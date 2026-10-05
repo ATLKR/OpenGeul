@@ -12,17 +12,20 @@ jobs:
       matrix:
         os: [windows-2025, windows-2022]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
+          ref: 86a62d99ce064d5649f543ebc9c26da64900184e
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
-      - name: Download exact candidate artifacts and verify payload
+      - name: Verify harness unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Download original candidate and verify payload
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,27 +37,21 @@ jobs:
           python -m pip install -r e2e/requirements.txt
           ./e2e/ensure-webview2.ps1
           python e2e/prepare_payload.py inputs/dist runtime
-      - name: Inspect documented elevated-host debugging and Win32 dialogs
-        run: python -u e2e/probe_native.py
-      - name: Archive exact public source for review
-        if: always() && matrix.os == 'windows-2022'
+      - name: Test all 14 native scenarios without rebuilding the prior app
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force source-review | Out-Null
-          git fetch --depth=1 origin 4bdbd349da9b821a0a8b3192cf34b883d6f26915
-          git archive --format=zip --output=source-review/composition-source.zip 4bdbd349da9b821a0a8b3192cf34b883d6f26915
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always() && matrix.os == 'windows-2022'
-        with:
-          name: source-review-${{ github.run_id }}
-          path: source-review/
-          retention-days: 1
-          if-no-files-found: warn
-      - name: Preserve diagnostics only
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          $env:E2E_MODE='native'
+          $env:E2E_EXE=(Resolve-Path 'runtime/OpenGeul.exe').Path
+          $env:E2E_FIXTURES=(Resolve-Path 'inputs/fixtures/e2e-fixtures').Path
+          $env:E2E_OUTPUT=Join-Path $pwd 'evidence'
+          python -u e2e/run.py
+      - name: Preserve harness evidence, not a release gate
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: native-diagnostic-${{ matrix.os }}-${{ github.run_id }}
+          name: native-harness-${{ matrix.os }}-${{ github.run_id }}
           path: evidence/
           retention-days: 1
           if-no-files-found: warn
