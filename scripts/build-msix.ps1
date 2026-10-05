@@ -19,7 +19,7 @@ $product = Get-Content 'config/product.json' -Raw | ConvertFrom-Json
 $lock = Get-Content 'config/upstream.lock.json' -Raw | ConvertFrom-Json
 if ($Store -and -not $IdentityFile) { throw 'Store build requires real Partner Center identity.' }
 python -m unittest discover -s tests -v
-node --experimental-strip-types --test tests/save-format.test.mjs
+node --experimental-strip-types --test tests/save-format.test.mjs tests/composition-final.test.mjs
 New-Item -ItemType Directory -Force $stage,$output | Out-Null
 $manifestArgs = @('scripts/buildkit.py','manifest','--out',(Join-Path $stage 'AppxManifest.xml'))
 if ($IdentityFile) { $manifestArgs += @('--identity',(Resolve-Path $IdentityFile).Path) }
@@ -48,6 +48,7 @@ python scripts/prepare_hwpx.py $source --red-probe
 python scripts/font_test_contract.py $source
 python scripts/prepare_upstream.py --patch-only
 python scripts/prepare_hwpx.py $source
+python scripts/patch_composition.py $source
 python scripts/patch_namespaces.py (Join-Path $source 'third_party/rhwp')
 python scripts/wasm_artifacts.py install $WasmDirectory $source
 Push-Location $source
