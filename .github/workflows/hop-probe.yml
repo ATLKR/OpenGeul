@@ -1,0 +1,75 @@
+name: OpenGeul HOP follow-up regression probe
+on:
+  push:
+    branches: [work/hop-followups]
+permissions:
+  contents: read
+  actions: read
+env:
+  PYTHONUTF8: '1'
+  GIT_LFS_SKIP_SMUDGE: '1'
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Reuse source-verified parser only for the isolated frontend probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 37332857367 --repo ATLKR/OpenGeul --name opengeul-wasm-37332857367 --dir wasm-input
+      - name: Build and regression-test the actual production sources
+        run: |
+          set -euo pipefail
+          python scripts/prepare_upstream.py --fetch-only
+          corepack enable
+          (cd .work/hop && pnpm install --frozen-lockfile)
+          python scripts/font_test_contract.py .work/hop
+          python scripts/prepare_upstream.py --patch-only
+          python scripts/prepare_hwpx.py .work/hop
+          python scripts/patch_composition.py .work/hop
+          python scripts/patch_namespaces.py .work/hop/third_party/rhwp
+          python scripts/wasm_artifacts.py install wasm-input .work/hop
+          python scripts/prepare_hop_fixes.py .work/hop
+          node --experimental-strip-types --loader ./tests/hop/loader.mjs --test tests/hop/keyboard.test.mjs tests/hop/toolbar-preferences.test.mjs
+          (cd .work/hop && pnpm run test:studio && pnpm run build:studio)
+          python scripts/buildkit.py frontend .work/hop/apps/studio-host/dist
+          node e2e/generate-browser-fixtures.mjs .work/hop .work/e2e-fixtures
+      - name: Install browser
+        env:
+          BROWSER: ${{ matrix.browser }}
+        run: |
+          python -m pip install -r e2e/requirements.txt
+          python -m playwright install --with-deps "$BROWSER"
+      - name: Run baseline and new keyboard/preference E2E assertions
+        env:
+          E2E_MODE: browser
+          E2E_BROWSER: ${{ matrix.browser }}
+          E2E_FIXTURES: ${{ github.workspace }}/.work/e2e-fixtures
+          E2E_OUTPUT: ${{ github.workspace }}/evidence
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python -m http.server 7700 --bind 127.0.0.1 --directory .work/hop/apps/studio-host/dist > evidence/server.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          python e2e/run_followups.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: hop-followups-${{ matrix.browser }}-${{ github.run_id }}
+          path: evidence/
+          retention-days: 1

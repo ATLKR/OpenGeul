@@ -1,0 +1,5 @@
+#icon-toolbar.opengeul-icons-only { min-height: 32px; }
+#icon-toolbar.opengeul-icons-only .tb-label { display: none; }
+#icon-toolbar.opengeul-icons-only .tb-btn { min-width: 32px; min-height: 28px; }
+.opengeul-toolbar-label-toggle { gap: 8px; cursor: pointer; }
+.opengeul-toolbar-label-toggle input { accent-color: var(--accent-color); }
