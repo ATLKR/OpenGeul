@@ -1,0 +1,3 @@
+[submodule "upstream/hop"]
+	path = upstream/hop
+	url = https://github.com/golbin/hop.git

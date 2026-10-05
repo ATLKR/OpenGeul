@@ -1,0 +1,7 @@
+{
+  "hop": {"repository": "https://github.com/golbin/hop.git", "version": "0.4.4", "commit": "d426f0395e97bc1972f66d894d1a7c76a36374bc"},
+  "rhwp": {"repository": "https://github.com/edwardkim/rhwp.git", "version": "0.8.4", "commit": "496333b27d21ddb9114ba9ae340bcb895870c9a7"},
+  "rust": "1.93.1",
+  "node": "24",
+  "pnpm": "10.33.0"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "OpenGeul",
+  "version": "1.0.0",
+  "channel": "development",
+  "repository": "ATLKR/OpenGeul",
+  "architecture": "x64"
+}

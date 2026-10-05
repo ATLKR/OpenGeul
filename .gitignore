@@ -1,0 +1,10 @@
+.work/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+store-identity.local.json
+*.pfx
+*.p12
+*.pem
+*.key
