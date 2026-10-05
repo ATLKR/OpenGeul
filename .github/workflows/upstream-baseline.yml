@@ -13,7 +13,15 @@ jobs:
   baseline:
     runs-on: windows-2025
     timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+      GIT_LFS_SKIP_SMUDGE: '1'
     steps:
+      - name: Preserve upstream byte-for-byte LF files before checkout
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
       - name: Checkout the exact HOP source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -25,6 +33,16 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - name: Port only the path comparison in the upstream test
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('tests/rhwp-boundary.test.mjs')
+          s = p.read_text(encoding='utf-8')
+          old = 'const relativePath = relative(studioRoot, file);'
+          assert s.count(old) == 1
+          s = s.replace(old, "const relativePath = relative(studioRoot, file).replaceAll('\\\\', '/');")
+          p.write_text(s, encoding='utf-8', newline='\n')
       - name: Verify source pins and install frozen dependencies
         shell: pwsh
         run: |
@@ -33,7 +51,7 @@ jobs:
           if ((git -C third_party/rhwp rev-parse HEAD) -ne '496333b27d21ddb9114ba9ae340bcb895870c9a7') { throw 'Unexpected rhwp revision' }
           corepack enable
           pnpm install --frozen-lockfile
-      - name: Run unchanged upstream contract and frontend tests
+      - name: Run upstream contracts and frontend tests (no skipped failures)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -50,4 +68,4 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          'This workflow only tests unmodified upstream. It publishes no application or fonts.' >> $env:GITHUB_STEP_SUMMARY
+          'This workflow tests upstream with a documented Windows test-path portability fix. It publishes no application or fonts.' >> $env:GITHUB_STEP_SUMMARY
