@@ -19,6 +19,7 @@ $product = Get-Content 'config/product.json' -Raw | ConvertFrom-Json
 $lock = Get-Content 'config/upstream.lock.json' -Raw | ConvertFrom-Json
 if ($Store -and -not $IdentityFile) { throw 'Store build requires real Partner Center identity.' }
 python -m unittest discover -s tests -v
+node --experimental-strip-types --test tests/save-format.test.mjs
 New-Item -ItemType Directory -Force $stage,$output | Out-Null
 $manifestArgs = @('scripts/buildkit.py','manifest','--out',(Join-Path $stage 'AppxManifest.xml'))
 if ($IdentityFile) { $manifestArgs += @('--identity',(Resolve-Path $IdentityFile).Path) }
@@ -37,16 +38,17 @@ corepack enable
 Push-Location $source
 try {
     pnpm install --frozen-lockfile
-    # Upstream's source/provenance and UI contracts run before intentional product-policy changes.
-    # Only the reproduced Windows path-separator false positive is ported; no assertion is removed.
+    # Upstream source/provenance and UI contracts precede intentional product changes.
     pnpm run test:upstream
     pnpm run test:studio
 } finally { Pop-Location }
+# Observe the original unsupported HWPX save failing the new expectation before changing production code.
+python scripts/prepare_hwpx.py $source --red-probe
 python scripts/font_test_contract.py $source
 python scripts/prepare_upstream.py --patch-only
+python scripts/prepare_hwpx.py $source
 Push-Location $source
 try {
-    # The actual modified frontend suite is a required gate, not the unchanged baseline alone.
     pnpm run test:studio
     pnpm run build:studio
     python ../../scripts/buildkit.py frontend apps/studio-host/dist
@@ -55,8 +57,11 @@ try {
     pnpm tauri build --no-bundle --target x86_64-pc-windows-msvc
     Push-Location 'third_party/rhwp'
     try {
-        # CLI retains native Skia PNG and direct PDF options, in addition to the standard engine.
         cargo build --release --locked --target x86_64-pc-windows-msvc --package rhwp --bin rhwp --features native-skia
+    } finally { Pop-Location }
+    Push-Location 'apps/desktop/rhwp-adapter'
+    try {
+        cargo run --release --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
     } finally { Pop-Location }
 } finally { Pop-Location }
 $release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
@@ -67,7 +72,6 @@ Copy-Item (Join-Path $release 'hop-desktop.exe') (Join-Path $stage 'OpenGeul.exe
 New-Item -ItemType Directory -Force (Join-Path $stage 'Tools') | Out-Null
 Copy-Item (Join-Path $release 'rhwp.exe') (Join-Path $stage 'Tools/rhwp.exe')
 Get-ChildItem $release -Filter '*.dll' -File | ForEach-Object { Copy-Item $_.FullName $stage }
-# A real executable smoke test catches missing native loader dependencies.
 $help = & (Join-Path $stage 'Tools/rhwp.exe') --help 2>&1 | Out-String
 if ($help -notmatch '(?i)rhwp|usage|사용') { throw 'CLI did not return usable help.' }
 $help | Set-Content (Join-Path $output 'rhwp-help.txt') -Encoding utf8
@@ -92,9 +96,8 @@ $package = Join-Path $output $fileName
 & $makeappx.FullName pack /d $stage /p $package /o
 & $makeappx.FullName unpack /p $package /d (Join-Path $root '.work/msix-verified') /o
 python scripts/releasekit.py verify $package
-# Portable form is useful before signing; it does not bypass organization/Windows security policy.
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path $output "OpenGeul_$($product.version)_windows-x64_unsigned-portable.zip")
 Copy-Item (Join-Path $stage 'AppxManifest.xml') $output
 python scripts/releasekit.py finish $output $source
 Write-Host "Built and structurally verified unsigned MSIX: $package"
-Write-Host 'No Store approval, trusted signature or manual document fidelity certification is implied.'
+Write-Host 'E2E jobs must pass before release. No trusted signature or Store approval is implied.'
