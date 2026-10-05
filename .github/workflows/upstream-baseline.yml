@@ -1,0 +1,53 @@
+name: Upstream Windows baseline
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/upstream-baseline.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: upstream-baseline-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  baseline:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - name: Checkout the exact HOP source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: golbin/hop
+          ref: d426f0395e97bc1972f66d894d1a7c76a36374bc
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Verify source pins and install frozen dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ((git -C third_party/rhwp rev-parse HEAD) -ne '496333b27d21ddb9114ba9ae340bcb895870c9a7') { throw 'Unexpected rhwp revision' }
+          corepack enable
+          pnpm install --frozen-lockfile
+      - name: Run unchanged upstream contract and frontend tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          pnpm run test:upstream
+          pnpm run test:studio
+      - name: Type-check and build the unchanged editor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          pnpm run build:studio
+      - name: Record baseline (not an OpenGeul release)
+        if: always()
+        shell: pwsh
+        run: |
+          'This workflow only tests unmodified upstream. It publishes no application or fonts.' >> $env:GITHUB_STEP_SUMMARY
