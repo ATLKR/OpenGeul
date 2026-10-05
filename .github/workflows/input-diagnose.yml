@@ -1,0 +1,76 @@
+name: OpenGeul Firefox input diagnosis
+on:
+  push:
+    branches: [work/firefox-input-diagnose]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Download exact production-source test input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 37332857367 --repo ATLKR/OpenGeul --name opengeul-browser-inputs-37332857367 --dir inputs
+      - name: Install test browser
+        run: |
+          python -m pip install -r e2e/requirements.txt
+          python -m playwright install --with-deps firefox
+      - name: Diagnose DOM input events without touching application internals
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python -m http.server 7700 --bind 127.0.0.1 --directory inputs/hop/apps/studio-host/dist > evidence/server.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          python - <<'PY'
+          import sys,json,shutil,time
+          from pathlib import Path
+          sys.path.insert(0,'e2e')
+          from driver import Session
+          from hwpx_oracle import inspect_hwpx
+          root=Path('evidence').resolve();doc=root/'input.hwpx'
+          shutil.copyfile('inputs/e2e-fixtures/basic.hwpx',doc)
+          s=Session('browser',root/'session',doc,browser='firefox')
+          page=s.page
+          events=[];states=[]
+          page.expose_function('recordInputDiagnostic',lambda event:events.append(event))
+          page.evaluate('''() => {
+            for (const type of ['focus','blur','keydown','keyup','beforeinput','input','compositionstart','compositionupdate','compositionend']) {
+              document.addEventListener(type,e => {
+                if(e.target instanceof HTMLTextAreaElement) window.recordInputDiagnostic({type,key:e.key,code:e.code,inputType:e.inputType,data:e.data,value:e.target.value,isComposing:e.isComposing,ctrl:e.ctrlKey,meta:e.metaKey,trusted:e.isTrusted});
+              },true);
+            }
+          }''')
+          area=page.locator('textarea[aria-label="문서 편집 입력"]')
+          def state(label):
+            value=page.evaluate('''() => ({active:document.activeElement?.outerHTML,value:document.querySelector('textarea')?.value,title:document.title,hasFocus:document.hasFocus(),toolbar:getComputedStyle(document.querySelector('#style-bar')).pointerEvents})''')
+            states.append({'label':label,**value})
+          try:
+            area.focus();state('focused')
+            page.keyboard.press('Control+End');state('after navigation')
+            page.keyboard.insert_text(' INSERT 한글 😀 ');state('after insert_text')
+            page.keyboard.type(' ASCII_KEY ');state('after ascii keyboard')
+            area.focus();page.keyboard.insert_text(' REFOCUS 한글 ');state('after refocus insert')
+            area.fill(' FILL 한글 ');state('after fill')
+            target=root/'saved.hwpx';s.save(doc,target)
+            states.append({'savedText':inspect_hwpx(target)['text']})
+          finally:
+            (root/'input-diagnostics.json').write_text(json.dumps({'states':states,'events':events},ensure_ascii=False,indent=2))
+            s.close()
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: firefox-input-${{ github.run_id }}
+          path: evidence/
+          retention-days: 1
