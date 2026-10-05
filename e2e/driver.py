@@ -51,7 +51,6 @@ class Session:
                     sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
                 env=dict(os.environ)
                 env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=f'--remote-debugging-port={port}'
-                # Outside the evidence tree, including when Windows delays releasing profile locks.
                 self.profile=Path(tempfile.mkdtemp(prefix='opengeul-e2e-profile-'))
                 env['WEBVIEW2_USER_DATA_FOLDER']=str(self.profile)
                 self.log=(folder/'process.log').open('w',encoding='utf-8')
@@ -72,7 +71,7 @@ class Session:
                 self.context=self.browser.new_context(accept_downloads=True, viewport={'width':1280,'height':900})
                 self.context.add_init_script("Object.defineProperty(window, 'showSaveFilePicker', {value: undefined, configurable: true});")
                 self.page=self.context.new_page()
-            # No network/DOM resource capture: do not redistribute installed font programs through traces.
+            # Disable resource capture so traces cannot redistribute installed fonts.
             self.context.tracing.start(screenshots=True,snapshots=False,sources=False)
             self.page.set_default_timeout(15000)
             self.page.on('console',lambda message:self.messages.append({'type':message.type,'text':message.text}))
@@ -117,16 +116,14 @@ class Session:
                 self.native_dialog(None if cancel else output)
                 if cancel: return None
             result=output if save_as else source
+            expect(self.page.locator('#sb-message')).to_contain_text('저장 완료',timeout=30000)
             self.page.wait_for_function('!document.title.startsWith("• ")',timeout=30000)
             until(lambda: result.is_file())
             return result
+        if save_as or cancel: raise ValueError('Browser suite uses existing-document direct downloads; native suite owns Save As dialogs')
+        # Existing source files download immediately; they do not show a Save As dialog.
         with self.page.expect_download(timeout=30000) as event:
             menu(self.page,command)
-            label=self.page.get_by_text('파일 이름(N):',exact=True)
-            label.wait_for()
-            field=label.locator('..').locator('input[type="text"]')
-            field.fill(output.stem)
-            field.press('Enter')
         download=event.value
         if not download.suggested_filename.lower().endswith('.hwpx'):
             raise AssertionError(f'Expected genuine HWPX download, got {download.suggested_filename}')

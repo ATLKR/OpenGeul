@@ -1,6 +1,6 @@
 # Windows x64, PowerShell 7, Python 3.11+, Node 24, Rustup and Windows SDK.
 [CmdletBinding()]
-param([switch]$Store, [string]$IdentityFile)
+param([switch]$Store, [string]$IdentityFile, [Parameter(Mandatory=$true)][string]$WasmDirectory)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -29,6 +29,8 @@ python scripts/prepare_upstream.py --fetch-only
 rustup toolchain install $lock.rust --profile minimal --target x86_64-pc-windows-msvc
 $env:RUSTUP_TOOLCHAIN = $lock.rust
 $env:CARGO_TARGET_DIR = Join-Path $root '.work/target'
+$editorTarget = $env:CARGO_TARGET_DIR
+$cliTarget = Join-Path $root '.work/target-cli'
 $env:CARGO_BUILD_JOBS = '2'
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
 $env:CARGO_PROFILE_TEST_DEBUG = '0'
@@ -46,30 +48,37 @@ python scripts/prepare_hwpx.py $source --red-probe
 python scripts/font_test_contract.py $source
 python scripts/prepare_upstream.py --patch-only
 python scripts/prepare_hwpx.py $source
+python scripts/patch_namespaces.py (Join-Path $source 'third_party/rhwp')
+python scripts/wasm_artifacts.py install $WasmDirectory $source
 Push-Location $source
 try {
     pnpm run test:studio
     pnpm run build:studio
     python ../../scripts/buildkit.py frontend apps/studio-host/dist
     Push-Location 'apps/desktop/src-tauri'
-    try { cargo test --locked } finally { Pop-Location }
+    try {
+        cargo test --locked
+        cargo run --locked --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
+    } finally { Pop-Location }
     pnpm tauri build --no-bundle --target x86_64-pc-windows-msvc
     Push-Location 'third_party/rhwp'
     try {
+        # cdylib/rlib outputs must not collide with the editor's different feature graph.
+        $env:CARGO_TARGET_DIR = $cliTarget
         cargo build --release --locked --target x86_64-pc-windows-msvc --package rhwp --bin rhwp --features native-skia
-    } finally { Pop-Location }
-    Push-Location 'apps/desktop/src-tauri'
-    try {
-        cargo run --release --locked --target x86_64-pc-windows-msvc --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
-    } finally { Pop-Location }
+    } finally {
+        $env:CARGO_TARGET_DIR = $editorTarget
+        Pop-Location
+    }
 } finally { Pop-Location }
 $release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
-foreach ($name in @('hop-desktop.exe','rhwp.exe')) {
-    if (-not (Test-Path (Join-Path $release $name))) { throw "Missing built runtime: $name" }
+$cliRelease = Join-Path $cliTarget 'x86_64-pc-windows-msvc/release'
+foreach ($path in @((Join-Path $release 'hop-desktop.exe'), (Join-Path $cliRelease 'rhwp.exe'))) {
+    if (-not (Test-Path $path)) { throw "Missing built runtime: $path" }
 }
 Copy-Item (Join-Path $release 'hop-desktop.exe') (Join-Path $stage 'OpenGeul.exe')
 New-Item -ItemType Directory -Force (Join-Path $stage 'Tools') | Out-Null
-Copy-Item (Join-Path $release 'rhwp.exe') (Join-Path $stage 'Tools/rhwp.exe')
+Copy-Item (Join-Path $cliRelease 'rhwp.exe') (Join-Path $stage 'Tools/rhwp.exe')
 Get-ChildItem $release -Filter '*.dll' -File | ForEach-Object { Copy-Item $_.FullName $stage }
 $help = & (Join-Path $stage 'Tools/rhwp.exe') --help 2>&1 | Out-String
 if ($help -notmatch '(?i)rhwp|usage|사용') { throw 'CLI did not return usable help.' }

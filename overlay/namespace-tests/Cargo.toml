@@ -1,0 +1,12 @@
+[package]
+name = "opengeul-namespace-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "../hwpx_namespaces.rs"
+
+[dependencies]
+quick-xml = "=0.41.0"
+roxmltree = "=0.21.1"
