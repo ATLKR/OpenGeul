@@ -1,5 +1,6 @@
 """Production UI automation. No app test APIs, IPC mocks or private document corpus."""
 from __future__ import annotations
+import ctypes
 import hashlib
 import json
 import os
@@ -11,9 +12,11 @@ import tempfile
 import time
 import urllib.request
 from playwright.sync_api import sync_playwright, expect
+from native_controls import filename_control
+from webview_debug import MachineRegistry, ScopedDebugOverride, debug_arguments
 
 
-def until(check, timeout=25):
+def until(check, timeout=25, *, pump=None):
     deadline=time.monotonic()+timeout
     error=None
     while time.monotonic()<deadline:
@@ -21,7 +24,7 @@ def until(check, timeout=25):
             value=check()
             if value: return value
         except (OSError, ValueError, AssertionError) as exc: error=exc
-        time.sleep(.1)
+        (pump(.1) if pump else time.sleep(.1))
     raise AssertionError(f'Condition timed out after {timeout}s; last error: {error}')
 
 def digest(path: Path) -> str: return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -48,29 +51,36 @@ class Session:
         self.mode=mode; self.folder=folder; folder.mkdir(parents=True,exist_ok=True)
         self.executable=executable; self.proc=None; self.browser=None; self.context=None; self.page=None
         self.messages=[]; self.requests=[]; self.dialogs=[]; self.errors=[]
-        self.profile=None; self.log=None; self.pw=sync_playwright().start()
+        self.profile=None; self.log=None; self.debug_override=None; self.pw=sync_playwright().start()
         try:
             if mode=='native':
                 if os.name != 'nt' or executable is None: raise RuntimeError('Native E2E needs Windows and the production executable')
                 with socket.socket() as sock:
                     sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
                 env=dict(os.environ)
-                env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=f'--remote-debugging-port={port}'
+                env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=debug_arguments(port)
                 self.profile=Path(tempfile.mkdtemp(prefix='opengeul-e2e-profile-'))
                 env['WEBVIEW2_USER_DATA_FOLDER']=str(self.profile)
+                if ctypes.windll.shell32.IsUserAnAdmin():
+                    self.debug_override=ScopedDebugOverride(MachineRegistry(), executable.name, port, str(self.profile),
+                        runner=os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted')
+                    self.debug_override.__enter__()
                 self.log=(folder/'process.log').open('w',encoding='utf-8')
                 self.proc=subprocess.Popen([str(executable),str(fixture)],cwd=executable.parent,env=env,stdout=self.log,stderr=subprocess.STDOUT)
                 endpoint=f'http://127.0.0.1:{port}'
+                opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 def ready():
                     if self.proc.poll() is not None: raise RuntimeError(f'App exited: {self.proc.returncode}')
                     try:
-                        with urllib.request.urlopen(endpoint+'/json/version',timeout=1) as response:
+                        with opener.open(endpoint+'/json/version',timeout=1) as response:
                             return bool(json.load(response).get('webSocketDebuggerUrl'))
                     except OSError: return False
                 until(ready,60)
                 self.browser=self.pw.chromium.connect_over_cdp(endpoint)
                 self.context=self.browser.contexts[0]
-                self.page=until(lambda: next((p for p in self.context.pages if not p.is_closed()),None),20)
+                self.page=next((p for p in self.context.pages if not p.is_closed()),None)
+                if self.page is None:
+                    self.page=self.context.wait_for_event('page',timeout=30000)
             else:
                 self.browser=getattr(self.pw,browser).launch(headless=True)
                 self.context=self.browser.new_context(accept_downloads=True, viewport={'width':1280,'height':900})
@@ -106,15 +116,16 @@ class Session:
 
     def native_dialog(self, target: Path|None):
         from pywinauto import Desktop
-        dialog=Desktop(backend='uia').window(class_name='#32770',process=self.proc.pid)
+        # UIA can omit these shell dialogs on hosted desktops. Select their real HWND
+        # under this application's PID, and use physical input for visible buttons.
+        dialog=Desktop(backend='win32').window(class_name='#32770',process=self.proc.pid)
         dialog.wait('visible',timeout=20)
-        if target is None:
-            dialog.child_window(auto_id='2',control_type='Button').invoke()
-        else:
-            edit_box=dialog.child_window(auto_id='1001',control_type='Edit')
-            edit_box.wait('exists',timeout=10)
-            edit_box.set_edit_text(str(target))
-            dialog.child_window(auto_id='1',control_type='Button').invoke()
+        if target is not None:
+            control=filename_control(dialog.descendants())
+            control.set_edit_text(str(target))
+        dialog.set_focus()
+        dialog.child_window(control_id=2 if target is None else 1,
+                            class_name='Button',visible_only=True).click_input()
         dialog.wait_not('visible',timeout=20)
 
     def save(self, source: Path, output: Path, *, save_as=False, cancel=False) -> Path|None:
@@ -139,22 +150,33 @@ class Session:
         return output
 
     def close(self):
-        if self.page:
-            try: self.page.screenshot(path=str(self.folder/'last-screen.png'),timeout=3000)
-            except Exception: pass
-        if self.context:
-            try: self.context.tracing.stop(path=str(self.folder/'trace.zip'))
-            except Exception: pass
-        (self.folder/'events.json').write_text(json.dumps({'console':self.messages[-200:],'requests':self.requests[-300:],
-            'dialogs':self.dialogs,'errors':self.errors},ensure_ascii=False,indent=2),encoding='utf-8')
-        if self.browser:
-            try:self.browser.close()
-            except Exception:pass
-        if self.proc and self.proc.poll() is None:
-            subprocess.run(['taskkill','/PID',str(self.proc.pid),'/T','/F'],capture_output=True,timeout=20)
-            try:self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:self.proc.kill()
-        if self.log:self.log.close()
-        try:self.pw.stop()
-        except Exception:pass
-        if self.profile: shutil.rmtree(self.profile,ignore_errors=True)
+        # Cleanup must also run when startup, evidence capture or process teardown fails.
+        try:
+            if self.page:
+                try:self.page.screenshot(path=str(self.folder/'last-screen.png'),timeout=3000)
+                except Exception:pass
+            if self.context:
+                try:self.context.tracing.stop(path=str(self.folder/'trace.zip'))
+                except Exception:pass
+            (self.folder/'events.json').write_text(json.dumps({'console':self.messages[-200:],'requests':self.requests[-300:],
+                'dialogs':self.dialogs,'errors':self.errors},ensure_ascii=False,indent=2),encoding='utf-8')
+        finally:
+            try:
+                if self.browser:
+                    try:self.browser.close()
+                    except Exception:pass
+                if self.proc and self.proc.poll() is None:
+                    try:subprocess.run(['taskkill','/PID',str(self.proc.pid),'/T','/F'],capture_output=True,timeout=20)
+                    finally:
+                        if self.proc.poll() is None:self.proc.kill()
+                        self.proc.wait(timeout=10)
+            finally:
+                try:
+                    if self.log:self.log.close()
+                    try:self.pw.stop()
+                    except Exception:pass
+                finally:
+                    try:
+                        if self.debug_override:self.debug_override.close()
+                    finally:
+                        if self.profile:shutil.rmtree(self.profile,ignore_errors=True)

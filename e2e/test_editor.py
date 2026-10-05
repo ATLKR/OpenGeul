@@ -163,15 +163,17 @@ class NativeTests(EditorTests):
     def test_multiple_windows_use_real_native_creation(self):
         before=len(self.session.context.pages)
         self.page.locator('textarea').first.focus()
-        self.page.keyboard.press('Control+Shift+n')
-        until(lambda:len(self.session.context.pages)>before,30)
+        with self.session.context.expect_page(timeout=30000) as event:
+            self.page.keyboard.press('Control+Shift+n')
+        expect(event.value.locator('#studio-root')).to_be_visible(timeout=30000)
+        self.assertGreater(len(self.session.context.pages),before)
         self.assertFalse(self.page.is_closed())
 
     def test_corrupt_open_leaves_original_document_usable(self):
         original=digest(self.document)
         menu(self.page,'file:open')
         self.session.native_dialog(FIXTURES/'invalid.hwpx')
-        until(lambda:bool(self.session.dialogs),20)
+        until(lambda:bool(self.session.dialogs),20,pump=lambda seconds:self.page.wait_for_timeout(seconds*1000))
         self.assertTrue(any('실패' in d['message'] or '오류' in d['message'] for d in self.session.dialogs),self.session.dialogs)
         self.assertEqual(digest(self.document),original)
         edit(self.page,' AFTER-ERROR ')
