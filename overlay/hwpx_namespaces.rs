@@ -66,8 +66,8 @@ impl<'a> HeaderNamespaces<'a> {
                 if declared_by_writer(ns.name(), ns.uri()) { continue; }
                 let name = ns.name().map_or_else(|| "xmlns".to_string(), |p| format!("xmlns:{p}"));
                 if existing.iter().any(|a| a.as_slice() == name.as_bytes()) { continue; }
-                let value = quick_xml::escape::escape(ns.uri());
-                tag.push_attribute((name.as_str(), value.as_ref()));
+                // The string attribute conversion escapes exactly once.
+                tag.push_attribute((name.as_str(), ns.uri()));
                 changed = true;
             }
             if changed {
