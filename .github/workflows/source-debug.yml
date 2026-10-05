@@ -1,0 +1,46 @@
+name: OpenGeul source debugging evidence
+on:
+  push:
+    branches: [work/hwpx-browser-probe]
+    paths: [.github/workflows/source-debug.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Collect exact source code without fonts or document corpora
+        env:
+          GIT_LFS_SKIP_SMUDGE: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/opengeul evidence/hop evidence/rhwp
+          git archive HEAD | tar -x -C evidence/opengeul
+          git init upstream-hop
+          git -C upstream-hop remote add origin https://github.com/golbin/hop.git
+          git -C upstream-hop fetch --depth 1 origin d426f0395e97bc1972f66d894d1a7c76a36374bc
+          git -C upstream-hop archive FETCH_HEAD apps scripts tests config package.json pnpm-lock.yaml pnpm-workspace.yaml LICENSE | tar -x -C evidence/hop
+          git init upstream-rhwp
+          git -C upstream-rhwp remote add origin https://github.com/edwardkim/rhwp.git
+          git -C upstream-rhwp fetch --depth 1 --filter=blob:none origin 496333b27d21ddb9114ba9ae340bcb895870c9a7
+          git -C upstream-rhwp archive FETCH_HEAD src rhwp-studio Cargo.toml Cargo.lock LICENSE | tar -x -C evidence/rhwp
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+          root = Path('evidence')
+          for p in sorted(root.rglob('*'), reverse=True):
+              if p.is_symlink(): p.unlink()
+              elif p.is_file() and p.suffix.lower() not in {'.py','.rs','.ts','.tsx','.js','.mjs','.cjs','.json','.html','.css','.toml','.yaml','.yml','.md','.txt','.ps1','.lock','.wasm','.sh','.svg','.plist'} and p.name not in {'LICENSE','.gitignore','.gitmodules','.gitattributes'}:
+                  p.unlink()
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: source-debug-${{ github.run_id }}
+          path: evidence/
+          retention-days: 1
+          if-no-files-found: error
