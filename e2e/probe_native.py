@@ -3,18 +3,16 @@ import ctypes, json, os, pathlib, socket, subprocess, tempfile, time, traceback,
 from playwright.sync_api import sync_playwright, expect
 from pywinauto import Desktop
 from PIL import ImageGrab
+from hwpx_oracle import inspect_hwpx
 assert os.environ.get('GITHUB_ACTIONS') == 'true', 'Runner-only diagnostic'
 out=pathlib.Path('evidence');out.mkdir(exist_ok=True)
-fixture=(pathlib.Path('inputs/fixtures/e2e-fixtures/basic.hwpx')).resolve()
+fixture=pathlib.Path('inputs/fixtures/e2e-fixtures/basic.hwpx').resolve()
 exe=pathlib.Path('runtime/OpenGeul.exe').resolve()
 profile=tempfile.mkdtemp(prefix='opengeul-native-diagnostic-')
 with socket.socket() as s:
     s.bind(('127.0.0.1',0));port=s.getsockname()[1]
 args=f'--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}'
 env=dict(os.environ);env['WEBVIEW2_USER_DATA_FOLDER']=profile;env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=args
-# Runtime 150+ ignores user/environment overrides in elevated processes.
-# Use the documented app-specific HKLM override ONLY on this disposable runner;
-# never alter a pre-existing value, wildcard, security policy or application binary.
 keys=[];proc=None;log=None
 try:
     print('ELEVATED',bool(ctypes.windll.shell32.IsUserAnAdmin()))
@@ -26,8 +24,7 @@ try:
                 try:winreg.QueryValueEx(key,'OpenGeul.exe')
                 except FileNotFoundError:pass
                 else:raise RuntimeError('Refusing to overwrite existing OpenGeul debug configuration')
-                winreg.SetValueEx(key,'OpenGeul.exe',0,winreg.REG_SZ,value)
-                keys.append(path)
+                winreg.SetValueEx(key,'OpenGeul.exe',0,winreg.REG_SZ,value);keys.append(path)
             finally:winreg.CloseKey(key)
     log=(out/'process.log').open('w',encoding='utf-8')
     proc=subprocess.Popen([str(exe),str(fixture)],cwd=exe.parent,env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -51,20 +48,32 @@ try:
         page=ctx.pages[0] if ctx.pages else ctx.wait_for_event('page',timeout=30000)
         page.wait_for_function('(name)=>document.querySelector("#sb-message")?.textContent.includes(name)',arg=fixture.name,timeout=60000)
         expect(page.locator('#style-bar')).to_have_css('pointer-events','auto',timeout=60000)
-        page.locator('[data-menu="file"] > .menu-title').click();page.locator('.md-item[data-cmd="file:save-as"]').click()
-        dialog=Desktop(backend='win32').window(class_name='#32770',process=proc.pid)
-        dialog.wait('visible',timeout=20)
-        dialog.print_control_identifiers(depth=5)
-        snapshot('save-as')
-        dialog.child_window(control_id=2,class_name='Button').click()
+        def save_as():
+            page.locator('[data-menu="file"] > .menu-title').click();page.locator('.md-item[data-cmd="file:save-as"]').click()
+            dialog=Desktop(backend='win32').window(class_name='#32770',process=proc.pid)
+            dialog.wait('visible',timeout=20)
+            controls=[w for w in dialog.descendants() if w.class_name() in ('Button','Edit') and w.is_visible()]
+            print('CONTROLS',json.dumps([{'id':w.control_id(),'handle':w.handle,'title':w.window_text(),'class':w.class_name(),'enabled':w.is_enabled(),'parent':w.parent().class_name()} for w in controls]))
+            return dialog
+        dialog=save_as();snapshot('save-as')
+        dialog.set_focus()
+        dialog.child_window(control_id=2,class_name='Button',visible_only=True).click_input()
         dialog.wait_not('visible',timeout=20)
         print('SAVE_AS_CANCELLED')
+        dialog=save_as()
+        target=(out/'saved-한글.hwpx').resolve()
+        edits=[w for w in dialog.descendants(class_name='Edit') if w.is_visible() and w.is_enabled() and w.parent().class_name()=='ComboBox']
+        assert len(edits)==1, f'Expected one filename control, got {len(edits)}'
+        edits[0].set_edit_text(str(target))
+        dialog.set_focus();dialog.child_window(control_id=1,class_name='Button',visible_only=True).click_input()
+        dialog.wait_not('visible',timeout=20)
+        page.wait_for_function('(name)=>document.querySelector("#sb-message")?.textContent.includes(name)',arg=target.name,timeout=20000)
+        assert inspect_hwpx(target)['text']==inspect_hwpx(fixture)['text']
+        print('SAVE_AS_OUTPUT_VALID')
         with ctx.expect_page(timeout=20000) as event:
             page.locator('[data-menu="file"] > .menu-title').click();page.locator('.md-item[data-cmd="file:new-window"]').click()
-        new=event.value
-        expect(new.locator('#studio-root')).to_be_visible(timeout=30000)
-        print('NEW_WINDOW_READY',len(ctx.pages))
-        snapshot('finished');browser.close()
+        new=event.value;expect(new.locator('#studio-root')).to_be_visible(timeout=30000)
+        print('NEW_WINDOW_READY',len(ctx.pages));snapshot('finished');browser.close()
 except Exception:
     traceback.print_exc()
     if proc:
@@ -75,7 +84,6 @@ finally:
     if proc:subprocess.run(['taskkill','/PID',str(proc.pid),'/T','/F'],capture_output=True,timeout=20)
     if log:log.close()
     for path in reversed(keys):
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_SET_VALUE|winreg.KEY_WOW64_64KEY) as key:
-            winreg.DeleteValue(key,'OpenGeul.exe')
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_SET_VALUE|winreg.KEY_WOW64_64KEY) as key:winreg.DeleteValue(key,'OpenGeul.exe')
     import shutil
     shutil.rmtree(profile,ignore_errors=True)
