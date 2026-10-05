@@ -1,0 +1,100 @@
+name: OpenGeul browser E2E development probe
+on:
+  push:
+    branches: [work/hwpx-browser-probe]
+permissions:
+  contents: read
+concurrency:
+  group: browser-probe-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PYTHONUTF8: '1'
+  GIT_LFS_SKIP_SMUDGE: '1'
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Build the production frontend and synthetic WASM inputs
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -v
+          node --experimental-strip-types --test tests/save-format.test.mjs
+          corepack enable
+          python scripts/prepare_upstream.py --fetch-only
+          (cd .work/hop && pnpm install --frozen-lockfile && pnpm run test:upstream && pnpm run test:studio)
+          python scripts/prepare_hwpx.py .work/hop --red-probe
+          python scripts/font_test_contract.py .work/hop
+          python scripts/prepare_upstream.py --patch-only
+          python scripts/prepare_hwpx.py .work/hop
+          (cd .work/hop && pnpm run test:studio && pnpm run build:studio)
+          python scripts/buildkit.py frontend .work/hop/apps/studio-host/dist
+          node e2e/generate-browser-fixtures.mjs .work/hop .work/e2e-fixtures
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: browser-probe-inputs-${{ github.run_id }}
+          include-hidden-files: true
+          path: |
+            .work/e2e-fixtures
+            .work/hop/apps/studio-host/dist
+          retention-days: 1
+          if-no-files-found: error
+  browser:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Download this run's production frontend
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "browser-probe-inputs-$GITHUB_RUN_ID" --dir inputs
+      - name: Install pinned test browser
+        env:
+          BROWSER: ${{ matrix.browser }}
+        run: |
+          python -m pip install -r e2e/requirements.txt
+          python -m playwright install --with-deps "$BROWSER"
+      - name: Exercise production UI and independent output validation
+        env:
+          E2E_MODE: browser
+          E2E_BROWSER: ${{ matrix.browser }}
+          E2E_FIXTURES: ${{ github.workspace }}/inputs/e2e-fixtures
+          E2E_OUTPUT: ${{ github.workspace }}/evidence
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python -m http.server 7700 --bind 127.0.0.1 --directory inputs/hop/apps/studio-host/dist > evidence/server.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          python e2e/run.py
+      - name: Save bounded diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: browser-probe-${{ matrix.browser }}-${{ github.run_id }}
+          path: evidence/
+          retention-days: 1
+          if-no-files-found: warn
