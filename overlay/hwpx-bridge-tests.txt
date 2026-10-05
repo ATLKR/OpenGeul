@@ -91,3 +91,11 @@
     release();
     await first;
   });
+
+  it('edits during staging cleanup remain unsaved after the command resolves', async () => {
+    const { bridge } = hwpxSaveSetup();
+    removeMock.mockImplementationOnce(async () => { bridge.markDocumentDirty(); });
+    const result = await bridge.saveDocumentFromCommand();
+    expect(result?.dirty).toBe(true);
+    expect(bridge.hasUnsavedChanges()).toBe(true);
+  });

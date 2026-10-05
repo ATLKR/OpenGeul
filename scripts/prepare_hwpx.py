@@ -27,7 +27,6 @@ def red_probe(source: Path) -> None:
         cli = source/'apps/studio-host/node_modules/vitest/vitest.mjs'
         if not node or not cli.is_file():
             raise RuntimeError('Node and installed Vitest are required for the baseline RED probe')
-        # Native Node avoids nested cmd.exe/.cmd quoting that skipped every test on Windows.
         command = [node, str(cli), 'run', 'src/core/tauri-bridge.test.ts']
         result = subprocess.run(command, cwd=source/'apps/studio-host', text=True,
             encoding='utf-8', errors='replace', stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
@@ -91,7 +90,6 @@ def patch(source: Path) -> None:
     try {
       const allowExternalOverwrite = await this.confirmExternalOverwriteIfNeeded(docId, finalPath);
       if (allowExternalOverwrite === null) return null;
-      // Serialize edited WASM state, never stale source bytes or renamed HWP data.
       const bytes = format === 'hwpx' ? super.exportHwpx() : super.exportHwp();
       const generation = this.editGeneration;
       const revision = this.revision;
@@ -101,6 +99,9 @@ def patch(source: Path) -> None:
         docId, stagedPath, targetPath: finalPath, expectedRevision: revision, allowExternalOverwrite,
       });
       await this.noteFinderRecentDocument(finalPath);
+      // Finish every asynchronous cleanup before computing the final clean/dirty state.
+      await remove(stagedPath).catch(() => undefined);
+      stagedPath = null;
       const result = { ...committed, dirty: this.editGeneration !== generation };
       this.applyNativeSaveResult(result);
       if (result.dirty) await this.invoke<void>('mark_document_dirty', { docId });

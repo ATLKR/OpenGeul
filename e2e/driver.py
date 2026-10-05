@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.request
 from playwright.sync_api import sync_playwright, expect
@@ -42,7 +43,7 @@ class Session:
         self.mode=mode; self.folder=folder; folder.mkdir(parents=True,exist_ok=True)
         self.executable=executable; self.proc=None; self.browser=None; self.context=None; self.page=None
         self.messages=[]; self.requests=[]; self.dialogs=[]; self.errors=[]
-        self.log=None; self.pw=sync_playwright().start()
+        self.profile=None; self.log=None; self.pw=sync_playwright().start()
         try:
             if mode=='native':
                 if os.name != 'nt' or executable is None: raise RuntimeError('Native E2E needs Windows and the production executable')
@@ -50,7 +51,9 @@ class Session:
                     sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
                 env=dict(os.environ)
                 env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=f'--remote-debugging-port={port}'
-                env['WEBVIEW2_USER_DATA_FOLDER']=str((folder/'webview-profile').resolve())
+                # Outside the evidence tree, including when Windows delays releasing profile locks.
+                self.profile=Path(tempfile.mkdtemp(prefix='opengeul-e2e-profile-'))
+                env['WEBVIEW2_USER_DATA_FOLDER']=str(self.profile)
                 self.log=(folder/'process.log').open('w',encoding='utf-8')
                 self.proc=subprocess.Popen([str(executable),str(fixture)],cwd=executable.parent,env=env,stdout=self.log,stderr=subprocess.STDOUT)
                 endpoint=f'http://127.0.0.1:{port}'
@@ -67,10 +70,10 @@ class Session:
             else:
                 self.browser=getattr(self.pw,browser).launch(headless=True)
                 self.context=self.browser.new_context(accept_downloads=True, viewport={'width':1280,'height':900})
-                # Real download fallback, not a mocked file-system API.
                 self.context.add_init_script("Object.defineProperty(window, 'showSaveFilePicker', {value: undefined, configurable: true});")
                 self.page=self.context.new_page()
-            self.context.tracing.start(screenshots=True,snapshots=True,sources=False)
+            # No network/DOM resource capture: do not redistribute installed font programs through traces.
+            self.context.tracing.start(screenshots=True,snapshots=False,sources=False)
             self.page.set_default_timeout(15000)
             self.page.on('console',lambda message:self.messages.append({'type':message.type,'text':message.text}))
             self.page.on('pageerror',lambda error:self.errors.append(str(error)))
@@ -149,4 +152,4 @@ class Session:
         if self.log:self.log.close()
         try:self.pw.stop()
         except Exception:pass
-        shutil.rmtree(self.folder/'webview-profile',ignore_errors=True)
+        if self.profile: shutil.rmtree(self.profile,ignore_errors=True)
