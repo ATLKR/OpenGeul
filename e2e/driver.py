@@ -30,11 +30,16 @@ def menu(page, command: str):
     page.locator('[data-menu="file"] > .menu-title').click()
     page.locator(f'.md-item[data-cmd="{command}"]').click()
 
+def primary_modifier(page):
+    # WebKit on Linux reports a macOS browser identity; use the UI platform, not runner OS.
+    mac=page.evaluate("/mac/i.test(navigator.platform) || /mac os/i.test(navigator.userAgent)")
+    return 'Meta' if mac else 'Control'
+
 def edit(page, text: str):
     area=page.locator('textarea').first
     area.wait_for(state='attached')
     area.focus()
-    page.keyboard.press('Control+End')
+    page.keyboard.press('Meta+ArrowDown' if primary_modifier(page)=='Meta' else 'Control+End')
     # Committed Unicode input, NOT the Windows OS IME composition engine.
     page.keyboard.insert_text(text)
 
@@ -86,14 +91,18 @@ class Session:
                 self.page.locator('#file-input').set_input_files(str(fixture))
             self.wait_loaded(fixture.name)
             (folder/'runtime.json').write_text(json.dumps({'mode':mode,'browser':self.browser.version,
-                'executableSha256':digest(executable) if executable else None,'fixtureSha256':digest(fixture)},indent=2),encoding='utf-8')
+                'executableSha256':digest(executable) if executable else None,'fixtureSha256':digest(fixture),
+                'navigator':self.page.evaluate('({platform:navigator.platform,userAgent:navigator.userAgent})')},indent=2),encoding='utf-8')
         except BaseException:
             self.close()
             raise
 
     def wait_loaded(self, name):
         self.page.wait_for_function('(name) => document.querySelector("#sb-message")?.textContent.includes(name)',arg=name,timeout=60000)
-        self.page.locator('textarea').first.wait_for(state='attached')
+        # The filename is displayed before await canvasView.loadDocument().
+        # Wait for observable editing readiness rather than adding an arbitrary delay.
+        expect(self.page.locator('#style-bar')).to_have_css('pointer-events','auto',timeout=60000)
+        self.page.locator('textarea[aria-label="문서 편집 입력"]').wait_for(state='attached')
 
     def native_dialog(self, target: Path|None):
         from pywinauto import Desktop
@@ -121,7 +130,6 @@ class Session:
             until(lambda: result.is_file())
             return result
         if save_as or cancel: raise ValueError('Browser suite uses existing-document direct downloads; native suite owns Save As dialogs')
-        # Existing source files download immediately; they do not show a Save As dialog.
         with self.page.expect_download(timeout=30000) as event:
             menu(self.page,command)
         download=event.value

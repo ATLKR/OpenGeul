@@ -7,7 +7,7 @@ import unittest
 import zipfile
 import xml.etree.ElementTree as ET
 from playwright.sync_api import expect
-from driver import Session, digest, edit, menu, until
+from driver import Session, digest, edit, menu, until, primary_modifier
 from hwpx_oracle import inspect_hwpx
 
 FIXTURES=Path(os.environ['E2E_FIXTURES']).resolve()
@@ -71,11 +71,11 @@ class EditorTests(unittest.TestCase):
     def test_undo_redo_changes_the_saved_document(self):
         marker=' UNDO-REDO-MARKER '
         edit(self.page,marker)
-        self.page.keyboard.press('Control+z')
+        self.page.keyboard.press(primary_modifier(self.page)+'+z')
         saved=self.save()
         self.assertNotIn(marker,inspect_hwpx(saved)['text'])
         self.page.locator('textarea').first.focus()
-        self.page.keyboard.press('Control+Shift+z')
+        self.page.keyboard.press(primary_modifier(self.page)+'+Shift+z')
         saved=self.save()
         self.assertEqual(inspect_hwpx(saved)['text'].count(marker),1)
 
