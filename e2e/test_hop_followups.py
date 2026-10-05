@@ -29,7 +29,10 @@ class FollowupTests:
         self.assertTrue(button.get_attribute('aria-label'))
         self.assertLessEqual(toolbar.bounding_box()['height'], old_height)
         self.page.reload(wait_until='domcontentloaded')
-        self.page.wait_for_function('document.querySelector("#opengeul-toolbar-labels") !== null')
+        # The preference module inserts this checkbox before async WASM initialization.
+        # Wait for the user's ready screen; mere element existence does not mean MenuBar is bound.
+        expect(self.page.locator('#sb-message')).to_contain_text('HWP 파일을 선택', timeout=60000)
+        self.page.locator('textarea[aria-label="문서 편집 입력"]').wait_for(state='attached')
         expect(self.page.locator('#icon-toolbar .tb-label').first).not_to_be_visible()
         self.page.locator('[data-menu="view"] > .menu-title').click()
         self.page.get_by_label('도구모음 글자 표시', exact=True).check()
