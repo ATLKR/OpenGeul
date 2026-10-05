@@ -42,11 +42,14 @@ try {
     pnpm run test:upstream
     pnpm run test:studio
 } finally { Pop-Location }
+python scripts/font_test_contract.py $source
 python scripts/prepare_upstream.py --patch-only
 Push-Location $source
 try {
     # The actual modified frontend suite is a required gate, not the unchanged baseline alone.
     pnpm run test:studio
+    pnpm run build:studio
+    python ../../scripts/buildkit.py frontend apps/studio-host/dist
     Push-Location 'apps/desktop/src-tauri'
     try { cargo test --locked } finally { Pop-Location }
     pnpm tauri build --no-bundle --target x86_64-pc-windows-msvc
