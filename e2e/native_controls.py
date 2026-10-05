@@ -13,15 +13,19 @@ def dismiss_error_dialog(pid: int) -> str:
     from pywinauto import Desktop
     dialog=Desktop(backend='win32').window(class_name='#32770',process=pid)
     dialog.wait('visible',timeout=20)
-    # Win32 exposes only the OK button for modern DirectUI TaskDialogs. UIA's
-    # top-level enumeration can omit them, but ElementFromHandle resolves the
-    # already verified HWND and exposes the accessible message text.
+    # Win32 exposes the button but not the DirectUI message. UIA root enumeration
+    # can omit the dialog, but its verified HWND exposes the accessible text.
     accessible=Desktop(backend='uia').window(handle=dialog.handle)
     message='\n'.join(control.window_text() for control in accessible.descendants(control_type='Text')
                       if control.window_text())
     if '실패' not in message and '오류' not in message:
         raise AssertionError(f'Expected the native file-open error, got {message!r}')
+    buttons=[control for control in dialog.descendants(class_name='Button')
+             if control.is_visible() and control.is_enabled()
+             and control.window_text().replace('&','').strip() in ('OK','확인')]
+    if len(buttons)!=1:
+        raise AssertionError(f'Expected one visible native error confirmation button; found {len(buttons)}')
     dialog.set_focus()
-    dialog.child_window(control_id=1,class_name='Button',visible_only=True).click_input()
+    buttons[0].click_input()
     dialog.wait_not('visible',timeout=20)
     return message
