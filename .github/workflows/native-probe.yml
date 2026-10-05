@@ -34,93 +34,22 @@ jobs:
           python -m pip install -r e2e/requirements.txt
           ./e2e/ensure-webview2.ps1
           python e2e/prepare_payload.py inputs/dist runtime
-      - name: Inspect WebView2, operating-system windows and event delivery
-        shell: python
+      - name: Inspect documented elevated-host debugging and Win32 dialogs
+        run: python -u e2e/probe_native.py
+      - name: Archive exact public source for review
+        if: always() && matrix.os == 'windows-2022'
+        shell: pwsh
         run: |
-          import json, os, pathlib, socket, subprocess, sys, tempfile, time, traceback, urllib.request
-          from playwright.sync_api import sync_playwright, expect
-          from pywinauto import Desktop
-          from PIL import ImageGrab
-          out=pathlib.Path('evidence'); out.mkdir(exist_ok=True)
-          fixtures=list(pathlib.Path('inputs/fixtures').rglob('*.hwpx'))
-          assert fixtures, 'Missing synthetic fixtures'
-          fixture=next((f for f in fixtures if 'basic' in f.name.lower()),fixtures[0]).resolve()
-          exe=pathlib.Path('runtime/OpenGeul.exe').resolve()
-          profile=tempfile.mkdtemp(prefix='opengeul-native-diagnostic-')
-          with socket.socket() as s:
-              s.bind(('127.0.0.1',0)); port=s.getsockname()[1]
-          env=dict(os.environ)
-          env['WEBVIEW2_USER_DATA_FOLDER']=profile
-          env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=f'--remote-debugging-port={port}'
-          log=(out/'process.log').open('w',encoding='utf-8')
-          proc=subprocess.Popen([str(exe),str(fixture)],cwd=exe.parent,env=env,stdout=log,stderr=subprocess.STDOUT)
-          opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-          def windows():
-              return [{'handle':w.handle,'pid':w.process_id(),'class':w.class_name(),'title':w.window_text(),'visible':w.is_visible()} for w in Desktop(backend='win32').windows(visible_only=False) if w.process_id()==proc.pid]
-          def snapshot(name):
-              try: ImageGrab.grab(all_screens=True).save(out/f'{name}.png')
-              except Exception as e: print('SCREENSHOT',repr(e))
-              try:
-                  data=windows();print(name,'WINDOWS',json.dumps(data));(out/f'{name}-windows.json').write_text(json.dumps(data,indent=2),encoding='utf-8')
-              except Exception as e: print('WINDOWS',repr(e))
-          print('PID',proc.pid,'PORT',port,'FIXTURE',fixture.name)
-          print('PROXY ENV PRESENT', {k:bool(os.environ.get(k)) for k in ['HTTP_PROXY','HTTPS_PROXY','NO_PROXY']})
-          endpoint=f'http://127.0.0.1:{port}'
-          ready=False; last_error=None
-          try:
-              for attempt in range(80):
-                  if proc.poll() is not None: raise RuntimeError(f'App exited {proc.returncode}')
-                  try:
-                      with opener.open(endpoint+'/json/version',timeout=1) as r: info=json.load(r)
-                      if info.get('webSocketDebuggerUrl'): ready=True;break
-                  except Exception as e: last_error=repr(e)
-                  if attempt in [5,30,60]: snapshot(f'start-{attempt}')
-                  time.sleep(.5)
-              print('CDP',ready,'LAST_ERROR',last_error)
-              snapshot('before-connect')
-              if not ready:
-                  subprocess.run(['powershell','-NoProfile','-Command',"Get-CimInstance Win32_Process | Where-Object {$_.Name -match 'OpenGeul|msedgewebview2'} | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Depth 3"],stdout=sys.stdout,stderr=sys.stdout)
-                  print('DEVTOOLS_FILES', [str(p.relative_to(profile)) for p in pathlib.Path(profile).rglob('DevToolsActivePort')])
-                  raise RuntimeError('CDP never opened; see native windows and process diagnostics')
-              with sync_playwright() as pw:
-                  browser=pw.chromium.connect_over_cdp(endpoint)
-                  ctx=browser.contexts[0]
-                  page=ctx.pages[0] if ctx.pages else ctx.wait_for_event('page',timeout=30000)
-                  page.on('pageerror',lambda e:print('PAGEERROR',str(e)))
-                  page.on('console',lambda m:print('CONSOLE',m.type,m.text))
-                  page.wait_for_function('(name)=>document.querySelector("#sb-message")?.textContent.includes(name)',arg=fixture.name,timeout=60000)
-                  expect(page.locator('#style-bar')).to_have_css('pointer-events','auto',timeout=60000)
-                  print('LOADED',page.url)
-                  page.locator('[data-menu="file"] > .menu-title').click()
-                  page.locator('.md-item[data-cmd="file:save-as"]').click()
-                  # A Playwright wait delivers CDP/IPC events; native-window polling alone does not.
-                  page.wait_for_timeout(1500)
-                  snapshot('save-as')
-                  ds=Desktop(backend='uia').windows(process=proc.pid,visible_only=False)
-                  for d in ds:
-                      print('UIA',repr(d.window_text()),d.class_name(),d.handle)
-                      if d.class_name()=='#32770':
-                          d.print_control_identifiers(depth=4)
-                          d.child_window(auto_id='2',control_type='Button').invoke()
-                  page.wait_for_timeout(500)
-                  before=len(ctx.pages)
-                  try:
-                      with ctx.expect_page(timeout=20000) as event:
-                          page.locator('[data-menu="file"] > .menu-title').click()
-                          page.locator('.md-item[data-cmd="file:new-window"]').click()
-                      print('NEW_PAGE',event.value.url,'COUNT',before,len(ctx.pages))
-                  finally: snapshot('new-window')
-                  browser.close()
-          except Exception:
-              traceback.print_exc()
-              snapshot('failure')
-              raise
-          finally:
-              subprocess.run(['taskkill','/PID',str(proc.pid),'/T','/F'],capture_output=True,timeout=20)
-              log.close()
-              # Browser profiles and font programs are not uploaded.
-              import shutil
-              shutil.rmtree(profile,ignore_errors=True)
+          New-Item -ItemType Directory -Force source-review | Out-Null
+          git fetch --depth=1 origin 4bdbd349da9b821a0a8b3192cf34b883d6f26915
+          git archive --format=zip --output=source-review/composition-source.zip 4bdbd349da9b821a0a8b3192cf34b883d6f26915
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && matrix.os == 'windows-2022'
+        with:
+          name: source-review-${{ github.run_id }}
+          path: source-review/
+          retention-days: 1
+          if-no-files-found: warn
       - name: Preserve diagnostics only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
