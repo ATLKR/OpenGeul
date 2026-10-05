@@ -15,6 +15,8 @@ def inspect_hwpx(data: bytes | Path, *, max_bytes: int = 128*1024*1024) -> dict:
             entries=archive.infolist()
             if not entries or entries[0].filename != 'mimetype' or entries[0].compress_type != zipfile.ZIP_STORED:
                 raise ValueError('HWPX mimetype must be first and uncompressed')
+            if any(entry.orig_filename != entry.filename for entry in entries):
+                raise ValueError('ZIP member name was normalized or truncated')
             names=[entry.filename for entry in entries]
             if len(set(names)) != len(names): raise ValueError('Duplicate ZIP entry')
             for name in names:

@@ -17,7 +17,10 @@ def package(text='계약서 &amp; &lt;금액&gt; Ω', *, mime=b'application/hwp+
         warnings.simplefilter('ignore', UserWarning)
         with zipfile.ZipFile(data,'w') as archive:
             for name,value in entries+list(extra):
-                if name not in omit: archive.writestr(name,value,compress_type=compression)
+                if name not in omit:
+                    # Preserve hostile raw names on Windows; ZipInfo normally normalizes them.
+                    info=zipfile.ZipInfo(name);info.filename=name;info.orig_filename=name
+                    archive.writestr(info,value,compress_type=compression)
     return data.getvalue()
 
 class OracleTests(unittest.TestCase):
