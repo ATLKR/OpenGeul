@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from playwright.sync_api import expect
 from driver import Session, digest, edit, menu, until, primary_modifier
 from hwpx_oracle import inspect_hwpx
+from native_controls import dismiss_error_dialog
 
 FIXTURES=Path(os.environ['E2E_FIXTURES']).resolve()
 OUTPUT=Path(os.environ['E2E_OUTPUT']).resolve()
@@ -173,8 +174,9 @@ class NativeTests(EditorTests):
         original=digest(self.document)
         menu(self.page,'file:open')
         self.session.native_dialog(FIXTURES/'invalid.hwpx')
-        until(lambda:bool(self.session.dialogs),20,pump=lambda seconds:self.page.wait_for_timeout(seconds*1000))
-        self.assertTrue(any('실패' in d['message'] or '오류' in d['message'] for d in self.session.dialogs),self.session.dialogs)
+        message=dismiss_error_dialog(self.session.proc.pid)
+        self.session.dialogs.append({'type':'native-error','message':message})
+        expect(self.page.locator('#sb-message')).to_contain_text('파일 열기 실패')
         self.assertEqual(digest(self.document),original)
         edit(self.page,' AFTER-ERROR ')
         self.assertIn('AFTER-ERROR',inspect_hwpx(self.save())['text'])
