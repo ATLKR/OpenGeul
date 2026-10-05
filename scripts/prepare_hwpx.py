@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,23 +23,26 @@ def red_probe(source: Path) -> None:
         replace(path,
             "await expect(bridge.saveDocumentFromCommand()).rejects.toThrow('HWPX 원본 저장은 아직 안전하게 지원하지 않습니다');",
             'await expect(bridge.saveDocumentFromCommand()).resolves.toBeDefined();')
-        pnpm = shutil.which('pnpm')
-        if not pnpm:
-            raise RuntimeError('pnpm is required for the baseline RED probe')
-        command = [pnpm, 'exec', 'vitest', 'run', 'src/core/tauri-bridge.test.ts', '-t', 'blocks direct save for HWPX sources']
-        # .cmd is deliberately executed through cmd.exe on Windows; no user input is interpolated.
-        if Path(pnpm).suffix.lower() == '.cmd':
-            command = ['cmd.exe', '/d', '/s', '/c', subprocess.list2cmdline(command)]
+        node = shutil.which('node')
+        cli = source/'apps/studio-host/node_modules/vitest/vitest.mjs'
+        if not node or not cli.is_file():
+            raise RuntimeError('Node and installed Vitest are required for the baseline RED probe')
+        # Native Node avoids nested cmd.exe/.cmd quoting that skipped every test on Windows.
+        command = [node, str(cli), 'run', 'src/core/tauri-bridge.test.ts']
         result = subprocess.run(command, cwd=source/'apps/studio-host', text=True,
             encoding='utf-8', errors='replace', stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
         print(result.stdout)
         if result.returncode == 0 or 'HWPX 원본 저장은 아직 안전하게 지원하지 않습니다' not in result.stdout:
             raise RuntimeError('Baseline did not fail for the expected HWPX save rejection')
-        print('EXPECTED RED: the unchanged application rejects HWPX direct saving; original test restored.')
+        print('EXPECTED RED: unchanged application rejects HWPX direct saving; original test restored.')
     finally:
         path.write_bytes(original)
 
 def patch(source: Path) -> None:
+    ledger = source/'.opengeul-overlay.json'
+    if not ledger.is_file(): raise ValueError('Apply the distribution overlay before HWPX extensions')
+    value = json.loads(ledger.read_text(encoding='utf-8'))
+    if value.get('hwpxSaveV1'): raise ValueError('HWPX extension already applied')
     native = source/'apps/desktop/src-tauri/src'
     core = source/'apps/studio-host/src/core'
     host = source/'apps/studio-host'
@@ -87,7 +91,7 @@ def patch(source: Path) -> None:
     try {
       const allowExternalOverwrite = await this.confirmExternalOverwriteIfNeeded(docId, finalPath);
       if (allowExternalOverwrite === null) return null;
-      // Export from the edited WASM document. Never re-read the stale source or rename HWP bytes.
+      // Serialize edited WASM state, never stale source bytes or renamed HWP data.
       const bytes = format === 'hwpx' ? super.exportHwpx() : super.exportHwp();
       const generation = this.editGeneration;
       const revision = this.revision;
@@ -96,10 +100,10 @@ def patch(source: Path) -> None:
       const committed = await this.invoke<DesktopSaveResult>(`commit_staged_${format}_save`, {
         docId, stagedPath, targetPath: finalPath, expectedRevision: revision, allowExternalOverwrite,
       });
+      await this.noteFinderRecentDocument(finalPath);
       const result = { ...committed, dirty: this.editGeneration !== generation };
       this.applyNativeSaveResult(result);
       if (result.dirty) await this.invoke<void>('mark_document_dirty', { docId });
-      await this.noteFinderRecentDocument(finalPath);
       return result;
     } finally {
       if (stagedPath) await remove(stagedPath).catch(() => undefined);
@@ -115,6 +119,10 @@ def patch(source: Path) -> None:
     replace(bridge, '  private async confirmReadyForDocumentReplacement(): Promise<boolean> {',
         '  private async confirmReadyForDocumentReplacement(): Promise<boolean> {\n    if (this.saveInProgress) return false;')
     replace(bridge, '      return result !== null;', '      return result !== null && !result.dirty;')
+    for reason in ('document-changed', 'document-mutated'):
+        replace(host/'src/main.ts',
+            f"    documentState.markDirty(typeof reason === 'string' ? reason : '{reason}');",
+            f"    documentState.markDirty(typeof reason === 'string' ? reason : '{reason}');\n    (wasm as DirtyAwareBridge).markDocumentDirty?.();")
     replace(host/'src/main.ts', """eventBus.on('desktop-document-saved', () => {
   documentState.markClean('save');
   sbMessage().textContent = '저장 완료';
@@ -132,11 +140,13 @@ def patch(source: Path) -> None:
     begin = text.index("  it('blocks direct save for HWPX sources'")
     end = text.index("  it('saves HWP bytes through native state", begin)
     replace(test, text[begin:end], (ROOT/'overlay/hwpx-bridge-tests.txt').read_text(encoding='utf-8')+'\n')
-    examples = source/'apps/desktop/rhwp-adapter/examples'
+    examples = source/'apps/desktop/src-tauri/examples'
     examples.mkdir(exist_ok=True)
     shutil.copy2(ROOT/'e2e/generate-fixtures.rs', examples/'opengeul-fixtures.rs')
-    ledger = source/'.opengeul-overlay.json'
-    value = json.loads(ledger.read_text(encoding='utf-8'))
+    value['baselinePreservedFiles'] = dict(value.get('preservedFiles', {}))
+    value['preservedFiles'] = {name: digest for name, digest in value['baselinePreservedFiles'].items()
+        if hashlib.sha256((source/name).read_bytes()).hexdigest() == digest}
+    value['hwpxSaveV1'] = True
     value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation']
     value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts']
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')

@@ -38,11 +38,10 @@ corepack enable
 Push-Location $source
 try {
     pnpm install --frozen-lockfile
-    # Upstream source/provenance and UI contracts precede intentional product changes.
     pnpm run test:upstream
     pnpm run test:studio
 } finally { Pop-Location }
-# Observe the original unsupported HWPX save failing the new expectation before changing production code.
+# Observe the original unsupported HWPX save failing before changing production code.
 python scripts/prepare_hwpx.py $source --red-probe
 python scripts/font_test_contract.py $source
 python scripts/prepare_upstream.py --patch-only
@@ -59,9 +58,9 @@ try {
     try {
         cargo build --release --locked --target x86_64-pc-windows-msvc --package rhwp --bin rhwp --features native-skia
     } finally { Pop-Location }
-    Push-Location 'apps/desktop/rhwp-adapter'
+    Push-Location 'apps/desktop/src-tauri'
     try {
-        cargo run --release --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
+        cargo run --release --locked --target x86_64-pc-windows-msvc --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
     } finally { Pop-Location }
 } finally { Pop-Location }
 $release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
