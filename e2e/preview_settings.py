@@ -10,7 +10,6 @@ from pathlib import Path
 from print_focus import _node
 from preview_policy import dropdown_index,option_index,validate_settings
 
-
 def wait(read,seconds=30):
     end=time.monotonic()+seconds
     while time.monotonic()<end:
@@ -18,7 +17,6 @@ def wait(read,seconds=30):
         if value is not None and value is not False:return value
         time.sleep(.15)
     raise AssertionError('Print preview setting did not reach the requested state')
-
 
 def rows(preview):
     controls=preview.descendants();nodes=[]
@@ -33,17 +31,14 @@ def rows(preview):
         nodes.append(node)
     return controls,nodes
 
-
 def dropdown(preview,label,pids):
     controls,nodes=rows(preview);i=dropdown_index(nodes,label,pids)
     return controls[i] if i is not None else None
-
 
 def selected(control,label):
     name=control.window_text()
     if control.element_info.control_type=='Button':return name.removeprefix(label+' ')
     return control.iface_value.CurrentValue
-
 
 def configure_preview(preview,pids,folder:Path|None=None):
     if preview.window_text()!='Print' or preview.class_name()!='RootView' or preview.process_id() not in pids:
@@ -60,8 +55,7 @@ def configure_preview(preview,pids,folder:Path|None=None):
     try:
         for label,value,key in (('Paper size','A4','paper'),('Margins','None','margins')):
             target=wait(lambda:dropdown(preview,label,pids))
-            before=selected(target,label)
-            state[key+'Before']=before
+            before=selected(target,label);state[key+'Before']=before
             if before!=value:
                 target.iface_expand_collapse.Expand()
                 def option():
@@ -69,9 +63,8 @@ def configure_preview(preview,pids,folder:Path|None=None):
                     return controls[i] if i is not None else None
                 choice=wait(option)
                 choice.iface_selection_item.Select()
-                current=wait(lambda:dropdown(preview,label,pids))
-                if current.iface_expand_collapse.CurrentExpandCollapseState==1:
-                    current.iface_expand_collapse.Collapse()
+                # Observe the committed value before another UI action. An
+                # immediate Collapse can cancel a pending provider selection.
             wait(lambda:selected(dropdown(preview,label,pids),label)==value)
             state[key]=value
         actual=[c for c in preview.descendants(control_type='RadioButton') if c.window_text()=='Actual size' and c.is_enabled() and c.process_id() in pids]
