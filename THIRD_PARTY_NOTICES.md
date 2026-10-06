@@ -36,3 +36,7 @@ SOFTWARE.
 The Windows build copies upstream LICENSE files and collects dependency license texts into Notices/Dependencies. Its inventory is deliberately over-inclusive and requires human review: it is not a complete SBOM or compliance certification. Check native/runtime/transitive dependencies, generated WASM, CanvasKit, Skia, resources and omitted notice texts before a supported stable release.
 
 No font binaries are included in this repository or intended runtime payload. Linking to a publisher does not sublicense their fonts. Installed fonts retain their original licenses. Trademarks and Store policies are separate from source-code licenses. Future LibreOffice imports retain their applicable MPL and other licenses; see docs/LICENSE_POLICY.md.
+
+## Reviewed downstream backport
+
+The plain-character shortcut fix is adapted from HOP PR #101 by FMsongX2, commit `f9bbe8dc66172a1959af1e388e6c28a5b597c5a6` (https://github.com/golbin/hop/pull/101). It prevents unmodified printable keys from being captured as global shortcuts; the HOP/rhwp MIT notices above remain applicable. OpenGeul adds regression coverage and does not claim the upstream PR has been merged. The toolbar-label preference is an OpenGeul implementation addressing HOP issue #97, not imported code from that issue.

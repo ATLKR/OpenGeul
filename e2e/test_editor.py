@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from playwright.sync_api import expect
 from driver import Session, digest, edit, menu, until, primary_modifier
 from hwpx_oracle import inspect_hwpx
+from native_controls import dismiss_error_dialog
 
 FIXTURES=Path(os.environ['E2E_FIXTURES']).resolve()
 OUTPUT=Path(os.environ['E2E_OUTPUT']).resolve()
@@ -163,16 +164,19 @@ class NativeTests(EditorTests):
     def test_multiple_windows_use_real_native_creation(self):
         before=len(self.session.context.pages)
         self.page.locator('textarea').first.focus()
-        self.page.keyboard.press('Control+Shift+n')
-        until(lambda:len(self.session.context.pages)>before,30)
+        with self.session.context.expect_page(timeout=30000) as event:
+            self.page.keyboard.press('Control+Shift+n')
+        expect(event.value.locator('#studio-root')).to_be_visible(timeout=30000)
+        self.assertGreater(len(self.session.context.pages),before)
         self.assertFalse(self.page.is_closed())
 
     def test_corrupt_open_leaves_original_document_usable(self):
         original=digest(self.document)
         menu(self.page,'file:open')
         self.session.native_dialog(FIXTURES/'invalid.hwpx')
-        until(lambda:bool(self.session.dialogs),20)
-        self.assertTrue(any('실패' in d['message'] or '오류' in d['message'] for d in self.session.dialogs),self.session.dialogs)
+        message=dismiss_error_dialog(self.session.proc.pid)
+        self.session.dialogs.append({'type':'native-error','message':message})
+        expect(self.page.locator('#sb-message')).to_contain_text('파일 열기 실패')
         self.assertEqual(digest(self.document),original)
         edit(self.page,' AFTER-ERROR ')
         self.assertIn('AFTER-ERROR',inspect_hwpx(self.save())['text'])
