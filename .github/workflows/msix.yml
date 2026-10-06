@@ -232,8 +232,63 @@ jobs:
           path: evidence/
           retention-days: 1
           if-no-files-found: warn
+  virtual-print:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Download this run's exact production payload and synthetic inputs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-x64-$env:GITHUB_RUN_ID" --dir package
+          gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs-$env:GITHUB_RUN_ID" --dir inputs
+          gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
+      - name: Prepare independent PDF checks, built-in printer and generated documents
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          Start-Service Spooler
+          Get-PrinterDriver -Name 'Microsoft Print To PDF' -ErrorAction Stop
+          python -m pip install -r e2e/print-requirements.txt
+          python -m unittest discover -s e2e/print_tests -v
+          ./e2e/ensure-webview2.ps1
+          python e2e/prepare_payload.py package runtime
+          node e2e/table_height.mjs generate wasm-input print-fixtures
+          python e2e/print_fixtures.py print-fixtures
+          node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
+      - name: Print through real Windows dialogs and inspect spooler and rendered PDF
+        shell: pwsh
+        run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
+      - name: Keep bounded synthetic print evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: virtual-print-${{ matrix.os }}-${{ github.run_id }}
+          path: print-evidence/
+          retention-days: 1
+          if-no-files-found: warn
   release:
-    needs: [wasm, build, native-e2e, browser-e2e, msix-install]
+    needs: [wasm, build, native-e2e, browser-e2e, msix-install, virtual-print]
     if: github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
