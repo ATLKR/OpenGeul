@@ -201,3 +201,37 @@ def open_system_dialog(app_hwnd: int, app_pid: int, evidence_dir: Path | None = 
     last_observation['state'] = 'timeout'
     _write_evidence(evidence_dir, last_observation)
     raise AssertionError('Owned system-print link did not become stably accessible')
+
+
+def fill_print_output(dialog, output: Path):
+    """Wait for stable real shell controls, then enter a path and click exactly once."""
+    from native_controls import filename_control
+
+    deadline = time.monotonic() + 30
+    previous = None
+    stable_since = 0.0
+    while time.monotonic() < deadline:
+        try:
+            field = filename_control(dialog.descendants())
+            buttons = [control for control in dialog.descendants(class_name='Button')
+                       if control.control_id() == 1 and control.is_visible() and control.is_enabled()]
+            if len(buttons) != 1:
+                raise ValueError('Save control is not uniquely ready')
+            button = buttons[0]
+            rect = field.rectangle()
+            current = (field.handle, button.handle, rect.left, rect.top, rect.right, rect.bottom)
+        except (ValueError, OSError):
+            current = None
+        now = time.monotonic()
+        if current is None or current != previous:
+            previous = current
+            stable_since = now
+        elif now - stable_since >= .75:
+            # Dispatch errors escape: never retry a possibly completed save action.
+            field.set_edit_text(str(output))
+            if field.window_text() != str(output):
+                raise AssertionError('Printer output path was not accepted')
+            button.click_input()
+            return
+        time.sleep(.1)
+    raise AssertionError('Print output filename/Save controls did not stabilize')
