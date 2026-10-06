@@ -32,6 +32,14 @@ def restore_default(api, previous, owned):
     else: api.SetDefaultPrinter(previous)
 
 
+def isolated_printer_info(original, name, mode, attributes):
+    # PyWin32 requires the complete PRINTER_INFO_2 mapping, including nullable fields.
+    info = dict(original)
+    info.update(pServerName=None, pPrinterName=name, pShareName=None,
+                pSecurityDescriptor=None, pDevMode=mode, Attributes=attributes)
+    return info
+
+
 class VirtualPrinter:
     def __init__(self, *, landscape=False):
         require_host(os.environ)
@@ -53,10 +61,9 @@ class VirtualPrinter:
         mode.Orientation = 2 if self.landscape else 1
         mode.Fields |= 0x2 | 0x1  # DM_PAPERSIZE | DM_ORIENTATION
         try:
-            self.handle = api.AddPrinter(None, 2, {'pPrinterName': self.name,
-                'pPortName': 'PORTPROMPT:', 'pDriverName': original['pDriverName'],
-                'pPrintProcessor': original['pPrintProcessor'], 'pDatatype': 'RAW', 'pDevMode': mode,
-                'Attributes': api.PRINTER_ATTRIBUTE_LOCAL | api.PRINTER_ATTRIBUTE_KEEPPRINTEDJOBS})
+            info = isolated_printer_info(original, self.name, mode,
+                api.PRINTER_ATTRIBUTE_LOCAL | api.PRINTER_ATTRIBUTE_KEEPPRINTEDJOBS)
+            self.handle = api.AddPrinter(None, 2, info)
             api.SetDefaultPrinter(self.name)
             self.default_changed = True
             if api.GetDefaultPrinter() != self.name: raise RuntimeError('Default printer did not select isolated queue')

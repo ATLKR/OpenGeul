@@ -25,3 +25,12 @@ class PrinterDefaultTests(unittest.TestCase):
         api=Mock();api.GetDefaultPrinter.return_value='Unrelated printer'
         with self.assertRaisesRegex(RuntimeError,'changed'):
             spooler.restore_default(api,'Previous queue','Owned test queue')
+    def test_complete_driver_configuration_is_preserved_without_sharing(self):
+        original={'pServerName':None,'pPrinterName':'Microsoft Print to PDF','pShareName':'DO-NOT-SHARE',
+          'pPortName':'PORTPROMPT:','pDriverName':'Microsoft Print To PDF','pSecurityDescriptor':'original-only',
+          'pPrintProcessor':'winprint','pDevMode':'old','pDatatype':'RAW','Status':0,'Attributes':0}
+        value=spooler.isolated_printer_info(original,'Owned queue','new mode',0x140)
+        self.assertEqual(set(value),set(original))
+        self.assertEqual(value['pPrinterName'],'Owned queue');self.assertEqual(value['pDevMode'],'new mode')
+        self.assertIsNone(value['pShareName']);self.assertIsNone(value['pSecurityDescriptor'])
+        self.assertEqual(original['pPrinterName'],'Microsoft Print to PDF')
