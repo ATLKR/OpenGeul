@@ -11,7 +11,7 @@ jobs:
   inspect:
     if: github.event.repository.private == false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 12
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +23,10 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Load explicitly identified prior product for diagnostic use only
         shell: pwsh
         env:
@@ -31,18 +35,28 @@ jobs:
           $PSNativeCommandUseErrorActionPreference=$true
           gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-windows-x64-37404480348 --dir package
           gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-e2e-inputs-37404480348 --dir inputs
+          gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-wasm-37404480348 --dir wasm-input
           python -m pip install -r e2e/print-requirements.txt
           Start-Service Spooler
           ./e2e/ensure-webview2.ps1
           python e2e/prepare_payload.py package runtime
-      - name: Inspect actual preview margins and scaling before system printing
+          node e2e/table_height.mjs generate wasm-input print-fixtures
+          python e2e/print_fixtures.py print-fixtures
+          node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
+      - name: Match preview and driver media before all real printing cases
         shell: pwsh
-        run: python -u e2e/diagnose_print_settings.py
+        run: python -u e2e/diagnose_print_settings.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out evidence
+      - name: Bound failure evidence without changing outcomes
+        if: always()
+        shell: pwsh
+        env:
+          EVIDENCE_STATUS: ${{ job.status }}
+        run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: release-diagnostic-${{ matrix.os }}-${{ github.run_id }}
-          path: evidence/
+          path: bounded-evidence/
           retention-days: 1
           compression-level: 9
           if-no-files-found: warn

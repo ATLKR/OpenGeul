@@ -1,57 +1,26 @@
-"""Read and inspect genuine print-preview control patterns; no print bypass."""
-import json,time
-from pathlib import Path
-from contextlib import ExitStack
+"""Diagnostic-only real printer run with explicit native preview settings."""
 from pywinauto import Desktop
-from pywinauto.keyboard import send_keys
-from PIL import ImageGrab
-from driver import Session
-from virtual_print import stop_session
-from print_queue import VirtualQueue,require_host
+import virtual_print
 from print_focus import _node,_owned_pids,_preview_windows
-require_host();folder=Path('evidence').resolve();folder.mkdir(exist_ok=True)
+from print_ui_policy import system_link
+from preview_settings import configure_preview,wait
 
-def controls(root):return root.descendants()
-def capture(root,label):
-    rows=[]
-    for c in controls(root):
-        row=_node(c)
-        if row['type'] in ('Button','ComboBox','Hyperlink','RadioButton','ListItem','MenuItem'):
-            row['patterns']={}
-            for p in ('iface_invoke','iface_selection_item','iface_expand_collapse','iface_legacy_iaccessible','iface_value','iface_scroll_item'):
-                try:
-                    obj=getattr(c,p);row['patterns'][p]=bool(obj)
-                except Exception as e:row['patterns'][p]=type(e).__name__
-        rows.append(row)
-    (folder/(label+'.json')).write_text(json.dumps(rows,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-    ImageGrab.grab().save(folder/(label+'.png'))
-    print(label,json.dumps([r for r in rows if r['type'] in ('Button','ComboBox','Hyperlink','RadioButton','ListItem','MenuItem')],ensure_ascii=False),flush=True)
-def wait(fn):
-    until=time.monotonic()+30
-    while time.monotonic()<until:
-        v=fn()
-        if v:return v
-        time.sleep(.2)
-    raise AssertionError('Diagnostic readiness timeout')
-def dropdown(preview,label):
-    old=[c for c in controls(preview) if c.element_info.control_type=='Button' and c.window_text().startswith(label+' ')]
-    if len(old)==1:return old[0]
-    groups=[c for c in controls(preview) if c.element_info.control_type=='Group' and c.window_text()==label]
-    choices=[c for g in groups for c in g.descendants(control_type='ComboBox')]
-    if len(choices)!=1:raise AssertionError(f'{label}: missing or ambiguous control')
-    return choices[0]
-with ExitStack() as stack:
-    q=stack.enter_context(VirtualQueue())
-    session=Session('native',folder/'session',Path('inputs/e2e-fixtures/basic.hwpx').resolve(),executable=Path('runtime/OpenGeul.exe').resolve())
-    stack.callback(stop_session,session)
-    w=Desktop(backend='win32').window(process=session.proc.pid,class_name='Tauri Window').wrapper_object()
-    w.set_focus();send_keys('^p',vk_packet=False)
-    desktop=Desktop(backend='uia');root=desktop.window(handle=w.handle).wrapper_object()
-    preview=wait(lambda:next(iter(_preview_windows(desktop,root,w.handle,_owned_pids(session.proc.pid))),None))
-    more=wait(lambda:next((c for c in controls(preview) if c.window_text()=='More settings' and c.element_info.control_type=='Button' and c.is_visible()),None))
-    more.click_input();time.sleep(2)
-    capture(preview,'expanded')
-    paper=dropdown(preview,'Paper size')
-    paper.click_input();time.sleep(1)
-    capture(root,'paper-options')
-    # Read-only pattern discovery is separate from any future action choice.
+def open_configured_system_dialog(hwnd,pid,folder=None):
+    desktop=Desktop(backend='uia');root=desktop.window(handle=hwnd).wrapper_object()
+    if root.process_id()!=pid or root.class_name()!='Tauri Window':raise AssertionError('Foreign application')
+    pids=_owned_pids(pid)
+    def preview():
+        windows=_preview_windows(desktop,root,hwnd,pids)
+        if len(windows)>1:raise AssertionError('Ambiguous preview')
+        if windows and any(c.window_text()=='More settings' and c.is_enabled() for c in windows[0].descendants(control_type='Button')):return windows[0]
+    window=wait(preview)
+    configure_preview(window,pids,folder)
+    def action():
+        controls=window.descendants();index=system_link([_node(c) for c in controls],pids)
+        return controls[index] if index is not None else None
+    # InvokePattern is the platform's real accessible user action, not an
+    # application API or PDF shortcut. It supports small offscreen previews.
+    wait(action).iface_invoke.Invoke()
+
+virtual_print.open_system_dialog=open_configured_system_dialog
+virtual_print.main()
