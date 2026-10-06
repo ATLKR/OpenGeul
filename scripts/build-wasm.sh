@@ -11,6 +11,9 @@ cargo test --manifest-path overlay/namespace-tests/Cargo.toml
 node --experimental-strip-types --test tests/composition-final.test.mjs
 python scripts/prepare_upstream.py --fetch-only
 python e2e/check_namespaces.py .work/hop .work/hop/apps/studio-host/vendor/rhwp-core .work/namespace-red --red
+node e2e/table_height.mjs generate .work/hop/apps/studio-host/vendor/rhwp-core .work/table-fixtures
+python e2e/table_height_fixtures.py .work/table-fixtures
+node e2e/table_height.mjs verify .work/hop/apps/studio-host/vendor/rhwp-core .work/table-fixtures --expect-clipping
 corepack enable
 (cd .work/hop && pnpm install --frozen-lockfile)
 python scripts/font_test_contract.py .work/hop
@@ -20,6 +23,7 @@ python scripts/patch_composition.py .work/hop
 python scripts/prepare_hop_fixes.py .work/hop
 node --experimental-strip-types --loader ./tests/hop/loader.mjs --test tests/hop/*.test.mjs
 python scripts/patch_namespaces.py .work/hop/third_party/rhwp
+python scripts/patch_table_height.py .work/hop/third_party/rhwp
 mkdir -p .work/tooling
 curl --fail --location --proto '=https' --tlsv1.2 https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-x86_64-unknown-linux-musl.tar.gz -o .work/tooling/wasm-pack.tar.gz
 printf '%s  %s\n' '278a8d668085821f4d1a637bd864f1713f872b0ae3a118c77562a308c0abfe8d' '.work/tooling/wasm-pack.tar.gz' | sha256sum --check
@@ -30,6 +34,7 @@ cp .work/hop/third_party/rhwp/LICENSE .work/rebuilt-wasm/LICENSE
 python scripts/wasm_artifacts.py capture .work/rebuilt-wasm
 python scripts/wasm_artifacts.py install .work/rebuilt-wasm .work/hop
 python e2e/check_namespaces.py .work/hop .work/hop/apps/studio-host/vendor/rhwp-core .work/namespace-green
+node e2e/table_height.mjs verify .work/hop/apps/studio-host/vendor/rhwp-core .work/table-fixtures
 (cd .work/hop && pnpm run test:studio && pnpm run build:studio)
 python scripts/buildkit.py frontend .work/hop/apps/studio-host/dist
 node e2e/generate-browser-fixtures.mjs .work/hop .work/e2e-fixtures

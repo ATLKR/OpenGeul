@@ -1,4 +1,4 @@
-"""Bind the rebuilt WASM files to this checkout's pinned source and namespace fix."""
+"""Bind rebuilt WASM files to this checkout's pinned source and reviewed fixes."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -10,7 +10,8 @@ def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def expected():
     return {'upstream':json.loads((ROOT/'config/upstream.lock.json').read_text()),
             'namespaceHelper':sha(ROOT/'overlay/hwpx_namespaces.rs'),
-            'namespacePatcher':sha(ROOT/'scripts/patch_namespaces.py')}
+            'namespacePatcher':sha(ROOT/'scripts/patch_namespaces.py'),
+            'tableHeightPatcher':sha(ROOT/'scripts/patch_table_height.py')}
 def validate(folder):
     for name in FILES:
         path=folder/name
@@ -38,6 +39,7 @@ def install(folder,source):
     if ledger.exists():
         state=json.loads(ledger.read_text());state['wasmRebuild']=value
         state['namespacePatch']=json.loads((source/'third_party/rhwp/.opengeul-namespaces.json').read_text())
+        state['tableHeightPatch']=json.loads((source/'third_party/rhwp/.opengeul-table-height.json').read_text())
         ledger.write_text(json.dumps(state,indent=2)+'\n')
     print('Verified and installed source-bound rebuilt WASM; upstream provenance retained separately.')
 if __name__=='__main__':
