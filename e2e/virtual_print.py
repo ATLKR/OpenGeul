@@ -3,6 +3,7 @@ No direct-PDF or app test bridge. No physical/default printer is changed.
 """
 from __future__ import annotations
 import argparse,json,shutil,subprocess,time,traceback
+from contextlib import ExitStack
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import psutil
@@ -12,6 +13,7 @@ from pywinauto.keyboard import send_keys
 from driver import Session,digest,edit
 from print_raster import inspect_print_pdf
 from print_queue import VirtualQueue,require_host
+from print_results import completed_job,validate_cases
 from print_focus import open_system_dialog,fill_print_output
 
 def wait(check,seconds=30):
@@ -40,12 +42,10 @@ def snapshot(folder):
 def system_dialog(session,queue):
     windows=[w for w in Desktop(backend='win32').windows(process=session.proc.pid,visible_only=True) if w.class_name()=='Tauri Window']
     if len(windows)!=1:raise AssertionError('Expected one owned app window')
-    def viewports():return {c.handle for c in windows[0].descendants(class_name='Chrome_RenderWidgetHostHWND') if c.is_visible()}
-    before=viewports();windows[0].set_focus();send_keys('^p')
-    created=wait(lambda:viewports()-before)
-    if len(created)!=1:raise AssertionError('Ambiguous print preview viewport')
-    time.sleep(3)
-    open_system_dialog(next(iter(created)))
+    windows[0].maximize()
+    wait(windows[0].is_maximized)
+    windows[0].set_focus();send_keys('^p',vk_packet=False)
+    open_system_dialog(windows[0].handle,session.proc.pid)
     dialog=wait(lambda:visible_dialog('Print',session.proc.pid))
     lists=[c for c in dialog.descendants(class_name='SysListView32') if c.is_visible()]
     if len(lists)!=1:raise AssertionError('Printer selection list was not found')
@@ -63,12 +63,30 @@ def configure_media(dialog,pid,folder):
     (folder/'requested-media.json').write_text(json.dumps({'paper':paper.selected_text(),'orientation':'Portrait'}))
     control(advanced,'Button',1).click_input();control(preferences,'Button',1).click_input()
     wait(lambda:not visible_dialog('Printing Preferences',pid))
+def capture_failure(folder, error_type):
+    if error_type is not None:
+        try:snapshot(folder)
+        except Exception as error:
+            (folder/'capture-error.txt').write_text(str(error),encoding='utf-8')
+    return False
+
+def stop_session(session):
+    # Unblock the native print/modal operation before deleting its owned queue.
+    try:
+        if session.proc and session.proc.poll() is None:
+            subprocess.run(['taskkill','/PID',str(session.proc.pid),'/T','/F'],capture_output=True,timeout=15)
+    finally:
+        session.close()
+
 def print_document(exe,fixture,case,folder):
     folder.mkdir(parents=True,exist_ok=False);source=folder/fixture.name;shutil.copyfile(fixture,source)
     before=digest(source);output=folder/'printed.pdf';session=None
     try:
-        with VirtualQueue() as queue:
+        with ExitStack() as resources:
+            queue=resources.enter_context(VirtualQueue())
             session=Session('native',folder/'session',source,executable=exe)
+            resources.callback(stop_session,session)
+            resources.push(lambda error_type,error,tb: capture_failure(folder,error_type))
             if queue.jobs():raise AssertionError('Queue contains stale jobs')
             dialog=system_dialog(session,queue);configure_media(dialog,session.proc.pid,folder)
             if case.get('range'):
@@ -85,23 +103,26 @@ def print_document(exe,fixture,case,folder):
                 fill_print_output(save,output)
                 wait(lambda:output.is_file() and output.stat().st_size>100,90)
                 wait(lambda:output.read_bytes().rstrip().endswith(b'%%EOF'),30)
-                jobs=wait(queue.jobs,30)
-                if len(jobs)!=1:raise AssertionError('Expected exactly one retained spooler job')
-                job=jobs[0];bad=queue.api.JOB_STATUS_ERROR|queue.api.JOB_STATUS_OFFLINE|queue.api.JOB_STATUS_PAPEROUT
-                if job['Status'] & bad:raise AssertionError(f'Spooler reported failure: {job["Status"]}')
-                spool={'queue':queue.name,'jobs':[{k:job.get(k) for k in ('JobId','pPrinterName','pDocument','pDatatype','Status','TotalPages','PagesPrinted')}]}
-                dm=job.get('pDevMode')
-                if dm is not None:spool['jobMedia']={k:getattr(dm,k) for k in ('PaperSize','PaperLength','PaperWidth','FormName','Orientation')}
+                def completed():
+                    jobs=queue.jobs()
+                    if not jobs:return None
+                    dm=jobs[0].get('pDevMode')
+                    media={} if dm is None else {k:getattr(dm,k) for k in ('PaperSize','PaperLength','PaperWidth','FormName','Orientation')}
+                    observation={'queue':queue.name,'jobs':[{k:j.get(k) for k in ('JobId','pPrinterName','pDocument','pDatatype','pStatus','Status','TotalPages','PagesPrinted')} for j in jobs], 'jobMedia':media}
+                    (folder/'spooler-latest.json').write_text(json.dumps(observation,ensure_ascii=False,indent=2),encoding='utf-8')
+                    job=completed_job(jobs,queue.name,source.name,len(case['pages']),media)
+                    return observation if job is not None else None
+                spool=wait(completed,30)
                 (folder/'spooler.json').write_text(json.dumps(spool,ensure_ascii=False,indent=2),encoding='utf-8')
                 report=inspect_print_pdf(output,{'pages':case['pages']},folder/'pdf-check',case['name']);report.update(spool)
             if digest(source)!=before:raise AssertionError('Printing modified the source document')
             report['sourceSha256']=before
             (folder/'result.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
             return report
-    except BaseException:snapshot(folder);raise
     finally:
-        if session:
-            subprocess.run(['taskkill','/PID',str(session.proc.pid),'/T','/F'],capture_output=True,timeout=15);session.close()
+        actual=digest(source)
+        (folder/'source-preservation.json').write_text(json.dumps({'before':before,'after':actual,'unchanged':actual==before}),encoding='utf-8')
+        if actual!=before:raise AssertionError('Printing modified the source document, including on failure/cancellation')
 def main():
     require_host();parser=argparse.ArgumentParser()
     for name in ('exe','inputs','fixtures','out'):parser.add_argument('--'+name,type=Path,required=True)
@@ -113,7 +134,7 @@ def main():
     multi=next(c for c in cases if c['name']=='multipage')
     cases.append({**multi,'name':'page-range','range':'2','pages':multi['pages'][1:]})
     cases.append({**basic,'name':'cancel','path':args.inputs/'basic.hwpx','cancel':True})
-    if len(cases)!=8:raise AssertionError('Required print scenario count changed')
+    validate_cases(cases)
     results=[];suite=ET.Element('testsuite',name='virtual-print',tests=str(len(cases)),failures='0',skipped='0')
     for case in cases:
         item=ET.SubElement(suite,'testcase',name=case['name'])
