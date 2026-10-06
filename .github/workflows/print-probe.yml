@@ -50,40 +50,10 @@ jobs:
           python -m pip install -r e2e/requirements.txt
           ./e2e/ensure-webview2.ps1
           python e2e/prepare_payload.py package runtime
-      - name: Inspect native print UI without calling CDP while it is modal
+      - name: Inspect native system Print dialog with an owned virtual queue
         timeout-minutes: 3
         shell: pwsh
-        run: |
-          @'
-          import sys,time,json,subprocess
-          from pathlib import Path
-          sys.path.insert(0,str(Path('e2e').resolve()))
-          from driver import Session
-          from pywinauto import Desktop
-          from pywinauto.keyboard import send_keys
-          from PIL import ImageGrab
-          root=Path('evidence').resolve();root.mkdir(exist_ok=True)
-          session=Session('native',root/'session',Path('inputs/e2e-fixtures/basic.hwpx').resolve(),executable=Path('runtime/OpenGeul.exe').resolve())
-          print('READY',session.proc.pid,flush=True)
-          try:
-              windows=Desktop(backend='win32').windows(process=session.proc.pid,visible_only=True)
-              windows[0].set_focus(); send_keys('^p'); time.sleep(4)
-              for backend in ('win32','uia'):
-                  rows=[]
-                  for w in Desktop(backend=backend).windows():
-                      if not w.is_visible():continue
-                      row={'title':w.window_text(),'class':w.class_name(),'pid':w.process_id(),'hwnd':w.handle,'children':[]}
-                      if w.process_id()==session.proc.pid or 'Print' in w.window_text():
-                          row['children']=[{'title':c.window_text(),'class':c.class_name(),'id':c.control_id(),'visible':c.is_visible()} for c in w.descendants()][:250]
-                      rows.append(row)
-                  (root/(backend+'-windows.json')).write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
-                  print(backend,json.dumps(rows,ensure_ascii=False),flush=True)
-              ImageGrab.grab().save(root/'desktop.png')
-          finally:
-              subprocess.run(['taskkill','/PID',str(session.proc.pid),'/T','/F'],capture_output=True,timeout=15)
-              session.close()
-          '@ | Set-Content .work-print-probe.py -Encoding utf8
-          python -u .work-print-probe.py
+        run: python -u e2e/print_probe.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
