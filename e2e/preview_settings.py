@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json,time
 from pathlib import Path
+from uia_snapshot import snapshot_descendants
 from print_focus import _node
 from preview_policy import dropdown_index,option_index,validate_settings
 
@@ -14,7 +15,7 @@ def wait(read,seconds=30):
     raise AssertionError('Print preview setting did not reach the requested state')
 
 def rows(preview):
-    controls=preview.descendants();nodes=[]
+    controls=snapshot_descendants(preview);nodes=[]
     for c in controls:
         node=_node(c)
         if node['type']=='ComboBox':
@@ -44,7 +45,7 @@ def activate_option(choice):
 def configure_preview(preview,pids,folder:Path|None=None):
     if preview.window_text()!='Print' or preview.class_name()!='RootView' or preview.process_id() not in pids:
         raise AssertionError('Cannot configure a foreign print preview')
-    more=[c for c in preview.descendants(control_type='Button') if c.window_text()=='More settings' and c.is_enabled()]
+    more=[c for c in snapshot_descendants(preview,control_type='Button') if c.window_text()=='More settings' and c.is_enabled()]
     if len(more)>1:raise AssertionError('Ambiguous More settings action')
     if more:
         from pywinauto.uia_defines import NoPatternInterfaceError
@@ -66,7 +67,7 @@ def configure_preview(preview,pids,folder:Path|None=None):
                 activate_option(choice)
             wait(lambda:selected(dropdown(preview,label,pids),label)==value)
             state[key]=value
-        actual=[c for c in preview.descendants(control_type='RadioButton') if c.window_text()=='Actual size' and c.is_enabled() and c.process_id() in pids]
+        actual=[c for c in snapshot_descendants(preview,control_type='RadioButton') if c.window_text()=='Actual size' and c.is_enabled() and c.process_id() in pids]
         if len(actual)!=1:raise AssertionError('Actual size choice is not unique')
         if not actual[0].iface_selection_item.CurrentIsSelected:actual[0].iface_selection_item.Select()
         state['actualSize']=bool(actual[0].iface_selection_item.CurrentIsSelected)
