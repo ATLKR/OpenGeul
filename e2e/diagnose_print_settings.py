@@ -1,4 +1,4 @@
-"""Probe real media controls with native accessibility, without a print bypass."""
+"""Read and inspect genuine print-preview control patterns; no print bypass."""
 import json,time
 from pathlib import Path
 from contextlib import ExitStack
@@ -13,10 +13,19 @@ require_host();folder=Path('evidence').resolve();folder.mkdir(exist_ok=True)
 
 def controls(root):return root.descendants()
 def capture(root,label):
-    rows=[_node(c) for c in controls(root)]
+    rows=[]
+    for c in controls(root):
+        row=_node(c)
+        if row['type'] in ('Button','ComboBox','Hyperlink','RadioButton','ListItem','MenuItem'):
+            row['patterns']={}
+            for p in ('iface_invoke','iface_selection_item','iface_expand_collapse','iface_legacy_iaccessible','iface_value','iface_scroll_item'):
+                try:
+                    obj=getattr(c,p);row['patterns'][p]=bool(obj)
+                except Exception as e:row['patterns'][p]=type(e).__name__
+        rows.append(row)
     (folder/(label+'.json')).write_text(json.dumps(rows,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     ImageGrab.grab().save(folder/(label+'.png'))
-    print(label,json.dumps([r for r in rows if r['type'] in ('Button','Hyperlink','ComboBox','ListItem','MenuItem','RadioButton','CheckBox','Edit')],ensure_ascii=False),flush=True)
+    print(label,json.dumps([r for r in rows if r['type'] in ('Button','ComboBox','Hyperlink','RadioButton','ListItem','MenuItem')],ensure_ascii=False),flush=True)
 def wait(fn):
     until=time.monotonic()+30
     while time.monotonic()<until:
@@ -39,17 +48,10 @@ with ExitStack() as stack:
     w.set_focus();send_keys('^p',vk_packet=False)
     desktop=Desktop(backend='uia');root=desktop.window(handle=w.handle).wrapper_object()
     preview=wait(lambda:next(iter(_preview_windows(desktop,root,w.handle,_owned_pids(session.proc.pid))),None))
-    more=wait(lambda:next((c for c in controls(preview) if c.window_text()=='More settings' and c.element_info.control_type=='Button'),None))
-    more.invoke();time.sleep(2)
-    capture(preview,'initial')
-    for label in ('Paper size','Margins'):
-        target=dropdown(preview,label)
-        # UIA activation still exercises the actual user-facing control, even when
-        # its scroll container has placed it outside the small runner viewport.
-        if target.element_info.control_type=='ComboBox':target.expand()
-        else:target.invoke()
-        time.sleep(1)
-        capture(root,label.replace(' ','-')+'-options')
-        send_keys('{ESC}')
-        time.sleep(.3)
-    capture(preview,'end')
+    more=wait(lambda:next((c for c in controls(preview) if c.window_text()=='More settings' and c.element_info.control_type=='Button' and c.is_visible()),None))
+    more.click_input();time.sleep(2)
+    capture(preview,'expanded')
+    paper=dropdown(preview,'Paper size')
+    paper.click_input();time.sleep(1)
+    capture(root,'paper-options')
+    # Read-only pattern discovery is separate from any future action choice.
