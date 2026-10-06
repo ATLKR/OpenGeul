@@ -1,0 +1,60 @@
+name: OpenGeul virtual printer probe
+on:
+  push:
+    branches: [work/virtual-printer-e2e]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: virtual-print-probe-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  capability:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-2022]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Inspect inbox printer and enable only its Windows feature when needed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable hosted runner required.' }
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          Start-Transcript -Path evidence/printer-capability.txt
+          try {
+            Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber
+            $feature = Get-WindowsOptionalFeature -Online -FeatureName Printing-PrintToPDFServices-Features
+            $feature | Format-List
+            if ($feature.State -ne 'Enabled') {
+              $enabled = Enable-WindowsOptionalFeature -Online -FeatureName Printing-PrintToPDFServices-Features -All -NoRestart
+              $enabled | Format-List
+              if ($enabled.RestartNeeded) { throw 'Printer enablement needs reboot; not silently skipped.' }
+            }
+            Set-Service Spooler -StartupType Manual
+            Start-Service Spooler
+            Get-Printer | Select-Object Name,DriverName,PortName | Format-Table
+            Get-PrinterDriver | Select-Object Name,Manufacturer | Format-Table
+            if (-not (Get-Printer -Name 'Microsoft Print to PDF' -ErrorAction SilentlyContinue)) {
+              Add-PrinterDriver -Name 'Microsoft Print To PDF'
+              Add-Printer -Name 'Microsoft Print to PDF' -DriverName 'Microsoft Print To PDF' -PortName 'PORTPROMPT:'
+            }
+            Get-Printer -Name 'Microsoft Print to PDF' | Select-Object Name,DriverName,PortName | ConvertTo-Json | Set-Content evidence/printer.json
+          } finally { Stop-Transcript }
+      - name: Preserve capabilities and exact public test sources for diagnosis
+        if: always()
+        shell: pwsh
+        run: git archive --format=zip --output=evidence/checkout.zip HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: print-capability-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/
+          retention-days: 1
+          if-no-files-found: error
