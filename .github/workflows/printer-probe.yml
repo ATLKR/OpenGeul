@@ -1,0 +1,19 @@
+name: OpenGeul printer harness probe (existing candidate)
+on:
+  push:
+    branches: [work/virtual-printer-tests]
+    paths: ['e2e/printing/**', '.github/workflows/printing.yml', '.github/workflows/printer-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: printer-harness-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  printer-probe:
+    uses: ./.github/workflows/printing.yml
+    with:
+      build-run: '37404480348'
+      build-sha: '21ec23749f74f932a9870cefcfa85cae1f3584db'
+# This reuses PR4's verified candidate and is not a replacement for same-run release gates.
