@@ -232,8 +232,17 @@ jobs:
           path: evidence/
           retention-days: 1
           if-no-files-found: warn
+  printer-e2e:
+    needs: build
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/printing.yml
+    with:
+      build-run: ${{ format('{0}', github.run_id) }}
+      build-sha: ${{ github.sha }}
   release:
-    needs: [wasm, build, native-e2e, browser-e2e, msix-install]
+    needs: [wasm, build, native-e2e, browser-e2e, msix-install, printer-e2e]
     if: github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
