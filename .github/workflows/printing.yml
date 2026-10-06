@@ -1,0 +1,81 @@
+name: OpenGeul actual virtual-printer E2E
+on:
+  workflow_call:
+    inputs:
+      build-run:
+        type: string
+        required: true
+      build-sha:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  printer:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+      PRINT_BUILD_RUN: ${{ inputs.build-run }}
+      PRINT_BUILD_SHA: ${{ inputs.build-sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Download only the selected build and matching WASM
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          if ($env:PRINT_BUILD_RUN -notmatch '^[1-9][0-9]*$') { throw 'Invalid run ID' }
+          gh run download $env:PRINT_BUILD_RUN --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-x64-$env:PRINT_BUILD_RUN" --dir package
+          gh run download $env:PRINT_BUILD_RUN --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs-$env:PRINT_BUILD_RUN" --dir inputs
+          gh run download $env:PRINT_BUILD_RUN --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:PRINT_BUILD_RUN" --dir wasm-input
+          python e2e/printing/verify_inputs.py
+          python e2e/prepare_payload.py package runtime
+      - name: Prepare inbox virtual printer and synthetic documents
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable runner required' }
+          New-Item -ItemType Directory print-evidence | Out-Null
+          if ((Get-Service Spooler).Status -ne 'Running') { Start-Service Spooler; New-Item print-evidence/spooler-started.txt | Out-Null }
+          Get-Printer -Name 'Microsoft Print to PDF' | Select-Object Name,DriverName,PortName | ConvertTo-Json | Set-Content print-evidence/inbox-printer.json
+          python -m pip install -r e2e/requirements.txt -r e2e/printing/requirements.txt
+          ./e2e/ensure-webview2.ps1
+          node e2e/table_height.mjs generate wasm-input inputs/e2e-fixtures
+          python e2e/table_height_fixtures.py inputs/e2e-fixtures
+      - name: Real Print UI, PDF driver, spooler and independent raster checks
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          $env:E2E_EXE=(Resolve-Path runtime/OpenGeul.exe).Path
+          $env:E2E_FIXTURES=(Resolve-Path inputs/e2e-fixtures).Path
+          $env:PRINT_EVIDENCE=Join-Path $pwd 'print-evidence'
+          python e2e/printing/run.py
+      - name: Restore spooler only when this test started it
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path print-evidence/spooler-started.txt) { Stop-Service Spooler }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: printer-e2e-${{ matrix.os }}-${{ github.run_id }}
+          path: print-evidence/
+          retention-days: 1
+          if-no-files-found: error
