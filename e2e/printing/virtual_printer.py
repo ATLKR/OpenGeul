@@ -7,6 +7,13 @@ import subprocess
 import time
 from queue_policy import validate_environment, validate_queue, completed_job
 
+def default_printer(api):
+    try:return api.GetDefaultPrinter()
+    except RuntimeError as error:
+        # pywin32 reports the documented no-default-printer case this way.
+        if str(error) == 'The default printer was not found.':return None
+        raise
+
 class VirtualPrinter:
     def __init__(self,evidence:Path):
         self.name=validate_environment(os.environ)
@@ -17,7 +24,7 @@ class VirtualPrinter:
         self.api=api
         if any(p['pPrinterName']==self.name for p in api.EnumPrinters(2,None,2)):
             raise ValueError('Refusing to modify a pre-existing test queue')
-        self.previous=api.GetDefaultPrinter()
+        self.previous=default_printer(api)
         try:
             self.handle=api.AddPrinter(None,2,{'pPrinterName':self.name,'pPortName':'PORTPROMPT:',
                 'pDriverName':'Microsoft Print To PDF','pPrintProcessor':'winprint','pDatatype':'RAW',
@@ -25,8 +32,8 @@ class VirtualPrinter:
             validate_queue(api.GetPrinter(self.handle,2),self.name)
             subprocess.run(['pwsh','-NoProfile','-NonInteractive','-Command',
                 "Set-PrintConfiguration -PrinterName '"+self.name+"' -PaperSize A4 -ErrorAction Stop"],check=True,timeout=30)
-            api.SetDefaultPrinter(self.name)
-            if api.GetDefaultPrinter()!=self.name:raise AssertionError('Default test queue not selected')
+            # Select the isolated queue explicitly in the real print UI; do not require
+            # or set a global default on runner accounts that start without one.
             (self.evidence/'printer.json').write_text(json.dumps({'name':self.name,'driver':'Microsoft Print To PDF',
                 'port':'PORTPROMPT:','keepPrintedJobs':True,'previousDefault':self.previous},indent=2),encoding='utf-8')
             return self
@@ -49,7 +56,7 @@ class VirtualPrinter:
     def close(self):
         if self.handle is None:return
         try:
-            if self.api.GetDefaultPrinter()==self.name and self.previous:
+            if default_printer(self.api)==self.name and self.previous:
                 self.api.SetDefaultPrinter(self.previous)
             for job in self.jobs():self.api.SetJob(self.handle,job['JobId'],0,None,5)
             self.api.DeletePrinter(self.handle)
@@ -57,6 +64,6 @@ class VirtualPrinter:
             self.api.ClosePrinter(self.handle);self.handle=None
         if any(p['pPrinterName']==self.name for p in self.api.EnumPrinters(2,None,2)):
             raise AssertionError('Temporary print queue was not removed')
-        if self.api.GetDefaultPrinter()!=self.previous:raise AssertionError('Default printer was not restored')
+        if default_printer(self.api)!=self.previous:raise AssertionError('Default printer was not restored')
         (self.evidence/'cleanup.json').write_text(json.dumps({'removed':self.name,'restoredDefault':self.previous}),encoding='utf-8')
     def __exit__(self,*args):self.close()
