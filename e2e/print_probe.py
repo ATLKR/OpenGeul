@@ -11,11 +11,9 @@ if os.name != 'nt' or os.environ.get('GITHUB_ACTIONS')!='true' or os.environ.get
     raise RuntimeError('Probe is restricted to disposable Windows runners')
 root=Path('evidence').resolve();root.mkdir(exist_ok=True)
 name='OpenGeul-CI-'+os.environ['GITHUB_RUN_ID']
-old=win32print.GetDefaultPrinter()
 subprocess.run(['pwsh','-NoProfile','-Command',"$ErrorActionPreference='Stop'; if(Get-Printer -Name $env:OG_PRINT_QUEUE -ErrorAction SilentlyContinue){throw 'Queue collision'}; Add-Printer -Name $env:OG_PRINT_QUEUE -DriverName 'Microsoft Print To PDF' -PortName 'PORTPROMPT:' -KeepPrintedJobs"],env={**os.environ,'OG_PRINT_QUEUE':name},check=True,timeout=30)
 session=None
 try:
-    win32print.SetDefaultPrinter(name)
     session=Session('native',root/'session',Path('inputs/e2e-fixtures/basic.hwpx').resolve(),executable=Path('runtime/OpenGeul.exe').resolve())
     print('READY',session.proc.pid,flush=True)
     windows=Desktop(backend='win32').windows(process=session.proc.pid,visible_only=True)
@@ -34,7 +32,6 @@ finally:
     if session:
         subprocess.run(['taskkill','/PID',str(session.proc.pid),'/T','/F'],capture_output=True,timeout=15)
         session.close()
-    win32print.SetDefaultPrinter(old)
     handle=win32print.OpenPrinter(name,{'DesiredAccess':win32print.PRINTER_ALL_ACCESS})
     try:win32print.DeletePrinter(handle)
     finally:win32print.ClosePrinter(handle)
