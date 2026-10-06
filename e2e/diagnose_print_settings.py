@@ -1,6 +1,4 @@
-"""Single-case diagnostic: does native selection commit without cancellation?"""
-import argparse,json
-from pathlib import Path
+"""All eight real printer scenarios using the separately identified prior binary."""
 from pywinauto import Desktop
 import virtual_print
 from print_focus import _node,_owned_pids,_preview_windows
@@ -22,9 +20,4 @@ def open_configured_system_dialog(hwnd,pid,folder=None):
     wait(action).iface_invoke.Invoke()
 
 virtual_print.open_system_dialog=open_configured_system_dialog
-p=argparse.ArgumentParser()
-for key in ('exe','inputs','fixtures','out'):p.add_argument('--'+key,type=Path,required=True)
-a=p.parse_args();a.out.mkdir(exist_ok=True)
-case={'name':'basic-hwpx','pages':[{'size_pt':[595.28,841.86],'markers':['OpenGeul fixture','한글','123']}]}
-result=virtual_print.print_document(a.exe.resolve(),(a.inputs/'basic.hwpx').resolve(),case,(a.out/'basic-hwpx').resolve())
-(a.out/'single-case-result.json').write_text(json.dumps({'diagnosticOnly':True,'case':'basic-hwpx','result':result},indent=2),encoding='utf-8')
+virtual_print.main()
