@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
-from queue_policy import validate_environment, validate_queue, completed_job
+from queue_policy import validate_environment, validate_queue, completed_job, queue_definition
 
 def default_printer(api):
     try:return api.GetDefaultPrinter()
@@ -26,9 +26,7 @@ class VirtualPrinter:
             raise ValueError('Refusing to modify a pre-existing test queue')
         self.previous=default_printer(api)
         try:
-            self.handle=api.AddPrinter(None,2,{'pPrinterName':self.name,'pPortName':'PORTPROMPT:',
-                'pDriverName':'Microsoft Print To PDF','pPrintProcessor':'winprint','pDatatype':'RAW',
-                'Attributes':0x40|0x100})
+            self.handle=api.AddPrinter(None,2,queue_definition(self.name))
             validate_queue(api.GetPrinter(self.handle,2),self.name)
             subprocess.run(['pwsh','-NoProfile','-NonInteractive','-Command',
                 "Set-PrintConfiguration -PrinterName '"+self.name+"' -PaperSize A4 -ErrorAction Stop"],check=True,timeout=30)

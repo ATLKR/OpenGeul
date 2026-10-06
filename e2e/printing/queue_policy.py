@@ -22,3 +22,12 @@ def completed_job(jobs,previous):
     status=new[0]['Status']
     if status & (2|64|512|1024):raise AssertionError(f'Print job failed: {status}')
     return new[0] if status & (128|4096) else None
+
+def queue_definition(name):
+    if not re.fullmatch(r'OpenGeul-E2E-[0-9]{1,15}',name):raise ValueError('Invalid owned queue name')
+    # pywin32 requires the complete PRINTER_INFO_2 mapping, including nullable fields.
+    return {'pServerName':None,'pPrinterName':name,'pShareName':None,'pPortName':'PORTPROMPT:',
+        'pDriverName':'Microsoft Print To PDF','pComment':'OpenGeul synthetic CI output only',
+        'pLocation':None,'pDevMode':None,'pSepFile':None,'pPrintProcessor':'winprint',
+        'pDatatype':'RAW','pParameters':None,'pSecurityDescriptor':None,'Attributes':0x140,
+        'Priority':1,'DefaultPriority':1,'StartTime':0,'UntilTime':0,'Status':0,'cJobs':0,'AveragePPM':0}
