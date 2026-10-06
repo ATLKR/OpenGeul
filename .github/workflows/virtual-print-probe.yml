@@ -9,9 +9,9 @@ concurrency:
   group: virtual-print-probe-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  capability:
+  printing:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
@@ -26,7 +26,11 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
-      - name: Inspect inbox printer and enable only its Windows feature when needed
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Ensure the inbox virtual printer on this disposable runner
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -42,13 +46,9 @@ jobs:
               if ($enabled.RestartNeeded) { throw 'Printer enablement needs reboot.' }
             }
             Start-Service Spooler
-            if (-not (Get-Printer -Name 'Microsoft Print to PDF' -ErrorAction SilentlyContinue)) {
-              Add-PrinterDriver -Name 'Microsoft Print To PDF'
-              Add-Printer -Name 'Microsoft Print to PDF' -DriverName 'Microsoft Print To PDF' -PortName 'PORTPROMPT:'
-            }
-            Get-Printer -Name 'Microsoft Print to PDF' | Select-Object Name,DriverName,PortName | ConvertTo-Json | Set-Content evidence/printer.json
+            if (-not (Get-PrinterDriver -Name 'Microsoft Print To PDF' -ErrorAction SilentlyContinue)) { Add-PrinterDriver -Name 'Microsoft Print To PDF' }
           } finally { Stop-Transcript }
-      - name: Reuse a successful immutable main binary only to diagnose the printer harness
+      - name: Reuse a successful immutable main binary only for the isolated harness probe
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,24 +57,37 @@ jobs:
           $run=gh api repos/ATLKR/OpenGeul/actions/runs/37399457757 | ConvertFrom-Json
           if ($run.conclusion -ne 'success' -or $run.head_sha -ne '642b7a0e6f681006b013fea6117071c189fa28e1') { throw 'Wrong probe payload provenance.' }
           gh run download 37399457757 --repo ATLKR/OpenGeul --name opengeul-windows-x64-37399457757 --dir package
-          gh run download 37399457757 --repo ATLKR/OpenGeul --name opengeul-e2e-inputs-37399457757 --dir inputs
-      - name: Inspect and cancel the real native print dialog
+          gh run download 37399457757 --repo ATLKR/OpenGeul --name opengeul-wasm-37399457757 --dir wasm
+      - name: Validate output oracles and immutable inputs
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference=$true
           $env:PYTHONUTF8='1'
-          python -m pip install -r e2e/requirements.txt
+          python -m pip install -r e2e/requirements.txt -r e2e/printing/requirements.txt
+          python -m unittest discover -s tests -v
+          python -m unittest discover -s tests/printing -v
           ./e2e/ensure-webview2.ps1
           python e2e/prepare_payload.py package runtime
-          python e2e/printing/probe.py
-      - name: Preserve the exact public test sources for diagnosis
+          python e2e/printing/verify_inputs.py package wasm 642b7a0e6f681006b013fea6117071c189fa28e1 37399457757
+          node e2e/printing/generate.mjs wasm inputs/print-fixtures
+      - name: Real Print command, isolated Windows spooler and output validation
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          $env:PYTHONUTF8='1'
+          $env:PRINT_OUTPUT=Join-Path $pwd 'evidence/printing'
+          $env:PRINT_FIXTURES=(Resolve-Path inputs/print-fixtures).Path
+          $env:E2E_EXE=(Resolve-Path runtime/OpenGeul.exe).Path
+          $env:PRINT_PAYLOAD_RUN='37399457757'
+          python e2e/printing/run_print.py
+      - name: Preserve exact public test sources for diagnosis
         if: always()
         shell: pwsh
         run: git archive --format=zip --output=evidence/checkout.zip HEAD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: print-capability-${{ matrix.os }}-${{ github.run_id }}
+          name: virtual-print-${{ matrix.os }}-${{ github.run_id }}
           path: evidence/
           retention-days: 1
           if-no-files-found: error

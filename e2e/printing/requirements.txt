@@ -1,0 +1,4 @@
+pypdf==5.9.0
+pypdfium2==5.8.0
+pillow==12.3.0
+reportlab==4.4.9
