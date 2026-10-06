@@ -1,0 +1,101 @@
+  function hwpxSaveSetup() {
+    const bridge = new TauriBridge();
+    const handle = writeHandle();
+    fsOpenMock.mockResolvedValue(handle);
+    applyOpenResult(bridge, nativeOpenResult({ fileName: 'source.hwpx', sourcePath: '/tmp/source.hwpx', format: 'hwpx', dirty: true }));
+    invokeMock.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === 'check_external_modification') return { changed: false };
+      if (command.startsWith('prepare_staged_')) return `${args.targetPath}.hop-save-0123456789abcdef0123456789abcdef.tmp`;
+      if (command.startsWith('commit_staged_')) return { docId: 'doc-1', sourcePath: args.targetPath, format: command.includes('hwpx') ? 'hwpx' : 'hwp', revision: 2, dirty: false, warnings: [] };
+      if (command === 'note_finder_recent_document' || command === 'mark_document_dirty') return undefined;
+      throw new Error(`unexpected command ${command}`);
+    });
+    return { bridge, handle };
+  }
+
+  it('saves edited HWPX bytes directly with the native staging and revision guards', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    const result = await bridge.saveDocumentFromCommand();
+    expect(handle.write).toHaveBeenCalledWith(new Uint8Array([0x50, 0x4b, 3]));
+    expect(getWasmMock(bridge, 'exportHwpMock')).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith('commit_staged_hwpx_save', expect.objectContaining({ targetPath: '/tmp/source.hwpx', expectedRevision: 1, allowExternalOverwrite: false }));
+    expect(result?.format).toBe('hwpx');
+    expect(bridge.hasUnsavedChanges()).toBe(false);
+    expect(saveMock).not.toHaveBeenCalled();
+  });
+
+  it('Save As exposes both formats and uses the chosen extension case-insensitively', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    saveMock.mockResolvedValue('/tmp/새 문서.HWPX');
+    await bridge.saveDocumentAsFromCommand();
+    expect(saveMock).toHaveBeenCalledWith({ defaultPath: 'source.hwpx', filters: [
+      { name: 'HWPX 문서', extensions: ['hwpx'] }, { name: 'HWP 문서', extensions: ['hwp'] },
+    ] });
+    expect(handle.write).toHaveBeenCalledWith(new Uint8Array([0x50, 0x4b, 3]));
+    expect(invokeMock).toHaveBeenCalledWith('prepare_staged_hwpx_save', { targetPath: '/tmp/새 문서.HWPX' });
+  });
+
+  it('explicit Save As HWP from HWPX still exports genuine HWP bytes', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    saveMock.mockResolvedValue('/tmp/converted.hwp');
+    const result = await bridge.saveDocumentAsFromCommand();
+    expect(handle.write).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
+    expect(result?.format).toBe('hwp');
+    expect(bridge.getSourceFormat()).toBe('hwp');
+  });
+
+  it('cancelled HWPX Save As does not serialize, stage, or mark clean', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    saveMock.mockResolvedValue(null);
+    expect(await bridge.saveDocumentAsFromCommand()).toBeNull();
+    expect(handle.write).not.toHaveBeenCalled();
+    expect(bridge.hasUnsavedChanges()).toBe(true);
+  });
+
+  it('rejects a misleading Save As extension without creating a staging file', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    saveMock.mockResolvedValue('/tmp/bad.hwpx.exe');
+    await expect(bridge.saveDocumentAsFromCommand()).rejects.toThrow('저장 형식');
+    expect(handle.write).not.toHaveBeenCalled();
+  });
+
+  it('cleans up failed HWPX writes and preserves dirty state', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    handle.write.mockRejectedValueOnce(new Error('disk full'));
+    await expect(bridge.saveDocumentFromCommand()).rejects.toThrow('disk full');
+    expect(removeMock).toHaveBeenCalled();
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'commit_staged_hwpx_save')).toBe(false);
+    expect(bridge.hasUnsavedChanges()).toBe(true);
+  });
+
+  it('typing while async save is writing leaves additional edits dirty', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    handle.write.mockImplementationOnce(async (bytes: Uint8Array) => {
+      bridge.markDocumentDirty();
+      return bytes.byteLength;
+    });
+    const result = await bridge.saveDocumentFromCommand();
+    expect(result?.dirty).toBe(true);
+    expect(bridge.hasUnsavedChanges()).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('mark_document_dirty', { docId: 'doc-1' });
+  });
+
+  it('serializes concurrent saves instead of racing native session revisions', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    handle.write.mockImplementationOnce(async (bytes: Uint8Array) => { await blocked; return bytes.byteLength; });
+    const first = bridge.saveDocumentFromCommand();
+    await vi.waitFor(() => expect(handle.write).toHaveBeenCalled());
+    await expect(bridge.saveDocumentFromCommand()).rejects.toThrow('저장이 진행 중');
+    release();
+    await first;
+  });
+
+  it('edits during staging cleanup remain unsaved after the command resolves', async () => {
+    const { bridge } = hwpxSaveSetup();
+    removeMock.mockImplementationOnce(async () => { bridge.markDocumentDirty(); });
+    const result = await bridge.saveDocumentFromCommand();
+    expect(result?.dirty).toBe(true);
+    expect(bridge.hasUnsavedChanges()).toBe(true);
+  });
