@@ -1,0 +1,29 @@
+name: OpenGeul release diagnostics
+'on':
+  push:
+    branches: [work/release-validation]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Export tracked source without fetching submodules or dependencies
+        run: |
+          mkdir source-evidence
+          git archive --format=zip --output=source-evidence/source.zip HEAD
+          git rev-parse HEAD > source-evidence/commit.txt
+          git ls-tree -r HEAD > source-evidence/tree.txt
+          test $(stat -c %s source-evidence/source.zip) -lt 2097152
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-source-${{ github.run_id }}
+          path: source-evidence/
+          retention-days: 1
+          compression-level: 9
+          if-no-files-found: error
