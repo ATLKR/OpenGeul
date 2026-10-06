@@ -1,9 +1,4 @@
-"""Configure real WebView2 preview through its native accessibility controls.
-
-The browser preview and the system driver have independent paper/margin state.
-Both must match the synthetic document. No internal browser state or test bridge
-is changed, and every possibly dispatched action is executed at most once.
-"""
+"""Configure genuine print-preview controls; never mutate internal browser state."""
 from __future__ import annotations
 import json,time
 from pathlib import Path
@@ -40,6 +35,12 @@ def selected(control,label):
     if control.element_info.control_type=='Button':return name.removeprefix(label+' ')
     return control.iface_value.CurrentValue
 
+def activate_option(choice):
+    """Commit by native input; SelectionItem alone did not commit on WebView2 153."""
+    if not choice.is_visible():choice.iface_scroll_item.ScrollIntoView()
+    wait(lambda:choice.is_visible() and choice.is_enabled())
+    choice.click_input()
+
 def configure_preview(preview,pids,folder:Path|None=None):
     if preview.window_text()!='Print' or preview.class_name()!='RootView' or preview.process_id() not in pids:
         raise AssertionError('Cannot configure a foreign print preview')
@@ -61,10 +62,8 @@ def configure_preview(preview,pids,folder:Path|None=None):
                 def option():
                     controls,nodes=rows(preview);i=option_index(nodes,value,pids)
                     return controls[i] if i is not None else None
-                choice=wait(option)
-                choice.iface_selection_item.Select()
-                # Observe the committed value before another UI action. An
-                # immediate Collapse can cancel a pending provider selection.
+                choice=wait(option);state[key+'Option']=_node(choice)
+                activate_option(choice)
             wait(lambda:selected(dropdown(preview,label,pids),label)==value)
             state[key]=value
         actual=[c for c in preview.descendants(control_type='RadioButton') if c.window_text()=='Actual size' and c.is_enabled() and c.process_id() in pids]
