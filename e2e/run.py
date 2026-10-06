@@ -22,9 +22,9 @@ class EvidenceResult(unittest.TextTestResult):
 
 def main():
     output=Path(os.environ['E2E_OUTPUT']);output.mkdir(parents=True,exist_ok=True)
-    from test_editor import suite
+    from test_hop_followups import suite
     result=unittest.TextTestRunner(verbosity=2,resultclass=EvidenceResult).run(suite())
-    expected=14 if os.environ.get('E2E_MODE')=='native' else 8
+    expected=16 if os.environ.get('E2E_MODE')=='native' else 10
     payload={'commit':os.environ.get('GITHUB_SHA'),'runId':os.environ.get('GITHUB_RUN_ID'),'mode':os.environ.get('E2E_MODE'),
         'browser':os.environ.get('E2E_BROWSER'),'os':os.environ.get('RUNNER_OS'),'tests':result.records,
         'expectedTests':expected,'success':result.wasSuccessful() and not result.skipped and result.testsRun==expected}

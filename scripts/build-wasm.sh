@@ -17,6 +17,8 @@ python scripts/font_test_contract.py .work/hop
 python scripts/prepare_upstream.py --patch-only
 python scripts/prepare_hwpx.py .work/hop
 python scripts/patch_composition.py .work/hop
+python scripts/prepare_hop_fixes.py .work/hop
+node --experimental-strip-types --loader ./tests/hop/loader.mjs --test tests/hop/*.test.mjs
 python scripts/patch_namespaces.py .work/hop/third_party/rhwp
 mkdir -p .work/tooling
 curl --fail --location --proto '=https' --tlsv1.2 https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-x86_64-unknown-linux-musl.tar.gz -o .work/tooling/wasm-pack.tar.gz
