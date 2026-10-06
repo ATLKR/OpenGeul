@@ -1,0 +1,2 @@
+# CI-only YAML parsing. No cache, paid service or application dependency.
+PyYAML==6.0.3
