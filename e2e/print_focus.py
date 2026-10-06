@@ -5,13 +5,45 @@ from pywinauto import Desktop
 from pywinauto.keyboard import send_keys
 from native_controls import filename_control
 
-def open_system_dialog(viewport):
-    window=Desktop(backend='win32').window(handle=viewport).wrapper_object()
-    if window.class_name()!='Chrome_RenderWidgetHostHWND' or not window.is_visible():
-        raise AssertionError('Print preview viewport is not visible')
-    window.set_focus()
-    window.click_input(coords=(4,4))
-    send_keys('^+p',vk_packet=False)
+def open_system_dialog(app_hwnd: int, app_pid: int):
+    """Select the real semantic preview action once, not a timing-sensitive key.
+
+    Windows 2022 exposes this action as Button, Windows 2025 as Hyperlink.
+    Both are observed under the owned Print/RootView accessibility window.
+    On-demand accessibility suffices; no extra browser flags or app hooks.
+    """
+    import psutil
+    from comtypes import COMError
+    from print_ui_policy import system_link
+    root = Desktop(backend='uia').window(handle=app_hwnd).wrapper_object()
+    if root.process_id() != app_pid or root.class_name() != 'Tauri Window':
+        raise AssertionError('Print action root is not the owned application')
+    deadline = time.monotonic() + 30
+    target = None
+    while time.monotonic() < deadline:
+        try:
+            pids = {app_pid, *(p.pid for p in psutil.Process(app_pid).children(recursive=True))}
+            previews = [c for c in root.descendants(control_type='Window')
+                        if c.window_text() == 'Print' and c.class_name() == 'RootView'
+                        and c.process_id() in pids and c.is_visible()]
+            if len(previews) > 1: raise AssertionError('Ambiguous owned Print preview')
+            if previews:
+                controls = previews[0].descendants()
+                nodes = [{'name': c.window_text(), 'type': c.element_info.control_type,
+                          'visible': c.is_visible(), 'enabled': c.is_enabled(), 'pid': c.process_id()}
+                         for c in controls]
+                index = system_link(nodes, pids)
+                if index is not None:
+                    target = controls[index]
+                    break
+        except COMError:
+            # Accessibility elements can be replaced during preview initialization.
+            # Re-observe readiness only; the eventual click itself is never retried.
+            pass
+        time.sleep(.15)
+    if target is None:
+        raise AssertionError('Owned system-print link did not become accessible')
+    target.click_input()
 
 def fill_print_output(dialog,output:Path):
     """Shell dialogs can replace their initial Edit HWND after becoming visible.

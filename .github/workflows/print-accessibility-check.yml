@@ -10,7 +10,7 @@ env:
 jobs:
   inspect:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -22,19 +22,11 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
-      - name: Preserve exact source for local diagnostic tests
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force source-evidence | Out-Null
-          git archive --format=zip --output=source-evidence/source.zip HEAD
-          git rev-parse HEAD | Set-Content source-evidence/commit.txt
-          git ls-tree -r HEAD | Set-Content source-evidence/tree.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
-          name: print-source-${{ matrix.os }}-${{ github.run_id }}
-          path: source-evidence/
-          retention-days: 1
-      - name: Load a previously verified product for diagnostic-only use
+          node-version: '24'
+          package-manager-cache: false
+      - name: Load the exact prior PR4 binary for diagnostic-only verification
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -42,68 +34,23 @@ jobs:
           $PSNativeCommandUseErrorActionPreference=$true
           gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-windows-x64-37404480348 --dir package
           gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-e2e-inputs-37404480348 --dir inputs
-          python -m pip install -r e2e/print-requirements.txt
+          gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-wasm-37404480348 --dir wasm-input
+      - name: Validate full runtime parity and synthetic test inputs
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
           Start-Service Spooler
+          Get-PrinterDriver -Name 'Microsoft Print To PDF' -ErrorAction Stop
+          python -m pip install -r e2e/print-requirements.txt
+          python -m unittest discover -s e2e/print_tests -v
           ./e2e/ensure-webview2.ps1
           python e2e/prepare_payload.py package runtime
-      - name: Compare on-demand accessibility with explicit accessibility
+          node e2e/table_height.mjs generate wasm-input print-fixtures
+          python e2e/print_fixtures.py print-fixtures
+          node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
+      - name: Real semantic Print action and completed-spooler tests
         shell: pwsh
-        timeout-minutes: 5
-        run: |
-          @'
-          import sys,time,json,subprocess,traceback
-          from pathlib import Path
-          sys.path.insert(0,str(Path('e2e').resolve()))
-          import driver,webview_debug
-          from print_queue import VirtualQueue,require_host
-          from pywinauto import Desktop
-          from pywinauto.keyboard import send_keys
-          from PIL import ImageGrab
-          require_host()
-          original=webview_debug.debug_arguments
-          for mode in ('on-demand','complete'):
-              folder=Path('evidence',mode).resolve();folder.mkdir(parents=True)
-              suffix='' if mode=='on-demand' else ' --force-renderer-accessibility=complete'
-              def arguments(port):return original(port)+suffix
-              driver.debug_arguments=arguments;webview_debug.debug_arguments=arguments
-              session=None
-              try:
-                  with VirtualQueue() as queue:
-                      try:
-                          session=driver.Session('native',folder/'session',Path('inputs/e2e-fixtures/basic.hwpx').resolve(),executable=Path('runtime/OpenGeul.exe').resolve())
-                          window=Desktop(backend='win32').window(process=session.proc.pid,class_name='Tauri Window').wrapper_object()
-                          window.set_focus();send_keys('^p',vk_packet=False)
-                          root=Desktop(backend='uia').window(handle=window.handle).wrapper_object()
-                          deadline=time.monotonic()+25;link=None;rows=[]
-                          while time.monotonic()<deadline:
-                              controls=root.descendants()
-                              rows=[{'name':c.window_text(),'class':c.class_name(),'type':c.element_info.control_type,'visible':c.is_visible(),'enabled':c.is_enabled(),'pid':c.process_id()} for c in controls][:600]
-                              found=[c for c in controls if c.window_text().startswith('Print using system dialog') and c.is_visible() and c.is_enabled() and c.element_info.control_type in ('Hyperlink','Button','Text')]
-                              if len(found)==1:link=found[0];break
-                              if len(found)>1:raise RuntimeError('Ambiguous print link')
-                              time.sleep(.3)
-                          (folder/'uia.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
-                          ImageGrab.grab().save(folder/'preview.png')
-                          print(mode,'nodes',len(rows),'found-link',bool(link),flush=True)
-                          if link:
-                              link.click_input()
-                              deadline=time.monotonic()+15;dialogs=[]
-                              while time.monotonic()<deadline:
-                                  dialogs=[w for w in Desktop(backend='win32').windows(class_name='#32770',visible_only=True) if w.window_text()=='Print']
-                                  if dialogs:break
-                                  time.sleep(.2)
-                              (folder/'system.json').write_text(json.dumps([{'name':w.window_text(),'pid':w.process_id(),'hwnd':w.handle} for w in dialogs],indent=2))
-                              ImageGrab.grab().save(folder/'system.png')
-                              print(mode,'system-dialog',bool(dialogs),flush=True)
-                      finally:
-                          if session:
-                              subprocess.run(['taskkill','/PID',str(session.proc.pid),'/T','/F'],capture_output=True,timeout=15)
-                              session.close();session=None
-              except Exception:
-                  (folder/'error.txt').write_text(traceback.format_exc(),encoding='utf-8')
-                  print(traceback.format_exc(),flush=True)
-          '@ | Set-Content .print-accessibility-check.py -Encoding utf8
-          python -u .print-accessibility-check.py
+        run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
