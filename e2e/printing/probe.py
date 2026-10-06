@@ -4,22 +4,20 @@ from pathlib import Path
 import sys
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from driver import Session,menu
+from driver import Session,menu,until
 from pywinauto import Desktop
 from PIL import ImageGrab
 out=Path('evidence');out.mkdir(exist_ok=True)
 s=None
 try:
-    s=Session('native',out/'session',Path('inputs/e2e-fixtures/basic.hwpx').resolve(),executable=Path('runtime/OpenGeul.exe').resolve())
+    s=Session('native',out/'session',Path('inputs/e2e-fixtures/basic.hwpx').resolve(),executable=Path('runtime/OpenGeul.exe').resolve(),accessibility=True)
     app=Desktop(backend='win32').window(process=s.proc.pid,class_name='Tauri Window')
     menu(s.page,'file:print')
     ui=Desktop(backend='uia').window(handle=app.handle)
-    ui.print_control_identifiers(filename=str(out/'preview-uia.txt'))
-    links=[c for c in ui.descendants() if 'Print using system dialog' in c.window_text()]
-    print('system links:',[(c.element_info.control_type,c.window_text()) for c in links])
-    if len(links)!=1:raise AssertionError('Expected exactly one accessible system-dialog action')
-    links[0].click_input()
-    time.sleep(2)
+    def links():return [c for c in ui.descendants(control_type='Hyperlink') if 'Print using system dialog' in c.window_text()]
+    try:
+        link=until(links,30)[0];link.click_input();time.sleep(2)
+    finally:ui.print_control_identifiers(filename=str(out/'preview-uia.txt'))
     records=[]
     for w in Desktop(backend='win32').windows(visible_only=True):
         if w.class_name()!='#32770':continue

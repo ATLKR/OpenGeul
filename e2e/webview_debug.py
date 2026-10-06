@@ -8,10 +8,12 @@ from __future__ import annotations
 from typing import Protocol
 
 
-def debug_arguments(port: int) -> str:
+def debug_arguments(port: int, *, accessibility: bool=False) -> str:
     if type(port) is not int or not 1024 <= port <= 65535:
         raise ValueError('Invalid loopback debugging port')
-    return f'--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}'
+    if type(accessibility) is not bool:
+        raise ValueError('Accessibility must be a boolean, not arbitrary browser arguments')
+    return f'--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}' + (' --force-renderer-accessibility=complete' if accessibility else '')
 
 
 class Registry(Protocol):
@@ -48,11 +50,11 @@ class MachineRegistry:
 
 
 class ScopedDebugOverride:
-    def __init__(self, registry: Registry, app: str, port: int, profile: str, *, runner: bool):
+    def __init__(self, registry: Registry, app: str, port: int, profile: str, *, runner: bool, accessibility: bool=False):
         if app != 'OpenGeul.exe':
             raise ValueError('Only the exact OpenGeul.exe test application is allowed')
         self.registry, self.app, self.runner = registry, app, runner
-        self.values = [('AdditionalBrowserArguments', debug_arguments(port)), ('UserDataFolder', profile)]
+        self.values = [('AdditionalBrowserArguments', debug_arguments(port, accessibility=accessibility)), ('UserDataFolder', profile)]
         self.written: list[tuple[str, str]] = []
 
     def __enter__(self):

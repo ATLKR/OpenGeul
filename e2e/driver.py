@@ -47,7 +47,7 @@ def edit(page, text: str):
     page.keyboard.insert_text(text)
 
 class Session:
-    def __init__(self, mode: str, folder: Path, fixture: Path, *, executable: Path|None=None, browser='chromium', url='http://127.0.0.1:7700'):
+    def __init__(self, mode: str, folder: Path, fixture: Path, *, executable: Path|None=None, browser='chromium', url='http://127.0.0.1:7700', accessibility=False):
         self.mode=mode; self.folder=folder; folder.mkdir(parents=True,exist_ok=True)
         self.executable=executable; self.proc=None; self.browser=None; self.context=None; self.page=None
         self.messages=[]; self.requests=[]; self.dialogs=[]; self.errors=[]
@@ -58,12 +58,12 @@ class Session:
                 with socket.socket() as sock:
                     sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
                 env=dict(os.environ)
-                env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=debug_arguments(port)
+                env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=debug_arguments(port,accessibility=accessibility)
                 self.profile=Path(tempfile.mkdtemp(prefix='opengeul-e2e-profile-'))
                 env['WEBVIEW2_USER_DATA_FOLDER']=str(self.profile)
                 if ctypes.windll.shell32.IsUserAnAdmin():
                     self.debug_override=ScopedDebugOverride(MachineRegistry(), executable.name, port, str(self.profile),
-                        runner=os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted')
+                        runner=os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted',accessibility=accessibility)
                     self.debug_override.__enter__()
                 self.log=(folder/'process.log').open('w',encoding='utf-8')
                 self.proc=subprocess.Popen([str(executable),str(fixture)],cwd=executable.parent,env=env,stdout=self.log,stderr=subprocess.STDOUT)
