@@ -39,13 +39,14 @@ def snapshot(folder):
     for w in Desktop(backend='win32').windows(class_name='#32770',visible_only=True):
         rows.append({'title':w.window_text(),'pid':w.process_id(),'hwnd':w.handle,'children':[{'title':c.window_text(),'class':c.class_name(),'id':c.control_id()} for c in w.descendants() if c.is_visible()][:200]})
     (folder/'native-dialogs.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
-def system_dialog(session,queue):
+def system_dialog(session,queue,folder):
     windows=[w for w in Desktop(backend='win32').windows(process=session.proc.pid,visible_only=True) if w.class_name()=='Tauri Window']
     if len(windows)!=1:raise AssertionError('Expected one owned app window')
-    windows[0].maximize()
-    wait(windows[0].is_maximized)
+    # Open the preview at the product's normal window geometry. If the exact
+    # semantic system-print action is off-screen, print_focus may adjust the
+    # already-open preview only after its accessibility tree is observed.
     windows[0].set_focus();send_keys('^p',vk_packet=False)
-    open_system_dialog(windows[0].handle,session.proc.pid)
+    open_system_dialog(windows[0].handle,session.proc.pid,folder)
     dialog=wait(lambda:visible_dialog('Print',session.proc.pid))
     lists=[c for c in dialog.descendants(class_name='SysListView32') if c.is_visible()]
     if len(lists)!=1:raise AssertionError('Printer selection list was not found')
@@ -88,7 +89,7 @@ def print_document(exe,fixture,case,folder):
             resources.callback(stop_session,session)
             resources.push(lambda error_type,error,tb: capture_failure(folder,error_type))
             if queue.jobs():raise AssertionError('Queue contains stale jobs')
-            dialog=system_dialog(session,queue);configure_media(dialog,session.proc.pid,folder)
+            dialog=system_dialog(session,queue,folder);configure_media(dialog,session.proc.pid,folder)
             if case.get('range'):
                 control(dialog,'Button',1059).click_input();control(dialog,'Edit',1152).set_edit_text(case['range'])
             snapshot(folder)

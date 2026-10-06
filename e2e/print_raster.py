@@ -53,7 +53,7 @@ def inspect_print_pdf(path,expectation,output,case):
                 actual=fingerprint(image)
                 if actual!=ref:
                     (output/f'page-{i+1}-mismatch.json').write_text(json.dumps({'expected':ref,'actual':actual},indent=2),encoding='utf-8')
-                    raise ValueError(f'Printed ink fingerprint changed on page {i+1}; explicit visual review required')
+                    raise ValueError(f'Printed ink fingerprint changed on page {i+1}; explicit visual review required; expected={ref}; actual={actual}')
                 result['checks'].append({'page':i+1,'size_pt':size,**actual})
             finally:
                 if bitmap is not None:bitmap.close()
