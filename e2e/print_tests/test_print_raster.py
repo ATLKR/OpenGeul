@@ -1,4 +1,4 @@
-"""Outlined printer regression tests do not depend on text extraction or OCR."""
+"""Independent raster comparison rejects outlined-print regressions without OCR."""
 import importlib.util
 from pathlib import Path
 import unittest
@@ -24,8 +24,9 @@ class RasterTests(unittest.TestCase):
     def test_added_output_fails(self):
         image=self.reference.copy();ImageDraw.Draw(image).rectangle((140,200,180,215),fill=0)
         with self.assertRaises(ValueError):self.m.compare_ink(image,self.reference)
-    def test_one_pixel_translation_is_tolerated(self):
-        image=Image.new('L',self.reference.size,255);image.paste(self.reference,(1,1));self.m.compare_ink(image,self.reference)
+    def test_pixel_shift_requires_explicit_reference_review(self):
+        image=Image.new('L',self.reference.size,255);image.paste(self.reference,(1,1))
+        with self.assertRaises(ValueError):self.m.compare_ink(image,self.reference)
     def test_uniform_blank_reference_is_not_a_valid_baseline(self):
         image=Image.new('L',self.reference.size,255)
         with self.assertRaises(ValueError):self.m.compare_ink(image,image)

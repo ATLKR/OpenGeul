@@ -13,6 +13,7 @@ from driver import Session,digest,edit
 from native_controls import filename_control
 from print_raster import inspect_print_pdf
 from print_queue import VirtualQueue,require_host
+from print_focus import open_system_dialog
 
 def wait(check,seconds=30):
     deadline=time.monotonic()+seconds
@@ -41,10 +42,11 @@ def system_dialog(session,queue):
     windows=[w for w in Desktop(backend='win32').windows(process=session.proc.pid,visible_only=True) if w.class_name()=='Tauri Window']
     if len(windows)!=1:raise AssertionError('Expected one owned app window')
     def viewports():return {c.handle for c in windows[0].descendants(class_name='Chrome_RenderWidgetHostHWND') if c.is_visible()}
-    before=viewports();windows[0].set_focus();send_keys('^p');wait(lambda:viewports()-before)
-    # Creating the native viewport precedes registering preview keyboard handlers.
-    # One bounded human-input settle interval, not an automatic flaky-test retry.
-    time.sleep(3);send_keys('^+p')
+    before=viewports();windows[0].set_focus();send_keys('^p')
+    created=wait(lambda:viewports()-before)
+    if len(created)!=1:raise AssertionError('Ambiguous print preview viewport')
+    time.sleep(3)
+    open_system_dialog(next(iter(created)))
     dialog=wait(lambda:visible_dialog('Print',session.proc.pid))
     lists=[c for c in dialog.descendants(class_name='SysListView32') if c.is_visible()]
     if len(lists)!=1:raise AssertionError('Printer selection list was not found')
