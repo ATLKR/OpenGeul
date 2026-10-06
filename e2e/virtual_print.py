@@ -10,10 +10,9 @@ from PIL import ImageGrab
 from pywinauto import Desktop
 from pywinauto.keyboard import send_keys
 from driver import Session,digest,edit
-from native_controls import filename_control
 from print_raster import inspect_print_pdf
 from print_queue import VirtualQueue,require_host
-from print_focus import open_system_dialog
+from print_focus import open_system_dialog,fill_print_output
 
 def wait(check,seconds=30):
     deadline=time.monotonic()+seconds
@@ -83,7 +82,7 @@ def print_document(exe,fixture,case,folder):
                 report={'cancelled':True,'jobs':[],'queue':queue.name}
             else:
                 control(dialog,'Button',1).click_input();save=wait(lambda:visible_dialog('Save Print Output As'))
-                filename_control(save.descendants()).set_edit_text(str(output));control(save,'Button',1).click_input()
+                fill_print_output(save,output)
                 wait(lambda:output.is_file() and output.stat().st_size>100,90)
                 wait(lambda:output.read_bytes().rstrip().endswith(b'%%EOF'),30)
                 jobs=wait(queue.jobs,30)
