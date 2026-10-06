@@ -7,9 +7,6 @@ from pathlib import Path
 from pywinauto import Desktop
 
 
-STABLE_ACTION_SECONDS = 2.5
-
-
 def _safe(call, default=None):
     try:
         return call()
@@ -91,116 +88,45 @@ def _preview_windows(desktop, app_root, app_hwnd: int, pids: set[int]):
 
 
 def open_system_dialog(app_hwnd: int, app_pid: int, evidence_dir: Path | None = None):
-    """Activate the real semantic preview action once after observable UI stability.
+    """Configure actual preview media, then invoke the owned system-print action once.
 
-    Windows 2022 exposes the system-print action as Button and Windows 2025 as
-    Hyperlink. The exact owned semantic action must remain enabled and at the same
-    accessible geometry for STABLE_ACTION_SECONDS before the one physical click.
-    If it is initially off-screen, scroll it into view; only then may the already-
-    opened preview cause the host to be maximized. No keyboard fallback or click
-    retry is used.
+    Chromium preview and the Windows driver independently store media settings.
+    The native accessibility action remains the same user-facing print command;
+    it is not a PDF export or an application test hook. Dispatch errors escape.
     """
-    from comtypes import COMError
     from print_ui_policy import system_link
+    from preview_settings import configure_preview, wait
 
     desktop = Desktop(backend='uia')
     root = desktop.window(handle=app_hwnd).wrapper_object()
     if root.process_id() != app_pid or root.class_name() != 'Tauri Window':
         raise AssertionError('Print action root is not the owned application')
+    pids = _owned_pids(app_pid)
 
-    deadline = time.monotonic() + 35
-    stable_signature = None
-    stable_since = 0.0
-    maximized_after_preview = False
-    last_observation = {'state': 'waiting', 'appPid': app_pid, 'appHwnd': app_hwnd}
+    def ready_preview():
+        previews = _preview_windows(desktop, root, app_hwnd, pids)
+        if len(previews) > 1:
+            raise AssertionError('Ambiguous owned Print preview')
+        if previews and any(c.window_text() == 'More settings' and c.is_enabled()
+                            for c in previews[0].descendants(control_type='Button')):
+            return previews[0]
+        return None
 
-    while time.monotonic() < deadline:
-        try:
-            pids = _owned_pids(app_pid)
-            previews = _preview_windows(desktop, root, app_hwnd, pids)
-            if len(previews) > 1:
-                last_observation = {
-                    'state': 'ambiguous-preview',
-                    'ownedPids': sorted(pids),
-                    'previews': [_node(p) for p in previews],
-                }
-                _write_evidence(evidence_dir, last_observation)
-                raise AssertionError('Ambiguous owned Print preview')
-            if not previews:
-                stable_signature = None
-                stable_since = 0.0
-                time.sleep(.15)
-                continue
+    preview = wait(ready_preview)
+    settings = configure_preview(preview, pids, evidence_dir)
 
-            preview = previews[0]
-            controls = preview.descendants()
-            nodes = [_node(control) for control in controls]
-            last_observation = {
-                'state': 'preview-observed',
-                'ownedPids': sorted(pids),
-                'preview': _node(preview),
-                'controls': nodes[:400],
-                'controlCount': len(nodes),
-            }
-            index = system_link(nodes, pids)
-            if index is None:
-                stable_signature = None
-                stable_since = 0.0
-                time.sleep(.15)
-                continue
+    def ready_action():
+        controls = preview.descendants()
+        index = system_link([_node(c) for c in controls], pids)
+        return controls[index] if index is not None else None
 
-            target = controls[index]
-            target_node = nodes[index]
-            if not target_node['visible']:
-                try:
-                    target.scroll_into_view()
-                except (AttributeError, COMError, OSError):
-                    pass
-                if not _safe(lambda: target.is_visible(), False) and not maximized_after_preview:
-                    try:
-                        Desktop(backend='win32').window(handle=app_hwnd).wrapper_object().maximize()
-                        maximized_after_preview = True
-                    except Exception:
-                        pass
-                stable_signature = None
-                stable_since = 0.0
-                time.sleep(.15)
-                continue
-
-            signature = (
-                _safe(lambda: preview.process_id()),
-                getattr(preview, 'handle', None),
-                tuple(_rect(preview) or ()),
-                target_node['pid'],
-                target_node['handle'],
-                target_node['name'],
-                target_node['type'],
-                tuple(target_node['rect'] or ()),
-            )
-            now = time.monotonic()
-            if signature != stable_signature:
-                stable_signature = signature
-                stable_since = now
-            elif now - stable_since >= STABLE_ACTION_SECONDS:
-                last_observation.update({
-                    'state': 'ready',
-                    'stableSeconds': now - stable_since,
-                    'selected': target_node,
-                    'maximizedAfterPreview': maximized_after_preview,
-                })
-                _write_evidence(evidence_dir, last_observation)
-                target.click_input()
-                return
-        except COMError:
-            # Accessibility elements can be replaced during preview initialization.
-            # Re-observe readiness only; the eventual click itself is never retried.
-            stable_signature = None
-            stable_since = 0.0
-        time.sleep(.15)
-
-    last_observation['state'] = 'timeout'
-    _write_evidence(evidence_dir, last_observation)
-    raise AssertionError('Owned system-print link did not become stably accessible')
+    target = wait(ready_action)
+    _write_evidence(evidence_dir, {
+        'state': 'configured', 'appPid': app_pid, 'appHwnd': app_hwnd,
+        'previewSettings': settings, 'selected': _node(target),
+        'activation': 'native UIA InvokePattern (one dispatch)',
+    })
+    target.iface_invoke.Invoke()
 
 
 def fill_print_output(dialog, output: Path):

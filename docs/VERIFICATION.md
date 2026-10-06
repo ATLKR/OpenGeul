@@ -1,5 +1,9 @@
 # Verification ledger
 
+## Current development candidate: 1.1.1
+
+OpenGeul now includes HWPX editing/saving and release-gated editor/virtual-printer tests. See [release readiness](RELEASE_READINESS.md) for the actual investigation and [Actions](https://github.com/ATLKR/OpenGeul/actions) for commit-specific final results. Historical entries below do not certify later commits. A queued build or diagnostic using an earlier binary is not a published release.
+
 ## 2026-10-05 — baseline and implementation
 
 - Legacy bootstrap: 19 Python tests passed, but never compiled on Windows.
@@ -18,11 +22,11 @@ Application source commit: `0349523066585437bdd06de8291a1d66a8d3b95f`.
 - The release contains the HOP Windows editor and rhwp CLI built from the pinned source versions documented in `provenance.json`. It does not include LibreOffice or promise DOCX/XLSX/PPTX support.
 - This documentation update does not rebuild or change that released application binary. Build claims above refer to the explicit application commit and run, not automatically to later commits.
 
-## Supported scope versus unverified behavior
+## Historical 1.0.0 scope versus unverified behavior
 
 The release retains the pinned upstream HOP Windows editor and rhwp CLI rather than reimplementing their engines. HWP/HWPX opening, HWP saving, PDF export, printing, drag/drop, multi-window behavior and file-association configuration are included in the source integration. Inclusion is not proof of correctness for every document or Windows configuration.
 
-HOP's current UI does not provide HWPX saving or autosave/recovery. OpenGeul has not added or certified those features. Consult the shipped `rhwp-help.txt` for the separate CLI capabilities and limits.
+The historical 1.0.0 build did not add HWPX saving or autosave/recovery. HWPX saving was subsequently implemented and merged in PR #1; autosave/recovery remains absent. Consult the shipped `rhwp-help.txt` for the separate CLI capabilities and limits.
 
 The installed-font-only policy and official download help are product safeguards, not a determination that every font already present on a user's computer is licensed for every intended use. Font embedding rights and the native Skia direct-PDF path need their own review; no blanket legal or compatibility guarantee is made.
 
