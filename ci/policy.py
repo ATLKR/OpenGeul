@@ -63,6 +63,8 @@ def audit(workflow):
     for name,job in jobs.items():
         if not isinstance(job,dict) or not guarded(job.get('if')):
             raise ValueError(f'{name}: public-only guard is required BEFORE runner allocation')
+        if str(job.get('continue-on-error','false')).lower()!='false':
+            raise ValueError(f'{name}: job-level failure suppression is not permitted')
         if any(k in job for k in ('uses','snapshot','container','services')):
             raise ValueError(f'{name}: unreviewed reusable workflow, image or service')
         runner=job.get('runs-on')

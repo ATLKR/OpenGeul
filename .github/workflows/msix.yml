@@ -68,6 +68,7 @@ jobs:
       shell: bash
       run: python ci/evidence.py size --limit-mib 32 .work/rebuilt-wasm
     - name: Share source-bound rebuilt engine
+      if: needs.preflight.outputs.mode == 'full'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-wasm-${{ github.run_id }}
@@ -402,3 +403,24 @@ jobs:
         gh release create "$RELEASE_TAG" package/* --repo "$REPO" --target "$BUILD_SHA" --prerelease --latest=false \
           --title "OpenGeul $RELEASE_TAG — E2E-tested unsigned Windows development build" \
           --notes-file docs/RELEASE_NOTES.md
+  cleanup-transports:
+    needs: [preflight, wasm, browser-e2e, build, native-e2e, msix-install, virtual-print, release]
+    if: github.event.repository.private == false && (always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.run_attempt == 1 && github.actor != 'dependabot[bot]' && needs.preflight.result == 'success' && needs.preflight.outputs.mode != 'checks' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Remove only this run's successfully consumed temporary transports
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CI_MODE: ${{ needs.preflight.outputs.mode }}
+        CI_NEEDS: ${{ toJSON(needs) }}
+      run: python ci/transport_cleanup.py
