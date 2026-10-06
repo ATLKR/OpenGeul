@@ -1,0 +1,82 @@
+name: OpenGeul virtual printer probe
+on:
+  push:
+    branches: [work/virtual-print-tests]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Inventory built-in virtual printer and spooler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          Get-Service Spooler | Format-List | Out-File evidence/spooler.txt
+          Start-Service Spooler
+          Get-Printer | Select-Object Name,DriverName,PortName | ConvertTo-Json -Depth 4 | Set-Content evidence/printers.json
+          Get-PrinterDriver | Select-Object Name,Manufacturer,InfPath | ConvertTo-Json -Depth 4 | Set-Content evidence/drivers.json
+          Get-WindowsOptionalFeature -Online | Where-Object FeatureName -Match 'Print|XPS' | Select-Object FeatureName,State | ConvertTo-Json | Set-Content evidence/features.json
+          Get-Content evidence/printers.json,evidence/drivers.json,evidence/features.json
+          git archive --format=zip --output=evidence/source.zip HEAD
+      - name: Download exact successful candidate for a harness-only probe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-windows-x64-37404480348 --dir package
+          gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-e2e-inputs-37404480348 --dir inputs
+          python -m pip install -r e2e/requirements.txt
+          ./e2e/ensure-webview2.ps1
+          python e2e/prepare_payload.py package runtime
+      - name: Inspect the actual app print dialog without printing to hardware
+        shell: pwsh
+        run: |
+          @'
+          import sys,time,json
+          from pathlib import Path
+          sys.path.insert(0,str(Path('e2e').resolve()))
+          from driver import Session,menu
+          from pywinauto import Desktop
+          root=Path('evidence').resolve()
+          session=Session('native',root/'session',Path('inputs/e2e-fixtures/basic.hwpx').resolve(),executable=Path('runtime/OpenGeul.exe').resolve())
+          try:
+              menu(session.page,'file:print')
+              session.page.wait_for_timeout(5000)
+              print('pages', [(p.url,p.title()) for p in session.context.pages])
+              desktop=Desktop(backend='win32')
+              rows=[]
+              for w in desktop.windows():
+                  if not w.is_visible():continue
+                  row={'title':w.window_text(),'class':w.class_name(),'pid':w.process_id(),'hwnd':w.handle,'children':[]}
+                  if w.process_id()==session.proc.pid or 'Print' in w.window_text():
+                      row['children']=[{'title':c.window_text(),'class':c.class_name(),'id':c.control_id(),'visible':c.is_visible()} for c in w.descendants()][:150]
+                  rows.append(row)
+              (root/'windows.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+              print(json.dumps(rows,ensure_ascii=False))
+              Desktop(backend='win32').capture_as_image().save(root/'desktop.png')
+          finally:session.close()
+          '@ | Set-Content .work-print-probe.py -Encoding utf8
+          python .work-print-probe.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: print-probe-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/
+          retention-days: 1
+          if-no-files-found: error
