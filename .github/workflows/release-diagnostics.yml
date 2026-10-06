@@ -4,26 +4,45 @@ name: OpenGeul release diagnostics
     branches: [work/release-validation]
 permissions:
   contents: read
+  actions: read
+env:
+  PYTHONUTF8: '1'
 jobs:
-  snapshot:
+  inspect:
     if: github.event.repository.private == false
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
-      - name: Export tracked source without fetching submodules or dependencies
-        run: |
-          mkdir source-evidence
-          git archive --format=zip --output=source-evidence/source.zip HEAD
-          git rev-parse HEAD > source-evidence/commit.txt
-          git ls-tree -r HEAD > source-evidence/tree.txt
-          test $(stat -c %s source-evidence/source.zip) -lt 2097152
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          name: release-source-${{ github.run_id }}
-          path: source-evidence/
+          python-version: '3.12'
+      - name: Load explicitly identified prior product for diagnostic use only
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-windows-x64-37404480348 --dir package
+          gh run download 37404480348 --repo ATLKR/OpenGeul --name opengeul-e2e-inputs-37404480348 --dir inputs
+          python -m pip install -r e2e/print-requirements.txt
+          Start-Service Spooler
+          ./e2e/ensure-webview2.ps1
+          python e2e/prepare_payload.py package runtime
+      - name: Inspect actual preview margins and scaling before system printing
+        shell: pwsh
+        run: python -u e2e/diagnose_print_settings.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: release-diagnostic-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/
           retention-days: 1
           compression-level: 9
-          if-no-files-found: error
+          if-no-files-found: warn
