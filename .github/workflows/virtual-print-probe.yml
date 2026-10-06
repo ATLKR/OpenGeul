@@ -12,6 +12,9 @@ jobs:
   capability:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -20,34 +23,51 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
       - name: Inspect inbox printer and enable only its Windows feature when needed
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
           if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable hosted runner required.' }
           New-Item -ItemType Directory -Force evidence | Out-Null
           Start-Transcript -Path evidence/printer-capability.txt
           try {
             Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber
-            $feature = Get-WindowsOptionalFeature -Online -FeatureName Printing-PrintToPDFServices-Features
-            $feature | Format-List
+            $feature=Get-WindowsOptionalFeature -Online -FeatureName Printing-PrintToPDFServices-Features
             if ($feature.State -ne 'Enabled') {
-              $enabled = Enable-WindowsOptionalFeature -Online -FeatureName Printing-PrintToPDFServices-Features -All -NoRestart
-              $enabled | Format-List
-              if ($enabled.RestartNeeded) { throw 'Printer enablement needs reboot; not silently skipped.' }
+              $enabled=Enable-WindowsOptionalFeature -Online -FeatureName Printing-PrintToPDFServices-Features -All -NoRestart
+              if ($enabled.RestartNeeded) { throw 'Printer enablement needs reboot.' }
             }
-            Set-Service Spooler -StartupType Manual
             Start-Service Spooler
-            Get-Printer | Select-Object Name,DriverName,PortName | Format-Table
-            Get-PrinterDriver | Select-Object Name,Manufacturer | Format-Table
             if (-not (Get-Printer -Name 'Microsoft Print to PDF' -ErrorAction SilentlyContinue)) {
               Add-PrinterDriver -Name 'Microsoft Print To PDF'
               Add-Printer -Name 'Microsoft Print to PDF' -DriverName 'Microsoft Print To PDF' -PortName 'PORTPROMPT:'
             }
             Get-Printer -Name 'Microsoft Print to PDF' | Select-Object Name,DriverName,PortName | ConvertTo-Json | Set-Content evidence/printer.json
           } finally { Stop-Transcript }
-      - name: Preserve capabilities and exact public test sources for diagnosis
+      - name: Reuse a successful immutable main binary only to diagnose the printer harness
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          $run=gh api repos/ATLKR/OpenGeul/actions/runs/37399457757 | ConvertFrom-Json
+          if ($run.conclusion -ne 'success' -or $run.head_sha -ne '642b7a0e6f681006b013fea6117071c189fa28e1') { throw 'Wrong probe payload provenance.' }
+          gh run download 37399457757 --repo ATLKR/OpenGeul --name opengeul-windows-x64-37399457757 --dir package
+          gh run download 37399457757 --repo ATLKR/OpenGeul --name opengeul-e2e-inputs-37399457757 --dir inputs
+      - name: Inspect and cancel the real native print dialog
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          $env:PYTHONUTF8='1'
+          python -m pip install -r e2e/requirements.txt
+          ./e2e/ensure-webview2.ps1
+          python e2e/prepare_payload.py package runtime
+          python e2e/printing/probe.py
+      - name: Preserve the exact public test sources for diagnosis
         if: always()
         shell: pwsh
         run: git archive --format=zip --output=evidence/checkout.zip HEAD
