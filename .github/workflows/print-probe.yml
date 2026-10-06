@@ -13,7 +13,7 @@ jobs:
       matrix:
         os: [windows-2022, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -23,16 +23,22 @@ jobs:
           python-version: '3.12'
       - name: Inventory built-in virtual printer and spooler
         shell: pwsh
+        timeout-minutes: 4
         run: |
           $ErrorActionPreference='Stop'
-          New-Item -ItemType Directory -Force evidence | Out-Null
-          Get-Service Spooler | Format-List | Out-File evidence/spooler.txt
+          New-Item -ItemType Directory -Force inventory | Out-Null
+          Get-Service Spooler | Format-List | Out-File inventory/spooler.txt
           Start-Service Spooler
-          Get-Printer | Select-Object Name,DriverName,PortName | ConvertTo-Json -Depth 4 | Set-Content evidence/printers.json
-          Get-PrinterDriver | Select-Object Name,Manufacturer,InfPath | ConvertTo-Json -Depth 4 | Set-Content evidence/drivers.json
-          Get-WindowsOptionalFeature -Online | Where-Object FeatureName -Match 'Print|XPS' | Select-Object FeatureName,State | ConvertTo-Json | Set-Content evidence/features.json
-          Get-Content evidence/printers.json,evidence/drivers.json,evidence/features.json
-          git archive --format=zip --output=evidence/source.zip HEAD
+          Get-Printer | Select-Object Name,DriverName,PortName | ConvertTo-Json -Depth 4 | Set-Content inventory/printers.json
+          Get-PrinterDriver | Select-Object Name,Manufacturer,InfPath | ConvertTo-Json -Depth 4 | Set-Content inventory/drivers.json
+          Get-Content inventory/printers.json,inventory/drivers.json
+          git archive --format=zip --output=inventory/source.zip HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: print-inventory-${{ matrix.os }}-${{ github.run_id }}
+          path: inventory/
+          retention-days: 1
+          if-no-files-found: error
       - name: Download exact successful candidate for a harness-only probe
         shell: pwsh
         env:
@@ -44,39 +50,44 @@ jobs:
           python -m pip install -r e2e/requirements.txt
           ./e2e/ensure-webview2.ps1
           python e2e/prepare_payload.py package runtime
-      - name: Inspect the actual app print dialog without printing to hardware
+      - name: Inspect native print UI without calling CDP while it is modal
+        timeout-minutes: 3
         shell: pwsh
         run: |
           @'
-          import sys,time,json
+          import sys,time,json,subprocess
           from pathlib import Path
           sys.path.insert(0,str(Path('e2e').resolve()))
-          from driver import Session,menu
+          from driver import Session
           from pywinauto import Desktop
-          root=Path('evidence').resolve()
+          from pywinauto.keyboard import send_keys
+          from PIL import ImageGrab
+          root=Path('evidence').resolve();root.mkdir(exist_ok=True)
           session=Session('native',root/'session',Path('inputs/e2e-fixtures/basic.hwpx').resolve(),executable=Path('runtime/OpenGeul.exe').resolve())
+          print('READY',session.proc.pid,flush=True)
           try:
-              menu(session.page,'file:print')
-              session.page.wait_for_timeout(5000)
-              print('pages', [(p.url,p.title()) for p in session.context.pages])
-              desktop=Desktop(backend='win32')
-              rows=[]
-              for w in desktop.windows():
-                  if not w.is_visible():continue
-                  row={'title':w.window_text(),'class':w.class_name(),'pid':w.process_id(),'hwnd':w.handle,'children':[]}
-                  if w.process_id()==session.proc.pid or 'Print' in w.window_text():
-                      row['children']=[{'title':c.window_text(),'class':c.class_name(),'id':c.control_id(),'visible':c.is_visible()} for c in w.descendants()][:150]
-                  rows.append(row)
-              (root/'windows.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
-              print(json.dumps(rows,ensure_ascii=False))
-              Desktop(backend='win32').capture_as_image().save(root/'desktop.png')
-          finally:session.close()
+              windows=Desktop(backend='win32').windows(process=session.proc.pid,visible_only=True)
+              windows[0].set_focus(); send_keys('^p'); time.sleep(4)
+              for backend in ('win32','uia'):
+                  rows=[]
+                  for w in Desktop(backend=backend).windows():
+                      if not w.is_visible():continue
+                      row={'title':w.window_text(),'class':w.class_name(),'pid':w.process_id(),'hwnd':w.handle,'children':[]}
+                      if w.process_id()==session.proc.pid or 'Print' in w.window_text():
+                          row['children']=[{'title':c.window_text(),'class':c.class_name(),'id':c.control_id(),'visible':c.is_visible()} for c in w.descendants()][:250]
+                      rows.append(row)
+                  (root/(backend+'-windows.json')).write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+                  print(backend,json.dumps(rows,ensure_ascii=False),flush=True)
+              ImageGrab.grab().save(root/'desktop.png')
+          finally:
+              subprocess.run(['taskkill','/PID',str(session.proc.pid),'/T','/F'],capture_output=True,timeout=15)
+              session.close()
           '@ | Set-Content .work-print-probe.py -Encoding utf8
-          python .work-print-probe.py
+          python -u .work-print-probe.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: print-probe-${{ matrix.os }}-${{ github.run_id }}
           path: evidence/
           retention-days: 1
-          if-no-files-found: error
+          if-no-files-found: warn
