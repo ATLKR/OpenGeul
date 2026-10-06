@@ -42,6 +42,8 @@ def snapshot(folder):
 def system_dialog(session,queue):
     windows=[w for w in Desktop(backend='win32').windows(process=session.proc.pid,visible_only=True) if w.class_name()=='Tauri Window']
     if len(windows)!=1:raise AssertionError('Expected one owned app window')
+    windows[0].maximize()
+    wait(windows[0].is_maximized)
     windows[0].set_focus();send_keys('^p',vk_packet=False)
     open_system_dialog(windows[0].handle,session.proc.pid)
     dialog=wait(lambda:visible_dialog('Print',session.proc.pid))
