@@ -52,7 +52,17 @@ python scripts/patch_composition.py $source
 python scripts/prepare_hop_fixes.py $source
 node --experimental-strip-types --loader ./tests/hop/loader.mjs --test tests/hop/*.test.mjs
 python scripts/patch_namespaces.py (Join-Path $source 'third_party/rhwp')
+python scripts/patch_table_height.py (Join-Path $source 'third_party/rhwp')
 python scripts/wasm_artifacts.py install $WasmDirectory $source
+$tableFixtures = Join-Path $root '.work/table-fixtures'
+$tableVendor = Join-Path $source 'apps/studio-host/vendor/rhwp-core'
+node e2e/table_height.mjs generate $tableVendor $tableFixtures
+python e2e/table_height_fixtures.py $tableFixtures
+node e2e/table_height.mjs verify $tableVendor $tableFixtures
+$tableTest = Join-Path $source 'third_party/rhwp/tests/opengeul_table_height.rs'
+if (Test-Path $tableTest) { throw 'Refusing to overwrite existing upstream test' }
+Copy-Item 'overlay/table_height_test.rs' $tableTest
+$env:OPENGEUL_TABLE_FIXTURES = $tableFixtures
 Push-Location $source
 try {
     pnpm run test:studio
@@ -68,6 +78,7 @@ try {
     try {
         # cdylib/rlib outputs must not collide with the editor's different feature graph.
         $env:CARGO_TARGET_DIR = $cliTarget
+        cargo test --locked --test opengeul_table_height
         cargo build --release --locked --target x86_64-pc-windows-msvc --package rhwp --bin rhwp --features native-skia
     } finally {
         $env:CARGO_TARGET_DIR = $editorTarget

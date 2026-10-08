@@ -40,3 +40,5 @@ No font binaries are included in this repository or intended runtime payload. Li
 ## Reviewed downstream backport
 
 The plain-character shortcut fix is adapted from HOP PR #101 by FMsongX2, commit `f9bbe8dc66172a1959af1e388e6c28a5b597c5a6` (https://github.com/golbin/hop/pull/101). It prevents unmodified printable keys from being captured as global shortcuts; the HOP/rhwp MIT notices above remain applicable. OpenGeul adds regression coverage and does not claim the upstream PR has been merged. The toolbar-label preference is an OpenGeul implementation addressing HOP issue #97, not imported code from that issue.
+
+The terminal negative-line-spacing clamp is adapted from rhwp PR #6074 by planet6897, commit `c7d3c66398acdb3c093fdea6fef573e14f771a6c` (https://github.com/edwardkim/rhwp/pull/6074). That work was incorporated upstream via PR #6076. OpenGeul limits the adaptation to terminal inline-table lines in its pinned 0.8.4 engine and supplies its own synthetic regression fixtures. The original rhwp MIT notice above remains applicable. This is not an upgrade to the complete newer engine and does not establish that all HOP table or printing reports are resolved.

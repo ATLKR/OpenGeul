@@ -1,0 +1,4 @@
+-r requirements.txt
+pypdfium2==5.8.0
+reportlab==4.4.9
+psutil==7.2.2

@@ -1,4 +1,14 @@
 """Select real Windows controls; never a search field or hidden legacy control."""
+def bind_dialog(desktop, pid):
+    """Freeze the exact HWND before a following same-class TaskDialog can appear."""
+    selected = desktop.window(class_name='#32770', process=pid)
+    selected.wait('visible', timeout=20)
+    actual = selected.wrapper_object()
+    if actual.process_id() != pid or actual.class_name() != '#32770':
+        raise ValueError('Native dialog ownership changed before binding')
+    return desktop.window(handle=actual.handle)
+
+
 def filename_control(controls):
     candidates=[control for control in controls
         if control.class_name()=='Edit' and control.is_visible() and control.is_enabled()
@@ -11,8 +21,7 @@ def filename_control(controls):
 def dismiss_error_dialog(pid: int) -> str:
     """Read the actual TaskDialog text through its HWND, then dismiss it physically."""
     from pywinauto import Desktop
-    dialog=Desktop(backend='win32').window(class_name='#32770',process=pid)
-    dialog.wait('visible',timeout=20)
+    dialog=bind_dialog(Desktop(backend='win32'), pid)
     # Win32 exposes the button but not the DirectUI message. UIA root enumeration
     # can omit the dialog, but its verified HWND exposes the accessible text.
     accessible=Desktop(backend='uia').window(handle=dialog.handle)

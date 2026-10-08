@@ -116,17 +116,24 @@ class Session:
 
     def native_dialog(self, target: Path|None):
         from pywinauto import Desktop
-        # UIA can omit these shell dialogs on hosted desktops. Select their real HWND
-        # under this application's PID, and use physical input for visible buttons.
-        dialog=Desktop(backend='win32').window(class_name='#32770',process=self.proc.pid)
-        dialog.wait('visible',timeout=20)
+        # UIA can omit these shell dialogs on hosted desktops. Pin the exact HWND:
+        # an invalid-file open can replace the file picker immediately with another
+        # #32770 error dialog, and a dynamic WindowSpecification would mistake that
+        # replacement for the original picker still being visible.
+        spec=Desktop(backend='win32').window(class_name='#32770',process=self.proc.pid)
+        spec.wait('visible',timeout=20)
+        dialog=spec.wrapper_object();hwnd=dialog.handle
         if target is not None:
             control=filename_control(dialog.descendants())
             control.set_edit_text(str(target))
-        dialog.set_focus()
-        dialog.child_window(control_id=2 if target is None else 1,
-                            class_name='Button',visible_only=True).click_input()
-        dialog.wait_not('visible',timeout=20)
+        buttons=[item for item in dialog.descendants(class_name='Button')
+                 if item.control_id()==(2 if target is None else 1)
+                 and item.is_visible() and item.is_enabled()]
+        if len(buttons)!=1:
+            raise AssertionError(f'Expected one native dialog action; found {len(buttons)}')
+        dialog.set_focus();buttons[0].click_input()
+        until(lambda: not ctypes.windll.user32.IsWindow(hwnd)
+              or not ctypes.windll.user32.IsWindowVisible(hwnd),timeout=20)
 
     def save(self, source: Path, output: Path, *, save_as=False, cancel=False) -> Path|None:
         command='file:save-as' if save_as else 'file:save'

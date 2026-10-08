@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "scale": 3,
+  "threshold": 160,
+  "sourceRun": 37415109909,
+  "sourceArtifact": 11389924227,
+  "productCommit": "0aedc704fe75b996bfa86f666f23e4297071de83",
+  "editorSha256": "375a067e7d0ecdbb16c8efbd16760335172849003b7584218adc00b668c818ce",
+  "referenceEnvironment": {"runner":"windows-2022","driver":"Microsoft Print To PDF","media":"A4 portrait","pdfium":"149.0.7825.0"},
+  "review": "All eight synthetic output pages visually inspected: complete five-line tables including terminal g descender; correct Korean/Latin basic documents; distinct page-1/page-2 markers and range only page 2. Fixed visible-ink fingerprints; candidate CI may not regenerate or accept references. This is a regression reference, not Hancom or physical-device certification.",
+  "cases": {
+    "table--300": [{"pixels":[1786,2526],"ink":12949,"bbox":[264,306,1526,430],"maskSha256":"a76769c07a47536f7862015013cf9b72baf5205b0771c1d1ad533276c185d873"}],
+    "table-0": [{"pixels":[1786,2526],"ink":13180,"bbox":[264,306,1526,466],"maskSha256":"39d07aa2cb735a82795c530dae4aa12ff7e41435368a8813553fbcbb6d0bfb34"}],
+    "table-600": [{"pixels":[1786,2526],"ink":13537,"bbox":[264,306,1526,556],"maskSha256":"2ec376bcf6899299aaa5930bff66ab04775754118261391d44577af84cea4be7"}],
+    "basic-hwp": [{"pixels":[1786,2526],"ink":3509,"bbox":[258,298,921,331],"maskSha256":"b281c0cd50724e2ee9180fa90579f2b305d63f8ba0f8649dba3f25576f6896bd"}],
+    "basic-hwpx": [{"pixels":[1786,2526],"ink":3509,"bbox":[258,298,921,331],"maskSha256":"b281c0cd50724e2ee9180fa90579f2b305d63f8ba0f8649dba3f25576f6896bd"}],
+    "multipage": [
+      {"pixels":[1786,2526],"ink":3984,"bbox":[258,300,848,328],"maskSha256":"bdcb2f530d8798bb49db46d94d12968a8996736251072f1e0a2f9324f0b68366"},
+      {"pixels":[1786,2526],"ink":4038,"bbox":[258,300,848,328],"maskSha256":"3c8cd3fdf91f0f9430953e5d5dafd92e43ca5e2ab1f7568d9ec476aabaad044b"}
+    ],
+    "page-range": [{"pixels":[1786,2526],"ink":4038,"bbox":[258,300,848,328],"maskSha256":"3c8cd3fdf91f0f9430953e5d5dafd92e43ca5e2ab1f7568d9ec476aabaad044b"}]
+  },
+  "reviewedVariants": [{
+    "id": "win25-webview153-digit4-outline",
+    "case": "table-0",
+    "page": 1,
+    "fingerprint": {"pixels":[1786,2526],"ink":13172,"bbox":[264,306,1526,466],"maskSha256":"2c089dd0291528e537981952e4cc8a22e5f82d5f8e25321986e8c6fb0dff1b97"},
+    "sourceRun": 37445818877,
+    "sourceArtifact": 11403760205,
+    "productCommit": "0aedc704fe75b996bfa86f666f23e4297071de83",
+    "editorSha256": "375a067e7d0ecdbb16c8efbd16760335172849003b7584218adc00b668c818ce",
+    "review": "2026-10-06: visually inspected complete current five-line table and independently compared both PDF content streams (1858 operators each). Only 10 coordinate operands inside the digit 4 outline differ: crossbar y=-2.24/-3.37 versus -2.40/-3.36. No text, glyph, table boundary, placement, page count or clipping path is removed. The entire 216-DPI mask differs at exactly eight pixels in [479,388,490,389]. Retain the original reference; accept this exact separately reviewed whole-page fingerprint only, with zero generic pixel tolerance."
+  }]
+}

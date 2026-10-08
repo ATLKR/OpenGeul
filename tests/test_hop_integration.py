@@ -19,7 +19,7 @@ class HopIntegrationTests(unittest.TestCase):
         self.assertIn('from test_hop_followups import suite',text)
         self.assertIn("expected=16 if os.environ.get('E2E_MODE')=='native' else 10",text)
         workflow=(ROOT/'.github/workflows/msix.yml').read_text()
-        self.assertIn('needs: [wasm, build, native-e2e, browser-e2e, msix-install]',workflow)
+        self.assertIn('needs: [wasm, build, native-e2e, browser-e2e, msix-install, virtual-print]',workflow)
     def test_backport_attribution_is_shipped_with_license_notices(self):
         text=(ROOT/'THIRD_PARTY_NOTICES.md').read_text()
         self.assertIn('FMsongX2',text)
