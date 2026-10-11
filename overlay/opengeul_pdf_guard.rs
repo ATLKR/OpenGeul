@@ -4,6 +4,10 @@
 mod font_policy;
 use std::collections::BTreeSet;
 
+pub fn incomplete_page_error(page_index: usize) -> String {
+    format!("PDF 내보내기를 중단했습니다: {}페이지를 변환할 수 없어 PDF 파일을 저장하지 않았습니다.", page_index + 1)
+}
+
 #[cfg(feature = "native-skia")]
 pub fn reject_direct_export() -> Result<(), String> {
     Err("OpenGeul direct PDF export is unavailable because this Skia path cannot enforce font embedding permissions. Use the guarded SVG backend (--backend svg).".into())

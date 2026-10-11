@@ -46,6 +46,13 @@ pub fn pdf_font_dirs(app: &AppHandle) -> Vec<PathBuf> {
             'third_party/rhwp/src/renderer/pdf.rs': '''/// Native PDF implementation selected by callers such as `export-pdf`.
     let fontdb = create_fontdb(export_options);
     crate::renderer::font_paths::load_into_fontdb(&mut fontdb, &options.font_paths);
+        let Some((chunk, svg_ref)) =
+            convert_page_chunk(&tree, export_options.embed_text, page_index, &mut to_chunk)?
+        else {
+            continue;
+        };
+WARN: 페이지 1 — 이 페이지만 건너뛰고 PDF 를 계속합니다.
+WARN: 페이지 2 — 이 페이지만 건너뛰고 PDF 를 계속합니다.
 pub fn layer_trees_to_pdf_with_links(
     layer_trees: &[crate::paint::PageLayerTree],
     links: &[Vec<super::hyperlinks::PdfLink>],

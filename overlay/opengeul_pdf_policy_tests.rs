@@ -6,7 +6,10 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use rhwp::renderer::pdf::{svgs_to_pdf_with_options, PdfBackend, PdfExportOptions};
+use rhwp::renderer::pdf::{
+    svg2pdf_invalid_image_error, svg2pdf_subset_error_stub, svg2pdf_to_chunk,
+    svgs_to_pdf_with_options, svgs_to_pdf_with_to_chunk, PdfBackend, PdfExportOptions,
+};
 use std::{
     fs,
     path::PathBuf,
@@ -150,6 +153,83 @@ fn default_svg_backend_rejects_a_usable_restricted_requested_font() {
             .expect_err("restricted font must be denied before PDF conversion");
     assert!(error.contains("PDF 글꼴 포함을 중단했습니다"), "{error}");
     assert!(error.contains(&family), "{error}");
+}
+
+fn permitted_three_pages() -> (FontDirectory, PdfExportOptions, Vec<String>) {
+    let bytes = font_with_flags(0);
+    let family = usable_family(&bytes, 0);
+    let directory = FontDirectory::new(&bytes);
+    let options = directory.compatibility_options(&family);
+    let pages = (180..183)
+        .map(|width| svg(&family).replace("width=\"180\"", &format!("width=\"{width}\"")))
+        .collect();
+    (directory, options, pages)
+}
+
+fn assert_complete_three_page_pdf(pdf: &[u8]) {
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert!(pdf.trim_ascii_end().ends_with(b"%%EOF"));
+    assert!(pdf.windows(8).any(|window| window == b"/Count 3"));
+}
+
+#[test]
+fn permitted_svg_export_preserves_all_selected_pages() {
+    let (_directory, options, pages) = permitted_three_pages();
+    assert_complete_three_page_pdf(&svgs_to_pdf_with_options(&pages, &options).unwrap());
+}
+
+#[test]
+fn persistent_subset_failure_on_first_middle_or_last_page_rejects_export() {
+    let mut incomplete_successes = Vec::new();
+    for failed_width in 180..183 {
+        for embed_text in [true, false] {
+            let (_directory, mut options, pages) = permitted_three_pages();
+            options.embed_text = embed_text;
+            let result = svgs_to_pdf_with_to_chunk(&pages, &options, |tree, embed| {
+                if tree.size().width() == failed_width as f32 {
+                    Err(svg2pdf_subset_error_stub())
+                } else {
+                    svg2pdf_to_chunk(tree, embed)
+                }
+            });
+            if result.is_ok() {
+                incomplete_successes.push((failed_width - 179, embed_text));
+            }
+        }
+    }
+    assert!(incomplete_successes.is_empty(), "failed selected pages returned incomplete PDF success (page, embed_text): {incomplete_successes:?}");
+}
+
+#[test]
+fn one_subset_retry_may_succeed_without_losing_a_page() {
+    let (_directory, options, pages) = permitted_three_pages();
+    let mut calls = 0;
+    let pdf = svgs_to_pdf_with_to_chunk(&pages, &options, |tree, embed| {
+        calls += 1;
+        if tree.size().width() == 180.0 && embed {
+            Err(svg2pdf_subset_error_stub())
+        } else {
+            svg2pdf_to_chunk(tree, embed)
+        }
+    }).unwrap();
+    assert_eq!(calls, 4, "one retry plus three successful page conversions");
+    assert_complete_three_page_pdf(&pdf);
+}
+
+#[test]
+fn non_subset_failure_is_fatal_without_retry_or_later_page_conversion() {
+    let (_directory, options, pages) = permitted_three_pages();
+    let mut calls = 0;
+    let result = svgs_to_pdf_with_to_chunk(&pages, &options, |tree, embed| {
+        calls += 1;
+        if tree.size().width() == 181.0 {
+            Err(svg2pdf_invalid_image_error())
+        } else {
+            svg2pdf_to_chunk(tree, embed)
+        }
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 2, "a fatal second-page error must stop before the third page");
 }
 
 #[cfg(feature = "native-skia")]

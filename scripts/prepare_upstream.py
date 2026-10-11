@@ -135,6 +135,15 @@ def patch(source: Path, version: str) -> None:
     anchor='/// Native PDF implementation selected by callers such as `export-pdf`.'
     value=replace_once(value,anchor,'#[cfg(not(target_arch = "wasm32"))]\nmod opengeul_pdf_guard;\n\n'+anchor)
     value=replace_once(value,'    let fontdb = create_fontdb(export_options);','    let mut fontdb = create_fontdb(export_options);\n    opengeul_pdf_guard::enforce(&mut fontdb, svg_pages)?;')
+    incomplete='''        let Some((chunk, svg_ref)) =
+            convert_page_chunk(&tree, export_options.embed_text, page_index, &mut to_chunk)?
+        else {
+            continue;
+        };'''
+    value=replace_once(value,incomplete,incomplete.replace('            continue;',
+        '            return Err(opengeul_pdf_guard::incomplete_page_error(page_index));'))
+    value=replace_once(value,' — 이 페이지만 건너뛰고 PDF 를 계속합니다.',
+        ' — PDF 내보내기를 중단합니다.',expected=2)
     value=replace_once(value,'    crate::renderer::font_paths::load_into_fontdb(&mut fontdb, &options.font_paths);','    for dir in &options.font_paths { fontdb.load_fonts_dir(dir); }')
     direct='''pub fn layer_trees_to_pdf_with_links(
     layer_trees: &[crate::paint::PageLayerTree],
