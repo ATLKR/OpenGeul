@@ -115,7 +115,7 @@ def ensure_source_release(tag, directory):
         return False
     subprocess.run(['gh', 'release', 'create', tag, *[str(path) for path in paths],
                     '--repo', REPOSITORY, '--target', provenance['commit'], '--prerelease', '--latest=false',
-                    '--title', f'OpenGeul {tag} — E2E-tested unsigned Windows development build',
+                    '--title', f'OpenGeul {tag} — 검증을 통과한 서명 없는 Windows 개발판',
                     '--notes-file', 'docs/RELEASE_NOTES.md'], check=True, timeout=180)
     return True
 

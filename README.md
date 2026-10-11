@@ -73,7 +73,7 @@ PR은 릴리스를 게시하지 않습니다. 수동 단계는 checks, engine, f
 PowerShell 7, Python 3.11 이상, Node 24/Corepack, Git, Rustup, Visual Studio C++
 빌드 도구와 Windows SDK가 필요합니다. 깨끗한 작업 디렉터리를 사용하세요.
 같은 OpenGeul 커밋에서 Linux의 scripts/build-wasm.sh가 만든 소스 검증 WASM을
-Windows 빌드에 전달해야 합니다. Actions의 **OpenGeul Windows build and release**를
+Windows 빌드에 전달해야 합니다. Actions의 **OpenGeul Windows 빌드·개발판 게시**를
 full로 실행하거나 해당 커밋의 검증된 WASM 디렉터리를 직접 지정하세요.
 
     ./scripts/build-msix.ps1 -WasmDirectory C:\path\to\verified-wasm

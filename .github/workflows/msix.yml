@@ -1,4 +1,4 @@
-name: OpenGeul Windows build and release
+name: OpenGeul Windows 빌드·개발판 게시
 'on':
   push:
     branches: [main]
@@ -9,7 +9,7 @@ name: OpenGeul Windows build and release
   workflow_dispatch:
     inputs:
       mode:
-        description: full = all gates and eligible release; engine/checks = diagnostic only, never publish
+        description: full = 전체 검증과 허용된 릴리스 게시; engine/checks = 진단 전용, 게시하지 않음
         type: choice
         required: true
         default: full
@@ -38,12 +38,12 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Install only pinned CI parser
+    - name: 고정된 CI 파서만 설치
       run: python -m pip install -r ci/requirements.txt
-    - name: Validate public/free-only workflows and requested stage
+    - name: 공개·무료 workflow와 요청 단계 확인
       id: policy
       run: python ci/policy.py --event
-    - name: Fast CI and package policy regression tests
+    - name: CI·패키지 정책 회귀 검사
       run: |
         python -m unittest discover -s ci/tests -v
         python -m unittest discover -s tests -v
@@ -62,12 +62,12 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Rebuild patched WASM and prove namespace regression RED to GREEN
+    - name: 수정된 WASM 재빌드와 namespace 회귀 실패·수정 후 통과 확인
       run: bash scripts/build-wasm.sh
-    - name: Enforce transport size before upload
+    - name: 업로드 전 전송 파일 크기 제한 검사
       shell: bash
       run: python ci/evidence.py size --limit-mib 32 .work/rebuilt-wasm
-    - name: Share source-bound rebuilt engine
+    - name: 소스가 일치하는 재빌드 엔진 전달
       if: needs.preflight.outputs.mode == 'full'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -84,10 +84,10 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 9
-    - name: Enforce transport size before upload
+    - name: 업로드 전 전송 파일 크기 제한 검사
       shell: bash
       run: python ci/evidence.py size --limit-mib 64 .work/e2e-fixtures .work/hop/apps/studio-host/dist
-    - name: Share production-source browser frontend and synthetic fixtures
+    - name: 제품 소스 브라우저 화면과 합성 시험 문서 전달
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-browser-inputs-${{ github.run_id }}
@@ -108,7 +108,7 @@ jobs:
       contents: read
       actions: read
     steps:
-    - name: Preserve exact source bytes on Windows
+    - name: Windows에서 정확한 소스 바이트 보존
       shell: pwsh
       run: |
         git config --global core.autocrlf false
@@ -123,18 +123,18 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Download this run's validated WASM
+    - name: 이 실행에서 검증한 WASM 받기
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: Verify native table and PDF policies and compile Windows editor
+    - name: 네이티브 표·PDF 정책 검사와 Windows 편집기 컴파일
       shell: pwsh
       run: ./scripts/build-msix.ps1 -Phase Editor -WasmDirectory wasm-input
-    - name: Enforce transport size before upload
+    - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
       run: python ci/evidence.py size --limit-mib 64 .work/editor-component
-    - name: Share source-bound editor component
+    - name: 소스가 일치하는 편집기 구성요소 전달
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-editor-component-${{ github.run_id }}
@@ -143,12 +143,12 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 9
-    - name: Stage only native fixtures (do not duplicate browser frontend)
+    - name: 네이티브 시험 문서만 준비
       shell: pwsh
       run: |
         python -c "import shutil; shutil.copytree('.work/e2e-fixtures', '.work/native-inputs/e2e-fixtures')"
         python ci/evidence.py size --limit-mib 16 .work/native-inputs
-    - name: Share native synthetic fixtures
+    - name: 네이티브 합성 시험 문서 전달
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-e2e-inputs-${{ github.run_id }}
@@ -166,7 +166,7 @@ jobs:
       contents: read
       actions: read
     steps:
-    - name: Preserve exact source bytes on Windows
+    - name: Windows에서 정확한 소스 바이트 보존
       shell: pwsh
       run: |
         git config --global core.autocrlf false
@@ -181,18 +181,18 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Download this run's validated WASM
+    - name: 이 실행에서 검증한 WASM 받기
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: Compile the production Windows CLI
+    - name: 제품 Windows CLI 컴파일
       shell: pwsh
       run: ./scripts/build-msix.ps1 -Phase Cli -WasmDirectory wasm-input
-    - name: Enforce transport size before upload
+    - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
       run: python ci/evidence.py size --limit-mib 32 .work/cli-component
-    - name: Share source-bound CLI component
+    - name: 소스가 일치하는 CLI 구성요소 전달
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-cli-component-${{ github.run_id }}
@@ -210,7 +210,7 @@ jobs:
       contents: read
       actions: read
     steps:
-    - name: Preserve exact source bytes on Windows
+    - name: Windows에서 정확한 소스 바이트 보존
       shell: pwsh
       run: |
         git config --global core.autocrlf false
@@ -221,7 +221,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Download both components from this exact run
+    - name: 동일 실행의 두 구성요소 받기
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
@@ -230,13 +230,13 @@ jobs:
         $PSNativeCommandUseErrorActionPreference=$true
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-editor-component-$env:GITHUB_RUN_ID" --dir editor-input
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-cli-component-$env:GITHUB_RUN_ID" --dir cli-input
-    - name: Validate source and byte parity before creating unsigned packages
+    - name: 서명 없는 패키지 생성 전 소스·바이트 일치 검증
       shell: pwsh
       run: ./scripts/build-msix.ps1 -Phase Package -EditorComponent editor-input -CliComponent cli-input
-    - name: Enforce transport size before upload
+    - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
       run: python ci/evidence.py size --limit-mib 96 dist
-    - name: Upload verified build outputs
+    - name: 검증한 빌드 결과 업로드
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-windows-x64-${{ github.run_id }}
@@ -258,7 +258,7 @@ jobs:
         os: [windows-2025, windows-2022]
       max-parallel: 2
     steps:
-    - name: Preserve exact source bytes for password fixture provenance
+    - name: 암호 시험 문서 증거를 위한 정확한 소스 바이트 보존
       shell: pwsh
       run: |
         git config --global core.autocrlf false
@@ -273,7 +273,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Download this run's immutable build inputs
+    - name: 동일 실행의 고정 빌드 입력 받기
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
@@ -282,17 +282,17 @@ jobs:
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-x64-$env:GITHUB_RUN_ID" --dir package
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs-$env:GITHUB_RUN_ID" --dir inputs
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: Install test tools and verify production payload identity
+    - name: 시험 도구 설치와 실제 제품 파일 신원 확인
       shell: pwsh
       run: |
         $PSNativeCommandUseErrorActionPreference=$true
         python -m pip install -r e2e/requirements.txt
         ./e2e/ensure-webview2.ps1
         python e2e/prepare_payload.py package runtime
-    - name: Guide users when WebView2 is unavailable
+    - name: WebView2가 없을 때 사용자 안내
       shell: pwsh
       run: python e2e/check_webview2_missing.py --exe runtime/OpenGeul.exe --output evidence
-    - name: Production WebView2 and real native file dialogs
+    - name: 제품 WebView2와 실제 Windows 파일 대화상자 검사
       shell: pwsh
       run: |
         $env:E2E_MODE='native'
@@ -300,20 +300,20 @@ jobs:
         $env:E2E_FIXTURES=(Resolve-Path inputs/e2e-fixtures).Path
         $env:E2E_OUTPUT=Join-Path $pwd 'evidence'
         python e2e/run.py
-    - name: Password retry, plaintext consent and dirty native close or replacement safety
+    - name: 암호 재입력·평문 저장 동의·미저장 문서 닫기·교체 보호 검사
       shell: pwsh
       run: |
         $ErrorActionPreference='Stop'
         $PSNativeCommandUseErrorActionPreference=$true
         node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures password-fixtures
         python e2e/password/native.py --source-root . --fixtures password-fixtures --exe runtime/OpenGeul.exe --output evidence/password-native --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID
-    - name: Bound evidence without changing test results
+    - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
         EVIDENCE_STATUS: ${{ job.status }}
       shell: pwsh
       run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
-    - name: Preserve bounded UI evidence even on failure
+    - name: 실패해도 크기가 제한된 UI 증거 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -342,17 +342,17 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Download production-source frontend and synthetic inputs
+    - name: 제품 소스 브라우저 화면과 합성 시험 입력 받기
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "opengeul-browser-inputs-$GITHUB_RUN_ID" --dir inputs
-    - name: Install pinned browser automation
+    - name: 고정된 브라우저 자동화 도구 설치
       env:
         BROWSER: ${{ matrix.browser }}
       run: |
         python -m pip install -r e2e/requirements.txt
         python -m playwright install --with-deps "$BROWSER"
-    - name: Real production frontend and download round trips
+    - name: 실제 제품 화면과 다운로드·재열기 검사
       env:
         E2E_BROWSER: ${{ matrix.browser }}
         E2E_MODE: browser
@@ -365,13 +365,13 @@ jobs:
         server=$!
         trap 'kill "$server" 2>/dev/null || true' EXIT
         python e2e/run.py
-    - name: Bound evidence without changing test results
+    - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
         EVIDENCE_STATUS: ${{ job.status }}
       shell: bash
       run: python ci/evidence.py pack evidence bounded-evidence --status "$EVIDENCE_STATUS"
-    - name: Preserve bounded browser evidence even on failure
+    - name: 실패해도 크기가 제한된 브라우저 증거 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -392,24 +392,24 @@ jobs:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
-    - name: Download unsigned release candidate
+    - name: 서명 없는 릴리스 후보 받기
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-x64-$env:GITHUB_RUN_ID" --dir package
-    - name: Prepare WebView2 for installed app launch
+    - name: 설치된 앱 실행을 위한 WebView2 준비
       shell: pwsh
       run: ./e2e/ensure-webview2.ps1
-    - name: Test-only signing, installed app and CLI launch, WACK, associations and uninstall
+    - name: 시험 전용 서명·설치 앱 및 CLI 실행·WACK·파일 연결·제거 검사
       shell: pwsh
       run: ./e2e/msix-install.ps1 -PackageDirectory package -OutputDirectory evidence
-    - name: Bound evidence without changing test results
+    - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
         EVIDENCE_STATUS: ${{ job.status }}
       shell: pwsh
       run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
-    - name: Preserve installation result without any certificate or signed artifact
+    - name: 인증서·서명 파일을 제외하고 설치 결과 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -442,7 +442,7 @@ jobs:
       with:
         node-version: '24'
         package-manager-cache: false
-    - name: Download this run's exact production payload and synthetic inputs
+    - name: 동일 실행의 실제 제품 파일과 합성 시험 입력 받기
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
@@ -451,7 +451,7 @@ jobs:
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-x64-$env:GITHUB_RUN_ID" --dir package
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs-$env:GITHUB_RUN_ID" --dir inputs
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: Prepare independent PDF checks, built-in printer and generated documents
+    - name: 독립 PDF 검사·기본 프린터·합성 문서 준비
       shell: pwsh
       run: |
         $PSNativeCommandUseErrorActionPreference=$true
@@ -464,16 +464,16 @@ jobs:
         node e2e/table_height.mjs generate wasm-input print-fixtures
         python e2e/print_fixtures.py print-fixtures
         node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
-    - name: Print through real Windows dialogs and inspect spooler and rendered PDF
+    - name: 실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사
       shell: pwsh
       run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
-    - name: Bound evidence without changing test results
+    - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
         EVIDENCE_STATUS: ${{ job.status }}
       shell: pwsh
       run: python ci/evidence.py pack print-evidence bounded-evidence --status $env:EVIDENCE_STATUS
-    - name: Keep bounded synthetic print evidence even on failure
+    - name: 실패해도 크기가 제한된 합성 인쇄 증거 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -496,10 +496,10 @@ jobs:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
-    - name: Authorize immutable prerelease tag
+    - name: 고정 사전 릴리스 태그의 게시 조건 확인
       id: release
       run: python3 scripts/releasekit.py authorize
-    - name: Download, reverify and preserve or publish the validated release
+    - name: 검증 릴리스 받기·재검증·보존 또는 게시
       env:
         GH_TOKEN: ${{ github.token }}
         REPO: ${{ github.repository }}
@@ -511,7 +511,7 @@ jobs:
         (cd package && sha256sum --check SHA256SUMS.txt)
         python3 scripts/releasekit.py verify package/*.msix
         python3 scripts/store_package.py --publish-release --release-tag "$RELEASE_TAG" --package-directory package
-    - name: Dispatch Store submission for an explicit stable tag push
+    - name: 명시적 안정판 태그 push의 Store 제출 실행
       if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
       env:
         GH_TOKEN: ${{ github.token }}
@@ -532,7 +532,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Remove only this run's successfully consumed temporary transports
+    - name: 이 실행에서 성공적으로 사용한 임시 전송 파일만 정리
       env:
         GH_TOKEN: ${{ github.token }}
         CI_MODE: ${{ needs.preflight.outputs.mode }}

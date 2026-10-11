@@ -58,7 +58,7 @@ class WorkflowTransportTests(unittest.TestCase):
             self.assertIn(item,job['if'])
         self.assertEqual(job['permissions'],{'contents':'read','actions':'write'})
     def test_engine_does_not_upload_unused_wasm(self):
-        step=next(s for s in self.w['jobs']['wasm']['steps'] if s.get('name')=='Share source-bound rebuilt engine')
+        step=next(s for s in self.w['jobs']['wasm']['steps'] if s.get('name')=='소스가 일치하는 재빌드 엔진 전달')
         self.assertIn("needs.preflight.outputs.mode == 'full'",step.get('if',''))
     def test_modes_and_full_windows_condition_unchanged(self):
         self.assertEqual(self.w['on']['workflow_dispatch']['inputs']['mode']['options'],['full','engine','checks'])

@@ -1,4 +1,4 @@
-name: Upstream Windows baseline
+name: 업스트림 Windows 기준 검증
 'on':
   push:
     branches: [main]
@@ -17,12 +17,12 @@ jobs:
       PYTHONUTF8: '1'
       GIT_LFS_SKIP_SMUDGE: '1'
     steps:
-    - name: Preserve upstream byte-for-byte LF files before checkout
+    - name: checkout 전 업스트림 LF 파일 바이트 보존
       shell: pwsh
       run: |
         git config --global core.autocrlf false
         git config --global core.longpaths true
-    - name: Checkout the exact HOP source
+    - name: 고정된 HOP 소스 받기
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: golbin/hop
@@ -33,7 +33,7 @@ jobs:
       with:
         node-version: '24'
         package-manager-cache: false
-    - name: Port only the path comparison in the upstream test
+    - name: 업스트림 시험의 경로 비교만 Windows에 맞게 수정
       shell: python
       run: |
         from pathlib import Path
@@ -43,7 +43,7 @@ jobs:
         assert s.count(old) == 1
         s = s.replace(old, "const relativePath = relative(studioRoot, file).replaceAll('\\\\', '/');")
         p.write_text(s, encoding='utf-8', newline='\n')
-    - name: Verify source pins and install frozen dependencies
+    - name: 소스 고정 확인과 잠금된 의존성 설치
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -51,22 +51,22 @@ jobs:
         if ((git -C third_party/rhwp rev-parse HEAD) -ne '1a76570e833917d15817415a53c09ad61ab3203f') { throw 'Unexpected rhwp revision' }
         corepack enable
         pnpm install --frozen-lockfile
-    - name: Run upstream contracts and frontend tests (no skipped failures)
+    - name: 업스트림 계약·화면 검사 실행
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
         $PSNativeCommandUseErrorActionPreference = $true
         pnpm run test:upstream
         pnpm run test:studio
-    - name: Type-check and build the unchanged editor
+    - name: 유지된 편집기 타입 검사와 빌드
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
         $PSNativeCommandUseErrorActionPreference = $true
         pnpm run build:studio
-    - name: Record baseline (not an OpenGeul release)
+    - name: 업스트림 기준 검사 기록
       if: always()
       shell: pwsh
       run: |
-        'This workflow tests upstream with a documented Windows test-path portability fix. It publishes no application or fonts.' >> $env:GITHUB_STEP_SUMMARY
+        '문서화된 Windows 시험 경로 수정을 적용해 업스트림을 검사합니다. 앱이나 글꼴은 게시하지 않습니다.' >> $env:GITHUB_STEP_SUMMARY
     if: github.event.repository.private == false
