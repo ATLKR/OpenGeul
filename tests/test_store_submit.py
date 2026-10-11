@@ -17,6 +17,7 @@ except ImportError:
     submitter = None
 from buildkit import DEV_IDENTITY, manifest
 from store_package import STORE_APP_ID, STORE_IDENTITY, REQUIRED_JOBS
+import store_listing
 
 
 class StoreSubmitTests(unittest.TestCase):
@@ -212,9 +213,37 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.perform()['status'], 'PreProcessing')
         self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT', 'UPLOAD', 'POST'])
         self.assertEqual(self.new['pricing'], self.baseline['pricing'])
-        self.assertEqual(self.new['listings'], self.baseline['listings'])
+        self.assertEqual(self.new['listings'], store_listing.apply_korean_listing(self.baseline)['listings'])
         self.assertEqual(self.new['targetPublishMode'], 'Manual')
         self.assertIn('Keep human notes', self.new['notesForCertification'])
+
+    def test_korean_listing_updates_all_existing_locales_and_preserves_baseline(self):
+        self.baseline['listings']['en-us'] = {
+            'baseListing': {'title': 'OpenGeul', 'description': 'Old English text',
+                            'images': [{'id': 'existing', 'fileStatus': 'Uploaded'}]},
+            'platformOverrides': {'Windows81': {'description': 'Preserved'}}}
+        original = copy.deepcopy(self.baseline)
+        self.assertEqual(self.perform()['status'], 'PreProcessing')
+        self.assertEqual(self.baseline, original)
+        self.assertEqual(self.new['listings'], store_listing.apply_korean_listing(original)['listings'])
+        self.assertEqual(self.new['pricing'], original['pricing'])
+        self.assertEqual(self.new['targetPublishMode'], original['targetPublishMode'])
+
+    def test_invalid_korean_listing_plan_preserves_existing_pending_before_mutation(self):
+        invalid = self.root / 'invalid-listing.json'
+        invalid.write_text('{"description":"English-only"}', encoding='utf-8')
+        original = copy.deepcopy(self.pending)
+        with patch.object(store_listing, 'CONFIG', invalid):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.pending, original)
+
+    def test_missing_korean_listing_preserves_pending_before_mutation(self):
+        self.baseline['listings'] = {'en-us': {'baseListing': {'title': 'OpenGeul'}}}
+        original = copy.deepcopy(self.pending)
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.pending, original)
 
     def test_free_replacement_preserves_unavailable_markets(self):
         self.baseline['pricing']['marketSpecificPricings'].update(

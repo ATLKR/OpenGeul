@@ -2,7 +2,6 @@
 from __future__ import annotations
 import argparse
 import base64
-import copy
 import hashlib
 import io
 import json
@@ -20,6 +19,7 @@ import zipfile
 from buildkit import manifest, package_version
 from check_store_api import authenticate
 from releasekit import REPOSITORY, verify_msix
+from store_listing import apply_korean_listing
 from store_package import (STORE_APP_ID, STORE_IDENTITY, authorize_release,
                            prepare, verify_checksums, verify_repackage)
 
@@ -352,6 +352,8 @@ def submit(tag, directory):
             raise SubmissionBlocked('Recorded Store submission disappeared without acknowledged deletion or publication')
         target = version + (0,)
         if _packages_version(baseline) >= target: return {'outcome': 'superseded', 'tag': tag}
+        # 설명 계획 전체를 확인한 뒤에만 기존 제출을 삭제하거나 새 제출을 만든다.
+        template = apply_korean_listing(baseline)
         pending = None
         if pending_id:
             if pending_id == baseline_id: raise SubmissionBlocked('Published submissions cannot be deleted')
@@ -413,7 +415,7 @@ def submit(tag, directory):
             if pending_id == baseline_id or pending.get('status') != 'PendingCommit':
                 raise SubmissionBlocked('New Store draft was not acknowledged')
             _save(journal, 'draft_ready', details, submission_id=pending_id)
-        metadata = copy.deepcopy(baseline)
+        metadata = template
         for package in metadata['applicationPackages']:
             package['fileStatus'] = 'PendingDelete'
         metadata['applicationPackages'].append({'fileName': details['package'], 'fileStatus': 'PendingUpload',
