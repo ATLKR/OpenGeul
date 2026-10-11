@@ -86,12 +86,18 @@ export const storeUpdateCommands: CommandDef[] = [
       try {
         services.eventBus.emit('desktop-status', 'Store 업데이트 확인 중...');
         const state = await desktop.checkStoreUpdate();
-        if ((stateRevisions.get(desktop) ?? 0) !== revision) return;
+        if ((stateRevisions.get(desktop) ?? 0) !== revision) {
+          services.eventBus.emit('desktop-status', 'Store 업데이트 확인을 마쳤습니다.');
+          return;
+        }
         services.eventBus.emit('desktop-update-state', state);
         services.eventBus.emit('desktop-status', state.status === 'idle'
           ? '현재 버전이 최신입니다.' : state.status === 'error' ? state.message : '새 버전이 있습니다.');
       } catch (error) {
-        if ((stateRevisions.get(desktop) ?? 0) !== revision) return;
+        if ((stateRevisions.get(desktop) ?? 0) !== revision) {
+          services.eventBus.emit('desktop-status', 'Store 업데이트 확인을 마쳤습니다.');
+          return;
+        }
         const message = `업데이트를 확인하지 못했습니다: ${errorText(error)}`;
         services.eventBus.emit('desktop-update-state', { status: 'error', version: '', message });
         services.eventBus.emit('desktop-status', message);

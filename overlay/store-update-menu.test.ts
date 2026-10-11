@@ -57,6 +57,36 @@ describe('Store update file menu', () => {
     expect(message).not.toHaveBeenCalledWith('새 버전이 있습니다.');
   });
 
+  it.each([
+    { status: 'idle' },
+    { status: 'available', version: '1.1.4.0' },
+    { status: 'error', version: '1.1.3.0', message: '연결 실패' },
+  ])('finishes the manual indicator when the native $status event arrives before its RPC result', async (latest) => {
+    let finish!: (state: typeof latest) => void;
+    const bridge = { checkStoreUpdate: () => new Promise((resolve) => { finish = resolve; }), getUpdatePreferences: () => Promise.resolve({ autoCheck: true }) };
+    const bus = new EventBus(); const state = vi.fn(); const message = vi.fn(); bus.on('desktop-update-state', state); bus.on('desktop-status', message); await initialize(bridge, bus);
+    const pending = command('file:check-update').execute(services(bridge, bus) as never);
+    expect(message).toHaveBeenLastCalledWith('Store 업데이트 확인 중...');
+    bus.emit('desktop-update-state', latest);
+    finish(latest); await pending;
+    expect(state.mock.calls).toEqual([[latest]]);
+    expect(message).toHaveBeenLastCalledWith('Store 업데이트 확인을 마쳤습니다.');
+    expect(message).not.toHaveBeenCalledWith('현재 버전이 최신입니다.');
+  });
+
+  it('finishes a rejected old request without replacing a newer native state', async () => {
+    let reject!: (error: Error) => void;
+    const bridge = { checkStoreUpdate: () => new Promise((_, fail) => { reject = fail; }), getUpdatePreferences: () => Promise.resolve({ autoCheck: true }) };
+    const bus = new EventBus(); const state = vi.fn(); const message = vi.fn(); bus.on('desktop-update-state', state); bus.on('desktop-status', message); await initialize(bridge, bus);
+    const pending = command('file:check-update').execute(services(bridge, bus) as never);
+    const latest = { status: 'idle' }; // Another window dismissed an available update; idle does not prove latest.
+    bus.emit('desktop-update-state', latest);
+    reject(new Error('이전 요청 연결 실패')); await pending;
+    expect(state.mock.calls).toEqual([[latest]]);
+    expect(message).toHaveBeenLastCalledWith('Store 업데이트 확인을 마쳤습니다.');
+    expect(message).not.toHaveBeenCalledWith('현재 버전이 최신입니다.');
+  });
+
   it('keeps manual checking available when automatic checks are off', async () => {
     const bridge = { checkStoreUpdate: vi.fn().mockResolvedValue({ status: 'idle' }), getUpdatePreferences: vi.fn().mockResolvedValue({ autoCheck: false }), setUpdateAutoCheck: vi.fn() };
     const bus = new EventBus(); const message = vi.fn(); bus.on('desktop-status', message);
