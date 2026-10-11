@@ -8,6 +8,7 @@ export CARGO_TARGET_DIR="$root/.work/target-wasm"
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
 cargo test --manifest-path overlay/namespace-tests/Cargo.toml
+cargo test --locked --manifest-path overlay/store-update-tests/Cargo.toml
 node --experimental-strip-types --test tests/composition-final.test.mjs
 python scripts/prepare_upstream.py --fetch-only
 python e2e/check_namespaces.py .work/hop .work/hop/apps/studio-host/vendor/rhwp-core .work/namespace-red --red
