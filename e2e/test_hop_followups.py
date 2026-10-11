@@ -41,5 +41,9 @@ class FollowupTests:
 
 def suite():
     base = NativeTests if MODE == 'native' else EditorTests
-    combined = type('OpenGeulFollowups', (FollowupTests, base), {})
+    mixins = (FollowupTests, base)
+    if MODE == 'native':
+        from native_zoom import NativeZoomTests
+        mixins = (NativeZoomTests, *mixins)
+    combined = type('OpenGeulFollowups', mixins, {})
     return unittest.defaultTestLoader.loadTestsFromTestCase(combined)

@@ -6,6 +6,7 @@ import sys
 import time
 import unittest
 import xml.etree.ElementTree as ET
+from suite_contract import required_methods, coverage_ok
 
 class EvidenceResult(unittest.TextTestResult):
     def __init__(self,*args,**kwargs):
@@ -24,10 +25,13 @@ def main():
     output=Path(os.environ['E2E_OUTPUT']);output.mkdir(parents=True,exist_ok=True)
     from test_hop_followups import suite
     result=unittest.TextTestRunner(verbosity=2,resultclass=EvidenceResult).run(suite())
-    expected=16 if os.environ.get('E2E_MODE')=='native' else 10
+    mode=os.environ.get('E2E_MODE','browser')
+    required=required_methods(mode)
+    expected=len(required)
     payload={'commit':os.environ.get('GITHUB_SHA'),'runId':os.environ.get('GITHUB_RUN_ID'),'mode':os.environ.get('E2E_MODE'),
         'browser':os.environ.get('E2E_BROWSER'),'os':os.environ.get('RUNNER_OS'),'tests':result.records,
-        'expectedTests':expected,'success':result.wasSuccessful() and not result.skipped and result.testsRun==expected}
+        'expectedTests':expected,'requiredMethods':list(required),
+        'success':result.wasSuccessful() and not result.skipped and result.testsRun==expected and coverage_ok(mode,result.records)}
     (output/'results.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
     xml=ET.Element('testsuite',name='OpenGeul E2E',tests=str(result.testsRun),failures=str(len(result.failures)),errors=str(len(result.errors)),skipped=str(len(result.skipped)))
     for record in result.records:
