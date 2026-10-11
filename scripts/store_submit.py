@@ -265,6 +265,11 @@ def _free(submission):
         raise SubmissionBlocked('Free Store pricing and all market overrides must be preserved')
 
 
+def _manual(submission):
+    if submission.get('targetPublishMode') != 'Manual':
+        raise SubmissionBlocked('Manual Store publication control must be preserved')
+
+
 def _packages_version(submission):
     versions = []
     packages = submission.get('applicationPackages')
@@ -338,6 +343,7 @@ def submit(tag, directory):
         if _id(baseline['id']) != baseline_id or baseline.get('status') != 'Published':
             raise SubmissionBlocked('Store has no verified Published baseline')
         _free(baseline)
+        _manual(baseline)
         if (not isinstance(baseline.get('applicationPackages'), list) or not baseline['applicationPackages']
                 or any(package.get('architecture', '').lower() != 'x64' for package in baseline['applicationPackages'])):
             raise SubmissionBlocked('Automatic updates require the published x64 package template')
@@ -363,6 +369,7 @@ def submit(tag, directory):
                 if status == 'CommitStarted':
                     status = _poll(api, pending_id)
                     _, pending = api('GET', f'submissions/{pending_id}')
+                _manual(pending)
                 _save(journal, 'submitted', details, submission_id=pending_id, status=status)
                 if status in FAILED: raise SubmissionBlocked(f'Store processing stopped in {status}; a newer stable release is required')
                 if (_id(pending['id']) != pending_id or _packages_version(pending) != target
@@ -416,6 +423,7 @@ def submit(tag, directory):
         for field in ('id', 'status', 'statusDetails', 'fileUploadUrl', 'friendlyName'):
             metadata.pop(field, None)
         _, updated = api('PUT', f'submissions/{pending_id}', metadata)
+        _manual(updated)
         if (_id(updated['id']) != pending_id or updated.get('status') != 'PendingCommit'
                 or _marker(details) not in updated.get('notesForCertification', '').splitlines()
                 or not _packages_match(updated, metadata['applicationPackages'])
@@ -426,6 +434,7 @@ def submit(tag, directory):
         if _ref(fresh, 'pendingApplicationSubmission') != pending_id or _ref(fresh, 'lastPublishedApplicationSubmission') != baseline_id or _newer(version):
             raise SubmissionBlocked('Store or stable tag state changed before commit')
         _, current = api('GET', f'submissions/{pending_id}')
+        _manual(current)
         if (_id(current['id']) != pending_id or current.get('status') != 'PendingCommit' or _marker(details) not in current.get('notesForCertification', '').splitlines()
                 or not _packages_match(current, metadata['applicationPackages'])
                 or current.get('pricing') != updated.get('pricing') or current.get('listings') != updated.get('listings')):

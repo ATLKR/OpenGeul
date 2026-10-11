@@ -224,6 +224,42 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.new['pricing'], original['pricing'])
         self.assertEqual(self.baseline, original)
 
+    def test_non_manual_publication_template_never_mutates_store(self):
+        for mode in ('Immediate', 'SpecificDate', None, 'unknown'):
+            with self.subTest(mode=mode):
+                self.calls.clear(); self.issues.clear()
+                self.baseline['targetPublishMode'] = mode
+                with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+                self.assertEqual(self.mutations(), [])
+
+    def test_changed_publication_mode_ack_never_uploads_or_commits(self):
+        def changed_ack(*args, **kwargs):
+            status, result = self.store(*args, **kwargs)
+            if args[2:4] == ('PUT', 'submissions/30'):
+                result['targetPublishMode'] = 'Immediate'
+            return status, result
+
+        with patch.object(submitter, '_request', side_effect=changed_ack):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT'])
+
+    def test_changed_publication_mode_after_upload_never_commits(self):
+        def changed_readback(*args, **kwargs):
+            status, result = self.store(*args, **kwargs)
+            if args[2:4] == ('GET', 'submissions/30'):
+                result['targetPublishMode'] = 'Immediate'
+            return status, result
+
+        with patch.object(submitter, '_request', side_effect=changed_readback):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT', 'UPLOAD'])
+
+    def test_existing_processing_request_requires_manual_publication(self):
+        self.perform(); self.calls.clear()
+        self.new['targetPublishMode'] = 'Immediate'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+
     def test_paid_or_unknown_market_prices_never_mutate_store(self):
         for value in ('Tier2', 'unknown', None, {'priceId': 'Free'}):
             with self.subTest(value=value):
