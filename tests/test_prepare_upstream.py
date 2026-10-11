@@ -18,6 +18,11 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.source = Path(self.tmp.name)
+        # 이 fixture는 Windows manifest/dependency 생성 경계만 다룬다.
+        # 실제 Store UI/bridge 연결은 별도의 준비 소스에서 TypeScript로 검증한다.
+        integration = patch.object(prepare_upstream, 'install_store_updates')
+        integration.start()
+        self.addCleanup(integration.stop)
         self.native = self.source / 'apps/desktop/src-tauri'
         files = {
             'apps/desktop/src-tauri/build.rs': 'fn main() {\n    tauri_build::build();\n}\n',
@@ -106,6 +111,17 @@ pub fn layer_trees_to_pdf_with_links(
         root = [p for p in lock['package'] if p['name'] == 'hop-desktop']
         self.assertEqual([p['version'] for p in root], ['1.1.2'])
 
+    def test_generated_store_update_transport_pins_the_fixed_tls_version(self):
+        # GHSA-2mjx-qc3c-rqvc의 첫 수정은 rustls 0.23.45다.
+        prepare_upstream.patch(self.source, '1.1.2')
+        manifest = tomllib.loads((self.native / 'Cargo.toml').read_text(encoding='utf-8'))
+        lock = tomllib.loads((self.native / 'Cargo.lock').read_text(encoding='utf-8'))
+        rustls = [p['version'] for p in lock['package'] if p['name'] == 'rustls']
+        self.assertEqual(rustls, ['0.23.45'], '새 HTTPS 확인에 취약한 TLS 버전을 추가할 수 없습니다')
+        self.assertEqual(manifest['dependencies']['reqwest']['version'], '=0.13.2')
+        self.assertEqual(manifest['dependencies']['rustls']['version'], '=0.23.45')
+        self.assertEqual(manifest['dependencies']['tokio']['version'], '=1.52.1')
+
     def test_changed_upstream_build_script_is_rejected_without_overwrite(self):
         path = self.native / 'build.rs'
         changed = 'fn main() {\n    tauri_build::build(); // upstream changed\n}\n'
@@ -134,7 +150,8 @@ pub fn layer_trees_to_pdf_with_links(
         self.assertEqual(cli_input, editor_input,
                          'Tauri rewrites the editor manifest with LF; CLI preparation must match')
         self.assertEqual(cli_input,
-                         b'[package]\nname = "hop-desktop"\nversion = "1.1.2"\n[dependencies]\ntauri = { version = "=2.11.1", features = [] }\n')
+                         b'[package]\nname = "hop-desktop"\nversion = "1.1.2"\n[dependencies]\ntauri = { version = "=2.11.1", features = [] }\n'
+                         + prepare_upstream.UPDATE_DEPENDENCIES.encode('utf-8'))
 
 
 if __name__ == '__main__':

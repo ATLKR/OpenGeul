@@ -15,6 +15,10 @@ from buildkit import ROOT, FONT_EXTENSIONS, make_assets, package_version, replac
 
 TAURI_VERSION = "2.11.1"
 DESKTOP_LOCK = ROOT / "overlay/desktop-cargo.lock.toml"
+UPDATE_DEPENDENCIES = '''reqwest = { version = "=0.13.2", default-features = false, features = ["rustls-no-provider"] }
+tokio = { version = "=1.52.1", features = ["time", "sync"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+'''
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -24,6 +28,17 @@ def run(*args: str, cwd: Path) -> str:
 
 def replace_file(path: Path, old: str, new: str, expected: int = 1, *, newline: str | None = None) -> None:
     path.write_text(replace_once(path.read_text(encoding='utf-8'),old,new,expected=expected),encoding='utf-8',newline=newline)
+
+
+def install_store_updates(source: Path) -> None:
+    """고정 Store 공개 메타데이터 확인과 사용자가 선택하는 Store 링크만 연결한다."""
+    integration = json.loads((ROOT/'overlay/store-update-integration.json').read_text(encoding='utf-8'))
+    for local, target in integration['copies'].items():
+        destination = source/target
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT/local, destination)
+    for item in integration['replacements']:
+        replace_file(source/item['file'], item['old'], item['new'])
 
 
 def patch(source: Path, version: str) -> None:
@@ -62,7 +77,7 @@ def patch(source: Path, version: str) -> None:
     # GHSA-7gmj-67g7-phm9: 로컬 IPC 출처 판별 수정이 포함된 버전을 정확히 고정한다.
     # .toml 확장자로 보안 잠금 입력도 기존 구성 요소 증명의 helper 해시에 포함한다.
     replace_file(native/'Cargo.toml', 'tauri = { version = "2", features = [] }',
-                 f'tauri = {{ version = "={TAURI_VERSION}", features = [] }}', newline='\n')
+                 f'tauri = {{ version = "={TAURI_VERSION}", features = [] }}\n'+UPDATE_DEPENDENCIES.rstrip(), newline='\n')
     lock = DESKTOP_LOCK.read_text(encoding='utf-8')
     selected = [p['version'] for p in tomllib.loads(lock)['package'] if p['name'] == 'tauri']
     if selected != [TAURI_VERSION]:
@@ -82,6 +97,7 @@ def patch(source: Path, version: str) -> None:
     shutil.copy2(ROOT/'overlay/opengeul_runtime.rs',native/'src/opengeul_runtime.rs')
     replace_file(native/'src/lib.rs','tauri::generate_handler![','tauri::generate_handler![\n            opengeul_font_resources::open_font_resource,')
     shutil.copy2(ROOT/'overlay/updates.rs',native/'src/updates.rs')
+    install_store_updates(source)
     # Native font scanning remains restricted to installed system/per-user font directories.
     font=native/'src/font_catalog.rs'
     replace_file(font,'use tauri::{AppHandle, Manager};','use tauri::AppHandle;')
