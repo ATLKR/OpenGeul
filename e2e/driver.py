@@ -47,7 +47,7 @@ def edit(page, text: str):
     page.keyboard.insert_text(text)
 
 class Session:
-    def __init__(self, mode: str, folder: Path, fixture: Path, *, executable: Path|None=None, browser='chromium', url='http://127.0.0.1:7700'):
+    def __init__(self, mode: str, folder: Path, fixture: Path|None, *, executable: Path|None=None, browser='chromium', url='http://127.0.0.1:7700'):
         self.mode=mode; self.folder=folder; folder.mkdir(parents=True,exist_ok=True)
         self.executable=executable; self.proc=None; self.browser=None; self.context=None; self.page=None
         self.messages=[]; self.requests=[]; self.dialogs=[]; self.errors=[]
@@ -66,7 +66,8 @@ class Session:
                         runner=os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted')
                     self.debug_override.__enter__()
                 self.log=(folder/'process.log').open('w',encoding='utf-8')
-                self.proc=subprocess.Popen([str(executable),str(fixture)],cwd=executable.parent,env=env,stdout=self.log,stderr=subprocess.STDOUT)
+                arguments=[str(executable)] + ([str(fixture)] if fixture else [])
+                self.proc=subprocess.Popen(arguments,cwd=executable.parent,env=env,stdout=self.log,stderr=subprocess.STDOUT)
                 endpoint=f'http://127.0.0.1:{port}'
                 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 def ready():
@@ -98,10 +99,13 @@ class Session:
             if mode!='native':
                 self.page.goto(url,wait_until='domcontentloaded')
                 expect(self.page.locator('#sb-message')).to_contain_text('HWP 파일을 선택',timeout=60000)
-                self.page.locator('#file-input').set_input_files(str(fixture))
-            self.wait_loaded(fixture.name)
+                if fixture: self.page.locator('#file-input').set_input_files(str(fixture))
+            if fixture is None:
+                expect(self.page.locator('#sb-message')).to_contain_text('HWP 파일을 선택',timeout=60000)
+                menu(self.page,'file:new-doc')
+            self.wait_loaded(fixture.name if fixture else '새 문서.hwp')
             (folder/'runtime.json').write_text(json.dumps({'mode':mode,'browser':self.browser.version,
-                'executableSha256':digest(executable) if executable else None,'fixtureSha256':digest(fixture),
+                'executableSha256':digest(executable) if executable else None,'fixtureSha256':digest(fixture) if fixture else None,
                 'navigator':self.page.evaluate('({platform:navigator.platform,userAgent:navigator.userAgent})')},indent=2),encoding='utf-8')
         except BaseException:
             self.close()

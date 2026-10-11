@@ -7,6 +7,11 @@ name: OpenGeul Store package
         type: string
         required: true
         default: v1.1.1-dev.29.1
+      verify_store_api:
+        description: Validate configured Store API credentials with an application GET only
+        type: boolean
+        required: true
+        default: false
 permissions:
   contents: read
   actions: read
@@ -45,6 +50,15 @@ jobs:
         if (-not $makeappx) { throw 'Windows SDK MakeAppx is missing.' }
         python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
         python ci/evidence.py size --limit-mib 96 store-output
+    - name: Capture the actual Windows editor for the Store listing
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        python -m pip install -r e2e/requirements.txt
+        ./e2e/ensure-webview2.ps1
+        python e2e/store_screenshot.py --exe .work/store-payload/OpenGeul.exe --output store-output
+        python ci/evidence.py size --limit-mib 96 store-output
     - name: Save Store package for the first manual Partner Center upload
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -53,3 +67,21 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 9
+  verify-api:
+    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.verify_store_api)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Validate OAuth credentials and GET the reserved Store application
+      env:
+        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
+        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
+        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
+        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
+      run: python scripts/check_store_api.py

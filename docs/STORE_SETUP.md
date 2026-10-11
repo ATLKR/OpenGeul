@@ -17,6 +17,10 @@ manifest to the actual Partner Center identity, uses Windows SDK MakeAppx, and
 compares every executable, DLL, resource and notice against the original MSIX.
 The output includes original source provenance, Store repackage provenance and
 SHA-256 checksums. It does not recompile the application or certify it for Store.
+The same artifact also includes `OpenGeul-editor.png`, a screenshot of the actual
+native Windows editor with synthetic text, and `screenshot-provenance.json`.
+Capture uses the unchanged packaged executable and existing Windows GUI tools;
+it does not fabricate the UI or resize an existing image.
 
 Packaging and the first manual upload need no signing secret or API key.
 The workflow generates an artifact; upload, certification and publication take
@@ -26,8 +30,12 @@ For future submission API automation, first publish the manual Store submission.
 Associate an Entra application with Partner Center and give it the Manager role.
 Store its `STORE_CLIENT_SECRET` in GitHub Actions secrets and back it up in Proton
 Pass. Record `STORE_APP_ID=9PJH0T3PHRMF`, `STORE_TENANT_ID` and `STORE_CLIENT_ID`
-as repository variables. These credentials are not used by this packaging workflow.
-Add and verify API automation after the account setup is complete.
+as repository variables. Only the optional API validation job uses these
+credentials. Submission upload automation can be added after setup is complete.
+The optional `verify_store_api` input runs a separate read-only check: obtain an
+OAuth access token and GET the reserved application. It verifies the app identity
+without creating, editing, deleting or committing a submission. The token and
+secret are never written to files or printed.
 
 API-created submissions must continue to be edited through the API; changing
 them in Partner Center can prevent subsequent API changes or commits. Microsoft
