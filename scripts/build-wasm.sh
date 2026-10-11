@@ -21,6 +21,7 @@ python scripts/prepare_upstream.py --patch-only
 python scripts/prepare_hwpx.py .work/hop
 python scripts/patch_composition.py .work/hop
 python scripts/prepare_hop_fixes.py .work/hop
+python scripts/patch_clipboard_cut.py .work/hop
 node --experimental-strip-types --loader ./tests/hop/loader.mjs --test tests/hop/*.test.mjs
 python scripts/patch_namespaces.py .work/hop/third_party/rhwp
 python scripts/patch_table_height.py .work/hop/third_party/rhwp

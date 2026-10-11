@@ -50,6 +50,7 @@ python scripts/prepare_upstream.py --patch-only
 python scripts/prepare_hwpx.py $source
 python scripts/patch_composition.py $source
 python scripts/prepare_hop_fixes.py $source
+python scripts/patch_clipboard_cut.py $source
 node --experimental-strip-types --loader ./tests/hop/loader.mjs --test tests/hop/*.test.mjs
 python scripts/patch_namespaces.py (Join-Path $source 'third_party/rhwp')
 python scripts/patch_table_height.py (Join-Path $source 'third_party/rhwp')
