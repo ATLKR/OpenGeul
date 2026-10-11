@@ -2,7 +2,6 @@ param([Parameter(Mandatory)][string]$CliPath,[Parameter(Mandatory)][string]$Pack
       [Parameter(Mandatory)][string]$OutputDirectory)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Installed CLI smoke is restricted to disposable GitHub Actions runners.' }
 $result=@{success=$false;expectedPackageFullName=$PackageFullName;scope='Installed CLI launched within the declared desktop package graph'}
 try {
  Add-Type @'

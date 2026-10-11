@@ -29,6 +29,17 @@ def patch(source: Path, version: str) -> None:
     native=source/'apps/desktop/src-tauri'
     host=source/'apps/studio-host'
     upstream=source/'third_party/rhwp'
+    build=native/'build.rs'
+    if build.read_text(encoding='utf-8') != 'fn main() {\n    tauri_build::build();\n}\n':
+        raise ValueError('Upstream native build script changed')
+    build.write_text('''fn main() {
+    let windows = tauri_build::WindowsAttributes::new()
+        .app_manifest(include_str!("windows-app-manifest.xml"));
+    let attrs = tauri_build::Attributes::new().windows_attributes(windows);
+    tauri_build::try_build(attrs).expect("failed to run Tauri build");
+}
+''',encoding='utf-8')
+    shutil.copy2(ROOT/'overlay/windows-app-manifest.xml',native/'windows-app-manifest.xml')
     cfg=native/'tauri.conf.json'
     cfg.write_text(json.dumps(tauri_config(json.loads(cfg.read_text(encoding='utf-8')),version),ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     win=native/'tauri.windows.conf.json'
