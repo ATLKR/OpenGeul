@@ -1,6 +1,6 @@
 # OpenGeul 개인정보 처리방침 / Privacy policy
 
-적용 버전 / Applies to: OpenGeul 1.1.1. 날짜 / Date: 2026-10-11.
+적용 버전 / Applies to: OpenGeul 1.1.1–1.1.2. 날짜 / Date: 2026-10-11.
 
 ## 한국어
 
@@ -14,7 +14,7 @@ OpenGeul은 사용자가 선택한 HWP/HWPX 문서를 PC에서 열고 편집하�
 
 이 버전에는 OpenGeul 계정 로그인, 광고, 분석용 추적 또는 개발자 서버로 문서를 업로드하는 기능이 없습니다. 앱 자체의 백그라운드 업데이트 기능은 비활성화되어 있습니다. **글꼴 도움말**의 다운로드 링크를 누르면 외부 글꼴 사이트를 기본 브라우저로 엽니다. 해당 사이트, Microsoft Store, Windows와 WebView2의 동작에는 각 제공자의 개인정보 처리방침이 적용됩니다. 사용자가 선택한 네트워크 경로, 클라우드 동기화 폴더와 네트워크 프린터는 해당 서비스로 데이터를 전달할 수 있습니다.
 
-문의는 [OpenGeul 지원 페이지](https://github.com/ATLKR/OpenGeul/issues)를 이용하세요. 공개 문의에 개인정보가 포함된 문서나 진단 정보를 첨부하지 마세요.
+문의는 [allenlim@allenlim.net](mailto:allenlim@allenlim.net) 또는 [OpenGeul 지원 페이지](https://opengeul.allenlim.net/#support)를 이용하세요. 공개 문의에 개인정보가 포함된 문서나 진단 정보를 첨부하지 마세요.
 
 ## English
 
@@ -28,4 +28,4 @@ The bundled command-line tool `Tools/rhwp.exe` can process documents, font folde
 
 This version has no OpenGeul account login, advertising, analytics tracking or feature that uploads documents to a developer-operated server. Its own background updater is disabled. Clicking a download link in **글꼴 도움말** opens an external font website in your default browser. Those websites, Microsoft Store, Windows and WebView2 have their own privacy policies. Network paths, cloud-synced folders and network printers you choose can send data through those services.
 
-Contact the developer through [OpenGeul support](https://github.com/ATLKR/OpenGeul/issues). Do not attach documents or diagnostics containing personal information to a public issue.
+Contact the developer at [allenlim@allenlim.net](mailto:allenlim@allenlim.net) or through [OpenGeul support](https://opengeul.allenlim.net/#support). Do not attach documents or diagnostics containing personal information to a public issue.
