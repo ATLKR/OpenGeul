@@ -123,7 +123,7 @@ def report_api_replacement_blocker(result):
     existing = result.get('existingSubmission')
     if (not isinstance(pending, dict) or pending.get('id') != SUBMISSION_ID
             or not isinstance(existing, dict) or existing.get('id') != SUBMISSION_ID
-            or existing.get('status') not in {'Certification', 'PendingPublication'}
+            or existing.get('status') not in {'Certification', 'PendingPublication', 'Release'}
             or pending.get('status') not in {None, existing['status']}
             or existing.get('targetPublishMode') != 'Manual'
             or existing.get('has_fileUploadUrl') is not False):
@@ -275,6 +275,42 @@ def self_check():
                 assert report_api_replacement_blocker({**blocked, 'observation': 'unverified'}) is False
                 assert report_api_replacement_blocker(result) is False  # Upload URL was present.
             assert not stdout.getvalue() and summary_path.read_bytes() == before
+            # A held Release/Manual state still has no verified Published baseline
+            # or upload path. Exercise the actual fixed GET -> sanitized report flow.
+            release_app = {**app, 'pendingApplicationSubmission': {'id': SUBMISSION_ID, 'status': 'Release'}}
+            release_submission = {**submission, 'status': 'Release', 'fileUploadUrl': None,
+                                  'pricing': {'priceId': 'Free', 'marketSpecificPricings':
+                                              {'SECRET_MARKET_A': 'NotAvailable', 'SECRET_MARKET_B': 'NotAvailable'}}}
+            release_opener = Opener(release_app, release_submission)
+            release = observe(release_opener, 'SECRET_OAUTH')
+            assert release_opener.calls == [BASE, BASE + '/submissions/' + SUBMISSION_ID]
+            assert release['existingSubmission']['packageVersions'] == ['1.1.1.0']
+            assert release['existingSubmission']['marketOverrideCounts']['NotAvailable'] == 2
+            with redirect_stdout(io.StringIO()) as stdout:
+                assert report_api_replacement_blocker(release) is True
+            added = summary_path.read_text(encoding='utf-8')[len(before.decode('utf-8')):]
+            assert stdout.getvalue().count('::warning') == 1
+            assert 'Verified status: `Release`' in added and len(added.encode('utf-8')) <= 2048
+            assert 'not a universal REST prohibition' in added
+            assert 'SECRET_' not in stdout.getvalue() + added and 'fileUploadUrl' not in added
+            before = summary_path.read_bytes()
+            rejected = [
+                {**release, 'lastPublishedApplicationSubmission': {'id': SUBMISSION_ID, 'status': 'Published'}},
+                {**release, 'appId': 'OTHER_APP'},
+                {**release, 'packageIdentityName': 'OTHER_IDENTITY'},
+                {**release, 'pendingApplicationSubmission': {'id': '123', 'status': 'Release'}},
+                {**release, 'existingSubmission': {**release['existingSubmission'], 'id': '123'}},
+                {**release, 'existingSubmission': {**release['existingSubmission'], 'targetPublishMode': 'Immediate'}},
+                {**release, 'existingSubmission': {**release['existingSubmission'], 'has_fileUploadUrl': True}},
+                {**release, 'pendingApplicationSubmission': {'id': SUBMISSION_ID, 'status': 'Published'},
+                 'existingSubmission': {**release['existingSubmission'], 'status': 'Published'}},
+                {**release, 'pendingApplicationSubmission': {'id': SUBMISSION_ID, 'status': 'Publishing'},
+                 'existingSubmission': {**release['existingSubmission'], 'status': 'Publishing'}},
+            ]
+            for candidate in rejected:
+                with redirect_stdout(io.StringIO()) as stdout:
+                    assert report_api_replacement_blocker(candidate) is False
+                assert not stdout.getvalue() and summary_path.read_bytes() == before
     print('Store observation self-check passed: exact GETs, identity, expiry and secret-free success/failure output.')
 
 
