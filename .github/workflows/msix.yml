@@ -21,6 +21,11 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
+    - name: Preserve exact source bytes for WASM overlay provenance
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
