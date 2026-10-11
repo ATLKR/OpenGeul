@@ -136,6 +136,16 @@ def patch_document_cancellation(host: Path) -> None:
     anchor = "  it('routes app quit requests through the existing close guard and cancels on refusal', async () => {"
     replace(host/'src/core/desktop-events.test.ts', anchor, CLOSE_CANCELLATION_TEST + anchor)
 
+def patch_clipboard_document_guard(host: Path) -> None:
+    command = host/'src/command/commands/edit.ts'
+    replace(command, '  void writeSelectedText(services, inputHandler)',
+        '  const documentGeneration = services.wasm.documentGeneration;\n  void writeSelectedText(services, inputHandler)')
+    replace(command, "        action === 'cut' &&\n        copiedSelection !== null &&",
+        "        action === 'cut' &&\n        services.wasm.documentGeneration === documentGeneration &&\n        copiedSelection !== null &&")
+    anchor = "  it('delegates object copy and cut to the upstream input handler paths', () => {"
+    replace(host/'src/command/commands/edit.test.ts', anchor,
+        (ROOT/'overlay/clipboard-document-tests.txt').read_text(encoding='utf-8') + anchor)
+
 def red_probe(source: Path) -> None:
     path = source / 'apps/studio-host/src/core/tauri-bridge.test.ts'
     original = path.read_bytes()
@@ -262,6 +272,7 @@ def patch(source: Path) -> None:
     replace(host/'src/command/commands/file.ts', "emitStatus(services, '저장 완료');",
         "emitStatus(services, result.dirty ? '이전 변경 저장 완료 — 추가 변경 미저장' : '저장 완료');", count=2)
     patch_document_cancellation(host)
+    patch_clipboard_document_guard(host)
     test = core/'tauri-bridge.test.ts'
     replace(test, "    exportHwpMock = vi.fn(() => new Uint8Array([1, 2, 3]));",
         "    exportHwpMock = vi.fn(() => new Uint8Array([1, 2, 3]));\n    exportHwpxMock = vi.fn(() => new Uint8Array([0x50, 0x4b, 3]));\n    exportHwpx() { return this.exportHwpxMock(); }")
@@ -278,8 +289,8 @@ def patch(source: Path) -> None:
     value['preservedFiles'] = {name: digest for name, digest in value['baselinePreservedFiles'].items()
         if hashlib.sha256((source/name).read_bytes()).hexdigest() == digest}
     value['hwpxSaveV1'] = True
-    value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation','native-dialog cancellation completion status']
-    value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts']
+    value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation','native-dialog cancellation completion status','async Cut document replacement guard']
+    value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts']
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
 

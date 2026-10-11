@@ -86,6 +86,16 @@ def patch(source: Path, version: str) -> None:
         allowed_roots.extend(dedupe_existing_dirs(vec![windir.join("Fonts")]));
     }''')
     shutil.copy2(ROOT/'overlay/font-catalog.ts',host/'src/core/font-catalog.ts')
+    # Keep proper names while making user-facing version and comparison labels Korean-first.
+    ui=upstream/'rhwp-studio/src/ui'
+    replace_file(ui/'about-dialog.ts', "titleEn.textContent = 'HWP/HWPX Compatible Module for Rust';",
+        "titleEn.textContent = 'Rust용 HWP/HWPX 호환 모듈';")
+    replace_file(ui/'about-dialog.ts', 'version.textContent = `Version ${__APP_VERSION__}`;',
+        'version.textContent = `버전 ${__APP_VERSION__}`;')
+    replace_file(ui/'compare-dialog.ts', 'L: ${this.escape(leftPreview)} / R: ${this.escape(rightPreview)}',
+        '왼쪽: ${this.escape(leftPreview)} / 오른쪽: ${this.escape(rightPreview)}')
+    replace_file(ui/'history-dialog.ts', 'L: ${this.escape(leftText)} / R: ${this.escape(rightText)}',
+        '이력: ${this.escape(leftText)} / 현재: ${this.escape(rightText)}')
     # Migrate the earlier OpenGeul visibility choice into HOP's native preference.
     # A newer explicit HOP choice wins, and storage denial must not break the UI.
     replace_file(host/'src/host/toolbar-labels.ts',
@@ -143,7 +153,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:

@@ -68,12 +68,16 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
     'apps/studio-host/src/core/tauri-bridge.ts', 'apps/studio-host/src/main.ts',
     'apps/studio-host/src/core/desktop-events.ts',
     'apps/studio-host/src/command/commands/file.ts', 'apps/studio-host/src/opengeul-font-resources.ts',
+    'apps/studio-host/src/command/commands/edit.ts',
     'apps/studio-host/src/host/toolbar-labels.ts',
     'third_party/rhwp/Cargo.toml', 'third_party/rhwp/Cargo.lock',
     'third_party/rhwp/vendor/svg2pdf/Cargo.toml', 'third_party/rhwp/vendor/svg2pdf/RHWP_PATCHES.md',
     'third_party/rhwp/src/renderer/pdf.rs', 'third_party/rhwp/src/cli/outputs/pdf.rs',
     'third_party/rhwp/src/parser/hwpx/header.rs',
     'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/about-dialog.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/compare-dialog.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/history-dialog.ts',
 }))
 NATIVE_FILES = tuple('third_party/rhwp/tests/'+name+'.rs' for name in TARGETS)
 CORE_TREES = ('third_party/rhwp/src', 'third_party/rhwp/vendor/svg2pdf/src')
@@ -241,7 +245,7 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
             or not isinstance(ledger.get('changes'), list) or not ledger['changes']
             or not isinstance(ledger.get('preservedFiles'), dict)
             or not isinstance(ledger.get('baselinePreservedFiles'), dict)
-            or ledger.get('extendedFiles') != ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts']):
+            or ledger.get('extendedFiles') != ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts']):
         raise ValueError('Incomplete prepared source overlay ledger')
     for key in ('preservedFiles', 'baselinePreservedFiles'):
         for name, digest in ledger[key].items():

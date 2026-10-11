@@ -40,6 +40,9 @@ pub fn pdf_font_dirs(app: &AppHandle) -> Vec<PathBuf> {
             'apps/studio-host/index.html': '<title>HOP</title><link href="/favicon.ico"></body>',
             'apps/studio-host/src/core/font-catalog.ts': '// upstream catalog\n',
             'apps/studio-host/src/host/toolbar-labels.ts': "  try { return localStorage.getItem(STORAGE_KEY) !== 'hidden'; }\n",
+            'third_party/rhwp/rhwp-studio/src/ui/about-dialog.ts': "titleEn.textContent = 'HWP/HWPX Compatible Module for Rust';\nversion.textContent = `Version ${__APP_VERSION__}`;\n",
+            'third_party/rhwp/rhwp-studio/src/ui/compare-dialog.ts': 'L: ${this.escape(leftPreview)} / R: ${this.escape(rightPreview)}\n',
+            'third_party/rhwp/rhwp-studio/src/ui/history-dialog.ts': 'L: ${this.escape(leftText)} / R: ${this.escape(rightText)}\n',
             'third_party/rhwp/src/renderer/pdf.rs': '''/// Native PDF implementation selected by callers such as `export-pdf`.
     let fontdb = create_fontdb(export_options);
     crate::renderer::font_paths::load_into_fontdb(&mut fontdb, &options.font_paths);

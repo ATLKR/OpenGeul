@@ -96,7 +96,7 @@ class WindowsComponentsTests(unittest.TestCase):
         ledger = {'version': json.loads((ROOT/'config/product.json').read_text())['version'],
                   'source': 'OpenGeul distribution overlays', 'preservedFiles': {},
                   'baselinePreservedFiles': {}, 'changes': ['synthetic owned source'],
-                  'hwpxSaveV1': True, 'extendedFiles': ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts'],
+                  'hwpxSaveV1': True, 'extendedFiles': ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts'],
                   'compositionFix': {'beforeSha256': 'c'*64,
                      'afterSha256': digest(engine/'input-handler-text.ts'),
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
@@ -448,6 +448,22 @@ class WindowsComponentsTests(unittest.TestCase):
     def test_cancel_close_source_is_part_of_every_worker_contract(self):
         self.assertIn('apps/studio-host/src/core/desktop-events.ts', self.helper().SOURCE_FILES,
                       'Actual close-cancellation event source must be bound in the receipt contract')
+
+    def test_cut_document_guard_source_is_part_of_every_worker_contract(self):
+        self.assertIn('apps/studio-host/src/command/commands/edit.ts', self.helper().SOURCE_FILES,
+                      'The actual async Cut document guard must be bound in the receipt contract')
+
+    def test_previous_save_ledger_without_cut_document_guard_is_rejected(self):
+        c = self.helper()
+        source = self.source()
+        path = source/'.opengeul-overlay.json'
+        ledger = json.loads(path.read_text())
+        ledger['extendedFiles'].remove('edit.ts')
+        write_json(path, ledger)
+        out = self.root/'old-cut-ledger'
+        with self.assertRaisesRegex(ValueError, 'overlay ledger'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
 
     def test_previous_save_ledger_without_close_cancellation_is_rejected(self):
         c = self.helper()
