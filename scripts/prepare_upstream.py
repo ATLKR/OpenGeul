@@ -9,7 +9,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from buildkit import ROOT, FONT_EXTENSIONS, make_assets, package_version, replace_once, tauri_config
+
+
+TAURI_VERSION = "2.11.1"
+DESKTOP_LOCK = ROOT / "overlay/desktop-cargo.lock.toml"
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -54,7 +59,17 @@ def patch(source: Path, version: str) -> None:
     # Tauri rewrites this manifest with LF in the editor build. Prepare identical
     # bytes for the CLI producer so the strict source contract survives that rewrite.
     replace_file(native/'Cargo.toml',f'version = "{hop_version}"',f'version = "{version}"',newline='\n')
-    replace_file(native/'Cargo.lock',f'name = "hop-desktop"\nversion = "{hop_version}"',f'name = "hop-desktop"\nversion = "{version}"')
+    # GHSA-7gmj-67g7-phm9: 로컬 IPC 출처 판별 수정이 포함된 버전을 정확히 고정한다.
+    # .toml 확장자로 보안 잠금 입력도 기존 구성 요소 증명의 helper 해시에 포함한다.
+    replace_file(native/'Cargo.toml', 'tauri = { version = "2", features = [] }',
+                 f'tauri = {{ version = "={TAURI_VERSION}", features = [] }}', newline='\n')
+    lock = DESKTOP_LOCK.read_text(encoding='utf-8')
+    selected = [p['version'] for p in tomllib.loads(lock)['package'] if p['name'] == 'tauri']
+    if selected != [TAURI_VERSION]:
+        raise ValueError('검토한 Tauri 보안 수정 버전과 데스크톱 잠금 파일이 다릅니다')
+    lock = replace_once(lock, f'name = "hop-desktop"\nversion = "{hop_version}"',
+                        f'name = "hop-desktop"\nversion = "{version}"')
+    (native/'Cargo.lock').write_text(lock, encoding='utf-8', newline='\n')
     for component in ('Preview','Thumbnail'):
         path=source/f'apps/desktop/quicklook/Resources/{component}/Info.plist'
         if path.is_file():
@@ -162,7 +177,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:

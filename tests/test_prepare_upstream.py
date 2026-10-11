@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -20,8 +21,8 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.native = self.source / 'apps/desktop/src-tauri'
         files = {
             'apps/desktop/src-tauri/build.rs': 'fn main() {\n    tauri_build::build();\n}\n',
-            'apps/desktop/src-tauri/Cargo.toml': 'version = "0.4.5"\n',
-            'apps/desktop/src-tauri/Cargo.lock': 'name = "hop-desktop"\nversion = "0.4.5"\n',
+            'apps/desktop/src-tauri/Cargo.toml': '[package]\nname = "hop-desktop"\nversion = "0.4.5"\n[dependencies]\ntauri = { version = "2", features = [] }\n',
+            'apps/desktop/src-tauri/Cargo.lock': 'version = 4\n[[package]]\nname = "hop-desktop"\nversion = "0.4.5"\n[[package]]\nname = "tauri"\nversion = "2.10.3"\n',
             'apps/desktop/src-tauri/tauri.conf.json': '{}',
             'apps/desktop/src-tauri/tauri.windows.conf.json': '{}',
             'package.json': '{}', 'apps/desktop/package.json': '{}',
@@ -89,6 +90,22 @@ pub fn layer_trees_to_pdf_with_links(
             'version': '6.0.0.0', 'processorArchitecture': '*', 'publicKeyToken': '6595b64144ccf1df', 'language': '*'})
         self.assertIsNone(doc.find('.//{urn:schemas-microsoft-com:asm.v3}requestedExecutionLevel'))
 
+    def test_generated_desktop_excludes_known_tauri_origin_confusion_versions(self):
+        # GHSA-7gmj-67g7-phm9: 영향 범위 2.0.0~2.11.0, 첫 수정 버전 2.11.1.
+        # 준비 단계가 업스트림의 취약 잠금 파일로 돌아가면 이 회귀가 실패해야 한다.
+        prepare_upstream.patch(self.source, '1.1.2')
+        manifest = tomllib.loads((self.native / 'Cargo.toml').read_text(encoding='utf-8'))
+        lock = tomllib.loads((self.native / 'Cargo.lock').read_text(encoding='utf-8'))
+        selected = [p for p in lock['package'] if p['name'] == 'tauri']
+        self.assertEqual(len(selected), 1)
+        version = tuple(map(int, selected[0]['version'].split('.')))
+        self.assertGreaterEqual(version, (2, 11, 1), '생성된 잠금 파일에 알려진 Tauri 취약 버전이 남았습니다')
+        self.assertEqual(version[0], 2, '검토되지 않은 메이저 버전을 선택했습니다')
+        self.assertEqual(manifest['dependencies']['tauri']['version'], '=' + selected[0]['version'],
+                         '선택한 보안 수정 버전을 정확히 고정해야 합니다')
+        root = [p for p in lock['package'] if p['name'] == 'hop-desktop']
+        self.assertEqual([p['version'] for p in root], ['1.1.2'])
+
     def test_changed_upstream_build_script_is_rejected_without_overwrite(self):
         path = self.native / 'build.rs'
         changed = 'fn main() {\n    tauri_build::build(); // upstream changed\n}\n'
@@ -100,7 +117,7 @@ pub fn layer_trees_to_pdf_with_links(
 
     def test_windows_preparation_matches_editor_manifest_line_endings(self):
         manifest = self.native / 'Cargo.toml'
-        manifest.write_bytes(b'[package]\r\nname = "hop-desktop"\r\nversion = "0.4.5"\r\n')
+        manifest.write_bytes(b'[package]\r\nname = "hop-desktop"\r\nversion = "0.4.5"\r\n[dependencies]\r\ntauri = { version = "2", features = [] }\r\n')
         path_open = Path.open
 
         def windows_open(path, mode='r', buffering=-1, encoding=None, errors=None, newline=None):
@@ -117,7 +134,7 @@ pub fn layer_trees_to_pdf_with_links(
         self.assertEqual(cli_input, editor_input,
                          'Tauri rewrites the editor manifest with LF; CLI preparation must match')
         self.assertEqual(cli_input,
-                         b'[package]\nname = "hop-desktop"\nversion = "1.1.2"\n')
+                         b'[package]\nname = "hop-desktop"\nversion = "1.1.2"\n[dependencies]\ntauri = { version = "=2.11.1", features = [] }\n')
 
 
 if __name__ == '__main__':
