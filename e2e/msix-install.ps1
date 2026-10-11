@@ -163,7 +163,63 @@ public static class OpenGeulPackageIdentity {
  $launched=$null
  & (Join-Path $PSScriptRoot 'wack-binaryinfo-hosts.ps1') -ExecutablePath $executable -OutputDirectory $OutputDirectory -Label installed
  & (Join-Path $PSScriptRoot 'wack-path-host.ps1') -InstalledExecutablePath $executable -PayloadExecutablePath $DiagnosticPayloadExecutablePath -OutputDirectory $OutputDirectory
- & (Join-Path $PSScriptRoot 'wack.ps1') -PackageFullName $installed.PackageFullName -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory $OutputDirectory
+ $contextDirectory=(New-Item -ItemType Directory -Force -Path (Join-Path $OutputDirectory 'package-context')).FullName
+ $contextResultPath=Join-Path $contextDirectory 'wack-package-context-observation.json'
+ $contextPidPath=Join-Path $contextDirectory 'package-context-host.json'
+ $contextHostPath=(Get-Process -Id $PID).Path
+ $contextStarted=[DateTime]::UtcNow
+ $contextEditorBefore=(Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash
+ $contextSupervisor=@{scope='package-identity diagnostics only; no identity-injected WACK';finished=$false;deadlineSeconds=90}
+ $contextLaunchAttempted=$false
+ try {
+  if ((Test-Path -LiteralPath $contextResultPath) -or (Test-Path -LiteralPath $contextPidPath)) { throw 'Refusing to reuse package-context output.' }
+  $contextDeadline=$contextStarted.AddSeconds(90)
+  $contextArguments="-NoProfile -NonInteractive -File `"$(Join-Path $PSScriptRoot 'wack-package-context-observation.ps1')`" -InstalledExecutablePath `"$executable`" -OutputDirectory `"$contextDirectory`" -ExpectedPackageFullName `"$($installed.PackageFullName)`""
+  $contextLaunchAttempted=$true
+  Invoke-CommandInDesktopPackage -PackageFamilyName $installed.PackageFamilyName -AppId OpenGeul -Command $contextHostPath -Args $contextArguments -PreventBreakaway
+  do {
+   if ((Test-Path -LiteralPath $contextResultPath) -and (Get-Item -LiteralPath $contextResultPath).Length -le 64KB) {
+    try {
+     $contextObservation=Get-Content -LiteralPath $contextResultPath -Raw | ConvertFrom-Json
+     $contextSupervisor.finished=($contextObservation.finished -eq $true)
+    } catch { $contextSupervisor.finished=$false }
+   }
+   if (-not $contextSupervisor.finished) { Start-Sleep -Milliseconds 100 }
+  } while (-not $contextSupervisor.finished -and [DateTime]::UtcNow -lt $contextDeadline)
+  if (-not $contextSupervisor.finished) { $contextSupervisor.reasonCode='context-timeout' }
+ } catch {
+  $contextSupervisor.reasonCode='context-launch-or-observation-failure'
+  $contextSupervisor.errorType=$_.Exception.GetBaseException().GetType().Name
+ } finally {
+  if ($contextLaunchAttempted -and -not $contextSupervisor.finished -and (Test-Path -LiteralPath $contextPidPath) -and (Get-Item -LiteralPath $contextPidPath).Length -le 4096) {
+   try {
+    $contextPid=Get-Content -LiteralPath $contextPidPath -Raw | ConvertFrom-Json
+    $contextProcess=Get-Process -Id ([int]$contextPid.processId) -ErrorAction Stop
+    try {
+     if ($contextProcess.Id -eq $PID -or $contextProcess.Path -ne $contextHostPath -or $contextProcess.StartTime.ToUniversalTime() -lt $contextStarted.AddSeconds(-1)) { throw 'Context PID ownership mismatch.' }
+     $contextLength=[uint32]0
+     if ([OpenGeulPackageIdentity]::GetPackageFullName($contextProcess.Handle,[ref]$contextLength,$null) -ne 122 -or $contextLength -gt 256) { throw 'Context PID package identity unavailable.' }
+     $contextName=[Text.StringBuilder]::new([int]$contextLength)
+     if ([OpenGeulPackageIdentity]::GetPackageFullName($contextProcess.Handle,[ref]$contextLength,$contextName) -ne 0 -or $contextName.ToString() -ne $installed.PackageFullName) { throw 'Context PID package identity mismatch.' }
+     $contextProcess.Kill($true);$null=$contextProcess.WaitForExit(5000)
+     $contextSupervisor.ownedProcessStopped=$contextProcess.HasExited
+    } finally { $contextProcess.Dispose() }
+   } catch { $contextSupervisor.cleanupErrorType=$_.Exception.GetBaseException().GetType().Name }
+  }
+  $contextSupervisor | ConvertTo-Json -Compress | Set-Content (Join-Path $contextDirectory 'context-supervisor.json') -Encoding utf8
+  if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash -ne $contextEditorBefore) { throw 'Package-context diagnostics modified the exact editor.' }
+ }
+ $fullNameWackFailure=$null
+ try {
+  & (Join-Path $PSScriptRoot 'wack.ps1') -PackageFullName $installed.PackageFullName -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory $OutputDirectory
+ } catch { $fullNameWackFailure=$_ }
+ # The SDK documents a separate ordinary appcert -appxpackagepath workflow.
+ # Preserve the original full-name report and failure; never run WACK in an injected package token.
+ Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Stop
+ try {
+  & (Join-Path $PSScriptRoot 'wack.ps1') -PackageFullName $installed.PackageFullName -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory (Join-Path $OutputDirectory 'package-path-mode') -PackagePath $copy
+ } catch { Write-Warning 'The separate documented package-path WACK attempt failed; its evidence is preserved.' }
+ if ($fullNameWackFailure) { throw $fullNameWackFailure }
  @{
   success=$true; packageFullName=$installed.PackageFullName; publisher=$publisher;
   fileTypes=$types; originalSha256=$before;
