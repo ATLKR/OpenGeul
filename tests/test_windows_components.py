@@ -1,6 +1,7 @@
 """Integrity controls for the two same-run Windows build transports."""
 from pathlib import Path
 import copy
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -167,9 +168,143 @@ class WindowsComponentsTests(unittest.TestCase):
         contract = json.loads((folders['editor']/'provenance.json').read_text())['source']
         self.assertEqual(receipt['sourceContractSha256'], hashlib.sha256((json.dumps(contract,indent=2,sort_keys=True)+'\n').encode()).hexdigest())
 
+    def test_cli_above_transport_cap_compresses_and_restores_exact_raw_runtime(self):
+        c = self.helper()
+        source = self.source()
+        cli_payload = self.payload('cli')
+        executable = cli_payload/'Tools/rhwp.exe'
+        with executable.open('ab') as stream:
+            for _ in range(33): stream.write(b'\0' * (1024 * 1024))
+        expected = {'size': executable.stat().st_size, 'sha256': digest(executable)}
+        self.assertGreater(expected['size'], c.CAPS['cli'])
+        folders = {role: self.root/(role+'-component') for role in ('editor', 'cli')}
+        c.capture('editor', self.payload('editor'), source, folders['editor'], env=self.env)
+        try: c.capture('cli', cli_payload, source, folders['cli'], env=self.env)
+        except ValueError as error: self.fail('Compressible production-sized CLI was rejected: '+str(error))
+        record = json.loads((folders['cli']/'provenance.json').read_text())
+        self.assertEqual(record['formatVersion'], 2)
+        self.assertEqual(record['runtime'], {'path': 'Tools/rhwp.exe', **expected})
+        self.assertEqual(set(record['files']), {'payload/Tools/rhwp.exe.gz'})
+        self.assertLessEqual(sum(p.stat().st_size for p in folders['cli'].rglob('*') if p.is_file()), c.CAPS['cli'])
+        self.assertFalse((folders['cli']/'payload/Tools/rhwp.exe').exists())
+        self.combine(folders)
+        restored = self.root/'combined/Tools/rhwp.exe'
+        self.assertEqual({'size': restored.stat().st_size, 'sha256': digest(restored)}, expected)
+        self.assertFalse((self.root/'combined/Tools/rhwp.exe.gz').exists())
+        receipt = json.loads((self.root/'package-source/.opengeul-windows-components.json').read_text())
+        self.assertEqual({k: receipt['components']['cli'][k] for k in ('size', 'sha256')}, expected)
+
+    def rewrite_cli_transport(self, folders, data, raw=None):
+        path = folders['cli']/'payload/Tools/rhwp.exe.gz'
+        path.write_bytes(data)
+        provenance = folders['cli']/'provenance.json'
+        value = json.loads(provenance.read_text())
+        value['files']['payload/Tools/rhwp.exe.gz'] = {'size': len(data), 'sha256': digest(path)}
+        if raw is not None:
+            value['runtime'] = {'path': 'Tools/rhwp.exe', 'size': len(raw),
+                                'sha256': hashlib.sha256(raw).hexdigest()}
+        write_json(provenance, value)
+
+    def test_cli_gzip_capture_is_deterministic_and_editor_format_stays_one(self):
+        folders = self.pair()
+        out = self.root/'second-cli'
+        self.helper().capture('cli', self.root/'cli-payload', self.root/'hop', out, env=self.env)
+        path = 'payload/Tools/rhwp.exe.gz'
+        self.assertEqual((folders['cli']/path).read_bytes(), (out/path).read_bytes())
+        self.assertEqual((folders['cli']/'provenance.json').read_bytes(), (out/'provenance.json').read_bytes())
+        self.assertEqual((out/path).read_bytes()[3:8], b'\0'*5, 'No filename flag or timestamp may enter transport')
+        self.assertEqual(json.loads((folders['editor']/'provenance.json').read_text())['formatVersion'], 1)
+
+    def test_recomputed_transport_cannot_authorize_invalid_gzip_streams(self):
+        folders = self.pair()
+        original = (folders['cli']/'payload/Tools/rhwp.exe.gz').read_bytes()
+        corrupt = bytearray(original); corrupt[-8] ^= 1
+        streams = {'truncated': original[:-1], 'CRC': bytes(corrupt),
+                   'trailing': original+b'junk', 'concatenated': original+original,
+                   'not-gzip': pe()}
+        for name, data in streams.items():
+            with self.subTest(stream=name):
+                self.rewrite_cli_transport(folders, data)
+                with patch.object(self.helper().tempfile, 'mkdtemp', side_effect=AssertionError('Validation must precede staging')):
+                    self.assert_rejected_without_outputs(folders, '(?i)gzip')
+
+    def test_forged_cli_runtime_path_size_hash_and_format_are_rejected_before_staging(self):
+        folders = self.pair()
+        path = folders['cli']/'provenance.json'
+        original = json.loads(path.read_text())
+        changes = [('path', '../rhwp.exe'), ('size', 255), ('size', 257), ('size', True),
+                   ('size', 96*1024*1024+1), ('sha256', '0'*64)]
+        for key, value in changes:
+            with self.subTest(key=key, value=value):
+                changed = copy.deepcopy(original)
+                changed['runtime'][key] = value
+                write_json(path, changed)
+                with patch.object(self.helper().tempfile, 'mkdtemp', side_effect=AssertionError('Validation must precede staging')):
+                    self.assert_rejected_without_outputs(folders, '(?i)runtime|cap')
+        for change in ({'formatVersion': 1}, {'runtime': {'path': 'Tools/rhwp.exe', 'size': 256, 'sha256': '0'*64, 'extra': 0}}):
+            with self.subTest(change=change):
+                changed = copy.deepcopy(original); changed.update(change)
+                write_json(path, changed)
+                self.assert_rejected_without_outputs(folders)
+
+    def test_gzip_expansion_is_bounded_by_declared_raw_size(self):
+        folders = self.pair()
+        self.rewrite_cli_transport(folders, gzip.compress(pe()+b'\0'*(2*1024*1024), mtime=0))
+        with patch.object(self.helper().tempfile, 'mkdtemp', side_effect=AssertionError('Expansion must fail before staging')):
+            self.assert_rejected_without_outputs(folders, 'runtime size|cap')
+
+    def test_capture_raw_and_combined_restored_payload_budget_are_enforced(self):
+        c = self.helper()
+        source = self.source()
+        payload = self.payload('cli')
+        with patch.object(c, 'MAX_PAYLOAD', 255):
+            with self.assertRaisesRegex(ValueError, 'cap'):
+                c.capture('cli', payload, source, self.root/'over-raw-cap', env=self.env)
+        self.assertFalse((self.root/'over-raw-cap').exists())
+        payload.rename(self.root/'unused-cli-payload')
+        folders = self.pair_from_source(source)
+        editor = json.loads((folders['editor']/'provenance.json').read_text())
+        editor_size = sum(v['size'] for n, v in editor['files'].items() if n.startswith('payload/'))
+        with patch.object(c, 'MAX_PAYLOAD', editor_size+255), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Combined cap must precede staging')):
+            self.assert_rejected_without_outputs(folders, 'combined|cap')
+
+    def test_capture_rechecks_cli_input_size_and_hash_after_inventory(self):
+        c = self.helper()
+        source = self.source()
+        payload = self.payload('cli')
+        path = payload/'Tools/rhwp.exe'
+        contract = c.source_contract
+        changed = bytearray(pe()); changed[200] ^= 1
+        for index, data in enumerate((bytes(changed), pe()+b'growth')):
+            with self.subTest(size=len(data)):
+                path.write_bytes(pe())
+                def change_after_inventory(source, config):
+                    result = contract(source, config)
+                    path.write_bytes(data)
+                    return result
+                out = self.root/('changed-input-'+str(index))
+                with patch.object(c, 'source_contract', side_effect=change_after_inventory), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Changed input must fail before staging')):
+                    with self.assertRaisesRegex(ValueError, 'runtime input'):
+                        c.capture('cli', payload, source, out, env=self.env)
+                self.assertFalse(out.exists())
+
+    def test_second_decode_rechecks_changed_transport_and_removes_private_staging(self):
+        folders = self.pair()
+        c = self.helper()
+        validate = c.validate_component
+        def change_after_validation(folder, role, current, config):
+            result = validate(folder, role, current, config)
+            if role == 'cli':
+                path = folder/'payload/Tools/rhwp.exe.gz'
+                path.write_bytes(gzip.compress(pe()+b'changed', mtime=0))
+            return result
+        with patch.object(c, 'validate_component', side_effect=change_after_validation):
+            self.assert_rejected_without_outputs(folders)
+        self.assertFalse(any(p.name.startswith(('.opengeul-joined-', '.opengeul-source-')) for p in self.root.iterdir()))
+
     def test_tampered_cli_is_rejected_before_any_editor_file_is_staged(self):
         folders = self.pair()
-        (folders['cli']/'payload/Tools/rhwp.exe').write_bytes(pe()+b'tamper')
+        (folders['cli']/'payload/Tools/rhwp.exe.gz').write_bytes(gzip.compress(pe()+b'tamper', mtime=0))
         self.assert_rejected_without_outputs(folders, 'inventory')
 
     def test_missing_and_extra_files_are_rejected(self):
@@ -236,15 +371,19 @@ class WindowsComponentsTests(unittest.TestCase):
         folders = self.pair()
         for role, name in [('cli','Tools/rhwp.exe'), ('editor','WebView2Loader.dll')]:
             with self.subTest(name=name):
-                path = folders[role]/'payload'/name
-                path.write_bytes(pe(0x14c))
+                path = folders[role]/'payload'/(name+'.gz' if role == 'cli' else name)
+                path.write_bytes(gzip.compress(pe(0x14c), mtime=0) if role == 'cli' else pe(0x14c))
                 provenance = folders[role]/'provenance.json'
                 value = json.loads(provenance.read_text())
-                value['files']['payload/'+name] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                value['files']['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                if role == 'cli':
+                    value['runtime'] = {'path': name, 'size': 256, 'sha256': hashlib.sha256(pe(0x14c)).hexdigest()}
                 write_json(provenance, value)
                 self.assert_rejected_without_outputs(folders, 'x64')
-                path.write_bytes(pe())
-                value['files']['payload/'+name] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                path.write_bytes(gzip.compress(pe(), mtime=0) if role == 'cli' else pe())
+                value['files']['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                if role == 'cli':
+                    value['runtime']['sha256'] = hashlib.sha256(pe()).hexdigest()
                 write_json(provenance, value)
 
     def test_local_helper_and_wasm_bindings_are_enforced_even_if_both_records_match(self):
