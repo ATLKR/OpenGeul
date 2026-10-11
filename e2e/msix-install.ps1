@@ -70,6 +70,16 @@ using System.Text;
 public static class OpenGeulPackageIdentity {
  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
  public static extern int GetPackageFullName(IntPtr process, ref uint length, StringBuilder name);
+ [DllImport("user32.dll", ExactSpelling=true)]
+ public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr window);
+ [DllImport("user32.dll", ExactSpelling=true)]
+ public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr context);
+ [DllImport("user32.dll", ExactSpelling=true)]
+ public static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+ [DllImport("user32.dll", ExactSpelling=true)]
+ public static extern uint GetDpiForWindow(IntPtr window);
+ [DllImport("shcore.dll", ExactSpelling=true)]
+ public static extern int GetProcessDpiAwareness(IntPtr process, out int awareness);
 }
 '@
  $launchStarted=Get-Date
@@ -88,6 +98,12 @@ public static class OpenGeulPackageIdentity {
  $launched.Refresh()
  if ($launched.HasExited -or $launched.MainWindowHandle -eq 0) { throw 'Installed app exited or lost its window during startup smoke.' }
  @{success=$true;processId=$launched.Id;packageFullName=$processIdentity.ToString();executable=$launched.Path;windowTitle=$launched.MainWindowTitle} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'installed-launch.json') -Encoding utf8
+ $context=[OpenGeulPackageIdentity]::GetWindowDpiAwarenessContext($launched.MainWindowHandle)
+ $windowAwareness=[OpenGeulPackageIdentity]::GetAwarenessFromDpiAwarenessContext($context)
+ $processAwareness=[int](-1)
+ $hresult=[OpenGeulPackageIdentity]::GetProcessDpiAwareness($launched.Handle,[ref]$processAwareness)
+ $os=Get-CimInstance Win32_OperatingSystem
+ @{scope='read-only awareness query of the verified installed editor; no DPI setters or gate exemption';packageFullName=$processIdentity.ToString();editorSha256=(Get-FileHash $executable -Algorithm SHA256).Hash;processId=$launched.Id;runnerSessionId=(Get-Process -Id $PID).SessionId;editorSessionId=$launched.SessionId;windowContextValid=($context -ne [IntPtr]::Zero);windowAwareness=$windowAwareness;perMonitorV2=[OpenGeulPackageIdentity]::AreDpiAwarenessContextsEqual($context,[IntPtr](-4));windowDpi=[OpenGeulPackageIdentity]::GetDpiForWindow($launched.MainWindowHandle);processAwarenessHresult=$hresult;processAwareness=$processAwareness;osCaption=$os.Caption;osBuild=$os.BuildNumber} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'dpi-context.json') -Encoding utf8
  $cli=Join-Path $installed.InstallLocation 'Tools/rhwp.exe'
  $cliResult=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli.json'
  if (Test-Path $cliResult) { throw 'Refusing to reuse an installed CLI result.' }

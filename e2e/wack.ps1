@@ -20,6 +20,7 @@ try {
  $report=Join-Path $output 'wack.xml'
  if (Test-Path $report) { throw 'Refusing to reuse an existing WACK report.' }
  $process=Start-Process $appcert -ArgumentList @('test','-packagefullname',$PackageFullName,'-reportoutputpath',"`"$report`"") -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $output 'wack-stdout.log') -RedirectStandardError (Join-Path $output 'wack-stderr.log')
+ @{scope='read-only WACK process context';runnerSessionId=(Get-Process -Id $PID).SessionId;wackSessionId=$process.SessionId} | ConvertTo-Json | Set-Content (Join-Path $output 'wack-context.json') -Encoding utf8
  if (-not $process.WaitForExit(900000)) { throw 'WACK exceeded the 15 minute runner deadline.' }
  $process.Refresh()
  python (Join-Path $PSScriptRoot 'wack_result.py') --report $report --out $summary --identity $Identity --version $Version --exit-code $process.ExitCode
