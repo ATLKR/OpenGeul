@@ -333,7 +333,7 @@ def submit(tag, directory):
         app = _app(api)
         baseline_id = _ref(app, 'lastPublishedApplicationSubmission')
         if not baseline_id:
-            raise SubmissionBlocked('First manual Store publication must finish before automatic replacement')
+            raise SubmissionBlocked('Automatic Store replacement requires a Published baseline; the initial submission was preserved')
         _, baseline = api('GET', f'submissions/{baseline_id}')
         if _id(baseline['id']) != baseline_id or baseline.get('status') != 'Published':
             raise SubmissionBlocked('Store has no verified Published baseline')

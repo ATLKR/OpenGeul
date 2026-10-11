@@ -55,8 +55,10 @@ start another workflow. Development tags and main pushes do not request Store
 certification. Manual `submit_to_store` also requires a validated stable tag-push
 source; its default is false.
 
-First complete the manual Store publication. The submitter requires a verified
-published baseline before deleting any pending submission. It preserves the
+The automatic submitter requires a verified published baseline before deleting
+any pending submission. Initial-submission replacement needs a separately
+established supported path; this guard does not authorize publishing an older
+package to create a baseline. The submitter preserves the
 baseline listings, age ratings and Free pricing, including regional overrides.
 `NotAvailable` market overrides are preserved as unavailable; they are not
 converted to Free or Base. Paid or unknown override values still block submission.
