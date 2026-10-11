@@ -3,19 +3,18 @@ name: OpenGeul Windows CI
   workflow_dispatch:
     inputs:
       mode:
-        description: Reuse the existing candidate for the resource-only manifest diagnostic
+        description: Read the confirmed WACK DPI carrier without changing any app package
         type: choice
         options: [full]
         default: full
         required: true
 permissions:
   contents: read
-  actions: read
 jobs:
-  manifest-diagnostic:
+  sdk-il-diagnostic:
     if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/diagnostic/msix-manifest-38132094391')
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
@@ -23,75 +22,12 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Verify the unchanged failed candidate before the manifest experiment
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        gh run download 38132094391 --repo ATLKR/OpenGeul --name opengeul-windows-x64-38132094391 --dir package
-        python e2e/prepare_payload.py package payload
-        $source = Get-Content package/provenance.json -Raw | ConvertFrom-Json
-        if ($source.repository -ne 'ATLKR/OpenGeul' -or $source.commit -ne 'e9cf4310cfc67438db4b4e7a12d6fabd6de1bc19' -or $source.runId -ne '38132094391') { throw 'Diagnostic source changed.' }
-        if ((Get-FileHash package/OpenGeul_1.1.2.0_x64_development-unsigned.msix -Algorithm SHA256).Hash -ne 'CD3531CAEB6E86942D84CA68E8643BF87855E04F2C5DD91FDDA551D58F24157A') { throw 'Original candidate MSIX changed.' }
-    - name: Replace only manifest resource 1 language 1033 and validate with Windows SDK MT
+    - name: Read only the confirmed SDK DPI carrier and test mapping
       shell: pwsh
       run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        New-Item -ItemType Directory evidence,diagnostic-package | Out-Null
-        $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-        $mt = Get-ChildItem $sdk -Filter mt.exe -Recurse | Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
-        $makeappx = Get-ChildItem $sdk -Filter makeappx.exe -Recurse | Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
-        if (-not $mt -or -not $makeappx) { throw 'Windows SDK tools are missing.' }
-        $originalEditor = (Get-FileHash payload/OpenGeul.exe -Algorithm SHA256).Hash
-        $clean = (Get-Content overlay/windows-app-manifest.xml | Select-Object -Skip 1 | ForEach-Object { " $($_.Trim()) " }) -join ''
-        $clean = $clean.Replace('xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">', 'xmlns:asmv3="urn:schemas-microsoft-com:asm.v3"> <assemblyIdentity type="win32" name="AllenLabs.OpenGeul" version="1.1.2.0" processorArchitecture="amd64" />')
-        [System.IO.File]::WriteAllText((Join-Path $pwd 'evidence/manifest-input.xml'), $clean, [System.Text.UTF8Encoding]::new($false))
-        & $mt.FullName -manifest evidence/manifest-input.xml -validate_manifest
-        Add-Type @'
-        using System;
-        using System.ComponentModel;
-        using System.Runtime.InteropServices;
-        public static class ManifestResourceDiagnostic {
-          [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true, ExactSpelling=true)]
-          static extern IntPtr BeginUpdateResourceW(string file, bool delete);
-          [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true, ExactSpelling=true)]
-          static extern bool UpdateResourceW(IntPtr update, IntPtr type, IntPtr name, ushort language, byte[] data, uint size);
-          [DllImport("kernel32.dll", SetLastError=true, ExactSpelling=true)]
-          static extern bool EndUpdateResourceW(IntPtr update, bool discard);
-          public static void Replace(string file, byte[] data) {
-            var handle=BeginUpdateResourceW(file,false);
-            if(handle==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-            bool changed=false;
-            try {
-              if(!UpdateResourceW(handle,(IntPtr)24,(IntPtr)1,1033,data,(uint)data.Length)) throw new Win32Exception(Marshal.GetLastWin32Error());
-              changed=true;
-            } finally {
-              if(!EndUpdateResourceW(handle,!changed)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            }
-          }
-        }
-        '@
-        [ManifestResourceDiagnostic]::Replace((Join-Path $pwd 'payload/OpenGeul.exe'), [System.Text.Encoding]::UTF8.GetBytes($clean))
-        & $mt.FullName "-inputresource:payload/OpenGeul.exe;#1" -out:evidence/manifest-after.xml
-        [xml]$verified = Get-Content evidence/manifest-after.xml -Raw
-        if ($verified.SelectSingleNode("//*[local-name()='dpiAware']").InnerText -ne 'true/pm' -or $verified.SelectSingleNode("//*[local-name()='dpiAwareness']").InnerText -ne 'PerMonitorV2') { throw 'Diagnostic DPI declaration changed.' }
-        Copy-Item package/AppxManifest.xml payload/AppxManifest.xml
-        Copy-Item package/AppxManifest.xml diagnostic-package/AppxManifest.xml
-        & $makeappx.FullName pack /d payload /p diagnostic-package/diagnostic.msix
-        @{sourceRun='38132094391';sourceCommit='e9cf4310cfc67438db4b4e7a12d6fabd6de1bc19';diagnosticOnly=$true;modifiedResource='OpenGeul.exe RT_MANIFEST #1 LANG1033';editorSha256Before=$originalEditor;editorSha256After=(Get-FileHash payload/OpenGeul.exe -Algorithm SHA256).Hash;manifestSha256After=(Get-FileHash evidence/manifest-input.xml -Algorithm SHA256).Hash;packageSha256=(Get-FileHash diagnostic-package/diagnostic.msix -Algorithm SHA256).Hash} | ConvertTo-Json | Set-Content evidence/diagnostic.json -Encoding utf8
-    - name: Prepare WebView2
-      shell: pwsh
-      run: ./e2e/ensure-webview2.ps1
-    - name: Observe bounded SDK message carriers without executing SDK modules
-      shell: pwsh
-      run: ./e2e/wack-sdk-observation.ps1 -OutputDirectory evidence
-    - name: Re-run the actual installed GUI, CLI and WACK on the diagnostic copy
-      shell: pwsh
-      run: ./e2e/msix-install.ps1 -PackageDirectory diagnostic-package -OutputDirectory evidence
-    - name: Preserve bounded diagnostic evidence without publishing a package
+        ./e2e/wack-sdk-il-observation.ps1 -SelfTest
+        ./e2e/wack-sdk-il-observation.ps1 -OutputDirectory evidence
+    - name: Preserve bounded static evidence without publishing a package
       if: always()
       shell: pwsh
       env:
@@ -100,8 +36,8 @@ jobs:
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: manifest-diagnostic-${{ github.run_id }}
+        name: sdk-il-diagnostic-${{ github.run_id }}
         path: bounded-evidence/
         retention-days: 1
-        if-no-files-found: warn
+        if-no-files-found: error
         compression-level: 9
