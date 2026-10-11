@@ -82,6 +82,21 @@
       "file": "apps/studio-host/src/main.ts",
       "old": "      onUpdateState: (state) => {\n        updateNotice?.setState(state);\n      },",
       "new": "      onUpdateState: (state) => {\n        eventBus.emit('desktop-update-state', state);\n      },"
+    },
+    {
+      "file": "apps/studio-host/src/core/desktop-events.ts",
+      "old": "  await listen('hop-update-state', (event) => {\n    onUpdateState(event.payload as DesktopUpdateState);\n  });",
+      "new": "  let updateStateRevision = 0;\n  await listen('hop-update-state', (event) => {\n    updateStateRevision += 1;\n    onUpdateState(event.payload as DesktopUpdateState);\n  });"
+    },
+    {
+      "file": "apps/studio-host/src/core/desktop-events.ts",
+      "old": "    try {\n      onUpdateState(await desktop.getUpdateState());\n    } catch (error) {",
+      "new": "    try {\n      const revision = updateStateRevision;\n      const state = await desktop.getUpdateState();\n      if (updateStateRevision === revision) onUpdateState(state);\n    } catch (error) {"
+    },
+    {
+      "file": "apps/studio-host/src/core/desktop-events.test.ts",
+      "old": "  it('hydrates update state and listens for later updater events', async () => {",
+      "new": "  it.each([\n    { name: 'old idle and new available', snapshot: { status: 'idle' }, latest: { status: 'available', version: '1.1.4.0' } },\n    { name: 'old available and new idle', snapshot: { status: 'available', version: '1.1.4.0' }, latest: { status: 'idle' } },\n    { name: 'snapshot with no intervening event', snapshot: { status: 'available', version: '1.1.4.0' }, latest: null },\n  ])('keeps the latest updater state while hydration is pending: $name', async ({ snapshot, latest }) => {\n    const { eventHandlers } = installTauriMocks();\n    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };\n    installDocumentStub();\n    let finish!: (value: typeof snapshot) => void;\n    let markStarted!: () => void;\n    const started = new Promise<void>((resolve) => { markStarted = resolve; });\n    const pending = new Promise<typeof snapshot>((resolve) => { finish = resolve; });\n    const onUpdateState = vi.fn();\n    const setup = setupDesktopEvents({\n      bridge: {\n        takePendingOpenPaths: vi.fn().mockResolvedValue([]),\n        getUpdateState: vi.fn(() => { markStarted(); return pending; }),\n      },\n      dispatcher: { dispatch: vi.fn() } as never,\n      eventBus: { emit: vi.fn() } as never,\n      setMessage: vi.fn(),\n      onUpdateState,\n    });\n    await started;\n    expect(onUpdateState).not.toHaveBeenCalled();\n    if (latest) {\n      const onNativeUpdate = eventHandlers.get('hop-update-state');\n      expect(onNativeUpdate).toBeTypeOf('function');\n      await onNativeUpdate!({ payload: latest });\n    }\n    finish(snapshot);\n    await setup;\n    expect(onUpdateState.mock.calls).toEqual([[latest ?? snapshot]]);\n  });\n\n  it('hydrates update state and listens for later updater events', async () => {"
     }
   ]
 }
