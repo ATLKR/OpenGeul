@@ -10,6 +10,8 @@ OpenGeul은 사용자가 선택한 HWP/HWPX 문서를 PC에서 열고 편집하�
 
 글꼴·화면·창 설정도 로컬에 저장합니다. 앱은 문서 표시와 PDF 내보내기에 설치된 글꼴 정보와 글꼴 파일을 읽습니다. Windows, WebView2 또는 앱의 진단 기능이 로컬 진단 정보를 남길 수 있습니다. 설정, 최근 문서 경로와 로컬 문서 이력에 별도의 앱 자체 암호화를 적용하지 않습니다. PC 사용자 계정과 저장장치의 보안 설정을 사용하세요.
 
+암호 문서를 열어 처리하는 경우, 다른 이름으로 저장한 평문 파일, PDF, 인쇄물, 클립보드와 직접 저장한 문서 이력에는 암호가 해제된 내용이 포함될 수 있습니다. 원본 문서의 암호는 이 자료에 자동으로 유지되지 않습니다. 암호 원본을 보존하려면 다른 이름으로 저장할 때 별도 경로를 선택하세요.
+
 함께 제공하는 명령줄 도구 `Tools/rhwp.exe`는 사용자가 지정한 문서, 글꼴 폴더와 문서 암호를 처리할 수 있습니다. 명령에 따라 문서 내용과 메타데이터를 파일 또는 표준 출력으로 내보냅니다. 사용자가 로컬 표준 입출력 방식의 MCP 서버를 실행하면 연결한 MCP 클라이언트로 문서 데이터를 전달할 수 있습니다. 도구를 연결한 클라이언트와 출력 파일의 접근 권한을 확인하세요.
 
 이 버전에는 OpenGeul 계정 로그인, 광고, 분석용 추적 또는 개발자 서버로 문서를 업로드하는 기능이 없습니다. 앱 자체의 백그라운드 업데이트 기능은 비활성화되어 있습니다. **글꼴 도움말**의 다운로드 링크를 누르면 외부 글꼴 사이트를 기본 브라우저로 엽니다. 해당 사이트, Microsoft Store, Windows와 WebView2의 동작에는 각 제공자의 개인정보 처리방침이 적용됩니다. 사용자가 선택한 네트워크 경로, 클라우드 동기화 폴더와 네트워크 프린터는 해당 서비스로 데이터를 전달할 수 있습니다.
@@ -23,6 +25,8 @@ OpenGeul is a Windows application that opens and edits HWP/HWPX documents on you
 The recent-document list stores the names and full paths of up to 10 files in the application's local data folder. Clear it with **목록 비우기** in the recent-document dialog. If you use **문서 이력 관리 → 현재 문서 저장**, the application keeps document-content snapshots, source filenames, your labels and timestamps in local WebView storage. Remove them with **선택 삭제** or **전체 비우기** in the document-history dialog. This manual history feature is separate from autosave or recovery, which this version does not provide.
 
 Font, view and window preferences are also stored locally. The application reads installed font information and font files for document rendering and PDF export. Windows, WebView2 or application diagnostics may retain local diagnostic information. The application does not apply its own encryption to preferences, recent-document paths or local document history. Use your PC account and storage security settings to protect them.
+
+When you open and process a password-protected document, plaintext Save As files, PDFs, printed output, clipboard data and explicitly saved local history may contain decrypted content. The original document's password is not automatically retained in those outputs. Choose a separate Save As path to preserve the protected original.
 
 The bundled command-line tool `Tools/rhwp.exe` can process documents, font folders and document passwords you specify. Depending on the command, it writes document contents and metadata to files or standard output. If you launch its local stdio MCP server, it can return document data to the MCP client you connect. Check access to that client and any output files.
 
