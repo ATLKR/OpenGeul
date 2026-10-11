@@ -1,110 +1,74 @@
-name: OpenGeul Store package
+name: OpenGeul Editor57 HWP picker diagnostic
 'on':
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Existing successful OpenGeul release to repackage
-        type: string
+      mode:
+        description: Observe one source-bound GUI picker path without qualifying a package
+        type: choice
+        options: [picker]
+        default: picker
         required: true
-      verify_store_api:
-        description: Validate configured Store API credentials with an application GET only
-        type: boolean
-        required: false
-        default: false
-      submit_to_store:
-        description: Submit a stable release update after the first Store publication
-        type: boolean
-        required: false
-        default: false
 permissions:
   contents: read
   actions: read
-concurrency:
-  group: opengeul-store
-  cancel-in-progress: false
-  queue: max
 env:
   PYTHONUTF8: '1'
+  GIT_LFS_SKIP_SMUDGE: '1'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
 jobs:
-  package:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main')
-    runs-on: windows-2022
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-      issues: write
+  picker:
+    if: github.event.repository.private == false && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/diagnostic/hwp-picker-editor57'
+    runs-on: windows-2025
+    timeout-minutes: 15
     steps:
+    - name: Preserve exact source bytes for fixture provenance
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Check Store runtime preservation
-      shell: pwsh
-      run: python -m unittest discover -s tests -p test_store_package.py -v
-    - name: Verify successful release and repackage unchanged runtime with Store identity
-      id: package
+    - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - name: Verify and download only immutable Editor57 and same-run WASM57
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-        $makeappx = Get-ChildItem $sdk -Filter makeappx.exe -Recurse |
-          Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
-        if (-not $makeappx) { throw 'Windows SDK MakeAppx is missing.' }
-        python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Capture the actual Windows editor for the Store listing
+      run: python probe/download-editor57.py --output evidence/source.json
+    - name: Prepare the existing public GUI automation tools
       shell: pwsh
       run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
         python -m pip install -r e2e/requirements.txt
         ./e2e/ensure-webview2.ps1
-        python e2e/store_screenshot.py --exe .work/store-payload/OpenGeul.exe --output store-output
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Save the verified Store package before submission
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-store-${{ github.run_id }}
-        path: store-output/*
-        retention-days: 1
-        if-no-files-found: error
-        compression-level: 9
-    - name: Submit the stable release to the Microsoft Store
-      if: inputs.submit_to_store
+    - name: Generate ephemeral synthetic inputs through the unchanged source-bound public generator
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        node e2e/generate-browser-fixtures.mjs fixture-hop smoke-fixtures
+        node e2e/password/generate-password-fixtures.mjs fixture-hop/apps/studio-host/vendor/rhwp-core smoke-fixtures password-fixtures
+    - name: Observe the actual HWP Direct Save block and first HWP Save As picker
+      shell: pwsh
+      run: python probe/hwp-picker-editor57.py
+    - name: Preserve bounded diagnostic metadata without documents or font programs
+      if: always()
       shell: pwsh
       env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        python scripts/store_submit.py --release-tag $env:RELEASE_TAG --package-directory store-output
-  verify-api:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.verify_store_api)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        EVIDENCE_STATUS: ${{ job.status }}
+      run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
       with:
-        persist-credentials: false
-    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-      with:
-        python-version: '3.12'
-    - name: Validate OAuth credentials and GET the reserved Store application
-      env:
-        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: python scripts/check_store_api.py
+        name: hwp-picker-editor57-${{ github.run_id }}
+        path: bounded-evidence/
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 9
