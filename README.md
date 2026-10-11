@@ -5,7 +5,9 @@ HWP/HWPX 문서를 내 PC에서 열고 편집하는 무료 Windows 앱입니다.
 [웹사이트와 사용 안내](https://opengeul.allenlim.net) ·
 [개발판과 검증 파일](https://github.com/ATLKR/OpenGeul/releases)
 
-Store 공개판은 1.1.1입니다. 아래 설명은 개발 소스 기준이며 Store 공개판과
+[![Microsoft Store 공개 버전](https://opengeul.allenlim.net/assets/store-version.svg)](https://apps.microsoft.com/detail/9PJH0T3PHRMF)
+
+배지는 확인된 Store 공개 버전을 표시합니다. 아래 설명은 개발 소스 기준이며 Store 공개판과
 서명 없는 GitHub 개발판을 별도로 안내합니다.
 
 ## 지원 기능
@@ -15,6 +17,12 @@ PDF 내보내기, Windows 인쇄, 끌어놓기, 여러 창, 최근 문서, 임�
 원자적 저장과 외부 변경 확인을 포함합니다. 표 배치와 마지막 줄 간격에 관한
 업스트림 수정 및 합성 문서 회귀 검사, 일반 p/P 입력, 도구 모음 레이블 설정도
 유지합니다.
+
+새 Store 공개 버전은 앱 시작 시와 실행 중 매시간 확인합니다. **파일 → Store
+업데이트 자동 확인**에서 끄거나 **Store 업데이트 확인**으로 직접 확인할 수
+있습니다. 새 버전 안내에서 **Microsoft Store 열기**를 선택하면 Store를 엽니다.
+강제 다운로드·설치·종료·재시작은 하지 않습니다. **나중에**는 해당 버전의
+자동 알림을 숨기며 수동 확인으로 다시 볼 수 있습니다.
 
 인터페이스는 한국어입니다. 암호 원본의 일반 저장은 차단하고, 다른 이름으로
 저장할 때 암호 없는 파일을 만들기 전에 확인합니다. 암호 원본을 보존하려면
@@ -81,6 +89,11 @@ full로 실행하거나 해당 커밋의 검증된 WASM 디렉터리를 직접 �
 [라이선스 정책](docs/LICENSE_POLICY.md), [검증 기록](docs/VERIFICATION.md),
 [설정 안내](docs/SETUP.md), [릴리스 체크리스트](docs/RELEASE_CHECKLIST.md)를
 참고하세요. 향후 MPL 코드를 가져올 때도 해당 의무는 유지됩니다.
+
+Telemetry는 이번 릴리스에 포함하지 않습니다. 미래 동의·최소 수집·삭제 계획은
+[Telemetry 준비 문서](docs/TELEMETRY_PREPARATION.md)에, WebView 없는 Windows
+화면의 재사용 경계와 시험 계획은 [native 전환 연구](docs/NATIVE_WINDOWS_FEASIBILITY.md)에
+기록했습니다. 개인정보 처리는 [처리방침](docs/PRIVACY.md)을 확인하세요.
 
 문의: [allenlim@allenlim.net](mailto:allenlim@allenlim.net).
 버전과 오류 내용을 알려 주세요. 공개 문의에 개인 문서나 암호를 첨부하지 마세요.

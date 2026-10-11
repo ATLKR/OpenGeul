@@ -113,7 +113,7 @@ class WindowsComponentsTests(unittest.TestCase):
         else:
             (target/'OpenGeul.exe').write_bytes(pe())
             (target/'WebView2Loader.dll').write_bytes(pe())
-            (target/'AppxManifest.xml').write_text(buildkit.manifest(buildkit.DEV_IDENTITY, '1.1.2'))
+            (target/'AppxManifest.xml').write_text(buildkit.manifest(buildkit.DEV_IDENTITY, json.loads((ROOT/'config/product.json').read_text())['version']))
             buildkit.make_assets(target/'Assets')
             (target/'Assets/app.ico').unlink()
             (target/'Assets/app.png').unlink()

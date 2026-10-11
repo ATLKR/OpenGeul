@@ -18,6 +18,8 @@ from buildkit import DEV_IDENTITY, manifest
 from store_package import STORE_IDENTITY, authorize_release, verify_repackage
 import store_package
 
+PRODUCT_VERSION = json.loads((ROOT / 'config/product.json').read_text())['version']
+
 
 class StorePackageTests(unittest.TestCase):
     def source_run(self, status='completed', conclusion='success'):
@@ -39,16 +41,16 @@ class StorePackageTests(unittest.TestCase):
         pe[128:132] = b'PE\0\0'; pe[132:134] = (0x8664).to_bytes(2, 'little')
         files = {'OpenGeul.exe': bytes(pe), 'Tools/rhwp.exe': bytes(pe),
                  'Notices/OpenGeul-LICENSE.txt': b'MIT',
-                 'AppxManifest.xml': manifest(DEV_IDENTITY, '1.1.2').encode()}
-        msix = root / 'OpenGeul_1.1.2.0_x64_unsigned.msix'
+                 'AppxManifest.xml': manifest(DEV_IDENTITY, PRODUCT_VERSION).encode()}
+        msix = root / f'OpenGeul_{PRODUCT_VERSION}.0_x64_unsigned.msix'
         with zipfile.ZipFile(msix, 'w') as archive:
             for name, value in files.items():
                 archive.writestr(zipfile.ZipInfo(name, timestamp) if timestamp else name, value)
             archive.writestr('AppxBlockMap.xml', b'<BlockMap/>')
             archive.writestr('[Content_Types].xml', b'<Types/>')
-        with zipfile.ZipFile(root / 'OpenGeul_1.1.2_x64_portable.zip', 'w') as archive:
+        with zipfile.ZipFile(root / f'OpenGeul_{PRODUCT_VERSION}_x64_portable.zip', 'w') as archive:
             for name, value in files.items(): archive.writestr(name, value)
-        provenance = {'version': '1.1.2', 'repository': 'ATLKR/OpenGeul', 'commit': 'a' * 40,
+        provenance = {'version': PRODUCT_VERSION, 'repository': 'ATLKR/OpenGeul', 'commit': 'a' * 40,
                       'runId': '123', 'package': msix.name,
                       'sha256': hashlib.sha256(msix.read_bytes()).hexdigest()}
         (root / 'provenance.json').write_text(json.dumps(provenance) + '\n')
@@ -59,7 +61,7 @@ class StorePackageTests(unittest.TestCase):
 
     def release_environment(self):
         return {'GITHUB_REPOSITORY': 'ATLKR/OpenGeul', 'GITHUB_EVENT_NAME': 'push',
-                'GITHUB_REF': 'refs/tags/v1.1.2', 'GITHUB_SHA': 'a' * 40,
+                'GITHUB_REF': f'refs/tags/v{PRODUCT_VERSION}', 'GITHUB_SHA': 'a' * 40,
                 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_NUMBER': '29', 'GITHUB_RUN_ATTEMPT': '1'}
 
     def test_source_completion_wait_preserves_success_authorization(self):
@@ -90,7 +92,7 @@ class StorePackageTests(unittest.TestCase):
             local = self.release_directory(Path(temporary) / 'local')
             remote = Path(temporary) / 'remote'
             shutil.copytree(local, remote)
-            release = {'id': 8, 'tag_name': 'v1.1.2', 'draft': False,
+            release = {'id': 8, 'tag_name': f'v{PRODUCT_VERSION}', 'draft': False,
                        'assets': [{'name': path.name, 'size': path.stat().st_size, 'state': 'uploaded'}
                                   for path in sorted(local.iterdir())]}
             commands = []
@@ -104,16 +106,16 @@ class StorePackageTests(unittest.TestCase):
 
             def github(path, **kwargs):
                 if path == 'releases?per_page=100': return [[release]]
-                if path == 'commits/v1.1.2': return {'sha': 'a' * 40}
+                if path == f'commits/v{PRODUCT_VERSION}': return {'sha': 'a' * 40}
                 self.fail('Unexpected remote lookup: ' + path)
 
             with patch.dict(os.environ, self.release_environment(), clear=True), \
                     patch.object(store_package, 'github', side_effect=github), \
                     patch.object(store_package.subprocess, 'run', side_effect=gh_download):
-                self.assertFalse(store_package.ensure_source_release('v1.1.2', local))
+                self.assertFalse(store_package.ensure_source_release(f'v{PRODUCT_VERSION}', local))
                 (remote / 'provenance.json').write_text('changed source')
                 with self.assertRaises(ValueError):
-                    store_package.ensure_source_release('v1.1.2', local)
+                    store_package.ensure_source_release(f'v{PRODUCT_VERSION}', local)
                 other_run = json.loads((local / 'provenance.json').read_text())
                 other_run['runId'] = '456'
                 (remote / 'provenance.json').write_text(json.dumps(other_run) + '\n')
@@ -121,7 +123,7 @@ class StorePackageTests(unittest.TestCase):
                     hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\n'
                     for path in sorted(remote.iterdir()) if path.name != 'SHA256SUMS.txt'))
                 with self.assertRaisesRegex(ValueError, 'authorized build'):
-                    store_package.ensure_source_release('v1.1.2', local)
+                    store_package.ensure_source_release(f'v{PRODUCT_VERSION}', local)
             self.assertEqual(json.loads((remote / 'provenance.json').read_text())['runId'], '456')
             self.assertEqual(len(commands), 3)
 
@@ -133,17 +135,17 @@ class StorePackageTests(unittest.TestCase):
 
             def github(path, **kwargs):
                 if path == 'releases?per_page=100': return [[]]
-                if path == 'commits/v1.1.2': return {'sha': 'a' * 40}
+                if path == f'commits/v{PRODUCT_VERSION}': return {'sha': 'a' * 40}
                 self.fail('Unexpected remote lookup: ' + path)
 
             with patch.dict(os.environ, self.release_environment(), clear=True), \
                     patch.object(store_package, 'github', side_effect=github), \
                     patch.object(store_package.subprocess, 'run',
                                  side_effect=lambda command, **kwargs: commands.append(command)):
-                self.assertTrue(store_package.ensure_source_release('v1.1.2', local))
-                self.assertEqual(commands[0][:4], ['gh', 'release', 'create', 'v1.1.2'])
+                self.assertTrue(store_package.ensure_source_release(f'v{PRODUCT_VERSION}', local))
+                self.assertEqual(commands[0][:4], ['gh', 'release', 'create', f'v{PRODUCT_VERSION}'])
                 (local / 'provenance.json').write_text('tampered')
-                with self.assertRaises(ValueError): store_package.ensure_source_release('v1.1.2', local)
+                with self.assertRaises(ValueError): store_package.ensure_source_release(f'v{PRODUCT_VERSION}', local)
             self.assertEqual(len(commands), 1)
 
     def test_release_retry_reuses_valid_original_assets_instead_of_fresh_archive_bytes(self):
@@ -151,13 +153,13 @@ class StorePackageTests(unittest.TestCase):
             local = self.release_directory(Path(temporary) / 'local', (2026, 10, 12, 0, 0, 0))
             remote = self.release_directory(Path(temporary) / 'remote', (2026, 10, 11, 0, 0, 0))
             self.assertNotEqual((local / 'provenance.json').read_bytes(), (remote / 'provenance.json').read_bytes())
-            release = {'id': 8, 'tag_name': 'v1.1.2', 'draft': False,
+            release = {'id': 8, 'tag_name': f'v{PRODUCT_VERSION}', 'draft': False,
                        'assets': [{'name': path.name, 'size': path.stat().st_size, 'state': 'uploaded'}
                                   for path in sorted(remote.iterdir())]}
 
             def github(path, **kwargs):
                 if path == 'releases?per_page=100': return [[release]]
-                if path == 'commits/v1.1.2': return {'sha': 'a' * 40}
+                if path == f'commits/v{PRODUCT_VERSION}': return {'sha': 'a' * 40}
                 self.fail('Unexpected remote lookup: ' + path)
 
             def download(command, **kwargs):
@@ -170,7 +172,7 @@ class StorePackageTests(unittest.TestCase):
                     patch.object(store_package, 'github', side_effect=github), \
                     patch.object(store_package.subprocess, 'run', side_effect=download):
                 try:
-                    created = store_package.ensure_source_release('v1.1.2', local)
+                    created = store_package.ensure_source_release(f'v{PRODUCT_VERSION}', local)
                 except ValueError as error:
                     self.fail(f'Valid original release must survive archive timestamp changes: {error}')
                 self.assertFalse(created)
@@ -182,16 +184,16 @@ class StorePackageTests(unittest.TestCase):
         with patch.dict(os.environ, self.release_environment(), clear=True), \
                 patch.object(store_package.subprocess, 'run',
                              side_effect=lambda command, **kwargs: commands.append(command)):
-            store_package.dispatch_store('v1.1.2')
-            for env, tag in (({'GITHUB_EVENT_NAME': 'workflow_dispatch'}, 'v1.1.2'),
-                             ({'GITHUB_REF': 'refs/heads/main'}, 'v1.1.2'),
-                             ({'GITHUB_REPOSITORY': 'other/OpenGeul'}, 'v1.1.2'),
-                             ({'GITHUB_REF': 'refs/tags/v1.1.2-dev.29.1'}, 'v1.1.2-dev.29.1'),
+            store_package.dispatch_store(f'v{PRODUCT_VERSION}')
+            for env, tag in (({'GITHUB_EVENT_NAME': 'workflow_dispatch'}, f'v{PRODUCT_VERSION}'),
+                             ({'GITHUB_REF': 'refs/heads/main'}, f'v{PRODUCT_VERSION}'),
+                             ({'GITHUB_REPOSITORY': 'other/OpenGeul'}, f'v{PRODUCT_VERSION}'),
+                             ({'GITHUB_REF': f'refs/tags/v{PRODUCT_VERSION}-dev.29.1'}, f'v{PRODUCT_VERSION}-dev.29.1'),
                              ({'GITHUB_REF': 'refs/tags/v1.01.2'}, 'v1.01.2')):
                 with self.subTest(env=env), patch.dict(os.environ, env):
                     with self.assertRaises(ValueError): store_package.dispatch_store(tag)
         self.assertEqual(commands, [['gh', 'workflow', 'run', 'store-package.yml', '--repo', 'ATLKR/OpenGeul',
-                                     '--ref', 'main', '-f', 'release_tag=v1.1.2', '-f', 'submit_to_store=true']])
+                                     '--ref', 'main', '-f', f'release_tag=v{PRODUCT_VERSION}', '-f', 'submit_to_store=true']])
 
     def test_successful_release_requires_every_source_gate(self):
         sha = 'a' * 40
@@ -209,7 +211,7 @@ class StorePackageTests(unittest.TestCase):
 
     def test_parallel_windows_producers_must_both_succeed(self):
         sha = 'a' * 40
-        provenance = {'version': '1.1.2', 'repository': 'ATLKR/OpenGeul', 'commit': sha, 'runId': '123'}
+        provenance = {'version': PRODUCT_VERSION, 'repository': 'ATLKR/OpenGeul', 'commit': sha, 'runId': '123'}
         for producer in ('windows-editor', 'windows-cli'):
             for conclusion in (None, 'failure', 'cancelled', 'skipped'):
                 with self.subTest(producer=producer, conclusion=conclusion):
@@ -217,7 +219,7 @@ class StorePackageTests(unittest.TestCase):
                     if conclusion is not None:
                         jobs.append({'name': producer, 'conclusion': conclusion})
                     with self.assertRaisesRegex(ValueError, 'gates did not all succeed'):
-                        authorize_release('v1.1.2-dev.29.1', provenance, self.source_run(), sha, jobs)
+                        authorize_release(f'v{PRODUCT_VERSION}-dev.29.1', provenance, self.source_run(), sha, jobs)
 
     def test_rejected_windows_producer_cannot_prepare_or_repackage_payload(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -230,12 +232,12 @@ class StorePackageTests(unittest.TestCase):
             next(job for job in jobs if job['name'] == 'windows-cli')['conclusion'] = 'failure'
 
             def github(path, **kwargs):
-                if path == 'releases/tags/v1.1.2':
-                    return {'tag_name': 'v1.1.2', 'draft': False,
+                if path == f'releases/tags/v{PRODUCT_VERSION}':
+                    return {'tag_name': f'v{PRODUCT_VERSION}', 'draft': False,
                             'assets': [{'name': path.name, 'size': path.stat().st_size}
                                        for path in published.iterdir()]}
                 if path == 'actions/runs/123/jobs?per_page=100': return [{'jobs': jobs}]
-                if path == 'commits/v1.1.2': return {'sha': 'a' * 40}
+                if path == f'commits/v{PRODUCT_VERSION}': return {'sha': 'a' * 40}
                 self.fail('Unexpected remote lookup: ' + path)
 
             def download(command, **kwargs):
@@ -250,7 +252,7 @@ class StorePackageTests(unittest.TestCase):
                     patch.object(store_package, 'prepare', side_effect=AssertionError(
                         'Payload preparation reached before Windows producer gates succeeded')) as prepare:
                 with self.assertRaisesRegex(ValueError, 'gates did not all succeed'):
-                    store_package.build('v1.1.2', root / 'MakeAppx.exe', output)
+                    store_package.build(f'v{PRODUCT_VERSION}', root / 'MakeAppx.exe', output)
                 prepare.assert_not_called()
             self.assertFalse(payload.exists())
             self.assertFalse(output.exists())
