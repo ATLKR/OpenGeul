@@ -82,12 +82,13 @@ try {
     pnpm run test:studio
     pnpm run build:studio
     python ../../scripts/buildkit.py frontend apps/studio-host/dist
-    # Keep the default-feature render-tree regression separate from the GUI
-    # target graph. It must finish before either production runtime is staged.
+    # Reuse the native test graph for the table and PDF policy regressions.
+    # Keep it separate from the GUI's different feature graph.
     Push-Location 'third_party/rhwp'
     try {
         $env:CARGO_TARGET_DIR = $cliTarget
         cargo test --locked --test opengeul_table_height
+        cargo test --locked --package rhwp --test opengeul_pdf_policy --features native-skia
     } finally {
         $env:CARGO_TARGET_DIR = $editorTarget
         Pop-Location
@@ -104,9 +105,6 @@ try {
     try {
         # cdylib/rlib outputs must not collide with the editor's different feature graph.
         $env:CARGO_TARGET_DIR = $cliTarget
-        # Test the production release/profile/target graph so native Skia is
-        # compiled once, then reused for the shipped CLI. All assertions remain.
-        cargo test --release --locked --target x86_64-pc-windows-msvc --package rhwp --test opengeul_pdf_policy --features native-skia
         cargo build --release --locked --target x86_64-pc-windows-msvc --package rhwp --bin rhwp --features native-skia
     } finally {
         $env:CARGO_TARGET_DIR = $editorTarget
