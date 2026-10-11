@@ -5,10 +5,11 @@ This is a development prerelease, not a Microsoft Store-certified or trusted-sig
 ## Included
 
 - HWP/HWPX opening, editing, saving and Save As between both formats, with staged/atomic writes, external-modification detection and round-trip regression checks.
-- Windows HOP editor plus `Tools/rhwp.exe` CLI with native Skia options, built from the pinned upstream revisions in `provenance.json`.
-- A narrow terminal-negative-spacing fix for inline-table last-line clipping; normal inter-line compression and positive spacing are preserved. This is not a claim that every table or the original HOP #99/#78 documents is fixed.
+- Windows HOP 0.4.5 editor plus `Tools/rhwp.exe` CLI from rhwp 0.8.7 with native Skia options, built from the pinned upstream revisions in `provenance.json`.
+- Upstream table-layout and terminal-line fixes, with synthetic native/WASM regressions for clipping and inter-line spacing. Nonblank terminal lines no longer add positive or negative trailing spacing. This is not a claim that every table or the original HOP #99/#78 documents is fixed.
+- Password prompting, retry/cancel and explicit consent before saving an encrypted HWP document without its password. Direct original saving remains blocked; open/save/export/print/close operations share the upstream document guard.
 - Normal `p/P` input with print shortcuts retained, and persistent toolbar-label visibility.
-- Installed-font-only policy, official font help, independent branding, and upstream self-updates disabled.
+- Installed-font-only policy, official font help, independent branding, and upstream self-updates disabled. GUI PDF export and the CLI's default SVG PDF backend retain the embedding-permission filter. The new optional direct Skia PDF backend returns an explicit policy error until its font resources can enforce that filter.
 - WebView2 prerequisite guidance, the MSIX Visual C++ framework dependency, retained native Skia notices, and per-monitor DPI awareness declared before window creation.
 
 ## Release verification

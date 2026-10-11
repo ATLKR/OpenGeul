@@ -59,13 +59,13 @@ impl<'a> HeaderNamespaces<'a> {
                 Event::Start(e) | Event::Empty(e) => e.into_owned(),
                 _ => return Err("XML fragment must begin at an element".into()),
             };
-            let existing = tag.attributes().map(|a| a.map(|a| a.key.as_ref().to_vec()))
+            let existing = tag.attributes().map(|a| a.map(|a| a.key.as_ref().to_owned()))
                 .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
             let mut changed = false;
             for ns in node.namespaces() {
                 if declared_by_writer(ns.name(), ns.uri()) { continue; }
                 let name = ns.name().map_or_else(|| "xmlns".to_string(), |p| format!("xmlns:{p}"));
-                if existing.iter().any(|a| a.as_slice() == name.as_bytes()) { continue; }
+                if existing.iter().any(|a| a == &name) { continue; }
                 // The string attribute conversion escapes exactly once.
                 tag.push_attribute((name.as_str(), ns.uri()));
                 changed = true;

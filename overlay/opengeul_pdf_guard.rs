@@ -4,6 +4,11 @@
 mod font_policy;
 use std::collections::BTreeSet;
 
+#[cfg(feature = "native-skia")]
+pub fn reject_direct_export() -> Result<(), String> {
+    Err("OpenGeul direct PDF export is unavailable because this Skia path cannot enforce font embedding permissions. Use the guarded SVG backend (--backend svg).".into())
+}
+
 pub fn enforce(fontdb: &mut usvg::fontdb::Database, pages: &[String]) -> Result<(), String> {
     let mut denied = Vec::new();
     let mut denied_names = BTreeSet::new();

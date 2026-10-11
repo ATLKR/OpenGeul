@@ -29,7 +29,8 @@ fn terminal_compressed_line_fits_without_changing_nonterminal_spacing() {
         for row in 0..5 { assert_eq!(text.matches(&format!("Row {row} lastline")).count(), 1); }
         let bottom = lines.iter().map(|line| number(line, "y") + number(line, "h")).fold(f64::NEG_INFINITY, f64::max);
         assert!(bottom <= number(cell, "y") + number(cell, "h") + 0.25, "last glyph line clips at spacing {spacing}");
-        let expected = f64::from(5 * (1000 + spacing) + (-spacing).max(0) + 282) * 96.0 / 7200.0;
+        // Nonblank terminal lines have no following line to space against (rhwp 0.8.7).
+        let expected = f64::from(4 * (1000 + spacing) + 1000 + 282) * 96.0 / 7200.0;
         assert!((number(cell, "h") - expected).abs() < 0.25, "positive/negative height mismatch: {spacing}");
         let pitch = f64::from(1000 + spacing) * 96.0 / 7200.0;
         for pair in lines.windows(2) { assert!((number(pair[1], "y") - number(pair[0], "y") - pitch).abs() < 0.25); }

@@ -3,9 +3,9 @@
 OpenGeul is an independent downstream distribution based on HOP and rhwp. The MIT license of OpenGeul's new code does not replace upstream or dependency licenses.
 
 Pinned upstreams:
-- HOP: https://github.com/golbin/hop/tree/d426f0395e97bc1972f66d894d1a7c76a36374bc
-- rhwp: https://github.com/edwardkim/rhwp/tree/496333b27d21ddb9114ba9ae340bcb895870c9a7
-- svg2pdf patch: https://github.com/edwardkim/svg2pdf/commit/2caeb0a038f9128b79833d803b94c2667565c4da
+- HOP: https://github.com/golbin/hop/tree/34bd15c97e0851627cb7f055042c5340198aeb7f
+- rhwp: https://github.com/edwardkim/rhwp/tree/1a76570e833917d15817415a53c09ad61ab3203f
+- svg2pdf 0.13.0 vendor patch: https://github.com/edwardkim/rhwp/tree/1a76570e833917d15817415a53c09ad61ab3203f/vendor/svg2pdf (upstream provenance in `RHWP_PATCHES.md`)
 
 HOP and rhwp license text, including source excerpts/derived integration code:
 
@@ -35,12 +35,12 @@ SOFTWARE.
 
 The Windows build copies upstream LICENSE files and collects dependency license texts into Notices/Dependencies. Its inventory is deliberately over-inclusive and requires human review: it is not a complete SBOM or compliance certification. Check native/runtime/transitive dependencies, generated WASM, CanvasKit, Skia, resources and omitted notice texts before a supported stable release.
 
-The native-Skia CLI includes rust-skia `skia-safe` and `skia-bindings` 0.99.0. Their exact [MIT license text](notices/rust-skia-0.99.0-LICENSE.txt) is from upstream commit `a25a0fdb7d90429aa2d1355eab3b910ced359f50`, SHA-256 `4b33ed5b329a3a79eb1243fd91373c68b0ae0b9df7503bfc50d0c5253adf1b9a`. Packaging copies it into each crate's notice directory and records its provenance in the dependency inventory. This rust-skia notice does not replace Google Skia or other dependency notices.
+The native-Skia CLI includes rust-skia `skia-safe` and `skia-bindings` 0.153.3. Their exact [MIT license text](notices/rust-skia-0.153.3-LICENSE.txt) is from upstream commit `b7f043e0b1e2a850e702245de811f01df1f6b0ff`, SHA-256 `4b33ed5b329a3a79eb1243fd91373c68b0ae0b9df7503bfc50d0c5253adf1b9a`. Packaging copies it into each crate's notice directory and records its provenance in the dependency inventory. This rust-skia notice does not replace Google Skia or other dependency notices.
 
 No font binaries are included in this repository or intended runtime payload. Linking to a publisher does not sublicense their fonts. Installed fonts retain their original licenses. Trademarks and Store policies are separate from source-code licenses. Future LibreOffice imports retain their applicable MPL and other licenses; see docs/LICENSE_POLICY.md.
 
-## Reviewed downstream backport
+## Retired downstream backports
 
-The plain-character shortcut fix is adapted from HOP PR #101 by FMsongX2, commit `f9bbe8dc66172a1959af1e388e6c28a5b597c5a6` (https://github.com/golbin/hop/pull/101). It prevents unmodified printable keys from being captured as global shortcuts; the HOP/rhwp MIT notices above remain applicable. OpenGeul adds regression coverage and does not claim the upstream PR has been merged. The toolbar-label preference is an OpenGeul implementation addressing HOP issue #97, not imported code from that issue.
+Earlier OpenGeul sources adapted the plain-character shortcut fix from HOP PR #101 by FMsongX2, commit `f9bbe8dc66172a1959af1e388e6c28a5b597c5a6` (https://github.com/golbin/hop/pull/101), and supplied a toolbar-label preference for HOP issue #97. The current distribution uses rhwp 0.8.7's result-aware shortcut dispatch and HOP 0.4.5's native toolbar preference. The duplicate downstream implementations are removed; regression coverage remains. A narrow migration carries the earlier OpenGeul hidden-label choice into HOP's native storage key. This does not claim PR #101 was merged.
 
-The terminal negative-line-spacing clamp is adapted from rhwp PR #6074 by planet6897, commit `c7d3c66398acdb3c093fdea6fef573e14f771a6c` (https://github.com/edwardkim/rhwp/pull/6074). That work was incorporated upstream via PR #6076. OpenGeul limits the adaptation to terminal inline-table lines in its pinned 0.8.4 engine and supplies its own synthetic regression fixtures. The original rhwp MIT notice above remains applicable. This is not an upgrade to the complete newer engine and does not establish that all HOP table or printing reports are resolved.
+Earlier OpenGeul sources narrowly adapted the terminal negative-line-spacing clamp from rhwp PR #6074 by planet6897, commit `c7d3c66398acdb3c093fdea6fef573e14f771a6c` (https://github.com/edwardkim/rhwp/pull/6074). That work was incorporated upstream via PR #6076 and is present in the pinned rhwp 0.8.7 engine. The duplicate source patch is removed; synthetic native/WASM geometry regressions remain. The original rhwp MIT notice above remains applicable. This does not establish that all HOP table or printing reports are resolved.

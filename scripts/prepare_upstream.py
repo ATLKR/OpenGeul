@@ -50,8 +50,9 @@ def patch(source: Path, version: str) -> None:
     for rel in ('package.json','apps/desktop/package.json'):
         path=source/rel; value=json.loads(path.read_text(encoding='utf-8')); value['version']=version
         path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-    replace_file(native/'Cargo.toml','version = "0.4.4"',f'version = "{version}"')
-    replace_file(native/'Cargo.lock','name = "hop-desktop"\nversion = "0.4.4"',f'name = "hop-desktop"\nversion = "{version}"')
+    hop_version=json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8'))['hop']['version']
+    replace_file(native/'Cargo.toml',f'version = "{hop_version}"',f'version = "{version}"')
+    replace_file(native/'Cargo.lock',f'name = "hop-desktop"\nversion = "{hop_version}"',f'name = "hop-desktop"\nversion = "{version}"')
     for component in ('Preview','Thumbnail'):
         path=source/f'apps/desktop/quicklook/Resources/{component}/Info.plist'
         if path.is_file():
@@ -83,6 +84,18 @@ def patch(source: Path, version: str) -> None:
         allowed_roots.extend(dedupe_existing_dirs(vec![windir.join("Fonts")]));
     }''')
     shutil.copy2(ROOT/'overlay/font-catalog.ts',host/'src/core/font-catalog.ts')
+    # Migrate the earlier OpenGeul visibility choice into HOP's native preference.
+    # A newer explicit HOP choice wins, and storage denial must not break the UI.
+    replace_file(host/'src/host/toolbar-labels.ts',
+        "  try { return localStorage.getItem(STORAGE_KEY) !== 'hidden'; }", """  try {
+    const current = localStorage.getItem(STORAGE_KEY);
+    if (current !== null) return current !== 'hidden';
+    if (localStorage.getItem('opengeul.toolbar.labels.visible') === 'false') {
+      try { localStorage.setItem(STORAGE_KEY, 'hidden'); } catch { /* Current view remains usable. */ }
+      return false;
+    }
+    return true;
+  }""")
     # Keep the Vite asset directory, but remove font programs before frontend build.
     for path in (source/'assets/fonts').rglob('*'):
         if path.is_file() and path.suffix.lower() in FONT_EXTENSIONS: path.unlink()
@@ -111,6 +124,12 @@ def patch(source: Path, version: str) -> None:
     value=replace_once(value,anchor,'#[cfg(not(target_arch = "wasm32"))]\nmod opengeul_pdf_guard;\n\n'+anchor)
     value=replace_once(value,'    let fontdb = create_fontdb(export_options);','    let mut fontdb = create_fontdb(export_options);\n    opengeul_pdf_guard::enforce(&mut fontdb, svg_pages)?;')
     value=replace_once(value,'    crate::renderer::font_paths::load_into_fontdb(&mut fontdb, &options.font_paths);','    for dir in &options.font_paths { fontdb.load_fonts_dir(dir); }')
+    direct='''pub fn layer_trees_to_pdf_with_links(
+    layer_trees: &[crate::paint::PageLayerTree],
+    links: &[Vec<super::hyperlinks::PdfLink>],
+    options: &DirectPdfExportOptions,
+) -> Result<Vec<u8>, String> {'''
+    value=replace_once(value,direct,direct+'\n    opengeul_pdf_guard::reject_direct_export()?;')
     pdf.write_text(value,encoding='utf-8')
     module_dir=upstream/'src/renderer/pdf'; module_dir.mkdir(exist_ok=True)
     shutil.copy2(ROOT/'overlay/opengeul_pdf_guard.rs',module_dir/'opengeul_pdf_guard.rs')
@@ -122,7 +141,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','disabled upstream updater']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:

@@ -8,7 +8,7 @@ Current releases contain no LibreOffice, DOCX/XLSX/PPTX engine or Microsoft/Hanc
 
 The dependency inventory is over-inclusive and is not legal clearance. Review missing license texts and optional native Skia dependencies before a supported stable release. Third-party font programs are not distributed. Installed-font usage and PDF embedding permissions remain separate.
 
-The shipped `native-skia` CLI uses rust-skia `skia-safe` and `skia-bindings` 0.99.0. Their MIT notice is copied from the exact [0.99.0 source commit](https://github.com/rust-skia/rust-skia/tree/a25a0fdb7d90429aa2d1355eab3b910ced359f50) into both Cargo notice directories. The collector records that commit, source URL and SHA-256 in `inventory.json`, and rejects a missing notice, changed bytes, missing runtime metadata or an unreviewed version/license. Missing texts for other over-inclusive build/dev records remain review items.
+The shipped `native-skia` CLI uses rust-skia `skia-safe` and `skia-bindings` 0.153.3. Their MIT notice is copied from the exact [0.153.3 source commit](https://github.com/rust-skia/rust-skia/tree/b7f043e0b1e2a850e702245de811f01df1f6b0ff) into both Cargo notice directories. The collector records that commit, source URL and SHA-256 in `inventory.json`, and rejects a missing notice, changed bytes, missing runtime metadata or an unreviewed version/license. Missing texts for other over-inclusive build/dev records remain review items.
 
 Primary references:
 - https://www.libreoffice.org/licenses/

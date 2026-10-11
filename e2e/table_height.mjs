@@ -41,10 +41,12 @@ if (mode === 'generate') {
     const bottom = Math.max(...lines.map(line => line.bbox.y + line.bbox.h));
     const overflow = bottom - cell.bbox.y - cell.bbox.h;
     assert.ok(Number.isFinite(overflow));
-    // Preserve compression BETWEEN lines; only a terminal negative trailing is excluded.
+    // Preserve positive/negative spacing BETWEEN lines; terminal spacing is excluded.
     const pitch = (1000 + spacing) * 96 / 7200;
     for (let i = 1; i < 5; i++) assert.ok(Math.abs(lines[i].bbox.y - lines[i-1].bbox.y - pitch) < 0.25);
-    const expectedHeight = (5 * (1000 + spacing) + (red ? 0 : Math.max(-spacing, 0)) + 282) * 96 / 7200;
+    // Upstream 0.8.7 excludes trailing spacing after a nonblank terminal line;
+    // positive and negative spacing still contribute between the five lines.
+    const expectedHeight = (red ? 5 * (1000 + spacing) + 282 : 4 * (1000 + spacing) + 1000 + 282) * 96 / 7200;
     assert.ok(Math.abs(cell.bbox.h - expectedHeight) < 0.25, `height ${cell.bbox.h} != ${expectedHeight}`);
     if (red && spacing < 0) assert.ok(overflow > 1, 'Baseline must exhibit actual glyph clipping');
     else assert.ok(overflow <= 0.25, `Terminal line clipped by ${overflow.toFixed(3)}px`);

@@ -26,7 +26,7 @@ jobs:
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: golbin/hop
-        ref: d426f0395e97bc1972f66d894d1a7c76a36374bc
+        ref: 34bd15c97e0851627cb7f055042c5340198aeb7f
         submodules: recursive
         persist-credentials: false
     - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
@@ -48,7 +48,7 @@ jobs:
       run: |
         $ErrorActionPreference = 'Stop'
         $PSNativeCommandUseErrorActionPreference = $true
-        if ((git -C third_party/rhwp rev-parse HEAD) -ne '496333b27d21ddb9114ba9ae340bcb895870c9a7') { throw 'Unexpected rhwp revision' }
+        if ((git -C third_party/rhwp rev-parse HEAD) -ne '1a76570e833917d15817415a53c09ad61ab3203f') { throw 'Unexpected rhwp revision' }
         corepack enable
         pnpm install --frozen-lockfile
     - name: Run upstream contracts and frontend tests (no skipped failures)

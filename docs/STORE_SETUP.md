@@ -13,8 +13,9 @@ certification before publishing. Store distribution supplies trusted signing.
 
 Declare Korean as the package's supported UI language. An English Store listing
 may explain that the interface is Korean. Put the Microsoft Edge WebView2 Runtime
-requirement in the first sentence of each listing. Disclose that the desktop GUI
-does not open password-protected documents and has no autosave/recovery.
+requirement in the first sentence of each listing. Disclose that saving over an
+encrypted original is blocked, saving an unencrypted copy requires explicit
+consent, and autosave/recovery is not provided.
 Use support email [allenlim@allenlim.net](mailto:allenlim@allenlim.net) and product
 website [opengeul.allenlim.net](https://opengeul.allenlim.net).
 

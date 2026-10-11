@@ -8,13 +8,14 @@ Before a supported stable/Store release, verify and record:
 - Korean IME, accessibility, DPI and keyboard navigation.
 - Installed system/per-user fonts, font help, missing-font/fallback layout warnings, Canvas2D/CanvasKit and PDF/printing.
 - Representative documents: open/edit/save/reopen in originating applications, values, tables, images, equations, notes, printing, unsupported/password/large files and graceful failure. Preserve originals.
+- Native password-document checks: correct/wrong password, retry/cancel without replacing the prior document, unchanged protected-source checksum, blocked original overwrite, explicit unencrypted Save As consent/cancel/reopen, and close/replacement safety.
 - No bundled font programs, credentials, personal test documents or unauthorized assets, including nested JS/WASM/EXE resources. File/magic scans alone are not a complete embedded-data audit.
 - Full dependency/Skia/CanvasKit/WASM license texts and notices; missing inventory entries reviewed; vulnerability checks.
 - Native SVG PDF metadata guard, optional direct Skia PDF, embedded document fonts and print-driver rights reviewed separately.
 - WACK and actual Partner Center identity, Store name rights, screenshots, age rating, support contact, privacy statement and runFullTrust explanation.
 - Real signing or Store distribution for normal trusted MSIX installation. Never publish private keys or tell users to disable protection.
 
-HWPX saving is implemented downstream and covered by native save/reopen tests. The GUI does not open password-protected documents, and autosave/recovery is not provided. Disclose these limits and preserve source documents when evaluating compatibility.
+HWPX saving is implemented downstream and covered by native save/reopen tests. Saving over an encrypted original is blocked, unencrypted Save As requires explicit consent, and autosave/recovery is not provided. Native password-document checks above must be recorded before advertising that capability as verified. Disclose these limits and preserve source documents when evaluating compatibility.
 
 The installed-package gate checks activation under the candidate's package identity and runs the installed CLI. It records actual WACK XML results when the kit is available. `wack.json` with `status=unavailable` is a remaining certification check, not a WACK pass. A complete Desktop Bridge report may satisfy `submissionCheckPassed` with optional findings only when every required test passes. Required warnings or failures, partial reports, identity mismatches and missing results fail the gate. `passed` remains false for a report with any warnings; inspect the preserved XML before Store submission.
 
