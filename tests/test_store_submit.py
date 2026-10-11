@@ -54,7 +54,7 @@ class StoreSubmitTests(unittest.TestCase):
         original_json = json.dumps(self.provenance).encode()
         (self.source / 'provenance.json').write_bytes(original_json)
         (self.directory / 'source-provenance.json').write_bytes(original_json)
-        (self.directory / 'AppxManifest.xml').write_text(manifest(STORE_IDENTITY, '1.1.3'))
+        (self.directory / 'AppxManifest.xml').write_text(manifest(STORE_IDENTITY, '1.1.3'), encoding='utf-8', newline='\n')
         self.details = {'storeAppId': STORE_APP_ID, 'identity': STORE_IDENTITY,
                         'version': '1.1.3', 'sourceReleaseId': 5,
                         'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3',
