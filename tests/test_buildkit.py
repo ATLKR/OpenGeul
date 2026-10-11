@@ -43,6 +43,7 @@ class BuildKitTests(unittest.TestCase):
         self.assertEqual(doc.find('p:Identity',ns).get('Publisher'),'CN=Example & Co')
         self.assertEqual(doc.find('p:Identity',ns).get('Version'),'1.2.3.0')
         self.assertEqual([x.text for x in doc.findall('.//u:FileType',ns)],['.hwp','.hwpx'])
+        self.assertEqual([x.get('Language') for x in doc.findall('p:Resources/p:Resource',ns)],['ko-kr'])
         self.assertIn('runFullTrust', xml);self.assertNotIn('runFullTrustAdmin',xml)
 
     def test_store_identity_rejects_placeholders_and_control_chars(self):
@@ -52,6 +53,14 @@ class BuildKitTests(unittest.TestCase):
                      {'name':'Example.App','publisher':'CN=x\n','displayName':'x'}):
             with self.subTest(data=data), self.assertRaises(ValueError): self.b.validate_identity(data, store=True)
         with self.assertRaises(ValueError): self.b.validate_identity(self.b.DEV_IDENTITY, store=True)
+
+    def test_manifest_supplies_the_bundled_cli_desktop_runtime(self):
+        doc=ET.fromstring(self.b.manifest(self.b.DEV_IDENTITY,'1.2.3'))
+        ns={'p':'http://schemas.microsoft.com/appx/manifest/foundation/windows10'}
+        deps=doc.findall('p:Dependencies/p:PackageDependency',ns)
+        self.assertEqual([dep.attrib for dep in deps],[{
+            'Name':'Microsoft.VCLibs.140.00.UWPDesktop','MinVersion':'14.0.30704.0',
+            'Publisher':'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'}])
 
     def test_payload_rejects_fonts_case_insensitively(self):
         for name in ('font.ttf','font.OTF','font.ttc','font.otc','font.woff','font.WOFF2','server.pfx','secrets.pem'):

@@ -35,6 +35,8 @@ SOFTWARE.
 
 The Windows build copies upstream LICENSE files and collects dependency license texts into Notices/Dependencies. Its inventory is deliberately over-inclusive and requires human review: it is not a complete SBOM or compliance certification. Check native/runtime/transitive dependencies, generated WASM, CanvasKit, Skia, resources and omitted notice texts before a supported stable release.
 
+The native-Skia CLI includes rust-skia `skia-safe` and `skia-bindings` 0.99.0. Their exact [MIT license text](notices/rust-skia-0.99.0-LICENSE.txt) is from upstream commit `a25a0fdb7d90429aa2d1355eab3b910ced359f50`, SHA-256 `4b33ed5b329a3a79eb1243fd91373c68b0ae0b9df7503bfc50d0c5253adf1b9a`. Packaging copies it into each crate's notice directory and records its provenance in the dependency inventory. This rust-skia notice does not replace Google Skia or other dependency notices.
+
 No font binaries are included in this repository or intended runtime payload. Linking to a publisher does not sublicense their fonts. Installed fonts retain their original licenses. Trademarks and Store policies are separate from source-code licenses. Future LibreOffice imports retain their applicable MPL and other licenses; see docs/LICENSE_POLICY.md.
 
 ## Reviewed downstream backport

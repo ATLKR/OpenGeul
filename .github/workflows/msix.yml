@@ -3,9 +3,9 @@ name: OpenGeul Windows build and release
   push:
     branches: [main]
     tags: [v*]
-    paths-ignore: [docs/**, '*.md']
+    paths-ignore: [docs/**, website/**, '*.md']
   pull_request:
-    paths-ignore: [docs/**, '*.md']
+    paths-ignore: [docs/**, website/**, '*.md']
   workflow_dispatch:
     inputs:
       mode:
@@ -191,6 +191,9 @@ jobs:
         python -m pip install -r e2e/requirements.txt
         ./e2e/ensure-webview2.ps1
         python e2e/prepare_payload.py package runtime
+    - name: Guide users when WebView2 is unavailable
+      shell: pwsh
+      run: python e2e/check_webview2_missing.py --exe runtime/OpenGeul.exe --output evidence
     - name: Production WebView2 and real native file dialogs
       shell: pwsh
       run: |
@@ -276,7 +279,7 @@ jobs:
   msix-install:
     needs: build
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -289,7 +292,10 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-x64-$env:GITHUB_RUN_ID" --dir package
-    - name: Test-only signing, install, file association registration and uninstall
+    - name: Prepare WebView2 for installed app launch
+      shell: pwsh
+      run: ./e2e/ensure-webview2.ps1
+    - name: Test-only signing, installed app and CLI launch, WACK, associations and uninstall
       shell: pwsh
       run: ./e2e/msix-install.ps1 -PackageDirectory package -OutputDirectory evidence
     - name: Bound evidence without changing test results

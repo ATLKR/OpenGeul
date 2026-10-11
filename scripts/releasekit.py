@@ -9,7 +9,7 @@ import re
 import struct
 import xml.etree.ElementTree as ET
 import zipfile
-from buildkit import ROOT, FONT_EXTENSIONS, SECRET_EXTENSIONS, package_version
+from buildkit import ROOT, FONT_EXTENSIONS, SECRET_EXTENSIONS, VCLIBS_DEPENDENCY, package_version
 
 REPOSITORY = 'ATLKR/OpenGeul'
 
@@ -76,6 +76,9 @@ def verify_msix(path: Path) -> dict:
         app = doc.find('p:Applications/p:Application', ns)
         if app is None or app.get('Executable') != 'OpenGeul.exe':
             raise ValueError('MSIX does not launch the real OpenGeul editor')
+        if not any(all(dep.get(key)==value for key,value in VCLIBS_DEPENDENCY.items())
+                   for dep in doc.findall('p:Dependencies/p:PackageDependency',ns)):
+            raise ValueError('MSIX lacks the required Desktop VCLibs dependency for the bundled CLI')
     return {'unsigned':True, 'architecture':'x64', 'members':len(names), 'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
 
 def finish(output: Path, source: Path) -> None:

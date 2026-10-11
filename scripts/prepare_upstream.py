@@ -47,7 +47,9 @@ def patch(source: Path, version: str) -> None:
             if n!=1: raise ValueError('Unexpected Quick Look version metadata')
             path.write_text(value,encoding='utf-8')
     replace_file(native/'src/lib.rs','        .plugin(tauri_plugin_updater::Builder::new().build())\n','')
-    replace_file(native/'src/lib.rs','mod app_quit;','mod app_quit;\nmod opengeul_font_resources;')
+    replace_file(native/'src/lib.rs','mod app_quit;','mod app_quit;\nmod opengeul_font_resources;\n#[cfg(windows)]\nmod opengeul_runtime;')
+    replace_file(native/'src/lib.rs','pub fn run() {','pub fn run() {\n    #[cfg(windows)]\n    if !opengeul_runtime::ready() { return; }')
+    shutil.copy2(ROOT/'overlay/opengeul_runtime.rs',native/'src/opengeul_runtime.rs')
     replace_file(native/'src/lib.rs','tauri::generate_handler![','tauri::generate_handler![\n            opengeul_font_resources::open_font_resource,')
     shutil.copy2(ROOT/'overlay/updates.rs',native/'src/updates.rs')
     # Native font scanning remains restricted to installed system/per-user font directories.

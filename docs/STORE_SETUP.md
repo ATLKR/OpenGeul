@@ -1,15 +1,29 @@
 # Store packaging
 
 Run **Actions → OpenGeul Store package → Run workflow** on `main` and select an
-existing release tag.
-The known validated release is `v1.1.1-dev.29.1`, from commit
-`56ca88331a2fdba47bcc6e7ec27ad433df89fe72` and successful run `37747244144`.
+existing release tag that contains the current runtime and notice fixes and has
+passed its full source workflow. Older releases do not gain these fixes through
+Store repackaging.
 
 Download `opengeul-store-<run ID>` within one day and upload its
-`OpenGeul_1.1.1.0_x64_store-unsigned.msix` in Partner Center. The reserved product
+`OpenGeul_<version>_x64_store-unsigned.msix` in Partner Center. The reserved product
 is **OpenGeul**, Store ID **9PJH0T3PHRMF**. Set its price to **Free** in Pricing and
 availability. Complete the listing, screenshots, age ratings, declarations and
 certification before publishing. Store distribution supplies trusted signing.
+
+Declare Korean as the package's supported UI language. An English Store listing
+may explain that the interface is Korean. Put the Microsoft Edge WebView2 Runtime
+requirement in the first sentence of each listing. Disclose that the desktop GUI
+does not open password-protected documents and has no autosave/recovery.
+Use support email [allenlim@allenlim.net](mailto:allenlim@allenlim.net) and product
+website [opengeul.allenlim.net](https://opengeul.allenlim.net).
+
+Before replacing a Store package, inspect the new source run's `msix-install`
+artifact. `installed-launch.json` must identify the candidate package and CLI
+help must come from its installed directory. Review `wack.json` and `wack.xml`:
+an unavailable kit is explicitly unverified, and an available kit's failure or
+incomplete/mismatched report blocks the source installation gate. WACK passing
+does not establish Partner Center certification.
 
 The workflow verifies the original release checksums, full MSIX/portable parity,
 tag/source/run identity, and every required source release gate. It changes the

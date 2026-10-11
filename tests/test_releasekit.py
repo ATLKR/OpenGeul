@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 
@@ -42,6 +43,15 @@ class ReleaseKitTests(unittest.TestCase):
                 for name,data in files.items(): z.writestr(name,data)
             result=k.verify_msix(p)
             self.assertTrue(result['unsigned']);self.assertEqual(result['architecture'],'x64')
+            doc=ET.fromstring(files['AppxManifest.xml'])
+            namespace='{http://schemas.microsoft.com/appx/manifest/foundation/windows10}'
+            dependencies=doc.find(namespace+'Dependencies')
+            for dep in dependencies.findall(namespace+'PackageDependency'): dependencies.remove(dep)
+            files['AppxManifest.xml']=ET.tostring(doc,encoding='unicode')
+            missing=Path(tmp)/'missing-runtime.msix'
+            with zipfile.ZipFile(missing,'w') as z:
+                for name,data in files.items(): z.writestr(name,data)
+            with self.assertRaisesRegex(ValueError,'VCLibs'): k.verify_msix(missing)
             with zipfile.ZipFile(p,'a') as z:z.writestr('Fonts/hidden.dat',b'wOF2bad')
             with self.assertRaises(ValueError):k.verify_msix(p)
 

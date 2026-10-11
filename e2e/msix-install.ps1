@@ -11,7 +11,7 @@ $before=(Get-FileHash $original[0].FullName -Algorithm SHA256).Hash
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 $work=Join-Path $env:RUNNER_TEMP ("opengeul-test-sign-"+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $work | Out-Null
-$cert=$null;$trusted=$null;$installed=$null
+$cert=$null;$trusted=$null;$installed=$null;$launched=$null;$addedFrameworks=@();$frameworkEvidence=@()
 try {
  [xml]$manifest=Get-Content (Join-Path $PackageDirectory 'AppxManifest.xml') -Raw
  $publisher=[string]$manifest.Package.Identity.Publisher
@@ -31,20 +31,87 @@ try {
  if (-not $signer) { throw 'Windows SDK SignTool is missing.' }
  & $signer.FullName sign /fd SHA256 /f (Join-Path $work 'test.pfx') /p $password $copy
  & $signer.FullName verify /pa $copy
+ foreach ($dependency in $manifest.SelectNodes("//*[local-name()='Dependencies']/*[local-name()='PackageDependency']")) {
+  $name=$dependency.GetAttribute('Name');$minimum=[version]$dependency.GetAttribute('MinVersion');$requiredPublisher=$dependency.GetAttribute('Publisher')
+  if ($name -ne 'Microsoft.VCLibs.140.00.UWPDesktop' -or $requiredPublisher -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') { throw 'Unreviewed package framework dependency.' }
+  $framework=Get-AppxPackage -Name $name | Where-Object { $_.Publisher -eq $requiredPublisher -and [version]$_.Version -ge $minimum -and $_.Architecture -eq 'X64' } | Select-Object -First 1
+  if (-not $framework) {
+   $download=Join-Path $work 'Microsoft.VCLibs.x64.14.00.Desktop.appx'
+   $url='https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx'
+   Invoke-WebRequest $url -OutFile $download
+   & $signer.FullName verify /pa $download
+   $archive=[System.IO.Compression.ZipFile]::OpenRead($download)
+   try {
+    $reader=[System.IO.StreamReader]::new($archive.GetEntry('AppxManifest.xml').Open())
+    try { [xml]$frameworkManifest=$reader.ReadToEnd() } finally { $reader.Dispose() }
+   } finally { $archive.Dispose() }
+   $frameworkIdentity=$frameworkManifest.Package.Identity
+   if ($frameworkIdentity.Name -ne $name -or $frameworkIdentity.Publisher -ne $requiredPublisher -or $frameworkIdentity.ProcessorArchitecture -ne 'x64' -or [version]$frameworkIdentity.Version -lt $minimum) { throw 'Downloaded VCLibs framework identity/version does not match the declared dependency.' }
+   Add-AppxPackage -Path $download -ErrorAction Stop
+   $framework=Get-AppxPackage -Name $name | Where-Object { $_.Publisher -eq $requiredPublisher -and [version]$_.Version -ge $minimum -and $_.Architecture -eq 'X64' } | Select-Object -First 1
+   if (-not $framework) { throw 'VCLibs framework registration failed.' }
+   $addedFrameworks+=$framework.PackageFullName
+   $frameworkEvidence+=@{packageFullName=$framework.PackageFullName;source=$url;sha256=(Get-FileHash $download -Algorithm SHA256).Hash}
+  } else { $frameworkEvidence+=@{packageFullName=$framework.PackageFullName;source='already registered'} }
+ }
+ $frameworkEvidence | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDirectory 'frameworks.json') -Encoding utf8
  Add-AppxPackage -Path $copy -ErrorAction Stop
  $installed=Get-AppxPackage -Name $identity
  if (-not $installed -or $installed.Publisher -ne $publisher) { throw 'Installed identity does not match.' }
  $registered=Get-AppxPackageManifest -Package $installed.PackageFullName
  $types=@($registered.SelectNodes("//*[local-name()='FileTypeAssociation']/*[local-name()='SupportedFileTypes']/*[local-name()='FileType']") | ForEach-Object { $_.InnerText })
  if ('.hwp' -notin $types -or '.hwpx' -notin $types) { throw 'Registered file associations missing.' }
- if (-not (Test-Path (Join-Path $installed.InstallLocation 'OpenGeul.exe'))) { throw 'Registered executable is missing.' }
+ $executable=Join-Path $installed.InstallLocation 'OpenGeul.exe'
+ if (-not (Test-Path $executable)) { throw 'Registered executable is missing.' }
+ Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class OpenGeulPackageIdentity {
+ [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+ public static extern int GetPackageFullName(IntPtr process, ref uint length, StringBuilder name);
+}
+'@
+ $launchStarted=Get-Date
+ Start-Process explorer.exe -ArgumentList "shell:AppsFolder\$($installed.PackageFamilyName)!OpenGeul"
+ $deadline=(Get-Date).AddSeconds(60)
+ do {
+  $launched=Get-Process -Name OpenGeul -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $executable -and $_.StartTime -ge $launchStarted -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+  if (-not $launched) { Start-Sleep -Milliseconds 250 }
+ } while (-not $launched -and (Get-Date) -lt $deadline)
+ if (-not $launched) { throw 'Installed app activation did not produce a visible owned window within 60 seconds.' }
+ $length=[uint32]0
+ if ([OpenGeulPackageIdentity]::GetPackageFullName($launched.Handle,[ref]$length,$null) -ne 122) { throw 'Launched installed process has no verifiable package identity.' }
+ $processIdentity=[System.Text.StringBuilder]::new([int]$length)
+ if ([OpenGeulPackageIdentity]::GetPackageFullName($launched.Handle,[ref]$length,$processIdentity) -ne 0 -or $processIdentity.ToString() -ne $installed.PackageFullName) { throw 'Launched process package identity does not match the installed candidate.' }
+ Start-Sleep -Seconds 3
+ $launched.Refresh()
+ if ($launched.HasExited -or $launched.MainWindowHandle -eq 0) { throw 'Installed app exited or lost its window during startup smoke.' }
+ @{success=$true;processId=$launched.Id;packageFullName=$processIdentity.ToString();executable=$launched.Path;windowTitle=$launched.MainWindowTitle} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'installed-launch.json') -Encoding utf8
+ $cli=Join-Path $installed.InstallLocation 'Tools/rhwp.exe'
+ $cliResult=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli.json'
+ if (Test-Path $cliResult) { throw 'Refusing to reuse an installed CLI result.' }
+ $probeArgs="-NoProfile -File `"$(Join-Path $PSScriptRoot 'installed-cli.ps1')`" -CliPath `"$cli`" -PackageFullName `"$($installed.PackageFullName)`" -OutputDirectory `"$((Resolve-Path $OutputDirectory).Path)`""
+ Invoke-CommandInDesktopPackage -PackageFamilyName $installed.PackageFamilyName -AppId OpenGeul -Command (Get-Process -Id $PID).Path -Args $probeArgs -PreventBreakaway
+ $deadline=(Get-Date).AddSeconds(60)
+ while (-not (Test-Path $cliResult) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+ if (-not (Test-Path $cliResult)) { throw 'Installed CLI package-context probe did not complete within 60 seconds.' }
+ $cliEvidence=Get-Content $cliResult -Raw | ConvertFrom-Json
+ if (-not $cliEvidence.success -or $cliEvidence.packageFullName -ne $installed.PackageFullName) { throw 'Installed CLI package-context probe failed; see installed-cli.json.' }
+ Stop-Process -Id $launched.Id -Force
+ $launched=$null
+ & (Join-Path $PSScriptRoot 'wack.ps1') -PackageFullName $installed.PackageFullName -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory $OutputDirectory
  @{
   success=$true; packageFullName=$installed.PackageFullName; publisher=$publisher;
   fileTypes=$types; originalSha256=$before;
-  scope='test-only signing, AppX installation, registered identity and file types, uninstall; not Store certification or real-printer/IME testing'
+  scope='test-only signing, AppX installation, package-identity activation, installed CLI, registered file types and uninstall; WACK status is reported separately in wack.json; not Store certification or real-printer/IME testing'
  } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDirectory 'install.json') -Encoding utf8
 } finally {
+ if ($launched -and -not $launched.HasExited) { Stop-Process -Id $launched.Id -Force -ErrorAction Continue }
+ if ($installed) { Get-Process -Name OpenGeul -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $installed.InstallLocation 'OpenGeul.exe') } | Stop-Process -Force -ErrorAction Continue }
+ if ($installed) { Get-Process -Name rhwp -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $installed.InstallLocation 'Tools/rhwp.exe') } | Stop-Process -Force -ErrorAction Continue }
  if ($installed) { Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Continue }
+ foreach ($framework in $addedFrameworks) { Remove-AppxPackage -Package $framework -ErrorAction Continue }
  if ($trusted) { Remove-Item ("Cert:\LocalMachine\TrustedPeople\"+$trusted.Thumbprint) -Force -ErrorAction Continue }
  if ($cert) { Remove-Item ("Cert:\CurrentUser\My\"+$cert.Thumbprint) -Force -ErrorAction Continue }
  Remove-Item $work -Recurse -Force -ErrorAction Continue

@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+
+const { default: worker } = await import(pathToFileURL(resolve(process.argv[2], 'worker.mjs')));
+const root = await worker.fetch(new Request('https://opengeul.allenlim.net/'));
+assert.equal(root.status, 200);
+assert.ok((await root.clone().text()).includes('allenlim@allenlim.net'));
+assert.equal(root.headers.get('Content-Type'), 'text/html; charset=utf-8');
+const privacy = await worker.fetch(new Request('https://opengeul.allenlim.net/privacy'));
+assert.equal(privacy.status, 200);
+assert.ok((await privacy.text()).includes('Cloudflare'));
+const picture = await worker.fetch(new Request('https://opengeul.allenlim.net/assets/opengeul-editor.png'));
+assert.deepEqual([...new Uint8Array(await picture.arrayBuffer()).slice(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+const head = await worker.fetch(new Request('https://opengeul.allenlim.net/', { method: 'HEAD' }));
+assert.equal(await head.text(), '');
+assert.equal((await worker.fetch(new Request('https://opengeul.allenlim.net/', { headers: { 'If-None-Match': root.headers.get('ETag') } }))).status, 304);
+assert.equal((await worker.fetch(new Request('https://opengeul.allenlim.net/missing'))).status, 404);
+assert.equal((await worker.fetch(new Request('https://opengeul.allenlim.net/constructor'))).status, 404);
+assert.equal((await worker.fetch(new Request('https://opengeul.allenlim.net/', { method: 'POST' }))).status, 405);
+console.log('Website Worker routes, privacy, image bytes, HEAD, caching and method checks passed.');

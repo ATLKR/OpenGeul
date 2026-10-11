@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FONT_EXTENSIONS = {'.ttf', '.otf', '.ttc', '.otc', '.woff', '.woff2', '.eot', '.pfb', '.pfm'}
 SECRET_EXTENSIONS = {'.pfx', '.p12', '.pem', '.key', '.cer', '.crt'}
 DEV_IDENTITY = {'name':'AllenLabs.OpenGeul.Development', 'publisher':'CN=OpenGeul Development', 'displayName':'OpenGeul Development'}
+VCLIBS_DEPENDENCY = {'Name':'Microsoft.VCLibs.140.00.UWPDesktop', 'MinVersion':'14.0.30704.0',
+                    'Publisher':'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'}
 
 
 def package_version(version: str) -> str:
@@ -81,8 +83,9 @@ def manifest(identity: dict, version: str) -> str:
     for key,value in [('DisplayName','OpenGeul'),('PublisherDisplayName',identity['displayName']),('Logo','Assets/StoreLogo.png')]: ET.SubElement(props,p(key)).text=value
     deps=ET.SubElement(root,p('Dependencies'))
     ET.SubElement(deps,p('TargetDeviceFamily'),Name='Windows.Desktop',MinVersion='10.0.19041.0',MaxVersionTested='10.0.26100.0')
+    ET.SubElement(deps,p('PackageDependency'),**VCLIBS_DEPENDENCY)
     resources=ET.SubElement(root,p('Resources'))
-    for lang in ('ko-kr','en-us'): ET.SubElement(resources,p('Resource'),Language=lang)
+    ET.SubElement(resources,p('Resource'),Language='ko-kr')
     apps=ET.SubElement(root,p('Applications'))
     app=ET.SubElement(apps,p('Application'),Id='OpenGeul',Executable='OpenGeul.exe',EntryPoint='Windows.FullTrustApplication')
     ET.SubElement(app,u('VisualElements'),DisplayName='OpenGeul',Description='HWP/HWPX document editor',BackgroundColor='transparent',Square150x150Logo='Assets/Square150x150Logo.png',Square44x44Logo='Assets/Square44x44Logo.png')

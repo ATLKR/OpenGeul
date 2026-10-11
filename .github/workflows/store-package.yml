@@ -6,7 +6,6 @@ name: OpenGeul Store package
         description: Existing successful OpenGeul release to repackage
         type: string
         required: true
-        default: v1.1.1-dev.29.1
       verify_store_api:
         description: Validate configured Store API credentials with an application GET only
         type: boolean
