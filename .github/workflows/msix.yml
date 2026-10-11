@@ -47,7 +47,7 @@ jobs:
         if (-not $mt -or -not $makeappx) { throw 'Windows SDK tools are missing.' }
         $originalEditor = (Get-FileHash payload/OpenGeul.exe -Algorithm SHA256).Hash
         $clean = (Get-Content overlay/windows-app-manifest.xml | Select-Object -Skip 1 | ForEach-Object { " $($_.Trim()) " }) -join ''
-        $clean = $clean.Replace('xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">', 'xmlns:asmv3="urn:schemas-microsoft-com:asm.v3"> <assemblyIdentity type="win32" name="AllenLabs.OpenGeul" version="1.1.2.0" processorArchitecture="*" />')
+        $clean = $clean.Replace('xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">', 'xmlns:asmv3="urn:schemas-microsoft-com:asm.v3"> <assemblyIdentity type="win32" name="AllenLabs.OpenGeul" version="1.1.2.0" processorArchitecture="amd64" />')
         [System.IO.File]::WriteAllText((Join-Path $pwd 'evidence/manifest-input.xml'), $clean, [System.Text.UTF8Encoding]::new($false))
         & $mt.FullName -manifest evidence/manifest-input.xml -validate_manifest
         Add-Type @'
