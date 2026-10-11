@@ -9,7 +9,7 @@ const home = await root.clone().text();
 assert.ok(home.includes('allenlim@allenlim.net'));
 const storePage = 'https://apps.microsoft.com/detail/9PJH0T3PHRMF';
 const storeApp = 'ms-windows-store://pdp/?ProductId=9PJH0T3PHRMF';
-const developmentZip = 'https://github.com/ATLKR/OpenGeul/releases/download/v1.1.2-dev.64.1/OpenGeul_1.1.2_windows-x64_unsigned-portable.zip';
+const developmentZip = 'https://github.com/ATLKR/OpenGeul/releases/download/v1.1.3-dev.68.1/OpenGeul_1.1.3_windows-x64_unsigned-portable.zip';
 const links = [...home.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)].map((match) => ({
   href: match[1].match(/\bhref="([^"]*)"/)?.[1],
   classes: match[1].match(/\bclass="([^"]*)"/)?.[1].split(/\s+/) ?? [],
