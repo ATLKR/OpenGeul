@@ -175,13 +175,17 @@ def patch(source: Path) -> None:
     native = source/'apps/desktop/src-tauri/src'
     core = source/'apps/studio-host/src/core'
     host = source/'apps/studio-host'
-    for name in ('opengeul_hwpx_commands.rs','opengeul_hwpx_state.rs','opengeul_hwpx_state_tests.rs'):
+    for name in ('opengeul_hwpx_commands.rs','opengeul_hwpx_state.rs','opengeul_hwpx_state_tests.rs','opengeul_hwp_staging_tests.rs'):
         shutil.copy2(ROOT/'overlay'/name, native/name)
     shutil.copy2(ROOT/'overlay/save-format.ts', core/'save-format.ts')
     replace(native/'commands.rs', 'use crate::font_catalog::LocalFontEntry;',
         '#[path = "opengeul_hwpx_commands.rs"]\npub mod opengeul_hwpx;\n\nuse crate::font_catalog::LocalFontEntry;')
     replace(native/'state.rs', 'use crate::pending_open::PendingOpenPaths;',
         '#[path = "opengeul_hwpx_state.rs"]\nmod opengeul_hwpx;\n\nuse crate::pending_open::PendingOpenPaths;')
+    replace(native/'state.rs', '        let bytes = std::fs::read(&staged_path).map_err(|e| {',
+        '        opengeul_hwpx::validate_staging_path(&staged_path, &target_path)?;\n        let bytes = std::fs::read(&staged_path).map_err(|e| {')
+    replace(native/'state.rs', '        let staged_path = dir.path().join("save.tmp");\n        let target_path = dir.path().join("saved.hwp");',
+        '        let target_path = dir.path().join("saved.hwp");\n        let staged_path = target_path.with_file_name(format!("saved.hwp.hop-save-{}.tmp", Uuid::new_v4().simple()));')
     replace(native/'lib.rs', 'tauri::generate_handler![',
         'tauri::generate_handler![\n            commands::opengeul_hwpx::prepare_staged_hwpx_save,\n            commands::opengeul_hwpx::commit_staged_hwpx_save,')
     bridge = core/'tauri-bridge.ts'

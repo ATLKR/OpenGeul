@@ -1,7 +1,7 @@
 //! HWPX persistence. This child module can reuse the existing private session guards.
 use super::*;
 
-fn validate_staging_path(staged: &Path, target: &Path) -> Result<(), String> {
+pub(super) fn validate_staging_path(staged: &Path, target: &Path) -> Result<(), String> {
     let parent = |p: &Path| -> Result<PathBuf, String> {
         std::fs::canonicalize(p.parent().ok_or("저장 상위 경로가 없습니다.")?)
             .map_err(|e| format!("저장 상위 경로 확인 실패: {e}"))
@@ -17,7 +17,7 @@ fn validate_staging_path(staged: &Path, target: &Path) -> Result<(), String> {
         return Err("일반 staging 파일만 저장할 수 있습니다.".into());
     }
     if metadata.len() > 512 * 1024 * 1024 {
-        return Err("HWPX 저장 파일이 512 MiB 제한을 초과했습니다.".into());
+        return Err("문서 저장 파일이 512 MiB 제한을 초과했습니다.".into());
     }
     Ok(())
 }
@@ -65,3 +65,7 @@ impl DocumentSessionManager {
 #[cfg(test)]
 #[path = "opengeul_hwpx_state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "opengeul_hwp_staging_tests.rs"]
+mod hwp_staging_tests;

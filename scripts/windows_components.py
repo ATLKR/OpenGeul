@@ -44,6 +44,7 @@ COPIED_OVERLAYS = {
     'apps/desktop/src-tauri/src/opengeul_hwpx_commands.rs': 'overlay/opengeul_hwpx_commands.rs',
     'apps/desktop/src-tauri/src/opengeul_hwpx_state.rs': 'overlay/opengeul_hwpx_state.rs',
     'apps/desktop/src-tauri/src/opengeul_hwpx_state_tests.rs': 'overlay/opengeul_hwpx_state_tests.rs',
+    'apps/desktop/src-tauri/src/opengeul_hwp_staging_tests.rs': 'overlay/opengeul_hwp_staging_tests.rs',
     'apps/studio-host/src/core/save-format.ts': 'overlay/save-format.ts',
     'apps/studio-host/src/core/font-catalog.ts': 'overlay/font-catalog.ts',
     'apps/studio-host/src/opengeul-font-help.ts': 'overlay/opengeul-font-help.ts',
