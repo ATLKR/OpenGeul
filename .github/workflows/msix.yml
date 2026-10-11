@@ -93,7 +93,7 @@ jobs:
       run: ./e2e/wack-binaryinfo-hosts.ps1 -ExecutablePath payload/OpenGeul.exe -OutputDirectory evidence -Label payload
     - name: Re-run the actual installed GUI, CLI and WACK on the diagnostic copy
       shell: pwsh
-      run: ./e2e/msix-install.ps1 -PackageDirectory diagnostic-package -OutputDirectory evidence
+      run: ./e2e/msix-install.ps1 -PackageDirectory diagnostic-package -OutputDirectory evidence -DiagnosticPayloadExecutablePath payload/OpenGeul.exe
     - name: Preserve bounded diagnostic evidence without publishing a package
       if: always()
       shell: pwsh

@@ -1,6 +1,7 @@
 # A short-lived test certificate signs a COPY on this disposable runner only.
 # No signing key, certificate or signed copy is published or used for production.
-param([Parameter(Mandatory)][string]$PackageDirectory,[Parameter(Mandatory)][string]$OutputDirectory)
+param([Parameter(Mandatory)][string]$PackageDirectory,[Parameter(Mandatory)][string]$OutputDirectory,
+      [Parameter(Mandatory)][string]$DiagnosticPayloadExecutablePath)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $PSNativeCommandUseErrorActionPreference=$true
@@ -161,6 +162,7 @@ public static class OpenGeulPackageIdentity {
  Stop-Process -Id $launched.Id -Force
  $launched=$null
  & (Join-Path $PSScriptRoot 'wack-binaryinfo-hosts.ps1') -ExecutablePath $executable -OutputDirectory $OutputDirectory -Label installed
+ & (Join-Path $PSScriptRoot 'wack-path-host.ps1') -InstalledExecutablePath $executable -PayloadExecutablePath $DiagnosticPayloadExecutablePath -OutputDirectory $OutputDirectory
  & (Join-Path $PSScriptRoot 'wack.ps1') -PackageFullName $installed.PackageFullName -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory $OutputDirectory
  @{
   success=$true; packageFullName=$installed.PackageFullName; publisher=$publisher;
