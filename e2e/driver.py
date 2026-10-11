@@ -127,8 +127,11 @@ class Session:
         spec=Desktop(backend='win32').window(class_name='#32770',process=self.proc.pid)
         spec.wait('visible',timeout=20)
         dialog=spec.wrapper_object();hwnd=dialog.handle
+        if dialog.process_id()!=self.proc.pid or dialog.class_name()!='#32770':
+            raise AssertionError('Native dialog ownership changed before binding')
         if target is not None:
-            control=filename_control(dialog.descendants())
+            # Visibility can precede shell control creation; keep this exact HWND.
+            control=until(lambda: filename_control(dialog.descendants()),timeout=20)
             control.set_edit_text(str(target))
         buttons=[item for item in dialog.descendants(class_name='Button')
                  if item.control_id()==(2 if target is None else 1)
@@ -145,7 +148,10 @@ class Session:
             menu(self.page,command)
             if save_as:
                 self.native_dialog(None if cancel else output)
-                if cancel: return None
+                if cancel:
+                    # The native HWND can disappear before the bridge releases its guard.
+                    expect(self.page.locator('#sb-message')).to_have_text('다른 이름으로 저장 취소',timeout=30000)
+                    return None
             result=output if save_as else source
             expect(self.page.locator('#sb-message')).to_contain_text('저장 완료',timeout=30000)
             self.page.wait_for_function('!document.title.startsWith("• ")',timeout=30000)
