@@ -270,7 +270,7 @@ class Qualification:
         from pywinauto import Desktop
         windows = [window for window in Desktop(backend="win32").windows(process=session.proc.pid)
                    if window.is_visible() and window.is_enabled() and window.window_text()
-                   and window.class_name() != "#32770"]
+                   and window.class_name() == "Tauri Window"]
         require(len(windows) == 1, "Expected one owned native editor window before requesting close")
         native = windows[0]
         require(native.process_id() == session.proc.pid, "Native close window ownership differs")
