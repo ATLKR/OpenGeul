@@ -112,6 +112,48 @@ def observe(opener, token, now=None):
                 **pricing_summary(submission.get('pricing'))}}
 
 
+def report_api_replacement_blocker(result):
+    """Report only the fixed verified hold; never interpolate raw API fields."""
+    if (not isinstance(result, dict) or result.get('observation') != 'read-only'
+            or result.get('appId') != APP_ID or result.get('packageIdentityName') != IDENTITY
+            or 'lastPublishedApplicationSubmission' not in result
+            or result['lastPublishedApplicationSubmission'] is not None):
+        return False
+    pending = result.get('pendingApplicationSubmission')
+    existing = result.get('existingSubmission')
+    if (not isinstance(pending, dict) or pending.get('id') != SUBMISSION_ID
+            or not isinstance(existing, dict) or existing.get('id') != SUBMISSION_ID
+            or existing.get('status') not in {'Certification', 'PendingPublication'}
+            or pending.get('status') not in {None, existing['status']}
+            or existing.get('targetPublishMode') != 'Manual'
+            or existing.get('has_fileUploadUrl') is not False):
+        return False
+    print('::warning title=Store API replacement path unresolved::'
+          'The fixed initial Manual submission has no Published baseline or upload URL; '
+          'a supported API-only replacement and recovery path remains unverified. '
+          'No Store mutation was attempted.')
+    summary = ('### Store API replacement path unresolved\n\n'
+               f'- App: `{APP_ID}`; pending submission: `{SUBMISSION_ID}`.\n'
+               f'- Verified status: `{existing["status"]}`; publication mode: `Manual`.\n'
+               '- Published baseline: absent; package upload URL: absent.\n\n'
+               'The observer performed only the fixed application/submission GETs after OAuth. '
+               'Read access does not establish write or cancellation acceptance. '
+               'This is an unresolved safe API path, not a universal REST prohibition. '
+               'Preserve this submission and the Manual hold; do not publish the historical package '
+               'or delete the initial record as a probe. No Store mutation was attempted.\n')
+    if len(summary.encode('utf-8')) > 2048:
+        raise ValueError('Fixed Store blocker summary exceeds 2 KiB')
+    path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if path:
+        try:
+            with open(path, 'a', encoding='utf-8') as stream:
+                stream.write(summary)
+        except OSError:
+            print('::warning title=Store blocker summary unavailable::'
+                  'The bounded summary could not be written; inspect the sanitized observation artifact.')
+    return True
+
+
 def load_authenticate():
     helper = Path(__file__).resolve().parents[1] / '.store-auth-source' / 'scripts'
     if not (helper / 'check_store_api.py').is_file():
@@ -217,6 +259,22 @@ def self_check():
             failed, exit_code = run_observation()
         assert exit_code == 1 and failed['stage'] == 'fixed-resource-get' and failed['httpStatus'] == 403
         assert 'SECRET_' not in json.dumps(failed) and not stdout.getvalue() and not stderr.getvalue()
+    import tempfile
+    blocked = {**result, 'pendingApplicationSubmission': {'id': SUBMISSION_ID, 'status': None},
+               'existingSubmission': {**result['existingSubmission'], 'has_fileUploadUrl': False}}
+    with tempfile.TemporaryDirectory() as temporary:
+        summary_path = Path(temporary) / 'summary.md'
+        with mock.patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(summary_path)}):
+            with redirect_stdout(io.StringIO()) as stdout:
+                assert report_api_replacement_blocker(blocked) is True
+            summary = summary_path.read_text(encoding='utf-8')
+            assert stdout.getvalue().count('::warning') == 1 and len(summary.encode('utf-8')) <= 2048
+            assert 'SECRET_' not in stdout.getvalue() + summary
+            before = summary_path.read_bytes()
+            with redirect_stdout(io.StringIO()) as stdout:
+                assert report_api_replacement_blocker({**blocked, 'observation': 'unverified'}) is False
+                assert report_api_replacement_blocker(result) is False  # Upload URL was present.
+            assert not stdout.getvalue() and summary_path.read_bytes() == before
     print('Store observation self-check passed: exact GETs, identity, expiry and secret-free success/failure output.')
 
 
@@ -235,6 +293,8 @@ def main():
     if args.output:
         args.output.write_text(text, encoding='utf-8')
     print(text, end='')
+    if code == 0:
+        report_api_replacement_blocker(result)
     return code
 
 
