@@ -261,7 +261,7 @@ def _free(submission):
     pricing = submission.get('pricing', {})
     overrides = pricing.get('marketSpecificPricings')
     if (pricing.get('priceId') != 'Free' or not isinstance(overrides, dict)
-            or any(value not in ('Free', 'Base') for value in overrides.values())):
+            or any(value not in ('Free', 'Base', 'NotAvailable') for value in overrides.values())):
         raise SubmissionBlocked('Free Store pricing and all market overrides must be preserved')
 
 

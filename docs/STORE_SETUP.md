@@ -57,6 +57,8 @@ source; its default is false.
 First complete the manual Store publication. The submitter requires a verified
 published baseline before deleting any pending submission. It preserves the
 baseline listings, age ratings and Free pricing, including regional overrides.
+`NotAvailable` market overrides are preserved as unavailable; they are not
+converted to Free or Base. Paid or unknown override values still block submission.
 Unsupported or paid pricing blocks replacement. A first-publication warning
 leaves the original submission, GitHub release and new package artifact intact.
 
