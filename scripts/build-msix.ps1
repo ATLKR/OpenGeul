@@ -1,6 +1,10 @@
 # Windows x64, PowerShell 7, Python 3.11+, Node 24, Rustup and Windows SDK.
 [CmdletBinding()]
-param([switch]$Store, [string]$IdentityFile, [Parameter(Mandatory=$true)][string]$WasmDirectory)
+param(
+    [switch]$Store, [string]$IdentityFile, [string]$WasmDirectory,
+    [ValidateSet('All','Editor','Cli','Package')][string]$Phase = 'All',
+    [string]$EditorComponent, [string]$CliComponent
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -8,7 +12,10 @@ $env:PYTHONUTF8 = '1'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 if (-not $IsWindows) { throw 'Native builds require Windows.' }
-foreach ($tool in @('python','git','node','rustup','corepack')) {
+if ($Phase -ne 'Package' -and -not $WasmDirectory) { throw 'Compilation requires source-bound rebuilt WASM.' }
+if ($Phase -eq 'Package' -and (-not $EditorComponent -or -not $CliComponent)) { throw 'Packaging requires both same-run components.' }
+$tools = if ($Phase -eq 'Package') { @('python') } else { @('python','git','node','rustup','corepack') }
+foreach ($tool in $tools) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Missing prerequisite: $tool" }
 }
 $source = Join-Path $root '.work/hop'
@@ -18,13 +25,23 @@ if ((Test-Path $stage) -or (Test-Path $output)) { throw 'Preserve previous outpu
 $product = Get-Content 'config/product.json' -Raw | ConvertFrom-Json
 $lock = Get-Content 'config/upstream.lock.json' -Raw | ConvertFrom-Json
 if ($Store -and -not $IdentityFile) { throw 'Store build requires real Partner Center identity.' }
-python -m unittest discover -s tests -v
-node --experimental-strip-types --test tests/save-format.test.mjs tests/composition-final.test.mjs
-New-Item -ItemType Directory -Force $stage,$output | Out-Null
+if ($Phase -eq 'Package') {
+    $source = Join-Path $root '.work/package-source'
+    # The join validates both complete inventories, source contracts and x64 PE
+    # bytes before creating any payload or restoring the release source ledger.
+    python scripts/windows_components.py combine --editor $EditorComponent --cli $CliComponent --payload $stage --source $source
+} else {
+if ($Phase -eq 'All') { python -m unittest discover -s tests -v }
+if ($Phase -in @('All','Editor')) {
+    node --experimental-strip-types --test tests/save-format.test.mjs tests/composition-final.test.mjs
+}
+New-Item -ItemType Directory -Force $stage | Out-Null
+if ($Phase -in @('All','Editor')) {
 $manifestArgs = @('scripts/buildkit.py','manifest','--out',(Join-Path $stage 'AppxManifest.xml'))
 if ($IdentityFile) { $manifestArgs += @('--identity',(Resolve-Path $IdentityFile).Path) }
 if ($Store) { $manifestArgs += '--store' }
 & python @manifestArgs
+}
 python scripts/prepare_upstream.py --fetch-only
 rustup toolchain install $lock.rust --profile minimal --target x86_64-pc-windows-msvc
 $env:RUSTUP_TOOLCHAIN = $lock.rust
@@ -61,39 +78,48 @@ python scripts/prepare_native_tests.py (Join-Path $source 'third_party/rhwp')
 $env:OPENGEUL_TABLE_FIXTURES = $tableFixtures
 Push-Location $source
 try {
+    if ($Phase -in @('All','Editor')) {
     pnpm run test:studio
     pnpm run build:studio
     python ../../scripts/buildkit.py frontend apps/studio-host/dist
+    # Keep the default-feature render-tree regression separate from the GUI
+    # target graph. It must finish before either production runtime is staged.
+    Push-Location 'third_party/rhwp'
+    try {
+        $env:CARGO_TARGET_DIR = $cliTarget
+        cargo test --locked --test opengeul_table_height
+    } finally {
+        $env:CARGO_TARGET_DIR = $editorTarget
+        Pop-Location
+    }
     Push-Location 'apps/desktop/src-tauri'
     try {
         cargo test --locked
         cargo run --locked --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
     } finally { Pop-Location }
     pnpm tauri build --no-bundle --target x86_64-pc-windows-msvc
+    }
+    if ($Phase -in @('All','Cli')) {
     Push-Location 'third_party/rhwp'
     try {
         # cdylib/rlib outputs must not collide with the editor's different feature graph.
         $env:CARGO_TARGET_DIR = $cliTarget
-        cargo test --locked --test opengeul_table_height
-        cargo test --locked --test opengeul_pdf_policy --features native-skia
+        # Test the production release/profile/target graph so native Skia is
+        # compiled once, then reused for the shipped CLI. All assertions remain.
+        cargo test --release --locked --target x86_64-pc-windows-msvc --package rhwp --test opengeul_pdf_policy --features native-skia
         cargo build --release --locked --target x86_64-pc-windows-msvc --package rhwp --bin rhwp --features native-skia
     } finally {
         $env:CARGO_TARGET_DIR = $editorTarget
         Pop-Location
     }
+    }
 } finally { Pop-Location }
 $release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
 $cliRelease = Join-Path $cliTarget 'x86_64-pc-windows-msvc/release'
-foreach ($path in @((Join-Path $release 'hop-desktop.exe'), (Join-Path $cliRelease 'rhwp.exe'))) {
-    if (-not (Test-Path $path)) { throw "Missing built runtime: $path" }
-}
+if ($Phase -in @('All','Editor')) {
+if (-not (Test-Path (Join-Path $release 'hop-desktop.exe'))) { throw 'Missing built editor runtime.' }
 Copy-Item (Join-Path $release 'hop-desktop.exe') (Join-Path $stage 'OpenGeul.exe')
-New-Item -ItemType Directory -Force (Join-Path $stage 'Tools') | Out-Null
-Copy-Item (Join-Path $cliRelease 'rhwp.exe') (Join-Path $stage 'Tools/rhwp.exe')
 Get-ChildItem $release -Filter '*.dll' -File | ForEach-Object { Copy-Item $_.FullName $stage }
-$help = & (Join-Path $stage 'Tools/rhwp.exe') --help 2>&1 | Out-String
-if ($help -notmatch '(?i)rhwp|usage|사용') { throw 'CLI did not return usable help.' }
-$help | Set-Content (Join-Path $output 'rhwp-help.txt') -Encoding utf8
 $assets = Join-Path $stage 'Assets'
 python scripts/buildkit.py assets $assets
 Remove-Item (Join-Path $assets 'app.ico'),(Join-Path $assets 'app.png')
@@ -104,6 +130,23 @@ Copy-Item (Join-Path $source 'LICENSE') (Join-Path $notices 'HOP-LICENSE.txt')
 Copy-Item (Join-Path $source 'third_party/rhwp/LICENSE') (Join-Path $notices 'rhwp-LICENSE.txt')
 Copy-Item 'THIRD_PARTY_NOTICES.md','docs/FONTS.md','docs/LICENSE_POLICY.md','config/upstream.lock.json' $notices
 python scripts/collect_notices.py --source $source --out (Join-Path $notices 'Dependencies')
+}
+if ($Phase -in @('All','Cli')) {
+if (-not (Test-Path (Join-Path $cliRelease 'rhwp.exe'))) { throw 'Missing built CLI runtime.' }
+New-Item -ItemType Directory -Force (Join-Path $stage 'Tools') | Out-Null
+Copy-Item (Join-Path $cliRelease 'rhwp.exe') (Join-Path $stage 'Tools/rhwp.exe')
+}
+if ($Phase -in @('Editor','Cli')) {
+    $role = $Phase.ToLowerInvariant()
+    python scripts/windows_components.py capture --role $role --payload $stage --source $source --out (Join-Path $root ".work/$role-component")
+    Write-Host "Built and source-bound $role component; release gates remain pending."
+    exit 0
+}
+}
+New-Item -ItemType Directory -Force $output | Out-Null
+$help = & (Join-Path $stage 'Tools/rhwp.exe') --help 2>&1 | Out-String
+if ($help -notmatch '(?i)rhwp|usage|사용') { throw 'CLI did not return usable help.' }
+$help | Set-Content (Join-Path $output 'rhwp-help.txt') -Encoding utf8
 python scripts/buildkit.py audit $stage
 $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
 $makeappx = Get-ChildItem $sdkRoot -Filter 'makeappx.exe' -Recurse |
@@ -117,6 +160,10 @@ $package = Join-Path $output $fileName
 python scripts/releasekit.py verify $package
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path $output "OpenGeul_$($product.version)_windows-x64_unsigned-portable.zip")
 Copy-Item (Join-Path $stage 'AppxManifest.xml') $output
-python scripts/releasekit.py finish $output $source
+if ($Phase -eq 'Package') {
+    python scripts/releasekit.py finish $output $source --require-windows-components
+} else {
+    python scripts/releasekit.py finish $output $source
+}
 Write-Host "Built and structurally verified unsigned MSIX: $package"
 Write-Host 'E2E jobs must pass before release. No trusted signature or Store approval is implied.'

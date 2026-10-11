@@ -6,9 +6,24 @@ class WiringTests(unittest.TestCase):
         data=yaml.safe_load((ROOT/'.github/workflows/msix.yml').read_text())
         if True in data:data['on']=data.pop(True)
         return data
-    def test_heavy_build_waits_for_preflight_and_browser_gate(self):
+    def test_windows_producers_run_alongside_browsers_and_package_joins_both(self):
         jobs=self.load()['jobs'];self.assertIn('preflight',jobs)
-        self.assertEqual(set(jobs['build']['needs']),{'preflight','wasm','browser-e2e'})
+        self.assertEqual(set(jobs['build']['needs']),{'preflight','wasm','windows-editor','windows-cli'})
+        for role in ('editor','cli'):
+            job=jobs['windows-'+role]
+            self.assertEqual(set(job['needs']),{'preflight','wasm'})
+            self.assertEqual(job['runs-on'],'windows-2025')
+            self.assertIn("needs.preflight.outputs.mode == 'full'",job['if'])
+            self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
+            commands='\n'.join(s.get('run','') for s in job['steps'])
+            self.assertIn('-Phase '+role.capitalize(),commands)
+            self.assertIn('opengeul-wasm-$env:GITHUB_RUN_ID',commands)
+        self.assertEqual(jobs['browser-e2e']['needs'],'wasm')
+        commands='\n'.join(s.get('run','') for s in jobs['build']['steps'])
+        self.assertIn('-Phase Package',commands)
+        for role in ('editor','cli'):
+            self.assertIn('opengeul-'+role+'-component-$env:GITHUB_RUN_ID',commands)
+        self.assertNotIn('cargo ',commands)
     def test_manual_engine_mode_never_reaches_release(self):
         w=self.load();options=w['on']['workflow_dispatch']['inputs']['mode']
         self.assertEqual(options['default'],'full');self.assertEqual(set(options['options']),{'full','engine','checks'})
@@ -27,11 +42,11 @@ class WiringTests(unittest.TestCase):
                 if s.get('uses','').startswith('actions/upload-artifact'):
                     self.assertGreater(i,pack[0]);self.assertEqual(s['with']['path'],'bounded-evidence/')
     def test_native_input_artifact_no_longer_duplicates_browser_dist(self):
-        steps=self.load()['jobs']['build']['steps']
+        steps=self.load()['jobs']['windows-editor']['steps']
         uploads=[s for s in steps if 'opengeul-e2e-inputs-' in s.get('with',{}).get('name','')]
         self.assertEqual(len(uploads),1);self.assertEqual(uploads[0]['with']['path'],'.work/native-inputs/')
     def test_all_transports_have_pre_upload_size_checks(self):
-        for job in ('wasm','build'):
+        for job in ('wasm','windows-editor','windows-cli','build'):
             steps=self.load()['jobs'][job]['steps']
             uploads=sum(s.get('uses','').startswith('actions/upload-artifact') for s in steps)
             checks=sum('ci/evidence.py size ' in s.get('run','') for s in steps)

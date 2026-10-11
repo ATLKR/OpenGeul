@@ -100,8 +100,8 @@ jobs:
         compression-level: 9
     needs: preflight
     if: github.event.repository.private == false && (needs.preflight.outputs.mode != 'checks')
-  build:
-    needs: [preflight, wasm, browser-e2e]
+  windows-editor:
+    needs: [preflight, wasm]
     runs-on: windows-2025
     timeout-minutes: 120
     permissions:
@@ -128,17 +128,18 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: Test and build full Windows editor, CLI and unsigned packages
+    - name: Test and compile Windows editor with native fixtures and notices
       shell: pwsh
-      run: ./scripts/build-msix.ps1 -WasmDirectory wasm-input
+      run: ./scripts/build-msix.ps1 -Phase Editor -WasmDirectory wasm-input
     - name: Enforce transport size before upload
       shell: pwsh
-      run: python ci/evidence.py size --limit-mib 96 dist
-    - name: Upload verified build outputs
+      run: python ci/evidence.py size --limit-mib 64 .work/editor-component
+    - name: Share source-bound editor component
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-windows-x64-${{ github.run_id }}
-        path: dist/*
+        name: opengeul-editor-component-${{ github.run_id }}
+        path: .work/editor-component/
+        include-hidden-files: true
         retention-days: 1
         if-no-files-found: error
         compression-level: 9
@@ -153,6 +154,93 @@ jobs:
         name: opengeul-e2e-inputs-${{ github.run_id }}
         include-hidden-files: true
         path: .work/native-inputs/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
+    if: github.event.repository.private == false && (needs.preflight.outputs.mode == 'full')
+  windows-cli:
+    needs: [preflight, wasm]
+    runs-on: windows-2025
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - name: Preserve exact source bytes on Windows
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Download this run's validated WASM
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
+    - name: Verify native PDF policy and compile Windows CLI in the release graph
+      shell: pwsh
+      run: ./scripts/build-msix.ps1 -Phase Cli -WasmDirectory wasm-input
+    - name: Enforce transport size before upload
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 32 .work/cli-component
+    - name: Share source-bound CLI component
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-cli-component-${{ github.run_id }}
+        path: .work/cli-component/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
+    if: github.event.repository.private == false && (needs.preflight.outputs.mode == 'full')
+  build:
+    needs: [preflight, wasm, windows-editor, windows-cli]
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - name: Preserve exact source bytes on Windows
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Download both components from this exact run
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-editor-component-$env:GITHUB_RUN_ID" --dir editor-input
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-cli-component-$env:GITHUB_RUN_ID" --dir cli-input
+    - name: Validate source and byte parity before creating unsigned packages
+      shell: pwsh
+      run: ./scripts/build-msix.ps1 -Phase Package -EditorComponent editor-input -CliComponent cli-input
+    - name: Enforce transport size before upload
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 96 dist
+    - name: Upload verified build outputs
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-windows-x64-${{ github.run_id }}
+        path: dist/*
         retention-days: 1
         if-no-files-found: error
         compression-level: 9
@@ -430,7 +518,7 @@ jobs:
         RELEASE_TAG: ${{ steps.release.outputs.tag }}
       run: python3 scripts/store_package.py --dispatch-store --release-tag "$RELEASE_TAG"
   cleanup-transports:
-    needs: [preflight, wasm, browser-e2e, build, native-e2e, msix-install, virtual-print, release]
+    needs: [preflight, wasm, browser-e2e, windows-editor, windows-cli, build, native-e2e, msix-install, virtual-print, release]
     if: github.event.repository.private == false && (always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.run_attempt == 1 && github.actor != 'dependabot[bot]' && needs.preflight.result == 'success' && needs.preflight.outputs.mode != 'checks' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
