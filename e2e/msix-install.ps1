@@ -92,7 +92,11 @@ public static class OpenGeulPackageIdentity {
  $cliResult=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli.json'
  if (Test-Path $cliResult) { throw 'Refusing to reuse an installed CLI result.' }
  $probeArgs="-NoProfile -File `"$(Join-Path $PSScriptRoot 'installed-cli.ps1')`" -CliPath `"$cli`" -PackageFullName `"$($installed.PackageFullName)`" -OutputDirectory `"$((Resolve-Path $OutputDirectory).Path)`""
- Invoke-CommandInDesktopPackage -PackageFamilyName $installed.PackageFamilyName -AppId OpenGeul -Command (Get-Process -Id $PID).Path -Args $probeArgs -PreventBreakaway
+ $probeHost=(Get-Process -Id $PID).Path
+ $probeStdout=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli-bootstrap-stdout.txt'
+ $probeStderr=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli-bootstrap-stderr.txt'
+ $bootstrapArgs="/d /s /c `"`"$probeHost`" $probeArgs 1>`"$probeStdout`" 2>`"$probeStderr`"`""
+ Invoke-CommandInDesktopPackage -PackageFamilyName $installed.PackageFamilyName -AppId OpenGeul -Command (Join-Path $env:WINDIR 'System32/cmd.exe') -Args $bootstrapArgs -PreventBreakaway
  $deadline=(Get-Date).AddSeconds(60)
  while (-not (Test-Path $cliResult) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
  if (-not (Test-Path $cliResult)) { throw 'Installed CLI package-context probe did not complete within 60 seconds.' }
