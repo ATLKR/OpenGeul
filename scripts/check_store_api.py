@@ -14,7 +14,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'ci'))
 from transport_cleanup import NoRedirect
 
 
-def main():
+def authenticate():
     stage='configuration'
     try:
         tenant=str(uuid.UUID(os.environ['STORE_TENANT_ID']))
@@ -31,6 +31,17 @@ def main():
         with opener.open(request,timeout=30) as response:
             token=json.load(response).get('access_token')
         if not isinstance(token,str) or not token: raise ValueError('OAuth returned no access token')
+        return opener, token
+    except urllib.error.HTTPError as error:
+        raise ValueError(f'{stage} failed with HTTP {error.code}; credentials and response contents were not logged.') from None
+    except (KeyError,ValueError,urllib.error.URLError,TimeoutError):
+        raise ValueError(f'{stage} failed; check configured credentials and app access. Credentials and response contents were not logged.') from None
+
+
+def main():
+    stage='OAuth'
+    try:
+        opener, token=authenticate()
         print('OAuth authentication succeeded; checking Store application read access.')
         stage='Store application GET'
         request=urllib.request.Request(f'https://manage.devcenter.microsoft.com/v1.0/my/applications/{STORE_APP_ID}',
@@ -43,6 +54,8 @@ def main():
     except (KeyError,ValueError,urllib.error.URLError,TimeoutError):
         raise SystemExit(f'{stage} failed; check configured credentials and app access. Credentials and response contents were not logged.') from None
     print(f'Read-only Store API access verified for OpenGeul ({STORE_APP_ID}).')
+    print('Published baseline:', 'present' if app.get('lastPublishedApplicationSubmission') else 'absent',
+          '; pending submission:', 'present' if app.get('pendingApplicationSubmission') else 'absent')
 
 
 if __name__=='__main__': main()

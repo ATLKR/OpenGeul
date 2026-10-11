@@ -1,8 +1,8 @@
-"""Repackage a successful public GitHub release for the reserved Store product.
+"""Preserve validated GitHub releases and repackage them for the Store product.
 
-Run on a disposable Windows runner through .github/workflows/store-package.yml.
-Checksums and complete MSIX/portable parity prove byte equality; the successful
-source run proves its recorded gates passed. This does not certify or sign it.
+Source publication follows the full release gates. Windows Store repackaging
+requires a completed successful source run and complete MSIX/portable parity.
+This does not certify or sign packages.
 """
 from __future__ import annotations
 import argparse
@@ -12,10 +12,12 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
+import time
 import zipfile
 
 from buildkit import manifest, package_version, validate_identity
-from releasekit import REPOSITORY, verify_msix
+from releasekit import REPOSITORY, release_allowed, release_tag, verify_msix
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'e2e'))
 from prepare_payload import PACKAGING_ONLY, inventory, prepare, safe_name, stream_hash, verify_checksums
 
@@ -32,7 +34,101 @@ REQUIRED_JOBS = {'preflight', 'wasm', 'build', 'release', 'msix-install',
 def github(path, *, pages=False):
     command = ['gh', 'api', f'repos/{REPOSITORY}/{path}']
     if pages: command += ['--paginate', '--slurp']
-    return json.loads(subprocess.check_output(command, text=True, encoding='utf-8'))
+    return json.loads(subprocess.check_output(command, text=True, encoding='utf-8', timeout=30))
+
+
+def wait_for_source_run(run_id, timeout=600):
+    if not re.fullmatch(r'[1-9][0-9]{0,19}', str(run_id)):
+        raise ValueError('Invalid source run ID')
+    deadline = time.monotonic() + timeout
+    while True:
+        run = github(f'actions/runs/{run_id}')
+        if (str(run.get('id')) != str(run_id)
+                or run.get('repository', {}).get('full_name') != REPOSITORY
+                or run.get('path') != '.github/workflows/msix.yml'):
+            raise ValueError('Source completion lookup returned a different run')
+        if run.get('status') == 'completed':
+            if run.get('conclusion') != 'success':
+                raise ValueError('Source release run did not complete successfully')
+            return run
+        if run.get('status') not in ('queued', 'in_progress', 'waiting', 'pending', 'requested'):
+            raise ValueError('Unexpected source completion status')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('Timed out waiting for source release completion')
+        time.sleep(min(10, remaining))
+
+
+def _verify_source_release(directory, version):
+    verify_checksums(directory)
+    provenance = json.loads((directory / 'provenance.json').read_text(encoding='utf-8'))
+    packages = list(directory.glob('*.msix'))
+    if (provenance.get('version') != version or len(packages) != 1
+            or provenance.get('repository') != REPOSITORY
+            or provenance.get('commit') != os.getenv('GITHUB_SHA')
+            or not re.fullmatch(r'[0-9a-f]{40}', provenance.get('commit', ''))
+            or str(provenance.get('runId')) != os.getenv('GITHUB_RUN_ID')
+            or provenance.get('package') != packages[0].name
+            or provenance.get('sha256') != verify_msix(packages[0])['sha256']):
+        raise ValueError('Source release artifacts do not match the authorized build')
+    if sum(path.stat().st_size for path in directory.iterdir()) > 96 * 1024 * 1024:
+        raise ValueError('Source release exceeds the 96 MiB package limit')
+    return provenance
+
+
+def ensure_source_release(tag, directory):
+    if not release_allowed(os.getenv('GITHUB_REPOSITORY', ''), os.getenv('GITHUB_EVENT_NAME', ''),
+                           os.getenv('GITHUB_REF', '')):
+        raise ValueError('Source release publication is not authorized')
+    version = json.loads((Path(__file__).resolve().parents[1] / 'config/product.json').read_text(encoding='utf-8'))['version']
+    expected = release_tag(version, os.environ['GITHUB_REF'], os.environ['GITHUB_RUN_NUMBER'],
+                           os.environ['GITHUB_RUN_ATTEMPT'])
+    if tag != expected:
+        raise ValueError('Source release tag does not match the authorized build')
+    provenance = _verify_source_release(directory, version)
+    paths = sorted(directory.iterdir())
+    releases = [item for page in github('releases?per_page=100', pages=True) for item in page
+                if item.get('tag_name') == tag]
+    if len(releases) > 1:
+        raise ValueError('Multiple source releases use the same tag')
+    if releases or os.environ['GITHUB_REF'].startswith('refs/tags/'):
+        if github(f'commits/{tag}').get('sha') != provenance['commit']:
+            raise ValueError('Release tag points to a different source commit')
+    if releases:
+        release = releases[0]
+        assets = release.get('assets', [])
+        names = {path.name for path in paths}
+        if (release.get('draft') is not False or len(assets) != len(names)
+                or any(asset.get('state') != 'uploaded' for asset in assets)
+                or {asset.get('name') for asset in assets} != names
+                or any(not isinstance(asset.get('size'), int) or asset['size'] < 0 for asset in assets)
+                or sum(asset['size'] for asset in assets) > 96 * 1024 * 1024):
+            raise ValueError('Existing release asset inventory does not match this build')
+        with tempfile.TemporaryDirectory(prefix='opengeul-release-') as temporary:
+            existing = Path(temporary) / 'assets'
+            existing.mkdir()
+            subprocess.run(['gh', 'release', 'download', tag, '--repo', REPOSITORY,
+                            '--dir', str(existing)], check=True, timeout=180)
+            _verify_source_release(existing, version)
+            prepare(existing, Path(temporary) / 'payload')
+        print('Original source release verified; existing publication preserved.')
+        return False
+    subprocess.run(['gh', 'release', 'create', tag, *[str(path) for path in paths],
+                    '--repo', REPOSITORY, '--target', provenance['commit'], '--prerelease', '--latest=false',
+                    '--title', f'OpenGeul {tag} — E2E-tested unsigned Windows development build',
+                    '--notes-file', 'docs/RELEASE_NOTES.md'], check=True, timeout=180)
+    return True
+
+
+def dispatch_store(tag):
+    package_version(tag.removeprefix('v'))
+    if (os.getenv('GITHUB_REPOSITORY') != REPOSITORY or os.getenv('GITHUB_EVENT_NAME') != 'push'
+            or os.getenv('GITHUB_REF') != 'refs/tags/' + tag
+            or not re.fullmatch(r'v[1-9][0-9]*\.[0-9]+\.[0-9]+', tag)):
+        raise ValueError('Store dispatch requires an owned explicit stable tag push')
+    subprocess.run(['gh', 'workflow', 'run', 'store-package.yml', '--repo', REPOSITORY,
+                    '--ref', 'main', '-f', 'release_tag=' + tag, '-f', 'submit_to_store=true'],
+                   check=True, timeout=30)
 
 
 def authorize_release(tag, provenance, run, tag_sha, jobs):
@@ -94,7 +190,7 @@ def build(tag, makeappx, output):
     provenance = json.loads((source / 'provenance.json').read_text(encoding='utf-8'))
     run_id = str(provenance.get('runId', ''))
     if not re.fullmatch(r'[1-9][0-9]{0,19}', run_id): raise ValueError('Invalid source run ID')
-    run = github(f'actions/runs/{run_id}')
+    run = wait_for_source_run(run_id)
     jobs = [job for page in github(f'actions/runs/{run_id}/jobs?per_page=100', pages=True) for job in page['jobs']]
     authorize_release(tag, provenance, run, github(f'commits/{tag}')['sha'], jobs)
     validated = prepare(source, payload)
@@ -131,7 +227,18 @@ def build(tag, makeappx, output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--release-tag', required=True)
-    parser.add_argument('--makeappx', required=True, type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--publish-release', action='store_true')
+    mode.add_argument('--dispatch-store', action='store_true')
+    parser.add_argument('--package-directory', type=Path)
+    parser.add_argument('--makeappx', type=Path)
     parser.add_argument('--output', type=Path, default=Path('store-output'))
     args = parser.parse_args()
-    build(args.release_tag, args.makeappx, args.output)
+    if args.publish_release:
+        if args.package_directory is None: parser.error('--publish-release requires --package-directory')
+        ensure_source_release(args.release_tag, args.package_directory)
+    elif args.dispatch_store:
+        dispatch_store(args.release_tag)
+    else:
+        if args.makeappx is None: parser.error('Store packaging requires --makeappx')
+        build(args.release_tag, args.makeappx, args.output)

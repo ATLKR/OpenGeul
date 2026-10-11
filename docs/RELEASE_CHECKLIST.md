@@ -16,6 +16,6 @@ Before a supported stable/Store release, verify and record:
 
 HWPX saving is implemented downstream and covered by native save/reopen tests. The GUI does not open password-protected documents, and autosave/recovery is not provided. Disclose these limits and preserve source documents when evaluating compatibility.
 
-The installed-package gate now checks activation under the candidate's package identity and runs the installed CLI. It records actual WACK XML results when the kit is available. `wack.json` with `status=unavailable` is a remaining certification check, not a WACK pass. A failed, partial, warning, mismatched or missing report from an available kit fails that gate.
+The installed-package gate checks activation under the candidate's package identity and runs the installed CLI. It records actual WACK XML results when the kit is available. `wack.json` with `status=unavailable` is a remaining certification check, not a WACK pass. A complete Desktop Bridge report may satisfy `submissionCheckPassed` with optional findings only when every required test passes. Required warnings or failures, partial reports, identity mismatches and missing results fail the gate. `passed` remains false for a report with any warnings; inspect the preserved XML before Store submission.
 
 Support is [allenlim@allenlim.net](mailto:allenlim@allenlim.net). The product website is [opengeul.allenlim.net](https://opengeul.allenlim.net).

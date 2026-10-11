@@ -9,7 +9,12 @@ name: OpenGeul Store package
       verify_store_api:
         description: Validate configured Store API credentials with an application GET only
         type: boolean
-        required: true
+        required: false
+        default: false
+      submit_to_store:
+        description: Submit a stable release update after the first Store publication
+        type: boolean
+        required: false
         default: false
 permissions:
   contents: read
@@ -17,6 +22,7 @@ permissions:
 concurrency:
   group: opengeul-store
   cancel-in-progress: false
+  queue: max
 env:
   PYTHONUTF8: '1'
 jobs:
@@ -24,6 +30,10 @@ jobs:
     if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main')
     runs-on: windows-2022
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      issues: write
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
@@ -58,7 +68,7 @@ jobs:
         ./e2e/ensure-webview2.ps1
         python e2e/store_screenshot.py --exe .work/store-payload/OpenGeul.exe --output store-output
         python ci/evidence.py size --limit-mib 96 store-output
-    - name: Save Store package for the first manual Partner Center upload
+    - name: Save the verified Store package before submission
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-store-${{ github.run_id }}
@@ -66,6 +76,20 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 9
+    - name: Submit the stable release to the Microsoft Store
+      if: inputs.submit_to_store
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
+        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
+        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
+        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        python scripts/store_submit.py --release-tag $env:RELEASE_TAG --package-directory store-output
   verify-api:
     if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.verify_store_api)
     runs-on: ubuntu-24.04
