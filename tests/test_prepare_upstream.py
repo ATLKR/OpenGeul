@@ -4,6 +4,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +87,27 @@ pub fn layer_trees_to_pdf_with_links(
             prepare_upstream.patch(self.source, '1.1.2')
         self.assertEqual(path.read_text(encoding='utf-8'), changed)
         self.assertFalse((self.native / 'windows-app-manifest.xml').exists())
+
+    def test_windows_preparation_matches_editor_manifest_line_endings(self):
+        manifest = self.native / 'Cargo.toml'
+        manifest.write_bytes(b'[package]\r\nname = "hop-desktop"\r\nversion = "0.4.5"\r\n')
+        path_open = Path.open
+
+        def windows_open(path, mode='r', buffering=-1, encoding=None, errors=None, newline=None):
+            # Emulate Windows' default text-write translation on every test host.
+            if 'w' in mode and 'b' not in mode and newline is None:
+                newline = '\r\n'
+            return path_open(path, mode, buffering, encoding, errors, newline)
+
+        with patch.object(Path, 'open', windows_open):
+            prepare_upstream.patch(self.source, '1.1.2')
+
+        cli_input = manifest.read_bytes()
+        editor_input = manifest.read_text(encoding='utf-8').encode('utf-8')
+        self.assertEqual(cli_input, editor_input,
+                         'Tauri rewrites the editor manifest with LF; CLI preparation must match')
+        self.assertEqual(cli_input,
+                         b'[package]\nname = "hop-desktop"\nversion = "1.1.2"\n')
 
 
 if __name__ == '__main__':

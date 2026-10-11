@@ -17,8 +17,8 @@ def run(*args: str, cwd: Path) -> str:
     return result.stdout.strip()
 
 
-def replace_file(path: Path, old: str, new: str, expected: int = 1) -> None:
-    path.write_text(replace_once(path.read_text(encoding='utf-8'),old,new,expected=expected),encoding='utf-8')
+def replace_file(path: Path, old: str, new: str, expected: int = 1, *, newline: str | None = None) -> None:
+    path.write_text(replace_once(path.read_text(encoding='utf-8'),old,new,expected=expected),encoding='utf-8',newline=newline)
 
 
 def patch(source: Path, version: str) -> None:
@@ -51,7 +51,9 @@ def patch(source: Path, version: str) -> None:
         path=source/rel; value=json.loads(path.read_text(encoding='utf-8')); value['version']=version
         path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     hop_version=json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8'))['hop']['version']
-    replace_file(native/'Cargo.toml',f'version = "{hop_version}"',f'version = "{version}"')
+    # Tauri rewrites this manifest with LF in the editor build. Prepare identical
+    # bytes for the CLI producer so the strict source contract survives that rewrite.
+    replace_file(native/'Cargo.toml',f'version = "{hop_version}"',f'version = "{version}"',newline='\n')
     replace_file(native/'Cargo.lock',f'name = "hop-desktop"\nversion = "{hop_version}"',f'name = "hop-desktop"\nversion = "{version}"')
     for component in ('Preview','Thumbnail'):
         path=source/f'apps/desktop/quicklook/Resources/{component}/Info.plist'

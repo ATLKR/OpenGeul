@@ -43,6 +43,10 @@ attempt or another source. Source trees, Cargo targets and
 `node_modules` are not transferred. Components expire after one day and have
 pre-upload limits of 64 MiB for the editor and 32 MiB for the CLI.
 
+Common preparation writes the desktop Cargo manifest with LF line endings,
+matching Tauri's editor-build rewrite. Both components still record and compare
+its raw byte hash; line-ending differences are rejected by the join.
+
 The editor retains component protocol 1. The protocol 2 CLI component carries
 the runtime as deterministic gzip at `payload/Tools/rhwp.exe.gz`; compressed
 transport and provenance together remain within the 32 MiB limit. The raw CLI
