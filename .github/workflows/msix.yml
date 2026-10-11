@@ -85,6 +85,9 @@ jobs:
     - name: Prepare WebView2
       shell: pwsh
       run: ./e2e/ensure-webview2.ps1
+    - name: Observe bounded SDK message carriers without executing SDK modules
+      shell: pwsh
+      run: ./e2e/wack-sdk-observation.ps1 -OutputDirectory evidence
     - name: Re-run the actual installed GUI, CLI and WACK on the diagnostic copy
       shell: pwsh
       run: ./e2e/msix-install.ps1 -PackageDirectory diagnostic-package -OutputDirectory evidence
