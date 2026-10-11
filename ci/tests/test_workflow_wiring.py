@@ -36,4 +36,17 @@ class WiringTests(unittest.TestCase):
             uploads=sum(s.get('uses','').startswith('actions/upload-artifact') for s in steps)
             checks=sum('ci/evidence.py size ' in s.get('run','') for s in steps)
             self.assertEqual(uploads,checks)
+    def test_password_ui_is_a_required_same_source_native_gate(self):
+        jobs=self.load()['jobs'];steps=jobs['native-e2e']['steps']
+        password=[s for s in steps if 'password/native.py' in s.get('run','')]
+        self.assertEqual(len(password),1,'Native password safety must gate each Windows matrix member')
+        self.assertNotIn('if',password[0]);self.assertFalse(password[0].get('continue-on-error',False))
+        run=password[0]['run']
+        for binding in ('--expected-source $env:GITHUB_SHA','--expected-run $env:GITHUB_RUN_ID',
+                        '--output evidence/password-native'):
+            self.assertIn(binding,run)
+        self.assertIn('native-e2e',jobs['release']['needs'])
+        self.assertTrue(any('opengeul-wasm-$env:GITHUB_RUN_ID' in s.get('run','') for s in steps))
+        checkout=next(i for i,s in enumerate(steps) if s.get('uses','').startswith('actions/checkout'))
+        self.assertTrue(any('core.autocrlf false' in s.get('run','') for s in steps[:checkout]))
 if __name__=='__main__':unittest.main()

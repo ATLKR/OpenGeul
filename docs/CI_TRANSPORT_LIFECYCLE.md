@@ -1,6 +1,6 @@
 # CI transport retention and cost boundaries — 2026-10-06
 
-This extends the existing public-only checks / engine / full workflow. All 62 editor UI executions, 16 virtual-printer scenarios and MSIX installation gates remain in full mode. No printer output reference, comparison threshold or application source changes here.
+This extends the existing public-only checks / engine / full workflow. All original 62 editor UI executions, 16 additional password-safety executions, 16 virtual-printer scenarios and MSIX installation gates remain in full mode. No printer output reference, comparison threshold or application source changes here.
 
 ## Stage and retention behavior
 

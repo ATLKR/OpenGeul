@@ -170,9 +170,18 @@ jobs:
         os: [windows-2025, windows-2022]
       max-parallel: 2
     steps:
+    - name: Preserve exact source bytes for password fixture provenance
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
+    - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+      with:
+        node-version: '24'
+        package-manager-cache: false
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
@@ -184,6 +193,7 @@ jobs:
         $PSNativeCommandUseErrorActionPreference=$true
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-x64-$env:GITHUB_RUN_ID" --dir package
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs-$env:GITHUB_RUN_ID" --dir inputs
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
     - name: Install test tools and verify production payload identity
       shell: pwsh
       run: |
@@ -202,6 +212,13 @@ jobs:
         $env:E2E_FIXTURES=(Resolve-Path inputs/e2e-fixtures).Path
         $env:E2E_OUTPUT=Join-Path $pwd 'evidence'
         python e2e/run.py
+    - name: Password retry, plaintext consent and dirty native close or replacement safety
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures password-fixtures
+        python e2e/password/native.py --source-root . --fixtures password-fixtures --exe runtime/OpenGeul.exe --output evidence/password-native --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID
     - name: Bound evidence without changing test results
       if: always()
       env:

@@ -53,6 +53,21 @@ class EvidenceTests(unittest.TestCase):
         self.put('a_success/large.png',b'a'*1500);self.put('z_failed/screen.png',b'b'*1500)
         self.p.pack(self.src,self.dest,'failure',limit=4096)
         self.assertTrue((self.dest/'z_failed/screen.png').exists())
+    def test_password_outcomes_and_provenance_survive_success_cap(self):
+        names=('results.json','junit.xml','identity.json','fixture-manifest.json','fixture-verification.json')
+        for name in names:
+            data=json.dumps({'tests':[],'padding':'x'*(16*1024)}).encode() if name.endswith('.json') else b'<testsuite>'+b' '*(16*1024)+b'</testsuite>'
+            self.put('password-native/'+name,data)
+        self.put('password-native/a_success/events.json',b'a'*(900*1024))
+        self.p.pack(self.src,self.dest,'success')
+        for name in names:self.assertTrue((self.dest/'password-native'/name).is_file(),name)
+    def test_nested_password_failure_is_prioritized_within_its_suite(self):
+        self.put('password-native/results.json',b'{"tests":[{"test":"suite.z_failed","status":"failed"}]}')
+        self.put('password-native/a_success/screen.png',b'a'*1500)
+        self.put('password-native/z_failed/screen.png',b'b'*1500)
+        self.p.pack(self.src,self.dest,'failure',limit=4096)
+        self.assertTrue((self.dest/'password-native/z_failed/screen.png').exists())
+        self.assertFalse((self.dest/'password-native/a_success/screen.png').exists())
     def test_success_and_failure_limits(self):
         self.assertEqual(self.p.LIMITS['success'],1024*1024)
         self.assertEqual(self.p.LIMITS['failure'],12*1024*1024)
