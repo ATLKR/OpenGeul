@@ -227,6 +227,48 @@ class Qualification:
         bound.wait_not("visible", timeout=20)
         return {"text": text, "buttons": names, "accepted": accept}
 
+    def unsaved_choice(self, session, protected: Path, choice: str, folder: Path, stage: str):
+        """Read and physically choose the real owned dirty-document TaskDialog."""
+        from pywinauto import Desktop
+        require(choice in ("저장", "취소"), "Unexpected safety-save choice")
+        bound = self.bind_dialog(Desktop(backend="win32"), session.proc.pid)
+        native = bound.wrapper_object()
+        require(native.window_text() == "저장 확인", "Expected dirty-document confirmation")
+        accessible = Desktop(backend="uia").window(handle=native.handle)
+        text = "\n".join(item.window_text() for item in self.snapshot(accessible, control_type="Text") if item.window_text())
+        require(f"{protected.name}의 변경 내용을 저장할까요?" in text,
+                f"Confirmation is not bound to the protected document: {text!r}")
+        buttons = [item for item in native.descendants(class_name="Button") if item.is_visible() and item.is_enabled()]
+        names = [item.window_text().replace("&", "").strip() for item in buttons]
+        selected = [item for item in buttons if item.window_text().replace("&", "").strip() == choice]
+        require(len(selected) == 1, f"Expected exact native safety action {choice!r}; actual buttons {names}")
+        native.capture_as_image().save(folder / f"{stage}-unsaved.png")
+        native.set_focus()
+        selected[0].click_input()
+        bound.wait_not("visible", timeout=20)
+        return {"text": text, "buttons": names, "choice": choice}
+
+    def request_native_close(self, session):
+        """Send physical Alt+F4 to the unique visible editor HWND owned by this PID."""
+        from pywinauto import Desktop
+        windows = [window for window in Desktop(backend="win32").windows(process=session.proc.pid)
+                   if window.is_visible() and window.is_enabled() and window.window_text()
+                   and window.class_name() != "#32770"]
+        require(len(windows) == 1, "Expected one owned native editor window before requesting close")
+        native = windows[0]
+        require(native.process_id() == session.proc.pid, "Native close window ownership differs")
+        observed = {"hwnd": native.handle, "processId": native.process_id(),
+                    "title": native.window_text(), "class": native.class_name(), "input": "physical Alt+F4"}
+        native.set_focus()
+        native.type_keys("%{F4}", set_foreground=True)
+        return observed
+
+    def protected_still_dirty(self, session, protected: Path, checksum: str):
+        require(session.proc.poll() is None and not session.page.is_closed(), "Safety cancellation closed the editor")
+        require(session.page.title().startswith("• ") and protected.name in session.page.title(),
+                "Safety cancellation replaced the document or lost dirty state")
+        self.unchanged(protected, checksum)
+
     def plaintext_text(self, path: Path, folder: Path):
         if path.suffix == ".hwpx":
             return self.inspect_hwpx(path)["text"]
@@ -296,10 +338,92 @@ class Qualification:
             if session is not None:
                 session.close()
 
+    def dirty_close_replacement(self, source_format: str):
+        folder, prior, protected, checksum, session = self.session(f"dirty-close-replacement-{source_format}", source_format)
+        cancelled_output = folder / f"cancelled-safety.{source_format}"
+        plaintext = folder / f"closed-safety.{source_format}"
+        try:
+            dialog = self.open_protected(session, protected)
+            dialog.locator("#hwp-password-input").fill(self.password)
+            dialog.locator("#hwp-password-input").press("Enter")
+            dialog.wait_for(state="hidden", timeout=30000)
+            session.wait_loaded(protected.name)
+            marker = f" DIRTY-SAFETY-{source_format} "
+            self.edit(session.page, marker)
+            self.protected_still_dirty(session, protected, checksum)
+
+            # Choosing another file must first ask about the dirty protected document.
+            self.menu(session.page, "file:open")
+            session.native_dialog(prior)
+            replacement_cancel = self.unsaved_choice(session, protected, "취소", folder, "replacement-cancel")
+            self.protected_still_dirty(session, protected, checksum)
+            session.wait_loaded(protected.name)
+
+            close_cancel_input = self.request_native_close(session)
+            close_cancel = self.unsaved_choice(session, protected, "취소", folder, "close-cancel")
+            self.protected_still_dirty(session, protected, checksum)
+
+            # Safety Save must share the existing operation lock, and cancelled
+            # plaintext consent must prevent replacement without losing edits.
+            self.menu(session.page, "file:open")
+            session.native_dialog(prior)
+            replacement_save = self.unsaved_choice(session, protected, "저장", folder, "replacement-save")
+            session.native_dialog(cancelled_output)
+            replacement_consent = self.consent(session, source_format, False, folder)
+            require(not cancelled_output.exists(), "Cancelled safety consent produced a plaintext file")
+            self.protected_still_dirty(session, protected, checksum)
+            session.wait_loaded(protected.name)
+            post = " AFTER-SAFETY-CANCELLATIONS "
+            self.edit(session.page, post)
+
+            # Approving safety Save on a real close request must finish the
+            # plaintext commit before the app's last native window exits normally.
+            close_save_input = self.request_native_close(session)
+            close_save = self.unsaved_choice(session, protected, "저장", folder, "close-save")
+            session.native_dialog(plaintext)
+            close_consent = self.consent(session, source_format, True, folder)
+            self.until(lambda: session.proc.poll() is not None, timeout=45)
+            require(session.proc.returncode == 0, f"Native close was not a clean process exit: {session.proc.returncode}")
+            normal_exit_code = session.proc.returncode
+            require(plaintext.is_file(), "Native safety close exited without the approved plaintext output")
+            self.unchanged(protected, checksum)
+            text = self.plaintext_text(plaintext, folder)
+            require(self.expected_text in text and text.count(marker) == 1 and text.count(post) == 1
+                    and self.prior_text not in text, "Safety close lost protected-document content or cancelled edits")
+
+            # Session.close now only cleans evidence from an already-exited PID;
+            # its taskkill fallback is never accepted as the normal-close proof.
+            session.close()
+            session = None
+            session = self.Session("native", folder / "fresh-safety-reopen", plaintext, executable=self.exe)
+            require(session.page.locator("#hwp-password-input").count() == 0, "Safety plaintext reopen prompts for a password")
+            reopened = " AFTER-SAFETY-REOPEN "
+            self.edit(session.page, reopened)
+            session.save(plaintext, plaintext)
+            final_text = self.plaintext_text(plaintext, folder)
+            require(self.expected_text in final_text and final_text.count(marker) == 1
+                    and final_text.count(post) == 1 and final_text.count(reopened) == 1
+                    and self.prior_text not in final_text, "Reopened safety output lost content or cannot save edits")
+            self.unchanged(protected, checksum)
+            return {"replacementCancel": replacement_cancel,
+                    "closeCancel": {"nativeInput": close_cancel_input, "confirmation": close_cancel},
+                    "replacementSave": replacement_save, "replacementPlaintextConsentCancelled": replacement_consent,
+                    "cancelledOutputAbsent": True,
+                    "closeSave": {"nativeInput": close_save_input, "confirmation": close_save},
+                    "closePlaintextConsentAccepted": close_consent, "normalNativeExitCode": normal_exit_code,
+                    "protectedSourceSha256": checksum, "protectedUnchanged": True,
+                    "plaintextOutputSha256": sha(plaintext), "freshReopenWithoutPassword": True,
+                    "plaintextDirectSaveAfterReopen": True}
+        finally:
+            if session is not None:
+                session.close()
+
     def run(self):
         cases = [(f"retry-cancel-{fmt}", lambda fmt=fmt: self.retry_cancel(fmt)) for fmt in ("hwp", "hwpx")]
         cases += [(f"save-{src}-to-{dst}", lambda src=src, dst=dst: self.save_plaintext(src, dst))
                   for src in ("hwp", "hwpx") for dst in ("hwp", "hwpx")]
+        cases += [(f"dirty-close-replacement-{fmt}", lambda fmt=fmt: self.dirty_close_replacement(fmt))
+                  for fmt in ("hwp", "hwpx")]
         for name, action in cases:
             started = time.monotonic()
             record = {"test": name}
@@ -314,10 +438,10 @@ class Qualification:
             record["seconds"] = round(time.monotonic() - started, 3)
             self.records.append(record)
             print(f"{name}: {record['status']}", flush=True)
-        success = len(self.records) == 6 and all(row["status"] == "passed" for row in self.records)
-        result = {**self.identity, "mode": "native-password", "expectedTests": 6, "tests": self.records, "success": success}
+        success = len(self.records) == 8 and all(row["status"] == "passed" for row in self.records)
+        result = {**self.identity, "mode": "native-password", "expectedTests": 8, "tests": self.records, "success": success}
         (self.output / "results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        suite = ET.Element("testsuite", name="OpenGeul native password", tests="6",
+        suite = ET.Element("testsuite", name="OpenGeul native password", tests="8",
                            failures=str(sum(row["status"] != "passed" for row in self.records)), errors="0", skipped="0")
         for row in self.records:
             case = ET.SubElement(suite, "testcase", name=row["test"], time=str(row["seconds"]))
