@@ -43,6 +43,15 @@ attempt or another source. Source trees, Cargo targets and
 `node_modules` are not transferred. Components expire after one day and have
 pre-upload limits of 64 MiB for the editor and 32 MiB for the CLI.
 
+The editor retains component protocol 1. The protocol 2 CLI component carries
+the runtime as deterministic gzip at `payload/Tools/rhwp.exe.gz`; compressed
+transport and provenance together remain within the 32 MiB limit. The raw CLI
+and the joined logical payload are each bounded to 96 MiB. Before staging, the
+join requires one complete gzip member, validates its CRC and end of stream,
+rejects trailing data or additional members, and checks the restored runtime's
+raw size, SHA256 and x64 PE header. The component receipt records the raw
+`Tools/rhwp.exe` runtime size and SHA256.
+
 All existing release gates remain required. Store package authorization also
 requires both producers to pass. Transport cleanup requires the complete,
 same-run validated batch and all consumers to succeed; failed runs retain

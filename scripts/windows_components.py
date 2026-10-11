@@ -7,7 +7,9 @@ No Cargo, node_modules, or complete upstream source trees cross this boundary.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -18,6 +20,7 @@ import subprocess
 import tempfile
 import tomllib
 import xml.etree.ElementTree as ET
+import zlib
 
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
@@ -25,6 +28,10 @@ from prepare_native_tests import TARGETS
 from wasm_artifacts import FILES as WASM_FILES
 
 CAPS = {'editor': 64*1024*1024, 'cli': 32*1024*1024}
+MAX_PAYLOAD = 96*1024*1024
+CLI_RUNTIME = 'Tools/rhwp.exe'
+CLI_GZIP = 'payload/'+CLI_RUNTIME+'.gz'
+BLOCK = 1024*1024
 MAX_FILES = 10_000
 MAX_METADATA = 512*1024
 TARGET = 'x86_64-pc-windows-msvc'
@@ -336,27 +343,102 @@ def _copy(source: Path, target: Path, expected: dict) -> None:
         raise ValueError('Component input changed during staging')
 
 
+class _GzipBuffer(io.BytesIO):
+    def write(self, data: bytes) -> int:
+        if self.tell()+len(data) > CAPS['cli']:
+            raise ValueError('CLI compressed transport exceeds cap')
+        return super().write(data)
+
+
+def _compress_cli(path: Path, expected: dict) -> bytes:
+    regular(path)
+    digest = hashlib.sha256(); size = 0
+    with _GzipBuffer() as buffer:
+        with path.open('rb') as source, gzip.GzipFile(fileobj=buffer, mode='wb', filename='', mtime=0, compresslevel=9) as target:
+            for block in iter(lambda: source.read(BLOCK), b''):
+                size += len(block)
+                if size > expected['size'] or size > MAX_PAYLOAD:
+                    raise ValueError('CLI runtime input exceeds size cap')
+                digest.update(block); target.write(block)
+        if size != expected['size'] or digest.hexdigest() != expected['sha256']:
+            raise ValueError('CLI runtime input changed during capture')
+        return buffer.getvalue()
+
+
+def _decode_cli(path: Path, runtime: dict, transport: dict, target=None) -> None:
+    """Check one bounded gzip member; an optional target is private staging only."""
+    regular(path)
+    decoder = zlib.decompressobj(16+zlib.MAX_WBITS)
+    raw_hash = hashlib.sha256(); compressed_hash = hashlib.sha256()
+    raw_size = 0; compressed_size = 0; header = bytearray()
+    try:
+        with path.open('rb') as source:
+            for compressed in iter(lambda: source.read(BLOCK), b''):
+                compressed_size += len(compressed); compressed_hash.update(compressed)
+                if compressed_size > transport['size'] or compressed_size > CAPS['cli']:
+                    raise ValueError('CLI gzip transport exceeds size cap')
+                if decoder.eof:
+                    raise ValueError('CLI gzip has trailing or concatenated data')
+                pending = compressed
+                while True:
+                    # Zero would disable zlib's output bound. The extra byte detects overflow.
+                    limit = min(BLOCK, runtime['size']-raw_size+1)
+                    block = decoder.decompress(pending, limit)
+                    pending = decoder.unconsumed_tail
+                    raw_size += len(block)
+                    if raw_size > runtime['size'] or raw_size > MAX_PAYLOAD:
+                        raise ValueError('CLI runtime size exceeds declared size/cap')
+                    raw_hash.update(block)
+                    if len(header) < 4096:
+                        header.extend(block[:4096-len(header)])
+                    if target is not None:
+                        target.write(block)
+                    if decoder.unused_data:
+                        raise ValueError('CLI gzip has trailing or concatenated data')
+                    if not pending and (len(block) < limit or decoder.eof):
+                        break
+        if not decoder.eof:
+            raise ValueError('CLI gzip stream is truncated')
+    except zlib.error as error:
+        raise ValueError('Invalid CLI gzip stream or CRC') from error
+    if compressed_size != transport['size'] or compressed_hash.hexdigest() != transport['sha256']:
+        raise ValueError('CLI gzip input changed during validation/staging')
+    if raw_size != runtime['size'] or raw_hash.hexdigest() != runtime['sha256']:
+        raise ValueError('CLI runtime size/hash mismatch')
+    pe_machine(header)
+
+
 def capture(role: str, payload: Path, source: Path, out: Path, *, env=None) -> None:
     if role not in CAPS:
         raise ValueError('Unknown component role')
     current = identity(env); config = configured(); fresh(out)
-    files, _ = tree(payload, CAPS[role]); validate_payload(payload, role, files)
+    files, _ = tree(payload, MAX_PAYLOAD if role == 'cli' else CAPS[role]); validate_payload(payload, role, files)
     parity, contract = source_contract(source, config)
     transport = {'payload/'+name: value for name, value in files.items()}
+    compressed = None
     if role == 'editor':
         transport['source-parity.json'] = {'size': len(parity), 'sha256': hashlib.sha256(parity).hexdigest()}
-    value = {'formatVersion': 1, **current, **config, 'role': role, 'target': TARGET,
+    else:
+        compressed = _compress_cli(payload/CLI_RUNTIME, files[CLI_RUNTIME])
+        transport = {CLI_GZIP: {'size': len(compressed), 'sha256': hashlib.sha256(compressed).hexdigest()}}
+    value = {'formatVersion': 2 if role == 'cli' else 1, **current, **config, 'role': role, 'target': TARGET,
              'features': FEATURES[role], 'source': contract, 'files': transport}
+    if role == 'cli':
+        value['runtime'] = {'path': CLI_RUNTIME, **files[CLI_RUNTIME]}
     metadata = encoded(value)
     if sum(item['size'] for item in transport.values())+len(metadata) > CAPS[role]:
         raise ValueError('Component exceeds total transport cap')
     out.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix='.opengeul-component-', dir=out.parent))
     try:
-        for name, record in files.items():
-            _copy(payload/name, stage/'payload'/name, record)
         if role == 'editor':
+            for name, record in files.items():
+                _copy(payload/name, stage/'payload'/name, record)
             (stage/'source-parity.json').write_bytes(parity)
+        else:
+            path = stage/CLI_GZIP
+            path.parent.mkdir(parents=True)
+            path.write_bytes(compressed)
         (stage/'provenance.json').write_bytes(metadata)
         fresh(out); stage.rename(out)
     finally:
@@ -371,8 +453,10 @@ def validate_component(folder: Path, role: str, current: dict, config: dict) -> 
     value = read_json(folder/'provenance.json')
     expected_keys = {'formatVersion','repository','commit','runId','runAttempt','product','upstream',
                      'helpers','role','target','features','source','files'}
+    if role == 'cli':
+        expected_keys.add('runtime')
     attempt = value.get('runAttempt')
-    if (set(value) != expected_keys or type(value.get('formatVersion')) is not int or value.get('formatVersion') != 1 or value.get('role') != role
+    if (set(value) != expected_keys or type(value.get('formatVersion')) is not int or value.get('formatVersion') != (2 if role == 'cli' else 1) or value.get('role') != role
             or value.get('target') != TARGET or value.get('features') != FEATURES[role]
             or any(value.get(k) != v for k, v in current.items() if k != 'runAttempt')
             or not isinstance(attempt, str) or not re.fullmatch(r'[1-9][0-9]*', attempt)
@@ -401,8 +485,19 @@ def validate_component(folder: Path, role: str, current: dict, config: dict) -> 
     expected_dirs = {parent.as_posix() for name in content for parent in PurePosixPath(name).parents if parent.as_posix() != '.'}
     if directories != expected_dirs:
         raise ValueError('Unexpected component directory')
-    payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
-    validate_payload(folder/'payload', role, payload)
+    if role == 'cli':
+        runtime = value['runtime']
+        if (not isinstance(runtime, dict) or set(runtime) != {'path','size','sha256'}
+                or runtime['path'] != CLI_RUNTIME or type(runtime['size']) is not int
+                or not 0 < runtime['size'] <= MAX_PAYLOAD
+                or not isinstance(runtime['sha256'], str) or not SHA.fullmatch(runtime['sha256'])):
+            raise ValueError('Invalid CLI runtime record or size cap')
+        if set(content) != {CLI_GZIP}:
+            raise ValueError('CLI component inventory must contain only the gzip runtime')
+        _decode_cli(folder/CLI_GZIP, runtime, content[CLI_GZIP])
+    else:
+        payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
+        validate_payload(folder/'payload', role, payload)
     contract = value['source']
     if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
@@ -448,11 +543,15 @@ def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None) -
     if sha(parity_path) != contract['ledgerSha256']:
         raise ValueError('Prepared source ledger hash mismatch')
     validate_ledger(parity, contract, config)
+    editor_size = sum(record['size'] for name, record in records['editor']['files'].items() if name.startswith('payload/'))
+    if editor_size+records['cli']['runtime']['size'] > MAX_PAYLOAD:
+        raise ValueError('Combined restored payload exceeds size cap')
     receipt = {'formatVersion': 1, **current,
                'sourceContractSha256': hashlib.sha256(encoded(contract)).hexdigest(),
                'components': {}}
     for role, folder, runtime in (('editor', editor, 'OpenGeul.exe'), ('cli', cli, 'Tools/rhwp.exe')):
-        inventory = records[role]['files']['payload/'+runtime]
+        inventory = ({key: records[role]['runtime'][key] for key in ('size','sha256')} if role == 'cli'
+                     else records[role]['files']['payload/'+runtime])
         receipt['components'][role] = {
             'artifactName': 'opengeul-'+role+'-component-'+current['runId'],
             'runAttempt': records[role]['runAttempt'], 'provenanceSha256': sha(folder/'provenance.json'),
@@ -464,10 +563,13 @@ def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None) -
     staged_source = Path(tempfile.mkdtemp(prefix='.opengeul-source-', dir=source.parent))
     published = []
     try:
-        for role, folder in (('editor', editor), ('cli', cli)):
-            for name, record in records[role]['files'].items():
-                if name.startswith('payload/'):
-                    _copy(folder/name, staged_payload/name.removeprefix('payload/'), record)
+        for name, record in records['editor']['files'].items():
+            if name.startswith('payload/'):
+                _copy(editor/name, staged_payload/name.removeprefix('payload/'), record)
+        runtime_path = staged_payload/CLI_RUNTIME
+        runtime_path.parent.mkdir(parents=True)
+        with runtime_path.open('xb') as target:
+            _decode_cli(cli/CLI_GZIP, records['cli']['runtime'], records['cli']['files'][CLI_GZIP], target)
         _copy(parity_path, staged_source/'.opengeul-overlay.json', records['editor']['files']['source-parity.json'])
         (staged_source/'.opengeul-windows-components.json').write_bytes(receipt_bytes)
         audit_payload(staged_payload)
