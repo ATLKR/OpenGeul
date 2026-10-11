@@ -6,8 +6,9 @@ def patch(source: Path):
     directory = source/'third_party/rhwp/rhwp-studio/src/engine'
     target = directory/'input-handler-text.ts'
     original = target.read_text(encoding='utf-8')
-    old = 'export function onCompositionEnd(this: any): void {\n  const anchor = this.compositionAnchor;'
-    new = 'export function onCompositionEnd(this: any): void {\n  settleFinalComposition(this, () => onInput.call(this));\n  const anchor = this.compositionAnchor;'
+    # Run after the upstream cell-block IME guard has rejected shortcut followups.
+    old = '  const anchor = this.compositionAnchor;\n  const finalLength = this.compositionLength;'
+    new = '  settleFinalComposition(this, () => onInput.call(this));\n  const anchor = this.compositionAnchor;\n  const finalLength = this.compositionLength;'
     if original.count(old) != 1: raise ValueError('Composition patch does not match pinned source')
     updated = "import { settleFinalComposition } from './opengeul-composition-final';\n" + original.replace(old,new)
     target.write_text(updated,encoding='utf-8')

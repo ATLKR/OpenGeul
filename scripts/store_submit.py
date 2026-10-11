@@ -261,7 +261,7 @@ def _free(submission):
     pricing = submission.get('pricing', {})
     overrides = pricing.get('marketSpecificPricings')
     if (pricing.get('priceId') != 'Free' or not isinstance(overrides, dict)
-            or any(value not in ('Free', 'Base') for value in overrides.values())):
+            or any(value not in ('Free', 'Base', 'NotAvailable') for value in overrides.values())):
         raise SubmissionBlocked('Free Store pricing and all market overrides must be preserved')
 
 
@@ -333,7 +333,7 @@ def submit(tag, directory):
         app = _app(api)
         baseline_id = _ref(app, 'lastPublishedApplicationSubmission')
         if not baseline_id:
-            raise SubmissionBlocked('First manual Store publication must finish before automatic replacement')
+            raise SubmissionBlocked('Automatic Store replacement requires a Published baseline; the initial submission was preserved')
         _, baseline = api('GET', f'submissions/{baseline_id}')
         if _id(baseline['id']) != baseline_id or baseline.get('status') != 'Published':
             raise SubmissionBlocked('Store has no verified Published baseline')

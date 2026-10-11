@@ -1,3 +1,4 @@
+import re
 import unittest
 from playwright.sync_api import expect
 from driver import edit, digest
@@ -23,19 +24,21 @@ class FollowupTests:
         expect(first_label).to_be_visible()
         old_height = toolbar.bounding_box()['height']
         self.page.locator('[data-menu="view"] > .menu-title').click()
-        self.page.get_by_label('도구모음 글자 표시', exact=True).uncheck()
+        choice = self.page.locator('[data-cmd="view:toolbar-labels"]')
+        choice.click()
+        expect(choice).to_have_attribute('aria-checked', 'false')
         expect(first_label).not_to_be_visible()
         button = toolbar.locator('button[title]').first
-        self.assertTrue(button.get_attribute('aria-label'))
+        expect(button).to_have_accessible_name(re.compile(r'.+'))
         self.assertLessEqual(toolbar.bounding_box()['height'], old_height)
         self.page.reload(wait_until='domcontentloaded')
-        # The preference module inserts this checkbox before async WASM initialization.
-        # Wait for the user's ready screen; mere element existence does not mean MenuBar is bound.
+        # Wait for the user's ready screen and native HOP MenuBar binding.
         expect(self.page.locator('#sb-message')).to_contain_text('HWP 파일을 선택', timeout=60000)
         self.page.locator('textarea[aria-label="문서 편집 입력"]').wait_for(state='attached')
         expect(self.page.locator('#icon-toolbar .tb-label').first).not_to_be_visible()
         self.page.locator('[data-menu="view"] > .menu-title').click()
-        self.page.get_by_label('도구모음 글자 표시', exact=True).check()
+        self.page.locator('[data-cmd="view:toolbar-labels"]').click()
+        expect(self.page.locator('[data-cmd="view:toolbar-labels"]')).to_have_attribute('aria-checked', 'true')
         expect(self.page.locator('#icon-toolbar .tb-label').first).to_be_visible()
         self.assertEqual(digest(self.document), original)
 

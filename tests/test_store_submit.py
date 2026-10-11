@@ -54,7 +54,7 @@ class StoreSubmitTests(unittest.TestCase):
         original_json = json.dumps(self.provenance).encode()
         (self.source / 'provenance.json').write_bytes(original_json)
         (self.directory / 'source-provenance.json').write_bytes(original_json)
-        (self.directory / 'AppxManifest.xml').write_text(manifest(STORE_IDENTITY, '1.1.3'))
+        (self.directory / 'AppxManifest.xml').write_text(manifest(STORE_IDENTITY, '1.1.3'), encoding='utf-8', newline='\n')
         self.details = {'storeAppId': STORE_APP_ID, 'identity': STORE_IDENTITY,
                         'version': '1.1.3', 'sourceReleaseId': 5,
                         'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3',
@@ -215,6 +215,35 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.new['listings'], self.baseline['listings'])
         self.assertEqual(self.new['targetPublishMode'], 'Manual')
         self.assertIn('Keep human notes', self.new['notesForCertification'])
+
+    def test_free_replacement_preserves_unavailable_markets(self):
+        self.baseline['pricing']['marketSpecificPricings'].update(
+            KR='Free', CN='NotAvailable', RU='NotAvailable')
+        original = copy.deepcopy(self.baseline)
+        self.assertEqual(self.perform()['status'], 'PreProcessing')
+        self.assertEqual(self.new['pricing'], original['pricing'])
+        self.assertEqual(self.baseline, original)
+
+    def test_paid_or_unknown_market_prices_never_mutate_store(self):
+        for value in ('Tier2', 'unknown', None, {'priceId': 'Free'}):
+            with self.subTest(value=value):
+                self.calls.clear(); self.issues.clear()
+                self.baseline['pricing']['marketSpecificPricings']['KR'] = value
+                with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+                self.assertEqual(self.mutations(), [])
+
+    def test_changed_unavailable_market_ack_never_uploads_or_commits(self):
+        self.baseline['pricing']['marketSpecificPricings']['CN'] = 'NotAvailable'
+
+        def changed_ack(*args, **kwargs):
+            status, result = self.store(*args, **kwargs)
+            if args[2:4] == ('PUT', 'submissions/30'):
+                result['pricing']['marketSpecificPricings']['CN'] = 'Base'
+            return status, result
+
+        with patch.object(submitter, '_request', side_effect=changed_ack):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT'])
 
     def test_wrong_put_package_acknowledgment_never_uploads_or_commits(self):
         for mode in ('old_only', 'old_uploaded', 'wrong_target', 'target_uploaded',

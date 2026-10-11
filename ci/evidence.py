@@ -17,6 +17,10 @@ TEXT={'.json','.xml','.log','.txt'}
 VISUAL={'.png','.pdf','.zip'}
 FONT_SUFFIX={'.ttf','.otf','.ttc','.woff','.woff2','.eot'}
 FONT_MAGIC=(b'OTTO',b'ttcf',b'wOFF',b'wOF2',b'\x00\x01\x00\x00')
+OUTCOME_PATHS=('results.json','summary.json','password-native/results.json')
+PRIORITY_PATHS={name for name in ('results.json','summary.json','junit.xml')}|{
+    'password-native/'+name for name in
+    ('results.json','junit.xml','identity.json','fixture-manifest.json','fixture-verification.json')}
 
 
 def files(root):
@@ -60,7 +64,7 @@ def pack(source,destination,status,limit=None):
     if destination.exists() or destination.is_symlink():raise ValueError('Refusing to overwrite bounded evidence')
     candidates=files(source);stage=None
     failed=set()
-    for name in ('results.json','summary.json'):
+    for name in OUTCOME_PATHS:
         summary=source/name
         if summary.is_file() and summary.stat().st_size<=2*1024*1024:
             value=json.loads(summary.read_text(encoding='utf-8'))
@@ -68,12 +72,13 @@ def pack(source,destination,status,limit=None):
             if not isinstance(records,list):records=value.get('results',[])
             for row in records:
                 if row.get('status') in ('failed','error','skipped') or row.get('passed') is False:
-                    failed.add(str(row.get('test',row.get('name',''))).rsplit('.',1)[-1])
-    # Root outcomes first, then failed-case diagnostics before successful traces.
+                    failed.add((Path(name).parent.parts,str(row.get('test',row.get('name',''))).rsplit('.',1)[-1]))
+    # Both native suites' outcomes and provenance precede bounded diagnostics.
     def rank(p):
         rel=p.relative_to(source)
-        if len(rel.parts)==1 and p.name in ('results.json','summary.json','junit.xml'):return (0,0,rel.as_posix())
-        is_failure=any(part in failed for part in rel.parts)
+        if rel.as_posix() in PRIORITY_PATHS:return (0,len(rel.parts),rel.as_posix())
+        is_failure=any(rel.parts[:len(prefix)]==prefix and case in rel.parts[len(prefix):]
+                       for prefix,case in failed)
         group=1 if is_failure else 3
         kind=0 if p.suffix in TEXT else 1 if p.suffix in ('.png','.pdf') else 2
         return (group,kind,rel.as_posix())

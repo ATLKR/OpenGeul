@@ -8,10 +8,10 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST_SKIA_NAMES = {'skia-safe', 'skia-bindings'}
-RUST_SKIA_VERSION = '0.99.0'
-RUST_SKIA_COMMIT = 'a25a0fdb7d90429aa2d1355eab3b910ced359f50'
+RUST_SKIA_VERSION = '0.153.3'
+RUST_SKIA_COMMIT = 'b7f043e0b1e2a850e702245de811f01df1f6b0ff'
 RUST_SKIA_SHA256 = '4b33ed5b329a3a79eb1243fd91373c68b0ae0b9df7503bfc50d0c5253adf1b9a'
-RUST_SKIA_NOTICE = ROOT / 'notices/rust-skia-0.99.0-LICENSE.txt'
+RUST_SKIA_NOTICE = ROOT / 'notices/rust-skia-0.153.3-LICENSE.txt'
 
 
 def collect(directory: Path, output: Path) -> list[str]:

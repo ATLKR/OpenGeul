@@ -4,15 +4,13 @@ import unittest
 ROOT=Path(__file__).resolve().parents[1]
 
 class HopIntegrationTests(unittest.TestCase):
-    def test_windows_build_applies_the_reviewed_fixes_before_building(self):
+    def test_windows_build_tests_upstream_behavior_before_building(self):
         text=(ROOT/'scripts/build-msix.ps1').read_text()
-        self.assertIn('python scripts/prepare_hop_fixes.py $source',text)
-        self.assertLess(text.index('python scripts/prepare_hop_fixes.py $source'),text.index('pnpm run build:studio'))
+        self.assertNotIn('prepare_hop_fixes',text)
         self.assertIn('--loader ./tests/hop/loader.mjs --test tests/hop/*.test.mjs',text)
-    def test_browser_build_applies_and_tests_the_same_fixes(self):
+    def test_browser_build_tests_the_same_upstream_behavior(self):
         text=(ROOT/'scripts/build-wasm.sh').read_text()
-        self.assertIn('python scripts/prepare_hop_fixes.py .work/hop',text)
-        self.assertLess(text.index('python scripts/prepare_hop_fixes.py .work/hop'),text.index('pnpm run build:studio'))
+        self.assertNotIn('prepare_hop_fixes',text)
         self.assertIn('--loader ./tests/hop/loader.mjs --test tests/hop/*.test.mjs',text)
     def test_release_tests_include_followups_without_dropping_baseline(self):
         text=(ROOT/'e2e/run.py').read_text()

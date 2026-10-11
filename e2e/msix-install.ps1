@@ -31,6 +31,7 @@ try {
  if (-not $signer) { throw 'Windows SDK SignTool is missing.' }
  & $signer.FullName sign /fd SHA256 /f (Join-Path $work 'test.pfx') /p $password $copy
  & $signer.FullName verify /pa $copy
+ $signedCopySha256=(Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash
  foreach ($dependency in $manifest.SelectNodes("//*[local-name()='Dependencies']/*[local-name()='PackageDependency']")) {
   $name=$dependency.GetAttribute('Name');$minimum=[version]$dependency.GetAttribute('MinVersion');$requiredPublisher=$dependency.GetAttribute('Publisher')
   if ($name -ne 'Microsoft.VCLibs.140.00.UWPDesktop' -or $requiredPublisher -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') { throw 'Unreviewed package framework dependency.' }
@@ -100,17 +101,22 @@ public static class OpenGeulPackageIdentity {
  if (-not $cliEvidence.success -or $cliEvidence.packageFullName -ne $installed.PackageFullName) { throw 'Installed CLI package-context probe failed; see installed-cli.json.' }
  Stop-Process -Id $launched.Id -Force
  $launched=$null
- & (Join-Path $PSScriptRoot 'wack.ps1') -PackageFullName $installed.PackageFullName -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory $OutputDirectory
+ # WACK's documented package-input mode analyses a temporary extraction, avoiding
+ # the WindowsApps activation-context access failure observed in full-name mode.
+ # Keep the test certificate trusted until WACK completes; do not alter the package.
+ Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Stop
+ if (Get-AppxPackage -Name $identity) { throw 'Installed smoke candidate remains registered before package-input WACK.' }
+ & (Join-Path $PSScriptRoot 'wack.ps1') -PackagePath $copy -ExpectedPackageSha256 $signedCopySha256 -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory $OutputDirectory
  @{
   success=$true; packageFullName=$installed.PackageFullName; publisher=$publisher;
-  fileTypes=$types; originalSha256=$before;
+  fileTypes=$types; originalSha256=$before; signedTestPackageSha256=$signedCopySha256;
   scope='test-only signing, AppX installation, package-identity activation, installed CLI, registered file types and uninstall; WACK status is reported separately in wack.json; not Store certification or real-printer/IME testing'
  } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDirectory 'install.json') -Encoding utf8
 } finally {
  if ($launched -and -not $launched.HasExited) { Stop-Process -Id $launched.Id -Force -ErrorAction Continue }
  if ($installed) { Get-Process -Name OpenGeul -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $installed.InstallLocation 'OpenGeul.exe') } | Stop-Process -Force -ErrorAction Continue }
  if ($installed) { Get-Process -Name rhwp -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $installed.InstallLocation 'Tools/rhwp.exe') } | Stop-Process -Force -ErrorAction Continue }
- if ($installed) { Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Continue }
+ if ($installed -and (Get-AppxPackage -Name $identity | Where-Object { $_.PackageFullName -eq $installed.PackageFullName })) { Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Continue }
  foreach ($framework in $addedFrameworks) { Remove-AppxPackage -Package $framework -ErrorAction Continue }
  if ($trusted) { Remove-Item ("Cert:\LocalMachine\TrustedPeople\"+$trusted.Thumbprint) -Force -ErrorAction Continue }
  if ($cert) { Remove-Item ("Cert:\CurrentUser\My\"+$cert.Thumbprint) -Force -ErrorAction Continue }

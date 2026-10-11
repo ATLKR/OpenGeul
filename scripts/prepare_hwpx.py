@@ -61,19 +61,24 @@ def patch(source: Path) -> None:
       throw new Error('HWPX 원본 저장은 아직 안전하게 지원하지 않습니다. 다른 이름으로 저장에서 HWP 파일로 저장하세요.');
     }
     return this.saveHwpThroughStaging(docId, null);""", """    const target = resolveSavePath(this.sourcePath, this.sourceFormat);
-    if (target.format !== this.sourceFormat) return this.saveDocumentAsFromCommand();
+    if (target.format !== this.sourceFormat) return this.saveDocumentAs();
     return this.saveHwpThroughStaging(docId, null, target.format);""")
     replace(bridge, """    const targetPath = await this.selectSavePath(this.suggestedHwpName(), 'HWP 문서', ['hwp']);
-    if (!targetPath) return null;
-    return this.saveHwpThroughStaging(docId, this.withExtension(targetPath, 'hwp'));""", """    const { save } = await import('@tauri-apps/plugin-dialog');
+    if (!targetPath) return null;""", """    const { save } = await import('@tauri-apps/plugin-dialog');
     const formats: DocumentFormat[] = this.sourceFormat === 'hwpx' ? ['hwpx', 'hwp'] : ['hwp', 'hwpx'];
     const targetPath = await save({
       defaultPath: this.suggestedHwpName().replace(/\\.hwp$/i, `.${this.sourceFormat}`),
       filters: formats.map((format) => ({ name: `${format.toUpperCase()} 문서`, extensions: [format] })),
     });
     if (!targetPath) return null;
-    const target = resolveSavePath(targetPath, this.sourceFormat);
-    return this.saveHwpThroughStaging(docId, target.path, target.format);""")
+    const target = resolveSavePath(targetPath, this.sourceFormat);""")
+    # Keep upstream's cleartext consent and private operation methods inside its lock.
+    replace(bridge, "return this.saveHwpThroughStaging(docId, this.withExtension(targetPath, 'hwp'));",
+        "return this.saveHwpThroughStaging(docId, target.path, target.format);")
+    replace(bridge, "저장한 HWP 파일에는 암호가 적용되지 않습니다. 암호 없이 저장하시겠습니까?",
+        "저장한 ${target.format.toUpperCase()} 파일에는 암호가 적용되지 않습니다. 암호 없이 저장하시겠습니까?")
+    replace(bridge, "message('저장한 ${target.format.toUpperCase()} 파일에는 암호가 적용되지 않습니다. 암호 없이 저장하시겠습니까?',",
+        "message(`저장한 ${target.format.toUpperCase()} 파일에는 암호가 적용되지 않습니다. 암호 없이 저장하시겠습니까?`,")
     replace(bridge, '    if (!this.docId || this.dirty) return;', '    if (!this.docId) return;\n    this.editGeneration += 1;\n    if (this.dirty) return;')
     start = bridge.read_text(encoding='utf-8')
     old = start[start.index('  private async saveHwpThroughStaging('):start.index('  private async confirmExternalOverwriteIfNeeded(')]
@@ -104,6 +109,7 @@ def patch(source: Path) -> None:
       stagedPath = null;
       const result = { ...committed, dirty: this.editGeneration !== generation };
       this.applyNativeSaveResult(result);
+      this.requiresPasswordForSave = false;
       if (result.dirty) await this.invoke<void>('mark_document_dirty', { docId });
       return result;
     } finally {
@@ -113,10 +119,11 @@ def patch(source: Path) -> None:
   }
 
 """)
-    replace(bridge, """    if (this.sourceFormat === 'hwpx') {
-      return this.saveDocumentAsFromCommand();
+    replace(bridge, """    if (this.sourceFormat === 'hwpx' || this.requiresPasswordForSave) {
+      return this.saveDocumentAs();
     }
-    return this.saveDocumentFromCommand();""", '    return this.saveDocumentFromCommand();')
+    return this.saveDocument();""", """    if (this.requiresPasswordForSave) return this.saveDocumentAs();
+    return this.saveDocument();""")
     replace(bridge, '  private async confirmReadyForDocumentReplacement(): Promise<boolean> {',
         '  private async confirmReadyForDocumentReplacement(): Promise<boolean> {\n    if (this.saveInProgress) return false;')
     replace(bridge, '      return result !== null;', '      return result !== null && !result.dirty;')
@@ -139,8 +146,10 @@ def patch(source: Path) -> None:
         "    exportHwpMock = vi.fn(() => new Uint8Array([1, 2, 3]));\n    exportHwpxMock = vi.fn(() => new Uint8Array([0x50, 0x4b, 3]));\n    exportHwpx() { return this.exportHwpxMock(); }")
     text = test.read_text(encoding='utf-8')
     begin = text.index("  it('blocks direct save for HWPX sources'")
-    end = text.index("  it('saves HWP bytes through native state", begin)
+    end = text.index("  it.each([false, true])('saves HWP bytes through native state", begin)
     replace(test, text[begin:end], (ROOT/'overlay/hwpx-bridge-tests.txt').read_text(encoding='utf-8')+'\n')
+    replace(test, "name: 'loadDocumentMock' | 'createNewDocumentMock' | 'exportHwpMock'",
+        "name: 'loadDocumentMock' | 'createNewDocumentMock' | 'exportHwpMock' | 'exportHwpxMock'")
     examples = source/'apps/desktop/src-tauri/examples'
     examples.mkdir(exist_ok=True)
     shutil.copy2(ROOT/'e2e/generate-fixtures.rs', examples/'opengeul-fixtures.rs')

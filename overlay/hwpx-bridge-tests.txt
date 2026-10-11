@@ -87,7 +87,7 @@
     handle.write.mockImplementationOnce(async (bytes: Uint8Array) => { await blocked; return bytes.byteLength; });
     const first = bridge.saveDocumentFromCommand();
     await vi.waitFor(() => expect(handle.write).toHaveBeenCalled());
-    await expect(bridge.saveDocumentFromCommand()).rejects.toThrow('저장이 진행 중');
+    await expect(bridge.saveDocumentFromCommand()).rejects.toThrow('다른 문서 작업이 진행 중');
     release();
     await first;
   });
@@ -98,4 +98,62 @@
     const result = await bridge.saveDocumentFromCommand();
     expect(result?.dirty).toBe(true);
     expect(bridge.hasUnsavedChanges()).toBe(true);
+  });
+
+  it('keeps password removal consent when Save As chooses HWPX', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    bridge.requiresPasswordForSave = true;
+    saveMock.mockResolvedValue('/tmp/plain.hwpx');
+    messageMock.mockResolvedValue('취소');
+    expect(await bridge.saveDocumentAsFromCommand()).toBeNull();
+    expect(messageMock).toHaveBeenCalledWith(expect.stringContaining('HWPX 파일에는 암호'), expect.anything());
+    expect(handle.write).not.toHaveBeenCalled();
+    expect(getWasmMock(bridge, 'exportHwpxMock')).not.toHaveBeenCalled();
+    expect(bridge.requiresPasswordForSave).toBe(true);
+
+    messageMock.mockResolvedValue('암호 없이 저장');
+    expect((await bridge.saveDocumentAsFromCommand())?.format).toBe('hwpx');
+    expect(bridge.requiresPasswordForSave).toBe(false);
+  });
+
+  it('saves dirty HWPX internally before closing without re-entering the document lock', async () => {
+    const { bridge } = hwpxSaveSetup();
+    messageMock.mockResolvedValue('저장');
+    const previousInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (command: string, args: Record<string, unknown>) =>
+      command === 'close_document' ? undefined : previousInvoke(command, args));
+    expect(await bridge.confirmWindowClose()).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('commit_staged_hwpx_save', expect.anything());
+    expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'doc-1' });
+    expect(saveMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the native HWPX session open if more edits arrive during the safety save', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    messageMock.mockResolvedValue('저장');
+    handle.write.mockImplementationOnce(async (bytes: Uint8Array) => {
+      bridge.markDocumentDirty();
+      return bytes.byteLength;
+    });
+    expect(await bridge.confirmWindowClose()).toBe(false);
+    expect(bridge.hasUnsavedChanges()).toBe(true);
+    expect(invokeMock).not.toHaveBeenCalledWith('close_document', expect.anything());
+  });
+
+  it('blocks open, export, print and close while a staged HWPX write owns the document', async () => {
+    const { bridge, handle } = hwpxSaveSetup();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    handle.write.mockImplementationOnce(async (bytes: Uint8Array) => { await blocked; return bytes.byteLength; });
+    const saving = bridge.saveDocumentFromCommand();
+    await vi.waitFor(() => expect(handle.write).toHaveBeenCalled());
+    try {
+      await expect(bridge.openDocumentByPath('/tmp/other.hwp')).rejects.toThrow('다른 문서 작업');
+      await expect(bridge.exportPdfFromCommand()).rejects.toThrow('다른 문서 작업');
+      await expect(bridge.printCurrentWebview()).rejects.toThrow('다른 문서 작업');
+      expect(await bridge.confirmWindowClose()).toBe(false);
+      expect(invokeMock).not.toHaveBeenCalledWith('prepare_document_open', expect.anything());
+      expect(saveMock).not.toHaveBeenCalled();
+    } finally { release(); }
+    await saving;
   });

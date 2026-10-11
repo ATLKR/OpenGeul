@@ -19,8 +19,8 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.native = self.source / 'apps/desktop/src-tauri'
         files = {
             'apps/desktop/src-tauri/build.rs': 'fn main() {\n    tauri_build::build();\n}\n',
-            'apps/desktop/src-tauri/Cargo.toml': 'version = "0.4.4"\n',
-            'apps/desktop/src-tauri/Cargo.lock': 'name = "hop-desktop"\nversion = "0.4.4"\n',
+            'apps/desktop/src-tauri/Cargo.toml': 'version = "0.4.5"\n',
+            'apps/desktop/src-tauri/Cargo.lock': 'name = "hop-desktop"\nversion = "0.4.5"\n',
             'apps/desktop/src-tauri/tauri.conf.json': '{}',
             'apps/desktop/src-tauri/tauri.windows.conf.json': '{}',
             'package.json': '{}', 'apps/desktop/package.json': '{}',
@@ -38,9 +38,15 @@ pub fn pdf_font_dirs(app: &AppHandle) -> Vec<PathBuf> {
 ''',
             'apps/studio-host/index.html': '<title>HOP</title><link href="/favicon.ico"></body>',
             'apps/studio-host/src/core/font-catalog.ts': '// upstream catalog\n',
+            'apps/studio-host/src/host/toolbar-labels.ts': "  try { return localStorage.getItem(STORAGE_KEY) !== 'hidden'; }\n",
             'third_party/rhwp/src/renderer/pdf.rs': '''/// Native PDF implementation selected by callers such as `export-pdf`.
     let fontdb = create_fontdb(export_options);
     crate::renderer::font_paths::load_into_fontdb(&mut fontdb, &options.font_paths);
+pub fn layer_trees_to_pdf_with_links(
+    layer_trees: &[crate::paint::PageLayerTree],
+    links: &[Vec<super::hyperlinks::PdfLink>],
+    options: &DirectPdfExportOptions,
+) -> Result<Vec<u8>, String> {
 ''',
             'apps/desktop/rhwp-adapter/src/lib.rs': '"Noto Sans KR".to_string()\n' * 3,
         }

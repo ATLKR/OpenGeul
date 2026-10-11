@@ -23,7 +23,7 @@ class BuildKitTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.b.replace_once(value, 'abc', 'X', expected=2 if value == 'abc' else 1)
 
     def test_tauri_brand_and_no_resources_or_updater(self):
-        data = {'productName':'HOP', 'identifier':'net.golbin.hop','version':'0.4.4',
+        data = {'productName':'HOP', 'identifier':'net.golbin.hop','version':'0.4.5',
           'app': {'windows':[{'label':'main','title':'HOP'}]},
           'plugins': {'updater': {'endpoints':['https://github.com/golbin/hop']}},
           'bundle': {'resources':{'font.ttf':'font.ttf'}, 'publisher':'golbin.net',
