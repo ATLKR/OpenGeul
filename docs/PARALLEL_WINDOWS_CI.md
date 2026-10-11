@@ -62,12 +62,37 @@ same-run validated batch and all consumers to succeed; failed runs retain
 inputs, successful PRs retain their unpublished package, and test evidence is
 never deleted by the transport cleanup.
 
-The earlier sequential candidate [run 38142625600](https://github.com/ATLKR/OpenGeul/actions/runs/38142625600)
-took 57 minutes 41 seconds in its Windows build job and 15 minutes 38 seconds
-in WASM. These are measured previous timings, not a prediction for the new
-pipeline. The parallel pipeline's duration must be measured on a completed
-run. It uses the existing public-repository standard runner policy with no
-automatic caches or paid runners.
+The historical candidates and the current qualified source run have these
+measured Windows scopes:
+
+| Source run | Measured Windows scope | Duration | Complete source workflow |
+| --- | --- | --- | --- |
+| [50 / 38142625600](https://github.com/ATLKR/OpenGeul/actions/runs/38142625600) | Sequential Windows build job | 57 minutes 41 seconds | Failed; not release-qualified |
+| [61 / 38161639847](https://github.com/ATLKR/OpenGeul/actions/runs/38161639847) | First parallel producer start through successful package assembly | 40 minutes 14 seconds | Failed; not release-qualified |
+| [64 / 38167617349](https://github.com/ATLKR/OpenGeul/actions/runs/38167617349), attempt 1 | Same parallel Windows scope | 39 minutes 53 seconds | Succeeded; source-qualified |
+
+The historical Windows scope was 17 minutes 27 seconds (30.25%) shorter in
+run 61 than run 50. Both complete source workflows failed, and they used
+different source commits and runner executions. These observations do not
+establish a qualified release, an end-to-end CI improvement, a controlled
+causal comparison or a universal speedup. Job durations are not summed to
+measure a parallel critical path.
+
+Source run 64 is bound to `a51cb3547f9cbd8f090fb032f550810855feaed3` and
+completed successfully with all 14 required source jobs and transport cleanup.
+The Windows interval ran from 19:29:45 UTC to 20:09:38 UTC on 2026-10-11:
+39 minutes 53 seconds, or 17 minutes 48 seconds (30.86%) shorter than the
+failed run 50's successful sequential Windows build job. The complete source
+workflow ran from 19:20:43 UTC to 20:14:58 UTC: 54 minutes 15 seconds. This
+whole-CI duration is separate from the Windows interval; no fully successful
+sequential whole-CI baseline is asserted. Fresh editor, CLI and WASM hashes,
+MSIX/portable runtime parity and all required runtime gates were verified for
+the [exact development release](https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.2-dev.64.1).
+These observations compare different commits and runner executions; they do
+not establish a controlled causal estimate or universal speedup. The workflow
+uses the existing public repository's standard runner policy with no automatic
+caches or paid runners; account-wide billing and storage are outside this
+workflow proof.
 
 For local Windows builds, `scripts/build-msix.ps1 -WasmDirectory <directory>`
 retains the complete sequential build. CI uses `-Phase Editor`, `-Phase Cli`
