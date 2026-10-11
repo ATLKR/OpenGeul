@@ -1,10 +1,13 @@
 import json
+import hashlib
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 import zipfile
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 
 class ReleaseKitTests(unittest.TestCase):
@@ -81,5 +84,48 @@ class ReleaseKitTests(unittest.TestCase):
         self.assertIn('--depth=1',prep)
         self.assertIn('test:studio',(root/'scripts/build-msix.ps1').read_text(encoding='utf-8'))
         self.assertNotIn('intentionally\n    # NOT represented as passing',(root/'scripts/build-msix.ps1').read_text(encoding='utf-8'))
+
+    def test_release_retains_component_proof_and_rejects_mixed_package_bytes(self):
+        k=self.api()
+        from buildkit import manifest,DEV_IDENTITY
+        env={'GITHUB_REPOSITORY':'ATLKR/OpenGeul','GITHUB_SHA':'a'*40,
+             'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'2'}
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);out=root/'dist';out.mkdir();source=root/'source';source.mkdir()
+            (source/'.opengeul-overlay.json').write_text('{"ownedTestLedger":true}')
+            pe=bytearray(256);pe[:2]=b'MZ';pe[60:64]=(128).to_bytes(4,'little')
+            pe[128:132]=b'PE\x00\x00';pe[132:134]=(0x8664).to_bytes(2,'little')
+            runtime=bytes(pe)
+            with zipfile.ZipFile(out/'app.msix','w') as z:
+                for name,data in {'AppxManifest.xml':manifest(DEV_IDENTITY,'1.1.2'),
+                    'OpenGeul.exe':runtime,'Tools/rhwp.exe':runtime,'[Content_Types].xml':'<Types/>',
+                    'AppxBlockMap.xml':'<BlockMap/>','Notices/OpenGeul-LICENSE.txt':'MIT'}.items():z.writestr(name,data)
+            receipt={'formatVersion':1,'repository':env['GITHUB_REPOSITORY'],'commit':env['GITHUB_SHA'],
+                'runId':'123','runAttempt':'2','sourceContractSha256':'b'*64,'components':{}}
+            for role,name in [('editor','OpenGeul.exe'),('cli','Tools/rhwp.exe')]:
+                receipt['components'][role]={'artifactName':f'opengeul-{role}-component-123',
+                    'runAttempt':'1','provenanceSha256':'c'*64,'runtime':name,'size':len(runtime),
+                    'sha256':hashlib.sha256(runtime).hexdigest()}
+            path=source/'.opengeul-windows-components.json'
+            with patch.dict(os.environ,env),self.assertRaisesRegex(ValueError,'requires Windows component proof'):
+                k.finish(out,source,require_components=True)
+            original=json.dumps(receipt)
+            for change in ('runtimeHash','source','run','futureAttempt'):
+                changed=json.loads(original)
+                if change=='runtimeHash':changed['components']['cli']['sha256']='d'*64
+                elif change=='source':changed['commit']='e'*40
+                elif change=='run':changed['runId']='124'
+                else:changed['components']['editor']['runAttempt']='3'
+                path.write_text(json.dumps(changed))
+                with self.subTest(change=change),patch.dict(os.environ,env),self.assertRaises(ValueError):
+                    k.finish(out,source)
+                self.assertFalse((out/'provenance.json').exists())
+                self.assertFalse((out/'SHA256SUMS.txt').exists())
+            path.write_text(original)
+            with patch.dict(os.environ,env):k.finish(out,source)
+            proof=json.loads((out/'provenance.json').read_text())
+            self.assertEqual(proof['windowsComponents'],receipt)
+            self.assertEqual(proof['sourceParity'],{'ownedTestLedger':True})
+            self.assertIn('provenance.json',(out/'SHA256SUMS.txt').read_text())
 
 if __name__=='__main__':unittest.main()

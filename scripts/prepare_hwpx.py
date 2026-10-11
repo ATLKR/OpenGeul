@@ -9,12 +9,132 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
+DOCUMENT_CANCELLATION_TESTS = """  it.each([
+    ['file:open', 'openDocumentFromDialog', '파일 열기 중...', '파일 열기 취소'],
+    ['file:save-as', 'saveDocumentAsFromCommand', '다른 이름으로 저장 중...', '다른 이름으로 저장 취소'],
+  ])('reports cancelled %s only after the document operation completes', async (id, method, pending, cancelled) => {
+    let cancel!: (value: null) => void;
+    let operationPending = true;
+    const selected = new Promise<null>((resolve) => { cancel = resolve; });
+    const eventBus = { emit: vi.fn((event: string, message: unknown) => {
+      if (event === 'desktop-status' && message === cancelled) {
+        expect(operationPending).toBe(false);
+      }
+    }) };
+    const wasm = desktopBridge({
+      [method]: vi.fn(async () => {
+        try {
+          return await selected;
+        } finally {
+          operationPending = false;
+        }
+      }),
+    });
+    const saving = command(id).execute(services({ wasm, eventBus }) as never);
+
+    await Promise.resolve();
+    expect(eventBus.emit.mock.calls).toEqual([['desktop-status', pending]]);
+    expect(operationPending).toBe(true);
+
+    cancel(null);
+    await saving;
+    expect(eventBus.emit.mock.calls).toEqual([
+      ['desktop-status', pending],
+      ['desktop-status', cancelled],
+    ]);
+    expect(globalThis.alert).not.toHaveBeenCalled();
+  });
+
+  it('reports failed Save As without claiming cancellation completed', async () => {
+    const eventBus = { emit: vi.fn() };
+    const wasm = desktopBridge({
+      saveDocumentAsFromCommand: vi.fn().mockRejectedValue(new Error('disk full')),
+    });
+
+    await command('file:save-as').execute(services({ wasm, eventBus }) as never);
+
+    expect(eventBus.emit.mock.calls).toEqual([
+      ['desktop-status', '다른 이름으로 저장 중...'],
+      ['desktop-status', '다른 이름으로 저장 실패: disk full'],
+    ]);
+    expect(globalThis.alert).toHaveBeenCalledWith('다른 이름으로 저장에 실패했습니다:\\ndisk full');
+  });
+
+"""
+
+CLOSE_CANCELLATION_TEST = """  it('reports cancelled close only after the close request settles', async () => {
+    const { getCloseHandler } = installTauriMocks();
+    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    installDocumentStub();
+    let cancel!: (value: boolean) => void;
+    let operationPending = true;
+    const decision = new Promise<boolean>((resolve) => { cancel = resolve; });
+    const setMessage = vi.fn(() => { expect(operationPending).toBe(false); });
+    const bridge = {
+      takePendingOpenPaths: vi.fn().mockResolvedValue([]),
+      confirmWindowClose: vi.fn(async () => {
+        try {
+          return await decision;
+        } finally {
+          operationPending = false;
+        }
+      }),
+      destroyCurrentWindow: vi.fn(),
+    };
+    await setupDesktopEvents({
+      bridge,
+      dispatcher: { dispatch: vi.fn() } as never,
+      eventBus: { emit: vi.fn() } as never,
+      setMessage,
+      onUpdateState: vi.fn(),
+    });
+    const preventDefault = vi.fn();
+    const closing = getCloseHandler()?.({ preventDefault });
+    await Promise.resolve();
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(setMessage).not.toHaveBeenCalled();
+    expect(bridge.destroyCurrentWindow).not.toHaveBeenCalled();
+
+    cancel(false);
+    await closing;
+    expect(setMessage.mock.calls).toEqual([['창 닫기 취소']]);
+    expect(bridge.destroyCurrentWindow).not.toHaveBeenCalled();
+  });
+
+"""
+
 def replace(path: Path, old: str, new: str, count: int = 1) -> None:
     text = path.read_text(encoding='utf-8')
     actual = text.count(old)
     if actual != count:
         raise ValueError(f'{path}: expected {count} anchors, found {actual}: {old[:75]!r}')
     path.write_text(text.replace(old, new), encoding='utf-8')
+
+def patch_document_cancellation(host: Path) -> None:
+    command = host/'src/command/commands/file.ts'
+    replace(command, """      const payload = await desktop.openDocumentFromDialog();
+      if (payload) services.eventBus.emit('desktop-document-loaded', payload);""",
+        """      emitStatus(services, '파일 열기 중...');
+      const payload = await desktop.openDocumentFromDialog();
+      if (payload === null) emitStatus(services, '파일 열기 취소');
+      if (payload) services.eventBus.emit('desktop-document-loaded', payload);""")
+    replace(command, """      const result = await desktop.saveDocumentAsFromCommand();
+      if (result) {""",
+        """      const result = await desktop.saveDocumentAsFromCommand();
+      if (result === null) emitStatus(services, '다른 이름으로 저장 취소');
+      if (result) {""")
+    replace(host/'src/core/desktop-events.ts', """    } else {
+      await onCancel?.();
+    }
+  } catch (error) {""", """    } else {
+      await onCancel?.();
+      if (context === 'close request') setMessage('창 닫기 취소');
+    }
+  } catch (error) {""")
+    anchor = "  it('uses desktop print integration when available', async () => {"
+    replace(host/'src/command/commands/file.test.ts', anchor, DOCUMENT_CANCELLATION_TESTS + anchor)
+    anchor = "  it('routes app quit requests through the existing close guard and cancels on refusal', async () => {"
+    replace(host/'src/core/desktop-events.test.ts', anchor, CLOSE_CANCELLATION_TEST + anchor)
 
 def red_probe(source: Path) -> None:
     path = source / 'apps/studio-host/src/core/tauri-bridge.test.ts'
@@ -141,6 +261,7 @@ def patch(source: Path) -> None:
 });""")
     replace(host/'src/command/commands/file.ts', "emitStatus(services, '저장 완료');",
         "emitStatus(services, result.dirty ? '이전 변경 저장 완료 — 추가 변경 미저장' : '저장 완료');", count=2)
+    patch_document_cancellation(host)
     test = core/'tauri-bridge.test.ts'
     replace(test, "    exportHwpMock = vi.fn(() => new Uint8Array([1, 2, 3]));",
         "    exportHwpMock = vi.fn(() => new Uint8Array([1, 2, 3]));\n    exportHwpxMock = vi.fn(() => new Uint8Array([0x50, 0x4b, 3]));\n    exportHwpx() { return this.exportHwpxMock(); }")
@@ -157,8 +278,8 @@ def patch(source: Path) -> None:
     value['preservedFiles'] = {name: digest for name, digest in value['baselinePreservedFiles'].items()
         if hashlib.sha256((source/name).read_bytes()).hexdigest() == digest}
     value['hwpxSaveV1'] = True
-    value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation']
-    value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts']
+    value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation','native-dialog cancellation completion status']
+    value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts']
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
 

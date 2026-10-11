@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -14,7 +15,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'e2e')]
 from buildkit import DEV_IDENTITY, manifest
-from store_package import REQUIRED_JOBS, STORE_IDENTITY, authorize_release, verify_repackage
+from store_package import STORE_IDENTITY, authorize_release, verify_repackage
 import store_package
 
 
@@ -23,6 +24,13 @@ class StorePackageTests(unittest.TestCase):
         return {'id': 123, 'run_number': 29, 'run_attempt': 1, 'head_sha': 'a' * 40,
                 'repository': {'full_name': 'ATLKR/OpenGeul'}, 'path': '.github/workflows/msix.yml',
                 'event': 'push', 'status': status, 'conclusion': conclusion}
+
+    def source_jobs(self):
+        return [{'name': name, 'conclusion': 'success'} for name in (
+            'preflight', 'wasm', 'windows-editor', 'windows-cli', 'build', 'release', 'msix-install',
+            'native-e2e (windows-2022)', 'native-e2e (windows-2025)',
+            'virtual-print (windows-2022)', 'virtual-print (windows-2025)',
+            'browser-e2e (chromium)', 'browser-e2e (firefox)', 'browser-e2e (webkit)')]
 
     def release_directory(self, root, timestamp=None):
         root.mkdir()
@@ -191,13 +199,61 @@ class StorePackageTests(unittest.TestCase):
         run = {'id': 123, 'run_number': 29, 'run_attempt': 1, 'head_sha': sha,
                'repository': {'full_name': 'ATLKR/OpenGeul'}, 'path': '.github/workflows/msix.yml',
                'event': 'push', 'status': 'completed', 'conclusion': 'success'}
-        jobs = [{'name': name, 'conclusion': 'success'} for name in sorted(REQUIRED_JOBS)]
+        jobs = self.source_jobs()
         authorize_release('v1.1.1-dev.29.1', provenance, run, sha, jobs)
         jobs[0]['conclusion'] = 'failure'
         with self.assertRaisesRegex(ValueError, 'gates did not all succeed'):
             authorize_release('v1.1.1-dev.29.1', provenance, run, sha, jobs)
         with self.assertRaisesRegex(ValueError, 'successful owned source run'):
             authorize_release('v1.1.1-dev.29.1', provenance, run, 'b' * 40, jobs)
+
+    def test_parallel_windows_producers_must_both_succeed(self):
+        sha = 'a' * 40
+        provenance = {'version': '1.1.2', 'repository': 'ATLKR/OpenGeul', 'commit': sha, 'runId': '123'}
+        for producer in ('windows-editor', 'windows-cli'):
+            for conclusion in (None, 'failure', 'cancelled', 'skipped'):
+                with self.subTest(producer=producer, conclusion=conclusion):
+                    jobs = [job for job in self.source_jobs() if job['name'] != producer]
+                    if conclusion is not None:
+                        jobs.append({'name': producer, 'conclusion': conclusion})
+                    with self.assertRaisesRegex(ValueError, 'gates did not all succeed'):
+                        authorize_release('v1.1.2-dev.29.1', provenance, self.source_run(), sha, jobs)
+
+    def test_rejected_windows_producer_cannot_prepare_or_repackage_payload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            published = self.release_directory(root / 'published')
+            source = root / '.work/store-source'
+            payload = root / '.work/store-payload'
+            output = root / 'store-output'
+            jobs = self.source_jobs()
+            next(job for job in jobs if job['name'] == 'windows-cli')['conclusion'] = 'failure'
+
+            def github(path, **kwargs):
+                if path == 'releases/tags/v1.1.2':
+                    return {'tag_name': 'v1.1.2', 'draft': False,
+                            'assets': [{'name': path.name, 'size': path.stat().st_size}
+                                       for path in published.iterdir()]}
+                if path == 'actions/runs/123/jobs?per_page=100': return [{'jobs': jobs}]
+                if path == 'commits/v1.1.2': return {'sha': 'a' * 40}
+                self.fail('Unexpected remote lookup: ' + path)
+
+            def download(command, **kwargs):
+                self.assertEqual(command[:3], ['gh', 'release', 'download'])
+                shutil.copytree(published, source)
+
+            with patch.object(store_package, 'os', SimpleNamespace(name='nt')), \
+                    patch.object(store_package, 'Path', side_effect=lambda value: root / value), \
+                    patch.object(store_package, 'github', side_effect=github), \
+                    patch.object(store_package, 'wait_for_source_run', return_value=self.source_run()), \
+                    patch.object(store_package.subprocess, 'run', side_effect=download), \
+                    patch.object(store_package, 'prepare', side_effect=AssertionError(
+                        'Payload preparation reached before Windows producer gates succeeded')) as prepare:
+                with self.assertRaisesRegex(ValueError, 'gates did not all succeed'):
+                    store_package.build('v1.1.2', root / 'MakeAppx.exe', output)
+                prepare.assert_not_called()
+            self.assertFalse(payload.exists())
+            self.assertFalse(output.exists())
 
     def test_only_identity_changes_and_dll_tampering_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

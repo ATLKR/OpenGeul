@@ -159,6 +159,18 @@ class Qualification:
         session.native_dialog(protected)
         return self.password_dialog(session)
 
+    def wait_cancelled_operation(self, session, message: str, document: Path):
+        # Native HWND disappearance can precede the Tauri promise and lock cleanup.
+        # The UI emits this terminal status only after the request settles.
+        session.page.wait_for_function(
+            '(message) => document.querySelector("#sb-message")?.textContent === message',
+            arg=message, timeout=30000)
+        require(document.name in session.page.title(), "Cancelled operation replaced the current document")
+        session.page.wait_for_function(
+            '() => { const bar = document.querySelector("#style-bar"); '
+            'return bar && getComputedStyle(bar).pointerEvents === "auto"; }', timeout=30000)
+        session.page.locator('textarea[aria-label="문서 편집 입력"]').wait_for(state='attached')
+
     def wrong_password(self, session, dialog):
         dialog.locator("#hwp-password-input").fill("OpenGeul-wrong-123456")
         dialog.locator("#hwp-password-input").press("Enter")
@@ -180,7 +192,7 @@ class Qualification:
             session.page.screenshot(path=str(folder / "retry-visible.png"))
             dialog.get_by_role("button", name="취소", exact=True).click()
             dialog.wait_for(state="hidden", timeout=30000)
-            session.wait_loaded(prior.name)
+            self.wait_cancelled_operation(session, "파일 열기 취소", prior)
             require(sha(prior) == previous_sha, "Cancelled opening wrote prior source")
             self.unchanged(protected, checksum)
             marker = f" AFTER-PASSWORD-CANCEL-{source_format} "
@@ -308,6 +320,7 @@ class Qualification:
             self.menu(session.page, "file:save-as")
             session.native_dialog(plaintext)
             cancelled = self.consent(session, output_format, False, folder)
+            self.wait_cancelled_operation(session, "다른 이름으로 저장 취소", protected)
             require(not plaintext.exists(), "Cancelled consent created plaintext output")
             self.unchanged(protected, checksum)
             require(session.page.title().startswith("• ") and protected.name in session.page.title(),
@@ -361,11 +374,12 @@ class Qualification:
             self.menu(session.page, "file:open")
             session.native_dialog(prior)
             replacement_cancel = self.unsaved_choice(session, protected, "취소", folder, "replacement-cancel")
+            self.wait_cancelled_operation(session, "파일 열기 취소", protected)
             self.protected_still_dirty(session, protected, checksum)
-            session.wait_loaded(protected.name)
 
             close_cancel_input = self.request_native_close(session)
             close_cancel = self.unsaved_choice(session, protected, "취소", folder, "close-cancel")
+            self.wait_cancelled_operation(session, "창 닫기 취소", protected)
             self.protected_still_dirty(session, protected, checksum)
 
             # Safety Save must share the existing operation lock, and cancelled
@@ -375,9 +389,9 @@ class Qualification:
             replacement_save = self.unsaved_choice(session, protected, "저장", folder, "replacement-save")
             session.native_dialog(cancelled_output)
             replacement_consent = self.consent(session, source_format, False, folder)
+            self.wait_cancelled_operation(session, "파일 열기 취소", protected)
             require(not cancelled_output.exists(), "Cancelled safety consent produced a plaintext file")
             self.protected_still_dirty(session, protected, checksum)
-            session.wait_loaded(protected.name)
             post = " AFTER-SAFETY-CANCELLATIONS "
             self.edit(session.page, post)
 

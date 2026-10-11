@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 import unittest
 PATH=Path(__file__).resolve().parents[1]/'transport_cleanup.py'
+WORKERS=('windows-editor','windows-cli')
+PREFIXES=('opengeul-wasm','opengeul-browser-inputs','opengeul-e2e-inputs','opengeul-windows-x64',
+          'opengeul-editor-component','opengeul-cli-component')
 
 class TransportCleanupTests(unittest.TestCase):
     def setUp(self):
@@ -16,10 +19,10 @@ class TransportCleanupTests(unittest.TestCase):
                   'GITHUB_REF':'refs/heads/main','GITHUB_ACTOR':'ATLKR','CI_MODE':'full'}
         self.event={'repository':{'full_name':'ATLKR/OpenGeul','private':False}}
         self.context=self.m.context(self.env,self.event)
-        self.needs={n:{'result':'success'} for n in self.m.GATES}
+        self.needs={n:{'result':'success'} for n in (*self.m.GATES,*WORKERS)}
         self.run={'id':55,'run_attempt':1,'head_sha':'a'*40,'event':'push','path':'.github/workflows/msix.yml',
                   'repository':self.event['repository'],'head_repository':self.event['repository']}
-        self.artifacts=[self.artifact(i+1,p+'-55') for i,p in enumerate(self.m.TRANSPORT)]
+        self.artifacts=[self.artifact(i+1,p+'-55') for i,p in enumerate(PREFIXES)]
         self.artifacts += [self.artifact(99,'virtual-print-windows-2025-55')]
     def artifact(self,id,name):
         return {'id':id,'name':name,'size_in_bytes':100,'expired':False,'workflow_run':{'id':55,'head_sha':'a'*40}}
@@ -28,11 +31,77 @@ class TransportCleanupTests(unittest.TestCase):
         return {'total_count':len(items),'artifacts':items}
     def plan(self,items=None,run=None,needs=None):
         return self.m.plan(self.context,self.needs if needs is None else needs,self.run if run is None else run,self.listing(items))
-    def test_successful_publication_removes_only_four_transport_files(self):
-        self.assertEqual([a['id'] for a in self.plan()],[1,2,3,4])
+    def api_fixture(self,calls,items=None,changed=None):
+        items=self.artifacts if items is None else items
+        def api(method,path):
+            calls.append((method,path))
+            if path.endswith('/runs/55'):return self.run
+            if '?per_page' in path:return self.listing(items)
+            if method=='GET':
+                artifact=next(a for a in items if path.endswith('/'+str(a['id'])))
+                return changed(artifact) if changed else artifact
+            return None
+        return api
+    def test_successful_publication_removes_only_six_transport_files(self):
+        self.assertEqual([a['id'] for a in self.plan()],[1,2,3,4,5,6])
+    def test_windows_producer_results_are_required_before_any_api_call(self):
+        for name in WORKERS:
+            for state in ('failure','cancelled','skipped',None):
+                with self.subTest(name=name,state=state):
+                    needs=copy.deepcopy(self.needs);needs[name]['result']=state
+                    result=self.m.execute(self.context,needs,lambda *a:self.fail('Failed producer must not call API'))
+                    self.assertEqual(result['deleted'],[])
+            with self.subTest(name=name,state='missing'):
+                needs={k:v for k,v in self.needs.items() if k!=name}
+                with self.assertRaises(ValueError):
+                    self.m.execute(self.context,needs,lambda *a:self.fail('Missing producer must not call API'))
+    def test_missing_component_prevents_the_whole_batch_from_being_deleted(self):
+        for name in ('opengeul-editor-component-55','opengeul-cli-component-55'):
+            with self.subTest(name=name):
+                calls=[];items=[a for a in self.artifacts if a['name']!=name]
+                with self.assertRaises(ValueError):
+                    self.m.execute(self.context,self.needs,self.api_fixture(calls,items))
+                self.assertFalse(any(m=='DELETE' for m,p in calls))
+    def test_invalid_component_prevents_deleting_valid_earlier_transports(self):
+        for name in ('opengeul-editor-component-55','opengeul-cli-component-55'):
+            for field,value in (('workflow_run',{'id':56,'head_sha':'a'*40}),
+                                ('workflow_run',{'id':55,'head_sha':'b'*40}),('expired',True),
+                                ('size_in_bytes',1024**3)):
+                with self.subTest(name=name,field=field,value=value):
+                    calls=[];items=copy.deepcopy(self.artifacts)
+                    next(a for a in items if a['name']==name)[field]=value
+                    with self.assertRaises(ValueError):
+                        self.m.execute(self.context,self.needs,self.api_fixture(calls,items))
+                    self.assertFalse(any(m=='DELETE' for m,p in calls))
+    def test_last_component_revalidation_failure_prevents_all_deletes(self):
+        calls=[]
+        def changed(artifact):
+            if artifact['name']=='opengeul-cli-component-55':
+                return {**artifact,'digest':'sha256:changed'}
+            return artifact
+        with self.assertRaises(ValueError):
+            self.m.execute(self.context,self.needs,self.api_fixture(calls,changed=changed))
+        self.assertTrue(any(p.endswith('/artifacts/5') for m,p in calls if m=='GET'))
+        self.assertTrue(any(p.endswith('/artifacts/6') for m,p in calls if m=='GET'))
+        self.assertFalse(any(m=='DELETE' for m,p in calls))
+    def test_ambiguous_component_identity_prevents_all_deletes(self):
+        component=next(a for a in self.artifacts if a['name']=='opengeul-cli-component-55')
+        for duplicate in ({**component,'id':88},{**component,'name':'opengeul-editor-component-55'}):
+            with self.subTest(duplicate=duplicate):
+                calls=[]
+                with self.assertRaises(ValueError):
+                    self.m.execute(self.context,self.needs,self.api_fixture(calls,self.artifacts+[duplicate]))
+                self.assertFalse(any(m=='DELETE' for m,p in calls))
+    def test_component_size_caps_include_only_the_existing_archive_overhead(self):
+        for name,cap in (('opengeul-editor-component-55',64),('opengeul-cli-component-55',32)):
+            with self.subTest(name=name):
+                artifact=self.artifact(88,name);artifact['size_in_bytes']=(cap+1)*1024**2
+                self.m.validate_artifact(self.context,artifact)
+                artifact['size_in_bytes']+=1
+                with self.assertRaises(ValueError):self.m.validate_artifact(self.context,artifact)
     def test_evidence_and_unrelated_names_are_never_deleted(self):
         self.artifacts.extend([self.artifact(90,'custom-result'),self.artifact(91,'opengeul-wasm-54')])
-        self.assertEqual(len(self.plan()),4)
+        self.assertEqual(len(self.plan()),6)
     def test_failure_of_each_gate_preserves_all_artifacts(self):
         for name in self.needs:
             with self.subTest(name=name):
@@ -48,20 +117,23 @@ class TransportCleanupTests(unittest.TestCase):
     def test_pr_keeps_candidate_package(self):
         self.context.update(event='pull_request',ref='refs/pull/6/merge');self.run['event']='pull_request'
         self.needs['release']['result']='skipped'
-        self.assertEqual([a['id'] for a in self.plan()],[1,2,3])
+        self.assertEqual([a['id'] for a in self.plan()],[1,2,3,5,6])
     def test_main_release_skipped_is_not_a_cleanup_success(self):
         self.needs['release']['result']='skipped';self.assertEqual(self.plan(),[])
     def test_scheduled_full_run_keeps_unpublished_package(self):
         self.context['event']='schedule';self.run['event']='schedule';self.needs['release']['result']='skipped'
-        self.assertEqual(len(self.plan()),3)
+        self.assertEqual(len(self.plan()),5)
     def test_engine_removes_only_browser_transport(self):
         self.context.update(event='workflow_dispatch',mode='engine');self.run['event']='workflow_dispatch'
-        for name in ('build','native-e2e','virtual-print','msix-install','release'):self.needs[name]['result']='skipped'
+        for name in (*WORKERS,'build','native-e2e','virtual-print','msix-install','release'):self.needs[name]['result']='skipped'
         self.assertEqual([a['id'] for a in self.plan()],[2])
     def test_engine_cannot_ignore_failed_windows_job(self):
         self.context.update(event='workflow_dispatch',mode='engine');self.run['event']='workflow_dispatch'
-        for name in ('build','native-e2e','virtual-print','msix-install','release'):self.needs[name]['result']='skipped'
-        self.needs['build']['result']='failure';self.assertEqual(self.plan(),[])
+        for name in (*WORKERS,'build','native-e2e','virtual-print','msix-install','release'):self.needs[name]['result']='skipped'
+        for name in (*WORKERS,'build'):
+            with self.subTest(name=name):
+                needs=copy.deepcopy(self.needs);needs[name]['result']='failure'
+                self.assertEqual(self.plan(needs=needs),[])
     def test_checks_stage_creates_no_cleanup(self):
         self.context.update(event='workflow_dispatch',mode='checks');self.run['event']='workflow_dispatch'
         self.assertEqual(self.plan(),[])
@@ -124,11 +196,11 @@ class TransportCleanupTests(unittest.TestCase):
             if path.endswith('/runs/55'):return self.run
             if '?per_page' in path:return self.listing()
             if method=='GET':return next(a for a in self.artifacts if path.endswith('/'+str(a['id'])))
-            self.assertGreaterEqual(sum(m=='GET' for m,p in calls),6)
+            self.assertGreaterEqual(sum(m=='GET' for m,p in calls),8)
             return None
         result=self.m.execute(self.context,self.needs,api)
-        self.assertEqual(result['deletedBytes'],400)
-        self.assertEqual([p.rsplit('/',1)[1] for m,p in calls if m=='DELETE'],['1','2','3','4'])
+        self.assertEqual(result['deletedBytes'],600)
+        self.assertEqual([p.rsplit('/',1)[1] for m,p in calls if m=='DELETE'],['1','2','3','4','5','6'])
     def test_failed_run_does_not_even_call_api(self):
         self.needs['virtual-print']['result']='failure'
         self.assertEqual(self.m.execute(self.context,self.needs,lambda *a:self.fail('API should not be called'))['deletedBytes'],0)

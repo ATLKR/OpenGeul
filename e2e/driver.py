@@ -127,8 +127,15 @@ class Session:
         spec=Desktop(backend='win32').window(class_name='#32770',process=self.proc.pid)
         spec.wait('visible',timeout=20)
         dialog=spec.wrapper_object();hwnd=dialog.handle
+        if dialog.process_id()!=self.proc.pid or dialog.class_name()!='#32770':
+            raise AssertionError('Native dialog ownership changed before binding')
         if target is not None:
-            control=filename_control(dialog.descendants())
+            # Visibility can precede shell control creation; keep this exact HWND.
+            try:
+                control=until(lambda: filename_control(dialog.descendants()),timeout=20)
+            except Exception:
+                self._record_picker_readiness_failure(dialog,hwnd)
+                raise
             control.set_edit_text(str(target))
         buttons=[item for item in dialog.descendants(class_name='Button')
                  if item.control_id()==(2 if target is None else 1)
@@ -139,13 +146,55 @@ class Session:
         until(lambda: not ctypes.windll.user32.IsWindow(hwnd)
               or not ctypes.windll.user32.IsWindowVisible(hwnd),timeout=20)
 
+    def _record_picker_readiness_failure(self, dialog, hwnd):
+        """Failure-only control metadata; never read filename or descendant text."""
+        try:
+            if (dialog.handle!=hwnd or dialog.process_id()!=self.proc.pid
+                    or dialog.class_name()!='#32770'):
+                return
+            title=dialog.window_text()
+            value={'hwnd':hwnd,'pid':self.proc.pid,'class':'#32770','title':title[:256],
+                   'descendants':[],'titleTruncated':len(title)>256,'descendantsTruncated':False,
+                   'classNamesTruncated':False,'sizeTruncated':False,'collectionFailed':False}
+            try:
+                controls=dialog.descendants()
+                value['descendantsTruncated']=len(controls)>64
+            except Exception:
+                controls=[]
+                value['collectionFailed']=True
+            for control in controls[:64]:
+                try:
+                    name=control.class_name();parent=control.parent().class_name()
+                    record={'class':name[:64],'parentClass':parent[:64],
+                            'controlId':int(control.control_id()),'visible':bool(control.is_visible()),
+                            'enabled':bool(control.is_enabled())}
+                    value['classNamesTruncated'] |= len(name)>64 or len(parent)>64
+                except Exception:
+                    value['collectionFailed']=True
+                    continue
+                value['descendants'].append(record)
+                if len(json.dumps(value,ensure_ascii=True,separators=(',',':')).encode('ascii'))>16*1024:
+                    value['descendants'].pop()
+                    value['descendantsTruncated']=True
+                    value['sizeTruncated']=True
+                    break
+            data=json.dumps(value,ensure_ascii=True,separators=(',',':')).encode('ascii')
+            if len(data)<=16*1024:
+                (self.folder/'native-picker-readiness.json').write_bytes(data)
+        except Exception:
+            # Diagnostic collection or writing must not replace the readiness error.
+            pass
+
     def save(self, source: Path, output: Path, *, save_as=False, cancel=False) -> Path|None:
         command='file:save-as' if save_as else 'file:save'
         if self.mode=='native':
             menu(self.page,command)
             if save_as:
                 self.native_dialog(None if cancel else output)
-                if cancel: return None
+                if cancel:
+                    # The native HWND can disappear before the bridge releases its guard.
+                    expect(self.page.locator('#sb-message')).to_have_text('다른 이름으로 저장 취소',timeout=30000)
+                    return None
             result=output if save_as else source
             expect(self.page.locator('#sb-message')).to_contain_text('저장 완료',timeout=30000)
             self.page.wait_for_function('!document.title.startsWith("• ")',timeout=30000)

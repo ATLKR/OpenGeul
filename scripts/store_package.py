@@ -25,7 +25,7 @@ STORE_IDENTITY = {'name': '57904TaewonLiodLim.OpenGeul',
                   'publisher': 'CN=D7EE05D6-C091-4FB1-BAF9-DA4E6852DA97',
                   'displayName': 'Allen Taewon Lim'}
 STORE_APP_ID = '9PJH0T3PHRMF'
-REQUIRED_JOBS = {'preflight', 'wasm', 'build', 'release', 'msix-install',
+REQUIRED_JOBS = {'preflight', 'wasm', 'windows-editor', 'windows-cli', 'build', 'release', 'msix-install',
                  'native-e2e (windows-2022)', 'native-e2e (windows-2025)',
                  'virtual-print (windows-2022)', 'virtual-print (windows-2025)',
                  'browser-e2e (chromium)', 'browser-e2e (firefox)', 'browser-e2e (webkit)'}

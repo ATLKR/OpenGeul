@@ -14,9 +14,12 @@ import urllib.request
 from policy import require_public, select_mode
 
 REPO = 'ATLKR/OpenGeul'
-GATES = ('preflight', 'wasm', 'browser-e2e', 'build', 'native-e2e', 'msix-install', 'virtual-print', 'release')
-TRANSPORT = ('opengeul-wasm', 'opengeul-browser-inputs', 'opengeul-e2e-inputs', 'opengeul-windows-x64')
-LIMITS = dict(zip(TRANSPORT, (32, 64, 16, 96)))
+GATES = ('preflight', 'wasm', 'windows-editor', 'windows-cli', 'browser-e2e', 'build',
+         'native-e2e', 'msix-install', 'virtual-print', 'release')
+TRANSPORT = ('opengeul-wasm', 'opengeul-browser-inputs', 'opengeul-e2e-inputs', 'opengeul-windows-x64',
+             'opengeul-editor-component', 'opengeul-cli-component')
+LIMITS = dict(zip(TRANSPORT, (32, 64, 16, 96, 64, 32)))
+PACKAGE = 'opengeul-windows-x64'
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 
 
@@ -52,10 +55,11 @@ def allowed_names(ctx, needs):
                   and (ctx['ref'] == 'refs/heads/main' or ctx['ref'].startswith('refs/tags/v')))
     if not publishing: expected['release'] = 'skipped'
     if mode == 'engine':
-        for name in ('build', 'native-e2e', 'msix-install', 'virtual-print'): expected[name] = 'skipped'
+        for name in ('windows-editor', 'windows-cli', 'build', 'native-e2e', 'msix-install', 'virtual-print'):
+            expected[name] = 'skipped'
     if states != expected: return set()  # Keep failure inputs for diagnosis; never call DELETE.
-    prefixes = set(TRANSPORT[:3]) if mode == 'full' else {TRANSPORT[1]}
-    if publishing: prefixes.add(TRANSPORT[3])
+    prefixes = set(TRANSPORT) - {PACKAGE} if mode == 'full' else {'opengeul-browser-inputs'}
+    if publishing: prefixes.add(PACKAGE)
     return {f'{name}-{ctx["run_id"]}' for name in prefixes}
 
 

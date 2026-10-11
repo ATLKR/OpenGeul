@@ -11,7 +11,46 @@ class WorkflowTransportTests(unittest.TestCase):
         self.assertEqual(set(self.w['jobs']['release']['needs']),{'wasm','build','native-e2e','browser-e2e','msix-install','virtual-print'})
     def test_cleanup_depends_on_every_consumer_and_publication(self):
         self.assertIn('cleanup-transports',self.w['jobs'],'Missing post-consumer cleanup')
-        self.assertEqual(set(self.w['jobs']['cleanup-transports']['needs']),{'preflight','wasm','build','native-e2e','browser-e2e','msix-install','virtual-print','release'})
+        self.assertEqual(set(self.w['jobs']['cleanup-transports']['needs']),{'preflight','wasm','windows-editor','windows-cli','build','native-e2e','browser-e2e','msix-install','virtual-print','release'})
+    def test_windows_components_build_in_parallel_and_full_mode_only(self):
+        for name in ('windows-editor','windows-cli'):
+            with self.subTest(name=name):
+                self.assertIn(name,self.w['jobs'],'Missing independent Windows producer')
+                job=self.w['jobs'][name]
+                self.assertEqual(set(job['needs']),{'preflight','wasm'})
+                self.assertEqual(job['runs-on'],'windows-2025')
+                self.assertTrue(guarded(job['if']))
+                self.assertIn("needs.preflight.outputs.mode == 'full'",job['if'])
+                self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
+                self.assertNotIn('continue-on-error',job)
+    def test_package_aggregator_waits_for_both_windows_components_without_serializing_browser(self):
+        self.assertEqual(set(self.w['jobs']['build']['needs']),{'preflight','wasm','windows-editor','windows-cli'})
+        needs=self.w['jobs']['browser-e2e']['needs']
+        self.assertEqual(set([needs] if isinstance(needs,str) else needs),{'wasm'})
+    def test_component_transports_are_bounded_before_upload_and_expire_in_one_day(self):
+        for job_name,prefix,cap in (('windows-editor','opengeul-editor-component',64),
+                                  ('windows-cli','opengeul-cli-component',32)):
+            with self.subTest(name=job_name):
+                self.assertIn(job_name,self.w['jobs'])
+                steps=self.w['jobs'][job_name]['steps']
+                uploads=[(i,s) for i,s in enumerate(steps) if s.get('uses','').startswith('actions/upload-artifact@')
+                         and s.get('with',{}).get('name')==prefix+'-${{ github.run_id }}']
+                self.assertEqual(len(uploads),1)
+                index,upload=uploads[0]
+                self.assertEqual(str(upload['with']['retention-days']),'1')
+                self.assertEqual(upload['with']['if-no-files-found'],'error')
+                self.assertNotIn('if',upload)
+                self.assertTrue(any(f'ci/evidence.py size --limit-mib {cap} ' in s.get('run','') for s in steps[:index]),
+                                'Component cap must be checked before uploading its transport')
+    def test_editor_produces_the_existing_bounded_native_fixture_transport(self):
+        jobs=self.w['jobs'];self.assertIn('windows-editor',jobs)
+        name='opengeul-e2e-inputs-${{ github.run_id }}'
+        producers=[job_name for job_name,job in jobs.items() for step in job.get('steps',[])
+                   if step.get('uses','').startswith('actions/upload-artifact@') and step.get('with',{}).get('name')==name]
+        self.assertEqual(producers,['windows-editor'])
+        steps=jobs['windows-editor']['steps'];index=next(i for i,s in enumerate(steps) if s.get('with',{}).get('name')==name)
+        self.assertEqual(str(steps[index]['with']['retention-days']),'1')
+        self.assertTrue(any('ci/evidence.py size --limit-mib 16 ' in s.get('run','') for s in steps[:index]))
     def test_cleanup_is_same_repo_nonfork_first_attempt_only(self):
         self.assertIn('cleanup-transports',self.w['jobs'])
         job=self.w['jobs']['cleanup-transports'];self.assertTrue(guarded(job['if']))

@@ -81,7 +81,42 @@ def verify_msix(path: Path) -> dict:
             raise ValueError('MSIX lacks the required Desktop VCLibs dependency for the bundled CLI')
     return {'unsigned':True, 'architecture':'x64', 'members':len(names), 'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
 
-def finish(output: Path, source: Path) -> None:
+def component_proof(source: Path, package: Path, required: bool) -> dict | None:
+    path = source/'.opengeul-windows-components.json'
+    if not path.exists() and not path.is_symlink():
+        if required: raise ValueError('Parallel packaging requires Windows component proof')
+        return None
+    from windows_components import read_json, identity
+    proof = read_json(path)
+    current = identity()
+    keys = {'formatVersion', *current, 'sourceContractSha256', 'components'}
+    if (set(proof) != keys or proof.get('formatVersion') != 1
+            or any(proof.get(key) != value for key, value in current.items())
+            or not re.fullmatch(r'[0-9a-f]{64}', str(proof.get('sourceContractSha256', '')))
+            or not isinstance(proof.get('components'), dict)
+            or set(proof['components']) != {'editor','cli'}):
+        raise ValueError('Windows component proof belongs to another source/run')
+    with zipfile.ZipFile(package) as archive:
+        members = {entry.filename.replace('\\','/'): entry for entry in archive.infolist() if not entry.is_dir()}
+        for role, runtime in (('editor','OpenGeul.exe'),('cli','Tools/rhwp.exe')):
+            record = proof['components'][role]
+            if (not isinstance(record, dict) or set(record) != {'artifactName','runAttempt','provenanceSha256','runtime','size','sha256'}
+                    or record.get('runtime') != runtime
+                    or record.get('artifactName') != f'opengeul-{role}-component-{current["runId"]}'
+                    or not isinstance(record.get('runAttempt'), str) or not re.fullmatch(r'[1-9][0-9]*', record['runAttempt'])
+                    or int(record['runAttempt']) > int(current['runAttempt'])
+                    or type(record.get('size')) is not int or record['size'] != members[runtime].file_size
+                    or any(not isinstance(record.get(key), str) or not re.fullmatch(r'[0-9a-f]{64}', record[key]) for key in ('provenanceSha256','sha256'))):
+                raise ValueError('Invalid Windows component runtime proof')
+            digest = hashlib.sha256()
+            with archive.open(members[runtime]) as stream:
+                for block in iter(lambda: stream.read(1024*1024), b''): digest.update(block)
+            if digest.hexdigest() != record['sha256']:
+                raise ValueError('Packaged runtime differs from its verified Windows component')
+    return proof
+
+
+def finish(output: Path, source: Path, *, require_components: bool = False) -> None:
     product = json.loads((ROOT/'config/product.json').read_text(encoding='utf-8'))
     packages = sorted(output.glob('*.msix'))
     if len(packages) != 1:
@@ -92,17 +127,19 @@ def finish(output: Path, source: Path) -> None:
                   upstream=json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8')),
                   sourceParity=json.loads((source/'.opengeul-overlay.json').read_text(encoding='utf-8')),
                   manualWindowsUx='not-verified', storeCertified=False)
+    proof = component_proof(source, packages[0], require_components)
+    if proof is not None: result['windowsComponents'] = proof
     (output/'provenance.json').write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
     (output/'SHA256SUMS.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in sorted(output.iterdir()) if p.is_file() and p.name!='SHA256SUMS.txt'),encoding='utf-8')
 
 def main():
     ap=argparse.ArgumentParser();sub=ap.add_subparsers(dest='cmd',required=True)
     p=sub.add_parser('verify');p.add_argument('package',type=Path)
-    p=sub.add_parser('finish');p.add_argument('output',type=Path);p.add_argument('source',type=Path)
+    p=sub.add_parser('finish');p.add_argument('output',type=Path);p.add_argument('source',type=Path);p.add_argument('--require-windows-components',action='store_true')
     sub.add_parser('authorize')
     a=ap.parse_args()
     if a.cmd=='verify':print(json.dumps(verify_msix(a.package),indent=2))
-    elif a.cmd=='finish':finish(a.output,a.source)
+    elif a.cmd=='finish':finish(a.output,a.source,require_components=a.require_windows_components)
     else:
         if not release_allowed(os.getenv('GITHUB_REPOSITORY',''),os.getenv('GITHUB_EVENT_NAME',''),os.getenv('GITHUB_REF','')):
             raise SystemExit('Release is not authorized for this repository/event/ref')
