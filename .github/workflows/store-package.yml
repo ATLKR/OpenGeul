@@ -1,86 +1,43 @@
-name: OpenGeul Store package
+name: OpenGeul read-only Store state
 'on':
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Existing successful OpenGeul release to repackage
-        type: string
-        required: true
-      verify_store_api:
-        description: Validate configured Store API credentials with an application GET only
-        type: boolean
-        required: true
-        default: false
 permissions:
   contents: read
-  actions: read
 concurrency:
-  group: opengeul-store
+  group: opengeul-store-state-observation
   cancel-in-progress: false
-env:
-  PYTHONUTF8: '1'
 jobs:
-  package:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main')
-    runs-on: windows-2022
-    timeout-minutes: 30
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        persist-credentials: false
-    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-      with:
-        python-version: '3.12'
-    - name: Check Store runtime preservation
-      shell: pwsh
-      run: python -m unittest discover -s tests -p test_store_package.py -v
-    - name: Verify successful release and repackage unchanged runtime with Store identity
-      id: package
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-        $makeappx = Get-ChildItem $sdk -Filter makeappx.exe -Recurse |
-          Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
-        if (-not $makeappx) { throw 'Windows SDK MakeAppx is missing.' }
-        python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Capture the actual Windows editor for the Store listing
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        python -m pip install -r e2e/requirements.txt
-        ./e2e/ensure-webview2.ps1
-        python e2e/store_screenshot.py --exe .work/store-payload/OpenGeul.exe --output store-output
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Save Store package for the first manual Partner Center upload
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-store-${{ github.run_id }}
-        path: store-output/*
-        retention-days: 1
-        if-no-files-found: error
-        compression-level: 9
-  verify-api:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.verify_store_api)
+  observe:
+    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/diagnostic/msix-manifest-38132094391')
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
+    - name: Read the existing main OAuth helper at its fixed source revision
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: 8cec8aca859584a204e981217077ab7e072e41ad
+        path: .store-auth-source
+        persist-credentials: false
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Validate OAuth credentials and GET the reserved Store application
+    - name: Check fixed GET scope and secret-free observation output
+      run: python e2e/store-state-observation.py --self-check
+    - name: Read only the approved Store application and existing submission
       env:
         STORE_APP_ID: ${{ vars.STORE_APP_ID }}
         STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
         STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
         STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: python scripts/check_store_api.py
+      run: python e2e/store-state-observation.py --output store-state-observation.json
+    - name: Preserve only the sanitized observation
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-store-state-${{ github.run_id }}
+        path: store-state-observation.json
+        retention-days: 1
+        if-no-files-found: warn
