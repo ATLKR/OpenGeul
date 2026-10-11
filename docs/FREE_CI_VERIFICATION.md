@@ -1,9 +1,9 @@
-# Free CI verification checkpoint — 2026-10-06
+# 무료 CI 검증 기록 — 2026-10-06
 
-The public/free-runner stage and bounded evidence changes were committed as `cf8e9987e85f4b9972430102c4403c850a832469`, preserving concurrent print activation changes from `7bccfcc`. Actual policy run [37435043657](https://github.com/ATLKR/OpenGeul/actions/runs/37435043657) passed 36 CI tests, 127 package/policy tests and six standalone Rust font-metadata tests. This is not a complete Windows, virtual-printer or release pass.
+이 문서는 2026-10-06 당시의 구현과 검증 기록입니다. 공개 저장소·무료 실행기 단계와 증거 크기 제한은 `cf8e9987e85f4b9972430102c4403c850a832469`로 커밋했고, 동시에 진행된 `7bccfcc`의 인쇄 활성화 변경을 유지했습니다. 실제 정책 실행 [37435043657](https://github.com/ATLKR/OpenGeul/actions/runs/37435043657)은 CI 테스트 36개, 패키지·정책 테스트 127개, 독립 Rust 글꼴 메타데이터 테스트 6개를 통과했습니다. 전체 Windows, 가상 프린터 또는 릴리스 검증을 통과했다는 뜻은 아닙니다.
 
-A follow-up source review found that the concurrent print-focus rewrite had removed `fill_print_output`, although `virtual_print.py` still imports it. A new preflight contract test proves the missing export before another expensive Windows build. Five native-boundary unit checks also pin stable filename/Save readiness, hidden or ambiguous controls, rejected output names and no second click after a dispatched input error. All six tests were observed failing on the missing-function source; restoring only the missing shell-save helper makes all six pass. The existing semantic preview changes are otherwise unchanged.
+후속 소스 검토에서 동시에 진행된 인쇄 포커스 수정이 `fill_print_output`을 제거했지만 `virtual_print.py`는 계속 가져오는 문제가 확인됐습니다. 새 사전 점검 계약 테스트는 비용이 큰 다음 Windows 빌드 전에 이 누락을 검출합니다. 네이티브 경계 단위 검사 5개는 안정적인 파일 이름·Save 준비 상태, 숨겨졌거나 모호한 컨트롤, 거부해야 할 출력 이름, 입력 오류가 전달된 뒤 두 번째 클릭을 하지 않는 조건도 고정합니다. 누락 함수가 있는 소스에서 6개 모두 실패하는 것을 확인했으며, 빠진 셸 저장 도우미만 복원한 뒤 모두 통과했습니다. 기존 인쇄 미리보기의 의미 기반 변경은 그대로 유지했습니다.
 
-Local final CI helper suite: 42 passed. The older hash-verified local source snapshot's 79 package/native helper tests also pass, but the newer complete package suite is only claimed from its actual GitHub run above. The new candidate requires fresh CI and all existing 62 editor UI plus 16 virtual-print gates; failure must continue to block release. No printing raster reference, comparison threshold, account budget, paid runner or signing secret was changed.
+당시 최종 로컬 CI 도우미 테스트는 42개가 통과했습니다. 해시를 확인한 이전 로컬 소스 스냅샷의 기존 패키지·네이티브 도우미 테스트 79개도 통과했습니다. 더 새로운 전체 패키지 테스트 결과는 위 실제 GitHub 실행의 근거만 사용합니다. 당시 새 후보에는 새 CI 실행과 기존 편집기 UI 62회·가상 인쇄 16개 검증이 모두 필요했고, 실패하면 계속 릴리스를 막아야 했습니다. 인쇄 래스터 기준, 비교 임계값, 계정 예산, 유료 실행기나 서명 비밀정보는 변경하지 않았습니다.
 
-Manual modes and storage caps are documented in FREE_CI.md. The repository owner still needs an appropriate Actions $0 stop-usage budget as the account-level backstop; these scripts do not read or set billing permissions.
+수동 모드와 저장 공간 상한은 FREE_CI.md에 설명합니다. 계정 차원의 보호 장치로 저장소 소유자가 적절한 Actions $0 사용 중지 예산을 설정해야 합니다. 이 스크립트는 청구 권한을 읽거나 설정하지 않습니다.

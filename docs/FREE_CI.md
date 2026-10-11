@@ -1,51 +1,51 @@
-# Free-only CI operating policy (2026-10-06)
+# 무료 CI 운영 정책 (2026-10-06)
 
-## What is and is not free
+## 무료 범위와 제외 범위
 
-GitHub documents standard GitHub-hosted runners in public repositories as free; larger runners are always charged. Splitting a paid job into steps does not make it free. This repository allows only `ubuntu-24.04`, `windows-2022`, and `windows-2025`, and places a public-repository predicate on every job before runner allocation. CI audits the explicit runner labels, static matrices, reviewed action commit pins, timeouts and one-day retention. Automatic Actions caches, custom images/snapshots, LFS and unreviewed service actions are not enabled.
+GitHub는 공개 저장소의 표준 GitHub 호스팅 실행기를 무료로 안내하며, 더 큰 실행기는 항상 과금합니다. 유료 작업을 여러 단계로 나눠도 무료가 되지 않습니다. 이 저장소는 `ubuntu-24.04`, `windows-2022`, `windows-2025`만 허용하고, 실행기를 배정하기 전에 모든 작업에 공개 저장소 조건을 적용합니다. CI는 명시적인 실행기 레이블, 정적 매트릭스, 검토된 액션 커밋 고정값, 시간 제한과 하루 보존 기간을 검사합니다. 자동 Actions 캐시, 사용자 지정 이미지·스냅샷, LFS와 검토하지 않은 서비스 액션은 활성화하지 않습니다.
 
-The account's billing state and other repositories are not inferable from this workflow. This audit is an accidental-drift check, not a security boundary against a writer who can change the policy too. It cannot guarantee the owner's entire account costs zero or retroactively remove accrued storage. Artifact/Packages storage and cache allowances need separate consideration.
+이 워크플로만으로 계정의 청구 상태나 다른 저장소의 상태를 알 수 없습니다. 이 검사는 우발적인 정책 변경을 막기 위한 것으로, 정책 자체를 바꿀 수 있는 작성자에 대한 보안 경계는 아닙니다. 소유자의 계정 전체 비용이 0이라고 보장하거나 이미 누적된 저장량을 소급 제거하지 못합니다. 산출물·Packages 저장 공간과 캐시 제공량은 별도로 고려해야 합니다.
 
-**Owner backstop:** in GitHub Billing and licensing > Budgets and alerts, create a repository-scoped Actions budget of **$0** and select **Stop usage when budget limit is reached** (not just email alerts). Check that the budget actually covers metered Actions storage; keep cache eviction limits at the included 10 GB, without opting into paid extra storage. This change does not read or change those account settings. A budget may block additional artifacts rather than permit an overage; do not work around that by enabling paid capacity.
+**소유자의 보호 장치:** GitHub Billing and licensing > Budgets and alerts에서 저장소 범위의 Actions 예산을 **$0**으로 만들고, 이메일 알림만 켜지 말고 **Stop usage when budget limit is reached**(한도 도달 시 사용 중지)를 선택하세요. 예산이 실제로 과금되는 Actions 저장 공간을 포함하는지 확인합니다. 캐시 제거 한도는 기본 제공 10 GB를 유지하고 유료 추가 저장 공간을 선택하지 않습니다. 이 변경은 계정 설정을 읽거나 바꾸지 않습니다. 예산 한도로 추가 산출물이 차단될 수 있으며, 이를 피하려고 유료 용량을 활성화하지 않습니다.
 
-Official references, checked 2026-10-06:
+2026-10-06에 확인한 공식 참고 자료:
 - https://docs.github.com/en/billing/concepts/product-billing/github-actions
 - https://docs.github.com/en/billing/how-tos/set-up-budgets
 - https://docs.github.com/en/actions/reference/limits
 - https://github.blog/changelog/2025-11-20-github-actions-cache-size-can-now-exceed-10-gb-per-repository/
 
-## Stages
+## 단계
 
-The Windows build workflow has explicit manual modes. `full` is the default. Pushes, tags, PRs and scheduled runs always use full mode; a PR cannot request a smaller gate through event inputs.
+Windows 빌드 워크플로는 명시적인 수동 모드를 제공합니다. 기본값은 `full`입니다. 푸시, 태그, PR과 예약 실행은 항상 전체 모드를 사용합니다. PR은 이벤트 입력으로 검증 범위를 줄일 수 없습니다.
 
-| Mode | Work performed | Publication |
+| 모드 | 수행 작업 | 게시 |
 | --- | --- | --- |
-| `checks` | Public/free policy audit, CI regression tests, package/policy tests | Never |
-| `engine` | Checks plus source-built WASM, frontend tests/build, all three browser E2E environments | Never |
-| `full` | Engine checks, Windows build, both Windows native E2E environments, both virtual printers, MSIX installation | Only after every required gate succeeds and the existing trusted repository/ref/event rule allows it |
+| `checks` | 공개·무료 정책 검사, CI 회귀 테스트, 패키지·정책 테스트 | 하지 않음 |
+| `engine` | 검사와 소스 빌드 WASM, 프런트엔드 테스트·빌드, 브라우저 E2E 환경 3종 | 하지 않음 |
+| `full` | 엔진 검사, Windows 빌드, Windows 네이티브 E2E 환경 2종, 가상 프린터 2종, MSIX 설치 | 모든 필수 검증이 성공하고 기존의 신뢰된 저장소·ref·이벤트 규칙이 허용할 때만 게시 |
 
-Preflight gates the source-built WASM. After preflight and WASM succeed, `windows-editor` and `windows-cli` compile in parallel on separate standard `windows-2025` runners, alongside all three browser E2E jobs. The `build` job joins both validated components and packages the payload without recompiling either runtime. A browser failure can arrive after Windows compilation starts and still blocks publication through the unchanged final release gates. This schedule overlaps work; it does not promise a shorter successful run or lower account-wide cost.
+사전 점검을 통과해야 소스 빌드 WASM을 실행합니다. 사전 점검과 WASM이 성공하면 `windows-editor`와 `windows-cli`가 별도의 표준 `windows-2025` 실행기에서 병렬 컴파일되며 브라우저 E2E 3개도 함께 실행됩니다. `build` 작업은 검증된 구성요소 둘을 결합해 실행 파일을 다시 컴파일하지 않고 패키지를 만듭니다. Windows 컴파일 시작 뒤 브라우저 실패가 발생해도 기존 최종 릴리스 검증에서 게시를 막습니다. 작업을 겹쳐 실행할 뿐, 성공 실행 시간이 줄거나 계정 전체 비용이 낮아진다고 보장하지 않습니다.
 
-The engine and Windows payload are each built once per full run and shared with downstream jobs from **that same run**. Native fixture transport no longer contains another copy of the browser frontend. Native and virtual-print matrices each use at most two standard runners; all three browsers remain enabled. No old diagnostic binary substitutes for a final-candidate build.
+엔진과 Windows 패키지 내용물은 전체 실행마다 각각 한 번 빌드하고 **동일한 실행**의 후속 작업과 공유합니다. 네이티브 테스트 자료 중간 산출물에는 더 이상 브라우저 프런트엔드 사본을 넣지 않습니다. 네이티브·가상 인쇄 매트릭스는 각각 표준 실행기를 최대 2개 사용하며 브라우저 3종은 모두 유지합니다. 과거 진단 바이너리를 최종 후보 빌드 대신 사용하지 않습니다.
 
-PR updates cancel obsolete executions of the same PR. Main release runs keep the existing non-interrupting concurrency behavior, so publication is not cancelled halfway through an upload. Documents-only changes still avoid the heavy workflow. Logs and job summaries carry routine results rather than copying every successful screenshot.
+PR 업데이트는 같은 PR의 이전 실행을 취소합니다. main 릴리스 실행은 기존의 중단하지 않는 동시 실행 동작을 유지하므로 업로드 도중 게시가 취소되지 않습니다. 문서만 변경하면 무거운 워크플로를 실행하지 않습니다. 일반 결과는 성공한 스크린샷을 모두 복사하지 않고 로그와 작업 요약에 기록합니다.
 
-## Storage bounds
+## 저장 공간 상한
 
-Each evidence job stages its output separately: at most **1 MiB** on success or **12 MiB** on failure/cancellation, including its index. Root JSON/JUnit outcomes are retained first; failed-case evidence has priority. Oversized/unsupported files and all source documents, fonts and keys are excluded; omissions are recorded, not concealed. Failed test status is never changed by evidence packing. Failure traces are checked for fonts and expansion limits. Existing raw evidence is left in the runner's temporary workspace, not deleted from other runs.
+각 증거 작업은 출력을 별도로 준비합니다. 색인을 포함해 성공 시 최대 **1 MiB**, 실패·취소 시 최대 **12 MiB**입니다. 루트 JSON·JUnit 결과를 먼저 보존하고 실패 사례 증거를 우선합니다. 크기가 초과하거나 지원하지 않는 파일, 모든 원본 문서·글꼴·키는 제외하며 누락을 기록합니다. 증거를 묶으면서 실패한 테스트 상태를 바꾸지 않습니다. 실패 추적은 글꼴과 압축 해제 크기 제한을 확인합니다. 기존 원시 증거는 실행기의 임시 작업 공간에 남기며 다른 실행의 자료를 지우지 않습니다.
 
-Before upload, each transport directory has a file-size ceiling: rebuilt WASM 32 MiB, browser inputs 64 MiB, editor component 64 MiB, CLI component 32 MiB, Windows package outputs 96 MiB and native fixtures 16 MiB. The protocol 2 CLI component stores the runtime as deterministic gzip, so its 32 MiB limit covers the compressed runtime and metadata; the restored raw CLI and joined logical payload each remain bounded to 96 MiB. The join verifies the complete single gzip member, CRC/end of stream, raw size, SHA256 and x64 PE header. Exceeding a ceiling fails rather than silently uploading more. All uploads use compression level 9 and one-day retention. These are per-upload bounds, **not** an account-wide storage reservation; multiple runs and other repositories can share allowances. Only genuinely releasable binaries belong in GitHub Releases, not arbitrary cache files.
+업로드 전 각 중간 산출물 디렉터리의 크기를 제한합니다. 재빌드 WASM 32 MiB, 브라우저 입력 64 MiB, 편집기 구성요소 64 MiB, CLI 구성요소 32 MiB, Windows 패키지 출력 96 MiB, 네이티브 테스트 자료 16 MiB입니다. 프로토콜 2 CLI 구성요소는 실행 파일을 결정적인 gzip으로 저장하므로 32 MiB 제한은 압축 실행 파일과 메타데이터에 적용합니다. 복원된 원시 CLI와 결합한 논리적 패키지 내용물은 각각 96 MiB 이내여야 합니다. 결합 시 전체 단일 gzip 멤버, CRC·스트림 끝, 원시 크기, SHA256과 x64 PE 헤더를 검증합니다. 상한을 초과하면 더 많이 조용히 업로드하지 않고 실패합니다. 모든 업로드는 압축 수준 9와 하루 보존을 사용합니다. 이는 업로드별 상한이며 **계정 전체 저장 공간을 예약하거나 보장하지 않습니다**. 여러 실행과 다른 저장소가 제공량을 공유할 수 있습니다. GitHub Releases에는 실제 릴리스할 바이너리만 넣고 임의의 캐시 파일을 넣지 않습니다.
 
-Temporary transport cleanup is limited to the owned public repository's first-attempt run, a complete validated same-run artifact batch and successful required consumers. Failed runs retain their inputs, successful PRs retain their unpublished Windows package, and test evidence is never selected for cleanup. The cleanup verifies each selected artifact again before deletion and does not remove another run's artifacts or Release assets.
+임시 중간 산출물 정리는 소유한 공개 저장소의 첫 실행 시도, 완전히 검증된 동일 실행 산출물 묶음과 필수 소비 작업 성공으로 제한됩니다. 실패 실행은 입력을 보존하고, 성공 PR은 게시하지 않은 Windows 패키지를 보존하며, 테스트 증거는 정리 대상으로 선택하지 않습니다. 삭제 전에 선택한 각 산출물을 다시 검증하며 다른 실행의 산출물이나 Release 자산을 제거하지 않습니다.
 
-## Verification boundary
+## 검증 경계
 
-[Source run 64](https://github.com/ATLKR/OpenGeul/actions/runs/38167617349), attempt 1, completed successfully on `a51cb3547f9cbd8f090fb032f550810855feaed3`. All 14 required source jobs and transport cleanup succeeded. The [qualified development release](https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.2-dev.64.1) contains the six verified original assets, with 1,562-file MSIX/portable runtime parity. Both Windows versions passed 16 original native cases and eight password cases, with 41 recorded native runtime sessions per OS; all three browsers and both virtual-printer matrices passed. The 13 required WACK tests passed with optional Blocked executables findings retained; this is not complete WACK PASS or Microsoft Store certification. No physical-printer qualification is claimed. The Windows producer-to-package interval was 39 minutes 53 seconds; the full workflow interval was 54 minutes 15 seconds. These are observations for this exact run, not an account-wide cost or future-duration guarantee.
+[소스 실행 64](https://github.com/ATLKR/OpenGeul/actions/runs/38167617349)의 시도 1은 `a51cb3547f9cbd8f090fb032f550810855feaed3`에서 성공 완료됐습니다. 필수 소스 작업 14개와 중간 산출물 정리가 모두 성공했습니다. [검증된 개발 릴리스](https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.2-dev.64.1)에는 확인된 원본 자산 6개가 있고, MSIX·포터블 런타임 파일 1,562개 전체의 일치를 검증했습니다. 두 Windows 버전에서 기존 네이티브 16개와 암호 8개 사례가 통과했으며 OS별 네이티브 실행 세션 41개를 기록했습니다. 브라우저 3종과 가상 프린터 매트릭스 2종도 모두 통과했습니다. WACK 필수 테스트 13개는 통과했고 선택 항목 Blocked executables 결과는 유지했습니다. 완전한 WACK PASS나 Microsoft Store 인증을 뜻하지 않으며 물리 프린터 검증도 주장하지 않습니다. Windows 생산 작업부터 패키지까지의 구간은 39분 53초, 전체 워크플로는 54분 15초였습니다. 이 결과는 정확히 해당 실행의 관찰이며 계정 전체 비용이나 향후 실행 시간을 보장하지 않습니다. 새 후보 1.1.3의 성공 근거로 사용하지 않습니다.
 
-### Historical context (2026-10-06)
+### 과거 맥락 (2026-10-06)
 
-The previous run `37421054207` built and passed all browsers and MSIX installation, but failed virtual printing and one Windows2025 native test. That earlier run was not release-qualified. The native failure trace reached `plugin:dialog|message` after an invalid document opened: an unbound class/PID selector then waited on the replacement TaskDialog. The concurrent commit `7bccfcc` already freezes the original file picker HWND and validates its action button; that implementation is preserved. This update applies exact-window binding to error-dialog dismissal as well. It still waits for closure and separately tests the expected error message; there is no retry or bypass.
+이전 실행 `37421054207`은 빌드, 모든 브라우저와 MSIX 설치를 통과했지만 가상 인쇄와 Windows2025 네이티브 테스트 하나가 실패했습니다. 해당 실행은 릴리스 검증을 통과하지 못했습니다. 네이티브 실패 추적은 잘못된 문서를 연 뒤 `plugin:dialog|message`에 도달했습니다. 이후 창과 연결되지 않은 class/PID 선택기가 교체된 TaskDialog를 기다렸습니다. 동시에 반영된 `7bccfcc`는 이미 원래 파일 선택기 HWND를 고정하고 동작 버튼을 검증하며, 그 구현을 유지했습니다. 이 업데이트는 오류 대화상자 해제에도 정확한 창 연결을 적용했습니다. 여전히 창 닫힘을 기다리고 예상 오류 메시지를 별도 검사하며 재시도나 우회는 없습니다.
 
-Local verification uses a hash-verified earlier source snapshot for unchanged files plus these explicit changes: 36 new CI tests and four native selector tests pass, and that snapshot's existing 75 tests remain passing. This is not a claim that the newer branch's whole suite or physical printers passed locally. Fresh GitHub CI on the committed candidate is authoritative. No raster baseline or printing comparison threshold was changed.
+당시 로컬 검증은 변경하지 않은 파일에 대해 해시를 확인한 이전 소스 스냅샷과 명시적인 변경을 사용했습니다. 새 CI 테스트 36개, 네이티브 선택기 테스트 4개와 해당 스냅샷의 기존 테스트 75개가 통과했습니다. 더 새로운 브랜치의 전체 테스트나 물리 프린터가 로컬에서 통과했다는 주장은 아닙니다. 커밋된 후보의 새 GitHub CI 결과를 최종 근거로 사용합니다. 래스터 기준이나 인쇄 비교 임계값은 바꾸지 않았습니다.
 
-Integration note: the branch advanced from `0999cf2` to `7bccfcc` while preparing these changes. The latter commit's native picker and print activation changes are retained, not overwritten. This CI update is applied on top of that newer head; its policy result does not establish a successful full printing run.
+통합 기록: 이 변경을 준비하는 동안 브랜치가 `0999cf2`에서 `7bccfcc`로 진행됐습니다. 후자의 네이티브 파일 선택기·인쇄 활성화 변경을 덮어쓰지 않고 유지했습니다. 이 CI 업데이트는 더 새로운 HEAD 위에 적용했으며 정책 검사 결과만으로 전체 인쇄 실행 성공을 확인하지 않습니다.

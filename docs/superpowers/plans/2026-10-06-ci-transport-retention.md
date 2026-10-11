@@ -1,25 +1,29 @@
-# Free CI transport lifecycle implementation plan
+# 무료 CI 전송 아티팩트 수명주기 구현 계획
 
-> Execute inline using superpowers:executing-plans and test-driven-development.
+> 이 문서는 2026-10-06 작성 당시의 계획과 점검 상태를 보존한 기록입니다. 체크박스와 소스 경계는 당시 기준입니다.
+> 같은 세션에서 superpowers:executing-plans와 test-driven-development를 사용해 실행한다.
 
-**Goal:** reduce temporary Actions storage while keeping every release gate and failure diagnostic.
-**Architecture:** extend the existing checks/engine/full workflow. A final, standard-runner job validates all consumer results and removes only its own run's exact temporary transport artifacts. PR candidate binaries and evidence remain available; published release assets are never touched.
-**Tech stack:** Python standard library, strict YAML policy, GitHub Actions REST API.
-**Spec:** docs/FREE_CI.md and the user's request for free-only staged CI/CD.
+**목표:** 모든 릴리스 필수 검사와 실패 진단을 유지하면서 임시 Actions 저장 공간을 줄인다.
+**구조:** 기존 checks/engine/full 워크플로를 확장한다. 마지막 표준 실행기 작업이 모든 소비 작업의 결과를 검증하고 자기 실행의 정확한 임시 전송 아티팩트만 제거한다. PR 후보 바이너리와 증거는 계속 이용할 수 있도록 유지하며, 게시된 릴리스 자산은 건드리지 않는다.
+**기술 구성:** Python 표준 라이브러리, 엄격한 YAML 정책, GitHub Actions REST API.
+**사양:** docs/FREE_CI.md와 무료만 사용하는 단계별 CI/CD에 대한 사용자 요청.
 
-## Constraints and review focus
-- Only public ATLKR/OpenGeul, standard runners, no paid cache/custom image/LFS or billing changes.
-- No cleanup before all mode-required consumers and any eligible publication succeed.
-- Do not delete failed/cancelled runs, other runs, fork/Dependabot artifacts, unknown names, evidence or Releases.
-- Artifact IDs must come from a complete same-run API listing and be revalidated before deletion.
-- No account-wide zero-cost promise; owner-set $0 stop-usage budget is still required.
-- Preserve unrelated concurrent changes and print pixel expectations. Changes apply to PR6 at its verified current head.
+## 제약과 검토 중점
 
-## Tasks
-- [x] Reproduce audit accepting job-level continue-on-error; add a failing regression and reject it.
-- [x] Test exact success/mode/ownership predicates and no-delete negative cases before implementing cleanup.
-- [x] Add last-consumer cleanup job and engine-only upload suppression; retain all existing UI/print/MSIX release dependencies.
-- [ ] Re-run focused local tests, review the exact diff, push with expected head, and inspect fresh GitHub checks.
+- 공개 ATLKR/OpenGeul과 표준 실행기만 사용한다. 유료 캐시·사용자 지정 이미지·LFS를 사용하거나 청구 설정을 변경하지 않는다.
+- 모드에서 요구하는 모든 소비 작업과 게시가 가능한 경우의 게시 작업이 성공하기 전에는 정리하지 않는다.
+- 실패·취소된 실행, 다른 실행, 포크·Dependabot 아티팩트, 알 수 없는 이름, 증거 또는 Releases를 삭제하지 않는다.
+- 아티팩트 ID는 같은 실행의 완전한 API 목록에서 얻고, 삭제 직전에 다시 검증해야 한다.
+- 계정 전체 비용이 0이라고 보장하지 않는다. 소유자가 설정하는 $0 사용 중단 예산은 여전히 필요하다.
+- 관련 없는 동시 변경과 인쇄 픽셀 기대값을 보존한다. 변경은 검증된 당시 PR6 헤드에 적용한다.
 
-## Source boundary
-ci/policy.py and .github/workflows/msix.yml were materialized and their Git blob hashes match 134e7f5. Other local files originate from the hash-verified adcf128 snapshot; do not claim it is the complete latest repository. Latest full CI, not that older snapshot, is authoritative for full-suite results.
+## 작업
+
+- [x] 작업 수준 continue-on-error를 감사가 허용하는 문제를 재현하고, 실패하는 회귀 테스트를 추가한 뒤 이를 거부한다.
+- [x] 정리 구현 전에 정확한 성공·모드·소유권 조건과 삭제하지 않아야 하는 부정 사례를 테스트한다.
+- [x] 마지막 소비 작업 이후의 정리 작업과 engine 모드 전용 업로드 억제를 추가한다. 기존 UI·인쇄·MSIX 릴리스 의존성을 모두 유지한다.
+- [ ] 집중 로컬 테스트를 다시 실행하고 정확한 diff를 검토한다. 예상 헤드를 확인해 push한 뒤 새 GitHub 검사를 확인한다.
+
+## 소스 경계
+
+ci/policy.py와 .github/workflows/msix.yml을 로컬 파일로 구성했으며, 두 파일의 Git blob 해시는 134e7f5와 일치했다. 다른 로컬 파일은 해시를 검증한 adcf128 스냅샷에서 가져왔다. 이를 당시 최신 저장소 전체라고 주장하지 않는다. 전체 테스트 결과의 기준은 이 오래된 스냅샷이 아니라 당시 최신 전체 CI다.

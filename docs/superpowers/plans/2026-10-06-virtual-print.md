@@ -1,13 +1,15 @@
-# Virtual printer E2E implementation
+# 가상 프린터 E2E 구현
 
-Goal: test the real OpenGeul Print path on free standard Windows runners, not app PDF export.
+> 이 문서는 2026-10-06 당시의 구현 계획과 검증 지점입니다. 아래의 통과 수치는 당시 로컬 결과이며, 후속 후보의 인쇄나 전체 CI 통과를 뜻하지 않습니다.
 
-1. Inventory the built-in driver and inspect real modal UI on Windows 2022 and 2025.
-2. Build negative controls for missing/invisible/clipped content, blank/extra pages, wrong media and reference drift before implementing the corresponding oracle.
-3. Generate synthetic documents; own only a uniquely named Microsoft Print To PDF queue on PORTPROMPT:. Never change or use a default/hardware printer.
-4. Drive actual print dialogs, record spooler jobs and source immutability; configure the real per-job A4 media instead of inconsistent default DEVMODE fields.
-5. Gate release on two same-run virtual-printer jobs, preserving the existing 62 UI executions and MSIX install checks. Verify fresh-candidate CI before merge.
+목표: 앱의 PDF 내보내기가 아니라 실제 OpenGeul 인쇄 경로를 무료 표준 Windows 실행기에서 테스트한다.
 
-Ruling: the actual virtual driver outlines text; text extraction alone cannot validate it. Visually review the fixed synthetic A4 output and commit its exact visible-ink fingerprints. Candidate CI never captures/approves its own baseline. No raster tolerance or automatic flaky retry is used. The unit suite independently proves detection of missing/clipped/extra ink and wrong page dimensions.
+1. 기본 제공 드라이버를 조사하고 Windows 2022와 2025에서 실제 모달 UI를 확인한다.
+2. 대응하는 검증기를 구현하기 전에 누락·비표시·잘린 내용, 빈 페이지·추가 페이지, 잘못된 용지와 기준 변경에 대한 부정 대조군을 만든다.
+3. 합성 문서를 생성한다. PORTPROMPT:의 고유 이름을 가진 Microsoft Print To PDF 대기열만 소유한다. 기본·물리 프린터는 변경하거나 사용하지 않는다.
+4. 실제 인쇄 대화상자를 조작하고 스풀러 작업과 원본 불변성을 기록한다. 일관되지 않은 기본 DEVMODE 필드 대신 작업별 실제 A4 용지를 설정한다.
+5. 같은 실행의 가상 프린터 작업 2개를 릴리스 필수 검사로 요구하면서 기존 UI 실행 62개와 MSIX 설치 검사를 유지한다. 병합 전에 새 후보 CI를 확인한다.
 
-Current checkpoint: reference pages reviewed; 23 PDF/raster unit tests and 75 policy tests pass locally. Native Windows 2025 preview activation is being verified separately. These results do not substitute for final-candidate printing or full CI.
+검토 판단: 실제 가상 드라이버는 텍스트를 윤곽선으로 출력하므로 텍스트 추출만으로는 검증할 수 없다. 고정된 합성 A4 출력을 시각적으로 검토하고 정확한 가시 잉크 지문을 커밋한다. 후보 CI가 자기 기준을 수집하거나 승인해서는 안 된다. 래스터 허용 오차나 자동 불안정 테스트 재시도를 사용하지 않는다. 단위 테스트 묶음은 잉크 누락·잘림·추가와 잘못된 페이지 크기를 검출함을 독립적으로 증명한다.
+
+당시 검증 지점: 기준 페이지를 검토했고 PDF·래스터 단위 테스트 23개와 정책 테스트 75개가 로컬에서 통과했다. 네이티브 Windows 2025 미리보기 활성화는 별도로 검증 중이었다. 이 결과는 최종 후보 인쇄나 전체 CI를 대신하지 않는다.

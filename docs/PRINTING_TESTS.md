@@ -1,37 +1,39 @@
-# Virtual printer verification
+# 가상 프린터 검증
 
-## Actual path
+> 이 문서는 2026-10-06 보강 시점의 테스트 경로, 기준과 증거를 기록합니다. 아래에서 설명하는 구현과 로컬 검증은 당시 상태이며, 후속 후보 릴리스의 통과를 뜻하지 않습니다.
 
-The unchanged production Windows app opens its normal Print UI. The test selects its own uniquely named Microsoft Print To PDF queue in the real system dialog, selects A4 portrait in the driver's Preferences/Advanced controls, supplies an output path, verifies the retained spooler job, and independently renders the resulting PDF with PDFium. App PDF export, CDP PrintToPDF, mocked callbacks and canned spool files are not substitutes.
+## 실제 실행 경로
 
-Eight scenarios per Windows image: HWP; HWPX; tables with negative, zero and positive line spacing; two-page output; page-2-only selection; cancellation with no output and a still-editable document. Inputs are synthetic, with no customer corpus or font files. Existing 62 editor UI executions and MSIX installation gates remain required independently.
+변경하지 않은 프로덕션 Windows 앱이 일반 인쇄 UI를 연다. 테스트는 실제 시스템 대화상자에서 테스트가 소유한 고유 이름의 Microsoft Print To PDF 대기열을 선택하고, 드라이버의 Preferences/Advanced 컨트롤에서 A4 세로 방향을 선택한다. 출력 경로를 입력하고 보존된 스풀러 작업을 확인한 뒤, 생성된 PDF를 PDFium으로 독립적으로 렌더링한다. 앱 PDF 내보내기, CDP PrintToPDF, 모의 콜백과 미리 만든 스풀 파일은 이 경로를 대신할 수 없다.
 
-## Media and visible-ink checks
+Windows 이미지마다 시나리오 8개를 실행한다. HWP, HWPX, 음수·0·양수 줄 간격의 표, 2페이지 출력, 2페이지 전용 선택, 출력이 없고 문서를 계속 편집할 수 있어야 하는 취소다. 입력은 합성 문서이며 고객 문서 모음이나 글꼴 파일은 포함하지 않는다. 기존 편집기 UI 실행 62개와 MSIX 설치 필수 검사는 별도로 계속 요구한다.
 
-A4 is selected explicitly and PDF page dimensions must match. Simply setting queue PaperSize=9 proved insufficient because other DEVMODE fields still described Letter. No default printer or global driver preferences are modified.
+## 용지와 가시 잉크 검사
 
-The observed Microsoft PDF driver output outlines glyphs, so its text extraction is empty. The live printer test therefore uses fixed, visually reviewed visible-ink fingerprints rather than claiming printed PDFs are searchable. Each full page is rasterized at 216 DPI with PDFium, thresholded at 160, and compared exactly with the committed dimensions, ink count, bounding box and SHA-256 mask. A changed pixel fails; CI never regenerates or approves its own reference. Actual page PNGs and mismatch metrics are retained for diagnosis. Searchable-PDF checks remain separate unit controls.
+A4를 명시적으로 선택하며 PDF 페이지 크기가 일치해야 한다. 대기열의 PaperSize=9만 설정하는 것은 충분하지 않았다. 다른 DEVMODE 필드가 여전히 Letter를 나타냈기 때문이다. 기본 프린터나 전역 드라이버 환경 설정은 변경하지 않는다.
 
-The initial reference records eight reviewed A4 pages from run 37415109909, Windows 2022 artifact 11389924227, built from PR4 product commit 0aedc704fe75b996bfa86f666f23e4297071de83. All five table rows, final descenders, Korean/Latin basic text, page markers and page-range output were visually checked. It is a narrow visual regression baseline, not a Hancom-certified layout oracle. Intentional compressed inter-line spacing remains compressed. Driver, PDFium or installed-font changes can legitimately require an explicit baseline review; do not silently loosen or regenerate expectations to make CI green.
+관찰한 Microsoft PDF 드라이버 출력은 글리프를 윤곽선으로 만들므로 텍스트 추출 결과가 비어 있다. 따라서 실제 프린터 테스트는 인쇄된 PDF가 검색 가능하다고 주장하는 대신, 고정되고 시각적으로 검토된 가시 잉크 지문을 사용한다. 각 전체 페이지를 PDFium으로 216 DPI에서 래스터화하고 임계값 160을 적용한 뒤, 커밋된 크기·잉크 수·경계 상자·SHA-256 마스크와 정확히 비교한다. 픽셀 하나라도 바뀌면 실패하며, CI가 자기 기준을 다시 생성하거나 승인하지 않는다. 진단을 위해 실제 페이지 PNG와 불일치 지표를 보존한다. 검색 가능한 PDF 검사는 별도의 단위 대조군으로 유지한다.
 
-## Safety and evidence
+초기 기준은 실행 37415109909의 Windows 2022 아티팩트 11389924227에서 검토한 A4 페이지 8개를 기록한다. 빌드의 PR4 제품 커밋은 0aedc704fe75b996bfa86f666f23e4297071de83다. 표의 5개 행 전체, 마지막 글자의 아래로 내려오는 획, 한국어·라틴 기본 텍스트, 페이지 표식과 페이지 범위 출력을 시각적으로 확인했다. 이는 범위가 좁은 시각적 회귀 기준이며 한컴이 인증한 레이아웃 검증기가 아니다. 의도적으로 압축된 줄 사이 간격은 그대로 압축된 상태를 유지한다. 드라이버·PDFium·설치된 글꼴이 바뀌면 명시적인 기준 재검토가 필요할 수 있다. CI를 통과시키려고 기대값을 조용히 완화하거나 다시 생성하지 않는다.
 
-Only disposable GitHub-hosted Windows runners are accepted. The test creates a random OpenGeul-CI queue using Microsoft's existing local driver and PORTPROMPT:, validates its exact name/driver/port, and removes only its own jobs and queue. No physical/network printer is selected. No external driver, paid larger runner, additional signing key, font binary or user document is needed.
+## 안전성과 증거
 
-Evidence includes synthetic printer PDFs, page PNGs, requested and actual media, spooler job metadata, source/binary hashes, dialog screenshots, JSON and JUnit. Retention is one day. No spool files or font files are uploaded.
+일회용 GitHub 호스팅 Windows 실행기만 허용한다. 테스트는 Microsoft의 기존 로컬 드라이버와 PORTPROMPT:를 사용해 무작위 OpenGeul-CI 대기열을 만든다. 정확한 이름·드라이버·포트를 검증하고, 자기 작업과 대기열만 제거한다. 물리·네트워크 프린터는 선택하지 않는다. 외부 드라이버, 유료 대형 실행기, 추가 서명 키, 글꼴 바이너리나 사용자 문서는 필요하지 않다.
 
-## Build provenance and limits
+증거에는 합성 프린터 PDF, 페이지 PNG, 요청한 용지와 실제 용지, 스풀러 작업 메타데이터, 소스·바이너리 해시, 대화상자 스크린샷, JSON과 JUnit이 포함된다. 보관 기간은 하루다. 스풀 파일이나 글꼴 파일은 업로드하지 않는다.
 
-Early print-probe jobs reuse the exact PR4 binary from run 37404480348 to investigate the harness. These are not fresh final-candidate build evidence. The integrated virtual-print jobs consume artifacts from their own workflow run, verify the package payload, and block release on failure. PRs cannot publish.
+## 빌드 출처와 한계
 
-Passing these tests does not certify physical paper feed, hardware duplex, ink/toner, color calibration, vendor PCL/PostScript or firmware, arbitrary documents or the original HOP reporters' documents. Store/WACK and trusted signing are still separate.
+초기 인쇄 진단 작업은 테스트 자동화를 조사하기 위해 실행 37404480348의 정확한 PR4 바이너리를 재사용했다. 이는 새 최종 후보 빌드의 증거가 아니다. 통합 가상 인쇄 작업은 자기 워크플로 실행의 아티팩트를 사용하고 패키지 페이로드를 검증하며, 실패하면 릴리스를 차단한다. PR은 게시할 수 없다.
 
-## October 6 hardening
+이 테스트의 통과는 물리 용지 공급, 하드웨어 양면 인쇄, 잉크·토너, 색 보정, 업체별 PCL/PostScript나 펌웨어, 임의의 문서 또는 원래 HOP 제보자의 문서를 인증하지 않는다. Store/WACK와 신뢰할 수 있는 서명도 별도 검증이다.
 
-The preview accelerator was unreliable on Windows 2025 even when the UI was visible. Diagnostic run 37418948716 observed that the actual `Print using system dialog` control works with normal on-demand accessibility on both images: it is a Button on the older runtime and a Hyperlink on the newer one. The test now observes the owned Print/RootView subtree, requires one visible enabled action with its exact accessible name and owned process, then physically clicks once. Transient accessibility elements are re-observed before the click, never retried after a possibly completed action. No force-accessibility flag, hidden app API, keyboard focus guessing or relaxed PDF reference is introduced.
+## 10월 6일 보강
 
-A spooler entry alone is no longer success. The exact owned document job must reach PRINTED without error or active flags, have the expected completed page counts and actual A4 portrait DEVMODE. Zero/unknown counts fail for this specifically verified Microsoft driver. Foreign, duplicate, paused, pending, wrong-document and wrong-media jobs cannot pass. All eight required scenario names must occur exactly once. On failures/cancellation the original file hash is still recorded and checked; modal app teardown precedes deletion of its owned queue.
+Windows 2025에서는 UI가 보여도 미리보기 단축키가 불안정했다. 진단 실행 37418948716에서 실제 `Print using system dialog` 컨트롤이 두 이미지 모두 일반적인 필요 시 접근성 조회로 작동함을 확인했다. 이전 런타임에서는 Button, 더 새로운 런타임에서는 Hyperlink 역할이었다. 보강된 테스트는 테스트 소유 Print/RootView 하위 트리를 관찰한다. 정확한 접근성 이름과 소유 프로세스가 일치하고 보이며 활성화된 동작이 하나만 있어야 하며, 이를 물리적으로 한 번 클릭한다. 일시적인 접근성 요소는 클릭 전에 다시 관찰하되 이미 동작이 완료됐을 수 있는 시점에는 재시도하지 않는다. 강제 접근성 플래그, 숨겨진 앱 API, 키보드 포커스 추측이나 PDF 기준 완화는 추가하지 않았다.
 
-Before launching an E2E runtime, checksum entries must cover every downloaded artifact exactly once. All runtime files in portable ZIP and MSIX must match, including DLLs, assets and notices, not only the two executables. Duplicate/case-aliased paths, path traversal, Windows device names/alternate streams, symbolic links, excessive expansion and missing resources fail before extraction. Extraction is staged and committed only after verification, never into an existing runtime. This proves payload identity, not authorship or a trusted signature; same-run artifact provenance remains required.
+보강 이후에는 스풀러 항목만으로 성공으로 판정하지 않는다. 정확한 테스트 소유 문서 작업이 오류·진행 중 플래그 없이 PRINTED에 도달하고, 예상 완료 페이지 수와 실제 A4 세로 방향 DEVMODE를 가져야 한다. 구체적으로 검증된 이 Microsoft 드라이버에서는 0이나 알 수 없는 수가 나오면 실패한다. 다른 작업, 중복 작업, 일시 중지·대기 중인 작업, 문서·용지가 다른 작업은 통과할 수 없다. 필수 시나리오 이름 8개가 각각 정확히 한 번 있어야 한다. 실패·취소 시에도 원본 파일 해시를 기록하고 확인한다. 소유 대기열을 삭제하기 전에 모달이 열린 앱을 종료한다.
 
-Evidence at the local checkpoint: policy tests 121 passed, independent PDF/raster tests 23 passed. Against the recorded PR4 artifact 11387902336, all 1,432 runtime files matched and retained the known editor SHA-256. The semantic-action diagnostic proved both system dialogs, not yet all printer scenarios. Final-candidate native printing and complete CI remain separate mandatory evidence; this document does not mark them successful in advance.
+E2E 런타임을 실행하기 전에 체크섬 항목이 다운로드한 모든 아티팩트를 정확히 한 번씩 포함해야 한다. portable ZIP과 MSIX의 모든 런타임 파일이 일치해야 한다. 실행 파일 두 개뿐 아니라 DLL, 자산과 고지도 포함한다. 중복·대소문자만 다른 경로, 경로 이탈, Windows 장치 이름·대체 스트림, 심볼릭 링크, 과도한 압축 확장과 누락된 자원은 압축 해제 전에 실패한다. 압축 해제는 단계적으로 수행하고 검증 후에만 반영하며 기존 런타임에 덮어쓰지 않는다. 이는 페이로드 동일성을 증명하지만 작성 주체나 신뢰할 수 있는 서명을 증명하지는 않는다. 같은 실행의 아티팩트 출처 정보는 여전히 필요하다.
+
+당시 로컬 검증 지점의 증거: 정책 테스트 121개, 독립적인 PDF·래스터 테스트 23개가 통과했다. 기록된 PR4 아티팩트 11387902336에서 런타임 파일 1,432개가 모두 일치했고 알려진 편집기 SHA-256을 유지했다. 의미가 일치하는 실제 UI 동작의 진단은 두 시스템 대화상자를 증명했으며, 아직 모든 프린터 시나리오를 증명한 것은 아니었다. 최종 후보 네이티브 인쇄와 전체 CI는 별도의 필수 증거다. 이 문서는 이들이 성공했다고 미리 선언하지 않는다.

@@ -1,25 +1,25 @@
-# Print hardening checkpoint — 2026-10-06
+# 인쇄 보강 검증 지점 — 2026-10-06
 
-This checkpoint records test automation changes, not a product release or blanket printing compatibility claim.
+이 기록은 2026-10-06 당시 테스트 자동화 변경을 정리한 것이다. 제품 릴리스나 포괄적인 인쇄 호환성 주장이 아니다. 아래의 구현·실패·대기·PR 상태는 모두 당시 기준이다.
 
-## Implemented
+## 구현한 내용
 
-- Replace the unreliable Ctrl+Shift+P preview accelerator with one physical click of the exact visible/enabled system-print action inside the owned Print/RootView accessibility window. Both the older Button and newer Hyperlink roles are supported. No force-accessibility flag, security downgrade or app-specific hook is added.
-- Maximize the actual app window before printing: failed multipage screenshots showed the preview footer outside the hosted runner's 1024x768 work area. Final verification of this adjustment is pending.
-- Require the exact scenario's retained spooler job to be PRINTED, with no textual/error/active status, matching one/two-page completion counts and actual A4 portrait media. Pending and queued are not success.
-- Validate all eight scenario names exactly once, preserve source hashes even on failure/cancellation, capture failures before app teardown, and close the app before deleting its owned queue.
-- Require complete artifact checksum coverage and full MSIX/portable runtime equality, including DLLs/assets/notices. Reject duplicates, Windows path aliases, special/symlink entries, path traversal, expansion limits and mismatched resources before staged extraction; never overwrite an existing runtime.
+- 불안정한 미리보기 단축키 Ctrl+Shift+P를 테스트 소유 Print/RootView 접근성 창 안의 정확하고 보이며 활성화된 시스템 인쇄 동작을 한 번 물리적으로 클릭하는 방식으로 교체했다. 이전 Button 역할과 더 새로운 Hyperlink 역할을 모두 지원한다. 강제 접근성 플래그, 보안 수준 하향이나 앱 전용 연결점은 추가하지 않았다.
+- 인쇄 전에 실제 앱 창을 최대화했다. 실패한 여러 페이지 스크린샷에서 미리보기 아래쪽 컨트롤이 호스팅 실행기의 1024x768 작업 영역 밖에 있었다. 이 조정의 최종 검증은 당시 대기 중이었다.
+- 정확한 시나리오의 보존된 스풀러 작업이 텍스트·오류·진행 중 상태 없이 PRINTED여야 하며, 완료된 1·2페이지 수와 실제 A4 세로 용지가 일치해야 한다. 대기 중이거나 대기열에 들어간 상태는 성공이 아니다.
+- 시나리오 이름 8개가 각각 정확히 한 번 있는지 확인한다. 실패·취소 시에도 소스 해시를 보존하고, 앱 종료 전에 실패 증거를 수집하며, 소유 대기열 삭제 전에 앱을 닫는다.
+- 아티팩트 체크섬이 전체를 포함해야 하고 MSIX·portable 런타임 전체가 같아야 한다. DLL·자산·고지도 포함한다. 단계적 압축 해제 전에 중복, Windows 경로 별칭, 특수·심볼릭 링크 항목, 경로 이탈, 압축 확장 제한 초과와 자원 불일치를 거부한다. 기존 런타임을 덮어쓰지 않는다.
 
-## Verified evidence
+## 검증한 증거
 
-- Local policy suite: 121 passed. Independent PDF/raster unit suite: 23 passed. New regression coverage was observed RED before implementation; removing the textual-status check makes its negative control fail.
-- Real package artifact 11387902336 from PR4 run 37404480348: 1,432 runtime files match, editor SHA-256 375a067e7d0ecdbb16c8efbd16760335172849003b7584218adc00b668c818ce, runtime manifest SHA-256 37c702879d315e8c9248e653ce88a236c30556d6c1c69442ae059d7f1baea48b. The strengthened verifier also completed on both diagnostic Windows jobs.
-- Run 37418948716 proved the real system-dialog action works with ordinary on-demand accessibility on both Windows images. This inspected the UI; it did not print.
-- Run 37420165987 at 8f37bdf used that prior PR4 binary, not a newly built candidate. Windows2025 completed five of eight full printer scenarios, including HWP/HWPX and negative/positive-spacing tables, against unchanged reference fingerprints. The earlier all-eight system-dialog failure no longer occurs. However two multipage/range cases encountered inaccessible preview controls, and the zero-spacing reference comparison failed.
-- In the same run Windows2022 completed actual spooler printing and media checks for six output cases, but their exact rasters differed from the reference; multipage encountered a dialog timeout. Cancellation passed. This is NOT an all-green run.
+- 로컬 정책 테스트 121개가 통과했다. 독립적인 PDF·래스터 단위 테스트 23개가 통과했다. 새 회귀 검사는 구현 전에 RED를 확인했으며, 텍스트 상태 검사를 제거하면 부정 대조군이 실패한다.
+- PR4 실행 37404480348의 실제 패키지 아티팩트 11387902336: 런타임 파일 1,432개 일치, 편집기 SHA-256 375a067e7d0ecdbb16c8efbd16760335172849003b7584218adc00b668c818ce, 런타임 매니페스트 SHA-256 37c702879d315e8c9248e653ce88a236c30556d6c1c69442ae059d7f1baea48b. 강화된 검증기는 두 진단 Windows 작업에서도 완료됐다.
+- 실행 37418948716은 두 Windows 이미지 모두에서 일반적인 필요 시 접근성 조회로 실제 시스템 대화상자 동작이 작동함을 증명했다. 이 실행은 UI를 확인했으며 인쇄하지 않았다.
+- 8f37bdf의 실행 37420165987은 새로 빌드한 후보가 아니라 이전 PR4 바이너리를 사용했다. Windows2025는 변경하지 않은 기준 지문에 대해 전체 프린터 시나리오 8개 중 5개를 완료했다. HWP/HWPX와 음수·양수 간격 표가 포함됐다. 이전에 8개 모두에서 발생했던 시스템 대화상자 실패는 더 이상 발생하지 않았다. 그러나 여러 페이지·범위 사례 2개는 미리보기 컨트롤에 접근하지 못했고, 0 간격 기준 비교는 실패했다.
+- 같은 실행의 Windows2022는 출력 사례 6개에서 실제 스풀러 인쇄와 용지 검사를 완료했지만 정확한 래스터가 기준과 달랐다. 여러 페이지 사례는 대화상자 시간 초과가 발생했다. 취소는 통과했다. 이 실행은 전체 통과가 아니다.
 
-## Failures deliberately preserved
+## 의도적으로 보존한 실패
 
-Windows2022 raster bounds showed shifted/scaled output, despite correct A4 job media. Windows2025's zero-spacing case differed at eight thresholded pixels (gray levels 154/155 vs 160/161) while dimensions and bounds matched. These are observations, not a proven cause or permission to replace references. No tolerance, baseline acceptance or skipped gate was introduced to hide them. The display-size adjustment is running separately in the diagnostic branch; all final-candidate same-run Windows/print checks remain required before merge.
+Windows2022 래스터 경계는 작업의 A4 용지가 정확했는데도 출력이 이동·확대 또는 축소됐음을 보여 줬다. Windows2025의 0 간격 사례는 크기와 경계가 같았지만 임계값을 적용한 픽셀 8개에서 차이가 있었다(회색 수준 154/155 대 160/161). 이는 관찰 결과이며, 입증된 원인이나 기준 교체 허가는 아니다. 이를 감추기 위한 허용 오차, 기준 수용이나 필수 검사 건너뛰기는 추가하지 않았다. 당시 표시 크기 조정은 진단 브랜치에서 별도로 실행 중이었다. 병합 전에 같은 실행의 최종 후보 Windows·인쇄 검사를 모두 통과해야 한다는 요구는 유지했다.
 
-The diagnostic workflow is isolated in work/print-accessibility-check and is NOT part of PR6 or the release path. PR6 remains draft. Hardware behavior, arbitrary documents, the original HOP report documents, trusted signing and Store/WACK are still outside the evidence above.
+진단 워크플로는 work/print-accessibility-check에 격리했으며 PR6이나 릴리스 경로에 포함하지 않았다. 당시 PR6은 초안 상태였다. 하드웨어 동작, 임의 문서, 원래 HOP 제보 문서, 신뢰할 수 있는 서명과 Store/WACK는 위 증거의 범위 밖이다.
