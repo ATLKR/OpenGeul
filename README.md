@@ -16,6 +16,8 @@ The interface is Korean. The desktop GUI does not open password-protected docume
 
 Outputs: unsigned MSIX, unsigned portable ZIP, SHA-256 checksums, source/package provenance and CLI help. An unsigned MSIX is **not** a trusted double-click installer. Portable ZIP users need the installed Microsoft Edge WebView2 Runtime. Respect Windows and company security policy; do not disable protection.
 
+Running `Tools/rhwp.exe` from the portable ZIP requires the latest [Microsoft Visual C++ v14 Redistributable (x64)](https://aka.ms/vc14/vc_redist.x64.exe).
+
 ## Fonts
 
 No third-party font programs are bundled. Installed Windows/user fonts are used; **글꼴 도움말** opens official Noto download pages and Windows font settings. The app never silently installs fonts or extracts another product's fonts. See [font policy](docs/FONTS.md). Font substitution may change line/page layout; keep originals. PDF metadata checks are a safeguard, not a legal audit.
