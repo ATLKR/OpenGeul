@@ -1,6 +1,8 @@
 import json
 import hashlib
 import os
+import stat
+import struct
 from pathlib import Path
 import sys
 import tempfile
@@ -9,6 +11,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
 
 class ReleaseKitTests(unittest.TestCase):
     def api(self):
@@ -65,6 +68,65 @@ class ReleaseKitTests(unittest.TestCase):
             with zipfile.ZipFile(p,'w') as z:z.writestr('../escape','oops')
             with self.assertRaises(ValueError):k.verify_msix(p)
         with self.assertRaises(ValueError):k.pe_machine(b'MZnot really a binary')
+
+    def _msix(self, path, extra=()):
+        from buildkit import manifest, DEV_IDENTITY
+        pe=bytearray(256);pe[:2]=b'MZ';struct.pack_into('<I',pe,60,128)
+        pe[128:132]=b'PE\0\0';struct.pack_into('<H',pe,132,0x8664)
+        files={'AppxManifest.xml':manifest(DEV_IDENTITY,'1.1.2'),
+               'OpenGeul.exe':bytes(pe),'Tools/rhwp.exe':bytes(pe),
+               '[Content_Types].xml':'<Types/>','AppxBlockMap.xml':'<BlockMap/>',
+               'Notices/OpenGeul-LICENSE.txt':'MIT'}
+        with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_DEFLATED) as archive:
+            for name,data in files.items():archive.writestr(name,data)
+            for name,data in extra:archive.writestr(name,bytes(pe) if data is None else data)
+
+    def _reject_before_member_read(self, path):
+        opened=[];original=zipfile.ZipFile.open
+        def observed(archive, member, *args, **kwargs):
+            opened.append(member.filename if isinstance(member,zipfile.ZipInfo) else member)
+            return original(archive,member,*args,**kwargs)
+        with patch.object(zipfile.ZipFile,'open',observed),self.assertRaises(ValueError):
+            self.api().verify_msix(path)
+        self.assertEqual(opened,[], 'Unsafe ZIP metadata must be rejected before any member read')
+
+    def test_msix_rejects_case_and_separator_aliases_before_member_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'aliases.msix'
+            for alias in ('tools/rhwp.exe','Tools\\rhwp.exe'):
+                with self.subTest(alias=alias):
+                    self._msix(path,[(alias,None)])
+                    self._reject_before_member_read(path)
+
+    def test_msix_expansion_caps_precede_member_reads(self):
+        from prepare_payload import MAX_FILE, MAX_UNCOMPRESSED, MAX_MEMBERS
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'expanded.msix'
+            for size in (MAX_FILE+1,MAX_UNCOMPRESSED+1):
+                with self.subTest(declaredSize=size):
+                    self._msix(path)
+                    data=bytearray(path.read_bytes());position=0
+                    while True:
+                        offset=data.find(b'PK\x01\x02',position)
+                        if offset<0:break
+                        name,extra,comment=struct.unpack_from('<HHH',data,offset+28)
+                        if data[offset+46:offset+46+name]==b'AppxManifest.xml':
+                            struct.pack_into('<I',data,offset+24,size)
+                        position=offset+46+name+extra+comment
+                    path.write_bytes(data)
+                    self._reject_before_member_read(path)
+            self._msix(path,[(f'extra/{number}.txt',b'') for number in range(MAX_MEMBERS-5)])
+            self._reject_before_member_read(path)
+
+    def test_msix_unsafe_and_special_members_precede_member_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'unsafe.msix'
+            special=zipfile.ZipInfo('extra/link.txt');special.create_system=3
+            special.external_attr=(stat.S_IFLNK|0o777)<<16
+            for member in ('../escape.txt','extra/./dot.txt','CON.txt',special):
+                with self.subTest(member=member.filename if isinstance(member,zipfile.ZipInfo) else member):
+                    self._msix(path,[(member,b'unsafe')])
+                    self._reject_before_member_read(path)
 
     def test_payload_allows_only_reviewed_cli_path(self):
         self.api()

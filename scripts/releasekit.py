@@ -7,9 +7,11 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import struct
+import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from buildkit import ROOT, FONT_EXTENSIONS, SECRET_EXTENSIONS, VCLIBS_DEPENDENCY, package_version
+sys.path.insert(0, str(ROOT/'e2e'))
 
 REPOSITORY = 'ATLKR/OpenGeul'
 
@@ -41,8 +43,10 @@ def pe_machine(header: bytes) -> int:
     return machine
 
 def verify_msix(path: Path) -> dict:
+    from prepare_payload import inventory
     required = {'OpenGeul.exe', 'Tools/rhwp.exe', 'AppxManifest.xml', 'AppxBlockMap.xml', '[Content_Types].xml', 'Notices/OpenGeul-LICENSE.txt'}
     with zipfile.ZipFile(path) as archive:
+        inventory(archive)  # Bound expansion and reject unsafe aliases/specials before any member read.
         names = archive.namelist()
         if len(names) != len(set(names)):
             raise ValueError('Duplicate package members')
