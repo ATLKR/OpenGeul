@@ -1,15 +1,17 @@
 # Store packaging
 
-Run **Actions → OpenGeul Store package → Run workflow** on `main` and select an
-existing release tag that contains the current runtime and notice fixes and has
-passed its full source workflow. Older releases do not gain these fixes through
-Store repackaging.
+Dispatch `.github/workflows/store-package.yml` on `main` through the GitHub API
+(for example, `gh workflow run store-package.yml --ref main -f release_tag=<tag>`).
+Select an existing release tag that contains the current runtime and notice fixes
+and has passed its full source workflow. Older releases do not gain these fixes
+through Store repackaging.
 
-Download `opengeul-store-<run ID>` within one day and upload its
-`OpenGeul_<version>_x64_store-unsigned.msix` in Partner Center. The reserved product
-is **OpenGeul**, Store ID **9PJH0T3PHRMF**. Set its price to **Free** in Pricing and
-availability. Complete the listing, screenshots, age ratings, declarations and
-certification before publishing. Store distribution supplies trusted signing.
+Download `opengeul-store-<run ID>` within one day to preserve the verified
+`OpenGeul_<version>_x64_store-unsigned.msix`. Artifact creation does not replace a
+Store submission. The reserved product is **OpenGeul**, Store ID
+**9PJH0T3PHRMF**. Preserve Free pricing, existing availability and age ratings;
+review the listing, screenshots and declarations before an API submission.
+Store distribution supplies trusted signing after certification and publication.
 
 Declare Korean as the package's supported UI language. An English Store listing
 may explain that the interface is Korean. Put the Microsoft Edge WebView2 Runtime
@@ -19,6 +21,9 @@ unencrypted file, and autosave/recovery is not provided. Recommend a separate
 output path to preserve the protected original.
 Use support email [allenlim@allenlim.net](mailto:allenlim@allenlim.net) and product
 website [opengeul.allenlim.net](https://opengeul.allenlim.net).
+The submission API ignores the obsolete listing fields `privacyPolicy`,
+`supportContact` and `websiteUrl`. Include these links in the supported description
+text; do not claim that this API updates dedicated Partner Center properties.
 
 Before replacing a Store package, inspect the new source run's `msix-install`
 artifact. `installed-launch.json` must identify the candidate package and CLI
@@ -38,10 +43,15 @@ native Windows editor with synthetic text, and `screenshot-provenance.json`.
 Capture uses the unchanged packaged executable and existing Windows GUI tools;
 it does not fabricate the UI or resize an existing image.
 
-Packaging and the first manual upload need no signing secret or API key.
-The manual workflow defaults to artifact-only packaging, so development tags can
-still supply the first reviewed Partner Center upload. The Store publisher display
-name is **Allen Taewon Lim**; the reserved package Name and Publisher CN stay fixed.
+Artifact-only packaging needs no signing secret or Store API key. The dispatched
+workflow defaults to artifact-only packaging; development tags can supply a
+reviewed first-submission package but cannot request automatic certification.
+API-only replacement of an initial submission needs a documented supported path
+before any deletion. A committed submission without an upload URL cannot accept
+the new package as an editable draft. Preserve it if safe cancellation and draft
+reconstruction cannot be established; never publish an older package to create a
+baseline. The Store publisher display name is **Allen Taewon Lim**; the reserved
+package Name and Publisher CN stay fixed.
 
 ## Automatic stable updates
 
@@ -90,8 +100,8 @@ An unresolved deletion or creation attempt blocks later candidates too. A commit
 response lost in transit is reconciled by GET of the recorded submission; commit
 is not blindly retried. Failures open/update the Issue, mention `@ATLKR`, and fail
 the Actions step while keeping the release and package. Email delivery follows
-your GitHub Issue and Actions notification settings. Inspect the Issue and Partner
-Center to reconcile an uncertain operation before changing its recorded state.
+your GitHub Issue and Actions notification settings. Inspect the Issue and fresh
+Store API readback to reconcile an uncertain operation before changing its record.
 
 The pipeline uploads a ZIP containing the verified Store MSIX and requests
 certification. Its success means Store ingestion accepted the request, not that
