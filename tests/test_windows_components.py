@@ -453,6 +453,18 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertIn('apps/studio-host/src/command/commands/edit.ts', self.helper().SOURCE_FILES,
                       'The actual async Cut document guard must be bound in the receipt contract')
 
+    def test_workers_with_different_host_visibility_css_cannot_join(self):
+        c = self.helper()
+        source = self.source()
+        style = source/'apps/studio-host/src/style.css'
+        style.parent.mkdir(parents=True, exist_ok=True)
+        style.write_text('.md-item { display: flex; }\n', encoding='utf-8')
+        folders = {role: self.root/(role+'-component') for role in ('editor', 'cli')}
+        c.capture('editor', self.payload('editor'), source, folders['editor'], env=self.env)
+        style.write_text('.md-item { display: flex; }\n.md-item[hidden] { display: none; }\n', encoding='utf-8')
+        c.capture('cli', self.payload('cli'), source, folders['cli'], env=self.env)
+        self.assert_rejected_without_outputs(folders)
+
     def test_previous_save_ledger_without_cut_document_guard_is_rejected(self):
         c = self.helper()
         source = self.source()

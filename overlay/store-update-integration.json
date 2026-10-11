@@ -97,6 +97,11 @@
       "file": "apps/studio-host/src/core/desktop-events.test.ts",
       "old": "  it('hydrates update state and listens for later updater events', async () => {",
       "new": "  it.each([\n    { name: 'old idle and new available', snapshot: { status: 'idle' }, latest: { status: 'available', version: '1.1.4.0' } },\n    { name: 'old available and new idle', snapshot: { status: 'available', version: '1.1.4.0' }, latest: { status: 'idle' } },\n    { name: 'snapshot with no intervening event', snapshot: { status: 'available', version: '1.1.4.0' }, latest: null },\n  ])('keeps the latest updater state while hydration is pending: $name', async ({ snapshot, latest }) => {\n    const { eventHandlers } = installTauriMocks();\n    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };\n    installDocumentStub();\n    let finish!: (value: typeof snapshot) => void;\n    let markStarted!: () => void;\n    const started = new Promise<void>((resolve) => { markStarted = resolve; });\n    const pending = new Promise<typeof snapshot>((resolve) => { finish = resolve; });\n    const onUpdateState = vi.fn();\n    const setup = setupDesktopEvents({\n      bridge: {\n        takePendingOpenPaths: vi.fn().mockResolvedValue([]),\n        getUpdateState: vi.fn(() => { markStarted(); return pending; }),\n      },\n      dispatcher: { dispatch: vi.fn() } as never,\n      eventBus: { emit: vi.fn() } as never,\n      setMessage: vi.fn(),\n      onUpdateState,\n    });\n    await started;\n    expect(onUpdateState).not.toHaveBeenCalled();\n    if (latest) {\n      const onNativeUpdate = eventHandlers.get('hop-update-state');\n      expect(onNativeUpdate).toBeTypeOf('function');\n      await onNativeUpdate!({ payload: latest });\n    }\n    finish(snapshot);\n    await setup;\n    expect(onUpdateState.mock.calls).toEqual([[latest ?? snapshot]]);\n  });\n\n  it('hydrates update state and listens for later updater events', async () => {"
+    },
+    {
+      "file": "apps/studio-host/src/style.css",
+      "old": "@import './styles/toolbar-labels.css';\n",
+      "new": "@import './styles/toolbar-labels.css';\n\n.md-item[hidden] {\n  display: none;\n}\n"
     }
   ]
 }

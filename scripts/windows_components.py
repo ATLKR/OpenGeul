@@ -69,7 +69,7 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
     'apps/desktop/src-tauri/src/app_quit.rs', 'apps/desktop/src-tauri/src/recent_documents.rs',
     'apps/desktop/src-tauri/src/opengeul_font_resources.rs', 'apps/desktop/src-tauri/src/windows.rs',
     'apps/studio-host/package.json', 'apps/studio-host/index.html',
-    'apps/studio-host/hop-overrides.ts',
+    'apps/studio-host/hop-overrides.ts', 'apps/studio-host/src/style.css',
     'apps/studio-host/src/core/tauri-bridge.ts', 'apps/studio-host/src/main.ts',
     'apps/studio-host/src/core/desktop-events.ts',
     'apps/studio-host/src/command/commands/file.ts', 'apps/studio-host/src/opengeul-font-resources.ts',
