@@ -80,6 +80,36 @@ public static class OpenGeulPackageIdentity {
  public static extern uint GetDpiForWindow(IntPtr window);
  [DllImport("shcore.dll", ExactSpelling=true)]
  public static extern int GetProcessDpiAwareness(IntPtr process, out int awareness);
+ [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true, ExactSpelling=true)]
+ static extern IntPtr LoadLibraryExW(string file, IntPtr reserved, uint flags);
+ [DllImport("kernel32.dll", SetLastError=true, ExactSpelling=true)]
+ static extern bool FreeLibrary(IntPtr module);
+ [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true, ExactSpelling=true)]
+ static extern IntPtr FindResourceW(IntPtr module, IntPtr name, IntPtr type);
+ [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true, ExactSpelling=true)]
+ static extern IntPtr FindResourceExW(IntPtr module, IntPtr type, IntPtr name, ushort language);
+ [DllImport("kernel32.dll", SetLastError=true, ExactSpelling=true)]
+ static extern uint SizeofResource(IntPtr module, IntPtr resource);
+ [DllImport("kernel32.dll", SetLastError=true, ExactSpelling=true)]
+ static extern IntPtr LoadResource(IntPtr module, IntPtr resource);
+ [DllImport("kernel32.dll", ExactSpelling=true)]
+ static extern IntPtr LockResource(IntPtr resource);
+ public static byte[] ReadManifest(string file, ushort language, bool defaultLookup) {
+  var module=LoadLibraryExW(file,IntPtr.Zero,0x22);
+  if(module==IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+  try {
+   var resource=defaultLookup ? FindResourceW(module,(IntPtr)1,(IntPtr)24) : FindResourceExW(module,(IntPtr)24,(IntPtr)1,language);
+   if(resource==IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+   var size=SizeofResource(module,resource);
+   if(size==0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+   if(size>65536) throw new InvalidOperationException("Unexpected bounded manifest size");
+   var loaded=LoadResource(module,resource);
+   if(loaded==IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+   var address=LockResource(loaded);
+   if(address==IntPtr.Zero) throw new InvalidOperationException("LockResource returned NULL");
+   var bytes=new byte[size]; Marshal.Copy(address,bytes,0,(int)size); return bytes;
+  } finally { FreeLibrary(module); }
+ }
 }
 '@
  $launchStarted=Get-Date
@@ -104,6 +134,20 @@ public static class OpenGeulPackageIdentity {
  $hresult=[OpenGeulPackageIdentity]::GetProcessDpiAwareness($launched.Handle,[ref]$processAwareness)
  $os=Get-CimInstance Win32_OperatingSystem
  @{scope='read-only awareness query of the verified installed editor; no DPI setters or gate exemption';packageFullName=$processIdentity.ToString();editorSha256=(Get-FileHash $executable -Algorithm SHA256).Hash;processId=$launched.Id;runnerSessionId=(Get-Process -Id $PID).SessionId;editorSessionId=$launched.SessionId;windowContextValid=($context -ne [IntPtr]::Zero);windowAwareness=$windowAwareness;perMonitorV2=[OpenGeulPackageIdentity]::AreDpiAwarenessContextsEqual($context,[IntPtr](-4));windowDpi=[OpenGeulPackageIdentity]::GetDpiForWindow($launched.MainWindowHandle);processAwarenessHresult=$hresult;processAwareness=$processAwareness;osCaption=$os.Caption;osBuild=$os.BuildNumber} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'dpi-context.json') -Encoding utf8
+ $resourceProbes=@()
+ foreach ($lookup in @(@{name='default';language=0;default=$true},@{name='requested-lang0';language=0;default=$false},@{name='en-US';language=1033;default=$false},@{name='ko-KR';language=1042;default=$false})) {
+  try {
+   [byte[]]$resource=[OpenGeulPackageIdentity]::ReadManifest($executable,[uint16]$lookup.language,[bool]$lookup.default)
+   $resourcePath=Join-Path $OutputDirectory ("manifest-resource-"+$lookup.name+'.xml')
+   [System.IO.File]::WriteAllBytes($resourcePath,$resource)
+   [xml]$doc=[System.Text.UTF8Encoding]::new($false,$true).GetString($resource)
+   $resourceProbes+=@{lookup=$lookup.name;success=$true;bytes=$resource.Length;sha256=(Get-FileHash $resourcePath -Algorithm SHA256).Hash;dpiAware=$doc.SelectSingleNode("//*[local-name()='dpiAware' and namespace-uri()='http://schemas.microsoft.com/SMI/2005/WindowsSettings']").InnerText;dpiAwareness=$doc.SelectSingleNode("//*[local-name()='dpiAwareness' and namespace-uri()='http://schemas.microsoft.com/SMI/2016/WindowsSettings']").InnerText}
+  } catch {
+   $failure=$_.Exception.GetBaseException()
+   $resourceProbes+=@{lookup=$lookup.name;success=$false;errorType=$failure.GetType().FullName;win32Error=if($failure -is [System.ComponentModel.Win32Exception]){$failure.NativeErrorCode}else{$null}}
+  }
+ }
+ $resourceProbes | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutputDirectory 'manifest-resource-probes.json') -Encoding utf8
  $cli=Join-Path $installed.InstallLocation 'Tools/rhwp.exe'
  $cliResult=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli.json'
  if (Test-Path $cliResult) { throw 'Refusing to reuse an installed CLI result.' }
