@@ -1,110 +1,232 @@
-name: OpenGeul Store package
+name: Diagnostic old-source CLI transport measurement
 'on':
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Existing successful OpenGeul release to repackage
-        type: string
-        required: true
-      verify_store_api:
-        description: Validate configured Store API credentials with an application GET only
-        type: boolean
-        required: false
-        default: false
-      submit_to_store:
-        description: Submit a stable release update after the first Store publication
-        type: boolean
-        required: false
-        default: false
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: opengeul-store
+  group: opengeul-cli-transport-57-diagnostic
   cancel-in-progress: false
-  queue: max
 env:
   PYTHONUTF8: '1'
 jobs:
-  package:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main')
-    runs-on: windows-2022
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-      issues: write
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        persist-credentials: false
-    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-      with:
-        python-version: '3.12'
-    - name: Check Store runtime preservation
-      shell: pwsh
-      run: python -m unittest discover -s tests -p test_store_package.py -v
-    - name: Verify successful release and repackage unchanged runtime with Store identity
-      id: package
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-        $makeappx = Get-ChildItem $sdk -Filter makeappx.exe -Recurse |
-          Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
-        if (-not $makeappx) { throw 'Windows SDK MakeAppx is missing.' }
-        python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Capture the actual Windows editor for the Store listing
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        python -m pip install -r e2e/requirements.txt
-        ./e2e/ensure-webview2.ps1
-        python e2e/store_screenshot.py --exe .work/store-payload/OpenGeul.exe --output store-output
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Save the verified Store package before submission
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-store-${{ github.run_id }}
-        path: store-output/*
-        retention-days: 1
-        if-no-files-found: error
-        compression-level: 9
-    - name: Submit the stable release to the Microsoft Store
-      if: inputs.submit_to_store
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        python scripts/store_submit.py --release-tag $env:RELEASE_TAG --package-directory store-output
-  verify-api:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.verify_store_api)
+  measure-old-cli:
+    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/diagnostic/cli-transport-57' && github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
-    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-      with:
-        python-version: '3.12'
-    - name: Validate OAuth credentials and GET the reserved Store application
+    - name: Measure the owned old-source package without exporting runtime bytes
       env:
-        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: python scripts/check_store_api.py
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        python - <<'PY'
+        import gzip, hashlib, io, json, os, re, stat, struct, subprocess, tempfile, zipfile
+        from pathlib import Path, PurePosixPath
+
+        REPO = 'ATLKR/OpenGeul'
+        RUN = 38142625600
+        COMMIT = '756116ff1fc094e8a1bdf2ecec6fcf3f6d3c4e17'
+        ARTIFACT = 'opengeul-windows-x64-38142625600'
+        ARTIFACT_ID = 11704979043
+        ARTIFACT_SHA = 'ed3f09d144c15a96906b54366791bc52372d0b5fec7b27918bc481427bb4ee9c'
+        BUILD_JOB = 114482799349
+        CAP = 96 * 1024 * 1024
+        INNER_CAP = 256 * 1024 * 1024  # Diagnostic-only in-memory inspection; not a production transport limit.
+        JSON_CAP = 64 * 1024
+        SHA = re.compile(r'[0-9a-f]{64}\Z')
+        RESERVED = re.compile(r'(?i)(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?\Z')
+        PACKAGE = 'OpenGeul_1.1.2.0_x64_development-unsigned.msix'
+
+        def require(condition, label):
+            if not condition: raise ValueError(label)
+
+        def api(endpoint):
+            response = subprocess.run(['gh', 'api', f'repos/{REPO}/' + endpoint],
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+            require(response.returncode == 0 and len(response.stdout) <= 2 * 1024 * 1024, 'API metadata')
+            return json.loads(response.stdout)
+
+        def sha_file(path):
+            digest = hashlib.sha256()
+            with path.open('rb') as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b''): digest.update(block)
+            return digest.hexdigest()
+
+        def members(archive, cap=CAP):
+            require(len(archive.infolist()) <= 10000, 'ZIP file count')
+            files, seen, expanded = {}, set(), 0
+            for entry in archive.infolist():
+                name = entry.filename.replace('\\', '/').rstrip('/') if entry.is_dir() else entry.filename.replace('\\', '/')
+                parts = name.split('/')
+                require(name and not PurePosixPath(name).is_absolute()
+                        and all(p not in ('', '.', '..') and p.rstrip(' .') == p and not RESERVED.fullmatch(p) for p in parts)
+                        and not any(ord(c) < 32 or ord(c) == 127 or c in ':<>"|?*' for c in name), 'ZIP path')
+                require(name.casefold() not in seen, 'ZIP duplicate/case collision')
+                seen.add(name.casefold())
+                kind = stat.S_IFMT(entry.external_attr >> 16)
+                require(kind in (0, stat.S_IFREG, stat.S_IFDIR)
+                        and (kind != stat.S_IFDIR or entry.is_dir())
+                        and not (entry.flag_bits & 1), 'ZIP file type/encryption')
+                require(0 <= entry.file_size <= cap, 'ZIP member bound')
+                expanded += entry.file_size
+                require(expanded <= cap, 'ZIP expanded bound')
+                if not entry.is_dir(): files[name] = entry
+            return files
+
+        def entry_sha(archive, entry):
+            digest, count = hashlib.sha256(), 0
+            with archive.open(entry) as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    count += len(block)
+                    require(count <= entry.file_size and count <= CAP, 'Stream bound')
+                    digest.update(block)
+            require(count == entry.file_size, 'Stream size')
+            return digest.hexdigest()
+
+        def bounded_json(archive, entry):
+            require(entry.file_size <= JSON_CAP, 'JSON bound')
+            return json.loads(archive.read(entry))
+
+        def main():
+            require(os.environ.get('GITHUB_REPOSITORY') == REPO
+                    and os.environ.get('GITHUB_REF') == 'refs/heads/diagnostic/cli-transport-57'
+                    and os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch', 'Diagnostic identity')
+            run = api(f'actions/runs/{RUN}')
+            require(run.get('id') == RUN and run.get('head_sha') == COMMIT and run.get('run_attempt') == 1
+                    and run.get('status') == 'completed' and run.get('path') == '.github/workflows/msix.yml'
+                    and run.get('repository', {}).get('full_name') == REPO
+                    and run.get('repository', {}).get('private') is False, 'Old run identity')
+            jobs = api(f'actions/runs/{RUN}/jobs?per_page=100')
+            selected = [job for job in jobs.get('jobs', []) if job.get('id') == BUILD_JOB]
+            require(len(selected) == 1 and selected[0].get('name') == 'build'
+                    and selected[0].get('conclusion') == 'success'
+                    and selected[0].get('head_sha') == COMMIT, 'Old successful package build')
+            response = api(f'actions/runs/{RUN}/artifacts?name={ARTIFACT}&per_page=100')
+            selected = response.get('artifacts', [])
+            require(response.get('total_count') == 1 and len(selected) == 1, 'Unique artifact')
+            artifact = selected[0]
+            require(artifact.get('id') == ARTIFACT_ID and artifact.get('name') == ARTIFACT
+                    and artifact.get('expired') is False and artifact.get('digest') == 'sha256:' + ARTIFACT_SHA
+                    and isinstance(artifact.get('size_in_bytes'), int) and 0 < artifact['size_in_bytes'] <= CAP
+                    and artifact.get('workflow_run', {}).get('id') == RUN
+                    and artifact['workflow_run'].get('head_sha') == COMMIT
+                    and artifact['workflow_run'].get('repository_id') == run['repository']['id'], 'Artifact provenance')
+            with tempfile.TemporaryDirectory(prefix='opengeul-owned-old-cli-') as folder:
+                path = Path(folder) / 'owned-artifact.zip'
+                with path.open('wb') as output:
+                    download = subprocess.run(['gh', 'api', f'repos/{REPO}/actions/artifacts/{ARTIFACT_ID}/zip'],
+                                              stdout=output, stderr=subprocess.DEVNULL, timeout=90)
+                require(download.returncode == 0 and 0 < path.stat().st_size <= CAP, 'Artifact download')
+                require(sha_file(path) == ARTIFACT_SHA, 'Downloaded API artifact digest')
+                with zipfile.ZipFile(path) as outer:
+                    files = members(outer)
+                    require({PACKAGE, 'provenance.json', 'SHA256SUMS.txt'} <= files.keys(), 'Package/provenance inventory')
+                    provenance = bounded_json(outer, files['provenance.json'])
+                    require(provenance.get('repository') == REPO and provenance.get('commit') == COMMIT
+                            and str(provenance.get('runId')) == str(RUN) and provenance.get('version') == '1.1.2'
+                            and provenance.get('architecture') == 'x64' and provenance.get('unsigned') is True
+                            and provenance.get('package') == PACKAGE, 'Package source provenance')
+                    upstream = json.loads(Path('config/upstream.lock.json').read_text())
+                    require(provenance.get('upstream') == upstream, 'Exact pinned upstream/toolchain provenance')
+                    source = provenance.get('sourceParity', {})
+                    require(source.get('version') == '1.1.2' and source.get('source') == 'OpenGeul distribution overlays'
+                            and source.get('hwpxSaveV1') is True and source.get('wasmRebuild', {}).get('upstream') == upstream,
+                            'Prepared source provenance')
+                    wasm = source['wasmRebuild']
+                    require(wasm.get('namespaceHelper') == sha_file(Path('overlay/hwpx_namespaces.rs'))
+                            and wasm.get('namespacePatcher') == sha_file(Path('scripts/patch_namespaces.py'))
+                            and wasm.get('generator') == 'wasm-pack 0.14.0 --target web --release --no-opt',
+                            'Prepared namespace/WASM provenance')
+                    expected_wasm = {
+                        'rhwp.js': '70cde06a369fa7fd4fc8bc8f3d6acaee158596ba1a116a2c72159002b0b5654e',
+                        'rhwp.d.ts': '4742243ad37a992ba3deec56a3e3e7b57f05073e49806027147acc054b5fce85',
+                        'rhwp_bg.wasm': 'd5455ff80f61af65dfab5cbe2f2058bc377e5d44f7c97dd7e586f0edaaa6d5da',
+                        'rhwp_bg.wasm.d.ts': '8c9f8bbb336094aa5017fdc03b1059cbe60e8af67086fec1287000a0e322f151',
+                        'package.json': '53d26a44ad282d5a4d8c8f4137fcc14493bbc1e6e45cde9b79051061b73d8ac8',
+                        'LICENSE': '1c3a7d5643b163a3ead4965e1bea33b832caee5bfca265efe42afcd7bc696b5b',
+                    }
+                    require(wasm.get('artifacts') == expected_wasm, 'Exact old source-built WASM artifact hashes')
+                    require(files['SHA256SUMS.txt'].file_size <= JSON_CAP, 'Checksums bound')
+                    checksums = {}
+                    for line in outer.read(files['SHA256SUMS.txt']).decode('utf-8-sig').splitlines():
+                        digest, name = line.split('  ', 1)
+                        require(SHA.fullmatch(digest) and name in files and name not in checksums, 'Checksum entry')
+                        checksums[name] = digest
+                    require(set(checksums) == set(files) - {'SHA256SUMS.txt'}, 'Complete artifact checksums')
+                    for name, digest in checksums.items(): require(entry_sha(outer, files[name]) == digest, 'Artifact file checksum')
+                    msix_sha = checksums[PACKAGE]
+                    require(provenance.get('sha256') == msix_sha, 'MSIX provenance hash')
+                    with zipfile.ZipFile(io.BytesIO(outer.read(files[PACKAGE]))) as package:
+                        package_files = members(package, INNER_CAP)
+                        require('Tools/rhwp.exe' in package_files and 'AppxSignature.p7x' not in package_files,
+                                'Owned unsigned package runtime')
+                        entry = package_files['Tools/rhwp.exe']
+                        digest, count, header = hashlib.sha256(), 0, b''
+                        class Counter:
+                            def __init__(self): self.bytes = 0
+                            def write(self, data): self.bytes += len(data); return len(data)
+                            def flush(self): pass
+                        compressed = Counter()
+                        with gzip.GzipFile(fileobj=compressed, mode='wb', filename='', compresslevel=9, mtime=0) as gz:
+                            with package.open(entry) as stream:
+                                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                                    count += len(block)
+                                    require(count <= entry.file_size and count <= INNER_CAP, 'CLI stream bound')
+                                    if len(header) < 4096: header += block[:4096 - len(header)]
+                                    digest.update(block)
+                                    gz.write(block)
+                        require(count == entry.file_size and len(header) >= 64 and header[:2] == b'MZ', 'CLI size/DOS header')
+                        offset = struct.unpack_from('<I', header, 60)[0]
+                        require(offset + 26 <= len(header) and header[offset:offset + 4] == b'PE\0\0', 'CLI PE header')
+                        machine = struct.unpack_from('<H', header, offset + 4)[0]
+                        characteristics = struct.unpack_from('<H', header, offset + 22)[0]
+                        optional = struct.unpack_from('<H', header, offset + 24)[0]
+                        require(machine == 0x8664 and optional == 0x20b and characteristics & 2
+                                and not characteristics & 0x2000, 'CLI x64 PE executable')
+                        runtime_sha = digest.hexdigest()
+                        runtime_proof = provenance.get('windowsComponents', {}).get('components', {}).get('cli')
+                        if runtime_proof is not None:
+                            require(runtime_proof.get('runtime') == 'Tools/rhwp.exe' and runtime_proof.get('size') == count
+                                    and runtime_proof.get('sha256') == runtime_sha, 'Optional source runtime proof')
+                        report = {
+                            'formatVersion': 1, 'qualification': 'old-source-50-size-measurement-only',
+                            'repository': REPO, 'sourceRunId': RUN, 'sourceCommit': COMMIT,
+                            'sourceBuildJobId': BUILD_JOB, 'version': '1.1.2', 'upstream': upstream,
+                            'artifact': {'id': ARTIFACT_ID, 'name': ARTIFACT, 'sha256': ARTIFACT_SHA,
+                                         'apiBytes': artifact['size_in_bytes'], 'downloadedBytes': path.stat().st_size},
+                            'package': {'name': PACKAGE, 'sha256': msix_sha, 'bytes': files[PACKAGE].file_size,
+                                        'provenanceSha256': checksums['provenance.json']},
+                            'runtime': {'path': 'Tools/rhwp.exe', 'zipInfoBytes': entry.file_size,
+                                        'streamedBytes': count, 'sha256': runtime_sha, 'peMachine': '0x8664',
+                                        'peOptionalMagic': '0x20b', 'isExecutable': True, 'isDll': False,
+                                        'msixCompressedBytes': entry.compress_size,
+                                        'gzipLevel9Mtime0ComparisonBytes': compressed.bytes,
+                                        'runtimeHashPresentInSourceProvenance': runtime_proof is not None},
+                            'diagnosticRunId': os.environ['GITHUB_RUN_ID'], 'diagnosticCommit': os.environ['GITHUB_SHA'],
+                            'note': 'Does not qualify source 57, approve a gate-cap change, or establish runtime byte equivalence.',
+                        }
+            data = (json.dumps(report, indent=2, sort_keys=True) + '\n').encode()
+            require(len(data) <= JSON_CAP, 'Report bound')
+            output = Path('diagnostic-evidence')
+            output.mkdir()
+            (output / 'cli-size.json').write_bytes(data)
+            print(json.dumps({'oldSourceRunId': RUN, 'runtimeBytes': count, 'runtimeSha256': runtime_sha,
+                              'gzipComparisonBytes': compressed.bytes}))
+
+        try:
+            main()
+        except Exception:
+            raise SystemExit('Diagnostic failed closed; download/API details are intentionally suppressed.')
+        PY
+    - name: Upload only the bounded measurement JSON
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-old-cli-size-${{ github.run_id }}
+        path: diagnostic-evidence/cli-size.json
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
