@@ -9,7 +9,16 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from buildkit import ROOT, FONT_EXTENSIONS, make_assets, package_version, replace_once, tauri_config
+
+
+TAURI_VERSION = "2.11.1"
+DESKTOP_LOCK = ROOT / "overlay/desktop-cargo.lock.toml"
+UPDATE_DEPENDENCIES = '''reqwest = { version = "=0.13.2", default-features = false, features = ["rustls-no-provider"] }
+tokio = { version = "=1.52.1", features = ["time", "sync"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+'''
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -19,6 +28,17 @@ def run(*args: str, cwd: Path) -> str:
 
 def replace_file(path: Path, old: str, new: str, expected: int = 1, *, newline: str | None = None) -> None:
     path.write_text(replace_once(path.read_text(encoding='utf-8'),old,new,expected=expected),encoding='utf-8',newline=newline)
+
+
+def install_store_updates(source: Path) -> None:
+    """고정 Store 공개 메타데이터 확인과 사용자가 선택하는 Store 링크만 연결한다."""
+    integration = json.loads((ROOT/'overlay/store-update-integration.json').read_text(encoding='utf-8'))
+    for local, target in integration['copies'].items():
+        destination = source/target
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT/local, destination)
+    for item in integration['replacements']:
+        replace_file(source/item['file'], item['old'], item['new'])
 
 
 def patch(source: Path, version: str) -> None:
@@ -54,7 +74,17 @@ def patch(source: Path, version: str) -> None:
     # Tauri rewrites this manifest with LF in the editor build. Prepare identical
     # bytes for the CLI producer so the strict source contract survives that rewrite.
     replace_file(native/'Cargo.toml',f'version = "{hop_version}"',f'version = "{version}"',newline='\n')
-    replace_file(native/'Cargo.lock',f'name = "hop-desktop"\nversion = "{hop_version}"',f'name = "hop-desktop"\nversion = "{version}"')
+    # GHSA-7gmj-67g7-phm9: 로컬 IPC 출처 판별 수정이 포함된 버전을 정확히 고정한다.
+    # .toml 확장자로 보안 잠금 입력도 기존 구성 요소 증명의 helper 해시에 포함한다.
+    replace_file(native/'Cargo.toml', 'tauri = { version = "2", features = [] }',
+                 f'tauri = {{ version = "={TAURI_VERSION}", features = [] }}\n'+UPDATE_DEPENDENCIES.rstrip(), newline='\n')
+    lock = DESKTOP_LOCK.read_text(encoding='utf-8')
+    selected = [p['version'] for p in tomllib.loads(lock)['package'] if p['name'] == 'tauri']
+    if selected != [TAURI_VERSION]:
+        raise ValueError('검토한 Tauri 보안 수정 버전과 데스크톱 잠금 파일이 다릅니다')
+    lock = replace_once(lock, f'name = "hop-desktop"\nversion = "{hop_version}"',
+                        f'name = "hop-desktop"\nversion = "{version}"')
+    (native/'Cargo.lock').write_text(lock, encoding='utf-8', newline='\n')
     for component in ('Preview','Thumbnail'):
         path=source/f'apps/desktop/quicklook/Resources/{component}/Info.plist'
         if path.is_file():
@@ -67,6 +97,7 @@ def patch(source: Path, version: str) -> None:
     shutil.copy2(ROOT/'overlay/opengeul_runtime.rs',native/'src/opengeul_runtime.rs')
     replace_file(native/'src/lib.rs','tauri::generate_handler![','tauri::generate_handler![\n            opengeul_font_resources::open_font_resource,')
     shutil.copy2(ROOT/'overlay/updates.rs',native/'src/updates.rs')
+    install_store_updates(source)
     # Native font scanning remains restricted to installed system/per-user font directories.
     font=native/'src/font_catalog.rs'
     replace_file(font,'use tauri::{AppHandle, Manager};','use tauri::AppHandle;')
@@ -86,6 +117,16 @@ def patch(source: Path, version: str) -> None:
         allowed_roots.extend(dedupe_existing_dirs(vec![windir.join("Fonts")]));
     }''')
     shutil.copy2(ROOT/'overlay/font-catalog.ts',host/'src/core/font-catalog.ts')
+    # Keep proper names while making user-facing version and comparison labels Korean-first.
+    ui=upstream/'rhwp-studio/src/ui'
+    replace_file(ui/'about-dialog.ts', "titleEn.textContent = 'HWP/HWPX Compatible Module for Rust';",
+        "titleEn.textContent = 'Rust용 HWP/HWPX 호환 모듈';")
+    replace_file(ui/'about-dialog.ts', 'version.textContent = `Version ${__APP_VERSION__}`;',
+        'version.textContent = `버전 ${__APP_VERSION__}`;')
+    replace_file(ui/'compare-dialog.ts', 'L: ${this.escape(leftPreview)} / R: ${this.escape(rightPreview)}',
+        '왼쪽: ${this.escape(leftPreview)} / 오른쪽: ${this.escape(rightPreview)}')
+    replace_file(ui/'history-dialog.ts', 'L: ${this.escape(leftText)} / R: ${this.escape(rightText)}',
+        '이력: ${this.escape(leftText)} / 현재: ${this.escape(rightText)}')
     # Migrate the earlier OpenGeul visibility choice into HOP's native preference.
     # A newer explicit HOP choice wins, and storage denial must not break the UI.
     replace_file(host/'src/host/toolbar-labels.ts',
@@ -125,6 +166,15 @@ def patch(source: Path, version: str) -> None:
     anchor='/// Native PDF implementation selected by callers such as `export-pdf`.'
     value=replace_once(value,anchor,'#[cfg(not(target_arch = "wasm32"))]\nmod opengeul_pdf_guard;\n\n'+anchor)
     value=replace_once(value,'    let fontdb = create_fontdb(export_options);','    let mut fontdb = create_fontdb(export_options);\n    opengeul_pdf_guard::enforce(&mut fontdb, svg_pages)?;')
+    incomplete='''        let Some((chunk, svg_ref)) =
+            convert_page_chunk(&tree, export_options.embed_text, page_index, &mut to_chunk)?
+        else {
+            continue;
+        };'''
+    value=replace_once(value,incomplete,incomplete.replace('            continue;',
+        '            return Err(opengeul_pdf_guard::incomplete_page_error(page_index));'))
+    value=replace_once(value,' — 이 페이지만 건너뛰고 PDF 를 계속합니다.',
+        ' — PDF 내보내기를 중단합니다.',expected=2)
     value=replace_once(value,'    crate::renderer::font_paths::load_into_fontdb(&mut fontdb, &options.font_paths);','    for dir in &options.font_paths { fontdb.load_fonts_dir(dir); }')
     direct='''pub fn layer_trees_to_pdf_with_links(
     layer_trees: &[crate::paint::PageLayerTree],
@@ -143,7 +193,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:

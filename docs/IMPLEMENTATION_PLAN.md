@@ -1,24 +1,24 @@
-# OpenGeul Windows distribution implementation plan
+# OpenGeul Windows 배포 구현 계획
 
-## User-approved scope (2026-10-05)
+## 사용자 승인 범위 (2026-10-05)
 
-Implement ATLKR/OpenGeul as a public, independently branded distribution of rhwp and HOP for Windows. Preserve the upstream Windows document editing, viewing, saving, printing, PDF export and command-line capabilities rather than replacing them with a stub or a web link. DOCX/XLSX/PPTX and LibreOffice integration are future work, not advertised features.
+ATLKR/OpenGeul을 rhwp와 HOP 기반의 공개 Windows 배포판으로 구현하고 독립적인 이름과 외형을 사용합니다. 기존 Windows 문서 편집·보기·저장·인쇄·PDF 내보내기·명령줄 기능을 유지합니다. 이 기능을 빈 구현이나 웹 링크로 대체하지 않습니다. DOCX/XLSX/PPTX와 LibreOffice 연동은 향후 과제이며 현재 제공 기능으로 안내하지 않습니다.
 
-Use installed fonts, provide an explicit official-source font installation guide, preserve third-party notices, and never publish third-party font files or private credentials. Disable upstream application self-updates in the MSIX channel. Unsigned MSIX and portable development builds must be labeled honestly; they are not Store-signed consumer installers.
+설치된 글꼴을 사용하고, 공식 출처에서 글꼴을 설치하는 명시적인 안내를 제공합니다. 제3자 고지를 유지하며 제3자 글꼴 파일이나 비공개 인증정보를 게시하지 않습니다. MSIX 채널에서는 원래 앱의 자체 업데이트를 비활성화합니다. 서명되지 않은 MSIX와 포터블 개발 빌드는 실제 상태를 명확히 표시하며, Store 서명을 받은 소비자용 설치 프로그램으로 안내하지 않습니다.
 
-## License boundary
+## 라이선스 경계
 
-OpenGeul-authored code: MIT. Upstream rhwp/HOP and third-party components retain their own notices and licenses. Future LibreOffice imports must retain applicable MPL-2.0 and other component licenses; the MIT root license does not relicense imported code. Prefer an isolated engine/adapter boundary.
+OpenGeul이 작성한 코드는 MIT입니다. 기존 rhwp/HOP와 제3자 구성요소에는 각자의 고지와 라이선스가 계속 적용됩니다. 향후 LibreOffice 코드를 가져오면 해당 MPL-2.0 및 다른 구성요소 라이선스를 유지해야 합니다. 루트 MIT 라이선스는 가져온 코드의 라이선스를 변경하지 않습니다. 분리된 엔진·어댑터 경계를 우선합니다.
 
-## Implementation tasks
+## 구현 과제
 
-1. Inspect the existing bootstrap and the exact upstream sources; record immutable source revisions and baseline tests.
-2. Add regression tests for preparation, feature preservation, font policy, identity/version generation, package contents and release authorization. Run them before implementing fixes.
-3. Prepare a reproducible complete upstream Windows build with OpenGeul overlays, not a reduced replacement editor; include the rhwp CLI where supported.
-4. Build and test on standard GitHub Windows runners, generate unsigned MSIX and portable artifacts, preserve source/license/provenance information and SHA-256 checksums.
-5. Run CI for pushes and pull requests. Publish clearly labeled prereleases only after required checks and an authorized main/tag trigger, never from an untrusted pull request.
-6. Verify the actual GitHub Actions result and inspect the generated package/release. Distinguish automated build evidence from manual Windows UX, HWP round-trip, font fidelity and Store certification checks.
+1. 기존 초기 구성과 정확한 업스트림 소스를 살펴보고, 변경 불가능한 소스 리비전과 기준 테스트를 기록합니다.
+2. 준비 과정, 기능 유지, 글꼴 정책, 식별자·버전 생성, 패키지 내용과 릴리스 권한에 대한 회귀 테스트를 추가합니다. 수정 구현 전에 실행합니다.
+3. 축소된 대체 편집기 대신 OpenGeul 오버레이를 적용한 재현 가능한 전체 업스트림 Windows 빌드를 준비합니다. 지원되는 rhwp CLI도 포함합니다.
+4. 표준 GitHub Windows 실행기에서 빌드·테스트하고, 서명되지 않은 MSIX와 포터블 산출물을 생성합니다. 소스·라이선스·출처 정보와 SHA-256 체크섬을 보존합니다.
+5. 푸시와 풀 리퀘스트에서 CI를 실행합니다. 필수 검사를 모두 통과하고 승인된 main/tag 이벤트가 있을 때만 명확하게 표시한 사전 릴리스를 게시합니다. 신뢰하지 않는 풀 리퀘스트에서는 게시하지 않습니다.
+6. 실제 GitHub Actions 결과와 생성된 패키지·릴리스를 확인합니다. 자동 빌드 근거와 수동 Windows UX, HWP 저장·재열기, 글꼴 충실도, Store 인증 검사를 구분합니다.
 
-## Completion evidence
+## 완료 근거
 
-Record remote commit, workflow run, test results, package names/checksums, release URL, and remaining manual verification in docs/VERIFICATION.md. Do not describe a queued workflow or source-only scaffold as a completed MSIX build.
+원격 커밋, 워크플로 실행, 테스트 결과, 패키지 이름·체크섬, 릴리스 URL과 남은 수동 검증을 docs/VERIFICATION.md에 기록합니다. 대기 중인 워크플로나 소스만 준비된 구성을 완료된 MSIX 빌드로 표현하지 않습니다.

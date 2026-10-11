@@ -1,4 +1,4 @@
-name: OpenGeul policy tests
+name: OpenGeul 정책 검사
 'on':
   push:
     branches: [main]
@@ -17,14 +17,14 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Audit free-only CI config and regression tests
+    - name: 무료 CI 설정과 회귀 검사 검토
       run: |
         python -m pip install -r ci/requirements.txt
         python ci/policy.py
         python -m unittest discover -s ci/tests -v
-    - name: Test policy and package verification
+    - name: 정책·패키지 검증 검사
       run: python3 -m unittest discover -s tests -v
-    - name: Test the standalone font metadata parser
+    - name: 독립 글꼴 메타데이터 파서 검사
       run: |
         rustc --edition=2021 --test overlay/font_policy.rs -o /tmp/opengeul-font-tests
         /tmp/opengeul-font-tests

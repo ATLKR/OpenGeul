@@ -1,43 +1,43 @@
-# Verification ledger
+# 검증 기록
 
-## Current development candidate: 1.1.1
+## 당시 개발 후보: 1.1.1
 
-OpenGeul now includes HWPX editing/saving and release-gated editor/virtual-printer tests. See [release readiness](RELEASE_READINESS.md) for the actual investigation and [Actions](https://github.com/ATLKR/OpenGeul/actions) for commit-specific final results. Historical entries below do not certify later commits. A queued build or diagnostic using an earlier binary is not a published release.
+이 절은 1.1.1 후보 당시의 기록입니다. OpenGeul에 HWPX 편집·저장과 릴리스 필수 편집기·가상 프린터 테스트가 추가됐습니다. 실제 조사 내용은 [릴리스 준비 기록](RELEASE_READINESS.md), 커밋별 최종 결과는 [Actions](https://github.com/ATLKR/OpenGeul/actions)를 확인하세요. 아래 역사 기록은 이후 커밋을 인증하지 않습니다. 대기 중인 빌드나 이전 바이너리를 사용한 진단은 게시된 릴리스가 아니며 새 1.1.3 후보의 성공을 미리 뜻하지 않습니다.
 
-## 2026-10-05 — baseline and implementation
+## 2026-10-05 — 기준 검증과 구현
 
-- Legacy bootstrap: 19 Python tests passed, but never compiled on Windows.
-- Actual Windows baseline run 37290548163: dependency install succeeded; upstream contracts had 29 passes, 2 failures, 1 intentional Windows skip. Failures were CRLF mutation of vendored JS provenance and Windows path separators in a source-boundary test.
-- Corrected baseline run 37291330701: SUCCESS, including upstream contracts, frontend tests and TypeScript/Vite editor build. Fixes preserve LF before checkout and normalize only the test path comparison; no failing assertion is disabled.
-- New release/PE/MSIX/owner policy tests were observed failing before implementation. Local Python suite at that checkpoint: 19 passed.
+- 초기 구성: Python 테스트 19개가 통과했지만 Windows에서 컴파일한 적은 없었습니다.
+- 실제 Windows 기준 실행 37290548163: 의존성 설치가 성공했고 업스트림 계약은 29개 통과, 2개 실패, 의도적인 Windows 건너뛰기 1개였습니다. 실패 원인은 벤더 JS 출처 바이트의 CRLF 변경과 소스 경계 테스트의 Windows 경로 구분자였습니다.
+- 수정한 기준 실행 37291330701: SUCCESS. 업스트림 계약, 프런트엔드 테스트와 TypeScript/Vite 편집기 빌드를 통과했습니다. 수정은 체크아웃 전 LF를 보존하고 테스트 경로 비교만 정규화합니다. 실패 단언을 비활성화하지 않았습니다.
+- 새 릴리스·PE·MSIX·소유자 정책 테스트는 구현 전에 실패하는 것을 확인했습니다. 해당 시점의 로컬 Python 테스트 19개가 통과했습니다.
 
-## 2026-10-05 — verified Windows build and published prerelease
+## 2026-10-05 — 확인된 Windows 빌드와 게시된 사전 릴리스
 
-Application source commit: `0349523066585437bdd06de8291a1d66a8d3b95f`.
+앱 소스 커밋: `0349523066585437bdd06de8291a1d66a8d3b95f`.
 
-- [Windows build and release run 37293488174](https://github.com/ATLKR/OpenGeul/actions/runs/37293488174) completed with `success`.
-- The workflow runs `scripts/build-msix.ps1` on `windows-2025`, uploads the build outputs, rechecks `SHA256SUMS.txt` and the MSIX in the release job, and publishes an explicitly unsigned development prerelease. This is an actual successful run, not a queued or predicted build.
-- [Published prerelease v1.0.0-dev.2.1](https://github.com/ATLKR/OpenGeul/releases/tag/v1.0.0-dev.2.1) is public, not a draft, and marked as a prerelease.
-- Published assets include `OpenGeul_1.0.0.0_x64_development-unsigned.msix`, `OpenGeul_1.0.0_windows-x64_unsigned-portable.zip`, `AppxManifest.xml`, `SHA256SUMS.txt`, `provenance.json`, and `rhwp-help.txt`.
-- The release contains the HOP Windows editor and rhwp CLI built from the pinned source versions documented in `provenance.json`. It does not include LibreOffice or promise DOCX/XLSX/PPTX support.
-- This documentation update does not rebuild or change that released application binary. Build claims above refer to the explicit application commit and run, not automatically to later commits.
+- [Windows 빌드·릴리스 실행 37293488174](https://github.com/ATLKR/OpenGeul/actions/runs/37293488174)이 `success`로 완료됐습니다.
+- 워크플로는 `windows-2025`에서 `scripts/build-msix.ps1`을 실행하고 빌드 출력을 업로드한 뒤, 릴리스 작업에서 `SHA256SUMS.txt`와 MSIX를 재검증하여 명시적으로 서명되지 않은 개발 사전 릴리스를 게시합니다. 실제 성공한 실행이며 대기 중이거나 예측한 빌드가 아닙니다.
+- [게시된 사전 릴리스 v1.0.0-dev.2.1](https://github.com/ATLKR/OpenGeul/releases/tag/v1.0.0-dev.2.1)은 공개 상태이며 초안이 아니고 사전 릴리스로 표시됐습니다.
+- 게시 자산은 `OpenGeul_1.0.0.0_x64_development-unsigned.msix`, `OpenGeul_1.0.0_windows-x64_unsigned-portable.zip`, `AppxManifest.xml`, `SHA256SUMS.txt`, `provenance.json`, `rhwp-help.txt`입니다.
+- 릴리스에는 `provenance.json`에 기록된 고정 소스 버전에서 빌드한 HOP Windows 편집기와 rhwp CLI가 있습니다. LibreOffice를 포함하거나 DOCX/XLSX/PPTX 지원을 약속하지 않습니다.
+- 이 문서 변경은 해당 릴리스 앱 바이너리를 다시 빌드하거나 바꾸지 않습니다. 위 빌드 설명은 명시한 앱 커밋과 실행에만 해당하며 이후 커밋에 자동 적용되지 않습니다.
 
-## Historical 1.0.0 scope versus unverified behavior
+## 과거 1.0.0 범위와 미검증 동작
 
-The release retains the pinned upstream HOP Windows editor and rhwp CLI rather than reimplementing their engines. HWP/HWPX opening, HWP saving, PDF export, printing, drag/drop, multi-window behavior and file-association configuration are included in the source integration. Inclusion is not proof of correctness for every document or Windows configuration.
+이 릴리스는 엔진을 다시 구현하지 않고 고정된 업스트림 HOP Windows 편집기와 rhwp CLI를 유지합니다. HWP/HWPX 열기, HWP 저장, PDF 내보내기, 인쇄, 끌어놓기, 다중 창과 파일 연결 설정이 소스 통합에 포함됐습니다. 포함됐다는 사실만으로 모든 문서나 Windows 설정에서의 정확성을 증명하지 않습니다.
 
-The historical 1.0.0 build did not add HWPX saving or autosave/recovery. HWPX saving was subsequently implemented and merged in PR #1; autosave/recovery remains absent. Consult the shipped `rhwp-help.txt` for the separate CLI capabilities and limits.
+과거 1.0.0 빌드는 HWPX 저장이나 자동 저장·복구를 추가하지 않았습니다. HWPX 저장은 이후 PR #1에서 구현·병합됐지만 자동 저장·복구는 여전히 없습니다. 별도 CLI 기능과 한계는 함께 제공하는 `rhwp-help.txt`를 확인하세요.
 
-The installed-font-only policy and official download help are product safeguards, not a determination that every font already present on a user's computer is licensed for every intended use. Font embedding rights and the native Skia direct-PDF path need their own review; no blanket legal or compatibility guarantee is made.
+설치된 글꼴만 사용하는 정책과 공식 다운로드 도움말은 제품 보호 장치입니다. 사용자 PC의 모든 글꼴이 모든 의도한 용도에 허가됐다는 판정이 아닙니다. 글꼴 포함 권한과 네이티브 Skia 직접 PDF 경로는 별도 검토가 필요하며, 포괄적인 법적·호환성 보장은 하지 않습니다.
 
-## Still requires manual verification before a stable release
+## 당시 정식 릴리스 전에 필요했던 수동 검증
 
-- Clean-machine GUI startup and WebView2 Runtime handling without Hancom or Microsoft Office installed.
-- Korean IME, accessibility, multi-window file activation and Windows file associations.
-- Representative HWP editing/saving and reopening in the original application; HWPX opening; visual fidelity, printing and PDF output.
-- Missing-font behavior: official download, user installation, font rescan and predictable substitution without silent downloads or extraction from other applications.
-- PDF embedding policy across all available export/rendering paths, including native Skia.
-- Hostile-document handling, recovery expectations, WACK and Microsoft Store certification.
-- Trusted signing and production installation/update behavior.
+- 한컴·Microsoft Office가 없는 새 기기에서의 GUI 시작과 WebView2 Runtime 처리.
+- 한국어 IME, 접근성, 다중 창 파일 활성화와 Windows 파일 연결.
+- 대표적인 HWP 편집·저장·원래 앱에서 재열기, HWPX 열기, 시각적 충실도, 인쇄와 PDF 출력.
+- 누락 글꼴 처리: 공식 다운로드, 사용자 설치, 재검색과 예측 가능한 대체. 조용한 다운로드나 다른 앱에서의 추출은 하지 않음.
+- 네이티브 Skia를 포함한 모든 내보내기·렌더링 경로의 PDF 포함 정책.
+- 악의적인 문서 처리, 복구 기대 범위, WACK와 Microsoft Store 인증.
+- 신뢰할 수 있는 서명과 배포 설치·업데이트 동작.
 
-Unsigned MSIX files are development/review artifacts, not trusted production installers. Normal installation requires the appropriate signing/trust setup or a Store-signed release. The portable ZIP can be extracted as a whole and tested using `OpenGeul.exe` with an installed WebView2 Runtime; the CLI is `Tools/rhwp.exe`. Organizational security policy can still block unsigned executables. Do not disable security protections to bypass that policy.
+이 목록은 당시 미검증 항목을 보존한 기록입니다. 현재 Store 상태와 후속 후보의 검증은 해당 버전·실행의 별도 근거를 따릅니다. 서명되지 않은 MSIX는 개발·검토 산출물이며 신뢰할 수 있는 배포용 설치 프로그램이 아닙니다. 일반 설치에는 적절한 서명·신뢰 설정이나 Store 서명 릴리스가 필요합니다. 포터블 ZIP은 전체를 풀고 설치된 WebView2 Runtime과 `OpenGeul.exe`로 검사할 수 있습니다. CLI는 `Tools/rhwp.exe`입니다. 조직의 보안 정책이 서명되지 않은 실행 파일을 막을 수 있으며, 우회하려고 보안 보호 기능을 끄지 마세요.

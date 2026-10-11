@@ -12,7 +12,7 @@ export default {
     if (!asset) return new Response('Not found', { status: 404 });
     const headers = {
       'Content-Type': asset.type,
-      'Cache-Control': path.startsWith('/assets/') ? 'public, max-age=3600' : 'public, max-age=60',
+      'Cache-Control': path.startsWith('/assets/') && path !== '/assets/store-version.svg' ? 'public, max-age=3600' : 'public, max-age=60',
       'Content-Security-Policy': "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'strict-origin-when-cross-origin',

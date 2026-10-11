@@ -17,6 +17,7 @@ except ImportError:
     submitter = None
 from buildkit import DEV_IDENTITY, manifest
 from store_package import STORE_APP_ID, STORE_IDENTITY, REQUIRED_JOBS
+import store_listing
 
 
 class StoreSubmitTests(unittest.TestCase):
@@ -212,9 +213,37 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.perform()['status'], 'PreProcessing')
         self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT', 'UPLOAD', 'POST'])
         self.assertEqual(self.new['pricing'], self.baseline['pricing'])
-        self.assertEqual(self.new['listings'], self.baseline['listings'])
+        self.assertEqual(self.new['listings'], store_listing.apply_korean_listing(self.baseline)['listings'])
         self.assertEqual(self.new['targetPublishMode'], 'Manual')
         self.assertIn('Keep human notes', self.new['notesForCertification'])
+
+    def test_korean_listing_updates_all_existing_locales_and_preserves_baseline(self):
+        self.baseline['listings']['en-us'] = {
+            'baseListing': {'title': 'OpenGeul', 'description': 'Old English text',
+                            'images': [{'id': 'existing', 'fileStatus': 'Uploaded'}]},
+            'platformOverrides': {'Windows81': {'description': 'Preserved'}}}
+        original = copy.deepcopy(self.baseline)
+        self.assertEqual(self.perform()['status'], 'PreProcessing')
+        self.assertEqual(self.baseline, original)
+        self.assertEqual(self.new['listings'], store_listing.apply_korean_listing(original)['listings'])
+        self.assertEqual(self.new['pricing'], original['pricing'])
+        self.assertEqual(self.new['targetPublishMode'], original['targetPublishMode'])
+
+    def test_invalid_korean_listing_plan_preserves_existing_pending_before_mutation(self):
+        invalid = self.root / 'invalid-listing.json'
+        invalid.write_text('{"description":"English-only"}', encoding='utf-8')
+        original = copy.deepcopy(self.pending)
+        with patch.object(store_listing, 'CONFIG', invalid):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.pending, original)
+
+    def test_missing_korean_listing_preserves_pending_before_mutation(self):
+        self.baseline['listings'] = {'en-us': {'baseListing': {'title': 'OpenGeul'}}}
+        original = copy.deepcopy(self.pending)
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.pending, original)
 
     def test_free_replacement_preserves_unavailable_markets(self):
         self.baseline['pricing']['marketSpecificPricings'].update(
@@ -223,6 +252,42 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.perform()['status'], 'PreProcessing')
         self.assertEqual(self.new['pricing'], original['pricing'])
         self.assertEqual(self.baseline, original)
+
+    def test_non_manual_publication_template_never_mutates_store(self):
+        for mode in ('Immediate', 'SpecificDate', None, 'unknown'):
+            with self.subTest(mode=mode):
+                self.calls.clear(); self.issues.clear()
+                self.baseline['targetPublishMode'] = mode
+                with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+                self.assertEqual(self.mutations(), [])
+
+    def test_changed_publication_mode_ack_never_uploads_or_commits(self):
+        def changed_ack(*args, **kwargs):
+            status, result = self.store(*args, **kwargs)
+            if args[2:4] == ('PUT', 'submissions/30'):
+                result['targetPublishMode'] = 'Immediate'
+            return status, result
+
+        with patch.object(submitter, '_request', side_effect=changed_ack):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT'])
+
+    def test_changed_publication_mode_after_upload_never_commits(self):
+        def changed_readback(*args, **kwargs):
+            status, result = self.store(*args, **kwargs)
+            if args[2:4] == ('GET', 'submissions/30'):
+                result['targetPublishMode'] = 'Immediate'
+            return status, result
+
+        with patch.object(submitter, '_request', side_effect=changed_readback):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT', 'UPLOAD'])
+
+    def test_existing_processing_request_requires_manual_publication(self):
+        self.perform(); self.calls.clear()
+        self.new['targetPublishMode'] = 'Immediate'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
 
     def test_paid_or_unknown_market_prices_never_mutate_store(self):
         for value in ('Tier2', 'unknown', None, {'priceId': 'Free'}):

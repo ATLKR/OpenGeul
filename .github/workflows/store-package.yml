@@ -1,18 +1,18 @@
-name: OpenGeul Store package
+name: OpenGeul Store 패키지
 'on':
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing successful OpenGeul release to repackage
+        description: Store 신원으로 재포장할 기존 검증 완료 OpenGeul 릴리스
         type: string
         required: true
       verify_store_api:
-        description: Validate configured Store API credentials with an application GET only
+        description: 앱 GET만으로 설정된 Store API 인증과 읽기 권한 확인
         type: boolean
         required: false
         default: false
       submit_to_store:
-        description: Submit a stable release update after the first Store publication
+        description: 최초 Store 공개 이후 검증된 안정판 업데이트 제출
         type: boolean
         required: false
         default: false
@@ -41,10 +41,10 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Check Store runtime preservation
+    - name: Store 런타임 보존 검사
       shell: pwsh
       run: python -m unittest discover -s tests -p test_store_package.py -v
-    - name: Verify successful release and repackage unchanged runtime with Store identity
+    - name: 검증 완료 릴리스의 런타임을 유지하며 Store 신원으로 재포장
       id: package
       shell: pwsh
       env:
@@ -59,7 +59,7 @@ jobs:
         if (-not $makeappx) { throw 'Windows SDK MakeAppx is missing.' }
         python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
         python ci/evidence.py size --limit-mib 96 store-output
-    - name: Capture the actual Windows editor for the Store listing
+    - name: Store 소개용 실제 Windows 편집기 화면 캡처
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -68,7 +68,7 @@ jobs:
         ./e2e/ensure-webview2.ps1
         python e2e/store_screenshot.py --exe .work/store-payload/OpenGeul.exe --output store-output
         python ci/evidence.py size --limit-mib 96 store-output
-    - name: Save the verified Store package before submission
+    - name: 제출 전 검증한 Store 패키지 보존
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-store-${{ github.run_id }}
@@ -76,7 +76,7 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 9
-    - name: Submit the stable release to the Microsoft Store
+    - name: Microsoft Store에 안정판 업데이트 제출
       if: inputs.submit_to_store
       shell: pwsh
       env:
@@ -101,7 +101,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Validate OAuth credentials and GET the reserved Store application
+    - name: OAuth 인증과 고정 Store 앱 GET 확인
       env:
         STORE_APP_ID: ${{ vars.STORE_APP_ID }}
         STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}

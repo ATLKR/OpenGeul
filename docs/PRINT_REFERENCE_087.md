@@ -1,53 +1,54 @@
-# rhwp 0.8.7 print reference review
+# rhwp 0.8.7 인쇄 기준 검토
 
-The exact print references are reviewed against the owned synthetic documents
-from [run 38142625600](https://github.com/ATLKR/OpenGeul/actions/runs/38142625600),
-source `756116ff1fc094e8a1bdf2ecec6fcf3f6d3c4e17`. Both Windows versions printed
-through the real Microsoft Print To PDF dialog. All eight output pages retain
-the expected A4 portrait media, page counts, table rows, Korean/Latin content,
-page markers and unchanged source files. Range output equals the second
-multipage page.
+> 이 문서는 아래에 명시한 실행과 소스에 대한 검토 기록입니다. 해당 증거를 후속 후보 릴리스의 인쇄·CI·Store 검증 완료로 확대하지 않습니다.
 
-Independent review reproduced all eight generated native source hashes by
-changing only ZIP DOS timestamps and the central-directory host byte of the
-controlled documents. Names, compressed member data, CRCs and document content
-remain identical; the fixture generator scripts are unchanged.
+정확한 인쇄 기준을
+[실행 38142625600](https://github.com/ATLKR/OpenGeul/actions/runs/38142625600)의
+테스트 소유 합성 문서와 대조해 검토했다. 소스는
+`756116ff1fc094e8a1bdf2ecec6fcf3f6d3c4e17`이다. 두 Windows 버전 모두
+실제 Microsoft Print To PDF 대화상자로 인쇄했다. 출력 페이지 8개는 모두
+예상한 A4 세로 용지, 페이지 수, 표 행, 한국어·라틴 내용, 페이지 표식과
+변경하지 않은 원본 파일을 유지했다. 범위 출력은 여러 페이지 문서의 두 번째
+페이지와 일치했다.
 
-The review compared the same fixture bytes with old rhwp 0.8.4 WASM
-`f059bddbb553223ee9ceb01e2b9e4cd8856301dc366f41310ad6f4cddbfb07f8`
-and the source-built rhwp 0.8.7 WASM
-`d5455ff80f61af65dfab5cbe2f2058bc377e5d44f7c97dd7e586f0edaaa6d5da`.
-The changed native masks agree with these source and geometry controls:
+독립 리뷰에서 통제된 문서의 ZIP DOS 타임스탬프와 중앙 디렉터리 호스트 바이트만
+변경해 생성된 네이티브 원본 해시 8개를 모두 재현했다. 이름, 압축된 멤버 데이터,
+CRC와 문서 내용은 동일하며 픽스처 생성기 스크립트도 변경하지 않았다.
 
-- The [border conversion correction](https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/layout/border_rendering.rs#L1298)
-  quantizes the 0.12 mm table border to 0.48 CSS px instead of 0.5. Table text
-  positions and advances remain unchanged, while all four strokes become
-  thinner. The negative/zero-spacing cell geometry stays unchanged.
-- The [+600 final-line correction](https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/height_measurer.rs#L3178)
-  removes spacing after the last nonblank line. Five 1,000-unit lines, four
-  600-unit gaps and 282 units of padding give
-  `(5*1000 + 4*600 + 282)*96/7200 = 102.4267` CSS px. The removed 8 CSS px
-  predicts the observed 18 raster px reduction at 216 DPI. All 65 table glyph
-  outlines remain, and terminal descenders stay inside the border.
-- The [HCR Batang metric correction](https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/layout/text_measurement.rs#L2192)
-  replaces inflated ASCII advances with the font's own metrics. Both basic
-  documents retain their 30 text elements and requested primary font. The
-  controlled right edge moves by -3.88 CSS px, predicting the native -9 raster
-  px width change.
-- Fitting paragraphs without stored line segments now use the
-  [frame baseline](https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/composer/line_breaking.rs#L3065).
-  The change from 0.8 to 0.85 of the 10 pt font predicts +0.6667 CSS px
-  (+1.5 raster px, aligned to the observed +2). Both multipage controls retain
-  the same 32 text elements and advances.
+같은 픽스처 바이트를 이전 rhwp 0.8.4 WASM
+`f059bddbb553223ee9ceb01e2b9e4cd8856301dc366f41310ad6f4cddbfb07f8`과
+소스에서 빌드한 rhwp 0.8.7 WASM
+`d5455ff80f61af65dfab5cbe2f2058bc377e5d44f7c97dd7e586f0edaaa6d5da`으로
+비교했다. 변경된 네이티브 마스크는 다음 소스·기하 대조군과 일치한다.
 
-The Windows 2022 and 2025 masks match apart from the previously reviewed
-eight-pixel digit-4 crossbar variant in `table-0`, at `[479,388,490,389]`.
-Its exact whole-page fingerprint is separately recorded. The matcher,
-216-DPI scale, threshold, page/media/spooler/source checks and zero generic
-pixel tolerance remain unchanged. CI does not regenerate references.
+- [테두리 변환 수정](https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/layout/border_rendering.rs#L1298)은
+  0.12 mm 표 테두리를 0.5 대신 0.48 CSS px로 양자화한다. 표 텍스트 위치와
+  글자 진행 폭은 유지하면서 네 방향 테두리 선이 모두 더 얇아졌다.
+  음수·0 간격 셀의 기하는 변경되지 않았다.
+- [+600 마지막 줄 수정](https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/height_measurer.rs#L3178)은
+  마지막 비어 있지 않은 줄 뒤의 간격을 제거한다. 1,000단위 줄 5개,
+  600단위 간격 4개와 여백 282단위를 합하면
+  `(5*1000 + 4*600 + 282)*96/7200 = 102.4267` CSS px다. 제거된 8 CSS px는
+  216 DPI에서 관찰한 래스터 높이 18 px 감소를 예측한다. 표 글리프 윤곽선
+  65개가 모두 남았으며 마지막 글자의 아래로 내려오는 획도 테두리 안에 있다.
+- [HCR Batang 메트릭 수정](https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/layout/text_measurement.rs#L2192)은
+  부풀려진 ASCII 진행 폭을 글꼴 자체 메트릭으로 교체한다. 기본 문서 두 개는
+  각각 텍스트 요소 30개와 요청한 기본 글꼴을 유지한다. 통제된 오른쪽 경계는
+  -3.88 CSS px 이동해 네이티브 래스터 폭의 -9 px 변화를 예측한다.
+- 저장된 줄 세그먼트 없이 한 줄에 들어가는 문단은 이제
+  [프레임 기준선](https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/composer/line_breaking.rs#L3065)을
+  사용한다. 10 pt 글꼴의 0.8에서 0.85로 바뀌면 +0.6667 CSS px가 예상된다.
+  이는 +1.5 래스터 px이며 관찰된 +2와 맞는다. 여러 페이지 대조군 두 개는
+  동일한 텍스트 요소 32개와 글자 진행 폭을 유지한다.
 
-The prior pristine WASM lacks OpenGeul's old negative-spacing backport;
-its -300 height is not the previous production height. Installed font binary
-hashes were not recorded, so the review does not claim font file identity.
-The native PDFs outline text; the raster and source controls supply the
-regression evidence. This does not certify a physical printer or Hancom parity.
+Windows 2022와 2025 마스크는 `table-0`의 `[479,388,490,389]`에서 이전에
+검토한 숫자 4의 가로획 변형 8픽셀을 제외하면 일치한다. 해당 전체 페이지의
+정확한 지문은 별도로 기록했다. 비교기, 216-DPI 배율, 임계값,
+페이지·용지·스풀러·소스 검사와 일반 픽셀 허용 오차 0은 변경하지 않았다.
+CI는 기준을 다시 생성하지 않는다.
+
+이전의 수정하지 않은 WASM에는 OpenGeul의 과거 음수 간격 백포트가 없다.
+따라서 그 WASM의 -300 높이는 이전 프로덕션 높이가 아니다. 설치된 글꼴
+바이너리 해시는 기록하지 않았으므로 글꼴 파일 동일성을 주장하지 않는다.
+네이티브 PDF는 텍스트를 윤곽선으로 출력하며, 래스터·소스 대조군이 회귀 증거를
+제공한다. 이 검토는 물리 프린터나 한컴과의 동일성을 인증하지 않는다.

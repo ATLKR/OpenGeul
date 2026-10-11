@@ -1,22 +1,38 @@
-# Release gates
+# 릴리스 체크리스트
 
-Unsigned developer prereleases may be published only after required automated tests, complete native build, package verification and checksums succeed. They are not supported stable releases or trusted installers.
+서명 없는 개발판은 필수 자동 검사, 전체 네이티브 빌드, 패키지 검증과 해시
+확인을 통과한 뒤에만 게시합니다. 신뢰된 일반 설치 파일과 구분합니다.
 
-Before a supported stable/Store release, verify and record:
-- Clean Windows 10/11 installation, startup, uninstall/update; installed/missing WebView2 and VC runtime behavior; offline operation.
-- HWP/HWPX double-click, drag/drop, multiple windows, Korean/space/long/UNC paths, HOP/other app coexistence; never force defaults.
-- Korean IME, accessibility, DPI and keyboard navigation.
-- Installed system/per-user fonts, font help, missing-font/fallback layout warnings, Canvas2D/CanvasKit and PDF/printing.
-- Representative documents: open/edit/save/reopen in originating applications, values, tables, images, equations, notes, printing, unsupported/password/large files and graceful failure. Preserve originals.
-- Native password-document checks: correct/wrong password, retry/cancel without replacing the prior document, unchanged protected-source checksum, blocked direct Save, explicit unencrypted Save As consent/cancel/reopen to a separate path, and close/replacement safety.
-- No bundled font programs, credentials, personal test documents or unauthorized assets, including nested JS/WASM/EXE resources. File/magic scans alone are not a complete embedded-data audit.
-- Full dependency/Skia/CanvasKit/WASM license texts and notices; missing inventory entries reviewed; vulnerability checks.
-- Native SVG PDF metadata guard, optional direct Skia PDF, embedded document fonts and print-driver rights reviewed separately.
-- WACK and actual Partner Center identity, Store name rights, screenshots, age rating, support contact, privacy statement and runFullTrust explanation.
-- Real signing or Store distribution for normal trusted MSIX installation. Never publish private keys or tell users to disable protection.
+지원 릴리스·Store 제출을 준비할 때 다음 결과와 한계를 기록하세요.
 
-HWPX saving is implemented downstream and covered by native save/reopen tests. Direct Save of encrypted originals is blocked, unencrypted Save As requires explicit consent, and autosave/recovery is not provided. Choose a separate output path to preserve the protected original. Native password-document checks above must be recorded before advertising that capability as verified. Disclose these limits and preserve source documents when evaluating compatibility.
+- Windows 10/11 설치·시작·제거·업데이트, WebView2·VC 런타임 유무, 오프라인 동작.
+- HWP/HWPX 연결 프로그램, 끌어놓기, 여러 창, 한글·공백·긴 경로·UNC 경로,
+  다른 앱과 공존. 기본 연결 프로그램을 강제로 바꾸지 않습니다.
+- 한국어 IME, 접근성, DPI와 키보드 탐색.
+- 시스템·사용자 글꼴, 글꼴 도움말, 누락·대체 글꼴 경고, Canvas2D/CanvasKit·PDF·인쇄.
+- 대표 문서의 열기·수정·저장·원래 앱에서 재열기, 값·표·이미지·수식·주석·인쇄,
+  미지원·암호·큰 파일의 실패 처리. 원본을 보관합니다.
+- 암호 입력·오입력·재시도·취소 시 이전 문서 보존, 암호 원본 해시 보존, 일반
+  저장 차단, 별도 경로의 평문 저장 확인·취소·재열기, 닫기·문서 교체 안전성.
+- 배포에 글꼴 파일·인증 정보·개인 문서·허가되지 않은 자료가 없는지 확인.
+  파일 확장자·매직 값 검사만으로 중첩 리소스 전체를 심사했다고 주장하지 않습니다.
+- 의존성·Skia·CanvasKit·WASM 라이선스와 고지, 누락 항목·취약점 검토.
+- SVG PDF 글꼴 가드, 선택적 직접 Skia PDF, 문서 포함 글꼴과 인쇄 드라이버 권한.
+- WACK 실제 결과, Store 식별자·이름·화면·연령 등급·지원·개인정보·runFullTrust 설명.
+- 한국어 우선 소개·도움말·릴리스 안내와 실제 공개 버전에 맞는 배지.
+- 일반 MSIX 설치를 위한 실제 서명 또는 Store 배포. 비밀키를 공개하지 않습니다.
 
-The installed-package gate checks activation under the candidate's package identity and runs the installed CLI. It records actual WACK XML results when the kit is available. `wack.json` with `status=unavailable` is a remaining certification check, not a WACK pass. A complete Desktop Bridge report may satisfy `submissionCheckPassed` with optional findings only when every required test passes. Required warnings or failures, partial reports, identity mismatches and missing results fail the gate. `passed` remains false for a report with any warnings; inspect the preserved XML before Store submission.
+HWPX 저장은 구현돼 있으며 네이티브 저장·재열기 검사를 유지합니다.
+암호 원본의 일반 저장은 차단하고 평문 저장 전 확인합니다. 자동 저장·복구는
+지원하지 않습니다. 원본 보존에는 별도 경로를 사용하세요. 암호 기능의 검증
+완료를 안내하기 전에 해당 후보의 실제 네이티브 검사 결과를 기록해야 합니다.
 
-Support is [allenlim@allenlim.net](mailto:allenlim@allenlim.net). The product website is [opengeul.allenlim.net](https://opengeul.allenlim.net).
+설치 검사는 후보 패키지 식별자로 앱을 실행하고 설치된 CLI를 확인합니다.
+WACK이 있으면 실제 XML을 보관합니다. status=unavailable은 미검증이며 통과가
+아닙니다. 전체 Desktop Bridge 보고서의 모든 필수 항목이 통과한 경우에만 선택
+항목 경고와 함께 submissionCheckPassed를 허용합니다. 필수 경고·실패, 불완전
+보고서, 식별자 불일치와 결과 누락은 검사를 실패시킵니다. 경고가 있는 보고서의
+passed는 false이며 Store 제출 전에 원본 XML을 확인합니다.
+
+지원: [allenlim@allenlim.net](mailto:allenlim@allenlim.net).
+웹사이트: [opengeul.allenlim.net](https://opengeul.allenlim.net).

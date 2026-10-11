@@ -1,23 +1,25 @@
-# HOP upstream follow-up triage
+# HOP 업스트림 후속 작업 분류
 
-## First downstream changes
+## 당시 첫 다운스트림 변경
 
-- golbin/hop#101, FMsongX2 commit f9bbe8dc66172a1959af1e388e6c28a5b597c5a6: backport the unmodified-character shortcut filter. Relates to Windows issue #95 and macOS issue #100. Keep Ctrl/Cmd+P, F6/F7 and object-property menu/button access. Remove stale plain-P shortcut labels. Local real-source keyboard regression: 6 failures before, 10 passing after; real keyboard UI save/reopen proof is required separately.
-- golbin/hop#97: add a persistent View > toolbar-label visibility preference. Default stays visible, storage-denied sessions remain usable, hidden button labels retain accessible names. Seven local preference unit tests passed after the expected RED phase. UI persistence and document-nonmutation checks are part of the new browser probe, not yet a claim of native verification.
+이 절은 과거 백포트 준비 기록입니다. 이후 HOP 0.4.5 / rhwp 0.8.7 통합에서 중복 구현을 제거한 내용은 UPSTREAM_UPDATE_VERIFICATION.md와 THIRD_PARTY_NOTICES.md를 확인하세요.
 
-No upstream PR is merged and no upstream issue is closed by these downstream changes. Preserve MIT notices and contributor attribution.
+- golbin/hop#101, FMsongX2 커밋 f9bbe8dc66172a1959af1e388e6c28a5b597c5a6: 보조 키 없는 문자 단축키 필터를 백포트했습니다. Windows 이슈 #95와 macOS 이슈 #100에 관련됩니다. Ctrl/Cmd+P, F6/F7과 개체 속성 메뉴·버튼 접근을 유지하고 오래된 단일 P 단축키 표시를 제거했습니다. 실제 소스의 로컬 키보드 회귀 테스트는 수정 전 6개 실패, 수정 후 10개 통과였습니다. 실제 키보드 UI 저장·재열기 증명은 별도 필요했습니다.
+- golbin/hop#97: 보기 메뉴의 도구 모음 글자 표시 설정을 저장하도록 추가했습니다. 기본은 표시이며 저장소 접근이 거부돼도 사용할 수 있습니다. 버튼 글자를 숨겨도 접근성 이름은 유지합니다. 예상한 RED 단계 뒤 로컬 설정 단위 테스트 7개가 통과했습니다. UI 설정 유지와 문서 변경 방지 검사는 새 브라우저 검사에 포함했으며 당시 네이티브 검증 완료 주장은 아니었습니다.
 
-## Next candidates requiring distinct reproduction
+이 다운스트림 변경으로 업스트림 PR이 병합되거나 이슈가 닫힌 것은 아닙니다. MIT 고지와 기여자 표시를 유지합니다.
 
-- #99 / #78: table-cell clipping and PDF layout. Need minimal synthetic table/shape fixtures and independent render evidence; text-only round trips do not establish a fix.
-- #73: saved-document corruption. Existing round-trip tests improve coverage but do not prove the reporter's document is fixed.
-- #96: rich clipboard formatting needs Windows native clipboard cases.
-- #98: password-protected documents need explicit decryption/save policy, not silent plaintext output.
-- #80: ARM64 needs a separately built and tested target; x64 emulation is not a native ARM64 claim.
-- PR #86: Hanja conversion needs dictionary-data provenance and license review before inclusion.
-- PR #87: web demo/UI redesign and HTML named .doc exports are not wholesale Windows backports.
-- PR #69: do not re-enable unsafe automatic lineseg repair against the current pinned baseline policy.
-- PR #71 (AI/cloud) and #49 (Android): outside the current Windows HWP/HWPX scope.
-- PR #74 / #84: macOS native clipboard/AppKit fixes are not Windows fixes.
+## 별도 재현이 필요했던 후속 후보
 
-Some unmerged proposals are closed or superseded. Check actual diff, maintainer comments and current source before applying; do not assume all unmerged work should be imported.
+- #99 / #78: 표 셀 잘림과 PDF 배치. 최소 합성 표·도형 자료와 독립 렌더 근거가 필요합니다. 텍스트만 저장·재열기한 결과는 수정 증명이 아닙니다.
+- #73: 저장 문서 손상. 기존 저장·재열기 테스트는 검증 범위를 늘리지만 제보자의 문서가 수정됐음을 증명하지 않습니다.
+- #96: 서식 있는 클립보드에는 Windows 네이티브 클립보드 사례가 필요합니다.
+- #98: 암호 문서에는 명시적인 해제·저장 정책이 필요하며 조용히 평문을 출력하면 안 됩니다.
+- #80: ARM64는 별도로 빌드·테스트한 대상이 필요합니다. x64 에뮬레이션은 네이티브 ARM64 지원 근거가 아닙니다.
+- PR #86: 한자 변환은 포함 전에 사전 데이터 출처와 라이선스 검토가 필요합니다.
+- PR #87: 웹 데모·UI 재설계와 HTML을 .doc 이름으로 내보내는 기능을 통째로 Windows에 백포트하지 않습니다.
+- PR #69: 고정한 기준 정책에 반하는 안전하지 않은 자동 lineseg 복구를 다시 활성화하지 않습니다.
+- PR #71 (AI/cloud), #49 (Android): 당시 Windows HWP/HWPX 범위 밖입니다.
+- PR #74 / #84: macOS 네이티브 클립보드·AppKit 수정은 Windows 수정이 아닙니다.
+
+병합되지 않은 제안 중 일부는 닫혔거나 다른 변경으로 대체됐습니다. 적용 전에 실제 diff, 유지관리자 의견과 현재 소스를 확인합니다. 병합되지 않은 작업을 모두 가져와야 한다고 가정하지 않습니다. 이 목록은 역사적 분류이며 이후 검증 결과를 축소하거나 새 후보의 성공을 선언하지 않습니다.

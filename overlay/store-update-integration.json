@@ -1,0 +1,102 @@
+{
+  "copies": {
+    "overlay/store-update-notice.ts": "apps/studio-host/src/ui/update-notice.ts",
+    "overlay/store-update-notice.test.ts": "apps/studio-host/src/ui/update-notice.test.ts",
+    "overlay/store-update-menu.ts": "apps/studio-host/src/host/store-updates.ts",
+    "overlay/store-update-menu.test.ts": "apps/studio-host/src/command/commands/store-update-menu.test.ts",
+    "overlay/store_update_policy.rs": "apps/desktop/src-tauri/src/store_update_policy.rs",
+    "overlay/store_update_transport.rs": "apps/desktop/src-tauri/src/store_update_transport.rs"
+  },
+  "replacements": [
+    {
+      "file": "apps/desktop/src-tauri/src/lib.rs",
+      "old": "use updates::{get_update_state, restart_to_apply_update, start_update_install};",
+      "new": "use updates::{check_store_update, dismiss_store_update, get_update_preferences, get_update_state, restart_to_apply_update, set_update_auto_check, start_update_install};"
+    },
+    {
+      "file": "apps/desktop/src-tauri/src/lib.rs",
+      "old": "            get_update_state,",
+      "new": "            get_update_state,\n            check_store_update,\n            dismiss_store_update,\n            get_update_preferences,\n            set_update_auto_check,"
+    },
+    {
+      "file": "apps/studio-host/src/core/tauri-bridge.ts",
+      "old": "export type DesktopUpdateState =",
+      "new": "export interface DesktopUpdatePreferences { autoCheck: boolean; }\n\nexport type DesktopUpdateState ="
+    },
+    {
+      "file": "apps/studio-host/src/core/tauri-bridge.ts",
+      "old": "  getUpdateState(): Promise<DesktopUpdateState>;",
+      "new": "  getUpdateState(): Promise<DesktopUpdateState>;\n  checkStoreUpdate(): Promise<DesktopUpdateState>;\n  getUpdatePreferences(): Promise<DesktopUpdatePreferences>;\n  setUpdateAutoCheck(enabled: boolean): Promise<DesktopUpdatePreferences>;\n  dismissStoreUpdate(): Promise<void>;"
+    },
+    {
+      "file": "apps/studio-host/src/core/tauri-bridge.ts",
+      "old": "  async startUpdateInstall(): Promise<void> {",
+      "new": "  async checkStoreUpdate(): Promise<DesktopUpdateState> {\n    return this.invoke<DesktopUpdateState>('check_store_update');\n  }\n\n  async getUpdatePreferences(): Promise<DesktopUpdatePreferences> {\n    return this.invoke<DesktopUpdatePreferences>('get_update_preferences');\n  }\n\n  async setUpdateAutoCheck(enabled: boolean): Promise<DesktopUpdatePreferences> {\n    return this.invoke<DesktopUpdatePreferences>('set_update_auto_check', { enabled });\n  }\n\n  async dismissStoreUpdate(): Promise<void> {\n    await this.invoke<void>('dismiss_store_update');\n  }\n\n  async startUpdateInstall(): Promise<void> {"
+    },
+    {
+      "file": "apps/studio-host/src/command/commands/file.ts",
+      "old": "import { replaceUpstreamCommands } from '../replace-upstream-commands';",
+      "new": "import { replaceUpstreamCommands } from '../replace-upstream-commands';\nimport { storeUpdateCommands } from '../../host/store-updates';\nexport { initStoreUpdateMenu } from '../../host/store-updates';"
+    },
+    {
+      "file": "apps/studio-host/src/command/commands/file.ts",
+      "old": "  ...hopOnlyCommands,\n];",
+      "new": "  ...hopOnlyCommands,\n  ...storeUpdateCommands,\n];"
+    },
+    {
+      "file": "apps/studio-host/src/main.ts",
+      "old": "import { UpdateNotice, type UpdateNoticeActions } from '@/ui/update-notice';",
+      "new": "import { UpdateNotice, type UpdateNoticeActions } from '@/ui/update-notice';\nimport { initStoreUpdateMenu } from '@/command/commands/file';"
+    },
+    {
+      "file": "apps/studio-host/src/main.ts",
+      "old": "    const updateNotice = tauriRuntime\n      ? new UpdateNotice(updateNoticeActions(wasm))\n      : null;",
+      "new": "    const updateNotice = tauriRuntime\n      ? new UpdateNotice(updateNoticeActions(wasm))\n      : null;\n    eventBus.on('desktop-update-state', (state) => {\n      updateNotice?.setState(state as Parameters<UpdateNotice['setState']>[0]);\n    });"
+    },
+    {
+      "file": "apps/studio-host/src/main.ts",
+      "old": "    }).finally(() => {\n      void homeScreen?.refresh(wasm.pageCount > 0);",
+      "new": "    }).finally(() => {\n      void initStoreUpdateMenu(wasm, eventBus).catch((error) => {\n        console.error('[main] 업데이트 메뉴 초기화 실패:', error);\n      });\n      void homeScreen?.refresh(wasm.pageCount > 0);"
+    },
+    {
+      "file": "apps/studio-host/src/main.ts",
+      "old": "    Pick<DesktopBridgeApi, 'startUpdateInstall' | 'restartToApplyUpdate'>",
+      "new": "    Pick<DesktopBridgeApi, 'startUpdateInstall' | 'dismissStoreUpdate' | 'checkStoreUpdate'>"
+    },
+    {
+      "file": "apps/studio-host/src/main.ts",
+      "old": "    startUpdateInstall: desktop.startUpdateInstall\n      ? () => desktop.startUpdateInstall!()\n      : undefined,\n    restartToApplyUpdate: desktop.restartToApplyUpdate\n      ? () => desktop.restartToApplyUpdate!()\n      : undefined,",
+      "new": "    openStore: desktop.startUpdateInstall\n      ? () => desktop.startUpdateInstall!()\n      : undefined,\n    dismissUpdate: desktop.dismissStoreUpdate\n      ? () => desktop.dismissStoreUpdate!()\n      : undefined,\n    checkUpdates: desktop.checkStoreUpdate\n      ? () => desktop.checkStoreUpdate!()\n      : undefined,"
+    },
+    {
+      "file": "apps/studio-host/src/core/desktop-events.ts",
+      "old": "  await listen('hop-update-state', (event) => {\n    onUpdateState(event.payload as DesktopUpdateState);\n  });",
+      "new": "  await listen('hop-update-state', (event) => {\n    onUpdateState(event.payload as DesktopUpdateState);\n  });\n  await listen('opengeul-update-preferences', (event) => {\n    eventBus.emit('desktop-update-preferences', event.payload);\n  });"
+    },
+    {
+      "file": "apps/studio-host/index.html",
+      "old": "          <div class=\"md-item\" data-cmd=\"file:about\"><span class=\"md-icon icon-help\"></span><span class=\"md-label\">제품 정보</span></div>",
+      "new": "          <div class=\"md-item\" data-cmd=\"file:check-update\"><span class=\"md-icon\"></span><span class=\"md-label\">Store 업데이트 확인</span></div>\n          <div class=\"md-item active\" data-cmd=\"file:auto-check-update\" role=\"menuitemcheckbox\" aria-checked=\"true\"><span class=\"md-icon\" aria-hidden=\"true\">✓</span><span class=\"md-label\">Store 업데이트 자동 확인</span></div>\n          <div class=\"md-item\" data-cmd=\"file:about\"><span class=\"md-icon icon-help\"></span><span class=\"md-label\">제품 정보</span></div>"
+    },
+    {
+      "file": "apps/studio-host/src/main.ts",
+      "old": "      onUpdateState: (state) => {\n        updateNotice?.setState(state);\n      },",
+      "new": "      onUpdateState: (state) => {\n        eventBus.emit('desktop-update-state', state);\n      },"
+    },
+    {
+      "file": "apps/studio-host/src/core/desktop-events.ts",
+      "old": "  await listen('hop-update-state', (event) => {\n    onUpdateState(event.payload as DesktopUpdateState);\n  });",
+      "new": "  let updateStateRevision = 0;\n  await listen('hop-update-state', (event) => {\n    updateStateRevision += 1;\n    onUpdateState(event.payload as DesktopUpdateState);\n  });"
+    },
+    {
+      "file": "apps/studio-host/src/core/desktop-events.ts",
+      "old": "    try {\n      onUpdateState(await desktop.getUpdateState());\n    } catch (error) {",
+      "new": "    try {\n      const revision = updateStateRevision;\n      const state = await desktop.getUpdateState();\n      if (updateStateRevision === revision) onUpdateState(state);\n    } catch (error) {"
+    },
+    {
+      "file": "apps/studio-host/src/core/desktop-events.test.ts",
+      "old": "  it('hydrates update state and listens for later updater events', async () => {",
+      "new": "  it.each([\n    { name: 'old idle and new available', snapshot: { status: 'idle' }, latest: { status: 'available', version: '1.1.4.0' } },\n    { name: 'old available and new idle', snapshot: { status: 'available', version: '1.1.4.0' }, latest: { status: 'idle' } },\n    { name: 'snapshot with no intervening event', snapshot: { status: 'available', version: '1.1.4.0' }, latest: null },\n  ])('keeps the latest updater state while hydration is pending: $name', async ({ snapshot, latest }) => {\n    const { eventHandlers } = installTauriMocks();\n    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };\n    installDocumentStub();\n    let finish!: (value: typeof snapshot) => void;\n    let markStarted!: () => void;\n    const started = new Promise<void>((resolve) => { markStarted = resolve; });\n    const pending = new Promise<typeof snapshot>((resolve) => { finish = resolve; });\n    const onUpdateState = vi.fn();\n    const setup = setupDesktopEvents({\n      bridge: {\n        takePendingOpenPaths: vi.fn().mockResolvedValue([]),\n        getUpdateState: vi.fn(() => { markStarted(); return pending; }),\n      },\n      dispatcher: { dispatch: vi.fn() } as never,\n      eventBus: { emit: vi.fn() } as never,\n      setMessage: vi.fn(),\n      onUpdateState,\n    });\n    await started;\n    expect(onUpdateState).not.toHaveBeenCalled();\n    if (latest) {\n      const onNativeUpdate = eventHandlers.get('hop-update-state');\n      expect(onNativeUpdate).toBeTypeOf('function');\n      await onNativeUpdate!({ payload: latest });\n    }\n    finish(snapshot);\n    await setup;\n    expect(onUpdateState.mock.calls).toEqual([[latest ?? snapshot]]);\n  });\n\n  it('hydrates update state and listens for later updater events', async () => {"
+    }
+  ]
+}

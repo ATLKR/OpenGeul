@@ -1,26 +1,26 @@
-# Release-candidate repairs — 2026-10-06
+# 릴리스 후보 수정 기록 — 2026-10-06
 
-## Root causes and scoped corrections
+## 원인과 제한된 수정
 
-The failing Windows 2022 spooler PDFs had A4 media but their content was scaled and offset. Independent PDF inspection found a white page path at (25.44,35.76)-(571.44,807.00) rather than (0.24,0)-(595.32,841.92), with retained glyph/operator counts. Native preview inspection showed Letter paper and Default extra margins before the A4 system-driver dialog. Configure both stages explicitly: A4, no additional preview margins and actual size; the actual driver remains A4 portrait.
+실패한 Windows 2022 스풀러 PDF는 용지가 A4였지만 내용이 축소되고 이동했습니다. 독립 PDF 검사에서 흰 페이지 경로가 (0.24,0)-(595.32,841.92) 대신 (25.44,35.76)-(571.44,807.00)에 있었고 글리프·연산자 수는 유지됐습니다. 네이티브 미리보기 검사에서는 A4 시스템 드라이버 대화상자 전에 Letter 용지와 Default 추가 여백이 확인됐습니다. 두 단계를 모두 명시적으로 설정했습니다. 미리보기는 A4, 추가 여백 없음, 실제 크기를 사용하고 실제 드라이버는 A4 세로를 유지합니다.
 
-WebView2 153 exposes dropdowns as ComboBox, while the older runtime uses named Buttons. Both offer native ExpandCollapse and ListItem options. SelectionItem.Select did not commit the newer preview's value even without Collapse. A single native option click does, followed by readback of the committed value. The owned system-print action uses its actual UIA InvokePattern once, avoiding small-display keyboard/click timing problems. There is no app test hook, direct-PDF shortcut or security flag.
+WebView2 153은 드롭다운을 ComboBox로 노출하고 이전 Runtime은 이름이 있는 Button을 사용합니다. 두 방식 모두 네이티브 ExpandCollapse와 ListItem 옵션을 제공합니다. SelectionItem.Select는 Collapse를 하지 않아도 새 미리보기의 값을 확정하지 못했습니다. 네이티브 옵션을 한 번 클릭하고 확정 값을 다시 읽으면 적용됐습니다. 소유한 시스템 인쇄 동작은 실제 UIA InvokePattern을 한 번 사용해 작은 화면에서의 키보드·클릭 시점 문제를 피합니다. 앱 테스트 훅, 직접 PDF 우회나 보안 플래그는 없습니다.
 
-## Real diagnostic evidence (not final-candidate build proof)
+## 실제 진단 근거와 최종 후보 빌드의 구분
 
-- Diagnostic 37443984734 on Windows 2022: all eight native printing scenarios passed with the original exact fingerprints after preview configuration.
-- Single-case diagnostic 37445466435: both Windows images printed HWPX successfully after the option-click correction.
-- All-case diagnostic 37445818877: Windows 2022 passed 8/8. Windows 2025 passed 7/8; the remaining case was the independently reviewed glyph variant below, not missing lines or a failed spooler.
-- These diagnostic runs reuse PR4 binary 375a067e7d0ecdbb16c8efbd16760335172849003b7584218adc00b668c818ce from source 0aedc704fe75b996bfa86f666f23e4297071de83. They never replace the final full workflow's same-run candidate tests.
+- Windows 2022 진단 37443984734: 미리보기 설정 후 원래의 정확한 지문으로 네이티브 인쇄 시나리오 8개가 모두 통과했습니다.
+- 단일 사례 진단 37445466435: 옵션 클릭 수정 후 두 Windows 이미지에서 HWPX 인쇄가 성공했습니다.
+- 전체 사례 진단 37445818877: Windows 2022는 8/8, Windows 2025는 7/8이 통과했습니다. 남은 사례는 아래의 독립 검토된 글리프 변형이며 누락된 줄이나 스풀러 실패가 아니었습니다.
+- 이 진단 실행은 소스 0aedc704fe75b996bfa86f666f23e4297071de83의 PR4 바이너리 375a067e7d0ecdbb16c8efbd16760335172849003b7584218adc00b668c818ce를 재사용했습니다. 최종 전체 워크플로의 동일 실행 후보 테스트를 대체하지 않습니다.
 
-## Explicit reference review, not a relaxed comparison
+## 비교 완화 대신 명시적인 기준 검토
 
-Windows 2025 table-0 output from run 37445818877, artifact 11403760205, has the same A4 dimensions, bounds, text, table borders and placement as the original. Both PDF page streams contain 1,858 operators; the only ten changed operands are coordinates of one digit-4 crossbar (-2.24/-3.37 versus -2.40/-3.36). All five rows and the terminal descender are visually intact. At 216 DPI this changes exactly eight thresholded pixels in [479,388,490,389].
+실행 37445818877, 산출물 11403760205의 Windows 2025 table-0 출력은 원래 출력과 A4 크기, 경계, 텍스트, 표 테두리와 배치가 같았습니다. 두 PDF 페이지 스트림 모두 연산자 1,858개를 포함했고 바뀐 피연산자 10개는 숫자 4 하나의 가로획 좌표뿐이었습니다(-2.24/-3.37 대 -2.40/-3.36). 행 5개와 마지막 하강부가 시각적으로 온전했습니다. 216 DPI에서 [479,388,490,389]의 임계값 처리 픽셀 정확히 8개만 달라졌습니다.
 
-Retain every original fingerprint, and add only this exact independently reviewed whole-page variant, scoped to table-0 page 1 with its run/artifact/review provenance. Unreviewed hashes, other cases/pages, changed bounds, missing review, duplicate variants and altered pixels still fail. There is no generic pixel tolerance or candidate-generated baseline. Re-reading all seven actual Windows 2025 output PDFs with this fixed reference set passes independent geometry/raster inspection; fresh CI must still execute the real print path.
+모든 원래 지문을 유지하고 실행·산출물·검토 출처를 갖춘 독립 검토된 전체 페이지 변형 하나만 table-0의 1쪽으로 제한해 추가했습니다. 검토하지 않은 해시, 다른 사례·페이지, 경계 변경, 검토 누락, 중복 변형과 달라진 픽셀은 계속 실패합니다. 일반적인 픽셀 허용 오차나 후보에서 만든 기준은 없습니다. 실제 Windows 2025 출력 PDF 7개를 이 고정 기준으로 다시 읽었을 때 독립적인 형태·래스터 검사를 통과했습니다. 새 CI에서도 실제 인쇄 경로를 실행해야 합니다.
 
-## Local review and final gate
+## 로컬 검토와 최종 검증
 
-New setting/order/action tests were observed failing before the fix. The local complete policy suite passes 150 tests, CI helper suite passes 81, and independent PDF/raster suite passes 31 (including eight reviewed-variant negative controls). The existing print-output save helper and exact-HWND error/file-dialog fixes are preserved.
+새 설정·순서·동작 테스트가 수정 전에 실패하는 것을 확인했습니다. 당시 전체 로컬 정책 테스트 150개, CI 도우미 테스트 81개, 독립 PDF·래스터 테스트 31개가 통과했습니다. 마지막 집합에는 검토된 변형의 음성 대조군 8개가 포함됩니다. 기존 인쇄 출력 저장 도우미와 정확한 HWND의 오류·파일 대화상자 수정을 유지했습니다.
 
-The final product patch version is 1.1.1 (MSIX 1.1.1.0). Application functionality is unchanged by the print harness correction; release notes now correctly advertise the previously implemented HWPX saving. Full source build, all 78 UI executions and MSIX installation must pass on the final candidate before merge/publication. This document does not mark that pending final execution successful. Reviewed in-session; no independent/subagent review is claimed.
+당시 최종 제품 패치 버전은 1.1.1(MSIX 1.1.1.0)이었습니다. 인쇄 테스트 도구 수정은 앱 기능을 바꾸지 않았고, 릴리스 노트는 이미 구현된 HWPX 저장을 올바르게 안내하도록 정리했습니다. 병합·게시 전 최종 후보에서 전체 소스 빌드, UI 실행 78회와 MSIX 설치가 통과해야 했습니다. 이 문서는 당시 대기 중이던 최종 실행을 성공으로 표시하지 않습니다. 세션 안에서 검토했으며 독립 또는 하위 에이전트 리뷰를 받았다고 주장하지 않습니다. 이후 후보의 성공 근거로 사용하지 않습니다.

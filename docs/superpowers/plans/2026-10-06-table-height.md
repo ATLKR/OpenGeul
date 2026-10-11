@@ -1,14 +1,16 @@
-# Terminal table-line height implementation plan
+# 표의 마지막 줄 높이 구현 계획
 
-**Goal:** Prevent compressed trailing line spacing from making a multi-paragraph table cell shorter than its last painted glyph line.
-**Architecture:** Adapt only the terminal-negative-spacing part of rhwp PR 6074 to pinned rhwp 0.8.4. Keep the existing nonterminal and positive-spacing rules, parser fixes, font policy and all 62 UI gates. Patch native and source-built WASM identically; bind the patch to WASM provenance.
-**Scope:** Related to HOP #99/#78, not proof that those reporters' documents or every printer are fixed. Do not import the broader row-growth heuristics from rhwp PR 6068 or normalize stored LINE_SEG values.
+> 이 문서는 2026-10-06 당시 rhwp 0.8.4를 대상으로 작성한 계획과 점검 상태입니다. 이후 rhwp 버전이나 후보 릴리스의 수정 완료를 뜻하지 않습니다.
 
-- [x] Generate a minimal synthetic five-paragraph inline table with public production WASM APIs and namespace-preserving XML mutation. Reproduce terminal glyph box overflow: 2.2px for -300 HWPUNIT spacing; zero/positive controls stay inside.
-- [x] Add a strict, exact-pinned-file patcher and refusal tests.
-- [ ] Run the synthetic geometry test against original and rebuilt WASM. Require the original to fail only the negative case and the rebuilt engine to pass all three cases, before and after save/reopen.
-- [ ] Run the same synthetic documents through the native Rust render tree. Keep native targets isolated from Skia CLI outputs.
-- [x] Include the patcher in source provenance and preserve contributor attribution.
-- [ ] Open a draft PR; merge only after the full actual CI is green. Record failed/pending gates, never replace them with a probe result.
+**목표:** 마지막 줄 간격이 압축되어 여러 문단을 가진 표 셀의 높이가 마지막으로 그려지는 글리프 줄보다 작아지는 문제를 막는다.
+**구조:** rhwp PR 6074 중 마지막 줄의 음수 간격 처리만 고정된 rhwp 0.8.4에 적용한다. 마지막 줄이 아닌 경우와 양수 간격의 기존 규칙, 파서 수정, 글꼴 정책과 UI 필수 검사 62개를 유지한다. 네이티브와 소스에서 빌드한 WASM에 동일하게 수정하고, 수정 내용을 WASM 출처 정보에 연결한다.
+**범위:** HOP #99/#78과 관련된 작업이며, 해당 제보자의 문서나 모든 프린터가 수정됐다는 증거는 아니다. rhwp PR 6068의 더 넓은 행 확장 휴리스틱을 가져오거나 저장된 LINE_SEG 값을 정규화하지 않는다.
 
-Review focus: positive trailing compatibility; negative nonterminal spacing remains compressed; exact pinned source drift; no font/customer document fixtures; same native/WASM patch and release gates. No fresh-context reviewer tool is available in this session; perform a separate diff review and leave PR draft until CI/review completes.
+- [x] 공개 프로덕션 WASM API와 네임스페이스를 보존하는 XML 수정으로 문단 5개의 최소 합성 인라인 표를 생성한다. 마지막 글리프 영역이 넘치는 문제를 재현한다. -300 HWPUNIT 간격에서 2.2px가 넘치며, 0·양수 대조군은 영역 안에 머문다.
+- [x] 정확히 고정된 파일에만 적용하는 엄격한 패처와 적용 거부 테스트를 추가한다.
+- [ ] 원래 WASM과 다시 빌드한 WASM에서 합성 기하 테스트를 실행한다. 저장·다시 열기 전후 모두, 원래 엔진은 음수 사례에서만 실패하고 다시 빌드한 엔진은 세 사례 모두 통과해야 한다.
+- [ ] 같은 합성 문서를 네이티브 Rust 렌더 트리로 실행한다. 네이티브 대상을 Skia CLI 출력과 분리해 유지한다.
+- [x] 패처를 소스 출처 정보에 포함하고 기여자 표시를 보존한다.
+- [ ] 초안 PR을 연다. 실제 전체 CI가 통과한 뒤에만 병합한다. 실패·대기 중인 필수 검사를 기록하고 진단 결과로 대체하지 않는다.
+
+검토 중점: 양수 마지막 간격의 호환성, 마지막 줄이 아닌 음수 간격의 압축 유지, 정확히 고정한 소스의 변경 여부, 글꼴·고객 문서 픽스처 제외, 동일한 네이티브·WASM 수정과 릴리스 필수 검사. 당시 세션에서는 새 컨텍스트의 리뷰어 도구를 사용할 수 없었다. 별도로 diff를 검토하고 CI와 리뷰가 끝날 때까지 PR을 초안으로 유지한다.

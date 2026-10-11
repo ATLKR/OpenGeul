@@ -41,11 +41,16 @@ SHA = re.compile(r'[0-9a-f]{64}\Z')
 COPIED_OVERLAYS = {
     'apps/desktop/src-tauri/src/opengeul_runtime.rs': 'overlay/opengeul_runtime.rs',
     'apps/desktop/src-tauri/src/updates.rs': 'overlay/updates.rs',
+    'apps/desktop/src-tauri/src/store_update_policy.rs': 'overlay/store_update_policy.rs',
+    'apps/desktop/src-tauri/src/store_update_transport.rs': 'overlay/store_update_transport.rs',
     'apps/desktop/src-tauri/src/opengeul_hwpx_commands.rs': 'overlay/opengeul_hwpx_commands.rs',
     'apps/desktop/src-tauri/src/opengeul_hwpx_state.rs': 'overlay/opengeul_hwpx_state.rs',
     'apps/desktop/src-tauri/src/opengeul_hwpx_state_tests.rs': 'overlay/opengeul_hwpx_state_tests.rs',
+    'apps/desktop/src-tauri/src/opengeul_hwp_staging_tests.rs': 'overlay/opengeul_hwp_staging_tests.rs',
     'apps/studio-host/src/core/save-format.ts': 'overlay/save-format.ts',
     'apps/studio-host/src/core/font-catalog.ts': 'overlay/font-catalog.ts',
+    'apps/studio-host/src/ui/update-notice.ts': 'overlay/store-update-notice.ts',
+    'apps/studio-host/src/host/store-updates.ts': 'overlay/store-update-menu.ts',
     'apps/studio-host/src/opengeul-font-help.ts': 'overlay/opengeul-font-help.ts',
     'third_party/rhwp/src/renderer/pdf/opengeul_pdf_guard.rs': 'overlay/opengeul_pdf_guard.rs',
     'third_party/rhwp/src/renderer/pdf/opengeul_font_policy.rs': 'overlay/font_policy.rs',
@@ -68,12 +73,16 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
     'apps/studio-host/src/core/tauri-bridge.ts', 'apps/studio-host/src/main.ts',
     'apps/studio-host/src/core/desktop-events.ts',
     'apps/studio-host/src/command/commands/file.ts', 'apps/studio-host/src/opengeul-font-resources.ts',
+    'apps/studio-host/src/command/commands/edit.ts',
     'apps/studio-host/src/host/toolbar-labels.ts',
     'third_party/rhwp/Cargo.toml', 'third_party/rhwp/Cargo.lock',
     'third_party/rhwp/vendor/svg2pdf/Cargo.toml', 'third_party/rhwp/vendor/svg2pdf/RHWP_PATCHES.md',
     'third_party/rhwp/src/renderer/pdf.rs', 'third_party/rhwp/src/cli/outputs/pdf.rs',
     'third_party/rhwp/src/parser/hwpx/header.rs',
     'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/about-dialog.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/compare-dialog.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/history-dialog.ts',
 }))
 NATIVE_FILES = tuple('third_party/rhwp/tests/'+name+'.rs' for name in TARGETS)
 CORE_TREES = ('third_party/rhwp/src', 'third_party/rhwp/vendor/svg2pdf/src')
@@ -241,7 +250,7 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
             or not isinstance(ledger.get('changes'), list) or not ledger['changes']
             or not isinstance(ledger.get('preservedFiles'), dict)
             or not isinstance(ledger.get('baselinePreservedFiles'), dict)
-            or ledger.get('extendedFiles') != ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts']):
+            or ledger.get('extendedFiles') != ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts']):
         raise ValueError('Incomplete prepared source overlay ledger')
     for key in ('preservedFiles', 'baselinePreservedFiles'):
         for name, digest in ledger[key].items():

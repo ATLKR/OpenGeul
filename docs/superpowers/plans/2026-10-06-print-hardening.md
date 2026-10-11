@@ -1,37 +1,42 @@
-# Print E2E and tested-payload hardening
+# 인쇄 E2E와 테스트 페이로드 검증 보강
 
-> For agentic workers: use superpowers:executing-plans and test-driven-development.
+> 이 문서는 2026-10-06 당시의 계획과 증거 기록입니다. 당시의 체크박스, 실패와 미완료 상태를 그대로 보존합니다.
+> 에이전트 작업자는 superpowers:executing-plans와 test-driven-development를 사용한다.
 
-**Goal:** remove observed native-print automation blockers without weakening output checks, and prove the tested portable payload equals the released MSIX payload.
-**Architecture:** keep the production application unchanged; exercise its real print UI with explicit native control readiness. Validate archive contents before extracting into an isolated runtime and require a completed owned spooler job.
-**Tech stack:** Python, pywinauto, WebView2 accessibility, Win32 spooler, GitHub standard Windows runners.
-**Spec:** docs/PRINTING_TESTS.md and the user's request to improve virtual-printer testing.
+**목표:** 출력 검사를 약화하지 않고 관찰된 네이티브 인쇄 자동화 장애를 제거한다. 테스트한 portable 페이로드가 릴리스한 MSIX 페이로드와 같음을 증명한다.
+**구조:** 프로덕션 앱은 변경하지 않는다. 네이티브 컨트롤 준비 상태를 명시적으로 확인하며 실제 인쇄 UI를 실행한다. 격리 런타임으로 압축을 풀기 전에 아카이브 내용을 검증하고, 테스트가 소유한 스풀러 작업의 완료를 요구한다.
+**기술 구성:** Python, pywinauto, WebView2 접근성, Win32 스풀러, GitHub 표준 Windows 실행기.
+**사양:** docs/PRINTING_TESTS.md와 가상 프린터 테스트 개선에 대한 사용자 요청.
 
-## Constraints
-- Retain all 62 editor UI and 16 virtual-printer executions; no skips, silent retries or relaxed pixel references.
-- Never print to hardware, change a default printer, ship fonts or disable runtime security.
-- Diagnostic probes may reuse the explicitly recorded previous PR4 binary; final release gates use only their own run's payload.
-- No unverified change is merged or described as a final printing pass.
+## 제약
 
-## Review focus
-- A visible preview does not mean its keyboard accelerator or accessibility tree is ready.
-- Every MSIX runtime file, not only the two EXEs, must match the portable archive.
-- Missing checksum entries, duplicate/case-aliased Windows paths and invalid ZIP data must fail before extraction.
-- A queued or paused job is not completed printing; actual media and page counts must match.
-- Failed or cancelled printing must preserve originals and clean up only owned resources.
+- 편집기 UI 실행 62개와 가상 프린터 실행 16개를 모두 유지한다. 건너뛰기, 조용한 재시도 또는 픽셀 기준 완화를 허용하지 않는다.
+- 물리 프린터로 인쇄하거나 기본 프린터를 변경하거나 글꼴을 배포하거나 런타임 보안을 비활성화하지 않는다.
+- 진단은 명시적으로 기록한 이전 PR4 바이너리를 재사용할 수 있다. 최종 릴리스 필수 검사는 자기 실행의 페이로드만 사용한다.
+- 검증되지 않은 변경을 병합하거나 최종 인쇄 통과로 설명하지 않는다.
 
-## Tasks
-- [x] Observe default/forced accessibility trees and the real system-print link on both Windows images; replace only the demonstrated unreliable input path.
-- [x] Add failing archive parity/manifest/path safety tests; implement preflight verification and staged extraction; run the complete local policy suite.
-- [x] Add failing spooler result tests; validate exact queue, completed status, media and page counts; verify old successful evidence still satisfies the stronger contract.
-- [ ] Run native diagnostic checks, review diff, then update PR6 once with the verified fixes and keep the full fresh-candidate CI authoritative.
+## 검토 중점
 
-## Evidence
-- Baseline adcf128 (a0f1366 plus diagnostic-only workflow): all 75 policy tests passed locally after every extracted Git blob matched its returned source tree SHA.
-- Prior Win2025 run 37416925059 repeatedly reached a visible Print preview but never opened the system Print dialog. Its screenshot contains the system-print link; no #32770 dialog was created.
-- Prior successful Win2022 run 37416539691 has Status=128 (PRINTED), A4 portrait and exact one/two-page spooler counts in all seven output scenarios.
+- 미리보기가 보인다는 사실만으로 키보드 단축키나 접근성 트리가 준비됐다고 볼 수 없다.
+- 실행 파일 두 개뿐 아니라 MSIX 런타임 파일 전체가 portable 아카이브와 일치해야 한다.
+- 누락된 체크섬 항목, 중복·대소문자만 다른 Windows 경로와 유효하지 않은 ZIP 데이터는 압축 해제 전에 실패해야 한다.
+- 대기열에 들어갔거나 일시 중지된 작업은 인쇄 완료가 아니다. 실제 용지와 페이지 수가 일치해야 한다.
+- 인쇄 실패·취소 시 원본을 보존하고 테스트가 소유한 자원만 정리해야 한다.
 
-- RED controls: previous payload preparation failed 17 of 21 real-archive cases; UI policy and spooler validators were missing; removing textual-status handling makes its dedicated negative control fail. GREEN: 121 policy tests and 23 independent PDF/raster tests.
-- Complete real artifact preflight: 1,432 matching runtime files, editor SHA-256 375a067e7d0ecdbb16c8efbd16760335172849003b7584218adc00b668c818ce; runtime manifest 37c702879d315e8c9248e653ce88a236c30556d6c1c69442ae059d7f1baea48b.
-- Review ruling: on-demand UIA already exposes the working system-print control on both images. Do not adopt the unnecessary force-accessibility experiment or any renderer-security flags.
-- A full diagnostic printing run at 8f37bdf uses the prior PR4 binary to check the harness. Final PR6 release gates remain same-run and are not replaced by that diagnostic. No external/subagent code review is claimed; diff and negative controls were reviewed in-session.
+## 작업
+
+- [x] 두 Windows 이미지에서 기본·강제 접근성 트리와 실제 시스템 인쇄 링크를 관찰한다. 불안정하다고 확인된 입력 경로만 교체한다.
+- [x] 실패하는 아카이브 동일성·매니페스트·경로 안전성 테스트를 추가한다. 사전 검증과 단계적 압축 해제를 구현하고 전체 로컬 정책 테스트를 실행한다.
+- [x] 실패하는 스풀러 결과 테스트를 추가한다. 정확한 대기열, 완료 상태, 용지와 페이지 수를 검증한다. 이전 성공 증거도 강화된 계약을 충족하는지 확인한다.
+- [ ] 네이티브 진단 검사를 실행하고 diff를 검토한 뒤 검증된 수정으로 PR6을 한 번 업데이트한다. 새 후보의 전체 CI를 최종 기준으로 유지한다.
+
+## 증거
+
+- 기준 adcf128(a0f1366에 진단 전용 워크플로를 추가한 상태): 추출한 모든 Git blob이 반환된 소스 트리 SHA와 일치함을 확인한 뒤 정책 테스트 75개가 모두 로컬에서 통과했다.
+- 이전 Win2025 실행 37416925059는 인쇄 미리보기가 보이는 상태에 반복해서 도달했지만 시스템 인쇄 대화상자를 열지 못했다. 스크린샷에 시스템 인쇄 링크가 있었으며 #32770 대화상자는 생성되지 않았다.
+- 이전 성공 Win2022 실행 37416539691에서는 출력 시나리오 7개 모두 Status=128 (PRINTED), A4 세로 방향과 정확한 1·2페이지 스풀러 수를 확인했다.
+
+- RED 대조군: 이전 페이로드 준비는 실제 아카이브 사례 21개 중 17개에서 실패했다. UI 정책과 스풀러 검증기가 없었으며, 텍스트 상태 처리를 제거하면 해당 부정 대조군이 실패한다. GREEN: 정책 테스트 121개와 독립적인 PDF·래스터 테스트 23개가 통과했다.
+- 실제 아티팩트 전체 사전 검증: 런타임 파일 1,432개 일치, 편집기 SHA-256 375a067e7d0ecdbb16c8efbd16760335172849003b7584218adc00b668c818ce, 런타임 매니페스트 37c702879d315e8c9248e653ce88a236c30556d6c1c69442ae059d7f1baea48b.
+- 검토 판단: 필요할 때 조회하는 UIA는 이미 두 이미지 모두에서 작동하는 시스템 인쇄 컨트롤을 노출했다. 불필요한 강제 접근성 실험이나 렌더러 보안 플래그를 도입하지 않는다.
+- 8f37bdf의 전체 진단 인쇄 실행은 이전 PR4 바이너리로 테스트 자동화를 확인했다. 최종 PR6 릴리스 필수 검사는 계속 같은 실행의 페이로드를 사용하며 이 진단으로 대체하지 않는다. 외부·서브에이전트 코드 리뷰를 수행했다고 주장하지 않는다. diff와 부정 대조군은 같은 세션에서 검토했다.

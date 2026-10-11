@@ -1,20 +1,20 @@
-# PR #1 repair ledger
+# PR #1 수정 기록
 
-## 2026-10-05
+## 2026-10-05 수정 기록
 
-User authorized continued repairs, verified merge, then selected HOP issue/PR follow-ups.
+사용자는 계속 수정하고 검증 후 병합하는 작업을 승인한 뒤 HOP 이슈·PR 후속 작업을 선택했습니다.
 
-Observed failures: run 37313586487 built the GUI and CLI but linking the subsequent fixture example failed with missing skparagraph.lib. The editor and standalone CLI reused a target directory despite separate lockfiles and native-skia feature graphs. Separate their target directories and create fixtures using the already-tested debug graph before release/CLI builds.
+관찰한 실패: 실행 37313586487은 GUI와 CLI를 빌드했지만 다음 테스트 자료 예제의 링크 단계에서 skparagraph.lib 누락으로 실패했습니다. 편집기와 독립 CLI가 서로 다른 잠금 파일과 native-skia 기능 그래프를 사용하면서도 대상 디렉터리를 공유했습니다. 대상 디렉터리를 분리하고 릴리스·CLI 빌드 전에 이미 테스트한 디버그 그래프로 테스트 자료를 생성하도록 수정했습니다.
 
-Run 37318297039 Chromium passed 7/8 scenarios; valid namespace-aliased input became invalid XML after save. Reproduced locally with the exact production WASM and independent ElementTree parsing. The parser stores raw paraHead fragments while the writer emits only canonical namespace declarations. Preserve inherited namespace bindings on detached fragment roots, without renaming text/QName values or weakening fixture validation. Also preserve aliased memo properties and head-tail XML. A new URI-escaping unit test caught a double-escape error; it was fixed rather than suppressed.
+실행 37318297039의 Chromium은 7/8 시나리오를 통과했습니다. 유효한 네임스페이스 별칭 입력이 저장 후 잘못된 XML이 됐습니다. 정확한 배포용 WASM과 독립 ElementTree 구문 분석으로 로컬 재현했습니다. 파서는 원시 paraHead 조각을 저장하지만 쓰기 경로는 정식 네임스페이스 선언만 출력했습니다. 텍스트·QName 값을 바꾸거나 테스트 자료 검증을 약화하지 않고, 분리된 조각 루트에 상속된 네임스페이스 연결을 보존했습니다. 별칭이 있는 메모 속성과 head-tail XML도 보존했습니다. 새 URI 이스케이프 단위 테스트에서 이중 이스케이프 오류가 발견됐고 이를 숨기지 않고 수정했습니다.
 
-The native parser and WASM parser both use the same source fix. Linux builds source-bound WASM first; Windows verifies hashes and source identifiers before consuming it. Browser jobs run against production sources and that same rebuilt WASM, while native jobs test the packaged executable. All required release gates remain mandatory.
+네이티브 파서와 WASM 파서는 같은 소스 수정을 사용합니다. Linux가 먼저 소스와 연결된 WASM을 빌드하고 Windows는 이를 사용하기 전에 해시와 소스 식별자를 검증합니다. 브라우저 작업은 배포용 소스와 같은 재빌드 WASM을 사용하고 네이티브 작업은 패키지 실행 파일을 검사합니다. 모든 필수 릴리스 검증을 유지했습니다.
 
-### Browser verification and input ordering
+### 브라우저 검증과 입력 순서
 
-- Run 37332857367 at 82d524a: namespace regression plus Chromium 8/8 and WebKit 8/8 passed; Firefox still failed. Waiting for editing readiness was appropriate but did not fix Firefox text loss.
-- Diagnostic run 37334337631 captured trusted DOM events: Firefox emits compositionstart, compositionupdate, beforeinput, compositionend, then input. Upstream cleared textarea.value in compositionend before processing any text. Real ASCII key events worked, disproving a general focus/readiness failure.
-- Added a narrow final-composition reconciliation before upstream records undo/clears the input. It uses the original onInput path, is not a browser or test-mode bypass, does not double-insert already-applied composition text, and rejects inactive/cancelled states. Eight unit tests observed RED then GREEN.
-- Probe run 37335188746 at d299415: all three production-frontend builds and their unchanged 8-case E2E suites passed. This is browser evidence only, not a substitute for final Windows package/native/install gates.
+- 82d524a의 실행 37332857367: 네임스페이스 회귀와 Chromium 8/8, WebKit 8/8이 통과했지만 Firefox는 여전히 실패했습니다. 편집 준비 상태를 기다리는 것은 적절했으나 Firefox 텍스트 손실을 해결하지 못했습니다.
+- 진단 실행 37334337631은 신뢰된 DOM 이벤트를 기록했습니다. Firefox는 compositionstart, compositionupdate, beforeinput, compositionend, input 순서로 발생시킵니다. 업스트림은 텍스트를 처리하기 전에 compositionend에서 textarea.value를 비웠습니다. 실제 ASCII 키 이벤트는 정상 동작해 일반적인 포커스·준비 상태 실패 가설을 배제했습니다.
+- 업스트림이 실행 취소를 기록하고 입력을 비우기 전에 제한적인 최종 조합 입력 보정을 추가했습니다. 원래 onInput 경로를 사용하며 브라우저·테스트 모드 우회가 아닙니다. 이미 적용한 조합 텍스트를 중복 삽입하지 않고 비활성·취소 상태를 거부합니다. 단위 테스트 8개에서 RED 후 GREEN을 확인했습니다.
+- d299415의 검사 실행 37335188746: 배포용 프런트엔드 빌드 3개와 변경하지 않은 각 8개 E2E 테스트가 모두 통과했습니다. 브라우저 근거일 뿐 최종 Windows 패키지·네이티브·설치 검증을 대체하지 않습니다.
 
-Local Python policy/integrity suite: 38 passed; Node format+composition suite: 22 passed. Seven Rust namespace helper tests passed in the WASM build. No assertion was removed or relaxed. Native Windows and installation outcomes must be recorded from the exact final PR run before merging.
+당시 로컬 Python 정책·무결성 테스트 38개, Node 형식·조합 테스트 22개가 통과했습니다. WASM 빌드에서 Rust 네임스페이스 도우미 테스트 7개도 통과했습니다. 단언을 제거하거나 완화하지 않았습니다. 병합 전에 정확한 최종 PR 실행의 네이티브 Windows·설치 결과를 기록해야 했습니다. 이 과거 기록은 이후 커밋의 결과를 보증하지 않습니다.

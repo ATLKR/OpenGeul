@@ -1,0 +1,35 @@
+  it('does not delete a new document selection after an asynchronous cut', async () => {
+    let finishWrite: (() => void) | undefined;
+    writeTextHtmlToClipboard.mockImplementation(() => new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    }));
+    const { services, inputHandler, wasm } = textSelectionServices();
+    const desktopWasm = { ...wasm, documentGeneration: 1 };
+
+    command('edit:cut')?.execute({ ...services, wasm: desktopWasm } as never);
+    // Replacement increments the generation even when the same bytes are reopened.
+    // The reused input handler can have identical coordinates in the new document.
+    desktopWasm.documentGeneration = 2;
+    inputHandler.getSelection.mockReturnValue(bodySelection);
+    finishWrite?.();
+    await flushClipboardAction();
+
+    expect(inputHandler.performDelete).not.toHaveBeenCalled();
+  });
+
+  it('still cuts the original document after a deferred clipboard write', async () => {
+    let finishWrite: (() => void) | undefined;
+    writeTextHtmlToClipboard.mockImplementation(() => new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    }));
+    const { services, inputHandler, wasm } = textSelectionServices();
+    const desktopWasm = { ...wasm, documentGeneration: 1 };
+
+    command('edit:cut')?.execute({ ...services, wasm: desktopWasm } as never);
+    expect(inputHandler.performDelete).not.toHaveBeenCalled();
+    finishWrite?.();
+    await flushClipboardAction();
+
+    expect(inputHandler.performDelete).toHaveBeenCalledOnce();
+  });
+

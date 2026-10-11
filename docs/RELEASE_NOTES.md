@@ -1,28 +1,71 @@
-# OpenGeul 1.1.2 — unsigned Windows development build
+# OpenGeul 1.1.3 — Windows 개발판
 
-This is a development prerelease, not a Microsoft Store-certified or trusted-signed installer. Own code is MIT, with upstream and third-party notices preserved.
+서명 없는 개발판입니다. Microsoft Store 인증이나 신뢰된 설치 서명을 뜻하지
+않습니다. 자체 코드는 MIT이며 업스트림·제3자 라이선스 고지를 유지합니다.
 
-## Included
+## 포함 기능
 
-- HWP/HWPX opening, editing, saving and Save As between both formats, with staged/atomic writes, external-modification detection and round-trip regression checks.
-- Windows HOP 0.4.5 editor plus `Tools/rhwp.exe` CLI from rhwp 0.8.7 with native Skia options, built from the pinned upstream revisions in `provenance.json`.
-- Upstream table-layout and terminal-line fixes, with synthetic native/WASM regressions for clipping and inter-line spacing. Nonblank terminal lines no longer add positive or negative trailing spacing. This is not a claim that every table or the original HOP #99/#78 documents is fixed.
-- Password prompting, retry/cancel and explicit consent before saving an encrypted document without its password. Direct Save remains blocked; choose a separate Save As path to preserve the protected original. Open/save/export/print/close operations share the upstream document guard.
-- Normal `p/P` input with print shortcuts retained, and persistent toolbar-label visibility.
-- Installed-font-only policy, official font help, independent branding, and upstream self-updates disabled. GUI PDF export and the CLI's default SVG PDF backend retain the embedding-permission filter. The new optional direct Skia PDF backend returns an explicit policy error until its font resources can enforce that filter.
-- WebView2 prerequisite guidance, the MSIX Visual C++ framework dependency, retained native Skia notices, and per-monitor DPI awareness declared before window creation.
+- HWP/HWPX 열기·편집·저장·형식 간 다른 이름으로 저장, 임시 파일을 통한 원자적
+  쓰기, 외부 변경 감지와 저장·재열기 검사.
+- 고정한 HOP 0.4.5와 rhwp 0.8.7을 소스에서 빌드한 편집기 및
+  Tools/rhwp.exe 명령줄 도구. native-skia 선택 기능과 정확한 소스 증거를 포함합니다.
+- 표 배치·마지막 줄 간격 수정과 네이티브·WASM 회귀 검사. 모든 표나 원래
+  HOP #99/#78 문서의 문제까지 해결됐다고 주장하지 않습니다.
+- 암호 입력·재시도·취소와 평문 저장 전 확인. 암호 원본의 일반 저장은 차단하며
+  원본을 보존하려면 별도 경로를 선택하세요. 열기·저장·내보내기·인쇄·닫기의
+  문서 보호 처리를 유지합니다.
+- 일반 p/P 입력, 인쇄 단축키와 도구 모음 레이블 설정.
+- 설치된 글꼴만 사용하고 공식 글꼴 도움말을 제공합니다. GUI·CLI의 기본 SVG PDF에는 글꼴 포함 권한 필터를 유지하며,
+  직접 Skia PDF는 같은 필터를 적용하기 전까지 명확한 정책 오류로 차단합니다.
+- WebView2 필요 안내, MSIX의 Visual C++ 프레임워크 의존성, native-skia 고지와
+  창 생성 전 모니터별 DPI 설정.
 
-## Release verification
+## 이번 후보의 개선과 검증
 
-Publication requires the same-run source-built WASM/browser gates, Windows compile and unit tests, 78 editor UI executions including password safety on both Windows images, 16 real virtual-printer scenarios, and MSIX test-sign/install/file-association/uninstall checks, plus GUI and CLI identity inside the installed package. When the Windows App Certification Kit is available, its complete candidate report must pass every required test; optional findings remain visible as warnings and do not imply Store approval. A failed or skipped required gate cannot publish. The eight printer scenarios per Windows image use the application's real Print UI, the Windows system dialog, an isolated Microsoft Print To PDF queue, completed spooler jobs and independently rendered output. Browser preview and driver are both configured to A4 portrait with no additional preview margins and actual size.
+- HWP 저장에서 대상 파일 자체나 다른 문서를 임시 저장 파일로 사용해 삭제되는
+  문제를 방지합니다. 정상적인 저장 대상별 UUID 임시 파일만 읽고 정리합니다.
+- 비동기 잘라내기 도중 문서를 교체하면 새 문서에서 내용을 삭제하지 않습니다.
+- 선택한 PDF 페이지를 모두 변환하지 못하면 성공 대신 오류로 내보내기를 중단합니다.
+  정상 내보내기와 성공 가능한 기존 글꼴 재시도는 유지합니다.
+- Tauri를 출처 판별 수정 버전 2.11.1에 정확히 고정하고 관련 잠금을 갱신합니다.
+- MSIX는 항목 읽기 전에 Windows 경로 별칭·특수 파일·압축 해제 상한을 검사합니다.
+- 앱·Store 소개·README·문서·릴리스 안내를 한국어 우선으로 정리합니다.
+- 새 Store 공개 버전을 앱 시작 시와 실행 중 매시간 자동 확인합니다. **파일 →
+  Store 업데이트 자동 확인**에서 끄거나 수동 확인할 수 있습니다. 사용자가
+  **Microsoft Store 열기**를 선택하면 고정 상품 페이지를 엽니다. 강제 설치나
+  재시작은 하지 않으며 **나중에**로 해당 버전의 자동 알림을 숨길 수 있습니다.
+- 웹사이트·README 배지는 실제 `Published` 제출을 조회해 갱신합니다. 인증 중인
+  후보를 공개 버전으로 표시하지 않으며 문서 데이터나 인증 정보를 공개하지 않습니다.
+- Telemetry는 포함하지 않습니다. 미래 설계와 Windows native 화면 전환 가능성은
+  별도 연구 문서로만 준비했습니다.
 
-Printer output is checked against exact reviewed whole-page fingerprints, including one documented WebView2 153 digit-4 outline variant. No generic pixel tolerance or automatic baseline update is used. Consult `docs/RELEASE_READINESS.md` for investigation evidence and the linked Actions run for this release's final result; diagnostic probes using older binaries are not fresh-candidate proof.
+검증을 통과하기 전에는 다음 릴리스 목표를 완료로 표시하지 않습니다.
 
-## Use and limits
+릴리스 게이트는 같은 실행의 소스 빌드 WASM·세 브라우저, Windows 편집기·CLI
+컴파일과 단위 검사, 두 Windows의 원래 네이티브·암호 문서 검사, 두 Windows의
+실제 가상 프린터 검사와 MSIX 설치·파일 연결·설치된 GUI/CLI·제거를 요구합니다.
+필수 실패나 건너뛰기가 있으면 게시하지 않습니다.
 
-- MSIX is unsigned and requires appropriate trust/signing or Store distribution for normal trusted installation.
-- Extract the entire portable ZIP and run `OpenGeul.exe`. Microsoft Edge WebView2 Runtime must be installed. The portable CLI also requires the Microsoft Visual C++ runtime; Store MSIX declares its framework dependency. Respect Windows/company security policy; do not disable protection.
-- Font files and private keys are not distributed. Installed fonts retain their licenses; missing fonts can change layout. Keep original documents and verify important output.
-- Autosave/recovery and LibreOffice/DOCX/XLSX/PPTX integration are not included. CLI commands and limitations are in `rhwp-help.txt`.
-- Automated virtual printing does not certify physical feed/duplex, vendor drivers/firmware, color calibration, arbitrary documents, font licensing, Korean OS IME in all environments or Store/WACK approval.
-- `SHA256SUMS.txt` and `provenance.json` identify the exact published files, source and build. MSIX package version is 1.1.2.0, newer than the previous 1.1.1.0 development package.
+인쇄는 실제 앱 메뉴와 Windows 대화상자, 격리한 Microsoft Print To PDF 큐,
+완료된 스풀러 작업과 독립 출력 검사로 확인합니다. 미리보기·드라이버는 A4
+세로·추가 여백 없음·실제 크기로 설정합니다. 원래 쪽 전체 지문과 검토된
+WebView2 153 숫자 4 변형만 허용하며 일반 픽셀 오차나 자동 기준 갱신은 없습니다.
+
+WACK이 있으면 해당 후보의 전체 보고서에서 모든 필수 항목을 통과해야 합니다.
+선택 항목 결과는 경고로 남기며 Store 승인으로 해석하지 않습니다. 과거 바이너리
+진단은 새 후보 증거가 아닙니다. 최종 결과는 이 릴리스의 Actions 실행과 증거를
+확인하세요.
+
+## 사용 방법과 한계
+
+- 서명 없는 MSIX의 일반 설치에는 적절한 서명·신뢰 설정 또는 Store 배포가 필요합니다.
+- 포터블 ZIP 전체를 풀고 OpenGeul.exe를 실행하세요. WebView2가 필요하며 포터블
+  CLI에는 Visual C++ 런타임도 필요합니다. Windows·조직 보안 정책을 따르세요.
+- 글꼴 파일·비밀키는 배포하지 않습니다. 설치된 글꼴의 라이선스가 계속 적용되고
+  글꼴 누락은 배치를 바꿀 수 있습니다. 원본을 보관하고 결과를 확인하세요.
+- 자동 저장·복구와 LibreOffice/DOCX/XLSX/PPTX 연동은 포함하지 않습니다.
+  CLI 명령·제한은 rhwp-help.txt를 참고하세요.
+- 가상 인쇄 검사는 실제 급지·양면·제조사 드라이버·펌웨어·색상 보정·모든 문서·
+  글꼴 권리·모든 한국어 IME 환경·Store/WACK 승인을 인증하지 않습니다.
+- SHA256SUMS.txt와 provenance.json이 정확한 파일·소스·빌드를 식별합니다.
+  이 후보의 MSIX 버전은 1.1.3.0이며 공개 Store 1.1.1.0과 구분합니다.

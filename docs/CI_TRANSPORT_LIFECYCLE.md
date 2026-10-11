@@ -1,42 +1,42 @@
-# CI transport retention and cost boundaries — 2026-10-06
+# CI 중간 산출물 보존과 비용 경계 — 2026-10-06
 
-This extends the existing public-only checks / engine / full workflow. All original 62 editor UI executions, 16 additional password-safety executions, 16 virtual-printer scenarios and MSIX installation gates remain in full mode. No printer output reference, comparison threshold or application source changes here.
+기존의 공개 저장소 전용 검사·엔진·전체 워크플로를 확장한 기록입니다. 전체 모드에는 기존 편집기 UI 실행 62회, 추가 암호 안전성 실행 16회, 가상 프린터 시나리오 16개와 MSIX 설치 검증이 모두 유지됩니다. 이 변경은 인쇄 출력 기준, 비교 임계값이나 앱 소스를 바꾸지 않습니다.
 
-## Stage and retention behavior
+## 단계별 동작과 보존
 
-- `checks`: policy/unit checks only, no transport uploads or cleanup job.
-- `engine`: source-built WASM plus all browser E2E jobs. The engine stays in the build workspace instead of uploading an unused WASM transport. When consumers succeed, only that run's browser-input transport is removed.
-- `full`: build one engine and one Windows payload, then test them on all existing environments. After every required consumer succeeds, remove only that run's named WASM, browser-input and native-fixture transports. On a successful publication, also remove the Actions copy of the package; GitHub Release assets are untouched.
-- Successful PRs and scheduled/unpublished full builds keep the MSIX/portable candidate artifact for its original one-day retention. All test evidence retains its existing bounded one-day policy.
-- Failure, cancellation, a skipped required test or incomplete status prevents deletion. Forks, Dependabot runs and re-run attempts do not receive cleanup authority. They fall back to one-day expiry.
+- `checks`: 정책·단위 검사만 수행하며 중간 산출물 업로드와 정리 작업은 없습니다.
+- `engine`: 소스에서 빌드한 WASM과 모든 브라우저 E2E 작업을 실행합니다. 사용하지 않는 WASM 중간 산출물을 업로드하지 않고 엔진을 빌드 작업 공간에 둡니다. 소비 작업이 성공하면 해당 실행의 브라우저 입력 중간 산출물만 삭제합니다.
+- `full`: 엔진 하나와 Windows 패키지 내용물 하나를 빌드한 뒤 기존 모든 환경에서 테스트합니다. 필수 소비 작업이 모두 성공하면 해당 실행에서 이름이 지정된 WASM·브라우저 입력·네이티브 테스트 자료 중간 산출물만 삭제합니다. 게시가 성공하면 패키지의 Actions 사본도 삭제하며 GitHub Release 자산은 유지합니다.
+- 성공한 PR과 예약 실행 또는 게시하지 않은 전체 빌드는 MSIX·포터블 후보 산출물을 기존의 하루 보존 기간 동안 유지합니다. 모든 테스트 증거는 기존의 크기 제한과 하루 보존 정책을 유지합니다.
+- 실패, 취소, 필수 테스트 건너뛰기나 불완전한 상태가 있으면 삭제하지 않습니다. 포크, Dependabot 실행과 재실행 시도에는 정리 권한을 부여하지 않으며 하루 만료 정책을 사용합니다.
 
-## Safety of cleanup
+## 정리 안전성
 
-The final job depends on preflight, WASM, browsers, Windows build, both native and printer matrices, MSIX install and release. Its own `actions: write` permission is not granted to tests or builds. It uses the normal temporary GitHub token, not an additional secret. It reads only the current workflow run's artifacts, validates repository, source SHA, workflow path and run attempt, then validates the entire selected batch again before the first deletion. An incomplete listing, missing expected artifact, duplicate name/ID, oversized input or changed metadata fails closed. API failures are reported; failed DELETE requests are not retried. A mid-cleanup API failure can leave a partly cleaned run, whose successful removals are logged.
+마지막 작업은 사전 점검, WASM, 브라우저, Windows 빌드, 두 네이티브·프린터 매트릭스, MSIX 설치와 릴리스에 의존합니다. 이 작업의 `actions: write` 권한은 테스트나 빌드에 부여하지 않습니다. 별도의 비밀정보 대신 일반적인 임시 GitHub 토큰을 사용합니다. 현재 워크플로 실행의 산출물만 읽고 저장소, 소스 SHA, 워크플로 경로와 실행 시도 번호를 확인한 뒤, 첫 삭제 전에 선택한 묶음 전체를 다시 검증합니다. 불완전한 목록, 예상 산출물 누락, 중복 이름·ID, 크기 초과나 메타데이터 변경이 있으면 작업을 중단합니다. API 오류를 보고하며 실패한 DELETE 요청은 재시도하지 않습니다. 정리 도중 API가 실패하면 일부만 정리된 상태가 남을 수 있고, 성공한 삭제 내역은 기록합니다.
 
-Only three exact transport names (plus the package after successful release) are candidates. Other runs, unknown artifact names, diagnostics, source files, caches, Releases and billing settings are not cleanup targets. The code has no repository-wide purge route. No artifact has been deleted directly from this development session.
+후보는 정확히 지정한 중간 산출물 이름 3개와 릴리스 성공 후의 패키지뿐입니다. 다른 실행, 알 수 없는 산출물 이름, 진단 자료, 소스 파일, 캐시, Releases와 청구 설정은 정리 대상이 아닙니다. 저장소 전체를 지우는 경로는 코드에 없습니다. 이 개발 세션에서 산출물을 직접 삭제한 적도 없습니다.
 
-Deletion means that re-running only downstream jobs after a successful first attempt may lack deleted intermediate inputs. Use a full new run when those inputs are needed; the code does not fetch an older artifact to mask this. Failed first attempts retain their inputs specifically for debugging/retry. As with any artifact cleanup, no account-wide storage reservation is implied.
+첫 시도가 성공해 중간 입력이 삭제된 뒤 후속 작업만 재실행하면 입력이 없을 수 있습니다. 입력이 필요한 경우 전체 새 실행을 사용합니다. 코드는 이를 숨기기 위해 이전 산출물을 가져오지 않습니다. 첫 시도가 실패하면 디버깅·재시도를 위해 입력을 보존합니다. 산출물 정리만으로 계정 전체 저장 공간을 예약하거나 보장하지는 않습니다.
 
-## Free usage boundary
+## 무료 사용 경계
 
-Standard GitHub-hosted runners on public repositories are free; splitting a paid runner into smaller steps would not make it free. This repository retains the static ubuntu-24.04 / windows-2022 / windows-2025 allowlist, and does not enable larger/self-hosted runners, paid caches, custom images or LFS. The workflow policy now also rejects job-level `continue-on-error`, not only step-level suppression.
+공개 저장소의 표준 GitHub 호스팅 실행기는 무료입니다. 유료 실행기를 작은 단계로 나눠도 무료가 되지 않습니다. 이 저장소는 정적인 ubuntu-24.04 / windows-2022 / windows-2025 허용 목록을 유지하며 더 큰 실행기, 자체 호스팅 실행기, 유료 캐시, 사용자 지정 이미지나 LFS를 활성화하지 않습니다. 워크플로 정책은 단계뿐 아니라 작업 단위의 `continue-on-error`도 거부합니다.
 
-Artifact storage accrues by retained size and time. Removing successfully consumed transport early reduces future accumulation, not charges already accrued. Logs and step summaries are used for the cleanup report instead of another artifact upload. The $0 Actions budget with **Stop usage when budget limit is reached**, scoped appropriately by the repository owner, remains the required billing backstop. Budget settings and actual billed usage were not read or changed here.
+산출물 저장량은 보존 크기와 시간에 따라 누적됩니다. 성공적으로 사용한 중간 산출물을 일찍 삭제하면 이후 누적량을 줄일 수 있지만 이미 발생한 요금은 없애지 않습니다. 정리 보고에는 별도 산출물 업로드 대신 로그와 단계 요약을 사용합니다. 저장소 소유자가 적절한 범위의 $0 Actions 예산과 **Stop usage when budget limit is reached**(예산 한도 도달 시 사용 중지)를 설정하는 것이 필수적인 청구 보호 장치입니다. 여기서는 예산 설정이나 실제 청구 사용량을 읽거나 변경하지 않았습니다.
 
-Official references checked 2026-10-06:
+2026-10-06에 확인한 공식 참고 자료:
 - https://docs.github.com/en/billing/concepts/product-billing/github-actions
 - https://docs.github.com/en/billing/how-tos/set-up-budgets
 - https://docs.github.com/en/rest/actions/artifacts?apiVersion=2022-11-28
 
-## Verification at implementation time
+## 구현 당시 검증
 
-The starting `ci/policy.py` and Windows workflow were materialized and matched their Git blob hashes at source commit 134e7f55a36855e3227b8c0195c62e5d40fa32da. An older source artifact was only a local working scaffold, not claimed to be the complete current tree.
+시작 시점의 `ci/policy.py`와 Windows 워크플로를 파일로 준비하고 소스 커밋 134e7f55a36855e3227b8c0195c62e5d40fa32da의 Git 객체 해시와 일치함을 확인했습니다. 이전 소스 산출물은 로컬 작업의 발판으로만 사용했으며 완전한 당시 최신 트리라고 주장하지 않았습니다.
 
-- New job-level suppression tests: three failed on the old policy, then passed with the guard.
-- New cleanup module tests: all 27 failed while implementation was missing, then passed; synthetic REST boundaries prove zero deletes for failures, wrong owners, changed metadata and incomplete lists.
-- New workflow tests: three failed before wiring, then passed. The original six release prerequisites and all existing matrix members are unchanged.
-- All **39 new local tests** pass; Python syntax and the modified workflow's public/standard-runner audit pass.
-- No live deletion, final Windows printing pass, complete candidate build, merge or release is inferred from these local tests. Fresh GitHub policy/full workflow results on the committed candidate remain separate evidence.
+- 새 작업 단위 오류 무시 방지 테스트 3개는 이전 정책에서 실패했고 가드 적용 후 통과했습니다.
+- 새 정리 모듈 테스트 27개는 구현이 없을 때 모두 실패했고 이후 통과했습니다. 합성 REST 경계 테스트에서 실패, 잘못된 소유자, 메타데이터 변경과 불완전한 목록은 삭제가 0회임을 확인했습니다.
+- 새 워크플로 테스트 3개는 연결 전 실패했고 이후 통과했습니다. 기존 릴리스 전제 조건 6개와 모든 기존 매트릭스 구성은 유지했습니다.
+- **새 로컬 테스트 39개**가 모두 통과했습니다. Python 문법과 수정된 워크플로의 공개 저장소·표준 실행기 검사도 통과했습니다.
+- 이 로컬 테스트는 실제 삭제, 최종 Windows 인쇄 통과, 전체 후보 빌드, 병합이나 릴리스 근거가 아닙니다. 커밋된 후보에 대한 새 GitHub 정책·전체 워크플로 결과는 별도 근거가 필요합니다.
 
-Review was performed in-session with explicit negative controls; no independent/subagent review is claimed. The pending virtual-printer failures are not removed or reclassified by this CI-only change.
+명시적인 음성 대조군을 포함해 세션 안에서 검토했으며 독립 또는 하위 에이전트 리뷰를 받았다고 주장하지 않습니다. 이 CI 전용 변경은 당시 미해결 가상 프린터 실패를 제거하거나 다른 상태로 분류하지 않았습니다.

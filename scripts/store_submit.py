@@ -2,7 +2,6 @@
 from __future__ import annotations
 import argparse
 import base64
-import copy
 import hashlib
 import io
 import json
@@ -20,6 +19,7 @@ import zipfile
 from buildkit import manifest, package_version
 from check_store_api import authenticate
 from releasekit import REPOSITORY, verify_msix
+from store_listing import apply_korean_listing
 from store_package import (STORE_APP_ID, STORE_IDENTITY, authorize_release,
                            prepare, verify_checksums, verify_repackage)
 
@@ -211,11 +211,11 @@ def _journal():
 
 
 def _journal_body(state, warning=None):
-    text = 'Store automation state. Do not clear an attempted phase until its outcome is reconciled.\n'
-    if warning: text += f'\n@ATLKR Store automation stopped: {warning}. Review Partner Center and this Actions run.\n'
+    text = 'Store 자동화 상태 기록입니다. 시도한 동작의 결과를 확인하기 전에는 해당 단계를 지우지 마세요.\n'
+    if warning: text += f'\n@ATLKR Store 자동화를 중단했습니다. 기술 진단: {warning}. Store 상태와 이 Actions 실행을 API로 확인하세요.\n'
     run_id = os.getenv('GITHUB_RUN_ID') or state.get('run_id')
-    if run_id: text += f'\n[Actions run](https://github.com/{REPOSITORY}/actions/runs/{_id(run_id)})\n'
-    if state.get('tag'): text += f'\n[Source release](https://github.com/{REPOSITORY}/releases/tag/{state["tag"]})\n'
+    if run_id: text += f'\n[Actions 실행](https://github.com/{REPOSITORY}/actions/runs/{_id(run_id)})\n'
+    if state.get('tag'): text += f'\n[소스 릴리스](https://github.com/{REPOSITORY}/releases/tag/{state["tag"]})\n'
     return text + '\n' + JOURNAL + json.dumps(state, sort_keys=True) + '\n-->\n'
 
 
@@ -265,6 +265,11 @@ def _free(submission):
         raise SubmissionBlocked('Free Store pricing and all market overrides must be preserved')
 
 
+def _manual(submission):
+    if submission.get('targetPublishMode') != 'Manual':
+        raise SubmissionBlocked('Manual Store publication control must be preserved')
+
+
 def _packages_version(submission):
     versions = []
     packages = submission.get('applicationPackages')
@@ -303,10 +308,10 @@ def _poll(api, submission_id):
 
 
 def _warn(reason):
-    print(f'::error::{reason}')
+    print(f'::error::Store 제출 자동화를 중단했습니다. 기술 진단: {reason}')
     if os.getenv('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
-            stream.write(f'Store automation stopped: {reason}. The GitHub release remains available.\n')
+            stream.write(f'Store 자동화를 중단했습니다. 기술 진단: {reason}. GitHub 릴리스는 계속 이용할 수 있습니다.\n')
     try:
         journal = _journal()
         _save(journal, journal['state']['phase'], warning=reason)
@@ -338,6 +343,7 @@ def submit(tag, directory):
         if _id(baseline['id']) != baseline_id or baseline.get('status') != 'Published':
             raise SubmissionBlocked('Store has no verified Published baseline')
         _free(baseline)
+        _manual(baseline)
         if (not isinstance(baseline.get('applicationPackages'), list) or not baseline['applicationPackages']
                 or any(package.get('architecture', '').lower() != 'x64' for package in baseline['applicationPackages'])):
             raise SubmissionBlocked('Automatic updates require the published x64 package template')
@@ -346,6 +352,8 @@ def submit(tag, directory):
             raise SubmissionBlocked('Recorded Store submission disappeared without acknowledged deletion or publication')
         target = version + (0,)
         if _packages_version(baseline) >= target: return {'outcome': 'superseded', 'tag': tag}
+        # 설명 계획 전체를 확인한 뒤에만 기존 제출을 삭제하거나 새 제출을 만든다.
+        template = apply_korean_listing(baseline)
         pending = None
         if pending_id:
             if pending_id == baseline_id: raise SubmissionBlocked('Published submissions cannot be deleted')
@@ -363,6 +371,7 @@ def submit(tag, directory):
                 if status == 'CommitStarted':
                     status = _poll(api, pending_id)
                     _, pending = api('GET', f'submissions/{pending_id}')
+                _manual(pending)
                 _save(journal, 'submitted', details, submission_id=pending_id, status=status)
                 if status in FAILED: raise SubmissionBlocked(f'Store processing stopped in {status}; a newer stable release is required')
                 if (_id(pending['id']) != pending_id or _packages_version(pending) != target
@@ -406,7 +415,7 @@ def submit(tag, directory):
             if pending_id == baseline_id or pending.get('status') != 'PendingCommit':
                 raise SubmissionBlocked('New Store draft was not acknowledged')
             _save(journal, 'draft_ready', details, submission_id=pending_id)
-        metadata = copy.deepcopy(baseline)
+        metadata = template
         for package in metadata['applicationPackages']:
             package['fileStatus'] = 'PendingDelete'
         metadata['applicationPackages'].append({'fileName': details['package'], 'fileStatus': 'PendingUpload',
@@ -416,6 +425,7 @@ def submit(tag, directory):
         for field in ('id', 'status', 'statusDetails', 'fileUploadUrl', 'friendlyName'):
             metadata.pop(field, None)
         _, updated = api('PUT', f'submissions/{pending_id}', metadata)
+        _manual(updated)
         if (_id(updated['id']) != pending_id or updated.get('status') != 'PendingCommit'
                 or _marker(details) not in updated.get('notesForCertification', '').splitlines()
                 or not _packages_match(updated, metadata['applicationPackages'])
@@ -426,6 +436,7 @@ def submit(tag, directory):
         if _ref(fresh, 'pendingApplicationSubmission') != pending_id or _ref(fresh, 'lastPublishedApplicationSubmission') != baseline_id or _newer(version):
             raise SubmissionBlocked('Store or stable tag state changed before commit')
         _, current = api('GET', f'submissions/{pending_id}')
+        _manual(current)
         if (_id(current['id']) != pending_id or current.get('status') != 'PendingCommit' or _marker(details) not in current.get('notesForCertification', '').splitlines()
                 or not _packages_match(current, metadata['applicationPackages'])
                 or current.get('pricing') != updated.get('pricing') or current.get('listings') != updated.get('listings')):
@@ -456,7 +467,7 @@ def main():
     print(json.dumps(result, sort_keys=True))
     if os.getenv('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
-            stream.write(f'Store submission result: {json.dumps(result, sort_keys=True)}. Certification completion remains separate.\n')
+            stream.write(f'Store 제출 결과: {json.dumps(result, sort_keys=True)}. 인증 완료와 실제 공개는 별도로 확인해야 합니다.\n')
 
 
 if __name__ == '__main__': main()
