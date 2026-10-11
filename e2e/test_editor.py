@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -46,6 +47,61 @@ class EditorTests(unittest.TestCase):
         self.assertTrue(self.page.evaluate('typeof window.__wasm === "undefined" && typeof window.__inputHandler === "undefined"'))
         self.assertEqual(inspect_hwpx(self.document)['text'],'OpenGeul fixture 한글 가나다 & <xml> Ω 123')
         self.assertFalse(self.session.errors,self.session.errors)
+        self.page.locator('[data-menu="file"] > .menu-title').click()
+        for command in ('file:open', 'file:save-as', 'file:about'):
+            expect(self.page.locator(f'.md-item[data-cmd="{command}"]')).to_be_visible()
+        expect(self.page.locator('[data-cmd="file:about"] .md-label')).to_have_text('제품 정보')
+        if MODE == 'browser':
+            for command in ('file:check-update', 'file:auto-check-update'):
+                item = self.page.locator(f'.md-item[data-cmd="{command}"]')
+                expect(item).to_have_attribute('hidden', '')
+                expect(item).to_be_hidden()
+        else:
+            expect(self.page.locator('[data-cmd="file:check-update"]')).to_be_visible()
+            auto = self.page.locator('[data-cmd="file:auto-check-update"]')
+            expect(auto).to_be_visible()
+            expect(auto).to_have_attribute('aria-checked', 'true')
+            failure = None
+            try:
+                auto.click()
+                expect(auto).to_have_attribute('aria-checked', 'false')
+                previous_process = self.session.proc
+                self.open(self.document)
+                self.assertIsNotNone(previous_process.poll())
+                self.assertIsNone(self.session.proc.poll())
+                self.page.locator('[data-menu="file"] > .menu-title').click()
+                auto = self.page.locator('[data-cmd="file:auto-check-update"]')
+                expect(self.page.locator('[data-cmd="file:check-update"]')).to_be_visible()
+                expect(auto).to_be_visible()
+                expect(auto).to_have_attribute('aria-checked', 'false')
+                (self.folder/'store-update-restart.json').write_text(json.dumps({
+                    'previousPid': previous_process.pid, 'currentPid': self.session.proc.pid,
+                    'previousExitCode': previous_process.poll(),
+                    'executableSha256': digest(EXE), 'autoCheckAfterRestart': False,
+                }, indent=2), encoding='utf-8')
+            except BaseException as error:
+                failure = error
+                raise
+            finally:
+                if self.session and self.session.page and not self.session.page.is_closed():
+                    try:
+                        current_page = self.session.page
+                        auto = current_page.locator('[data-cmd="file:auto-check-update"]')
+                        if auto.get_attribute('aria-checked') == 'false':
+                            file_menu = current_page.locator('[data-menu="file"]')
+                            if 'open' not in (file_menu.get_attribute('class') or '').split():
+                                file_menu.locator('.menu-title').click()
+                            auto.click()
+                            expect(auto).to_have_attribute('aria-checked', 'true')
+                    except BaseException as error:
+                        if failure is None:
+                            raise
+                        failure.add_note(f'자동 확인 ON 복원 검사도 실패했습니다: {type(error).__name__}')
+                elif failure is not None:
+                    failure.add_note('유효한 편집기 Session이 없어 자동 확인 ON을 복원하지 못했습니다.')
+        file_menu = self.page.locator('[data-menu="file"]')
+        if 'open' in (file_menu.get_attribute('class') or '').split():
+            file_menu.locator('.menu-title').click()
 
     def test_edit_save_reopen_unicode_xml_and_emoji(self):
         marker=' E2E 한글 & <saved> Ω 😀 END'
