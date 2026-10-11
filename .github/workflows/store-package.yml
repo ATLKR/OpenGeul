@@ -1,0 +1,55 @@
+name: OpenGeul Store package
+'on':
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing successful OpenGeul release to repackage
+        type: string
+        required: true
+        default: v1.1.1-dev.29.1
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: opengeul-store
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+jobs:
+  package:
+    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main')
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Check Store runtime preservation
+      shell: pwsh
+      run: python -m unittest discover -s tests -p test_store_package.py -v
+    - name: Verify successful release and repackage unchanged runtime with Store identity
+      id: package
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+        $makeappx = Get-ChildItem $sdk -Filter makeappx.exe -Recurse |
+          Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
+        if (-not $makeappx) { throw 'Windows SDK MakeAppx is missing.' }
+        python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
+        python ci/evidence.py size --limit-mib 96 store-output
+    - name: Save Store package for the first manual Partner Center upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-store-${{ github.run_id }}
+        path: store-output/*
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
