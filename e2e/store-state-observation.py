@@ -35,6 +35,29 @@ def reference(value):
     return {'id': str(value['id']), 'status': status}
 
 
+def pricing_summary(pricing):
+    pricing = pricing if isinstance(pricing, dict) else {}
+    base = pricing.get('priceId')
+    base_tier = isinstance(base, str) and re.fullmatch(r'Tier[1-9][0-9]*', base) is not None
+    free_base = True if base == 'Free' else False if base_tier else None
+    overrides = pricing.get('marketSpecificPricings')
+    counts = None
+    if isinstance(overrides, dict):
+        counts = dict.fromkeys(('Free', 'Base', 'NotAvailable', 'recognizedTier', 'unknown'), 0)
+        for value in overrides.values():
+            if isinstance(value, str) and value in ('Free', 'Base', 'NotAvailable'):
+                counts[value] += 1
+            elif isinstance(value, str) and re.fullmatch(r'Tier[1-9][0-9]*', value):
+                counts['recognizedTier'] += 1
+            else:
+                counts['unknown'] += 1
+    available_free = None
+    if counts is not None and counts['unknown'] == 0 and free_base is not None:
+        available_free = free_base and counts['recognizedTier'] == 0
+    return {'freeBasePrice': free_base, 'marketOverrideCounts': counts,
+            'availableMarketsFree': available_free}
+
+
 def observe(opener, token, now=None):
     def get(url):
         request = urllib.request.Request(url, method='GET', headers={
@@ -80,17 +103,13 @@ def observe(opener, token, now=None):
                     expiry_valid = instant > (now or datetime.now(timezone.utc))
         except (ValueError, OverflowError):
             pass
-    pricing = submission.get('pricing')
-    pricing = pricing if isinstance(pricing, dict) else {}
-    overrides = pricing.get('marketSpecificPricings')
     return {'observation': 'read-only', 'appId': APP_ID, 'packageIdentityName': IDENTITY,
             **refs, 'existingSubmission': {'id': SUBMISSION_ID, 'status': status,
                 'targetPublishMode': mode, 'has_fileUploadUrl': bool(url),
                 'fileUploadExpiryValid': expiry_valid,
                 'expiryCheckScope': 'timestamp only; not signature or upload authorization',
                 'packageCount': len(packages), 'packageVersions': versions,
-                'freeBasePrice': pricing['priceId'] == 'Free' if isinstance(pricing.get('priceId'), str) else None,
-                'marketOverridesFreeOrBase': all(value in ('Free', 'Base') for value in overrides.values()) if isinstance(overrides, dict) else None}}
+                **pricing_summary(submission.get('pricing'))}}
 
 
 def load_authenticate():
@@ -145,6 +164,32 @@ def self_check():
     assert result['existingSubmission']['freeBasePrice'] is True
     assert result['lastPublishedApplicationSubmission'] is None
     assert 'SECRET_' not in json.dumps(result) and '"fileUploadUrl"' not in json.dumps(result)
+    pricing_cases = [
+        ({'priceId': 'Free', 'marketSpecificPricings': {'SECRET_MARKET_A': 'Free', 'SECRET_MARKET_B': 'Base', 'SECRET_MARKET_C': 'NotAvailable'}}, True,
+         {'Free': 1, 'Base': 1, 'NotAvailable': 1, 'recognizedTier': 0, 'unknown': 0}),
+        ({'priceId': 'Free', 'marketSpecificPricings': {'SECRET_MARKET': 'Tier12'}}, False,
+         {'Free': 0, 'Base': 0, 'NotAvailable': 0, 'recognizedTier': 1, 'unknown': 0}),
+        ({'priceId': 'Free', 'marketSpecificPricings': {'SECRET_MARKET': {'priceId': 'Free'}}}, None,
+         {'Free': 0, 'Base': 0, 'NotAvailable': 0, 'recognizedTier': 0, 'unknown': 1}),
+        ({'priceId': 'Free'}, None, None),
+        ({'priceId': 'Free', 'marketSpecificPricings': {}}, True,
+         {'Free': 0, 'Base': 0, 'NotAvailable': 0, 'recognizedTier': 0, 'unknown': 0}),
+        ({'priceId': 'Tier1', 'marketSpecificPricings': {}}, False,
+         {'Free': 0, 'Base': 0, 'NotAvailable': 0, 'recognizedTier': 0, 'unknown': 0}),
+        ({'priceId': 'Free', 'marketSpecificPricings': {'SECRET_MARKET_A': 'Tier1', 'SECRET_MARKET_B': 'SECRET_UNKNOWN'}}, None,
+         {'Free': 0, 'Base': 0, 'NotAvailable': 0, 'recognizedTier': 1, 'unknown': 1}),
+        ({'priceId': 'Free', 'marketSpecificPricings': {'SECRET_MARKET': 'Tier0'}}, None,
+         {'Free': 0, 'Base': 0, 'NotAvailable': 0, 'recognizedTier': 0, 'unknown': 1}),
+        ({'priceId': 'SECRET_UNKNOWN', 'marketSpecificPricings': {}}, None,
+         {'Free': 0, 'Base': 0, 'NotAvailable': 0, 'recognizedTier': 0, 'unknown': 0}),
+    ]
+    for pricing, available_free, counts in pricing_cases:
+        summary = observe(Opener(app, {**submission, 'pricing': pricing}), 'SECRET_OAUTH')['existingSubmission']
+        assert 'availableMarketsFree' in summary, 'Pricing availability summary is missing'
+        assert summary['availableMarketsFree'] is available_free
+        assert summary['marketOverrideCounts'] == counts
+        assert 'marketOverridesFreeOrBase' not in summary
+        assert 'SECRET_' not in json.dumps(summary) and '"Tier12"' not in json.dumps(summary)
     submission['fileUploadUrl'] = None
     assert observe(Opener(app, submission), 'SECRET_OAUTH')['existingSubmission']['has_fileUploadUrl'] is False
     submission['fileUploadUrl'] = 'https://example.blob.core.windows.net/?sig=SECRET_SAS&se=2000-01-01T00%3A00%3A00Z'
