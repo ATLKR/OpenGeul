@@ -1,0 +1,75 @@
+{
+  "repository": "ATLKR/OpenGeul",
+  "archiveTag": "store-package-1.1.3-dev.68.1",
+  "targetCommit": "b3c8b61d01731dc1e39357034d9c489a3ea829a9",
+  "storeExecutionCommit": "58697cece9aee95e4884c7d61b6c782c49c5104f",
+  "sourceContractSha256": "6e6b9bcfd0d87f291db43b2f1d6abfe85976bf214e828bdaff55de651f439d02",
+  "portableVerification": {
+    "msix": "OpenGeul_1.1.3.0_x64_development-unsigned.msix",
+    "portable": "OpenGeul_1.1.3_windows-x64_unsigned-portable.zip",
+    "editorSha256": "7b065bdcba965cb4a0ac00cde753e31b72ffa201c2c441465cb70503e3b31a7b",
+    "verifiedRuntimeFiles": 1565,
+    "runtimeManifestSha256": "d322c9ea8ade3b5f2437fc98bacd93449c2ff2dd408191ae28de9281f946cc30"
+  },
+  "runtimeSnapshotSha256": "47d8cc15b01306bbc6d557d766fd88dd31c88578597f3970f7a548acbe4277c3",
+  "qualificationAssertedByOfflineVerifier": false,
+  "sourceRunId": 38181680763,
+  "storeRunId": 38185086797,
+  "storeArtifactId": 11719695508,
+  "sourceReleaseId": 409988125,
+  "sourceAssetSnapshotSha256": "2f0e4e109ea00b4ed0ee55b8fd3b2cd79a3a64c3d8a3a9318529cdf97462a859",
+  "decision": "create-draft",
+  "missingAssets": [
+    "AppxManifest.xml",
+    "OpenGeul-editor.png",
+    "OpenGeul_1.1.3.0_x64_store-unsigned.msix",
+    "SHA256SUMS.txt",
+    "screenshot-provenance.json",
+    "source-provenance.json",
+    "store-provenance.json"
+  ],
+  "assets": {
+    "AppxManifest.xml": {
+      "size": 1900,
+      "sha256": "ab7253d4438fd0d751ff802689d777282bdc7c6f36871860cbd910c21123b021"
+    },
+    "OpenGeul-editor.png": {
+      "size": 72067,
+      "sha256": "12888d467342b689333f74f7dd8874505562c35fd4bfe7b0fa950d92687b81dc"
+    },
+    "OpenGeul_1.1.3.0_x64_store-unsigned.msix": {
+      "size": 33164997,
+      "sha256": "9fcdadee493138a8f4a2bf06069d3128f3a55539a7b1c861135216fd6edb6ed8"
+    },
+    "SHA256SUMS.txt": {
+      "size": 552,
+      "sha256": "f525aecbfac8e7c0739755ee66cf65a8c05a9575dc000465ce7e67fe5963e4b0"
+    },
+    "screenshot-provenance.json": {
+      "size": 597,
+      "sha256": "1618dd94cb3de200324b0d57726818e089ca5c182dc763ff89b4391204a74e76"
+    },
+    "source-provenance.json": {
+      "size": 6508,
+      "sha256": "c29467bea17b3b6762b5c6aab33dbab07709dfeec92d346afac3e241f8168865"
+    },
+    "store-provenance.json": {
+      "size": 216160,
+      "sha256": "c0e89f09ebc0b24a4912de62df92aed2d5dc7a8a10b9efdac3c4e415422ab599"
+    }
+  },
+  "createRequest": {
+    "tag_name": "store-package-1.1.3-dev.68.1",
+    "target_commitish": "b3c8b61d01731dc1e39357034d9c489a3ea829a9",
+    "draft": true,
+    "prerelease": true,
+    "make_latest": "false",
+    "name": "OpenGeul 1.1.3 dev.68.1 \u2014 \uc11c\uba85 \uc5c6\ub294 Store \ud328\ud0a4\uc9c0 \uc6d0\ubcf8 \ubcf4\uad00",
+    "body": "\uac80\uc99d \uc644\ub8cc \uac1c\ubc1c \uc18c\uc2a4 [v1.1.3-dev.68.1](https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3-dev.68.1)\uc758 Store \uc2e0\uc6d0 \ud328\ud0a4\uc9c0 \uc6d0\ubcf8 7\uac1c\ub97c \ubcf4\uad00\ud569\ub2c8\ub2e4. \uc11c\uba85 \uc5c6\ub294 \uae30\uc220 \ubcf4\uad00 \ud30c\uc77c\uc774\uba70 \uc774 \ud328\ud0a4\uc9c0\uc758 Microsoft Store \uc778\uc99d \ub610\ub294 \uacf5\uac1c\ub97c \ub73b\ud558\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4."
+  },
+  "publishRequest": {
+    "draft": false,
+    "prerelease": true,
+    "make_latest": "false"
+  }
+}

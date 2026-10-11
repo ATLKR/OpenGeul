@@ -1,0 +1,62 @@
+{
+  "sourceCommit": "UNSET",
+  "sourceRunId": "UNSET",
+  "sourceRunNumber": "UNSET",
+  "sourceRunAttempt": "UNSET",
+  "sourceReleaseId": "UNSET",
+  "sourceTag": "UNSET",
+  "storeExecutionCommit": "UNSET",
+  "storeRunId": "UNSET",
+  "storeRunAttempt": "UNSET",
+  "storeArtifactId": "UNSET",
+  "storeArtifactBytes": "UNSET",
+  "storeArtifactSha256": "UNSET",
+  "archiveReleaseId": "UNSET",
+  "archiveTag": "UNSET",
+  "sourceAssetSnapshotSha256": "UNSET",
+  "preparedPlanSha256": "UNSET",
+  "runtimeSnapshotSha256": "UNSET",
+  "guiSha256": "UNSET",
+  "sourceProvenanceSha256": "UNSET",
+  "approvedWebsiteDiffSha256": "UNSET",
+  "repository": "ATLKR/OpenGeul",
+  "approvedWebsiteDiff": [],
+  "assets": {
+    "AppxManifest.xml": {
+      "size": "UNSET",
+      "sha256": "UNSET"
+    },
+    "OpenGeul-editor.png": {
+      "size": "UNSET",
+      "sha256": "UNSET"
+    },
+    "UNSET_MSIX_NAME": {
+      "size": "UNSET",
+      "sha256": "UNSET"
+    },
+    "SHA256SUMS.txt": {
+      "size": "UNSET",
+      "sha256": "UNSET"
+    },
+    "screenshot-provenance.json": {
+      "size": "UNSET",
+      "sha256": "UNSET"
+    },
+    "source-provenance.json": {
+      "size": "UNSET",
+      "sha256": "UNSET"
+    },
+    "store-provenance.json": {
+      "size": "UNSET",
+      "sha256": "UNSET"
+    }
+  },
+  "protectedFiles": {
+    "scripts/buildkit.py": "UNSET",
+    "scripts/releasekit.py": "UNSET",
+    "scripts/store_package.py": "UNSET",
+    "e2e/prepare_payload.py": "UNSET",
+    ".github/workflows/store-package.yml": "UNSET",
+    "e2e/store_screenshot.py": "UNSET"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "sourceCommit": "b3c8b61d01731dc1e39357034d9c489a3ea829a9",
+  "sourceRunId": 38181680763,
+  "sourceRunNumber": 68,
+  "sourceRunAttempt": 1,
+  "sourceReleaseId": 409988125,
+  "sourceTag": "v1.1.3-dev.68.1",
+  "storeExecutionCommit": "58697cece9aee95e4884c7d61b6c782c49c5104f",
+  "storeRunId": 38185086797,
+  "storeRunAttempt": 1,
+  "storeArtifactId": 11719695508,
+  "storeArtifactBytes": 31000005,
+  "storeArtifactSha256": "2fa075d9328b6132ed12c15676e1439046c350c446207bc789790f817309524a",
+  "archiveReleaseId": 409993111,
+  "archiveTag": "store-package-1.1.3-dev.68.1",
+  "sourceAssetSnapshotSha256": "2f0e4e109ea00b4ed0ee55b8fd3b2cd79a3a64c3d8a3a9318529cdf97462a859",
+  "preparedPlanSha256": "191f2738a1e4776b0818b4cc2d725b4f2222c91ca1502e61804e5857d6c832b7",
+  "runtimeSnapshotSha256": "47d8cc15b01306bbc6d557d766fd88dd31c88578597f3970f7a548acbe4277c3",
+  "guiSha256": "7b065bdcba965cb4a0ac00cde753e31b72ffa201c2c441465cb70503e3b31a7b",
+  "sourceProvenanceSha256": "c29467bea17b3b6762b5c6aab33dbab07709dfeec92d346afac3e241f8168865",
+  "approvedWebsiteDiffSha256": "e5fd6de3d129812937f493d8d43654d5feb031d38c03f435047ff51b0f997412",
+  "repository": "ATLKR/OpenGeul",
+  "approvedWebsiteDiff": [
+    {
+      "path": "website/check.mjs",
+      "beforeSha256": "a05eb6ccba6e7ce3f9abe612b556c7516a09564a4269a17b5ab5423f156e0fc1",
+      "afterSha256": "2b0dfd0d3d7cd886bef498d7c8bd661fef2cc6ac907c5f646cf04a566ea92f60"
+    },
+    {
+      "path": "website/index.html",
+      "beforeSha256": "03dd3eff5429d54e22df3a3bb804bb5b0b27db787b923eee2c794c3789bcc674",
+      "afterSha256": "03465555b720983f11c8eca04ec68e29fc65f0069948b2b648bf1723d61cc036"
+    },
+    {
+      "path": "website/store-release.json",
+      "beforeSha256": "02c85a1dd1245309e4683b74284a6f82ea46226001c5e3e59360fdb8c597f3cf",
+      "afterSha256": "834865fe11700807860205094904d44646cbf81371a5a5dbf6d82aaea0186ad7"
+    }
+  ],
+  "assets": {
+    "AppxManifest.xml": {
+      "size": 1900,
+      "sha256": "ab7253d4438fd0d751ff802689d777282bdc7c6f36871860cbd910c21123b021"
+    },
+    "OpenGeul-editor.png": {
+      "size": 72067,
+      "sha256": "12888d467342b689333f74f7dd8874505562c35fd4bfe7b0fa950d92687b81dc"
+    },
+    "OpenGeul_1.1.3.0_x64_store-unsigned.msix": {
+      "size": 33164997,
+      "sha256": "9fcdadee493138a8f4a2bf06069d3128f3a55539a7b1c861135216fd6edb6ed8"
+    },
+    "SHA256SUMS.txt": {
+      "size": 552,
+      "sha256": "f525aecbfac8e7c0739755ee66cf65a8c05a9575dc000465ce7e67fe5963e4b0"
+    },
+    "screenshot-provenance.json": {
+      "size": 597,
+      "sha256": "1618dd94cb3de200324b0d57726818e089ca5c182dc763ff89b4391204a74e76"
+    },
+    "source-provenance.json": {
+      "size": 6508,
+      "sha256": "c29467bea17b3b6762b5c6aab33dbab07709dfeec92d346afac3e241f8168865"
+    },
+    "store-provenance.json": {
+      "size": 216160,
+      "sha256": "c0e89f09ebc0b24a4912de62df92aed2d5dc7a8a10b9efdac3c4e415422ab599"
+    }
+  },
+  "protectedFiles": {
+    "scripts/buildkit.py": "9df65acb14819386242861f8af7571261ccd1e8cf7ab78925e8a45d869340151",
+    "scripts/releasekit.py": "244e0d2bc1a8a72487d8838197435489e4ef90ad29e57265ed5c0a4f7217632d",
+    "scripts/store_package.py": "bd27878ae81f598e0ca26c61fa533905ed455263a5de81fd9ad409b42a952663",
+    "e2e/prepare_payload.py": "74abced513f5447f94a45817f5d895b8b9dc9f621588d7de56dedbbaca8bc62c",
+    ".github/workflows/store-package.yml": "45cfd710125626d67719b15f5512c42d2777db8e60277a2ca42bf5e53f762249",
+    "e2e/store_screenshot.py": "10f606c7aeadbc8c2d4b9ec0d8685c5553d1ccac7f34d79f145447fb41d9cdba"
+  }
+}
