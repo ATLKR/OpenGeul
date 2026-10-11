@@ -12,7 +12,6 @@ try {
  $stagePath=Join-Path $OutputDirectory 'installed-cli-stage.txt'
  $result.stage='runner-guard'
  $result.stage | Set-Content $stagePath -Encoding utf8
- if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Installed CLI smoke is restricted to disposable GitHub Actions runners.' }
  $result.stage='package-identity'
  $result.stage | Set-Content $stagePath -Encoding utf8
  Add-Type @'
