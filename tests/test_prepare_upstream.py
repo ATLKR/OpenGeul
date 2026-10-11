@@ -60,10 +60,14 @@ pub fn pdf_font_dirs(app: &AppHandle) -> Vec<PathBuf> {
         included = re.search(r'\.app_manifest\(include_str!\("([^"]+)"\)\)', build)
         self.assertIsNotNone(included, 'Native build does not consume the generated application manifest')
         self.assertEqual(self.native / included.group(1), manifest)
-        doc = ET.parse(manifest).getroot()
+        rendered = ''.join(f' {line.strip()} ' for line in manifest.read_text(encoding='utf-8').splitlines())
+        doc = ET.fromstring(rendered)
         self.assertEqual(doc.findtext('.//{http://schemas.microsoft.com/SMI/2005/WindowsSettings}dpiAware'), 'true/pm')
         self.assertEqual(doc.findtext('.//{http://schemas.microsoft.com/SMI/2016/WindowsSettings}dpiAwareness'), 'PerMonitorV2')
-        controls = doc.find('.//{urn:schemas-microsoft-com:asm.v1}assemblyIdentity')
+        self.assertEqual(doc[0].tag, '{urn:schemas-microsoft-com:asm.v1}assemblyIdentity')
+        self.assertEqual(doc[0].attrib, {'type': 'win32', 'name': 'AllenLabs.OpenGeul',
+            'version': '1.1.2.0', 'processorArchitecture': 'amd64'})
+        controls = doc.find('{urn:schemas-microsoft-com:asm.v1}dependency/{urn:schemas-microsoft-com:asm.v1}dependentAssembly/{urn:schemas-microsoft-com:asm.v1}assemblyIdentity')
         self.assertEqual(controls.attrib, {'type': 'win32', 'name': 'Microsoft.Windows.Common-Controls',
             'version': '6.0.0.0', 'processorArchitecture': '*', 'publicKeyToken': '6595b64144ccf1df', 'language': '*'})
         self.assertIsNone(doc.find('.//{urn:schemas-microsoft-com:asm.v3}requestedExecutionLevel'))

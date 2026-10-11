@@ -40,6 +40,7 @@ def patch(source: Path, version: str) -> None:
 }
 ''',encoding='utf-8')
     shutil.copy2(ROOT/'overlay/windows-app-manifest.xml',native/'windows-app-manifest.xml')
+    replace_file(native/'windows-app-manifest.xml', '@VERSION@', package_version(version))
     cfg=native/'tauri.conf.json'
     cfg.write_text(json.dumps(tauri_config(json.loads(cfg.read_text(encoding='utf-8')),version),ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     win=native/'tauri.windows.conf.json'
