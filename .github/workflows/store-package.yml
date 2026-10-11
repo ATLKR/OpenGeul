@@ -1,110 +1,40 @@
-name: OpenGeul Store package
+name: OpenGeul archive64 upload diagnostic
 'on':
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing successful OpenGeul release to repackage
         type: string
         required: true
       verify_store_api:
-        description: Validate configured Store API credentials with an application GET only
         type: boolean
-        required: false
         default: false
       submit_to_store:
-        description: Submit a stable release update after the first Store publication
         type: boolean
-        required: false
         default: false
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: opengeul-store
+  group: opengeul-archive64-upload
   cancel-in-progress: false
-  queue: max
-env:
-  PYTHONUTF8: '1'
 jobs:
-  package:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main')
-    runs-on: windows-2022
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-      issues: write
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        persist-credentials: false
-    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-      with:
-        python-version: '3.12'
-    - name: Check Store runtime preservation
-      shell: pwsh
-      run: python -m unittest discover -s tests -p test_store_package.py -v
-    - name: Verify successful release and repackage unchanged runtime with Store identity
-      id: package
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-        $makeappx = Get-ChildItem $sdk -Filter makeappx.exe -Recurse |
-          Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
-        if (-not $makeappx) { throw 'Windows SDK MakeAppx is missing.' }
-        python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Capture the actual Windows editor for the Store listing
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        python -m pip install -r e2e/requirements.txt
-        ./e2e/ensure-webview2.ps1
-        python e2e/store_screenshot.py --exe .work/store-payload/OpenGeul.exe --output store-output
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Save the verified Store package before submission
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-store-${{ github.run_id }}
-        path: store-output/*
-        retention-days: 1
-        if-no-files-found: error
-        compression-level: 9
-    - name: Submit the stable release to the Microsoft Store
-      if: inputs.submit_to_store
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        python scripts/store_submit.py --release-tag $env:RELEASE_TAG --package-directory store-output
-  verify-api:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.verify_store_api)
+  upload-originals-to-draft:
+    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/diagnostic/archive-upload64' && github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR' && github.run_attempt == 1 && github.event_name == 'workflow_dispatch' && inputs.release_tag == 'v1.1.2-dev.64.1' && !inputs.verify_store_api && !inputs.submit_to_store)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
+        fetch-depth: 2
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Validate OAuth credentials and GET the reserved Store application
+    - name: Validate exact original Store ZIP and upload only missing assets to fixed draft
       env:
-        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: python scripts/check_store_api.py
+        GH_TOKEN: ${{ github.token }}
+        PYTHONDONTWRITEBYTECODE: '1'
+      run: python probe/archive-upload64.py

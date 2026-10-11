@@ -1,0 +1,50 @@
+{
+  "repository": "ATLKR/OpenGeul",
+  "sourceCommit": "a51cb3547f9cbd8f090fb032f550810855feaed3",
+  "sourceRunId": 38167617349,
+  "sourceReleaseId": 409897256,
+  "sourceTag": "v1.1.2-dev.64.1",
+  "archiveReleaseId": 409905491,
+  "archiveTag": "store-package-1.1.2-dev.64.1",
+  "sourceAssetSnapshotSha256": "446636c7c11868552852442c23ec1e9beebcc72391083b7dcc51a32323966e2d",
+  "storeRunId": 38171791278,
+  "storeArtifactId": 11713548698,
+  "storeArtifactBytes": 29820625,
+  "storeArtifactSha256": "98e1033fd5488b4eb49a60d8a809443bea1583d6592eb90f533c6b2ab6e3202e",
+  "assets": {
+    "AppxManifest.xml": {
+      "size": 1900,
+      "sha256": "384cc80dcc0e5349c5703a99dc906ebd74699f7b7815c5d301a9217da1b6bfc2"
+    },
+    "OpenGeul-editor.png": {
+      "size": 72067,
+      "sha256": "12888d467342b689333f74f7dd8874505562c35fd4bfe7b0fa950d92687b81dc"
+    },
+    "OpenGeul_1.1.2.0_x64_store-unsigned.msix": {
+      "size": 31976804,
+      "sha256": "2b615829c1caa9510dca04f5e2a8a8c6c74ad5ef1aa69fae99bb725b3428af1e"
+    },
+    "SHA256SUMS.txt": {
+      "size": 552,
+      "sha256": "54e655023e32291894a17f63b1e064fd9d2a7aa81dc710ba7b53a91aae9cc682"
+    },
+    "screenshot-provenance.json": {
+      "size": 597,
+      "sha256": "4db7070b770efb4cbcb435174f2451632740efd225c3db31162ef0ce55b1389c"
+    },
+    "source-provenance.json": {
+      "size": 6346,
+      "sha256": "5b96cc0584abb89ca26aff393f0dc7d6a81d4b61333f455d339988a7a833c67a"
+    },
+    "store-provenance.json": {
+      "size": 215779,
+      "sha256": "888833c86efca0aebbcb43d7e2ef76e0f0e22de4ed533879ab30a2cd60414074"
+    }
+  },
+  "validators": {
+    "scripts/buildkit.py": "9df65acb14819386242861f8af7571261ccd1e8cf7ab78925e8a45d869340151",
+    "scripts/releasekit.py": "1c40bc60e22ab15ab9ca7737701b1145ce6de322e545e01bd285a54de1b0bff8",
+    "scripts/store_package.py": "b74555d34a7acc9357b8ea34f422d60c425cb5a2dc44fbabec2fee9a201a39eb",
+    "e2e/prepare_payload.py": "74abced513f5447f94a45817f5d895b8b9dc9f621588d7de56dedbbaca8bc62c"
+  }
+}
