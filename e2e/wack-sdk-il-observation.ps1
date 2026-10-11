@@ -339,6 +339,10 @@ def self_test():
         assert observation["mappings"][0]["parentTag"] == "Tests" and not observation["truncated"]
     capture_result, stdout, stderr = capture([sys.executable, "-c", "print('metadata only')"])
     assert capture_result["exitCode"] == 0 and b"metadata only" in stdout and not stderr
+    overflow_result, overflow_stdout, _ = capture([sys.executable, "-c",
+        "import sys; sys.stdout.buffer.write(b'x' * (16 * 1024 * 1024 + 65536))"])
+    assert overflow_result["stdoutTruncated"] and len(overflow_stdout) == STDOUT_LIMIT
+    assert overflow_result["stdoutBytesObserved"] > STDOUT_LIMIT
     oversized = {"il": extract_il(sample), "extra": "x" * (JSON_LIMIT - 4096)}
     oversized["il"]["targetClasses"][0]["text"] = "x" * CLASS_LIMIT
     encoded = encode_result(oversized)

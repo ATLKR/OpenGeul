@@ -160,6 +160,7 @@ public static class OpenGeulPackageIdentity {
  if (-not $cliEvidence.success -or $cliEvidence.packageFullName -ne $installed.PackageFullName) { throw 'Installed CLI package-context probe failed; see installed-cli.json.' }
  Stop-Process -Id $launched.Id -Force
  $launched=$null
+ & (Join-Path $PSScriptRoot 'wack-binaryinfo-hosts.ps1') -ExecutablePath $executable -OutputDirectory $OutputDirectory -Label installed
  & (Join-Path $PSScriptRoot 'wack.ps1') -PackageFullName $installed.PackageFullName -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory $OutputDirectory
  @{
   success=$true; packageFullName=$installed.PackageFullName; publisher=$publisher;
