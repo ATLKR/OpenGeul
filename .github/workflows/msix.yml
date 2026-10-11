@@ -128,7 +128,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: Test and compile Windows editor with native fixtures and notices
+    - name: Verify native table and PDF policies and compile Windows editor
       shell: pwsh
       run: ./scripts/build-msix.ps1 -Phase Editor -WasmDirectory wasm-input
     - name: Enforce transport size before upload
@@ -186,7 +186,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: Verify native PDF policy and compile Windows CLI in the release graph
+    - name: Compile the production Windows CLI
       shell: pwsh
       run: ./scripts/build-msix.ps1 -Phase Cli -WasmDirectory wasm-input
     - name: Enforce transport size before upload

@@ -23,11 +23,15 @@ flowchart LR
   browser --> release
 ```
 
-The CLI's native PDF policy tests use the production release profile, Windows
-x64 target and `native-skia` features. The subsequent CLI build reuses that
-compiled graph. The editor keeps the default-feature native table regression,
-GUI unit tests, fixture generation, frontend font audit and dependency notices.
-The CLI and editor retain isolated Cargo target directories.
+The editor job runs the unchanged four native PDF policy tests with
+`native-skia`, immediately after the default-feature native table regression.
+Both tests use the existing debug test target directory; neither uses release
+LTO. The CLI job builds only the production release binary, retaining its
+Windows x64 target, `native-skia` features and upstream release profile.
+Both jobs must pass before their source-bound components can be joined.
+The editor also keeps GUI unit tests, fixture generation, frontend font audit
+and dependency notices. The CLI and editor retain isolated Cargo target
+directories, including separation between native tests and the GUI graph.
 
 Each component records its role, repository, current workflow source commit,
 run ID and attempt, pinned upstream versions, reviewed overlay/source
