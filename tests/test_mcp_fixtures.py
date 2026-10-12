@@ -93,6 +93,10 @@ class McpFixtureTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.stage()
         self.assertEqual(list(self.output.iterdir()),[])
         with self.assertRaises(ValueError):self.module().stage(self.basic,self.password,self.wasm_file,self.password/'out',self.binding)
+    def test_dot_dot_output_alias_cannot_write_inside_original_inputs(self):
+        other=self.root/'other';other.mkdir();aliased=other/'..'/self.password.name/'qa-output'
+        with self.assertRaises(ValueError):self.module().stage(self.basic,self.password,self.wasm_file,aliased,self.binding)
+        self.assertFalse((self.password/'qa-output').exists())
     def test_bounded_file_size_checked_before_read_or_copy(self):
         m=self.module();path=self.password/'protected.hwp'
         with path.open('wb') as stream:stream.truncate(m.MAX_FILE+1)

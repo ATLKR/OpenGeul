@@ -36,7 +36,9 @@ def require(condition,message):
     if not condition:raise ValueError(message)
 
 def safe_path(path):
-    path=Path(path).absolute()
+    path=Path(path)
+    require('..' not in path.parts,'QA 경로의 상위 디렉터리 별칭을 허용하지 않습니다')
+    path=path.absolute()
     for part in (path,*path.parents):
         if part.exists() or part.is_symlink():
             state=part.lstat()
