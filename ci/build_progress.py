@@ -19,27 +19,57 @@ MAX_LOG = MAX_TOTAL - 4096
 GIB = 1024 ** 3
 
 
-def resource_decision(cpu, total, available, cpu_busy=None):
+def resource_decision(cpu, total, available, cpu_busy=None, *, architecture='x64', workload='native'):
+    if architecture not in ('x64','arm64') or workload not in ('native','release'):
+        raise ValueError('알 수 없는 컴파일 자원 정책입니다')
     if (any(type(v) is not int for v in (cpu, total, available)) or cpu < 1
             or total < 0 or not 0 <= available <= total
             or cpu_busy is not None and (type(cpu_busy) is not int or not 0 <= cpu_busy <= 100)):
         raise ValueError('잘못된 CPU·메모리 관측입니다')
     if cpu == 1: return {'jobs': 1, 'reason': 'singleCore'}
     if cpu_busy is None: return {'jobs': min(cpu, 2), 'reason': 'cpuUnavailable'}
+    release_headroom = architecture == 'x64' and workload == 'release' and cpu_busy <= 25 and total >= 14*GIB
     if cpu_busy >= 90: limit, reason = 1, 'cpuBusy'
     elif cpu_busy >= 75: limit, reason = min(cpu, 2), 'cpuBusy'
     elif cpu_busy > 25: limit, reason = cpu, 'cpuLimited'
-    else: limit, reason = cpu*2, 'headroom'
-    limit = min(limit, 8)
+    else: limit, reason = cpu*(3 if release_headroom else 2), 'headroom'
+    limit = min(limit, 12 if release_headroom else 8)
     if total < 14*GIB and limit > 2: limit, reason = 2, 'memoryLimited'
-    # OS용 2 GiB를 남기고 동시 compiler 하나에 1.25 GiB를 배정한다.
-    memory_limit = max(1, (available - 2*GIB) // (5*GIB//4))
+    # OS용 2 GiB를 남기고 기본 1.25 GiB, 관측한 x64 release headroom만 0.75 GiB를 계산한다.
+    slot = 3*GIB//4 if release_headroom else 5*GIB//4
+    memory_limit = max(1, (available - 2*GIB) // slot)
     if memory_limit < limit: limit, reason = memory_limit, 'memoryLimited'
-    return {'jobs': max(level for level in (1,2,4,8) if level <= limit), 'reason': reason}
+    return {'jobs': max(level for level in (1,2,4,8,12) if level <= limit), 'reason': reason}
 
 
-def select_jobs(cpu, total, available, cpu_busy=None):
-    return resource_decision(cpu, total, available, cpu_busy)['jobs']
+def select_jobs(cpu, total, available, cpu_busy=None, *, architecture='x64', workload='native'):
+    return resource_decision(cpu, total, available, cpu_busy, architecture=architecture, workload=workload)['jobs']
+
+
+def require_release_environment(architecture, workload, *, env=None, event=None):
+    if architecture != 'x64' or workload != 'release': return
+    env = os.environ if env is None else env
+    if 'GITHUB_ACTIONS' not in env:
+        if any(key in env for key in ('GITHUB_REPOSITORY','GITHUB_EVENT_PATH','GITHUB_JOB','GITHUB_SHA',
+                                     'GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_EVENT_NAME','GITHUB_WORKFLOW_REF')):
+            raise ValueError('부분 CI 환경에서 release 병렬도 override를 허용하지 않습니다')
+        return
+    if env.get('GITHUB_ACTIONS') != 'true': raise ValueError('현재 GitHub Actions 식별값이 다릅니다')
+    components.identity(env)
+    if (env.get('GITHUB_JOB') not in ('windows-editor','windows-cli')
+            or env.get('GITHUB_EVENT_NAME') not in ('push','pull_request','schedule','workflow_dispatch')):
+        raise ValueError('해당 x64 소스 compiler 작업이 아닙니다')
+    if event is None:
+        if not isinstance(env.get('GITHUB_EVENT_PATH'),str) or not env['GITHUB_EVENT_PATH']:
+            raise ValueError('현재 공개 CI 이벤트 원본이 없습니다')
+        path = Path(env['GITHUB_EVENT_PATH']); components.regular(path)
+        if not 0 < path.stat().st_size <= 256*1024: raise ValueError('현재 공개 CI 이벤트 크기가 다릅니다')
+        event = components.read_json(path)
+    from policy import require_public
+    require_public(event)
+    repository = event.get('repository',{})
+    if repository.get('full_name') != 'ATLKR/OpenGeul' or repository.get('id') != 1405493151:
+        raise ValueError('해당 공개 저장소의 현재 release 자원 요청이 아닙니다')
 
 
 def build_command(stage, architecture):
@@ -184,13 +214,17 @@ def main():
     jobs = commands.add_parser('jobs')
     for key in ('cpu', 'total-memory', 'available-memory'): jobs.add_argument('--'+key, type=int, required=True)
     jobs.add_argument('--cpu-busy', type=int)
+    jobs.add_argument('--architecture', choices=('x64','arm64'), default='x64')
+    jobs.add_argument('--workload', choices=('native','release'), default='native')
     jobs.add_argument('--json', action='store_true')
     for mode in ('run', 'verify'):
         item = commands.add_parser(mode); item.add_argument('--stage', choices=STAGES, required=True)
         item.add_argument('--architecture', choices=('x64', 'arm64'), required=True)
     args = parser.parse_args()
     if args.command == 'jobs':
-        decision = resource_decision(args.cpu, args.total_memory, args.available_memory, args.cpu_busy)
+        require_release_environment(args.architecture,args.workload)
+        decision = resource_decision(args.cpu, args.total_memory, args.available_memory, args.cpu_busy,
+                                     architecture=args.architecture, workload=args.workload)
         print(json.dumps(decision, separators=(',', ':')) if args.json else decision['jobs'])
     elif args.command == 'verify': verify_stage(args.stage, args.architecture)
     else:

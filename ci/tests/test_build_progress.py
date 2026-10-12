@@ -102,6 +102,51 @@ class BuildProgressTests(unittest.TestCase):
         script=(Path(__file__).resolve().parents[2]/'scripts/build-msix.ps1').read_text()
         self.assertIn('$decision.jobs -gt [Math]::Min($processorCount*2,8)',script)
 
+    def test_only_x64_release_uses_twelve_with_observed_cpu_and_memory_headroom(self):
+        gib = 1024**3
+        for arch, workload, expected in [('x64','release',12),('arm64','release',8),
+                                         ('x64','native',8),('arm64','native',8)]:
+            with self.subTest(architecture=arch,workload=workload):
+                self.assertEqual(progress.resource_decision(4,16*gib,13*gib,25,
+                    architecture=arch,workload=workload),{'jobs':expected,'reason':'headroom'})
+
+    def test_release_preserves_unknown_busy_single_core_and_small_runner_limits(self):
+        gib=1024**3
+        for cpu,total,free,busy,expected in [(1,16*gib,13*gib,0,1),(4,14*gib-1,13*gib,0,2),
+                    (4,16*gib,13*gib,None,2),(4,16*gib,13*gib,26,4),
+                    (4,16*gib,13*gib,75,2),(4,16*gib,13*gib,90,1)]:
+            with self.subTest(cpu=cpu,busy=busy):
+                self.assertEqual(progress.select_jobs(cpu,total,free,busy,architecture='x64',workload='release'),expected)
+
+    def test_release_memory_floor_selects_discrete_levels_and_three_times_cores(self):
+        gib=1024**3;reserve=2*gib;slot=3*gib//4
+        for jobs,previous in [(2,1),(4,2),(8,4),(12,8)]:
+            available=reserve+jobs*slot
+            self.assertEqual(progress.select_jobs(4,16*gib,available,0,workload='release'),jobs)
+            self.assertEqual(progress.select_jobs(4,16*gib,available-1,0,workload='release'),previous)
+        for cpu,expected in [(2,4),(3,8),(4,12),(8,12)]:
+            self.assertEqual(progress.select_jobs(cpu,32*gib,24*gib,0,workload='release'),expected)
+
+    def test_release_override_rejects_unknown_context_and_nonpublic_ci(self):
+        env={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':'ATLKR/OpenGeul','GITHUB_SHA':'a'*40,
+             'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1','GITHUB_JOB':'windows-cli',
+             'GITHUB_EVENT_NAME':'push'}
+        event={'repository':{'private':False,'full_name':'ATLKR/OpenGeul','id':1405493151}}
+        progress.require_release_environment('x64','release',env=env,event=event)
+        progress.require_release_environment('x64','release',env={})
+        for key in ('GITHUB_SHA','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_EVENT_NAME','GITHUB_WORKFLOW_REF'):
+            with self.subTest(partial=key), self.assertRaises(ValueError):
+                progress.require_release_environment('x64','release',env={key:'partial'})
+        for bad in [{'repository':{'private':True,'full_name':'ATLKR/OpenGeul','id':1405493151}},
+                    {'repository':{'full_name':'ATLKR/OpenGeul','id':1405493151}},
+                    {'repository':{'private':False,'full_name':'someone/OpenGeul','id':1405493151}}]:
+            with self.assertRaises(ValueError):progress.require_release_environment('x64','release',env=env,event=bad)
+        for key,value in [('GITHUB_ACTIONS','false'),('GITHUB_REPOSITORY','someone/OpenGeul'),
+                          ('GITHUB_JOB','store-wack'),('GITHUB_EVENT_NAME','repository_dispatch')]:
+            changed={**env,key:value}
+            with self.assertRaises(ValueError):progress.require_release_environment('x64','release',env=changed,event=event)
+        with self.assertRaises(ValueError):progress.resource_decision(4,16*1024**3,13*1024**3,0,workload='other')
+
     def test_each_native_compile_reobserves_resources_without_changing_original_arguments(self):
         source = (Path(__file__).resolve().parents[2]/'scripts/build-msix.ps1').read_text()
         lines = [line.strip() for line in source.splitlines()]
@@ -109,8 +154,10 @@ class BuildProgressTests(unittest.TestCase):
         self.assertEqual(len(commands), 7)
         for index, line in enumerate(lines):
             if line.startswith(('cargo ', 'rustc ', 'pnpm tauri build ')):
-                self.assertEqual(lines[index-1], 'Set-EditorCargoParallelism')
-        self.assertEqual(source.count('Set-EditorCargoParallelism\n'), 8)
+                expected = 'Set-EditorCargoParallelism -Workload Release' if line.startswith(('cargo build --release ', 'pnpm tauri build ')) else 'Set-EditorCargoParallelism'
+                self.assertEqual(lines[index-1], expected)
+        self.assertEqual(source.count('Set-EditorCargoParallelism\n'), 6)
+        self.assertEqual(source.count('Set-EditorCargoParallelism -Workload Release\n'), 2)
 
     def test_native_and_release_require_previous_success_before_process_launch(self):
         for stage in ('NativeTests', 'Release'):

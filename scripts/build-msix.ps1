@@ -15,6 +15,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 if (-not $IsWindows) { throw 'Native builds require Windows.' }
 function Set-EditorCargoParallelism {
+    param([ValidateSet('Native','Release')][string]$Workload = 'Native')
     # 새 컴파일을 시작할 때만 재측정한다. 실행 중 Cargo의 jobserver는 변경하지 않는다.
     $processorCount = [Environment]::ProcessorCount
     $totalMemory = 0; $availableMemory = 0; $cpuBusy = -1
@@ -49,16 +50,21 @@ function Set-EditorCargoParallelism {
         if ($logicalCount -lt 1) { throw 'Missing CPU observation.' }
         $processorCount = $logicalCount
         $totalMemory = $totalKiB * 1024; $availableMemory = $availableKiB * 1024
-        $decision = python (Join-Path $root 'ci/build_progress.py') jobs --cpu $processorCount --total-memory $totalMemory --available-memory $availableMemory --cpu-busy $cpuBusy --json | ConvertFrom-Json
+        $decision = python (Join-Path $root 'ci/build_progress.py') jobs --cpu $processorCount --total-memory $totalMemory --available-memory $availableMemory --cpu-busy $cpuBusy --architecture $Architecture --workload ($Workload.ToLowerInvariant()) --json | ConvertFrom-Json
+        $x64Release = $Architecture -eq 'x64' -and $Workload -eq 'Release'
         if (($decision.jobs -isnot [int] -and $decision.jobs -isnot [long]) -or
-            $decision.jobs -lt 1 -or $decision.jobs -gt [Math]::Min($processorCount*2,8) -or
+            $decision.jobs -notin @(1,2,4,8,12) -or
+            ($x64Release -and $decision.jobs -gt [Math]::Min($processorCount*3,12)) -or
+            (-not $x64Release -and $decision.jobs -gt [Math]::Min($processorCount*2,8)) -or
+            ($decision.jobs -eq 12 -and (-not $x64Release -or $cpuBusy -lt 0 -or $cpuBusy -gt 25 -or
+                $totalMemory -lt 14GB -or $availableMemory -lt 11GB)) -or
             $decision.reason -notin @('singleCore','cpuUnavailable','cpuBusy','cpuLimited','memoryLimited','headroom')) { throw 'Invalid resource decision.' }
         $buildJobs = $decision.jobs; $reason = $decision.reason
     } catch {
         $buildJobs = [Math]::Min([Environment]::ProcessorCount, 2); $reason = 'observationUnavailable'
     }
     $env:CARGO_BUILD_JOBS = [string]$buildJobs
-    Write-Host "빌드 자원 재측정: CPU=$processorCount; CPU busy=$cpuBusy%; RAM bytes=$totalMemory; 여유 RAM bytes=$availableMemory; cargo jobs=$buildJobs; reason=$reason."
+    Write-Host "빌드 자원 재측정: CPU=$processorCount; CPU busy=$cpuBusy%; RAM bytes=$totalMemory; 여유 RAM bytes=$availableMemory; cargo jobs=$buildJobs; reason=$reason. workload=$Workload; architecture=$Architecture."
 }
 if ($EditorStage -ne 'All' -and $Phase -ne 'Editor') { throw 'Editor stages require the Editor phase.' }
 $prepareEditor = $Phase -ne 'Editor' -or $EditorStage -in @('All','Prepare')
@@ -179,7 +185,7 @@ try {
     } finally { Pop-Location }
     }
     if ($editorRelease) {
-        Set-EditorCargoParallelism
+        Set-EditorCargoParallelism -Workload Release
         pnpm tauri build --no-bundle --target $target
     }
     if ($Phase -in @('All','Cli')) {
@@ -187,7 +193,7 @@ try {
     try {
         # cdylib/rlib outputs must not collide with the editor's different feature graph.
         $env:CARGO_TARGET_DIR = $cliTarget
-        Set-EditorCargoParallelism
+        Set-EditorCargoParallelism -Workload Release
         cargo build --release --locked --target $target --package rhwp --bin rhwp --features native-skia
     } finally {
         $env:CARGO_TARGET_DIR = $editorTarget
