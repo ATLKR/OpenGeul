@@ -210,7 +210,7 @@ def verify(directory):
         and wrapper.get('qualificationFinalized') is False and wrapper.get('wholeSourceQualified') is False and wrapper.get('storeCertified') is False,
         'The exact importer block/environment/cleanup did not pass')
     ast=native._json(evidence/'importer-ast-slice.json');production=(ROOT/'e2e/msix-wack-import.ps1').read_text(encoding='utf-8')
-    require(ast.get('productionSha256')==IMPORTER_SHA and ast.get('sliceExecutedVerbatim') is True
+    require(ast.get('productionSha256')==IMPORTER_SHA and ast.get('slicePreservedVerbatim') is True
         and all(ast.get(key) is False for key in ('productionRoleGuardExecuted','validateInputExecuted','finalizeExecuted')),
         'The diagnostic executed producer/current-run/finalizer code')
     require({row['name'] for row in ast['functions']}=={'Assert-OpenGeulSelectedUnsignedPackage','ConvertTo-OpenGeulUtcSecond','Get-OpenGeulNativePublicCertificate'}

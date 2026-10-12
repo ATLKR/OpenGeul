@@ -45,6 +45,7 @@ jobs:
           $ErrorActionPreference='Stop'
           $PSNativeCommandUseErrorActionPreference=$true
           python ci/evidence.py pack diagnostic/evidence bounded-evidence --status $env:EVIDENCE_STATUS
+          python -c "import json,os; from pathlib import Path; x=json.loads(Path('bounded-evidence/evidence-index.json').read_text(encoding='utf-8-sig')); assert type(x['omittedCount']) is int and x['omittedCount']==0 and x['copiedBytes']==x['sourceBytes'] and x['status']==os.environ['EVIDENCE_STATUS'], 'SDK original evidence omitted or changed status'"
       - name: SDK 진단 원문 보존 — 개인 키·서명 패키지는 업로드하지 않음
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
