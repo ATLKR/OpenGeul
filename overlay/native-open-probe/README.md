@@ -6,12 +6,14 @@
 Windows x64 또는 ARM64의 실제 native runner에서 해당 target으로 빌드합니다.
 
 ```powershell
+$env:CARGO_TARGET_DIR = Join-Path (Get-Location).Path '.work/native-open-probe-target'
 cargo build --locked --manifest-path overlay/native-open-probe/Cargo.toml --target x86_64-pc-windows-msvc
-python e2e/native_activation_probe.py --binary overlay/native-open-probe/target/x86_64-pc-windows-msvc/debug/opengeul-native-open-probe.exe --architecture x64 --output-dir .work/activation-x64
+python e2e/native_activation_probe.py --binary .work/native-open-probe-target/x86_64-pc-windows-msvc/debug/opengeul-native-open-probe.exe --architecture x64 --output-dir .work/activation-x64
 ```
 
 ARM64는 target을 `aarch64-pc-windows-msvc`, architecture를 `arm64`로 변경합니다.
-`CARGO_TARGET_DIR`를 지정했다면 해당 경로의 실행 파일을 전달합니다.
+`CARGO_TARGET_DIR`는 항상 `overlay` 밖에 지정해야 합니다. 빌드 출력이 제품 소스 증명의
+overlay helper 목록에 섞이지 않도록 위 예제처럼 별도 `.work` 경로를 사용합니다.
 기본 실행은 private 임시 폴더의 읽기 전용 한글 TXT 파일과 폴더만 기본 앱으로 엽니다.
 파일은 명시적인 소유 HWND, 폴더는 제품의 자동 소유 창 발견 경로를 사용합니다.
 각 probe는 STA 창을 만들고, controller가 실제 native PID·실행 파일·표시 중인 HWND
