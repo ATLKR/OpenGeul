@@ -18,6 +18,25 @@ function Assert-OpenGeulSelectedUnsignedPackage {
  }
 }
 
+function ConvertTo-OpenGeulUtcSecond {
+ param([Parameter(Mandatory)][AllowNull()][object]$Value)
+ $format="yyyy-MM-ddTHH:mm:ss'Z'"
+ $culture=[Globalization.CultureInfo]::InvariantCulture
+ if ($Value -is [string]) {
+  $parsed=[DateTime]::MinValue
+  $styles=[Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+  if ($Value -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\z' -or
+      -not [DateTime]::TryParseExact($Value,$format,$culture,$styles,[ref]$parsed) -or
+      $parsed.ToString($format,$culture) -cne $Value) { throw '정확한 UTC 전체 초 인증서 날짜가 필요합니다.' }
+  return $Value
+ }
+ # PowerShell 7.4 ConvertFrom-Json turns ISO Z strings into UTC DateTime.
+ # Reject values whose timezone or fractional ticks would be lost by formatting.
+ if ($Value -is [DateTime] -and $Value.Kind -eq [DateTimeKind]::Utc -and
+     $Value.Ticks % [TimeSpan]::TicksPerSecond -eq 0) { return $Value.ToString($format,$culture) }
+ throw '인증서 날짜를 손실 없이 UTC 전체 초로 확인할 수 없습니다.'
+}
+
 function Get-OpenGeulNativePublicCertificate {
  param([Parameter(Mandatory)][string]$FilePath,[Parameter(Mandatory)]$Metadata,
        [Parameter(Mandatory)][string]$Publisher)
@@ -35,8 +54,8 @@ function Get-OpenGeulNativePublicCertificate {
       [Convert]::ToBase64String($der) -cne $Metadata.derBase64 -or $sha -cne $Metadata.sha256 -or
       $public.Thumbprint -cne $Metadata.thumbprint -or $public.Thumbprint -cne $Metadata.signerThumbprint -or
       $public.Subject -cne $Publisher -or $public.Subject -cne $Metadata.subject -or $public.Issuer -cne $Publisher -or
-      $public.NotBefore.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'") -cne $Metadata.notBefore -or
-      $public.NotAfter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'") -cne $Metadata.notAfter -or
+      $public.NotBefore.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'") -cne (ConvertTo-OpenGeulUtcSecond -Value $Metadata.notBefore) -or
+      $public.NotAfter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'") -cne (ConvertTo-OpenGeulUtcSecond -Value $Metadata.notAfter) -or
       $public.NotBefore.ToUniversalTime() -gt $now -or $public.NotAfter.ToUniversalTime() -le $now -or
       ($public.NotAfter.ToUniversalTime()-$public.NotBefore.ToUniversalTime()).TotalSeconds -gt 86400 -or
       -not $codeSigning -or $Metadata.codeSigning -isnot [bool] -or $Metadata.codeSigning -ne $true -or

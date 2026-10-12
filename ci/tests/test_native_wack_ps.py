@@ -66,9 +66,9 @@ foreach ($failed in @('','nativeSuccess','oversize')+$cleanupFields) {
 param([string]$Source,[string]$Root)
 $ErrorActionPreference='Stop'
 $t=$null;$e=$null;$a=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$t,[ref]$e)
-$f=$a.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-OpenGeulNativePublicCertificate'},$true)
-if (-not $f) {throw 'certificate function missing'}
-Invoke-Expression $f.Extent.Text
+$functions=$a.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('ConvertTo-OpenGeulUtcSecond','Get-OpenGeulNativePublicCertificate')},$true)
+if (-not @($functions | Where-Object Name -eq 'Get-OpenGeulNativePublicCertificate').Count) {throw 'certificate function missing'}
+foreach ($function in $functions) {Invoke-Expression $function.Extent.Text}
 $rsa=[Security.Cryptography.RSA]::Create(2048)
 $req=[Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=OpenGeul Development',$rsa,[Security.Cryptography.HashAlgorithmName]::SHA256,[Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $oids=[Security.Cryptography.OidCollection]::new();[void]$oids.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.3'))
@@ -83,6 +83,21 @@ $metadata=@{derBase64=[Convert]::ToBase64String($der);sha256=[Convert]::ToHexStr
 $parsed=Get-OpenGeulNativePublicCertificate -FilePath $path -Metadata $metadata -Publisher $cert.Subject
 if ($parsed.HasPrivateKey -or $parsed.Thumbprint -cne $cert.Thumbprint) {throw 'public DER import mismatch'}
 $parsed.Dispose()
+# Exercise the same PowerShell 7.4 JSON boundary as pending-native.json.
+$roundTrip=$metadata | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+if ($roundTrip.notBefore -isnot [DateTime] -or $roundTrip.notBefore.Kind -ne [DateTimeKind]::Utc -or
+    $roundTrip.notAfter -isnot [DateTime] -or $roundTrip.notAfter.Kind -ne [DateTimeKind]::Utc) {throw 'JSON UTC dates did not exercise DateTime conversion'}
+$parsed=Get-OpenGeulNativePublicCertificate -FilePath $path -Metadata $roundTrip -Publisher $cert.Subject
+if ($parsed.HasPrivateKey -or $parsed.Thumbprint -cne $cert.Thumbprint) {throw 'JSON UTC DER import mismatch'}
+$parsed.Dispose()
+foreach ($field in @('notBefore','notAfter')) {
+ $different=$roundTrip.$field.AddSeconds(1)
+ foreach ($value in @($different,$different.ToString("yyyy-MM-ddTHH:mm:ss'Z'"))) {
+  $bad=$metadata.Clone();$bad[$field]=$value;$accepted=$false
+  try {$p=Get-OpenGeulNativePublicCertificate -FilePath $path -Metadata $bad -Publisher $cert.Subject;$p.Dispose();$accepted=$true} catch {}
+  if ($accepted) {throw "different valid UTC certificate date accepted: $field"}
+ }
+}
 foreach($field in @('derBase64','sha256','thumbprint','signerThumbprint','subject','notBefore','notAfter','codeSigning','publicOnly','signatureStatus')) {
  $bad=$metadata.Clone();$bad[$field]=if ($metadata[$field] -is [bool]) {$false} else {'mismatch'}
  $accepted=$false;try {$p=Get-OpenGeulNativePublicCertificate -FilePath $path -Metadata $bad -Publisher $cert.Subject;$p.Dispose();$accepted=$true} catch {}
@@ -110,6 +125,43 @@ foreach ($kind in @('pfx','noeku','longlived','expired','future')) {
 $cert.Dispose();$rsa.Dispose()
 """,encoding='utf-8')
             result=subprocess.run([str(PW),'-NoProfile','-File',str(script),'-Source',str(ROOT/'e2e/msix-wack-import.ps1'),'-Root',tmp],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    @unittest.skipUnless(PW.is_file(), 'PowerShell runtime unavailable')
+    def test_certificate_dates_accept_only_lossless_iso_z_or_whole_utc_datetime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script=Path(tmp)/'utc-date-boundary.ps1'
+            script.write_text(r"""
+param([string]$Source)
+$ErrorActionPreference='Stop'
+$t=$null;$e=$null;$a=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$t,[ref]$e)
+$f=$a.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'ConvertTo-OpenGeulUtcSecond'},$true)
+if (-not $f) {throw 'lossless UTC date normalizer missing'}
+Invoke-Expression $f.Extent.Text
+$text='2026-10-12T15:42:58Z'
+$utc=[DateTime]::new(2026,10,12,15,42,58,[DateTimeKind]::Utc)
+$json=('{"date":"'+$text+'"}') | ConvertFrom-Json
+foreach($value in @($text,$utc,$json.date)) {
+ if ((ConvertTo-OpenGeulUtcSecond -Value $value) -cne $text) {throw 'UTC timestamp changed'}
+}
+$rejected=@(
+ [DateTime]::SpecifyKind($utc,[DateTimeKind]::Local),
+ [DateTime]::SpecifyKind($utc,[DateTimeKind]::Unspecified),
+ $utc.AddTicks(1),$utc.AddMilliseconds(1),[DateTimeOffset]::new($utc),
+ '2026-10-12T15:42:58.000Z','2026-10-12T15:42:58.001Z',
+ '2026-10-12T15:42:58+00:00','2026-10-12T15:42:58-00:00',
+ '2026-10-12T15:42:58+09:00','2026-10-12T15:42:58z',
+ '2026-10-12T15:42:58','2026-10-12 15:42:58Z','2026-02-30T15:42:58Z',
+ '2026-10-12T25:42:58Z','2026-10-12T15:42:60Z','2026-10-12T15:42:58Z ',
+ ' 2026-10-12T15:42:58Z','２０２６-10-12T15:42:58Z','',123,$true,
+ @{'date'=$text},$null)
+foreach($value in $rejected) {
+ $accepted=$false
+ try {$null=ConvertTo-OpenGeulUtcSecond -Value $value;$accepted=$true} catch {}
+ if($accepted){throw 'ambiguous, malformed or lossy certificate timestamp accepted'}
+}
+""",encoding='utf-8')
+            result=subprocess.run([str(PW),'-NoProfile','-File',str(script),'-Source',str(ROOT/'e2e/msix-wack-import.ps1')],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
     @unittest.skipUnless(PW.is_file(), 'PowerShell runtime unavailable')
