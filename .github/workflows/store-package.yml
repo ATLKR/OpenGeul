@@ -34,7 +34,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
-          import hashlib, json, subprocess, re
+          import hashlib, json, subprocess, re, os
           from pathlib import Path
           r = subprocess.run(['gh', 'api', 'repos/ATLKR/OpenGeul/actions/jobs/115007617322/logs'], capture_output=True, timeout=120)
           result = {'jobId': 115007617322, 'returncode': r.returncode, 'storeMutationsAttempted': False}
@@ -44,6 +44,12 @@ jobs:
               error=r.stderr.decode('utf-8',errors='replace')
               hints=['Resource not accessible by integration','Must have admin rights to Repository','Not Found','Forbidden','unable to parse response','failed to run','HTTP 403','HTTP 404','HTTP 410','HTTP 502','HTTP 503']
               result.update(stderrBytes=len(r.stderr),stderrSha256=hashlib.sha256(r.stderr).hexdigest(),httpStatusCodes=sorted(set(re.findall(r'HTTP (\d{3})',error))),knownHints=[hint for hint in hints if hint in error])
+              if len(r.stderr)<=1024:
+                  message=error.replace(os.environ.get('GH_TOKEN','') or 'UNSET_TOKEN_SENTINEL','[redacted]')
+                  message=re.sub(r'https?://\S+','[redacted-url]',message)
+                  message=re.sub(r'(?i)bearer\s+\S+','[redacted-auth]',message)
+                  message=re.sub(r'[A-Za-z0-9_+/=.-]{24,}','[redacted-long-value]',message)
+                  result['boundedRedactedCliDiagnostic']=message
           Path('store-failure-log-byte-observation.json').write_text(json.dumps(result,sort_keys=True,indent=2)+'\n',encoding='utf-8')
           print(json.dumps(result))
           PY
