@@ -40,7 +40,7 @@ class FailureDiagnosticsTests(unittest.TestCase):
             self.assertTrue(all(type(value) is bool for value in details['environmentMatches'].values()))
         self.assertEqual(subject.context_diagnostics({}, {})['inputsShape'], 'missing')
 
-    def test_reporting_does_not_accept_null_inputs_or_wrong_context(self):
+    def test_no_input_dispatch_accepts_github_shapes_and_rejects_values(self):
         env = {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
             'GITHUB_REPOSITORY': 'ATLKR/OpenGeul', 'GITHUB_ACTOR': 'ATLKR',
             'GITHUB_TRIGGERING_ACTOR': 'ATLKR', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
@@ -49,8 +49,21 @@ class FailureDiagnosticsTests(unittest.TestCase):
             'GITHUB_RUN_ID': '123', 'GH_TOKEN': 'same', 'GITHUB_TOKEN': 'same'}
         event = {'repository': {'full_name': 'ATLKR/OpenGeul', 'private': False}, 'inputs': None}
         self.assertEqual(subject.context_diagnostics(env, event)['inputsShape'], 'null')
-        with self.assertRaises(ValueError):
+        for inputs in (None, {}):
+            event['inputs'] = inputs
             subject.context(env, event)
+        del event['inputs']
+        subject.context(env, event)
+        for inputs in ({'unapproved': 'value'}, [], '', False, 0):
+            event['inputs'] = inputs
+            with self.subTest(inputs=inputs), self.assertRaises(ValueError):
+                subject.context(env, event)
+        event['inputs'] = None
+        for key in ('GITHUB_REF', 'GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR', 'GITHUB_RUN_ATTEMPT'):
+            bad = dict(env)
+            bad[key] = 'unapproved'
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                subject.context(bad, event)
 
 
 if __name__ == '__main__':

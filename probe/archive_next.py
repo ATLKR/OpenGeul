@@ -231,7 +231,8 @@ def context(env,event):
         and env.get('GH_TOKEN') and env.get('GITHUB_TOKEN')
         and hmac.compare_digest(env['GH_TOKEN'],env['GITHUB_TOKEN']))
     require(isinstance(event,dict) and event.get('repository',{}).get('full_name')=='ATLKR/OpenGeul'
-            and event['repository'].get('private') is False and event.get('inputs',{})=={})
+            and event['repository'].get('private') is False
+            and (event.get('inputs') is None or event.get('inputs')=={}))
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
