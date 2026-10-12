@@ -36,7 +36,7 @@ jobs:
           python - <<'PY'
           import hashlib, json, subprocess, re, os
           from pathlib import Path
-          r = subprocess.run(['gh', 'api', '--method', 'GET', 'repos/ATLKR/OpenGeul/actions/jobs/115007617322/logs'], capture_output=True, timeout=120)
+          r = subprocess.run(['gh', 'api', '--allow-escape-sequences', '--method', 'GET', 'repos/ATLKR/OpenGeul/actions/jobs/115007617322/logs'], capture_output=True, timeout=120)
           result = {'jobId': 115007617322, 'returncode': r.returncode, 'storeMutationsAttempted': False}
           if r.returncode == 0:
               result.update(bytes=len(r.stdout), sha256=hashlib.sha256(r.stdout).hexdigest(), matchesRetainedOriginal=len(r.stdout)==16981 and hashlib.sha256(r.stdout).hexdigest()=='1858029bdb6c40fb10f3114504c07ca4456b9b449e2c03d584f92bd1affcde81')
