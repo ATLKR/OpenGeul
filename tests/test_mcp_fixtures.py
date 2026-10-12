@@ -51,6 +51,15 @@ class McpFixtureTests(unittest.TestCase):
         self.assertEqual((self.output/'password-fixtures/manifest.json').read_bytes(),(self.password/'manifest.json').read_bytes())
         self.assertTrue(m.verify(self.output,self.binding,self.wasm)['publicQaOnly'])
         self.assertFalse(proof['fullSourceQualified'])
+    def test_arm_qa_uses_distinct_producer_artifact_and_requires_same_architecture(self):
+        m=self.module();proof=m.stage(self.basic,self.password,self.wasm_file,self.output,self.binding,architecture='arm64')
+        self.assertEqual(proof['artifactName'],'opengeul-mcp-fixtures-arm64-12')
+        self.assertEqual(proof['producerJobName'],'native-e2e (windows-11-arm)')
+        self.assertTrue(m.verify(self.output,self.binding,self.wasm,architecture='arm64')['publicQaOnly'])
+        with self.assertRaises(ValueError):m.verify(self.output,self.binding,self.wasm,architecture='x64')
+    def test_unknown_architecture_blocks_before_output(self):
+        with self.assertRaises(ValueError):self.module().stage(self.basic,self.password,self.wasm_file,self.output,self.binding,architecture='neutral')
+        self.assertFalse(self.output.exists())
     def test_foreign_commit_run_attempt_repository_are_rejected(self):
         self.stage();m=self.module()
         for key,value in [('sourceCommit','b'*40),('sourceRun','13'),('runAttempt','3'),('repository','other/OpenGeul')]:

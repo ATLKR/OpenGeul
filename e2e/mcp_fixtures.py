@@ -20,6 +20,7 @@ sys.path[:0]=[str(ROOT/'e2e'),str(ROOT/'scripts')]
 from mcp_worker import password_inputs,strict_json,NORMAL_TEXT
 from hwpx_oracle import inspect_hwpx
 from wasm_artifacts import expected as wasm_expected,FILES as WASM_FILES
+from windows_arch import require_architecture
 
 MAX_BYTES=16*1024*1024
 MAX_FILE=4*1024*1024
@@ -133,12 +134,15 @@ def inventory(folder,names):
     require(sum(path.stat().st_size for path in files.values())<=MAX_BYTES,'QA 원본 총 크기 상한을 초과했습니다')
     return files
 
-def verify(folder,binding,wasm):
+def verify(folder,binding,wasm,*,architecture='x64'):
+    architecture=require_architecture(architecture);suffix='-arm64' if architecture=='arm64' else ''
+    producer='native-e2e (windows-11-arm)' if architecture=='arm64' else 'native-e2e (windows-2025)'
     identity(binding);wasm_proof(wasm);files=inventory(folder,PAYLOAD_FILES|{MANIFEST});proof=json_file(files[MANIFEST])
-    exact(proof,('formatVersion','repository','sourceCommit','sourceRun','runAttempt','artifactName','producerJobName','helperSha256','publicQaOnly','fullSourceQualified','files'))
+    exact(proof,('formatVersion','repository','sourceCommit','sourceRun','runAttempt','architecture','artifactName','producerJobName','helperSha256','publicQaOnly','fullSourceQualified','files'))
     require(type(proof['formatVersion']) is int and proof['formatVersion']==1
-            and all(proof[k]==v for k,v in binding.items()) and proof['artifactName']=='opengeul-mcp-fixtures-'+binding['sourceRun']
-            and proof['producerJobName']=='native-e2e (windows-2025)' and proof['helperSha256']==sha(Path(__file__))
+            and all(proof[k]==v for k,v in binding.items()) and proof['architecture']==architecture
+            and proof['artifactName']=='opengeul-mcp-fixtures'+suffix+'-'+binding['sourceRun']
+            and proof['producerJobName']==producer and proof['helperSha256']==sha(Path(__file__))
             and proof['publicQaOnly'] is True and proof['fullSourceQualified'] is False,'QA 전송 source/job/attempt 계약이 다릅니다')
     exact(proof['files'],PAYLOAD_FILES)
     for name,expected_record in proof['files'].items():
@@ -147,7 +151,9 @@ def verify(folder,binding,wasm):
     profile(files['e2e-fixtures/basic.hwpx'],folder/'password-fixtures',wasm)
     return proof
 
-def stage(fixtures,password,wasm_manifest,output,binding):
+def stage(fixtures,password,wasm_manifest,output,binding,*,architecture='x64'):
+    architecture=require_architecture(architecture);suffix='-arm64' if architecture=='arm64' else ''
+    producer='native-e2e (windows-11-arm)' if architecture=='arm64' else 'native-e2e (windows-2025)'
     identity(binding);output=safe_path(output);fixtures=safe_path(fixtures);password=safe_path(password);wasm_manifest=safe_path(wasm_manifest)
     require(not output.exists() and all(output not in path.parents and path not in output.parents and output!=path for path in (fixtures,password,wasm_manifest)),
             'QA 기존 출력·원본 안·원본 위에는 쓰지 않습니다')
@@ -159,14 +165,14 @@ def stage(fixtures,password,wasm_manifest,output,binding):
     captured={name:record(read(path,MAX_JSON if name.endswith('.json') else MAX_FILE)) for name,path in files.items()}
     require(sum(r['bytes'] for r in captured.values())<=MAX_BYTES,'QA 원본 총 크기 상한을 초과했습니다')
     wasm=json_file(wasm_manifest);wasm_proof(wasm);profile(basic,password,wasm)
-    proof={'formatVersion':1,**binding,'artifactName':'opengeul-mcp-fixtures-'+binding['sourceRun'],'producerJobName':'native-e2e (windows-2025)',
+    proof={'formatVersion':1,**binding,'architecture':architecture,'artifactName':'opengeul-mcp-fixtures'+suffix+'-'+binding['sourceRun'],'producerJobName':producer,
            'helperSha256':sha(Path(__file__)),'publicQaOnly':True,'fullSourceQualified':False,'files':captured}
     with tempfile.TemporaryDirectory(prefix='.opengeul-mcp-qa-',dir=output.parent) as temporary:
         staged=Path(temporary)/'payload';staged.mkdir()
         for name,path in files.items():
             target=staged/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target)
         (staged/MANIFEST).write_text(json.dumps(proof,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-        verify(staged,binding,wasm);require(not output.exists(),'QA 출력이 검증 중 생성되어 덮어쓰지 않습니다');staged.rename(output)
+        verify(staged,binding,wasm,architecture=architecture);require(not output.exists(),'QA 출력이 검증 중 생성되어 덮어쓰지 않습니다');staged.rename(output)
     return proof
 
 def main():
@@ -175,15 +181,17 @@ def main():
     v=sub.add_parser('verify');v.add_argument('folder',type=Path)
     for item in (s,v):
         item.add_argument('--wasm-provenance',type=Path,required=True);item.add_argument('--source-commit',required=True);item.add_argument('--source-run',required=True);item.add_argument('--source-attempt',required=True)
+        item.add_argument('--architecture',choices=('x64','arm64'),default='x64')
     a=p.parse_args();binding={'repository':'ATLKR/OpenGeul','sourceCommit':a.source_commit,'sourceRun':a.source_run,'runAttempt':a.source_attempt}
     if a.mode=='stage':
         require(os.getenv('GITHUB_REPOSITORY')==binding['repository'] and os.getenv('GITHUB_SHA')==binding['sourceCommit']
                 and os.getenv('GITHUB_RUN_ID')==binding['sourceRun'] and os.getenv('GITHUB_RUN_ATTEMPT')==binding['runAttempt']
-                and os.getenv('GITHUB_JOB')=='native-e2e' and os.getenv('RUNNER_OS')=='Windows' and os.getenv('RUNNER_ARCH')=='X64',
-                'native-e2e windows-2025 성공 단계의 현재 실행만 QA 원본을 준비합니다')
-        proof=stage(a.fixtures,a.password_fixtures,a.wasm_provenance,a.output,binding)
-    else:proof=verify(a.folder,binding,json_file(a.wasm_provenance))
-    print(json.dumps({'passed':True,'sourceCommit':proof['sourceCommit'],'sourceRun':proof['sourceRun'],'runAttempt':proof['runAttempt'],'files':len(proof['files']),'publicQaOnly':True,'fullSourceQualified':False}))
+                and os.getenv('GITHUB_JOB')==('native-e2e-arm64' if a.architecture=='arm64' else 'native-e2e')
+                and os.getenv('RUNNER_OS')=='Windows' and os.getenv('RUNNER_ARCH')==('ARM64' if a.architecture=='arm64' else 'X64'),
+                '해당 아키텍처 native-e2e 현재 실행만 QA 원본을 준비합니다')
+        proof=stage(a.fixtures,a.password_fixtures,a.wasm_provenance,a.output,binding,architecture=a.architecture)
+    else:proof=verify(a.folder,binding,json_file(a.wasm_provenance),architecture=a.architecture)
+    print(json.dumps({'passed':True,'sourceCommit':proof['sourceCommit'],'sourceRun':proof['sourceRun'],'runAttempt':proof['runAttempt'],'architecture':proof['architecture'],'files':len(proof['files']),'publicQaOnly':True,'fullSourceQualified':False}))
 
 if __name__=='__main__':
     try:main()
