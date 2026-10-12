@@ -21,8 +21,8 @@ def main():
     if OUTPUT.exists():
         raise ValueError('existing-proof')
     OUTPUT.mkdir()
-    if sys.version_info[:2] != (3,12):
-        raise ValueError('Python-3.12-required')
+    if sys.version_info[:2] != (3,12) or sys.flags.utf8_mode != 1:
+        raise ValueError('Python-3.12-and-production-UTF8-required')
     from native_architecture import WindowsProbe, verify_host
     from releasekit import pe_machine
     with Path(sys.executable).open('rb') as stream:
@@ -48,10 +48,12 @@ def main():
         'repository':os.environ['GITHUB_REPOSITORY'], 'head':os.environ['GITHUB_SHA'],
         'runId':os.environ['GITHUB_RUN_ID'], 'attempt':os.environ['GITHUB_RUN_ATTEMPT'],
         'pythonVersion':list(sys.version_info[:3]), 'executable':sys.executable,
+        'utf8Mode':sys.flags.utf8_mode,
         'processMachine':process['processMachine'], 'nativeOsMachine':process['nativeMachine'],
         'executablePeMachine':executable_machine, 'nativeHostVerified':host,
         'imports':imports, 'testModules':list(TEST_MODULES), 'testsRun':result.testsRun,
         'testFailures':len(result.failures), 'testErrors':len(result.errors),
+        'testSkipped':len(result.skipped),
         'testsSucceeded':result.wasSuccessful(), 'testSeconds':time.monotonic()-started,
         'productCompiles':0, 'wackRuns':0, 'installedPackages':0, 'storeApiCalls':0,
         'sourceQualified':False, 'wackQualified':False, 'storeQualified':False,
@@ -60,7 +62,7 @@ def main():
     if len(raw.encode('utf-8')) > 16*1024:
         raise ValueError('proof-too-large')
     (OUTPUT/'native-python-stdlib-compatibility.json').write_text(raw, encoding='utf-8')
-    if not result.wasSuccessful():
+    if not result.wasSuccessful() or result.skipped:
         raise SystemExit(1)
 
 
