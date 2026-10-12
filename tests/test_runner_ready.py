@@ -63,6 +63,20 @@ class Kernel:
     def IsWow64Process2(self, handle, process, native): native._obj.value = 0xAA64; return True
 
 
+class WindowUser:
+    def IsWindow(self, hwnd): return True
+    def GetForegroundWindow(self): return 12
+    def GetWindowThreadProcessId(self, hwnd, pid): pid._obj.value = 200; return 201
+    def GetWindowTextW(self, hwnd, text, count): text.value = 'Microsoft account'; return len(text.value)
+    def GetClassNameW(self, hwnd, text, count): text.value = 'Windows.UI.Core.CoreWindow'; return len(text.value)
+    def IsWindowVisible(self, hwnd): return True
+    def IsWindowEnabled(self, hwnd): return True
+
+
+class Dwm:
+    def DwmGetWindowAttribute(self, hwnd, attribute, cloaked, size): return 0
+
+
 class RunnerReadyTests(unittest.TestCase):
     def oobe(self):
         observed = {
@@ -162,13 +176,14 @@ class RunnerReadyTests(unittest.TestCase):
     def test_actual_close_method_rechecks_bound_identity_before_one_normal_close(self):
         value = module(); observed = self.oobe(); candidate = value.privacy_candidate(observed, 1, 'C:\\Windows')
         probe = value.WindowsProbe.__new__(value.WindowsProbe); calls = []
-        class User:
+        class User(WindowUser):
             def GetWindowThreadProcessId(self, hwnd, pid): pid._obj.value = 200; return 201
             def GetForegroundWindow(self): return 12
             def SendMessageTimeoutW(self, *args): calls.append(args[:4]); return 1
             def IsWindow(self, hwnd): return not calls
         probe.user = User(); probe.current = lambda hwnd: copy.deepcopy(observed)
         probe.kernel = Kernel()
+        probe.dwm = Dwm()
         probe.session_id = lambda: 1; probe.windows_directory = lambda: 'C:\\Windows'
         result = probe.close_verified(candidate)
         self.assertEqual(calls, [(12, 0x0010, 0, 0)])
@@ -178,7 +193,7 @@ class RunnerReadyTests(unittest.TestCase):
         value = module()
         for condition in ('destroyed', 'reused', 'error'):
             observed = self.oobe(); candidate = value.privacy_candidate(observed, 1, 'C:\\Windows'); calls = []
-            class User:
+            class User(WindowUser):
                 def GetForegroundWindow(self): return 12
                 def GetWindowThreadProcessId(self, hwnd, pid):
                     pid._obj.value = 200 if not calls else (0 if condition == 'destroyed' else 999); return 201
@@ -190,6 +205,7 @@ class RunnerReadyTests(unittest.TestCase):
                     return condition == 'reused' or self.checks == 1
             probe = value.WindowsProbe.__new__(value.WindowsProbe)
             probe.user = User(); probe.kernel = Kernel(); probe.current = lambda hwnd: copy.deepcopy(observed)
+            probe.dwm = Dwm()
             probe.session_id = lambda: 1; probe.windows_directory = lambda: 'C:\\Windows'
             result = probe.close_verified(candidate)
             with self.subTest(condition=condition):
@@ -198,6 +214,38 @@ class RunnerReadyTests(unittest.TestCase):
                 self.assertEqual(result['windowDisappeared'], condition == 'destroyed')
                 self.assertEqual(result['ownershipChangedAfterSend'], condition == 'reused')
                 self.assertEqual(result['postSendErrorType'], 'OSError' if condition == 'error' else None)
+
+    def test_native_state_distinguishes_destroyed_hidden_cloaked_and_active_surface(self):
+        value = module(); candidate = value.privacy_candidate(self.oobe(), 1, 'C:\\Windows')
+        for condition in ('destroyed', 'hidden', 'cloaked', 'active'):
+            probe = value.WindowsProbe.__new__(value.WindowsProbe); probe.user = WindowUser(); probe.kernel = Kernel(); probe.dwm = Dwm()
+            if condition == 'destroyed': probe.user.IsWindow = lambda hwnd: False
+            if condition in ('hidden', 'cloaked'): probe.user.GetForegroundWindow = lambda: 20
+            if condition == 'hidden': probe.user.IsWindowVisible = lambda hwnd: False
+            if condition == 'cloaked':
+                def cloak(hwnd, attr, out, size): self.assertEqual(attr, 14); out._obj.value = 2; return 0
+                probe.dwm.DwmGetWindowAttribute = cloak
+            state = probe.window_state(candidate, 11)
+            with self.subTest(condition=condition):
+                self.assertEqual(state['dismissalKind'], 'unconfirmed' if condition == 'active' else condition)
+                self.assertEqual(state['surfaceDismissed'], condition != 'active')
+                self.assertEqual(state['windowExists'], condition != 'destroyed')
+
+    def test_foreign_identity_active_cloak_or_unknown_dwm_cannot_prove_dismissal(self):
+        value = module(); candidate = value.privacy_candidate(self.oobe(), 1, 'C:\\Windows')
+        for condition in ('pid', 'title', 'class', 'creation', 'native', 'active-cloak', 'dwm-error'):
+            probe = value.WindowsProbe.__new__(value.WindowsProbe); probe.user = WindowUser(); probe.kernel = Kernel(); probe.dwm = Dwm()
+            probe.user.GetForegroundWindow = lambda: 20
+            def cloak(hwnd, attr, out, size): out._obj.value = 2; return 0
+            probe.dwm.DwmGetWindowAttribute = cloak
+            if condition == 'pid': probe.user.GetWindowThreadProcessId = lambda *args: 0
+            if condition == 'title': probe.user.GetWindowTextW = lambda *args: 0
+            if condition == 'class': probe.user.GetClassNameW = lambda *args: 0
+            if condition == 'creation': probe.kernel.GetProcessTimes = lambda *args: False
+            if condition == 'native': probe.kernel.IsWow64Process2 = lambda *args: False
+            if condition == 'active-cloak': probe.user.GetForegroundWindow = lambda: 12
+            if condition == 'dwm-error': probe.dwm.DwmGetWindowAttribute = lambda *args: -2147024891
+            with self.subTest(condition=condition): self.assertFalse(probe.window_state(candidate, 11)['surfaceDismissed'])
 
     def test_held_process_creation_native_or_final_hwnd_owner_change_never_sends_close(self):
         value = module()

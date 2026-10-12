@@ -256,6 +256,9 @@ class WindowsProbe:
         require(os.name == 'nt', 'Windows 전용 관찰입니다')
         self.user = ctypes.WinDLL('user32', use_last_error=True)
         self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        self.dwm = ctypes.WinDLL('dwmapi', use_last_error=True)
+        self.dwm.DwmGetWindowAttribute.argtypes = [W.HWND, W.DWORD, W.LPVOID, W.DWORD]
+        self.dwm.DwmGetWindowAttribute.restype = W.LONG
         self.callback = ctypes.WINFUNCTYPE(W.BOOL, W.HWND, W.LPARAM)
         for name, args, result in [('EnumWindows', [self.callback, W.LPARAM], W.BOOL),
              ('GetForegroundWindow', [], W.HWND), ('GetWindowThreadProcessId', [W.HWND, ctypes.POINTER(W.DWORD)], W.DWORD),
@@ -401,7 +404,7 @@ class WindowsProbe:
                 '닫기 직전 OS 창/PID/생성시각/이미지/서명이 변경됐습니다')
         handle = self.kernel.OpenProcess(0x1000, False, candidate['process']['processId'])
         require(handle, '닫기 직전 소유 process handle을 열지 못했습니다')
-        ownership_changed = False; post_send_error = None; exists_after = None; visible_after = None
+        ownership_changed = False; post_send_error = None; states = []; sample_count = 0; start = time.monotonic()
         try:
             times = [W.FILETIME() for _ in range(4)]; process = W.WORD(); native = W.WORD()
             require(self.kernel.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]) and
@@ -414,21 +417,29 @@ class WindowsProbe:
                     '닫기 직전 HWND 소유권이 변경됐습니다')
             require(int(self.user.GetForegroundWindow() or 0) == candidate['hwnd'],
                     '닫기 직전 전경 HWND가 변경됐습니다')
+            before_state = self.window_state(candidate, handle); before_state['elapsedMs'] = round((time.monotonic() - start) * 1000)
+            require(before_state['ownerMatches'] and before_state['foregroundHwnd'] == candidate['hwnd'],
+                    '닫기 직전 native 창 상태 소유권이 다릅니다')
             result = ctypes.c_size_t()
             delivered = bool(self.user.SendMessageTimeoutW(candidate['hwnd'], 0x0010, 0, 0, 0x0002, 3000, ctypes.byref(result)))
             deadline = time.monotonic() + 10
             try:
-                while self.user.IsWindow(candidate['hwnd']) and time.monotonic() < deadline:
-                    pid = W.DWORD(); self.user.GetWindowThreadProcessId(candidate['hwnd'], ctypes.byref(pid))
-                    if not pid.value and not self.user.IsWindow(candidate['hwnd']): break
-                    if pid.value != candidate['process']['processId']: ownership_changed = True; break
+                while True:
+                    state = self.window_state(candidate, handle); state['elapsedMs'] = round((time.monotonic() - start) * 1000)
+                    sample_count += 1; states.append(state)
+                    if len(states) > 32: del states[16]
+                    if state['surfaceDismissed']: break
+                    if state['windowExists'] and not state['ownerMatches']: ownership_changed = True; break
+                    if time.monotonic() >= deadline: break
                     time.sleep(0.1)
-                exists_after = bool(self.user.IsWindow(candidate['hwnd']))
-                visible_after = bool(self.user.IsWindowVisible(candidate['hwnd'])) if exists_after and not ownership_changed else False if not exists_after else None
-                disappeared = not exists_after
             except Exception as error:
-                post_send_error = bounded(type(error).__name__); disappeared = False
+                post_send_error = bounded(type(error).__name__)
         finally: self.kernel.CloseHandle(handle)
+        after_release = None
+        try: after_release = self.window_state(candidate, None); after_release['elapsedMs'] = round((time.monotonic() - start) * 1000)
+        except Exception as error: post_send_error = bounded(type(error).__name__)
+        final = states[-1] if states else None
+        dismissed = bool(final and final['surfaceDismissed'] and not ownership_changed and post_send_error is None)
         return {'operation': 'WM_CLOSE', 'kind': candidate['kind'], 'hwnd': candidate['hwnd'],
                 'processId': candidate['process']['processId'], 'createdFileTime': candidate['process']['createdFileTime'],
                 'imageSha256': candidate['process']['imageSha256'], 'messageRequests': 1,
@@ -436,9 +447,48 @@ class WindowsProbe:
                 'boundUiaChildProcesses': fresh.get('boundUiaChildProcesses', []),
                 'livePidAndThreadRechecked': True, 'heldProcessCreationAndNativeRechecked': True, 'uiaContextRechecked': True,
                 'ownershipChangedAfterSend': ownership_changed, 'messageDelivered': delivered,
-                'windowExistsAfter': exists_after, 'windowVisibleAfter': visible_after,
+                'beforeNativeState': before_state, 'nativeStates': states, 'nativeStateSamples': sample_count,
+                'afterHandleReleaseState': after_release,
+                'windowExistsAfter': final['windowExists'] if final else None,
+                'windowVisibleAfter': final['visible'] if final else None,
                 'postSendErrorType': post_send_error,
-                'windowDisappeared': not ownership_changed and disappeared}
+                'windowDisappeared': bool(dismissed and not final['windowExists']),
+                'surfaceDismissed': dismissed, 'dismissalKind': final['dismissalKind'] if dismissed else 'unconfirmed'}
+
+    def window_state(self, candidate, held_handle):
+        hwnd = candidate['hwnd']; exists = bool(self.user.IsWindow(hwnd)); foreground = int(self.user.GetForegroundWindow() or 0)
+        state = {'hwnd': hwnd, 'windowExists': exists, 'foregroundHwnd': foreground,
+                 'processId': None, 'threadId': None, 'title': None, 'className': None, 'visible': None,
+                 'enabled': None, 'cloakedBits': None, 'dwmHresult': None, 'heldCreationFileTime': None,
+                 'heldProcessMachine': None, 'heldNativeMachine': None, 'ownerMatches': False,
+                 'surfaceDismissed': False, 'dismissalKind': 'unconfirmed'}
+        if held_handle:
+            times = [W.FILETIME() for _ in range(4)]; process = W.WORD(); native = W.WORD()
+            if self.kernel.GetProcessTimes(held_handle, *[ctypes.byref(t) for t in times]):
+                state['heldCreationFileTime'] = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+            if self.kernel.IsWow64Process2(held_handle, ctypes.byref(process), ctypes.byref(native)):
+                state['heldProcessMachine'] = process.value; state['heldNativeMachine'] = native.value
+        if not exists:
+            state.update(surfaceDismissed=True, dismissalKind='destroyed'); return state
+        pid = W.DWORD(); thread = self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not thread or not pid.value:
+            if not self.user.IsWindow(hwnd): state.update(windowExists=False, surfaceDismissed=True, dismissalKind='destroyed')
+            return state
+        title = ctypes.create_unicode_buffer(257); cls = ctypes.create_unicode_buffer(257)
+        self.user.GetWindowTextW(hwnd, title, 257); self.user.GetClassNameW(hwnd, cls, 257)
+        state.update(processId=pid.value, threadId=int(thread), title=bounded(title.value), className=bounded(cls.value),
+                     visible=bool(self.user.IsWindowVisible(hwnd)), enabled=bool(self.user.IsWindowEnabled(hwnd)))
+        cloaked = W.DWORD(); status = self.dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+        state['dwmHresult'] = f'0x{status & 0xffffffff:08x}'
+        if status == 0 and not cloaked.value & ~7: state['cloakedBits'] = cloaked.value
+        state['ownerMatches'] = (pid.value == candidate['process']['processId'] and thread == candidate['window']['threadId']
+            and state['title'] == candidate['window']['title'] and state['className'] == candidate['window']['className']
+            and bool(held_handle) and state['heldCreationFileTime'] == candidate['process']['createdFileTime']
+            and state['heldProcessMachine'] == 0 and state['heldNativeMachine'] == 0xAA64)
+        if state['ownerMatches'] and foreground != hwnd:
+            if state['visible'] is False: state.update(surfaceDismissed=True, dismissalKind='hidden')
+            elif state['cloakedBits']: state.update(surfaceDismissed=True, dismissalKind='cloaked')
+        return state
 
     def focus_probe(self):
         """현재 helper 자신의 창 하나만 만들고 focus/제거를 검증한다."""
@@ -517,7 +567,7 @@ def prepare(probe, env, output):
             candidate = privacy_candidate(before, probe.session_id(), probe.windows_directory())
             result['stage'] = 'privacyNormalClose'
             closed = probe.close_verified(candidate); result['actions'].append(closed); result['inputsPerformed'] += 1
-            require(closed['messageDelivered'] and closed['windowDisappeared'], 'OS 개인정보 창의 정상 닫기가 완료되지 않았습니다')
+            require(closed['messageDelivered'] and closed.get('surfaceDismissed', closed['windowDisappeared']), 'OS 개인정보 창의 정상 닫기가 완료되지 않았습니다')
         result['stage'] = 'osForegroundTransition'
         transition = foreground_transition(probe); result['foregroundTransition'] = transition['samples']
         windows = transition['windowObservation']
@@ -528,7 +578,7 @@ def prepare(probe, env, output):
             candidate = search_candidate(probe.current(foreground['hwnd']), probe.session_id(), probe.windows_directory())
             result['stage'] = 'searchNormalClose'
             closed = probe.close_verified(candidate); result['actions'].append(closed); result['inputsPerformed'] += 1
-            require(closed['messageDelivered'] and closed['windowDisappeared'], '관측된 Windows Search 창의 정상 닫기가 완료되지 않았습니다')
+            require(closed['messageDelivered'] and closed.get('surfaceDismissed', closed['windowDisappeared']), '관측된 Windows Search 창의 정상 닫기가 완료되지 않았습니다')
         # Known paging-file warning is handled only if it actually becomes foreground.
         windows = probe.windows(); validate_windows(windows)
         foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
@@ -538,7 +588,7 @@ def prepare(probe, env, output):
             candidate = paging_candidate(probe.current(foreground['hwnd']), probe.session_id(), probe.windows_directory())
             result['stage'] = 'pagingNormalClose'
             closed = probe.close_verified(candidate); result['actions'].append(closed); result['inputsPerformed'] += 1
-            require(closed['messageDelivered'] and closed['windowDisappeared'], '관측된 paging-file 경고의 정상 닫기가 완료되지 않았습니다')
+            require(closed['messageDelivered'] and closed.get('surfaceDismissed', closed['windowDisappeared']), '관측된 paging-file 경고의 정상 닫기가 완료되지 않았습니다')
         result['stage'] = 'ownedFocusProbe'
         windows = probe.windows(); validate_windows(windows)
         result['branchObservations'].append({'stage': 'beforeOwnedProbe', 'foregroundHwnd': windows['foregroundHwnd'],
