@@ -71,6 +71,7 @@ class WindowsFocusProbe:
                 ('IsWindowEnabled',[W.HWND],W.BOOL),('GetAncestor',[W.HWND,W.UINT],W.HWND),
                 ('GetWindow',[W.HWND,W.UINT],W.HWND),('GetForegroundWindow',[],W.HWND),
                 ('SetForegroundWindow',[W.HWND],W.BOOL),('WindowFromPoint',[W.POINT],W.HWND),
+                ('SendMessageTimeoutW',[W.HWND,W.UINT,W.WPARAM,W.LPARAM,W.UINT,W.UINT,ctypes.POINTER(ctypes.c_size_t)],ctypes.c_ssize_t),
                 ('GetWindowThreadProcessId',[W.HWND,ctypes.POINTER(W.DWORD)],W.DWORD),
                 ('GetClassNameW',[W.HWND,W.LPWSTR,ctypes.c_int],ctypes.c_int)]:
             function=getattr(self.user,name);function.argtypes=args;function.restype=result
@@ -153,6 +154,21 @@ class WindowsFocusProbe:
 
     def foreground(self):return int(self.user.GetForegroundWindow() or 0)
     def set_foreground(self,hwnd):return bool(self.user.SetForegroundWindow(hwnd))
+    def sync_activation(self,hwnd,expected,report):
+        """Order one owned cross-queue activation; WM_NULL performs no UI input."""
+        report.update({'message':'WM_NULL','timeoutMs':1000,'foregroundBefore':self.foreground()})
+        if self.window(hwnd)!=expected or expected['root']!=hwnd or expected['pid'] not in self.handles:
+            raise AssertionError('Owned activation target identity changed')
+        record=self.handles[expected['pid']][2];self.verify_process(expected['pid'],record)
+        result=self.ctypes.c_size_t();start=time.monotonic()
+        report['returned']=bool(self.user.SendMessageTimeoutW(hwnd,0,0,0,0x23,1000,self.ctypes.byref(result)))
+        report['durationMs']=round((time.monotonic()-start)*1000,3)
+        if not report['returned']:
+            report['foregroundAfter']=self.foreground();return False
+        self.verify_process(expected['pid'],record)
+        if self.window(hwnd)!=expected:raise AssertionError('Owned activation HWND retargeted during its barrier')
+        report['foregroundAfter']=self.foreground();report['foregroundMatched']=report['foregroundAfter']==hwnd
+        return report['foregroundMatched']
     def hit(self,point):return int(self.user.WindowFromPoint(self.W.POINT(*point)) or 0)
     def focused(self):
         from pywinauto.uia_defines import IUIA
@@ -287,9 +303,13 @@ class OwnedPreviewFocus:
             # This property is diagnostic only. Expand/Invoke/SelectionItem act
             # through their own UIA patterns and do not send keyboard input.
             entry['targetKeyboardFocusable']=_safe(lambda:bool(control.element_info.element.CurrentIsKeyboardFocusable))
-            if entry['foregroundBefore']!=self.preview_window:
+            entry['foregroundAtActivation']=self.probe.foreground()
+            if entry['foregroundAtActivation']!=self.preview_window:
                 entry['setForegroundReturned']=self.probe.set_foreground(self.preview_window)
                 if not entry['setForegroundReturned']:raise AssertionError('Owned print foreground request failed')
+                entry['activationBarrier']={}
+                if not self.probe.sync_activation(self.preview_window,self.windows[self.preview_window],entry['activationBarrier']):
+                    raise AssertionError('Owned print activation was not processed')
             if self.probe.foreground()!=self.preview_window:raise AssertionError('Owned print foreground was not observed')
             self._live(control);entry['passed']=True
         finally:
@@ -338,6 +358,9 @@ def prepare_app_for_print(app_hwnd,app_pid,runtime,*,app_handle,evidence_dir=Non
         if api.foreground()!=app_hwnd:
             entry['setForegroundReturned']=api.set_foreground(app_hwnd)
             if not entry['setForegroundReturned']:raise AssertionError('Initial owned app foreground request failed')
+            entry['activationBarrier']={}
+            if not api.sync_activation(app_hwnd,window,entry['activationBarrier']):
+                raise AssertionError('Initial owned app activation was not processed')
         if api.foreground()!=app_hwnd:raise AssertionError('Initial owned app foreground was not observed')
         api.verify_process(app_pid,process)
         if api.window(app_hwnd)!=window:raise AssertionError('Initial print HWND identity changed')
