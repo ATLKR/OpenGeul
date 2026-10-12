@@ -115,50 +115,132 @@ def _newer(version):
     return False
 
 
+def _inspect_qualified(directory, source):
+    # 실제 Store 신원/서명/설치/native/raw12 검증은 공유 검사기를 반드시 사용한다.
+    from store_qualification import inspect_qualified
+    return inspect_qualified(directory, source)
+
+
+def _actor(actor):
+    if not isinstance(actor, dict): return False
+    if actor.get('login') == 'ATLKR': return actor.get('type') == 'User'
+    return (actor.get('login') == 'github-actions[bot]' and actor.get('type') == 'Bot'
+            and type(actor.get('id')) is int and actor['id'] == 41898282)
+
+
+def _store_workflow(details):
+    run_id = _id(os.getenv('GITHUB_RUN_ID'))
+    attempt = _id(os.getenv('GITHUB_RUN_ATTEMPT'))
+    sha = os.getenv('GITHUB_SHA')
+    run = _gh('GET', f'actions/runs/{run_id}')
+    if (not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha)
+            or _id(run.get('id')) != run_id or run.get('head_sha') != sha
+            or type(run.get('run_attempt')) is not int or str(run['run_attempt']) != attempt
+            or run.get('repository', {}).get('full_name') != REPOSITORY
+            or run.get('repository', {}).get('private') is not False
+            or run.get('event') != 'workflow_dispatch' or run.get('head_branch') != 'main'
+            or run.get('path') != '.github/workflows/store-package.yml'
+            or run.get('status') != 'in_progress' or run.get('conclusion') is not None
+            or not _actor(run.get('actor')) or not _actor(run.get('triggering_actor'))
+            or run['actor']['login'] != os.getenv('GITHUB_ACTOR')
+            or details.get('repackageCommit') != sha or str(details.get('repackageRunId')) != run_id):
+        raise SubmissionBlocked('Store writes require the current owned main workflow and actor')
+    jobs = [job for page in _gh('GET', f'actions/runs/{run_id}/jobs?per_page=100', pages=True) for job in page['jobs']]
+    for name in ('package', 'Store WACK (windows-2025)', 'Store WACK (windows-11-arm)', 'qualify'):
+        found = [job for job in jobs if job.get('name') == name]
+        if (len(found) != 1 or found[0].get('status') != 'completed' or found[0].get('conclusion') != 'success'
+                or str(found[0].get('run_id')) != run_id or type(found[0].get('run_attempt')) is not int
+                or str(found[0]['run_attempt']) != attempt or found[0].get('head_sha') != sha):
+            raise SubmissionBlocked('Both Store WACK and qualification jobs must succeed in this exact execution')
+    return attempt
+
+
 def _verify(tag, directory):
+    from release_pair import verify_pair, source_fingerprint, copy_architecture
     version = _version(tag)
     if os.getenv('GITHUB_REPOSITORY') != REPOSITORY or os.getenv('GITHUB_REF') != 'refs/heads/main':
         raise SubmissionBlocked('Store writes require the owned main workflow')
+    product = json.loads((Path(__file__).resolve().parents[1] / 'config/product.json').read_text(encoding='utf-8'))
+    if product.get('version') != tag[1:]: raise SubmissionBlocked('Stable submission must match the current product version')
     verify_checksums(directory)
     if sum(path.stat().st_size for path in directory.iterdir()) > LIMIT:
         raise SubmissionBlocked('Store artifacts exceed 96 MiB')
     details = json.loads((directory / 'store-provenance.json').read_text(encoding='utf-8'))
     source = directory.resolve().parent / '.work/store-source'
-    if sum(path.stat().st_size for path in source.iterdir()) > LIMIT:
-        raise SubmissionBlocked('Source release artifacts exceed 96 MiB')
-    verify_checksums(source)
-    provenance = json.loads((directory / 'source-provenance.json').read_text(encoding='utf-8'))
-    if (provenance != json.loads((source / 'provenance.json').read_text(encoding='utf-8'))
+    provenance = verify_pair(source)
+    fingerprint = source_fingerprint(source)
+    if (type(details.get('formatVersion')) is not int or details['formatVersion'] != 2
+            or type(provenance.get('formatVersion')) is not int or provenance['formatVersion'] != 2
+            or set(details.get('architectures', {})) != {'x64', 'arm64'}
+            or provenance != json.loads((directory / 'source-provenance.json').read_text(encoding='utf-8'))
             or details.get('storeAppId') != STORE_APP_ID or details.get('identity') != STORE_IDENTITY
-            or details.get('version') != tag[1:] or details.get('unsigned') is not True
-            or details.get('storeCertified') is not False
+            or details.get('version') != tag[1:] or provenance.get('version') != tag[1:]
+            or details.get('unsigned') is not True or details.get('storeCertified') is not False
             or details.get('sourceCommit') != provenance.get('commit')
-            or str(details.get('sourceRunId')) != str(provenance.get('runId'))
-            or details.get('sourceMsixSha256') != provenance.get('sha256')
-            or details.get('sourceRelease') != f'https://github.com/{REPOSITORY}/releases/tag/{tag}'
-            or (directory / 'AppxManifest.xml').read_bytes() != manifest(STORE_IDENTITY, tag[1:]).encode()):
-        raise SubmissionBlocked('Store package provenance does not match its validated source')
+            or details.get('sourceRunId') != provenance.get('runId')
+            or details.get('sourceRunAttempt') != provenance.get('runAttempt')
+            or details.get('sourceAssetFingerprintSha256') != fingerprint
+            or details.get('sourceRelease') != f'https://github.com/{REPOSITORY}/releases/tag/{tag}'):
+        raise SubmissionBlocked('Store pair provenance does not match its validated Source22')
     run_id = _id(provenance['runId'])
     release = _gh('GET', f'releases/tags/{tag}')
     if release.get('draft') is not False or release.get('tag_name') != tag or _id(release['id']) != _id(details['sourceReleaseId']):
         raise SubmissionBlocked('Source release identity changed')
+    assets = release.get('assets')
+    local = {path.name: path for path in source.iterdir()}
+    if (not isinstance(assets, list) or len(assets) != 22
+            or {item.get('name') for item in assets} != set(local)):
+        raise SubmissionBlocked('The published source must contain exactly the validated 22 assets')
+    for asset in assets:
+        path = local[asset['name']]; _id(asset.get('id'))
+        if (asset.get('state') != 'uploaded' or type(asset.get('size')) is not int
+                or asset['size'] != path.stat().st_size
+                or asset.get('digest') != 'sha256:' + hashlib.sha256(path.read_bytes()).hexdigest()):
+            raise SubmissionBlocked('Published Source22 asset bytes changed')
     run = _gh('GET', f'actions/runs/{run_id}')
     if run.get('event') != 'push' or run.get('head_branch') != tag:
         raise SubmissionBlocked('Store submission requires the stable tag push source run')
     jobs = [job for page in _gh('GET', f'actions/runs/{run_id}/jobs?per_page=100', pages=True) for job in page['jobs']]
     authorize_release(tag, provenance, run, _gh('GET', f'commits/{tag}')['sha'], jobs)
-    with tempfile.TemporaryDirectory(prefix='store-recheck-', dir=source.parent) as temporary:
-        original = source / prepare(source, Path(temporary) / 'payload')['msix']
-    name = f'OpenGeul_{package_version(tag[1:])}_x64_store-unsigned.msix'
-    package = directory / name
-    if (details.get('package') != name or provenance.get('package') != original.name
-            or verify_msix(original)['sha256'] != provenance['sha256']
-            or verify_msix(package)['sha256'] != details.get('sha256')
-            or verify_repackage(original, package, tag[1:]) != details.get('runtimeSha256')):
-        raise SubmissionBlocked('Store package bytes or runtime parity changed')
+    attempt = _store_workflow(details)
+    proof = _inspect_qualified(directory, source)
+    if (type(proof.get('formatVersion')) is not int or proof['formatVersion'] != 1
+            or proof.get('repository') != REPOSITORY or proof.get('storeCertified') is not False
+            or set(proof.get('architectures', {})) != {'x64','arm64'}
+            or proof.get('storeRunAttempt') != attempt
+            or any(proof.get(key) != details[key] for key in (
+                'sourceCommit','sourceRunId','sourceRunAttempt','sourceReleaseId','sourceAssetFingerprintSha256',
+                'repackageCommit','repackageRunId'))):
+        raise SubmissionBlocked('Current dual Store identity qualification is required')
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_STORED) as archive:
-        archive.writestr(name, package.read_bytes())
+    with tempfile.TemporaryDirectory(prefix='store-pair-recheck-', dir=source.parent) as temporary, \
+            zipfile.ZipFile(buffer, 'w', zipfile.ZIP_STORED) as archive:
+        for architecture in ('x64', 'arm64'):
+            entry = details['architectures'][architecture]
+            original = provenance['architectures'][architecture]['provenance']
+            restored = Path(temporary) / architecture
+            copy_architecture(source, architecture, restored)
+            with tempfile.TemporaryDirectory(prefix='payload-', dir=temporary) as payload:
+                prepared = prepare(restored, Path(payload) / 'runtime', architecture=architecture)
+            name = f'OpenGeul_{package_version(tag[1:])}_{architecture}_store-unsigned.msix'
+            package = directory / name
+            receipt = proof['architectures'][architecture]
+            if (entry.get('package') != name or entry.get('manifest') != f'AppxManifest-{architecture}.xml'
+                    or entry.get('sourceMsix') != original['package'] or prepared['msix'] != original['package']
+                    or entry.get('sourceMsixSha256') != original['sha256']
+                    or verify_msix(source / original['package'], architecture=architecture)['sha256'] != original['sha256']
+                    or verify_msix(package, architecture=architecture)['sha256'] != entry.get('sha256')
+                    or (directory / entry['manifest']).read_bytes() != manifest(STORE_IDENTITY, tag[1:], architecture).encode()
+                    or verify_repackage(source / original['package'], package, tag[1:], architecture=architecture) != entry.get('runtimeSha256')
+                    or receipt.get('architecture') != architecture or receipt.get('fullWackPassed') is not True
+                    or receipt.get('storeCertified') is not False or receipt.get('originalMsix') != name
+                    or receipt.get('originalMsixSha256') != entry['sha256']):
+                raise SubmissionBlocked('One Store package lacks matching source bytes, complete parity or full WACK')
+            raw = package.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != entry['sha256']:
+                raise SubmissionBlocked('Store package changed while preparing upload')
+            archive.writestr(name, raw)
+    if source_fingerprint(source) != fingerprint: raise SubmissionBlocked('Source pair changed during submission validation')
     body = buffer.getvalue()
     if len(body) > LIMIT: raise SubmissionBlocked('Store ZIP exceeds 96 MiB')
     return details, version, body
@@ -175,8 +257,18 @@ def _journal_state(body):
         if state.get(field) is not None: _id(state[field])
     if state.get('tag') is not None: _version(state['tag'])
     for field, size in (('source_sha', 40), ('source_msix_sha256', 64)):
-        if state.get(field) is not None and not re.fullmatch('[0-9a-f]{' + str(size) + '}', state[field]):
+        if state.get(field) is not None and (not isinstance(state[field], str) or not re.fullmatch('[0-9a-f]{' + str(size) + '}', state[field])):
             raise SubmissionBlocked('Store state Issue has invalid source identity')
+    fields = {'source_asset_fingerprint_sha256', 'source_msix_sha256_by_arch', 'store_msix_sha256_by_arch'}
+    if fields & state.keys():
+        if (not fields <= state.keys() or not isinstance(state['source_asset_fingerprint_sha256'], str)
+                or not re.fullmatch(r'[0-9a-f]{64}', state['source_asset_fingerprint_sha256'])):
+            raise SubmissionBlocked('Store journal has incomplete source pair identity')
+        for field in fields - {'source_asset_fingerprint_sha256'}:
+            value = state[field]
+            if (not isinstance(value, dict) or set(value) != {'x64','arm64'}
+                    or any(not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest) for digest in value.values())):
+                raise SubmissionBlocked('Store journal has incomplete package pair identity')
     return state
 
 
@@ -223,9 +315,17 @@ def _save(journal, phase, details=None, *, warning=None, **fields):
     state = dict(journal['state'], phase=phase)
     if details:
         state.update(tag='v' + details['version'], release_id=_id(details['sourceReleaseId']),
-                     run_id=_id(details['sourceRunId']), source_sha=details['sourceCommit'],
-                     source_msix_sha256=details['sourceMsixSha256'])
+                     run_id=_id(details['sourceRunId']), source_sha=details['sourceCommit'])
+        if details.get('formatVersion') == 2:
+            state.pop('source_msix_sha256', None)
+            state.update(_pair_identity(details))
+        else: state['source_msix_sha256'] = details['sourceMsixSha256']
     state.update(fields)
+    if 'source_asset_fingerprint_sha256' in state:
+        current = _gh('GET', f'issues/{journal["number"]}')
+        if (not _owned_journal(current) or _id(current['number']) != journal['number']
+                or _journal_state(current['body']) != journal['state']):
+            raise SubmissionBlocked('Store journal changed before mutation; reconcile the current attempt')
     expected = _journal_body(state, warning)
     item = _gh('PATCH', f'issues/{journal["number"]}', {'body': expected, 'state': 'open'})
     if not _owned_journal(item) or _id(item['number']) != journal['number'] or _journal_state(item['body']) != state:
@@ -237,7 +337,27 @@ def _save(journal, phase, details=None, *, warning=None, **fields):
 
 
 def _marker(details):
+    if details.get('formatVersion') == 2:
+        value = {key: details[key] for key in ('formatVersion','version','sourceReleaseId','sourceCommit','sourceAssetFingerprintSha256')}
+        value['architectures'] = {arch: {key: entry[key] for key in ('sourceMsixSha256','package','sha256')}
+            for arch, entry in details['architectures'].items()}
+        return MARKER + json.dumps(value, sort_keys=True)
     return MARKER + json.dumps({key: details[key] for key in ('version', 'sourceReleaseId', 'sourceCommit', 'sourceMsixSha256')}, sort_keys=True)
+
+
+def _pair_identity(details):
+    return {'source_asset_fingerprint_sha256': details['sourceAssetFingerprintSha256'],
+        'source_msix_sha256_by_arch': {arch: entry['sourceMsixSha256'] for arch,entry in details['architectures'].items()},
+        'store_msix_sha256_by_arch': {arch: entry['sha256'] for arch,entry in details['architectures'].items()}}
+
+
+def _journal_matches(state, details):
+    if (state.get('tag') != 'v' + details['version'] or state.get('source_sha') != details['sourceCommit']
+            or state.get('release_id') != _id(details['sourceReleaseId']) or state.get('run_id') != _id(details['sourceRunId'])):
+        return False
+    if details.get('formatVersion') == 2:
+        return all(state.get(key) == value for key,value in _pair_identity(details).items())
+    return state.get('source_msix_sha256') == details['sourceMsixSha256']
 
 
 def _app(api):
@@ -295,6 +415,60 @@ def _packages_match(submission, expected):
                     for package in expected))
 
 
+def _published_architectures(submission):
+    packages = submission.get('applicationPackages')
+    if not isinstance(packages, list): raise SubmissionBlocked('Published package architectures are unavailable')
+    active = [item for item in packages if item.get('fileStatus') != 'PendingDelete']
+    architectures = []
+    for item in active:
+        value = item.get('architecture')
+        if not isinstance(value, str) or not value.isascii():
+            raise SubmissionBlocked('Published package architecture is unknown')
+        architectures.append(value.lower())
+    if sorted(architectures) not in (['x64'], ['arm64','x64']):
+        raise SubmissionBlocked('Published baseline must be x64 or one matching x64/ARM64 pair')
+    if any(item.get('fileStatus') != 'Uploaded' for item in active):
+        raise SubmissionBlocked('Published baseline package is not uploaded')
+    if len(active) == 2 and active[0].get('version') != active[1].get('version'):
+        raise SubmissionBlocked('Published baseline pair versions differ')
+
+
+def _requested_pair(api, submission_id, details, template):
+    """동일 SID만 재조회. PreProcessing의 미완성 SDK 필드는 관측 성공으로 꾸미지 않는다."""
+    expected = {entry['package']: arch for arch,entry in details['architectures'].items()}
+    deadline = time.monotonic() + 600
+    for _ in range(40):
+        _, current = api('GET', f'submissions/{submission_id}')
+        _manual(current); _free(current)
+        if (current.get('status') not in ACCEPTED | {'CommitStarted'}
+                or _id(current.get('id')) != submission_id or _marker(details) not in current.get('notesForCertification','').splitlines()
+                or current.get('pricing') != template.get('pricing') or current.get('listings') != template.get('listings')):
+            raise SubmissionBlocked('Committed Store pair identity, publication control or metadata changed')
+        packages = current.get('applicationPackages')
+        if not isinstance(packages, list) or any(not isinstance(item, dict) for item in packages):
+            raise SubmissionBlocked('Committed Store package records are unavailable')
+        active = [item for item in packages if item.get('fileStatus') != 'PendingDelete']
+        names = [item.get('fileName') for item in active]
+        if len(names) != len(set(names)) or any(name not in expected for name in names):
+            raise SubmissionBlocked('Committed Store package pair contains unexpected records')
+        if set(names) == set(expected):
+            observed = True
+            for item in active:
+                arch = expected[item['fileName']]
+                value = item.get('architecture')
+                if value is not None and (not isinstance(value,str) or not value.isascii() or value.lower() != arch):
+                    raise SubmissionBlocked('Committed Store package architecture differs')
+                if item.get('version') is not None and item['version'] != package_version(details['version']):
+                    raise SubmissionBlocked('Committed Store package version differs')
+                if item.get('fileStatus') not in {'PendingUpload','Uploaded'}:
+                    raise SubmissionBlocked('Committed Store package upload state is unknown')
+                observed &= value is not None and item.get('version') is not None and item.get('fileStatus') == 'Uploaded'
+            return {'packageMetadataObserved': bool(observed)}
+        if time.monotonic() + 15 >= deadline: break
+        time.sleep(15)
+    raise SubmissionBlocked('Committed Store pair names remain unconfirmed after bounded same-ID polling')
+
+
 def _poll(api, submission_id):
     deadline = time.monotonic() + 600
     for _ in range(40):
@@ -328,6 +502,9 @@ def submit(tag, directory):
             raise SubmissionBlocked('An earlier Store mutation lacks acknowledgment; reconcile the app journal before any new submission')
         opener, token = authenticate()
         def api(method, path, data=None): return _request(opener, token, method, path, data)
+        paired = details.get('formatVersion') == 2
+        if paired and state.get('tag') == tag and state['phase'] in {'draft_ready','commit_attempted','submitted'} and not _journal_matches(state, details):
+            raise SubmissionBlocked('Current journal does not own the complete verified package pair')
         if state['phase'] == 'commit_attempted':
             status = _poll(api, _id(state.get('submission_id')))
             _save(journal, 'submitted', status=status)
@@ -344,7 +521,8 @@ def submit(tag, directory):
             raise SubmissionBlocked('Store has no verified Published baseline')
         _free(baseline)
         _manual(baseline)
-        if (not isinstance(baseline.get('applicationPackages'), list) or not baseline['applicationPackages']
+        if paired: _published_architectures(baseline)
+        elif (not isinstance(baseline.get('applicationPackages'), list) or not baseline['applicationPackages']
                 or any(package.get('architecture', '').lower() != 'x64' for package in baseline['applicationPackages'])):
             raise SubmissionBlocked('Automatic updates require the published x64 package template')
         pending_id = _ref(app, 'pendingApplicationSubmission')
@@ -374,15 +552,22 @@ def submit(tag, directory):
                 _manual(pending)
                 _save(journal, 'submitted', details, submission_id=pending_id, status=status)
                 if status in FAILED: raise SubmissionBlocked(f'Store processing stopped in {status}; a newer stable release is required')
-                if (_id(pending['id']) != pending_id or _packages_version(pending) != target
-                        or not any(package.get('fileName') == details['package'] and package.get('version') == package_version(tag[1:])
-                                   and package.get('fileStatus') != 'PendingDelete' for package in pending['applicationPackages'])):
-                    raise SubmissionBlocked('Existing Store request does not contain the verified target package version')
-                return {'outcome': 'already_requested', 'tag': tag, 'submission_id': pending_id, 'status': status}
-            owned = (matching or (state['phase'] == 'draft_ready' and state.get('submission_id') == pending_id
-                     and state.get('tag') == tag and state.get('source_sha') == details['sourceCommit']
-                     and state.get('source_msix_sha256') == details['sourceMsixSha256']))
+                if paired:
+                    observed = _requested_pair(api, pending_id, details, template)
+                else:
+                    if (_id(pending['id']) != pending_id or _packages_version(pending) != target
+                            or not any(package.get('fileName') == details['package'] and package.get('version') == package_version(tag[1:])
+                                       and package.get('fileStatus') != 'PendingDelete' for package in pending['applicationPackages'])):
+                        raise SubmissionBlocked('Existing Store request does not contain the verified target package version')
+                    observed = {}
+                return {'outcome': 'already_requested', 'tag': tag, 'submission_id': pending_id, 'status': status, **observed}
+            owned = matching or (state['phase'] == 'draft_ready' and state.get('submission_id') == pending_id
+                     and _journal_matches(state, details))
             if not (owned and pending.get('status') == 'PendingCommit'):
+                if paired and not (state['phase'] in {'draft_ready','submitted'}
+                        and state.get('submission_id') == pending_id and state.get('tag')
+                        and _version(state['tag']) < version):
+                    raise SubmissionBlocked('An unowned pending Store submission is preserved for reconciliation')
                 if _packages_version(pending) >= target: return {'outcome': 'superseded', 'tag': tag}
                 fresh = _app(api)
                 if _ref(fresh, 'pendingApplicationSubmission') != pending_id or _ref(fresh, 'lastPublishedApplicationSubmission') != baseline_id or _newer(version):
@@ -418,8 +603,11 @@ def submit(tag, directory):
         metadata = template
         for package in metadata['applicationPackages']:
             package['fileStatus'] = 'PendingDelete'
-        metadata['applicationPackages'].append({'fileName': details['package'], 'fileStatus': 'PendingUpload',
-                                               'minimumDirectXVersion': 'None', 'minimumSystemRam': 'None'})
+        package_names = ([details['architectures'][arch]['package'] for arch in ('x64','arm64')]
+                         if paired else [details['package']])
+        for name in package_names:
+            metadata['applicationPackages'].append({'fileName': name, 'fileStatus': 'PendingUpload',
+                                                   'minimumDirectXVersion': 'None', 'minimumSystemRam': 'None'})
         notes = [line for line in metadata.get('notesForCertification', '').splitlines() if not line.startswith(MARKER)]
         metadata['notesForCertification'] = '\n'.join(notes + [_marker(details)])
         for field in ('id', 'status', 'statusDetails', 'fileUploadUrl', 'friendlyName'):
@@ -447,7 +635,8 @@ def submit(tag, directory):
         status = _poll(api, pending_id)
         _save(journal, 'submitted', details, submission_id=pending_id, status=status)
         if status in FAILED: raise SubmissionBlocked(f'Store processing stopped in {status}; a newer stable release is required')
-        return {'outcome': 'requested', 'tag': tag, 'submission_id': pending_id, 'status': status}
+        observed = _requested_pair(api, pending_id, details, template) if paired else {}
+        return {'outcome': 'requested', 'tag': tag, 'submission_id': pending_id, 'status': status, **observed}
     except SubmissionBlocked as error:
         _warn(str(error))
         raise

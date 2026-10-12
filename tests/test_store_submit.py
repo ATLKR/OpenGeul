@@ -1,10 +1,12 @@
 import copy
 import hashlib
 import io
+import importlib.util
 import json
 from pathlib import Path
 import sys
 import tempfile
+import shutil
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -20,7 +22,35 @@ from store_package import STORE_APP_ID, STORE_IDENTITY, REQUIRED_JOBS
 import store_listing
 
 
+def historical_verify(tag, directory):
+    """이전 단일 x64 프로토콜의 상태기계 검사. 실제 CLI에는 이 경로가 없다."""
+    version = submitter._version(tag)
+    if submitter.os.getenv('GITHUB_REF') != 'refs/heads/main':
+        raise submitter.SubmissionBlocked('Historical workflow ref changed')
+    source = directory.parent / '.work/store-source'
+    submitter.verify_checksums(directory); submitter.verify_checksums(source)
+    details = json.loads((directory / 'store-provenance.json').read_bytes())
+    original = json.loads((source / 'provenance.json').read_bytes())
+    if (original != json.loads((directory / 'source-provenance.json').read_bytes())
+            or details['sourceMsixSha256'] != original['sha256']):
+        raise submitter.SubmissionBlocked('Historical source changed')
+    run = submitter._gh('GET', 'actions/runs/' + original['runId'])
+    if run.get('event') != 'push' or run.get('head_branch') != tag:
+        raise submitter.SubmissionBlocked('Historical stable source required')
+    jobs = [job for page in submitter._gh('GET', f'actions/runs/{original["runId"]}/jobs?per_page=100', pages=True) for job in page['jobs']]
+    submitter.authorize_release(tag, original, run, submitter._gh('GET', 'commits/' + tag)['sha'], jobs)
+    if (submitter.verify_msix(source / original['package'])['sha256'] != original['sha256']
+            or submitter.verify_msix(directory / details['package'])['sha256'] != details['sha256']
+            or submitter.verify_repackage(source / original['package'], directory / details['package'], tag[1:]) != details['runtimeSha256']):
+        raise submitter.SubmissionBlocked('Historical runtime changed')
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_STORED) as archive:
+        archive.writestr(details['package'], (directory / details['package']).read_bytes())
+    return details, version, buffer.getvalue()
+
+
 class StoreSubmitTests(unittest.TestCase):
+    historical = True
     def setUp(self):
         self.assertIsNotNone(submitter, 'The Store submission command is missing')
         self.temp = tempfile.TemporaryDirectory()
@@ -106,6 +136,10 @@ class StoreSubmitTests(unittest.TestCase):
                                                          'GITHUB_RUN_ID': '456'}, clear=False)]
         for active in self.patches:
             active.start(); self.addCleanup(active.stop)
+        if self.historical:
+            adapter = patch.object(submitter, '_verify', side_effect=historical_verify)
+            adapter.start(); self.addCleanup(adapter.stop)
+            self.historical_adapter = adapter
 
     def checksums(self, directory):
         (directory / 'SHA256SUMS.txt').write_text(''.join(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\n'
@@ -216,6 +250,11 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.new['listings'], store_listing.apply_korean_listing(self.baseline)['listings'])
         self.assertEqual(self.new['targetPublishMode'], 'Manual')
         self.assertIn('Keep human notes', self.new['notesForCertification'])
+
+    def test_actual_entrypoint_rejects_original_single_x64_release(self):
+        self.historical_adapter.stop()
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
 
     def test_korean_listing_updates_all_existing_locales_and_preserves_baseline(self):
         self.baseline['listings']['en-us'] = {
@@ -531,6 +570,326 @@ class StoreSubmitTests(unittest.TestCase):
                                     'user': author})
                 self.assertEqual(self.perform()['status'], 'PreProcessing')
                 self.assertEqual(self.issues[1]['user'], self.bot)
+
+
+class DualStoreSubmitTests(unittest.TestCase):
+    """실제 두 PE/MSIX/portable/Source WACK와 로컬 Partner Center 상태기계."""
+    historical = False
+    checksums = StoreSubmitTests.checksums
+    write_details = StoreSubmitTests.write_details
+    perform = StoreSubmitTests.perform
+    mutations = StoreSubmitTests.mutations
+    change_packages = StoreSubmitTests.change_packages
+
+    def setUp(self):
+        StoreSubmitTests.setUp(self)
+        spec = importlib.util.spec_from_file_location('submit_package_fixture', ROOT / 'tests/test_store_package.py')
+        fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+        pair = fixture.StorePackageTests().dual_release_directory(self.root / 'pair-fixture')
+        shutil.rmtree(self.source); shutil.copytree(pair, self.source)
+        for path in self.directory.iterdir(): path.unlink()
+        self.provenance = json.loads((self.source / 'provenance.json').read_bytes())
+        self.details = {'formatVersion': 2, 'storeAppId': STORE_APP_ID, 'identity': dict(STORE_IDENTITY),
+            'version': '1.1.3', 'sourceReleaseId': 5, 'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3',
+            'sourceCommit': self.sha, 'sourceRunId': '123', 'sourceRunAttempt': '1',
+            'repackageCommit': 'b' * 40, 'repackageRunId': '456', 'architectures': {},
+            'unsigned': True, 'storeCertified': False}
+        import release_pair
+        self.details['sourceAssetFingerprintSha256'] = release_pair.source_fingerprint(self.source)
+        for arch in ('x64', 'arm64'):
+            original = self.provenance['architectures'][arch]['provenance']
+            with zipfile.ZipFile(self.source / original['package']) as archive:
+                files = {name: archive.read(name) for name in archive.namelist()}
+            raw = manifest(STORE_IDENTITY, '1.1.3', arch).encode(); files['AppxManifest.xml'] = raw
+            name = f'OpenGeul_1.1.3.0_{arch}_store-unsigned.msix'
+            with zipfile.ZipFile(self.directory / name, 'w') as archive:
+                for member, content in files.items(): archive.writestr(member, content)
+            manifest_name = 'AppxManifest-' + arch + '.xml'; (self.directory / manifest_name).write_bytes(raw)
+            self.details['architectures'][arch] = {'sourceMsix': original['package'], 'sourceMsixSha256': original['sha256'],
+                'package': name, 'sha256': hashlib.sha256((self.directory / name).read_bytes()).hexdigest(), 'manifest': manifest_name,
+                'runtimeSha256': {member: hashlib.sha256(content).hexdigest() for member, content in files.items()
+                    if member not in {'AppxManifest.xml', 'AppxBlockMap.xml', '[Content_Types].xml'}}}
+        (self.directory / 'source-provenance.json').write_bytes((self.source / 'provenance.json').read_bytes())
+        self.write_details()
+        self.proof = {'formatVersion': 1, 'repository': 'ATLKR/OpenGeul',
+            **{key: self.details[key] for key in ('sourceCommit','sourceRunId','sourceRunAttempt','sourceReleaseId','sourceAssetFingerprintSha256','repackageCommit','repackageRunId')},
+            'storeRunAttempt': '2', 'storeCertified': False,
+            'architectures': {arch: {'architecture': arch, 'fullWackPassed': True,
+                'originalMsix': entry['package'], 'originalMsixSha256': entry['sha256'], 'storeCertified': False}
+                for arch, entry in self.details['architectures'].items()}}
+        # WACK/설치 검사기는 별도 실제 raw12 fixture 검사로 검증된다. 여기서는 해당 경계의 결과를 고정한다.
+        self.inspector = patch.object(submitter, '_inspect_qualified', side_effect=lambda *args: copy.deepcopy(self.proof), create=True)
+        self.inspect_mock = self.inspector.start(); self.addCleanup(self.inspector.stop)
+        self.env = patch.dict(submitter.os.environ, {'GITHUB_SHA': 'b' * 40, 'GITHUB_RUN_ATTEMPT': '2',
+            'GITHUB_ACTOR': 'github-actions[bot]'}, clear=False)
+        self.env.start(); self.addCleanup(self.env.stop)
+        self.source_jobs = [{'name': name, 'status': 'completed', 'conclusion': 'success',
+            'run_id': 123, 'run_attempt': 1, 'head_sha': self.sha} for name in REQUIRED_JOBS]
+        self.store_run = {'id': 456, 'head_sha': 'b' * 40, 'head_branch': 'main', 'run_attempt': 2,
+            'repository': {'full_name': 'ATLKR/OpenGeul', 'private': False}, 'event': 'workflow_dispatch',
+            'path': '.github/workflows/store-package.yml', 'status': 'in_progress', 'conclusion': None,
+            'actor': copy.deepcopy(self.bot), 'triggering_actor': copy.deepcopy(self.bot)}
+        self.store_jobs = [{'name': name, 'status': 'completed', 'conclusion': 'success',
+            'run_id': 456, 'run_attempt': 2, 'head_sha': 'b' * 40}
+            for name in ('package','Store WACK (windows-2025)','Store WACK (windows-11-arm)','qualify')]
+        self.release = {'id': 5, 'draft': False, 'tag_name': self.tag,
+            'assets': [{'id': i + 100, 'name': p.name, 'size': p.stat().st_size, 'state': 'uploaded',
+                'digest': 'sha256:' + hashlib.sha256(p.read_bytes()).hexdigest()} for i,p in enumerate(sorted(self.source.iterdir()))]}
+        self.app['pendingApplicationSubmission'] = None
+        self.post_commit_mode = 'success'
+
+    def github(self, method, path, data=None, *, pages=False):
+        if path == 'releases/tags/v1.1.3':
+            self.calls.append(('github', method, path)); return copy.deepcopy(self.release)
+        if path.startswith('actions/runs/123/jobs'):
+            self.calls.append(('github', method, path)); return [{'jobs': copy.deepcopy(self.source_jobs)}]
+        if path == 'actions/runs/456':
+            self.calls.append(('github', method, path)); return copy.deepcopy(self.store_run)
+        if path.startswith('actions/runs/456/jobs'):
+            self.calls.append(('github', method, path)); return [{'jobs': copy.deepcopy(self.store_jobs)}]
+        return StoreSubmitTests.github(self, method, path, data, pages=pages)
+
+    def store(self, opener, token, method, path, data=None):
+        if method == 'PUT': self.put_metadata = copy.deepcopy(data)
+        status, result = StoreSubmitTests.store(self, opener, token, method, path, data)
+        if method == 'POST' and path.endswith('/commit'):
+            for arch, entry in self.details['architectures'].items():
+                for package in self.new['applicationPackages']:
+                    if package.get('fileName') == entry['package']:
+                        package.update(architecture=arch.upper(), version='1.1.3.0', fileStatus='Uploaded')
+            if self.post_commit_mode == 'no_sdk_fields':
+                for package in self.new['applicationPackages']:
+                    if package.get('fileStatus') != 'PendingDelete':
+                        package.pop('version', None); package.pop('architecture', None)
+            if self.post_commit_mode == 'one_package': self.new['applicationPackages'] = self.new['applicationPackages'][:-1]
+            if self.post_commit_mode == 'mixed_version': self.new['applicationPackages'][-1]['version'] = '1.1.4.0'
+            if self.post_commit_mode == 'wrong_arch': self.new['applicationPackages'][-1]['architecture'] = 'X64'
+            if self.post_commit_mode == 'pricing': self.new['pricing']['priceId'] = 'Tier1'
+            if self.post_commit_mode == 'listings': self.new['listings'] = {}
+            if self.post_commit_mode == 'manual': self.new['targetPublishMode'] = 'Immediate'
+            if self.post_commit_mode == 'status': self.new['status'] = 'CertificationFailed'
+            if self.post_commit_mode == 'failed_after_poll': self.new['status'] = 'PreProcessing'
+        if method == 'GET' and path == 'submissions/30' and result.get('status') in submitter.ACCEPTED:
+            if self.post_commit_mode == 'failed_after_poll': result['status'] = 'CertificationFailed'
+        return status, result
+
+    def upload(self, opener, url, body):
+        self.calls.append(('store','UPLOAD','blob'))
+        if self.upload_mode == 'timeout': raise submitter.StoreError('upload', None)
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            self.assertEqual(set(archive.namelist()), {e['package'] for e in self.details['architectures'].values()})
+            self.assertEqual(len(archive.infolist()), 2)
+            for item in archive.infolist():
+                self.assertEqual(item.compress_type, zipfile.ZIP_STORED)
+                self.assertEqual(archive.read(item), (self.directory / item.filename).read_bytes())
+
+    def rejected(self):
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+
+    def test_pair_upload_and_writable_metadata_preserve_opaque_template(self):
+        self.baseline['listings']['ko-kr']['opaque'] = {'keep': ['human']}
+        self.baseline['pricing']['marketSpecificPricings']['KR'] = 'NotAvailable'
+        result = self.perform(); self.assertEqual(result['outcome'], 'requested')
+        self.assertEqual(self.mutations(), ['POST','PUT','UPLOAD','POST'])
+        self.inspect_mock.assert_called_once()
+        for package in self.new['applicationPackages']:
+            if package['fileStatus'] != 'PendingDelete':
+                self.assertIn(package['fileName'], [e['package'] for e in self.details['architectures'].values()])
+        self.assertEqual(self.new['pricing'], self.baseline['pricing'])
+        self.assertEqual(self.new['listings']['ko-kr']['opaque'], {'keep': ['human']})
+        uploaded = [p for p in self.put_metadata['applicationPackages'] if p['fileStatus'] == 'PendingUpload']
+        self.assertEqual(len(uploaded), 2)
+        for package in uploaded:
+            self.assertEqual(set(package), {'fileName','fileStatus','minimumDirectXVersion','minimumSystemRam'})
+
+    def test_external_verifier_rejects_historical_single_source(self):
+        self.provenance.pop('formatVersion'); (self.directory / 'source-provenance.json').write_text(json.dumps(self.provenance)); self.checksums(self.directory)
+        self.rejected()
+
+    def test_source_release_must_be_whole_canonical_push_same_attempt_and_assets(self):
+        for change in ('event','branch','status','attempt','asset'):
+            with self.subTest(change=change):
+                old_run = copy.deepcopy(self.run); old_release = copy.deepcopy(self.release)
+                if change == 'event': self.run['event'] = 'workflow_dispatch'
+                if change == 'branch': self.run['head_branch'] = 'main'
+                if change == 'status': self.run['conclusion'] = 'failure'
+                if change == 'attempt': self.run['run_attempt'] = 2
+                if change == 'asset': self.release['assets'][0]['digest'] = 'sha256:' + '0'*64
+                self.rejected(); self.run = old_run; self.release = old_release
+
+    def test_source_requires_both_arm_jobs_exact_unique_success(self):
+        for change in ('missing','duplicate','failure','other_head','other_attempt'):
+            with self.subTest(change=change):
+                old = copy.deepcopy(self.source_jobs)
+                arm = next(j for j in self.source_jobs if j['name'] == 'msix-install-arm64')
+                if change == 'missing': self.source_jobs.remove(arm)
+                if change == 'duplicate': self.source_jobs.append(copy.deepcopy(arm))
+                if change == 'failure': arm['conclusion'] = 'failure'
+                if change == 'other_head': arm['head_sha'] = 'c'*40
+                if change == 'other_attempt': arm['run_attempt'] = 2
+                self.rejected(); self.source_jobs = old
+
+    def test_current_store_workflow_identity_actors_and_four_jobs_gate(self):
+        for change in ('event','ref','path','sha','attempt','repo','actor','trigger','bot_id','missing','duplicate','job_attempt'):
+            with self.subTest(change=change):
+                old = copy.deepcopy(self.store_run); jobs = copy.deepcopy(self.store_jobs)
+                fields = {'event':('event','push'),'ref':('head_branch','other'),'path':('path','.github/workflows/msix.yml'),
+                    'sha':('head_sha','c'*40),'attempt':('run_attempt',1)}
+                if change in fields: self.store_run[fields[change][0]] = fields[change][1]
+                if change == 'repo': self.store_run['repository']['private'] = True
+                if change == 'actor': self.store_run['actor'] = {'login':'other','type':'User','id':1}
+                if change == 'trigger': self.store_run['triggering_actor'] = {'login':'other','type':'User','id':1}
+                if change == 'bot_id': self.store_run['actor']['id'] = 1
+                if change == 'missing': self.store_jobs.pop()
+                if change == 'duplicate': self.store_jobs.append(copy.deepcopy(self.store_jobs[0]))
+                if change == 'job_attempt': self.store_jobs[-1]['run_attempt'] = 1
+                self.rejected(); self.store_run = old; self.store_jobs = jobs
+
+    def test_both_store_identity_full_wack_receipt_is_required(self):
+        for change in ('missing','failed','other_source','other_store','other_attempt','hash'):
+            with self.subTest(change=change):
+                old = copy.deepcopy(self.proof)
+                if change == 'missing': self.proof['architectures'].pop('arm64')
+                if change == 'failed': self.proof['architectures']['arm64']['fullWackPassed'] = False
+                if change == 'other_source': self.proof['sourceCommit'] = 'c'*40
+                if change == 'other_store': self.proof['repackageCommit'] = 'c'*40
+                if change == 'other_attempt': self.proof['storeRunAttempt'] = '1'
+                if change == 'hash': self.proof['architectures']['arm64']['originalMsixSha256'] = '0'*64
+                self.rejected(); self.proof = old
+
+    def test_pair_marker_and_journal_bind_both_source_and_store_hashes(self):
+        self.perform(); state = submitter._journal_state(self.issues[0]['body'])
+        self.assertEqual(state['source_asset_fingerprint_sha256'], self.details['sourceAssetFingerprintSha256'])
+        self.assertEqual(state['source_msix_sha256_by_arch'], {a:e['sourceMsixSha256'] for a,e in self.details['architectures'].items()})
+        self.assertEqual(state['store_msix_sha256_by_arch'], {a:e['sha256'] for a,e in self.details['architectures'].items()})
+        marker = json.loads(submitter._marker(self.details)[len(submitter.MARKER):])
+        self.assertEqual(marker['sourceAssetFingerprintSha256'], self.details['sourceAssetFingerprintSha256'])
+        self.assertEqual(set(marker['architectures']), {'x64','arm64'})
+
+    def test_unknown_pending_draft_is_preserved(self):
+        self.app['pendingApplicationSubmission'] = {'id':'20'}; self.rejected()
+
+    def test_paired_upload_retry_requires_full_journal_ownership(self):
+        self.upload_mode = 'timeout'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        state = submitter._journal_state(self.issues[0]['body']); state['source_msix_sha256_by_arch']['arm64'] = '0'*64
+        self.issues[0]['body'] = submitter._journal_body(state)
+        self.new['notesForCertification'] = 'human removed marker'
+        self.calls.clear(); self.upload_mode = 'success'
+        self.rejected()
+
+    def test_paired_retry_resumes_same_draft_only(self):
+        self.upload_mode = 'timeout'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.calls.clear(); self.upload_mode = 'success'
+        self.assertEqual(self.perform()['outcome'], 'requested')
+        self.assertEqual(self.mutations(), ['PUT','UPLOAD','POST'])
+
+    def test_already_requested_requires_both_exact_versions(self):
+        self.perform(); self.calls.clear()
+        self.new['applicationPackages'].pop()
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+
+    def test_commit_unknown_never_repeats_and_pair_recovery_detects_tamper(self):
+        self.commit_mode = 'unknown'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        state = submitter._journal_state(self.issues[0]['body'])
+        state['store_msix_sha256_by_arch']['arm64'] = '0'*64; self.issues[0]['body'] = submitter._journal_body(state)
+        self.calls.clear(); self.commit_mode = 'success'
+        self.rejected()
+
+    def readback_rejected(self, mode):
+        self.post_commit_mode = mode
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations().count('POST'), 2)
+        self.assertEqual(self.mutations().count('UPLOAD'), 1)
+        self.calls.clear()
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+
+    def test_commit_readback_cannot_drop_arm64(self): self.readback_rejected('one_package')
+    def test_commit_readback_cannot_mix_versions(self): self.readback_rejected('mixed_version')
+    def test_commit_readback_cannot_duplicate_architecture(self): self.readback_rejected('wrong_arch')
+    def test_commit_readback_preserves_pricing(self): self.readback_rejected('pricing')
+    def test_commit_readback_preserves_listings(self): self.readback_rejected('listings')
+    def test_commit_readback_preserves_manual_control(self): self.readback_rejected('manual')
+    def test_failure_between_status_poll_and_readback_remains_blocking(self): self.readback_rejected('failed_after_poll')
+
+    def test_legacy_single_hash_journal_never_owns_current_pair(self):
+        state = {'app_id':STORE_APP_ID,'phase':'draft_ready','submission_id':'20','tag':self.tag,
+            'source_sha':self.sha,'release_id':'5','run_id':'123',
+            'source_msix_sha256':self.details['architectures']['x64']['sourceMsixSha256']}
+        self.issues.append({'number':1,'title':submitter.TITLE,'body':submitter._journal_body(state),'user':copy.deepcopy(self.bot)})
+        self.app['pendingApplicationSubmission'] = {'id':'20'}; self.rejected()
+
+    def test_owned_older_legacy_failed_submission_can_be_replaced_once(self):
+        self.app['pendingApplicationSubmission'] = {'id':'20'}; self.pending['status'] = 'CommitFailed'
+        state = {'app_id':STORE_APP_ID,'phase':'submitted','submission_id':'20','tag':'v1.1.2','status':'CommitFailed'}
+        self.issues.append({'number':1,'title':submitter.TITLE,'body':submitter._journal_body(state),'user':copy.deepcopy(self.bot)})
+        self.assertEqual(self.perform()['outcome'], 'requested')
+        self.assertEqual(self.mutations(), ['DELETE','POST','PUT','UPLOAD','POST'])
+
+    def test_published_dual_baseline_accepts_ascii_case_same_version_only(self):
+        arm = copy.deepcopy(self.baseline['applicationPackages'][0]); arm.update(fileName='old-arm.msix',architecture='aRm64')
+        self.baseline['applicationPackages'].append(arm)
+        self.assertEqual(self.perform()['outcome'], 'requested')
+
+    def test_published_dual_baseline_mixed_versions_is_preserved(self):
+        arm = copy.deepcopy(self.baseline['applicationPackages'][0]); arm.update(fileName='old-arm.msix',architecture='ARM64',version='1.1.1.0')
+        self.baseline['applicationPackages'].append(arm); self.rejected()
+
+    def test_manual_actor_atlkr_and_bot_original_rerun_are_allowed(self):
+        self.store_run['triggering_actor'] = {'login':'ATLKR','type':'User','id':1}
+        self.assertEqual(self.perform()['outcome'], 'requested')
+
+    def test_source_optional_full_wack_failure_blocks_external_verifier(self):
+        xml = self.source / 'wack-arm64.xml'; xml.write_text(xml.read_text().replace('OVERALL_RESULT="PASS"','OVERALL_RESULT="FAIL"'))
+        self.checksums(self.source)
+        self.rejected()
+
+    def test_missing_arm64_package_or_runtime_replacement_never_uploads(self):
+        entry = self.details['architectures']['arm64']; path = self.directory / entry['package']
+        with zipfile.ZipFile(path) as archive: files = {n:archive.read(n) for n in archive.namelist()}
+        files['Tools/rhwp.exe'] += b'changed'
+        with zipfile.ZipFile(path,'w') as archive:
+            for n,raw in files.items(): archive.writestr(n,raw)
+        entry['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.proof['architectures']['arm64']['originalMsixSha256'] = entry['sha256']; self.write_details()
+        self.rejected()
+
+    def test_unknown_create_outcome_never_repeats_writes(self):
+        self.create_mode = 'timeout'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.calls.clear(); self.create_mode = 'success'; self.app['pendingApplicationSubmission'] = None
+        self.rejected()
+
+    def test_owned_delete_timeout_never_creates_or_repeats_deletion(self):
+        self.app['pendingApplicationSubmission'] = {'id':'20'}; self.pending['status'] = 'CommitFailed'
+        state = {'app_id':STORE_APP_ID,'phase':'submitted','submission_id':'20','tag':'v1.1.2','status':'CommitFailed'}
+        self.issues.append({'number':1,'title':submitter.TITLE,'body':submitter._journal_body(state),'user':copy.deepcopy(self.bot)})
+        self.delete_mode = 'timeout'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), ['DELETE'])
+        self.calls.clear(); self.delete_mode = 'success'; self.rejected()
+
+    def test_unknown_commit_recovers_same_id_without_duplicate_commit(self):
+        self.commit_mode = 'unknown'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.new['status'] = 'PreProcessing'; self.calls.clear()
+        self.assertEqual(self.perform()['outcome'], 'already_requested')
+        self.assertEqual(self.mutations(), [])
+
+    def test_preprocessing_without_sdk_version_is_honest_and_does_not_repeat_commit(self):
+        self.post_commit_mode = 'no_sdk_fields'
+        result = self.perform()
+        self.assertEqual(result['outcome'], 'requested')
+        self.assertEqual(result['packageMetadataObserved'], False)
+        self.calls.clear()
+        retry = self.perform(); self.assertEqual(retry['outcome'], 'already_requested')
+        self.assertEqual(retry['packageMetadataObserved'], False)
+        self.assertEqual(self.mutations(), [])
 
 
 if __name__ == '__main__': unittest.main()
