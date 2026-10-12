@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
 import buildkit
 import prepare_native_tests
+import native_activation
+import native_source_contract
 import wasm_artifacts
 import windows_arch
 
@@ -80,6 +82,7 @@ class WindowsComponentsTests(unittest.TestCase):
         prepare_native_tests.prepare(core)
         for upstream, local in c.COPIED_OVERLAYS.items():
             (source/upstream).write_bytes((ROOT/local).read_bytes())
+        self.native_source(source)
         namespace = {'patch': 'HWPX header raw-fragment inherited namespaces',
                      'upstreamHeaderSha256': 'b'*64,
                      'patchedHeaderSha256': digest(core/'src/parser/hwpx/header.rs'),
@@ -105,6 +108,52 @@ class WindowsComponentsTests(unittest.TestCase):
                   'namespacePatch': namespace, 'wasmRebuild': wasm}
         write_json(source/'.opengeul-overlay.json', ledger)
         return source
+
+    def native_source(self, source):
+        """소유한 작은 원본 fixture만 대체하고 실제 source policy는 그대로 실행한다."""
+        native = source/'apps/desktop/src-tauri'
+        config = self.helper().configured()
+        original = '[package]\nname="hop-desktop"\nversion="'+config['product']['version']+'"\n[dependencies]\ntauri = { version = "=2.11.1", features = [] }\nopen = "5"\n[patch.crates-io]\n'
+        (native/'Cargo.toml').write_text(native_activation.desktop_manifest(original), encoding='utf-8')
+        lock = (ROOT/'overlay/desktop-cargo.lock.toml').read_text(encoding='utf-8')
+        lock = buildkit.replace_once(lock, 'name = "hop-desktop"\nversion = "'+config['upstream']['hop']['version']+'"',
+                                   'name = "hop-desktop"\nversion = "'+config['product']['version']+'"')
+        (native/'Cargo.lock').write_text(lock, encoding='utf-8', newline='\n')
+        references = {}
+        for directory, actual in native_source_contract.REFERENCE.items():
+            changed = ('Cargo.toml', 'src/app.rs', 'src/process.rs') if directory == 'tauri-2.11.1' else ('Cargo.toml', 'src/dialog/windows.rs')
+            original_files = {name: ('owned original '+directory+'/'+name+'\n').encode()
+                              for name in (*changed, 'LICENSE')}
+            prepared_files = {name: (b'owned prepared '+content if name in changed else content)
+                              for name, content in original_files.items()}
+            for name, content in prepared_files.items():
+                path = native/'opengeul-native'/directory/name
+                path.parent.mkdir(parents=True, exist_ok=True);path.write_bytes(content)
+            references[directory] = {key: actual[key] for key in ('name','version','archiveSha256')}
+            references[directory]['originalFiles'] = {name: hashlib.sha256(value).hexdigest() for name,value in original_files.items()}
+            references[directory]['patchedFiles'] = {name: hashlib.sha256(prepared_files[name]).hexdigest() for name in changed}
+        replacement = patch.object(native_source_contract, 'REFERENCE', references)
+        replacement.start();self.addCleanup(replacement.stop)
+        self.native_reference_path = self.root/'owned-native-reference.json'
+        write_json(self.native_reference_path, references)
+        shim = {name: digest(ROOT/'overlay/native-open'/name) for name in native_source_contract.SHIM_FILES}
+        ledger = {'formatVersion':1, 'patchInputSha256':digest(ROOT/'overlay/native-activation-patches.json'),
+                  'originalManifestSha256':hashlib.sha256(original.encode()).hexdigest(),
+                  'preparedManifestSha256':digest(native/'Cargo.toml'),
+                  'preparedLockSha256':digest(native/'Cargo.lock'), 'crates':{}, 'shimFiles':shim}
+        for directory,item in references.items():
+            ledger['crates'][directory] = {key:item[key] for key in ('name','version','archiveSha256','originalFiles')}
+            ledger['crates'][directory]['preparedFiles'] = {**item['originalFiles'],**item['patchedFiles']}
+        (source/native_source_contract.LEDGER_PATH).write_bytes(native_source_contract.ledger_bytes(ledger))
+
+    def cli_command(self, *arguments):
+        # A subprocess cannot inherit a Python fixture constant. Substitute only
+        # that immutable test input, then run the unchanged public argparse path.
+        return [sys.executable, '-c',
+                "import json,runpy,sys,native_source_contract;from pathlib import Path;"
+                "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
+                "sys.argv=sys.argv[2:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                str(self.native_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')
@@ -151,15 +200,15 @@ class WindowsComponentsTests(unittest.TestCase):
         for role in folders:
             payload = self.payload(role, 'arm64')
             result = subprocess.run(
-                [sys.executable, str(HELPER), 'capture', '--architecture', 'arm64', '--role', role,
-                 '--payload', str(payload), '--source', str(source), '--out', str(folders[role])],
-                env={**os.environ, **self.env}, capture_output=True, text=True)
+                self.cli_command('capture', '--architecture', 'arm64', '--role', role,
+                 '--payload', str(payload), '--source', str(source), '--out', str(folders[role])),
+                env={**os.environ, **self.env, 'PYTHONPATH':str(ROOT/'scripts')}, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
         result = subprocess.run(
-            [sys.executable, str(HELPER), 'combine', '--architecture', 'arm64',
+            self.cli_command('combine', '--architecture', 'arm64',
              '--editor', str(folders['editor']), '--cli', str(folders['cli']),
-             '--payload', str(self.root/'combined'), '--source', str(self.root/'package-source')],
-            env={**os.environ, **self.env}, capture_output=True, text=True)
+             '--payload', str(self.root/'combined'), '--source', str(self.root/'package-source')),
+            env={**os.environ, **self.env, 'PYTHONPATH':str(ROOT/'scripts')}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root/'combined/Tools/rhwp.exe').read_bytes(), pe(0xAA64))
 
@@ -289,6 +338,157 @@ class WindowsComponentsTests(unittest.TestCase):
             self.assertEqual(record['provenanceSha256'], digest(folders[role]/'provenance.json'))
         contract = json.loads((folders['editor']/'provenance.json').read_text())['source']
         self.assertEqual(receipt['sourceContractSha256'], hashlib.sha256((json.dumps(contract,indent=2,sort_keys=True)+'\n').encode()).hexdigest())
+
+    def test_capture_requires_native_activation_ledger_before_creating_transport(self):
+        source = self.source()
+        (source/'apps/desktop/src-tauri/.opengeul-native-activation.json').unlink(missing_ok=True)
+        out = self.root/'unbound-native-component'
+        with self.assertRaises(ValueError):
+            self.helper().capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_unlisted_native_vendor_source_cannot_enter_a_component(self):
+        source = self.source()
+        extra = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.11.1/src/unreviewed.rs'
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text('// unreviewed compiler source\n')
+        with self.assertRaises(ValueError):
+            self.helper().capture('cli', self.payload('cli'), source, self.root/'extra-native', env=self.env)
+        self.assertFalse((self.root/'extra-native').exists())
+
+    def test_both_producers_bind_the_same_required_full_native_activation_proof(self):
+        folders = self.pair()
+        records = [json.loads((folders[role]/'provenance.json').read_text()) for role in ('editor','cli')]
+        for record in records:
+            self.assertIn('nativeActivation', record['source'])
+            self.assertIn('overlay/native-open/README.md', record['helpers'])
+        self.assertEqual(records[0]['source']['nativeActivation'], records[1]['source']['nativeActivation'])
+        native = records[0]['source']['nativeActivation']['ledger']
+        self.assertEqual(set(native['crates']), {'tauri-2.11.1','tauri-runtime-wry-2.11.1'})
+        self.assertEqual(set(native['shimFiles']), {'Cargo.toml','LICENSE.txt','README.md','src/activation.rs','src/lib.rs'})
+
+    def test_consumer_rejects_missing_native_proof_even_when_both_records_agree(self):
+        folders = self.pair()
+        for folder in folders.values():
+            path = folder/'provenance.json'
+            record = json.loads(path.read_text())
+            record['source'].pop('nativeActivation', None)
+            write_json(path, record)
+        self.assert_rejected_without_outputs(folders)
+
+    def test_actual_vendor_mutation_and_rehashed_ledger_cannot_authorize_new_source(self):
+        source = self.source()
+        path = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.11.1/src/process.rs'
+        path.write_bytes(path.read_bytes()+b'// changed compiler input\n')
+        payload = self.payload('editor')
+        with self.assertRaisesRegex(ValueError, 'compiler source inventory'):
+            self.helper().capture('editor', payload, source, self.root/'tampered-vendor', env=self.env)
+        ledger_path = source/native_source_contract.LEDGER_PATH
+        ledger = json.loads(ledger_path.read_bytes())
+        ledger['crates']['tauri-2.11.1']['preparedFiles']['src/process.rs'] = digest(path)
+        ledger_path.write_bytes(native_source_contract.ledger_bytes(ledger))
+        with self.assertRaisesRegex(ValueError, 'prepared source inventory'):
+            self.helper().capture('editor', payload, source, self.root/'rehash-vendor', env=self.env)
+        self.assertFalse((self.root/'tampered-vendor').exists())
+        self.assertFalse((self.root/'rehash-vendor').exists())
+
+    def test_mixed_original_inventory_or_crate_identity_cannot_become_source_proof(self):
+        source = self.source();payload = self.payload('cli')
+        path = source/native_source_contract.LEDGER_PATH
+        original = json.loads(path.read_bytes())
+        for index, change in enumerate(('archive','version','original','prepared','outside')):
+            altered = copy.deepcopy(original);crate = altered['crates']['tauri-2.11.1']
+            if change == 'archive':crate['archiveSha256'] = '0'*64
+            elif change == 'version':crate['version'] = '2.11.0'
+            elif change == 'original':crate['originalFiles']['src/app.rs'] = '0'*64
+            elif change == 'prepared':crate['preparedFiles'].pop('src/app.rs')
+            else:crate['originalFiles']['../outside.rs'] = '0'*64
+            path.write_bytes(native_source_contract.ledger_bytes(altered))
+            out = self.root/('invalid-native-origin-'+str(index))
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'native activation|Native activation'):
+                self.helper().capture('cli', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_vendor_symlink_and_unlisted_empty_directory_fail_before_staging(self):
+        source = self.source();payload = self.payload('cli')
+        directory = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.11.1'
+        extra = directory/'unlisted-empty';extra.mkdir()
+        with self.assertRaisesRegex(ValueError, 'source directory'):
+            self.helper().capture('cli', payload, source, self.root/'extra-directory', env=self.env)
+        extra.rmdir()
+        path = directory/'LICENSE';data = path.read_bytes();path.unlink()
+        outside = self.root/'outside-vendor-license';outside.write_bytes(data)
+        try:path.symlink_to(outside)
+        except OSError as error:self.skipTest('Owned synthetic symlink fixture unavailable: '+str(error))
+        with self.assertRaisesRegex(ValueError, 'symlink|reparse'):
+            self.helper().capture('cli', payload, source, self.root/'outside-vendor', env=self.env)
+        self.assertFalse((self.root/'extra-directory').exists())
+        self.assertFalse((self.root/'outside-vendor').exists())
+
+    def test_rehashed_native_consumer_metadata_still_requires_reviewed_origin_and_patch_bytes(self):
+        folders = self.pair()
+        originals = {role:json.loads((folder/'provenance.json').read_bytes()) for role,folder in folders.items()}
+        for change in ('archive','origin','prepared','shim','manifest','lock','patch','raw-ledger'):
+            for role,folder in folders.items():
+                record = copy.deepcopy(originals[role]);source = record['source'];ledger = source['nativeActivation']['ledger']
+                crate = ledger['crates']['tauri-2.11.1']
+                if change == 'archive':crate['archiveSha256'] = '0'*64
+                elif change == 'origin':crate['originalFiles']['src/app.rs'] = '0'*64
+                elif change == 'prepared':crate['preparedFiles']['src/app.rs'] = '0'*64
+                elif change == 'shim':ledger['shimFiles']['src/lib.rs'] = '0'*64
+                elif change == 'manifest':ledger['preparedManifestSha256'] = '0'*64
+                elif change == 'lock':ledger['preparedLockSha256'] = '0'*64
+                elif change == 'patch':ledger['patchInputSha256'] = '0'*64
+                source['preparedFiles'][native_source_contract.LEDGER_PATH] = hashlib.sha256(native_source_contract.ledger_bytes(ledger)).hexdigest()
+                if change == 'raw-ledger':source['preparedFiles'][native_source_contract.LEDGER_PATH] = '0'*64
+                write_json(folder/'provenance.json', record)
+            with self.subTest(change=change):self.assert_rejected_without_outputs(folders)
+
+    def test_native_ledger_serialization_is_order_independent_and_raw_lf_bound(self):
+        folders = self.pair()
+        for folder in folders.values():
+            path = folder/'provenance.json';record = json.loads(path.read_bytes())
+            ledger = record['source']['nativeActivation']['ledger']
+            record['source']['nativeActivation']['ledger'] = {key:ledger[key] for key in reversed(list(ledger))}
+            write_json(path, record)
+        self.combine(folders)
+        self.assertTrue((self.root/'combined/Tools/rhwp.exe').is_file())
+
+    def test_native_lock_binds_product_version_derivation_without_mutating_the_seed(self):
+        source = self.source();seed = ROOT/'overlay/desktop-cargo.lock.toml'
+        before = seed.read_bytes()
+        try:_, contract = self.helper().source_contract(source, self.helper().configured())
+        except ValueError as error:self.fail('Correct product-version lock was rejected: '+str(error))
+        self.assertNotEqual(contract['nativeActivation']['ledger']['preparedLockSha256'], digest(seed))
+        self.assertEqual(contract['nativeActivation']['ledger']['preparedLockSha256'],
+                         digest(source/'apps/desktop/src-tauri/Cargo.lock'))
+        self.assertEqual(seed.read_bytes(), before)
+
+    def test_rehashed_native_manifest_with_wrong_product_version_is_rejected(self):
+        source = self.source();manifest = source/'apps/desktop/src-tauri/Cargo.toml'
+        version = self.helper().configured()['product']['version']
+        manifest.write_text(buildkit.replace_once(manifest.read_text(), 'version="'+version+'"', 'version="0.0.1"'))
+        path = source/native_source_contract.LEDGER_PATH;ledger = json.loads(path.read_bytes())
+        ledger['preparedManifestSha256'] = digest(manifest)
+        path.write_bytes(native_source_contract.ledger_bytes(ledger))
+        out = self.root/'wrong-native-product-version'
+        with self.assertRaisesRegex(ValueError, 'product version'):
+            self.helper().capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_crlf_or_unbound_shim_helper_cannot_enter_native_source_contract(self):
+        source = self.source();payload = self.payload('editor')
+        path = source/native_source_contract.LEDGER_PATH
+        original = path.read_bytes();path.write_bytes(original.replace(b'\n',b'\r\n'))
+        with self.assertRaisesRegex(ValueError, 'raw ledger digest'):
+            self.helper().capture('editor', payload, source, self.root/'crlf-native-ledger', env=self.env)
+        path.write_bytes(original)
+        shim = source/'apps/desktop/src-tauri/opengeul-native/native-open/src/lib.rs'
+        shim.write_bytes(shim.read_bytes()+b'// changed helper\n')
+        with self.assertRaisesRegex(ValueError, 'overlay helper mismatch'):
+            self.helper().capture('editor', payload, source, self.root/'changed-native-shim', env=self.env)
+        self.assertFalse((self.root/'crlf-native-ledger').exists())
+        self.assertFalse((self.root/'changed-native-shim').exists())
 
     def test_cli_above_transport_cap_compresses_and_restores_exact_raw_runtime(self):
         c = self.helper()
