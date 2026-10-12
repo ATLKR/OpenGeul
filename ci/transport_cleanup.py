@@ -16,7 +16,8 @@ from policy import require_public, select_mode
 REPO = 'ATLKR/OpenGeul'
 GATES = ('preflight', 'wasm', 'windows-editor', 'windows-cli', 'browser-e2e', 'build',
          'native-e2e', 'msix-install', 'virtual-print', 'release',
-         'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64')
+         'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64',
+         'native-e2e-arm64', 'virtual-print-arm64')
 TRANSPORT = ('opengeul-wasm', 'opengeul-browser-inputs', 'opengeul-e2e-inputs', 'opengeul-windows-x64',
              'opengeul-editor-component', 'opengeul-cli-component', 'opengeul-e2e-inputs-arm64',
              'opengeul-windows-arm64', 'opengeul-editor-component-arm64', 'opengeul-cli-component-arm64')
@@ -58,7 +59,8 @@ def allowed_names(ctx, needs):
     if not publishing: expected['release'] = 'skipped'
     if mode == 'engine':
         for name in ('windows-editor', 'windows-cli', 'build', 'native-e2e', 'msix-install', 'virtual-print',
-                     'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64'):
+                     'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64',
+                     'native-e2e-arm64', 'virtual-print-arm64'):
             expected[name] = 'skipped'
     if states != expected: return set()  # Keep failure inputs for diagnosis; never call DELETE.
     prefixes = set(TRANSPORT) - PACKAGES if mode == 'full' else {'opengeul-browser-inputs'}

@@ -29,12 +29,13 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(options['default'],'full');self.assertEqual(set(options['options']),{'full','engine','checks'})
         self.assertIn("needs.preflight.outputs.mode == 'full'",w['jobs']['build']['if'])
     def test_all_required_release_gates_remain(self):
-        jobs=self.load()['jobs'];self.assertEqual(set(jobs['release']['needs']),{'wasm','build','build-arm64','native-e2e','browser-e2e','msix-install','msix-install-arm64','virtual-print'})
+        jobs=self.load()['jobs'];self.assertEqual(set(jobs['release']['needs']),{'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'})
         for job in ('native-e2e','virtual-print'):
-            self.assertEqual(set(jobs[job]['strategy']['matrix']['os']),{'windows-2022','windows-2025','windows-11-arm'})
+            self.assertEqual(set(jobs[job]['strategy']['matrix']['os']),{'windows-2022','windows-2025'})
+            self.assertEqual(jobs[job+'-arm64']['runs-on'],'windows-11-arm')
         self.assertEqual(set(jobs['browser-e2e']['strategy']['matrix']['browser']),{'chromium','firefox','webkit'})
     def test_diagnostics_are_bounded_before_upload(self):
-        for job in ('native-e2e','virtual-print','browser-e2e','msix-install','msix-install-arm64'):
+        for job in ('native-e2e','native-e2e-arm64','virtual-print','virtual-print-arm64','browser-e2e','msix-install','msix-install-arm64'):
             steps=self.load()['jobs'][job]['steps']
             pack=[i for i,s in enumerate(steps) if 'ci/evidence.py pack ' in s.get('run','')]
             self.assertEqual(len(pack),1)

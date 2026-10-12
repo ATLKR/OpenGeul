@@ -394,7 +394,7 @@ jobs:
         compression-level: 9
     if: github.event.repository.private == false && (needs.preflight.outputs.mode == 'full')
   native-e2e:
-    needs: [build, build-arm64]
+    needs: build
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     permissions:
@@ -403,11 +403,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2025, windows-2022, windows-11-arm]
-      max-parallel: 3
+        os: [windows-2025, windows-2022]
+      max-parallel: 2
     env:
-      E2E_ARCHITECTURE: ${{ matrix.os == 'windows-11-arm' && 'arm64' || 'x64' }}
-      E2E_INPUT_SUFFIX: ${{ matrix.os == 'windows-11-arm' && '-arm64' || '' }}
+      E2E_ARCHITECTURE: x64
+      E2E_INPUT_SUFFIX: ''
     steps:
     - name: 암호 시험 문서 증거를 위한 정확한 소스 바이트 보존
       shell: pwsh
@@ -470,6 +470,84 @@ jobs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: native-e2e-${{ matrix.os }}-${{ github.run_id }}
+        path: bounded-evidence/
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 9
+    if: github.event.repository.private == false
+  native-e2e-arm64:
+    name: native-e2e (windows-11-arm)
+    needs: build-arm64
+    runs-on: windows-11-arm
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    env:
+      E2E_ARCHITECTURE: arm64
+      E2E_INPUT_SUFFIX: '-arm64'
+    steps:
+    - name: 암호 시험 문서 증거를 위한 정확한 소스 바이트 보존
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: x64
+    - name: 동일 실행의 고정 빌드 입력 받기
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $PSNativeCommandUseErrorActionPreference=$true
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-${env:E2E_ARCHITECTURE}-$env:GITHUB_RUN_ID" --dir package
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs${env:E2E_INPUT_SUFFIX}-$env:GITHUB_RUN_ID" --dir inputs
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
+    - name: 시험 도구 설치와 실제 제품 파일 신원 확인
+      shell: pwsh
+      run: |
+        $PSNativeCommandUseErrorActionPreference=$true
+        python -m pip install -r e2e/requirements.txt
+        ./e2e/ensure-webview2.ps1
+        python e2e/prepare_payload.py package runtime --architecture $env:E2E_ARCHITECTURE
+    - name: WebView2가 없을 때 사용자 안내
+      shell: pwsh
+      run: python e2e/check_webview2_missing.py --exe runtime/OpenGeul.exe --output evidence
+    - name: 제품 WebView2와 실제 Windows 파일 대화상자 검사
+      shell: pwsh
+      run: |
+        $env:E2E_MODE='native'
+        $env:E2E_EXE=(Resolve-Path runtime/OpenGeul.exe).Path
+        $env:E2E_FIXTURES=(Resolve-Path inputs/e2e-fixtures).Path
+        $env:E2E_OUTPUT=Join-Path $pwd 'evidence'
+        python e2e/run.py
+    - name: 암호 재입력·평문 저장 동의·미저장 문서 닫기·교체 보호 검사
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures password-fixtures
+        python e2e/password/native.py --source-root . --fixtures password-fixtures --exe runtime/OpenGeul.exe --output evidence/password-native --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID
+    - name: 검사 결과를 유지하며 증거 크기 제한
+      if: always()
+      env:
+        EVIDENCE_STATUS: ${{ job.status }}
+      shell: pwsh
+      run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
+    - name: 실패해도 크기가 제한된 UI 증거 보존
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: native-e2e-windows-11-arm-${{ github.run_id }}
         path: bounded-evidence/
         retention-days: 1
         if-no-files-found: warn
@@ -618,7 +696,7 @@ jobs:
         compression-level: 9
     if: github.event.repository.private == false
   virtual-print:
-    needs: [build, build-arm64]
+    needs: build
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
@@ -627,11 +705,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-2025, windows-11-arm]
-      max-parallel: 3
+        os: [windows-2022, windows-2025]
+      max-parallel: 2
     env:
-      E2E_ARCHITECTURE: ${{ matrix.os == 'windows-11-arm' && 'arm64' || 'x64' }}
-      E2E_INPUT_SUFFIX: ${{ matrix.os == 'windows-11-arm' && '-arm64' || '' }}
+      E2E_ARCHITECTURE: x64
+      E2E_INPUT_SUFFIX: ''
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
@@ -685,8 +763,72 @@ jobs:
         if-no-files-found: warn
         compression-level: 9
     if: github.event.repository.private == false
+  virtual-print-arm64:
+    name: virtual-print (windows-11-arm)
+    needs: build-arm64
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      E2E_ARCHITECTURE: arm64
+      E2E_INPUT_SUFFIX: '-arm64'
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: x64
+    - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - name: 동일 실행의 실제 제품 파일과 합성 시험 입력 받기
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $PSNativeCommandUseErrorActionPreference=$true
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-${env:E2E_ARCHITECTURE}-$env:GITHUB_RUN_ID" --dir package
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs${env:E2E_INPUT_SUFFIX}-$env:GITHUB_RUN_ID" --dir inputs
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
+    - name: 독립 PDF 검사·기본 프린터·합성 문서 준비
+      shell: pwsh
+      run: |
+        $PSNativeCommandUseErrorActionPreference=$true
+        Start-Service Spooler
+        Get-PrinterDriver -Name 'Microsoft Print To PDF' -ErrorAction Stop
+        python -m pip install -r e2e/print-requirements.txt
+        python -m unittest discover -s e2e/print_tests -v
+        ./e2e/ensure-webview2.ps1
+        python e2e/prepare_payload.py package runtime --architecture $env:E2E_ARCHITECTURE
+        node e2e/table_height.mjs generate wasm-input print-fixtures
+        python e2e/print_fixtures.py print-fixtures
+        node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
+    - name: 실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사
+      shell: pwsh
+      run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
+    - name: 검사 결과를 유지하며 증거 크기 제한
+      if: always()
+      env:
+        EVIDENCE_STATUS: ${{ job.status }}
+      shell: pwsh
+      run: python ci/evidence.py pack print-evidence bounded-evidence --status $env:EVIDENCE_STATUS
+    - name: 실패해도 크기가 제한된 합성 인쇄 증거 보존
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: virtual-print-windows-11-arm-${{ github.run_id }}
+        path: bounded-evidence/
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 9
+    if: github.event.repository.private == false
   release:
-    needs: [wasm, build, build-arm64, native-e2e, browser-e2e, msix-install, msix-install-arm64, virtual-print]
+    needs: [wasm, build, build-arm64, native-e2e, native-e2e-arm64, browser-e2e, msix-install, msix-install-arm64, virtual-print, virtual-print-arm64]
     if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
     runs-on: ubuntu-24.04
@@ -727,7 +869,7 @@ jobs:
         RELEASE_TAG: ${{ steps.release.outputs.tag }}
       run: python3 scripts/store_package.py --dispatch-store --release-tag "$RELEASE_TAG"
   cleanup-transports:
-    needs: [preflight, wasm, browser-e2e, windows-editor, windows-cli, windows-editor-arm64, windows-cli-arm64, build, build-arm64, native-e2e, msix-install, msix-install-arm64, virtual-print, release]
+    needs: [preflight, wasm, browser-e2e, windows-editor, windows-cli, windows-editor-arm64, windows-cli-arm64, build, build-arm64, native-e2e, native-e2e-arm64, msix-install, msix-install-arm64, virtual-print, virtual-print-arm64, release]
     if: github.event.repository.private == false && (always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.run_attempt == 1 && github.actor != 'dependabot[bot]' && needs.preflight.result == 'success' && needs.preflight.outputs.mode != 'checks' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
     timeout-minutes: 5

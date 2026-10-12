@@ -1,5 +1,7 @@
 """ARM native 검사와 기존 x64 검사를 같은 릴리스 필수 조건으로 연결한다."""
 from pathlib import Path
+import hashlib
+import json
 import sys
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -13,7 +15,7 @@ class Arm64WorkflowTests(unittest.TestCase):
         expanded = []
         for name, job in self.jobs.items():
             matrix = job.get('strategy', {}).get('matrix')
-            expanded.extend([f'{name} ({value})' for values in matrix.values() for value in values] if matrix else [name])
+            expanded.extend([f'{name} ({value})' for values in matrix.values() for value in values] if matrix else [job.get('name', name)])
         old = {'preflight','wasm','windows-editor','windows-cli','build','msix-install','release','cleanup-transports',
                'browser-e2e (chromium)','browser-e2e (firefox)','browser-e2e (webkit)',
                'native-e2e (windows-2022)','native-e2e (windows-2025)',
@@ -35,16 +37,23 @@ class Arm64WorkflowTests(unittest.TestCase):
     def test_all_native_print_and_install_consumers_use_actual_architecture(self):
         for name in ('native-e2e','virtual-print'):
             job=self.jobs[name]
-            self.assertEqual(set(job['needs']), {'build','build-arm64'})
-            self.assertEqual(set(job['strategy']['matrix']['os']), {'windows-2022','windows-2025','windows-11-arm'})
-            self.assertIn('E2E_ARCHITECTURE', job['env'])
-            self.assertIn('--architecture $env:E2E_ARCHITECTURE', self.commands(name))
-            self.assertIn('opengeul-windows-${env:E2E_ARCHITECTURE}-', self.commands(name))
+            self.assertEqual(job['needs'], 'build')
+            self.assertEqual(set(job['strategy']['matrix']['os']), {'windows-2022','windows-2025'})
+            self.assertEqual(job['env'], {'E2E_ARCHITECTURE':'x64','E2E_INPUT_SUFFIX':''})
+            arm=self.jobs[name+'-arm64']
+            self.assertEqual(arm['name'], name+' (windows-11-arm)')
+            self.assertEqual(arm['needs'], 'build-arm64')
+            self.assertEqual(arm['runs-on'], 'windows-11-arm')
+            self.assertNotIn('strategy',arm)
+            self.assertEqual(arm['env'], {'E2E_ARCHITECTURE':'arm64','E2E_INPUT_SUFFIX':'-arm64'})
+            for consumer in (name,name+'-arm64'):
+                self.assertIn('--architecture $env:E2E_ARCHITECTURE', self.commands(consumer))
+                self.assertIn('opengeul-windows-${env:E2E_ARCHITECTURE}-', self.commands(consumer))
         job=self.jobs['msix-install-arm64']
         self.assertEqual(job['runs-on'],'windows-11-arm');self.assertEqual(job['needs'],'build-arm64')
         self.assertIn('-Architecture arm64', self.commands('msix-install-arm64'))
     def test_release_requires_both_architectures_and_full_wack_receipts(self):
-        self.assertEqual(set(self.jobs['release']['needs']), {'wasm','build','build-arm64','native-e2e','browser-e2e','msix-install','msix-install-arm64','virtual-print'})
+        self.assertEqual(set(self.jobs['release']['needs']), {'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'})
         commands=self.commands('release')
         for required in ('--name "opengeul-windows-arm64-$BUILD_RUN_ID" --dir package-arm64',
                          '--name "msix-install-$BUILD_RUN_ID" --dir wack-x64',
@@ -52,6 +61,24 @@ class Arm64WorkflowTests(unittest.TestCase):
                          'scripts/release_pair.py assemble --x64 package --arm64 package-arm64 --wack-x64 wack-x64 --wack-arm64 wack-arm64 --output release-output',
                          '--package-directory release-output'):
             self.assertIn(required,commands)
+    def test_original_native_and_print_steps_cases_and_artifacts_remain_exact(self):
+        # c689fa5 원본 전체 단계. matrix OS만 실제 ARM 표시명으로 정규화한다.
+        original={'native-e2e':'bf842e5d0cc3a3b4e537fabd0a3b2648769d9429bbe62883bcd0f89999b4dcb9',
+                  'virtual-print':'dc5a7018b29922bb810bcd94a70d0ea154a35a1b13665e73191c25f8053ea5df'}
+        def bind(value):
+            if isinstance(value,dict):return {k:bind(v) for k,v in value.items()}
+            if isinstance(value,list):return [bind(v) for v in value]
+            if isinstance(value,str):return value.replace('${{ matrix.os }}','windows-11-arm')
+            return value
+        for name,expected in original.items():
+            for suffix in ('','-arm64'):
+                with self.subTest(job=name+suffix):
+                    job=self.jobs[name+suffix]
+                    steps=json.dumps(bind(job['steps']),sort_keys=True,separators=(',',':')).encode()
+                    self.assertEqual(hashlib.sha256(steps).hexdigest(),expected)
+                    self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
+                    self.assertEqual(str(job['timeout-minutes']),'40' if name=='native-e2e' else '30')
+                    self.assertNotIn('continue-on-error',job)
     def test_build_commands_are_native_target_explicit_without_changing_feature_graph(self):
         text=(ROOT/'scripts/build-msix.ps1').read_text()
         self.assertIn('$env:RUSTUP_TOOLCHAIN = "$($lock.rust)-$target"',text)

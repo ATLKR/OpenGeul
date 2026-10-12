@@ -8,10 +8,10 @@ ROOT=Path(__file__).resolve().parents[2]
 class WorkflowTransportTests(unittest.TestCase):
     def setUp(self):self.w=load_workflow(ROOT/'.github/workflows/msix.yml')
     def test_existing_release_gate_set_is_preserved_and_requires_arm64(self):
-        self.assertEqual(set(self.w['jobs']['release']['needs']),{'wasm','build','build-arm64','native-e2e','browser-e2e','msix-install','msix-install-arm64','virtual-print'})
+        self.assertEqual(set(self.w['jobs']['release']['needs']),{'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'})
     def test_cleanup_depends_on_every_consumer_and_publication(self):
         self.assertIn('cleanup-transports',self.w['jobs'],'Missing post-consumer cleanup')
-        self.assertEqual(set(self.w['jobs']['cleanup-transports']['needs']),{'preflight','wasm','windows-editor','windows-cli','windows-editor-arm64','windows-cli-arm64','build','build-arm64','native-e2e','browser-e2e','msix-install','msix-install-arm64','virtual-print','release'})
+        self.assertEqual(set(self.w['jobs']['cleanup-transports']['needs']),{'preflight','wasm','windows-editor','windows-cli','windows-editor-arm64','windows-cli-arm64','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64','release'})
     def test_windows_components_build_in_parallel_and_full_mode_only(self):
         for name in ('windows-editor','windows-cli'):
             with self.subTest(name=name):
@@ -70,5 +70,6 @@ class WorkflowTransportTests(unittest.TestCase):
         jobs=self.w['jobs']
         self.assertEqual(jobs['browser-e2e']['strategy']['matrix']['browser'],['chromium','firefox','webkit'])
         for name in ('native-e2e','virtual-print'):
-            self.assertEqual(set(jobs[name]['strategy']['matrix']['os']),{'windows-2022','windows-2025','windows-11-arm'})
+            self.assertEqual(set(jobs[name]['strategy']['matrix']['os']),{'windows-2022','windows-2025'})
+            self.assertEqual(jobs[name+'-arm64']['runs-on'],'windows-11-arm')
 if __name__=='__main__':unittest.main()

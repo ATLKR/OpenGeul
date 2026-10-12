@@ -117,6 +117,14 @@ class TransportCleanupTests(unittest.TestCase):
             with self.subTest(name=name):
                 needs=copy.deepcopy(self.needs);needs[name]['result']='failure'
                 self.assertEqual(self.plan(needs=needs),[])
+    def test_separate_arm64_native_and_print_failures_never_call_delete(self):
+        for name in ('native-e2e-arm64','virtual-print-arm64'):
+            self.assertIn(name,self.m.GATES)
+            for status in ('failure','skipped','cancelled'):
+                with self.subTest(job=name,status=status):
+                    needs=copy.deepcopy(self.needs);needs[name]['result']=status;calls=[]
+                    self.m.execute(self.context,needs,self.api_fixture(calls))
+                    self.assertEqual(calls,[])
     def test_cancelled_pending_or_skipped_required_gate_preserves(self):
         for status in ('cancelled','queued','in_progress','skipped',None):
             needs=copy.deepcopy(self.needs);needs['virtual-print']['result']=status
@@ -135,11 +143,11 @@ class TransportCleanupTests(unittest.TestCase):
         self.assertEqual(len(self.plan()),8)
     def test_engine_removes_only_browser_transport(self):
         self.context.update(event='workflow_dispatch',mode='engine');self.run['event']='workflow_dispatch'
-        for name in (*WORKERS,'build','build-arm64','native-e2e','virtual-print','msix-install','msix-install-arm64','release'):self.needs[name]['result']='skipped'
+        for name in (*WORKERS,'build','build-arm64','native-e2e','native-e2e-arm64','virtual-print','virtual-print-arm64','msix-install','msix-install-arm64','release'):self.needs[name]['result']='skipped'
         self.assertEqual([a['id'] for a in self.plan()],[2])
     def test_engine_cannot_ignore_failed_windows_job(self):
         self.context.update(event='workflow_dispatch',mode='engine');self.run['event']='workflow_dispatch'
-        for name in (*WORKERS,'build','build-arm64','native-e2e','virtual-print','msix-install','msix-install-arm64','release'):self.needs[name]['result']='skipped'
+        for name in (*WORKERS,'build','build-arm64','native-e2e','native-e2e-arm64','virtual-print','virtual-print-arm64','msix-install','msix-install-arm64','release'):self.needs[name]['result']='skipped'
         for name in (*WORKERS,'build','build-arm64','msix-install-arm64'):
             with self.subTest(name=name):
                 needs=copy.deepcopy(self.needs);needs[name]['result']='failure'
