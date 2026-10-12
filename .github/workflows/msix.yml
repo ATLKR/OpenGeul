@@ -459,12 +459,37 @@ jobs:
         $PSNativeCommandUseErrorActionPreference=$true
         node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures password-fixtures
         python e2e/password/native.py --source-root . --fixtures password-fixtures --exe runtime/OpenGeul.exe --output evidence/password-native --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID
+    - name: 실제 MCP stdio·암호 입력·COM 작업자 실패 격리 검사
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
+        $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
+        python e2e/mcp_worker.py --context portable --architecture $env:E2E_ARCHITECTURE --exe runtime/Tools/rhwp.exe --fixtures inputs/e2e-fixtures --password-fixtures password-fixtures --expected-sha256 $cliSha --out evidence/mcp
+    - name: 설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비
+      if: env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/mcp_fixtures.py stage --architecture $env:E2E_ARCHITECTURE --fixtures inputs/e2e-fixtures --password-fixtures password-fixtures --wasm-provenance wasm-input/OPEN_GEUL_WASM.json --output mcp-qa --source-commit $env:GITHUB_SHA --source-run $env:GITHUB_RUN_ID --source-attempt $env:GITHUB_RUN_ATTEMPT
+        python ci/evidence.py size --limit-mib 16 mcp-qa
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
         EVIDENCE_STATUS: ${{ job.status }}
       shell: pwsh
       run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
+    - name: 동일 실행의 공개 MCP QA 입력을 하루 동안 보존
+      if: env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-mcp-fixtures${{ env.E2E_INPUT_SUFFIX }}-${{ github.run_id }}
+        path: mcp-qa/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
     - name: 실패해도 크기가 제한된 UI 증거 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -537,12 +562,37 @@ jobs:
         $PSNativeCommandUseErrorActionPreference=$true
         node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures password-fixtures
         python e2e/password/native.py --source-root . --fixtures password-fixtures --exe runtime/OpenGeul.exe --output evidence/password-native --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID
+    - name: 실제 MCP stdio·암호 입력·COM 작업자 실패 격리 검사
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
+        $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
+        python e2e/mcp_worker.py --context portable --architecture $env:E2E_ARCHITECTURE --exe runtime/Tools/rhwp.exe --fixtures inputs/e2e-fixtures --password-fixtures password-fixtures --expected-sha256 $cliSha --out evidence/mcp
+    - name: 설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비
+      if: env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/mcp_fixtures.py stage --architecture $env:E2E_ARCHITECTURE --fixtures inputs/e2e-fixtures --password-fixtures password-fixtures --wasm-provenance wasm-input/OPEN_GEUL_WASM.json --output mcp-qa --source-commit $env:GITHUB_SHA --source-run $env:GITHUB_RUN_ID --source-attempt $env:GITHUB_RUN_ATTEMPT
+        python ci/evidence.py size --limit-mib 16 mcp-qa
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
         EVIDENCE_STATUS: ${{ job.status }}
       shell: pwsh
       run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
+    - name: 동일 실행의 공개 MCP QA 입력을 하루 동안 보존
+      if: env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-mcp-fixtures${{ env.E2E_INPUT_SUFFIX }}-${{ github.run_id }}
+        path: mcp-qa/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
     - name: 실패해도 크기가 제한된 UI 증거 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -612,7 +662,7 @@ jobs:
         compression-level: 9
     if: github.event.repository.private == false
   msix-install:
-    needs: build
+    needs: [build, native-e2e]
     runs-on: windows-2025
     timeout-minutes: 30
     permissions:
@@ -631,12 +681,22 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-x64-$env:GITHUB_RUN_ID" --dir package
+    - name: 같은 소스·아키텍처 실행의 검증한 MCP QA 원본 받기
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python scripts/mcp_qa_download.py source --package-directory package --output mcp-qa
     - name: 설치된 앱 실행을 위한 WebView2 준비
       shell: pwsh
       run: ./e2e/ensure-webview2.ps1
     - name: 시험 전용 서명·설치 앱 및 CLI 실행·WACK·파일 연결·제거 검사
       shell: pwsh
-      run: ./e2e/msix-install.ps1 -PackageDirectory package -OutputDirectory evidence
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
+        $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
+        ./e2e/msix-install.ps1 -PackageDirectory package -OutputDirectory evidence -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
@@ -654,7 +714,7 @@ jobs:
         compression-level: 9
     if: github.event.repository.private == false
   msix-install-arm64:
-    needs: build-arm64
+    needs: [build-arm64, native-e2e-arm64]
     runs-on: windows-11-arm
     timeout-minutes: 30
     permissions:
@@ -673,12 +733,22 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-arm64-$env:GITHUB_RUN_ID" --dir package
+    - name: 같은 소스·아키텍처 실행의 검증한 MCP QA 원본 받기
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python scripts/mcp_qa_download.py source --package-directory package --output mcp-qa
     - name: 설치된 앱 실행을 위한 WebView2 준비
       shell: pwsh
       run: ./e2e/ensure-webview2.ps1
     - name: 시험 전용 서명·설치 앱 및 CLI 실행·WACK·파일 연결·제거 검사
       shell: pwsh
-      run: ./e2e/msix-install.ps1 -Architecture arm64 -PackageDirectory package -OutputDirectory evidence
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
+        $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
+        ./e2e/msix-install.ps1 -Architecture arm64 -PackageDirectory package -OutputDirectory evidence -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:

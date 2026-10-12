@@ -1,11 +1,15 @@
 # A short-lived test certificate signs a COPY on this disposable runner only.
 # No signing key, certificate or signed copy is published or used for production.
 param([Parameter(Mandatory)][string]$PackageDirectory,[Parameter(Mandatory)][string]$OutputDirectory,
+      [Parameter(Mandatory)][string]$McpFixtureDirectory,
+      [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedCliSha256,
       [ValidateSet('x64','arm64')][string]$Architecture='x64')
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $PSNativeCommandUseErrorActionPreference=$true
 if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Install smoke is restricted to disposable GitHub Actions runners.' }
+$McpFixtureDirectory=(Resolve-Path -LiteralPath $McpFixtureDirectory -ErrorAction Stop).Path
+if (-not (Test-Path -LiteralPath (Join-Path $McpFixtureDirectory 'e2e-fixtures/basic.hwpx')) -or -not (Test-Path -LiteralPath (Join-Path $McpFixtureDirectory 'password-fixtures/manifest.json'))) { throw '검증한 같은 소스 실행의 MCP QA 원본이 필요합니다.' }
 $original=@(Get-ChildItem $PackageDirectory -Filter '*.msix')
 if ($original.Count -ne 1) { throw 'Exactly one package required.' }
 $before=(Get-FileHash $original[0].FullName -Algorithm SHA256).Hash
@@ -97,7 +101,7 @@ public static class OpenGeulPackageIdentity {
  $cli=Join-Path $installed.InstallLocation 'Tools/rhwp.exe'
  $cliResult=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli.json'
  if (Test-Path $cliResult) { throw 'Refusing to reuse an installed CLI result.' }
- $probeArgs="-NoProfile -File `"$(Join-Path $PSScriptRoot 'installed-cli.ps1')`" -CliPath `"$cli`" -PackageFullName `"$($installed.PackageFullName)`" -OutputDirectory `"$((Resolve-Path $OutputDirectory).Path)`" -Architecture $Architecture -PythonPath `"$((Get-Command python -ErrorAction Stop).Source)`""
+ $probeArgs="-NoProfile -File `"$(Join-Path $PSScriptRoot 'installed-cli.ps1')`" -CliPath `"$cli`" -PackageFullName `"$($installed.PackageFullName)`" -OutputDirectory `"$((Resolve-Path $OutputDirectory).Path)`" -McpFixtureDirectory `"$McpFixtureDirectory`" -ExpectedCliSha256 $ExpectedCliSha256 -Architecture $Architecture -PythonPath `"$((Get-Command python -ErrorAction Stop).Source)`""
  Invoke-CommandInDesktopPackage -PackageFamilyName $installed.PackageFamilyName -AppId OpenGeul -Command (Get-Process -Id $PID).Path -Args $probeArgs -PreventBreakaway
  $deadline=(Get-Date).AddSeconds(60)
  while (-not (Test-Path $cliResult) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
@@ -115,8 +119,9 @@ public static class OpenGeulPackageIdentity {
  @{
   success=$true; architecture=$Architecture; packageFullName=$installed.PackageFullName; publisher=$publisher;
   fileTypes=$types; originalSha256=$before; signedTestPackageSha256=$signedCopySha256;
+  mcp=$cliEvidence.mcp;
   scope='test-only signing, AppX installation, package-identity activation, installed CLI, registered file types and uninstall; WACK status is reported separately in wack.json; not Store certification or real-printer/IME testing'
- } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDirectory 'install.json') -Encoding utf8
+ } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $OutputDirectory 'install.json') -Encoding utf8
 } finally {
  if ($launched -and -not $launched.HasExited) { Stop-Process -Id $launched.Id -Force -ErrorAction Continue }
  if ($installed) { Get-Process -Name OpenGeul -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $installed.InstallLocation 'OpenGeul.exe') } | Stop-Process -Force -ErrorAction Continue }

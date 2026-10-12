@@ -41,6 +41,10 @@ class WiringTests(unittest.TestCase):
             self.assertEqual(len(pack),1)
             for i,s in enumerate(steps):
                 if s.get('uses','').startswith('actions/upload-artifact'):
+                    if s.get('with',{}).get('path')=='mcp-qa/':
+                        self.assertEqual(s['with']['name'],'opengeul-mcp-fixtures${{ env.E2E_INPUT_SUFFIX }}-${{ github.run_id }}')
+                        self.assertEqual(s['if'],"env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'")
+                        continue  # 별도 test_qa_upload가 원본 QA 입력·16 MiB 제한을 검사한다.
                     self.assertGreater(i,pack[0]);self.assertEqual(s['with']['path'],'bounded-evidence/')
     def test_native_input_artifact_no_longer_duplicates_browser_dist(self):
         steps=self.load()['jobs']['windows-editor']['steps']
@@ -65,4 +69,47 @@ class WiringTests(unittest.TestCase):
         self.assertTrue(any('opengeul-wasm-$env:GITHUB_RUN_ID' in s.get('run','') for s in steps))
         checkout=next(i for i,s in enumerate(steps) if s.get('uses','').startswith('actions/checkout'))
         self.assertTrue(any('core.autocrlf false' in s.get('run','') for s in steps[:checkout]))
+    def test_mcp_is_required_after_original_password_generation_on_all_native_runners(self):
+        jobs=self.load()['jobs']
+        for name in ('native-e2e','native-e2e-arm64'):
+            with self.subTest(job=name):
+                steps=jobs[name]['steps'];mcp=[(i,s) for i,s in enumerate(steps) if 'e2e/mcp_worker.py' in s.get('run','')]
+                self.assertEqual(len(mcp),1,'모든 실제 native OS에서 휴대용 MCP를 실행해야 합니다')
+                index,step=mcp[0];self.assertNotIn('if',step);self.assertFalse(step.get('continue-on-error',False))
+                prepare=next(i for i,s in enumerate(steps) if 'prepare_payload.py package runtime' in s.get('run',''))
+                password=next(i for i,s in enumerate(steps) if 'generate-password-fixtures.mjs' in s.get('run',''))
+                self.assertLess(prepare,password);self.assertLess(password,index)
+                for flag in ('--context portable','--architecture $env:E2E_ARCHITECTURE','--exe runtime/Tools/rhwp.exe',
+                             '--fixtures inputs/e2e-fixtures','--password-fixtures password-fixtures','--expected-sha256 $cliSha','--out evidence/mcp'):
+                    self.assertIn(flag,step['run'])
+                self.assertIn('windowsComponents.components.cli.sha256',step['run'])
+                self.assertNotIn('Get-FileHash',step['run'],'기대 CLI 해시는 실행 파일이 아니라 package 증명에서 받아야 합니다')
+    def test_qa_upload_is_arch_specific_original_bounded_one_day_input(self):
+        jobs=self.load()['jobs']
+        for name in ('native-e2e','native-e2e-arm64'):
+            steps=jobs[name]['steps'];stages=[(i,s) for i,s in enumerate(steps) if 'e2e/mcp_fixtures.py stage' in s.get('run','')]
+            uploads=[(i,s) for i,s in enumerate(steps) if s.get('with',{}).get('path')=='mcp-qa/']
+            self.assertEqual(len(stages),1);self.assertEqual(len(uploads),1);i,stage=stages[0];j,upload=uploads[0]
+            self.assertLess(i,j);self.assertEqual(stage['if'],"env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'")
+            self.assertEqual(upload['if'],stage['if']);self.assertFalse(stage.get('continue-on-error',False))
+            for binding in ('--architecture $env:E2E_ARCHITECTURE','--fixtures inputs/e2e-fixtures','--password-fixtures password-fixtures',
+                            '--wasm-provenance wasm-input/OPEN_GEUL_WASM.json','--source-commit $env:GITHUB_SHA','--source-run $env:GITHUB_RUN_ID',
+                            '--source-attempt $env:GITHUB_RUN_ATTEMPT','ci/evidence.py size --limit-mib 16 mcp-qa'):
+                self.assertIn(binding,stage['run'])
+            self.assertEqual(upload['with']['name'],'opengeul-mcp-fixtures${{ env.E2E_INPUT_SUFFIX }}-${{ github.run_id }}')
+            self.assertEqual(upload['with']['retention-days'],1);self.assertEqual(upload['with']['if-no-files-found'],'error')
+        cleanup=(ROOT/'ci/transport_cleanup.py').read_text();self.assertNotIn('opengeul-mcp-fixtures',cleanup)
+    def test_installed_mcp_gets_same_arch_source_qa_before_any_install(self):
+        jobs=self.load()['jobs']
+        for name,build,native in (('msix-install','build','native-e2e'),('msix-install-arm64','build-arm64','native-e2e-arm64')):
+            with self.subTest(job=name):
+                job=jobs[name];self.assertEqual(set(job['needs']),{build,native});steps=job['steps']
+                qa=[(i,s) for i,s in enumerate(steps) if 'scripts/mcp_qa_download.py' in s.get('run','')]
+                self.assertEqual(len(qa),1);index,step=qa[0];self.assertNotIn('if',step)
+                self.assertIn('scripts/mcp_qa_download.py source --package-directory package --output mcp-qa',step['run']);self.assertEqual(step['env']['GH_TOKEN'],'${{ github.token }}')
+                install=next((i,s) for i,s in enumerate(steps) if './e2e/msix-install.ps1 ' in s.get('run',''))
+                self.assertLess(index,install[0]);self.assertIn('-McpFixtureDirectory mcp-qa',install[1]['run'])
+                self.assertIn('-ExpectedCliSha256 $cliSha',install[1]['run'])
+                self.assertIn('windowsComponents.components.cli.sha256',install[1]['run'])
+                self.assertEqual(job['permissions'],{'contents':'read','actions':'read'});self.assertEqual(job['timeout-minutes'],30)
 if __name__=='__main__':unittest.main()

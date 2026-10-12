@@ -1,5 +1,7 @@
 param([Parameter(Mandatory)][string]$CliPath,[Parameter(Mandatory)][string]$PackageFullName,
       [Parameter(Mandatory)][string]$OutputDirectory,
+      [Parameter(Mandatory)][string]$McpFixtureDirectory,
+      [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedCliSha256,
       [ValidateSet('x64','arm64')][string]$Architecture='x64',
       [Parameter(Mandatory)][string]$PythonPath)
 Set-StrictMode -Version Latest
@@ -28,11 +30,16 @@ public static class OpenGeulCliIdentity {
  $result.nativeArchitecture=$actual.nativeArchitecture
  $result.helpBytes=$actual.helpBytes
  $result.helpSha256=$actual.helpSha256
+ $mcpDirectory=Join-Path $OutputDirectory 'installed-mcp'
+ $mcpPath=Join-Path $mcpDirectory 'mcp-result.json'
+ & $PythonPath (Join-Path $PSScriptRoot 'mcp_worker.py') --exe $CliPath --architecture $Architecture --expected-sha256 $ExpectedCliSha256 --context installed --package-full-name $PackageFullName --fixtures (Join-Path $McpFixtureDirectory 'e2e-fixtures') --password-fixtures (Join-Path $McpFixtureDirectory 'password-fixtures') --out $mcpDirectory
+ & $PythonPath (Join-Path $PSScriptRoot '../scripts/mcp_qualification.py') --receipt $mcpPath --architecture $Architecture --cli-sha256 $ExpectedCliSha256 --package-full-name $PackageFullName
+ $result.mcp=Get-Content $mcpPath -Raw | ConvertFrom-Json
  $result.success=$true
 } catch { $result.reason=$_.Exception.Message }
 finally {
  $temporary=Join-Path $OutputDirectory 'installed-cli.json.tmp'
- $result | ConvertTo-Json -Depth 10 | Set-Content $temporary -Encoding utf8
+ $result | ConvertTo-Json -Depth 20 | Set-Content $temporary -Encoding utf8
  Move-Item $temporary (Join-Path $OutputDirectory 'installed-cli.json')
 }
 if (-not $result.success) { exit 1 }
