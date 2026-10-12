@@ -88,6 +88,24 @@ class McpQaDownloadTests(unittest.TestCase):
     def download(self):
         return self.module().download_source(self.package,self.output,backend=self.backend,env=self.env)
 
+    def pr_context(self):
+        """실제 PR API head와 checkout merge가 다른, 현재 열린 PR의 합성 API 형태."""
+        base,head='c'*40,'b'*40
+        repo={'id':100,'full_name':'ATLKR/OpenGeul','private':False}
+        event={'repository':repo,'number':19,'pull_request':{'id':1900,'number':19,
+            'base':{'sha':base,'ref':'main','repo':repo},
+            'head':{'sha':head,'ref':'codex/pr-candidate','repo':repo}}}
+        self.event_path=self.root/'event.json';self.event_path.write_text(json.dumps(event))
+        self.env.update(GITHUB_EVENT_NAME='pull_request',GITHUB_REF='refs/pull/19/merge',
+            GITHUB_HEAD_REF='codex/pr-candidate',GITHUB_BASE_REF='main',GITHUB_EVENT_PATH=str(self.event_path))
+        self.run.update(event='pull_request',head_sha=head,head_branch='codex/pr-candidate',pull_requests=[{
+            'id':1900,'number':19,'base':{'sha':base,'ref':'main','repo':{'id':100}},
+            'head':{'sha':head,'ref':'codex/pr-candidate','repo':{'id':100}}}])
+        self.run['repository']['id']=100
+        self.job['head_sha']=head;self.artifact['workflow_run']['head_sha']=head;self.refresh()
+        self.responses['commits/'+'a'*40]={'sha':'a'*40,'parents':[{'sha':base},{'sha':head}]}
+        return event
+
     def rejected(self):
         with self.assertRaises(ValueError): self.download()
         self.assertFalse(self.output.exists()); self.assertFalse(self.output.with_name('mcp-qa-origin').exists())
@@ -102,6 +120,82 @@ class McpQaDownloadTests(unittest.TestCase):
         self.assertEqual(receipt['artifact']['id'],67)
         self.assertEqual({p.relative_to(self.output).as_posix() for p in self.output.rglob('*') if p.is_file()},
                          mcp_fixtures.PAYLOAD_FILES|{mcp_fixtures.MANIFEST})
+
+    def test_current_pr_merge_preserves_source_sha_and_separately_proves_api_head(self):
+        self.pr_context();self.download()
+        self.assertTrue(mcp_fixtures.verify(self.output,self.binding,self.qa.wasm)['publicQaOnly'])
+        receipt=json.loads((self.output.with_name('mcp-qa-origin')/'receipt.json').read_bytes())
+        self.assertEqual(receipt['sourceCommit'],'a'*40);self.assertEqual(receipt['run']['head_sha'],'b'*40)
+        self.assertEqual(receipt['pullRequestBinding'],{'number':19,'id':1900,'mergeCommit':'a'*40,
+            'apiHeadCommit':'b'*40,'baseCommit':'c'*40,'headRepositoryId':100,'baseRepositoryId':100})
+
+    def test_arm64_public_fork_pr_retains_merge_identity_and_its_own_qa_producer(self):
+        event=self.pr_context();event['pull_request']['head']['repo']={**event['pull_request']['head']['repo'],
+            'id':101,'full_name':'contributor/OpenGeul'}
+        self.event_path.write_text(json.dumps(event));self.run['pull_requests'][0]['head']['repo']['id']=101
+        self.job['name']='native-e2e (windows-11-arm)';self.artifact['name']='opengeul-mcp-fixtures-arm64-123'
+        self.qa.output.rename(self.qa.output.with_name('old'))
+        mcp_fixtures.stage(self.qa.basic,self.qa.password,self.qa.wasm_file,self.qa.output,self.binding,architecture='arm64')
+        self.archive=self.make_zip();self.artifact.update(size_in_bytes=len(self.archive),digest='sha256:'+hashlib.sha256(self.archive).hexdigest());self.refresh()
+        self.module().download_source(self.package.with_name('arm64'),self.output,backend=self.backend,env=self.env)
+        self.assertTrue(mcp_fixtures.verify(self.output,self.binding,self.qa.wasm,architecture='arm64')['publicQaOnly'])
+        receipt=json.loads((self.output.with_name('mcp-qa-origin')/'receipt.json').read_bytes())
+        self.assertEqual(receipt['sourceCommit'],'a'*40);self.assertEqual(receipt['pullRequestBinding']['headRepositoryId'],101)
+
+    def test_pr_merge_requires_exact_two_ordered_parent_shas(self):
+        self.pr_context();path='commits/'+'a'*40
+        for commit in ({'sha':'a'*40,'parents':[{'sha':'b'*40},{'sha':'c'*40}]},
+                {'sha':'a'*40,'parents':[{'sha':'c'*40}]},
+                {'sha':'a'*40,'parents':[{'sha':'c'*40},{'sha':'b'*40},{'sha':'d'*40}]},
+                {'sha':'a'*40,'parents':[{'sha':'d'*40},{'sha':'b'*40}]},
+                {'sha':'d'*40,'parents':[{'sha':'c'*40},{'sha':'b'*40}]}):
+            with self.subTest(commit=commit):self.responses[path]=commit;self.rejected()
+
+    def test_pr_requires_current_single_association_and_head_base_ref_repositories(self):
+        self.pr_context();original=copy.deepcopy(self.run)
+        changes=[lambda r:r.update(pull_requests=[]),lambda r:r['pull_requests'].append(copy.deepcopy(r['pull_requests'][0])),
+            lambda r:r['pull_requests'][0].update(number=20),lambda r:r['pull_requests'][0].update(id=True),
+            lambda r:r['pull_requests'][0]['head'].update(sha='d'*40),
+            lambda r:r['pull_requests'][0]['base'].update(sha='d'*40),
+            lambda r:r['pull_requests'][0]['base']['repo'].update(id=101),
+            lambda r:r['pull_requests'][0]['head']['repo'].update(id=101),
+            lambda r:r['repository'].update(id=101),
+            lambda r:r.update(head_branch='foreign')]
+        for change in changes:
+            with self.subTest(change=change):
+                self.run=copy.deepcopy(original);change(self.run);self.refresh();self.rejected()
+
+    def test_pr_requires_exact_current_execution_environment_and_event(self):
+        self.pr_context();original=dict(self.env)
+        for key,value in [('GITHUB_EVENT_NAME','workflow_dispatch'),('GITHUB_REF','refs/pull/20/merge'),
+                ('GITHUB_REF','refs/pull/19/head'),('GITHUB_REF',True),('GITHUB_HEAD_REF','foreign'),('GITHUB_BASE_REF','other'),
+                ('GITHUB_SHA','d'*40),('GITHUB_RUN_ID','999'),('GITHUB_RUN_ATTEMPT','2')]:
+            with self.subTest(key=key):self.env=dict(original,**{key:value});self.rejected()
+        self.env=original
+        event=json.loads(self.event_path.read_bytes());event['pull_request']['base']['repo']['private']=True
+        self.event_path.write_text(json.dumps(event));self.rejected()
+
+    def test_pr_api_job_and_artifact_cannot_claim_unproven_merge_or_foreign_head(self):
+        self.pr_context();self.job['head_sha']='a'*40;self.refresh();self.rejected()
+        self.job['head_sha']='b'*40;self.artifact['workflow_run']['head_sha']='a'*40;self.refresh();self.rejected()
+
+    def test_pr_event_duplicate_bool_oversize_and_symlink_are_rejected(self):
+        event=self.pr_context();original=self.event_path.read_bytes()
+        controls=[b'{"number":19,"number":19}',b' '*(2*1024*1024+1)]
+        event['pull_request']['number']=True;controls.append(json.dumps(event).encode())
+        for raw in controls:
+            with self.subTest(raw=raw[:20]):self.event_path.write_bytes(raw);self.rejected()
+        self.event_path.write_bytes(original);link=self.root/'event-link.json';link.symlink_to(self.event_path)
+        self.env['GITHUB_EVENT_PATH']=str(link);self.rejected()
+
+    def test_push_cannot_use_pr_mapping_to_accept_a_different_api_head(self):
+        self.pr_context();self.run.update(event='push');self.refresh();self.rejected()
+
+    def test_store_source_cannot_use_pr_merge_mapping(self):
+        store,source,env=self.store_inputs();self.pr_context()
+        with self.assertRaises(ValueError):
+            self.module().download_store(store,source,'x64',self.output,backend=self.backend,env=env)
+        self.assertFalse(self.output.exists());self.assertFalse(self.output.with_name('mcp-qa-origin').exists())
 
     def test_server_digest_and_downloaded_size_must_match_before_extract(self):
         for changes in ({'digest':'sha256:'+'0'*64},{'size_in_bytes':len(self.archive)+1},

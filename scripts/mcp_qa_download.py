@@ -39,7 +39,7 @@ def require(value, message):
 class GitHub:
     """고정 저장소 GET만 허용하고 stdout/stderr를 크기·시간 상한 안에서 수집한다."""
     def _bytes(self, path, cap):
-        require(re.fullmatch(r'(?:actions/runs/[1-9][0-9]*(?:/attempts/[1-9][0-9]*/jobs\?per_page=100|/artifacts\?per_page=100)?|actions/artifacts/[1-9][0-9]*(?:/zip)?|commits/v[1-9][0-9]*\.[0-9]+\.[0-9]+(?:-dev\.[1-9][0-9]*\.[1-9][0-9]*)?)', path),
+        require(re.fullmatch(r'(?:actions/runs/[1-9][0-9]*(?:/attempts/[1-9][0-9]*/jobs\?per_page=100|/artifacts\?per_page=100)?|actions/artifacts/[1-9][0-9]*(?:/zip)?|commits/(?:[0-9a-f]{40}|v[1-9][0-9]*\.[0-9]+\.[0-9]+(?:-dev\.[1-9][0-9]*\.[1-9][0-9]*)?))', path),
                 '허용하지 않은 GitHub GET 경로입니다')
         command = ['gh','api','--method','GET',f'repos/{REPOSITORY}/{path}']
         process = subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -162,23 +162,81 @@ def _page(value, key):
     return value[key]
 
 
-def _run_jobs(binding, backend):
+def _pr_binding(binding, run, backend, env):
+    """현재 PR의 실제 checkout merge만 API head와 연결한다. Source SHA를 바꾸지 않는다."""
+    require(env.get('GITHUB_EVENT_NAME')=='pull_request'
+            and all(env.get(key)==binding[value] for key,value in (
+                ('GITHUB_REPOSITORY','repository'),('GITHUB_SHA','sourceCommit'),
+                ('GITHUB_RUN_ID','sourceRun'),('GITHUB_RUN_ATTEMPT','runAttempt'))),
+            'PR 연결은 현재 pull_request 실행에서만 허용합니다')
+    ref=env.get('GITHUB_REF')
+    require(isinstance(ref,str),'현재 PR merge ref는 문자열이어야 합니다')
+    match=re.fullmatch(r'refs/pull/([1-9][0-9]{0,19})/merge',ref)
+    require(match is not None,'현재 PR merge ref가 필요합니다')
+    path=env.get('GITHUB_EVENT_PATH')
+    require(isinstance(path,str) and 0<len(path)<=32768,'현재 bounded PR event가 필요합니다')
+    event=qa.strict_json(qa.read(Path(path),MAX_METADATA))
+    def obj(value):
+        require(isinstance(value,dict),'PR 신원 객체가 필요합니다');return value
+    def positive(value):
+        require(type(value) is int and 0<value<2**63,'PR/repository ID가 올바르지 않습니다');return value
+    event=obj(event);pr=obj(event.get('pull_request'));repo=obj(event.get('repository'))
+    number=positive(pr.get('number'));pr_id=positive(pr.get('id'));repo_id=positive(repo.get('id'))
+    require(type(event.get('number')) is int and event['number']==number==int(match[1])
+            and repo.get('full_name')==REPOSITORY and repo.get('private') is False
+            and type(run['repository'].get('id')) is int and run['repository']['id']==repo_id,
+            '현재 PR 번호/owned repository가 다릅니다')
+    rows=run.get('pull_requests')
+    require(isinstance(rows,list) and len(rows)==1,'현재 실행의 단일 PR API association이 필요합니다')
+    associated=obj(rows[0])
+    require(type(associated.get('id')) is int and associated['id']==pr_id
+            and type(associated.get('number')) is int and associated['number']==number,'실행 API의 PR 신원이 다릅니다')
+    observed={}
+    for role,env_ref in (('base','GITHUB_BASE_REF'),('head','GITHUB_HEAD_REF')):
+        actual=obj(pr.get(role));linked=obj(associated.get(role));side_repo=obj(actual.get('repo'))
+        linked_repo=obj(linked.get('repo'));side_id=positive(side_repo.get('id'))
+        value=actual.get('sha');branch=actual.get('ref')
+        require(isinstance(value,str) and re.fullmatch('[0-9a-f]{40}',value)
+                and isinstance(branch,str) and 0<len(branch)<=255 and not any(ord(c)<32 for c in branch)
+                and linked.get('sha')==value and linked.get('ref')==branch and env.get(env_ref)==branch
+                and type(linked_repo.get('id')) is int and linked_repo['id']==side_id
+                and side_repo.get('private') is False,'현재 PR head/base SHA·ref·repository가 다릅니다')
+        if role=='base':
+            require(side_id==repo_id and side_repo.get('full_name')==REPOSITORY,'PR base는 고정 owned repository여야 합니다')
+        observed[role]=(value,branch,side_id)
+    require(run.get('head_sha')==observed['head'][0] and run.get('head_branch')==observed['head'][1],
+            'PR 실행 API head/ref가 현재 event와 다릅니다')
+    merge=obj(backend.get('commits/'+binding['sourceCommit']));parents=merge.get('parents')
+    require(merge.get('sha')==binding['sourceCommit'] and isinstance(parents,list) and len(parents)==2
+            and all(isinstance(row,dict) for row in parents)
+            and [row.get('sha') for row in parents]==[observed['base'][0],observed['head'][0]],
+            '실제 checkout merge의 두 부모가 현재 PR base/head와 다릅니다')
+    return {'number':number,'id':pr_id,'mergeCommit':binding['sourceCommit'],'apiHeadCommit':observed['head'][0],
+            'baseCommit':observed['base'][0],'headRepositoryId':observed['head'][2],'baseRepositoryId':observed['base'][2]}
+
+
+def _run_jobs(binding, backend, *, env=None, allow_pr=False):
     run_id = binding['sourceRun']; attempt = int(binding['runAttempt'])
     run = backend.get('actions/runs/'+run_id)
     require(isinstance(run,dict) and type(run.get('id')) is int and str(run['id'])==run_id
             and type(run.get('run_attempt')) is int and run['run_attempt']==attempt
-            and run.get('head_sha')==binding['sourceCommit']
             and run.get('repository',{}).get('full_name')==REPOSITORY and run['repository'].get('private') is False
             and run.get('path')=='.github/workflows/msix.yml' and run.get('event') in ('push','pull_request','workflow_dispatch')
             and (run.get('status')=='in_progress' and run.get('conclusion') is None
                  or run.get('status')=='completed' and run.get('conclusion')=='success'),
             '실제 Source GitHub 실행·시도·workflow·결과가 다릅니다')
+    pr=None
+    if run['event']=='pull_request':
+        require(allow_pr,'Store QA는 PR Source를 재사용하지 않습니다')
+        pr=_pr_binding(binding,run,backend,os.environ if env is None else env)
+    else:
+        require(run.get('head_sha')==binding['sourceCommit'],'Source API와 checkout SHA가 다릅니다')
     _time(run.get('run_started_at'))
     jobs = _page(backend.get(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100'),'jobs')
-    return run,jobs
+    return run,jobs,pr
 
 
-def _artifact(value, binding, architecture, run, producer):
+def _artifact(value, binding, architecture, run, producer, pr=None):
     suffix = '-arm64' if architecture=='arm64' else ''
     require(isinstance(value,dict) and type(value.get('id')) is int and value['id']>0
             and value.get('name')=='opengeul-mcp-fixtures'+suffix+'-'+binding['sourceRun']
@@ -187,7 +245,7 @@ def _artifact(value, binding, architecture, run, producer):
             and re.fullmatch('sha256:[0-9a-f]{64}',value['digest'])
             and type(value.get('workflow_run',{}).get('id')) is int
             and str(value['workflow_run']['id'])==binding['sourceRun']
-            and value['workflow_run'].get('head_sha')==binding['sourceCommit'],
+            and value['workflow_run'].get('head_sha')==(pr['apiHeadCommit'] if pr else binding['sourceCommit']),
             '다른 실행·아키텍처·digest의 QA artifact입니다')
     created = _time(value.get('created_at')); updated = _time(value.get('updated_at'))
     require(_time(run['run_started_at'])<=_time(producer['started_at'])<=created<=updated<=_time(producer['completed_at']),
@@ -235,7 +293,7 @@ def _move_new(source, destination):
         raise ValueError('원자적 no-replace 게시를 지원하지 않는 호스트입니다')
 
 
-def _fetch(binding, wasm, architecture, output, origin, backend, run, jobs):
+def _fetch(binding, wasm, architecture, output, origin, backend, run, jobs, pr=None):
     producer_name = 'native-e2e (windows-11-arm)' if architecture=='arm64' else 'native-e2e (windows-2025)'
     candidates = [job for job in jobs if job.get('name')==producer_name]
     require(len(candidates)==1,'해당 QA 생산자의 성공 job이 정확히 하나여야 합니다')
@@ -243,12 +301,12 @@ def _fetch(binding, wasm, architecture, output, origin, backend, run, jobs):
     require(producer.get('status')=='completed' and producer.get('conclusion')=='success'
             and type(producer.get('run_id')) is int and str(producer['run_id'])==binding['sourceRun']
             and type(producer.get('run_attempt')) is int and str(producer['run_attempt'])==binding['runAttempt']
-            and producer.get('head_sha')==binding['sourceCommit'],'QA 생산자 결과·실행·attempt가 다릅니다')
+            and producer.get('head_sha')==(pr['apiHeadCommit'] if pr else binding['sourceCommit']),'QA 생산자 결과·실행·attempt가 다릅니다')
     name='opengeul-mcp-fixtures'+('-arm64' if architecture=='arm64' else '')+'-'+binding['sourceRun']
     matches=[item for item in _page(backend.get('actions/runs/'+binding['sourceRun']+'/artifacts?per_page=100'),'artifacts') if item.get('name')==name]
     require(len(matches)==1,'QA artifact 이름이 없거나 중복되어 재선택하지 않습니다')
-    selected=_artifact(matches[0],binding,architecture,run,producer)
-    fixed=_artifact(backend.get('actions/artifacts/'+str(selected['id'])),binding,architecture,run,producer)
+    selected=_artifact(matches[0],binding,architecture,run,producer,pr)
+    fixed=_artifact(backend.get('actions/artifacts/'+str(selected['id'])),binding,architecture,run,producer,pr)
     require(fixed==selected,'선택한 QA artifact가 다운로드 전에 변경되었습니다')
     raw=backend.zip(selected['id'])
     require(isinstance(raw,bytes) and 0<len(raw)<=MAX_ZIP and len(raw)==selected['size_in_bytes']
@@ -263,6 +321,7 @@ def _fetch(binding, wasm, architecture, output, origin, backend, run, jobs):
             'originalZip':{'name':'original.zip','bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()},
             'fixtureManifestSha256':qa.sha(payload/qa.MANIFEST),'helperSha256':qa.sha(Path(qa.__file__)),
             'publicQaOnly':True,'fullSourceQualified':False,'verifiedFiles':12}
+        if pr is not None:receipt['pullRequestBinding']=pr
         data=(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n').encode('utf-8')
         require(len(data)<=qa.MAX_JSON,'QA origin receipt 크기 상한을 초과했습니다')
         (proof/'receipt.json').write_bytes(data)
@@ -277,8 +336,8 @@ def _fetch(binding, wasm, architecture, output, origin, backend, run, jobs):
 def download_source(package_directory, output, *, backend=None, env=None):
     output,origin=_boundary(output,(package_directory,))
     binding,wasm,architecture=source_context(Path(package_directory),env)
-    backend=GitHub() if backend is None else backend;run,jobs=_run_jobs(binding,backend)
-    return _fetch(binding,wasm,architecture,output,origin,backend,run,jobs)
+    backend=GitHub() if backend is None else backend;run,jobs,pr=_run_jobs(binding,backend,env=env,allow_pr=True)
+    return _fetch(binding,wasm,architecture,output,origin,backend,run,jobs,pr)
 
 
 def download_store(store_directory, source_directory, architecture, output, *, backend=None, env=None):
@@ -298,7 +357,7 @@ def download_store(store_directory, source_directory, architecture, output, *, b
     provenance=pair['architectures'][architecture]['provenance'];binding,wasm=_binding(provenance)
     require(binding=={'repository':pair['repository'],'sourceCommit':pair['commit'],'sourceRun':pair['runId'],'runAttempt':pair['runAttempt']},
             '선택 아키텍처와 공통 Source 실행이 다릅니다')
-    backend=GitHub() if backend is None else backend;run,jobs=_run_jobs(binding,backend)
+    backend=GitHub() if backend is None else backend;run,jobs,_=_run_jobs(binding,backend,env=env)
     tag=details['sourceRelease'].rsplit('/',1)[1]
     tag_sha=backend.get('commits/'+tag).get('sha')
     store_package.authorize_release(tag,pair,run,tag_sha,jobs)
