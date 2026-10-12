@@ -303,13 +303,63 @@ class Transport:
             raise RuntimeError('고정 원본 artifact 전송에 실패했습니다') from None
 
 
+def failure_details(error):
+    """원문·locals·외부 경로 없이 이 파일의 실패 위치만 기록한다."""
+    allowed = {'ValueError', 'RuntimeError', 'KeyError', 'FileNotFoundError',
+        'PermissionError', 'UnicodeDecodeError', 'JSONDecodeError', 'BadZipFile',
+        'TimeoutExpired', 'OSError'}
+    name = type(error).__name__
+    frames = []
+    trace = error.__traceback__
+    while trace is not None and len(frames) < 12:
+        code = trace.tb_frame.f_code
+        if code.co_filename == __file__ and re.fullmatch('[A-Za-z_][A-Za-z_0-9]*', code.co_name):
+            frames.append({'function': code.co_name, 'line': trace.tb_lineno})
+        trace = trace.tb_next
+    return {'exceptionType': name if name in allowed else 'Exception', 'frames': frames}
+
+
+def context_diagnostics(env, event):
+    """정책을 변경하지 않고 고정 키의 일치 여부와 입력 형태만 보고한다."""
+    expected={'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'github-hosted','GITHUB_REPOSITORY':'ATLKR/OpenGeul',
+        'GITHUB_ACTOR':'ATLKR','GITHUB_TRIGGERING_ACTOR':'ATLKR','GITHUB_EVENT_NAME':'workflow_dispatch',
+        'GITHUB_RUN_ATTEMPT':'1','GITHUB_REF':'refs/heads/diagnostic/archive-next-conditional',
+        'GITHUB_WORKFLOW_REF':'ATLKR/OpenGeul/.github/workflows/store-package.yml@refs/heads/diagnostic/archive-next-conditional'}
+    event = event if isinstance(event, dict) else {}
+    repository = event.get('repository')
+    repository = repository if isinstance(repository, dict) else {}
+    shape = ('missing' if 'inputs' not in event else 'null' if event['inputs'] is None else
+        'empty_object' if isinstance(event['inputs'], dict) and not event['inputs'] else
+        'nonempty_object' if isinstance(event['inputs'], dict) else 'other')
+    return {'environmentMatches': {key: env.get(key) == value for key, value in expected.items()},
+        'runIdValid': bool(re.fullmatch('[1-9][0-9]*', env.get('GITHUB_RUN_ID', ''))),
+        'tokensMatch': bool(env.get('GH_TOKEN') and env.get('GITHUB_TOKEN')
+            and hmac.compare_digest(env['GH_TOKEN'], env['GITHUB_TOKEN'])),
+        'repositoryMatches': repository.get('full_name') == 'ATLKR/OpenGeul',
+        'repositoryPublic': repository.get('private') is False, 'inputsShape': shape}
+
+
+def failure_receipt(error):
+    result = {'status': 'failed', 'published': False, 'sourceQualified': False,
+        'diagnosticOnly': True, 'failure': failure_details(error)}
+    try:
+        with Path(os.environ['GITHUB_EVENT_PATH']).open('rb') as stream:
+            raw = stream.read(2*1024*1024+1)
+        require(len(raw) <= 2*1024*1024)
+        result['context'] = context_diagnostics(os.environ, strict_json(raw))
+    except Exception:
+        result['contextUnavailable'] = True
+    return result
+
+
 if __name__=='__main__':
     try:
         result=main()
         Path('archive-next-transfer-receipt.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
         print(json.dumps(result,ensure_ascii=False))
-    except Exception:
-        Path('archive-next-transfer-receipt.json').write_text(json.dumps({'status':'failed',
-            'published':False,'sourceQualified':False,'diagnosticOnly':True})+'\n')
+    except Exception as error:
+        result = failure_receipt(error)
+        Path('archive-next-transfer-receipt.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+        print(json.dumps(result,ensure_ascii=False),file=sys.stderr)
         print('보관 전송 준비 상태: 미확정 핀 또는 미연결 실행 경로로 거부했습니다.',file=sys.stderr)
         sys.exit(1)
