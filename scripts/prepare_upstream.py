@@ -1,9 +1,11 @@
 """Fetch exact public upstream versions, then apply OpenGeul overlays. Never resets user files."""
 from __future__ import annotations
 import argparse
+import fnmatch
 import json
 import hashlib
 import os
+import posixpath
 from pathlib import Path
 import re
 import shutil
@@ -28,6 +30,136 @@ def run(*args: str, cwd: Path) -> str:
 
 def replace_file(path: Path, old: str, new: str, expected: int = 1, *, newline: str | None = None) -> None:
     path.write_text(replace_once(path.read_text(encoding='utf-8'),old,new,expected=expected),encoding='utf-8',newline=newline)
+
+
+def checkout_rhwp(destination: Path, repository: str, commit: str) -> None:
+    """고정 소스·샘플·시험 입력을 유지하고 대용량 개발 참조만 제외한다."""
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise ValueError('rhwp checkout requires an exact commit')
+    if destination.exists() and any(destination.iterdir()):
+        raise ValueError('Refusing to overwrite a nonempty rhwp checkout')
+    destination.mkdir(parents=True, exist_ok=True)
+    run('git', 'init', '--quiet', str(destination), cwd=ROOT)
+    run('git', 'config', 'core.autocrlf', 'false', cwd=destination)
+    run('git', 'config', 'core.longpaths', 'true', cwd=destination)
+    run('git', 'remote', 'add', 'origin', repository, cwd=destination)
+    run('git', 'fetch', '--filter=blob:none', '--depth=1', 'origin', commit, cwd=destination)
+    if run('git', 'rev-parse', 'FETCH_HEAD', cwd=destination) != commit:
+        raise ValueError('rhwp fetched commit does not match the lock')
+    directories = run('git', 'ls-tree', '-d', '-z', '--name-only', 'FETCH_HEAD', cwd=destination).split('\0')
+    selected = [name for name in directories if name and name not in ('mydocs', 'pdf', 'tools')]
+    manual = run('git', 'ls-tree', '-d', '-z', '--name-only', 'FETCH_HEAD:mydocs', cwd=destination).split('\0')
+    selected += ['mydocs/' + name for name in manual if name and name not in ('pr', 'report')]
+    # Cargo resolves every workspace member before building a selected target.
+    # Tools are not uniformly reference data: retain their required source and
+    # local dependency closure, even when those directories are otherwise sparse.
+    selected += cargo_source_directories(destination, 'FETCH_HEAD')
+    if any('\n' in name or '\r' in name for name in selected):
+        raise ValueError('Unsupported upstream directory name')
+    run('git', 'sparse-checkout', 'init', '--cone', cwd=destination)
+    subprocess.run(['git', 'sparse-checkout', 'set', '--stdin'], cwd=destination,
+                   input='\n'.join(selected) + '\n', text=True, encoding='utf-8', check=True)
+    run('git', 'checkout', '--detach', 'FETCH_HEAD', cwd=destination)
+    restore_compile_inputs(destination)
+
+
+def cargo_source_directories(source: Path, revision: str) -> list[str]:
+    tracked = set(run('git', 'ls-tree', '-r', '-z', '--name-only', revision, cwd=source).split('\0'))
+    manifests = {name for name in tracked if name == 'Cargo.toml' or name.endswith('/Cargo.toml')}
+    if 'Cargo.toml' not in manifests:
+        raise ValueError('Pinned rhwp source has no root Cargo manifest')
+    queue = ['Cargo.toml']
+    seen = set()
+    target_directories = set()
+
+    def dependency_tables(value):
+        for key, table in value.items():
+            if not isinstance(table, dict):
+                continue
+            if key in ('dependencies', 'build-dependencies', 'dev-dependencies'):
+                yield table
+            else:
+                yield from dependency_tables(table)
+
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        if name not in manifests:
+            raise ValueError('Missing local Cargo manifest: ' + name)
+        seen.add(name)
+        size = int(run('git', 'cat-file', '-s', revision + ':' + name, cwd=source))
+        if not 0 < size <= 1024 * 1024:
+            raise ValueError('Cargo manifest exceeds the source inspection bound')
+        value = tomllib.loads(run('git', 'show', revision + ':' + name, cwd=source))
+        directory = posixpath.dirname(name)
+        for member in value.get('workspace', {}).get('members', []):
+            pattern = posixpath.normpath(posixpath.join(directory, member))
+            matches = [path for path in manifests if fnmatch.fnmatchcase(posixpath.dirname(path) or '.', pattern)]
+            if not matches:
+                raise ValueError('Missing Cargo workspace member: ' + pattern)
+            queue.extend(matches)
+        for table in dependency_tables(value):
+            for dependency in table.values():
+                if not isinstance(dependency, dict) or 'path' not in dependency:
+                    continue
+                path = dependency['path']
+                if not isinstance(path, str) or '\\' in path or posixpath.isabs(path):
+                    raise ValueError('Unsupported local Cargo dependency path')
+                path = posixpath.normpath(posixpath.join(directory, path))
+                if path == '..' or path.startswith('../'):
+                    raise ValueError('Cargo dependency escapes the upstream checkout')
+                queue.append(posixpath.normpath(posixpath.join(path, 'Cargo.toml')))
+        # Explicit Cargo target paths may point outside the member directory.
+        for kind in ('bin', 'test', 'bench', 'example'):
+            for target in value.get(kind, []):
+                if not isinstance(target, dict) or 'path' not in target:
+                    continue
+                path = posixpath.normpath(posixpath.join(directory, target['path']))
+                if path == '..' or path.startswith('../') or posixpath.isabs(path):
+                    raise ValueError('Cargo target source escapes the checkout: ' + path)
+                # Some original targets are generated by upstream scripts and
+                # are absent even in a complete Git checkout. Keep that original
+                # build contract; sparse checkout must retain all tracked ones.
+                if path not in tracked:
+                    continue
+                parent = posixpath.dirname(path)
+                if parent:
+                    target_directories.add(parent)
+    return sorted({posixpath.dirname(name) for name in seen if posixpath.dirname(name)} | target_directories)
+
+
+def restore_compile_inputs(source: Path) -> None:
+    """희소 경로의 literal include 입력도 원래 Git blob으로 복원한다."""
+    names = run('git', 'ls-files', '-z', '*.rs', cwd=source).split('\0')
+    for name in names:
+        rust = source / name
+        if not name or not rust.is_file():
+            continue
+        text = rust.read_text(encoding='utf-8')
+        for relative in re.findall(r'\binclude_(?:bytes|str)!\s*\(\s*"([^"\n]+)"', text):
+            if '\\' in relative:
+                raise ValueError('Unsupported escaped Rust include input')
+            target = (rust.parent / relative).resolve()
+            try:
+                path = target.relative_to(source.resolve()).as_posix()
+            except ValueError:
+                raise ValueError('Rust include input escapes the upstream checkout') from None
+            if target.is_file():
+                continue
+            # A missing fixture is a preparation failure, never a skipped test.
+            try:
+                size = int(run('git', 'cat-file', '-s', 'HEAD:' + path, cwd=source))
+                kind = run('git', 'cat-file', '-t', 'HEAD:' + path, cwd=source)
+            except subprocess.CalledProcessError:
+                raise ValueError('Missing tracked Rust include input: ' + path) from None
+            if kind != 'blob' or not 0 <= size <= 64 * 1024 * 1024:
+                raise ValueError('Unsupported Rust include input: ' + path)
+            data = subprocess.check_output(['git', 'show', 'HEAD:' + path], cwd=source)
+            if len(data) != size:
+                raise ValueError('Rust include blob size changed')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
 
 
 def install_store_updates(source: Path) -> None:
@@ -222,7 +354,11 @@ def main() -> None:
         run('git','remote','add','origin',lock['hop']['repository'],cwd=dest)
         run('git','-c','core.autocrlf=false','fetch','--depth=1','origin',lock['hop']['commit'],cwd=dest)
         run('git','-c','core.autocrlf=false','checkout','--detach','FETCH_HEAD',cwd=dest)
-        run('git','-c','core.longpaths=true','-c','core.autocrlf=false','submodule','update','--init','--depth=1','--recursive',cwd=dest)
+        # The locked rhwp tree contains gigabytes of development screenshots and
+        # reference PDFs. Native ARM runners have 14 GiB; retain all source,
+        # samples, tests and literal compile inputs without fetching those blobs.
+        run('git', 'submodule', 'init', 'third_party/rhwp', cwd=dest)
+        checkout_rhwp(dest/'third_party/rhwp', lock['rhwp']['repository'], lock['rhwp']['commit'])
     if run('git','rev-parse','HEAD',cwd=dest)!=lock['hop']['commit']:raise ValueError('HOP commit mismatch')
     if run('git','rev-parse','HEAD',cwd=dest/'third_party/rhwp')!=lock['rhwp']['commit']:raise ValueError('rhwp submodule mismatch')
     if not args.patch_only:port_windows_contract_test(dest)

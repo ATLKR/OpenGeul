@@ -89,7 +89,7 @@ pub fn layer_trees_to_pdf_with_links(
         self.assertEqual(doc.findtext('.//{http://schemas.microsoft.com/SMI/2016/WindowsSettings}dpiAwareness'), 'PerMonitorV2')
         self.assertEqual(doc[0].tag, '{urn:schemas-microsoft-com:asm.v1}assemblyIdentity')
         self.assertEqual(doc[0].attrib, {'type': 'win32', 'name': 'AllenLabs.OpenGeul',
-            'version': '1.1.2.0', 'processorArchitecture': 'amd64'})
+            'version': '1.1.2.0', 'processorArchitecture': '*'})
         controls = doc.find('{urn:schemas-microsoft-com:asm.v1}dependency/{urn:schemas-microsoft-com:asm.v1}dependentAssembly/{urn:schemas-microsoft-com:asm.v1}assemblyIdentity')
         self.assertEqual(controls.attrib, {'type': 'win32', 'name': 'Microsoft.Windows.Common-Controls',
             'version': '6.0.0.0', 'processorArchitecture': '*', 'publicKeyToken': '6595b64144ccf1df', 'language': '*'})
