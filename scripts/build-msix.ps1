@@ -14,6 +14,52 @@ $env:PYTHONUTF8 = '1'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 if (-not $IsWindows) { throw 'Native builds require Windows.' }
+function Set-EditorCargoParallelism {
+    # 새 컴파일을 시작할 때만 재측정한다. 실행 중 Cargo의 jobserver는 변경하지 않는다.
+    $processorCount = [Environment]::ProcessorCount
+    $totalMemory = 0; $availableMemory = 0; $cpuBusy = -1
+    try {
+        # 언어 독립 raw counter의 새 1초 구간만 사용한다. 지난 컴파일의 부하 값은 재사용하지 않는다.
+        $before = @(Get-CimInstance Win32_PerfRawData_PerfOS_Processor -Filter "Name='_Total'" -OperationTimeoutSec 5 -ErrorAction Stop)
+        Start-Sleep -Milliseconds 1000
+        $after = @(Get-CimInstance Win32_PerfRawData_PerfOS_Processor -Filter "Name='_Total'" -OperationTimeoutSec 5 -ErrorAction Stop)
+        [long]$idleBefore = 0; [long]$idleAfter = 0; [long]$tickBefore = 0; [long]$tickAfter = 0
+        if ($before.Count -ne 1 -or $after.Count -ne 1 -or
+            -not [long]::TryParse([string]$before[0].PercentProcessorTime, [ref]$idleBefore) -or
+            -not [long]::TryParse([string]$after[0].PercentProcessorTime, [ref]$idleAfter) -or
+            -not [long]::TryParse([string]$before[0].Timestamp_Sys100NS, [ref]$tickBefore) -or
+            -not [long]::TryParse([string]$after[0].Timestamp_Sys100NS, [ref]$tickAfter) -or
+            $idleBefore -lt 0 -or $tickBefore -lt 0 -or $tickAfter -le $tickBefore -or
+            $idleAfter -lt $idleBefore -or ($idleAfter-$idleBefore) -gt ($tickAfter-$tickBefore)) { throw 'Invalid CPU interval.' }
+        $cpuBusy = [int][Math]::Ceiling(100 * (1 - [decimal]($idleAfter-$idleBefore) / ($tickAfter-$tickBefore)))
+        $systems = @(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop)
+        $processors = @(Get-CimInstance Win32_Processor -OperationTimeoutSec 5 -ErrorAction Stop)
+        [long]$totalKiB = 0; [long]$availableKiB = 0
+        if ($systems.Count -ne 1 -or
+            -not [long]::TryParse([string]$systems[0].TotalVisibleMemorySize, [ref]$totalKiB) -or
+            -not [long]::TryParse([string]$systems[0].FreePhysicalMemory, [ref]$availableKiB) -or
+            $totalKiB -lt 1 -or $availableKiB -lt 0 -or $availableKiB -gt $totalKiB) { throw 'Invalid memory observation.' }
+        $logicalCount = 0
+        foreach ($processor in $processors) {
+            [int]$cores = 0
+            if (-not [int]::TryParse([string]$processor.NumberOfLogicalProcessors, [ref]$cores) -or
+                $cores -lt 1) { throw 'Invalid CPU observation.' }
+            $logicalCount += $cores
+        }
+        if ($logicalCount -lt 1) { throw 'Missing CPU observation.' }
+        $processorCount = $logicalCount
+        $totalMemory = $totalKiB * 1024; $availableMemory = $availableKiB * 1024
+        $decision = python (Join-Path $root 'ci/build_progress.py') jobs --cpu $processorCount --total-memory $totalMemory --available-memory $availableMemory --cpu-busy $cpuBusy --json | ConvertFrom-Json
+        if (($decision.jobs -isnot [int] -and $decision.jobs -isnot [long]) -or
+            $decision.jobs -lt 1 -or $decision.jobs -gt [Math]::Min($processorCount,4) -or
+            $decision.reason -notin @('singleCore','cpuUnavailable','cpuBusy','cpuLimited','memoryLimited','headroom')) { throw 'Invalid resource decision.' }
+        $buildJobs = $decision.jobs; $reason = $decision.reason
+    } catch {
+        $buildJobs = [Math]::Min([Environment]::ProcessorCount, 2); $reason = 'observationUnavailable'
+    }
+    $env:CARGO_BUILD_JOBS = [string]$buildJobs
+    Write-Host "빌드 자원 재측정: CPU=$processorCount; CPU busy=$cpuBusy%; RAM bytes=$totalMemory; 여유 RAM bytes=$availableMemory; cargo jobs=$buildJobs; reason=$reason."
+}
 if ($EditorStage -ne 'All' -and $Phase -ne 'Editor') { throw 'Editor stages require the Editor phase.' }
 $prepareEditor = $Phase -ne 'Editor' -or $EditorStage -in @('All','Prepare')
 $editorTests = $Phase -in @('All','Editor') -and $EditorStage -in @('All','NativeTests')
@@ -62,21 +108,10 @@ $env:RUSTUP_TOOLCHAIN = "$($lock.rust)-$target"
 $env:CARGO_TARGET_DIR = Join-Path $root '.work/target'
 $editorTarget = $env:CARGO_TARGET_DIR
 $cliTarget = Join-Path $root '.work/target-cli'
-$processorCount = [Environment]::ProcessorCount
-try {
-    $memory = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-    $totalMemory = [long]$memory.TotalVisibleMemorySize * 1024
-    $availableMemory = [long]$memory.FreePhysicalMemory * 1024
-    $buildJobs = python ci/build_progress.py jobs --cpu $processorCount --total-memory $totalMemory --available-memory $availableMemory
-} catch {
-    $totalMemory = 0; $availableMemory = 0
-    $buildJobs = [Math]::Min($processorCount, 2)
-}
-$env:CARGO_BUILD_JOBS = [string]$buildJobs
-Write-Host "빌드 자원: CPU=$processorCount; RAM bytes=$totalMemory; 여유 RAM bytes=$availableMemory; cargo jobs=$buildJobs (전체 14 GiB·여유 12 GiB 이상에서 최대 4)."
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
 $env:CARGO_PROFILE_TEST_DEBUG = '0'
 if ($prepareEditor) {
+Set-EditorCargoParallelism
 rustc --target $target --edition=2021 --test overlay/font_policy.rs -o .work/font-policy-tests.exe
 & .work/font-policy-tests.exe
 corepack enable
@@ -120,7 +155,9 @@ try {
     Push-Location 'third_party/rhwp'
     try {
         $env:CARGO_TARGET_DIR = $cliTarget
+        Set-EditorCargoParallelism
         cargo test --locked --target $target --test opengeul_table_height
+        Set-EditorCargoParallelism
         cargo test --locked --target $target --package rhwp --test opengeul_pdf_policy --features native-skia
     } finally {
         $env:CARGO_TARGET_DIR = $editorTarget
@@ -128,17 +165,24 @@ try {
     }
     Push-Location 'apps/desktop/src-tauri'
     try {
+        Set-EditorCargoParallelism
         cargo test --locked --target $target
+        Set-EditorCargoParallelism
         cargo test --locked --target $target --package opengeul-native-open
+        Set-EditorCargoParallelism
         cargo run --locked --target $target --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
     } finally { Pop-Location }
     }
-    if ($editorRelease) { pnpm tauri build --no-bundle --target $target }
+    if ($editorRelease) {
+        Set-EditorCargoParallelism
+        pnpm tauri build --no-bundle --target $target
+    }
     if ($Phase -in @('All','Cli')) {
     Push-Location 'third_party/rhwp'
     try {
         # cdylib/rlib outputs must not collide with the editor's different feature graph.
         $env:CARGO_TARGET_DIR = $cliTarget
+        Set-EditorCargoParallelism
         cargo build --release --locked --target $target --package rhwp --bin rhwp --features native-skia
     } finally {
         $env:CARGO_TARGET_DIR = $editorTarget

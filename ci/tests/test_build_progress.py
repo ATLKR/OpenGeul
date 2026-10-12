@@ -53,12 +53,40 @@ class BuildProgressTests(unittest.TestCase):
                 (4, 14*gib, 12*gib, 4), (4, 14*gib-1, 12*gib, 2),
                 (4, 16*gib, 12*gib-1, 2), (4, 8*gib, 4*gib, 2)]:
             with self.subTest(cpu=cpu,total=total,available=available):
-                self.assertEqual(progress.select_jobs(cpu, total, available), expected)
+                self.assertEqual(progress.select_jobs(cpu, total, available, 0), expected)
 
     def test_jobs_reject_noninteger_and_impossible_host_reports(self):
         for values in [(True, 20, 10), (4, True, 0), (4, 20, 1.0), (0, 20, 10),
                        (4, -1, 0), (4, 10, 11), ('4', 20, 10)]:
             with self.subTest(values=values), self.assertRaises(ValueError): progress.select_jobs(*values)
+
+    def test_new_invocation_scales_two_four_two_when_memory_becomes_free_then_busy(self):
+        gib = 1024 ** 3
+        observations = [(4, 16*gib, 8*gib, 10), (4, 16*gib, 13*gib, 10),
+                        (4, 16*gib, 13*gib, 26), (4, 16*gib, 13*gib, 75)]
+        self.assertEqual([progress.select_jobs(*value) for value in observations], [2, 4, 2, 1])
+
+    def test_headroom_and_unknown_cpu_are_bounded_and_reasons_are_controlled(self):
+        gib = 1024 ** 3
+        cases = [(4,16*gib,13*gib,25,4,'headroom'), (4,16*gib,13*gib,26,2,'cpuLimited'),
+                 (4,16*gib,13*gib,75,1,'cpuBusy'), (1,16*gib,13*gib,0,1,'singleCore'),
+                 (4,16*gib,11*gib,0,2,'memoryLimited'), (4,16*gib,13*gib,None,2,'cpuUnavailable')]
+        for cpu,total,available,busy,jobs,reason in cases:
+            with self.subTest(busy=busy, cpu=cpu, available=available):
+                self.assertEqual(progress.resource_decision(cpu,total,available,busy), {'jobs':jobs,'reason':reason})
+        for busy in (True,1.0,'0',-1,101):
+            with self.subTest(busy=busy), self.assertRaises(ValueError):
+                progress.select_jobs(4,16*gib,13*gib,busy)
+
+    def test_each_native_compile_reobserves_resources_without_changing_original_arguments(self):
+        source = (Path(__file__).resolve().parents[2]/'scripts/build-msix.ps1').read_text()
+        lines = [line.strip() for line in source.splitlines()]
+        commands = [line for line in lines if line.startswith(('cargo ', 'rustc '))]
+        self.assertEqual(len(commands), 7)
+        for index, line in enumerate(lines):
+            if line.startswith(('cargo ', 'rustc ', 'pnpm tauri build ')):
+                self.assertEqual(lines[index-1], 'Set-EditorCargoParallelism')
+        self.assertEqual(source.count('Set-EditorCargoParallelism\n'), 8)
 
     def test_native_and_release_require_previous_success_before_process_launch(self):
         for stage in ('NativeTests', 'Release'):

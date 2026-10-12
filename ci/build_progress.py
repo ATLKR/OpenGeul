@@ -19,11 +19,21 @@ MAX_LOG = MAX_TOTAL - 4096
 GIB = 1024 ** 3
 
 
-def select_jobs(cpu, total, available):
+def resource_decision(cpu, total, available, cpu_busy=None):
     if (any(type(v) is not int for v in (cpu, total, available)) or cpu < 1
-            or total < 0 or not 0 <= available <= total):
+            or total < 0 or not 0 <= available <= total
+            or cpu_busy is not None and (type(cpu_busy) is not int or not 0 <= cpu_busy <= 100)):
         raise ValueError('잘못된 CPU·메모리 관측입니다')
-    return min(cpu, 4) if cpu >= 4 and total >= 14*GIB and available >= 12*GIB else min(cpu, 2)
+    if cpu == 1: return {'jobs': 1, 'reason': 'singleCore'}
+    if cpu_busy is None: return {'jobs': min(cpu, 2), 'reason': 'cpuUnavailable'}
+    if cpu_busy >= 75: return {'jobs': 1, 'reason': 'cpuBusy'}
+    if cpu_busy > 25 or cpu < 4: return {'jobs': min(cpu, 2), 'reason': 'cpuLimited'}
+    if total < 14*GIB or available < 12*GIB: return {'jobs': 2, 'reason': 'memoryLimited'}
+    return {'jobs': 4, 'reason': 'headroom'}
+
+
+def select_jobs(cpu, total, available, cpu_busy=None):
+    return resource_decision(cpu, total, available, cpu_busy)['jobs']
 
 
 def build_command(stage, architecture):
@@ -167,11 +177,15 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     jobs = commands.add_parser('jobs')
     for key in ('cpu', 'total-memory', 'available-memory'): jobs.add_argument('--'+key, type=int, required=True)
+    jobs.add_argument('--cpu-busy', type=int)
+    jobs.add_argument('--json', action='store_true')
     for mode in ('run', 'verify'):
         item = commands.add_parser(mode); item.add_argument('--stage', choices=STAGES, required=True)
         item.add_argument('--architecture', choices=('x64', 'arm64'), required=True)
     args = parser.parse_args()
-    if args.command == 'jobs': print(select_jobs(args.cpu, args.total_memory, args.available_memory))
+    if args.command == 'jobs':
+        decision = resource_decision(args.cpu, args.total_memory, args.available_memory, args.cpu_busy)
+        print(json.dumps(decision, separators=(',', ':')) if args.json else decision['jobs'])
     elif args.command == 'verify': verify_stage(args.stage, args.architecture)
     else:
         if os.name != 'nt': raise ValueError('실제 빌드 실행은 Windows 전용입니다')
