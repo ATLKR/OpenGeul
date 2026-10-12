@@ -190,13 +190,90 @@ fn dispatch(args: Vec<String>) {
 }
 
 #[cfg(windows)]
+fn bootstrap_failure(error: &std::io::Error) -> std::io::Result<()> {
+    use std::io::Write;
+    use windows::Win32::{
+        Foundation::*,
+        System::{SystemInformation::*, Threading::*},
+    };
+    // 컴파일한 dev manifest의 repo root만 사용한다. 환경 변수/argv/private header는 기록하지 않는다.
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("com-smoke");
+    if !directory.is_dir() || directory.is_symlink() {
+        return Ok(());
+    }
+    let mut process = IMAGE_FILE_MACHINE::default();
+    let mut native = IMAGE_FILE_MACHINE::default();
+    unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, Some(&mut native)) }
+        .map_err(std::io::Error::other)?;
+    let mut birth = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut birth,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .map_err(std::io::Error::other)?;
+    let birth = ((birth.dwHighDateTime as u64) << 32) | birth.dwLowDateTime as u64;
+    let pid = unsafe { GetCurrentProcessId() };
+    let message = error.to_string();
+    let operations = [
+        "worker stdin CreateFileW",
+        "worker stdin GetNamedPipeServerProcessId",
+        "worker stdout CreateFileW",
+        "worker stdout GetNamedPipeServerProcessId",
+        "worker stderr CreateFileW",
+        "worker stderr GetNamedPipeServerProcessId",
+    ];
+    let operation = operations
+        .into_iter()
+        .find(|operation| message.starts_with(operation))
+        .unwrap_or("bootstrap (unclassified)");
+    let hresult = message
+        .split_once("HRESULT 0x")
+        .and_then(|(_, suffix)| suffix.get(..8))
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+    let record = serde_json::json!({"formatVersion":1,"diagnosticOnly":true,"qualification":false,
+        "phase":"serve_if_requested","operation":operation,"errorKind":format!("{:?}",error.kind()),
+        "win32Error":error.raw_os_error(),"hresult":hresult,"workerPid":pid,
+        "workerCreationTime":birth,"processMachine":process.0,"nativeMachine":native.0});
+    let bytes = serde_json::to_vec(&record).map_err(std::io::Error::other)?;
+    if bytes.len() > 4096 {
+        return Err(std::io::Error::other(
+            "고정 bootstrap 진단 상한을 초과했습니다.",
+        ));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join(format!("bootstrap-failure-{pid}-{birth}.json")))?;
+    file.write_all(&bytes)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn main() {
     use opengeul_com_worker::{run_cli, serve_if_requested};
     // Rust stdio 접근보다 먼저 SCM bootstrap을 분기한다.
     match serve_if_requested(dispatch) {
         Ok(true) => return,
         Ok(false) => {}
-        Err(_) => std::process::exit(1),
+        Err(error) => {
+            let _ = bootstrap_failure(&error);
+            std::process::exit(1);
+        }
     }
     let exe = std::env::current_exe().unwrap();
     let parent = identity();

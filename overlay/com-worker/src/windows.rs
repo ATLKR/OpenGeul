@@ -44,6 +44,15 @@ fn win_at(operation: &'static str, error: windows::core::Error) -> io::Error {
     let kind = win(error).kind();
     io::Error::new(kind, format!("{operation} 실패 (HRESULT 0x{code:08x})"))
 }
+fn pipe_error(operation: &'static str, process: &Handle, error: io::Error) -> io::Error {
+    // 아직 nonce ACK 전인 handle은 관측만 한다. 종료/입력/소유권 승격을 하지 않는다.
+    let mut exit = 0;
+    let exit = unsafe { GetExitCodeProcess(process.0, &mut exit) }
+        .ok()
+        .map(|_| exit);
+    let pid = unsafe { GetProcessId(process.0) };
+    io::Error::new(error.kind(), format!("문서 작업자 연결 단계({operation}) 실패; workerPid={pid}; workerExitCode={exit:?}; {error}"))
+}
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
@@ -576,7 +585,10 @@ impl Pipe {
             }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "문서 작업자 연결 시간이 초과되었습니다.",
+                format!(
+                    "문서 작업자 연결 시간이 초과되었습니다. wait=0x{:08x}",
+                    wait.0
+                ),
             ));
         }
         unsafe {
@@ -1338,18 +1350,28 @@ pub fn run_cli(
         .map_err(|_| fail("작업자 연결 정보를 만들지 못했습니다."))?;
     invoke(&object, BEGIN_DISPID, DISPATCH_METHOD, Some(&bootstrap))?;
     let deadline = Instant::now() + Duration::from_secs(BOOTSTRAP_SECONDS);
-    input.connect(pid, deadline)?;
-    output.connect(pid, deadline)?;
-    error.connect(pid, deadline)?;
+    input
+        .connect(pid, deadline)
+        .map_err(|error| pipe_error("parent stdin connect", &process, error))?;
+    output
+        .connect(pid, deadline)
+        .map_err(|error| pipe_error("parent stdout connect", &process, error))?;
+    error
+        .connect(pid, deadline)
+        .map_err(|error| pipe_error("parent stderr connect", &process, error))?;
     // PID property는 아직 신뢰하지 않는다. 세 pipe와 nonce ACK를 확인한 후에만 종료 권한을 행사한다.
     let mut length = [0u8; 4];
-    output.read_exact(&mut length, deadline)?;
+    output
+        .read_exact(&mut length, deadline)
+        .map_err(|error| pipe_error("parent stdout ACK length", &process, error))?;
     let length = u32::from_le_bytes(length) as usize;
     if length == 0 || length > 4096 {
         return Err(fail("작업자 인증 응답 크기가 올바르지 않습니다."));
     }
     let mut ack = vec![0u8; length];
-    output.read_exact(&mut ack, deadline)?;
+    output
+        .read_exact(&mut ack, deadline)
+        .map_err(|error| pipe_error("parent stdout ACK data", &process, error))?;
     if ack != bootstrap.as_bytes() {
         return Err(fail("작업자 인증 응답이 현재 작업과 다릅니다."));
     }
@@ -1367,8 +1389,12 @@ pub fn run_cli(
     }
     let stdout = thread::spawn(move || output.read_all());
     let stderr = thread::spawn(move || error.read_all());
-    input.write_all(&(header.len() as u32).to_le_bytes(), Some(deadline))?;
-    input.write_all(&header, Some(deadline))?;
+    input
+        .write_all(&(header.len() as u32).to_le_bytes(), Some(deadline))
+        .map_err(|error| pipe_error("parent stdin header length", &worker.process, error))?;
+    input
+        .write_all(&header, Some(deadline))
+        .map_err(|error| pipe_error("parent stdin header data", &worker.process, error))?;
     // stdin payload 실패는 기존 write_all 계약처럼 종료 상태와 stderr로 판정한다.
     if let Some(data) = stdin_payload {
         let _ = input.write_all(data, None);
@@ -1391,7 +1417,22 @@ pub fn run_cli(
     })
 }
 
-fn client_pipe(name: &str, read: bool, parent: u32) -> io::Result<Handle> {
+fn client_pipe(name: &str, read: bool, parent: u32, role: &'static str) -> io::Result<Handle> {
+    let (open, query) = match role {
+        "stdin" => (
+            "worker stdin CreateFileW",
+            "worker stdin GetNamedPipeServerProcessId",
+        ),
+        "stdout" => (
+            "worker stdout CreateFileW",
+            "worker stdout GetNamedPipeServerProcessId",
+        ),
+        "stderr" => (
+            "worker stderr CreateFileW",
+            "worker stderr GetNamedPipeServerProcessId",
+        ),
+        _ => return Err(fail("알 수 없는 작업자 채널입니다.")),
+    };
     let handle = unsafe {
         CreateFileW(
             PCWSTR(wide(name).as_ptr()),
@@ -1406,12 +1447,12 @@ fn client_pipe(name: &str, read: bool, parent: u32) -> io::Result<Handle> {
             FILE_ATTRIBUTE_NORMAL,
             None,
         )
-        .map_err(win)?
+        .map_err(|error| win_at(open, error))?
     };
     let handle = Handle::new(handle)?;
     let mut pid = 0;
     unsafe {
-        GetNamedPipeServerProcessId(handle.0, &mut pid).map_err(win)?;
+        GetNamedPipeServerProcessId(handle.0, &mut pid).map_err(|error| win_at(query, error))?;
     }
     if pid != parent {
         return Err(fail("작업자 pipe의 부모 프로세스가 다릅니다."));
@@ -1547,9 +1588,19 @@ pub fn serve_if_requested(dispatch: fn(Vec<String>)) -> io::Result<bool> {
         return Err(fail("등록한 부모와 연결 요청의 부모 프로세스가 다릅니다."));
     }
     let _parent = own_process(metadata.parent_pid, false)?;
-    let input = client_pipe(&metadata.pipe("stdin")?, true, metadata.parent_pid)?;
-    let output = client_pipe(&metadata.pipe("stdout")?, false, metadata.parent_pid)?;
-    let error = client_pipe(&metadata.pipe("stderr")?, false, metadata.parent_pid)?;
+    let input = client_pipe(&metadata.pipe("stdin")?, true, metadata.parent_pid, "stdin")?;
+    let output = client_pipe(
+        &metadata.pipe("stdout")?,
+        false,
+        metadata.parent_pid,
+        "stdout",
+    )?;
+    let error = client_pipe(
+        &metadata.pipe("stderr")?,
+        false,
+        metadata.parent_pid,
+        "stderr",
+    )?;
     let ack =
         serde_json::to_vec(&metadata).map_err(|_| fail("작업자 인증 응답을 만들지 못했습니다."))?;
     raw_write_all(output.0, &(ack.len() as u32).to_le_bytes())?;
