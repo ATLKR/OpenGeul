@@ -202,7 +202,8 @@ def verify(directory):
         'Retained actual diagnostic producer job/API mismatch')
     wrapper=native._json(evidence/'same-signed-sdk-diagnostic.json');pending=native._json(evidence/'pending-native.json')
     checks=('success','processEnvironmentUnchanged','githubEnvironmentUnchanged','signedInputUnchanged','publicCertificateUnchanged',
-        'originalPendingUnchanged','trustedCertificateAbsent','originalInstalledEvidenceUnchanged','unsignedOriginalUnchanged','installJsonAbsent','sourceBindingDiffersFromDiagnostic')
+        'originalPendingUnchanged','trustedCertificateAbsent','originalInstalledEvidenceUnchanged','unsignedOriginalUnchanged','installJsonAbsent',
+        'sourceBindingDiffersFromDiagnostic','sdkSliceTempRemoved','executionScriptRootMatchesProduction')
     require(all(wrapper.get(key) is True for key in checks) and wrapper.get('exactSignedInputSha256')==SIGNED_SHA
         and wrapper.get('certificateSha256')==CER_SHA and wrapper.get('originalPendingSha256')==PENDING_SHA
         and wrapper.get('productionImporterSha256')==IMPORTER_SHA and wrapper.get('originalSourceBinding')==SOURCE
@@ -220,6 +221,10 @@ def verify(directory):
         raw=(evidence/name).read_bytes();require(len(raw)==row['bytes'] and hashlib.sha256(raw).hexdigest()==row['sha256']
             and raw==production[row['startOffset']:row['endOffset']].encode('utf-8'),'Production AST slice/function bytes changed')
     require(wrapper.get('executedSliceSha256')==ast['slice']['sha256'],'Executed production SDK slice differs')
+    require(wrapper.get('executionMechanism')=='exclusive-dot-source-in-original-e2e'
+        and wrapper.get('executedSliceFileSha256')==ast['slice']['sha256']
+        and type(wrapper.get('executedSliceFileBytes')) is int and wrapper['executedSliceFileBytes']==ast['slice']['bytes'],
+        'The exact original SDK script context/temp byte proof differs')
     require(not (evidence/'install.json').exists(),'A diagnostic must never create a production qualification marker')
     controller=native._json(evidence/'sdk-controller.json')
     tool=native._controller(controller,current['binding'],'source',pending['native'],{'consumer':current['job']})

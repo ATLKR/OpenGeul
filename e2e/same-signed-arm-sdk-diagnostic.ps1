@@ -71,6 +71,29 @@ function Write-SameSignedFreshJson {
  try { $stream.Write($bytes,0,$bytes.Length) } finally { $stream.Dispose() }
 }
 
+function New-SameSignedSdkSliceFile {
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$Text,
+       [Parameter(Mandatory)][hashtable]$Ownership)
+ $bytes=[Text.UTF8Encoding]::new($false).GetBytes($Text)
+ if ($Ownership.created -ne $false -or $bytes.Length -ne 5017 -or
+     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() -cne 'a41391ee1ec242df972eb05505d905a0d86745950fcfd65591b5b7874e228fd5') { throw 'Exact original SDK slice bytes required.' }
+ $stream=[IO.File]::Open($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+ $Ownership.created=$true
+ try { $stream.Write($bytes,0,$bytes.Length) } finally { $stream.Dispose() }
+ if ((Get-Item -LiteralPath $Path -Force).Length -ne 5017 -or
+     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'a41391ee1ec242df972eb05505d905a0d86745950fcfd65591b5b7874e228fd5') { throw 'Exclusive SDK slice file changed before execution.' }
+}
+
+function Remove-SameSignedSdkSliceFile {
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][bool]$Owned)
+ if ($Owned -and (Test-Path -LiteralPath $Path)) {
+  $item=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Owned SDK slice cleanup requires a regular file.' }
+  Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+ }
+ return (-not (Test-Path -LiteralPath $Path))
+}
+
 $sourceBinding=@{repository='ATLKR/OpenGeul';commit='a785d3d33537ecedef325043346dc81425001dae';runId='38265944818';runAttempt='1'}
 $diagnosticBinding=@{repository=$env:GITHUB_REPOSITORY;commit=$env:GITHUB_SHA;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT}
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
@@ -130,14 +153,21 @@ $receipt=[ordered]@{formatVersion=1;success=$false;scope='Exact previously nativ
  productionImporterSha256=$original.productionSha256;executedSliceSha256=$original.slice.sha256;exactSignedInputSha256=$signedSha;
  certificateSha256=$cerSha;certificateThumbprint=$thumbprint;unsignedOriginalSha256=$pending.unsignedSha256;originalPendingSha256=$pendingSha;
  processEnvironmentBeforeSha256=$beforeEnvironment.sha256;githubEnvironmentBeforeSha256=$beforeEnvironment.githubSha256;
+ executionMechanism='exclusive-dot-source-in-original-e2e';executedSliceFileSha256=$original.slice.sha256;executedSliceFileBytes=$original.slice.bytes;
  sourceBindingDiffersFromDiagnostic=$true;qualificationFinalized=$false;wholeSourceQualified=$false;storeCertified=$false}
+$primaryError=$null;$cleanupError=$null;$sdkSliceOwnership=@{created=$false}
+$sdkSliceTempPath=Join-Path $PSScriptRoot ('.opengeul-sdk-slice-'+[guid]::NewGuid().ToString('N')+'.ps1')
+$receipt.executionScriptRootMatchesProduction=((Split-Path -Parent $sdkSliceTempPath) -ceq (Split-Path -Parent (Join-Path $PSScriptRoot 'msix-wack-import.ps1')))
 try {
- # The pinned original assignments, SDK calls and try/finally execute verbatim.
- # This wrapper is also in e2e/, preserving the original PSScriptRoot resolution.
- Invoke-Expression -Command $original.slice.text
+ New-SameSignedSdkSliceFile -Path $sdkSliceTempPath -Text $original.slice.text -Ownership $sdkSliceOwnership
+ # A real file in the same e2e directory retains original PSScriptRoot semantics.
+ . $sdkSliceTempPath
  $receipt.success=$true
-} catch { $receipt.error=$_.Exception.Message;throw }
+} catch { $primaryError=$_;$receipt.error=$_.Exception.Message }
 finally {
+ try { $receipt.sdkSliceTempRemoved=Remove-SameSignedSdkSliceFile -Path $sdkSliceTempPath -Owned $sdkSliceOwnership.created }
+ catch { $cleanupError=$_;$receipt.sdkSliceTempRemoved=$false;$receipt.sdkSliceCleanupError=$_.Exception.Message }
+ try {
  $afterEnvironment=Get-SameSignedEnvironmentDigest
  $receipt.processEnvironmentAfterSha256=$afterEnvironment.sha256
  $receipt.githubEnvironmentAfterSha256=$afterEnvironment.githubSha256
@@ -154,9 +184,11 @@ finally {
  $receipt.installJsonAbsent=(-not (Test-Path -LiteralPath (Join-Path $OutputDirectory 'install.json')))
  Assert-OpenGeulSelectedUnsignedPackage -PackageDirectory $PackageDirectory -ExpectedSha256 $pending.unsignedSha256
  $receipt.unsignedOriginalUnchanged=$true
- foreach ($name in @('unsignedOriginalUnchanged','processEnvironmentUnchanged','githubEnvironmentUnchanged','signedInputUnchanged','publicCertificateUnchanged','originalPendingUnchanged','trustedCertificateAbsent','originalInstalledEvidenceUnchanged','installJsonAbsent')) {
+ foreach ($name in @('sdkSliceTempRemoved','executionScriptRootMatchesProduction','unsignedOriginalUnchanged','processEnvironmentUnchanged','githubEnvironmentUnchanged','signedInputUnchanged','publicCertificateUnchanged','originalPendingUnchanged','trustedCertificateAbsent','originalInstalledEvidenceUnchanged','installJsonAbsent')) {
   if ($receipt[$name] -ne $true) { $receipt.success=$false }
  }
+ } catch { $cleanupError=$_;$receipt.success=$false;$receipt.cleanupCheckError=$_.Exception.Message }
  Write-SameSignedFreshJson -Path (Join-Path $OutputDirectory 'same-signed-sdk-diagnostic.json') -Value $receipt
- if (-not $receipt.success) { throw 'Same-signed SDK diagnostic did not pass all original-input/environment/cleanup checks; see its receipt.' }
 }
+if ($primaryError) { throw $primaryError }
+if (-not $receipt.success) { throw 'Same-signed SDK diagnostic did not pass all original-input/environment/temp cleanup checks; see its receipt.' }
