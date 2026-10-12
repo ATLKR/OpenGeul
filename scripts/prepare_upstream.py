@@ -14,6 +14,7 @@ import sys
 import tomllib
 from buildkit import ROOT, FONT_EXTENSIONS, make_assets, package_version, replace_once, tauri_config
 from native_activation import apply as apply_native_activation
+from com_worker import apply as apply_com_worker
 
 
 TAURI_VERSION = "2.11.1"
@@ -218,6 +219,8 @@ def patch(source: Path, version: str) -> None:
     lock = replace_once(lock, f'name = "hop-desktop"\nversion = "{hop_version}"',
                         f'name = "hop-desktop"\nversion = "{version}"')
     (native/'Cargo.lock').write_text(lock, encoding='utf-8', newline='\n')
+    com_proof = apply_com_worker(source)
+    shutil.copy2(ROOT/'overlay/cli-cargo.lock.toml', upstream/'Cargo.lock')
     activation_proof = apply_native_activation(source)
     for component in ('Preview','Thumbnail'):
         path=source/f'apps/desktop/quicklook/Resources/{component}/Info.plist'
@@ -327,7 +330,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:

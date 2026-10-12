@@ -1,6 +1,7 @@
 """Generated native build inputs must declare DPI awareness before any HWND exists."""
 from pathlib import Path
 import json
+import json
 import re
 import sys
 import tempfile
@@ -29,6 +30,10 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.activation = activation.start()
         self.activation.return_value = {'formatVersion': 1, 'testFixture': True}
         self.addCleanup(activation.stop)
+        worker = patch.object(prepare_upstream, 'apply_com_worker')
+        self.worker = worker.start()
+        self.worker.return_value = {'formatVersion': 1, 'testFixture': 'COM'}
+        self.addCleanup(worker.stop)
         self.native = self.source / 'apps/desktop/src-tauri'
         files = {
             'apps/desktop/src-tauri/build.rs': 'fn main() {\n    tauri_build::build();\n}\n',
@@ -149,6 +154,25 @@ pub fn layer_trees_to_pdf_with_links(
         self.assertEqual(observed, ['1.1.2'], 'Native source preparation must receive the final product lock')
         ledger = json.loads((self.source / '.opengeul-overlay.json').read_text(encoding='utf-8'))
         self.assertEqual(ledger['nativeActivation'], {'formatVersion': 1, 'testFixture': True})
+
+    def test_com_lock_and_public_ledger_precede_native_source_capture(self):
+        observed = []
+        def worker(source):
+            self.assertFalse((source / 'third_party/rhwp/Cargo.lock').exists())
+            observed.append('COM')
+            return {'formatVersion': 1, 'testFixture': 'COM'}
+        def activation(source):
+            self.assertEqual((source / 'third_party/rhwp/Cargo.lock').read_bytes(),
+                             (prepare_upstream.ROOT / 'overlay/cli-cargo.lock.toml').read_bytes())
+            observed.append('native')
+            return {'formatVersion': 1, 'testFixture': True}
+        self.worker.side_effect = worker
+        self.activation.side_effect = activation
+        prepare_upstream.patch(self.source, '1.1.3')
+        self.assertEqual(observed, ['COM', 'native'])
+        self.worker.assert_called_once_with(self.source)
+        ledger = json.loads((self.source / '.opengeul-overlay.json').read_text(encoding='utf-8'))
+        self.assertEqual(ledger['comWorker'], {'formatVersion': 1, 'testFixture': 'COM'})
 
     def test_windows_preparation_matches_editor_manifest_line_endings(self):
         manifest = self.native / 'Cargo.toml'
