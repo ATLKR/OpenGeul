@@ -29,11 +29,11 @@
           "replacements": [
             [
               "  pub fn restart(&self) -> ! {",
-              "  #[cfg(all(windows, feature = \"opengeul-store-no-restart\"))]\n  pub fn restart(&self) -> ! {\n    panic!(\"Microsoft Store 배포에서는 앱 자체 재시작을 지원하지 않습니다\");\n  }\n\n  #[cfg(not(all(windows, feature = \"opengeul-store-no-restart\")))]\n  pub fn restart(&self) -> ! {"
+              "  /// OpenGeul Store builds reject self restart before requesting app exit.\n  #[cfg(all(windows, feature = \"opengeul-store-no-restart\"))]\n  pub fn restart(&self) -> ! {\n    panic!(\"Microsoft Store 배포에서는 앱 자체 재시작을 지원하지 않습니다\");\n  }\n\n  #[cfg(not(all(windows, feature = \"opengeul-store-no-restart\")))]\n  pub fn restart(&self) -> ! {"
             ],
             [
               "  pub fn request_restart(&self) {",
-              "  #[cfg(all(windows, feature = \"opengeul-store-no-restart\"))]\n  pub fn request_restart(&self) {\n    log::error!(\"Microsoft Store에서 업데이트한 뒤 앱을 다시 열어 주세요\");\n  }\n\n  #[cfg(not(all(windows, feature = \"opengeul-store-no-restart\")))]\n  pub fn request_restart(&self) {"
+              "  /// OpenGeul Store builds keep the app running and direct updating to Store.\n  #[cfg(all(windows, feature = \"opengeul-store-no-restart\"))]\n  pub fn request_restart(&self) {\n    log::error!(\"Microsoft Store에서 업데이트한 뒤 앱을 다시 열어 주세요\");\n  }\n\n  #[cfg(not(all(windows, feature = \"opengeul-store-no-restart\")))]\n  pub fn request_restart(&self) {"
             ]
           ]
         }
