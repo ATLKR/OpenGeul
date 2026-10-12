@@ -721,6 +721,55 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertEqual((out/path).read_bytes()[3:8], b'\0'*5, 'No filename flag or timestamp may enter transport')
         self.assertEqual(json.loads((folders['editor']/'provenance.json').read_text())['formatVersion'], 1)
 
+    def test_large_editor_inventory_captures_all_fields_within_unchanged_metadata_cap(self):
+        c=self.helper();source=self.source();payload=self.payload('editor')
+        baseline=self.root/'small-editor';c.capture('editor',payload,source,baseline,env=self.env)
+        expected=c.read_json(baseline/'provenance.json')
+        assets=payload/'Notices/many';assets.mkdir()
+        for index in range(3200):
+            (assets/f'owned-runtime-{index:04}.txt').write_bytes(b'owned runtime resource')
+        inventory,_=c.tree(payload,c.CAPS['editor'])
+        expected['files']={**{'payload/'+name:record for name,record in inventory.items()},
+            'source-parity.json':expected['files']['source-parity.json']}
+        pretty=(json.dumps(expected,indent=2,sort_keys=True)+'\n').encode()
+        compact=(json.dumps(expected,sort_keys=True,separators=(',',':'))+'\n').encode()
+        self.assertGreater(len(pretty),c.MAX_METADATA);self.assertLess(len(compact),c.MAX_METADATA)
+        out=self.root/'large-editor';c.capture('editor',payload,source,out,env=self.env)
+        self.assertEqual((out/'provenance.json').read_bytes(),compact)
+        actual=c.validate_component(out,'editor',c.identity(self.env),c.configured())
+        self.assertEqual(actual,expected);self.assertEqual(len(actual['files']),len(inventory)+1)
+        self.assertEqual(actual['formatVersion'],1)
+        self.assertEqual((out/'source-parity.json').read_bytes(),(baseline/'source-parity.json').read_bytes())
+        cli=self.root/'matching-cli';c.capture('cli',self.payload('cli'),source,cli,env=self.env)
+        self.assertEqual(c.read_json(cli/'provenance.json')['formatVersion'],2)
+        self.assertEqual(c.read_json(cli/'provenance.json')['source'],actual['source'])
+        c.combine(out,cli,self.root/'combined',self.root/'package-source',env=self.env)
+        combined,_=c.tree(self.root/'combined',c.MAX_PAYLOAD)
+        self.assertEqual(combined,{**inventory,c.CLI_RUNTIME:{'size':len(pe()),'sha256':hashlib.sha256(pe()).hexdigest()}})
+        self.assertEqual(c.read_json(self.root/'package-source/.opengeul-windows-components.json')['sourceContractSha256'],
+            hashlib.sha256((json.dumps(actual['source'],indent=2,sort_keys=True)+'\n').encode()).hexdigest())
+
+    def test_compact_encoding_preserves_default_source_contract_bytes_and_hash(self):
+        c=self.helper();source=self.source();_,contract=c.source_contract(source,c.configured())
+        pretty=(json.dumps(contract,indent=2,sort_keys=True)+'\n').encode()
+        self.assertEqual(c.encoded(contract),pretty)
+        self.assertEqual(c.encoded(contract,compact=False),pretty)
+        compact=c.encoded(contract,compact=True)
+        self.assertEqual(json.loads(compact),contract);self.assertLess(len(compact),len(pretty))
+        self.assertEqual(c.encoded(contract),pretty)
+        with self.assertRaisesRegex(ValueError,'metadata exceeds cap'):
+            c.encoded({'owned':'x'*c.MAX_METADATA},compact=True)
+
+    def test_editor_compact_metadata_still_over_cap_is_rejected_before_output(self):
+        c=self.helper();source=self.source();payload=self.payload('editor')
+        assets=payload/'Notices/many';assets.mkdir()
+        for index in range(7000):
+            (assets/f'owned-runtime-{index:04}.txt').write_bytes(b'owned runtime resource')
+        out=self.root/'oversized-metadata'
+        with self.assertRaisesRegex(ValueError,'metadata exceeds cap'):
+            c.capture('editor',payload,source,out,env=self.env)
+        self.assertFalse(out.exists())
+
     def test_recomputed_transport_cannot_authorize_invalid_gzip_streams(self):
         folders = self.pair()
         original = (folders['cli']/'payload/Tools/rhwp.exe.gz').read_bytes()

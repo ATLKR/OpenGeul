@@ -159,8 +159,9 @@ def read_json(path: Path) -> dict:
     return value
 
 
-def encoded(value: dict) -> bytes:
-    data = (json.dumps(value, indent=2, sort_keys=True)+'\n').encode()
+def encoded(value: dict, *, compact: bool = False) -> bytes:
+    options = {'separators': (',', ':')} if compact else {'indent': 2}
+    data = (json.dumps(value, sort_keys=True, **options)+'\n').encode()
     if len(data) > MAX_METADATA:
         raise ValueError('Component metadata exceeds cap')
     return data
@@ -463,7 +464,7 @@ def capture(role: str, payload: Path, source: Path, out: Path, *, env=None, arch
              'features': FEATURES[role], 'source': contract, 'files': transport}
     if role == 'cli':
         value['runtime'] = {'path': CLI_RUNTIME, **files[CLI_RUNTIME]}
-    metadata = encoded(value)
+    metadata = encoded(value, compact=True)
     if sum(item['size'] for item in transport.values())+len(metadata) > CAPS[role]:
         raise ValueError('Component exceeds total transport cap')
     out.parent.mkdir(parents=True, exist_ok=True)
