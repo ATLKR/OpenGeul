@@ -1017,6 +1017,21 @@ jobs:
     - name: 실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사
       shell: pwsh
       run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
+    - name: 성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존
+      id: synthetic-pdfs
+      if: success() && github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      shell: pwsh
+      run: python ci/synthetic_print_pdfs.py --os ${{ matrix.os }}
+    - name: 제한된 합성 PDF 원본 전송
+      id: synthetic-pdfs-evidence
+      if: always() && steps.synthetic-pdfs.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-synthetic-print-pdfs-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: synthetic-pdf-evidence/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
@@ -1103,6 +1118,21 @@ jobs:
     - name: 실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사
       shell: pwsh
       run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
+    - name: 성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존
+      id: synthetic-pdfs
+      if: success() && github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      shell: pwsh
+      run: python ci/synthetic_print_pdfs.py --os windows-11-arm
+    - name: 제한된 합성 PDF 원본 전송
+      id: synthetic-pdfs-evidence
+      if: always() && steps.synthetic-pdfs.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-synthetic-print-pdfs-windows-11-arm-${{ github.run_id }}-${{ github.run_attempt }}
+        path: synthetic-pdf-evidence/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:

@@ -54,6 +54,8 @@ class WiringTests(unittest.TestCase):
                         self.assertEqual(s['with']['name'],'opengeul-mcp-fixtures${{ env.E2E_INPUT_SUFFIX }}-${{ github.run_id }}')
                         self.assertEqual(s['if'],"env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'")
                         continue  # 별도 test_qa_upload가 원본 QA 입력·16 MiB 제한을 검사한다.
+                    if s.get('id')=='synthetic-pdfs-evidence':
+                        self.assertIn(job,('virtual-print','virtual-print-arm64'));continue  # exact7+manifest 전송은 별도 합성 PDF 계약 검사.
                     if 'native-transport/native-install.json' in s.get('with',{}).get('path',''):
                         self.assertEqual(job,'msix-native-arm64');continue  # exact3 transport 검사기는 별도로 검사한다.
                     self.assertGreater(i,pack[0]);self.assertEqual(s['with']['path'],'bounded-evidence/')

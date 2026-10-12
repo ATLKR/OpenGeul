@@ -89,7 +89,9 @@ class Arm64WorkflowTests(unittest.TestCase):
                     # 기존 16+암호8·인쇄 전체 단계의 원래 해시는 갱신하지 않는다.
                     additions={'실제 MCP stdio·암호 입력·COM 작업자 실패 격리 검사',
                                '설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비',
-                               '동일 실행의 공개 MCP QA 입력을 하루 동안 보존'} if name=='native-e2e' else set()
+                               '동일 실행의 공개 MCP QA 입력을 하루 동안 보존'} if name=='native-e2e' else {
+                                   '성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존',
+                                   '제한된 합성 PDF 원본 전송'}  # 별도 exact2 합성 PDF 계약 검사; 원래 해시는 유지.
                     if suffix == '-arm64':
                         # 준비·증거 단계만 별도 계약으로 검증하며 원래 GUI 시험 해시는 보존한다.
                         additions |= {'ARM 러너의 검증된 OS 창과 전경 준비',
