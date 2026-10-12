@@ -78,6 +78,12 @@ jobs:
           node e2e/table_height.mjs generate wasm-input print-fixtures
           python e2e/print_fixtures.py print-fixtures
           node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
+      - name: 기존 엄격한 ARM 준비 절차로 현재 소유 OS 창만 정상 닫기
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          python e2e/runner-ready.py --prepare --output runner-ready
       - name: 기존 8사례를 소유한 앱·미리보기 입력으로 실행
         shell: pwsh
         run: |
@@ -94,6 +100,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference=$true
           python ci/evidence.py pack print-evidence bounded-evidence --status $env:EVIDENCE_STATUS
           python ci/evidence.py size --limit-mib 4 diagnostic-receipt
+          if (Test-Path runner-ready) { python ci/evidence.py size --limit-mib 16 runner-ready }
       - name: 크기가 제한된 실제 증거 보존
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -102,6 +109,7 @@ jobs:
           path: |
             bounded-evidence/
             diagnostic-receipt/
+            runner-ready/
           retention-days: 1
           if-no-files-found: error
           compression-level: 9

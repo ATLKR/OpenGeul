@@ -186,5 +186,17 @@ class ContextTests(unittest.TestCase):
         env=self.context(event='workflow_dispatch',ref=branch,actor=BOT,job='observe',workflow='store-package.yml');self.reject(env)
         env=self.context(event='workflow_dispatch',ref=branch,job='observe',workflow='store-package.yml',payload={'repository':{**PUBLIC,'private':True}});self.reject(env)
 
+    def test_print_diagnostic_is_one_exact_owned_context(self):
+        branch='refs/heads/diagnostic/owned-print-preview-75'
+        env=self.context(event='workflow_dispatch',ref=branch,job='print-diagnostic',workflow='store-package.yml')
+        self.assertEqual(self.value.binding(env)['context'],'print-focus-diagnostic')
+        for key,val in [('GITHUB_RUN_ATTEMPT','2'),('GITHUB_JOB','observe'),
+                        ('GITHUB_REF',branch+'-other'),('GITHUB_ACTOR_ID','999'),
+                        ('GITHUB_WORKFLOW_REF',f'{REPOSITORY}/.github/workflows/msix.yml@{branch}')]:
+            env=self.context(event='workflow_dispatch',ref=branch,job='print-diagnostic',workflow='store-package.yml')
+            env[key]=val;self.reject(env)
+        env=self.context(event='workflow_dispatch',ref=branch,actor=BOT,job='print-diagnostic',workflow='store-package.yml');self.reject(env)
+        env=self.context(event='workflow_dispatch',ref=branch,job='print-diagnostic',workflow='store-package.yml',payload={'repository':{**PUBLIC,'private':True}});self.reject(env)
+
 
 if __name__=='__main__':unittest.main()
