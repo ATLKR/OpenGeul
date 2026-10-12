@@ -487,7 +487,7 @@ struct Pipe {
     handle: Handle,
 }
 fn pipe_sddl(sid: &str, integrity: u32, read_attributes: bool) -> String {
-    // 두 값만 비교한다. production은 실제 대조 결과 전까지 기존 mask를 유지한다.
+    // 실제 양 아키텍처의 native 대조에서 필요한 metadata bit만 허용한다.
     let mask = 0x100003
         | if read_attributes {
             FILE_READ_ATTRIBUTES.0
@@ -499,7 +499,7 @@ fn pipe_sddl(sid: &str, integrity: u32, read_attributes: bool) -> String {
 impl Pipe {
     fn create(name: &str, output: bool, sid: &str, integrity: u32) -> io::Result<Self> {
         // 같은 로그온의 read/write만 허용하고 pipe instance 생성 권한(0x4)은 주지 않는다.
-        let sddl = pipe_sddl(sid, integrity, false);
+        let sddl = pipe_sddl(sid, integrity, true);
         Self::create_descriptor(name, output, &sddl)
     }
     fn create_descriptor(name: &str, output: bool, sddl: &str) -> io::Result<Self> {
