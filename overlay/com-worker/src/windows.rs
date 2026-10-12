@@ -39,6 +39,11 @@ fn win(error: windows::core::Error) -> io::Error {
         error.code().0 as u32
     ))
 }
+fn win_at(operation: &'static str, error: windows::core::Error) -> io::Error {
+    let code = error.code().0 as u32;
+    let kind = win(error).kind();
+    io::Error::new(kind, format!("{operation} 실패 (HRESULT 0x{code:08x})"))
+}
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
@@ -806,6 +811,43 @@ struct Registration {
     parent_pid: u32,
 }
 impl Registration {
+    fn verify_activation(&self, clsid: &str) -> io::Result<()> {
+        let pid = unsafe { GetCurrentProcessId() };
+        let owner = format!(
+            "OpenGeul-v1:{clsid}:{pid}:{}",
+            created(unsafe { GetCurrentProcess() })?
+        );
+        let root = if elevated()? {
+            HKEY_LOCAL_MACHINE
+        } else {
+            HKEY_CURRENT_USER
+        };
+        if !self.active
+            || !self.complete
+            || self.parent.is_some()
+            || !super::wire::guid(clsid)
+            || clsid == FIXED_CLSID
+            || self.path != format!("Software\\Classes\\CLSID\\{{{clsid}}}")
+            || self.root != root
+            || self.parent_pid != pid
+            || self.owner != owner
+            || self.command != format!("\"{}\" --opengeul-com-worker --clsid {clsid}", self.exe)
+            || std::fs::canonicalize(&self.exe)? != std::fs::canonicalize(std::env::current_exe()?)?
+        {
+            return Err(fail("현재 부모가 만든 정확한 작업자 등록만 활성화합니다."));
+        }
+        let key = open_key(self.root, &self.path, KEY_READ)?;
+        let server = open_key(key.0, "LocalServer32", KEY_READ)?;
+        if !key_shape(key.0, 1, 1)?
+            || !key_shape(server.0, 0, 2)?
+            || reg_get(key.0, "OpenGeulOwner")? != self.owner
+            || reg_get(server.0, "ServerExecutable")? != self.exe
+            || reg_get(server.0, "")? != self.command
+        {
+            return Err(fail("활성화 전에 소유한 작업자 등록이 변경되었습니다."));
+        }
+        Ok(())
+    }
     fn create(clsid: &str, exe: &Path) -> io::Result<Self> {
         if !super::wire::guid(clsid) || clsid == FIXED_CLSID {
             return Err(fail(
@@ -1110,6 +1152,46 @@ mod tests {
         assert!(own_process(unsafe { GetCurrentProcessId() }, true).is_err());
         assert!(own_process(0, true).is_err());
     }
+
+    #[test]
+    fn owned_activation_only_accepts_exact_creator_registration() {
+        let clsid = fresh_guid().unwrap();
+        let mut owned = Registration::create(&clsid, &std::env::current_exe().unwrap()).unwrap();
+        let context = owned_activation_context(&clsid, Some(&owned)).unwrap();
+        assert_eq!(context, CLSCTX_LOCAL_SERVER | CLSCTX_ENABLE_AAA);
+        assert_eq!(context.0 & CLSCTX_DISABLE_AAA.0, 0);
+        assert!(owned_activation_context(&fresh_guid().unwrap(), Some(&owned)).is_err());
+        assert!(owned_activation_context(&clsid, None).is_err());
+        assert!(owned_activation_context(FIXED_CLSID, Some(&owned)).is_err());
+        if !packaged().unwrap() {
+            assert!(owned_activation_context(FIXED_CLSID, None).is_err());
+        }
+        let key = open_key(owned.root, &owned.path, KEY_READ | KEY_WRITE).unwrap();
+        let server = open_key(key.0, "LocalServer32", KEY_READ | KEY_WRITE).unwrap();
+        reg_set(server.0, "ServerExecutable", "synthetic-foreign-executable").unwrap();
+        assert!(owned_activation_context(&clsid, Some(&owned)).is_err());
+        assert_eq!(
+            reg_get(server.0, "ServerExecutable").unwrap(),
+            "synthetic-foreign-executable"
+        );
+        reg_set(server.0, "ServerExecutable", &owned.exe).unwrap();
+        reg_set(key.0, "OpenGeulOwner", "synthetic-foreign-owner").unwrap();
+        assert!(owned_activation_context(&clsid, Some(&owned)).is_err());
+        reg_set(key.0, "OpenGeulOwner", &owned.owner).unwrap();
+        assert!(owned_activation_context(&clsid, Some(&owned)).is_ok());
+        drop(server);
+        drop(key);
+        owned.cleanup().unwrap();
+        let error = win_at(
+            "CoCreateInstance",
+            windows::core::Error::from_hresult(E_ACCESSDENIED),
+        );
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "CoCreateInstance 실패 (HRESULT 0x80070005)"
+        );
+    }
 }
 fn packaged() -> io::Result<bool> {
     let mut length = 0;
@@ -1121,6 +1203,21 @@ fn packaged() -> io::Result<bool> {
     } else {
         Err(fail("현재 CLI 패키지 식별자를 확인하지 못했습니다."))
     }
+}
+fn owned_activation_context(
+    clsid: &str,
+    registration: Option<&Registration>,
+) -> io::Result<CLSCTX> {
+    if let Some(registration) = registration {
+        registration.verify_activation(clsid)?;
+    } else if clsid != FIXED_CLSID || !packaged()? {
+        return Err(fail(
+            "알 수 없는 COM 클래스에 호출자 신원을 전달하지 않습니다.",
+        ));
+    }
+    // 기본 EOAC_DISABLE_AAA는 유지한다. 이 private 소유 class 활성화만 예외다.
+    // 공식 CLSCTX_ENABLE_AAA 계약은 이 호출에 한해 process-wide 설정을 override한다.
+    Ok(CLSCTX_LOCAL_SERVER | CLSCTX_ENABLE_AAA)
 }
 fn environment() -> io::Result<Vec<u16>> {
     let raw = unsafe { GetEnvironmentStringsW() };
@@ -1183,13 +1280,10 @@ pub fn run_cli(
     } else {
         Some(Registration::create(&clsid, exe)?)
     };
+    let context = owned_activation_context(&clsid, registration.as_ref())?;
     let object: IDispatch = unsafe {
-        CoCreateInstance(
-            &guid(&clsid)?,
-            None,
-            CLSCTX_LOCAL_SERVER | CLSCTX_DISABLE_AAA,
-        )
-        .map_err(win)?
+        CoCreateInstance(&guid(&clsid)?, None, context)
+            .map_err(|error| win_at("CoCreateInstance", error))?
     };
     unsafe {
         CoSetProxyBlanket(
@@ -1202,7 +1296,7 @@ pub fn run_cli(
             None,
             EOAC_NONE,
         )
-        .map_err(win)?;
+        .map_err(|error| win_at("CoSetProxyBlanket", error))?;
     }
     let version = invoke(&object, VERSION_DISPID, DISPATCH_PROPERTYGET, None)?;
     let pid = invoke(&object, PID_DISPID, DISPATCH_PROPERTYGET, None)?;

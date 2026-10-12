@@ -146,5 +146,15 @@ class ComWorkerSourceTests(unittest.TestCase):
             'src/opengeul_com_worker/mod.rs', 'src/opengeul_com_worker/wire.rs',
             'src/opengeul_com_worker/windows.rs'})
 
+    def test_owned_activation_exception_retains_default_com_security(self):
+        self.helper().apply(self.source)
+        native = (self.core/'src/opengeul_com_worker/windows.rs').read_text()
+        self.assertIn('EOAC_DISABLE_AAA.0 | EOAC_NO_CUSTOM_MARSHAL.0', native)
+        self.assertIn('fn owned_activation_context(', native)
+        self.assertIn('registration.verify_activation(clsid)?;', native)
+        self.assertIn('CLSCTX_LOCAL_SERVER | CLSCTX_ENABLE_AAA', native)
+        self.assertIn('owned_activation_context(&clsid, registration.as_ref())?', native)
+        self.assertIn('CoCreateInstance(&guid(&clsid)?, None, context)', native)
+
 
 if __name__ == '__main__': unittest.main()
