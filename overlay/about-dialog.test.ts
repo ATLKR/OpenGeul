@@ -116,6 +116,12 @@ describe('OpenGeul 제품 정보', () => {
     expect(new Product().body().querySelector('.about-hop-version')?.textContent).toBe('OpenGeul 버전 1.2.0');
   });
 
+  it('keeps the long notices and contact reachable in a short desktop window', () => {
+    const body = new Product().body();
+    expect(body.style.maxHeight).toBe('calc(100dvh - 128px)');
+    expect(body.style.overflowY).toBe('auto');
+  });
+
   it('lets the actual inherited modal keep default keyboard copying in both readonly fields', () => {
     const product = new Product();
     product.show();

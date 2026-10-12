@@ -6,6 +6,8 @@ const HOP_BASE_VERSION = '0.4.5';
 export class AboutDialog extends UpstreamAboutDialog {
   protected override createBody(): HTMLElement {
     const body = super.createBody();
+    body.style.maxHeight = 'calc(100dvh - 128px)';
+    body.style.overflowY = 'auto';
     const name = body.querySelector('.about-product-name');
     if (name) name.textContent = 'OpenGeul';
     const description = body.querySelector('.about-product-name-ko');
