@@ -63,6 +63,29 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertIsNotNone(components, 'Windows component integrity helper is missing')
         return components
 
+    def test_owned_composition_fixture_crlf_keeps_text_and_raw_byte_contracts_distinct(self):
+        original_write_text = Path.write_text
+        def windows_composition_write(path, data, *args, **kwargs):
+            if path.name == 'input-handler-text.ts' and kwargs.get('newline') is None:
+                kwargs['newline'] = '\r\n'
+            return original_write_text(path, data, *args, **kwargs)
+        # Use real files while exercising Windows' default text newline conversion.
+        with patch.object(Path, 'write_text', windows_composition_write):
+            source = self.source()
+        path = source/'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts'
+        raw = path.read_bytes()
+        self.assertIn(b'\r\n', raw)
+        normalized_sha = hashlib.sha256(path.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
+        self.assertNotEqual(digest(path), normalized_sha)
+        ledger = self.helper().read_json(source/'.opengeul-overlay.json')
+        self.assertEqual(ledger['compositionFix']['afterSha256'], normalized_sha)
+        _, contract = self.helper().source_contract(source, self.helper().configured())
+        self.assertEqual(contract['compositionTextSha256'], normalized_sha)
+        self.assertEqual(contract['preparedFiles'][path.relative_to(source).as_posix()], digest(path))
+        path.write_bytes(raw.replace(b'synthetic prepared source', b'changed prepared source'))
+        with self.assertRaisesRegex(ValueError, 'Incomplete composition source ledger'):
+            self.helper().source_contract(source, self.helper().configured())
+
     def source(self):
         c = self.helper()
         source = self.root/'hop'
@@ -115,7 +138,7 @@ class WindowsComponentsTests(unittest.TestCase):
                   'baselinePreservedFiles': {}, 'changes': ['synthetic owned source'],
                   'hwpxSaveV1': True, 'extendedFiles': ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts'],
                   'compositionFix': {'beforeSha256': 'c'*64,
-                     'afterSha256': digest(engine/'input-handler-text.ts'),
+                     'afterSha256': hashlib.sha256((engine/'input-handler-text.ts').read_text(encoding='utf-8').encode('utf-8')).hexdigest(),
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
                   'namespacePatch': namespace, 'wasmRebuild': wasm,
                   'comWorker': json.loads((source/com_source_contract.LEDGER_PATH).read_bytes()),
