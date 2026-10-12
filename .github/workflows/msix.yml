@@ -10,6 +10,11 @@ jobs:
     runs-on: windows-11-arm
     timeout-minutes: 5
     steps:
+    - name: Production과 동일한 checkout 바이트·경로 정책
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false

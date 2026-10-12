@@ -17,6 +17,26 @@ TEST_MODULES = ('test_buildkit','test_windows_components','test_native_architect
                 'test_prepare_native_tests','test_cross_platform_fingerprint')
 
 
+def observe_owned_fixture():
+    from test_windows_components import WindowsComponentsTests
+    case = WindowsComponentsTests('test_caps_are_checked_at_capture_and_join')
+    case.setUp()
+    try:
+        source = case.source()
+        path = source/'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts'
+        raw = path.read_bytes()
+        normalized = path.read_text(encoding='utf-8').encode('utf-8')
+        ledger = json.loads((source/'.opengeul-overlay.json').read_bytes())['compositionFix']
+        return {'scope':'owned synthetic test fixture only; no product document',
+                'containsCrLf':b'\r\n' in raw, 'rawSha256':hashlib.sha256(raw).hexdigest(),
+                'normalizedTextSha256':hashlib.sha256(normalized).hexdigest(),
+                'ledgerAfterSha256':ledger['afterSha256'],
+                'rawEqualsNormalized':raw == normalized,
+                'ledgerMatchesNormalizedText':ledger['afterSha256'] == hashlib.sha256(normalized).hexdigest()}
+    finally:
+        case.doCleanups()
+
+
 def main():
     if OUTPUT.exists():
         raise ValueError('existing-proof')
@@ -40,6 +60,7 @@ def main():
     expected = 'e16fcaf8c8b0eee13fe0d6f6a60248506fc1fc128bfa2f7bd0220beb05661726'
     if imports['build_progress']['sha256'] != expected:
         raise ValueError('original-resource-policy-changed')
+    fixture_observation = observe_owned_fixture()
     started = time.monotonic()
     suite = unittest.defaultTestLoader.loadTestsFromNames(TEST_MODULES)
     result = unittest.TextTestRunner(verbosity=1).run(suite)
@@ -52,6 +73,7 @@ def main():
         'processMachine':process['processMachine'], 'nativeOsMachine':process['nativeMachine'],
         'executablePeMachine':executable_machine, 'nativeHostVerified':host,
         'imports':imports, 'testModules':list(TEST_MODULES), 'testsRun':result.testsRun,
+        'ownedSyntheticCompositionFixtureObservation':fixture_observation,
         'testFailures':len(result.failures), 'testErrors':len(result.errors),
         'testSkipped':len(result.skipped),
         'testsSucceeded':result.wasSuccessful(), 'testSeconds':time.monotonic()-started,
