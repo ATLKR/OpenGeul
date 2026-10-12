@@ -2142,6 +2142,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "open",
+ "opengeul-native-open",
  "reqwest",
  "rustls",
  "serde",
@@ -3325,6 +3326,14 @@ dependencies = [
  "is-wsl",
  "libc",
  "pathdiff",
+]
+
+[[package]]
+name = "opengeul-native-open"
+version = "1.0.0"
+dependencies = [
+ "windows",
+ "windows-future",
 ]
 
 [[package]]
@@ -5383,8 +5392,6 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 [[package]]
 name = "tauri"
 version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b93bd86d231f0a8138f11a02a584769fe4b703dc36ae133d783228dbc4801405"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5681,8 +5688,6 @@ dependencies = [
 [[package]]
 name = "tauri-runtime-wry"
 version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3989df2ae1c476404fe0a2e8ffc4cfbde97e51efd613c2bb5355fbc9ab52cf0"
 dependencies = [
  "gtk",
  "http",
@@ -5691,6 +5696,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "once_cell",
+ "opengeul-native-open",
  "percent-encoding",
  "raw-window-handle",
  "softbuffer",

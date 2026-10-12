@@ -1,0 +1,12 @@
+[package]
+name = "opengeul-native-open"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.79"
+license = "MIT"
+license-file = "LICENSE.txt"
+description = "OpenGeul Windows 기본 앱 및 폴더 활성화"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.3", features = ["Foundation", "Storage", "System", "Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Threading", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-future = "=0.2.1"
