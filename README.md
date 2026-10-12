@@ -38,6 +38,10 @@ Foundation과 제휴하거나 이들의 승인을 받은 제품은 아닙니다.
 
 고정한 HOP 데스크톱 앱과 rhwp 편집기·엔진 전체를 소스에서 빌드합니다.
 고급 변환·렌더링용 rhwp 명령줄 도구는 native-skia로 함께 빌드합니다.
+Windows x64와 ARM64의 편집기·CLI를 각각 네이티브로 빌드합니다. MCP 서버는
+문서 작업을 별도 작업자 프로세스로 실행해 실패를 격리합니다. ARM64는 실제
+Windows 11 ARM64에서 제품·WebView2·작업자의 네이티브 실행을 검증하는
+릴리스 게이트를 둡니다. 통과 여부는 해당 릴리스의 원본 증거를 확인하세요.
 소스 버전·커밋은 [upstream.lock.json](config/upstream.lock.json)에 기록하며,
 준비 스크립트가 검토 가능한 확장 코드를 적용합니다. upstream/hop도 같은
 커밋을 가리킵니다. 명령줄 기능·제한은 rhwp-help.txt 또는
@@ -57,8 +61,10 @@ PR은 릴리스를 게시하지 않습니다. 수동 단계는 checks, engine, f
 명령줄 도움말이 들어 있습니다. 서명 없는 MSIX는 신뢰된 일반 설치 파일이
 아닙니다. 포터블 ZIP은 전체를 풀고 WebView2 런타임을 설치해야 합니다.
 포터블 명령줄 도구에는 최신
-[Microsoft Visual C++ v14 재배포 패키지(x64)](https://aka.ms/vc14/vc_redist.x64.exe)도
-필요합니다. Windows와 조직의 보안 정책을 따라 사용하세요.
+Microsoft Visual C++ v14 재배포 패키지도 필요합니다. 사용하는 ZIP에 맞는
+[x64 런타임](https://aka.ms/vc14/vc_redist.x64.exe) 또는
+[ARM64 런타임](https://aka.ms/vc14/vc_redist.arm64.exe)을 설치하세요.
+Windows와 조직의 보안 정책을 따라 사용하세요.
 
 ## 글꼴
 
@@ -77,6 +83,9 @@ Windows 빌드에 전달해야 합니다. Actions의 **OpenGeul Windows 빌드·
 full로 실행하거나 해당 커밋의 검증된 WASM 디렉터리를 직접 지정하세요.
 
     ./scripts/build-msix.ps1 -WasmDirectory C:\path\to\verified-wasm
+
+ARM64 Windows에서는 네이티브 ARM64 빌드 도구를 준비하고
+`-Architecture arm64`를 추가합니다. 아키텍처를 혼합한 구성 요소는 거부합니다.
 
 엔진·확장 코드 증거가 일치하지 않으면 빌드를 거절합니다. 준비 과정은 기존
 .work/hop, .work/payload, dist를 덮어쓰지 않습니다. 작업을 보관한 뒤 다시
