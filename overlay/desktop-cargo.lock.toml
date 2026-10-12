@@ -4302,6 +4302,8 @@ dependencies = [
  "usvg",
  "wasm-bindgen",
  "web-sys",
+ "windows",
+ "windows-core",
  "zeroize",
  "zip 8.5.1",
 ]
