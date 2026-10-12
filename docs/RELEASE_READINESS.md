@@ -14,9 +14,31 @@ Store API로 제출합니다. 가격은 무료로 유지하며 이번 새 제출
 x64 후보에만 적용됩니다. 진행 기준은 [다음 릴리스 목표](NEXT_RELEASE_GOAL.md)를
 따릅니다.
 
+### 실제 Source75 결과와 남은 수정
+
+[Source75](https://github.com/ATLKR/OpenGeul/actions/runs/38237687615)는 소스
+`f104fd4080214bc072cf39a24e73454685dd4254`의 시도 1이며 전체 결과는 실패입니다.
+실제 작업 21개 중 성공 16개, 실패 3개, 건너뛰기 2개를 확인했습니다.
+Windows 2022 파일 선택기의 사라진 자식 HWND, ARM64 인쇄 미리보기의 여백
+옵션 대기, ARM64 러너의 WACK 도구 부재가 남았습니다. 릴리스는 생성하지
+않았으며 이 실행을 새 후보의 전체 통과로 사용하지 않습니다.
+
+ARM64 설치 후보의 GUI·WebView2·CLI와 설치된 MCP의 문서 작업 17개·64개
+일괄 요청은 네이티브로 완료됐습니다. WACK가 실행되지 않았으므로 설치 작업
+전체의 통과를 뜻하지 않습니다. 인쇄는 ARM64 8개 중 7개가 통과했고 남은
+사례는 PDF 출력 이전의 미리보기 설정에서 실패했습니다. 인쇄 기준과 허용
+오차는 유지합니다.
+
+[별도 SDK 진단](https://github.com/ATLKR/OpenGeul/actions/runs/38247515867)에서는
+x64 표준 러너의 원본 Microsoft WACK가 ARM64 패키지 입력의 필수 13개·선택
+11개를 모두 통과했습니다. 이 결과는 SDK의 검사 가능성에만 적용됩니다.
+새 후보에서는 ARM64 네이티브 설치와 x64 WACK가 같은 테스트 서명 MSIX를
+검사하도록 연결하고 두 작업을 모두 필수 조건으로 검증합니다. 과거 진단
+패키지나 다른 서명 바이트로 새 후보의 통과를 대신하지 않습니다.
+
 ## 2026-10-11 — 이전 x64 1.1.3 개발 후보
 
-현재 새 Windows 후보의 앱 소스는 `b3c8b61d01731dc1e39357034d9c489a3ea829a9`, 제품 버전은 1.1.3(MSIX 1.1.3.0)입니다. HOP 0.4.5와 rhwp 0.8.7을 반영한 [Source68 실행 38181680763](https://github.com/ATLKR/OpenGeul/actions/runs/38181680763)의 실제 작업 15개가 정리 작업까지 모두 성공했습니다. [v1.1.3-dev.68.1](https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3-dev.68.1)의 공개 원본 6개, 새 GUI·CLI의 소스 바인딩과 MSIX·portable 전체 파일 1,565개의 일치도 확인했습니다. 검사 수와 범위는 [최신 검증 기록](VERIFICATION.md)에 정리했습니다.
+당시 Windows 후보의 앱 소스는 `b3c8b61d01731dc1e39357034d9c489a3ea829a9`, 제품 버전은 1.1.3(MSIX 1.1.3.0)이었습니다. HOP 0.4.5와 rhwp 0.8.7을 반영한 [Source68 실행 38181680763](https://github.com/ATLKR/OpenGeul/actions/runs/38181680763)의 실제 작업 15개가 정리 작업까지 모두 성공했습니다. [v1.1.3-dev.68.1](https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3-dev.68.1)의 공개 원본 6개, 새 GUI·CLI의 소스 바인딩과 MSIX·portable 전체 파일 1,565개의 일치도 확인했습니다. 검사 수와 범위는 [최신 검증 기록](VERIFICATION.md)에 정리했습니다.
 
 ### Store 공개판과 준비된 후보
 
