@@ -105,7 +105,8 @@ pub fn layer_trees_to_pdf_with_links(
         for name, text in files.items():
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding='utf-8')
+            # The pinned Git checkout uses LF, including the byte-guarded About source.
+            path.write_text(text, encoding='utf-8', newline='\n')
 
     def test_preparation_emits_the_manifest_used_by_the_native_build(self):
         prepare_upstream.patch(self.source, '1.1.2')
