@@ -34,6 +34,7 @@ class StoreAdoptionWorkflowTests(unittest.TestCase):
             'github.triggering_actor': 'ATLKR',
             'inputs.submit_to_store': True,
             'inputs.adopt_pending_submission': False,
+            'inputs.recover_pending_submission': False,
             **{("needs." + job + ".result" if '-' not in job
                 else "needs['" + job + "'].result"): 'success' for job in NEEDS},
         }

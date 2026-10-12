@@ -21,6 +21,11 @@ name: OpenGeul Store 패키지와 실제 설치·전체 WACK 검증
         type: boolean
         required: false
         default: false
+      recover_pending_submission:
+        description: 확인된 409 초안을 API로 삭제하고 새 초안에 검증된 두 패키지 제출
+        type: boolean
+        required: false
+        default: false
       adoption_draft_sha256:
         description: 채택할 초안의 확인된 API 상태 SHA-256
         type: string
@@ -348,7 +353,7 @@ jobs:
           compression-level: 9
   submit:
     needs: [package, store-native-arm64, store-wack-x64, store-wack, qualify]
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.submit_to_store && (!inputs.adopt_pending_submission || (github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR')) && needs.package.result == 'success' && needs['store-native-arm64'].result == 'success' && needs['store-wack-x64'].result == 'success' && needs['store-wack'].result == 'success' && needs.qualify.result == 'success')
+    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.submit_to_store && (!inputs.adopt_pending_submission || (github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR')) && (!inputs.recover_pending_submission || (github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR')) && !(inputs.adopt_pending_submission && inputs.recover_pending_submission) && needs.package.result == 'success' && needs['store-native-arm64'].result == 'success' && needs['store-wack-x64'].result == 'success' && needs['store-wack'].result == 'success' && needs.qualify.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -380,6 +385,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           STORE_ADOPT_PENDING: ${{ inputs.adopt_pending_submission }}
+          STORE_RECOVER_PENDING: ${{ inputs.recover_pending_submission }}
           STORE_ADOPTION_DRAFT_SHA256: ${{ inputs.adoption_draft_sha256 }}
           STORE_APP_ID: ${{ vars.STORE_APP_ID }}
           STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
