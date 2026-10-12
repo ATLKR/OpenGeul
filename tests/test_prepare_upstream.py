@@ -1,5 +1,6 @@
 """Generated native build inputs must declare DPI awareness before any HWND exists."""
 from pathlib import Path
+import json
 import re
 import sys
 import tempfile
@@ -26,6 +27,7 @@ class PrepareNativeManifestTests(unittest.TestCase):
         # 전체 vendor/shim 무결성은 test_native_activation에서 별도로 검사한다.
         activation = patch.object(prepare_upstream, 'apply_native_activation')
         self.activation = activation.start()
+        self.activation.return_value = {'formatVersion': 1, 'testFixture': True}
         self.addCleanup(activation.stop)
         self.native = self.source / 'apps/desktop/src-tauri'
         files = {
@@ -140,10 +142,13 @@ pub fn layer_trees_to_pdf_with_links(
         def activation(source):
             lock = tomllib.loads((source / 'apps/desktop/src-tauri/Cargo.lock').read_text(encoding='utf-8'))
             observed.extend(p['version'] for p in lock['package'] if p['name'] == 'hop-desktop')
+            return {'formatVersion': 1, 'testFixture': True}
         self.activation.side_effect = activation
         prepare_upstream.patch(self.source, '1.1.2')
         self.activation.assert_called_once_with(self.source)
         self.assertEqual(observed, ['1.1.2'], 'Native source preparation must receive the final product lock')
+        ledger = json.loads((self.source / '.opengeul-overlay.json').read_text(encoding='utf-8'))
+        self.assertEqual(ledger['nativeActivation'], {'formatVersion': 1, 'testFixture': True})
 
     def test_windows_preparation_matches_editor_manifest_line_endings(self):
         manifest = self.native / 'Cargo.toml'

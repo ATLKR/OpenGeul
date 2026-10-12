@@ -218,7 +218,7 @@ def patch(source: Path, version: str) -> None:
     lock = replace_once(lock, f'name = "hop-desktop"\nversion = "{hop_version}"',
                         f'name = "hop-desktop"\nversion = "{version}"')
     (native/'Cargo.lock').write_text(lock, encoding='utf-8', newline='\n')
-    apply_native_activation(source)
+    activation_proof = apply_native_activation(source)
     for component in ('Preview','Thumbnail'):
         path=source/f'apps/desktop/quicklook/Resources/{component}/Info.plist'
         if path.is_file():
@@ -327,7 +327,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:
