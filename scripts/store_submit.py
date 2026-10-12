@@ -31,6 +31,13 @@ ACCEPTED = {'PreProcessing', 'Certification', 'Release', 'PendingPublication', '
 FAILED = {'CommitFailed', 'PreProcessingFailed', 'CertificationFailed', 'ReleaseFailed', 'PublishFailed', 'Canceled'}
 PHASES = {'idle', 'delete_attempted', 'delete_confirmed', 'create_attempted', 'draft_ready', 'commit_attempted', 'submitted'}
 LIMIT = 96 * 1024 * 1024
+ADOPTION_PENDING_ID = '1152921505702100805'
+ADOPTION_BASELINE_ID = '1152921505702042424'
+ADOPTION_SOURCE = {'version': '1.1.3',
+    'sourceCommit': '859f676167b258a7a6a57ecdfcb0e224338de01a',
+    'sourceRunId': '38294374822', 'sourceRunAttempt': '1',
+    'sourceReleaseId': 410953892,
+    'sourceAssetFingerprintSha256': 'fa5e0d0857d7e5d3331c731d408cea0aad9656f55ae25e68b70c4504c01cd11e'}
 
 
 class SubmissionBlocked(ValueError):
@@ -259,6 +266,19 @@ def _journal_state(body):
     for field, size in (('source_sha', 40), ('source_msix_sha256', 64)):
         if state.get(field) is not None and (not isinstance(state[field], str) or not re.fullmatch('[0-9a-f]{' + str(size) + '}', state[field])):
             raise SubmissionBlocked('Store state Issue has invalid source identity')
+    for field in ('adopted_draft_semantic_sha256', 'adopted_latest_draft_semantic_sha256',
+                  'adopted_baseline_semantic_sha256'):
+        if field in state and (not isinstance(state[field], str)
+                or not re.fullmatch('[0-9a-f]{64}', state[field])):
+            raise SubmissionBlocked('Store journal has invalid adopted draft identity')
+    if state.get('adopted_pending_id') is not None:
+        if (_id(state['adopted_pending_id']) != ADOPTION_PENDING_ID
+                or state.get('submission_id') != ADOPTION_PENDING_ID
+                or state.get('baseline_id') != ADOPTION_BASELINE_ID):
+            raise SubmissionBlocked('Store journal adopted another pending or Published SID')
+    if ('adoption_upload_destination_missing' in state
+            and type(state['adoption_upload_destination_missing']) is not bool):
+        raise SubmissionBlocked('Store journal has invalid upload reconciliation state')
     fields = {'source_asset_fingerprint_sha256', 'source_msix_sha256_by_arch', 'store_msix_sha256_by_arch'}
     if fields & state.keys():
         if (not fields <= state.keys() or not isinstance(state['source_asset_fingerprint_sha256'], str)
@@ -314,6 +334,12 @@ def _journal_body(state, warning=None):
 def _save(journal, phase, details=None, *, warning=None, **fields):
     state = dict(journal['state'], phase=phase)
     if details:
+        if (state.get('adopted_pending_id') and state.get('tag')
+                and state['tag'] != 'v' + details['version']):
+            if journal['state']['phase'] in {'create_attempted', 'delete_attempted', 'commit_attempted'}:
+                raise SubmissionBlocked('An uncertain adopted submission cannot be reset for another release')
+            state = {key: value for key, value in state.items()
+                if not key.startswith(('adopted_', 'adoption_'))}
         state.update(tag='v' + details['version'], release_id=_id(details['sourceReleaseId']),
                      run_id=_id(details['sourceRunId']), source_sha=details['sourceCommit'])
         if details.get('formatVersion') == 2:
@@ -393,6 +419,91 @@ def _publication_mode(submission):
 def _immediate(submission):
     if submission.get('targetPublishMode') != 'Immediate':
         raise SubmissionBlocked('This Store update must publish automatically after certification')
+
+
+def draft_semantic_sha256(submission):
+    """상태/서버 전송 필드와 별도로 모든 초안 콘텐츠를 정확히 고정한다."""
+    if not isinstance(submission, dict):
+        raise SubmissionBlocked('Store draft semantic metadata is invalid')
+    excluded = {'id', 'status', 'statusDetails', 'fileUploadUrl', 'friendlyName'}
+    try:
+        value = {key: item for key, item in submission.items() if key not in excluded}
+        body = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(',', ':'), allow_nan=False).encode('utf-8')
+    except (TypeError, ValueError, UnicodeError):
+        raise SubmissionBlocked('Store draft semantic metadata is invalid') from None
+    return hashlib.sha256(body).hexdigest()
+
+
+def _adoption_proof(details):
+    requested = os.getenv('STORE_ADOPT_PENDING', 'false')
+    if requested == 'false': return None
+    if requested != 'true':
+        raise SubmissionBlocked('Store draft adoption requires an explicit boolean request')
+    if (details.get('formatVersion') != 2 or details.get('storeAppId') != STORE_APP_ID
+            or details.get('identity') != STORE_IDENTITY
+            or any(details.get(key) != value for key, value in ADOPTION_SOURCE.items())
+            or os.getenv('GITHUB_EVENT_NAME') != 'workflow_dispatch'
+            or os.getenv('GITHUB_ACTOR') != 'ATLKR'
+            or os.getenv('GITHUB_JOB') != 'submit'
+            or os.getenv('GITHUB_WORKFLOW_REF') != f'{REPOSITORY}/.github/workflows/store-package.yml@refs/heads/main'):
+        raise SubmissionBlocked('Store draft adoption belongs to one approved canonical source and owner')
+    # _verify already enforces these gates. Refresh them for this explicit handoff.
+    _store_workflow(details)
+    run = _gh('GET', f'actions/runs/{_id(os.getenv("GITHUB_RUN_ID"))}')
+    owner = {'login': 'ATLKR', 'type': 'User', 'id': 65988341}
+    if any(not isinstance(run.get(key), dict)
+           or any(run[key].get(field) != value for field, value in owner.items())
+           for key in ('actor', 'triggering_actor')):
+        raise SubmissionBlocked('Only the explicitly approving Store owner may adopt this draft')
+    def unique(items):
+        result = {}
+        for key, value in items:
+            if key in result: raise ValueError('duplicate')
+            result[key] = value
+        return result
+    try:
+        event_path = Path(os.environ['GITHUB_EVENT_PATH'])
+        if event_path.is_symlink() or not event_path.is_file() or event_path.stat().st_size > 2 * 1024 * 1024:
+            raise ValueError('event')
+        event = json.loads(event_path.read_bytes(), object_pairs_hook=unique,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('constant')))
+    except (KeyError, OSError, ValueError, TypeError):
+        raise SubmissionBlocked('Store draft adoption lacks a valid actual dispatch event') from None
+    sha = os.getenv('STORE_ADOPTION_DRAFT_SHA256')
+    inputs = event.get('inputs') if isinstance(event, dict) else None
+    sender = event.get('sender') if isinstance(event, dict) else None
+    repository = event.get('repository') if isinstance(event, dict) else None
+    if (not isinstance(inputs, dict) or not isinstance(sender, dict)
+            or any(sender.get(key) != value for key, value in owner.items())
+            or not isinstance(repository, dict) or repository.get('full_name') != REPOSITORY
+            or repository.get('private') is not False
+            or not (inputs.get('adopt_pending_submission') is True
+                    or inputs.get('adopt_pending_submission') == 'true')
+            or not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha)
+            or inputs.get('adoption_draft_sha256') != sha):
+        raise SubmissionBlocked('Store draft adoption requires the exact approved dispatch fingerprint')
+    return {'pending_id': ADOPTION_PENDING_ID, 'baseline_id': ADOPTION_BASELINE_ID,
+            'draft_sha256': sha}
+
+
+def _fresh_adoption(api, proof, baseline_sha256):
+    app = _app(api)
+    if (_ref(app, 'pendingApplicationSubmission') != proof['pending_id']
+            or _ref(app, 'lastPublishedApplicationSubmission') != proof['baseline_id']):
+        raise SubmissionBlocked('Approved Store pending or Published reference changed before adoption write')
+    _, baseline = api('GET', f'submissions/{proof["baseline_id"]}')
+    _free(baseline); _publication_mode(baseline)
+    if (_id(baseline.get('id')) != proof['baseline_id'] or baseline.get('status') != 'Published'
+            or _packages_version(baseline) != (1, 1, 1, 0)
+            or draft_semantic_sha256(baseline) != baseline_sha256):
+        raise SubmissionBlocked('Approved Published baseline changed before adoption write')
+    _, draft = api('GET', f'submissions/{proof["pending_id"]}')
+    _free(draft); _publication_mode(draft)
+    if (_id(draft.get('id')) != proof['pending_id'] or draft.get('status') != 'PendingCommit'
+            or draft_semantic_sha256(draft) != proof['draft_sha256']):
+        raise SubmissionBlocked('Approved PendingCommit draft content changed before adoption write')
+    return draft
 
 
 def _packages_version(submission):
@@ -501,8 +612,23 @@ def _warn(reason):
 def submit(tag, directory):
     try:
         details, version, body = _verify(tag, directory)
+        adoption = _adoption_proof(details)
         journal = _journal()
         state = journal['state']
+        if state.get('adopted_pending_id') and state.get('tag') == tag and state['phase'] == 'draft_ready':
+            if (any(details.get(key) != value for key, value in ADOPTION_SOURCE.items())
+                    or not _journal_matches(state, details)
+                    or not all(key in state for key in ('adopted_draft_semantic_sha256',
+                        'adopted_latest_draft_semantic_sha256', 'adopted_baseline_semantic_sha256'))
+                    or adoption and adoption['draft_sha256'] != state['adopted_draft_semantic_sha256']):
+                raise SubmissionBlocked('Persisted adoption must own this exact approved source and package pair')
+            if state.get('adoption_upload_destination_missing'):
+                raise SubmissionBlocked('The owned Store draft lacks an acknowledged upload destination; API reconciliation is required')
+            adoption = {'pending_id': ADOPTION_PENDING_ID, 'baseline_id': ADOPTION_BASELINE_ID,
+                'draft_sha256': state['adopted_latest_draft_semantic_sha256']}
+            adoption_baseline_sha256 = state['adopted_baseline_semantic_sha256']
+        if adoption and state.get('submission_id') not in (None, adoption['pending_id']):
+            raise SubmissionBlocked('Draft adoption cannot retarget an existing owned submission')
         if state['phase'] in {'delete_attempted', 'create_attempted'}:
             raise SubmissionBlocked('An earlier Store mutation lacks acknowledgment; reconcile the app journal before any new submission')
         opener, token = authenticate()
@@ -539,6 +665,8 @@ def submit(tag, directory):
                 or any(package.get('architecture', '').lower() != 'x64' for package in baseline['applicationPackages'])):
             raise SubmissionBlocked('Automatic updates require the published x64 package template')
         pending_id = _ref(app, 'pendingApplicationSubmission')
+        if adoption and (pending_id != adoption['pending_id'] or baseline_id != adoption['baseline_id']):
+            raise SubmissionBlocked('Draft adoption may write only the explicitly approved existing SID')
         if state['phase'] in {'draft_ready', 'submitted'} and state['submission_id'] not in {pending_id, baseline_id}:
             raise SubmissionBlocked('Recorded Store submission disappeared without acknowledged deletion or publication')
         target = version + (0,)
@@ -553,6 +681,10 @@ def submit(tag, directory):
             if (_id(pending['id']) != pending_id or pending.get('status') == 'Published'
                     or pending.get('status') not in ACCEPTED | FAILED | {'None', 'PendingCommit', 'CommitStarted'}):
                 raise SubmissionBlocked('Published or unowned pending submission cannot be replaced')
+            if (state['phase'] == 'submitted' and state.get('submission_id') == pending_id
+                    and state.get('status') in ACCEPTED | {'CommitStarted'}
+                    and pending.get('status') in {'PendingCommit', 'None'}):
+                raise SubmissionBlocked('A confirmed processing submission has contradictory draft readback; preserve it for read-only reconciliation')
             # 과거 tag의 journal도 처리 중인 Manual 제출의 삭제/재commit을 허가하지 않는다.
             if pending.get('status') in ACCEPTED | {'CommitStarted'}:
                 _immediate(pending)
@@ -580,6 +712,19 @@ def submit(tag, directory):
                 return {'outcome': 'already_requested', 'tag': tag, 'submission_id': pending_id, 'status': status, **observed}
             owned = matching or (state['phase'] == 'draft_ready' and state.get('submission_id') == pending_id
                      and _journal_matches(state, details))
+            if adoption and not state.get('adopted_pending_id'):
+                if state != {'app_id': STORE_APP_ID, 'phase': 'idle'}:
+                    raise SubmissionBlocked('Draft adoption requires an idle journal with no prior mutation or SID')
+                adoption_baseline_sha256 = draft_semantic_sha256(baseline)
+                pending = _fresh_adoption(api, adoption, adoption_baseline_sha256)
+                if _packages_version(pending) > target:
+                    raise SubmissionBlocked('A newer pending Store package is preserved')
+                _save(journal, 'draft_ready', details, submission_id=pending_id,
+                    baseline_id=baseline_id, adopted_pending_id=pending_id,
+                    adopted_draft_semantic_sha256=adoption['draft_sha256'],
+                    adopted_latest_draft_semantic_sha256=adoption['draft_sha256'],
+                    adopted_baseline_semantic_sha256=adoption_baseline_sha256)
+                owned = True
             if owned and pending.get('status') == 'PendingCommit':
                 # 소유권이 확인된 편집 가능한 Manual 초안만 동일 SID PUT으로 전환한다.
                 _publication_mode(pending)
@@ -632,6 +777,8 @@ def submit(tag, directory):
         metadata['notesForCertification'] = '\n'.join(notes + [_marker(details)])
         for field in ('id', 'status', 'statusDetails', 'fileUploadUrl', 'friendlyName'):
             metadata.pop(field, None)
+        if adoption:
+            _fresh_adoption(api, adoption, adoption_baseline_sha256)
         _, updated = api('PUT', f'submissions/{pending_id}', metadata)
         _immediate(updated)
         if (_id(updated['id']) != pending_id or updated.get('status') != 'PendingCommit'
@@ -639,7 +786,15 @@ def submit(tag, directory):
                 or not _packages_match(updated, metadata['applicationPackages'])
                 or updated.get('pricing') != metadata['pricing'] or updated.get('listings') != metadata.get('listings')):
             raise SubmissionBlocked('Store metadata update was not confirmed')
-        _upload(opener, updated['fileUploadUrl'], body)
+        upload_url = updated.get('fileUploadUrl')
+        missing_upload = not isinstance(upload_url, str) or not upload_url
+        if adoption:
+            _save(journal, 'draft_ready', details,
+                adopted_latest_draft_semantic_sha256=draft_semantic_sha256(updated),
+                adoption_upload_destination_missing=missing_upload)
+        if missing_upload:
+            raise SubmissionBlocked('Store metadata was acknowledged but no upload destination was returned; preserve this SID for API reconciliation')
+        _upload(opener, upload_url, body)
         fresh = _app(api)
         if _ref(fresh, 'pendingApplicationSubmission') != pending_id or _ref(fresh, 'lastPublishedApplicationSubmission') != baseline_id or _newer(version):
             raise SubmissionBlocked('Store or stable tag state changed before commit')
