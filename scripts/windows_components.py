@@ -22,6 +22,7 @@ import tomllib
 import xml.etree.ElementTree as ET
 import zlib
 import native_source_contract
+import com_source_contract
 
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
@@ -40,6 +41,8 @@ FEATURES = {'editor': 'default', 'cli': 'native-skia'}
 RESERVED = re.compile(r'(?i)(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?\Z')
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 COPIED_OVERLAYS = {
+    **{com_source_contract.CORE+'/src/opengeul_com_worker/'+name:
+       'overlay/com-worker/src/'+name for name in com_source_contract.FILES},
     **{native_source_contract.NATIVE_ROOT + '/opengeul-native/native-open/' + name:
        'overlay/native-open/' + name for name in native_source_contract.SHIM_FILES},
     'apps/desktop/src-tauri/src/opengeul_runtime.rs': 'overlay/opengeul_runtime.rs',
@@ -61,6 +64,8 @@ COPIED_OVERLAYS = {
     'third_party/rhwp/rhwp-studio/src/engine/opengeul-composition-final.ts': 'overlay/composition-final.ts',
 }
 SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
+    com_source_contract.LEDGER_PATH,
+    'third_party/rhwp/src/main.rs', 'third_party/rhwp/src/mcp_serve.rs',
     native_source_contract.LEDGER_PATH,
     'package.json', 'pnpm-lock.yaml', 'apps/desktop/package.json',
     'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock',
@@ -262,6 +267,10 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     if (not isinstance(activation, dict) or not isinstance(activation.get('ledger'), dict)
             or ledger.get('nativeActivation') != activation['ledger']):
         raise ValueError('Distribution ledger native activation proof mismatch')
+    worker = contract.get('comWorker')
+    if (not isinstance(worker, dict) or not isinstance(worker.get('ledger'), dict)
+            or ledger.get('comWorker') != worker['ledger']):
+        raise ValueError('Distribution ledger COM worker proof mismatch')
     for key in ('preservedFiles', 'baselinePreservedFiles'):
         for name, digest in ledger[key].items():
             safe_name(name)
@@ -318,6 +327,8 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
         raise ValueError('Native original manifest hash mismatch')
     if not (source/native_source_contract.LEDGER_PATH).is_file():
         raise ValueError('Missing native activation source ledger')
+    if not (source/com_source_contract.LEDGER_PATH).is_file():
+        raise ValueError('Missing COM worker source ledger')
     files = {name: sha(source/name) for name in (*SOURCE_FILES, *NATIVE_FILES)}
     core_files = {}
     for directory in CORE_TREES:
@@ -333,6 +344,8 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
                 'namespacePatch': read_json(core/'.opengeul-namespaces.json'),
                 'wasmRebuild': ledger.get('wasmRebuild'),
                 'nativeActivation': native_source_contract.capture(source, files, config,
+                    read_json=read_json, tree=tree, sha=sha),
+                'comWorker': com_source_contract.capture(source, files, native, config,
                     read_json=read_json, tree=tree, sha=sha),
                 # patch_composition hashes its LF text before write_text translates on Windows.
                 'compositionTextSha256': hashlib.sha256((source/'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts').read_text(encoding='utf-8').encode()).hexdigest()}
@@ -525,7 +538,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
         validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
-    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation'}
+    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
         raise ValueError('Invalid prepared source contract')
     _hashes(contract['preparedFiles'], set(SOURCE_FILES) | set(NATIVE_FILES))
@@ -546,6 +559,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
             or native['targets'] != {name: config['helpers']['overlay/'+local] for name, local in TARGETS.items()}
             or not isinstance(native['originalManifestSha256'], str) or not SHA.fullmatch(native['originalManifestSha256'])):
         raise ValueError('Invalid native test source contract')
+    com_source_contract.validate(contract['comWorker'], contract['preparedFiles'], native, config)
     for upstream, local in COPIED_OVERLAYS.items():
         if contract['preparedFiles'][upstream] != config['helpers'][local]:
             raise ValueError('Prepared overlay source contract mismatch')

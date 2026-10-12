@@ -20,6 +20,8 @@ import buildkit
 import prepare_native_tests
 import native_activation
 import native_source_contract
+import com_worker
+import com_source_contract
 import wasm_artifacts
 import windows_arch
 
@@ -65,6 +67,8 @@ class WindowsComponentsTests(unittest.TestCase):
         c = self.helper()
         source = self.root/'hop'
         for name in c.SOURCE_FILES:
+            if name == com_source_contract.LEDGER_PATH or name.startswith('third_party/rhwp/src/opengeul_com_worker/'):
+                continue
             path = source/name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('synthetic prepared source: '+name+'\n', encoding='utf-8')
@@ -80,9 +84,16 @@ class WindowsComponentsTests(unittest.TestCase):
             (folder/'.git/HEAD').write_text(lock[name]['commit']+'\n')
         original = '[package]\nname = "rhwp"\nversion = "0.8.7"\nautotests = false\n'
         (core/'Cargo.toml').write_text(original, encoding='utf-8')
-        prepare_native_tests.prepare(core)
         for upstream, local in c.COPIED_OVERLAYS.items():
+            if upstream.startswith('third_party/rhwp/src/opengeul_com_worker/'):continue
             (source/upstream).write_bytes((ROOT/local).read_bytes())
+        self.com_source(source)
+        prepare_native_tests.prepare(core)
+        manifest = (core/'Cargo.toml').read_text(encoding='utf-8')
+        com_source_contract.REFERENCE['preparedManifestSha256'] = [
+            hashlib.sha256(manifest.replace('\n', ending).encode()).hexdigest()
+            for ending in ('\n','\r\n')]
+        write_json(self.com_reference_path,com_source_contract.REFERENCE)
         self.native_source(source)
         namespace = {'patch': 'HWPX header raw-fragment inherited namespaces',
                      'upstreamHeaderSha256': 'b'*64,
@@ -107,9 +118,22 @@ class WindowsComponentsTests(unittest.TestCase):
                      'afterSha256': digest(engine/'input-handler-text.ts'),
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
                   'namespacePatch': namespace, 'wasmRebuild': wasm,
+                  'comWorker': json.loads((source/com_source_contract.LEDGER_PATH).read_bytes()),
                   'nativeActivation': json.loads((source/native_source_contract.LEDGER_PATH).read_bytes())}
         write_json(source/'.opengeul-overlay.json', ledger)
         return source
+
+    def com_source(self, source):
+        core = source/'third_party/rhwp'
+        (core/'src/main.rs').write_text('mod mcp_serve;\nfn main() {\n    let raw_args: Vec<String> = env::args().collect();\n    controlled_parser(raw_args);\n}\n')
+        (core/'src/mcp_serve.rs').write_text('// owned transport fixture\n'+com_worker.OLD_TRANSPORT)
+        ledger = com_worker.apply(source)
+        (core/'Cargo.lock').write_bytes((ROOT/'overlay/cli-cargo.lock.toml').read_bytes())
+        reference = {name:ledger[name] for name in ('originalFiles','patchedFiles')}
+        replacement = patch.object(com_source_contract,'REFERENCE',reference)
+        replacement.start();self.addCleanup(replacement.stop)
+        self.com_reference_path = self.root/'owned-com-reference.json'
+        write_json(self.com_reference_path,reference)
 
     def native_source(self, source):
         """소유한 작은 원본 fixture만 대체하고 실제 source policy는 그대로 실행한다."""
@@ -152,10 +176,11 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
-                "sys.argv=sys.argv[2:];runpy.run_path(sys.argv[0],run_name='__main__')",
-                str(self.native_reference_path),str(HELPER),*arguments]
+                "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
+                "sys.argv=sys.argv[3:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                str(self.native_reference_path),str(self.com_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')
@@ -348,6 +373,115 @@ class WindowsComponentsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.helper().capture('editor', self.payload('editor'), source, out, env=self.env)
         self.assertFalse(out.exists())
+
+    def test_capture_requires_com_worker_ledger_before_creating_transport(self):
+        source = self.source();(source/'third_party/rhwp/.opengeul-com-worker.json').unlink(missing_ok=True)
+        out = self.root/'unbound-com-component'
+        with self.assertRaises(ValueError):
+            self.helper().capture('cli',self.payload('cli'),source,out,env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_unlisted_com_worker_source_cannot_enter_a_component(self):
+        source = self.source();extra = source/'third_party/rhwp/src/opengeul_com_worker/extra.rs'
+        extra.parent.mkdir(parents=True,exist_ok=True);extra.write_text('// unreviewed COM source\n')
+        out = self.root/'extra-com-component'
+        with self.assertRaises(ValueError):
+            self.helper().capture('editor',self.payload('editor'),source,out,env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_both_components_require_the_same_full_com_proof_and_public_binding(self):
+        folders = self.pair()
+        records = [json.loads((folders[role]/'provenance.json').read_bytes()) for role in ('editor','cli')]
+        for record in records:self.assertIn('comWorker',record['source'])
+        self.assertEqual(records[0]['source']['comWorker'],records[1]['source']['comWorker'])
+        public = json.loads((folders['editor']/'source-parity.json').read_bytes())
+        self.assertEqual(public['comWorker'],records[0]['source']['comWorker']['ledger'])
+
+    def test_consumer_rejects_missing_com_proof_even_when_both_records_agree(self):
+        folders = self.pair()
+        for folder in folders.values():
+            path = folder/'provenance.json';record = json.loads(path.read_bytes())
+            record['source'].pop('comWorker',None);write_json(path,record)
+        self.assert_rejected_without_outputs(folders)
+
+    def test_typed_dispatch_and_worker_code_tampering_fail_before_capture(self):
+        source = self.source();payload = self.payload('cli')
+        names = ['src/main.rs','src/mcp_serve.rs',*(f'src/opengeul_com_worker/{name}' for name in com_source_contract.FILES)]
+        for index,name in enumerate(names):
+            path = source/'third_party/rhwp'/name;original = path.read_bytes();path.write_bytes(original+b'// unreviewed change\n')
+            out = self.root/('tampered-com-source-'+str(index))
+            with self.subTest(path=name),self.assertRaises(ValueError):
+                self.helper().capture('cli',payload,source,out,env=self.env)
+            self.assertFalse(out.exists());path.write_bytes(original)
+
+    def test_rehashed_dispatch_and_origin_ledgers_cannot_authorize_other_cli_source(self):
+        source = self.source();payload = self.payload('cli');path = source/com_source_contract.LEDGER_PATH
+        original = json.loads(path.read_bytes());config = self.helper().configured()
+        for index,change in enumerate(('original','patched','helper','clsid','qualification')):
+            altered = copy.deepcopy(original)
+            if change == 'original':altered['originalFiles']['src/main.rs'] = '0'*64
+            elif change == 'patched':altered['patchedFiles']['src/mcp_serve.rs'] = '0'*64
+            elif change == 'helper':altered['helperSha256'] = '0'*64
+            elif change == 'clsid':altered['fixedClsid'] = '00000000-0000-0000-0000-000000000000'
+            else:altered['qualification'] = True
+            path.write_bytes(com_source_contract.ledger_bytes(altered,config))
+            out = self.root/('rehashed-com-source-'+str(index))
+            with self.subTest(change=change),self.assertRaisesRegex(ValueError,'COM worker'):
+                self.helper().capture('cli',payload,source,out,env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_com_manifest_native_test_prefix_and_exact_cli_lock_are_bound(self):
+        source = self.source();payload = self.payload('cli');core = source/'third_party/rhwp'
+        lock = core/'Cargo.lock';before = lock.read_bytes();lock.write_bytes(before+b'# unreviewed lock\n')
+        with self.assertRaisesRegex(ValueError,'CLI lock'):
+            self.helper().capture('cli',payload,source,self.root/'unreviewed-cli-lock',env=self.env)
+        lock.write_bytes(before)
+        manifest = core/'Cargo.toml';original = manifest.read_bytes()
+        manifest.write_bytes(original+b'\n[unreviewed]\nfeature=true\n')
+        with self.assertRaisesRegex(ValueError,'compiled native-test manifest mismatch'):
+            self.helper().capture('cli',payload,source,self.root/'unreviewed-native-suffix',env=self.env)
+        self.assertFalse((self.root/'unreviewed-cli-lock').exists());self.assertFalse((self.root/'unreviewed-native-suffix').exists())
+
+    def test_com_consumer_rehash_cannot_change_fixed_source_dependency_or_test_prefix(self):
+        folders = self.pair();originals = {role:json.loads((folder/'provenance.json').read_bytes()) for role,folder in folders.items()}
+        config = self.helper().configured()
+        for change in ('original','patched','copied','dependency','native-prefix','lock','raw-ledger','prepared-manifest'):
+            for role,folder in folders.items():
+                record = copy.deepcopy(originals[role]);source = record['source'];ledger = source['comWorker']['ledger']
+                if change == 'original':ledger['originalFiles']['Cargo.toml'] = '0'*64
+                elif change == 'patched':ledger['patchedFiles']['src/main.rs'] = '0'*64
+                elif change == 'copied':ledger['copiedFiles']['src/opengeul_com_worker/mod.rs'] = '0'*64
+                elif change == 'dependency':ledger['windowsDependencies']['windows-core'] = '=0.62.2'
+                elif change == 'native-prefix':source['nativeTests']['originalManifestSha256'] = '0'*64
+                elif change == 'prepared-manifest':source['preparedFiles']['third_party/rhwp/Cargo.toml'] = '0'*64
+                elif change == 'lock':source['preparedFiles']['third_party/rhwp/Cargo.lock'] = '0'*64
+                source['preparedFiles'][com_source_contract.LEDGER_PATH] = hashlib.sha256(com_source_contract.ledger_bytes(ledger,config)).hexdigest()
+                if change == 'raw-ledger':source['preparedFiles'][com_source_contract.LEDGER_PATH] = '0'*64
+                write_json(folder/'provenance.json',record)
+            with self.subTest(change=change):self.assert_rejected_without_outputs(folders,'COM worker')
+
+    def test_public_com_ledger_must_match_the_component_proof_after_rehash(self):
+        folders = self.pair();path = folders['editor']/'source-parity.json';public = json.loads(path.read_bytes())
+        public['comWorker']['helperSha256'] = '0'*64;write_json(path,public)
+        for role,folder in folders.items():
+            provenance = folder/'provenance.json';record = json.loads(provenance.read_bytes())
+            record['source']['ledgerSha256'] = digest(path)
+            if role == 'editor':record['files']['source-parity.json'] = {'size':path.stat().st_size,'sha256':digest(path)}
+            write_json(provenance,record)
+        self.assert_rejected_without_outputs(folders,'COM worker proof mismatch')
+
+    def test_com_worker_directory_has_no_unlisted_empty_subtree_or_symlink(self):
+        source = self.source();payload = self.payload('cli');root = source/'third_party/rhwp/src/opengeul_com_worker'
+        empty = root/'unlisted';empty.mkdir()
+        with self.assertRaisesRegex(ValueError,'complete module source inventory'):
+            self.helper().capture('cli',payload,source,self.root/'extra-com-directory',env=self.env)
+        empty.rmdir();path = root/'mod.rs';data = path.read_bytes();path.unlink()
+        other = self.root/'outside-com.rs';other.write_bytes(data)
+        try:path.symlink_to(other)
+        except OSError:self.skipTest('Host cannot create owned symlink fixture')
+        with self.assertRaisesRegex(ValueError,'symlink|reparse'):
+            self.helper().capture('cli',payload,source,self.root/'outside-com-module',env=self.env)
+        self.assertFalse((self.root/'extra-com-directory').exists());self.assertFalse((self.root/'outside-com-module').exists())
 
     def test_unlisted_native_vendor_source_cannot_enter_a_component(self):
         source = self.source()
