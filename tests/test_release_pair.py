@@ -119,7 +119,7 @@ class ReleasePairTests(unittest.TestCase):
             for original, flattened in d['architectures'][arch]['assets'].items():
                 self.assertEqual((self.output / flattened).read_bytes(), (self.packages[arch] / original).read_bytes())
         fingerprint = hashlib.sha256(json.dumps([{'name': p.name, 'size': p.stat().st_size,
-            'sha256': hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(self.output.iterdir())], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            'sha256': hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(self.output.iterdir(), key=lambda p: p.name)], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         self.assertEqual(pair.source_fingerprint(self.output), fingerprint)
 
     def test_copy_architecture_restores_original_six_with_no_overwrite(self):

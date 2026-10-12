@@ -41,7 +41,7 @@ def _context(details, env):
 
 
 def _fingerprint(directory):
-    return hashlib.sha256(encoded([{'name': p.name, 'size': p.stat().st_size, 'sha256': sha(p)} for p in sorted(directory.iterdir())])).hexdigest()
+    return hashlib.sha256(encoded([{'name': p.name, 'size': p.stat().st_size, 'sha256': sha(p)} for p in sorted(directory.iterdir(), key=lambda p: p.name)])).hexdigest()
 
 
 def _store(directory, env):

@@ -327,7 +327,7 @@ def verify_pair(directory):
 def source_fingerprint(directory):
     """검증된 flat22파일의 바이트 fingerprint; CI qualification을 대신하지 않는다."""
     _descriptor(directory)
-    rows = [{'name': p.name, 'size': p.stat().st_size, 'sha256': sha(p)} for p in sorted(directory.iterdir())]
+    rows = [{'name': p.name, 'size': p.stat().st_size, 'sha256': sha(p)} for p in sorted(directory.iterdir(), key=lambda p: p.name)]
     return hashlib.sha256(encoded(rows)).hexdigest()
 
 
