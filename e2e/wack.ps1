@@ -16,7 +16,7 @@ if (-not (Test-Path $appcert)) {
    expectedIdentity=$Identity;expectedVersion=$Version;scope='WACK has not run; this is not certification evidence'} |
   ConvertTo-Json | Set-Content $summary -Encoding utf8
  Write-Warning 'WACK unavailable; review wack.json. Installation smoke is not WACK approval.'
- return
+ throw 'Windows App Certification Kit을 사용할 수 없어 전체 WACK 검증을 완료하지 못했습니다. wack.json을 확인하세요.'
 }
 $process=$null
 try {

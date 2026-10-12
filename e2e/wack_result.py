@@ -69,13 +69,15 @@ def main():
     parser.add_argument('--exit-code',type=int,required=True)
     args=parser.parse_args();result=inspect(args.report,args.identity,args.version,args.exit_code)
     args.out.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-    if not result['submissionCheckPassed']:raise SystemExit(result['reason'])
-    if result['passed']:print('WACK XML reports a complete PASS for the tested package identity and version.')
-    else:
+    if result['passed']:
+        print('WACK XML reports a complete PASS for the tested package identity and version.')
+        return
+    if result['submissionCheckPassed']:
         print('::warning::'+result['reason'])
         for test in result['nonPassingTests']:
             message='\n'.join([f"{test['name']}: {test['result']}"]+test['messages'])
             print('::warning::'+message.replace('%','%25').replace('\r','%0D').replace('\n','%0A'))
+    raise SystemExit(result['reason'])
 
 
 if __name__=='__main__':main()

@@ -1,5 +1,6 @@
 from pathlib import Path
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -198,7 +199,7 @@ class CentennialWackReportTests(unittest.TestCase):
                  '--report',str(self.report),'--out',str(output),'--identity',self.identity,
                  '--version',self.version,'--exit-code','0']
         completed=subprocess.run(command,capture_output=True,text=True)
-        self.assertEqual(completed.returncode,0,completed.stderr)
+        self.assertNotEqual(completed.returncode,0,'An optional WACK FAIL must block the release process')
         self.assertIn('::warning::',completed.stdout)
         self.assertIn('blocked executable reference',completed.stdout)
         self.assertIn('"cmd.exe"',completed.stdout)
@@ -208,6 +209,49 @@ class CentennialWackReportTests(unittest.TestCase):
         self.assertFalse(result['passed'])
         self.assertTrue(result['submissionCheckPassed'])
         self.assertEqual(result['overallResult'],'WARNING')
+        self.assertEqual(result['reportSha256'],hashlib.sha256(self.report.read_bytes()).hexdigest())
+
+    def test_cli_complete_centennial_pass_exits_zero_and_preserves_result(self):
+        self.write(self.synthetic_pass())
+        output=Path(self.tmp.name)/'result.json'
+        completed=subprocess.run(
+            [sys.executable,str(Path(__file__).resolve().parents[1]/'e2e/wack_result.py'),
+             '--report',str(self.report),'--out',str(output),'--identity',self.identity,
+             '--version',self.version,'--exit-code','0'],capture_output=True,text=True)
+        self.assertEqual(completed.returncode,0,completed.stderr)
+        self.assertIn('complete PASS',completed.stdout)
+        result=json.loads(output.read_text())
+        self.assertTrue(result['passed'])
+        self.assertEqual(result['nonPassingTests'],[])
+        self.assertEqual(result['reportSha256'],hashlib.sha256(self.report.read_bytes()).hexdigest())
+
+    def test_cli_optional_warning_or_failure_cannot_pass_under_overall_pass(self):
+        for outcome in ('FAIL','WARNING'):
+            with self.subTest(outcome=outcome):
+                root=self.synthetic_pass()
+                root.find(".//TEST[@NAME='Blocked executables']/RESULT").text=outcome
+                self.write(root)
+                output=Path(self.tmp.name)/'result.json'
+                completed=subprocess.run(
+                    [sys.executable,str(Path(__file__).resolve().parents[1]/'e2e/wack_result.py'),
+                     '--report',str(self.report),'--out',str(output),'--identity',self.identity,
+                     '--version',self.version,'--exit-code','0'],capture_output=True,text=True)
+                self.assertNotEqual(completed.returncode,0,'OVERALL_RESULT cannot conceal a non-passing optional test')
+                result=json.loads(output.read_text())
+                self.assertFalse(result['passed'])
+                self.assertTrue(result['submissionCheckPassed'],'Historical required-test analysis stays distinct from the execution gate')
+                self.assertEqual(result['nonPassingTests'][0]['result'],outcome)
+
+
+class WindowsWackGatePolicyTests(unittest.TestCase):
+    def test_sdk_unavailable_writes_failed_evidence_then_throws_without_return(self):
+        source=(Path(__file__).resolve().parents[1]/'e2e/wack.ps1').read_text(encoding='utf-8')
+        branch=source.split('if (-not (Test-Path $appcert)) {',1)[1].split('$process=$null',1)[0]
+        self.assertIn("status='unavailable';passed=$false",branch)
+        summary_position=branch.index('Set-Content $summary')
+        self.assertNotRegex(branch,r'(?m)^\s*(?:return|exit)\b','Unavailable SDK must fail instead of returning success')
+        self.assertRegex(branch,r'(?m)^\s*throw\s')
+        self.assertLess(summary_position,branch.index('throw'))
 
 
 if __name__=='__main__':unittest.main()
