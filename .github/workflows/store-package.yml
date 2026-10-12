@@ -29,6 +29,20 @@ jobs:
           python-version: '3.12'
       - name: 실제 GET 경계와 비밀·URL 출력 차단 회귀 검사
         run: python -m unittest discover -s tests -p test_store_pending_observe.py -v
+      - name: 고정 실패 실행의 공식 로그 바이트 SHA만 관찰
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, subprocess
+          from pathlib import Path
+          r = subprocess.run(['gh', 'api', 'repos/ATLKR/OpenGeul/actions/jobs/115007617322/logs'], capture_output=True, timeout=120)
+          result = {'jobId': 115007617322, 'returncode': r.returncode, 'storeMutationsAttempted': False}
+          if r.returncode == 0:
+              result.update(bytes=len(r.stdout), sha256=hashlib.sha256(r.stdout).hexdigest(), matchesRetainedOriginal=len(r.stdout)==16981 and hashlib.sha256(r.stdout).hexdigest()=='1858029bdb6c40fb10f3114504c07ca4456b9b449e2c03d584f92bd1affcde81')
+          Path('store-failure-log-byte-observation.json').write_text(json.dumps(result,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(result))
+          PY
       - name: 현재 대기 제출과 공개 기준을 읽기만 수행
         env:
           STORE_APP_ID: ${{ vars.STORE_APP_ID }}
@@ -42,6 +56,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: opengeul-store-pending-state-${{ github.run_id }}
-          path: store-pending-observation.json
+          path: |
+            store-pending-observation.json
+            store-failure-log-byte-observation.json
           retention-days: 1
           if-no-files-found: warn
