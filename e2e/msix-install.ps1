@@ -8,6 +8,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $PSNativeCommandUseErrorActionPreference=$true
 if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Install smoke is restricted to disposable GitHub Actions runners.' }
+$publicCiContext=[ordered]@{CiActions=[string]$env:GITHUB_ACTIONS;CiRunnerEnvironment=[string]$env:RUNNER_ENVIRONMENT;
+ CiRepository=[string]$env:GITHUB_REPOSITORY;CiCommit=[string]$env:GITHUB_SHA;
+ CiRunId=[string]$env:GITHUB_RUN_ID;CiRunAttempt=[string]$env:GITHUB_RUN_ATTEMPT}
+if ($publicCiContext.CiActions -cne 'true' -or $publicCiContext.CiRunnerEnvironment -cne 'github-hosted' -or
+ $publicCiContext.CiRepository -cne 'ATLKR/OpenGeul' -or $publicCiContext.CiCommit -cnotmatch '^[0-9a-f]{40}$' -or
+ $publicCiContext.CiRunId -cnotmatch '^[1-9][0-9]{0,19}$' -or $publicCiContext.CiRunAttempt -cnotmatch '^[1-9][0-9]{0,19}$') {
+ throw '현재 공개 CI 실행 정보가 올바르지 않습니다.'
+}
 $McpFixtureDirectory=(Resolve-Path -LiteralPath $McpFixtureDirectory -ErrorAction Stop).Path
 if (-not (Test-Path -LiteralPath (Join-Path $McpFixtureDirectory 'e2e-fixtures/basic.hwpx')) -or -not (Test-Path -LiteralPath (Join-Path $McpFixtureDirectory 'password-fixtures/manifest.json'))) { throw '검증한 같은 소스 실행의 MCP QA 원본이 필요합니다.' }
 $original=@(Get-ChildItem $PackageDirectory -Filter '*.msix')
@@ -102,6 +110,7 @@ public static class OpenGeulPackageIdentity {
  $cliResult=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli.json'
  if (Test-Path $cliResult) { throw 'Refusing to reuse an installed CLI result.' }
  $probeArgs="-NoProfile -File `"$(Join-Path $PSScriptRoot 'installed-cli.ps1')`" -CliPath `"$cli`" -PackageFullName `"$($installed.PackageFullName)`" -OutputDirectory `"$((Resolve-Path $OutputDirectory).Path)`" -McpFixtureDirectory `"$McpFixtureDirectory`" -ExpectedCliSha256 $ExpectedCliSha256 -Architecture $Architecture -PythonPath `"$((Get-Command python -ErrorAction Stop).Source)`""
+ $probeArgs+=" -CiActions $($publicCiContext.CiActions) -CiRunnerEnvironment $($publicCiContext.CiRunnerEnvironment) -CiRepository $($publicCiContext.CiRepository) -CiCommit $($publicCiContext.CiCommit) -CiRunId $($publicCiContext.CiRunId) -CiRunAttempt $($publicCiContext.CiRunAttempt)"
  Invoke-CommandInDesktopPackage -PackageFamilyName $installed.PackageFamilyName -AppId OpenGeul -Command (Get-Process -Id $PID).Path -Args $probeArgs -PreventBreakaway
  $deadline=(Get-Date).AddSeconds(60)
  while (-not (Test-Path $cliResult) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
