@@ -25,7 +25,7 @@ def main():
     event, event_hash = ready.public_event(env)
     ready.require(ready.event_actor(event, env) == ('ATLKR', 65988341, 'User'), '진단 actor가 다릅니다')
     source = ready.commit_sha(env.get('GITHUB_SHA')); run = ready.decimal(env.get('GITHUB_RUN_ID'))
-    ready.require(hashlib.sha256((ROOT / 'e2e/runner-ready.py').read_bytes()).hexdigest() == 'fc57d77f7c35eb8ae6300adf88440df0e9e52d5ae67d0c18cc69a34ab2a13a87', 'production a3a helper bytes 다름')
+    ready.require(hashlib.sha256((ROOT / 'e2e/runner-ready.py').read_bytes()).hexdigest() == '4b0583eece75b37d2f8c4d811bd7eca6833418153f1c5a2111b790b423b9f464', 'production lifecycle helper bytes 다름')
     out = ready.safe_output(Path('wsl-timeline')); out.mkdir()
     probe = ready.WindowsProbe(); host = probe.host()
     ready.require(host['nativeMachine'] == 0xAA64 and host['processMachine'] in (0, 0x8664), 'ARM host가 아닙니다')
@@ -37,9 +37,9 @@ def main():
         'helperSha256': hashlib.sha256((ROOT / 'e2e/runner-ready.py').read_bytes()).hexdigest(),
         'observerSha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'samples': [],
         'boundWindow': None, 'boundProcess': None, 'naturalProcessExitObserved': False,
-        'productionCandidateCommit': 'a3a398bfcf6232659eed1a1c658e070268a90345',
-        'postExitFreshCompositeQualified': False, 'foregroundWaitPredicateExercised': False}
-    held = None; started = time.monotonic(); expected = ntpath.join(probe.windows_directory(), 'System32', 'wsl.exe')
+        'productionCandidateCommit': '60b40844cf76b4a8e300d2fe951346fded343f2a',
+        'postExitBoundImageCompositeQualified': False, 'foregroundWaitPredicateExercised': False}
+    held = None; started = time.monotonic(); deadline = started + 65; expected = ntpath.join(probe.windows_directory(), 'System32', 'wsl.exe')
     try:
         probe.screen(out / 'before.png')
         while time.monotonic() - started < 65:
@@ -63,26 +63,34 @@ def main():
                     '관측 WSL 실제 경로/native/session/서명이 다릅니다')
                 held = probe.kernel.OpenProcess(0x1000, False, window['processId']); ready.require(held, 'held WSL 조회 실패')
                 record.update(boundWindow=window, boundProcess=process)
+                initial = probe.startup_process_state(held, process['processId'])
+                ready.require(initial['createdFileTime'] == process['createdFileTime'] and initial['sessionId'] == process['sessionId']
+                    and initial['processMachine'] == 0 and initial['nativeMachine'] == 0xAA64 and initial['exitCode'] == 259, 'live held identity 변경')
+                record['liveBoundImage'] = probe.bound_image(expected, deadline=deadline)
+                ready.require(record['liveBoundImage']['bytes'] == process['imageBytes']
+                    and record['liveBoundImage']['sha256'] == process['imageSha256']
+                    and record['liveBoundImage']['signature'] == process['signature'], 'live process/file fingerprint 변경')
             if held:
                 window = record['boundWindow']; process = record['boundProcess']; exists = bool(probe.user.IsWindow(window['hwnd']))
-                exit_code = W.DWORD(); ready.require(probe.kernel.GetExitCodeProcess(held, ctypes.byref(exit_code)), 'held exit 조회 실패')
+                state = probe.startup_process_state(held, process['processId'])
                 owner = W.DWORD(); thread = probe.user.GetWindowThreadProcessId(window['hwnd'], ctypes.byref(owner)) if exists else 0
-                times = [W.FILETIME() for _ in range(4)]; native = W.WORD(); machine = W.WORD()
-                ready.require(probe.kernel.GetProcessTimes(held, *[ctypes.byref(t) for t in times])
-                    and ((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime) == process['createdFileTime']
-                    and probe.kernel.IsWow64Process2(held, ctypes.byref(machine), ctypes.byref(native))
-                    and machine.value == 0 and native.value == 0xAA64, 'held WSL identity 변경')
+                ready.require(state['createdFileTime'] == process['createdFileTime']
+                    and state['sessionId'] == process['sessionId'] == probe.session_id()
+                    and state['processMachine'] == 0 and state['nativeMachine'] == 0xAA64, 'held WSL identity 변경')
                 ready.require(not exists or (owner.value == process['processId'] and thread == window['threadId']), 'WSL HWND owner 변경')
                 sample.update(windowExists=exists, visible=bool(probe.user.IsWindowVisible(window['hwnd'])) if exists else False,
-                    heldExitCode=exit_code.value, sameWindowForeground=rows['foregroundHwnd'] == window['hwnd'])
-                if exit_code.value != 259:
+                    heldExitCode=state['exitCode'], sameWindowForeground=rows['foregroundHwnd'] == window['hwnd'])
+                if state['exitCode'] != 259:
                     ready.require(not exists, '종료된 WSL HWND가 남았습니다')
                     record['naturalProcessExitObserved'] = True; record['samples'].append(sample)
-                    record['afterProcesses'] = probe.processes([process['processId']])
-                    record['freshCompositeEqual'] = record['afterProcesses'] == [process]
-                    ready.require(record['freshCompositeEqual'], 'production processes post-exit composite 변경')
-                    ready.require(time.monotonic() - started <= 65, '65초 composite deadline 초과')
-                    record['postExitFreshCompositeQualified'] = True
+                    record['postExitHeldIdentity'] = state
+                    record['postExitImage'] = probe.bound_image(expected, deadline=deadline)
+                    record['boundImageEqual'] = record['postExitImage'] == record['liveBoundImage']
+                    ready.require(record['boundImageEqual'], 'bound post-exit disk image 변경')
+                    ready.require(probe.startup_process_state(held, process['processId']) == state
+                        and not probe.user.IsWindow(window['hwnd']), 'post-image held identity/window 변경')
+                    ready.require(time.monotonic() <= deadline, '65초 composite deadline 초과')
+                    record['postExitBoundImageCompositeQualified'] = True
                     break
             record['samples'].append(sample); time.sleep(0.5)
     except Exception as error:
@@ -96,7 +104,7 @@ def main():
     ready.require('errorType' not in record, '읽기 전용 timeline identity 실패')
     print(json.dumps({'readOnly': True, 'wslObserved': held is not None,
         'naturalProcessExitObserved': record['naturalProcessExitObserved'],
-        'postExitFreshCompositeQualified': record['postExitFreshCompositeQualified'], 'sourceQualified': False}))
+        'postExitBoundImageCompositeQualified': record['postExitBoundImageCompositeQualified'], 'sourceQualified': False}))
 
 
 if __name__ == '__main__': main()
