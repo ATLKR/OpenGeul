@@ -30,7 +30,16 @@ class Arm64WorkflowTests(unittest.TestCase):
             self.assertEqual(set(job['needs']), {'preflight','wasm'})
             self.assertEqual(job['runs-on'], 'windows-11-arm')
             self.assertEqual(job['permissions'], {'contents':'read','actions':'read'})
-            self.assertIn('-Architecture arm64', self.commands(name))
+            if name == 'windows-editor-arm64':
+                from build_progress import build_command
+                stages=[step for step in self.jobs[name]['steps'] if 'ci/build_progress.py run ' in step.get('run','')]
+                self.assertEqual([step['id'] for step in stages], ['editor-prepare','editor-native-tests','editor-release'])
+                for stage, step in zip(('Prepare','NativeTests','Release'), stages):
+                    self.assertEqual(step['run'], 'python ci/build_progress.py run --stage '+stage+' --architecture arm64')
+                    self.assertEqual(build_command(stage,'arm64')[-2:], ['-Architecture','arm64'])
+                    self.assertNotIn('if', step)
+            else:
+                self.assertIn('-Architecture arm64', self.commands(name))
             self.assertIn('opengeul-wasm-$env:GITHUB_RUN_ID', self.commands(name))
         self.assertEqual(set(self.jobs['build-arm64']['needs']), {'preflight','wasm','windows-editor-arm64','windows-cli-arm64'})
         self.assertIn('-Phase Package -Architecture arm64', self.commands('build-arm64'))

@@ -128,9 +128,48 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: 네이티브 표·PDF 정책 검사와 Windows 편집기 컴파일
+    - name: 원본 시험·소스·프런트엔드 준비
+      id: editor-prepare
       shell: pwsh
-      run: ./scripts/build-msix.ps1 -Phase Editor -WasmDirectory wasm-input
+      run: python ci/build_progress.py run --stage Prepare --architecture x64
+    - name: 원본 시험·소스·프런트엔드 준비 원본 로그 checkpoint 보존
+      id: progress-prepare
+      if: always() && !cancelled() && steps.editor-prepare.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-x64-prepare-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-x64/prepare/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: 필수 네이티브 표·PDF·데스크톱 시험
+      id: editor-native-tests
+      shell: pwsh
+      run: python ci/build_progress.py run --stage NativeTests --architecture x64
+    - name: 필수 네이티브 표·PDF·데스크톱 시험 원본 로그 checkpoint 보존
+      id: progress-native-tests
+      if: always() && !cancelled() && steps.editor-native-tests.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-x64-native-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-x64/native-tests/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: 제품 release 빌드·구성요소 capture
+      id: editor-release
+      shell: pwsh
+      run: python ci/build_progress.py run --stage Release --architecture x64
+    - name: 제품 release 빌드·구성요소 capture 원본 로그 checkpoint 보존
+      id: progress-release
+      if: always() && !cancelled() && steps.editor-release.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-x64-release-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-x64/release/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
       run: python ci/evidence.py size --limit-mib 64 .work/editor-component
@@ -187,9 +226,48 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: 네이티브 표·PDF 정책 검사와 Windows 편집기 컴파일
+    - name: 원본 시험·소스·프런트엔드 준비
+      id: editor-prepare
       shell: pwsh
-      run: ./scripts/build-msix.ps1 -Phase Editor -Architecture arm64 -WasmDirectory wasm-input
+      run: python ci/build_progress.py run --stage Prepare --architecture arm64
+    - name: 원본 시험·소스·프런트엔드 준비 원본 로그 checkpoint 보존
+      id: progress-prepare
+      if: always() && !cancelled() && steps.editor-prepare.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-arm64-prepare-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-arm64/prepare/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: 필수 네이티브 표·PDF·데스크톱 시험
+      id: editor-native-tests
+      shell: pwsh
+      run: python ci/build_progress.py run --stage NativeTests --architecture arm64
+    - name: 필수 네이티브 표·PDF·데스크톱 시험 원본 로그 checkpoint 보존
+      id: progress-native-tests
+      if: always() && !cancelled() && steps.editor-native-tests.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-arm64-native-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-arm64/native-tests/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: 제품 release 빌드·구성요소 capture
+      id: editor-release
+      shell: pwsh
+      run: python ci/build_progress.py run --stage Release --architecture arm64
+    - name: 제품 release 빌드·구성요소 capture 원본 로그 checkpoint 보존
+      id: progress-release
+      if: always() && !cancelled() && steps.editor-release.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-arm64-release-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-arm64/release/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
       run: python ci/evidence.py size --limit-mib 64 .work/editor-component

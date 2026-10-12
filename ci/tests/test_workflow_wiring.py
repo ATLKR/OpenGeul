@@ -16,7 +16,16 @@ class WiringTests(unittest.TestCase):
             self.assertIn("needs.preflight.outputs.mode == 'full'",job['if'])
             self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
             commands='\n'.join(s.get('run','') for s in job['steps'])
-            self.assertIn('-Phase '+role.capitalize(),commands)
+            if role == 'editor':
+                from build_progress import build_command
+                phases = [s for s in job['steps'] if 'ci/build_progress.py run ' in s.get('run','')]
+                self.assertEqual([s['id'] for s in phases], ['editor-prepare','editor-native-tests','editor-release'])
+                for stage, step in zip(('Prepare','NativeTests','Release'), phases):
+                    self.assertEqual(step['run'], 'python ci/build_progress.py run --stage '+stage+' --architecture x64')
+                    self.assertEqual(build_command(stage,'x64')[5:7], ['-Phase','Editor'])
+                    self.assertNotIn('if', step)
+            else:
+                self.assertIn('-Phase '+role.capitalize(),commands)
             self.assertIn('opengeul-wasm-$env:GITHUB_RUN_ID',commands)
         self.assertEqual(jobs['browser-e2e']['needs'],'wasm')
         commands='\n'.join(s.get('run','') for s in jobs['build']['steps'])
@@ -55,6 +64,13 @@ class WiringTests(unittest.TestCase):
             steps=self.load()['jobs'][job]['steps']
             uploads=sum(s.get('uses','').startswith('actions/upload-artifact') for s in steps)
             checks=sum('ci/evidence.py size ' in s.get('run','') for s in steps)
+            for step in steps:
+                if 'ci/build_progress.py run ' in step.get('run',''):
+                    from build_progress import MAX_TOTAL, MAX_LOG
+                    self.assertEqual(MAX_TOTAL, 16*1024*1024)
+                    self.assertLessEqual(MAX_LOG, MAX_TOTAL-4096)
+                    self.assertIn(step['id'], {'editor-prepare','editor-native-tests','editor-release'})
+                    checks += 1
             self.assertEqual(uploads,checks)
     def test_password_ui_is_a_required_same_source_native_gate(self):
         jobs=self.load()['jobs'];steps=jobs['native-e2e']['steps']

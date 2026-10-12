@@ -3,6 +3,7 @@
 param(
     [switch]$Store, [string]$IdentityFile, [string]$WasmDirectory,
     [ValidateSet('All','Editor','Cli','Package')][string]$Phase = 'All',
+    [ValidateSet('All','Prepare','NativeTests','Release')][string]$EditorStage = 'All',
     [string]$EditorComponent, [string]$CliComponent,
     [ValidateSet('x64','arm64')][string]$Architecture = 'x64'
 )
@@ -13,6 +14,10 @@ $env:PYTHONUTF8 = '1'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 if (-not $IsWindows) { throw 'Native builds require Windows.' }
+if ($EditorStage -ne 'All' -and $Phase -ne 'Editor') { throw 'Editor stages require the Editor phase.' }
+$prepareEditor = $Phase -ne 'Editor' -or $EditorStage -in @('All','Prepare')
+$editorTests = $Phase -in @('All','Editor') -and $EditorStage -in @('All','NativeTests')
+$editorRelease = $Phase -in @('All','Editor') -and $EditorStage -in @('All','Release')
 if ($Phase -ne 'Package' -and -not $WasmDirectory) { throw 'Compilation requires source-bound rebuilt WASM.' }
 if ($Phase -eq 'Package' -and (-not $EditorComponent -or -not $CliComponent)) { throw 'Packaging requires both same-run components.' }
 $tools = if ($Phase -eq 'Package') { @('python') } else { @('python','git','node','rustup','corepack') }
@@ -22,7 +27,10 @@ foreach ($tool in $tools) {
 $source = Join-Path $root '.work/hop'
 $stage = Join-Path $root '.work/payload'
 $output = Join-Path $root 'dist'
-if ((Test-Path $stage) -or (Test-Path $output)) { throw 'Preserve previous outputs before rebuilding; .work/payload or dist already exists.' }
+if ($Phase -eq 'Editor' -and $EditorStage -in @('NativeTests','Release')) {
+    if (-not (Test-Path $stage -PathType Container) -or (Test-Path $output)) { throw 'Editor stage requires its existing payload and no package output.' }
+    python ci/build_progress.py verify --stage $EditorStage --architecture $Architecture
+} elseif ((Test-Path $stage) -or (Test-Path $output)) { throw 'Preserve previous outputs before rebuilding; .work/payload or dist already exists.' }
 $product = Get-Content 'config/product.json' -Raw | ConvertFrom-Json
 $lock = Get-Content 'config/upstream.lock.json' -Raw | ConvertFrom-Json
 $target = python -c "import sys;sys.path.insert(0,'scripts');from windows_arch import target_triple;print(target_triple(sys.argv[1]))" $Architecture
@@ -35,6 +43,7 @@ if ($Phase -eq 'Package') {
     # bytes before creating any payload or restoring the release source ledger.
     python scripts/windows_components.py combine --editor $EditorComponent --cli $CliComponent --payload $stage --source $source --architecture $Architecture
 } else {
+if ($prepareEditor) {
 if ($Phase -eq 'All') { python -m unittest discover -s tests -v }
 if ($Phase -in @('All','Editor')) {
     node --experimental-strip-types --test tests/save-format.test.mjs tests/composition-final.test.mjs
@@ -48,13 +57,26 @@ if ($Store) { $manifestArgs += '--store' }
 }
 python scripts/prepare_upstream.py --fetch-only
 rustup toolchain install "$($lock.rust)-$target" --profile minimal --target $target
+}
 $env:RUSTUP_TOOLCHAIN = "$($lock.rust)-$target"
 $env:CARGO_TARGET_DIR = Join-Path $root '.work/target'
 $editorTarget = $env:CARGO_TARGET_DIR
 $cliTarget = Join-Path $root '.work/target-cli'
-$env:CARGO_BUILD_JOBS = '2'
+$processorCount = [Environment]::ProcessorCount
+try {
+    $memory = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+    $totalMemory = [long]$memory.TotalVisibleMemorySize * 1024
+    $availableMemory = [long]$memory.FreePhysicalMemory * 1024
+    $buildJobs = python ci/build_progress.py jobs --cpu $processorCount --total-memory $totalMemory --available-memory $availableMemory
+} catch {
+    $totalMemory = 0; $availableMemory = 0
+    $buildJobs = [Math]::Min($processorCount, 2)
+}
+$env:CARGO_BUILD_JOBS = [string]$buildJobs
+Write-Host "빌드 자원: CPU=$processorCount; RAM bytes=$totalMemory; 여유 RAM bytes=$availableMemory; cargo jobs=$buildJobs (전체 14 GiB·여유 12 GiB 이상에서 최대 4)."
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
 $env:CARGO_PROFILE_TEST_DEBUG = '0'
+if ($prepareEditor) {
 rustc --target $target --edition=2021 --test overlay/font_policy.rs -o .work/font-policy-tests.exe
 & .work/font-policy-tests.exe
 corepack enable
@@ -80,12 +102,19 @@ python e2e/table_height_fixtures.py $tableFixtures
 node e2e/table_height.mjs verify $tableVendor $tableFixtures
 python scripts/prepare_native_tests.py (Join-Path $source 'third_party/rhwp')
 $env:OPENGEUL_TABLE_FIXTURES = $tableFixtures
+} else {
+    $tableFixtures = Join-Path $root '.work/table-fixtures'
+    $env:OPENGEUL_TABLE_FIXTURES = $tableFixtures
+}
 Push-Location $source
 try {
-    if ($Phase -in @('All','Editor')) {
+    if ($Phase -in @('All','Editor') -and $EditorStage -in @('All','Prepare')) {
     pnpm run test:studio
     pnpm run build:studio
     python ../../scripts/buildkit.py frontend apps/studio-host/dist
+    }
+    if ($Phase -eq 'Editor' -and $EditorStage -eq 'Prepare') { exit 0 }
+    if ($editorTests) {
     # Reuse the native test graph for the table and PDF policy regressions.
     # Keep it separate from the GUI's different feature graph.
     Push-Location 'third_party/rhwp'
@@ -103,8 +132,8 @@ try {
         cargo test --locked --target $target --package opengeul-native-open
         cargo run --locked --target $target --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
     } finally { Pop-Location }
-    pnpm tauri build --no-bundle --target $target
     }
+    if ($editorRelease) { pnpm tauri build --no-bundle --target $target }
     if ($Phase -in @('All','Cli')) {
     Push-Location 'third_party/rhwp'
     try {
@@ -117,9 +146,10 @@ try {
     }
     }
 } finally { Pop-Location }
+if ($Phase -eq 'Editor' -and $EditorStage -eq 'NativeTests') { exit 0 }
 $release = Join-Path $env:CARGO_TARGET_DIR "$target/release"
 $cliRelease = Join-Path $cliTarget "$target/release"
-if ($Phase -in @('All','Editor')) {
+if ($editorRelease) {
 if (-not (Test-Path (Join-Path $release 'hop-desktop.exe'))) { throw 'Missing built editor runtime.' }
 Copy-Item (Join-Path $release 'hop-desktop.exe') (Join-Path $stage 'OpenGeul.exe')
 Get-ChildItem $release -Filter '*.dll' -File | ForEach-Object { Copy-Item $_.FullName $stage }
