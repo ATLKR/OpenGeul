@@ -14,7 +14,7 @@ from driver import Session,digest,edit
 from print_raster import inspect_print_pdf
 from print_queue import VirtualQueue,require_host
 from print_results import completed_job,validate_cases
-from print_focus import open_system_dialog,fill_print_output
+from print_focus import open_system_dialog,fill_print_output,prepare_app_for_print
 
 def wait(check,seconds=30):
     deadline=time.monotonic()+seconds
@@ -45,8 +45,11 @@ def system_dialog(session,queue,folder):
     # Open the preview at the product's normal window geometry. If the exact
     # semantic system-print action is off-screen, print_focus may adjust the
     # already-open preview only after its accessibility tree is observed.
-    windows[0].set_focus();send_keys('^p',vk_packet=False)
-    open_system_dialog(windows[0].handle,session.proc.pid,folder)
+    runtime=json.loads((folder/'session/runtime.json').read_text(encoding='utf-8'))
+    prepare_app_for_print(windows[0].handle,session.proc.pid,runtime,
+                          app_handle=int(session.proc._handle),evidence_dir=folder)
+    send_keys('^p',vk_packet=False)
+    open_system_dialog(windows[0].handle,session.proc.pid,folder,app_handle=int(session.proc._handle))
     dialog=wait(lambda:visible_dialog('Print',session.proc.pid))
     lists=[c for c in dialog.descendants(class_name='SysListView32') if c.is_visible()]
     if len(lists)!=1:raise AssertionError('Printer selection list was not found')

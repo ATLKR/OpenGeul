@@ -24,10 +24,11 @@ class PreviewActionTests(unittest.TestCase):
         self.module=importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules,{'print_focus':types.SimpleNamespace(_node=lambda c:{})}),patch.object(sys,'path',[str(ROOT/'e2e'),*sys.path]):spec.loader.exec_module(self.module)
         self.module.time=Clock();self.choice=Choice()
+        self.focus=types.SimpleNamespace(preview=object(),check=lambda *a,**kw:None,read=lambda *a,**kw:None)
         self.assertTrue(callable(getattr(self.module,'activate_option',None)),'Missing native option commit helper')
     def call(self):
         self.assertTrue(callable(getattr(self.module,'activate_option',None)),'Missing native option commit helper')
-        self.module.activate_option(self.choice)
+        self.module.activate_option(self.choice,self.focus)
     def test_visible_option_clicked_once(self):self.call();self.assertEqual(self.choice.clicks,1)
     def test_failed_click_is_not_retried(self):
         self.choice.fail=True
@@ -40,5 +41,10 @@ class PreviewActionTests(unittest.TestCase):
     def test_disabled_option_never_clicked(self):
         self.choice.enabled=False
         with self.assertRaises(AssertionError):self.call()
+        self.assertEqual(self.choice.clicks,0)
+    def test_failed_owned_point_guard_never_clicks(self):
+        def rejected(*args,**kwargs):raise AssertionError('foreign point owner')
+        self.focus.check=rejected
+        with self.assertRaisesRegex(AssertionError,'foreign point owner'):self.call()
         self.assertEqual(self.choice.clicks,0)
 if __name__=='__main__':unittest.main()
