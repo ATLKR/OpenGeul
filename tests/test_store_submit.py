@@ -36,7 +36,7 @@ class StoreSubmitTests(unittest.TestCase):
         pe[:2] = b'MZ'; pe[60:64] = (128).to_bytes(4, 'little')
         pe[128:132] = b'PE\0\0'; pe[132:134] = (0x8664).to_bytes(2, 'little')
         runtime = {'OpenGeul.exe': bytes(pe), 'Tools/rhwp.exe': bytes(pe),
-                   'WebView2Loader.dll': b'loader', 'Notices/OpenGeul-LICENSE.txt': b'MIT'}
+                   'WebView2Loader.dll': bytes(pe) + b'loader', 'Notices/OpenGeul-LICENSE.txt': b'MIT'}
         original = self.source / 'original.msix'
         packaged = self.directory / 'OpenGeul_1.1.3.0_x64_store-unsigned.msix'
         for path, identity in [(original, DEV_IDENTITY), (packaged, STORE_IDENTITY)]:

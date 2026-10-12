@@ -265,7 +265,7 @@ class StorePackageTests(unittest.TestCase):
             pe[:2] = b'MZ'; pe[60:64] = (128).to_bytes(4, 'little')
             pe[128:132] = b'PE\0\0'; pe[132:134] = (0x8664).to_bytes(2, 'little')
             runtime = {'OpenGeul.exe': bytes(pe), 'Tools/rhwp.exe': bytes(pe),
-                       'WebView2Loader.dll': b'original loader', 'Notices/OpenGeul-LICENSE.txt': b'MIT',
+                       'WebView2Loader.dll': bytes(pe) + b'original loader', 'Notices/OpenGeul-LICENSE.txt': b'MIT',
                        'AppxBlockMap.xml': b'<BlockMap/>', '[Content_Types].xml': b'<Types/>'}
             with zipfile.ZipFile(source, 'w') as archive:
                 for name, value in runtime.items(): archive.writestr(name, value)
@@ -278,9 +278,9 @@ class StorePackageTests(unittest.TestCase):
 
             write_store(runtime)
             verified = verify_repackage(source, store, '1.1.1')
-            self.assertEqual(verified['WebView2Loader.dll'], hashlib.sha256(b'original loader').hexdigest())
+            self.assertEqual(verified['WebView2Loader.dll'], hashlib.sha256(runtime['WebView2Loader.dll']).hexdigest())
             self.assertNotIn('AppxManifest.xml', verified)
-            write_store({**runtime, 'WebView2Loader.dll': b'different loader'})
+            write_store({**runtime, 'WebView2Loader.dll': bytes(pe) + b'different loader'})
             with self.assertRaisesRegex(ValueError, 'Runtime bytes changed'):
                 verify_repackage(source, store, '1.1.1')
             write_store(runtime, DEV_IDENTITY)

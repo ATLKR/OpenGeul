@@ -28,7 +28,7 @@ class PayloadParityTests(unittest.TestCase):
         pe[128:132] = b'PE\0\0'; pe[132:134] = (0x8664).to_bytes(2, 'little')
         self.payload = {'AppxManifest.xml': manifest(DEV_IDENTITY, '1.0.0').encode(),
                         'OpenGeul.exe': bytes(pe), 'Tools/rhwp.exe': bytes(pe),
-                        'WebView2Loader.dll': b'loader-original',
+                        'WebView2Loader.dll': bytes(pe) + b'loader-original',
                         'Notices/OpenGeul-LICENSE.txt': b'MIT', 'Assets/StoreLogo.png': b'PNG'}
         self.metadata = {'AppxBlockMap.xml': b'<BlockMap/>', '[Content_Types].xml': b'<Types/>'}
         self.msix = self.package / 'app.msix'
@@ -52,7 +52,7 @@ class PayloadParityTests(unittest.TestCase):
 
     def test_equal_full_runtime_is_accepted(self):
         prepare(self.package, self.output)
-        self.assertEqual((self.output / 'WebView2Loader.dll').read_bytes(), b'loader-original')
+        self.assertEqual((self.output / 'WebView2Loader.dll').read_bytes(), self.payload['WebView2Loader.dll'])
 
     def test_dll_mismatch_is_not_hidden_by_equal_exes(self):
         self.write_zip(self.portable, {**self.payload, 'WebView2Loader.dll': b'different-loader'})

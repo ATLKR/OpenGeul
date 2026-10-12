@@ -16,6 +16,7 @@ import sys
 import tempfile
 import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+from windows_arch import SUPPORTED_ARCHITECTURES, require_architecture
 
 MAX_MEMBERS = 10_000
 MAX_UNCOMPRESSED = 512 * 1024 * 1024
@@ -89,13 +90,14 @@ def inventory(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     return files
 
 
-def prepare(package: Path, output: Path):
+def prepare(package: Path, output: Path, architecture: str = 'x64'):
+    architecture=require_architecture(architecture)
     if output.exists() or output.is_symlink(): raise ValueError('Refusing to overwrite an existing test runtime')
     verify_checksums(package)
     msix = list(package.glob('*.msix')); portable = list(package.glob('*portable.zip'))
     if len(msix) != 1 or len(portable) != 1: raise ValueError('Exactly one MSIX and portable archive required')
     from releasekit import verify_msix
-    verify_msix(msix[0])
+    verify_msix(msix[0],architecture)
     with zipfile.ZipFile(portable[0]) as archive, zipfile.ZipFile(msix[0]) as packaged:
         portable_files, packaged_files = inventory(archive), inventory(packaged)
         runtime_files = {n:e for n,e in packaged_files.items() if n not in PACKAGING_ONLY}
@@ -123,7 +125,7 @@ def prepare(package: Path, output: Path):
             stage.rename(output)
         finally:
             if stage.exists(): shutil.rmtree(stage)
-    result = {'msix': msix[0].name, 'portable': portable[0].name,
+    result = {'msix': msix[0].name, 'portable': portable[0].name, 'architecture':architecture,
               'editorSha256': digests['OpenGeul.exe'], 'verifiedRuntimeFiles': len(digests),
               'runtimeManifestSha256': hashlib.sha256(json.dumps(digests,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
     print(json.dumps(result))
@@ -131,5 +133,5 @@ def prepare(package: Path, output: Path):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(); parser.add_argument('package', type=Path); parser.add_argument('output', type=Path)
-    args = parser.parse_args(); prepare(args.package, args.output)
+    parser = argparse.ArgumentParser(); parser.add_argument('package', type=Path); parser.add_argument('output', type=Path); parser.add_argument('--architecture', choices=SUPPORTED_ARCHITECTURES, default='x64')
+    args = parser.parse_args(); prepare(args.package, args.output,args.architecture)

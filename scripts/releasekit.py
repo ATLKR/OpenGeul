@@ -11,6 +11,7 @@ import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from buildkit import ROOT, FONT_EXTENSIONS, SECRET_EXTENSIONS, VCLIBS_DEPENDENCY, package_version
+from windows_arch import SUPPORTED_ARCHITECTURES, require_architecture, machine_for, component_artifact_name
 sys.path.insert(0, str(ROOT/'e2e'))
 
 REPOSITORY = 'ATLKR/OpenGeul'
@@ -31,18 +32,20 @@ def release_tag(version: str, ref: str, run: str, attempt: str) -> str:
         raise ValueError('Invalid main-branch release identity')
     return f'v{version}-dev.{run}.{attempt}'
 
-def pe_machine(header: bytes) -> int:
+def pe_machine(header: bytes, architecture: str = 'x64') -> int:
+    expected = machine_for(architecture)
     if len(header) < 64 or header[:2] != b'MZ':
         raise ValueError('Runtime file is not a PE executable')
     offset = struct.unpack_from('<I', header, 60)[0]
     if offset + 6 > len(header) or header[offset:offset + 4] != b'PE\0\0':
         raise ValueError('Invalid PE header')
     machine = struct.unpack_from('<H', header, offset + 4)[0]
-    if machine != 0x8664:
-        raise ValueError('This distribution requires Windows x64 executables')
+    if machine != expected:
+        raise ValueError(f'Expected a native Windows {architecture} executable')
     return machine
 
-def verify_msix(path: Path) -> dict:
+def verify_msix(path: Path, architecture: str = 'x64') -> dict:
+    architecture=require_architecture(architecture)
     from prepare_payload import inventory
     required = {'OpenGeul.exe', 'Tools/rhwp.exe', 'AppxManifest.xml', 'AppxBlockMap.xml', '[Content_Types].xml', 'Notices/OpenGeul-LICENSE.txt'}
     with zipfile.ZipFile(path) as archive:
@@ -63,8 +66,8 @@ def verify_msix(path: Path) -> dict:
                 header = entry.read(4096)
             if header[:4] in (b'wOFF', b'wOF2', b'ttcf', b'OTTO', b'\0\1\0\0'):
                 raise ValueError('Disguised font file in package')
-            if name.endswith('.exe'):
-                pe_machine(header)
+            if parts.suffix.lower() in ('.exe','.dll'):
+                pe_machine(header,architecture)
         normalized = {name.replace('\\', '/') for name in names}
         if not required <= normalized:
             raise ValueError('Package lacks required real runtime, manifest or license files: ' + str(required - normalized))
@@ -75,7 +78,7 @@ def verify_msix(path: Path) -> dict:
         doc = ET.fromstring(content('AppxManifest.xml'))
         ns = {'p':'http://schemas.microsoft.com/appx/manifest/foundation/windows10'}
         identity = doc.find('p:Identity', ns)
-        if identity is None or identity.get('ProcessorArchitecture') != 'x64':
+        if identity is None or identity.get('ProcessorArchitecture') != architecture:
             raise ValueError('Wrong MSIX architecture')
         app = doc.find('p:Applications/p:Application', ns)
         if app is None or app.get('Executable') != 'OpenGeul.exe':
@@ -83,9 +86,10 @@ def verify_msix(path: Path) -> dict:
         if not any(all(dep.get(key)==value for key,value in VCLIBS_DEPENDENCY.items())
                    for dep in doc.findall('p:Dependencies/p:PackageDependency',ns)):
             raise ValueError('MSIX lacks the required Desktop VCLibs dependency for the bundled CLI')
-    return {'unsigned':True, 'architecture':'x64', 'members':len(names), 'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+    return {'unsigned':True, 'architecture':architecture, 'members':len(names), 'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
 
-def component_proof(source: Path, package: Path, required: bool) -> dict | None:
+def component_proof(source: Path, package: Path, required: bool, architecture: str = 'x64') -> dict | None:
+    architecture=require_architecture(architecture)
     path = source/'.opengeul-windows-components.json'
     if not path.exists() and not path.is_symlink():
         if required: raise ValueError('Parallel packaging requires Windows component proof')
@@ -106,7 +110,7 @@ def component_proof(source: Path, package: Path, required: bool) -> dict | None:
             record = proof['components'][role]
             if (not isinstance(record, dict) or set(record) != {'artifactName','runAttempt','provenanceSha256','runtime','size','sha256'}
                     or record.get('runtime') != runtime
-                    or record.get('artifactName') != f'opengeul-{role}-component-{current["runId"]}'
+                    or record.get('artifactName') != component_artifact_name(role,current['runId'],architecture)
                     or not isinstance(record.get('runAttempt'), str) or not re.fullmatch(r'[1-9][0-9]*', record['runAttempt'])
                     or int(record['runAttempt']) > int(current['runAttempt'])
                     or type(record.get('size')) is not int or record['size'] != members[runtime].file_size
@@ -120,30 +124,31 @@ def component_proof(source: Path, package: Path, required: bool) -> dict | None:
     return proof
 
 
-def finish(output: Path, source: Path, *, require_components: bool = False) -> None:
+def finish(output: Path, source: Path, *, require_components: bool = False, architecture: str = 'x64') -> None:
+    architecture=require_architecture(architecture)
     product = json.loads((ROOT/'config/product.json').read_text(encoding='utf-8'))
     packages = sorted(output.glob('*.msix'))
     if len(packages) != 1:
         raise ValueError('Expected exactly one MSIX')
-    result = verify_msix(packages[0])
+    result = verify_msix(packages[0],architecture)
     result.update(repository=REPOSITORY, commit=os.getenv('GITHUB_SHA'), runId=os.getenv('GITHUB_RUN_ID'),
                   version=product['version'], package=packages[0].name,
                   upstream=json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8')),
                   sourceParity=json.loads((source/'.opengeul-overlay.json').read_text(encoding='utf-8')),
                   manualWindowsUx='not-verified', storeCertified=False)
-    proof = component_proof(source, packages[0], require_components)
+    proof = component_proof(source, packages[0], require_components,architecture)
     if proof is not None: result['windowsComponents'] = proof
     (output/'provenance.json').write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
     (output/'SHA256SUMS.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in sorted(output.iterdir()) if p.is_file() and p.name!='SHA256SUMS.txt'),encoding='utf-8')
 
 def main():
     ap=argparse.ArgumentParser();sub=ap.add_subparsers(dest='cmd',required=True)
-    p=sub.add_parser('verify');p.add_argument('package',type=Path)
-    p=sub.add_parser('finish');p.add_argument('output',type=Path);p.add_argument('source',type=Path);p.add_argument('--require-windows-components',action='store_true')
+    p=sub.add_parser('verify');p.add_argument('package',type=Path);p.add_argument('--architecture',choices=SUPPORTED_ARCHITECTURES,default='x64')
+    p=sub.add_parser('finish');p.add_argument('output',type=Path);p.add_argument('source',type=Path);p.add_argument('--require-windows-components',action='store_true');p.add_argument('--architecture',choices=SUPPORTED_ARCHITECTURES,default='x64')
     sub.add_parser('authorize')
     a=ap.parse_args()
-    if a.cmd=='verify':print(json.dumps(verify_msix(a.package),indent=2))
-    elif a.cmd=='finish':finish(a.output,a.source,require_components=a.require_windows_components)
+    if a.cmd=='verify':print(json.dumps(verify_msix(a.package,a.architecture),indent=2))
+    elif a.cmd=='finish':finish(a.output,a.source,require_components=a.require_windows_components,architecture=a.architecture)
     else:
         if not release_allowed(os.getenv('GITHUB_REPOSITORY',''),os.getenv('GITHUB_EVENT_NAME',''),os.getenv('GITHUB_REF','')):
             raise SystemExit('Release is not authorized for this repository/event/ref')

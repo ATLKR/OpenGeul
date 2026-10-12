@@ -8,6 +8,7 @@ import re
 import struct
 import xml.etree.ElementTree as ET
 import zlib
+from windows_arch import SUPPORTED_ARCHITECTURES, require_architecture
 
 ROOT = Path(__file__).resolve().parents[1]
 FONT_EXTENSIONS = {'.ttf', '.otf', '.ttc', '.otc', '.woff', '.woff2', '.eot', '.pfb', '.pfm'}
@@ -69,8 +70,9 @@ def validate_identity(identity: dict, *, store: bool = False) -> dict:
     return {k:identity[k] for k in required}
 
 
-def manifest(identity: dict, version: str) -> str:
+def manifest(identity: dict, version: str, architecture: str = 'x64') -> str:
     identity=validate_identity(identity)
+    architecture=require_architecture(architecture)
     ns='http://schemas.microsoft.com/appx/manifest/foundation/windows10'
     uap='http://schemas.microsoft.com/appx/manifest/uap/windows10'
     rescap='http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities'
@@ -78,7 +80,7 @@ def manifest(identity: dict, version: str) -> str:
     p=lambda n:f'{{{ns}}}{n}'
     u=lambda n:f'{{{uap}}}{n}'
     root=ET.Element(p('Package'),IgnorableNamespaces='uap rescap')
-    ET.SubElement(root,p('Identity'),Name=identity['name'],Publisher=identity['publisher'],Version=package_version(version),ProcessorArchitecture='x64')
+    ET.SubElement(root,p('Identity'),Name=identity['name'],Publisher=identity['publisher'],Version=package_version(version),ProcessorArchitecture=architecture)
     props=ET.SubElement(root,p('Properties'))
     for key,value in [('DisplayName','OpenGeul'),('PublisherDisplayName',identity['displayName']),('Logo','Assets/StoreLogo.png')]: ET.SubElement(props,p(key)).text=value
     deps=ET.SubElement(root,p('Dependencies'))
@@ -156,7 +158,7 @@ def make_assets(out: Path) -> None:
 
 def main() -> None:
     ap=argparse.ArgumentParser(); sub=ap.add_subparsers(dest='command',required=True)
-    m=sub.add_parser('manifest'); m.add_argument('--out',type=Path,required=True); m.add_argument('--identity',type=Path); m.add_argument('--store',action='store_true')
+    m=sub.add_parser('manifest'); m.add_argument('--out',type=Path,required=True); m.add_argument('--identity',type=Path); m.add_argument('--store',action='store_true'); m.add_argument('--architecture',choices=SUPPORTED_ARCHITECTURES,default='x64')
     a=sub.add_parser('audit'); a.add_argument('directory',type=Path)
     a=sub.add_parser('assets'); a.add_argument('directory',type=Path)
     a=sub.add_parser('frontend'); a.add_argument('directory',type=Path)
@@ -168,6 +170,6 @@ def main() -> None:
         identity=json.loads(ns.identity.read_text(encoding='utf-8-sig')) if ns.identity else DEV_IDENTITY
         identity=validate_identity(identity,store=ns.store)
         version=json.loads((ROOT/'config/product.json').read_text(encoding='utf-8'))['version']
-        ns.out.write_text(manifest(identity,version),encoding='utf-8')
+        ns.out.write_text(manifest(identity,version,ns.architecture),encoding='utf-8')
 
 if __name__=='__main__': main()
