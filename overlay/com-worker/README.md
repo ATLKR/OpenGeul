@@ -13,7 +13,7 @@
 - MSIX는 고정 CLSID `c6c4d247-b4f0-563d-a649-4765796e3164`를 `com:ExeServer`로 선언한다. Executable은 `Tools\rhwp.exe`, Arguments는 `--opengeul-com-worker --clsid c6c4d247-b4f0-563d-a649-4765796e3164`다. 기본 시스템 COM 정책을 사용하며 광범위 launch DACL을 추가하지 않는다.
 - 포터블은 매 작업의 fresh CLSID를 등록한다. 표준 사용자는 HKCU, elevated token은 HKLM의 64비트 `Software\Classes\CLSID`를 사용한다. COM의 관리자/UAC 비활성 HKCU 무시 규칙 때문에 HKCU만 사용한다고 가정하지 않는다. 기존 merged-view key 또는 생성 경합에서 발견한 기존 key는 수정하지 않는다.
 - `REGCLS_SINGLEUSE`와 atomic 단일 작업 승인을 함께 적용한다. `IDispatch`의 primitive BSTR metadata를 사용하므로 새 custom IID의 proxy/stub에 의존하지 않는다. `Begin`은 보호 헤더 실행 전에 응답한다.
-- COM은 packet privacy, caller identify, activate-as-activator 금지를 요청한다. worker는 실제 호출 토큰과 부모 프로세스의 사용자 SID·로그온 SID·integrity RID·elevation이 자기 토큰과 모두 같아야 작업을 받는다. 같은 사용자 이름만으로 elevated 작업을 허용하지 않는다.
+- COM은 packet privacy, caller identify, 기본 activate-as-activator 금지를 요청한다. 자기 EXE의 검증한 fresh 등록 또는 현재 패키지의 고정 class를 활성화하는 한 호출에만 공식 `CLSCTX_ENABLE_AAA` 예외를 적용한다. fresh 등록은 호출 직전에 현재 부모 PID·생성 시간·hive·owner·값·key shape·ServerExecutable을 다시 확인한다. 프로세스의 `EOAC_DISABLE_AAA`와 custom marshaling 금지는 유지하고 임의 CLSID·remote·in-process 활성화를 허용하지 않는다. worker는 실제 호출 토큰과 부모 프로세스의 사용자 SID·로그온 SID·integrity RID·elevation이 자기 토큰과 모두 같아야 작업을 받는다. 같은 사용자 이름만으로 elevated 작업을 허용하지 않는다.
 
 ## 보호 채널과 종료
 
@@ -33,7 +33,9 @@ worker는 Win32와 CRT stdin/stdout/stderr를 연결하기 전 Rust stdio를 사
 
 Linux의 실제 wire 검사와 Python 소스 변환 검사, Rust 1.93.1의 x64/ARM64 Windows `cargo check --all-targets --locked --offline`를 별도로 기록한다. 타입 검사 통과는 COM 호출 실행이나 WACK PASS를 뜻하지 않는다.
 
-제품으로 복사하지 않는 `tests/transport_windows.rs`는 Windows에서 같은 EXE의 SCM worker를 이용하여 Unicode argv, password-stdin 바이트/EOF, 입력 없는 EOF, exit 1/3, 비JSON stdout, stderr, 실제 abort 후 다음 작업, cwd/합성 환경과 실제 worker PID·native machine·작업 시작 전 임시 key 삭제를 검사한다. Windows-only 단위 검사는 등록 충돌·변경 marker 보존·부분 등록 회수·고정 CLSID 삭제 배제·부모 PID 종료 배제를 검사한다. Linux에서는 이 Windows 실행 검사를 실행하지 않았다고 명시한다.
+제품으로 복사하지 않는 `tests/transport_windows.rs`는 Windows에서 같은 EXE의 SCM worker를 이용하여 Unicode argv, password-stdin 바이트/EOF, 입력 없는 EOF, exit 1/3, 비JSON stdout, stderr, 실제 abort 후 다음 작업, cwd/합성 환경과 실제 worker PID·native machine·작업 시작 전 임시 key 삭제를 검사한다. Windows-only 단위 검사는 등록 충돌·변경 marker 보존·부분 등록 회수·고정 CLSID 삭제 배제·부모 PID 종료 배제·활성화 직전 소유 등록 검증을 검사한다. Linux에서는 이 Windows 실행 검사를 실행하지 않았다고 명시한다.
+
+첫 실제 x64 진단에서는 등록 5개·wire 8개가 통과했지만 첫 `run_cli`가 OS 오류 5로 실패했다. 해당 원본 오류에는 operation 이름이 없어 실패 API를 직접 입증하지 않는다. 기본 LaunchingUser와 AAA 금지의 공식 계약 충돌을 근거로 위 per-call 후보를 마련했으며, 후보의 실제 Windows 통과는 새 실행으로 증명해야 한다. 이후 CoCreateInstance·proxy blanket 오류는 사용자 입력 없이 고정 operation 이름·HRESULT·원래 I/O 오류 종류를 기록한다.
 
 표준 사용자/HKCU, 관리자/UAC 비활성/HKLM, 실제 설치된 MSIX fixed CLSID와 package identity, x64/ARM64 native 실행, 실제 MCP 도구의 성공·암호·부분 batch·ir-diff exit 3·오류·worker 강제 종료 후 부모 생존, 등록 강제 종료 정리 제어와 새 전체 WACK 결과는 후속 Windows 실행 증거가 필요하다. 이 문서는 그 결과를 대신하지 않는다.
 
@@ -43,6 +45,8 @@ Linux의 실제 wire 검사와 Python 소스 변환 검사, Rust 1.93.1의 x64/A
 - [MSIX com:ExeServer](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-com-exeserver)
 - [HKCR merged view와 관리자 COM 규칙](https://learn.microsoft.com/en-us/windows/win32/sysinfo/merged-view-of-hkey-classes-root)
 - [REGCLS_SINGLEUSE](https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/ne-combaseapi-regcls)
+- [LaunchingUser 기본 신원](https://learn.microsoft.com/en-us/windows/win32/com/launching-user)
+- [CLSCTX_ENABLE_AAA의 호출별 예외](https://learn.microsoft.com/en-us/windows/win32/api/wtypesbase/ne-wtypesbase-clsctx)
 - [인터페이스 marshaling](https://learn.microsoft.com/en-us/windows/win32/com/interface-marshaling)
 - [Named pipe 보안과 권한](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
 - [실제 pipe client PID](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid)
