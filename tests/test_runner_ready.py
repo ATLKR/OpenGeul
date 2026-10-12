@@ -1,5 +1,6 @@
 """읽기 전용 ARM 러너 관찰의 실행 경계·상한·무입력을 검증한다."""
 import importlib.util
+import copy
 import json
 from pathlib import Path
 import tempfile
@@ -40,7 +41,8 @@ class Observer:
     def processes(self, pids):
         return [{'processId': n, 'imagePath': 'C:\\Windows\\System32\\ApplicationFrameHost.exe',
                  'imageBytes': 1000, 'imageSha256': 'b' * 64, 'createdFileTime': 100000,
-                 'sessionId': 1, 'signature': {'status': 'Valid', 'subject': 'CN=Microsoft Windows, O=Microsoft Corporation',
+                 'sessionId': 1, 'processMachine': 0, 'nativeMachine': 0xAA64,
+                 'signature': {'status': 'Valid', 'subject': 'CN=Microsoft Windows, O=Microsoft Corporation',
                  'issuer': 'CN=Microsoft Windows Production PCA', 'thumbprint': 'C' * 40,
                  'publisherMicrosoft': True}} for n in pids]
 
@@ -54,7 +56,196 @@ class Observer:
         return {'width': 1200, 'height': 900}
 
 
+class Kernel:
+    def OpenProcess(self, *args): return 11
+    def CloseHandle(self, handle): return True
+    def GetProcessTimes(self, handle, created, *rest): created._obj.dwLowDateTime = 100000; return True
+    def IsWow64Process2(self, handle, process, native): native._obj.value = 0xAA64; return True
+
+
 class RunnerReadyTests(unittest.TestCase):
+    def oobe(self):
+        observed = {
+            'foreground': {'hwnd': 12, 'processId': 200, 'threadId': 201, 'title': 'Microsoft account',
+                           'className': 'Windows.UI.Core.CoreWindow', 'visible': True, 'enabled': True,
+                           'rectangle': [0, 0, 1024, 768]},
+            'processes': [{**Observer().processes([200])[0], 'imagePath': 'C:\\Windows\\System32\\WWAHost.exe'}],
+            'uia': [{'hwnd': 12, 'truncated': False, 'nodes': [
+                {'name': name, 'automationId': automation, 'controlType': kind, 'processId': 200,
+                 'className': '', 'enabled': True, 'offscreen': False} for name, automation, kind in [
+                    ('Choose privacy settings for your device', '', 50033), ('Windows Setup', '', 50006),
+                    ('ms-appx-web://microsoft.windows.cloudexperiencehost/core/view/oobeLightFooterHost.html', '', 50033),
+                    ('Next, tab through all privacy settings to continue', 'OobeSettingsAcceptButton', 50000)]]}]}
+        return observed
+
+    def test_known_signed_native_privacy_window_is_selected_without_accept_or_settings(self):
+        candidate = module().privacy_candidate(self.oobe(), 1, 'C:\\Windows')
+        self.assertEqual(candidate['hwnd'], 12)
+        self.assertEqual(candidate['process']['imagePath'], 'C:\\Windows\\System32\\WWAHost.exe')
+        self.assertEqual(candidate['operation'], 'WM_CLOSE')
+
+    def test_privacy_selection_rejects_changed_owner_native_session_signature_and_context(self):
+        for change in ('pid', 'creation', 'path', 'signature', 'publisher', 'native', 'session',
+                       'class', 'title', 'disabled', 'hidden', 'uia-owner', 'uia-error', 'uia-truncated', 'context', 'next-id'):
+            observed = self.oobe(); window = observed['foreground']; process = observed['processes'][0]; tree = observed['uia'][0]
+            if change == 'pid': process['processId'] = 999
+            elif change == 'creation': process['createdFileTime'] = 0
+            elif change == 'path': process['imagePath'] = 'C:\\attacker\\WWAHost.exe'
+            elif change == 'signature': process['signature']['status'] = 'NotSigned'
+            elif change == 'publisher': process['signature']['subject'] = 'CN=Other publisher'
+            elif change == 'native': process['processMachine'] = 0x8664
+            elif change == 'session': process['sessionId'] = 2
+            elif change == 'class': window['className'] = '#32770'
+            elif change == 'title': window['title'] = 'Another account'
+            elif change == 'disabled': window['enabled'] = False
+            elif change == 'hidden': window['visible'] = False
+            elif change == 'uia-owner': tree['nodes'][0]['processId'] = 999
+            elif change == 'uia-error': tree['error'] = {'type': 'COMError', 'hresult': '0x80070005'}
+            elif change == 'uia-truncated': tree['truncated'] = True
+            elif change == 'context': tree['nodes'][2]['name'] = 'Untrusted document'
+            elif change == 'next-id': tree['nodes'][3]['automationId'] = 'UnknownNext'
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                module().privacy_candidate(observed, 1, 'C:\\Windows')
+
+    def test_actual_close_method_rechecks_bound_identity_before_one_normal_close(self):
+        value = module(); observed = self.oobe(); candidate = value.privacy_candidate(observed, 1, 'C:\\Windows')
+        probe = value.WindowsProbe.__new__(value.WindowsProbe); calls = []
+        class User:
+            def GetWindowThreadProcessId(self, hwnd, pid): pid._obj.value = 200; return 201
+            def GetForegroundWindow(self): return 12
+            def SendMessageTimeoutW(self, *args): calls.append(args[:4]); return 1
+            def IsWindow(self, hwnd): return not calls
+        probe.user = User(); probe.current = lambda hwnd: copy.deepcopy(observed)
+        probe.kernel = Kernel()
+        probe.session_id = lambda: 1; probe.windows_directory = lambda: 'C:\\Windows'
+        result = probe.close_verified(candidate)
+        self.assertEqual(calls, [(12, 0x0010, 0, 0)])
+        self.assertTrue(result['messageDelivered']); self.assertTrue(result['windowDisappeared'])
+
+    def test_post_send_destruction_race_is_success_and_error_or_reuse_keeps_request_receipt(self):
+        value = module()
+        for condition in ('destroyed', 'reused', 'error'):
+            observed = self.oobe(); candidate = value.privacy_candidate(observed, 1, 'C:\\Windows'); calls = []
+            class User:
+                def GetForegroundWindow(self): return 12
+                def GetWindowThreadProcessId(self, hwnd, pid):
+                    pid._obj.value = 200 if not calls else (0 if condition == 'destroyed' else 999); return 201
+                def SendMessageTimeoutW(self, *args): calls.append(args[:4]); return 1
+                def IsWindow(self, hwnd):
+                    if not calls: return True
+                    if condition == 'error': raise OSError('external API observation failed')
+                    self.checks = getattr(self, 'checks', 0) + 1
+                    return condition == 'reused' or self.checks == 1
+            probe = value.WindowsProbe.__new__(value.WindowsProbe)
+            probe.user = User(); probe.kernel = Kernel(); probe.current = lambda hwnd: copy.deepcopy(observed)
+            probe.session_id = lambda: 1; probe.windows_directory = lambda: 'C:\\Windows'
+            result = probe.close_verified(candidate)
+            with self.subTest(condition=condition):
+                self.assertEqual(calls, [(12, 0x0010, 0, 0)])
+                self.assertEqual(result['messageRequests'], 1)
+                self.assertEqual(result['windowDisappeared'], condition == 'destroyed')
+                self.assertEqual(result['ownershipChangedAfterSend'], condition == 'reused')
+                self.assertEqual(result['postSendErrorType'], 'OSError' if condition == 'error' else None)
+
+    def test_held_process_creation_native_or_final_hwnd_owner_change_never_sends_close(self):
+        value = module()
+        for condition in ('creation', 'native', 'pid', 'foreground'):
+            observed = self.oobe(); candidate = value.privacy_candidate(observed, 1, 'C:\\Windows')
+            kernel = Kernel()
+            if condition == 'creation': kernel.GetProcessTimes = lambda *args: False
+            if condition == 'native': kernel.IsWow64Process2 = lambda *args: False
+            user = SimpleNamespace(GetWindowThreadProcessId=lambda *args: 0,
+                                   SendMessageTimeoutW=lambda *args: self.fail('held owner 검증 실패 후 입력 금지'))
+            if condition == 'foreground':
+                def owner(hwnd, pid): pid._obj.value = 200; return 201
+                user.GetWindowThreadProcessId = owner; user.GetForegroundWindow = lambda: 99
+            probe = value.WindowsProbe.__new__(value.WindowsProbe)
+            probe.user = user; probe.kernel = kernel; probe.current = lambda hwnd: copy.deepcopy(observed)
+            probe.session_id = lambda: 1; probe.windows_directory = lambda: 'C:\\Windows'
+            with self.subTest(condition=condition), self.assertRaises(ValueError): probe.close_verified(candidate)
+
+    def test_close_recheck_changed_pid_creation_hash_or_window_never_sends_input(self):
+        value = module()
+        for change in ('pid', 'creation', 'hash', 'thread', 'class', 'signature'):
+            observed = self.oobe(); candidate = value.privacy_candidate(observed, 1, 'C:\\Windows')
+            fresh = copy.deepcopy(observed)
+            if change == 'pid': fresh['processes'][0]['processId'] = 999
+            elif change == 'creation': fresh['processes'][0]['createdFileTime'] += 1
+            elif change == 'hash': fresh['processes'][0]['imageSha256'] = 'c' * 64
+            elif change == 'thread': fresh['foreground']['threadId'] += 1
+            elif change == 'class': fresh['foreground']['className'] = 'OtherClass'
+            elif change == 'signature': fresh['processes'][0]['signature']['status'] = 'NotSigned'
+            probe = value.WindowsProbe.__new__(value.WindowsProbe)
+            probe.user = SimpleNamespace(SendMessageTimeoutW=lambda *args: self.fail('검증 실패 후 입력 금지'))
+            probe.current = lambda hwnd: fresh; probe.session_id = lambda: 1; probe.windows_directory = lambda: 'C:\\Windows'
+            with self.subTest(change=change), self.assertRaises(ValueError): probe.close_verified(candidate)
+
+    def test_production_scope_requires_exact_source_workflow_push_main(self):
+        value = module()
+        production = {**ENV, 'GITHUB_REF': 'refs/heads/main', 'GITHUB_EVENT_NAME': 'push',
+                      'GITHUB_WORKFLOW_REF': 'ATLKR/OpenGeul/.github/workflows/msix.yml@refs/heads/main'}
+        self.assertEqual(value.binding(production)['ref'], 'refs/heads/main')
+        for workflow in ('', 'Other/repo/.github/workflows/msix.yml@refs/heads/main',
+                         'ATLKR/OpenGeul/.github/workflows/store-package.yml@refs/heads/main'):
+            with self.subTest(workflow=workflow), self.assertRaises(ValueError):
+                value.binding({**production, 'GITHUB_WORKFLOW_REF': workflow})
+
+    def test_prepare_retains_before_after_and_separates_normal_close_from_consent(self):
+        value = module(); observation = self.oobe(); calls = []
+        class Ready(Observer):
+            def windows(self):
+                window = copy.deepcopy(observation['foreground'])
+                if calls: window.update({'hwnd': 20, 'title': 'Program Manager', 'className': 'Progman'})
+                return {'foregroundHwnd': window['hwnd'], 'windows': [window], 'truncated': False}
+            def processes(self, pids): return copy.deepcopy(observation['processes'])
+            def uia(self, hwnd):
+                if hwnd == 12: return copy.deepcopy(observation['uia'][0])
+                return {'hwnd': hwnd, 'nodes': [], 'truncated': False}
+            def session_id(self): return 1
+            def windows_directory(self): return 'C:\\Windows'
+            def close_verified(self, candidate):
+                calls.append('WM_CLOSE')
+                return {'messageRequests': 1, 'messageDelivered': True, 'windowDisappeared': True}
+            def focus_probe(self):
+                calls.append('owned-focus')
+                return {'setForegroundReturned': True, 'foregroundMatched': True, 'ownedWindowRemoved': True}
+        with tempfile.TemporaryDirectory() as d:
+            result = value.prepare(Ready(), ENV, Path(d) / 'ready')
+            self.assertEqual(calls, ['WM_CLOSE', 'owned-focus'])
+            self.assertTrue(result['hostReadyQualified']); self.assertFalse(result['sourceQualified'])
+            self.assertFalse(result['readOnly']); self.assertEqual(result['inputsPerformed'], 1)
+            self.assertEqual(result['consentInputsPerformed'], 0); self.assertEqual(result['registryWrites'], 0)
+            self.assertEqual(result['processTerminations'], 0)
+            self.assertTrue((Path(d) / 'ready/before/observation.json').is_file())
+            self.assertTrue((Path(d) / 'ready/after/observation.json').is_file())
+
+    def test_failed_close_keeps_action_receipt_and_never_focuses_or_retries(self):
+        value = module(); observation = self.oobe(); calls = []
+        class Ready(Observer):
+            def windows(self): return {'foregroundHwnd': 12, 'windows': [observation['foreground']], 'truncated': False}
+            def processes(self, pids): return copy.deepcopy(observation['processes'])
+            def uia(self, hwnd): return copy.deepcopy(observation['uia'][0])
+            def session_id(self): return 1
+            def windows_directory(self): return 'C:\\Windows'
+            def close_verified(self, candidate):
+                calls.append('WM_CLOSE'); return {'messageRequests': 1, 'messageDelivered': True, 'windowDisappeared': False}
+            def focus_probe(self): self.fail('실패한 close 후 focus/retry 금지')
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError): value.prepare(Ready(), ENV, Path(d) / 'ready')
+            result = json.loads((Path(d) / 'ready/preparation.json').read_text())
+            self.assertEqual(calls, ['WM_CLOSE']); self.assertEqual(len(result['actions']), 1)
+            self.assertEqual(result['inputsPerformed'], 1); self.assertFalse(result['hostReadyQualified'])
+            self.assertFalse(result['sourceQualified']); self.assertTrue(result['afterObservationRetained'])
+
+    def test_failed_focus_setter_never_qualifies_even_if_foreground_matches(self):
+        value = module(); observer = Observer()
+        observer.focus_probe = lambda: {'setForegroundReturned': False, 'foregroundMatched': True, 'ownedWindowRemoved': True}
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError): value.prepare(observer, ENV, Path(d) / 'ready')
+            result = json.loads((Path(d) / 'ready/preparation.json').read_text())
+            self.assertFalse(result['hostReadyQualified']); self.assertFalse(result['sourceQualified'])
+            self.assertEqual(result['stage'], 'ownedFocusProbe'); self.assertEqual(result['actions'], [])
+
     def test_actual_windows_reader_keeps_foreground_ahead_of_hidden_window_cap(self):
         value = module(); probe = value.WindowsProbe.__new__(value.WindowsProbe)
         class User:
