@@ -6,6 +6,7 @@ import types
 import unittest
 import json
 import tempfile
+import ctypes
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,7 @@ class NativeApi:
         self.foreground_hwnd = 999
         self.foreground_result = True
         self.foreground_calls = []
+        self.activation_barriers=[]
         self.focused_control = None
         self.hit_hwnd = 200
         self.closed = False
@@ -62,6 +64,10 @@ class NativeApi:
         if self.foreground_result:self.foreground_hwnd = hwnd
         return self.foreground_result
     def focused(self): return self.focused_control
+    def sync_activation(self,hwnd,expected,report):
+        self.activation_barriers.append(hwnd)
+        report.update({'returned':True,'timeoutMs':1000,'foregroundAfter':self.foreground_hwnd})
+        return True
     def hit(self, point): return self.hit_hwnd
     def close(self): self.closed = True
 
@@ -112,6 +118,55 @@ class PrintPreviewFocusTests(unittest.TestCase):
         self.assertEqual(self.probe.foreground_calls,[200])
         self.assertIs(self.probe.focused_control,self.app)
 
+    def test_one_activation_orders_async_zero_before_semantic_dispatch(self):
+        guard=self.guard()
+        def activated(hwnd):
+            self.probe.foreground_calls.append(hwnd);self.probe.foreground_hwnd=0;return True
+        def processed(hwnd,expected,report):
+            self.probe.activation_barriers.append(hwnd);self.probe.foreground_hwnd=hwnd
+            report.update({'returned':True,'timeoutMs':1000});return True
+        self.probe.set_foreground=activated;self.probe.sync_activation=processed
+        guard.prepare(self.target,'margins-expand')
+        self.assertEqual(self.probe.foreground_calls,[200]);self.assertEqual(self.probe.activation_barriers,[200])
+
+    def test_foreign_foreground_after_barrier_still_rejects_one_activation(self):
+        guard=self.guard()
+        def processed(hwnd,expected,report):
+            self.probe.activation_barriers.append(hwnd);self.probe.foreground_hwnd=999;return True
+        self.probe.sync_activation=processed
+        with self.assertRaises(AssertionError):guard.prepare(self.target,'margins-expand')
+        self.assertEqual(self.probe.foreground_calls,[200]);self.assertEqual(self.probe.activation_barriers,[200])
+
+    def test_hung_barrier_never_approves_semantic_input(self):
+        guard=self.guard()
+        self.probe.sync_activation=lambda hwnd,expected,report:False
+        with self.assertRaises(AssertionError):guard.prepare(self.target,'margins-expand')
+        self.assertEqual(self.probe.foreground_calls,[200])
+
+    def test_real_windows_adapter_orders_owned_wm_null_once_and_rechecks_identity(self):
+        probe=self.module.WindowsFocusProbe.__new__(self.module.WindowsFocusProbe)
+        probe.ctypes=ctypes;probe.user=types.SimpleNamespace();window=dict(self.probe.windows[100]);messages=[]
+        record={'pid':10,'creation':110,'session':2}
+        image={'imagePath':'OpenGeul.exe','nativeMachine':0xAA64}
+        probe.handles={10:(77,False,record,image)}
+        probe.process=types.SimpleNamespace(inspect=lambda pid,handle:{**image,'exitCode':259,'processMachine':0})
+        probe._times_session=lambda pid,handle:dict(record)
+        probe.window=lambda hwnd:dict(window)
+        probe.foreground=lambda:self.probe.foreground_hwnd
+        def message(hwnd,kind,wparam,lparam,flags,timeout,result):
+            messages.append((hwnd,kind,wparam,lparam,flags,timeout));self.probe.foreground_hwnd=hwnd;return 1
+        probe.user.SendMessageTimeoutW=message
+        report={};fn=getattr(probe,'sync_activation',None);self.assertIsNotNone(fn)
+        self.assertTrue(fn(100,dict(window),report))
+        self.assertEqual(messages,[(100,0,0,0,0x23,1000)])
+        self.assertTrue(report['returned']);self.assertEqual(report['foregroundAfter'],100)
+        messages.clear()
+        def retarget(*args):
+            messages.append(args[:6]);window['pid']=99;return 1
+        probe.user.SendMessageTimeoutW=retarget
+        with self.assertRaises(AssertionError):fn(100,self.probe.windows[100],{})
+        self.assertEqual(len(messages),1)
+
     def test_foreign_semantic_provider_is_rejected_before_foreground_or_pattern(self):
         guard=self.guard();self.target.pid=99
         with self.assertRaises(AssertionError):guard.prepare(self.target,'margins-expand')
@@ -121,7 +176,7 @@ class PrintPreviewFocusTests(unittest.TestCase):
         guard=self.guard();original=self.probe.foreground;reads=[]
         def observed():
             reads.append(None)
-            return 999 if len(reads)==5 else original()
+            return 999 if len(reads)==6 else original()
         self.probe.foreground=observed
         with self.assertRaises(AssertionError):guard.prepare(self.target,'margins-expand')
         self.assertEqual(self.probe.foreground_calls,[200])
