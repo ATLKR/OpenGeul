@@ -248,7 +248,7 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT', 'UPLOAD', 'POST'])
         self.assertEqual(self.new['pricing'], self.baseline['pricing'])
         self.assertEqual(self.new['listings'], store_listing.apply_korean_listing(self.baseline)['listings'])
-        self.assertEqual(self.new['targetPublishMode'], 'Manual')
+        self.assertEqual(self.new['targetPublishMode'], 'Immediate')
         self.assertIn('Keep human notes', self.new['notesForCertification'])
 
     def test_actual_entrypoint_rejects_original_single_x64_release(self):
@@ -266,7 +266,7 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.baseline, original)
         self.assertEqual(self.new['listings'], store_listing.apply_korean_listing(original)['listings'])
         self.assertEqual(self.new['pricing'], original['pricing'])
-        self.assertEqual(self.new['targetPublishMode'], original['targetPublishMode'])
+        self.assertEqual(self.new['targetPublishMode'], 'Immediate')
 
     def test_invalid_korean_listing_plan_preserves_existing_pending_before_mutation(self):
         invalid = self.root / 'invalid-listing.json'
@@ -292,8 +292,8 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.new['pricing'], original['pricing'])
         self.assertEqual(self.baseline, original)
 
-    def test_non_manual_publication_template_never_mutates_store(self):
-        for mode in ('Immediate', 'SpecificDate', None, 'unknown'):
+    def test_unknown_publication_template_never_mutates_store(self):
+        for mode in ('SpecificDate', None, 'unknown'):
             with self.subTest(mode=mode):
                 self.calls.clear(); self.issues.clear()
                 self.baseline['targetPublishMode'] = mode
@@ -304,7 +304,7 @@ class StoreSubmitTests(unittest.TestCase):
         def changed_ack(*args, **kwargs):
             status, result = self.store(*args, **kwargs)
             if args[2:4] == ('PUT', 'submissions/30'):
-                result['targetPublishMode'] = 'Immediate'
+                result['targetPublishMode'] = 'Manual'
             return status, result
 
         with patch.object(submitter, '_request', side_effect=changed_ack):
@@ -315,16 +315,16 @@ class StoreSubmitTests(unittest.TestCase):
         def changed_readback(*args, **kwargs):
             status, result = self.store(*args, **kwargs)
             if args[2:4] == ('GET', 'submissions/30'):
-                result['targetPublishMode'] = 'Immediate'
+                result['targetPublishMode'] = 'Manual'
             return status, result
 
         with patch.object(submitter, '_request', side_effect=changed_readback):
             with self.assertRaises(submitter.SubmissionBlocked): self.perform()
         self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT', 'UPLOAD'])
 
-    def test_existing_processing_request_requires_manual_publication(self):
+    def test_existing_processing_request_requires_immediate_publication(self):
         self.perform(); self.calls.clear()
-        self.new['targetPublishMode'] = 'Immediate'
+        self.new['targetPublishMode'] = 'Manual'
         with self.assertRaises(submitter.SubmissionBlocked): self.perform()
         self.assertEqual(self.mutations(), [])
 
@@ -666,7 +666,7 @@ class DualStoreSubmitTests(unittest.TestCase):
             if self.post_commit_mode == 'wrong_arch': self.new['applicationPackages'][-1]['architecture'] = 'X64'
             if self.post_commit_mode == 'pricing': self.new['pricing']['priceId'] = 'Tier1'
             if self.post_commit_mode == 'listings': self.new['listings'] = {}
-            if self.post_commit_mode == 'manual': self.new['targetPublishMode'] = 'Immediate'
+            if self.post_commit_mode == 'manual': self.new['targetPublishMode'] = 'Manual'
             if self.post_commit_mode == 'status': self.new['status'] = 'CertificationFailed'
             if self.post_commit_mode == 'failed_after_poll': self.new['status'] = 'PreProcessing'
         if method == 'GET' and path == 'submissions/30' and result.get('status') in submitter.ACCEPTED:
@@ -702,6 +702,95 @@ class DualStoreSubmitTests(unittest.TestCase):
         self.assertEqual(len(uploaded), 2)
         for package in uploaded:
             self.assertEqual(set(package), {'fileName','fileStatus','minimumDirectXVersion','minimumSystemRam'})
+
+    def test_new_pair_automatically_publishes_after_certification(self):
+        original = copy.deepcopy(self.baseline)
+        self.assertEqual(self.perform()['outcome'], 'requested')
+        self.assertEqual(self.put_metadata['targetPublishMode'], 'Immediate')
+        self.assertEqual(self.new['targetPublishMode'], 'Immediate')
+        self.assertEqual(self.baseline, original)
+        self.assertEqual(self.new['pricing'], original['pricing'])
+        self.assertEqual(self.new['listings'], store_listing.apply_korean_listing(original)['listings'])
+
+    def test_published_immediate_baseline_can_supply_next_pair(self):
+        self.baseline['targetPublishMode'] = 'Immediate'
+        original = copy.deepcopy(self.baseline)
+        self.assertEqual(self.perform()['outcome'], 'requested')
+        self.assertEqual(self.new['targetPublishMode'], 'Immediate')
+        self.assertEqual(self.baseline, original)
+
+    def test_owned_manual_editable_pair_switches_same_sid_without_recreation(self):
+        self.upload_mode = 'timeout'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.new['targetPublishMode'] = 'Manual'
+        self.calls.clear(); self.upload_mode = 'success'
+        result = self.perform()
+        self.assertEqual(result['submission_id'], '30')
+        self.assertEqual(self.mutations(), ['PUT','UPLOAD','POST'])
+        self.assertEqual(self.new['targetPublishMode'], 'Immediate')
+
+    def test_owned_manual_noneditable_pair_is_preserved_without_mutation(self):
+        self.perform(); self.new['targetPublishMode'] = 'Manual'
+        for status in ('CommitStarted','PreProcessing','Certification','Release','PendingPublication','Publishing'):
+            with self.subTest(status=status):
+                self.new['status'] = status; original = copy.deepcopy(self.new)
+                self.calls.clear()
+                with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+                self.assertEqual(self.mutations(), [])
+                self.assertEqual(self.new, original)
+                self.assertNotIn(('store','GET','submissions/30/status'), self.calls)
+
+    def test_manual_unknown_commit_resume_does_not_repeat_or_convert_writes(self):
+        self.commit_mode = 'unknown'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.new['targetPublishMode'] = 'Manual'; self.calls.clear()
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), [])
+        self.assertNotIn(('store','GET','submissions/30/status'), self.calls)
+        self.assertEqual(submitter._journal_state(self.issues[0]['body'])['phase'], 'commit_attempted')
+
+    def test_older_manual_processing_journal_never_authorizes_replacement(self):
+        for phase in ('submitted','commit_attempted'):
+            for status in ('CommitStarted','PreProcessing','Certification','Release','PendingPublication','Publishing'):
+                with self.subTest(phase=phase,status=status):
+                    self.calls.clear(); self.issues.clear()
+                    self.app['pendingApplicationSubmission'] = {'id':'20'}
+                    self.pending['status'] = status
+                    state = {'app_id':STORE_APP_ID,'phase':phase,'submission_id':'20','tag':'v1.1.2','status':status}
+                    self.issues.append({'number':1,'title':submitter.TITLE,
+                        'body':submitter._journal_body(state),'user':copy.deepcopy(self.bot)})
+                    original = copy.deepcopy(self.pending)
+                    with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+                    self.assertEqual(self.mutations(), [])
+                    self.assertEqual(self.pending, original)
+                    saved = submitter._journal_state(self.issues[0]['body'])
+                    for key in ('phase','submission_id','tag','status'):
+                        self.assertEqual(saved[key],state[key])
+                    self.assertNotIn(('store','GET','submissions/20/status'),self.calls)
+
+    def test_pair_manual_put_ack_stops_before_upload_or_commit(self):
+        def changed_ack(*args, **kwargs):
+            status, result = self.store(*args, **kwargs)
+            if args[2:4] == ('PUT','submissions/30'): result['targetPublishMode'] = 'Manual'
+            return status, result
+        with patch.object(submitter, '_request', side_effect=changed_ack):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), ['POST','PUT'])
+
+    def test_pair_manual_fresh_draft_stops_before_commit(self):
+        def changed_readback(*args, **kwargs):
+            status, result = self.store(*args, **kwargs)
+            if args[2:4] == ('GET','submissions/30'): result['targetPublishMode'] = 'Manual'
+            return status, result
+        with patch.object(submitter, '_request', side_effect=changed_readback):
+            with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.assertEqual(self.mutations(), ['POST','PUT','UPLOAD'])
+
+    def test_owned_editable_pair_with_unknown_publish_mode_is_preserved(self):
+        self.upload_mode = 'timeout'
+        with self.assertRaises(submitter.SubmissionBlocked): self.perform()
+        self.new['targetPublishMode'] = 'SpecificDate'; self.calls.clear(); self.upload_mode = 'success'
+        self.rejected()
 
     def test_external_verifier_rejects_historical_single_source(self):
         self.provenance.pop('formatVersion'); (self.directory / 'source-provenance.json').write_text(json.dumps(self.provenance)); self.checksums(self.directory)
@@ -814,7 +903,7 @@ class DualStoreSubmitTests(unittest.TestCase):
     def test_commit_readback_cannot_duplicate_architecture(self): self.readback_rejected('wrong_arch')
     def test_commit_readback_preserves_pricing(self): self.readback_rejected('pricing')
     def test_commit_readback_preserves_listings(self): self.readback_rejected('listings')
-    def test_commit_readback_preserves_manual_control(self): self.readback_rejected('manual')
+    def test_commit_readback_preserves_immediate_control(self): self.readback_rejected('manual')
     def test_failure_between_status_poll_and_readback_remains_blocking(self): self.readback_rejected('failed_after_poll')
 
     def test_legacy_single_hash_journal_never_owns_current_pair(self):

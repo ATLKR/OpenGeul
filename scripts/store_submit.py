@@ -385,9 +385,14 @@ def _free(submission):
         raise SubmissionBlocked('Free Store pricing and all market overrides must be preserved')
 
 
-def _manual(submission):
-    if submission.get('targetPublishMode') != 'Manual':
-        raise SubmissionBlocked('Manual Store publication control must be preserved')
+def _publication_mode(submission):
+    if submission.get('targetPublishMode') not in ('Manual', 'Immediate'):
+        raise SubmissionBlocked('Store publication mode is unknown')
+
+
+def _immediate(submission):
+    if submission.get('targetPublishMode') != 'Immediate':
+        raise SubmissionBlocked('This Store update must publish automatically after certification')
 
 
 def _packages_version(submission):
@@ -439,7 +444,7 @@ def _requested_pair(api, submission_id, details, template):
     deadline = time.monotonic() + 600
     for _ in range(40):
         _, current = api('GET', f'submissions/{submission_id}')
-        _manual(current); _free(current)
+        _immediate(current); _free(current)
         if (current.get('status') not in ACCEPTED | {'CommitStarted'}
                 or _id(current.get('id')) != submission_id or _marker(details) not in current.get('notesForCertification','').splitlines()
                 or current.get('pricing') != template.get('pricing') or current.get('listings') != template.get('listings')):
@@ -506,7 +511,15 @@ def submit(tag, directory):
         if paired and state.get('tag') == tag and state['phase'] in {'draft_ready','commit_attempted','submitted'} and not _journal_matches(state, details):
             raise SubmissionBlocked('Current journal does not own the complete verified package pair')
         if state['phase'] == 'commit_attempted':
-            status = _poll(api, _id(state.get('submission_id')))
+            submission_id = _id(state.get('submission_id'))
+            _, current = api('GET', f'submissions/{submission_id}')
+            if _id(current.get('id')) != submission_id:
+                raise SubmissionBlocked('Recorded Store submission identity changed')
+            if current.get('status') in FAILED and state.get('tag') != tag:
+                _publication_mode(current)  # 실패가 확정된 과거 Manual journal의 읽기 복구만 허용한다.
+            else:
+                _immediate(current)
+            status = _poll(api, submission_id)
             _save(journal, 'submitted', status=status)
             state = journal['state']
         if state['phase'] == 'submitted' and state.get('status') in FAILED and state.get('tag') == tag:
@@ -520,7 +533,7 @@ def submit(tag, directory):
         if _id(baseline['id']) != baseline_id or baseline.get('status') != 'Published':
             raise SubmissionBlocked('Store has no verified Published baseline')
         _free(baseline)
-        _manual(baseline)
+        _publication_mode(baseline)
         if paired: _published_architectures(baseline)
         elif (not isinstance(baseline.get('applicationPackages'), list) or not baseline['applicationPackages']
                 or any(package.get('architecture', '').lower() != 'x64' for package in baseline['applicationPackages'])):
@@ -532,6 +545,7 @@ def submit(tag, directory):
         if _packages_version(baseline) >= target: return {'outcome': 'superseded', 'tag': tag}
         # 설명 계획 전체를 확인한 뒤에만 기존 제출을 삭제하거나 새 제출을 만든다.
         template = apply_korean_listing(baseline)
+        template['targetPublishMode'] = 'Immediate'
         pending = None
         if pending_id:
             if pending_id == baseline_id: raise SubmissionBlocked('Published submissions cannot be deleted')
@@ -539,6 +553,9 @@ def submit(tag, directory):
             if (_id(pending['id']) != pending_id or pending.get('status') == 'Published'
                     or pending.get('status') not in ACCEPTED | FAILED | {'None', 'PendingCommit', 'CommitStarted'}):
                 raise SubmissionBlocked('Published or unowned pending submission cannot be replaced')
+            # 과거 tag의 journal도 처리 중인 Manual 제출의 삭제/재commit을 허가하지 않는다.
+            if pending.get('status') in ACCEPTED | {'CommitStarted'}:
+                _immediate(pending)
             lines = pending.get('notesForCertification', '').splitlines()
             matching = _marker(details) in lines
             if matching and pending.get('status') in FAILED:
@@ -549,7 +566,7 @@ def submit(tag, directory):
                 if status == 'CommitStarted':
                     status = _poll(api, pending_id)
                     _, pending = api('GET', f'submissions/{pending_id}')
-                _manual(pending)
+                _immediate(pending)
                 _save(journal, 'submitted', details, submission_id=pending_id, status=status)
                 if status in FAILED: raise SubmissionBlocked(f'Store processing stopped in {status}; a newer stable release is required')
                 if paired:
@@ -563,6 +580,9 @@ def submit(tag, directory):
                 return {'outcome': 'already_requested', 'tag': tag, 'submission_id': pending_id, 'status': status, **observed}
             owned = matching or (state['phase'] == 'draft_ready' and state.get('submission_id') == pending_id
                      and _journal_matches(state, details))
+            if owned and pending.get('status') == 'PendingCommit':
+                # 소유권이 확인된 편집 가능한 Manual 초안만 동일 SID PUT으로 전환한다.
+                _publication_mode(pending)
             if not (owned and pending.get('status') == 'PendingCommit'):
                 if paired and not (state['phase'] in {'draft_ready','submitted'}
                         and state.get('submission_id') == pending_id and state.get('tag')
@@ -613,7 +633,7 @@ def submit(tag, directory):
         for field in ('id', 'status', 'statusDetails', 'fileUploadUrl', 'friendlyName'):
             metadata.pop(field, None)
         _, updated = api('PUT', f'submissions/{pending_id}', metadata)
-        _manual(updated)
+        _immediate(updated)
         if (_id(updated['id']) != pending_id or updated.get('status') != 'PendingCommit'
                 or _marker(details) not in updated.get('notesForCertification', '').splitlines()
                 or not _packages_match(updated, metadata['applicationPackages'])
@@ -624,7 +644,7 @@ def submit(tag, directory):
         if _ref(fresh, 'pendingApplicationSubmission') != pending_id or _ref(fresh, 'lastPublishedApplicationSubmission') != baseline_id or _newer(version):
             raise SubmissionBlocked('Store or stable tag state changed before commit')
         _, current = api('GET', f'submissions/{pending_id}')
-        _manual(current)
+        _immediate(current)
         if (_id(current['id']) != pending_id or current.get('status') != 'PendingCommit' or _marker(details) not in current.get('notesForCertification', '').splitlines()
                 or not _packages_match(current, metadata['applicationPackages'])
                 or current.get('pricing') != updated.get('pricing') or current.get('listings') != updated.get('listings')):
