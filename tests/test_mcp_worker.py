@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock,patch
 import sys
 import tempfile
 import time
@@ -99,6 +100,42 @@ class McpWorkerTests(unittest.TestCase):
         self.assertRegex(summary['responseSha256'],r'^[0-9a-f]{64}$')
     def test_malformed_paths_are_exercised_as_server_errors_not_silently_filtered(self):
         m=self.module();self.assertEqual(m.MALFORMED_PATHS,[None,[],[1],'a.hwpx'])
+    def test_installed_batch_retains_actual_response_count_and_rejects_partial_or_dead_server(self):
+        from test_hwpx_oracle import package
+        m=self.module();fixtures=self.folder/'fixtures';fixtures.mkdir();(fixtures/'basic.hwpx').write_bytes(package('OpenGeul fixture 한글 가나다 &amp; &lt;xml&gt; Ω 123'))
+        encrypted=[]
+        for format in ('hwp','hwpx'):
+            path=self.folder/('protected.'+format);path.write_bytes(b'owned unit input');encrypted.append((format,path,m.sha(path)))
+        diff={'identical':False,'diffCount':1};batch=[{'pageCount':1},{'error':'missing'}]
+        for count,alive in ((64,True),(63,True),(64,False)):
+            with self.subTest(records=count,serverAlive=alive):
+                work=self.folder/(str(count)+'-'+str(alive));work.mkdir();client=MagicMock();client.process.poll.return_value=None if alive else 0
+                client.frames_sent=30;client.frames_received=29;watch=MagicMock();watch.wait.return_value={'processId':101}
+                def response(value,error=False):
+                    text='\n'.join(json.dumps(row) for row in value) if isinstance(value,list) else json.dumps(value)
+                    return {'id':7,'result':{'isError':error,'content':[{'type':'text','text':text}]}}
+                def request(method,params=None):
+                    if method=='initialize':return {'result':{'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.8.7'}}}
+                    if method=='ping':return {'result':{}}
+                    if method=='tools/list':return {'result':{'tools':[{'name':name} for name in ('hwp_info','hwp_export_text','hwp_replace_text','hwp_batch','hwp_ir_diff')]}}
+                    name,args=params['name'],params['arguments']
+                    if name=='hwp_export_text':
+                        protected=Path(args['path']).name.startswith('protected.')
+                        return response({'pages':[{'text':'owned encrypted unit text' if protected else m.NORMAL_TEXT}]},protected and args.get('password')!='public-unit-QA')
+                    if name=='hwp_replace_text':Path(args['output']).write_bytes(package(m.WRITE_MARKER));return response({'replacedCount':1})
+                    if name=='hwp_ir_diff':return response(diff)
+                    return response(batch,error=args.get('paths') in m.MALFORMED_PATHS)
+                client.request.side_effect=request;client.finish.return_value=response([{'pageCount':1}]*count)
+                with patch.object(m,'password_inputs',return_value=({'expectedText':'owned encrypted unit text'},encrypted,'public-unit-QA')),patch.object(m,'stress_document',return_value={'scope':'unit'}),patch.object(m,'direct_cli',side_effect=[{'records':[diff]},{'records':batch}]):
+                    if count!=64 or not alive:
+                        with self.assertRaises(ValueError):m.run_cases(client,self.fake,work,fixtures,password_folder=self.folder,watch=watch,context='installed')
+                    else:
+                        proof=m.run_cases(client,self.fake,work,fixtures,password_folder=self.folder,watch=watch,context='installed')
+                        isolation=proof['workerIsolation'];self.assertEqual(isolation['batchRecords'],64)
+                        self.assertEqual(isolation['response']['checks'],{'records':64,'passed':True})
+                        self.assertEqual(isolation['response']['name'],'installed-worker-batch64')
+                        self.assertEqual(isolation['response'],m.result_receipt('installed-worker-batch64',client.finish.return_value,{'records':64,'passed':True}))
+                        self.assertNotIn('content',isolation['response']);self.assertFalse(isolation['forcedTermination'])
 
 
     def worker(self):

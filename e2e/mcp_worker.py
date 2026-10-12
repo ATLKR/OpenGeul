@@ -375,7 +375,9 @@ def run_cases(client,executable,work,fixtures,*,password_folder,watch,context,pr
     else:
         token=client.begin('tools/call',{'name':'hwp_batch','arguments':{'subcommand':'info','paths':[str(stress)]*64,'threads':1}})
         worker=watch.wait(client);response=client.finish(token);require(len(tool_records(response))==64,'설치 MCP worker의 batch 결과가 다릅니다')
-        fault={'worker':worker,'sameServerAlive':client.process.poll() is None,'forcedTermination':False,
+        require(client.process.poll() is None,'설치 작업자 호출 후 MCP 서버가 종료됐습니다')
+        fault={'worker':worker,'sameServerAlive':True,'forcedTermination':False,'batchRecords':64,
+               'response':result_receipt('installed-worker-batch64',response,{'records':64,'passed':True}),
                'scope':'설치 fixed COM class의 native/package identity 관측; 공유 process 강제 종료 없음'}
     require(sha(source)==before,'MCP suite가 원본 합성 입력을 변경했습니다')
     return {'cases':records,'caseCount':len(records),'stressFixture':stress_proof,'workerIsolation':fault,
