@@ -13,8 +13,8 @@ sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'e2e')]
 import release_pair
 import store_qualification as qual
 from buildkit import manifest, package_version
-from store_package import STORE_IDENTITY
-from windows_arch import machine_for
+from store_package import STORE_IDENTITY, REQUIRED_JOBS, authorize_release
+from windows_arch import component_artifact_name, machine_for
 from wack_result import inspect
 import store_screenshot
 
@@ -25,6 +25,14 @@ fixtures = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixtur
 class StoreQualificationTests(unittest.TestCase):
     def setUp(self):
         self.fixture = fixtures.ReleasePairTests(); self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
+        self.fixture.env['GITHUB_RUN_ID'] = '38181680763'
+        for arch in ('x64', 'arm64'):
+            def bind_run(provenance):
+                provenance['runId'] = '38181680763'
+                components = provenance['windowsComponents']; components['runId'] = '38181680763'
+                for role, record in components['components'].items():
+                    record['artifactName'] = component_artifact_name(role, '38181680763', arch)
+            self.fixture.mutate_prov(arch, bind_run)
         self.fixture.assemble(); self.source = self.fixture.output
         self.root = self.fixture.root; self.store = self.root / 'store'; self.store.mkdir()
         self.outputs = {a: self.root / ('qualification-' + a) for a in ('x64', 'arm64')}
@@ -73,8 +81,8 @@ class StoreQualificationTests(unittest.TestCase):
                 'helpBytes': 10, 'helpSha256': hashlib.sha256(b'rhwp help\n').hexdigest(), 'nativeArchitecture': cli})
         (self.store / 'source-provenance.json').write_bytes((self.source / 'provenance.json').read_bytes())
         self.details = {'formatVersion': 2, 'storeAppId': '9PJH0T3PHRMF', 'identity': dict(STORE_IDENTITY), 'version': '1.1.3',
-            'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3-dev.1234.2', 'sourceReleaseId': 200,
-            'sourceCommit': 'a' * 40, 'sourceRunId': '1234', 'sourceRunAttempt': '2',
+            'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3-dev.68.2', 'sourceReleaseId': 200,
+            'sourceCommit': 'a' * 40, 'sourceRunId': '38181680763', 'sourceRunAttempt': '2',
             'sourceAssetFingerprintSha256': release_pair.source_fingerprint(self.source),
             'repackageCommit': 'b' * 40, 'repackageRunId': '9999', 'architectures': entries,
             'unsigned': True, 'storeCertified': False}
@@ -99,6 +107,39 @@ class StoreQualificationTests(unittest.TestCase):
         self.assertEqual({p.name for p in out.iterdir()}, {self.details['architectures']['arm64']['package'], 'AppxManifest.xml'})
         self.assertEqual((out / 'AppxManifest.xml').read_bytes(), (self.store / 'AppxManifest-arm64.xml').read_bytes())
         with self.assertRaises(ValueError): qual.select('arm64', self.store, out, env=self.env)
+
+    def test_dev_tag_number_is_independent_of_source_run_id_and_api_authorized(self):
+        source = release_pair.verify_pair(self.source)
+        self.assertNotEqual(self.details['sourceRunId'], '68')
+        run = {'id': 38181680763, 'run_number': 68, 'run_attempt': 2, 'head_sha': 'a' * 40,
+            'repository': {'full_name': 'ATLKR/OpenGeul'}, 'path': '.github/workflows/msix.yml',
+            'event': 'push', 'status': 'completed', 'conclusion': 'success'}
+        jobs = [{'name': name, 'conclusion': 'success', 'run_attempt': 2,
+            'run_id': run['id'], 'head_sha': run['head_sha']} for name in REQUIRED_JOBS]
+        tag = self.details['sourceRelease'].rsplit('/', 1)[1]
+        authorize_release(tag, source, run, run['head_sha'], jobs)
+        qual.select('x64', self.store, self.root / 'dev-selected', env=self.env)
+        for changed in ('v1.1.3-dev.38181680763.2', 'v1.1.3-dev.69.2', 'v1.1.3-dev.68.1'):
+            with self.subTest(tag=changed), self.assertRaises(ValueError):
+                authorize_release(changed, source, run, run['head_sha'], jobs)
+
+    def test_canonical_stable_source_url_remains_accepted(self):
+        self.details['sourceRelease'] = 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3'
+        self.fixture.write_json(self.store / 'store-provenance.json', self.details); self.fixture.sums(self.store)
+        self.collect('x64'); self.collect('arm64'); self.verify()
+
+    def test_noncanonical_or_unbound_source_urls_fail_before_selection(self):
+        base = 'https://github.com/ATLKR/OpenGeul/releases/tag/v'
+        urls = [base + '1.1.3-dev.68.1', base + '1.1.4-dev.68.2', base + '1.1.3-dev.068.2',
+            base + '1.1.3-dev.0.2', base + '1.1.3-dev.68.02', base + '1.1.3-dev.68.2?draft=true',
+            base + '01.1.3-dev.68.2', base.replace('ATLKR/OpenGeul', 'outsider/OpenGeul') + '1.1.3-dev.68.2']
+        for i, url in enumerate(urls):
+            with self.subTest(url=url):
+                self.details['sourceRelease'] = url
+                self.fixture.write_json(self.store / 'store-provenance.json', self.details); self.fixture.sums(self.store)
+                output = self.root / ('rejected-url-' + str(i))
+                with self.assertRaises(ValueError): qual.select('arm64', self.store, output, env=self.env)
+                self.assertFalse(output.exists())
 
     def test_both_store_identity_full_wack_proofs_append_without_original_changes(self):
         original = {p.name: p.read_bytes() for p in self.store.iterdir()}

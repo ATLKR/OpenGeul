@@ -10,6 +10,7 @@ import itertools
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import re
 import shutil
 import sys
 import tempfile
@@ -53,7 +54,10 @@ def _store(directory, env):
     require(source.get('formatVersion') == 2 and source.get('repository') == 'ATLKR/OpenGeul' and all(details[d] == source[s] for d,s in [('sourceCommit','commit'),('sourceRunId','runId'),('sourceRunAttempt','runAttempt'),('version','version')]), 'Source 쌍과 Store 출처 불일치')
     require(type(details['sourceReleaseId']) is int and details['sourceReleaseId'] > 0 and digest(details['sourceAssetFingerprintSha256']) == details['sourceAssetFingerprintSha256'], 'Source release/fingerprint 불일치')
     base = 'https://github.com/ATLKR/OpenGeul/releases/tag/v' + details['version']
-    require(details['sourceRelease'] in (base, base + '-dev.' + details['sourceRunId'] + '.' + details['sourceRunAttempt']), '정확한 Source 태그 URL 필요')
+    attempt = details['sourceRunAttempt']; url = details['sourceRelease']
+    require(isinstance(attempt, str) and re.fullmatch(r'[1-9][0-9]{0,19}', attempt), '정확한 Source attempt 필요')
+    # dev.N의 N은 run_number다. GET 원본 다운로드의 authorize_release가 실제 API 번호를 검증한다.
+    require(isinstance(url, str) and (url == base or re.fullmatch(re.escape(base) + r'-dev\.[1-9][0-9]{0,19}\.' + re.escape(attempt), url)), '정확한 Source 태그 URL 필요')
     require(isinstance(details['architectures'], dict) and set(details['architectures']) == set(ARCHES), '두 Store 아키텍처 필요')
     names = {'source-provenance.json','store-provenance.json','SHA256SUMS.txt'}
     for arch in ARCHES:
