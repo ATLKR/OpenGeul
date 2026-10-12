@@ -283,17 +283,21 @@ class OwnedPreviewFocus:
         try:
             # Binding precedes the one activation attempt; actual foreground is never fabricated.
             self._live(control,require_foreground=False)
+            entry['targetRuntimeId']=_runtime_id(control)
+            # This property is diagnostic only. Expand/Invoke/SelectionItem act
+            # through their own UIA patterns and do not send keyboard input.
+            entry['targetKeyboardFocusable']=_safe(lambda:bool(control.element_info.element.CurrentIsKeyboardFocusable))
             if entry['foregroundBefore']!=self.preview_window:
                 entry['setForegroundReturned']=self.probe.set_foreground(self.preview_window)
                 if not entry['setForegroundReturned']:raise AssertionError('Owned print foreground request failed')
             if self.probe.foreground()!=self.preview_window:raise AssertionError('Owned print foreground was not observed')
-            control.element_info.element.SetFocus()
-            focused=self.probe.focused()
-            if focused is None or _runtime_id(control) not in [row['runtimeId'] for row in self._chain(focused)]:
-                raise AssertionError('Actual keyboard focus is outside the print target')
             self._live(control);entry['passed']=True
         finally:
-            entry['foregroundAfter']=self.probe.foreground();self._record(entry)
+            entry['foregroundAfter']=self.probe.foreground()
+            foreground_changed=entry.get('passed') is True and entry['foregroundAfter']!=self.preview_window
+            if foreground_changed:entry['passed']=False;entry['errorType']='AssertionError'
+            self._record(entry)
+            if foreground_changed:raise AssertionError('Owned print foreground changed before semantic input')
 
     def check(self,control,phase,*,physical=False):
         entry={'phase':phase,'operation':'read-only-guard','foreground':self.probe.foreground()}

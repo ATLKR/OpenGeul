@@ -92,7 +92,7 @@ class PrintPreviewFocusTests(unittest.TestCase):
         guard = self.guard()
         guard.prepare(self.target, 'margins-expand')
         self.assertEqual(self.probe.foreground_hwnd, 200)
-        self.assertIs(self.probe.focused_control, self.target)
+        self.assertIsNone(self.probe.focused_control)
         self.assertEqual(self.probe.foreground_calls, [200])
         guard.check(self.target, 'margins-after-expand')
         self.assertEqual(self.probe.foreground_calls, [200])
@@ -103,6 +103,28 @@ class PrintPreviewFocusTests(unittest.TestCase):
         fn(100,10,self.runtime,app_handle=77,probe=self.probe)
         self.assertEqual(self.probe.foreground_calls,[100])
         self.assertEqual(self.probe.foreground_hwnd,100)
+
+    def test_semantic_prepare_does_not_require_or_change_keyboard_focus(self):
+        guard=self.guard();self.target.focus_error=OSError('Semantic target is not keyboard focusable')
+        self.probe.focused_control=self.app
+        self.probe.focused=lambda:(_ for _ in ()).throw(AssertionError('Global focus must not approve semantic input'))
+        guard.prepare(self.target,'margins-expand')
+        self.assertEqual(self.probe.foreground_calls,[200])
+        self.assertIs(self.probe.focused_control,self.app)
+
+    def test_foreign_semantic_provider_is_rejected_before_foreground_or_pattern(self):
+        guard=self.guard();self.target.pid=99
+        with self.assertRaises(AssertionError):guard.prepare(self.target,'margins-expand')
+        self.assertEqual(self.probe.foreground_calls,[])
+
+    def test_semantic_prepare_rejects_foreground_changed_at_final_observation(self):
+        guard=self.guard();original=self.probe.foreground;reads=[]
+        def observed():
+            reads.append(None)
+            return 999 if len(reads)==5 else original()
+        self.probe.foreground=observed
+        with self.assertRaises(AssertionError):guard.prepare(self.target,'margins-expand')
+        self.assertEqual(self.probe.foreground_calls,[200])
 
     def test_initial_ctrl_p_boundary_refuses_failed_focus_or_foreign_hwnd(self):
         fn=getattr(self.module,'prepare_app_for_print',None)
@@ -157,16 +179,19 @@ class PrintPreviewFocusTests(unittest.TestCase):
         with self.assertRaises(AssertionError):guard.prepare(self.target, 'margins-expand')
         self.assertIsNone(self.probe.focused_control)
 
-    def test_uia_focus_failure_escapes_without_second_focus_call(self):
+    def test_non_keyboard_focusable_semantic_target_preserves_owned_foreground(self):
         guard = self.guard();self.target.focus_error = OSError('Focus rejected')
-        with self.assertRaisesRegex(OSError, 'Focus rejected'):guard.prepare(self.target, 'margins-expand')
+        self.target.element_info.element.CurrentIsKeyboardFocusable=False
+        guard.prepare(self.target, 'margins-expand')
         self.assertEqual(self.probe.foreground_calls, [200])
+        self.assertIsNone(self.probe.focused_control)
 
-    def test_actual_focused_element_must_belong_to_target(self):
+    def test_global_keyboard_focus_cannot_authorize_target_outside_exact_preview(self):
         guard = self.guard()
-        self.target.element_info.element.SetFocus = lambda: None
-        self.probe.focused_control = self.app
+        self.target.parent_control=self.app
+        self.probe.focused_control = self.target
         with self.assertRaises(AssertionError):guard.prepare(self.target, 'margins-expand')
+        self.assertEqual(self.probe.foreground_calls,[])
 
     def test_no_native_ancestor_has_no_app_hwnd_fallback(self):
         self.preview.parent_control = None
@@ -268,11 +293,13 @@ class PrintPreviewFocusTests(unittest.TestCase):
 
     def test_actual_configure_preview_prepares_before_expand_and_clicks_once(self):
         module,margins=self.settings();guard=self.guard()
+        margins.element_info.element.CurrentIsKeyboardFocusable=False
+        margins.focus_error=OSError('Semantic target is not keyboard focusable')
         result=module.configure_preview(self.preview,{10,20},focus=guard)
         self.assertEqual(self.actions,['expand','click'])
         self.assertEqual(result['margins'],'None')
         self.assertEqual(self.probe.foreground_calls,[200])
-        self.assertIs(self.probe.focused_control,margins)
+        self.assertIsNone(self.probe.focused_control)
 
     def test_actual_configure_preview_foreign_focus_failure_dispatches_nothing(self):
         module,_=self.settings();guard=self.guard();self.probe.foreground_result=False
