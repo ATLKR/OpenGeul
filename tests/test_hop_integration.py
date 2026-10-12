@@ -1,6 +1,7 @@
 """Keep reviewed HOP fixes in both shipped frontends and every release gate."""
 from pathlib import Path
 import unittest
+from ci.policy import load_workflow
 ROOT=Path(__file__).resolve().parents[1]
 
 class HopIntegrationTests(unittest.TestCase):
@@ -16,8 +17,12 @@ class HopIntegrationTests(unittest.TestCase):
         text=(ROOT/'e2e/run.py').read_text()
         self.assertIn('from test_hop_followups import suite',text)
         self.assertIn("expected=16 if os.environ.get('E2E_MODE')=='native' else 10",text)
-        workflow=(ROOT/'.github/workflows/msix.yml').read_text()
-        self.assertIn('needs: [wasm, build, build-arm64, native-e2e, browser-e2e, msix-install, msix-install-arm64, virtual-print]',workflow)
+        workflow=load_workflow(ROOT/'.github/workflows/msix.yml')
+        self.assertEqual(workflow['jobs']['release']['needs'], [
+            'wasm', 'build', 'build-arm64', 'native-e2e', 'native-e2e-arm64',
+            'browser-e2e', 'msix-install', 'msix-install-arm64',
+            'virtual-print', 'virtual-print-arm64',
+        ])
     def test_backport_attribution_is_shipped_with_license_notices(self):
         text=(ROOT/'THIRD_PARTY_NOTICES.md').read_text()
         self.assertIn('FMsongX2',text)
