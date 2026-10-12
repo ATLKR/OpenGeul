@@ -1,4 +1,4 @@
-name: OpenGeul cold compiler 병렬도 8·12·16 진단
+name: OpenGeul ARM64 cold compiler 병렬도 8·12·16 진단
 'on':
   workflow_dispatch:
 permissions:
@@ -13,9 +13,9 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
 jobs:
   compile-pressure:
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/diagnostic/cargo-pressure-8-12-16')
+    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/diagnostic/cargo-pressure-arm64-8-12-16')
     name: Cold ${{ matrix.workload }} · jobs ${{ matrix.jobs }}
-    runs-on: windows-2025
+    runs-on: windows-11-arm
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -60,7 +60,7 @@ jobs:
         $PSNativeCommandUseErrorActionPreference = $true
         python scripts/prepare_upstream.py --fetch-only
         $lock = Get-Content config/upstream.lock.json -Raw | ConvertFrom-Json
-        $target = 'x86_64-pc-windows-msvc'
+        $target = 'aarch64-pc-windows-msvc'
         rustup toolchain install "$($lock.rust)-$target" --profile minimal --target $target
         corepack enable
         Push-Location .work/hop

@@ -55,7 +55,7 @@ class PressureBenchmarkTests(unittest.TestCase):
 
     def test_workload_is_the_original_locked_native_skia_cli_release(self):
         self.assertEqual(self.m.COMMAND, ('cargo', 'build', '--release', '--locked', '--target',
-                         'x86_64-pc-windows-msvc', '--package', 'rhwp', '--bin', 'rhwp', '--features', 'native-skia'))
+                         'aarch64-pc-windows-msvc', '--package', 'rhwp', '--bin', 'rhwp', '--features', 'native-skia'))
         self.assertEqual(self.m.LEVELS, (8, 12, 16))
 
     def test_unknown_or_empty_statistics_do_not_qualify_a_result(self):

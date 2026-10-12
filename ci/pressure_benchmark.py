@@ -18,20 +18,22 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
 sys.path.insert(0, str(ROOT/'ci'))
+sys.path.insert(0, str(ROOT/'e2e'))
 import windows_components as components
 from policy import require_public
 from build_progress import terminate_owned
+from native_architecture import verify_host
 
 BASE = 'f104fd4080214bc072cf39a24e73454685dd4254'
-BRANCH = 'diagnostic/cargo-pressure-8-12-16'
+BRANCH = 'diagnostic/cargo-pressure-arm64-8-12-16'
 WASM_RUN = 38237687615
 WASM_ARTIFACT = 11741399358
 WASM_SIZE = 4829693
 WASM_DIGEST = '943441db925635b074b40abba0f31f91cb5bfdc5cf8aa7da3c5dcd2421bb2c2c'
 LEVELS = (8, 12, 16)
-COMMAND = ('cargo', 'build', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc',
+COMMAND = ('cargo', 'build', '--release', '--locked', '--target', 'aarch64-pc-windows-msvc',
            '--package', 'rhwp', '--bin', 'rhwp', '--features', 'native-skia')
-EDITOR_COMMAND = ('pnpm', 'tauri', 'build', '--no-bundle', '--target', 'x86_64-pc-windows-msvc')
+EDITOR_COMMAND = ('pnpm', 'tauri', 'build', '--no-bundle', '--target', 'aarch64-pc-windows-msvc')
 CHANGED_PATHS = ('.github/workflows/msix.yml', 'ci/pressure_benchmark.py', 'ci/tests/test_pressure_benchmark.py')
 GIB = 1024**3
 LOG_CAP = 8*1024*1024
@@ -217,7 +219,7 @@ def compile_measure(jobs, workload):
     expected_editor = 'pnpm tauri build --no-bundle --target $target'
     if production.count(expected_line) != 1 or production.count(expected_editor) != 1:
         raise ValueError('비교할 원본 제품 compile 명령이 변경되었습니다')
-    toolchain = config['upstream']['rust']+'-x86_64-pc-windows-msvc'
+    toolchain = config['upstream']['rust']+'-aarch64-pc-windows-msvc'
     env = os.environ.copy(); env['RUSTUP_TOOLCHAIN'] = toolchain
     version = subprocess.check_output(['rustc','--version'],env=env,cwd=ROOT,timeout=30).decode().strip()
     if not version.startswith('rustc '+config['upstream']['rust']+' '): raise ValueError('실제 고정 Rust toolchain이 다릅니다')
@@ -229,6 +231,7 @@ def compile_measure(jobs, workload):
     env['CARGO_TARGET_DIR'] = str(target); env['CARGO_BUILD_JOBS'] = str(jobs)
     env['CARGO_PROFILE_DEV_DEBUG'] = '0'; env['CARGO_PROFILE_TEST_DEBUG'] = '0'
     env.pop('GH_TOKEN',None)
+    host_architecture = verify_host('arm64')
     probe = WindowsProbe(); first = probe.sample()
     cpu = os.cpu_count()
     if cpu != 4 or not 14*GIB <= first['totalPhysicalBytes'] <= 18*GIB:
@@ -236,7 +239,7 @@ def compile_measure(jobs, workload):
     if first['availablePhysicalBytes'] <= MIN_FREE: raise ValueError('cold compiler 시작 전 RAM 부족')
     info = {'formatVersion':1, **current, 'jobs':jobs, 'command':list(command), 'workingDirectory':cwd.relative_to(ROOT).as_posix(),
             'runnerOS':os.getenv('RUNNER_OS'), 'runnerArchitecture':os.getenv('RUNNER_ARCH'), 'runnerImageVersion':os.getenv('ImageVersion'),
-            'logicalCpuCount':cpu, 'observedInitialMemory':first, 'rustVersion':version, 'rustupToolchain':toolchain,
+            'logicalCpuCount':cpu, 'hostArchitecture':host_architecture, 'observedInitialMemory':first, 'rustVersion':version, 'rustupToolchain':toolchain,
             'cargoTargetInitiallyAbsent':True, 'actionsCacheUsed':False, 'workload':workload,
             'timingScope':'Compiler parent process wall time includes Cargo dependency/Skia downloads; excludes checkout/upstream preparation/Rust installation',
             'sampleIntervalSeconds':2, 'abortAvailablePhysicalBytes':MIN_FREE,
@@ -317,8 +320,8 @@ def compile_measure(jobs, workload):
                    'originalLogSha256':components.sha(log_path), 'originalSamplesSha256':components.sha(sample_path), **state,
                    'resourceStatistics':statistics(samples) if samples else None}
         if summary['compileSucceeded']:
-            executable = target/('x86_64-pc-windows-msvc/release/'+('rhwp.exe' if workload == 'cli' else 'hop-desktop.exe'))
-            with executable.open('rb') as stream: summary['compiledPeMachine'] = components.pe_machine(stream.read(4096),'x64')
+            executable = target/('aarch64-pc-windows-msvc/release/'+('rhwp.exe' if workload == 'cli' else 'hop-desktop.exe'))
+            with executable.open('rb') as stream: summary['compiledPeMachine'] = components.pe_machine(stream.read(4096),'arm64')
             summary['compiledExecutableBytes'] = executable.stat().st_size
             summary['compiledExecutableSha256'] = components.sha(executable)
         write_new(OUTPUT/'summary.json',encoded(summary),JSON_CAP)
