@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -20,6 +21,21 @@ import store_screenshot
 
 spec = importlib.util.spec_from_file_location('pair_fixture', ROOT / 'tests/test_release_pair.py')
 fixtures = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixtures)
+
+
+class StoreScreenshotImportTests(unittest.TestCase):
+    def test_receipt_helper_import_needs_no_gui_dependencies(self):
+        # The policy runners install only the CI parser. A clean interpreter
+        # must inspect screenshot provenance without loading the UI driver.
+        code = (
+            "import sys; sys.path[:0]=['scripts','e2e']; import store_screenshot; "
+            "assert 'driver' not in sys.modules and 'playwright' not in sys.modules; "
+            "assert store_screenshot.capture_expected_sha({'formatVersion':2,"
+            "'architectures':{'x64':{'runtimeSha256':{'OpenGeul.exe':'expected'}}}})=='expected'"
+        )
+        result = subprocess.run([sys.executable, '-S', '-c', code], cwd=ROOT,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class StoreQualificationTests(unittest.TestCase):

@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 
-from driver import Session, digest, edit, until
 from prepare_payload import stream_hash, verify_checksums
 
 
@@ -18,6 +17,7 @@ def capture_expected_sha(provenance):
 def capture(executable: Path, output: Path):
     if os.name != 'nt' or os.environ.get('GITHUB_ACTIONS') != 'true':
         raise RuntimeError('Store capture requires a disposable Windows GitHub runner')
+    from driver import Session, digest, edit, until
     import win32api
     import win32con
     from pywinauto import Desktop
