@@ -57,7 +57,8 @@ class RunnerReadyWorkflowTests(unittest.TestCase):
         product = next(i for i, s in enumerate(steps) if './e2e/msix-install.ps1' in s.get('run', ''))
         self.assertLess(index, product);self.assertNotIn('if', steps[product])
         self.assertNotIn('continue-on-error', steps[product])
-        self.assertNotIn('runner-ready.py', str(self.store['store-wack']))
+        for name in ('store-wack-x64','store-wack'):
+            self.assertNotIn('runner-ready.py', str(self.store[name]))
 
     def test_original_before_after_png_json_and_result_use_raw_hard_cap_and_attempt_unique_upload(self):
         jobs = [(name, self.source[name]) for name in ARM_JOBS] + [('store-native-arm64', self.store['store-native-arm64'])]
@@ -97,9 +98,10 @@ class RunnerReadyWorkflowTests(unittest.TestCase):
                     'msix-install','msix-native-arm64','msix-install-arm64','virtual-print','virtual-print-arm64'}
         self.assertEqual(set(self.source['release']['needs']), required)
         self.assertTrue(required <= set(self.source['cleanup-transports']['needs']))
-        self.assertEqual(self.store['store-wack']['strategy']['matrix']['architecture'], ['x64','arm64'])
-        self.assertEqual(set(self.store['qualify']['needs']), {'package','store-native-arm64','store-wack'})
-        self.assertEqual(set(self.store['submit']['needs']), {'package','store-native-arm64','store-wack','qualify'})
+        for name in ('store-wack-x64','store-wack'):
+            self.assertNotIn('strategy',self.store[name])
+        self.assertEqual(set(self.store['qualify']['needs']), {'package','store-native-arm64','store-wack-x64','store-wack'})
+        self.assertEqual(set(self.store['submit']['needs']), {'package','store-native-arm64','store-wack-x64','store-wack','qualify'})
         for name in ARM_JOBS:
             self.assertNotIn('continue-on-error', self.source[name])
         self.assertIn('-ExpectedCliSha256 $cliSha', '\n'.join(s.get('run', '') for s in self.store['store-native-arm64']['steps']))

@@ -62,24 +62,36 @@ class ArmWackSplitWorkflowTests(unittest.TestCase):
 
     def test_store_sdk_stays_on_x64_and_all_five_jobs_precede_submission(self):
         self.assertIn('store-native-arm64', self.store)
-        native = self.store['store-native-arm64']; sdk = self.store['store-wack']
+        self.assertIn('store-wack-x64', self.store)
+        native = self.store['store-native-arm64']; sdk = self.store['store-wack']; x64 = self.store['store-wack-x64']
         self.assertEqual(native['runs-on'], 'windows-11-arm')
         self.assertEqual(native['env'], {'ARCHITECTURE':'arm64'})
         self.assertEqual(native['needs'], ['package'])
         self.assertIn('-NativeOnly -TransportDirectory native-transport', self.commands(native))
         self.assertEqual(sdk['runs-on'], 'windows-2025')
-        self.assertEqual(sdk['strategy']['matrix'], {'architecture':['x64','arm64']})
-        self.assertEqual(sdk['name'], 'Store WACK (${{ matrix.architecture }})')
+        self.assertNotIn('strategy', sdk)
+        self.assertEqual(sdk['name'], 'Store WACK (arm64)')
         self.assertEqual(set(sdk['needs']), {'package','store-native-arm64'})
-        self.assertEqual(sdk['env'], {'ARCHITECTURE':'${{ matrix.architecture }}'})
+        self.assertEqual(sdk['env'], {'ARCHITECTURE':'arm64'})
+        self.assertEqual(x64['runs-on'], 'windows-2025')
+        self.assertEqual(x64['name'], 'Store WACK (x64)')
+        self.assertEqual(x64['needs'], ['package'])
+        self.assertEqual(x64['env'], {'ARCHITECTURE':'x64'})
+        self.assertNotIn('strategy', x64)
+        self.assertNotIn('native_wack_transport.py', self.commands(x64))
+        self.assertNotIn('msix-wack-import.ps1', self.commands(x64))
+        self.assertIn('./e2e/msix-install.ps1 ', self.commands(x64))
+        self.assertNotIn('runner-ready.py', self.commands(x64))
         self.assertNotIn('runner-ready.py', self.commands(sdk))
         download = next(s for s in sdk['steps'] if 'native_wack_transport.py download-store' in s.get('run', ''))
-        self.assertEqual(download['if'], "env.ARCHITECTURE == 'arm64'")
+        self.assertNotIn('if', download)
         self.assertEqual(download['env'], {'GH_TOKEN':'${{ github.token }}'})
         self.assertIn('scripts/native_wack_transport.py download-store --store-directory store-output --output native-input', download['run'])
-        self.assertIn('./e2e/msix-wack-import.ps1 -PackageDirectory package-wack -NativeDirectory native-input -OutputDirectory installed', self.commands(sdk))
+        self.assertIn('./e2e/msix-wack-import.ps1 -OriginalDirectory store-output -PackageDirectory package-wack -NativeDirectory native-input -OutputDirectory installed', self.commands(sdk))
         for final in ('qualify','submit'):
-            self.assertIn('store-native-arm64', self.store[final]['needs'])
+            for gate in ('store-native-arm64','store-wack-x64','store-wack'):
+                self.assertIn(gate, self.store[final]['needs'])
+                self.assertIn("needs['"+gate+"'].result == 'success'", self.store[final]['if'])
             self.assertIn("needs['store-native-arm64'].result == 'success'", self.store[final]['if'])
         self.assert_transport(native, 'scripts/native_wack_transport.py publish-store --store-directory store-output --evidence installed --transport native-transport',
                               'opengeul-store-native-signed-arm64-${{ github.run_id }}-${{ github.run_attempt }}')

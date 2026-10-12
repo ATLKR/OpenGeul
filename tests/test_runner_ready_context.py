@@ -158,8 +158,9 @@ class ContextTests(unittest.TestCase):
 
     def test_x64_sdk_consumers_cannot_run_arm_native_readiness(self):
         self.reject(self.context(job='msix-install-arm64'))
-        env=self.context(event='workflow_dispatch',job='store-wack',workflow='store-package.yml');env['ARCHITECTURE']='arm64'
-        self.reject(env)
+        for job,architecture in (('store-wack','arm64'),('store-wack-x64','x64')):
+            env=self.context(event='workflow_dispatch',job=job,workflow='store-package.yml');env['ARCHITECTURE']=architecture
+            self.reject(env)
 
     def test_source_job_workflow_and_host_drift_are_rejected(self):
         for key,val in [('GITHUB_JOB','native-e2e'),('GITHUB_JOB','unknown-job'),

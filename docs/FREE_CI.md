@@ -47,8 +47,10 @@ ARM64 후보는 `msix-native-arm64`가 표준 `windows-11-arm` 실행기에서 �
 
 Store는 `package`, `store-native-arm64`, `Store WACK (x64)`,
 `Store WACK (arm64)`, `qualify`의 **5개 필수 작업**을 같은 실행에서
-통과해야 제출할 수 있습니다. 두 SDK 검사는 x64 표준 실행기에서 최대
-2개 병렬로 진행합니다. ARM 네이티브 검증과 전체 SDK 결과가 누락되거나
+통과해야 제출할 수 있습니다. x64 설치·SDK 작업 `store-wack-x64`는 `package`만 기다리며 ARM 네이티브
+설치와 동시에 시작합니다. ARM SDK 작업 `store-wack`는 네이티브 성공 후보를
+받은 뒤 진행하고, 두 SDK 작업은 x64 표준 실행기에서 동시에 실행할 수
+있습니다. ARM 네이티브 검증과 전체 SDK 결과가 누락되거나
 실패하면 `qualify`와 `submit` 모두 진행하지 않습니다. 기존 Source22,
 Store 기본 파일 7개·공개 상태 포함 9개, 두 아키텍처의 raw12 증거,
 무료 가격과 인증 후 자동 공개 조건을 유지합니다.
