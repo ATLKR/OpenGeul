@@ -26,6 +26,33 @@ class StoreQualificationWorkflowTests(unittest.TestCase):
         self.assertIn('store_qualification.py select',text);self.assertIn('store_qualification.py collect',text)
         self.assertIn('github.run_id',text)
 
+    def test_source22_and_bound_arch_qa_are_validated_before_store_install(self):
+        steps=self.jobs['store-wack']['steps']
+        downloads=[(i,s) for i,s in enumerate(steps) if '--download-source-release' in s.get('run','')]
+        self.assertEqual(len(downloads),1)
+        index,step=downloads[0];self.assertNotIn('if',step)
+        self.assertEqual(step['env'],{'GH_TOKEN':'${{ github.token }}','RELEASE_TAG':'${{ inputs.release_tag }}'})
+        run=step['run']
+        source='scripts/store_package.py --download-source-release --release-tag $env:RELEASE_TAG --output .work/store-source'
+        qa='scripts/mcp_qa_download.py store --store-directory store-output --source-directory .work/store-source --architecture $env:ARCHITECTURE --output mcp-qa'
+        self.assertIn(source,run);self.assertIn(qa,run);self.assertLess(run.index(source),run.index(qa))
+        self.assertIn('ci/evidence.py size --limit-mib 192 .work/store-source',run)
+        self.assertIn('ci/evidence.py size --limit-mib 16 mcp-qa',run)
+        self.assertIn('$PSNativeCommandUseErrorActionPreference = $true',run)
+        install=next(i for i,s in enumerate(steps) if './e2e/msix-install.ps1 ' in s.get('run',''))
+        self.assertLess(index,install)
+
+    def test_store_install_receives_source_cli_hash_and_qa_without_binary_hash_fallback(self):
+        step=next(s for s in self.jobs['store-wack']['steps'] if './e2e/msix-install.ps1 ' in s.get('run',''))
+        run=step['run'];self.assertNotIn('if',step)
+        self.assertIn('Get-Content (Join-Path .work/store-source ("provenance-{0}.json" -f $env:ARCHITECTURE))',run)
+        self.assertIn('$cliSha=[string]$provenance.windowsComponents.components.cli.sha256',run)
+        self.assertIn('-Architecture $env:ARCHITECTURE -PackageDirectory package-wack -OutputDirectory installed -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha',run)
+        self.assertNotIn('Get-FileHash',run)
+        self.assertLess(run.index('windowsComponents.components.cli.sha256'),run.index('./e2e/msix-install.ps1'))
+        self.assertLess(run.index('./e2e/msix-install.ps1'),run.index('store_qualification.py collect'))
+        self.assertNotIn('STORE_CLIENT_SECRET',str(step));self.assertNotIn('GH_TOKEN',step.get('env',{}))
+
     def test_readonly_qualification_runs_also_when_submission_is_false(self):
         self.assertIn('qualify',self.jobs)
         job=self.jobs['qualify'];self.assertEqual(job['needs'],['package','store-wack'])

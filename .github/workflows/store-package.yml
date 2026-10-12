@@ -96,12 +96,25 @@ jobs:
           gh run download $env:GITHUB_RUN_ID --repo ATLKR/OpenGeul --name "opengeul-store-$env:GITHUB_RUN_ID" --dir store-output
           python ci/evidence.py size --limit-mib 96 store-output
           python scripts/store_qualification.py select --architecture $env:ARCHITECTURE --directory store-output --output package-wack
+      - name: 검증된 Source22와 같은 아키텍처의 MCP QA 원본 받기
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          python scripts/store_package.py --download-source-release --release-tag $env:RELEASE_TAG --output .work/store-source
+          python ci/evidence.py size --limit-mib 192 .work/store-source
+          python scripts/mcp_qa_download.py store --store-directory store-output --source-directory .work/store-source --architecture $env:ARCHITECTURE --output mcp-qa
+          python ci/evidence.py size --limit-mib 16 mcp-qa
       - name: 실제 Store 신원 설치·네이티브 GUI·CLI·연결·삭제·전체 WACK
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
+          $provenance=Get-Content (Join-Path .work/store-source ("provenance-{0}.json" -f $env:ARCHITECTURE)) -Raw | ConvertFrom-Json
+          $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
           ./e2e/ensure-webview2.ps1
-          ./e2e/msix-install.ps1 -Architecture $env:ARCHITECTURE -PackageDirectory package-wack -OutputDirectory installed
+          ./e2e/msix-install.ps1 -Architecture $env:ARCHITECTURE -PackageDirectory package-wack -OutputDirectory installed -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
           python scripts/store_qualification.py collect --architecture $env:ARCHITECTURE --directory store-output --evidence installed --output qualification
           python ci/evidence.py size --limit-mib 16 qualification
       - name: 실제 결과를 유지하며 비밀 없는 진단 보존
