@@ -55,6 +55,19 @@ class PendingObserveTests(unittest.TestCase):
         results = [self.observe(Opener([APP, value, submission('123', 'Published')])) for value in (first, second)]
         self.assertNotEqual(results[0].get('pendingSubmission', {}).get('draftContentSha256'), results[1].get('pendingSubmission', {}).get('draftContentSha256'))
 
+    def test_mandatory_flag_reports_only_actual_boolean_and_preserves_missing(self):
+        for value in (None, False, True):
+            pending=submission('246','PendingCommit')
+            if value is not None: pending['packageDeliveryOptions']={'isMandatoryUpdate':value,'unrelated':'SECRET_DELIVERY'}
+            result=self.observe(Opener([APP,pending,submission('123','Published')]))
+            self.assertIs(result['pendingSubmission']['mandatoryUpdate'],value)
+            self.assertNotIn('SECRET_DELIVERY',json.dumps(result))
+        for value in ('false',0,1,[],{}):
+            pending=submission('246','PendingCommit');pending['packageDeliveryOptions']={'isMandatoryUpdate':value}
+            opener=Opener([APP,pending])
+            with self.assertRaises(ValueError): helper.observe(opener,'SECRET_OAUTH')
+            self.assertEqual(len(opener.calls),2)
+
     def test_sensitive_upload_url_is_excluded_from_fingerprint(self):
         first = submission('246', 'PendingCommit'); second = submission('246', 'PendingCommit')
         second['fileUploadUrl'] = 'https://other.example/?sig=SECRET_CHANGED'

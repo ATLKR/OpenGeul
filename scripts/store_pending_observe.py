@@ -60,9 +60,14 @@ def summary(value,expected):
     overrides=pricing.get('marketSpecificPricings'); require(isinstance(overrides,dict))
     available_free=price=='Free' and all(isinstance(p,str) and p in {'Free','Base','NotAvailable'} for p in overrides.values())
     upload_destination=value.get('fileUploadUrl'); require(upload_destination is None or isinstance(upload_destination,str))
+    delivery=value.get('packageDeliveryOptions')
+    require(delivery is None or isinstance(delivery,dict))
+    mandatory=delivery.get('isMandatoryUpdate') if isinstance(delivery,dict) else None
+    require(mandatory is None or type(mandatory) is bool)
     fields=('applicationPackages','listings','pricing','packageDeliveryOptions','notesForCertification','targetPublishMode','targetPublishDate')
     return {'id':expected,'status':value['status'],'targetPublishMode':value['targetPublishMode'],'freeBasePrice':price=='Free',
             'availableMarketsFree':available_free,'packageCount':len(selected),'packages':selected,'uploadDestinationPresent':bool(upload_destination),
+            'mandatoryUpdate':mandatory,
             'draftContentSha256':draft_semantic_fingerprint(value),'apiFieldSha256':{field:fingerprint(value[field]) for field in fields if field in value},
             'fingerprintFormat':'canonical UTF-8 JSON: sorted keys, compact separators, ensure_ascii=False; raw values/URLs never emitted'}
 
