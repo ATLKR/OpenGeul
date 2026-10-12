@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -17,6 +18,7 @@ sys.path.insert(0, str(ROOT/'scripts'))
 import buildkit
 import prepare_native_tests
 import wasm_artifacts
+import windows_arch
 
 HELPER = ROOT/'scripts/windows_components.py'
 components = None
@@ -104,16 +106,17 @@ class WindowsComponentsTests(unittest.TestCase):
         write_json(source/'.opengeul-overlay.json', ledger)
         return source
 
-    def payload(self, role):
+    def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')
         target.mkdir()
+        machine = windows_arch.machine_for(architecture)
         if role == 'cli':
             (target/'Tools').mkdir()
-            (target/'Tools/rhwp.exe').write_bytes(pe())
+            (target/'Tools/rhwp.exe').write_bytes(pe(machine))
         else:
-            (target/'OpenGeul.exe').write_bytes(pe())
-            (target/'WebView2Loader.dll').write_bytes(pe())
-            (target/'AppxManifest.xml').write_text(buildkit.manifest(buildkit.DEV_IDENTITY, json.loads((ROOT/'config/product.json').read_text())['version']))
+            (target/'OpenGeul.exe').write_bytes(pe(machine))
+            (target/'WebView2Loader.dll').write_bytes(pe(machine))
+            (target/'AppxManifest.xml').write_text(buildkit.manifest(buildkit.DEV_IDENTITY, json.loads((ROOT/'config/product.json').read_text())['version'], architecture))
             buildkit.make_assets(target/'Assets')
             (target/'Assets/app.ico').unlink()
             (target/'Assets/app.png').unlink()
@@ -121,24 +124,143 @@ class WindowsComponentsTests(unittest.TestCase):
             (target/'Notices/OpenGeul-LICENSE.txt').write_text('Owned synthetic fixture notice')
         return target
 
-    def pair(self):
+    def pair(self, architecture='x64'):
         c = self.helper()
         source = self.source()
         folders = {}
         for role in ('editor', 'cli'):
             folders[role] = self.root/(role+'-component')
-            c.capture(role, self.payload(role), source, folders[role], env=self.env)
+            options = {} if architecture == 'x64' else {'architecture': architecture}
+            c.capture(role, self.payload(role, architecture), source, folders[role], env=self.env, **options)
         return folders
 
-    def combine(self, folders, env=None):
+    def combine(self, folders, env=None, architecture='x64'):
+        options = {} if architecture == 'x64' else {'architecture': architecture}
         return self.helper().combine(folders['editor'], folders['cli'], self.root/'combined',
-                                     self.root/'package-source', env=self.env if env is None else env)
+                                     self.root/'package-source', env=self.env if env is None else env, **options)
 
-    def assert_rejected_without_outputs(self, folders, match=None, env=None):
+    def assert_rejected_without_outputs(self, folders, match=None, env=None, architecture='x64'):
         with self.assertRaisesRegex(ValueError, match or '.'):
-            self.combine(folders, env)
+            self.combine(folders, env, architecture)
         self.assertFalse((self.root/'combined').exists())
         self.assertFalse((self.root/'package-source').exists())
+
+    def test_arm64_cli_capture_and_combine_restore_exact_runtime(self):
+        source = self.source()
+        folders = {role: self.root/(role+'-component') for role in ('editor', 'cli')}
+        for role in folders:
+            payload = self.payload(role, 'arm64')
+            result = subprocess.run(
+                [sys.executable, str(HELPER), 'capture', '--architecture', 'arm64', '--role', role,
+                 '--payload', str(payload), '--source', str(source), '--out', str(folders[role])],
+                env={**os.environ, **self.env}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(
+            [sys.executable, str(HELPER), 'combine', '--architecture', 'arm64',
+             '--editor', str(folders['editor']), '--cli', str(folders['cli']),
+             '--payload', str(self.root/'combined'), '--source', str(self.root/'package-source')],
+            env={**os.environ, **self.env}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root/'combined/Tools/rhwp.exe').read_bytes(), pe(0xAA64))
+
+    def test_arm64_components_bind_native_exes_dll_manifest_and_artifact_names(self):
+        folders = self.pair('arm64')
+        self.combine(folders, architecture='arm64')
+        for name in ('OpenGeul.exe', 'WebView2Loader.dll', 'Tools/rhwp.exe'):
+            self.assertEqual((self.root/'combined'/name).read_bytes(), pe(0xAA64))
+        self.assertIn('ProcessorArchitecture="arm64"', (self.root/'combined/AppxManifest.xml').read_text())
+        receipt = json.loads((self.root/'package-source/.opengeul-windows-components.json').read_text())
+        for role in folders:
+            record = json.loads((folders[role]/'provenance.json').read_text())
+            self.assertEqual(record['target'], 'aarch64-pc-windows-msvc')
+            self.assertEqual(record['formatVersion'], 2 if role == 'cli' else 1)
+            self.assertEqual(record['helpers']['scripts/windows_arch.py'], digest(ROOT/'scripts/windows_arch.py'))
+            self.assertEqual(receipt['components'][role]['artifactName'],
+                             'opengeul-'+role+'-component-arm64-'+self.env['GITHUB_RUN_ID'])
+            self.assertEqual(receipt['components'][role]['provenanceSha256'], digest(folders[role]/'provenance.json'))
+        self.assertEqual(json.loads((folders['editor']/'provenance.json').read_text())['source'],
+                         json.loads((folders['cli']/'provenance.json').read_text())['source'])
+
+    def test_unsupported_component_architectures_fail_before_local_inputs_or_staging(self):
+        c = self.helper()
+        for architecture in ('ARM64', 'arm64ec', 'x86', '', None):
+            with self.subTest(architecture=architecture), patch.object(c, 'configured', side_effect=AssertionError('Architecture must be validated first')):
+                with self.assertRaises(ValueError):
+                    c.capture('cli', self.root/'absent', self.root/'absent-source', self.root/'out',
+                              architecture=architecture, env=self.env)
+                with self.assertRaises(ValueError):
+                    c.combine(self.root/'absent-editor', self.root/'absent-cli', self.root/'combined',
+                              self.root/'package-source', architecture=architecture, env=self.env)
+        self.assertFalse((self.root/'out').exists())
+        self.assertFalse((self.root/'combined').exists())
+
+    def test_arm64_capture_rejects_mixed_exe_dll_manifest_and_arm64ec_before_staging(self):
+        c = self.helper()
+        source = self.source()
+        payloads = {role: self.payload(role, 'arm64') for role in ('editor', 'cli')}
+        changes = [('editor', 'OpenGeul.exe', pe()), ('editor', 'WebView2Loader.dll', pe()),
+                   ('editor', 'WebView2Loader.dll', pe(0xA641)), ('cli', 'Tools/rhwp.exe', pe()),
+                   ('cli', 'Tools/rhwp.exe', pe(0xA641)),
+                   ('editor', 'AppxManifest.xml', buildkit.manifest(buildkit.DEV_IDENTITY,
+                        json.loads((ROOT/'config/product.json').read_text())['version']).encode())]
+        for index, (role, name, data) in enumerate(changes):
+            path = payloads[role]/name
+            original = path.read_bytes()
+            path.write_bytes(data)
+            out = self.root/f'rejected-architecture-{index}'
+            with self.subTest(role=role, name=name, index=index), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Invalid architecture must precede staging')):
+                with self.assertRaisesRegex(ValueError, 'arm64|architecture'):
+                    c.capture(role, payloads[role], source, out, architecture='arm64', env=self.env)
+            self.assertFalse(out.exists())
+            path.write_bytes(original)
+
+    def test_arm64_target_and_role_metadata_cannot_be_forged_before_staging(self):
+        folders = self.pair('arm64')
+        for role, folder in folders.items():
+            path = folder/'provenance.json'
+            original = json.loads(path.read_text())
+            for key, value in [('target', 'x86_64-pc-windows-msvc'), ('target', 'arm64ec-pc-windows-msvc'),
+                               ('role', 'cli' if role == 'editor' else 'editor')]:
+                changed = copy.deepcopy(original); changed[key] = value
+                write_json(path, changed)
+                with self.subTest(role=role, key=key, value=value), patch.object(self.helper().tempfile, 'mkdtemp', side_effect=AssertionError('Identity must precede staging')):
+                    self.assert_rejected_without_outputs(folders, 'identity', architecture='arm64')
+            write_json(path, original)
+
+    def test_arm64_recomputed_inventory_cannot_authorize_x64_or_arm64ec_runtime(self):
+        folders = self.pair('arm64')
+        for role, name in [('editor','OpenGeul.exe'), ('editor','WebView2Loader.dll'), ('cli','Tools/rhwp.exe')]:
+            path = folders[role]/'payload'/(name+'.gz' if role == 'cli' else name)
+            provenance = folders[role]/'provenance.json'
+            original_data = path.read_bytes(); original = json.loads(provenance.read_text())
+            for machine in (0x8664, 0xA641):
+                raw = pe(machine)
+                path.write_bytes(gzip.compress(raw, mtime=0) if role == 'cli' else raw)
+                changed = copy.deepcopy(original)
+                changed['files']['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                if role == 'cli':
+                    changed['runtime'] = {'path': name, 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+                write_json(provenance, changed)
+                with self.subTest(role=role, name=name, machine=machine), patch.object(self.helper().tempfile, 'mkdtemp', side_effect=AssertionError('Native PE validation must precede staging')):
+                    self.assert_rejected_without_outputs(folders, 'arm64', architecture='arm64')
+            path.write_bytes(original_data); write_json(provenance, original)
+
+    def test_x64_editor_and_arm64_cli_cannot_join_for_either_expected_architecture(self):
+        c = self.helper(); source = self.source()
+        folders = {role: self.root/(role+'-component') for role in ('editor', 'cli')}
+        c.capture('editor', self.payload('editor'), source, folders['editor'], env=self.env)
+        c.capture('cli', self.payload('cli', 'arm64'), source, folders['cli'], architecture='arm64', env=self.env)
+        for architecture in ('x64', 'arm64'):
+            with self.subTest(architecture=architecture), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Mixed architecture must precede staging')):
+                self.assert_rejected_without_outputs(folders, 'identity', architecture=architecture)
+
+    def test_arm64_workers_still_require_complete_core_source_parity(self):
+        c = self.helper(); source = self.source()
+        folders = {role: self.root/(role+'-component') for role in ('editor', 'cli')}
+        c.capture('editor', self.payload('editor', 'arm64'), source, folders['editor'], architecture='arm64', env=self.env)
+        (source/'third_party/rhwp/src/owned-synthetic.rs').write_text('// changed after editor build\n')
+        c.capture('cli', self.payload('cli', 'arm64'), source, folders['cli'], architecture='arm64', env=self.env)
+        self.assert_rejected_without_outputs(folders, 'source parity', architecture='arm64')
 
     def test_same_run_components_restore_complete_payload_and_exact_ledger(self):
         folders = self.pair()
@@ -292,8 +414,8 @@ class WindowsComponentsTests(unittest.TestCase):
         folders = self.pair()
         c = self.helper()
         validate = c.validate_component
-        def change_after_validation(folder, role, current, config):
-            result = validate(folder, role, current, config)
+        def change_after_validation(folder, role, current, config, *, architecture='x64'):
+            result = validate(folder, role, current, config, architecture=architecture)
             if role == 'cli':
                 path = folder/'payload/Tools/rhwp.exe.gz'
                 path.write_bytes(gzip.compress(pe()+b'changed', mtime=0))

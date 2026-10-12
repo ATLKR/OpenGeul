@@ -26,6 +26,7 @@ from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
 from prepare_native_tests import TARGETS
 from wasm_artifacts import FILES as WASM_FILES
+from windows_arch import SUPPORTED_ARCHITECTURES, component_artifact_name, require_architecture, target_triple
 
 CAPS = {'editor': 64*1024*1024, 'cli': 32*1024*1024}
 MAX_PAYLOAD = 96*1024*1024
@@ -34,7 +35,6 @@ CLI_GZIP = 'payload/'+CLI_RUNTIME+'.gz'
 BLOCK = 1024*1024
 MAX_FILES = 10_000
 MAX_METADATA = 512*1024
-TARGET = 'x86_64-pc-windows-msvc'
 FEATURES = {'editor': 'default', 'cli': 'native-skia'}
 RESERVED = re.compile(r'(?i)(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?\Z')
 SHA = re.compile(r'[0-9a-f]{64}\Z')
@@ -210,7 +210,8 @@ def tree(folder: Path, cap: int) -> tuple[dict, set]:
     return files, directories
 
 
-def validate_payload(folder: Path, role: str, files: dict) -> None:
+def validate_payload(folder: Path, role: str, files: dict, architecture: str = 'x64') -> None:
+    architecture = require_architecture(architecture)
     required = {'Tools/rhwp.exe'} if role == 'cli' else {
         'OpenGeul.exe', 'AppxManifest.xml', 'Notices/OpenGeul-LICENSE.txt',
         'Assets/StoreLogo.png', 'Assets/Square44x44Logo.png', 'Assets/Square150x150Logo.png'}
@@ -224,14 +225,14 @@ def validate_payload(folder: Path, role: str, files: dict) -> None:
             raise ValueError('Editor component cannot contain the CLI')
         if Path(name).suffix.lower() in ('.exe', '.dll'):
             with (folder/name).open('rb') as stream:
-                pe_machine(stream.read(4096))
+                pe_machine(stream.read(4096), architecture)
     if role == 'editor':
         try:
             doc = ET.fromstring((folder/'AppxManifest.xml').read_bytes())
             ns = {'p': 'http://schemas.microsoft.com/appx/manifest/foundation/windows10'}
             ident = doc.find('p:Identity', ns); app = doc.find('p:Applications/p:Application', ns)
             version = read_json(ROOT/'config/product.json')['version']
-            if (ident is None or ident.get('ProcessorArchitecture') != 'x64'
+            if (ident is None or ident.get('ProcessorArchitecture') != architecture
                     or ident.get('Version') != package_version(version)
                     or app is None or app.get('Executable') != 'OpenGeul.exe'):
                 raise ValueError('Wrong editor component manifest identity/architecture')
@@ -374,8 +375,9 @@ def _compress_cli(path: Path, expected: dict) -> bytes:
         return buffer.getvalue()
 
 
-def _decode_cli(path: Path, runtime: dict, transport: dict, target=None) -> None:
+def _decode_cli(path: Path, runtime: dict, transport: dict, target=None, *, architecture: str = 'x64') -> None:
     """Check one bounded gzip member; an optional target is private staging only."""
+    architecture = require_architecture(architecture)
     regular(path)
     decoder = zlib.decompressobj(16+zlib.MAX_WBITS)
     raw_hash = hashlib.sha256(); compressed_hash = hashlib.sha256()
@@ -414,14 +416,15 @@ def _decode_cli(path: Path, runtime: dict, transport: dict, target=None) -> None
         raise ValueError('CLI gzip input changed during validation/staging')
     if raw_size != runtime['size'] or raw_hash.hexdigest() != runtime['sha256']:
         raise ValueError('CLI runtime size/hash mismatch')
-    pe_machine(header)
+    pe_machine(header, architecture)
 
 
-def capture(role: str, payload: Path, source: Path, out: Path, *, env=None) -> None:
+def capture(role: str, payload: Path, source: Path, out: Path, *, env=None, architecture: str = 'x64') -> None:
+    architecture = require_architecture(architecture)
     if role not in CAPS:
         raise ValueError('Unknown component role')
     current = identity(env); config = configured(); fresh(out)
-    files, _ = tree(payload, MAX_PAYLOAD if role == 'cli' else CAPS[role]); validate_payload(payload, role, files)
+    files, _ = tree(payload, MAX_PAYLOAD if role == 'cli' else CAPS[role]); validate_payload(payload, role, files, architecture)
     parity, contract = source_contract(source, config)
     transport = {'payload/'+name: value for name, value in files.items()}
     compressed = None
@@ -430,7 +433,7 @@ def capture(role: str, payload: Path, source: Path, out: Path, *, env=None) -> N
     else:
         compressed = _compress_cli(payload/CLI_RUNTIME, files[CLI_RUNTIME])
         transport = {CLI_GZIP: {'size': len(compressed), 'sha256': hashlib.sha256(compressed).hexdigest()}}
-    value = {'formatVersion': 2 if role == 'cli' else 1, **current, **config, 'role': role, 'target': TARGET,
+    value = {'formatVersion': 2 if role == 'cli' else 1, **current, **config, 'role': role, 'target': target_triple(architecture),
              'features': FEATURES[role], 'source': contract, 'files': transport}
     if role == 'cli':
         value['runtime'] = {'path': CLI_RUNTIME, **files[CLI_RUNTIME]}
@@ -455,7 +458,8 @@ def capture(role: str, payload: Path, source: Path, out: Path, *, env=None) -> N
             shutil.rmtree(stage)
 
 
-def validate_component(folder: Path, role: str, current: dict, config: dict) -> dict:
+def validate_component(folder: Path, role: str, current: dict, config: dict, *, architecture: str = 'x64') -> dict:
+    architecture = require_architecture(architecture)
     actual, directories = tree(folder, CAPS[role])
     if 'provenance.json' not in actual:
         raise ValueError('Missing component provenance')
@@ -466,7 +470,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict) -> 
         expected_keys.add('runtime')
     attempt = value.get('runAttempt')
     if (set(value) != expected_keys or type(value.get('formatVersion')) is not int or value.get('formatVersion') != (2 if role == 'cli' else 1) or value.get('role') != role
-            or value.get('target') != TARGET or value.get('features') != FEATURES[role]
+            or value.get('target') != target_triple(architecture) or value.get('features') != FEATURES[role]
             or any(value.get(k) != v for k, v in current.items() if k != 'runAttempt')
             or not isinstance(attempt, str) or not re.fullmatch(r'[1-9][0-9]*', attempt)
             or int(attempt) > int(current['runAttempt'])):
@@ -503,10 +507,10 @@ def validate_component(folder: Path, role: str, current: dict, config: dict) -> 
             raise ValueError('Invalid CLI runtime record or size cap')
         if set(content) != {CLI_GZIP}:
             raise ValueError('CLI component inventory must contain only the gzip runtime')
-        _decode_cli(folder/CLI_GZIP, runtime, content[CLI_GZIP])
+        _decode_cli(folder/CLI_GZIP, runtime, content[CLI_GZIP], architecture=architecture)
     else:
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
-        validate_payload(folder/'payload', role, payload)
+        validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
     if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
@@ -537,12 +541,13 @@ def validate_component(folder: Path, role: str, current: dict, config: dict) -> 
     return value
 
 
-def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None) -> None:
+def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None, architecture: str = 'x64') -> None:
+    architecture = require_architecture(architecture)
     current = identity(env); config = configured()
     fresh(payload); fresh(source)
     if payload == source or payload in source.parents or source in payload.parents:
         raise ValueError('Component output directories must be separate')
-    records = {role: validate_component(folder, role, current, config)
+    records = {role: validate_component(folder, role, current, config, architecture=architecture)
                for role, folder in (('editor', editor), ('cli', cli))}
     if records['editor']['source'] != records['cli']['source']:
         raise ValueError('Editor and CLI prepared source parity mismatch')
@@ -562,7 +567,7 @@ def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None) -
         inventory = ({key: records[role]['runtime'][key] for key in ('size','sha256')} if role == 'cli'
                      else records[role]['files']['payload/'+runtime])
         receipt['components'][role] = {
-            'artifactName': 'opengeul-'+role+'-component-'+current['runId'],
+            'artifactName': component_artifact_name(role, current['runId'], architecture),
             'runAttempt': records[role]['runAttempt'], 'provenanceSha256': sha(folder/'provenance.json'),
             'runtime': runtime, **inventory}
     receipt_bytes = encoded(receipt)
@@ -578,7 +583,7 @@ def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None) -
         runtime_path = staged_payload/CLI_RUNTIME
         runtime_path.parent.mkdir(parents=True)
         with runtime_path.open('xb') as target:
-            _decode_cli(cli/CLI_GZIP, records['cli']['runtime'], records['cli']['files'][CLI_GZIP], target)
+            _decode_cli(cli/CLI_GZIP, records['cli']['runtime'], records['cli']['files'][CLI_GZIP], target, architecture=architecture)
         _copy(parity_path, staged_source/'.opengeul-overlay.json', records['editor']['files']['source-parity.json'])
         (staged_source/'.opengeul-windows-components.json').write_bytes(receipt_bytes)
         audit_payload(staged_payload)
@@ -602,15 +607,17 @@ def main() -> None:
     capture_parser.add_argument('--role', choices=tuple(CAPS), required=True)
     for flag in ('payload', 'source', 'out'):
         capture_parser.add_argument('--'+flag, type=Path, required=True)
+    capture_parser.add_argument('--architecture', choices=SUPPORTED_ARCHITECTURES, default='x64')
     combine_parser = sub.add_parser('combine')
     for flag in ('editor', 'cli', 'payload', 'source'):
         combine_parser.add_argument('--'+flag, type=Path, required=True)
+    combine_parser.add_argument('--architecture', choices=SUPPORTED_ARCHITECTURES, default='x64')
     args = parser.parse_args()
     try:
         if args.command == 'capture':
-            capture(args.role, args.payload.absolute(), args.source.absolute(), args.out.absolute())
+            capture(args.role, args.payload.absolute(), args.source.absolute(), args.out.absolute(), architecture=args.architecture)
         else:
-            combine(args.editor.absolute(), args.cli.absolute(), args.payload.absolute(), args.source.absolute())
+            combine(args.editor.absolute(), args.cli.absolute(), args.payload.absolute(), args.source.absolute(), architecture=args.architecture)
     except (ValueError, OSError, subprocess.CalledProcessError, tomllib.TOMLDecodeError) as error:
         parser.exit(1, 'Windows component integrity check failed: '+str(error)+'\n')
     print('Verified Windows component '+args.command+' (same-run transport selection remains required).')
