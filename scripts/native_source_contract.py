@@ -20,7 +20,7 @@ SHIM_FILES = ('Cargo.toml', 'LICENSE.txt', 'README.md', 'src/activation.rs', 'sr
 MAX_LEDGER = 256 * 1024
 MAX_VENDOR = 32 * 1024 * 1024
 SHA = re.compile(r'[0-9a-f]{64}\Z')
-PATCH_SHA256 = '3a515f47c919e1e0222e7f1d91f0d4aa963c77285294669b23cc6eb8e9dc615d'
+PATCH_SHA256 = '20502be251bf375fda3215f57022a3e9c07f4f18a60ac72f1068bd46c11a9ac0'
 
 
 def _require(value, message):
@@ -135,8 +135,9 @@ def capture(source: Path, prepared_files, config, *, read_json, tree, sha):
     manifest = tomllib.loads((source / NATIVE_ROOT / 'Cargo.toml').read_text(encoding='utf-8'))
     _require(manifest.get('package', {}).get('version') == config['product']['version'],
              'Native activation compiler product version mismatch')
-    _require(manifest['target']['cfg(windows)']['dependencies']['open'] ==
-             {'package': 'opengeul-native-open', 'path': 'opengeul-native/native-open'} and
+    windows = manifest['target']['cfg(windows)']['dependencies']
+    _require(windows.get('opengeul-native-open') == {'path': 'opengeul-native/native-open'}
+             and 'open' not in windows and 'open' not in manifest['dependencies'] and
              manifest['target']['cfg(not(windows))']['dependencies']['open'] == '5',
              'Native activation desktop dependency contract mismatch')
     _require(manifest['dependencies']['tauri'] == {'version': '=2.11.1', 'features': [FEATURE]},
@@ -325,4 +326,4 @@ REFERENCE = {'tauri-2.11.1': {'name': 'tauri',
                                                 'src/window/mod.rs': 'e1efb04e03b1163c35a61c383ffd3d3adfff2ed8bf6bb6e3305147d4e91bcb6e',
                                                 'src/window/windows.rs': '734622475b78dbf0c7ac6bd780c893e6cad6cfe034d84fa5f6397b92ede139ab'},
                               'patchedFiles': {'Cargo.toml': 'ac65fe1a4f080507296c32665a4b392485f3444a0921b3b0b873d42ae6be2991',
-                                               'src/dialog/windows.rs': 'c727ce0dba9f76ecacfe1c72b64747189932be07b2f3687952ee22c78a35e24f'}}}
+                                               'src/dialog/windows.rs': '28846c64771defd06ecddaca0537d685e078ead427ea24190d695abcf2b7c399'}}}

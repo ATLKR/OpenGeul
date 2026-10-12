@@ -10,6 +10,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -483,6 +484,35 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertEqual(contract['nativeActivation']['ledger']['preparedLockSha256'],
                          digest(source/'apps/desktop/src-tauri/Cargo.lock'))
         self.assertEqual(seed.read_bytes(), before)
+
+    def test_reviewed_native_dependency_has_one_source_per_key_and_preserves_open_library_name(self):
+        source = self.source();native = source/'apps/desktop/src-tauri'
+        manifest = tomllib.loads((native/'Cargo.toml').read_text())
+        windows = manifest['target']['cfg(windows)']['dependencies']
+        nonwindows = manifest['target']['cfg(not(windows))']['dependencies']
+        self.assertNotIn('open',windows,'Cargo cannot give the same dependency key two source paths')
+        self.assertEqual(windows.get('opengeul-native-open'),{'path':'opengeul-native/native-open'})
+        self.assertEqual(nonwindows['open'],'5')
+        shim = tomllib.loads((native/'opengeul-native/native-open/Cargo.toml').read_text())
+        self.assertEqual(shim['lib']['name'],'open','Protected open::that call sites must resolve unchanged')
+        try:self.helper().source_contract(source,self.helper().configured())
+        except (KeyError,ValueError) as error:self.fail('Reviewed unique dependency source was rejected: '+str(error))
+
+    def test_rehashed_old_target_dependent_open_alias_is_rejected_before_transport(self):
+        source = self.source();native = source/'apps/desktop/src-tauri';manifest = native/'Cargo.toml'
+        text = buildkit.replace_once(manifest.read_text(),
+            'opengeul-native-open = { path = "opengeul-native/native-open" }',
+            'open = { package = "opengeul-native-open", path = "opengeul-native/native-open" }')
+        manifest.write_text(text,encoding='utf-8',newline='\n')
+        path = source/native_source_contract.LEDGER_PATH;ledger = json.loads(path.read_bytes())
+        ledger['preparedManifestSha256'] = digest(manifest)
+        path.write_bytes(native_source_contract.ledger_bytes(ledger))
+        public_path = source/'.opengeul-overlay.json';public = json.loads(public_path.read_bytes())
+        public['nativeActivation'] = ledger;write_json(public_path,public)
+        out = self.root/'target-source-conflict'
+        with self.assertRaisesRegex(ValueError,'dependency contract'):
+            self.helper().capture('editor',self.payload('editor'),source,out,env=self.env)
+        self.assertFalse(out.exists())
 
     def test_rehashed_native_manifest_with_wrong_product_version_is_rejected(self):
         source = self.source();manifest = source/'apps/desktop/src-tauri/Cargo.toml'
