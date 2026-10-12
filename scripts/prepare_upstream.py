@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tomllib
 from buildkit import ROOT, FONT_EXTENSIONS, make_assets, package_version, replace_once, tauri_config
+from native_activation import apply as apply_native_activation
 
 
 TAURI_VERSION = "2.11.1"
@@ -217,6 +218,7 @@ def patch(source: Path, version: str) -> None:
     lock = replace_once(lock, f'name = "hop-desktop"\nversion = "{hop_version}"',
                         f'name = "hop-desktop"\nversion = "{version}"')
     (native/'Cargo.lock').write_text(lock, encoding='utf-8', newline='\n')
+    apply_native_activation(source)
     for component in ('Preview','Thumbnail'):
         path=source/f'apps/desktop/quicklook/Resources/{component}/Info.plist'
         if path.is_file():

@@ -62,6 +62,24 @@ class BuildKitTests(unittest.TestCase):
             'Name':'Microsoft.VCLibs.140.00.UWPDesktop','MinVersion':'14.0.30704.0',
             'Publisher':'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'}])
 
+    def test_both_architectures_register_the_owned_out_of_process_document_worker(self):
+        namespaces = {'p': 'http://schemas.microsoft.com/appx/manifest/foundation/windows10',
+                      'com': 'http://schemas.microsoft.com/appx/manifest/com/windows10',
+                      'u': 'http://schemas.microsoft.com/appx/manifest/uap/windows10'}
+        for architecture in ('x64', 'arm64'):
+            with self.subTest(architecture=architecture):
+                doc = ET.fromstring(self.b.manifest(self.b.DEV_IDENTITY, '1.1.3', architecture))
+                self.assertEqual(doc.find('p:Identity', namespaces).get('ProcessorArchitecture'), architecture)
+                server = doc.find('.//com:Extension/com:ComServer/com:ExeServer', namespaces)
+                self.assertIsNotNone(server, 'Packaged MCP needs the registered isolated worker')
+                self.assertEqual(server.get('Executable'), 'Tools\\rhwp.exe')
+                self.assertEqual(server.get('Arguments'),
+                                 '--opengeul-com-worker --clsid c6c4d247-b4f0-563d-a649-4765796e3164')
+                self.assertEqual(server.find('com:Class', namespaces).get('Id'),
+                                 'c6c4d247-b4f0-563d-a649-4765796e3164')
+                self.assertNotIn('LaunchAndActivationPermission', server.attrib)
+                self.assertEqual(doc.find('.//u:VisualElements', namespaces).get('Description'), 'HWP/HWPX 문서 편집기')
+
     def test_payload_rejects_fonts_case_insensitively(self):
         for name in ('font.ttf','font.OTF','font.ttc','font.otc','font.woff','font.WOFF2','server.pfx','secrets.pem'):
             with tempfile.TemporaryDirectory() as tmp:

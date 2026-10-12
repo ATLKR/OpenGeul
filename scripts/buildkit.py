@@ -75,11 +75,12 @@ def manifest(identity: dict, version: str, architecture: str = 'x64') -> str:
     architecture=require_architecture(architecture)
     ns='http://schemas.microsoft.com/appx/manifest/foundation/windows10'
     uap='http://schemas.microsoft.com/appx/manifest/uap/windows10'
+    com='http://schemas.microsoft.com/appx/manifest/com/windows10'
     rescap='http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities'
-    ET.register_namespace('',ns); ET.register_namespace('uap',uap); ET.register_namespace('rescap',rescap)
+    ET.register_namespace('',ns); ET.register_namespace('uap',uap); ET.register_namespace('rescap',rescap); ET.register_namespace('com',com)
     p=lambda n:f'{{{ns}}}{n}'
     u=lambda n:f'{{{uap}}}{n}'
-    root=ET.Element(p('Package'),IgnorableNamespaces='uap rescap')
+    root=ET.Element(p('Package'),IgnorableNamespaces='uap rescap com')
     ET.SubElement(root,p('Identity'),Name=identity['name'],Publisher=identity['publisher'],Version=package_version(version),ProcessorArchitecture=architecture)
     props=ET.SubElement(root,p('Properties'))
     for key,value in [('DisplayName','OpenGeul'),('PublisherDisplayName',identity['displayName']),('Logo','Assets/StoreLogo.png')]: ET.SubElement(props,p(key)).text=value
@@ -90,12 +91,21 @@ def manifest(identity: dict, version: str, architecture: str = 'x64') -> str:
     ET.SubElement(resources,p('Resource'),Language='ko-kr')
     apps=ET.SubElement(root,p('Applications'))
     app=ET.SubElement(apps,p('Application'),Id='OpenGeul',Executable='OpenGeul.exe',EntryPoint='Windows.FullTrustApplication')
-    ET.SubElement(app,u('VisualElements'),DisplayName='OpenGeul',Description='HWP/HWPX document editor',BackgroundColor='transparent',Square150x150Logo='Assets/Square150x150Logo.png',Square44x44Logo='Assets/Square44x44Logo.png')
+    ET.SubElement(app,u('VisualElements'),DisplayName='OpenGeul',Description='HWP/HWPX 문서 편집기',BackgroundColor='transparent',Square150x150Logo='Assets/Square150x150Logo.png',Square44x44Logo='Assets/Square44x44Logo.png')
     exts=ET.SubElement(app,p('Extensions'))
     ext=ET.SubElement(exts,u('Extension'),Category='windows.fileTypeAssociation')
     assoc=ET.SubElement(ext,u('FileTypeAssociation'),Name='opengeul.documents')
     types=ET.SubElement(assoc,u('SupportedFileTypes'))
     for value in ('.hwp','.hwpx'): ET.SubElement(types,u('FileType')).text=value
+    c=lambda n:f'{{{com}}}{n}'
+    worker_class='c6c4d247-b4f0-563d-a649-4765796e3164'
+    extension=ET.SubElement(exts,c('Extension'),Category='windows.comServer')
+    servers=ET.SubElement(extension,c('ComServer'))
+    server=ET.SubElement(servers,c('ExeServer'),Executable='Tools\\rhwp.exe',
+                         Arguments='--opengeul-com-worker --clsid '+worker_class,
+                         DisplayName='OpenGeul 문서 작업자')
+    # Use the system COM activation policy; do not broaden launch permissions.
+    ET.SubElement(server,c('Class'),Id=worker_class)
     caps=ET.SubElement(root,p('Capabilities'))
     ET.SubElement(caps,f'{{{rescap}}}Capability',Name='runFullTrust')
     ET.indent(root)

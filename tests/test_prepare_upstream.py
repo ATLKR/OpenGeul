@@ -23,6 +23,10 @@ class PrepareNativeManifestTests(unittest.TestCase):
         integration = patch.object(prepare_upstream, 'install_store_updates')
         integration.start()
         self.addCleanup(integration.stop)
+        # 전체 vendor/shim 무결성은 test_native_activation에서 별도로 검사한다.
+        activation = patch.object(prepare_upstream, 'apply_native_activation')
+        self.activation = activation.start()
+        self.addCleanup(activation.stop)
         self.native = self.source / 'apps/desktop/src-tauri'
         files = {
             'apps/desktop/src-tauri/build.rs': 'fn main() {\n    tauri_build::build();\n}\n',
@@ -130,6 +134,16 @@ pub fn layer_trees_to_pdf_with_links(
             prepare_upstream.patch(self.source, '1.1.2')
         self.assertEqual(path.read_text(encoding='utf-8'), changed)
         self.assertFalse((self.native / 'windows-app-manifest.xml').exists())
+
+    def test_native_activation_prepares_the_same_locked_desktop_source(self):
+        observed = []
+        def activation(source):
+            lock = tomllib.loads((source / 'apps/desktop/src-tauri/Cargo.lock').read_text(encoding='utf-8'))
+            observed.extend(p['version'] for p in lock['package'] if p['name'] == 'hop-desktop')
+        self.activation.side_effect = activation
+        prepare_upstream.patch(self.source, '1.1.2')
+        self.activation.assert_called_once_with(self.source)
+        self.assertEqual(observed, ['1.1.2'], 'Native source preparation must receive the final product lock')
 
     def test_windows_preparation_matches_editor_manifest_line_endings(self):
         manifest = self.native / 'Cargo.toml'
