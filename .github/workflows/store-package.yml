@@ -23,7 +23,7 @@ jobs:
         shell: pwsh
         env:
           PYTHONUTF8: '1'
-        run: python e2e/runner-ready.py --output runner-ready
+        run: python e2e/runner-ready.py --prepare --output runner-ready
       - name: 관찰 원본만 보존
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
