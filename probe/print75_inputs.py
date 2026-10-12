@@ -169,7 +169,9 @@ def prepare():
                 and provenance['architecture']=='arm64'
                 and provenance['windowsComponents']['sourceContractSha256']==CONTRACT_SHA,'Compiled source contract differs')
         prepared=runtime_prepare(ROOT/'package',ROOT/'runtime','arm64')
-        require(prepared['verifiedRuntimeFiles']==1567,'Complete runtime file count differs')
+        require(prepared['verifiedRuntimeFiles']==1566 and prepared['runtimeManifestSha256']==
+                'c21354d6c04d0028adf38b3f3d08950e15542f261eacf39b87bb276043474463',
+                'Complete runtime file inventory differs')
         for name,(size,sha) in EXES.items():
             require((ROOT/'runtime'/name).stat().st_size==size and digest(ROOT/'runtime'/name)==sha,'Compiled PE bytes differ')
         wasm_artifacts.validate(ROOT/'wasm-input')
