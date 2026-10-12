@@ -102,15 +102,22 @@ def metadata_from_store(app, submission):
                    for price in pricing['marketSpecificPricings'].values())):
         raise ValueError('무료 Store 가격 계약이 일치하지 않습니다')
     packages = submission.get('applicationPackages')
-    if not isinstance(packages, list) or not 1 <= len(packages) <= 128:
+    if not isinstance(packages, list) or not 1 <= len(packages) <= 2:
         raise ValueError('Store 패키지 목록이 올바르지 않습니다')
     versions = set()
+    architectures = set()
     for package in packages:
         if (not isinstance(package, dict) or not isinstance(package.get('architecture'), str)
-                or package['architecture'].lower() != 'x64' or package.get('fileStatus') != 'Uploaded'):
-            raise ValueError('공개 x64 Store 패키지가 아닙니다')
+                or not package['architecture'].isascii() or package.get('fileStatus') != 'Uploaded'):
+            raise ValueError('공개 x64·ARM64 Store 패키지가 아닙니다')
+        architecture = package['architecture'].lower()
+        if architecture not in {'x64', 'arm64'} or architecture in architectures:
+            raise ValueError('Store 패키지 아키텍처가 알 수 없거나 중복되었습니다')
+        architectures.add(architecture)
         _version(package.get('version'))
         versions.add(package['version'])
+    if architectures not in ({'x64'}, {'x64', 'arm64'}):
+        raise ValueError('기존 x64 또는 x64·ARM64 공개 패키지 집합이 필요합니다')
     if len(versions) != 1:
         raise ValueError('공개 Store 패키지 버전이 하나로 일치하지 않습니다')
     return validate_metadata({'formatVersion': 1, 'appId': STORE_APP_ID, 'status': 'Published',

@@ -71,11 +71,103 @@ class StoreReleaseStatusTests(unittest.TestCase):
 
     def test_multiple_packages_require_one_unambiguous_public_version(self):
         packages = [copy.deepcopy(self.submission['applicationPackages'][0]) for _ in range(2)]
+        packages[1]['architecture'] = 'ARM64'
         self.assertEqual(status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': packages}), self.public)
         packages = copy.deepcopy(packages); packages[1]['version'] = '1.1.2.0'
         for value in ([], packages, packages * 65):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': value})
+
+    def test_dual_published_packages_normalize_only_ascii_case_without_expanding_public_schema(self):
+        expected = {**self.public, 'version': '1.1.3.0', 'submissionId': '123'}
+        app = {**self.app, 'lastPublishedApplicationSubmission': {'id': '123', 'status': 'Published'}}
+        for architectures in (('X64', 'ARM64'), ('x64', 'arm64'), ('Arm64', 'x64'), ('aRm64', 'X64')):
+            with self.subTest(architectures=architectures):
+                submission = {**self.submission, 'id': '123', 'applicationPackages': [
+                    {'version': '1.1.3.0', 'architecture': architecture, 'fileStatus': 'Uploaded'}
+                    for architecture in architectures]}
+                original = copy.deepcopy(submission)
+                result = status.metadata_from_store(app, submission)
+                self.assertEqual(result, expected)
+                self.assertEqual(set(result), {'formatVersion', 'appId', 'status', 'version', 'storeUrl', 'submissionId'})
+                self.assertEqual(status.decode_metadata(status.encode_metadata(result)), expected)
+                self.assertEqual(submission, original)
+
+    def test_arm64_without_x64_is_not_a_supported_published_package_set(self):
+        package = {**self.submission['applicationPackages'][0], 'architecture': 'ARM64'}
+        with self.assertRaises(ValueError):
+            status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': [package]})
+
+    def test_duplicate_architectures_are_rejected_after_case_normalization(self):
+        for architectures in (('X64', 'x64'), ('ARM64', 'arm64'), ('x64', 'ARM64', 'X64'),
+                              ('arm64', 'X64', 'ARM64')):
+            packages = [{**self.submission['applicationPackages'][0], 'architecture': architecture}
+                        for architecture in architectures]
+            with self.subTest(architectures=architectures), self.assertRaises(ValueError):
+                status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': packages})
+
+    def test_dual_packages_reject_unknown_non_ascii_missing_and_nonstring_architectures(self):
+        for architecture in ('ARM', 'arm32', 'ARM64EC', 'neutral', 'x86', 'AMD64', '', ' X64', 'arm64 ',
+                             'ARM64\n', 'Ｘ64', 'ａｒｍ64', 'x₆₄', None, True, False, 64, [], {}):
+            bad = {**self.submission['applicationPackages'][0], 'architecture': architecture}
+            with self.subTest(architecture=architecture), self.assertRaises(ValueError):
+                status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': [
+                    self.submission['applicationPackages'][0], bad]})
+        for package in ({'version': '1.1.1.0', 'fileStatus': 'Uploaded'}, None, True, 'ARM64'):
+            with self.subTest(package=package), self.assertRaises(ValueError):
+                status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': [
+                    self.submission['applicationPackages'][0], package]})
+
+    def test_dual_packages_require_each_package_to_be_uploaded(self):
+        for file_status in ('PendingUpload', 'PendingDelete', 'UploadFailed', 'uploaded', None, True):
+            for invalid_index in (0, 1):
+                packages = [{**self.submission['applicationPackages'][0], 'architecture': architecture}
+                            for architecture in ('x64', 'arm64')]
+                packages[invalid_index]['fileStatus'] = file_status
+                with self.subTest(file_status=file_status, invalid_index=invalid_index), self.assertRaises(ValueError):
+                    status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': packages})
+
+    def test_dual_packages_require_one_canonical_four_u16_version(self):
+        for version in ('0.0.0.0', '65535.65535.65535.65535'):
+            packages = [{'version': version, 'architecture': architecture, 'fileStatus': 'Uploaded'}
+                        for architecture in ('x64', 'arm64')]
+            self.assertEqual(status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': packages}),
+                             {**self.public, 'version': version})
+        for version in ('1.1.2.0', '01.1.1.0', '1.1.1', '1.1.1.65536', '1.1.1.-1', '１.1.1.0',
+                        '1.1.1.0\n', None, True, 1110):
+            packages = [copy.deepcopy(self.submission['applicationPackages'][0]),
+                        {'version': version, 'architecture': 'arm64', 'fileStatus': 'Uploaded'}]
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                status.metadata_from_store(self.app, {**self.submission, 'applicationPackages': packages})
+
+    def test_dual_packages_still_require_the_owned_published_submission(self):
+        submission = {**self.submission, 'applicationPackages': [
+            {**self.submission['applicationPackages'][0], 'architecture': architecture}
+            for architecture in ('x64', 'arm64')]}
+        for change in ({'id': '99'}, {'id': True}, {'status': 'Certification'}, {'status': 'Release'},
+                       {'status': 'PendingPublication'}, {'targetPublishMode': 'Immediate'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                status.metadata_from_store(self.app, {**submission, **change})
+        for change in ({'id': 'OTHER'}, {'publisherName': 'OTHER'},
+                       {'lastPublishedApplicationSubmission': {'id': '99', 'status': 'Published'}}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                status.metadata_from_store({**self.app, **change}, submission)
+
+    def test_invalid_dual_observation_cannot_update_public_metadata(self):
+        duplicate = [copy.deepcopy(self.submission['applicationPackages'][0]) for _ in range(2)]
+        class Opener:
+            def __init__(self): self.calls = []
+            def open(inner, request, timeout):
+                inner.calls.append(request.get_method())
+                data = self.app if len(inner.calls) == 1 else {**self.submission, 'applicationPackages': duplicate}
+                response = io.BytesIO(json.dumps(data).encode()); response.status = 200
+                return response
+        opener = Opener()
+        with patch.object(status, 'require_environment'), patch.object(status, 'authenticate', return_value=(opener, 'TEST_ONLY')), \
+                patch.object(status, 'github') as github:
+            with self.assertRaises(ValueError): status.refresh()
+            github.assert_not_called()
+        self.assertEqual(opener.calls, ['GET', 'GET'])
 
     def test_public_schema_rejects_boolean_extra_duplicate_bad_unicode_and_oversize(self):
         for change in ({'formatVersion': True}, {'formatVersion': 2}, {'schemaVersion': 1}, {'status': 'Release'},
