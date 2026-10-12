@@ -1,12 +1,12 @@
-name: Source75 ARM 소유 인쇄 포커스 진단
+name: Source81 ARM 소유 인쇄 포커스 진단
 'on':
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 실패 Source75 원본을 이용한 진단 전용 표식
+        description: 실패 Source81 원본을 이용한 진단 전용 표식
         type: string
         required: true
-        default: source75-owned-print-diagnostic
+        default: source81-owned-print-diagnostic
       verify_store_api:
         type: boolean
         default: false
@@ -17,7 +17,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: owned-print-preview-source75-arm-diagnostic
+  group: owned-print-preview-source81-arm-diagnostic
   cancel-in-progress: false
 env:
   PYTHONUTF8: '1'
@@ -28,7 +28,7 @@ jobs:
       github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul'
       && github.event_name == 'workflow_dispatch' && github.actor == 'ATLKR'
       && github.ref == 'refs/heads/diagnostic/owned-print-preview-75' && github.run_attempt == 1
-      && inputs.release_tag == 'source75-owned-print-diagnostic'
+      && inputs.release_tag == 'source81-owned-print-diagnostic'
       && inputs.verify_store_api == false && inputs.submit_to_store == false)
     runs-on: windows-11-arm
     timeout-minutes: 18
@@ -38,7 +38,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: f104fd4080214bc072cf39a24e73454685dd4254
+          ref: a785d3d33537ecedef325043346dc81425001dae
           path: source-reader
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -56,17 +56,19 @@ jobs:
           $PSNativeCommandUseErrorActionPreference=$true
           python -m pip install -r e2e/print-requirements.txt
           python -m unittest discover -s tests -p test_print_preview_focus.py -v
+          python -m unittest discover -s tests -p test_runner_ready.py -v
+          python -m unittest discover -s tests -p test_runner_ready_context.py -v
           python -m unittest discover -s tests -p test_preview_actions.py -v
           python -m unittest discover -s tests -p test_print_configuration_order.py -v
           python -m unittest discover -s e2e/print_tests -v
-      - name: Source75 고정 원본 ZIP과 전체 런타임을 검증
+      - name: Source81 고정 원본 ZIP과 전체 런타임을 검증
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
           $PSNativeCommandUseErrorActionPreference=$true
-          python probe/print75_inputs.py
+          python probe/print81_inputs.py
       - name: 기존 WebView2·Microsoft PDF·합성 인쇄 문서 준비
         shell: pwsh
         run: |
@@ -105,7 +107,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: source75-owned-print-arm-${{ github.run_id }}-${{ github.run_attempt }}
+          name: source81-owned-print-arm-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             bounded-evidence/
             diagnostic-receipt/

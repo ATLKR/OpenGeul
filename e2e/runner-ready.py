@@ -21,7 +21,7 @@ MAX_JSON = 256 * 1024
 BRANCH = 'refs/heads/diagnostic/arm-runner-ready71'
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = 'ATLKR/OpenGeul'
-SOURCE_JOBS = frozenset(('native-e2e-arm64', 'virtual-print-arm64', 'msix-install-arm64'))
+SOURCE_JOBS = frozenset(('native-e2e-arm64', 'virtual-print-arm64', 'msix-native-arm64'))
 FIXED_ACTORS = {'ATLKR': (65988341, 'User'), 'github-actions[bot]': (41898282, 'Bot')}
 
 # The script also runs directly from e2e/ on hosted Windows.
@@ -176,15 +176,9 @@ def binding(env):
         require(event_name == 'workflow_dispatch' and actor == 'ATLKR' and attempt == '1' and job == 'observe'
                 and workflow == f'{REPOSITORY}/.github/workflows/store-package.yml@{BRANCH}',
                 '허용된 고정 ARM 진단 실행이 아닙니다')
-    elif ref == 'refs/heads/diagnostic/owned-print-preview-75':
-        context = 'print-focus-diagnostic'
-        require(event_name == 'workflow_dispatch' and actor == 'ATLKR' and attempt == '1'
-                and job == 'print-diagnostic' and workflow ==
-                f'{REPOSITORY}/.github/workflows/store-package.yml@refs/heads/diagnostic/owned-print-preview-75',
-                '허용된 고정 ARM 인쇄 포커스 진단 실행이 아닙니다')
     elif workflow == f'{REPOSITORY}/.github/workflows/store-package.yml@refs/heads/main':
         context = 'store'
-        require(event_name == 'workflow_dispatch' and ref == 'refs/heads/main' and job == 'store-wack'
+        require(event_name == 'workflow_dispatch' and ref == 'refs/heads/main' and job == 'store-native-arm64'
                 and env.get('ARCHITECTURE') == 'arm64' and actor in FIXED_ACTORS,
                 '허용된 ARM Store 준비 실행이 아닙니다')
     else:
@@ -428,6 +422,7 @@ class WindowsProbe:
              ('QueryFullProcessImageNameW', [W.HANDLE, W.DWORD, W.LPWSTR, ctypes.POINTER(W.DWORD)], W.BOOL),
              ('ProcessIdToSessionId', [W.DWORD, ctypes.POINTER(W.DWORD)], W.BOOL),
              ('GetWindowsDirectoryW', [W.LPWSTR, W.UINT], W.UINT),
+             ('GetExitCodeProcess', [W.HANDLE, ctypes.POINTER(W.DWORD)], W.BOOL),
              ('GetProcessTimes', [W.HANDLE, *[ctypes.POINTER(W.FILETIME)] * 4], W.BOOL)]:
             f = getattr(self.kernel, name); f.argtypes = args; f.restype = result
 
@@ -643,6 +638,79 @@ class WindowsProbe:
             elif state['cloakedBits']: state.update(surfaceDismissed=True, dismissalKind='cloaked')
         return state
 
+    def wait_startup_foreground(self, owned_hwnd, result):
+        """첫 owned 활성화 전에 동일 WSL 시작 process의 자연 종료만 최대 65초 읽는다."""
+        started = time.monotonic(); deadline = started + 65
+        windows = self.windows(); validate_windows(windows)
+        foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
+        expected_path = ntpath.join(self.windows_directory(), 'System32', 'wsl.exe')
+        if not foreground or foreground['className'] != 'ConsoleWindowClass' or ntpath.normcase(foreground['title']) != ntpath.normcase(expected_path):
+            return
+        require(foreground['visible'] is True and foreground['enabled'] is True, 'WSL 시작 창 상태가 다릅니다')
+        processes = self.processes([foreground['processId']])
+        require(len(processes) == 1 and processes[0]['processId'] == foreground['processId'], 'WSL 소유 process가 다릅니다')
+        process = processes[0]; signature = process['signature']
+        require(ntpath.normcase(process['imagePath']) == ntpath.normcase(expected_path)
+            and process['createdFileTime'] > 0 and process['sessionId'] == self.session_id()
+            and process['processMachine'] == 0 and process['nativeMachine'] == 0xAA64
+            and process['imageBytes'] > 0 and re.fullmatch('[0-9a-f]{64}', process['imageSha256'])
+            and signature['status'] == 'Valid' and signature['publisherMicrosoft'] is True
+            and re.search(r'(?:^|,\s*)CN=Microsoft Windows(?:,|$)', signature['subject'])
+            and re.search(r'(?:^|,\s*)O=Microsoft Corporation(?:,|$)', signature['subject']),
+            'WSL 실제 경로·native·생성시각·session·Microsoft 서명이 다릅니다')
+        trace = {'readOnly': True, 'timeoutSeconds': 65, 'boundWindow': foreground, 'boundProcess': process,
+                 'samples': [], 'naturalProcessExitObserved': False, 'stage': 'heldIdentity'}
+        result['startupWait'] = trace
+        handle = self.kernel.OpenProcess(0x1000, False, process['processId'])
+        require(handle, 'WSL held 조회 handle을 열지 못했습니다')
+        try:
+            while True:
+                trace['stage'] = 'heldIdentity'
+                times = [W.FILETIME() for _ in range(4)]; machine = W.WORD(); native = W.WORD(); exit_code = W.DWORD()
+                require(self.kernel.GetProcessTimes(handle, *[ctypes.byref(t) for t in times])
+                    and ((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime) == process['createdFileTime']
+                    and self.kernel.IsWow64Process2(handle, ctypes.byref(machine), ctypes.byref(native))
+                    and machine.value == 0 and native.value == 0xAA64
+                    and self.kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)), 'WSL held 생성시각/native/exit 조회가 다릅니다')
+                exists = bool(self.user.IsWindow(foreground['hwnd'])); owner = W.DWORD()
+                thread = self.user.GetWindowThreadProcessId(foreground['hwnd'], ctypes.byref(owner)) if exists else 0
+                current_foreground = int(self.user.GetForegroundWindow() or 0)
+                if exists:
+                    trace['stage'] = 'windowIdentity'
+                    title = ctypes.create_unicode_buffer(257); cls = ctypes.create_unicode_buffer(257)
+                    self.user.GetWindowTextW(foreground['hwnd'], title, 257); self.user.GetClassNameW(foreground['hwnd'], cls, 257)
+                    require(owner.value == process['processId'] and thread == foreground['threadId']
+                        and title.value == foreground['title'] and cls.value == foreground['className'], 'WSL HWND/PID/TID/class가 변경됐습니다')
+                sample = {'elapsedMs': round((time.monotonic() - started) * 1000), 'windowExists': exists,
+                          'foregroundHwnd': current_foreground, 'heldExitCode': exit_code.value}
+                trace['samples'].append(sample)
+                if len(trace['samples']) > 32: del trace['samples'][16]
+                require(time.monotonic() <= deadline, 'WSL 자연 종료 준비 시간이 초과했습니다')
+                if exit_code.value != 259:
+                    require(not exists, '종료된 WSL 창의 소유 상태가 남았습니다')
+                    require(current_foreground in (0, owned_hwnd), 'WSL 자연 종료 순간 알 수 없는 전경 창이 나타났습니다')
+                    trace['stage'] = 'postExitFingerprint'
+                    trace['afterProcesses'] = self.processes([process['processId']])
+                    require(trace['afterProcesses'] == [process], 'WSL 기다림 전후 경로/서명/session/생성시각이 변경됐습니다')
+                    require(time.monotonic() <= deadline, 'WSL 자연 종료 검증 시간이 초과했습니다')
+                    require(int(self.user.GetForegroundWindow() or 0) in (0, owned_hwnd), 'WSL 종료 검증 중 전경 창이 변경됐습니다')
+                    trace['naturalProcessExitObserved'] = True
+                    trace['durationMs'] = round((time.monotonic() - started) * 1000)
+                    trace['stage'] = 'naturalExitConfirmed'
+                    return
+                trace['stage'] = 'foregroundIdentity'
+                require(exists and current_foreground in (0, foreground['hwnd'], owned_hwnd), 'WSL 기다림 중 알 수 없는 전경/창 변경입니다')
+                remaining = deadline - time.monotonic()
+                require(remaining > 0, 'WSL 자연 종료 준비 시간이 초과했습니다')
+                # 대기 중에도 이 helper 자신의 창만 응답한다. WSL/다른 창에는 메시지를 보내지 않는다.
+                message = W.MSG()
+                for _ in range(64):
+                    if not self.user.PeekMessageW(ctypes.byref(message), owned_hwnd, 0, 0, 1): break
+                    self.user.TranslateMessage(ctypes.byref(message)); self.user.DispatchMessageW(ctypes.byref(message))
+                time.sleep(min(0.25, remaining))
+        finally:
+            self.kernel.CloseHandle(handle)
+
     def focus_probe(self):
         """현재 helper 자신의 창 하나만 만들고 focus/제거를 검증한다."""
         wndproc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, W.HWND, W.UINT, W.WPARAM, W.LPARAM)
@@ -667,12 +735,17 @@ class WindowsProbe:
         window_class.proc = callback; window_class.instance = instance; window_class.name = name
         require(self.user.RegisterClassW(ctypes.byref(window_class)), '소유 focus probe class 생성 실패')
         hwnd = None; result = {'processId': pid, 'className': name, 'foregroundMatched': False, 'ownedWindowRemoved': False}
+        self.last_focus_probe_result = result
         try:
             hwnd = self.user.CreateWindowExW(0, name, 'OpenGeul CI owned focus probe', 0x10CF0000,
                                             20, 20, 360, 180, None, None, instance, None)
             require(hwnd, '소유 focus probe 창 생성 실패'); hwnd = int(hwnd); owner = W.DWORD()
             self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)); require(owner.value == pid, 'probe PID가 다릅니다')
             result.update({'hwnd': hwnd, 'foregroundBefore': int(self.user.GetForegroundWindow() or 0), **self.host()})
+            self.wait_startup_foreground(hwnd, result)
+            self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            require(self.user.IsWindow(hwnd) and owner.value == pid, '기다림 뒤 probe HWND 소유권이 다릅니다')
+            result['foregroundAtActivation'] = int(self.user.GetForegroundWindow() or 0)
             result['setForegroundReturned'] = bool(self.user.SetForegroundWindow(hwnd))
             message = W.MSG(); deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
@@ -752,6 +825,8 @@ def prepare(probe, env, output):
         result['hostReadyQualified'] = True; result['stage'] = 'complete'
     except Exception as error:
         result['errorType'] = bounded(type(error).__name__)
+        if result['focusProbe'] is None:
+            result['focusProbe'] = getattr(probe, 'last_focus_probe_result', None)
     finally:
         try:
             observe(probe, env, output / 'after')
