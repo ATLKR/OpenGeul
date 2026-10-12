@@ -26,10 +26,16 @@ def resource_decision(cpu, total, available, cpu_busy=None):
         raise ValueError('잘못된 CPU·메모리 관측입니다')
     if cpu == 1: return {'jobs': 1, 'reason': 'singleCore'}
     if cpu_busy is None: return {'jobs': min(cpu, 2), 'reason': 'cpuUnavailable'}
-    if cpu_busy >= 75: return {'jobs': 1, 'reason': 'cpuBusy'}
-    if cpu_busy > 25 or cpu < 4: return {'jobs': min(cpu, 2), 'reason': 'cpuLimited'}
-    if total < 14*GIB or available < 12*GIB: return {'jobs': 2, 'reason': 'memoryLimited'}
-    return {'jobs': 4, 'reason': 'headroom'}
+    if cpu_busy >= 90: limit, reason = 1, 'cpuBusy'
+    elif cpu_busy >= 75: limit, reason = min(cpu, 2), 'cpuBusy'
+    elif cpu_busy > 25: limit, reason = cpu, 'cpuLimited'
+    else: limit, reason = cpu*2, 'headroom'
+    limit = min(limit, 8)
+    if total < 14*GIB and limit > 2: limit, reason = 2, 'memoryLimited'
+    # OS용 2 GiB를 남기고 동시 compiler 하나에 1.25 GiB를 배정한다.
+    memory_limit = max(1, (available - 2*GIB) // (5*GIB//4))
+    if memory_limit < limit: limit, reason = memory_limit, 'memoryLimited'
+    return {'jobs': max(level for level in (1,2,4,8) if level <= limit), 'reason': reason}
 
 
 def select_jobs(cpu, total, available, cpu_busy=None):

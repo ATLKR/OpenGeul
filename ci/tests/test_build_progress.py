@@ -48,10 +48,10 @@ class BuildProgressTests(unittest.TestCase):
 
     def test_jobs_bound_cpu_and_require_total_and_available_memory(self):
         gib = 1024 ** 3
-        for cpu, total, available, expected in [(4, 16*gib, 13*gib, 4), (8, 32*gib, 20*gib, 4),
-                (3, 16*gib, 13*gib, 2), (1, 16*gib, 13*gib, 1),
-                (4, 14*gib, 12*gib, 4), (4, 14*gib-1, 12*gib, 2),
-                (4, 16*gib, 12*gib-1, 2), (4, 8*gib, 4*gib, 2)]:
+        for cpu, total, available, expected in [(4, 16*gib, 13*gib, 8), (8, 32*gib, 20*gib, 8),
+                (3, 16*gib, 13*gib, 4), (2, 16*gib, 13*gib, 4), (1, 16*gib, 13*gib, 1),
+                (4, 14*gib, 12*gib, 8), (4, 14*gib-1, 12*gib, 2),
+                (4, 16*gib, 12*gib-1, 4), (4, 8*gib, 4*gib, 1)]:
             with self.subTest(cpu=cpu,total=total,available=available):
                 self.assertEqual(progress.select_jobs(cpu, total, available, 0), expected)
 
@@ -60,23 +60,47 @@ class BuildProgressTests(unittest.TestCase):
                        (4, -1, 0), (4, 10, 11), ('4', 20, 10)]:
             with self.subTest(values=values), self.assertRaises(ValueError): progress.select_jobs(*values)
 
-    def test_new_invocation_scales_two_four_two_when_memory_becomes_free_then_busy(self):
+    def test_new_invocation_scales_four_eight_four_two_one_as_resources_change(self):
         gib = 1024 ** 3
         observations = [(4, 16*gib, 8*gib, 10), (4, 16*gib, 13*gib, 10),
-                        (4, 16*gib, 13*gib, 26), (4, 16*gib, 13*gib, 75)]
-        self.assertEqual([progress.select_jobs(*value) for value in observations], [2, 4, 2, 1])
+                        (4, 16*gib, 13*gib, 26), (4, 16*gib, 13*gib, 75),
+                        (4, 16*gib, 13*gib, 90)]
+        self.assertEqual([progress.select_jobs(*value) for value in observations], [4, 8, 4, 2, 1])
 
     def test_headroom_and_unknown_cpu_are_bounded_and_reasons_are_controlled(self):
         gib = 1024 ** 3
-        cases = [(4,16*gib,13*gib,25,4,'headroom'), (4,16*gib,13*gib,26,2,'cpuLimited'),
-                 (4,16*gib,13*gib,75,1,'cpuBusy'), (1,16*gib,13*gib,0,1,'singleCore'),
-                 (4,16*gib,11*gib,0,2,'memoryLimited'), (4,16*gib,13*gib,None,2,'cpuUnavailable')]
+        cases = [(4,16*gib,13*gib,25,8,'headroom'), (4,16*gib,13*gib,26,4,'cpuLimited'),
+                 (4,16*gib,13*gib,74,4,'cpuLimited'), (4,16*gib,13*gib,75,2,'cpuBusy'),
+                 (4,16*gib,13*gib,89,2,'cpuBusy'), (4,16*gib,13*gib,90,1,'cpuBusy'),
+                 (4,16*gib,13*gib,100,1,'cpuBusy'), (1,16*gib,13*gib,0,1,'singleCore'),
+                 (4,16*gib,11*gib,0,4,'memoryLimited'), (4,16*gib,13*gib,None,2,'cpuUnavailable')]
         for cpu,total,available,busy,jobs,reason in cases:
             with self.subTest(busy=busy, cpu=cpu, available=available):
                 self.assertEqual(progress.resource_decision(cpu,total,available,busy), {'jobs':jobs,'reason':reason})
         for busy in (True,1.0,'0',-1,101):
             with self.subTest(busy=busy), self.assertRaises(ValueError):
                 progress.select_jobs(4,16*gib,13*gib,busy)
+
+    def test_memory_reserve_and_compiler_budget_limit_all_discrete_levels(self):
+        gib=1024**3;reserve=2*gib;per_compiler=5*gib//4
+        for jobs in (2,4,8):
+            available=reserve+jobs*per_compiler
+            with self.subTest(jobs=jobs):
+                self.assertEqual(progress.select_jobs(4,16*gib,available,0),jobs)
+                self.assertEqual(progress.select_jobs(4,16*gib,available-1,0),jobs//2)
+        for cpu,free in [(2,13*gib),(3,13*gib),(4,5*gib),(8,11*gib)]:
+            jobs=progress.select_jobs(cpu,32*gib,free,0)
+            self.assertIn(jobs,(1,2,4,8));self.assertLessEqual(jobs,2*cpu)
+            self.assertLessEqual(reserve+jobs*per_compiler,free)
+        self.assertEqual(progress.select_jobs(4,16*gib,reserve,0),1)
+
+    def test_verified_source73_prepare_metrics_have_room_for_eight_offline_only(self):
+        # 실제 Source73 Prepare 원본 두 로그의 숫자. 새 정책 실제 Windows 실행 주장이 아니다.
+        for total,free in [(17174360064,13567537152),(17169387520,12996775936)]:
+            with self.subTest(total=total):
+                self.assertEqual(progress.resource_decision(4,total,free,6),{'jobs':8,'reason':'headroom'})
+        script=(Path(__file__).resolve().parents[2]/'scripts/build-msix.ps1').read_text()
+        self.assertIn('$decision.jobs -gt [Math]::Min($processorCount*2,8)',script)
 
     def test_each_native_compile_reobserves_resources_without_changing_original_arguments(self):
         source = (Path(__file__).resolve().parents[2]/'scripts/build-msix.ps1').read_text()

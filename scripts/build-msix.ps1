@@ -51,7 +51,7 @@ function Set-EditorCargoParallelism {
         $totalMemory = $totalKiB * 1024; $availableMemory = $availableKiB * 1024
         $decision = python (Join-Path $root 'ci/build_progress.py') jobs --cpu $processorCount --total-memory $totalMemory --available-memory $availableMemory --cpu-busy $cpuBusy --json | ConvertFrom-Json
         if (($decision.jobs -isnot [int] -and $decision.jobs -isnot [long]) -or
-            $decision.jobs -lt 1 -or $decision.jobs -gt [Math]::Min($processorCount,4) -or
+            $decision.jobs -lt 1 -or $decision.jobs -gt [Math]::Min($processorCount*2,8) -or
             $decision.reason -notin @('singleCore','cpuUnavailable','cpuBusy','cpuLimited','memoryLimited','headroom')) { throw 'Invalid resource decision.' }
         $buildJobs = $decision.jobs; $reason = $decision.reason
     } catch {
