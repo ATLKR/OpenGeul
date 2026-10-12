@@ -105,7 +105,8 @@ class WindowsComponentsTests(unittest.TestCase):
                   'compositionFix': {'beforeSha256': 'c'*64,
                      'afterSha256': digest(engine/'input-handler-text.ts'),
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
-                  'namespacePatch': namespace, 'wasmRebuild': wasm}
+                  'namespacePatch': namespace, 'wasmRebuild': wasm,
+                  'nativeActivation': json.loads((source/native_source_contract.LEDGER_PATH).read_bytes())}
         write_json(source/'.opengeul-overlay.json', ledger)
         return source
 
@@ -375,6 +376,25 @@ class WindowsComponentsTests(unittest.TestCase):
             record['source'].pop('nativeActivation', None)
             write_json(path, record)
         self.assert_rejected_without_outputs(folders)
+
+    def test_public_distribution_ledger_requires_the_actual_native_activation_proof(self):
+        source = self.source();path = source/'.opengeul-overlay.json'
+        ledger = json.loads(path.read_bytes());ledger.pop('nativeActivation',None);write_json(path,ledger)
+        out = self.root/'missing-public-native-proof'
+        with self.assertRaisesRegex(ValueError,'native activation|Native activation'):
+            self.helper().capture('editor',self.payload('editor'),source,out,env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_consumer_rejects_rehashed_public_native_proof_that_disagrees_with_both_producers(self):
+        folders = self.pair();path = folders['editor']/'source-parity.json'
+        parity = json.loads(path.read_bytes());parity['nativeActivation'] = {'unbound':'different proof'}
+        write_json(path,parity)
+        for role,folder in folders.items():
+            provenance = folder/'provenance.json';value = json.loads(provenance.read_bytes())
+            value['source']['ledgerSha256'] = digest(path)
+            if role == 'editor':value['files']['source-parity.json'] = {'size':path.stat().st_size,'sha256':digest(path)}
+            write_json(provenance,value)
+        self.assert_rejected_without_outputs(folders,'native activation|Native activation')
 
     def test_actual_vendor_mutation_and_rehashed_ledger_cannot_authorize_new_source(self):
         source = self.source()

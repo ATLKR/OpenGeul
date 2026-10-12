@@ -258,6 +258,10 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
             or not isinstance(ledger.get('baselinePreservedFiles'), dict)
             or ledger.get('extendedFiles') != ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts']):
         raise ValueError('Incomplete prepared source overlay ledger')
+    activation = contract.get('nativeActivation')
+    if (not isinstance(activation, dict) or not isinstance(activation.get('ledger'), dict)
+            or ledger.get('nativeActivation') != activation['ledger']):
+        raise ValueError('Distribution ledger native activation proof mismatch')
     for key in ('preservedFiles', 'baselinePreservedFiles'):
         for name, digest in ledger[key].items():
             safe_name(name)
