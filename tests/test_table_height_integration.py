@@ -16,7 +16,7 @@ class TableHeightIntegrationTests(unittest.TestCase):
 
     def test_native_render_test_runs_in_isolated_graph_before_cli_build(self):
         source = (ROOT/'scripts/build-msix.ps1').read_text(encoding='utf-8')
-        test = 'cargo test --locked --test opengeul_table_height'
+        test = 'cargo test --locked --target $target --test opengeul_table_height'
         self.assertIn(test, source)
         self.assertLess(source.index('$env:CARGO_TARGET_DIR = $cliTarget'), source.index(test))
         self.assertLess(source.index(test), source.index('cargo build --release'))
@@ -27,7 +27,7 @@ class TableHeightIntegrationTests(unittest.TestCase):
         source = (ROOT/'scripts/build-msix.ps1').read_text(encoding='utf-8')
         self.assertIn('node e2e/table_height.mjs verify $tableVendor $tableFixtures', source)
         self.assertIn('python e2e/table_height_fixtures.py $tableFixtures', source)
-        self.assertLess(source.index('python scripts/prepare_native_tests.py'), source.index('cargo test --locked --test opengeul_table_height'))
+        self.assertLess(source.index('python scripts/prepare_native_tests.py'), source.index('cargo test --locked --target $target --test opengeul_table_height'))
 
     def test_wasm_baseline_and_rebuild_both_verify_table_geometry(self):
         source = (ROOT/'scripts/build-wasm.sh').read_text(encoding='utf-8')

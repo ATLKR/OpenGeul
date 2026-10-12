@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import re
 
-RUNNERS = frozenset({'ubuntu-24.04', 'windows-2022', 'windows-2025'})
+RUNNERS = frozenset({'ubuntu-24.04', 'windows-2022', 'windows-2025', 'windows-11-arm'})
 PUBLIC = 'github.event.repository.private == false'
 ACTIONS = {
     'actions/checkout': 'fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',

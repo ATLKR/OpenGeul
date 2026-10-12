@@ -5,9 +5,10 @@ from pathlib import Path
 import sys
 import unittest
 PATH=Path(__file__).resolve().parents[1]/'transport_cleanup.py'
-WORKERS=('windows-editor','windows-cli')
+WORKERS=('windows-editor','windows-cli','windows-editor-arm64','windows-cli-arm64')
 PREFIXES=('opengeul-wasm','opengeul-browser-inputs','opengeul-e2e-inputs','opengeul-windows-x64',
-          'opengeul-editor-component','opengeul-cli-component')
+          'opengeul-editor-component','opengeul-cli-component','opengeul-e2e-inputs-arm64',
+          'opengeul-windows-arm64','opengeul-editor-component-arm64','opengeul-cli-component-arm64')
 
 class TransportCleanupTests(unittest.TestCase):
     def setUp(self):
@@ -19,7 +20,7 @@ class TransportCleanupTests(unittest.TestCase):
                   'GITHUB_REF':'refs/heads/main','GITHUB_ACTOR':'ATLKR','CI_MODE':'full'}
         self.event={'repository':{'full_name':'ATLKR/OpenGeul','private':False}}
         self.context=self.m.context(self.env,self.event)
-        self.needs={n:{'result':'success'} for n in (*self.m.GATES,*WORKERS)}
+        self.needs={n:{'result':'success'} for n in (*self.m.GATES,*WORKERS,'build-arm64','msix-install-arm64')}
         self.run={'id':55,'run_attempt':1,'head_sha':'a'*40,'event':'push','path':'.github/workflows/msix.yml',
                   'repository':self.event['repository'],'head_repository':self.event['repository']}
         self.artifacts=[self.artifact(i+1,p+'-55') for i,p in enumerate(PREFIXES)]
@@ -42,8 +43,8 @@ class TransportCleanupTests(unittest.TestCase):
                 return changed(artifact) if changed else artifact
             return None
         return api
-    def test_successful_publication_removes_only_six_transport_files(self):
-        self.assertEqual([a['id'] for a in self.plan()],[1,2,3,4,5,6])
+    def test_successful_publication_removes_only_ten_bounded_transport_files(self):
+        self.assertEqual([a['id'] for a in self.plan()],list(range(1,11)))
     def test_windows_producer_results_are_required_before_any_api_call(self):
         for name in WORKERS:
             for state in ('failure','cancelled','skipped',None):
@@ -56,14 +57,14 @@ class TransportCleanupTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.m.execute(self.context,needs,lambda *a:self.fail('Missing producer must not call API'))
     def test_missing_component_prevents_the_whole_batch_from_being_deleted(self):
-        for name in ('opengeul-editor-component-55','opengeul-cli-component-55'):
+        for name in ('opengeul-editor-component-55','opengeul-cli-component-55','opengeul-editor-component-arm64-55','opengeul-cli-component-arm64-55'):
             with self.subTest(name=name):
                 calls=[];items=[a for a in self.artifacts if a['name']!=name]
                 with self.assertRaises(ValueError):
                     self.m.execute(self.context,self.needs,self.api_fixture(calls,items))
                 self.assertFalse(any(m=='DELETE' for m,p in calls))
     def test_invalid_component_prevents_deleting_valid_earlier_transports(self):
-        for name in ('opengeul-editor-component-55','opengeul-cli-component-55'):
+        for name in ('opengeul-editor-component-55','opengeul-cli-component-55','opengeul-editor-component-arm64-55','opengeul-cli-component-arm64-55'):
             for field,value in (('workflow_run',{'id':56,'head_sha':'a'*40}),
                                 ('workflow_run',{'id':55,'head_sha':'b'*40}),('expired',True),
                                 ('size_in_bytes',1024**3)):
@@ -84,6 +85,14 @@ class TransportCleanupTests(unittest.TestCase):
         self.assertTrue(any(p.endswith('/artifacts/5') for m,p in calls if m=='GET'))
         self.assertTrue(any(p.endswith('/artifacts/6') for m,p in calls if m=='GET'))
         self.assertFalse(any(m=='DELETE' for m,p in calls))
+    def test_last_arm_component_revalidation_failure_prevents_all_deletes(self):
+        calls=[]
+        def changed(artifact):
+            return {**artifact,'digest':'sha256:changed'} if artifact['name']=='opengeul-cli-component-arm64-55' else artifact
+        with self.assertRaises(ValueError):
+            self.m.execute(self.context,self.needs,self.api_fixture(calls,changed=changed))
+        self.assertTrue(any(p.endswith('/artifacts/10') for m,p in calls if m=='GET'))
+        self.assertFalse(any(m=='DELETE' for m,p in calls))
     def test_ambiguous_component_identity_prevents_all_deletes(self):
         component=next(a for a in self.artifacts if a['name']=='opengeul-cli-component-55')
         for duplicate in ({**component,'id':88},{**component,'name':'opengeul-editor-component-55'}):
@@ -93,7 +102,8 @@ class TransportCleanupTests(unittest.TestCase):
                     self.m.execute(self.context,self.needs,self.api_fixture(calls,self.artifacts+[duplicate]))
                 self.assertFalse(any(m=='DELETE' for m,p in calls))
     def test_component_size_caps_include_only_the_existing_archive_overhead(self):
-        for name,cap in (('opengeul-editor-component-55',64),('opengeul-cli-component-55',32)):
+        for name,cap in (('opengeul-editor-component-55',64),('opengeul-cli-component-55',32),
+                         ('opengeul-editor-component-arm64-55',64),('opengeul-cli-component-arm64-55',32)):
             with self.subTest(name=name):
                 artifact=self.artifact(88,name);artifact['size_in_bytes']=(cap+1)*1024**2
                 self.m.validate_artifact(self.context,artifact)
@@ -101,7 +111,7 @@ class TransportCleanupTests(unittest.TestCase):
                 with self.assertRaises(ValueError):self.m.validate_artifact(self.context,artifact)
     def test_evidence_and_unrelated_names_are_never_deleted(self):
         self.artifacts.extend([self.artifact(90,'custom-result'),self.artifact(91,'opengeul-wasm-54')])
-        self.assertEqual(len(self.plan()),6)
+        self.assertEqual(len(self.plan()),10)
     def test_failure_of_each_gate_preserves_all_artifacts(self):
         for name in self.needs:
             with self.subTest(name=name):
@@ -117,20 +127,20 @@ class TransportCleanupTests(unittest.TestCase):
     def test_pr_keeps_candidate_package(self):
         self.context.update(event='pull_request',ref='refs/pull/6/merge');self.run['event']='pull_request'
         self.needs['release']['result']='skipped'
-        self.assertEqual([a['id'] for a in self.plan()],[1,2,3,5,6])
+        self.assertEqual([a['id'] for a in self.plan()],[1,2,3,5,6,7,9,10])
     def test_main_release_skipped_is_not_a_cleanup_success(self):
         self.needs['release']['result']='skipped';self.assertEqual(self.plan(),[])
     def test_scheduled_full_run_keeps_unpublished_package(self):
         self.context['event']='schedule';self.run['event']='schedule';self.needs['release']['result']='skipped'
-        self.assertEqual(len(self.plan()),5)
+        self.assertEqual(len(self.plan()),8)
     def test_engine_removes_only_browser_transport(self):
         self.context.update(event='workflow_dispatch',mode='engine');self.run['event']='workflow_dispatch'
-        for name in (*WORKERS,'build','native-e2e','virtual-print','msix-install','release'):self.needs[name]['result']='skipped'
+        for name in (*WORKERS,'build','build-arm64','native-e2e','virtual-print','msix-install','msix-install-arm64','release'):self.needs[name]['result']='skipped'
         self.assertEqual([a['id'] for a in self.plan()],[2])
     def test_engine_cannot_ignore_failed_windows_job(self):
         self.context.update(event='workflow_dispatch',mode='engine');self.run['event']='workflow_dispatch'
-        for name in (*WORKERS,'build','native-e2e','virtual-print','msix-install','release'):self.needs[name]['result']='skipped'
-        for name in (*WORKERS,'build'):
+        for name in (*WORKERS,'build','build-arm64','native-e2e','virtual-print','msix-install','msix-install-arm64','release'):self.needs[name]['result']='skipped'
+        for name in (*WORKERS,'build','build-arm64','msix-install-arm64'):
             with self.subTest(name=name):
                 needs=copy.deepcopy(self.needs);needs[name]['result']='failure'
                 self.assertEqual(self.plan(needs=needs),[])
@@ -196,11 +206,11 @@ class TransportCleanupTests(unittest.TestCase):
             if path.endswith('/runs/55'):return self.run
             if '?per_page' in path:return self.listing()
             if method=='GET':return next(a for a in self.artifacts if path.endswith('/'+str(a['id'])))
-            self.assertGreaterEqual(sum(m=='GET' for m,p in calls),8)
+            self.assertGreaterEqual(sum(m=='GET' for m,p in calls),12)
             return None
         result=self.m.execute(self.context,self.needs,api)
-        self.assertEqual(result['deletedBytes'],600)
-        self.assertEqual([p.rsplit('/',1)[1] for m,p in calls if m=='DELETE'],['1','2','3','4','5','6'])
+        self.assertEqual(result['deletedBytes'],1000)
+        self.assertEqual([p.rsplit('/',1)[1] for m,p in calls if m=='DELETE'],[str(i) for i in range(1,11)])
     def test_failed_run_does_not_even_call_api(self):
         self.needs['virtual-print']['result']='failure'
         self.assertEqual(self.m.execute(self.context,self.needs,lambda *a:self.fail('API should not be called'))['deletedBytes'],0)

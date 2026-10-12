@@ -1,7 +1,10 @@
 param([Parameter(Mandatory)][string]$CliPath,[Parameter(Mandatory)][string]$PackageFullName,
-      [Parameter(Mandatory)][string]$OutputDirectory)
+      [Parameter(Mandatory)][string]$OutputDirectory,
+      [ValidateSet('x64','arm64')][string]$Architecture='x64',
+      [Parameter(Mandatory)][string]$PythonPath)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+$PSNativeCommandUseErrorActionPreference=$true
 $result=@{success=$false;expectedPackageFullName=$PackageFullName;scope='Installed CLI launched within the declared desktop package graph'}
 try {
  Add-Type @'
@@ -18,15 +21,18 @@ public static class OpenGeulCliIdentity {
  $identity=[System.Text.StringBuilder]::new([int]$length)
  if ([OpenGeulCliIdentity]::GetCurrentPackageFullName([ref]$length,$identity) -ne 0 -or $identity.ToString() -ne $PackageFullName) { throw 'CLI probe has a different package identity.' }
  $result.packageFullName=$identity.ToString()
- $help=& $CliPath --help 2>&1 | Out-String
- $result.exitCode=$LASTEXITCODE
- $help | Set-Content (Join-Path $OutputDirectory 'installed-cli-help.txt') -Encoding utf8
- if ($result.exitCode -ne 0 -or $help -notmatch '(?i)rhwp|usage|사용') { throw 'Installed CLI did not return usable help.' }
+ & $PythonPath (Join-Path $PSScriptRoot 'native_architecture.py') cli --architecture $Architecture --executable $CliPath --package-full-name $PackageFullName --output (Join-Path $OutputDirectory 'installed-cli-native.json') --help-output (Join-Path $OutputDirectory 'installed-cli-help.txt')
+ $actual=Get-Content (Join-Path $OutputDirectory 'installed-cli-native.json') -Raw | ConvertFrom-Json
+ if (-not $actual.success -or $actual.packageFullName -ne $PackageFullName -or $actual.nativeArchitecture.architecture -ne $Architecture) { throw '설치 CLI의 실제 native process 또는 package identity 검증에 실패했습니다.' }
+ $result.exitCode=$actual.exitCode
+ $result.nativeArchitecture=$actual.nativeArchitecture
+ $result.helpBytes=$actual.helpBytes
+ $result.helpSha256=$actual.helpSha256
  $result.success=$true
 } catch { $result.reason=$_.Exception.Message }
 finally {
  $temporary=Join-Path $OutputDirectory 'installed-cli.json.tmp'
- $result | ConvertTo-Json | Set-Content $temporary -Encoding utf8
+ $result | ConvertTo-Json -Depth 10 | Set-Content $temporary -Encoding utf8
  Move-Item $temporary (Join-Path $OutputDirectory 'installed-cli.json')
 }
 if (-not $result.success) { exit 1 }

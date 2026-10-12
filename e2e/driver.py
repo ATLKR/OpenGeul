@@ -14,6 +14,7 @@ import urllib.request
 from playwright.sync_api import sync_playwright, expect
 from native_controls import filename_control
 from webview_debug import MachineRegistry, ScopedDebugOverride, debug_arguments
+from native_architecture import verify_executable, verify_host, verify_process, verify_webview2, require_architecture
 
 
 def until(check, timeout=25, *, pump=None):
@@ -55,6 +56,9 @@ class Session:
         try:
             if mode=='native':
                 if os.name != 'nt' or executable is None: raise RuntimeError('Native E2E needs Windows and the production executable')
+                architecture=require_architecture(os.environ.get('E2E_ARCHITECTURE','x64'))
+                verify_executable(executable,architecture)
+                verify_host(architecture)
                 with socket.socket() as sock:
                     sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
                 env=dict(os.environ)
@@ -68,6 +72,7 @@ class Session:
                 self.log=(folder/'process.log').open('w',encoding='utf-8')
                 arguments=[str(executable)] + ([str(fixture)] if fixture else [])
                 self.proc=subprocess.Popen(arguments,cwd=executable.parent,env=env,stdout=self.log,stderr=subprocess.STDOUT)
+                self.native_architecture=verify_process(self.proc.pid,executable,architecture,handle=int(self.proc._handle))
                 endpoint=f'http://127.0.0.1:{port}'
                 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 def ready():
@@ -104,9 +109,13 @@ class Session:
                 expect(self.page.locator('#sb-message')).to_contain_text('HWP 파일을 선택',timeout=60000)
                 menu(self.page,'file:new-doc')
             self.wait_loaded(fixture.name if fixture else '새 문서.hwp')
-            (folder/'runtime.json').write_text(json.dumps({'mode':mode,'browser':self.browser.version,
+            runtime={'mode':mode,'browser':self.browser.version,
                 'executableSha256':digest(executable) if executable else None,'fixtureSha256':digest(fixture) if fixture else None,
-                'navigator':self.page.evaluate('({platform:navigator.platform,userAgent:navigator.userAgent})')},indent=2),encoding='utf-8')
+                'navigator':self.page.evaluate('({platform:navigator.platform,userAgent:navigator.userAgent})')}
+            if mode=='native':
+                runtime['nativeArchitecture']=self.native_architecture
+                runtime['webview2Native']=verify_webview2(self.proc.pid,architecture)
+            (folder/'runtime.json').write_text(json.dumps(runtime,indent=2),encoding='utf-8')
         except BaseException:
             self.close()
             raise

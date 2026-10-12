@@ -1,6 +1,7 @@
 # A short-lived test certificate signs a COPY on this disposable runner only.
 # No signing key, certificate or signed copy is published or used for production.
-param([Parameter(Mandatory)][string]$PackageDirectory,[Parameter(Mandatory)][string]$OutputDirectory)
+param([Parameter(Mandatory)][string]$PackageDirectory,[Parameter(Mandatory)][string]$OutputDirectory,
+      [ValidateSet('x64','arm64')][string]$Architecture='x64')
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $PSNativeCommandUseErrorActionPreference=$true
@@ -16,6 +17,8 @@ try {
  [xml]$manifest=Get-Content (Join-Path $PackageDirectory 'AppxManifest.xml') -Raw
  $publisher=[string]$manifest.Package.Identity.Publisher
  $identity=[string]$manifest.Package.Identity.Name
+ if ([string]$manifest.Package.Identity.ProcessorArchitecture -cne $Architecture) { throw '설치 후보의 아키텍처가 기대값과 다릅니다.' }
+ python (Join-Path $PSScriptRoot 'native_architecture.py') host --architecture $Architecture --output (Join-Path $OutputDirectory 'host-architecture.json')
  if (-not $publisher -or -not $identity) { throw 'Package identity missing.' }
  if (Get-AppxPackage -Name $identity) { throw 'Refusing to replace an existing package.' }
  $cert=New-SelfSignedCertificate -Type Custom -Subject $publisher -KeyUsage DigitalSignature -KeyExportPolicy Exportable -CertStoreLocation 'Cert:\CurrentUser\My' -NotAfter (Get-Date).AddDays(1) -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}')
@@ -35,10 +38,10 @@ try {
  foreach ($dependency in $manifest.SelectNodes("//*[local-name()='Dependencies']/*[local-name()='PackageDependency']")) {
   $name=$dependency.GetAttribute('Name');$minimum=[version]$dependency.GetAttribute('MinVersion');$requiredPublisher=$dependency.GetAttribute('Publisher')
   if ($name -ne 'Microsoft.VCLibs.140.00.UWPDesktop' -or $requiredPublisher -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') { throw 'Unreviewed package framework dependency.' }
-  $framework=Get-AppxPackage -Name $name | Where-Object { $_.Publisher -eq $requiredPublisher -and [version]$_.Version -ge $minimum -and $_.Architecture -eq 'X64' } | Select-Object -First 1
+  $framework=Get-AppxPackage -Name $name | Where-Object { $_.Publisher -eq $requiredPublisher -and [version]$_.Version -ge $minimum -and $_.Architecture.ToString().ToLowerInvariant() -eq $Architecture } | Select-Object -First 1
   if (-not $framework) {
-   $download=Join-Path $work 'Microsoft.VCLibs.x64.14.00.Desktop.appx'
-   $url='https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx'
+   $download=Join-Path $work "Microsoft.VCLibs.$Architecture.14.00.Desktop.appx"
+   $url=if ($Architecture -eq 'arm64') { 'https://aka.ms/Microsoft.VCLibs.arm64.14.00.Desktop.appx' } else { 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' }
    Invoke-WebRequest $url -OutFile $download
    & $signer.FullName verify /pa $download
    $archive=[System.IO.Compression.ZipFile]::OpenRead($download)
@@ -47,9 +50,9 @@ try {
     try { [xml]$frameworkManifest=$reader.ReadToEnd() } finally { $reader.Dispose() }
    } finally { $archive.Dispose() }
    $frameworkIdentity=$frameworkManifest.Package.Identity
-   if ($frameworkIdentity.Name -ne $name -or $frameworkIdentity.Publisher -ne $requiredPublisher -or $frameworkIdentity.ProcessorArchitecture -ne 'x64' -or [version]$frameworkIdentity.Version -lt $minimum) { throw 'Downloaded VCLibs framework identity/version does not match the declared dependency.' }
+   if ($frameworkIdentity.Name -ne $name -or $frameworkIdentity.Publisher -ne $requiredPublisher -or $frameworkIdentity.ProcessorArchitecture -cne $Architecture -or [version]$frameworkIdentity.Version -lt $minimum) { throw 'Downloaded VCLibs framework identity/version does not match the declared dependency.' }
    Add-AppxPackage -Path $download -ErrorAction Stop
-   $framework=Get-AppxPackage -Name $name | Where-Object { $_.Publisher -eq $requiredPublisher -and [version]$_.Version -ge $minimum -and $_.Architecture -eq 'X64' } | Select-Object -First 1
+   $framework=Get-AppxPackage -Name $name | Where-Object { $_.Publisher -eq $requiredPublisher -and [version]$_.Version -ge $minimum -and $_.Architecture.ToString().ToLowerInvariant() -eq $Architecture } | Select-Object -First 1
    if (-not $framework) { throw 'VCLibs framework registration failed.' }
    $addedFrameworks+=$framework.PackageFullName
    $frameworkEvidence+=@{packageFullName=$framework.PackageFullName;source=$url;sha256=(Get-FileHash $download -Algorithm SHA256).Hash}
@@ -58,7 +61,7 @@ try {
  $frameworkEvidence | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDirectory 'frameworks.json') -Encoding utf8
  Add-AppxPackage -Path $copy -ErrorAction Stop
  $installed=Get-AppxPackage -Name $identity
- if (-not $installed -or $installed.Publisher -ne $publisher) { throw 'Installed identity does not match.' }
+ if (-not $installed -or $installed.Publisher -ne $publisher -or $installed.Architecture.ToString().ToLowerInvariant() -ne $Architecture) { throw 'Installed identity does not match.' }
  $registered=Get-AppxPackageManifest -Package $installed.PackageFullName
  $types=@($registered.SelectNodes("//*[local-name()='FileTypeAssociation']/*[local-name()='SupportedFileTypes']/*[local-name()='FileType']") | ForEach-Object { $_.InnerText })
  if ('.hwp' -notin $types -or '.hwpx' -notin $types) { throw 'Registered file associations missing.' }
@@ -88,17 +91,19 @@ public static class OpenGeulPackageIdentity {
  Start-Sleep -Seconds 3
  $launched.Refresh()
  if ($launched.HasExited -or $launched.MainWindowHandle -eq 0) { throw 'Installed app exited or lost its window during startup smoke.' }
- @{success=$true;processId=$launched.Id;packageFullName=$processIdentity.ToString();executable=$launched.Path;windowTitle=$launched.MainWindowTitle} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'installed-launch.json') -Encoding utf8
+ python (Join-Path $PSScriptRoot 'native_architecture.py') process --architecture $Architecture --pid $launched.Id --executable $executable --package-full-name $installed.PackageFullName --webview2 --output (Join-Path $OutputDirectory 'installed-native-architecture.json')
+ $nativeEvidence=Get-Content (Join-Path $OutputDirectory 'installed-native-architecture.json') -Raw | ConvertFrom-Json
+ @{success=$true;architecture=$Architecture;nativeArchitecture=$nativeEvidence;processId=$launched.Id;packageFullName=$processIdentity.ToString();executable=$launched.Path;windowTitle=$launched.MainWindowTitle} | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $OutputDirectory 'installed-launch.json') -Encoding utf8
  $cli=Join-Path $installed.InstallLocation 'Tools/rhwp.exe'
  $cliResult=Join-Path (Resolve-Path $OutputDirectory).Path 'installed-cli.json'
  if (Test-Path $cliResult) { throw 'Refusing to reuse an installed CLI result.' }
- $probeArgs="-NoProfile -File `"$(Join-Path $PSScriptRoot 'installed-cli.ps1')`" -CliPath `"$cli`" -PackageFullName `"$($installed.PackageFullName)`" -OutputDirectory `"$((Resolve-Path $OutputDirectory).Path)`""
+ $probeArgs="-NoProfile -File `"$(Join-Path $PSScriptRoot 'installed-cli.ps1')`" -CliPath `"$cli`" -PackageFullName `"$($installed.PackageFullName)`" -OutputDirectory `"$((Resolve-Path $OutputDirectory).Path)`" -Architecture $Architecture -PythonPath `"$((Get-Command python -ErrorAction Stop).Source)`""
  Invoke-CommandInDesktopPackage -PackageFamilyName $installed.PackageFamilyName -AppId OpenGeul -Command (Get-Process -Id $PID).Path -Args $probeArgs -PreventBreakaway
  $deadline=(Get-Date).AddSeconds(60)
  while (-not (Test-Path $cliResult) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
  if (-not (Test-Path $cliResult)) { throw 'Installed CLI package-context probe did not complete within 60 seconds.' }
  $cliEvidence=Get-Content $cliResult -Raw | ConvertFrom-Json
- if (-not $cliEvidence.success -or $cliEvidence.packageFullName -ne $installed.PackageFullName) { throw 'Installed CLI package-context probe failed; see installed-cli.json.' }
+ if (-not $cliEvidence.success -or $cliEvidence.packageFullName -ne $installed.PackageFullName -or $cliEvidence.nativeArchitecture.architecture -ne $Architecture) { throw 'Installed CLI package-context probe failed; see installed-cli.json.' }
  Stop-Process -Id $launched.Id -Force
  $launched=$null
  # WACK's documented package-input mode analyses a temporary extraction, avoiding
@@ -108,7 +113,7 @@ public static class OpenGeulPackageIdentity {
  if (Get-AppxPackage -Name $identity) { throw 'Installed smoke candidate remains registered before package-input WACK.' }
  & (Join-Path $PSScriptRoot 'wack.ps1') -PackagePath $copy -ExpectedPackageSha256 $signedCopySha256 -Identity $identity -Version ([string]$manifest.Package.Identity.Version) -OutputDirectory $OutputDirectory
  @{
-  success=$true; packageFullName=$installed.PackageFullName; publisher=$publisher;
+  success=$true; architecture=$Architecture; packageFullName=$installed.PackageFullName; publisher=$publisher;
   fileTypes=$types; originalSha256=$before; signedTestPackageSha256=$signedCopySha256;
   scope='test-only signing, AppX installation, package-identity activation, installed CLI, registered file types and uninstall; WACK status is reported separately in wack.json; not Store certification or real-printer/IME testing'
  } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDirectory 'install.json') -Encoding utf8

@@ -29,12 +29,12 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(options['default'],'full');self.assertEqual(set(options['options']),{'full','engine','checks'})
         self.assertIn("needs.preflight.outputs.mode == 'full'",w['jobs']['build']['if'])
     def test_all_required_release_gates_remain(self):
-        jobs=self.load()['jobs'];self.assertEqual(set(jobs['release']['needs']),{'wasm','build','native-e2e','browser-e2e','msix-install','virtual-print'})
+        jobs=self.load()['jobs'];self.assertEqual(set(jobs['release']['needs']),{'wasm','build','build-arm64','native-e2e','browser-e2e','msix-install','msix-install-arm64','virtual-print'})
         for job in ('native-e2e','virtual-print'):
-            self.assertEqual(set(jobs[job]['strategy']['matrix']['os']),{'windows-2022','windows-2025'})
+            self.assertEqual(set(jobs[job]['strategy']['matrix']['os']),{'windows-2022','windows-2025','windows-11-arm'})
         self.assertEqual(set(jobs['browser-e2e']['strategy']['matrix']['browser']),{'chromium','firefox','webkit'})
     def test_diagnostics_are_bounded_before_upload(self):
-        for job in ('native-e2e','virtual-print','browser-e2e','msix-install'):
+        for job in ('native-e2e','virtual-print','browser-e2e','msix-install','msix-install-arm64'):
             steps=self.load()['jobs'][job]['steps']
             pack=[i for i,s in enumerate(steps) if 'ci/evidence.py pack ' in s.get('run','')]
             self.assertEqual(len(pack),1)
@@ -46,7 +46,7 @@ class WiringTests(unittest.TestCase):
         uploads=[s for s in steps if 'opengeul-e2e-inputs-' in s.get('with',{}).get('name','')]
         self.assertEqual(len(uploads),1);self.assertEqual(uploads[0]['with']['path'],'.work/native-inputs/')
     def test_all_transports_have_pre_upload_size_checks(self):
-        for job in ('wasm','windows-editor','windows-cli','build'):
+        for job in ('wasm','windows-editor','windows-cli','build','windows-editor-arm64','windows-cli-arm64','build-arm64'):
             steps=self.load()['jobs'][job]['steps']
             uploads=sum(s.get('uses','').startswith('actions/upload-artifact') for s in steps)
             checks=sum('ci/evidence.py size ' in s.get('run','') for s in steps)
