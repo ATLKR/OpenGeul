@@ -30,6 +30,8 @@ UNIT_CASES = {
         'windows::tests::fixed_package_class_is_never_a_temporary_cleanup_target',
         'windows::tests::current_parent_pid_cannot_be_attached_as_a_terminable_worker',
         'windows::tests::owned_activation_only_accepts_exact_creator_registration',
+        'windows::tests::pipe_metadata_grant_compares_original_client_open',
+        'windows::tests::pipe_metadata_grant_denies_instance_creation_in_access_check',
     },
     'wire': {
         'protected_header_preserves_argv_and_raw_environment',
