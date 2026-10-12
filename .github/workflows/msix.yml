@@ -4,6 +4,9 @@ on:
 permissions:
   contents: read
   actions: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
 concurrency:
   group: same-signed-arm-sdk-source81-${{ github.ref }}
   cancel-in-progress: false
