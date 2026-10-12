@@ -638,6 +638,41 @@ class WindowsProbe:
             elif state['cloakedBits']: state.update(surfaceDismissed=True, dismissalKind='cloaked')
         return state
 
+    def bound_image(self, path, *, deadline):
+        """이미 live process와 연결한 경로의 현재 PE/파일/서명만 읽는다. process 경로 대체가 아니다."""
+        require(time.monotonic() < deadline, 'bound 이미지 검증 시간이 초과했습니다')
+        from e2e.native_architecture import verify_executable
+        file = Path(path)
+        machine = verify_executable(file, 'arm64')
+        size = file.stat().st_size; h = hashlib.sha256(); total = 0
+        with file.open('rb') as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                total += len(block); require(total <= size, 'bound 이미지 읽기 중 파일이 커졌습니다'); h.update(block)
+        require(total == size and file.stat().st_size == size, 'bound 이미지 읽기 중 파일 크기가 변경됐습니다')
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, 'bound 이미지 서명 조회 시간이 남아 있지 않습니다')
+        script = "$p=[Console]::In.ReadToEnd()|ConvertFrom-Json; @($p|ForEach-Object { $s=Get-AuthenticodeSignature -LiteralPath $_ -ErrorAction Stop; @{status=[string]$s.Status;subject=[string]$s.SignerCertificate.Subject;issuer=[string]$s.SignerCertificate.Issuer;thumbprint=[string]$s.SignerCertificate.Thumbprint} })|ConvertTo-Json -Compress"
+        completed = subprocess.run(['pwsh', '-NoProfile', '-NonInteractive', '-Command', script],
+            input=json.dumps([str(file)]).encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=min(20, remaining))
+        require(time.monotonic() <= deadline, 'bound 이미지 서명 조회 시간이 초과했습니다')
+        require(completed.returncode == 0 and len(completed.stdout) <= 16384, 'bound 이미지 서명 조회가 실패했습니다')
+        signatures = json.loads(completed.stdout.decode('utf-8-sig'))
+        if type(signatures) is dict: signatures = [signatures]
+        require(type(signatures) is list and len(signatures) == 1 and type(signatures[0]) is dict, 'bound 이미지 서명 개수가 다릅니다')
+        signature = {key: bounded(signatures[0].get(key, '')) for key in ('status', 'subject', 'issuer', 'thumbprint')}
+        signature['publisherMicrosoft'] = signature['status'] == 'Valid' and bool(re.search(r'(?:CN|O)=Microsoft(?: Windows| Corporation)', signature['subject']))
+        return {'path': path, 'peMachine': machine, 'bytes': size, 'sha256': h.hexdigest(), 'signature': signature}
+
+    def startup_process_state(self, handle, pid):
+        times = [W.FILETIME() for _ in range(4)]; machine = W.WORD(); native = W.WORD(); exit_code = W.DWORD(); session = W.DWORD()
+        require(self.kernel.GetProcessTimes(handle, *[ctypes.byref(t) for t in times])
+            and self.kernel.IsWow64Process2(handle, ctypes.byref(machine), ctypes.byref(native))
+            and self.kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            and self.kernel.ProcessIdToSessionId(pid, ctypes.byref(session)), 'WSL held 생성시각/native/session/exit 조회 실패')
+        return {'createdFileTime': (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime,
+                'processMachine': machine.value, 'nativeMachine': native.value, 'sessionId': session.value, 'exitCode': exit_code.value}
+
     def wait_startup_foreground(self, owned_hwnd, result):
         """첫 owned 활성화 전에 동일 WSL 시작 process의 자연 종료만 최대 65초 읽는다."""
         started = time.monotonic(); deadline = started + 65
@@ -664,14 +699,21 @@ class WindowsProbe:
         handle = self.kernel.OpenProcess(0x1000, False, process['processId'])
         require(handle, 'WSL held 조회 handle을 열지 못했습니다')
         try:
+            initial = self.startup_process_state(handle, process['processId'])
+            require(initial['createdFileTime'] == process['createdFileTime'] and initial['processMachine'] == 0
+                and initial['nativeMachine'] == 0xAA64 and initial['sessionId'] == process['sessionId'] == self.session_id()
+                and initial['exitCode'] == 259, 'live WSL held identity가 다릅니다')
+            trace['stage'] = 'liveBoundImage'
+            trace['liveBoundImage'] = self.bound_image(expected_path, deadline=deadline)
+            require(trace['liveBoundImage']['bytes'] == process['imageBytes']
+                and trace['liveBoundImage']['sha256'] == process['imageSha256']
+                and trace['liveBoundImage']['signature'] == process['signature'], 'live WSL process와 실제 PE/파일/서명이 다릅니다')
             while True:
                 trace['stage'] = 'heldIdentity'
-                times = [W.FILETIME() for _ in range(4)]; machine = W.WORD(); native = W.WORD(); exit_code = W.DWORD()
-                require(self.kernel.GetProcessTimes(handle, *[ctypes.byref(t) for t in times])
-                    and ((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime) == process['createdFileTime']
-                    and self.kernel.IsWow64Process2(handle, ctypes.byref(machine), ctypes.byref(native))
-                    and machine.value == 0 and native.value == 0xAA64
-                    and self.kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)), 'WSL held 생성시각/native/exit 조회가 다릅니다')
+                state = self.startup_process_state(handle, process['processId'])
+                require(state['createdFileTime'] == process['createdFileTime'] and state['processMachine'] == 0
+                    and state['nativeMachine'] == 0xAA64 and state['sessionId'] == process['sessionId'] == self.session_id(),
+                    'WSL held 생성시각/native/session이 다릅니다')
                 exists = bool(self.user.IsWindow(foreground['hwnd'])); owner = W.DWORD()
                 thread = self.user.GetWindowThreadProcessId(foreground['hwnd'], ctypes.byref(owner)) if exists else 0
                 current_foreground = int(self.user.GetForegroundWindow() or 0)
@@ -682,16 +724,19 @@ class WindowsProbe:
                     require(owner.value == process['processId'] and thread == foreground['threadId']
                         and title.value == foreground['title'] and cls.value == foreground['className'], 'WSL HWND/PID/TID/class가 변경됐습니다')
                 sample = {'elapsedMs': round((time.monotonic() - started) * 1000), 'windowExists': exists,
-                          'foregroundHwnd': current_foreground, 'heldExitCode': exit_code.value}
+                          'foregroundHwnd': current_foreground, 'heldExitCode': state['exitCode']}
                 trace['samples'].append(sample)
                 if len(trace['samples']) > 32: del trace['samples'][16]
                 require(time.monotonic() <= deadline, 'WSL 자연 종료 준비 시간이 초과했습니다')
-                if exit_code.value != 259:
+                if state['exitCode'] != 259:
                     require(not exists, '종료된 WSL 창의 소유 상태가 남았습니다')
                     require(current_foreground in (0, owned_hwnd), 'WSL 자연 종료 순간 알 수 없는 전경 창이 나타났습니다')
-                    trace['stage'] = 'postExitFingerprint'
-                    trace['afterProcesses'] = self.processes([process['processId']])
-                    require(trace['afterProcesses'] == [process], 'WSL 기다림 전후 경로/서명/session/생성시각이 변경됐습니다')
+                    trace['postExitHeldIdentity'] = state
+                    trace['stage'] = 'postExitBoundImage'
+                    trace['postExitImage'] = self.bound_image(expected_path, deadline=deadline)
+                    require(trace['postExitImage'] == trace['liveBoundImage'], 'WSL 종료 전후 bound PE/파일/hash/서명이 변경됐습니다')
+                    require(self.startup_process_state(handle, process['processId']) == state
+                        and not self.user.IsWindow(foreground['hwnd']), 'WSL 종료 이미지 검증 뒤 held identity/창이 변경됐습니다')
                     require(time.monotonic() <= deadline, 'WSL 자연 종료 검증 시간이 초과했습니다')
                     require(int(self.user.GetForegroundWindow() or 0) in (0, owned_hwnd), 'WSL 종료 검증 중 전경 창이 변경됐습니다')
                     trace['naturalProcessExitObserved'] = True
