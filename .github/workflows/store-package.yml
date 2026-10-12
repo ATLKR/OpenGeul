@@ -28,7 +28,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: 실제 GET 경계와 비밀·URL 출력 차단 회귀 검사
-        run: python -m unittest discover -s tests -p test_store_pending_observe.py -v
+        run: |
+          python -m unittest discover -s tests -p test_store_pending_observe.py -v
+          python -m unittest discover -s tests -p test_store_status_diagnostics.py -v
       - name: 고정 실패 실행의 공식 로그 바이트 SHA만 관찰
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,6 +63,13 @@ jobs:
           STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
           EXPECTED_PENDING_ID: ${{ inputs.expected_pending_id }}
         run: python scripts/store_pending_observe.py --expected-pending-id "$EXPECTED_PENDING_ID" --output store-pending-observation.json
+      - name: 고정 초안·공개 기준·상태의 제한된 오류/경고 GET 관찰
+        env:
+          STORE_APP_ID: ${{ vars.STORE_APP_ID }}
+          STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
+          STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
+          STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
+        run: python scripts/store_status_diagnostics.py --output store-status-diagnostics.json
       - name: 제한된 관측 필드만 보존
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -69,5 +78,6 @@ jobs:
           path: |
             store-pending-observation.json
             store-failure-log-byte-observation.json
+            store-status-diagnostics.json
           retention-days: 1
           if-no-files-found: warn
