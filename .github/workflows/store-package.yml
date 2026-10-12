@@ -50,7 +50,7 @@ jobs:
         $cargoTarget = Join-Path $env:GITHUB_WORKSPACE '.work/native-open-probe-target'
         New-Item -ItemType Directory -Path $output | Out-Null
         $sources = @{}
-        $files = @(Get-ChildItem overlay/native-open -Recurse -File) + @(Get-ChildItem overlay/native-open-probe -Recurse -File) + @(Get-Item e2e/native_activation_probe.py, e2e/native_architecture.py, scripts/windows_arch.py, scripts/releasekit.py)
+        $files = @(Get-ChildItem overlay/native-open -Recurse -File) + @(Get-ChildItem overlay/native-open-probe -Recurse -File) + @(Get-Item e2e/native_activation_probe.py, e2e/native_architecture.py, scripts/windows_arch.py, scripts/releasekit.py, scripts/buildkit.py, ci/evidence.py)
         foreach ($file in $files) {
           $relative = [System.IO.Path]::GetRelativePath($env:GITHUB_WORKSPACE, $file.FullName).Replace('\', '/')
           $sources[$relative] = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
