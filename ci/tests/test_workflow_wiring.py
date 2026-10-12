@@ -49,7 +49,7 @@ class WiringTests(unittest.TestCase):
             pack=[i for i,s in enumerate(steps) if 'ci/evidence.py pack ' in s.get('run','')]
             self.assertEqual(len(pack),1)
             for i,s in enumerate(steps):
-                if s.get('uses','').startswith('actions/upload-artifact'):
+                if s.get('uses','').startswith('actions/upload-artifact') and s.get('id') != 'runner-ready-evidence':
                     if s.get('with',{}).get('path')=='mcp-qa/':
                         self.assertEqual(s['with']['name'],'opengeul-mcp-fixtures${{ env.E2E_INPUT_SUFFIX }}-${{ github.run_id }}')
                         self.assertEqual(s['if'],"env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'")

@@ -107,6 +107,36 @@ jobs:
           python ci/evidence.py size --limit-mib 192 .work/store-source
           python scripts/mcp_qa_download.py store --store-directory store-output --source-directory .work/store-source --architecture $env:ARCHITECTURE --output mcp-qa
           python ci/evidence.py size --limit-mib 16 mcp-qa
+      - name: ARM 러너 관찰 도구 준비
+        id: runner-ready-tools
+        if: env.ARCHITECTURE == 'arm64'
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference=$true
+          python -m pip install -r e2e/requirements.txt
+      - name: ARM 러너의 검증된 OS 창과 전경 준비
+        id: runner-ready
+        if: env.ARCHITECTURE == 'arm64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          python e2e/runner-ready.py --prepare --output runner-ready
+      - name: ARM 러너 준비 원본 증거 크기 제한
+        id: runner-ready-size
+        if: always() && env.ARCHITECTURE == 'arm64' && steps.runner-ready.outcome != 'skipped'
+        shell: pwsh
+        run: python ci/evidence.py size --limit-mib 16 runner-ready
+      - name: ARM 러너 준비 원본 관찰 보존
+        id: runner-ready-evidence
+        if: always() && env.ARCHITECTURE == 'arm64' && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-runner-ready-store-wack-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runner-ready/
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
       - name: 실제 Store 신원 설치·네이티브 GUI·CLI·연결·삭제·전체 WACK
         run: |
           $ErrorActionPreference = 'Stop'

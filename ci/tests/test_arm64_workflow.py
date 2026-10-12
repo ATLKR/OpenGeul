@@ -88,6 +88,11 @@ class Arm64WorkflowTests(unittest.TestCase):
                     additions={'실제 MCP stdio·암호 입력·COM 작업자 실패 격리 검사',
                                '설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비',
                                '동일 실행의 공개 MCP QA 입력을 하루 동안 보존'} if name=='native-e2e' else set()
+                    if suffix == '-arm64':
+                        # 준비·증거 단계만 별도 계약으로 검증하며 원래 GUI 시험 해시는 보존한다.
+                        additions |= {'ARM 러너의 검증된 OS 창과 전경 준비',
+                                      'ARM 러너 준비 원본 증거 크기 제한',
+                                      'ARM 러너 준비 원본 관찰 보존'}
                     steps=json.dumps(bind([step for step in job['steps'] if step.get('name') not in additions]),sort_keys=True,separators=(',',':')).encode()
                     self.assertEqual(hashlib.sha256(steps).hexdigest(),expected)
                     self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})

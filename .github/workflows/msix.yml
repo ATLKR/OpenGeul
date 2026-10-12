@@ -622,6 +622,28 @@ jobs:
         python -m pip install -r e2e/requirements.txt
         ./e2e/ensure-webview2.ps1
         python e2e/prepare_payload.py package runtime --architecture $env:E2E_ARCHITECTURE
+    - name: ARM 러너의 검증된 OS 창과 전경 준비
+      id: runner-ready
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/runner-ready.py --prepare --output runner-ready
+    - name: ARM 러너 준비 원본 증거 크기 제한
+      id: runner-ready-size
+      if: always() && steps.runner-ready.outcome != 'skipped'
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 16 runner-ready
+    - name: ARM 러너 준비 원본 관찰 보존
+      id: runner-ready-evidence
+      if: always() && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-runner-ready-native-e2e-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: runner-ready/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: WebView2가 없을 때 사용자 안내
       shell: pwsh
       run: python e2e/check_webview2_missing.py --exe runtime/OpenGeul.exe --output evidence
@@ -816,6 +838,34 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: python scripts/mcp_qa_download.py source --package-directory package --output mcp-qa
+    - name: ARM 러너 관찰 도구 준비
+      id: runner-ready-tools
+      shell: pwsh
+      run: |
+        $PSNativeCommandUseErrorActionPreference=$true
+        python -m pip install -r e2e/requirements.txt
+    - name: ARM 러너의 검증된 OS 창과 전경 준비
+      id: runner-ready
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/runner-ready.py --prepare --output runner-ready
+    - name: ARM 러너 준비 원본 증거 크기 제한
+      id: runner-ready-size
+      if: always() && steps.runner-ready.outcome != 'skipped'
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 16 runner-ready
+    - name: ARM 러너 준비 원본 관찰 보존
+      id: runner-ready-evidence
+      if: always() && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-runner-ready-msix-install-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: runner-ready/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: 설치된 앱 실행을 위한 WebView2 준비
       shell: pwsh
       run: ./e2e/ensure-webview2.ps1
@@ -956,6 +1006,28 @@ jobs:
         node e2e/table_height.mjs generate wasm-input print-fixtures
         python e2e/print_fixtures.py print-fixtures
         node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
+    - name: ARM 러너의 검증된 OS 창과 전경 준비
+      id: runner-ready
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/runner-ready.py --prepare --output runner-ready
+    - name: ARM 러너 준비 원본 증거 크기 제한
+      id: runner-ready-size
+      if: always() && steps.runner-ready.outcome != 'skipped'
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 16 runner-ready
+    - name: ARM 러너 준비 원본 관찰 보존
+      id: runner-ready-evidence
+      if: always() && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-runner-ready-virtual-print-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: runner-ready/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: 실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사
       shell: pwsh
       run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence

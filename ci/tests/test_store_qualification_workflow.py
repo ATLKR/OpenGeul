@@ -74,9 +74,11 @@ class StoreQualificationWorkflowTests(unittest.TestCase):
         job=self.jobs['store-wack']
         for step in job['steps']:
             self.assertNotIn('continue-on-error',step)
-        uploads=[s for s in job['steps'] if s.get('uses','').startswith('actions/upload-artifact@')]
+        # 별도 runner-ready 계약은 raw PNG/JSON의 16 MiB cap과 실패 보존을 검사한다.
+        uploads=[s for s in job['steps'] if s.get('uses','').startswith('actions/upload-artifact@') and s.get('id') != 'runner-ready-evidence']
         self.assertEqual(len(uploads),1);self.assertEqual(uploads[0]['if'],'always()')
         self.assertEqual(uploads[0]['with']['retention-days'],'1')
+        self.assertEqual(uploads[0]['with']['name'],'opengeul-store-wack-${{ env.ARCHITECTURE }}-${{ github.run_id }}')
 
     def test_all_jobs_keep_the_public_standard_free_policy(self): audit(self.w)
 
