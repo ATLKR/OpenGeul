@@ -8,7 +8,7 @@ from policy import load_workflow
 
 ROOT = Path(__file__).resolve().parents[2]
 UPLOAD = 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
-ARM_JOBS = ('native-e2e-arm64', 'virtual-print-arm64', 'msix-install-arm64')
+ARM_JOBS = ('native-e2e-arm64', 'virtual-print-arm64', 'msix-native-arm64')
 
 
 class RunnerReadyWorkflowTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class RunnerReadyWorkflowTests(unittest.TestCase):
     def test_source_arm_preparation_follows_dependencies_and_precedes_every_product_gui(self):
         products = {'native-e2e-arm64': 'e2e/check_webview2_missing.py',
                     'virtual-print-arm64': 'e2e/virtual_print.py',
-                    'msix-install-arm64': './e2e/msix-install.ps1'}
+                    'msix-native-arm64': './e2e/msix-install.ps1'}
         for name in ARM_JOBS:
             with self.subTest(job=name):
                 steps, index, ready = self.ready(self.source[name])
@@ -43,24 +43,24 @@ class RunnerReadyWorkflowTests(unittest.TestCase):
                 self.assertIn("$PSNativeCommandUseErrorActionPreference=$true", ready['run'])
                 self.assertIn('python e2e/runner-ready.py --prepare --output runner-ready', ready['run'])
 
-    def test_no_x64_job_runs_arm_readiness_and_store_matrix_condition_is_exact(self):
+    def test_no_x64_sdk_job_runs_arm_readiness_and_store_native_job_is_exact(self):
         for name, job in self.source.items():
             if name not in ARM_JOBS:
                 self.assertNotIn('e2e/runner-ready.py', '\n'.join(s.get('run', '') for s in job.get('steps', [])))
-        steps, index, ready = self.ready(self.store['store-wack'])
-        self.assertEqual(ready['if'], "env.ARCHITECTURE == 'arm64'")
+        native=self.store['store-native-arm64']
+        steps, index, ready = self.ready(native)
+        self.assertNotIn('if', ready)
         dependency = [i for i, s in enumerate(steps) if s.get('id') == 'runner-ready-tools']
-        self.assertEqual(len(dependency), 1)
-        self.assertLess(dependency[0], index)
-        self.assertEqual(steps[dependency[0]]['if'], ready['if'])
+        self.assertEqual(len(dependency), 1);self.assertLess(dependency[0], index)
+        self.assertNotIn('if', steps[dependency[0]])
         self.assertIn('python -m pip install -r e2e/requirements.txt', steps[dependency[0]]['run'])
         product = next(i for i, s in enumerate(steps) if './e2e/msix-install.ps1' in s.get('run', ''))
-        self.assertLess(index, product)
-        self.assertNotIn('if', steps[product])
+        self.assertLess(index, product);self.assertNotIn('if', steps[product])
         self.assertNotIn('continue-on-error', steps[product])
+        self.assertNotIn('runner-ready.py', str(self.store['store-wack']))
 
     def test_original_before_after_png_json_and_result_use_raw_hard_cap_and_attempt_unique_upload(self):
-        jobs = [(name, self.source[name]) for name in ARM_JOBS] + [('store-wack', self.store['store-wack'])]
+        jobs = [(name, self.source[name]) for name in ARM_JOBS] + [('store-native-arm64', self.store['store-native-arm64'])]
         for name, job in jobs:
             with self.subTest(job=name):
                 steps, ready_index, _ = self.ready(job)
@@ -82,11 +82,9 @@ class RunnerReadyWorkflowTests(unittest.TestCase):
                 self.assertEqual(options['if-no-files-found'], 'error')
                 self.assertIn('${{ github.run_id }}-${{ github.run_attempt }}', options['name'])
                 self.assertNotIn('overwrite', options); self.assertNotIn('include-hidden-files', options)
-                if name == 'store-wack':
-                    for step in (cap, upload): self.assertIn("env.ARCHITECTURE == 'arm64'", step['if'])
 
     def test_ready_helpers_do_not_receive_tokens_or_bypass_binding_environment(self):
-        for job in [self.source[name] for name in ARM_JOBS] + [self.store['store-wack']]:
+        for job in [self.source[name] for name in ARM_JOBS] + [self.store['store-native-arm64']]:
             for step in job['steps']:
                 if step.get('id', '').startswith('runner-ready'):
                     self.assertNotIn('env', step)
@@ -96,15 +94,15 @@ class RunnerReadyWorkflowTests(unittest.TestCase):
 
     def test_source_release_cleanup_and_store_full_wack_gates_are_not_bypassed(self):
         required = {'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e',
-                    'msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'}
+                    'msix-install','msix-native-arm64','msix-install-arm64','virtual-print','virtual-print-arm64'}
         self.assertEqual(set(self.source['release']['needs']), required)
         self.assertTrue(required <= set(self.source['cleanup-transports']['needs']))
-        self.assertEqual(self.store['store-wack']['strategy']['matrix']['os'], ['windows-2025','windows-11-arm'])
-        self.assertEqual(set(self.store['qualify']['needs']), {'package','store-wack'})
-        self.assertEqual(set(self.store['submit']['needs']), {'qualify'})
+        self.assertEqual(self.store['store-wack']['strategy']['matrix']['architecture'], ['x64','arm64'])
+        self.assertEqual(set(self.store['qualify']['needs']), {'package','store-native-arm64','store-wack'})
+        self.assertEqual(set(self.store['submit']['needs']), {'package','store-native-arm64','store-wack','qualify'})
         for name in ARM_JOBS:
             self.assertNotIn('continue-on-error', self.source[name])
-        self.assertIn('-ExpectedCliSha256 $cliSha', '\n'.join(s.get('run', '') for s in self.store['store-wack']['steps']))
+        self.assertIn('-ExpectedCliSha256 $cliSha', '\n'.join(s.get('run', '') for s in self.store['store-native-arm64']['steps']))
         self.assertIn('scripts/store_qualification.py collect', '\n'.join(s.get('run', '') for s in self.store['store-wack']['steps']))
 
 

@@ -813,7 +813,7 @@ jobs:
         if-no-files-found: warn
         compression-level: 9
     if: github.event.repository.private == false
-  msix-install-arm64:
+  msix-native-arm64:
     needs: [build-arm64, native-e2e-arm64]
     runs-on: windows-11-arm
     timeout-minutes: 30
@@ -861,7 +861,7 @@ jobs:
       if: always() && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-runner-ready-msix-install-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-runner-ready-msix-native-arm64-${{ github.run_id }}-${{ github.run_attempt }}
         path: runner-ready/
         retention-days: 1
         if-no-files-found: error
@@ -869,14 +869,33 @@ jobs:
     - name: 설치된 앱 실행을 위한 WebView2 준비
       shell: pwsh
       run: ./e2e/ensure-webview2.ps1
-    - name: 시험 전용 서명·설치 앱 및 CLI 실행·WACK·파일 연결·제거 검사
+    - name: 시험 전용 서명·ARM 네이티브 설치·MCP·파일 연결·제거 검사
       shell: pwsh
       run: |
         $ErrorActionPreference='Stop'
         $PSNativeCommandUseErrorActionPreference=$true
         $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
         $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
-        ./e2e/msix-install.ps1 -Architecture arm64 -PackageDirectory package -OutputDirectory evidence -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
+        ./e2e/msix-install.ps1 -NativeOnly -TransportDirectory native-transport -Architecture arm64 -PackageDirectory package -OutputDirectory evidence -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
+    - name: 동일 서명 MSIX와 공개 인증서의 현재 실행 출처 검증
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python scripts/native_wack_transport.py publish-source --package-directory package --evidence evidence --transport native-transport
+    - name: ARM 네이티브 성공 후보를 SDK 검사에 하루 동안 전달
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-native-signed-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          native-transport/native-install.json
+          native-transport/test-only.msix
+          native-transport/test.cer
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
@@ -884,6 +903,59 @@ jobs:
       shell: pwsh
       run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
     - name: 인증서·서명 파일을 제외하고 설치 결과 보존
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: msix-native-arm64-${{ github.run_id }}
+        path: bounded-evidence/
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 9
+    if: github.event.repository.private == false
+  msix-install-arm64:
+    needs: [build-arm64, msix-native-arm64]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: x64
+    - name: 서명 없는 릴리스 후보 받기
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-arm64-$env:GITHUB_RUN_ID" --dir package
+    - name: 현재 ARM 네이티브 성공 작업의 동일 서명 후보 검증과 수신
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python scripts/native_wack_transport.py download-source --package-directory package --output native-input
+    - name: 원본 Microsoft x64 SDK로 ARM 후보 전체 WACK 및 네이티브 증거 결합
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        ./e2e/msix-wack-import.ps1 -PackageDirectory package -NativeDirectory native-input -OutputDirectory evidence
+    - name: 검사 결과를 유지하며 증거 크기 제한
+      if: always()
+      env:
+        EVIDENCE_STATUS: ${{ job.status }}
+      shell: pwsh
+      run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
+    - name: 인증서·서명 파일을 제외하고 설치와 전체 WACK 결과 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -1048,7 +1120,7 @@ jobs:
         compression-level: 9
     if: github.event.repository.private == false
   release:
-    needs: [wasm, build, build-arm64, native-e2e, native-e2e-arm64, browser-e2e, msix-install, msix-install-arm64, virtual-print, virtual-print-arm64]
+    needs: [wasm, build, build-arm64, native-e2e, native-e2e-arm64, browser-e2e, msix-install, msix-native-arm64, msix-install-arm64, virtual-print, virtual-print-arm64]
     if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
     runs-on: ubuntu-24.04
@@ -1089,7 +1161,7 @@ jobs:
         RELEASE_TAG: ${{ steps.release.outputs.tag }}
       run: python3 scripts/store_package.py --dispatch-store --release-tag "$RELEASE_TAG"
   cleanup-transports:
-    needs: [preflight, wasm, browser-e2e, windows-editor, windows-cli, windows-editor-arm64, windows-cli-arm64, build, build-arm64, native-e2e, native-e2e-arm64, msix-install, msix-install-arm64, virtual-print, virtual-print-arm64, release]
+    needs: [preflight, wasm, browser-e2e, windows-editor, windows-cli, windows-editor-arm64, windows-cli-arm64, build, build-arm64, native-e2e, native-e2e-arm64, msix-install, msix-native-arm64, msix-install-arm64, virtual-print, virtual-print-arm64, release]
     if: github.event.repository.private == false && (always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.run_attempt == 1 && github.actor != 'dependabot[bot]' && needs.preflight.result == 'success' && needs.preflight.outputs.mode != 'checks' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -73,7 +73,7 @@ class ContextTests(unittest.TestCase):
     def test_source_push_supports_main_canonical_and_version_matched_development_tags(self):
         self.assertEqual(json.loads((ROOT / 'config/product.json').read_text())['version'], '1.1.3')
         for ref in ('refs/heads/main', 'refs/tags/v1.1.3', 'refs/tags/v1.1.3-dev.72.1'):
-            for job in ('native-e2e-arm64', 'virtual-print-arm64', 'msix-install-arm64'):
+            for job in ('native-e2e-arm64', 'virtual-print-arm64', 'msix-native-arm64'):
                 with self.subTest(ref=ref, job=job): self.assertEqual(self.value.binding(self.context(ref=ref, job=job))['ref'], ref)
 
     def test_source_current_attempt_is_preserved_without_release_authorization(self):
@@ -156,6 +156,11 @@ class ContextTests(unittest.TestCase):
         for ref in ('refs/pull/17/head','refs/pull/18/merge','refs/heads/main'):
             env=self.pr(); env['GITHUB_REF']=ref; env['GITHUB_WORKFLOW_REF']=f'{REPOSITORY}/.github/workflows/msix.yml@{ref}'; self.reject(env)
 
+    def test_x64_sdk_consumers_cannot_run_arm_native_readiness(self):
+        self.reject(self.context(job='msix-install-arm64'))
+        env=self.context(event='workflow_dispatch',job='store-wack',workflow='store-package.yml');env['ARCHITECTURE']='arm64'
+        self.reject(env)
+
     def test_source_job_workflow_and_host_drift_are_rejected(self):
         for key,val in [('GITHUB_JOB','native-e2e'),('GITHUB_JOB','unknown-job'),
                         ('GITHUB_WORKFLOW_REF',f'{REPOSITORY}/.github/workflows/msix.yml@refs/heads/feature'),
@@ -163,13 +168,13 @@ class ContextTests(unittest.TestCase):
                         ('RUNNER_ENVIRONMENT','self-hosted'),('GITHUB_ACTIONS','false'),('GITHUB_REPOSITORY','other/repo')]:
             env=self.context(); env[key]=val; self.reject(env)
 
-    def test_store_only_fixed_actors_manual_main_arm_store_wack(self):
+    def test_store_only_fixed_actors_manual_main_arm_native_job(self):
         for actor in (USER,BOT):
-            env=self.context(event='workflow_dispatch',actor=actor,job='store-wack',workflow='store-package.yml',attempt='2'); env['ARCHITECTURE']='arm64'
+            env=self.context(event='workflow_dispatch',actor=actor,job='store-native-arm64',workflow='store-package.yml',attempt='2'); env['ARCHITECTURE']='arm64'
             self.assertEqual(self.value.binding(env)['runAttempt'],'2')
         for change in ('actor','event','ref','arch','job','workflow'):
-            env=self.context(event='workflow_dispatch',job='store-wack',workflow='store-package.yml'); env['ARCHITECTURE']='arm64'
-            if change=='actor': env=self.context(event='workflow_dispatch',actor={'login':'public-contributor','id':91827364,'type':'User'},job='store-wack',workflow='store-package.yml');env['ARCHITECTURE']='arm64'
+            env=self.context(event='workflow_dispatch',job='store-native-arm64',workflow='store-package.yml'); env['ARCHITECTURE']='arm64'
+            if change=='actor': env=self.context(event='workflow_dispatch',actor={'login':'public-contributor','id':91827364,'type':'User'},job='store-native-arm64',workflow='store-package.yml');env['ARCHITECTURE']='arm64'
             elif change=='event': env['GITHUB_EVENT_NAME']='pull_request'
             elif change=='ref': env['GITHUB_REF']='refs/tags/v1.1.3'
             elif change=='arch': env['ARCHITECTURE']='x64'

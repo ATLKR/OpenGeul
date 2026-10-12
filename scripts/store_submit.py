@@ -146,12 +146,12 @@ def _store_workflow(details):
             or details.get('repackageCommit') != sha or str(details.get('repackageRunId')) != run_id):
         raise SubmissionBlocked('Store writes require the current owned main workflow and actor')
     jobs = [job for page in _gh('GET', f'actions/runs/{run_id}/jobs?per_page=100', pages=True) for job in page['jobs']]
-    for name in ('package', 'Store WACK (windows-2025)', 'Store WACK (windows-11-arm)', 'qualify'):
+    for name in ('package', 'store-native-arm64', 'Store WACK (x64)', 'Store WACK (arm64)', 'qualify'):
         found = [job for job in jobs if job.get('name') == name]
         if (len(found) != 1 or found[0].get('status') != 'completed' or found[0].get('conclusion') != 'success'
                 or str(found[0].get('run_id')) != run_id or type(found[0].get('run_attempt')) is not int
                 or str(found[0]['run_attempt']) != attempt or found[0].get('head_sha') != sha):
-            raise SubmissionBlocked('Both Store WACK and qualification jobs must succeed in this exact execution')
+            raise SubmissionBlocked('All five Store package, native, SDK and qualification jobs must succeed in this exact execution')
     return attempt
 
 

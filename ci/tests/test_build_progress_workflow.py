@@ -150,7 +150,7 @@ class BuildProgressWorkflowTests(unittest.TestCase):
     def test_checkpoints_do_not_add_jobs_or_change_editor_and_release_dependency_contracts(self):
         self.assertEqual(set(self.jobs), {'preflight', 'wasm', 'windows-editor', 'windows-editor-arm64',
                          'windows-cli', 'windows-cli-arm64', 'build', 'build-arm64', 'native-e2e',
-                         'native-e2e-arm64', 'browser-e2e', 'msix-install', 'msix-install-arm64',
+                         'native-e2e-arm64', 'browser-e2e', 'msix-install', 'msix-native-arm64', 'msix-install-arm64',
                          'virtual-print', 'virtual-print-arm64', 'release', 'cleanup-transports'})
         for name, _, runner in EDITORS:
             job = self.jobs[name]
@@ -161,7 +161,7 @@ class BuildProgressWorkflowTests(unittest.TestCase):
             self.assertEqual(job['if'],
                              "github.event.repository.private == false && (needs.preflight.outputs.mode == 'full')")
         self.assertEqual(set(self.jobs['release']['needs']), {'wasm', 'build', 'build-arm64', 'native-e2e',
-                         'native-e2e-arm64', 'browser-e2e', 'msix-install', 'msix-install-arm64',
+                         'native-e2e-arm64', 'browser-e2e', 'msix-install', 'msix-native-arm64', 'msix-install-arm64',
                          'virtual-print', 'virtual-print-arm64'})
         self.assertEqual(set(self.jobs['cleanup-transports']['needs']), set(self.jobs) - {'cleanup-transports'})
 

@@ -35,7 +35,7 @@ LEGACY_REQUIRED_JOBS = {'preflight', 'wasm', 'windows-editor', 'windows-cli', 'b
                  'virtual-print (windows-2022)', 'virtual-print (windows-2025)',
                  'browser-e2e (chromium)', 'browser-e2e (firefox)', 'browser-e2e (webkit)'}
 REQUIRED_JOBS = LEGACY_REQUIRED_JOBS | {
-    'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64',
+    'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64', 'msix-native-arm64',
     'native-e2e (windows-11-arm)', 'virtual-print (windows-11-arm)'}
 
 
@@ -177,6 +177,13 @@ def dispatch_store(tag):
 def authorize_release(tag, provenance, run, tag_sha, jobs):
     version = provenance['version']
     package_version(version)
+    dual = _dual_source(provenance)
+    if dual:
+        for role in ('repository', 'head_repository'):
+            repository = run.get(role)
+            if (not isinstance(repository, dict) or repository.get('full_name') != REPOSITORY
+                    or repository.get('private') is not False):
+                raise ValueError('Dual source authority requires the owned literal public repository and head')
     expected_tags = {'v' + version, f'v{version}-dev.{run["run_number"]}.{run["run_attempt"]}'}
     if (tag not in expected_tags or provenance.get('repository') != REPOSITORY
             or not re.fullmatch(r'[0-9a-f]{40}', provenance.get('commit', ''))
@@ -187,7 +194,6 @@ def authorize_release(tag, provenance, run, tag_sha, jobs):
             or run.get('event') not in ('push', 'workflow_dispatch')
             or run.get('status') != 'completed' or run.get('conclusion') != 'success'):
         raise ValueError('Release provenance does not match a successful owned source run')
-    dual = _dual_source(provenance)
     required = REQUIRED_JOBS if dual else LEGACY_REQUIRED_JOBS
     passed = {job['name'] for job in jobs if job.get('conclusion') == 'success'}
     if not required <= passed:
@@ -200,7 +206,8 @@ def authorize_release(tag, provenance, run, tag_sha, jobs):
         attempt = int(raw_attempt)
         for name in required:
             evidence = [job for job in jobs if job.get('name') == name]
-            if (len(evidence) != 1 or evidence[0].get('conclusion') != 'success'
+            if (len(evidence) != 1 or evidence[0].get('status') != 'completed'
+                    or evidence[0].get('conclusion') != 'success'
                     or type(evidence[0].get('run_attempt')) is not int or evidence[0]['run_attempt'] != attempt
                     or str(evidence[0].get('run_id')) != str(run['id']) or evidence[0].get('head_sha') != tag_sha):
                 raise ValueError('Dual source gate evidence is duplicated or belongs to another source run or attempt')

@@ -51,6 +51,7 @@ class McpQaDownloadTests(unittest.TestCase):
             path.write_text(json.dumps(value)+'\n'); maker.checksum_directory(folder)
         self.run = {'id':123,'run_number':29,'run_attempt':1,'head_sha':'a'*40,
             'repository':{'full_name':'ATLKR/OpenGeul','private':False},
+            'head_repository':{'full_name':'ATLKR/OpenGeul','private':False},
             'path':'.github/workflows/msix.yml','event':'push','status':'in_progress',
             'conclusion':None,'run_started_at':'2026-10-12T00:00:00Z'}
         self.job = {'id':45,'name':'native-e2e (windows-2025)','run_id':123,'run_attempt':1,

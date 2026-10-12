@@ -21,7 +21,7 @@ MAX_JSON = 256 * 1024
 BRANCH = 'refs/heads/diagnostic/arm-runner-ready71'
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = 'ATLKR/OpenGeul'
-SOURCE_JOBS = frozenset(('native-e2e-arm64', 'virtual-print-arm64', 'msix-install-arm64'))
+SOURCE_JOBS = frozenset(('native-e2e-arm64', 'virtual-print-arm64', 'msix-native-arm64'))
 FIXED_ACTORS = {'ATLKR': (65988341, 'User'), 'github-actions[bot]': (41898282, 'Bot')}
 
 # The script also runs directly from e2e/ on hosted Windows.
@@ -178,7 +178,7 @@ def binding(env):
                 '허용된 고정 ARM 진단 실행이 아닙니다')
     elif workflow == f'{REPOSITORY}/.github/workflows/store-package.yml@refs/heads/main':
         context = 'store'
-        require(event_name == 'workflow_dispatch' and ref == 'refs/heads/main' and job == 'store-wack'
+        require(event_name == 'workflow_dispatch' and ref == 'refs/heads/main' and job == 'store-native-arm64'
                 and env.get('ARCHITECTURE') == 'arm64' and actor in FIXED_ACTORS,
                 '허용된 ARM Store 준비 실행이 아닙니다')
     else:

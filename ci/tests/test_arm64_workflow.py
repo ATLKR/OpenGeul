@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class Arm64WorkflowTests(unittest.TestCase):
     def setUp(self):self.jobs = load_workflow(ROOT/'.github/workflows/msix.yml')['jobs']
     def commands(self, name):return '\n'.join(step.get('run', '') for step in self.jobs[name]['steps'])
-    def test_exact21_expanded_jobs_preserve_all15_x64_checks(self):
+    def test_exact22_expanded_jobs_preserve_all15_x64_checks(self):
         expanded = []
         for name, job in self.jobs.items():
             matrix = job.get('strategy', {}).get('matrix')
@@ -20,9 +20,9 @@ class Arm64WorkflowTests(unittest.TestCase):
                'browser-e2e (chromium)','browser-e2e (firefox)','browser-e2e (webkit)',
                'native-e2e (windows-2022)','native-e2e (windows-2025)',
                'virtual-print (windows-2022)','virtual-print (windows-2025)'}
-        new = {'windows-editor-arm64','windows-cli-arm64','build-arm64','msix-install-arm64',
+        new = {'windows-editor-arm64','windows-cli-arm64','build-arm64','msix-install-arm64','msix-native-arm64',
                'native-e2e (windows-11-arm)','virtual-print (windows-11-arm)'}
-        self.assertEqual(set(expanded), old | new);self.assertEqual(len(expanded), 21)
+        self.assertEqual(set(expanded), old | new);self.assertEqual(len(expanded), 22)
     def test_native_arm_producers_share_wasm_and_never_wait_on_browser(self):
         for role in ('editor','cli'):
             name = 'windows-'+role+'-arm64';self.assertIn(name, self.jobs)
@@ -58,11 +58,13 @@ class Arm64WorkflowTests(unittest.TestCase):
             for consumer in (name,name+'-arm64'):
                 self.assertIn('--architecture $env:E2E_ARCHITECTURE', self.commands(consumer))
                 self.assertIn('opengeul-windows-${env:E2E_ARCHITECTURE}-', self.commands(consumer))
-        job=self.jobs['msix-install-arm64']
+        job=self.jobs['msix-native-arm64']
         self.assertEqual(job['runs-on'],'windows-11-arm');self.assertEqual(set(job['needs']),{'build-arm64','native-e2e-arm64'})
-        self.assertIn('-Architecture arm64', self.commands('msix-install-arm64'))
+        self.assertIn('-Architecture arm64', self.commands('msix-native-arm64'))
+        sdk=self.jobs['msix-install-arm64'];self.assertEqual(sdk['runs-on'],'windows-2025')
+        self.assertEqual(set(sdk['needs']),{'build-arm64','msix-native-arm64'})
     def test_release_requires_both_architectures_and_full_wack_receipts(self):
-        self.assertEqual(set(self.jobs['release']['needs']), {'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'})
+        self.assertEqual(set(self.jobs['release']['needs']), {'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-native-arm64','msix-install-arm64','virtual-print','virtual-print-arm64'})
         commands=self.commands('release')
         for required in ('--name "opengeul-windows-arm64-$BUILD_RUN_ID" --dir package-arm64',
                          '--name "msix-install-$BUILD_RUN_ID" --dir wack-x64',

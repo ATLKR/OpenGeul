@@ -136,9 +136,10 @@ class StoreQualificationTests(unittest.TestCase):
         source = release_pair.verify_pair(self.source)
         self.assertNotEqual(self.details['sourceRunId'], '68')
         run = {'id': 38181680763, 'run_number': 68, 'run_attempt': 2, 'head_sha': 'a' * 40,
-            'repository': {'full_name': 'ATLKR/OpenGeul'}, 'path': '.github/workflows/msix.yml',
+            'repository': {'full_name': 'ATLKR/OpenGeul', 'private': False},
+            'head_repository': {'full_name': 'ATLKR/OpenGeul', 'private': False}, 'path': '.github/workflows/msix.yml',
             'event': 'push', 'status': 'completed', 'conclusion': 'success'}
-        jobs = [{'name': name, 'conclusion': 'success', 'run_attempt': 2,
+        jobs = [{'name': name, 'status': 'completed', 'conclusion': 'success', 'run_attempt': 2,
             'run_id': run['id'], 'head_sha': run['head_sha']} for name in REQUIRED_JOBS]
         tag = self.details['sourceRelease'].rsplit('/', 1)[1]
         authorize_release(tag, source, run, run['head_sha'], jobs)

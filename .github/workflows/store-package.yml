@@ -68,19 +68,13 @@ jobs:
           retention-days: 1
           if-no-files-found: error
           compression-level: 9
-  store-wack:
-    name: Store WACK (${{ matrix.os }})
+  store-native-arm64:
     needs: [package]
     if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && needs.package.result == 'success')
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        os: [windows-2025, windows-11-arm]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-11-arm
     timeout-minutes: 30
     env:
-      ARCHITECTURE: ${{ matrix.os == 'windows-11-arm' && 'arm64' || 'x64' }}
+      ARCHITECTURE: arm64
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -109,14 +103,12 @@ jobs:
           python ci/evidence.py size --limit-mib 16 mcp-qa
       - name: ARM 러너 관찰 도구 준비
         id: runner-ready-tools
-        if: env.ARCHITECTURE == 'arm64'
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference=$true
           python -m pip install -r e2e/requirements.txt
       - name: ARM 러너의 검증된 OS 창과 전경 준비
         id: runner-ready
-        if: env.ARCHITECTURE == 'arm64'
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -124,27 +116,119 @@ jobs:
           python e2e/runner-ready.py --prepare --output runner-ready
       - name: ARM 러너 준비 원본 증거 크기 제한
         id: runner-ready-size
-        if: always() && env.ARCHITECTURE == 'arm64' && steps.runner-ready.outcome != 'skipped'
+        if: always() && steps.runner-ready.outcome != 'skipped'
         shell: pwsh
         run: python ci/evidence.py size --limit-mib 16 runner-ready
       - name: ARM 러너 준비 원본 관찰 보존
         id: runner-ready-evidence
-        if: always() && env.ARCHITECTURE == 'arm64' && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
+        if: always() && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: opengeul-runner-ready-store-wack-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          name: opengeul-runner-ready-store-native-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           path: runner-ready/
           retention-days: 1
           if-no-files-found: error
           compression-level: 6
-      - name: 실제 Store 신원 설치·네이티브 GUI·CLI·연결·삭제·전체 WACK
+      - name: 실제 Store 신원 ARM 네이티브 설치·MCP·연결·삭제
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $provenance=Get-Content (Join-Path .work/store-source ("provenance-{0}.json" -f $env:ARCHITECTURE)) -Raw | ConvertFrom-Json
           $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
           ./e2e/ensure-webview2.ps1
-          ./e2e/msix-install.ps1 -Architecture $env:ARCHITECTURE -PackageDirectory package-wack -OutputDirectory installed -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
+          ./e2e/msix-install.ps1 -NativeOnly -TransportDirectory native-transport -Architecture $env:ARCHITECTURE -PackageDirectory package-wack -OutputDirectory installed -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
+      - name: 동일 Store 서명 MSIX와 공개 인증서의 현재 실행 출처 검증
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          python scripts/native_wack_transport.py publish-store --store-directory store-output --evidence installed --transport native-transport
+      - name: Store ARM 네이티브 성공 후보를 SDK 검사에 하루 동안 전달
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-store-native-signed-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            native-transport/native-install.json
+            native-transport/test-only.msix
+            native-transport/test.cer
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 9
+      - name: 실제 결과를 유지하며 비밀 없는 진단 보존
+        if: always()
+        env:
+          ACTUAL_JOB_STATUS: ${{ job.status }}
+        run: |
+          python ci/evidence.py pack installed store-native-evidence --status $env:ACTUAL_JOB_STATUS
+          python ci/evidence.py size --limit-mib 32 store-native-evidence
+      - name: ARM 네이티브 설치 원본 증거 보존
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-store-native-arm64-${{ github.run_id }}
+          path: store-native-evidence/
+          retention-days: 1
+          if-no-files-found: error
+  store-wack:
+    name: Store WACK (${{ matrix.architecture }})
+    needs: [package, store-native-arm64]
+    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && needs.package.result == 'success' && needs['store-native-arm64'].result == 'success')
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        architecture: [x64, arm64]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      ARCHITECTURE: ${{ matrix.architecture }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: 같은 Store 실행의 원본만 받기
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download $env:GITHUB_RUN_ID --repo ATLKR/OpenGeul --name "opengeul-store-$env:GITHUB_RUN_ID" --dir store-output
+          python ci/evidence.py size --limit-mib 96 store-output
+          python scripts/store_qualification.py select --architecture $env:ARCHITECTURE --directory store-output --output package-wack
+      - name: 검증된 Source22와 같은 아키텍처의 MCP QA 원본 받기
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          python scripts/store_package.py --download-source-release --release-tag $env:RELEASE_TAG --output .work/store-source
+          python ci/evidence.py size --limit-mib 192 .work/store-source
+          python scripts/mcp_qa_download.py store --store-directory store-output --source-directory .work/store-source --architecture $env:ARCHITECTURE --output mcp-qa
+          python ci/evidence.py size --limit-mib 16 mcp-qa
+      - name: 현재 Store ARM 네이티브 성공 작업의 동일 서명 후보 검증과 수신
+        if: env.ARCHITECTURE == 'arm64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          python scripts/native_wack_transport.py download-store --store-directory store-output --output native-input
+      - name: 실제 Store 신원 설치·네이티브 GUI·CLI·연결·삭제·전체 WACK
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $provenance=Get-Content (Join-Path .work/store-source ("provenance-{0}.json" -f $env:ARCHITECTURE)) -Raw | ConvertFrom-Json
+          $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
+          if ($env:ARCHITECTURE -eq 'x64') {
+            ./e2e/ensure-webview2.ps1
+            ./e2e/msix-install.ps1 -Architecture $env:ARCHITECTURE -PackageDirectory package-wack -OutputDirectory installed -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
+          } else {
+            ./e2e/msix-wack-import.ps1 -PackageDirectory package-wack -NativeDirectory native-input -OutputDirectory installed
+          }
           python scripts/store_qualification.py collect --architecture $env:ARCHITECTURE --directory store-output --evidence installed --output qualification
           python ci/evidence.py size --limit-mib 16 qualification
       - name: 실제 결과를 유지하며 비밀 없는 진단 보존
@@ -165,8 +249,8 @@ jobs:
           retention-days: 1
           if-no-files-found: error
   qualify:
-    needs: [package, store-wack]
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && needs.package.result == 'success' && needs['store-wack'].result == 'success')
+    needs: [package, store-native-arm64, store-wack]
+    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && needs.package.result == 'success' && needs['store-native-arm64'].result == 'success' && needs['store-wack'].result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -205,8 +289,8 @@ jobs:
           if-no-files-found: error
           compression-level: 9
   submit:
-    needs: [qualify]
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.submit_to_store && needs.qualify.result == 'success')
+    needs: [package, store-native-arm64, store-wack, qualify]
+    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.submit_to_store && needs.package.result == 'success' && needs['store-native-arm64'].result == 'success' && needs['store-wack'].result == 'success' && needs.qualify.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

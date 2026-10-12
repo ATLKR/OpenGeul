@@ -20,7 +20,7 @@ class HopIntegrationTests(unittest.TestCase):
         workflow=load_workflow(ROOT/'.github/workflows/msix.yml')
         self.assertEqual(workflow['jobs']['release']['needs'], [
             'wasm', 'build', 'build-arm64', 'native-e2e', 'native-e2e-arm64',
-            'browser-e2e', 'msix-install', 'msix-install-arm64',
+            'browser-e2e', 'msix-install', 'msix-native-arm64', 'msix-install-arm64',
             'virtual-print', 'virtual-print-arm64',
         ])
     def test_backport_attribution_is_shipped_with_license_notices(self):

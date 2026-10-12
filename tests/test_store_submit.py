@@ -123,7 +123,8 @@ class StoreSubmitTests(unittest.TestCase):
         self.before_delete_version = None
         self.new = None
         self.run = {'id': 123, 'head_sha': self.sha, 'head_branch': self.tag,
-                    'run_number': 40, 'run_attempt': 1, 'repository': {'full_name': 'ATLKR/OpenGeul'},
+                    'run_number': 40, 'run_attempt': 1, 'repository': {'full_name': 'ATLKR/OpenGeul', 'private': False},
+                    'head_repository': {'full_name': 'ATLKR/OpenGeul', 'private': False},
                     'event': 'push', 'path': '.github/workflows/msix.yml',
                     'status': 'completed', 'conclusion': 'success'}
         self.patches = [patch.object(submitter, '_gh', side_effect=self.github),
@@ -631,7 +632,7 @@ class DualStoreSubmitTests(unittest.TestCase):
             'actor': copy.deepcopy(self.bot), 'triggering_actor': copy.deepcopy(self.bot)}
         self.store_jobs = [{'name': name, 'status': 'completed', 'conclusion': 'success',
             'run_id': 456, 'run_attempt': 2, 'head_sha': 'b' * 40}
-            for name in ('package','Store WACK (windows-2025)','Store WACK (windows-11-arm)','qualify')]
+            for name in ('package','store-native-arm64','Store WACK (x64)','Store WACK (arm64)','qualify')]
         self.release = {'id': 5, 'draft': False, 'tag_name': self.tag,
             'assets': [{'id': i + 100, 'name': p.name, 'size': p.stat().st_size, 'state': 'uploaded',
                 'digest': 'sha256:' + hashlib.sha256(p.read_bytes()).hexdigest()} for i,p in enumerate(sorted(self.source.iterdir()))]}
@@ -819,7 +820,7 @@ class DualStoreSubmitTests(unittest.TestCase):
                 if change == 'other_attempt': arm['run_attempt'] = 2
                 self.rejected(); self.source_jobs = old
 
-    def test_current_store_workflow_identity_actors_and_four_jobs_gate(self):
+    def test_current_store_workflow_identity_actors_and_five_jobs_gate(self):
         for change in ('event','ref','path','sha','attempt','repo','actor','trigger','bot_id','missing','duplicate','job_attempt'):
             with self.subTest(change=change):
                 old = copy.deepcopy(self.store_run); jobs = copy.deepcopy(self.store_jobs)
@@ -834,6 +835,27 @@ class DualStoreSubmitTests(unittest.TestCase):
                 if change == 'duplicate': self.store_jobs.append(copy.deepcopy(self.store_jobs[0]))
                 if change == 'job_attempt': self.store_jobs[-1]['run_attempt'] = 1
                 self.rejected(); self.store_run = old; self.store_jobs = jobs
+
+    def test_native_arm_missing_cannot_use_legacy_sdk_job_names_as_authority(self):
+        self.store_jobs = [job for job in self.store_jobs if job['name'] != 'store-native-arm64']
+        self.store_jobs += [{**self.store_jobs[0], 'name': name} for name in
+                            ('Store WACK (windows-2025)','Store WACK (windows-11-arm)')]
+        self.rejected()
+
+    def test_each_native_and_sdk_gate_is_required_before_store_mutation(self):
+        for name in ('package','store-native-arm64','Store WACK (x64)','Store WACK (arm64)','qualify'):
+            for change in ('missing','skipped','failure','cancelled','missing_status','running','old_head','old_attempt','duplicate'):
+                with self.subTest(name=name, change=change):
+                    old = copy.deepcopy(self.store_jobs)
+                    job = next(job for job in self.store_jobs if job['name'] == name)
+                    if change == 'missing': self.store_jobs.remove(job)
+                    elif change in ('skipped','failure','cancelled'): job['conclusion'] = change
+                    elif change == 'missing_status': job.pop('status')
+                    elif change == 'running': job['status'] = 'in_progress'
+                    elif change == 'old_head': job['head_sha'] = 'c' * 40
+                    elif change == 'old_attempt': job['run_attempt'] = 1
+                    else: self.store_jobs.append(copy.deepcopy(job))
+                    self.rejected(); self.store_jobs = old
 
     def test_both_store_identity_full_wack_receipt_is_required(self):
         for change in ('missing','failed','other_source','other_store','other_attempt','hash'):

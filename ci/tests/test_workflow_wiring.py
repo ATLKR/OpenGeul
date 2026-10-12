@@ -38,13 +38,13 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(options['default'],'full');self.assertEqual(set(options['options']),{'full','engine','checks'})
         self.assertIn("needs.preflight.outputs.mode == 'full'",w['jobs']['build']['if'])
     def test_all_required_release_gates_remain(self):
-        jobs=self.load()['jobs'];self.assertEqual(set(jobs['release']['needs']),{'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'})
+        jobs=self.load()['jobs'];self.assertEqual(set(jobs['release']['needs']),{'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-native-arm64','msix-install-arm64','virtual-print','virtual-print-arm64'})
         for job in ('native-e2e','virtual-print'):
             self.assertEqual(set(jobs[job]['strategy']['matrix']['os']),{'windows-2022','windows-2025'})
             self.assertEqual(jobs[job+'-arm64']['runs-on'],'windows-11-arm')
         self.assertEqual(set(jobs['browser-e2e']['strategy']['matrix']['browser']),{'chromium','firefox','webkit'})
     def test_diagnostics_are_bounded_before_upload(self):
-        for job in ('native-e2e','native-e2e-arm64','virtual-print','virtual-print-arm64','browser-e2e','msix-install','msix-install-arm64'):
+        for job in ('native-e2e','native-e2e-arm64','virtual-print','virtual-print-arm64','browser-e2e','msix-install','msix-native-arm64','msix-install-arm64'):
             steps=self.load()['jobs'][job]['steps']
             pack=[i for i,s in enumerate(steps) if 'ci/evidence.py pack ' in s.get('run','')]
             self.assertEqual(len(pack),1)
@@ -54,6 +54,8 @@ class WiringTests(unittest.TestCase):
                         self.assertEqual(s['with']['name'],'opengeul-mcp-fixtures${{ env.E2E_INPUT_SUFFIX }}-${{ github.run_id }}')
                         self.assertEqual(s['if'],"env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'")
                         continue  # 별도 test_qa_upload가 원본 QA 입력·16 MiB 제한을 검사한다.
+                    if 'native-transport/native-install.json' in s.get('with',{}).get('path',''):
+                        self.assertEqual(job,'msix-native-arm64');continue  # exact3 transport 검사기는 별도로 검사한다.
                     self.assertGreater(i,pack[0]);self.assertEqual(s['with']['path'],'bounded-evidence/')
     def test_native_input_artifact_no_longer_duplicates_browser_dist(self):
         steps=self.load()['jobs']['windows-editor']['steps']
@@ -117,7 +119,7 @@ class WiringTests(unittest.TestCase):
         cleanup=(ROOT/'ci/transport_cleanup.py').read_text();self.assertNotIn('opengeul-mcp-fixtures',cleanup)
     def test_installed_mcp_gets_same_arch_source_qa_before_any_install(self):
         jobs=self.load()['jobs']
-        for name,build,native in (('msix-install','build','native-e2e'),('msix-install-arm64','build-arm64','native-e2e-arm64')):
+        for name,build,native in (('msix-install','build','native-e2e'),('msix-native-arm64','build-arm64','native-e2e-arm64')):
             with self.subTest(job=name):
                 job=jobs[name];self.assertEqual(set(job['needs']),{build,native});steps=job['steps']
                 qa=[(i,s) for i,s in enumerate(steps) if 'scripts/mcp_qa_download.py' in s.get('run','')]
