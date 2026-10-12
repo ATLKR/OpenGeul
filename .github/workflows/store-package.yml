@@ -1,262 +1,107 @@
-name: OpenGeul Store 패키지와 실제 설치·전체 WACK 검증
+name: Source75 ARM 소유 인쇄 포커스 진단
 'on':
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 같은 소스의 x64·ARM64 원본과 전체 WACK이 검증된 릴리스
+        description: 실패 Source75 원본을 이용한 진단 전용 표식
         type: string
         required: true
+        default: source75-owned-print-diagnostic
       verify_store_api:
-        description: 고정 Store 앱 GET으로 인증과 읽기 권한 확인
         type: boolean
-        required: false
         default: false
       submit_to_store:
-        description: 두 실제 Store 신원 패키지 검증 후 안정판 업데이트 API 제출
         type: boolean
-        required: false
         default: false
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: opengeul-store
+  group: owned-print-preview-source75-arm-diagnostic
   cancel-in-progress: false
-  queue: max
 env:
   PYTHONUTF8: '1'
+  E2E_ARCHITECTURE: arm64
 jobs:
-  package:
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main')
-    runs-on: windows-2025
-    timeout-minutes: 30
+  print-diagnostic:
+    if: >-
+      github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul'
+      && github.event_name == 'workflow_dispatch' && github.actor == 'ATLKR'
+      && github.ref == 'refs/heads/diagnostic/owned-print-preview-75' && github.run_attempt == 1
+      && inputs.release_tag == 'source75-owned-print-diagnostic'
+      && inputs.verify_store_api == false && inputs.submit_to_store == false)
+    runs-on: windows-11-arm
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-        with:
-          python-version: '3.12'
-      - name: 두 Store 런타임과 출처 보존 검사
-        run: python -m unittest discover -s tests -p test_store_package.py -v
-      - name: 검증된 원본 두 개를 같은 버전의 Store 신원으로 재포장
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-          $makeappx = Get-ChildItem $sdk -Filter makeappx.exe -Recurse | Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $makeappx) { throw 'Windows SDK MakeAppx가 없습니다.' }
-          python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
-          python ci/evidence.py size --limit-mib 192 .work/store-source
-          python ci/evidence.py size --limit-mib 96 store-output
-      - name: 실제 x64 Store 편집기 소개 화면 캡처
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          python -m pip install -r e2e/requirements.txt
-          ./e2e/ensure-webview2.ps1
-          python e2e/store_screenshot.py --exe .work/store-payload/x64/OpenGeul.exe --output store-output
-          python ci/evidence.py size --limit-mib 96 store-output
-      - name: 원본 Store 두 패키지 보존
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: opengeul-store-${{ github.run_id }}
-          path: store-output/*
-          retention-days: 1
-          if-no-files-found: error
-          compression-level: 9
-  store-wack:
-    name: Store WACK (${{ matrix.os }})
-    needs: [package]
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && needs.package.result == 'success')
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        os: [windows-2025, windows-11-arm]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    env:
-      ARCHITECTURE: ${{ matrix.os == 'windows-11-arm' && 'arm64' || 'x64' }}
-    steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
+          ref: f104fd4080214bc072cf39a24e73454685dd4254
+          path: source-reader
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
           architecture: x64
-      - name: 같은 Store 실행의 원본만 받기
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh run download $env:GITHUB_RUN_ID --repo ATLKR/OpenGeul --name "opengeul-store-$env:GITHUB_RUN_ID" --dir store-output
-          python ci/evidence.py size --limit-mib 96 store-output
-          python scripts/store_qualification.py select --architecture $env:ARCHITECTURE --directory store-output --output package-wack
-      - name: 검증된 Source22와 같은 아키텍처의 MCP QA 원본 받기
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          python scripts/store_package.py --download-source-release --release-tag $env:RELEASE_TAG --output .work/store-source
-          python ci/evidence.py size --limit-mib 192 .work/store-source
-          python scripts/mcp_qa_download.py store --store-directory store-output --source-directory .work/store-source --architecture $env:ARCHITECTURE --output mcp-qa
-          python ci/evidence.py size --limit-mib 16 mcp-qa
-      - name: ARM 러너 관찰 도구 준비
-        id: runner-ready-tools
-        if: env.ARCHITECTURE == 'arm64'
-        shell: pwsh
-        run: |
-          $PSNativeCommandUseErrorActionPreference=$true
-          python -m pip install -r e2e/requirements.txt
-      - name: ARM 러너의 검증된 OS 창과 전경 준비
-        id: runner-ready
-        if: env.ARCHITECTURE == 'arm64'
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: 인쇄 관측과 기존 로컬 회귀 검증
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $PSNativeCommandUseErrorActionPreference=$true
-          python e2e/runner-ready.py --prepare --output runner-ready
-      - name: ARM 러너 준비 원본 증거 크기 제한
-        id: runner-ready-size
-        if: always() && env.ARCHITECTURE == 'arm64' && steps.runner-ready.outcome != 'skipped'
+          python -m pip install -r e2e/print-requirements.txt
+          python -m unittest discover -s tests -p test_print_preview_focus.py -v
+          python -m unittest discover -s tests -p test_preview_actions.py -v
+          python -m unittest discover -s tests -p test_print_configuration_order.py -v
+          python -m unittest discover -s e2e/print_tests -v
+      - name: Source75 고정 원본 ZIP과 전체 런타임을 검증
         shell: pwsh
-        run: python ci/evidence.py size --limit-mib 16 runner-ready
-      - name: ARM 러너 준비 원본 관찰 보존
-        id: runner-ready-evidence
-        if: always() && env.ARCHITECTURE == 'arm64' && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: opengeul-runner-ready-store-wack-arm64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: runner-ready/
-          retention-days: 1
-          if-no-files-found: error
-          compression-level: 6
-      - name: 실제 Store 신원 설치·네이티브 GUI·CLI·연결·삭제·전체 WACK
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $provenance=Get-Content (Join-Path .work/store-source ("provenance-{0}.json" -f $env:ARCHITECTURE)) -Raw | ConvertFrom-Json
-          $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          python probe/print75_inputs.py
+      - name: 기존 WebView2·Microsoft PDF·합성 인쇄 문서 준비
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          Start-Service Spooler
+          Get-PrinterDriver -Name 'Microsoft Print To PDF' -ErrorAction Stop
           ./e2e/ensure-webview2.ps1
-          ./e2e/msix-install.ps1 -Architecture $env:ARCHITECTURE -PackageDirectory package-wack -OutputDirectory installed -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
-          python scripts/store_qualification.py collect --architecture $env:ARCHITECTURE --directory store-output --evidence installed --output qualification
-          python ci/evidence.py size --limit-mib 16 qualification
-      - name: 실제 결과를 유지하며 비밀 없는 진단 보존
-        if: always()
-        env:
-          ACTUAL_JOB_STATUS: ${{ job.status }}
+          node e2e/table_height.mjs generate wasm-input print-fixtures
+          python e2e/print_fixtures.py print-fixtures
+          node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
+      - name: 기존 8사례를 소유한 앱·미리보기 입력으로 실행
+        shell: pwsh
         run: |
-          python ci/evidence.py pack installed store-wack-evidence --status $env:ACTUAL_JOB_STATUS
-          python ci/evidence.py size --limit-mib 32 store-wack-evidence
-      - name: 아키텍처별 원본 WACK 증거 보존
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
+      - name: 실패를 유지하며 진단 원본 크기 제한
+        if: always()
+        shell: pwsh
+        env:
+          EVIDENCE_STATUS: ${{ job.status }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          python ci/evidence.py pack print-evidence bounded-evidence --status $env:EVIDENCE_STATUS
+          python ci/evidence.py size --limit-mib 4 diagnostic-receipt
+      - name: 크기가 제한된 실제 증거 보존
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: opengeul-store-wack-${{ env.ARCHITECTURE }}-${{ github.run_id }}
+          name: source75-owned-print-arm-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            qualification/
-            store-wack-evidence/
-          retention-days: 1
-          if-no-files-found: error
-  qualify:
-    needs: [package, store-wack]
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && needs.package.result == 'success' && needs['store-wack'].result == 'success')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-        with:
-          python-version: '3.12'
-      - name: 같은 실행의 Store 원본과 두 WACK 원본 받기
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh run download "$GITHUB_RUN_ID" --repo ATLKR/OpenGeul --name "opengeul-store-$GITHUB_RUN_ID" --dir store-output
-          gh run download "$GITHUB_RUN_ID" --repo ATLKR/OpenGeul --name "opengeul-store-wack-x64-$GITHUB_RUN_ID" --dir wack-x64
-          gh run download "$GITHUB_RUN_ID" --repo ATLKR/OpenGeul --name "opengeul-store-wack-arm64-$GITHUB_RUN_ID" --dir wack-arm64
-          python ci/evidence.py size --limit-mib 96 store-output
-          python ci/evidence.py size --limit-mib 32 wack-x64 wack-arm64
-      - name: 검증된 Source22 원본을 GET만으로 다시 확인
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          python scripts/store_package.py --download-source-release --release-tag "$RELEASE_TAG" --output .work/store-source
-          python ci/evidence.py size --limit-mib 192 .work/store-source
-      - name: 실제 Store raw12와 Source 런타임 보존 재검증
-        run: |
-          python scripts/store_qualification.py verify --directory store-output --source-directory .work/store-source --x64 wack-x64/qualification --arm64 wack-arm64/qualification
-          python ci/evidence.py size --limit-mib 96 store-output
-      - name: 검증한 같은 Store 원본과 증거만 보존
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: opengeul-store-qualified-${{ github.run_id }}
-          path: store-output/*
+            bounded-evidence/
+            diagnostic-receipt/
           retention-days: 1
           if-no-files-found: error
           compression-level: 9
-  submit:
-    needs: [qualify]
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.submit_to_store && needs.qualify.result == 'success')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-      issues: write
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-        with:
-          python-version: '3.12'
-      - name: 같은 Store 실행의 검증된 원본만 받기
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh run download "$GITHUB_RUN_ID" --repo ATLKR/OpenGeul --name "opengeul-store-qualified-$GITHUB_RUN_ID" --dir store-output
-          python ci/evidence.py size --limit-mib 96 store-output
-      - name: 불변 Source22 릴리스를 GET만으로 확인
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          python scripts/store_package.py --download-source-release --release-tag "$RELEASE_TAG" --output .work/store-source
-          python ci/evidence.py size --limit-mib 192 .work/store-source
-      - name: 모든 실제 증거와 API 실행 gate 확인 후 안정판 업데이트 제출
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-          STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-          STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-          STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-        run: python scripts/store_submit.py --release-tag "$RELEASE_TAG" --package-directory store-output
-  verify-api:
-    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.verify_store_api)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-        with:
-          python-version: '3.12'
-      - name: OAuth 인증과 고정 Store 앱 GET 확인
-        env:
-          STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-          STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-          STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-          STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-        run: python scripts/check_store_api.py
