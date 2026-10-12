@@ -81,7 +81,12 @@ $product = Get-Content 'config/product.json' -Raw | ConvertFrom-Json
 $lock = Get-Content 'config/upstream.lock.json' -Raw | ConvertFrom-Json
 $target = python -c "import sys;sys.path.insert(0,'scripts');from windows_arch import target_triple;print(target_triple(sys.argv[1]))" $Architecture
 New-Item -ItemType Directory -Force (Join-Path $root '.work') | Out-Null
-python e2e/native_architecture.py host --architecture $Architecture --output (Join-Path $root '.work/host-architecture.json')
+$hostArchitectureOutput = if ($Phase -eq 'Editor' -and $EditorStage -ne 'All') {
+    Join-Path $root ('.work/host-architecture-{0}-{1}.json' -f $Architecture,$EditorStage)
+} else {
+    Join-Path $root '.work/host-architecture.json'
+}
+python e2e/native_architecture.py host --architecture $Architecture --output $hostArchitectureOutput
 if ($Store -and -not $IdentityFile) { throw 'Store build requires real Partner Center identity.' }
 if ($Phase -eq 'Package') {
     $source = Join-Path $root '.work/package-source'
