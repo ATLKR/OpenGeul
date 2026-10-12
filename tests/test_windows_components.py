@@ -1084,7 +1084,7 @@ class WindowsComponentsTests(unittest.TestCase):
         c = self.helper()
         source = self.source()
         path = source/'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts'
-        path.write_bytes(path.read_bytes().replace(b'\n', b'\r\n'))
+        path.write_bytes(path.read_text(encoding='utf-8').encode('utf-8').replace(b'\n', b'\r\n'))
         out = self.root/'crlf-component'
         c.capture('editor', self.payload('editor'), source, out, env=self.env)
         value = json.loads((out/'provenance.json').read_text())
@@ -1125,16 +1125,22 @@ class WindowsComponentsTests(unittest.TestCase):
 
     def test_unsafe_windows_paths_case_collisions_and_symlinks_are_rejected(self):
         c = self.helper()
-        source = self.source()
-        payload = self.payload('editor')
-        for name in ('opengeul.exe', 'CON.dll', 'COM¹.dll', 'COM².dll', 'LPT³.dll',
-                     'bad:name.dll', 'bad\\name.dll', 'trailing .dll '):
-            with self.subTest(name=name):
-                path = payload/name
-                path.write_bytes(pe())
-                with self.assertRaises(ValueError):
-                    c.capture('editor', payload, source, self.root/'bad-path', env=self.env)
-                path.unlink()
+        # JSON can carry a conflicting Windows name even when NTFS cannot create
+        # two case-insensitive files or literal reserved/backslash names. Exercise
+        # the real consumer before staging rather than overwrite valid payloads.
+        folders = self.pair()
+        provenance = folders['editor']/'provenance.json'
+        original = json.loads(provenance.read_text())
+        for name in ('payload/opengeul.exe', 'payload/CON.dll', 'payload/COM¹.dll',
+                     'payload/COM².dll', 'payload/LPT³.dll', 'payload/bad:name.dll',
+                     'payload/bad\\name.dll', 'payload/trailing .dll '):
+            with self.subTest(inventoryName=name):
+                value = copy.deepcopy(original)
+                value['files'][name] = value['files']['payload/OpenGeul.exe']
+                write_json(provenance, value)
+                self.assert_rejected_without_outputs(folders, 'inventory|path')
+        source = self.root/'hop'
+        payload = self.root/'editor-payload'
         link = payload/'Notices/link.txt'
         try:
             link.symlink_to(payload/'Notices/OpenGeul-LICENSE.txt')
@@ -1155,7 +1161,7 @@ class WindowsComponentsTests(unittest.TestCase):
         c = self.helper()
         source = self.source()
         path = source/'third_party/rhwp/Cargo.toml'
-        path.write_bytes(path.read_bytes().replace(b'\n', b'\r\n'))
+        path.write_bytes(path.read_text(encoding='utf-8').encode('utf-8').replace(b'\n', b'\r\n'))
         out = self.root/'crlf-native'
         c.capture('cli', self.payload('cli'), source, out, env=self.env)
         value = json.loads((out/'provenance.json').read_text())
