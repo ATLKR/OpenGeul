@@ -40,6 +40,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
+        architecture: x64
     - name: 고정 CI 파서만 설치·공개 무료 정책 검사
       shell: pwsh
       run: |
