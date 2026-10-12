@@ -9,6 +9,12 @@ from driver import Session, digest, edit, until
 from prepare_payload import stream_hash, verify_checksums
 
 
+def capture_expected_sha(provenance):
+    runtime = (provenance['architectures']['x64']['runtimeSha256']
+               if provenance.get('formatVersion') == 2 else provenance['runtimeSha256'])
+    return runtime['OpenGeul.exe']
+
+
 def capture(executable: Path, output: Path):
     if os.name != 'nt' or os.environ.get('GITHUB_ACTIONS') != 'true':
         raise RuntimeError('Store capture requires a disposable Windows GitHub runner')
@@ -19,7 +25,7 @@ def capture(executable: Path, output: Path):
     executable=executable.resolve(); output=output.resolve()
     verify_checksums(output)
     provenance=json.loads((output/'store-provenance.json').read_text(encoding='utf-8'))
-    expected=provenance['runtimeSha256']['OpenGeul.exe']
+    expected=capture_expected_sha(provenance)
     if digest(executable) != expected: raise ValueError('Screenshot executable differs from the Store package')
     original=win32api.EnumDisplaySettings(None,win32con.ENUM_CURRENT_SETTINGS)
     changed=False; session=None
