@@ -44,9 +44,21 @@ jobs:
       id: policy
       run: python ci/policy.py --event
     - name: CI·패키지 정책 회귀 검사
-      run: |
-        python -m unittest discover -s ci/tests -v
-        python -m unittest discover -s tests -v
+      id: preflight-tests
+      run: python ci/preflight_tests.py
+    - name: 병렬 사전 검사 원본 기록 크기 제한
+      id: preflight-size
+      if: always() && steps.preflight-tests.outcome != 'skipped'
+      run: python ci/evidence.py size --limit-mib 9 .work/preflight-tests
+    - name: 각 필수 시험 원본 로그와 종료 상태 보존
+      if: always() && steps.preflight-size.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-preflight-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/preflight-tests/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     if: github.event.repository.private == false
   wasm:
     runs-on: ubuntu-24.04
