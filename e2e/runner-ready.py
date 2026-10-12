@@ -176,6 +176,13 @@ def binding(env):
         require(event_name == 'workflow_dispatch' and actor == 'ATLKR' and attempt == '1' and job == 'observe'
                 and workflow == f'{REPOSITORY}/.github/workflows/store-package.yml@{BRANCH}',
                 '허용된 고정 ARM 진단 실행이 아닙니다')
+    elif ref == 'refs/heads/diagnostic/owned-print-preview-75':
+        context = 'print-focus-diagnostic'
+        require(event_name == 'workflow_dispatch' and actor == 'ATLKR' and attempt == '1'
+                and job == 'print-diagnostic' and workflow ==
+                f'{REPOSITORY}/.github/workflows/store-package.yml@refs/heads/diagnostic/owned-print-preview-75'
+                and event.get('ref') in ('diagnostic/owned-print-preview-75', 'refs/heads/diagnostic/owned-print-preview-75'),
+                '허용된 고정 ARM 인쇄 포커스 진단 실행이 아닙니다')
     elif workflow == f'{REPOSITORY}/.github/workflows/store-package.yml@refs/heads/main':
         context = 'store'
         require(event_name == 'workflow_dispatch' and ref == 'refs/heads/main' and job == 'store-native-arm64'

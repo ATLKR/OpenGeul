@@ -183,6 +183,25 @@ class ContextTests(unittest.TestCase):
             elif change=='workflow': env['GITHUB_WORKFLOW_REF']=f'{REPOSITORY}/.github/workflows/msix.yml@refs/heads/main'
             self.reject(env)
 
+    def test_print_diagnostic_fixed_public_context_is_explicitly_allowed(self):
+        branch = 'refs/heads/diagnostic/owned-print-preview-75'
+        env = self.context(event='workflow_dispatch', ref=branch, job='print-diagnostic', workflow='store-package.yml')
+        result = self.value.binding(env)
+        self.assertEqual(result['context'], 'print-focus-diagnostic')
+        self.assertEqual(result['ref'], branch); self.assertEqual(result['runAttempt'], '1')
+
+    def test_print_diagnostic_foreign_contexts_never_reach_os_probe(self):
+        branch = 'refs/heads/diagnostic/owned-print-preview-75'
+        for key, val in [('GITHUB_RUN_ATTEMPT', '2'), ('GITHUB_JOB', 'observe'),
+            ('GITHUB_REF', 'refs/heads/diagnostic/foreign'), ('GITHUB_EVENT_NAME', 'push'),
+            ('GITHUB_WORKFLOW_REF', f'{REPOSITORY}/.github/workflows/msix.yml@{branch}')]:
+            env = self.context(event='workflow_dispatch', ref=branch, job='print-diagnostic', workflow='store-package.yml')
+            env[key] = val; self.reject(env)
+        for actor in (BOT, {'login': 'other-user', 'id': 99, 'type': 'User'}):
+            self.reject(self.context(event='workflow_dispatch', ref=branch, actor=actor, job='print-diagnostic', workflow='store-package.yml'))
+        for payload in ({'repository': {**PUBLIC, 'private': True}}, {'ref': 'diagnostic/foreign'}):
+            self.reject(self.context(event='workflow_dispatch', ref=branch, job='print-diagnostic', workflow='store-package.yml', payload=payload))
+
     def test_diagnostic_stays_fixed_actor_attempt_workflow_job_and_public_event(self):
         branch='refs/heads/diagnostic/arm-runner-ready71'
         env=self.context(event='workflow_dispatch',ref=branch,job='observe',workflow='store-package.yml')
