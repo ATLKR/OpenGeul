@@ -156,14 +156,15 @@ PAGING_WARNING = ('Windows created a temporary paging file on your computer beca
                   'size for all disk drives may be somewhat larger than the size you specified.')
 
 
-def owned_os_candidate(observed, session_id, windows_directory, executable, title, class_name):
+def owned_os_candidate(observed, session_id, windows_directory, executable, title, class_name, *, relative_path=None, owner_only=True):
     window = observed.get('foreground')
     require(type(window) is dict and window['title'] == title and window['className'] == class_name
             and window['visible'] is True and window['enabled'] is True, '관측된 OS 전경 창이 다릅니다')
     processes = [p for p in observed['processes'] if p['processId'] == window['processId']]
     require(len(processes) == 1, 'OS 창 소유 process가 유일하지 않습니다'); process = processes[0]
     signature = process['signature']
-    require(ntpath.normcase(process['imagePath']) == ntpath.normcase(ntpath.join(windows_directory, 'System32', executable))
+    expected_path = ntpath.join(windows_directory, relative_path or ntpath.join('System32', executable))
+    require(ntpath.normcase(process['imagePath']) == ntpath.normcase(expected_path)
             and process['createdFileTime'] > 0 and process['sessionId'] == session_id
             and process['processMachine'] == 0 and process['nativeMachine'] == 0xAA64
             and process['imageBytes'] > 0 and re.fullmatch('[0-9a-f]{64}', process['imageSha256'])
@@ -173,7 +174,7 @@ def owned_os_candidate(observed, session_id, windows_directory, executable, titl
             'OS process의 경로·native·생성시각·session·Microsoft 서명이 다릅니다')
     trees = [t for t in observed['uia'] if t['hwnd'] == window['hwnd']]
     require(len(trees) == 1 and 'error' not in trees[0] and trees[0]['truncated'] is False
-            and trees[0]['nodes'] and all(n['processId'] == window['processId'] for n in trees[0]['nodes']),
+            and trees[0]['nodes'] and (not owner_only or all(n['processId'] == window['processId'] for n in trees[0]['nodes'])),
             'OS 창 UIA 소유권/완전성이 다릅니다')
     return {'hwnd': window['hwnd'], 'window': window, 'process': process,
             'uia': trees[0], 'operation': 'WM_CLOSE', 'kind': executable}
@@ -200,6 +201,38 @@ def paging_candidate(observed, session_id, windows_directory):
     require(any(n['name'] == bounded(PAGING_WARNING) and n['controlType'] == 50020 for n in nodes)
             and sum(n['name'] == 'OK' and n['controlType'] == 50000 and n['enabled'] and not n['offscreen'] for n in nodes) == 1,
             '관측된 임시 paging-file 경고 문맥이 다릅니다')
+    return candidate
+
+
+def search_candidate(observed, session_id, windows_directory):
+    candidate = owned_os_candidate(observed, session_id, windows_directory, 'SearchHost.exe', 'Search',
+        'Windows.UI.Core.CoreWindow', relative_path=ntpath.join('SystemApps',
+        'MicrosoftWindows.Client.CBS_cw5n1h2txyewy', 'SearchHost.exe'), owner_only=False)
+    nodes = candidate['uia']['nodes']; owner = candidate['process']['processId']
+    require(nodes[0]['name'] == 'Search' and nodes[0]['className'] == 'Windows.UI.Core.CoreWindow'
+            and nodes[0]['controlType'] == 50032 and nodes[0]['processId'] == owner
+            and sum(n['name'] == 'Search box' and n['automationId'] == 'SearchTextBox' and
+                    n['className'] == 'RichEditBox' and n['controlType'] == 50004 and n['processId'] == owner
+                    and n['enabled'] and not n['offscreen'] for n in nodes) == 1,
+            '관측된 Windows Search root/SearchTextBox 문맥이 다릅니다')
+    child_pids = set(n['processId'] for n in nodes) - {owner}
+    require(len(child_pids) <= 3 and all(pid > 0 for pid in child_pids), 'Search UIA child PID 상한이 다릅니다')
+    prefix = ntpath.join(ntpath.splitdrive(windows_directory)[0] + '\\', 'Program Files (x86)',
+                         'Microsoft', 'EdgeWebView', 'Application')
+    for pid in child_pids:
+        processes = [p for p in observed['processes'] if p['processId'] == pid]
+        require(len(processes) == 1, 'Search UIA child process 바인딩이 없습니다'); process = processes[0]
+        suffix = process['imagePath'][len(prefix):] if ntpath.normcase(process['imagePath']).startswith(ntpath.normcase(prefix) + '\\') else ''
+        signature = process['signature']
+        require(re.fullmatch(r'\\[0-9]{1,5}(?:\.[0-9]{1,5}){3}\\msedgewebview2\.exe', suffix, re.IGNORECASE)
+                and process['createdFileTime'] >= candidate['process']['createdFileTime']
+                and process['sessionId'] == session_id and process['processMachine'] == 0 and process['nativeMachine'] == 0xAA64
+                and process['imageBytes'] > 0 and re.fullmatch('[0-9a-f]{64}', process['imageSha256'])
+                and signature['status'] == 'Valid' and signature['publisherMicrosoft'] is True
+                and re.search(r'(?:^|,\s*)CN=Microsoft Corporation(?:,|$)', signature['subject'])
+                and re.search(r'(?:^|,\s*)O=Microsoft Corporation(?:,|$)', signature['subject']),
+                'Search UIA child의 native/생성시각/session/정확 EdgeWebView 경로/서명이 다릅니다')
+    candidate['boundUiaChildProcesses'] = [p for p in observed['processes'] if p['processId'] in child_pids]
     return candidate
 
 
@@ -336,18 +369,24 @@ class WindowsProbe:
         require(window is not None and windows['foregroundHwnd'] == hwnd,
                 '관측한 OS 창이 현재 전경 창과 다릅니다')
         tree = self.uia(hwnd); validate_uia(tree, hwnd)
-        return {'foreground': window, 'processes': self.processes([window['processId']]), 'uia': [tree]}
+        pids = list(dict.fromkeys([window['processId']] + [n['processId'] for n in tree['nodes'] if n['processId']]))
+        require(len(pids) <= MAX_PROCESSES, 'OS UIA 소유 process 상한을 넘었습니다')
+        return {'foreground': window, 'processes': self.processes(pids), 'uia': [tree]}
 
     def close_verified(self, candidate):
-        classifier = privacy_candidate if candidate['kind'] == 'WWAHost.exe' else paging_candidate
+        classifiers = {'WWAHost.exe': privacy_candidate, 'SystemPropertiesPerformance.exe': paging_candidate,
+                       'SearchHost.exe': search_candidate}
+        require(candidate['kind'] in classifiers, '알 수 없는 OS 창 닫기를 허용하지 않습니다')
+        classifier = classifiers[candidate['kind']]
         fresh = classifier(self.current(candidate['hwnd']), self.session_id(), self.windows_directory())
         require(fresh['process'] == candidate['process'] and
+                fresh.get('boundUiaChildProcesses') == candidate.get('boundUiaChildProcesses') and
                 all(fresh['window'][k] == candidate['window'][k] for k in
                     ('hwnd', 'processId', 'threadId', 'title', 'className', 'visible', 'enabled')),
                 '닫기 직전 OS 창/PID/생성시각/이미지/서명이 변경됐습니다')
         handle = self.kernel.OpenProcess(0x1000, False, candidate['process']['processId'])
         require(handle, '닫기 직전 소유 process handle을 열지 못했습니다')
-        ownership_changed = False; post_send_error = None
+        ownership_changed = False; post_send_error = None; exists_after = None; visible_after = None
         try:
             times = [W.FILETIME() for _ in range(4)]; process = W.WORD(); native = W.WORD()
             require(self.kernel.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]) and
@@ -369,7 +408,9 @@ class WindowsProbe:
                     if not pid.value and not self.user.IsWindow(candidate['hwnd']): break
                     if pid.value != candidate['process']['processId']: ownership_changed = True; break
                     time.sleep(0.1)
-                disappeared = not bool(self.user.IsWindow(candidate['hwnd']))
+                exists_after = bool(self.user.IsWindow(candidate['hwnd']))
+                visible_after = bool(self.user.IsWindowVisible(candidate['hwnd'])) if exists_after and not ownership_changed else False if not exists_after else None
+                disappeared = not exists_after
             except Exception as error:
                 post_send_error = bounded(type(error).__name__); disappeared = False
         finally: self.kernel.CloseHandle(handle)
@@ -377,8 +418,10 @@ class WindowsProbe:
                 'processId': candidate['process']['processId'], 'createdFileTime': candidate['process']['createdFileTime'],
                 'imageSha256': candidate['process']['imageSha256'], 'messageRequests': 1,
                 'verifiedOwner': fresh['process'], 'verifiedClass': fresh['window']['className'],
+                'boundUiaChildProcesses': fresh.get('boundUiaChildProcesses', []),
                 'livePidAndThreadRechecked': True, 'heldProcessCreationAndNativeRechecked': True, 'uiaContextRechecked': True,
                 'ownershipChangedAfterSend': ownership_changed, 'messageDelivered': delivered,
+                'windowExistsAfter': exists_after, 'windowVisibleAfter': visible_after,
                 'postSendErrorType': post_send_error,
                 'windowDisappeared': not ownership_changed and disappeared}
 
@@ -453,12 +496,20 @@ def prepare(probe, env, output):
     try:
         before = observe(probe, env, output / 'before')
         foreground = before['foreground']
-        if foreground and (foreground['title'] == 'Microsoft account' or foreground['className'] == 'Windows.UI.Core.CoreWindow'):
+        if foreground and foreground['title'] == 'Microsoft account':
             result['stage'] = 'privacyOwnerValidation'
             candidate = privacy_candidate(before, probe.session_id(), probe.windows_directory())
             result['stage'] = 'privacyNormalClose'
             closed = probe.close_verified(candidate); result['actions'].append(closed); result['inputsPerformed'] += 1
             require(closed['messageDelivered'] and closed['windowDisappeared'], 'OS 개인정보 창의 정상 닫기가 완료되지 않았습니다')
+        windows = probe.windows(); validate_windows(windows)
+        foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
+        if foreground and foreground['title'] == 'Search' and foreground['className'] == 'Windows.UI.Core.CoreWindow':
+            result['stage'] = 'searchOwnerValidation'
+            candidate = search_candidate(probe.current(foreground['hwnd']), probe.session_id(), probe.windows_directory())
+            result['stage'] = 'searchNormalClose'
+            closed = probe.close_verified(candidate); result['actions'].append(closed); result['inputsPerformed'] += 1
+            require(closed['messageDelivered'] and closed['windowDisappeared'], '관측된 Windows Search 창의 정상 닫기가 완료되지 않았습니다')
         # Known paging-file warning is handled only if it actually becomes foreground.
         windows = probe.windows(); validate_windows(windows)
         foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)

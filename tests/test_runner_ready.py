@@ -84,6 +84,43 @@ class RunnerReadyTests(unittest.TestCase):
         self.assertEqual(candidate['process']['imagePath'], 'C:\\Windows\\System32\\WWAHost.exe')
         self.assertEqual(candidate['operation'], 'WM_CLOSE')
 
+    def search(self):
+        observed = self.oobe(); observed['foreground']['title'] = 'Search'
+        owner = observed['processes'][0]
+        owner['imagePath'] = 'C:\\Windows\\SystemApps\\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\\SearchHost.exe'
+        nodes = [{'name': name, 'automationId': automation, 'controlType': kind, 'processId': pid,
+                  'className': cls, 'enabled': True, 'offscreen': False}for name, automation, kind, pid, cls in [
+                    ('Search', '', 50032, 200, 'Windows.UI.Core.CoreWindow'),
+                    ('Search box', 'SearchTextBox', 50004, 200, 'RichEditBox'),
+                    ('Search - Web content', '', 50033, 201, 'BrowserRootView'),
+                    ('', '', 50033, 202, 'Intermediate D3D Window')]]
+        observed['uia'][0]['nodes'] = nodes
+        for pid in [201, 202]:
+            child = copy.deepcopy(owner); child.update({'processId': pid, 'createdFileTime': 200000,
+                'imagePath': 'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\154.0.4258.53\\msedgewebview2.exe'})
+            child['signature']['subject'] = 'CN=Microsoft Corporation, O=Microsoft Corporation'
+            observed['processes'].append(child)
+        return observed
+
+    def test_exact_signed_search_root_and_native_uia_children_are_selected_without_typing(self):
+        candidate = module().search_candidate(self.search(), 1, 'C:\\Windows')
+        self.assertEqual(candidate['kind'], 'SearchHost.exe'); self.assertEqual(candidate['operation'], 'WM_CLOSE')
+        self.assertEqual([p['processId'] for p in candidate['boundUiaChildProcesses']], [201, 202])
+
+    def test_search_root_textbox_and_child_identity_changes_are_rejected(self):
+        for change in ('root', 'textbox', 'textbox-pid', 'child-pid', 'child-path', 'child-native', 'child-session', 'child-creation', 'child-signature'):
+            observed = self.search(); tree = observed['uia'][0]; child = observed['processes'][1]
+            if change == 'root': tree['nodes'][0]['processId'] = 999
+            if change == 'textbox': tree['nodes'][1]['automationId'] = 'AnotherBox'
+            if change == 'textbox-pid': tree['nodes'][1]['processId'] = 201
+            if change == 'child-pid': child['processId'] = 999
+            if change == 'child-path': child['imagePath'] = 'C:\\Other\\msedgewebview2.exe'
+            if change == 'child-native': child['processMachine'] = 0x8664
+            if change == 'child-session': child['sessionId'] = 2
+            if change == 'child-creation': child['createdFileTime'] = 1
+            if change == 'child-signature': child['signature']['status'] = 'NotSigned'
+            with self.subTest(change=change), self.assertRaises(ValueError): module().search_candidate(observed, 1, 'C:\\Windows')
+
     def test_privacy_selection_rejects_changed_owner_native_session_signature_and_context(self):
         for change in ('pid', 'creation', 'path', 'signature', 'publisher', 'native', 'session',
                        'class', 'title', 'disabled', 'hidden', 'uia-owner', 'uia-error', 'uia-truncated', 'context', 'next-id'):
