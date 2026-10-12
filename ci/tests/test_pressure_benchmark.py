@@ -76,6 +76,14 @@ class PressureBenchmarkTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.m.write_new(path, b'def', 3)
             with self.assertRaises(ValueError): self.m.write_new(Path(temporary)/'too-large', b'abcd', 3)
 
+    def test_post_exit_reader_failure_blocks_a_successful_parent(self):
+        state = {'logCapExceeded':False,'readerError':False}
+        self.assertIsNone(self.m.reader_failure(state))
+        state['logCapExceeded'] = True
+        self.assertEqual(self.m.reader_failure(state), 'logCapExceeded')
+        state['logCapExceeded'] = False; state['readerError'] = True
+        self.assertEqual(self.m.reader_failure(state), 'logReaderFailed')
+
     @unittest.skipUnless(os.name == 'nt', 'Actual Win32 API probe requires the benchmark Windows runner')
     def test_actual_windows_api(self):
         probe = self.m.WindowsProbe()

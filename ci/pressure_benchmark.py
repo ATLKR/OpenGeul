@@ -106,6 +106,12 @@ def write_new(path, raw, cap):
     with path.open('xb') as stream: stream.write(raw)
 
 
+def reader_failure(state):
+    if state['logCapExceeded']: return 'logCapExceeded'
+    if state['readerError']: return 'logReaderFailed'
+    return None
+
+
 def encoded(value): return (json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode()
 def git(*args): return subprocess.check_output(['git',*args],cwd=ROOT,timeout=30).decode().strip()
 def utc(): return datetime.now(timezone.utc).isoformat()
@@ -278,6 +284,7 @@ def compile_measure(jobs, workload):
             finish = state['parentExitMonotonicNs'] or finish
             reader.join(timeout=10)
             if reader.is_alive(): raise ValueError('소유 compiler 원본 stdout이 완료되지 않았습니다')
+            abort = abort or reader_failure(state)
             process.stdout.close()
     except BaseException:
         if abort is None: abort = 'diagnosticException'
