@@ -16,11 +16,11 @@ permissions:
 jobs:
   observe:
     if: >-
-      github.event.repository.private == false && github.repository == 'ATLKR/OpenGeul'
+      github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul'
       && github.event_name == 'workflow_dispatch' && github.actor == 'ATLKR'
       && github.ref == 'refs/heads/diagnostic/source81-wsl-timeline' && github.run_attempt == 1
       && inputs.release_tag == 'source81-readonly-wsl-timeline'
-      && inputs.verify_store_api == false && inputs.submit_to_store == false
+      && inputs.verify_store_api == false && inputs.submit_to_store == false)
     runs-on: windows-11-arm
     timeout-minutes: 5
     steps:
