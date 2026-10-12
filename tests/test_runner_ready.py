@@ -3,7 +3,9 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,6 +55,45 @@ class Observer:
 
 
 class RunnerReadyTests(unittest.TestCase):
+    def test_actual_windows_reader_keeps_foreground_ahead_of_hidden_window_cap(self):
+        value = module(); probe = value.WindowsProbe.__new__(value.WindowsProbe)
+        class User:
+            def GetForegroundWindow(self): return 1000
+            def EnumWindows(self, callback, _):
+                for hwnd in [*range(1, 100), 1000]:
+                    if not callback(hwnd, 0): break
+            def GetWindowThreadProcessId(self, hwnd, pid): pid._obj.value = hwnd + 100; return hwnd + 200
+            def GetWindowTextW(self, hwnd, buffer, _): buffer.value = 'Privacy' if hwnd == 1000 else ''; return len(buffer.value)
+            def GetClassNameW(self, hwnd, buffer, _): buffer.value = 'Windows.UI.Core.CoreWindow'; return len(buffer.value)
+            def GetWindowRect(self, hwnd, rect): return True
+            def IsWindowVisible(self, hwnd): return hwnd == 1000
+            def IsWindowEnabled(self, hwnd): return True
+        probe.user = User(); probe.callback = lambda callback: callback
+        observed = probe.windows(); value.validate_windows(observed)
+        self.assertEqual(len(observed['windows']), 64)
+        self.assertTrue(observed['truncated'])
+        self.assertEqual(observed['windows'][0]['hwnd'], 1000)
+        self.assertEqual(observed['windows'][0]['processId'], 1100)
+
+    def test_actual_uia_reader_uses_standard_control_view_walker_without_value_pattern(self):
+        value = module(); probe = value.WindowsProbe.__new__(value.WindowsProbe)
+        child = SimpleNamespace(CurrentName='Next', CurrentControlType=50000, CurrentAutomationId='Next',
+                                CurrentClassName='Button', CurrentProcessId=200, CurrentIsEnabled=True, CurrentIsOffscreen=False)
+        root = SimpleNamespace(CurrentName='Privacy', CurrentControlType=50032, CurrentAutomationId='',
+                               CurrentClassName='Windows.UI.Core.CoreWindow', CurrentProcessId=200,
+                               CurrentIsEnabled=True, CurrentIsOffscreen=False)
+        walker = SimpleNamespace(GetFirstChildElement=lambda element: child if element is root else None,
+                                 GetNextSiblingElement=lambda element: None)
+        # IUIA owns the COM interface; ControlViewWalker is the standard UIAutomation property.
+        api = SimpleNamespace(iuia=SimpleNamespace(ElementFromHandle=lambda hwnd: root, ControlViewWalker=walker))
+        with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(),
+                        'pywinauto.uia_defines': SimpleNamespace(IUIA=lambda: api)}):
+            observed = probe.uia(12)
+        value.validate_uia(observed, 12)
+        self.assertNotIn('error', observed)
+        self.assertEqual([row['name'] for row in observed['nodes']], ['Privacy', 'Next'])
+        self.assertEqual([row['processId'] for row in observed['nodes']], [200, 200])
+
     def test_emulated_controller_native_arm_host_is_observed_without_inputs(self):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / 'proof'

@@ -172,6 +172,7 @@ class WindowsProbe:
         foreground = int(self.user.GetForegroundWindow() or 0); rows = []; truncated = False
         def read(hwnd, _):
             nonlocal truncated
+            if any(row['hwnd'] == int(hwnd) for row in rows): return True
             if len(rows) >= MAX_WINDOWS: truncated = True; return False
             pid = W.DWORD(); tid = self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             if not tid or not pid.value: return True
@@ -181,6 +182,9 @@ class WindowsProbe:
                          'className': bounded(cls.value), 'visible': bool(self.user.IsWindowVisible(hwnd)),
                          'enabled': bool(self.user.IsWindowEnabled(hwnd)), 'rectangle': [rect.left, rect.top, rect.right, rect.bottom]})
             return True
+        # EnumWindows may enumerate many hidden windows before the foreground.
+        # Read that exact HWND first, retaining the same total bound and no input.
+        if foreground: read(foreground, 0)
         callback = self.callback(read); self.user.EnumWindows(callback, 0)
         return {'foregroundHwnd': foreground, 'windows': rows, 'truncated': truncated}
 
@@ -188,7 +192,7 @@ class WindowsProbe:
         result = {'hwnd': hwnd, 'nodes': [], 'truncated': False}
         try:
             from pywinauto.uia_defines import IUIA
-            api = IUIA(); root = api.iuia.ElementFromHandle(hwnd); walker = api.tree_walker; pending = [root]
+            api = IUIA(); root = api.iuia.ElementFromHandle(hwnd); walker = api.iuia.ControlViewWalker; pending = [root]
             while pending and len(result['nodes']) < MAX_UIA:
                 element = pending.pop(); result['nodes'].append({'name': bounded(element.CurrentName),
                     'controlType': int(element.CurrentControlType), 'automationId': bounded(element.CurrentAutomationId),
