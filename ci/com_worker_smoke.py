@@ -29,6 +29,7 @@ UNIT_CASES = {
         'windows::tests::partial_owned_server_is_cleaned_without_removing_unknown_values',
         'windows::tests::fixed_package_class_is_never_a_temporary_cleanup_target',
         'windows::tests::current_parent_pid_cannot_be_attached_as_a_terminable_worker',
+        'windows::tests::owned_activation_only_accepts_exact_creator_registration',
     },
     'wire': {
         'protected_header_preserves_argv_and_raw_environment',
