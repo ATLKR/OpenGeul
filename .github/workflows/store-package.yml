@@ -1,110 +1,66 @@
-name: OpenGeul Store 패키지
+name: OpenGeul 네이티브 COM 격리 진단
 'on':
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Store 신원으로 재포장할 기존 검증 완료 OpenGeul 릴리스
-        type: string
-        required: true
-      verify_store_api:
-        description: 앱 GET만으로 설정된 Store API 인증과 읽기 권한 확인
-        type: boolean
-        required: false
-        default: false
-      submit_to_store:
-        description: 최초 Store 공개 이후 검증된 안정판 업데이트 제출
-        type: boolean
-        required: false
-        default: false
+  workflow_dispatch: {}
 permissions:
   contents: read
-  actions: read
 concurrency:
-  group: opengeul-store
+  group: opengeul-native-com-diagnostic
   cancel-in-progress: false
-  queue: max
 env:
   PYTHONUTF8: '1'
 jobs:
-  package:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main')
-    runs-on: windows-2022
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-      issues: write
+  native-com:
+    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diagnostic/native-com-113' && github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR' && github.run_attempt == 1)
+    name: Native COM (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
     steps:
+    - name: Windows에서 정확한 소스 바이트 보존
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-    - name: Store 런타임 보존 검사
-      shell: pwsh
-      run: python -m unittest discover -s tests -p test_store_package.py -v
-    - name: 검증 완료 릴리스의 런타임을 유지하며 Store 신원으로 재포장
-      id: package
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-        $makeappx = Get-ChildItem $sdk -Filter makeappx.exe -Recurse |
-          Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
-        if (-not $makeappx) { throw 'Windows SDK MakeAppx is missing.' }
-        python scripts/store_package.py --release-tag $env:RELEASE_TAG --makeappx $makeappx.FullName
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: Store 소개용 실제 Windows 편집기 화면 캡처
+        architecture: x64
+    - name: 진단 소스와 네이티브 Rust 호스트 확인
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
         $PSNativeCommandUseErrorActionPreference = $true
-        python -m pip install -r e2e/requirements.txt
-        ./e2e/ensure-webview2.ps1
-        python e2e/store_screenshot.py --exe .work/store-payload/OpenGeul.exe --output store-output
-        python ci/evidence.py size --limit-mib 96 store-output
-    - name: 제출 전 검증한 Store 패키지 보존
+        if ((git rev-parse HEAD).Trim() -ne $env:GITHUB_SHA) { throw 'Checkout SHA mismatch' }
+        $arch = if ('${{ matrix.os }}' -eq 'windows-11-arm') { 'arm64' } else { 'x64' }
+        $target = if ($arch -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+        $toolchain = "1.93.1-$target"
+        rustup toolchain install $toolchain --profile minimal
+        rustup run $toolchain rustc --version --verbose
+        "OPENGEUL_DIAG_ARCH=$arch" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "OPENGEUL_DIAG_TARGET=$target" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "OPENGEUL_DIAG_TOOLCHAIN=$toolchain" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+    - name: 실제 SCM worker와 표준입출력·충돌 격리 검사
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        python ci/com_worker_smoke.py --architecture $env:OPENGEUL_DIAG_ARCH --target $env:OPENGEUL_DIAG_TARGET --toolchain $env:OPENGEUL_DIAG_TOOLCHAIN --output com-smoke
+    - name: 원본 진단 자료의 크기 제한 확인
+      if: always()
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 32 com-smoke
+    - name: 원본 Windows COM 진단 자료 보존
+      if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-store-${{ github.run_id }}
-        path: store-output/*
+        name: opengeul-com-smoke-${{ matrix.os }}-${{ github.run_id }}
+        path: com-smoke/*
         retention-days: 1
         if-no-files-found: error
         compression-level: 9
-    - name: Microsoft Store에 안정판 업데이트 제출
-      if: inputs.submit_to_store
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ inputs.release_tag }}
-        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: |
-        $ErrorActionPreference = 'Stop'
-        $PSNativeCommandUseErrorActionPreference = $true
-        python scripts/store_submit.py --release-tag $env:RELEASE_TAG --package-directory store-output
-  verify-api:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/main' && inputs.verify_store_api)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        persist-credentials: false
-    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-      with:
-        python-version: '3.12'
-    - name: OAuth 인증과 고정 Store 앱 GET 확인
-      env:
-        STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-        STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-        STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-        STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      run: python scripts/check_store_api.py
