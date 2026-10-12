@@ -26,6 +26,7 @@ from release_pair import ARCHES, _check_wack, _copy, _fresh, _separate, basename
 from store_package import STORE_IDENTITY
 from windows_arch import machine_for, require_architecture
 from windows_components import identity, regular, sha
+from mcp_qualification import verify as verify_mcp
 
 STORE_CAP = 96 * 1024 * 1024
 RAW_CAP = 16 * 1024 * 1024
@@ -115,6 +116,11 @@ def _native(evidence, details, current, arch):
     gui = records[0]
     require(launch.get('architecture') == arch and launch.get('processId') == gui['processId'] and launch.get('executable') == gui['imagePath'] and gui['runningAtInspection'] is True, '실제 owned GUI가 검사 중 종료됐거나 다른 PID임')
     require(type(cli.get('exitCode')) is int and cli['exitCode'] == 0 and type(cli.get('helpBytes')) is int and 0 < cli['helpBytes'] <= 1024*1024 and digest(cli.get('helpSha256')), 'native CLI 정상 종료/help 증거 필요')
+    for record in (installation, cli):
+        proof = verify_mcp(record.get('mcp'), arch, details['architectures'][arch]['runtimeSha256']['Tools/rhwp.exe'],
+            full_name, current['commit'], current['runId'], current['runAttempt'])
+        require(proof['serverNativeArchitecture']['bytes'] == records[1]['bytes'], 'MCP 실제 CLI 크기가 Store 원본과 다름')
+    require(encoded(installation['mcp']) == encoded(cli['mcp']), '설치/MSIX와 CLI의 MCP 증명이 서로 다름')
     web = gui.get('webview2Native')
     require(isinstance(web, dict) and web.get('rootProcessId') == gui['processId'] and web.get('architecture') == arch and web.get('helperSha256') == helper_sha, 'GUI가 소유한 native WebView2 증거 필요')
     processes = web.get('processes')

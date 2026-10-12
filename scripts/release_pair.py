@@ -26,6 +26,7 @@ from prepare_payload import prepare, safe_name, verify_checksums, stream_hash
 from wack_result import inspect
 from windows_arch import component_artifact_name, require_architecture
 from windows_components import identity, regular, sha, _ancestors
+from mcp_qualification import verify as verify_mcp
 
 ARCHES = ('x64', 'arm64')
 ARCH_LIMIT = 96 * 1024 * 1024
@@ -169,6 +170,10 @@ def _architecture(package, wack, arch, expected=None):
             with archive.open(runtime) as stream:
                 require(stream_hash(stream) == record['sha256'], 'MSIX runtime과 producer 해시 불일치')
     _check_wack(wack, package_identity, msix_hash, arch)
+    installation = read_json(wack / 'install.json')
+    proof = verify_mcp(installation.get('mcp'), arch, records['cli']['sha256'],
+        installation['packageFullName'], current['commit'], current['runId'], current['runAttempt'])
+    require(proof['serverNativeArchitecture']['bytes'] == records['cli']['size'], 'MCP 실제 CLI 크기가 원본과 다름')
     return provenance, current, names
 
 

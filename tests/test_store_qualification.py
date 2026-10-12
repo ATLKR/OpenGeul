@@ -33,6 +33,12 @@ class StoreQualificationTests(unittest.TestCase):
                 for role, record in components['components'].items():
                     record['artifactName'] = component_artifact_name(role, '38181680763', arch)
             self.fixture.mutate_prov(arch, bind_run)
+            installation_path = self.fixture.wacks[arch] / 'install.json'
+            installation = json.loads(installation_path.read_bytes())
+            cli = self.fixture.runtime[arch]['Tools/rhwp.exe']
+            installation['mcp'] = fixtures.installed_proof(arch, hashlib.sha256(cli).hexdigest(),
+                installation['packageFullName'], 'a' * 40, '38181680763', '2', len(cli))
+            self.fixture.write_json(installation_path, installation)
         self.fixture.assemble(); self.source = self.fixture.output
         self.root = self.fixture.root; self.store = self.root / 'store'; self.store.mkdir()
         self.outputs = {a: self.root / ('qualification-' + a) for a in ('x64', 'arm64')}
@@ -61,6 +67,8 @@ class StoreQualificationTests(unittest.TestCase):
             self.fixture.write_json(wack / 'wack.json', inspect(wack / 'wack.xml', STORE_IDENTITY['name'], '1.1.3.0', 0))
             full_name = f"{STORE_IDENTITY['name']}_1.1.3.0_{arch}__{release_pair._publisher_id(STORE_IDENTITY['publisher'])}"
             install = json.loads((wack / 'install.json').read_bytes()); install.update(originalSha256=entries[arch]['sha256'], publisher=STORE_IDENTITY['publisher'], packageFullName=full_name, fileTypes=['.hwp', '.hwpx'])
+            install['mcp'] = fixtures.installed_proof(arch, hashes['Tools/rhwp.exe'], full_name,
+                'b' * 40, '9999', '1', len(runtime['Tools/rhwp.exe']))
             self.fixture.write_json(wack / 'install.json', install)
             pid = 100 if arch == 'x64' else 200
             native = {'architecture': arch, 'processId': pid, 'imagePath': f'C:\\Program Files\\WindowsApps\\{full_name}\\OpenGeul.exe',
@@ -78,7 +86,7 @@ class StoreQualificationTests(unittest.TestCase):
             cli = dict(native); cli.pop('webview2Native'); cli.update(processId=pid + 2, imagePath=f'C:\\Program Files\\WindowsApps\\{full_name}\\Tools\\rhwp.exe',
                 sha256=hashes['Tools/rhwp.exe'], bytes=len(runtime['Tools/rhwp.exe']), runningAtInspection=False)
             self.fixture.write_json(wack / 'installed-cli.json', {'success': True, 'packageFullName': full_name, 'exitCode': 0,
-                'helpBytes': 10, 'helpSha256': hashlib.sha256(b'rhwp help\n').hexdigest(), 'nativeArchitecture': cli})
+                'helpBytes': 10, 'helpSha256': hashlib.sha256(b'rhwp help\n').hexdigest(), 'nativeArchitecture': cli, 'mcp': install['mcp']})
         (self.store / 'source-provenance.json').write_bytes((self.source / 'provenance.json').read_bytes())
         self.details = {'formatVersion': 2, 'storeAppId': '9PJH0T3PHRMF', 'identity': dict(STORE_IDENTITY), 'version': '1.1.3',
             'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3-dev.68.2', 'sourceReleaseId': 200,
@@ -156,6 +164,45 @@ class StoreQualificationTests(unittest.TestCase):
     def test_wrong_store_identity_is_rejected(self):
         self.details['identity']['name'] = 'other'; self.fixture.write_json(self.store / 'store-provenance.json', self.details); self.fixture.sums(self.store)
         self.rejected_collect()
+
+    def test_store_full_wack_without_installed_mcp_proof_is_rejected(self):
+        self.change_json(self.evidence['arm64']/'install.json',lambda d:d.pop('mcp',None))
+        self.rejected_collect()
+
+    def test_store_installed_cli_mcp_is_mandatory_and_equal_to_installation(self):
+        path = self.evidence['arm64'] / 'installed-cli.json'
+        original = path.read_bytes()
+        for mutate in (lambda d:d.pop('mcp'),lambda d:d['mcp']['stressFixture'].update(sha256='0'*64)):
+            with self.subTest(mutate=mutate):
+                path.write_bytes(original);self.change_json(path,mutate);self.rejected_collect()
+
+    def test_both_store_mcp_proofs_cannot_reuse_source_execution_or_false_case(self):
+        paths = [self.evidence['arm64']/name for name in ('install.json','installed-cli.json')]
+        original = {p:p.read_bytes() for p in paths}
+        for mutate in (lambda p:p.update(sourceCommit='a'*40,sourceRun='38181680763',runAttempt='2'),
+                lambda p:p['cases'][-1]['checks'].update(ciphertextUnchanged=False),
+                lambda p:p['workerIsolation']['worker'].update(sha256='0'*64)):
+            with self.subTest(mutate=mutate):
+                for path in paths:
+                    path.write_bytes(original[path]);self.change_json(path,lambda d:mutate(d['mcp']))
+                self.rejected_collect()
+
+    def test_qualified_inspector_rejects_mcp_tampering_even_after_all_hashes_rebuilt(self):
+        self.collect('x64'); self.collect('arm64'); self.verify()
+        receipt_path = self.store / 'store-qualification.json'
+        receipt = json.loads(receipt_path.read_bytes())
+        for name in ('install-arm64.json','installed-cli-arm64.json'):
+            self.change_json(self.store/name,lambda d:d['mcp']['workerIsolation'].update(forcedTermination=True))
+            receipt['architectures']['arm64']['raw'][name] = {'size':(self.store/name).stat().st_size,
+                'sha256':hashlib.sha256((self.store/name).read_bytes()).hexdigest()}
+        self.fixture.write_json(receipt_path,receipt)
+        prefix = (self.store/'SHA256SUMS.txt').read_bytes()[:receipt['originalChecksumsBytes']]
+        originals = {line.split('  ',1)[1] for line in prefix.decode().splitlines()}
+        (self.store/'SHA256SUMS.txt').write_bytes(prefix + ''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n'
+            for p in sorted(self.store.iterdir()) if p.name not in originals | {'SHA256SUMS.txt'}).encode())
+        # 원본 prefix/raw hashes/SUMS를 모두 맞춰도 실제 MCP 판정은 재검사되어야 한다.
+        qual.verify_checksums(self.store)
+        with self.assertRaises(ValueError):qual.inspect_qualified(self.store,self.source,env=self.env)
 
     def test_wrong_store_architecture_is_rejected(self):
         self.details['architectures']['arm64']['package'] = self.details['architectures']['x64']['package']

@@ -13,7 +13,8 @@ from unittest.mock import patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'e2e')]
+sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'e2e'), str(ROOT / 'tests')]
+from test_mcp_qualification import installed_proof
 from buildkit import DEV_IDENTITY, manifest
 from windows_arch import component_artifact_name, machine_for
 from wack_result import inspect as inspect_wack
@@ -102,7 +103,10 @@ class StorePackageTests(unittest.TestCase):
             (wack / 'install.json').write_text(json.dumps({
                 'success': True, 'originalSha256': provenance['sha256'].upper(),
                 'signedTestPackageSha256': signed.upper(), 'publisher': DEV_IDENTITY['publisher'],
-                'packageFullName': f"{DEV_IDENTITY['name']}_{PRODUCT_VERSION}.0_{architecture}__9za217j1njc2t"}) + '\n')
+                'packageFullName': f"{DEV_IDENTITY['name']}_{PRODUCT_VERSION}.0_{architecture}__9za217j1njc2t",
+                'mcp': installed_proof(architecture,components['components']['cli']['sha256'],
+                    f"{DEV_IDENTITY['name']}_{PRODUCT_VERSION}.0_{architecture}__9za217j1njc2t",
+                    'a' * 40, '123', '1', components['components']['cli']['size'])}) + '\n')
             (wack / 'wack-context.json').write_text(json.dumps({
                 'invocationMode': 'documented-appxpackagepath', 'inputPackageSha256': signed.upper(),
                 'runnerSessionId': 1, 'wackSessionId': 1}) + '\n')

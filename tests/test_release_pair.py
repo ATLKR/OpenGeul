@@ -10,7 +10,8 @@ import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'e2e')]
+sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'e2e'), str(ROOT / 'tests')]
+from test_mcp_qualification import installed_proof
 from buildkit import DEV_IDENTITY, manifest
 from windows_arch import component_artifact_name, machine_for
 from wack_result import inspect
@@ -69,6 +70,8 @@ class ReleasePairTests(unittest.TestCase):
         install = {'success': True, 'originalSha256': hashlib.sha256(msix.read_bytes()).hexdigest().upper(),
             'signedTestPackageSha256': signed.upper(), 'publisher': DEV_IDENTITY['publisher'],
             'packageFullName': f"{DEV_IDENTITY['name']}_1.1.3.0_{arch}__9za217j1njc2t"}
+        install['mcp'] = installed_proof(arch, components['components']['cli']['sha256'], install['packageFullName'],
+            'a' * 40, '1234', '2', components['components']['cli']['size'])
         self.write_json(wack / 'install.json', install)
         self.write_json(wack / 'wack-context.json', {'invocationMode': 'documented-appxpackagepath',
             'inputPackageSha256': signed.upper(), 'runnerSessionId': 1, 'wackSessionId': 1})
@@ -115,6 +118,21 @@ class ReleasePairTests(unittest.TestCase):
 
     def test_original_checksum_tampering_rejected(self):
         (self.packages['arm64'] / 'rhwp-help.txt').write_text('tampered'); self.rejected()
+
+    def test_full_source_wack_without_installed_mcp_proof_is_rejected(self):
+        installation = self.wacks['arm64']/'install.json'
+        value = json.loads(installation.read_bytes());value.pop('mcp',None);self.write_json(installation,value)
+        self.rejected()
+
+    def test_rehashed_source_mcp_stale_binding_or_false_case_is_rejected(self):
+        self.assemble()
+        path = self.output / 'install-arm64.json'; original = path.read_bytes()
+        for mutate in (lambda p:p.update(sourceRun='999'), lambda p:p.update(helperSha256='0'*64),
+                lambda p:p['cases'][3]['checks'].update(sourceTextMatched=False),
+                lambda p:p['serverNativeArchitecture'].update(bytes=1)):
+            with self.subTest(mutate=mutate):
+                value = json.loads(original); mutate(value['mcp']); self.write_json(path,value); self.sums(self.output)
+                with self.assertRaises(ValueError): pair.verify_pair(self.output)
 
     def test_wrong_architecture_declaration_rejected(self):
         self.mutate_prov('arm64', lambda d: d.update(architecture='x64')); self.rejected()
