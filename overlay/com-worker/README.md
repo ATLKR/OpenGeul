@@ -37,6 +37,8 @@ Linux의 실제 wire 검사와 Python 소스 변환 검사, Rust 1.93.1의 x64/A
 
 첫 실제 x64 진단에서는 등록 5개·wire 8개가 통과했지만 첫 `run_cli`가 OS 오류 5로 실패했다. 해당 원본 오류에는 operation 이름이 없어 실패 API를 직접 입증하지 않는다. 기본 LaunchingUser와 AAA 금지의 공식 계약 충돌을 근거로 위 per-call 후보를 마련했으며, 후보의 실제 Windows 통과는 새 실행으로 증명해야 한다. 이후 CoCreateInstance·proxy blanket 오류는 사용자 입력 없이 고정 operation 이름·HRESULT·원래 I/O 오류 종류를 기록한다.
 
+per-call 후보의 다음 x64 진단은 등록 6개·wire 8개를 통과한 뒤 첫 작업의 pipe 대기에서 실패했다. 원본에는 채널 정보가 없어 정확한 connect/ACK/header 단계나 작업자 실패 API는 아직 확정하지 않는다. 후속 관측은 같은 timeout·권한·PID/nonce 검증을 유지하며 부모 오류에 고정 채널·wait 결과·보유한 작업자 handle의 PID/종료 코드를 붙인다. dev-only bootstrap 오류는 컴파일한 manifest의 저장소 `com-smoke`에 새 파일로 기록한다. 4 KiB 상한의 고정 operation·오류 종류/번호·PID/생성 시간·native machine만 쓰고, 환경·argv·암호·원본 오류 메시지는 파일에 쓰지 않는다. 이 관측 파일 작성 코드는 제품으로 복사하지 않는다.
+
 표준 사용자/HKCU, 관리자/UAC 비활성/HKLM, 실제 설치된 MSIX fixed CLSID와 package identity, x64/ARM64 native 실행, 실제 MCP 도구의 성공·암호·부분 batch·ir-diff exit 3·오류·worker 강제 종료 후 부모 생존, 등록 강제 종료 정리 제어와 새 전체 WACK 결과는 후속 Windows 실행 증거가 필요하다. 이 문서는 그 결과를 대신하지 않는다.
 
 ## 공식 근거

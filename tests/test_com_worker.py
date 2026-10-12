@@ -156,5 +156,14 @@ class ComWorkerSourceTests(unittest.TestCase):
         self.assertIn('owned_activation_context(&clsid, registration.as_ref())?', native)
         self.assertIn('CoCreateInstance(&guid(&clsid)?, None, context)', native)
 
+    def test_handshake_errors_name_static_channel_without_logging_private_header(self):
+        self.helper().apply(self.source)
+        native = (self.core/'src/opengeul_com_worker/windows.rs').read_text()
+        self.assertIn('pipe_error("parent stdin connect", &process, error)', native)
+        self.assertIn('pipe_error("parent stdout ACK length", &process, error)', native)
+        self.assertIn('worker stdin GetNamedPipeServerProcessId', native)
+        self.assertIn('wait=0x', native)
+        self.assertIn('const BOOTSTRAP_SECONDS: u64 = 65;', native)
+
 
 if __name__ == '__main__': unittest.main()
