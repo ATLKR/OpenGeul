@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -129,6 +130,7 @@ class Session:
 
     def native_dialog(self, target: Path|None):
         from pywinauto import Desktop
+        from pywinauto.controls.hwndwrapper import InvalidWindowHandle
         # UIA can omit these shell dialogs on hosted desktops. Pin the exact HWND:
         # an invalid-file open can replace the file picker immediately with another
         # #32770 error dialog, and a dynamic WindowSpecification would mistake that
@@ -141,7 +143,41 @@ class Session:
         if target is not None:
             # Visibility can precede shell control creation; keep this exact HWND.
             try:
-                control=until(lambda: filename_control(dialog.descendants()),timeout=20)
+                user32=ctypes.windll.user32
+                def identity():
+                    pid=ctypes.c_uint32();name=ctypes.create_unicode_buffer(256)
+                    thread=user32.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+                    if (dialog.handle!=hwnd or not user32.IsWindow(hwnd)
+                            or not user32.IsWindowVisible(hwnd) or not user32.IsWindowEnabled(hwnd)
+                            or not thread or pid.value!=self.proc.pid
+                            or not user32.GetClassNameW(hwnd,name,len(name)) or name.value!='#32770'):
+                        raise RuntimeError('Native filename dialog ownership changed')
+                    return thread
+                bound_thread=identity()
+                def filename_ready():
+                    if identity()!=bound_thread:
+                        raise RuntimeError('Native filename dialog thread changed')
+                    try:
+                        controls=dialog.descendants()
+                    except InvalidWindowHandle as exc:
+                        # pywinauto 0.6.9 stores this HWND only in its fixed message.
+                        match=re.fullmatch(r'Handle ([1-9][0-9]*) is not a vaild window handle',str(exc))
+                        if (not match or int(match[1])==hwnd or user32.IsWindow(int(match[1]))):
+                            raise
+                        try:
+                            unchanged=identity()==bound_thread
+                        except RuntimeError:
+                            raise exc
+                        if not unchanged:
+                            raise
+                        return False
+                    if identity()!=bound_thread:
+                        raise RuntimeError('Native filename dialog thread changed')
+                    selected=filename_control(controls)
+                    if identity()!=bound_thread:
+                        raise RuntimeError('Native filename dialog thread changed')
+                    return selected
+                control=until(filename_ready,timeout=20)
             except Exception:
                 self._record_picker_readiness_failure(dialog,hwnd)
                 raise

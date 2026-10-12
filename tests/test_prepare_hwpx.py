@@ -1,5 +1,6 @@
 """Cancellation must finish in the application before the native driver continues."""
 import importlib.util
+import ctypes
 import json
 from pathlib import Path
 import sys
@@ -87,8 +88,26 @@ class NativePickerReadinessTests(unittest.TestCase):
         self.api = patch.dict(sys.modules, {'pywinauto': types.SimpleNamespace(Desktop=lambda **kw: self.desktop)})
         self.api.start()
         self.addCleanup(self.api.stop)
+        class InvalidWindowHandle(RuntimeError):
+            pass
+        error_api = patch.dict(sys.modules, {
+            'pywinauto.controls': types.ModuleType('pywinauto.controls'),
+            'pywinauto.controls.hwndwrapper': types.SimpleNamespace(InvalidWindowHandle=InvalidWindowHandle)})
+        error_api.start()
+        self.addCleanup(error_api.stop)
+        self.closed = False
+        self.button.click_input.side_effect = lambda: setattr(self, 'closed', True)
+        def thread(hwnd, pid):
+            pid._obj.value = 123
+            return 7
+        def classname(hwnd, text, size):
+            text.value = '#32770'
+            return len(text.value)
         self.driver.ctypes = types.SimpleNamespace(windll=types.SimpleNamespace(
-            user32=types.SimpleNamespace(IsWindow=lambda hwnd: False, IsWindowVisible=lambda hwnd: False)))
+            user32=types.SimpleNamespace(IsWindow=lambda hwnd: not self.closed,
+                IsWindowVisible=lambda hwnd: not self.closed, IsWindowEnabled=lambda hwnd: True,
+                GetWindowThreadProcessId=thread, GetClassNameW=classname)),
+            c_uint32=ctypes.c_uint32, byref=ctypes.byref, create_unicode_buffer=ctypes.create_unicode_buffer)
         self.driver.until = Mock(side_effect=self.poll)
 
     def poll(self, check, timeout=25, **kwargs):
