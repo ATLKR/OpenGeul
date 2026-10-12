@@ -106,7 +106,7 @@ def _publisher_id(publisher):
     return ''.join(alphabet[int(bits[i:i + 5], 2)] for i in range(0, 65, 5))
 
 
-def _check_wack(folder, package_identity, msix_hash, arch):
+def _check_wack(folder, package_identity, msix_hash, arch, *, unsigned=None, current=None, scope=None, original_files=None):
     version = package_identity['Version']; name = package_identity['Name']; publisher = package_identity['Publisher']
     installation = read_json(folder / 'install.json')
     require(installation.get('success') is True and digest(installation.get('originalSha256')) == msix_hash, '설치 원본 MSIX 해시/성공 불일치')
@@ -123,6 +123,15 @@ def _check_wack(folder, package_identity, msix_hash, arch):
     report = ET.fromstring((folder / 'wack.xml').read_bytes())
     embedded = report.findall('./APPLICATIONS/Installed_Programs/Program[@Source="AppxPackage"]/Indicators/WindowsStoreAppManifestIndicators/PackageManifest/Package/Identity')
     require(len(embedded) == 1 and all(embedded[0].get(k) == v for k, v in package_identity.items()), 'WACK embedded package identity 불일치')
+    if arch == 'arm64':
+        require(unsigned is not None and current is not None and scope in ('source','store') and original_files is not None,
+                'ARM 네이티브 설치·SDK 원본 결합 재검증에 필요한 바이트/현재 실행 없음')
+        import native_wack_transport
+        split=native_wack_transport.verify_split(installation,context,unsigned,package_identity,current,scope,original_files)
+        require(report.get('VERSION') == split['controller']['tool']['version'], 'raw SDK XML과 실제 stock WACK 버전 불일치')
+        require(type(context.get('runnerSessionId')) is int and context['runnerSessionId']>0
+            and type(context.get('wackSessionId')) is int and context['wackSessionId']==context['runnerSessionId'],
+            '같은 실제 desktop session에서 WACK 실행 필요')
 
 
 def _architecture(package, wack, arch, expected=None):
@@ -169,7 +178,10 @@ def _architecture(package, wack, arch, expected=None):
             require(type(record['size']) is int and record['size'] == archive.getinfo(runtime).file_size, '구성 요소 runtime 크기 불일치')
             with archive.open(runtime) as stream:
                 require(stream_hash(stream) == record['sha256'], 'MSIX runtime과 producer 해시 불일치')
-    _check_wack(wack, package_identity, msix_hash, arch)
+    if arch=='arm64':
+        import native_wack_transport
+        _check_wack(wack,package_identity,msix_hash,arch,unsigned=msix,current=current,scope='source',original_files=native_wack_transport._files(package))
+    else:_check_wack(wack, package_identity, msix_hash, arch)
     installation = read_json(wack / 'install.json')
     proof = verify_mcp(installation.get('mcp'), arch, records['cli']['sha256'],
         installation['packageFullName'], current['commit'], current['runId'], current['runAttempt'])

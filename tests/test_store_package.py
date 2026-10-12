@@ -117,6 +117,8 @@ class StorePackageTests(unittest.TestCase):
             (wack / 'wack.json').write_text(json.dumps(inspect_wack(
                 wack / 'wack.xml', DEV_IDENTITY['name'], PRODUCT_VERSION + '.0', 0)) + '\n')
         output = root / 'pair'
+        import native_split_fixture
+        native_split_fixture.bind_source(packages['arm64'],wacks['arm64'])
         release_pair.assemble(packages['x64'], packages['arm64'], wacks['x64'], wacks['arm64'], output,
                               env={'GITHUB_REPOSITORY': 'ATLKR/OpenGeul', 'GITHUB_SHA': 'a' * 40,
                                    'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'})
@@ -433,7 +435,9 @@ class StorePackageTests(unittest.TestCase):
             checksums.write_text(checksums.read_text().replace(previous + '  rhwp-help.txt',
                                  hashlib.sha256(help_path.read_bytes()).hexdigest() + '  rhwp-help.txt'))
             self.checksum_directory(remote)
-            self.assertEqual(release_pair.verify_pair(remote), release_pair.verify_pair(source))
+            # Rehashing modified Source6 metadata cannot replace the original
+            # successful ARM producer's API-bound complete input snapshot.
+            with self.assertRaises(ValueError):release_pair.verify_pair(remote)
             self.assertNotEqual(release_pair.source_fingerprint(remote), release_pair.source_fingerprint(source))
             release = {'id': 8, 'tag_name': f'v{PRODUCT_VERSION}', 'draft': False,
                        'assets': [{'name': path.name, 'size': path.stat().st_size, 'state': 'uploaded'}
@@ -451,7 +455,7 @@ class StorePackageTests(unittest.TestCase):
             with patch.dict(os.environ, self.release_environment(), clear=True), \
                     patch.object(store_package, 'github', side_effect=github), \
                     patch.object(store_package.subprocess, 'run', side_effect=download):
-                with self.assertRaisesRegex(ValueError, 'bytes'):
+                with self.assertRaisesRegex(ValueError, 'byte'):
                     store_package.ensure_source_release(f'v{PRODUCT_VERSION}', source)
             self.assertEqual(len(commands), 1)
             self.assertEqual({path.name: path.read_bytes() for path in remote.iterdir()}, before)

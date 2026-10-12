@@ -79,6 +79,20 @@ class ReleasePairTests(unittest.TestCase):
         <APPLICATIONS><Installed_Programs><Program Source="AppxPackage" Name="{DEV_IDENTITY['name']}" Version="1.1.3.0"><Indicators><WindowsStoreAppManifestIndicators><PackageManifest><Package><Identity Name="{DEV_IDENTITY['name']}" Publisher="{DEV_IDENTITY['publisher']}" Version="1.1.3.0" ProcessorArchitecture="{arch}"/></Package></PackageManifest></WindowsStoreAppManifestIndicators></Indicators></Program></Installed_Programs></APPLICATIONS>
         <TEST NAME="Required"><RESULT>PASS</RESULT></TEST><TEST NAME="Blocked executables" OPTIONAL="TRUE"><RESULT>PASS</RESULT></TEST></REPORT>'''
         (wack / 'wack.xml').write_text(xml, encoding='utf-8'); self.summary(arch)
+        if arch=='arm64':self.rebind_split()
+
+    def rebind_split(self):
+        import native_split_fixture
+        import native_wack_transport
+        arch='arm64';package=self.packages[arch];wack=self.wacks[arch]
+        provenance=json.loads((package/'provenance.json').read_bytes())
+        installation=json.loads((wack/'install.json').read_bytes());installation.pop('armNativeSplit',None)
+        binding={'repository':provenance['repository'],'commit':provenance['commit'],'runId':provenance['runId'],
+            'runAttempt':provenance['windowsComponents']['runAttempt']}
+        _,installation,join,_=native_split_fixture.make_split(package/provenance['package'],installation,binding,'source',native_wack_transport._files(package))
+        self.write_json(wack/'install.json',installation)
+        context=json.loads((wack/'wack-context.json').read_bytes());context.update(inputPackageSha256=installation['signedTestPackageSha256'],nativeSignedJoin=join)
+        self.write_json(wack/'wack-context.json',context)
 
     def summary(self, arch):
         w = self.wacks[arch]
@@ -123,6 +137,10 @@ class ReleasePairTests(unittest.TestCase):
         installation = self.wacks['arm64']/'install.json'
         value = json.loads(installation.read_bytes());value.pop('mcp',None);self.write_json(installation,value)
         self.rejected()
+
+    def test_arm64_legacy_install_success_without_mandatory_native_sdk_join_is_rejected(self):
+        path=self.wacks['arm64']/'install.json';value=json.loads(path.read_bytes());value.pop('armNativeSplit',None)
+        self.write_json(path,value);self.rejected()
 
     def test_rehashed_source_mcp_stale_binding_or_false_case_is_rejected(self):
         self.assemble()

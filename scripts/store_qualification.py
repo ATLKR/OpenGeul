@@ -141,7 +141,12 @@ def _native(evidence, details, current, arch):
 
 def _proof(details, current, arch, evidence):
     paths = [evidence / name for name in RAW]; budget(paths, RAW_CAP)
-    _check_wack(evidence, _package_identity(details, arch), details['architectures'][arch]['sha256'], arch)
+    if arch=='arm64':
+        import native_wack_transport
+        directory=Path(details['_directory'])
+        _check_wack(evidence,_package_identity(details,arch),details['architectures'][arch]['sha256'],arch,
+            unsigned=directory/details['architectures'][arch]['package'],current=current,scope='store',original_files=native_wack_transport._files(directory))
+    else:_check_wack(evidence, _package_identity(details, arch), details['architectures'][arch]['sha256'], arch)
     _native(evidence, details, current, arch)
     names = {name: Path(name).stem + '-' + arch + Path(name).suffix for name in RAW}
     raw = {names[name]: {'size': (evidence / name).stat().st_size, 'sha256': sha(evidence / name)} for name in RAW}
@@ -164,7 +169,8 @@ def select(architecture, directory, output, *, env=None):
 def collect(architecture, directory, evidence, output, *, env=None):
     require_architecture(architecture); _fresh(output); _separate(output, directory, evidence)
     details, current = _store(directory, env)
-    require((os.environ if env is None else env).get('GITHUB_JOB') == 'store-wack', 'Store WACK job 원본 관측만 허용')
+    expected_job='store-wack' if architecture=='arm64' else 'store-wack-x64'
+    require((os.environ if env is None else env).get('GITHUB_JOB') == expected_job, '해당 아키텍처의 실제 Store WACK job 원본 관측만 허용')
     details['_directory'] = str(directory)
     names, raw = _proof(details, current, architecture, evidence)
     receipt = {'formatVersion': 1, 'architecture': architecture, 'repository': current['repository'],
