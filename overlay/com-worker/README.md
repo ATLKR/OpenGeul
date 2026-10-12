@@ -39,6 +39,8 @@ Linux의 실제 wire 검사와 Python 소스 변환 검사, Rust 1.93.1의 x64/A
 
 per-call 후보의 다음 x64 진단은 등록 6개·wire 8개를 통과한 뒤 첫 작업의 pipe 대기에서 실패했다. 원본에는 채널 정보가 없어 정확한 connect/ACK/header 단계나 작업자 실패 API는 아직 확정하지 않는다. 후속 관측은 같은 timeout·권한·PID/nonce 검증을 유지하며 부모 오류에 고정 채널·wait 결과·보유한 작업자 handle의 PID/종료 코드를 붙인다. dev-only bootstrap 오류는 컴파일한 manifest의 저장소 `com-smoke`에 새 파일로 기록한다. 4 KiB 상한의 고정 operation·오류 종류/번호·PID/생성 시간·native machine만 쓰고, 환경·argv·암호·원본 오류 메시지는 파일에 쓰지 않는다. 이 관측 파일 작성 코드는 제품으로 복사하지 않는다.
 
+세 번째 실제 두 아키텍처 진단은 worker의 첫 stdin `CreateFileW`가 `0x80070005`로 실패하고 종료 코드 1을 반환했음을 특정했다. 방향은 서버 outbound/client read로 맞으며, 원 DACL `0x100003`에는 `FILE_READ_ATTRIBUTES`가 없다. 추가한 Windows-only 비교는 원 descriptor와 metadata bit `0x80`만 더한 descriptor를 동일한 formatter·SID·integrity·원 client API로 대조한다. 원 open의 정확한 거부와 후보의 실제 양방향 open·peer PID 조회·한 바이트 I/O 성공을 요구한다. 별도 실제 `AccessCheck`는 metadata/data 접근 허용과 pipe instance 생성 권한 거부를 검사한다. 인스턴스 수나 first-instance flag를 ACL 거부 증거로 사용하지 않는다. **이 비교는 아직 실행되지 않았으며 production DACL과 client 요청은 원래 값이다.** 실제 비교 성공 후에만 필요한 단일 metadata bit를 제품에 적용할 수 있다.
+
 표준 사용자/HKCU, 관리자/UAC 비활성/HKLM, 실제 설치된 MSIX fixed CLSID와 package identity, x64/ARM64 native 실행, 실제 MCP 도구의 성공·암호·부분 batch·ir-diff exit 3·오류·worker 강제 종료 후 부모 생존, 등록 강제 종료 정리 제어와 새 전체 WACK 결과는 후속 Windows 실행 증거가 필요하다. 이 문서는 그 결과를 대신하지 않는다.
 
 ## 공식 근거

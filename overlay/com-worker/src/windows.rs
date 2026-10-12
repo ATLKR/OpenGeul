@@ -486,12 +486,24 @@ fn own_process(pid: u32, terminate: bool) -> io::Result<Handle> {
 struct Pipe {
     handle: Handle,
 }
+fn pipe_sddl(sid: &str, integrity: u32, read_attributes: bool) -> String {
+    // 두 값만 비교한다. production은 실제 대조 결과 전까지 기존 mask를 유지한다.
+    let mask = 0x100003
+        | if read_attributes {
+            FILE_READ_ATTRIBUTES.0
+        } else {
+            0
+        };
+    format!("D:P(A;;0x{mask:x};;;{sid})S:(ML;;NWNR;;;S-1-16-{integrity})")
+}
 impl Pipe {
     fn create(name: &str, output: bool, sid: &str, integrity: u32) -> io::Result<Self> {
         // 같은 로그온의 read/write만 허용하고 pipe instance 생성 권한(0x4)은 주지 않는다.
-        let sddl = wide(&format!(
-            "D:P(A;;0x100003;;;{sid})S:(ML;;NWNR;;;S-1-16-{integrity})"
-        ));
+        let sddl = pipe_sddl(sid, integrity, false);
+        Self::create_descriptor(name, output, &sddl)
+    }
+    fn create_descriptor(name: &str, output: bool, sddl: &str) -> io::Result<Self> {
+        let sddl = wide(sddl);
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -1203,6 +1215,143 @@ mod tests {
             error.to_string(),
             "CoCreateInstance 실패 (HRESULT 0x80070005)"
         );
+    }
+
+    #[test]
+    fn pipe_metadata_grant_compares_original_client_open() {
+        let own = process_identity(unsafe { GetCurrentProcess() }).unwrap();
+        let pid = unsafe { GetCurrentProcessId() };
+        for output in [true, false] {
+            let role = if output { "stdin" } else { "stdout" };
+            let original_name = format!(
+                "\\\\.\\pipe\\OpenGeul.ComWorker.Unit.{}",
+                fresh_guid().unwrap()
+            );
+            let original_sddl = pipe_sddl(&own.logon, own.integrity, false);
+            let original = Pipe::create_descriptor(&original_name, output, &original_sddl).unwrap();
+            let denied = match client_pipe(&original_name, output, pid, role) {
+                Ok(_) => {
+                    panic!("baseline 최소 descriptor가 예상과 달리 client open을 허용했습니다")
+                }
+                Err(error) => error,
+            };
+            assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                denied.to_string(),
+                format!("worker {role} CreateFileW 실패 (HRESULT 0x80070005)")
+            );
+            drop(original);
+            let candidate_name = format!(
+                "\\\\.\\pipe\\OpenGeul.ComWorker.Unit.{}",
+                fresh_guid().unwrap()
+            );
+            let candidate_sddl = pipe_sddl(&own.logon, own.integrity, true);
+            let candidate =
+                Pipe::create_descriptor(&candidate_name, output, &candidate_sddl).unwrap();
+            // 실제 client API/요청 mask/peer 검사/방향/SID/IL은 baseline과 동일하다.
+            let client = client_pipe(&candidate_name, output, pid, role).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(BOOTSTRAP_SECONDS);
+            candidate.connect(pid, deadline).unwrap();
+            let mut bytes = [0u8; 1];
+            if output {
+                candidate.write_all(b"x", Some(deadline)).unwrap();
+                raw_read_exact(client.0, &mut bytes).unwrap();
+            } else {
+                raw_write_all(client.0, b"x").unwrap();
+                candidate.read_exact(&mut bytes, deadline).unwrap();
+            }
+            assert_eq!(&bytes, b"x");
+        }
+    }
+
+    #[test]
+    fn pipe_metadata_grant_denies_instance_creation_in_access_check() {
+        let own = process_identity(unsafe { GetCurrentProcess() }).unwrap();
+        // AccessCheck는 owner/group을 요구한다. 실제 kernel 생성도 이를 token에서 채운다.
+        let sddl = wide(&format!(
+            "O:{}G:{}{}",
+            own.user,
+            own.user,
+            pipe_sddl(&own.logon, own.integrity, true)
+        ));
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+            .unwrap();
+        }
+        struct Descriptor(PSECURITY_DESCRIPTOR);
+        impl Drop for Descriptor {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = LocalFree(Some(HLOCAL(self.0 .0)));
+                }
+            }
+        }
+        let descriptor = Descriptor(descriptor);
+        let mut token = HANDLE::default();
+        unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_QUERY | TOKEN_DUPLICATE,
+                &mut token,
+            )
+            .unwrap();
+        }
+        let token = Handle::new(token).unwrap();
+        let mut duplicate = HANDLE::default();
+        unsafe {
+            DuplicateTokenEx(
+                token.0,
+                TOKEN_QUERY,
+                None,
+                SecurityImpersonation,
+                TokenImpersonation,
+                &mut duplicate,
+            )
+            .unwrap();
+        }
+        let duplicate = Handle::new(duplicate).unwrap();
+        let mapping = GENERIC_MAPPING {
+            GenericRead: FILE_GENERIC_READ.0,
+            GenericWrite: FILE_GENERIC_WRITE.0,
+            GenericExecute: FILE_GENERIC_EXECUTE.0,
+            GenericAll: FILE_ALL_ACCESS.0,
+        };
+        for (desired, allowed) in [
+            (FILE_READ_ATTRIBUTES.0, true),
+            (FILE_READ_DATA.0, true),
+            (FILE_WRITE_DATA.0, true),
+            (FILE_CREATE_PIPE_INSTANCE.0, false),
+        ] {
+            let mut privileges = PRIVILEGE_SET::default();
+            let mut length = mem::size_of::<PRIVILEGE_SET>() as u32;
+            let mut granted = 0;
+            let mut status = windows::core::BOOL(0);
+            unsafe {
+                AccessCheck(
+                    descriptor.0,
+                    duplicate.0,
+                    desired,
+                    &mapping,
+                    Some(&mut privileges),
+                    &mut length,
+                    &mut granted,
+                    &mut status,
+                )
+                .unwrap();
+            }
+            assert_eq!(status.as_bool(), allowed);
+            if allowed {
+                assert_eq!(granted & desired, desired);
+            } else {
+                assert_eq!(granted & FILE_CREATE_PIPE_INSTANCE.0, 0);
+            }
+        }
     }
 }
 fn packaged() -> io::Result<bool> {

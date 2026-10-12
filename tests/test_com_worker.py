@@ -165,5 +165,13 @@ class ComWorkerSourceTests(unittest.TestCase):
         self.assertIn('wait=0x', native)
         self.assertIn('const BOOTSTRAP_SECONDS: u64 = 65;', native)
 
+    def test_metadata_comparison_is_native_test_only_and_keeps_production_access(self):
+        self.helper().apply(self.source)
+        native = (self.core/'src/opengeul_com_worker/windows.rs').read_text()
+        self.assertTrue('fn pipe_sddl(' in native, '동일 descriptor formatter의 native 비교 경계가 필요합니다')
+        self.assertTrue('pipe_sddl(sid, integrity, false)' in native, '실제 관측 전 production 권한을 바꾸지 않습니다')
+        self.assertTrue('fn pipe_metadata_grant_compares_original_client_open()' in native)
+        self.assertTrue('fn pipe_metadata_grant_denies_instance_creation_in_access_check()' in native)
+
 
 if __name__ == '__main__': unittest.main()
