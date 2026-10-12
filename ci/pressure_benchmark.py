@@ -39,6 +39,7 @@ SAMPLES_CAP = 2*1024*1024
 JSON_CAP = 512*1024
 MIN_FREE = 3*GIB//2
 OUTPUT = ROOT/'pressure-evidence'
+TRANSPORT_STAGE = 'notStarted'
 
 
 class FILETIME(ctypes.Structure):
@@ -136,21 +137,35 @@ def execution():
     return current
 
 
-def api_raw(path):
+def github_request(path):
     request = urllib.request.Request('https://api.github.com/repos/ATLKR/OpenGeul/'+path,
-        headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'})
+        headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'})
+    request.add_unredirected_header('Authorization','Bearer '+os.environ['GH_TOKEN'])
+    return request
+
+
+def api_raw(path):
+    request = github_request(path)
     with urllib.request.urlopen(request,timeout=30) as response: raw = response.read(JSON_CAP+1)
     if len(raw) > JSON_CAP: raise ValueError('공식 원본 API 크기 제한 위반')
     return raw, json.loads(raw,object_pairs_hook=components._pairs)
 
 
 def download_wasm():
+    global TRANSPORT_STAGE
     current = execution()
     if OUTPUT.exists(): raise ValueError('기존 진단 원본을 보존합니다')
     OUTPUT.mkdir()
+    write_new(OUTPUT/'diagnostic-context.json',encoded(current),JSON_CAP)
+    TRANSPORT_STAGE = 'sourceRunApi'
     raw_run, run = api_raw(f'actions/runs/{WASM_RUN}')
+    write_new(OUTPUT/'source75-run-original.api.json',raw_run,JSON_CAP)
+    TRANSPORT_STAGE = 'sourceArtifactApi'
     raw_artifact, artifact = api_raw(f'actions/artifacts/{WASM_ARTIFACT}')
+    write_new(OUTPUT/'source75-wasm-original.api.json',raw_artifact,JSON_CAP)
+    TRANSPORT_STAGE = 'sourceAttemptJobsApi'
     raw_jobs, jobs = api_raw(f'actions/runs/{WASM_RUN}/attempts/1/jobs?per_page=100')
+    write_new(OUTPUT/'source75-attempt1-jobs-original.api.json',raw_jobs,JSON_CAP)
     wasm_jobs = [job for job in jobs.get('jobs',[]) if job.get('name') == 'wasm']
     if (run.get('id') != WASM_RUN or run.get('head_sha') != BASE or run.get('run_attempt') != 1
             or run.get('head_branch') != 'main' or run.get('path') != '.github/workflows/msix.yml'
@@ -163,15 +178,12 @@ def download_wasm():
             or artifact.get('workflow_run',{}).get('repository_id') != 1405493151
             or artifact.get('workflow_run',{}).get('head_repository_id') != 1405493151
             or artifact.get('workflow_run',{}).get('id') != WASM_RUN): raise ValueError('실제 Source75 WASM 원본 신원이 다릅니다')
-    request = urllib.request.Request('https://api.github.com/repos/ATLKR/OpenGeul/'+f'actions/artifacts/{WASM_ARTIFACT}/zip',
-        headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+    TRANSPORT_STAGE = 'artifactZipRedirectDownload'
+    request = github_request(f'actions/artifacts/{WASM_ARTIFACT}/zip')
     with urllib.request.urlopen(request,timeout=60) as response: raw_zip = response.read(WASM_SIZE+1)
     if len(raw_zip) != WASM_SIZE or hashlib.sha256(raw_zip).hexdigest() != WASM_DIGEST:
         raise ValueError('Source75 WASM 원본 ZIP SHA·size가 다릅니다')
     write_new(OUTPUT/'source75-wasm-original.zip',raw_zip,WASM_SIZE)
-    write_new(OUTPUT/'source75-run-original.api.json',raw_run,JSON_CAP)
-    write_new(OUTPUT/'source75-wasm-original.api.json',raw_artifact,JSON_CAP)
-    write_new(OUTPUT/'source75-attempt1-jobs-original.api.json',raw_jobs,JSON_CAP)
     target = ROOT/'wasm-input'
     if target.exists(): raise ValueError('기존 WASM 입력을 보존합니다')
     target.mkdir()
@@ -183,7 +195,6 @@ def download_wasm():
         for item in archive.infolist():
             if item.is_dir() or item.external_attr >> 16 & 0o170000 == 0o120000: raise ValueError('정규 WASM 파일이 아닙니다')
             write_new(target/item.filename,archive.read(item),32*1024*1024)
-    write_new(OUTPUT/'diagnostic-context.json',encoded(current),JSON_CAP)
     print('Source75 원본 WASM run/head/a1/artifact/ZIP SHA·size/CRC/7파일 확인. 진단 source qualification=false.')
 
 
@@ -332,4 +343,9 @@ def main():
 if __name__ == '__main__':
     try: sys.exit(main())
     except Exception as error:
-        print('성능 진단 실패:',type(error).__name__,file=sys.stderr); sys.exit(1)
+        status = getattr(error,'code',None)
+        status = status if type(status) is int else None
+        failure = {'diagnosticStage':TRANSPORT_STAGE,'errorType':type(error).__name__,'httpStatus':status,
+                   'sourceQualification':False,'releaseQualification':False,'storeQualification':False}
+        if OUTPUT.is_dir() and not (OUTPUT/'failure.json').exists(): write_new(OUTPUT/'failure.json',encoded(failure),JSON_CAP)
+        print('성능 진단 실패:',json.dumps(failure,ensure_ascii=False),file=sys.stderr); sys.exit(1)

@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 import sys
 import time
+import urllib.request
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 PATH = ROOT/'ci/pressure_benchmark.py'
@@ -83,6 +85,14 @@ class PressureBenchmarkTests(unittest.TestCase):
         self.assertEqual(self.m.reader_failure(state), 'logCapExceeded')
         state['logCapExceeded'] = False; state['readerError'] = True
         self.assertEqual(self.m.reader_failure(state), 'logReaderFailed')
+
+    def test_bearer_is_initial_api_only_and_never_copied_to_signed_blob(self):
+        with patch.dict(os.environ, {'GH_TOKEN':'synthetic-test-token'}):
+            request = self.m.github_request('actions/artifacts/11741399358/zip')
+        self.assertEqual(request.get_header('Authorization'), 'Bearer synthetic-test-token')
+        redirected = urllib.request.HTTPRedirectHandler().redirect_request(request, None, 302, 'Found', {},
+                        'https://example.blob.core.windows.net/diagnostic-synthetic-zip')
+        self.assertIsNone(redirected.get_header('Authorization'))
 
     @unittest.skipUnless(os.name == 'nt', 'Actual Win32 API probe requires the benchmark Windows runner')
     def test_actual_windows_api(self):
