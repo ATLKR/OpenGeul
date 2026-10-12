@@ -204,6 +204,21 @@ def paging_candidate(observed, session_id, windows_directory):
     return candidate
 
 
+def foreground_transition(probe):
+    """OS 창 정상 닫기 뒤 전경 전환을 최대 2초·21회 읽기만 관찰한다."""
+    start = time.monotonic(); deadline = start + 2; samples = []; windows = None
+    for _ in range(21):
+        if samples and time.monotonic() > deadline: break
+        windows = probe.windows(); validate_windows(windows)
+        foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
+        samples.append({'elapsedMs': round((time.monotonic() - start) * 1000),
+                        'foregroundHwnd': windows['foregroundHwnd'], 'foreground': foreground})
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: break
+        time.sleep(min(0.1, remaining))
+    return {'samples': samples, 'windowObservation': windows}
+
+
 def search_candidate(observed, session_id, windows_directory):
     candidate = owned_os_candidate(observed, session_id, windows_directory, 'SearchHost.exe', 'Search',
         'Windows.UI.Core.CoreWindow', relative_path=ntpath.join('SystemApps',
@@ -491,19 +506,23 @@ def prepare(probe, env, output):
               'productExecuted': False, 'hostReadyQualified': False, 'readOnly': False,
               'scope': '공개 disposable ARM hosted OS 창의 정상 닫기와 helper 소유 focus만 검증',
               'helperSha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              'actions': [], 'inputsPerformed': 0, 'consentInputsPerformed': 0, 'registryWrites': 0,
+              'actions': [], 'branchObservations': [], 'inputsPerformed': 0, 'consentInputsPerformed': 0, 'registryWrites': 0,
               'processTerminations': 0, 'focusProbe': None, 'stage': 'beforeObservation'}
     try:
         before = observe(probe, env, output / 'before')
         foreground = before['foreground']
+        result['branchObservations'].append({'stage': 'privacySelection', 'foreground': foreground})
         if foreground and foreground['title'] == 'Microsoft account':
             result['stage'] = 'privacyOwnerValidation'
             candidate = privacy_candidate(before, probe.session_id(), probe.windows_directory())
             result['stage'] = 'privacyNormalClose'
             closed = probe.close_verified(candidate); result['actions'].append(closed); result['inputsPerformed'] += 1
             require(closed['messageDelivered'] and closed['windowDisappeared'], 'OS 개인정보 창의 정상 닫기가 완료되지 않았습니다')
-        windows = probe.windows(); validate_windows(windows)
+        result['stage'] = 'osForegroundTransition'
+        transition = foreground_transition(probe); result['foregroundTransition'] = transition['samples']
+        windows = transition['windowObservation']
         foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
+        result['branchObservations'].append({'stage': 'searchSelection', 'foreground': foreground})
         if foreground and foreground['title'] == 'Search' and foreground['className'] == 'Windows.UI.Core.CoreWindow':
             result['stage'] = 'searchOwnerValidation'
             candidate = search_candidate(probe.current(foreground['hwnd']), probe.session_id(), probe.windows_directory())
@@ -513,6 +532,7 @@ def prepare(probe, env, output):
         # Known paging-file warning is handled only if it actually becomes foreground.
         windows = probe.windows(); validate_windows(windows)
         foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
+        result['branchObservations'].append({'stage': 'pagingSelection', 'foreground': foreground})
         if foreground and foreground['title'] == 'System Properties' and foreground['className'] == '#32770':
             result['stage'] = 'pagingOwnerValidation'
             candidate = paging_candidate(probe.current(foreground['hwnd']), probe.session_id(), probe.windows_directory())
@@ -520,6 +540,9 @@ def prepare(probe, env, output):
             closed = probe.close_verified(candidate); result['actions'].append(closed); result['inputsPerformed'] += 1
             require(closed['messageDelivered'] and closed['windowDisappeared'], '관측된 paging-file 경고의 정상 닫기가 완료되지 않았습니다')
         result['stage'] = 'ownedFocusProbe'
+        windows = probe.windows(); validate_windows(windows)
+        result['branchObservations'].append({'stage': 'beforeOwnedProbe', 'foregroundHwnd': windows['foregroundHwnd'],
+            'foreground': next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)})
         focus = probe.focus_probe(); result['focusProbe'] = focus
         require(focus['setForegroundReturned'] is True and focus['foregroundMatched'] is True and focus['ownedWindowRemoved'] is True,
                 'helper 소유 창의 실제 foreground/cleanup 검증이 통과하지 않았습니다')

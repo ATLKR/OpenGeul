@@ -107,6 +107,21 @@ class RunnerReadyTests(unittest.TestCase):
         self.assertEqual(candidate['kind'], 'SearchHost.exe'); self.assertEqual(candidate['operation'], 'WM_CLOSE')
         self.assertEqual([p['processId'] for p in candidate['boundUiaChildProcesses']], [201, 202])
 
+    def test_readonly_timeline_observes_search_after_late_os_foreground_transition(self):
+        value = module(); clock = [0.0]; reads = []
+        class Delayed:
+            def windows(self):
+                reads.append(clock[0]); window = copy.deepcopy(self_outer.search()['foreground'])
+                if clock[0] < 0.3: window.update({'hwnd': 20, 'title': 'Program Manager', 'className': 'Progman'})
+                return {'foregroundHwnd': window['hwnd'], 'windows': [window], 'truncated': False}
+        self_outer = self
+        with patch.object(value.time, 'monotonic', lambda: clock[0]), patch.object(value.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            observed = value.foreground_transition(Delayed())
+        self.assertEqual(observed['windowObservation']['foregroundHwnd'], 12)
+        self.assertEqual(observed['samples'][0]['foreground']['title'], 'Program Manager')
+        self.assertEqual(observed['samples'][-1]['foreground']['title'], 'Search')
+        self.assertLessEqual(len(reads), 21); self.assertLessEqual(clock[0], 2.0)
+
     def test_search_root_textbox_and_child_identity_changes_are_rejected(self):
         for change in ('root', 'textbox', 'textbox-pid', 'child-pid', 'child-path', 'child-native', 'child-session', 'child-creation', 'child-signature'):
             observed = self.search(); tree = observed['uia'][0]; child = observed['processes'][1]
