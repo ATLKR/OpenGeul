@@ -56,6 +56,7 @@ COPIED_OVERLAYS = {
     'apps/studio-host/src/core/save-format.ts': 'overlay/save-format.ts',
     'apps/studio-host/src/core/font-catalog.ts': 'overlay/font-catalog.ts',
     'apps/studio-host/src/ui/update-notice.ts': 'overlay/store-update-notice.ts',
+    'apps/studio-host/src/ui/about-dialog.ts': 'overlay/about-dialog.ts',
     'apps/studio-host/src/host/store-updates.ts': 'overlay/store-update-menu.ts',
     'apps/studio-host/src/opengeul-font-help.ts': 'overlay/opengeul-font-help.ts',
     'third_party/rhwp/src/renderer/pdf/opengeul_pdf_guard.rs': 'overlay/opengeul_pdf_guard.rs',

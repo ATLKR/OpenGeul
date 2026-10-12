@@ -1008,6 +1008,19 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertIn('apps/studio-host/src/command/commands/edit.ts', self.helper().SOURCE_FILES,
                       'The actual async Cut document guard must be bound in the receipt contract')
 
+    def test_product_information_is_bound_to_the_reviewed_copied_overlay(self):
+        c = self.helper()
+        name = 'apps/studio-host/src/ui/about-dialog.ts'
+        self.assertEqual(c.COPIED_OVERLAYS.get(name), 'overlay/about-dialog.ts')
+        self.assertIn(name, c.SOURCE_FILES)
+        source = self.source()
+        path = source/name
+        path.write_bytes(path.read_bytes().replace(b'allenlim@allenlim.net', b'wrong@example.invalid'))
+        output = self.root/'wrong-product-contact'
+        with self.assertRaisesRegex(ValueError, 'overlay helper mismatch'):
+            c.capture('editor', self.payload('editor'), source, output, env=self.env)
+        self.assertFalse(output.exists())
+
     def test_workers_with_different_host_visibility_css_cannot_join(self):
         c = self.helper()
         source = self.source()
