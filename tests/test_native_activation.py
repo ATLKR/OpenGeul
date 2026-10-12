@@ -101,12 +101,19 @@ class NativeActivationTests(unittest.TestCase):
         value = tomllib.loads(h.desktop_manifest(original))
         self.assertNotIn('open', value['dependencies'])
         self.assertEqual(value['target']['cfg(not(windows))']['dependencies']['open'], '5')
-        selected = value['target']['cfg(windows)']['dependencies']['open']
-        self.assertEqual(selected, {'package': 'opengeul-native-open', 'path': 'opengeul-native/native-open'})
+        selected = value['target']['cfg(windows)']['dependencies'].get('opengeul-native-open')
+        self.assertEqual(selected, {'path': 'opengeul-native/native-open'})
+        self.assertNotIn('open', value['target']['cfg(windows)']['dependencies'])
         self.assertEqual(value['dependencies']['tauri']['features'], ['opengeul-store-no-restart'])
         self.assertEqual(value['patch']['crates-io']['tauri']['path'], 'opengeul-native/tauri-2.11.1')
         self.assertEqual(value['workspace']['default-members'], ['.'])
         self.assertEqual(value['workspace']['members'], ['opengeul-native/native-open'])
+
+    def test_native_package_exports_open_without_reusing_registry_dependency_key(self):
+        self.helper()
+        shim = tomllib.loads((ROOT/'overlay/native-open/Cargo.toml').read_text())
+        self.assertEqual(shim['package']['name'], 'opengeul-native-open')
+        self.assertEqual(shim.get('lib', {}).get('name'), 'open')
 
     def test_desktop_manifest_refuses_changed_dependency_or_repeated_application(self):
         h = self.helper()

@@ -107,7 +107,7 @@ tauri-runtime-wry = { path = "opengeul-native/tauri-runtime-wry-2.11.1" }
     return value.rstrip() + '''
 
 [target.'cfg(windows)'.dependencies]
-open = { package = "opengeul-native-open", path = "opengeul-native/native-open" }
+opengeul-native-open = { path = "opengeul-native/native-open" }
 
 [target.'cfg(not(windows))'.dependencies]
 open = "5"

@@ -66,7 +66,7 @@
             ],
             [
               "        let link = PCWSTR(lparam.0 as _);\n        let _ = unsafe { ShellExecuteW(None, None, link, None, None, SW_SHOWNORMAL) };",
-              "        // TASKDIALOG callback owns this live, NUL-terminated link for this call.\n        let result = unsafe { PCWSTR(lparam.0 as _).to_string() }\n          .map_err(std::io::Error::other)\n          .and_then(|link| opengeul_native_open::that_with_owner(link, hwnd.0 as isize));\n        if let Err(error) = result {\n          log::error!(\"failed to open dialog help link: {error}\");\n        }"
+              "        // TASKDIALOG callback owns this live, NUL-terminated link for this call.\n        let result = unsafe { PCWSTR(lparam.0 as _).to_string() }\n          .map_err(std::io::Error::other)\n          .and_then(|link| open::that_with_owner(link, hwnd.0 as isize));\n        if let Err(error) = result {\n          log::error!(\"failed to open dialog help link: {error}\");\n        }"
             ]
           ]
         }
