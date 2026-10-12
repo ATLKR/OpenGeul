@@ -25,6 +25,7 @@ def main():
     event, event_hash = ready.public_event(env)
     ready.require(ready.event_actor(event, env) == ('ATLKR', 65988341, 'User'), '진단 actor가 다릅니다')
     source = ready.commit_sha(env.get('GITHUB_SHA')); run = ready.decimal(env.get('GITHUB_RUN_ID'))
+    ready.require(hashlib.sha256((ROOT / 'e2e/runner-ready.py').read_bytes()).hexdigest() == 'fc57d77f7c35eb8ae6300adf88440df0e9e52d5ae67d0c18cc69a34ab2a13a87', 'production a3a helper bytes 다름')
     out = ready.safe_output(Path('wsl-timeline')); out.mkdir()
     probe = ready.WindowsProbe(); host = probe.host()
     ready.require(host['nativeMachine'] == 0xAA64 and host['processMachine'] in (0, 0x8664), 'ARM host가 아닙니다')
@@ -35,11 +36,13 @@ def main():
         'inputsPerformed': 0, 'registryWrites': 0, 'processTerminations': 0, 'controller': host,
         'helperSha256': hashlib.sha256((ROOT / 'e2e/runner-ready.py').read_bytes()).hexdigest(),
         'observerSha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'samples': [],
-        'boundWindow': None, 'boundProcess': None, 'naturalProcessExitObserved': False}
+        'boundWindow': None, 'boundProcess': None, 'naturalProcessExitObserved': False,
+        'productionCandidateCommit': 'a3a398bfcf6232659eed1a1c658e070268a90345',
+        'postExitFreshCompositeQualified': False, 'foregroundWaitPredicateExercised': False}
     held = None; started = time.monotonic(); expected = ntpath.join(probe.windows_directory(), 'System32', 'wsl.exe')
     try:
         probe.screen(out / 'before.png')
-        while time.monotonic() - started < 90:
+        while time.monotonic() - started < 65:
             rows = probe.windows(); ready.validate_windows(rows)
             fore = next((w for w in rows['windows'] if w['hwnd'] == rows['foregroundHwnd']), None)
             sample = {'elapsedMs': round((time.monotonic() - started) * 1000), 'foregroundHwnd': rows['foregroundHwnd'],
@@ -74,7 +77,13 @@ def main():
                     heldExitCode=exit_code.value, sameWindowForeground=rows['foregroundHwnd'] == window['hwnd'])
                 if exit_code.value != 259:
                     ready.require(not exists, '종료된 WSL HWND가 남았습니다')
-                    record['naturalProcessExitObserved'] = True; record['samples'].append(sample); break
+                    record['naturalProcessExitObserved'] = True; record['samples'].append(sample)
+                    record['afterProcesses'] = probe.processes([process['processId']])
+                    record['freshCompositeEqual'] = record['afterProcesses'] == [process]
+                    ready.require(record['freshCompositeEqual'], 'production processes post-exit composite 변경')
+                    ready.require(time.monotonic() - started <= 65, '65초 composite deadline 초과')
+                    record['postExitFreshCompositeQualified'] = True
+                    break
             record['samples'].append(sample); time.sleep(0.5)
     except Exception as error:
         record['errorType'] = type(error).__name__
@@ -86,7 +95,8 @@ def main():
         ready.require(len(raw) <= 256 * 1024, '관측 JSON 상한 초과'); (out / 'timeline.json').write_bytes(raw)
     ready.require('errorType' not in record, '읽기 전용 timeline identity 실패')
     print(json.dumps({'readOnly': True, 'wslObserved': held is not None,
-        'naturalProcessExitObserved': record['naturalProcessExitObserved'], 'sourceQualified': False}))
+        'naturalProcessExitObserved': record['naturalProcessExitObserved'],
+        'postExitFreshCompositeQualified': record['postExitFreshCompositeQualified'], 'sourceQualified': False}))
 
 
 if __name__ == '__main__': main()
