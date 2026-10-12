@@ -1,4 +1,7 @@
 import json
+import hashlib
+import zipfile
+from unittest.mock import patch
 from pathlib import Path
 import sys
 import tempfile
@@ -131,5 +134,62 @@ class BuildKitTests(unittest.TestCase):
         data=json.loads((ROOT/'config/font-resources.json').read_text(encoding='utf-8'))
         self.assertEqual({x['id'] for x in data},{'noto-sans','noto-serif','windows-font-settings'})
         self.assertTrue(all(x['url'].startswith(('https://fonts.google.com/','ms-settings:fonts')) for x in data))
+
+class ManifestWriterIntegrationTests(unittest.TestCase):
+    """Windows TextIO newline 규칙부터 기존 Source6 검증까지 실제 경로를 잇는다."""
+    def fixture(self):
+        from test_mcp_qa_download import McpQaDownloadTests
+        value = McpQaDownloadTests('runTest'); value.setUp()
+        self.addCleanup(value.doCleanups)
+        return value
+
+    def replace_manifest(self, package, content):
+        from test_store_package import StorePackageTests
+        (package/'AppxManifest.xml').write_bytes(content)
+        path = package/'provenance.json'; provenance = json.loads(path.read_bytes())
+        msix = package/provenance['package']
+        for archive_path in (msix,next(package.glob('*portable.zip'))):
+            with zipfile.ZipFile(archive_path) as archive:
+                members = [(info,archive.read(info)) for info in archive.infolist()]
+            with zipfile.ZipFile(archive_path,'w') as archive:
+                for info,data in members:
+                    archive.writestr(info,content if info.filename=='AppxManifest.xml' else data)
+        provenance['sha256'] = hashlib.sha256(msix.read_bytes()).hexdigest()
+        path.write_text(json.dumps(provenance)+'\n',encoding='utf-8')
+        StorePackageTests().checksum_directory(package)
+
+    def test_windows_manifest_writer_roundtrips_through_strict_source_context(self):
+        import buildkit
+        fixture = self.fixture()
+        # Windows newline=None translates LF to CRLF. Explicit LF must override it.
+        def windows_write_text(path,text,encoding=None,errors=None,newline=None):
+            with path.open('w',encoding=encoding,errors=errors,
+                           newline='\r\n' if newline is None else newline) as stream:
+                return stream.write(text)
+        for architecture in ('x64','arm64'):
+            with self.subTest(architecture=architecture):
+                package = fixture.package.with_name(architecture)
+                target = package/'AppxManifest.xml'
+                with patch.object(Path,'write_text',windows_write_text), patch.object(sys,'argv',
+                        ['buildkit.py','manifest','--out',str(target),'--architecture',architecture]):
+                    buildkit.main()
+                content = target.read_bytes()
+                self.replace_manifest(package,content)
+                binding,_,observed = fixture.module().source_context(package,fixture.env)
+                self.assertEqual(observed,architecture)
+                self.assertEqual(binding,fixture.binding)
+                self.assertEqual(content,buildkit.manifest(buildkit.DEV_IDENTITY,'1.1.3',architecture).encode())
+                self.assertNotIn(b'\r\n',content)
+
+    def test_strict_source_context_still_rejects_self_consistent_crlf_input(self):
+        import buildkit
+        fixture = self.fixture()
+        for architecture in ('x64','arm64'):
+            with self.subTest(architecture=architecture):
+                package = fixture.package.with_name(architecture)
+                content = buildkit.manifest(buildkit.DEV_IDENTITY,'1.1.3',architecture).encode().replace(b'\n',b'\r\n')
+                self.replace_manifest(package,content)
+                with self.assertRaisesRegex(ValueError,'manifest'):
+                    fixture.module().source_context(package,fixture.env)
 
 if __name__ == '__main__': unittest.main()

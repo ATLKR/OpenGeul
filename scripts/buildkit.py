@@ -180,6 +180,6 @@ def main() -> None:
         identity=json.loads(ns.identity.read_text(encoding='utf-8-sig')) if ns.identity else DEV_IDENTITY
         identity=validate_identity(identity,store=ns.store)
         version=json.loads((ROOT/'config/product.json').read_text(encoding='utf-8'))['version']
-        ns.out.write_text(manifest(identity,version,ns.architecture),encoding='utf-8')
+        ns.out.write_text(manifest(identity,version,ns.architecture),encoding='utf-8',newline='\n')
 
 if __name__=='__main__': main()
