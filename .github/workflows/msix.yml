@@ -220,7 +220,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-        architecture: x64
+        architecture: arm64
     - name: 이 실행에서 검증한 WASM 받기
       shell: pwsh
       env:
@@ -362,7 +362,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-        architecture: x64
+        architecture: arm64
     - name: 이 실행에서 검증한 WASM 받기
       shell: pwsh
       env:
@@ -446,7 +446,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-        architecture: x64
+        architecture: arm64
     - name: 동일 실행의 두 구성요소 받기
       shell: pwsh
       env:
