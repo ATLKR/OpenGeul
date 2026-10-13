@@ -36,40 +36,52 @@ def selected(control,label):
     if control.element_info.control_type=='Button':return name.removeprefix(label+' ')
     return control.iface_value.CurrentValue
 
-def activate_option(choice):
+def activate_option(choice,focus):
     """Commit by native input; SelectionItem alone did not commit on WebView2 153."""
-    if not choice.is_visible():choice.iface_scroll_item.ScrollIntoView()
+    if not choice.is_visible():
+        focus.check(choice,'option-scroll')
+        choice.iface_scroll_item.ScrollIntoView()
     wait(lambda:choice.is_visible() and choice.is_enabled())
+    focus.check(choice,'option-click',physical=True)
     choice.click_input()
+    focus.read(focus.preview,'option-after-click')
 
-def configure_preview(preview,pids,folder:Path|None=None):
+def configure_preview(preview,pids,folder:Path|None=None,*,focus):
     if preview.window_text()!='Print' or preview.class_name()!='RootView' or preview.process_id() not in pids:
         raise AssertionError('Cannot configure a foreign print preview')
     more=[c for c in snapshot_descendants(preview,control_type='Button') if c.window_text()=='More settings' and c.is_enabled()]
     if len(more)>1:raise AssertionError('Ambiguous More settings action')
     if more:
+        focus.prepare(more[0],'more-settings-expand')
         from pywinauto.uia_defines import NoPatternInterfaceError
         try:pattern=more[0].iface_expand_collapse
         except NoPatternInterfaceError:pattern=None
         if pattern is not None:pattern.Expand()
         else:more[0].iface_invoke.Invoke()
+        focus.read(preview,'more-settings-after-expand')
     state={}
     try:
         for label,value,key in (('Paper size','A4','paper'),('Margins','None','margins')):
             target=wait(lambda:dropdown(preview,label,pids))
             before=selected(target,label);state[key+'Before']=before
             if before!=value:
+                focus.prepare(target,key+'-expand')
                 target.iface_expand_collapse.Expand()
+                focus.read(target,key+'-after-expand')
                 def option():
+                    focus.read(preview,key+'-option-read')
                     controls,nodes=rows(preview);i=option_index(nodes,value,pids)
                     return controls[i] if i is not None else None
                 choice=wait(option);state[key+'Option']=_node(choice)
-                activate_option(choice)
+                activate_option(choice,focus)
             wait(lambda:selected(dropdown(preview,label,pids),label)==value)
             state[key]=value
         actual=[c for c in snapshot_descendants(preview,control_type='RadioButton') if c.window_text()=='Actual size' and c.is_enabled() and c.process_id() in pids]
         if len(actual)!=1:raise AssertionError('Actual size choice is not unique')
-        if not actual[0].iface_selection_item.CurrentIsSelected:actual[0].iface_selection_item.Select()
+        if not actual[0].iface_selection_item.CurrentIsSelected:
+            focus.prepare(actual[0],'actual-size-select')
+            actual[0].iface_selection_item.Select()
+            focus.read(preview,'actual-size-after-select')
         state['actualSize']=bool(actual[0].iface_selection_item.CurrentIsSelected)
         validate_settings(state)
         return state

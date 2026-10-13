@@ -16,12 +16,12 @@ from policy import require_public, select_mode
 REPO = 'ATLKR/OpenGeul'
 GATES = ('preflight', 'wasm', 'windows-editor', 'windows-cli', 'browser-e2e', 'build',
          'native-e2e', 'msix-install', 'virtual-print', 'release',
-         'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64',
+         'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64', 'msix-native-arm64',
          'native-e2e-arm64', 'virtual-print-arm64')
 TRANSPORT = ('opengeul-wasm', 'opengeul-browser-inputs', 'opengeul-e2e-inputs', 'opengeul-windows-x64',
              'opengeul-editor-component', 'opengeul-cli-component', 'opengeul-e2e-inputs-arm64',
-             'opengeul-windows-arm64', 'opengeul-editor-component-arm64', 'opengeul-cli-component-arm64')
-LIMITS = dict(zip(TRANSPORT, (32, 64, 16, 96, 64, 32, 16, 96, 64, 32)))
+             'opengeul-windows-arm64', 'opengeul-editor-component-arm64', 'opengeul-cli-component-arm64', 'opengeul-native-signed-arm64')
+LIMITS = dict(zip(TRANSPORT, (32, 64, 16, 96, 64, 32, 16, 96, 64, 32, 96)))
 PACKAGES = frozenset({'opengeul-windows-x64', 'opengeul-windows-arm64'})
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 
@@ -59,13 +59,13 @@ def allowed_names(ctx, needs):
     if not publishing: expected['release'] = 'skipped'
     if mode == 'engine':
         for name in ('windows-editor', 'windows-cli', 'build', 'native-e2e', 'msix-install', 'virtual-print',
-                     'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64',
+                     'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64', 'msix-native-arm64',
                      'native-e2e-arm64', 'virtual-print-arm64'):
             expected[name] = 'skipped'
     if states != expected: return set()  # Keep failure inputs for diagnosis; never call DELETE.
     prefixes = set(TRANSPORT) - PACKAGES if mode == 'full' else {'opengeul-browser-inputs'}
     if publishing: prefixes.update(PACKAGES)
-    return {f'{name}-{ctx["run_id"]}' for name in prefixes}
+    return {f'{name}-{ctx["run_id"]}' + ('-1' if name == 'opengeul-native-signed-arm64' else '') for name in prefixes}
 
 
 def validate_run(ctx, run):
@@ -83,7 +83,8 @@ def validate_artifact(ctx, artifact):
     owner = artifact.get('workflow_run', {})
     if owner.get('id') != ctx['run_id'] or owner.get('head_sha') != ctx['sha']:
         raise ValueError('Transport belongs to a different source or run')
-    prefix = artifact['name'].rsplit('-', 1)[0]
+    prefix = next((name for name in LIMITS if artifact.get('name') ==
+                   f'{name}-{ctx["run_id"]}' + ('-1' if name == 'opengeul-native-signed-arm64' else '')), None)
     size = artifact.get('size_in_bytes')
     if (prefix not in LIMITS or type(artifact.get('id')) is not int or artifact['id'] <= 0
             or artifact.get('expired') is not False or type(size) is not int

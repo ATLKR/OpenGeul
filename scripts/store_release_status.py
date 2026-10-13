@@ -93,8 +93,8 @@ def _reference(app):
 def metadata_from_store(app, submission):
     submission_id = _reference(app)
     if (not isinstance(submission, dict) or submission.get('id') != submission_id
-            or submission.get('status') != 'Published' or submission.get('targetPublishMode') != 'Manual'):
-        raise ValueError('일치하는 수동 공개 Store 제출이 아닙니다')
+            or submission.get('status') != 'Published' or submission.get('targetPublishMode') not in ('Manual', 'Immediate')):
+        raise ValueError('일치하는 공개 Store 제출 또는 공개 방식이 아닙니다')
     pricing = submission.get('pricing')
     if (not isinstance(pricing, dict) or pricing.get('priceId') != 'Free'
             or not isinstance(pricing.get('marketSpecificPricings'), dict)

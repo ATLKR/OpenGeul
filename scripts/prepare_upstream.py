@@ -175,6 +175,21 @@ def install_store_updates(source: Path) -> None:
         replace_file(source/item['file'], item['old'], item['new'])
 
 
+def install_product_information(source: Path) -> None:
+    """기존 정보 화면에 제품 신원과 복사 가능한 연락처만 표시한다."""
+    target = source/'apps/studio-host/src/ui/about-dialog.ts'
+    original_sha = 'c5e116871de4ce7cd13bb94a1be757164468153e7bcab21bbca4134df0b044af'
+    if hashlib.sha256(target.read_bytes()).hexdigest() != original_sha:
+        raise ValueError('Upstream product information source changed')
+    text = (ROOT/'overlay/about-dialog.ts').read_text(encoding='utf-8')
+    match = re.search(r"^const HOP_BASE_VERSION = '([^']+)';$", text, re.MULTILINE)
+    pinned = json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8'))['hop']['version']
+    if match is None or match[1] != pinned:
+        raise ValueError('Reviewed HOP attribution version does not match the upstream lock')
+    shutil.copy2(ROOT/'overlay/about-dialog.ts', target)
+    shutil.copy2(ROOT/'overlay/about-dialog.test.ts', target.with_name('about-dialog.test.ts'))
+
+
 def patch(source: Path, version: str) -> None:
     package_version(version)
     protected = ['apps/desktop/src-tauri/src/' + x for x in ('commands.rs','state.rs','pdf_export.rs','pending_open.rs','app_quit.rs','recent_documents.rs')]
@@ -260,6 +275,7 @@ def patch(source: Path, version: str) -> None:
         "titleEn.textContent = 'Rust용 HWP/HWPX 호환 모듈';")
     replace_file(ui/'about-dialog.ts', 'version.textContent = `Version ${__APP_VERSION__}`;',
         'version.textContent = `버전 ${__APP_VERSION__}`;')
+    install_product_information(source)
     replace_file(ui/'compare-dialog.ts', 'L: ${this.escape(leftPreview)} / R: ${this.escape(rightPreview)}',
         '왼쪽: ${this.escape(leftPreview)} / 오른쪽: ${this.escape(rightPreview)}')
     replace_file(ui/'history-dialog.ts', 'L: ${this.escape(leftText)} / R: ${this.escape(rightText)}',

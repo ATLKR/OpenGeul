@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class Arm64WorkflowTests(unittest.TestCase):
     def setUp(self):self.jobs = load_workflow(ROOT/'.github/workflows/msix.yml')['jobs']
     def commands(self, name):return '\n'.join(step.get('run', '') for step in self.jobs[name]['steps'])
-    def test_exact21_expanded_jobs_preserve_all15_x64_checks(self):
+    def test_exact22_expanded_jobs_preserve_all15_x64_checks(self):
         expanded = []
         for name, job in self.jobs.items():
             matrix = job.get('strategy', {}).get('matrix')
@@ -20,9 +20,9 @@ class Arm64WorkflowTests(unittest.TestCase):
                'browser-e2e (chromium)','browser-e2e (firefox)','browser-e2e (webkit)',
                'native-e2e (windows-2022)','native-e2e (windows-2025)',
                'virtual-print (windows-2022)','virtual-print (windows-2025)'}
-        new = {'windows-editor-arm64','windows-cli-arm64','build-arm64','msix-install-arm64',
+        new = {'windows-editor-arm64','windows-cli-arm64','build-arm64','msix-install-arm64','msix-native-arm64',
                'native-e2e (windows-11-arm)','virtual-print (windows-11-arm)'}
-        self.assertEqual(set(expanded), old | new);self.assertEqual(len(expanded), 21)
+        self.assertEqual(set(expanded), old | new);self.assertEqual(len(expanded), 22)
     def test_native_arm_producers_share_wasm_and_never_wait_on_browser(self):
         for role in ('editor','cli'):
             name = 'windows-'+role+'-arm64';self.assertIn(name, self.jobs)
@@ -30,7 +30,16 @@ class Arm64WorkflowTests(unittest.TestCase):
             self.assertEqual(set(job['needs']), {'preflight','wasm'})
             self.assertEqual(job['runs-on'], 'windows-11-arm')
             self.assertEqual(job['permissions'], {'contents':'read','actions':'read'})
-            self.assertIn('-Architecture arm64', self.commands(name))
+            if name == 'windows-editor-arm64':
+                from build_progress import build_command
+                stages=[step for step in self.jobs[name]['steps'] if 'ci/build_progress.py run ' in step.get('run','')]
+                self.assertEqual([step['id'] for step in stages], ['editor-prepare','editor-native-tests','editor-release'])
+                for stage, step in zip(('Prepare','NativeTests','Release'), stages):
+                    self.assertEqual(step['run'], 'python ci/build_progress.py run --stage '+stage+' --architecture arm64')
+                    self.assertEqual(build_command(stage,'arm64')[-2:], ['-Architecture','arm64'])
+                    self.assertNotIn('if', step)
+            else:
+                self.assertIn('-Architecture arm64', self.commands(name))
             self.assertIn('opengeul-wasm-$env:GITHUB_RUN_ID', self.commands(name))
         self.assertEqual(set(self.jobs['build-arm64']['needs']), {'preflight','wasm','windows-editor-arm64','windows-cli-arm64'})
         self.assertIn('-Phase Package -Architecture arm64', self.commands('build-arm64'))
@@ -49,11 +58,13 @@ class Arm64WorkflowTests(unittest.TestCase):
             for consumer in (name,name+'-arm64'):
                 self.assertIn('--architecture $env:E2E_ARCHITECTURE', self.commands(consumer))
                 self.assertIn('opengeul-windows-${env:E2E_ARCHITECTURE}-', self.commands(consumer))
-        job=self.jobs['msix-install-arm64']
+        job=self.jobs['msix-native-arm64']
         self.assertEqual(job['runs-on'],'windows-11-arm');self.assertEqual(set(job['needs']),{'build-arm64','native-e2e-arm64'})
-        self.assertIn('-Architecture arm64', self.commands('msix-install-arm64'))
+        self.assertIn('-Architecture arm64', self.commands('msix-native-arm64'))
+        sdk=self.jobs['msix-install-arm64'];self.assertEqual(sdk['runs-on'],'windows-2025')
+        self.assertEqual(set(sdk['needs']),{'build-arm64','msix-native-arm64'})
     def test_release_requires_both_architectures_and_full_wack_receipts(self):
-        self.assertEqual(set(self.jobs['release']['needs']), {'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'})
+        self.assertEqual(set(self.jobs['release']['needs']), {'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-native-arm64','msix-install-arm64','virtual-print','virtual-print-arm64'})
         commands=self.commands('release')
         for required in ('--name "opengeul-windows-arm64-$BUILD_RUN_ID" --dir package-arm64',
                          '--name "msix-install-$BUILD_RUN_ID" --dir wack-x64',
@@ -78,7 +89,14 @@ class Arm64WorkflowTests(unittest.TestCase):
                     # 기존 16+암호8·인쇄 전체 단계의 원래 해시는 갱신하지 않는다.
                     additions={'실제 MCP stdio·암호 입력·COM 작업자 실패 격리 검사',
                                '설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비',
-                               '동일 실행의 공개 MCP QA 입력을 하루 동안 보존'} if name=='native-e2e' else set()
+                               '동일 실행의 공개 MCP QA 입력을 하루 동안 보존'} if name=='native-e2e' else {
+                                   '성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존',
+                                   '제한된 합성 PDF 원본 전송'}  # 별도 exact2 합성 PDF 계약 검사; 원래 해시는 유지.
+                    if suffix == '-arm64':
+                        # 준비·증거 단계만 별도 계약으로 검증하며 원래 GUI 시험 해시는 보존한다.
+                        additions |= {'ARM 러너의 검증된 OS 창과 전경 준비',
+                                      'ARM 러너 준비 원본 증거 크기 제한',
+                                      'ARM 러너 준비 원본 관찰 보존'}
                     steps=json.dumps(bind([step for step in job['steps'] if step.get('name') not in additions]),sort_keys=True,separators=(',',':')).encode()
                     self.assertEqual(hashlib.sha256(steps).hexdigest(),expected)
                     self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})

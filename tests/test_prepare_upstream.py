@@ -57,6 +57,27 @@ pub fn pdf_font_dirs(app: &AppHandle) -> Vec<PathBuf> {
             'apps/studio-host/index.html': '<title>HOP</title><link href="/favicon.ico"></body>',
             'apps/studio-host/src/core/font-catalog.ts': '// upstream catalog\n',
             'apps/studio-host/src/host/toolbar-labels.ts': "  try { return localStorage.getItem(STORAGE_KEY) !== 'hidden'; }\n",
+            'apps/studio-host/src/ui/about-dialog.ts': '''import { AboutDialog as UpstreamAboutDialog } from '@/upstream/ui';
+
+export class AboutDialog extends UpstreamAboutDialog {
+  protected override createBody(): HTMLElement {
+    const body = super.createBody();
+    const version = body.querySelector('.about-version');
+
+    const hopVersion = document.createElement('div');
+    hopVersion.className = 'about-hop-version';
+    hopVersion.textContent = `HOP ${__HOP_VERSION__}`;
+
+    if (version?.parentNode) {
+      version.parentNode.insertBefore(hopVersion, version.nextSibling);
+    } else {
+      body.appendChild(hopVersion);
+    }
+
+    return body;
+  }
+}
+''',
             'third_party/rhwp/rhwp-studio/src/ui/about-dialog.ts': "titleEn.textContent = 'HWP/HWPX Compatible Module for Rust';\nversion.textContent = `Version ${__APP_VERSION__}`;\n",
             'third_party/rhwp/rhwp-studio/src/ui/compare-dialog.ts': 'L: ${this.escape(leftPreview)} / R: ${this.escape(rightPreview)}\n',
             'third_party/rhwp/rhwp-studio/src/ui/history-dialog.ts': 'L: ${this.escape(leftText)} / R: ${this.escape(rightText)}\n',
@@ -84,7 +105,8 @@ pub fn layer_trees_to_pdf_with_links(
         for name, text in files.items():
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding='utf-8')
+            # The pinned Git checkout uses LF, including the byte-guarded About source.
+            path.write_text(text, encoding='utf-8', newline='\n')
 
     def test_preparation_emits_the_manifest_used_by_the_native_build(self):
         prepare_upstream.patch(self.source, '1.1.2')
@@ -132,6 +154,37 @@ pub fn layer_trees_to_pdf_with_links(
         self.assertEqual(manifest['dependencies']['reqwest']['version'], '=0.13.2')
         self.assertEqual(manifest['dependencies']['rustls']['version'], '=0.23.45')
         self.assertEqual(manifest['dependencies']['tokio']['version'], '=1.52.1')
+
+    def test_preparation_installs_product_contact_and_actual_ui_regressions(self):
+        prepare_upstream.patch(self.source, '1.1.3')
+        path = self.source/'apps/studio-host/src/ui/about-dialog.ts'
+        self.assertIn('allenlim@allenlim.net', path.read_text(encoding='utf-8'))
+        self.assertEqual(path.read_bytes(), (ROOT/'overlay/about-dialog.ts').read_bytes())
+        self.assertEqual((self.source/'apps/studio-host/src/ui/about-dialog.test.ts').read_bytes(),
+                         (ROOT/'overlay/about-dialog.test.ts').read_bytes())
+
+    def test_changed_upstream_about_is_rejected_without_overwrite(self):
+        path = self.source/'apps/studio-host/src/ui/about-dialog.ts'
+        changed = path.read_bytes() + b'// unreviewed upstream change\n'
+        path.write_bytes(changed)
+        with self.assertRaisesRegex(ValueError, 'product information source changed'):
+            prepare_upstream.install_product_information(self.source)
+        self.assertEqual(path.read_bytes(), changed)
+        self.assertFalse(path.with_name('about-dialog.test.ts').exists())
+
+    def test_upstream_hop_version_change_requires_reviewed_about_attribution(self):
+        path = self.source/'apps/studio-host/src/ui/about-dialog.ts'
+        original = path.read_bytes()
+        read_text = Path.read_text
+        def changed_lock(file, *args, **kwargs):
+            text = read_text(file, *args, **kwargs)
+            if file == ROOT/'config/upstream.lock.json':
+                value = json.loads(text); value['hop']['version'] = '0.4.6'
+                return json.dumps(value)
+            return text
+        with patch.object(Path, 'read_text', changed_lock), self.assertRaisesRegex(ValueError, 'HOP attribution version'):
+            prepare_upstream.install_product_information(self.source)
+        self.assertEqual(path.read_bytes(), original)
 
     def test_changed_upstream_build_script_is_rejected_without_overwrite(self):
         path = self.native / 'build.rs'

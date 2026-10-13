@@ -51,7 +51,7 @@ class StoreReleaseStatusTests(unittest.TestCase):
 
     def test_identity_manual_free_x64_and_uploaded_fail_closed(self):
         cases = [('app', 'id', 'OTHER'), ('app', 'publisherName', 'OTHER'), ('app', 'packageIdentityName', 'OTHER'),
-                 ('submission', 'id', '99'), ('submission', 'targetPublishMode', 'Immediate'),
+                 ('submission', 'id', '99'), ('submission', 'targetPublishMode', 'Unknown'),
                  ('submission', 'targetPublishMode', 'SpecificDate')]
         for group, key, value in cases:
             app, submission = copy.deepcopy(self.app), copy.deepcopy(self.submission)
@@ -145,13 +145,94 @@ class StoreReleaseStatusTests(unittest.TestCase):
             {**self.submission['applicationPackages'][0], 'architecture': architecture}
             for architecture in ('x64', 'arm64')]}
         for change in ({'id': '99'}, {'id': True}, {'status': 'Certification'}, {'status': 'Release'},
-                       {'status': 'PendingPublication'}, {'targetPublishMode': 'Immediate'}):
+                       {'status': 'PendingPublication'}, {'targetPublishMode': 'SpecificDate'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 status.metadata_from_store(self.app, {**submission, **change})
         for change in ({'id': 'OTHER'}, {'publisherName': 'OTHER'},
                        {'lastPublishedApplicationSubmission': {'id': '99', 'status': 'Published'}}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 status.metadata_from_store({**self.app, **change}, submission)
+
+    def test_manual_and_immediate_published_versions_preserve_exact_public_schema(self):
+        expected = {**self.public, 'version': '1.1.3.0', 'submissionId': '123'}
+        app = {**self.app, 'lastPublishedApplicationSubmission': {'id': '123', 'status': 'Published'}}
+        for mode in ('Manual', 'Immediate'):
+            for architectures in (('X64',), ('x64', 'ARM64')):
+                submission = {**self.submission, 'id': '123', 'targetPublishMode': mode,
+                              'applicationPackages': [{'version': '1.1.3.0', 'architecture': architecture,
+                                                       'fileStatus': 'Uploaded'} for architecture in architectures]}
+                original = copy.deepcopy(submission)
+                with self.subTest(mode=mode, architectures=architectures):
+                    result = status.metadata_from_store(app, submission)
+                    self.assertEqual(result, expected)
+                    self.assertEqual(set(result), {'formatVersion', 'appId', 'status', 'version',
+                                                   'storeUrl', 'submissionId'})
+                    encoded = status.encode_metadata(result)
+                    self.assertEqual(status.decode_metadata(encoded), expected)
+                    self.assertNotIn(b'PRIVATE', encoded)
+                    self.assertNotIn(b'SECRET', encoded)
+                    self.assertEqual(submission, original)
+
+    def test_unknown_scheduled_missing_and_nonstring_publish_modes_are_rejected(self):
+        for mode in ('Unknown', 'SpecificDate', '', 'immediate', 'IMMEDIATE', 'manual', ' Immediate',
+                     'Immediate ', 'Immediate\n', 'Ｍanual', None, True, False, 0, [], {}):
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                status.metadata_from_store(self.app, {**self.submission, 'targetPublishMode': mode})
+        candidate = copy.deepcopy(self.submission)
+        del candidate['targetPublishMode']
+        with self.assertRaises(ValueError):
+            status.metadata_from_store(self.app, candidate)
+
+    def test_immediate_not_yet_published_never_reaches_github_metadata(self):
+        for state in ('Certification', 'Release', 'PendingPublication', 'Publishing', 'PendingCommit'):
+            submission = {**self.submission, 'status': state, 'targetPublishMode': 'Immediate'}
+            class Opener:
+                def __init__(inner): inner.calls = []
+                def open(inner, request, timeout):
+                    inner.calls.append((request.full_url, request.get_method()))
+                    response = io.BytesIO(json.dumps(self.app if len(inner.calls) == 1 else submission).encode())
+                    response.status = 200
+                    return response
+            opener = Opener()
+            with self.subTest(state=state), patch.object(status, 'require_environment'), \
+                    patch.object(status, 'authenticate', return_value=(opener, 'TEST_ONLY')), \
+                    patch.object(status, 'github') as github:
+                with self.assertRaises(ValueError): status.refresh()
+                github.assert_not_called()
+            self.assertEqual([method for _, method in opener.calls], ['GET', 'GET'])
+
+    def test_immediate_published_observation_updates_only_changed_metadata_once(self):
+        expected = {**self.public, 'version': '1.1.3.0', 'submissionId': '123'}
+        app = {**self.app, 'lastPublishedApplicationSubmission': {'id': '123', 'status': 'Published'}}
+        submission = {**self.submission, 'id': '123', 'targetPublishMode': 'Immediate',
+                      'applicationPackages': [{'version': '1.1.3.0', 'architecture': architecture,
+                                               'fileStatus': 'Uploaded'} for architecture in ('x64', 'arm64')]}
+        for changed in (False, True):
+            class Opener:
+                def __init__(inner): inner.calls = []
+                def open(inner, request, timeout):
+                    inner.calls.append((request.full_url, request.get_method(), timeout))
+                    response = io.BytesIO(json.dumps(app if len(inner.calls) == 1 else submission).encode())
+                    response.status = 200
+                    return response
+            opener = Opener()
+            calls = []
+            def github(method, path, data=None):
+                calls.append((method, path, data))
+                if method == 'GET':
+                    return self.contents(status.encode_metadata(self.public if changed else expected))
+                return {'content': {'path': 'website/store-release.json', 'sha': 'b' * 40}}
+            with self.subTest(changed=changed), patch.object(status, 'require_environment'), \
+                    patch.object(status, 'authenticate', return_value=(opener, 'TEST_ONLY')), \
+                    patch.object(status, 'github', side_effect=github), patch('builtins.print'):
+                self.assertEqual(status.refresh(), (expected, changed))
+            base = 'https://manage.devcenter.microsoft.com/v1.0/my/applications/' + STORE_APP_ID
+            self.assertEqual(opener.calls, [(base, 'GET', 30), (base + '/submissions/123', 'GET', 30)])
+            self.assertEqual([c[0] for c in calls], ['GET', 'PUT'] if changed else ['GET'])
+            if changed:
+                self.assertEqual(calls[1][1], 'contents/website/store-release.json')
+                self.assertEqual(calls[1][2]['sha'], 'a' * 40)
+                self.assertEqual(status.decode_metadata(base64.b64decode(calls[1][2]['content'])), expected)
 
     def test_invalid_dual_observation_cannot_update_public_metadata(self):
         duplicate = [copy.deepcopy(self.submission['applicationPackages'][0]) for _ in range(2)]

@@ -63,6 +63,29 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertIsNotNone(components, 'Windows component integrity helper is missing')
         return components
 
+    def test_owned_composition_fixture_crlf_keeps_text_and_raw_byte_contracts_distinct(self):
+        original_write_text = Path.write_text
+        def windows_composition_write(path, data, *args, **kwargs):
+            if path.name == 'input-handler-text.ts' and kwargs.get('newline') is None:
+                kwargs['newline'] = '\r\n'
+            return original_write_text(path, data, *args, **kwargs)
+        # Use real files while exercising Windows' default text newline conversion.
+        with patch.object(Path, 'write_text', windows_composition_write):
+            source = self.source()
+        path = source/'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts'
+        raw = path.read_bytes()
+        self.assertIn(b'\r\n', raw)
+        normalized_sha = hashlib.sha256(path.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
+        self.assertNotEqual(digest(path), normalized_sha)
+        ledger = self.helper().read_json(source/'.opengeul-overlay.json')
+        self.assertEqual(ledger['compositionFix']['afterSha256'], normalized_sha)
+        _, contract = self.helper().source_contract(source, self.helper().configured())
+        self.assertEqual(contract['compositionTextSha256'], normalized_sha)
+        self.assertEqual(contract['preparedFiles'][path.relative_to(source).as_posix()], digest(path))
+        path.write_bytes(raw.replace(b'synthetic prepared source', b'changed prepared source'))
+        with self.assertRaisesRegex(ValueError, 'Incomplete composition source ledger'):
+            self.helper().source_contract(source, self.helper().configured())
+
     def source(self):
         c = self.helper()
         source = self.root/'hop'
@@ -115,7 +138,7 @@ class WindowsComponentsTests(unittest.TestCase):
                   'baselinePreservedFiles': {}, 'changes': ['synthetic owned source'],
                   'hwpxSaveV1': True, 'extendedFiles': ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts'],
                   'compositionFix': {'beforeSha256': 'c'*64,
-                     'afterSha256': digest(engine/'input-handler-text.ts'),
+                     'afterSha256': hashlib.sha256((engine/'input-handler-text.ts').read_text(encoding='utf-8').encode('utf-8')).hexdigest(),
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
                   'namespacePatch': namespace, 'wasmRebuild': wasm,
                   'comWorker': json.loads((source/com_source_contract.LEDGER_PATH).read_bytes()),
@@ -1008,6 +1031,19 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertIn('apps/studio-host/src/command/commands/edit.ts', self.helper().SOURCE_FILES,
                       'The actual async Cut document guard must be bound in the receipt contract')
 
+    def test_product_information_is_bound_to_the_reviewed_copied_overlay(self):
+        c = self.helper()
+        name = 'apps/studio-host/src/ui/about-dialog.ts'
+        self.assertEqual(c.COPIED_OVERLAYS.get(name), 'overlay/about-dialog.ts')
+        self.assertIn(name, c.SOURCE_FILES)
+        source = self.source()
+        path = source/name
+        path.write_bytes(path.read_bytes().replace(b'allenlim@allenlim.net', b'wrong@example.invalid'))
+        output = self.root/'wrong-product-contact'
+        with self.assertRaisesRegex(ValueError, 'overlay helper mismatch'):
+            c.capture('editor', self.payload('editor'), source, output, env=self.env)
+        self.assertFalse(output.exists())
+
     def test_workers_with_different_host_visibility_css_cannot_join(self):
         c = self.helper()
         source = self.source()
@@ -1048,7 +1084,7 @@ class WindowsComponentsTests(unittest.TestCase):
         c = self.helper()
         source = self.source()
         path = source/'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts'
-        path.write_bytes(path.read_bytes().replace(b'\n', b'\r\n'))
+        path.write_bytes(path.read_text(encoding='utf-8').encode('utf-8').replace(b'\n', b'\r\n'))
         out = self.root/'crlf-component'
         c.capture('editor', self.payload('editor'), source, out, env=self.env)
         value = json.loads((out/'provenance.json').read_text())
@@ -1089,16 +1125,22 @@ class WindowsComponentsTests(unittest.TestCase):
 
     def test_unsafe_windows_paths_case_collisions_and_symlinks_are_rejected(self):
         c = self.helper()
-        source = self.source()
-        payload = self.payload('editor')
-        for name in ('opengeul.exe', 'CON.dll', 'COM¹.dll', 'COM².dll', 'LPT³.dll',
-                     'bad:name.dll', 'bad\\name.dll', 'trailing .dll '):
-            with self.subTest(name=name):
-                path = payload/name
-                path.write_bytes(pe())
-                with self.assertRaises(ValueError):
-                    c.capture('editor', payload, source, self.root/'bad-path', env=self.env)
-                path.unlink()
+        # JSON can carry a conflicting Windows name even when NTFS cannot create
+        # two case-insensitive files or literal reserved/backslash names. Exercise
+        # the real consumer before staging rather than overwrite valid payloads.
+        folders = self.pair()
+        provenance = folders['editor']/'provenance.json'
+        original = json.loads(provenance.read_text())
+        for name in ('payload/opengeul.exe', 'payload/CON.dll', 'payload/COM¹.dll',
+                     'payload/COM².dll', 'payload/LPT³.dll', 'payload/bad:name.dll',
+                     'payload/bad\\name.dll', 'payload/trailing .dll '):
+            with self.subTest(inventoryName=name):
+                value = copy.deepcopy(original)
+                value['files'][name] = value['files']['payload/OpenGeul.exe']
+                write_json(provenance, value)
+                self.assert_rejected_without_outputs(folders, 'inventory|path')
+        source = self.root/'hop'
+        payload = self.root/'editor-payload'
         link = payload/'Notices/link.txt'
         try:
             link.symlink_to(payload/'Notices/OpenGeul-LICENSE.txt')
@@ -1119,7 +1161,7 @@ class WindowsComponentsTests(unittest.TestCase):
         c = self.helper()
         source = self.source()
         path = source/'third_party/rhwp/Cargo.toml'
-        path.write_bytes(path.read_bytes().replace(b'\n', b'\r\n'))
+        path.write_bytes(path.read_text(encoding='utf-8').encode('utf-8').replace(b'\n', b'\r\n'))
         out = self.root/'crlf-native'
         c.capture('cli', self.payload('cli'), source, out, env=self.env)
         value = json.loads((out/'provenance.json').read_text())

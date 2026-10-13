@@ -16,7 +16,16 @@ class WiringTests(unittest.TestCase):
             self.assertIn("needs.preflight.outputs.mode == 'full'",job['if'])
             self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
             commands='\n'.join(s.get('run','') for s in job['steps'])
-            self.assertIn('-Phase '+role.capitalize(),commands)
+            if role == 'editor':
+                from build_progress import build_command
+                phases = [s for s in job['steps'] if 'ci/build_progress.py run ' in s.get('run','')]
+                self.assertEqual([s['id'] for s in phases], ['editor-prepare','editor-native-tests','editor-release'])
+                for stage, step in zip(('Prepare','NativeTests','Release'), phases):
+                    self.assertEqual(step['run'], 'python ci/build_progress.py run --stage '+stage+' --architecture x64')
+                    self.assertEqual(build_command(stage,'x64')[5:7], ['-Phase','Editor'])
+                    self.assertNotIn('if', step)
+            else:
+                self.assertIn('-Phase '+role.capitalize(),commands)
             self.assertIn('opengeul-wasm-$env:GITHUB_RUN_ID',commands)
         self.assertEqual(jobs['browser-e2e']['needs'],'wasm')
         commands='\n'.join(s.get('run','') for s in jobs['build']['steps'])
@@ -29,22 +38,26 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(options['default'],'full');self.assertEqual(set(options['options']),{'full','engine','checks'})
         self.assertIn("needs.preflight.outputs.mode == 'full'",w['jobs']['build']['if'])
     def test_all_required_release_gates_remain(self):
-        jobs=self.load()['jobs'];self.assertEqual(set(jobs['release']['needs']),{'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'})
+        jobs=self.load()['jobs'];self.assertEqual(set(jobs['release']['needs']),{'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-native-arm64','msix-install-arm64','virtual-print','virtual-print-arm64'})
         for job in ('native-e2e','virtual-print'):
             self.assertEqual(set(jobs[job]['strategy']['matrix']['os']),{'windows-2022','windows-2025'})
             self.assertEqual(jobs[job+'-arm64']['runs-on'],'windows-11-arm')
         self.assertEqual(set(jobs['browser-e2e']['strategy']['matrix']['browser']),{'chromium','firefox','webkit'})
     def test_diagnostics_are_bounded_before_upload(self):
-        for job in ('native-e2e','native-e2e-arm64','virtual-print','virtual-print-arm64','browser-e2e','msix-install','msix-install-arm64'):
+        for job in ('native-e2e','native-e2e-arm64','virtual-print','virtual-print-arm64','browser-e2e','msix-install','msix-native-arm64','msix-install-arm64'):
             steps=self.load()['jobs'][job]['steps']
             pack=[i for i,s in enumerate(steps) if 'ci/evidence.py pack ' in s.get('run','')]
             self.assertEqual(len(pack),1)
             for i,s in enumerate(steps):
-                if s.get('uses','').startswith('actions/upload-artifact'):
+                if s.get('uses','').startswith('actions/upload-artifact') and s.get('id') != 'runner-ready-evidence':
                     if s.get('with',{}).get('path')=='mcp-qa/':
                         self.assertEqual(s['with']['name'],'opengeul-mcp-fixtures${{ env.E2E_INPUT_SUFFIX }}-${{ github.run_id }}')
                         self.assertEqual(s['if'],"env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'")
                         continue  # 별도 test_qa_upload가 원본 QA 입력·16 MiB 제한을 검사한다.
+                    if s.get('id')=='synthetic-pdfs-evidence':
+                        self.assertIn(job,('virtual-print','virtual-print-arm64'));continue  # exact7+manifest 전송은 별도 합성 PDF 계약 검사.
+                    if 'native-transport/native-install.json' in s.get('with',{}).get('path',''):
+                        self.assertEqual(job,'msix-native-arm64');continue  # exact3 transport 검사기는 별도로 검사한다.
                     self.assertGreater(i,pack[0]);self.assertEqual(s['with']['path'],'bounded-evidence/')
     def test_native_input_artifact_no_longer_duplicates_browser_dist(self):
         steps=self.load()['jobs']['windows-editor']['steps']
@@ -55,6 +68,13 @@ class WiringTests(unittest.TestCase):
             steps=self.load()['jobs'][job]['steps']
             uploads=sum(s.get('uses','').startswith('actions/upload-artifact') for s in steps)
             checks=sum('ci/evidence.py size ' in s.get('run','') for s in steps)
+            for step in steps:
+                if 'ci/build_progress.py run ' in step.get('run',''):
+                    from build_progress import MAX_TOTAL, MAX_LOG
+                    self.assertEqual(MAX_TOTAL, 16*1024*1024)
+                    self.assertLessEqual(MAX_LOG, MAX_TOTAL-4096)
+                    self.assertIn(step['id'], {'editor-prepare','editor-native-tests','editor-release'})
+                    checks += 1
             self.assertEqual(uploads,checks)
     def test_password_ui_is_a_required_same_source_native_gate(self):
         jobs=self.load()['jobs'];steps=jobs['native-e2e']['steps']
@@ -101,7 +121,7 @@ class WiringTests(unittest.TestCase):
         cleanup=(ROOT/'ci/transport_cleanup.py').read_text();self.assertNotIn('opengeul-mcp-fixtures',cleanup)
     def test_installed_mcp_gets_same_arch_source_qa_before_any_install(self):
         jobs=self.load()['jobs']
-        for name,build,native in (('msix-install','build','native-e2e'),('msix-install-arm64','build-arm64','native-e2e-arm64')):
+        for name,build,native in (('msix-install','build','native-e2e'),('msix-native-arm64','build-arm64','native-e2e-arm64')):
             with self.subTest(job=name):
                 job=jobs[name];self.assertEqual(set(job['needs']),{build,native});steps=job['steps']
                 qa=[(i,s) for i,s in enumerate(steps) if 'scripts/mcp_qa_download.py' in s.get('run','')]

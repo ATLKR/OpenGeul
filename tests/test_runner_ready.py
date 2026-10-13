@@ -1,6 +1,7 @@
 """읽기 전용 ARM 러너 관찰의 실행 경계·상한·무입력을 검증한다."""
 import importlib.util
 import copy
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -77,7 +78,118 @@ class Dwm:
     def DwmGetWindowAttribute(self, hwnd, attribute, cloaked, size): return 0
 
 
+class ApiCall:
+    def __init__(self, callback): self.callback = callback
+    def __call__(self, *args): return self.callback(*args)
+
+
+class StartupFixture:
+    """외부 WinAPI만 교체: own 창 생성 중 WSL fore 출현/자연 종료를 재현한다."""
+    def __init__(self, value, *, expires=60, setter=True, change=None, exited_path_unavailable=False):
+        self.value = value; self.clock = 0; self.expires = expires; self.setter = setter; self.change = change
+        self.fore = 20; self.probe_exists = False; self.calls = []; self.closed = []; self.opened = []; self.signature_timeouts = []
+        self.exited_path_unavailable = exited_path_unavailable
+        self.directory = tempfile.TemporaryDirectory(); self.file = Path(self.directory.name) / 'synthetic-wsl.exe'
+        data = bytearray(512); data[:2] = b'MZ'; data[60:64] = (128).to_bytes(4, 'little')
+        data[128:132] = b'PE\x00\x00'; data[132:134] = (0xAA64).to_bytes(2, 'little'); self.file.write_bytes(data)
+        self.process = Observer().processes([200])[0]
+        self.process.update(imagePath='C:\\Windows\\System32\\wsl.exe', imageBytes=len(data), imageSha256=hashlib.sha256(data).hexdigest())
+        self.window = {'hwnd': 12, 'processId': 200, 'threadId': 201,
+            'title': self.process['imagePath'], 'className': 'ConsoleWindowClass',
+            'visible': True, 'enabled': True, 'rectangle': [31, 104, 1024, 623]}
+        def api(fn): return ApiCall(fn)
+        self.user = SimpleNamespace(
+            DefWindowProcW=api(lambda *a: 0), RegisterClassW=api(lambda *a: 1), UnregisterClassW=api(lambda *a: 1),
+            CreateWindowExW=api(self.create), SetForegroundWindow=api(self.set_foreground),
+            DestroyWindow=api(self.destroy), PeekMessageW=api(lambda *a: 0),
+            TranslateMessage=api(lambda *a: 1), DispatchMessageW=api(lambda *a: 0),
+            GetWindowThreadProcessId=api(self.owner), IsWindow=api(self.exists),
+            GetForegroundWindow=api(self.foreground), GetWindowTextW=api(self.title),
+            GetClassNameW=api(self.class_name), IsWindowVisible=api(self.exists), IsWindowEnabled=api(lambda h: 1))
+        self.kernel = SimpleNamespace(GetModuleHandleW=api(lambda *a: 1), GetCurrentProcessId=api(lambda: 100),
+            OpenProcess=api(lambda *a: self.opened.append(a) or 11), CloseHandle=api(lambda h: self.closed.append(h) or 1),
+            GetProcessTimes=api(self.times), IsWow64Process2=api(self.native), GetExitCodeProcess=api(self.exit_code),
+            ProcessIdToSessionId=api(self.session))
+        self.probe = value.WindowsProbe.__new__(value.WindowsProbe); self.probe.user = self.user; self.probe.kernel = self.kernel
+        self.probe.host = lambda: {'processId': 100, 'processMachine': 0, 'nativeMachine': 0xAA64}
+        self.probe.windows_directory = lambda: 'C:\\Windows'; self.probe.session_id = lambda: 1
+        self.probe.windows = self.windows; self.probe.processes = self.processes
+    def create(self, *args): self.probe_exists = True; self.fore = 12; return 500
+    def exists(self, hwnd): return self.probe_exists if hwnd == 500 else self.clock < self.expires
+    def foreground(self):
+        if self.change == 'foreignRetirement' and self.clock >= self.expires: return 777
+        if self.fore == 12 and self.clock >= self.expires: return 0
+        if self.change == 'foreignForeground' and self.clock > 0: return 777
+        return self.fore
+    def owner(self, hwnd, pid):
+        pid._obj.value = 100 if hwnd == 500 else (999 if self.change == 'pid' and self.clock > 0 else 200)
+        return 101 if hwnd == 500 else (999 if self.change == 'thread' and self.clock > 0 else 201)
+    def title(self, hwnd, buffer, _): buffer.value = self.window['title']; return len(buffer.value)
+    def class_name(self, hwnd, buffer, _): buffer.value = 'OtherClass' if self.change == 'class' and self.clock else self.window['className']; return len(buffer.value)
+    def times(self, handle, created, *rest): created._obj.dwLowDateTime = 99999 if self.change == 'creation' and self.clock else 100000; return 1
+    def native(self, handle, process, native): native._obj.value = 0x8664 if self.change == 'native' and self.clock else 0xAA64; return 1
+    def session(self, pid, session): session._obj.value = 2 if self.change == 'session' and self.clock else 1; return 1
+    def exit_code(self, handle, code): code._obj.value = 0 if self.clock >= self.expires else 259; return 1
+    def set_foreground(self, hwnd):
+        self.calls.append(('SetForegroundWindow', hwnd, self.clock))
+        returned = self.setter and self.clock >= self.expires
+        if returned: self.fore = 777 if self.change == 'afterActivation' else hwnd
+        return returned
+    def destroy(self, hwnd):
+        if hwnd != 500: raise AssertionError('OS 창 종료 금지')
+        self.probe_exists = False; return 1
+    def windows(self):
+        return {'foregroundHwnd': self.foreground(), 'windows': [copy.deepcopy(self.window)], 'truncated': False}
+    def processes(self, pids):
+        result = copy.deepcopy(self.process)
+        if self.exited_path_unavailable and self.clock >= self.expires:
+            result.update(imagePath='', imageBytes=0, imageSha256='', signature={
+                'status': 'Unavailable', 'subject': '', 'issuer': '', 'thumbprint': '', 'publisherMicrosoft': False})
+        if self.change == 'signature' and self.clock: result['signature']['status'] = 'NotSigned'
+        if self.change == 'session' and self.clock: result['sessionId'] = 2
+        if self.change == 'hash' and self.clock: result['imageSha256'] = 'c' * 64
+        return [result]
+    def sleep(self, duration):
+        self.clock += duration
+        if self.change == 'hash':
+            data = bytearray(self.file.read_bytes()); data[-1] = 1; self.file.write_bytes(data)
+        if self.change == 'pe':
+            data = bytearray(self.file.read_bytes()); data[132:134] = (0x8664).to_bytes(2, 'little'); self.file.write_bytes(data)
+        if self.change == 'missingFile' and self.file.exists(): self.file.unlink()
+    def signature(self, args, **kwargs):
+        if not self.opened: raise AssertionError('fresh file 서명 전에 동일 process handle 유지 필수')
+        self.signature_timeouts.append(kwargs['timeout'])
+        result = copy.deepcopy(self.process['signature']); result.pop('publisherMicrosoft')
+        if self.change == 'initialSignature': result['status'] = 'NotSigned'
+        if self.change == 'signature' and self.clock: result['status'] = 'NotSigned'
+        return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode())
+    def run(self):
+        import ctypes
+        try:
+            with patch.object(ctypes, 'WINFUNCTYPE', ctypes.CFUNCTYPE, create=True), \
+                 patch.object(self.value.time, 'monotonic', lambda: self.clock), \
+                 patch.object(self.value.time, 'sleep', self.sleep), \
+                 patch.object(self.value, 'Path', lambda path: self.file if str(path) == self.process['imagePath'] else Path(path)), \
+                 patch.object(self.value.subprocess, 'run', self.signature):
+                return self.probe.focus_probe()
+        finally: self.directory.cleanup()
+
+
 class RunnerReadyTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.event_path = Path(directory.name) / 'event.json'
+        self.event = {'repository': {'full_name': 'ATLKR/OpenGeul', 'private': False, 'id': 1405493151},
+                      'sender': {'login': 'ATLKR', 'id': 65988341, 'type': 'User'},
+                      'ref': 'diagnostic/arm-runner-ready71'}
+        self.event_path.write_text(json.dumps(self.event))
+        context = patch.dict(ENV, {'GITHUB_EVENT_PATH': str(self.event_path), 'GITHUB_ACTOR_ID': '65988341',
+                                  'GITHUB_JOB': 'observe',
+                                  'GITHUB_WORKFLOW_REF': 'ATLKR/OpenGeul/.github/workflows/store-package.yml@refs/heads/diagnostic/arm-runner-ready71'})
+        context.start()
+        self.addCleanup(context.stop)
+
     def oobe(self):
         observed = {
             'foreground': {'hwnd': 12, 'processId': 200, 'threadId': 201, 'title': 'Microsoft account',
@@ -282,7 +394,9 @@ class RunnerReadyTests(unittest.TestCase):
 
     def test_production_scope_requires_exact_source_workflow_push_main(self):
         value = module()
+        self.event_path.write_text(json.dumps({**self.event, 'ref': 'refs/heads/main', 'deleted': False}))
         production = {**ENV, 'GITHUB_REF': 'refs/heads/main', 'GITHUB_EVENT_NAME': 'push',
+                      'GITHUB_JOB': 'native-e2e-arm64',
                       'GITHUB_WORKFLOW_REF': 'ATLKR/OpenGeul/.github/workflows/msix.yml@refs/heads/main'}
         self.assertEqual(value.binding(production)['ref'], 'refs/heads/main')
         for workflow in ('', 'Other/repo/.github/workflows/msix.yml@refs/heads/main',
@@ -345,6 +459,77 @@ class RunnerReadyTests(unittest.TestCase):
             result = json.loads((Path(d) / 'ready/preparation.json').read_text())
             self.assertFalse(result['hostReadyQualified']); self.assertFalse(result['sourceQualified'])
             self.assertEqual(result['stage'], 'ownedFocusProbe'); self.assertEqual(result['actions'], [])
+
+    def test_actual_probe_waits_for_wsl_appearing_during_create_then_one_setter(self):
+        fixture = StartupFixture(module())
+        result = fixture.run()
+        self.assertTrue(result['setForegroundReturned']); self.assertTrue(result['foregroundMatched'])
+        self.assertTrue(result['ownedWindowRemoved'])
+        self.assertEqual(len(fixture.calls), 1); self.assertEqual(fixture.calls[0][:2], ('SetForegroundWindow', 500))
+        self.assertGreaterEqual(fixture.calls[0][2], 60)
+        self.assertTrue(result['startupWait']['naturalProcessExitObserved'])
+        self.assertEqual(result['startupWait']['timeoutSeconds'], 65)
+
+    def test_actual_probe_wsl_deadline_performs_no_activation_or_os_input(self):
+        fixture = StartupFixture(module(), expires=1000)
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(fixture.calls, []); self.assertLessEqual(fixture.clock, 65)
+        self.assertFalse(fixture.probe_exists); self.assertEqual(fixture.closed, [11])
+
+    def test_actual_wait_rejects_owner_generation_native_signature_session_and_foreign_changes(self):
+        for change in ('pid', 'thread', 'class', 'creation', 'native', 'signature', 'session', 'hash', 'foreignForeground'):
+            fixture = StartupFixture(module(), change=change)
+            with self.subTest(change=change), self.assertRaises(ValueError): fixture.run()
+            self.assertEqual(fixture.calls, []); self.assertFalse(fixture.probe_exists)
+
+    def test_false_setter_or_foreign_after_wait_still_cannot_match(self):
+        for setter, change in ((False, None), (True, 'afterActivation')):
+            fixture = StartupFixture(module(), expires=1, setter=setter, change=change)
+            result = fixture.run()
+            self.assertFalse(result['setForegroundReturned'] and result['foregroundMatched'])
+            self.assertEqual(len(fixture.calls), 1); self.assertTrue(result['ownedWindowRemoved'])
+
+    def test_unknown_foreground_at_natural_exit_never_activates_probe(self):
+        fixture = StartupFixture(module(), expires=1, change='foreignRetirement')
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(fixture.calls, []); self.assertFalse(fixture.probe_exists)
+
+    def test_actual44_dead_process_blank_image_query_uses_separate_verified_disk_image(self):
+        fixture = StartupFixture(module(), expires=1, exited_path_unavailable=True)
+        result = fixture.run()
+        self.assertTrue(result['foregroundMatched']); self.assertEqual(len(fixture.calls), 1)
+        trace = result['startupWait']
+        self.assertEqual(trace['liveBoundImage'], trace['postExitImage'])
+        self.assertEqual(trace['postExitHeldIdentity']['sessionId'], 1)
+        self.assertTrue(trace['naturalProcessExitObserved'])
+
+    def test_separate_image_read_rejects_wrong_pe_missing_disk_and_blank_live_binding(self):
+        for change in ('pe', 'missingFile', 'liveBlank'):
+            fixture = StartupFixture(module(), expires=1, change=change, exited_path_unavailable=True)
+            if change == 'liveBlank': fixture.process.update(imagePath='', imageBytes=0, imageSha256='')
+            with self.subTest(change=change), self.assertRaises(ValueError): fixture.run()
+            self.assertEqual(fixture.calls, []); self.assertFalse(fixture.probe_exists)
+
+    def test_held_handle_precedes_fresh_image_and_is_closed_on_initial_image_rejection(self):
+        fixture = StartupFixture(module(), expires=1, change='initialSignature')
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(len(fixture.opened), 1); self.assertEqual(fixture.closed, [11])
+        self.assertEqual(fixture.calls, []); self.assertFalse(fixture.probe_exists)
+
+    def test_post_exit_signature_uses_only_remaining_startup_budget(self):
+        fixture = StartupFixture(module(), expires=64.75, exited_path_unavailable=True)
+        result = fixture.run()
+        self.assertTrue(result['foregroundMatched'])
+        self.assertEqual(fixture.signature_timeouts, [20, 0.25])
+        self.assertLessEqual(fixture.calls[0][2], 65)
+
+    def test_expired_bound_image_budget_never_starts_signature(self):
+        fixture = StartupFixture(module())
+        try:
+            with patch.object(fixture.value.time, 'monotonic', lambda: 1), self.assertRaises(ValueError):
+                fixture.probe.bound_image(fixture.process['imagePath'], deadline=1)
+            self.assertEqual(fixture.signature_timeouts, [])
+        finally: fixture.directory.cleanup()
 
     def test_actual_windows_reader_keeps_foreground_ahead_of_hidden_window_cap(self):
         value = module(); probe = value.WindowsProbe.__new__(value.WindowsProbe)

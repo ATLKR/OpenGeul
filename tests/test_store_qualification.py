@@ -55,6 +55,7 @@ class StoreQualificationTests(unittest.TestCase):
             installation['mcp'] = fixtures.installed_proof(arch, hashlib.sha256(cli).hexdigest(),
                 installation['packageFullName'], 'a' * 40, '38181680763', '2', len(cli))
             self.fixture.write_json(installation_path, installation)
+        self.fixture.rebind_split()
         self.fixture.assemble(); self.source = self.fixture.output
         self.root = self.fixture.root; self.store = self.root / 'store'; self.store.mkdir()
         self.outputs = {a: self.root / ('qualification-' + a) for a in ('x64', 'arm64')}
@@ -111,9 +112,25 @@ class StoreQualificationTests(unittest.TestCase):
             'repackageCommit': 'b' * 40, 'repackageRunId': '9999', 'architectures': entries,
             'unsigned': True, 'storeCertified': False}
         self.fixture.write_json(self.store / 'store-provenance.json', self.details); self.fixture.sums(self.store)
+        self.rebind_store_split()
+
+    def rebind_store_split(self):
+        import native_split_fixture
+        import native_wack_transport
+        arch='arm64';wack=self.evidence[arch];entry=self.details['architectures'][arch]
+        installation=json.loads((wack/'install.json').read_bytes())
+        binding={key:self.env[value] for key,value in [('repository','GITHUB_REPOSITORY'),('commit','GITHUB_SHA'),('runId','GITHUB_RUN_ID'),('runAttempt','GITHUB_RUN_ATTEMPT')]}
+        split,installation,join,_=native_split_fixture.make_split(self.store/entry['package'],installation,binding,'store',native_wack_transport._files(self.store))
+        self.fixture.write_json(wack/'install.json',installation)
+        for name,key in [('installed-launch.json','launch'),('installed-cli.json','cli')]:
+            import base64
+            (wack/name).write_bytes(base64.b64decode(split['native']['originalEvidence'][name]['rawBase64']))
+        context=json.loads((wack/'wack-context.json').read_bytes());context.update(inputPackageSha256=installation['signedTestPackageSha256'],nativeSignedJoin=join)
+        self.fixture.write_json(wack/'wack-context.json',context)
 
     def collect(self, arch):
-        return qual.collect(arch, self.store, self.evidence[arch], self.outputs[arch], env=self.env)
+        env=dict(self.env,GITHUB_JOB='store-wack' if arch=='arm64' else 'store-wack-x64')
+        return qual.collect(arch, self.store, self.evidence[arch], self.outputs[arch], env=env)
 
     def verify(self):
         return qual.verify(self.store, self.source, self.outputs['x64'], self.outputs['arm64'], env=dict(self.env, GITHUB_JOB='qualify'))
@@ -136,9 +153,10 @@ class StoreQualificationTests(unittest.TestCase):
         source = release_pair.verify_pair(self.source)
         self.assertNotEqual(self.details['sourceRunId'], '68')
         run = {'id': 38181680763, 'run_number': 68, 'run_attempt': 2, 'head_sha': 'a' * 40,
-            'repository': {'full_name': 'ATLKR/OpenGeul'}, 'path': '.github/workflows/msix.yml',
+            'repository': {'full_name': 'ATLKR/OpenGeul', 'private': False},
+            'head_repository': {'full_name': 'ATLKR/OpenGeul', 'private': False}, 'path': '.github/workflows/msix.yml',
             'event': 'push', 'status': 'completed', 'conclusion': 'success'}
-        jobs = [{'name': name, 'conclusion': 'success', 'run_attempt': 2,
+        jobs = [{'name': name, 'status': 'completed', 'conclusion': 'success', 'run_attempt': 2,
             'run_id': run['id'], 'head_sha': run['head_sha']} for name in REQUIRED_JOBS]
         tag = self.details['sourceRelease'].rsplit('/', 1)[1]
         authorize_release(tag, source, run, run['head_sha'], jobs)
@@ -150,7 +168,7 @@ class StoreQualificationTests(unittest.TestCase):
     def test_canonical_stable_source_url_remains_accepted(self):
         self.details['sourceRelease'] = 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3'
         self.fixture.write_json(self.store / 'store-provenance.json', self.details); self.fixture.sums(self.store)
-        self.collect('x64'); self.collect('arm64'); self.verify()
+        self.rebind_store_split();self.collect('x64'); self.collect('arm64'); self.verify()
 
     def test_noncanonical_or_unbound_source_urls_fail_before_selection(self):
         base = 'https://github.com/ATLKR/OpenGeul/releases/tag/v'

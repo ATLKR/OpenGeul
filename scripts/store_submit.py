@@ -31,6 +31,24 @@ ACCEPTED = {'PreProcessing', 'Certification', 'Release', 'PendingPublication', '
 FAILED = {'CommitFailed', 'PreProcessingFailed', 'CertificationFailed', 'ReleaseFailed', 'PublishFailed', 'Canceled'}
 PHASES = {'idle', 'delete_attempted', 'delete_confirmed', 'create_attempted', 'draft_ready', 'commit_attempted', 'submitted'}
 LIMIT = 96 * 1024 * 1024
+ADOPTION_PENDING_ID = '1152921505702100805'
+ADOPTION_BASELINE_ID = '1152921505702042424'
+ADOPTION_SOURCE = {'version': '1.1.3',
+    'sourceCommit': '859f676167b258a7a6a57ecdfcb0e224338de01a',
+    'sourceRunId': '38294374822', 'sourceRunAttempt': '1',
+    'sourceReleaseId': 410953892,
+    'sourceAssetFingerprintSha256': 'fa5e0d0857d7e5d3331c731d408cea0aad9656f55ae25e68b70c4504c01cd11e'}
+RECOVERY_RUN_ID = '38307171848'
+RECOVERY_COMMIT = '82369eef2d3e89f66255da6514554acbd33032dc'
+RECOVERY_SUBMIT_JOB_ID = 115007617322
+RECOVERY_DRAFT_SHA256 = '51f2a2a519cf4378b1adba9ba41d679288fca972b4cd6d55969a417fe046db01'
+RECOVERY_FAILURE_LOG_SHA256 = '1858029bdb6c40fb10f3114504c07ca4456b9b449e2c03d584f92bd1affcde81'
+RECOVERY_SOURCE_PAIR = {
+    'x64': '2901fbc514dbc868083c8bb50b8a0eedd4bbc0c9cf703a96062de8da9f8d3655',
+    'arm64': 'fd5af011629f4026a3c276d932d9453c38f1ac6d9d590163b03be81030ed2ace'}
+RECOVERY_STORE_PAIR = {
+    'x64': '76cbf587c649aea14f83bbbd717a85f505c3586781a7927400a4949ddeb379f5',
+    'arm64': '31a2dfb8e3b42f2e41b10f7ef542f4accb353e6d9c639c5638c02d4d808f2299'}
 
 
 class SubmissionBlocked(ValueError):
@@ -38,9 +56,16 @@ class SubmissionBlocked(ValueError):
 
 
 class StoreError(SubmissionBlocked):
-    def __init__(self, operation, status):
+    def __init__(self, operation, status, *, response_sha256=None, reason_code=None, response_truncated=False):
         self.status = status
-        super().__init__(f'Store {operation} failed with HTTP {status}' if status else f'Store {operation} has no acknowledged response')
+        self.response_sha256 = response_sha256
+        self.reason_code = reason_code
+        self.response_truncated = response_truncated
+        reason = f'Store {operation} failed with HTTP {status}' if status else f'Store {operation} has no acknowledged response'
+        if response_sha256:
+            reason += f'; response {"prefix " if response_truncated else ""}SHA256 {response_sha256}'
+        if reason_code: reason += f'; reason code {reason_code}'
+        super().__init__(reason)
 
 
 def _id(value):
@@ -82,7 +107,22 @@ def _request(opener, token, method, path, data=None):
             if method == 'DELETE': return response.status, body
             return response.status, json.loads(body) if body else None
     except urllib.error.HTTPError as error:
-        raise StoreError(method, error.code) from None
+        # Diagnostic-only projection: neither service messages nor URLs are emitted.
+        digest = reason = None
+        truncated = False
+        try:
+            body = error.read(64 * 1024 + 1)
+            truncated = len(body) > 64 * 1024
+            body = body[:64 * 1024]
+            digest = hashlib.sha256(body).hexdigest()
+            if not truncated:
+                value = json.loads(body)
+                candidate = value.get('code', value.get('errorCode')) if isinstance(value, dict) else None
+                if candidate in {'InvalidState', 'Conflict', 'UnsupportedFeature', 'InvalidSubmissionState', 'BadRequest'}:
+                    reason = candidate
+        except (OSError, ValueError, TypeError): pass
+        raise StoreError(method, error.code, response_sha256=digest,
+            reason_code=reason, response_truncated=truncated) from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         raise StoreError(method, None) from None
 
@@ -146,12 +186,12 @@ def _store_workflow(details):
             or details.get('repackageCommit') != sha or str(details.get('repackageRunId')) != run_id):
         raise SubmissionBlocked('Store writes require the current owned main workflow and actor')
     jobs = [job for page in _gh('GET', f'actions/runs/{run_id}/jobs?per_page=100', pages=True) for job in page['jobs']]
-    for name in ('package', 'Store WACK (windows-2025)', 'Store WACK (windows-11-arm)', 'qualify'):
+    for name in ('package', 'store-native-arm64', 'Store WACK (x64)', 'Store WACK (arm64)', 'qualify'):
         found = [job for job in jobs if job.get('name') == name]
         if (len(found) != 1 or found[0].get('status') != 'completed' or found[0].get('conclusion') != 'success'
                 or str(found[0].get('run_id')) != run_id or type(found[0].get('run_attempt')) is not int
                 or str(found[0]['run_attempt']) != attempt or found[0].get('head_sha') != sha):
-            raise SubmissionBlocked('Both Store WACK and qualification jobs must succeed in this exact execution')
+            raise SubmissionBlocked('All five Store package, native, SDK and qualification jobs must succeed in this exact execution')
     return attempt
 
 
@@ -259,6 +299,19 @@ def _journal_state(body):
     for field, size in (('source_sha', 40), ('source_msix_sha256', 64)):
         if state.get(field) is not None and (not isinstance(state[field], str) or not re.fullmatch('[0-9a-f]{' + str(size) + '}', state[field])):
             raise SubmissionBlocked('Store state Issue has invalid source identity')
+    for field in ('adopted_draft_semantic_sha256', 'adopted_latest_draft_semantic_sha256',
+                  'adopted_baseline_semantic_sha256'):
+        if field in state and (not isinstance(state[field], str)
+                or not re.fullmatch('[0-9a-f]{64}', state[field])):
+            raise SubmissionBlocked('Store journal has invalid adopted draft identity')
+    if state.get('adopted_pending_id') is not None:
+        if (_id(state['adopted_pending_id']) != ADOPTION_PENDING_ID
+                or state.get('submission_id') != ADOPTION_PENDING_ID
+                or state.get('baseline_id') != ADOPTION_BASELINE_ID):
+            raise SubmissionBlocked('Store journal adopted another pending or Published SID')
+    if ('adoption_upload_destination_missing' in state
+            and type(state['adoption_upload_destination_missing']) is not bool):
+        raise SubmissionBlocked('Store journal has invalid upload reconciliation state')
     fields = {'source_asset_fingerprint_sha256', 'source_msix_sha256_by_arch', 'store_msix_sha256_by_arch'}
     if fields & state.keys():
         if (not fields <= state.keys() or not isinstance(state['source_asset_fingerprint_sha256'], str)
@@ -269,6 +322,12 @@ def _journal_state(body):
             if (not isinstance(value, dict) or set(value) != {'x64','arm64'}
                     or any(not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest) for digest in value.values())):
                 raise SubmissionBlocked('Store journal has incomplete package pair identity')
+    if 'recovered_clone' in state:
+        expected = dict(_recovery_claim(), conflict_run_id=RECOVERY_RUN_ID,
+            conflict_job_id=RECOVERY_SUBMIT_JOB_ID, conflict_log_sha256=RECOVERY_FAILURE_LOG_SHA256,
+            deletion_acknowledged=True)
+        if state['recovered_clone'] != expected or state.get('adopted_pending_id') is not None:
+            raise SubmissionBlocked('Store recovery history changed or retained the deleted SID ownership')
     return state
 
 
@@ -311,9 +370,27 @@ def _journal_body(state, warning=None):
     return text + '\n' + JOURNAL + json.dumps(state, sort_keys=True) + '\n-->\n'
 
 
-def _save(journal, phase, details=None, *, warning=None, **fields):
+def _save(journal, phase, details=None, *, warning=None, retire_adoption=False, **fields):
     state = dict(journal['state'], phase=phase)
+    if retire_adoption:
+        prior = dict(journal['state'])
+        if (phase != 'delete_confirmed' or prior.pop('deleted_id', None) != ADOPTION_PENDING_ID
+                or prior.get('phase') != 'delete_attempted'):
+            raise SubmissionBlocked('Adoption history can move only after the exact clone deletion acknowledgment')
+        prior['phase'] = 'draft_ready'
+        if prior != _recovery_claim():
+            raise SubmissionBlocked('The exact prior clone claim changed before acknowledged recovery')
+        state = {key: value for key, value in state.items() if not key.startswith(('adopted_', 'adoption_'))}
+        state['recovered_clone'] = dict(prior, conflict_run_id=RECOVERY_RUN_ID,
+            conflict_job_id=RECOVERY_SUBMIT_JOB_ID, conflict_log_sha256=RECOVERY_FAILURE_LOG_SHA256,
+            deletion_acknowledged=True)
     if details:
+        if (state.get('adopted_pending_id') and state.get('tag')
+                and state['tag'] != 'v' + details['version']):
+            if journal['state']['phase'] in {'create_attempted', 'delete_attempted', 'commit_attempted'}:
+                raise SubmissionBlocked('An uncertain adopted submission cannot be reset for another release')
+            state = {key: value for key, value in state.items()
+                if not key.startswith(('adopted_', 'adoption_'))}
         state.update(tag='v' + details['version'], release_id=_id(details['sourceReleaseId']),
                      run_id=_id(details['sourceRunId']), source_sha=details['sourceCommit'])
         if details.get('formatVersion') == 2:
@@ -385,9 +462,214 @@ def _free(submission):
         raise SubmissionBlocked('Free Store pricing and all market overrides must be preserved')
 
 
-def _manual(submission):
-    if submission.get('targetPublishMode') != 'Manual':
-        raise SubmissionBlocked('Manual Store publication control must be preserved')
+def _publication_mode(submission):
+    if submission.get('targetPublishMode') not in ('Manual', 'Immediate'):
+        raise SubmissionBlocked('Store publication mode is unknown')
+
+
+def _immediate(submission):
+    if submission.get('targetPublishMode') != 'Immediate':
+        raise SubmissionBlocked('This Store update must publish automatically after certification')
+
+
+def draft_semantic_sha256(submission):
+    """상태/서버 전송 필드와 별도로 모든 초안 콘텐츠를 정확히 고정한다."""
+    if not isinstance(submission, dict):
+        raise SubmissionBlocked('Store draft semantic metadata is invalid')
+    excluded = {'id', 'status', 'statusDetails', 'fileUploadUrl', 'friendlyName'}
+    try:
+        value = {key: item for key, item in submission.items() if key not in excluded}
+        body = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(',', ':'), allow_nan=False).encode('utf-8')
+    except (TypeError, ValueError, UnicodeError):
+        raise SubmissionBlocked('Store draft semantic metadata is invalid') from None
+    return hashlib.sha256(body).hexdigest()
+
+
+def _adoption_proof(details, *, recovery=False):
+    requested = os.getenv('STORE_RECOVER_PENDING' if recovery else 'STORE_ADOPT_PENDING', 'false')
+    if requested == 'false': return None
+    if requested != 'true':
+        raise SubmissionBlocked('Store draft adoption requires an explicit boolean request')
+    if (details.get('formatVersion') != 2 or details.get('storeAppId') != STORE_APP_ID
+            or details.get('identity') != STORE_IDENTITY
+            or any(details.get(key) != value for key, value in ADOPTION_SOURCE.items())
+            or os.getenv('GITHUB_EVENT_NAME') != 'workflow_dispatch'
+            or os.getenv('GITHUB_ACTOR') != 'ATLKR'
+            or os.getenv('GITHUB_JOB') != 'submit'
+            or os.getenv('GITHUB_WORKFLOW_REF') != f'{REPOSITORY}/.github/workflows/store-package.yml@refs/heads/main'):
+        raise SubmissionBlocked('Store draft adoption belongs to one approved canonical source and owner')
+    # _verify already enforces these gates. Refresh them for this explicit handoff.
+    _store_workflow(details)
+    run = _gh('GET', f'actions/runs/{_id(os.getenv("GITHUB_RUN_ID"))}')
+    owner = {'login': 'ATLKR', 'type': 'User', 'id': 65988341}
+    if any(not isinstance(run.get(key), dict)
+           or any(run[key].get(field) != value for field, value in owner.items())
+           for key in ('actor', 'triggering_actor')):
+        raise SubmissionBlocked('Only the explicitly approving Store owner may adopt this draft')
+    def unique(items):
+        result = {}
+        for key, value in items:
+            if key in result: raise ValueError('duplicate')
+            result[key] = value
+        return result
+    try:
+        event_path = Path(os.environ['GITHUB_EVENT_PATH'])
+        if event_path.is_symlink() or not event_path.is_file() or event_path.stat().st_size > 2 * 1024 * 1024:
+            raise ValueError('event')
+        event = json.loads(event_path.read_bytes(), object_pairs_hook=unique,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('constant')))
+    except (KeyError, OSError, ValueError, TypeError):
+        raise SubmissionBlocked('Store draft adoption lacks a valid actual dispatch event') from None
+    sha = os.getenv('STORE_ADOPTION_DRAFT_SHA256')
+    inputs = event.get('inputs') if isinstance(event, dict) else None
+    sender = event.get('sender') if isinstance(event, dict) else None
+    repository = event.get('repository') if isinstance(event, dict) else None
+    if (not isinstance(inputs, dict) or not isinstance(sender, dict)
+            or any(sender.get(key) != value for key, value in owner.items())
+            or not isinstance(repository, dict) or repository.get('full_name') != REPOSITORY
+            or repository.get('private') is not False
+            or not (inputs.get('recover_pending_submission' if recovery else 'adopt_pending_submission') is True
+                    or inputs.get('recover_pending_submission' if recovery else 'adopt_pending_submission') == 'true')
+            or not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha)
+            or inputs.get('adoption_draft_sha256') != sha
+            or recovery and inputs.get('adopt_pending_submission', False) not in (False, 'false')):
+        raise SubmissionBlocked('Store draft adoption requires the exact approved dispatch fingerprint')
+    return {'pending_id': ADOPTION_PENDING_ID, 'baseline_id': ADOPTION_BASELINE_ID,
+            'draft_sha256': sha}
+
+
+def _fresh_adoption(api, proof, baseline_sha256):
+    app = _app(api)
+    if (_ref(app, 'pendingApplicationSubmission') != proof['pending_id']
+            or _ref(app, 'lastPublishedApplicationSubmission') != proof['baseline_id']):
+        raise SubmissionBlocked('Approved Store pending or Published reference changed before adoption write')
+    _, baseline = api('GET', f'submissions/{proof["baseline_id"]}')
+    _free(baseline); _publication_mode(baseline)
+    if (_id(baseline.get('id')) != proof['baseline_id'] or baseline.get('status') != 'Published'
+            or _packages_version(baseline) != (1, 1, 1, 0)
+            or draft_semantic_sha256(baseline) != baseline_sha256):
+        raise SubmissionBlocked('Approved Published baseline changed before adoption write')
+    _, draft = api('GET', f'submissions/{proof["pending_id"]}')
+    _free(draft); _publication_mode(draft)
+    if (_id(draft.get('id')) != proof['pending_id'] or draft.get('status') != 'PendingCommit'
+            or draft_semantic_sha256(draft) != proof['draft_sha256']):
+        raise SubmissionBlocked('Approved PendingCommit draft content changed before adoption write')
+    return draft
+
+
+def _recovery_claim():
+    return {'app_id': STORE_APP_ID, 'phase': 'draft_ready', 'tag': 'v1.1.3',
+        'source_sha': ADOPTION_SOURCE['sourceCommit'], 'release_id': str(ADOPTION_SOURCE['sourceReleaseId']),
+        'run_id': ADOPTION_SOURCE['sourceRunId'], 'submission_id': ADOPTION_PENDING_ID,
+        'baseline_id': ADOPTION_BASELINE_ID,
+        'source_asset_fingerprint_sha256': ADOPTION_SOURCE['sourceAssetFingerprintSha256'],
+        'source_msix_sha256_by_arch': dict(RECOVERY_SOURCE_PAIR),
+        'store_msix_sha256_by_arch': dict(RECOVERY_STORE_PAIR),
+        'adopted_pending_id': ADOPTION_PENDING_ID,
+        'adopted_draft_semantic_sha256': RECOVERY_DRAFT_SHA256,
+        'adopted_latest_draft_semantic_sha256': RECOVERY_DRAFT_SHA256,
+        'adopted_baseline_semantic_sha256': RECOVERY_DRAFT_SHA256}
+
+
+def _recovery_proof(details):
+    proof = _adoption_proof(details, recovery=True)
+    if proof is None: return None
+    if (os.getenv('STORE_ADOPT_PENDING', 'false') != 'false'
+            or proof['draft_sha256'] != RECOVERY_DRAFT_SHA256
+            or os.getenv('GITHUB_RUN_ATTEMPT') != '1'
+            or {arch: entry['sourceMsixSha256'] for arch, entry in details['architectures'].items()} != RECOVERY_SOURCE_PAIR):
+        raise SubmissionBlocked('Recovery requires only the exact approved clone and unchanged canonical source pair')
+    run = _gh('GET', f'actions/runs/{RECOVERY_RUN_ID}')
+    owner = {'login': 'ATLKR', 'type': 'User', 'id': 65988341}
+    if (run.get('id') != int(RECOVERY_RUN_ID) or run.get('run_number') != 52
+            or type(run.get('run_attempt')) is not int or run['run_attempt'] != 1
+            or run.get('head_sha') != RECOVERY_COMMIT or run.get('head_branch') != 'main'
+            or run.get('event') != 'workflow_dispatch' or run.get('path') != '.github/workflows/store-package.yml'
+            or run.get('status') != 'completed' or run.get('conclusion') != 'failure'
+            or run.get('repository', {}).get('full_name') != REPOSITORY
+            or run.get('repository', {}).get('private') is not False
+            or any(not isinstance(run.get(key), dict)
+                or any(run[key].get(field) != value for field, value in owner.items())
+                for key in ('actor', 'triggering_actor'))):
+        raise SubmissionBlocked('The approved prior Store52 conflict execution changed')
+    jobs = [job for page in _gh('GET', f'actions/runs/{RECOVERY_RUN_ID}/jobs?per_page=100', pages=True) for job in page['jobs']]
+    for name in ('package', 'store-native-arm64', 'Store WACK (x64)', 'Store WACK (arm64)', 'qualify', 'submit'):
+        found = [job for job in jobs if job.get('name') == name]
+        if (len(found) != 1 or found[0].get('status') != 'completed'
+                or found[0].get('conclusion') != ('failure' if name == 'submit' else 'success')
+                or str(found[0].get('run_id')) != RECOVERY_RUN_ID
+                or type(found[0].get('run_attempt')) is not int or found[0]['run_attempt'] != 1
+                or found[0].get('head_sha') != RECOVERY_COMMIT
+                or name == 'submit' and found[0].get('id') != RECOVERY_SUBMIT_JOB_ID):
+            raise SubmissionBlocked('Recovery requires the exact prior five successful gates and failed submit job')
+    # Capture the fixed official log silently. Its contents, arguments and URLs are never emitted.
+    try:
+        result = subprocess.run(['gh', 'api', '--allow-escape-sequences', '--method', 'GET',
+            f'repos/{REPOSITORY}/actions/jobs/{RECOVERY_SUBMIT_JOB_ID}/logs'],
+            check=True, capture_output=True, timeout=120)
+        raw = result.stdout
+        if (not isinstance(raw, bytes) or len(raw) > 2 * 1024 * 1024
+                or hashlib.sha256(raw).hexdigest() != RECOVERY_FAILURE_LOG_SHA256
+                or b'Store PUT failed with HTTP 409' not in raw):
+            raise ValueError('conflict log')
+    except (subprocess.SubprocessError, OSError, ValueError):
+        raise SubmissionBlocked('The fixed prior PUT409 log could not be verified; no recovery write is allowed') from None
+    return proof
+
+
+def _no_mandatory_update(submission):
+    options = submission.get('packageDeliveryOptions')
+    if not isinstance(options, dict) or options.get('isMandatoryUpdate') is not False:
+        raise SubmissionBlocked('Mandatory update true or unknown is unsupported; preserve this submission')
+
+
+def _fresh_recovery_clone(api, proof):
+    draft = _fresh_adoption(api, proof, RECOVERY_DRAFT_SHA256)
+    _no_mandatory_update(draft)
+    if draft.get('fileUploadUrl') not in (None, ''):
+        raise SubmissionBlocked('The known conflict clone acquired an upload destination; preserve it for reconciliation')
+    return draft
+
+
+def _recover_clone(api, journal, details, proof):
+    state = journal['state']
+    if state.get('recovered_clone') is not None:
+        if not _journal_matches(state, details):
+            raise SubmissionBlocked('An acknowledged recovery already owns another qualified package pair')
+        return
+    if state != _recovery_claim():
+        raise SubmissionBlocked('Recovery requires the exact unchanged prior adopted Store52 journal')
+    if _newer(_version('v' + details['version'])):
+        raise SubmissionBlocked('A newer stable source preserves the existing clone')
+    draft = _fresh_recovery_clone(api, proof)
+    _, baseline = api('GET', f'submissions/{ADOPTION_BASELINE_ID}')
+    _no_mandatory_update(baseline)
+    _published_architectures(baseline)
+    apply_korean_listing(baseline)  # Validate the complete offline listing plan before any DELETE.
+    # Re-read both full semantic identities immediately before the durable delete intent.
+    draft = _fresh_recovery_clone(api, proof)
+    _save(journal, 'delete_attempted', deleted_id=ADOPTION_PENDING_ID)
+    draft = _fresh_recovery_clone(api, proof)
+    if _newer(_version('v' + details['version'])):
+        raise SubmissionBlocked('Stable tag state changed before clone deletion')
+    status, acknowledgment = api('DELETE', f'submissions/{ADOPTION_PENDING_ID}')
+    if not 200 <= status < 300 or acknowledgment != b'':
+        raise SubmissionBlocked('Store clone deletion was not acknowledged by an empty successful response')
+    fresh = _app(api)
+    if (_ref(fresh, 'pendingApplicationSubmission') is not None
+            or _ref(fresh, 'lastPublishedApplicationSubmission') != ADOPTION_BASELINE_ID):
+        raise SubmissionBlocked('Clone deletion is not confirmed or another submission appeared')
+    try: api('GET', f'submissions/{ADOPTION_PENDING_ID}')
+    except StoreError as error:
+        if error.status != 404: raise
+    else: raise SubmissionBlocked('The deleted clone is still readable')
+    _, baseline = api('GET', f'submissions/{ADOPTION_BASELINE_ID}')
+    _free(baseline); _publication_mode(baseline); _no_mandatory_update(baseline)
+    if (baseline.get('id') != ADOPTION_BASELINE_ID or baseline.get('status') != 'Published'
+            or draft_semantic_sha256(baseline) != RECOVERY_DRAFT_SHA256):
+        raise SubmissionBlocked('Published baseline changed after clone deletion; preserve the delete intent')
+    _save(journal, 'delete_confirmed', details, retire_adoption=True, submission_id=None)
 
 
 def _packages_version(submission):
@@ -439,7 +721,7 @@ def _requested_pair(api, submission_id, details, template):
     deadline = time.monotonic() + 600
     for _ in range(40):
         _, current = api('GET', f'submissions/{submission_id}')
-        _manual(current); _free(current)
+        _immediate(current); _free(current)
         if (current.get('status') not in ACCEPTED | {'CommitStarted'}
                 or _id(current.get('id')) != submission_id or _marker(details) not in current.get('notesForCertification','').splitlines()
                 or current.get('pricing') != template.get('pricing') or current.get('listings') != template.get('listings')):
@@ -496,8 +778,31 @@ def _warn(reason):
 def submit(tag, directory):
     try:
         details, version, body = _verify(tag, directory)
+        adoption = _adoption_proof(details)
+        recovery = _recovery_proof(details)
         journal = _journal()
         state = journal['state']
+        if recovery:
+            if state['phase'] in {'delete_attempted', 'create_attempted'}:
+                raise SubmissionBlocked('An earlier recovery mutation lacks acknowledgment; reconcile without new writes')
+            opener, token = authenticate()
+            def recovery_api(method, path, data=None): return _request(opener, token, method, path, data)
+            _recover_clone(recovery_api, journal, details, recovery)
+            state = journal['state']
+        if state.get('adopted_pending_id') and state.get('tag') == tag and state['phase'] == 'draft_ready':
+            if (any(details.get(key) != value for key, value in ADOPTION_SOURCE.items())
+                    or not _journal_matches(state, details)
+                    or not all(key in state for key in ('adopted_draft_semantic_sha256',
+                        'adopted_latest_draft_semantic_sha256', 'adopted_baseline_semantic_sha256'))
+                    or adoption and adoption['draft_sha256'] != state['adopted_draft_semantic_sha256']):
+                raise SubmissionBlocked('Persisted adoption must own this exact approved source and package pair')
+            if state.get('adoption_upload_destination_missing'):
+                raise SubmissionBlocked('The owned Store draft lacks an acknowledged upload destination; API reconciliation is required')
+            adoption = {'pending_id': ADOPTION_PENDING_ID, 'baseline_id': ADOPTION_BASELINE_ID,
+                'draft_sha256': state['adopted_latest_draft_semantic_sha256']}
+            adoption_baseline_sha256 = state['adopted_baseline_semantic_sha256']
+        if adoption and state.get('submission_id') not in (None, adoption['pending_id']):
+            raise SubmissionBlocked('Draft adoption cannot retarget an existing owned submission')
         if state['phase'] in {'delete_attempted', 'create_attempted'}:
             raise SubmissionBlocked('An earlier Store mutation lacks acknowledgment; reconcile the app journal before any new submission')
         opener, token = authenticate()
@@ -506,7 +811,15 @@ def submit(tag, directory):
         if paired and state.get('tag') == tag and state['phase'] in {'draft_ready','commit_attempted','submitted'} and not _journal_matches(state, details):
             raise SubmissionBlocked('Current journal does not own the complete verified package pair')
         if state['phase'] == 'commit_attempted':
-            status = _poll(api, _id(state.get('submission_id')))
+            submission_id = _id(state.get('submission_id'))
+            _, current = api('GET', f'submissions/{submission_id}')
+            if _id(current.get('id')) != submission_id:
+                raise SubmissionBlocked('Recorded Store submission identity changed')
+            if current.get('status') in FAILED and state.get('tag') != tag:
+                _publication_mode(current)  # 실패가 확정된 과거 Manual journal의 읽기 복구만 허용한다.
+            else:
+                _immediate(current)
+            status = _poll(api, submission_id)
             _save(journal, 'submitted', status=status)
             state = journal['state']
         if state['phase'] == 'submitted' and state.get('status') in FAILED and state.get('tag') == tag:
@@ -520,18 +833,21 @@ def submit(tag, directory):
         if _id(baseline['id']) != baseline_id or baseline.get('status') != 'Published':
             raise SubmissionBlocked('Store has no verified Published baseline')
         _free(baseline)
-        _manual(baseline)
+        _publication_mode(baseline)
         if paired: _published_architectures(baseline)
         elif (not isinstance(baseline.get('applicationPackages'), list) or not baseline['applicationPackages']
                 or any(package.get('architecture', '').lower() != 'x64' for package in baseline['applicationPackages'])):
             raise SubmissionBlocked('Automatic updates require the published x64 package template')
         pending_id = _ref(app, 'pendingApplicationSubmission')
+        if adoption and (pending_id != adoption['pending_id'] or baseline_id != adoption['baseline_id']):
+            raise SubmissionBlocked('Draft adoption may write only the explicitly approved existing SID')
         if state['phase'] in {'draft_ready', 'submitted'} and state['submission_id'] not in {pending_id, baseline_id}:
             raise SubmissionBlocked('Recorded Store submission disappeared without acknowledged deletion or publication')
         target = version + (0,)
         if _packages_version(baseline) >= target: return {'outcome': 'superseded', 'tag': tag}
         # 설명 계획 전체를 확인한 뒤에만 기존 제출을 삭제하거나 새 제출을 만든다.
         template = apply_korean_listing(baseline)
+        template['targetPublishMode'] = 'Immediate'
         pending = None
         if pending_id:
             if pending_id == baseline_id: raise SubmissionBlocked('Published submissions cannot be deleted')
@@ -539,6 +855,13 @@ def submit(tag, directory):
             if (_id(pending['id']) != pending_id or pending.get('status') == 'Published'
                     or pending.get('status') not in ACCEPTED | FAILED | {'None', 'PendingCommit', 'CommitStarted'}):
                 raise SubmissionBlocked('Published or unowned pending submission cannot be replaced')
+            if (state['phase'] == 'submitted' and state.get('submission_id') == pending_id
+                    and state.get('status') in ACCEPTED | {'CommitStarted'}
+                    and pending.get('status') in {'PendingCommit', 'None'}):
+                raise SubmissionBlocked('A confirmed processing submission has contradictory draft readback; preserve it for read-only reconciliation')
+            # 과거 tag의 journal도 처리 중인 Manual 제출의 삭제/재commit을 허가하지 않는다.
+            if pending.get('status') in ACCEPTED | {'CommitStarted'}:
+                _immediate(pending)
             lines = pending.get('notesForCertification', '').splitlines()
             matching = _marker(details) in lines
             if matching and pending.get('status') in FAILED:
@@ -549,7 +872,7 @@ def submit(tag, directory):
                 if status == 'CommitStarted':
                     status = _poll(api, pending_id)
                     _, pending = api('GET', f'submissions/{pending_id}')
-                _manual(pending)
+                _immediate(pending)
                 _save(journal, 'submitted', details, submission_id=pending_id, status=status)
                 if status in FAILED: raise SubmissionBlocked(f'Store processing stopped in {status}; a newer stable release is required')
                 if paired:
@@ -563,6 +886,22 @@ def submit(tag, directory):
                 return {'outcome': 'already_requested', 'tag': tag, 'submission_id': pending_id, 'status': status, **observed}
             owned = matching or (state['phase'] == 'draft_ready' and state.get('submission_id') == pending_id
                      and _journal_matches(state, details))
+            if adoption and not state.get('adopted_pending_id'):
+                if state != {'app_id': STORE_APP_ID, 'phase': 'idle'}:
+                    raise SubmissionBlocked('Draft adoption requires an idle journal with no prior mutation or SID')
+                adoption_baseline_sha256 = draft_semantic_sha256(baseline)
+                pending = _fresh_adoption(api, adoption, adoption_baseline_sha256)
+                if _packages_version(pending) > target:
+                    raise SubmissionBlocked('A newer pending Store package is preserved')
+                _save(journal, 'draft_ready', details, submission_id=pending_id,
+                    baseline_id=baseline_id, adopted_pending_id=pending_id,
+                    adopted_draft_semantic_sha256=adoption['draft_sha256'],
+                    adopted_latest_draft_semantic_sha256=adoption['draft_sha256'],
+                    adopted_baseline_semantic_sha256=adoption_baseline_sha256)
+                owned = True
+            if owned and pending.get('status') == 'PendingCommit':
+                # 소유권이 확인된 편집 가능한 Manual 초안만 동일 SID PUT으로 전환한다.
+                _publication_mode(pending)
             if not (owned and pending.get('status') == 'PendingCommit'):
                 if paired and not (state['phase'] in {'draft_ready','submitted'}
                         and state.get('submission_id') == pending_id and state.get('tag')
@@ -597,7 +936,8 @@ def submit(tag, directory):
             _save(journal, 'create_attempted', details, baseline_id=baseline_id, submission_id=None)
             _, pending = api('POST', 'submissions')
             pending_id = _id(pending['id'])
-            if pending_id == baseline_id or pending.get('status') != 'PendingCommit':
+            if (pending_id == baseline_id or state.get('recovered_clone') and pending_id == ADOPTION_PENDING_ID
+                    or pending.get('status') != 'PendingCommit'):
                 raise SubmissionBlocked('New Store draft was not acknowledged')
             _save(journal, 'draft_ready', details, submission_id=pending_id)
         metadata = template
@@ -612,19 +952,29 @@ def submit(tag, directory):
         metadata['notesForCertification'] = '\n'.join(notes + [_marker(details)])
         for field in ('id', 'status', 'statusDetails', 'fileUploadUrl', 'friendlyName'):
             metadata.pop(field, None)
+        if adoption:
+            _fresh_adoption(api, adoption, adoption_baseline_sha256)
         _, updated = api('PUT', f'submissions/{pending_id}', metadata)
-        _manual(updated)
+        _immediate(updated)
         if (_id(updated['id']) != pending_id or updated.get('status') != 'PendingCommit'
                 or _marker(details) not in updated.get('notesForCertification', '').splitlines()
                 or not _packages_match(updated, metadata['applicationPackages'])
                 or updated.get('pricing') != metadata['pricing'] or updated.get('listings') != metadata.get('listings')):
             raise SubmissionBlocked('Store metadata update was not confirmed')
-        _upload(opener, updated['fileUploadUrl'], body)
+        upload_url = updated.get('fileUploadUrl')
+        missing_upload = not isinstance(upload_url, str) or not upload_url
+        if adoption:
+            _save(journal, 'draft_ready', details,
+                adopted_latest_draft_semantic_sha256=draft_semantic_sha256(updated),
+                adoption_upload_destination_missing=missing_upload)
+        if missing_upload:
+            raise SubmissionBlocked('Store metadata was acknowledged but no upload destination was returned; preserve this SID for API reconciliation')
+        _upload(opener, upload_url, body)
         fresh = _app(api)
         if _ref(fresh, 'pendingApplicationSubmission') != pending_id or _ref(fresh, 'lastPublishedApplicationSubmission') != baseline_id or _newer(version):
             raise SubmissionBlocked('Store or stable tag state changed before commit')
         _, current = api('GET', f'submissions/{pending_id}')
-        _manual(current)
+        _immediate(current)
         if (_id(current['id']) != pending_id or current.get('status') != 'PendingCommit' or _marker(details) not in current.get('notesForCertification', '').splitlines()
                 or not _packages_match(current, metadata['applicationPackages'])
                 or current.get('pricing') != updated.get('pricing') or current.get('listings') != updated.get('listings')):

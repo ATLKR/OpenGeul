@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import time
 
 MAX_WINDOWS = 64
@@ -18,6 +19,14 @@ MAX_UIA = 64
 MAX_PROCESSES = 8
 MAX_JSON = 256 * 1024
 BRANCH = 'refs/heads/diagnostic/arm-runner-ready71'
+ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY = 'ATLKR/OpenGeul'
+SOURCE_JOBS = frozenset(('native-e2e-arm64', 'virtual-print-arm64', 'msix-native-arm64'))
+FIXED_ACTORS = {'ATLKR': (65988341, 'User'), 'github-actions[bot]': (41898282, 'Bot')}
+
+# The script also runs directly from e2e/ on hosted Windows.
+sys.path.insert(0, str(ROOT))
+from ci.policy import require_public
 
 
 def require(value, message):
@@ -42,19 +51,157 @@ def shape(value, keys):
     require(type(value) is dict and set(value) == set(keys), '관찰 필드가 다릅니다')
 
 
+def bounded_object(path):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, 'JSON 중복 필드를 허용하지 않습니다')
+            result[key] = value
+        return result
+
+    def constant(_):
+        raise ValueError('JSON 비유한 수를 허용하지 않습니다')
+
+    try:
+        with Path(path).open('rb') as stream:
+            raw = stream.read(MAX_JSON + 1)
+        require(len(raw) <= MAX_JSON, 'JSON 입력 상한을 초과했습니다')
+        value = json.loads(raw.decode('utf-8'), object_pairs_hook=pairs, parse_constant=constant)
+    except (OSError, TypeError, UnicodeError, RecursionError) as exc:
+        raise ValueError('JSON 입력을 읽을 수 없습니다') from exc
+    require(type(value) is dict, 'JSON 최상위 객체가 없습니다')
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def decimal(value):
+    require(type(value) is str and re.fullmatch('[1-9][0-9]{0,19}', value),
+            '양의 bounded decimal 실행 식별자가 없습니다')
+    return value
+
+
+def commit_sha(value):
+    require(type(value) is str and re.fullmatch('[0-9a-f]{40}', value) and value != '0' * 40,
+            '유효한 source commit SHA가 없습니다')
+    return value
+
+
+def public_repository(value, owned=False):
+    require(type(value) is dict, '공개 repository 객체가 없습니다')
+    require_public({'repository': value})
+    name = value.get('full_name')
+    require(type(name) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}', name),
+            'repository 이름 형식이 다릅니다')
+    integer(value.get('id'))
+    if owned: require(name == REPOSITORY, '소유 공개 repository가 다릅니다')
+    return value
+
+
+def public_event(env):
+    path = env.get('GITHUB_EVENT_PATH')
+    require(type(path) is str and bool(path), '실제 공개 event 파일 경로가 없습니다')
+    event, digest = bounded_object(path)
+    public_repository(event.get('repository'), owned=True)
+    return event, digest
+
+
+def event_actor(event, env):
+    login = env.get('GITHUB_ACTOR')
+    actor_id = decimal(env.get('GITHUB_ACTOR_ID'))
+    sender = event.get('sender')
+    if 'sender' not in event and env.get('GITHUB_EVENT_NAME') == 'schedule':
+        fixed = FIXED_ACTORS.get(login)
+        require(fixed is not None and str(fixed[0]) == actor_id, 'schedule actor fallback이 다릅니다')
+        sender = {'login': login, 'id': fixed[0], 'type': fixed[1]}
+    require(type(sender) is dict, '실제 event sender가 없습니다')
+    sender_login, sender_id, sender_type = sender.get('login'), sender.get('id'), sender.get('type')
+    integer(sender_id)
+    require(sender_type in ('User', 'Bot') and type(sender_login) is str, 'event sender 유형이 다릅니다')
+    account = sender_login.removesuffix('[bot]') if sender_type == 'Bot' else sender_login
+    require(re.fullmatch('[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?', account)
+            and '--' not in account and (sender_type == 'Bot' or '[bot]' not in sender_login),
+            'event sender login 형식이 다릅니다')
+    require(sender_login == login and str(sender_id) == actor_id, 'event/env actor 바인딩이 다릅니다')
+    if sender_login in FIXED_ACTORS:
+        require((sender_id, sender_type) == FIXED_ACTORS[sender_login], '고정 actor tuple이 다릅니다')
+    return sender_login, sender_id, sender_type
+
+
+def product_version():
+    product, _ = bounded_object(ROOT / 'config/product.json')
+    version = product.get('version')
+    require(product.get('repository') == REPOSITORY and type(version) is str
+            and re.fullmatch(r'(0|[1-9][0-9]{0,9})\.(0|[1-9][0-9]{0,9})\.(0|[1-9][0-9]{0,9})', version),
+            'canonical product version이 없습니다')
+    return version
+
+
+def pull_request_context(event, env):
+    pr = event.get('pull_request')
+    require(type(pr) is dict, 'pull request 객체가 없습니다')
+    number = event.get('number'); integer(number)
+    require(type(pr.get('number')) is int and pr['number'] == number
+            and env.get('GITHUB_REF') == f'refs/pull/{number}/merge', 'PR number/merge ref가 다릅니다')
+    for side in ('head', 'base'):
+        row = pr.get(side)
+        require(type(row) is dict, 'PR head/base 객체가 없습니다')
+        repo = public_repository(row.get('repo'), owned=side == 'base')
+        commit_sha(row.get('sha'))
+        ref = row.get('ref'); text(ref)
+        require(bool(ref) and not any(ord(c) <= 32 or ord(c) == 127 or c in '~^:?*[\\' for c in ref)
+                and not any(part.startswith('.') or part.endswith('.lock') for part in ref.split('/'))
+                and not any(token in ref for token in ('..', '//', '@{'))
+                and not ref.startswith('/') and not ref.endswith(('/', '.')) and ref != '@',
+                'PR branch ref 형식이 다릅니다')
+        if side == 'base':
+            require(ref == 'main' and repo['id'] == event['repository']['id'], 'PR base 바인딩이 다릅니다')
+        key = 'GITHUB_' + side.upper() + '_REF'
+        if key in env: require(env[key] == ref, 'PR head/base env 바인딩이 다릅니다')
+    merge = pr.get('merge_commit_sha')
+    if merge is not None:
+        require(commit_sha(merge) == env['GITHUB_SHA'], 'PR merge source SHA가 다릅니다')
+
+
 def binding(env):
-    fixed = {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
-             'GITHUB_REPOSITORY': 'ATLKR/OpenGeul', 'GITHUB_ACTOR': 'ATLKR', 'GITHUB_RUN_ATTEMPT': '1'}
-    require(all(env.get(k) == v for k, v in fixed.items()), '허용된 공개 ARM 진단 실행이 아닙니다')
-    diagnostic = env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and env.get('GITHUB_REF') == BRANCH
-    production = env.get('GITHUB_EVENT_NAME') == 'push' and env.get('GITHUB_REF') == 'refs/heads/main' \
-        and env.get('GITHUB_WORKFLOW_REF') == 'ATLKR/OpenGeul/.github/workflows/msix.yml@refs/heads/main'
-    require(diagnostic or production, '허용된 ARM hosted 진단/Source 실행이 아닙니다')
-    require(type(env.get('GITHUB_SHA')) is str and re.fullmatch('[0-9a-f]{40}', env['GITHUB_SHA'])
-            and type(env.get('GITHUB_RUN_ID')) is str and re.fullmatch('[1-9][0-9]{0,19}', env['GITHUB_RUN_ID']),
-            '진단 source/run 바인딩이 없습니다')
-    return {'sourceCommit': env['GITHUB_SHA'], 'runId': env['GITHUB_RUN_ID'], 'runAttempt': '1',
-            'repository': 'ATLKR/OpenGeul', 'actor': 'ATLKR', 'ref': env['GITHUB_REF']}
+    fixed = {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted', 'GITHUB_REPOSITORY': REPOSITORY}
+    require(all(env.get(k) == v for k, v in fixed.items()), '허용된 공개 hosted 실행이 아닙니다')
+    source = commit_sha(env.get('GITHUB_SHA'))
+    run_id = decimal(env.get('GITHUB_RUN_ID')); attempt = decimal(env.get('GITHUB_RUN_ATTEMPT'))
+    event, digest = public_event(env)
+    actor, actor_id, actor_type = event_actor(event, env)
+    event_name, ref, job = env.get('GITHUB_EVENT_NAME'), env.get('GITHUB_REF'), env.get('GITHUB_JOB')
+    workflow = env.get('GITHUB_WORKFLOW_REF')
+    version = product_version()
+    if ref == BRANCH:
+        context = 'diagnostic'
+        require(event_name == 'workflow_dispatch' and actor == 'ATLKR' and attempt == '1' and job == 'observe'
+                and workflow == f'{REPOSITORY}/.github/workflows/store-package.yml@{BRANCH}',
+                '허용된 고정 ARM 진단 실행이 아닙니다')
+    elif workflow == f'{REPOSITORY}/.github/workflows/store-package.yml@refs/heads/main':
+        context = 'store'
+        require(event_name == 'workflow_dispatch' and ref == 'refs/heads/main' and job == 'store-native-arm64'
+                and env.get('ARCHITECTURE') == 'arm64' and actor in FIXED_ACTORS,
+                '허용된 ARM Store 준비 실행이 아닙니다')
+    else:
+        context = 'source'
+        require(job in SOURCE_JOBS and event_name in ('push', 'workflow_dispatch', 'schedule', 'pull_request')
+                and workflow == f'{REPOSITORY}/.github/workflows/msix.yml@{ref}',
+                '허용된 ARM Source workflow/job이 아닙니다')
+        if event_name == 'push':
+            tag = f'refs/tags/v{version}'
+            require(ref == 'refs/heads/main' or ref == tag or (type(ref) is str and
+                    re.fullmatch(re.escape(tag) + r'-dev\.[1-9][0-9]{0,19}\.[1-9][0-9]{0,19}', ref)),
+                    'canonical main/tag Source ref가 아닙니다')
+            require(event.get('ref') == ref and event.get('deleted') is False, '실제 push ref가 다릅니다')
+        elif event_name == 'pull_request':
+            pull_request_context(event, env)
+        else:
+            require(ref == 'refs/heads/main', 'manual/schedule Source ref가 main이 아닙니다')
+    if event_name == 'workflow_dispatch':
+        require(event.get('ref') in (ref, ref.removeprefix('refs/heads/')), '실제 manual event ref가 다릅니다')
+    return {'sourceCommit': source, 'runId': run_id, 'runAttempt': attempt,
+            'repository': REPOSITORY, 'actor': actor, 'actorId': actor_id, 'actorType': actor_type,
+            'ref': ref, 'event': event_name, 'job': job, 'workflowRef': workflow,
+            'context': context, 'productVersion': version, 'eventSha256': digest}
 
 
 def safe_output(path):
@@ -275,6 +422,7 @@ class WindowsProbe:
              ('QueryFullProcessImageNameW', [W.HANDLE, W.DWORD, W.LPWSTR, ctypes.POINTER(W.DWORD)], W.BOOL),
              ('ProcessIdToSessionId', [W.DWORD, ctypes.POINTER(W.DWORD)], W.BOOL),
              ('GetWindowsDirectoryW', [W.LPWSTR, W.UINT], W.UINT),
+             ('GetExitCodeProcess', [W.HANDLE, ctypes.POINTER(W.DWORD)], W.BOOL),
              ('GetProcessTimes', [W.HANDLE, *[ctypes.POINTER(W.FILETIME)] * 4], W.BOOL)]:
             f = getattr(self.kernel, name); f.argtypes = args; f.restype = result
 
@@ -490,6 +638,124 @@ class WindowsProbe:
             elif state['cloakedBits']: state.update(surfaceDismissed=True, dismissalKind='cloaked')
         return state
 
+    def bound_image(self, path, *, deadline):
+        """이미 live process와 연결한 경로의 현재 PE/파일/서명만 읽는다. process 경로 대체가 아니다."""
+        require(time.monotonic() < deadline, 'bound 이미지 검증 시간이 초과했습니다')
+        from e2e.native_architecture import verify_executable
+        file = Path(path)
+        machine = verify_executable(file, 'arm64')
+        size = file.stat().st_size; h = hashlib.sha256(); total = 0
+        with file.open('rb') as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                total += len(block); require(total <= size, 'bound 이미지 읽기 중 파일이 커졌습니다'); h.update(block)
+        require(total == size and file.stat().st_size == size, 'bound 이미지 읽기 중 파일 크기가 변경됐습니다')
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, 'bound 이미지 서명 조회 시간이 남아 있지 않습니다')
+        script = "$p=[Console]::In.ReadToEnd()|ConvertFrom-Json; @($p|ForEach-Object { $s=Get-AuthenticodeSignature -LiteralPath $_ -ErrorAction Stop; @{status=[string]$s.Status;subject=[string]$s.SignerCertificate.Subject;issuer=[string]$s.SignerCertificate.Issuer;thumbprint=[string]$s.SignerCertificate.Thumbprint} })|ConvertTo-Json -Compress"
+        completed = subprocess.run(['pwsh', '-NoProfile', '-NonInteractive', '-Command', script],
+            input=json.dumps([str(file)]).encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=min(20, remaining))
+        require(time.monotonic() <= deadline, 'bound 이미지 서명 조회 시간이 초과했습니다')
+        require(completed.returncode == 0 and len(completed.stdout) <= 16384, 'bound 이미지 서명 조회가 실패했습니다')
+        signatures = json.loads(completed.stdout.decode('utf-8-sig'))
+        if type(signatures) is dict: signatures = [signatures]
+        require(type(signatures) is list and len(signatures) == 1 and type(signatures[0]) is dict, 'bound 이미지 서명 개수가 다릅니다')
+        signature = {key: bounded(signatures[0].get(key, '')) for key in ('status', 'subject', 'issuer', 'thumbprint')}
+        signature['publisherMicrosoft'] = signature['status'] == 'Valid' and bool(re.search(r'(?:CN|O)=Microsoft(?: Windows| Corporation)', signature['subject']))
+        return {'path': path, 'peMachine': machine, 'bytes': size, 'sha256': h.hexdigest(), 'signature': signature}
+
+    def startup_process_state(self, handle, pid):
+        times = [W.FILETIME() for _ in range(4)]; machine = W.WORD(); native = W.WORD(); exit_code = W.DWORD(); session = W.DWORD()
+        require(self.kernel.GetProcessTimes(handle, *[ctypes.byref(t) for t in times])
+            and self.kernel.IsWow64Process2(handle, ctypes.byref(machine), ctypes.byref(native))
+            and self.kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            and self.kernel.ProcessIdToSessionId(pid, ctypes.byref(session)), 'WSL held 생성시각/native/session/exit 조회 실패')
+        return {'createdFileTime': (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime,
+                'processMachine': machine.value, 'nativeMachine': native.value, 'sessionId': session.value, 'exitCode': exit_code.value}
+
+    def wait_startup_foreground(self, owned_hwnd, result):
+        """첫 owned 활성화 전에 동일 WSL 시작 process의 자연 종료만 최대 65초 읽는다."""
+        started = time.monotonic(); deadline = started + 65
+        windows = self.windows(); validate_windows(windows)
+        foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
+        expected_path = ntpath.join(self.windows_directory(), 'System32', 'wsl.exe')
+        if not foreground or foreground['className'] != 'ConsoleWindowClass' or ntpath.normcase(foreground['title']) != ntpath.normcase(expected_path):
+            return
+        require(foreground['visible'] is True and foreground['enabled'] is True, 'WSL 시작 창 상태가 다릅니다')
+        processes = self.processes([foreground['processId']])
+        require(len(processes) == 1 and processes[0]['processId'] == foreground['processId'], 'WSL 소유 process가 다릅니다')
+        process = processes[0]; signature = process['signature']
+        require(ntpath.normcase(process['imagePath']) == ntpath.normcase(expected_path)
+            and process['createdFileTime'] > 0 and process['sessionId'] == self.session_id()
+            and process['processMachine'] == 0 and process['nativeMachine'] == 0xAA64
+            and process['imageBytes'] > 0 and re.fullmatch('[0-9a-f]{64}', process['imageSha256'])
+            and signature['status'] == 'Valid' and signature['publisherMicrosoft'] is True
+            and re.search(r'(?:^|,\s*)CN=Microsoft Windows(?:,|$)', signature['subject'])
+            and re.search(r'(?:^|,\s*)O=Microsoft Corporation(?:,|$)', signature['subject']),
+            'WSL 실제 경로·native·생성시각·session·Microsoft 서명이 다릅니다')
+        trace = {'readOnly': True, 'timeoutSeconds': 65, 'boundWindow': foreground, 'boundProcess': process,
+                 'samples': [], 'naturalProcessExitObserved': False, 'stage': 'heldIdentity'}
+        result['startupWait'] = trace
+        handle = self.kernel.OpenProcess(0x1000, False, process['processId'])
+        require(handle, 'WSL held 조회 handle을 열지 못했습니다')
+        try:
+            initial = self.startup_process_state(handle, process['processId'])
+            require(initial['createdFileTime'] == process['createdFileTime'] and initial['processMachine'] == 0
+                and initial['nativeMachine'] == 0xAA64 and initial['sessionId'] == process['sessionId'] == self.session_id()
+                and initial['exitCode'] == 259, 'live WSL held identity가 다릅니다')
+            trace['stage'] = 'liveBoundImage'
+            trace['liveBoundImage'] = self.bound_image(expected_path, deadline=deadline)
+            require(trace['liveBoundImage']['bytes'] == process['imageBytes']
+                and trace['liveBoundImage']['sha256'] == process['imageSha256']
+                and trace['liveBoundImage']['signature'] == process['signature'], 'live WSL process와 실제 PE/파일/서명이 다릅니다')
+            while True:
+                trace['stage'] = 'heldIdentity'
+                state = self.startup_process_state(handle, process['processId'])
+                require(state['createdFileTime'] == process['createdFileTime'] and state['processMachine'] == 0
+                    and state['nativeMachine'] == 0xAA64 and state['sessionId'] == process['sessionId'] == self.session_id(),
+                    'WSL held 생성시각/native/session이 다릅니다')
+                exists = bool(self.user.IsWindow(foreground['hwnd'])); owner = W.DWORD()
+                thread = self.user.GetWindowThreadProcessId(foreground['hwnd'], ctypes.byref(owner)) if exists else 0
+                current_foreground = int(self.user.GetForegroundWindow() or 0)
+                if exists:
+                    trace['stage'] = 'windowIdentity'
+                    title = ctypes.create_unicode_buffer(257); cls = ctypes.create_unicode_buffer(257)
+                    self.user.GetWindowTextW(foreground['hwnd'], title, 257); self.user.GetClassNameW(foreground['hwnd'], cls, 257)
+                    require(owner.value == process['processId'] and thread == foreground['threadId']
+                        and title.value == foreground['title'] and cls.value == foreground['className'], 'WSL HWND/PID/TID/class가 변경됐습니다')
+                sample = {'elapsedMs': round((time.monotonic() - started) * 1000), 'windowExists': exists,
+                          'foregroundHwnd': current_foreground, 'heldExitCode': state['exitCode']}
+                trace['samples'].append(sample)
+                if len(trace['samples']) > 32: del trace['samples'][16]
+                require(time.monotonic() <= deadline, 'WSL 자연 종료 준비 시간이 초과했습니다')
+                if state['exitCode'] != 259:
+                    require(not exists, '종료된 WSL 창의 소유 상태가 남았습니다')
+                    require(current_foreground in (0, owned_hwnd), 'WSL 자연 종료 순간 알 수 없는 전경 창이 나타났습니다')
+                    trace['postExitHeldIdentity'] = state
+                    trace['stage'] = 'postExitBoundImage'
+                    trace['postExitImage'] = self.bound_image(expected_path, deadline=deadline)
+                    require(trace['postExitImage'] == trace['liveBoundImage'], 'WSL 종료 전후 bound PE/파일/hash/서명이 변경됐습니다')
+                    require(self.startup_process_state(handle, process['processId']) == state
+                        and not self.user.IsWindow(foreground['hwnd']), 'WSL 종료 이미지 검증 뒤 held identity/창이 변경됐습니다')
+                    require(time.monotonic() <= deadline, 'WSL 자연 종료 검증 시간이 초과했습니다')
+                    require(int(self.user.GetForegroundWindow() or 0) in (0, owned_hwnd), 'WSL 종료 검증 중 전경 창이 변경됐습니다')
+                    trace['naturalProcessExitObserved'] = True
+                    trace['durationMs'] = round((time.monotonic() - started) * 1000)
+                    trace['stage'] = 'naturalExitConfirmed'
+                    return
+                trace['stage'] = 'foregroundIdentity'
+                require(exists and current_foreground in (0, foreground['hwnd'], owned_hwnd), 'WSL 기다림 중 알 수 없는 전경/창 변경입니다')
+                remaining = deadline - time.monotonic()
+                require(remaining > 0, 'WSL 자연 종료 준비 시간이 초과했습니다')
+                # 대기 중에도 이 helper 자신의 창만 응답한다. WSL/다른 창에는 메시지를 보내지 않는다.
+                message = W.MSG()
+                for _ in range(64):
+                    if not self.user.PeekMessageW(ctypes.byref(message), owned_hwnd, 0, 0, 1): break
+                    self.user.TranslateMessage(ctypes.byref(message)); self.user.DispatchMessageW(ctypes.byref(message))
+                time.sleep(min(0.25, remaining))
+        finally:
+            self.kernel.CloseHandle(handle)
+
     def focus_probe(self):
         """현재 helper 자신의 창 하나만 만들고 focus/제거를 검증한다."""
         wndproc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, W.HWND, W.UINT, W.WPARAM, W.LPARAM)
@@ -514,12 +780,17 @@ class WindowsProbe:
         window_class.proc = callback; window_class.instance = instance; window_class.name = name
         require(self.user.RegisterClassW(ctypes.byref(window_class)), '소유 focus probe class 생성 실패')
         hwnd = None; result = {'processId': pid, 'className': name, 'foregroundMatched': False, 'ownedWindowRemoved': False}
+        self.last_focus_probe_result = result
         try:
             hwnd = self.user.CreateWindowExW(0, name, 'OpenGeul CI owned focus probe', 0x10CF0000,
                                             20, 20, 360, 180, None, None, instance, None)
             require(hwnd, '소유 focus probe 창 생성 실패'); hwnd = int(hwnd); owner = W.DWORD()
             self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)); require(owner.value == pid, 'probe PID가 다릅니다')
             result.update({'hwnd': hwnd, 'foregroundBefore': int(self.user.GetForegroundWindow() or 0), **self.host()})
+            self.wait_startup_foreground(hwnd, result)
+            self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            require(self.user.IsWindow(hwnd) and owner.value == pid, '기다림 뒤 probe HWND 소유권이 다릅니다')
+            result['foregroundAtActivation'] = int(self.user.GetForegroundWindow() or 0)
             result['setForegroundReturned'] = bool(self.user.SetForegroundWindow(hwnd))
             message = W.MSG(); deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
@@ -599,6 +870,8 @@ def prepare(probe, env, output):
         result['hostReadyQualified'] = True; result['stage'] = 'complete'
     except Exception as error:
         result['errorType'] = bounded(type(error).__name__)
+        if result['focusProbe'] is None:
+            result['focusProbe'] = getattr(probe, 'last_focus_probe_result', None)
     finally:
         try:
             observe(probe, env, output / 'after')

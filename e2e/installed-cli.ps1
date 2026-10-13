@@ -2,6 +2,12 @@ param([Parameter(Mandatory)][string]$CliPath,[Parameter(Mandatory)][string]$Pack
       [Parameter(Mandatory)][string]$OutputDirectory,
       [Parameter(Mandatory)][string]$McpFixtureDirectory,
       [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedCliSha256,
+      [Parameter(Mandatory)][ValidateSet('true',IgnoreCase=$false)][string]$CiActions,
+      [Parameter(Mandatory)][ValidateSet('github-hosted',IgnoreCase=$false)][string]$CiRunnerEnvironment,
+      [Parameter(Mandatory)][ValidateSet('ATLKR/OpenGeul',IgnoreCase=$false)][string]$CiRepository,
+      [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$',Options='None')][string]$CiCommit,
+      [Parameter(Mandatory)][ValidatePattern('^[1-9][0-9]{0,19}$')][string]$CiRunId,
+      [Parameter(Mandatory)][ValidatePattern('^[1-9][0-9]{0,19}$')][string]$CiRunAttempt,
       [ValidateSet('x64','arm64')][string]$Architecture='x64',
       [Parameter(Mandatory)][string]$PythonPath)
 Set-StrictMode -Version Latest
@@ -9,6 +15,15 @@ $ErrorActionPreference='Stop'
 $PSNativeCommandUseErrorActionPreference=$true
 $result=@{success=$false;expectedPackageFullName=$PackageFullName;scope='Installed CLI launched within the declared desktop package graph'}
 try {
+ $publicCiEnvironment=[ordered]@{GITHUB_ACTIONS=$CiActions;RUNNER_ENVIRONMENT=$CiRunnerEnvironment;
+  GITHUB_REPOSITORY=$CiRepository;GITHUB_SHA=$CiCommit;GITHUB_RUN_ID=$CiRunId;GITHUB_RUN_ATTEMPT=$CiRunAttempt}
+ foreach ($name in $publicCiEnvironment.Keys) {
+  $existing=[Environment]::GetEnvironmentVariable($name,'Process')
+  if (-not [string]::IsNullOrEmpty($existing) -and $existing -cne $publicCiEnvironment[$name]) { throw '패키지 child 환경이 현재 CI 실행과 다릅니다.' }
+ }
+ foreach ($name in $publicCiEnvironment.Keys) {
+  [Environment]::SetEnvironmentVariable($name,$publicCiEnvironment[$name],'Process')
+ }
  Add-Type @'
 using System;
 using System.Runtime.InteropServices;

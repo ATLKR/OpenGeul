@@ -8,10 +8,10 @@ ROOT=Path(__file__).resolve().parents[2]
 class WorkflowTransportTests(unittest.TestCase):
     def setUp(self):self.w=load_workflow(ROOT/'.github/workflows/msix.yml')
     def test_existing_release_gate_set_is_preserved_and_requires_arm64(self):
-        self.assertEqual(set(self.w['jobs']['release']['needs']),{'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64'})
+        self.assertEqual(set(self.w['jobs']['release']['needs']),{'wasm','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-native-arm64','msix-install-arm64','virtual-print','virtual-print-arm64'})
     def test_cleanup_depends_on_every_consumer_and_publication(self):
         self.assertIn('cleanup-transports',self.w['jobs'],'Missing post-consumer cleanup')
-        self.assertEqual(set(self.w['jobs']['cleanup-transports']['needs']),{'preflight','wasm','windows-editor','windows-cli','windows-editor-arm64','windows-cli-arm64','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-install-arm64','virtual-print','virtual-print-arm64','release'})
+        self.assertEqual(set(self.w['jobs']['cleanup-transports']['needs']),{'preflight','wasm','windows-editor','windows-cli','windows-editor-arm64','windows-cli-arm64','build','build-arm64','native-e2e','native-e2e-arm64','browser-e2e','msix-install','msix-native-arm64','msix-install-arm64','virtual-print','virtual-print-arm64','release'})
     def test_windows_components_build_in_parallel_and_full_mode_only(self):
         for name in ('windows-editor','windows-cli'):
             with self.subTest(name=name):

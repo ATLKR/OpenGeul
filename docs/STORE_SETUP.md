@@ -32,6 +32,14 @@ opengeul-store-<run ID> 파일을 하루 안에 내려받아 검증된 Store MSI
 supportContact, websiteUrl 필드로 전용 Partner Center 설정이 바뀐다고
 주장하지 않습니다. 문서화되지 않은 defaultLanguage 필드를 만들어 넣지 않습니다.
 
+2026-10-12 사용자 요청의 고객용 연락처는 `allenlim@allenlim.net`, 홈페이지는
+`https://opengeul.allenlim.net`입니다. 그날 공개 카탈로그의 홈페이지는 GitHub
+저장소, 지원 URI는 GitHub Issues였으며 해당 전용 속성을 API로 갱신했다고
+기록하지 않습니다. 최신 공식 제출 API 문서도 두 필드를 폐기된 값으로 명시하며
+값을 보내도 무시하고 Partner Center의 Properties에서 변경하도록 안내합니다.
+소개 본문과 앱 제품 정보에 연락처를 표시하는 수정은 전용 Store 버튼 수정과
+별개로 검증합니다.
+
 새 소스 실행의 msix-install 증거를 확인하세요. installed-launch.json의
 후보 패키지 식별자와 설치 디렉터리에서 실행한 CLI 도움말이 일치해야 합니다.
 wack.json·wack.xml도 확인합니다. 도구 없음은 미검증, 필수 실패·부분 보고서·
@@ -64,8 +72,11 @@ submit_to_store 수동 입력도 검증된 정식 태그 push를 요구하며 �
 원본 소개·연령 등급·무료 가격·시장 설정을 보존하고 승인한 한국어 소개 변경은
 검토된 텍스트 필드에만 적용합니다. NotAvailable은 이용 불가 시장으로 유지하며
 Free·Base로 바꾸지 않습니다. 유료·알 수 없는 가격은 제출을 차단합니다.
-Manual 공개 설정은 기준 제출, PUT 응답, 커밋 직전 GET 및 기존 처리 요청에서
-확인하며 자동·예약 공개로 바뀌면 중단합니다.
+사용자의 2026-10-12 지시에 따라 새 제출은 `targetPublishMode=Immediate`로
+설정해 인증 통과 후 자동 공개합니다. 기존 Published 기준 제출은 `Manual`과
+`Immediate`를 읽을 수 있지만, 새 요청의 PUT 응답·커밋 직전 GET·같은 SID의
+처리 결과에서는 `Immediate`를 확인합니다. 알 수 없는 공개 방식이나 예약 공개는
+차단합니다. 이미 인증·공개 처리 중인 수동 요청을 다시 커밋하거나 삭제하지 않습니다.
 
 Entra 앱에는 Partner Center Manager 접근이 필요합니다.
 STORE_CLIENT_SECRET은 GitHub Actions secrets에 보관하고 Proton Pass에
@@ -83,7 +94,7 @@ ID와 시도 기록을 남기고, 빈 본문의 성공 DELETE·대기 제출 없
 중단하고 새 제출을 만들지 않습니다. 공개 기준 제출은 삭제하지 않습니다.
 
 메타데이터 응답과 커밋 직전 조회가 의도한 패키지 이름·업로드/삭제 상태·최소
-요구 사항·소개·가격·수동 공개 방식과 일치해야 합니다.
+요구 사항·소개·가격·인증 후 자동 공개 방식과 일치해야 합니다.
 단일 신뢰된 GitHub Actions 봇 Issue에 변경 시도·확정을 기록합니다.
 결과 불명 삭제·생성은 다음 후보도 차단합니다. 커밋 응답이 끊기면 같은 ID를
 GET으로 확인하고 커밋을 반복하지 않습니다. 실패는 Issue·Actions 오류로
@@ -91,7 +102,8 @@ GET으로 확인하고 커밋을 반복하지 않습니다. 실패는 Issue·Act
 전에 거래 기록을 지우지 마세요.
 
 검증한 MSIX의 ZIP을 업로드하고 인증 처리를 요청합니다. 접수 성공과 Microsoft의
-인증·공개 완료는 구분하며 수동 공개를 유지합니다. API로 만든 제출은 계속
+인증·공개 완료는 구분하며 이번 제출은 인증 후 자동 공개합니다. 공개 배지는
+실제 `Published` 상태를 확인한 뒤에만 갱신합니다. API로 만든 제출은 계속
 API로 편집해야 합니다. Partner Center에서 수정하면 후속 API 변경·커밋이
 막힐 수 있습니다. Microsoft CLI의 publish --noCommit도 기존 초안을 먼저
 삭제할 수 있으므로 단순한 사전 초안 확인만으로 동시 변경을 보호하지 못합니다.

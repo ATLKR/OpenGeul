@@ -44,9 +44,21 @@ jobs:
       id: policy
       run: python ci/policy.py --event
     - name: CI·패키지 정책 회귀 검사
-      run: |
-        python -m unittest discover -s ci/tests -v
-        python -m unittest discover -s tests -v
+      id: preflight-tests
+      run: python ci/preflight_tests.py
+    - name: 병렬 사전 검사 원본 기록 크기 제한
+      id: preflight-size
+      if: always() && steps.preflight-tests.outcome != 'skipped'
+      run: python ci/evidence.py size --limit-mib 9 .work/preflight-tests
+    - name: 각 필수 시험 원본 로그와 종료 상태 보존
+      if: always() && steps.preflight-size.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-preflight-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/preflight-tests/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     if: github.event.repository.private == false
   wasm:
     runs-on: ubuntu-24.04
@@ -128,9 +140,48 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: 네이티브 표·PDF 정책 검사와 Windows 편집기 컴파일
+    - name: 원본 시험·소스·프런트엔드 준비
+      id: editor-prepare
       shell: pwsh
-      run: ./scripts/build-msix.ps1 -Phase Editor -WasmDirectory wasm-input
+      run: python ci/build_progress.py run --stage Prepare --architecture x64
+    - name: 원본 시험·소스·프런트엔드 준비 원본 로그 checkpoint 보존
+      id: progress-prepare
+      if: always() && !cancelled() && steps.editor-prepare.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-x64-prepare-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-x64/prepare/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: 필수 네이티브 표·PDF·데스크톱 시험
+      id: editor-native-tests
+      shell: pwsh
+      run: python ci/build_progress.py run --stage NativeTests --architecture x64
+    - name: 필수 네이티브 표·PDF·데스크톱 시험 원본 로그 checkpoint 보존
+      id: progress-native-tests
+      if: always() && !cancelled() && steps.editor-native-tests.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-x64-native-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-x64/native-tests/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: 제품 release 빌드·구성요소 capture
+      id: editor-release
+      shell: pwsh
+      run: python ci/build_progress.py run --stage Release --architecture x64
+    - name: 제품 release 빌드·구성요소 capture 원본 로그 checkpoint 보존
+      id: progress-release
+      if: always() && !cancelled() && steps.editor-release.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-x64-release-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-x64/release/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
       run: python ci/evidence.py size --limit-mib 64 .work/editor-component
@@ -181,15 +232,54 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-        architecture: x64
+        architecture: arm64
     - name: 이 실행에서 검증한 WASM 받기
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
-    - name: 네이티브 표·PDF 정책 검사와 Windows 편집기 컴파일
+    - name: 원본 시험·소스·프런트엔드 준비
+      id: editor-prepare
       shell: pwsh
-      run: ./scripts/build-msix.ps1 -Phase Editor -Architecture arm64 -WasmDirectory wasm-input
+      run: python ci/build_progress.py run --stage Prepare --architecture arm64
+    - name: 원본 시험·소스·프런트엔드 준비 원본 로그 checkpoint 보존
+      id: progress-prepare
+      if: always() && !cancelled() && steps.editor-prepare.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-arm64-prepare-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-arm64/prepare/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: 필수 네이티브 표·PDF·데스크톱 시험
+      id: editor-native-tests
+      shell: pwsh
+      run: python ci/build_progress.py run --stage NativeTests --architecture arm64
+    - name: 필수 네이티브 표·PDF·데스크톱 시험 원본 로그 checkpoint 보존
+      id: progress-native-tests
+      if: always() && !cancelled() && steps.editor-native-tests.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-arm64-native-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-arm64/native-tests/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: 제품 release 빌드·구성요소 capture
+      id: editor-release
+      shell: pwsh
+      run: python ci/build_progress.py run --stage Release --architecture arm64
+    - name: 제품 release 빌드·구성요소 capture 원본 로그 checkpoint 보존
+      id: progress-release
+      if: always() && !cancelled() && steps.editor-release.outcome != 'skipped'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-build-progress-editor-arm64-release-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/build-progress/editor-arm64/release/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
       run: python ci/evidence.py size --limit-mib 64 .work/editor-component
@@ -284,7 +374,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-        architecture: x64
+        architecture: arm64
     - name: 이 실행에서 검증한 WASM 받기
       shell: pwsh
       env:
@@ -368,7 +458,7 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
-        architecture: x64
+        architecture: arm64
     - name: 동일 실행의 두 구성요소 받기
       shell: pwsh
       env:
@@ -544,6 +634,28 @@ jobs:
         python -m pip install -r e2e/requirements.txt
         ./e2e/ensure-webview2.ps1
         python e2e/prepare_payload.py package runtime --architecture $env:E2E_ARCHITECTURE
+    - name: ARM 러너의 검증된 OS 창과 전경 준비
+      id: runner-ready
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/runner-ready.py --prepare --output runner-ready
+    - name: ARM 러너 준비 원본 증거 크기 제한
+      id: runner-ready-size
+      if: always() && steps.runner-ready.outcome != 'skipped'
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 16 runner-ready
+    - name: ARM 러너 준비 원본 관찰 보존
+      id: runner-ready-evidence
+      if: always() && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-runner-ready-native-e2e-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: runner-ready/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: WebView2가 없을 때 사용자 안내
       shell: pwsh
       run: python e2e/check_webview2_missing.py --exe runtime/OpenGeul.exe --output evidence
@@ -713,7 +825,7 @@ jobs:
         if-no-files-found: warn
         compression-level: 9
     if: github.event.repository.private == false
-  msix-install-arm64:
+  msix-native-arm64:
     needs: [build-arm64, native-e2e-arm64]
     runs-on: windows-11-arm
     timeout-minutes: 30
@@ -738,17 +850,64 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: python scripts/mcp_qa_download.py source --package-directory package --output mcp-qa
+    - name: ARM 러너 관찰 도구 준비
+      id: runner-ready-tools
+      shell: pwsh
+      run: |
+        $PSNativeCommandUseErrorActionPreference=$true
+        python -m pip install -r e2e/requirements.txt
+    - name: ARM 러너의 검증된 OS 창과 전경 준비
+      id: runner-ready
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/runner-ready.py --prepare --output runner-ready
+    - name: ARM 러너 준비 원본 증거 크기 제한
+      id: runner-ready-size
+      if: always() && steps.runner-ready.outcome != 'skipped'
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 16 runner-ready
+    - name: ARM 러너 준비 원본 관찰 보존
+      id: runner-ready-evidence
+      if: always() && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-runner-ready-msix-native-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: runner-ready/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: 설치된 앱 실행을 위한 WebView2 준비
       shell: pwsh
       run: ./e2e/ensure-webview2.ps1
-    - name: 시험 전용 서명·설치 앱 및 CLI 실행·WACK·파일 연결·제거 검사
+    - name: 시험 전용 서명·ARM 네이티브 설치·MCP·파일 연결·제거 검사
       shell: pwsh
       run: |
         $ErrorActionPreference='Stop'
         $PSNativeCommandUseErrorActionPreference=$true
         $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
         $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
-        ./e2e/msix-install.ps1 -Architecture arm64 -PackageDirectory package -OutputDirectory evidence -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
+        ./e2e/msix-install.ps1 -NativeOnly -TransportDirectory native-transport -Architecture arm64 -PackageDirectory package -OutputDirectory evidence -McpFixtureDirectory mcp-qa -ExpectedCliSha256 $cliSha
+    - name: 동일 서명 MSIX와 공개 인증서의 현재 실행 출처 검증
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python scripts/native_wack_transport.py publish-source --package-directory package --evidence evidence --transport native-transport
+    - name: ARM 네이티브 성공 후보를 SDK 검사에 하루 동안 전달
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-native-signed-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          native-transport/native-install.json
+          native-transport/test-only.msix
+          native-transport/test.cer
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
@@ -756,6 +915,59 @@ jobs:
       shell: pwsh
       run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
     - name: 인증서·서명 파일을 제외하고 설치 결과 보존
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: msix-native-arm64-${{ github.run_id }}
+        path: bounded-evidence/
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 9
+    if: github.event.repository.private == false
+  msix-install-arm64:
+    needs: [build-arm64, msix-native-arm64]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: x64
+    - name: 서명 없는 릴리스 후보 받기
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-windows-arm64-$env:GITHUB_RUN_ID" --dir package
+    - name: 현재 ARM 네이티브 성공 작업의 동일 서명 후보 검증과 수신
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python scripts/native_wack_transport.py download-source --package-directory package --output native-input
+    - name: 원본 Microsoft x64 SDK로 ARM 후보 전체 WACK 및 네이티브 증거 결합
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        ./e2e/msix-wack-import.ps1 -PackageDirectory package -NativeDirectory native-input -OutputDirectory evidence
+    - name: 검사 결과를 유지하며 증거 크기 제한
+      if: always()
+      env:
+        EVIDENCE_STATUS: ${{ job.status }}
+      shell: pwsh
+      run: python ci/evidence.py pack evidence bounded-evidence --status $env:EVIDENCE_STATUS
+    - name: 인증서·서명 파일을 제외하고 설치와 전체 WACK 결과 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -817,6 +1029,21 @@ jobs:
     - name: 실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사
       shell: pwsh
       run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
+    - name: 성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존
+      id: synthetic-pdfs
+      if: success() && github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      shell: pwsh
+      run: python ci/synthetic_print_pdfs.py --os ${{ matrix.os }}
+    - name: 제한된 합성 PDF 원본 전송
+      id: synthetic-pdfs-evidence
+      if: always() && steps.synthetic-pdfs.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-synthetic-print-pdfs-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: synthetic-pdf-evidence/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
@@ -878,9 +1105,46 @@ jobs:
         node e2e/table_height.mjs generate wasm-input print-fixtures
         python e2e/print_fixtures.py print-fixtures
         node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
+    - name: ARM 러너의 검증된 OS 창과 전경 준비
+      id: runner-ready
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/runner-ready.py --prepare --output runner-ready
+    - name: ARM 러너 준비 원본 증거 크기 제한
+      id: runner-ready-size
+      if: always() && steps.runner-ready.outcome != 'skipped'
+      shell: pwsh
+      run: python ci/evidence.py size --limit-mib 16 runner-ready
+    - name: ARM 러너 준비 원본 관찰 보존
+      id: runner-ready-evidence
+      if: always() && steps.runner-ready.outcome != 'skipped' && steps.runner-ready-size.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-runner-ready-virtual-print-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: runner-ready/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: 실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사
       shell: pwsh
       run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
+    - name: 성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존
+      id: synthetic-pdfs
+      if: success() && github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      shell: pwsh
+      run: python ci/synthetic_print_pdfs.py --os windows-11-arm
+    - name: 제한된 합성 PDF 원본 전송
+      id: synthetic-pdfs-evidence
+      if: always() && steps.synthetic-pdfs.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-synthetic-print-pdfs-windows-11-arm-${{ github.run_id }}-${{ github.run_attempt }}
+        path: synthetic-pdf-evidence/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
     - name: 검사 결과를 유지하며 증거 크기 제한
       if: always()
       env:
@@ -898,7 +1162,7 @@ jobs:
         compression-level: 9
     if: github.event.repository.private == false
   release:
-    needs: [wasm, build, build-arm64, native-e2e, native-e2e-arm64, browser-e2e, msix-install, msix-install-arm64, virtual-print, virtual-print-arm64]
+    needs: [wasm, build, build-arm64, native-e2e, native-e2e-arm64, browser-e2e, msix-install, msix-native-arm64, msix-install-arm64, virtual-print, virtual-print-arm64]
     if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
     runs-on: ubuntu-24.04
@@ -939,7 +1203,7 @@ jobs:
         RELEASE_TAG: ${{ steps.release.outputs.tag }}
       run: python3 scripts/store_package.py --dispatch-store --release-tag "$RELEASE_TAG"
   cleanup-transports:
-    needs: [preflight, wasm, browser-e2e, windows-editor, windows-cli, windows-editor-arm64, windows-cli-arm64, build, build-arm64, native-e2e, native-e2e-arm64, msix-install, msix-install-arm64, virtual-print, virtual-print-arm64, release]
+    needs: [preflight, wasm, browser-e2e, windows-editor, windows-cli, windows-editor-arm64, windows-cli-arm64, build, build-arm64, native-e2e, native-e2e-arm64, msix-install, msix-native-arm64, msix-install-arm64, virtual-print, virtual-print-arm64, release]
     if: github.event.repository.private == false && (always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.run_attempt == 1 && github.actor != 'dependabot[bot]' && needs.preflight.result == 'success' && needs.preflight.outputs.mode != 'checks' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
     timeout-minutes: 5

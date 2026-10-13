@@ -27,7 +27,8 @@ PRODUCT_VERSION = json.loads((ROOT / 'config/product.json').read_text())['versio
 class StorePackageTests(unittest.TestCase):
     def source_run(self, status='completed', conclusion='success'):
         return {'id': 123, 'run_number': 29, 'run_attempt': 1, 'head_sha': 'a' * 40,
-                'repository': {'full_name': 'ATLKR/OpenGeul'}, 'path': '.github/workflows/msix.yml',
+                'repository': {'full_name': 'ATLKR/OpenGeul', 'private': False},
+                'head_repository': {'full_name': 'ATLKR/OpenGeul', 'private': False}, 'path': '.github/workflows/msix.yml',
                 'event': 'push', 'status': status, 'conclusion': conclusion}
 
     def source_jobs(self):
@@ -39,9 +40,9 @@ class StorePackageTests(unittest.TestCase):
 
     def dual_source_jobs(self):
         jobs = self.source_jobs() + [{'name': name, 'conclusion': 'success'} for name in (
-            'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64',
+            'windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64', 'msix-native-arm64',
             'native-e2e (windows-11-arm)', 'virtual-print (windows-11-arm)')]
-        return [{**job, 'run_id': 123, 'run_attempt': 1, 'head_sha': 'a' * 40} for job in jobs]
+        return [{**job, 'status': 'completed', 'run_id': 123, 'run_attempt': 1, 'head_sha': 'a' * 40} for job in jobs]
 
     def release_directory(self, root, timestamp=None, architecture='x64'):
         root.mkdir()
@@ -116,6 +117,8 @@ class StorePackageTests(unittest.TestCase):
             (wack / 'wack.json').write_text(json.dumps(inspect_wack(
                 wack / 'wack.xml', DEV_IDENTITY['name'], PRODUCT_VERSION + '.0', 0)) + '\n')
         output = root / 'pair'
+        import native_split_fixture
+        native_split_fixture.bind_source(packages['arm64'],wacks['arm64'])
         release_pair.assemble(packages['x64'], packages['arm64'], wacks['x64'], wacks['arm64'], output,
                               env={'GITHUB_REPOSITORY': 'ATLKR/OpenGeul', 'GITHUB_SHA': 'a' * 40,
                                    'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'})
@@ -261,7 +264,8 @@ class StorePackageTests(unittest.TestCase):
         sha = 'a' * 40
         provenance = {'version': '1.1.1', 'repository': 'ATLKR/OpenGeul', 'commit': sha, 'runId': '123'}
         run = {'id': 123, 'run_number': 29, 'run_attempt': 1, 'head_sha': sha,
-               'repository': {'full_name': 'ATLKR/OpenGeul'}, 'path': '.github/workflows/msix.yml',
+               'repository': {'full_name': 'ATLKR/OpenGeul', 'private': False},
+                'head_repository': {'full_name': 'ATLKR/OpenGeul', 'private': False}, 'path': '.github/workflows/msix.yml',
                'event': 'push', 'status': 'completed', 'conclusion': 'success'}
         jobs = self.source_jobs()
         authorize_release('v1.1.1-dev.29.1', provenance, run, sha, jobs)
@@ -288,7 +292,7 @@ class StorePackageTests(unittest.TestCase):
                       'commit': 'a' * 40, 'runId': '123', 'runAttempt': '1'}
         jobs = self.dual_source_jobs()
         authorize_release(f'v{PRODUCT_VERSION}-dev.29.1', provenance, self.source_run(), 'a' * 40, jobs)
-        for required in ('windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64',
+        for required in ('windows-editor-arm64', 'windows-cli-arm64', 'build-arm64', 'msix-install-arm64', 'msix-native-arm64',
                          'native-e2e (windows-11-arm)', 'virtual-print (windows-11-arm)'):
             for conclusion in (None, 'failure', 'cancelled', 'skipped'):
                 candidate = [dict(job) for job in jobs if job['name'] != required]
@@ -297,6 +301,36 @@ class StorePackageTests(unittest.TestCase):
                                       'run_attempt': 1, 'head_sha': 'a' * 40})
                 with self.subTest(required=required, conclusion=conclusion), self.assertRaises(ValueError):
                     authorize_release(f'v{PRODUCT_VERSION}-dev.29.1', provenance, self.source_run(), 'a' * 40, candidate)
+
+    def test_all21_dual_source_jobs_require_completed_same_head_and_attempt(self):
+        provenance = {'formatVersion': 2, 'version': PRODUCT_VERSION, 'repository': 'ATLKR/OpenGeul',
+                      'commit': 'a' * 40, 'runId': '123', 'runAttempt': '1'}
+        self.assertEqual(len(store_package.REQUIRED_JOBS), 21)
+        for name in store_package.REQUIRED_JOBS:
+            for changes in ({'status':None}, {'status':'in_progress'}, {'status':'queued'},
+                            {'conclusion':'failure'}, {'conclusion':'skipped'}, {'conclusion':'cancelled'},
+                            {'head_sha':'b'*40}, {'run_attempt':2}, {'run_id':124}):
+                jobs=self.dual_source_jobs();next(job for job in jobs if job['name']==name).update(changes)
+                with self.subTest(name=name, changes=changes), self.assertRaises(ValueError):
+                    authorize_release(f'v{PRODUCT_VERSION}-dev.29.1', provenance, self.source_run(), 'a'*40, jobs)
+            for change in ('missing','duplicate'):
+                jobs=self.dual_source_jobs();job=next(job for job in jobs if job['name']==name)
+                if change=='missing': jobs.remove(job)
+                else: jobs.append(dict(job))
+                with self.subTest(name=name, change=change), self.assertRaises(ValueError):
+                    authorize_release(f'v{PRODUCT_VERSION}-dev.29.1', provenance, self.source_run(), 'a'*40, jobs)
+
+    def test_dual_source_api_owner_and_head_must_be_literal_public(self):
+        provenance = {'formatVersion': 2, 'version': PRODUCT_VERSION, 'repository': 'ATLKR/OpenGeul',
+                      'commit': 'a' * 40, 'runId': '123', 'runAttempt': '1'}
+        for role in ('repository','head_repository'):
+            for change in (None, {}, {'full_name':'fork/OpenGeul','private':False},
+                           {'full_name':'ATLKR/OpenGeul','private':True},
+                           {'full_name':'ATLKR/OpenGeul','private':'false'},
+                           {'full_name':'ATLKR/OpenGeul','private':0}):
+                run=self.source_run();run[role]=change
+                with self.subTest(role=role, change=change), self.assertRaises(ValueError):
+                    authorize_release(f'v{PRODUCT_VERSION}-dev.29.1', provenance, run, 'a'*40, self.dual_source_jobs())
 
     def test_dual_source_rejects_other_attempt_duplicate_or_foreign_gate_evidence(self):
         provenance = {'formatVersion': 2, 'version': PRODUCT_VERSION, 'repository': 'ATLKR/OpenGeul',
@@ -401,7 +435,9 @@ class StorePackageTests(unittest.TestCase):
             checksums.write_text(checksums.read_text().replace(previous + '  rhwp-help.txt',
                                  hashlib.sha256(help_path.read_bytes()).hexdigest() + '  rhwp-help.txt'))
             self.checksum_directory(remote)
-            self.assertEqual(release_pair.verify_pair(remote), release_pair.verify_pair(source))
+            # Rehashing modified Source6 metadata cannot replace the original
+            # successful ARM producer's API-bound complete input snapshot.
+            with self.assertRaises(ValueError):release_pair.verify_pair(remote)
             self.assertNotEqual(release_pair.source_fingerprint(remote), release_pair.source_fingerprint(source))
             release = {'id': 8, 'tag_name': f'v{PRODUCT_VERSION}', 'draft': False,
                        'assets': [{'name': path.name, 'size': path.stat().st_size, 'state': 'uploaded'}
@@ -419,7 +455,7 @@ class StorePackageTests(unittest.TestCase):
             with patch.dict(os.environ, self.release_environment(), clear=True), \
                     patch.object(store_package, 'github', side_effect=github), \
                     patch.object(store_package.subprocess, 'run', side_effect=download):
-                with self.assertRaisesRegex(ValueError, 'bytes'):
+                with self.assertRaisesRegex(ValueError, 'byte'):
                     store_package.ensure_source_release(f'v{PRODUCT_VERSION}', source)
             self.assertEqual(len(commands), 1)
             self.assertEqual({path.name: path.read_bytes() for path in remote.iterdir()}, before)
