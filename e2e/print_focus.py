@@ -391,34 +391,45 @@ def prepare_app_for_print(app_hwnd,app_pid,runtime,*,app_handle,evidence_dir=Non
         if foreground_changed:raise AssertionError('Initial owned app foreground changed before print input')
 
 
+def _bind_native_print_processes(api,pid,app_pid,runtime,app_handle):
+    """Hold the actual app and each verified WebView ancestor before native input."""
+    app=runtime['nativeArchitecture'];web=runtime['webview2Native']
+    if app['processId']!=app_pid or web['rootProcessId']!=app_pid or app_handle is None:
+        raise AssertionError('Native Print input needs the actual owned app handle')
+    api.architecture=app.get('architecture');expected={app_pid:app};processes={}
+    if len(web['processes'])>64:raise AssertionError('Owned Print process inventory exceeds its bound')
+    for row in web['processes']:
+        child=row['processId']
+        if type(child) is not int or child<=0 or child in expected:
+            raise AssertionError('Duplicate or invalid owned Print process identity')
+        expected[child]=row
+    processes[app_pid]=api.bind_process(app_pid,app,app_handle)
+    def bind(owned):
+        chain=[];current=owned
+        while current!=app_pid:
+            if current in chain or current not in expected:
+                raise AssertionError('Native Print has a foreign process parent chain')
+            chain.append(current);current=expected[current]['parentProcessId']
+        for child in reversed(chain):
+            parent=expected[child]['parentProcessId']
+            if child not in processes:
+                record=api.bind_process(child,expected[child])
+                if record.get('parentProcessId')!=parent or record['creation']<processes[parent]['creation']:
+                    raise AssertionError('Native Print process ancestry changed')
+                processes[child]=record
+        for child in [app_pid,*reversed(chain)]:api.verify_process(child,processes[child])
+    bind(pid)
+    return processes,bind
+
+
 def click_owned_print_preferences(dialog,app_pid,runtime,*,app_handle,evidence_dir=None,probe=None):
     """Bind the exact native Print/Preferences target before one physical input."""
     api=probe or WindowsFocusProbe();processes={}
     entry={'kind':'diagnostic-metadata','operation':'native-preferences-input',
            'sourceQualified':False,'productTelemetry':False,'passed':False}
     try:
-        app=runtime['nativeArchitecture'];web=runtime['webview2Native']
-        if app['processId']!=app_pid or web['rootProcessId']!=app_pid or app_handle is None:
-            raise AssertionError('Native Print input needs the actual owned app handle')
-        api.architecture=app.get('architecture');expected={app_pid:app}
-        if len(web['processes'])>64:raise AssertionError('Owned Print process inventory exceeds its bound')
-        for row in web['processes']:
-            pid=row['processId']
-            if type(pid) is not int or pid<=0 or pid in expected:
-                raise AssertionError('Duplicate or invalid owned Print process identity')
-            expected[pid]=row
-        pid=dialog.process_id();chain=[];current=pid
-        while current!=app_pid:
-            if current in chain or current not in expected:
-                raise AssertionError('Native Print has a foreign process parent chain')
-            chain.append(current);current=expected[current]['parentProcessId']
-        processes[app_pid]=api.bind_process(app_pid,app,app_handle)
-        for child in reversed(chain):
-            parent=expected[child]['parentProcessId']
-            record=api.bind_process(child,expected[child])
-            if record.get('parentProcessId')!=parent or record['creation']<processes[parent]['creation']:
-                raise AssertionError('Native Print process ancestry changed')
-            processes[child]=record
+        pid=dialog.process_id()
+        processes,_bind=_bind_native_print_processes(api,pid,app_pid,runtime,app_handle)
         hwnd=dialog.handle;window=api.window(hwnd)
         entry.update({'appPid':app_pid,'dialogHwnd':hwnd,'dialogPid':pid,
                       'dialogTid':window['tid'],'foregroundBefore':api.foreground()})
@@ -585,35 +596,124 @@ def open_system_dialog(app_hwnd: int, app_pid: int, evidence_dir: Path | None = 
     finally:focus.close()
 
 
-def fill_print_output(dialog, output: Path):
+def fill_print_output(dialog, output: Path, app_pid, runtime, *, app_handle, evidence_dir=None, probe=None):
     """Wait for stable real shell controls, then enter a path and click exactly once."""
     from native_controls import filename_control
 
-    deadline = time.monotonic() + 30
-    previous = None
-    stable_since = 0.0
-    while time.monotonic() < deadline:
-        try:
-            field = filename_control(dialog.descendants())
-            buttons = [control for control in dialog.descendants(class_name='Button')
-                       if control.control_id() == 1 and control.is_visible() and control.is_enabled()]
-            if len(buttons) != 1:
-                raise ValueError('Save control is not uniquely ready')
-            button = buttons[0]
-            rect = field.rectangle()
-            current = (field.handle, button.handle, rect.left, rect.top, rect.right, rect.bottom)
-        except (ValueError, OSError):
-            current = None
-        now = time.monotonic()
-        if current is None or current != previous:
-            previous = current
-            stable_since = now
-        elif now - stable_since >= .75:
-            # Dispatch errors escape: never retry a possibly completed save action.
-            field.set_edit_text(str(output))
-            if field.window_text() != str(output):
-                raise AssertionError('Printer output path was not accepted')
-            button.click_input()
-            return
-        time.sleep(.1)
-    raise AssertionError('Print output filename/Save controls did not stabilize')
+    api=probe or WindowsFocusProbe()
+    entry={'kind':'diagnostic-metadata','operation':'native-save-input','phase':'binding',
+           'sourceQualified':False,'productTelemetry':False,'passed':False}
+    try:
+        pid=dialog.process_id();hwnd=dialog.handle
+        processes,bind=_bind_native_print_processes(api,pid,app_pid,runtime,app_handle)
+        window=api.window(hwnd);owners={}
+        entry.update(appPid=app_pid,dialogPid=pid,dialogHwnd=hwnd,dialogTid=window['tid'],
+                     foregroundBefore=api.foreground(),ownerHwnds=window['owners'])
+        if (dialog.class_name()!='#32770' or dialog.window_text()!='Save Print Output As'
+                or window['pid']!=pid or window['root']!=hwnd or window['cls']!='#32770'
+                or not window['visible'] or not window['enabled']):
+            raise AssertionError('Print output is not the exact ready owned Save dialog')
+        for owner in window['owners']:
+            row=api.window(owner);bind(row['pid'])
+            if row['root']!=owner:raise AssertionError('Print output native owner is not a root window')
+            owners[owner]=row
+        entry.update(processes=list(processes.values())[:8],processesOmitted=max(0,len(processes)-8),
+                     runtimeIdentities=[{'pid':owned,**{key:runtime_row.get(key) for key in
+                         ('sha256','bytes','peMachine','processMachine','nativeMachine')}}
+                         for owned,runtime_row in [(app_pid,runtime['nativeArchitecture']),
+                             *[(row['processId'],row) for row in runtime['webview2Native']['processes']]]
+                         if owned in processes][:8])
+
+        def dialog_live():
+            for owned,record in processes.items():api.verify_process(owned,record)
+            if (dialog.handle!=hwnd or dialog.process_id()!=pid or dialog.class_name()!='#32770'
+                    or dialog.window_text()!='Save Print Output As' or api.window(hwnd)!=window):
+                raise AssertionError('Bound print output dialog identity changed')
+            for owner,row in owners.items():
+                if api.window(owner)!=row:raise AssertionError('Bound print output native owner changed')
+
+        deadline = time.monotonic() + 30
+        previous = None
+        stable_since = 0.0
+        entry['phase']='controls-stabilizing'
+        while time.monotonic() < deadline:
+            dialog_live()
+            try:
+                field = filename_control(dialog.descendants())
+                buttons = [control for control in dialog.descendants(class_name='Button')
+                           if control.control_id() == 1 and control.is_visible() and control.is_enabled()]
+                if len(buttons) != 1:
+                    raise ValueError('Save control is not uniquely ready')
+                button = buttons[0]
+                rect = field.rectangle()
+                current = (field.handle, button.handle, rect.left, rect.top, rect.right, rect.bottom)
+            except (ValueError, OSError):
+                current = None
+            now = time.monotonic()
+            if current is None or current != previous:
+                previous = current
+                stable_since = now
+            elif now - stable_since >= .75:
+                break
+            time.sleep(.1)
+        else:raise AssertionError('Print output filename/Save controls did not stabilize')
+
+        combo=field.parent();controls=[(field,'Edit'),(combo,'ComboBox'),(button,'Button')]
+        targets=[api.window(control.handle) for control,_cls in controls]
+        rects=[_rect(control) for control,_cls in controls]
+        for rect in rects:
+            if (rect is None or any(type(n) is not int or not -2**31<=n<2**31 for n in rect)
+                    or rect[2]<=rect[0] or rect[3]<=rect[1]):
+                raise AssertionError('Print output control rectangle is invalid')
+        save_rect=rects[-1];point=((save_rect[0]+save_rect[2])//2,(save_rect[1]+save_rect[3])//2)
+        entry.update(fieldHwnd=field.handle,buttonHwnd=button.handle,buttonTid=targets[-1]['tid'],point=point,
+                     fieldRect=rects[0],buttonRect=save_rect,nativeControls=targets,ownerWindows=list(owners.values()))
+        def recheck():
+            dialog_live()
+            for (control,cls),target,rect in zip(controls,targets,rects):
+                if (control.handle!=target['hwnd'] or control.process_id()!=pid or control.class_name()!=cls
+                        or target['pid']!=pid or target['tid']!=window['tid'] or target['root']!=hwnd
+                        or target['cls']!=cls or not target['visible'] or not target['enabled']
+                        or not control.is_visible() or not control.is_enabled()
+                        or api.window(control.handle)!=target or _rect(control)!=rect):
+                    raise AssertionError('Bound print output control identity changed')
+            if button.control_id()!=1 or field.parent().handle!=combo.handle:
+                raise AssertionError('Bound print output filename/Save controls retargeted')
+
+        entry['phase']='foreground-preparation';recheck()
+        if api.foreground()!=hwnd:
+            entry['setForegroundReturned']=api.set_foreground(hwnd)
+            if not entry['setForegroundReturned']:raise AssertionError('Owned Save foreground request failed')
+            entry['activationBarrier']={}
+            if not api.sync_activation(hwnd,window,entry['activationBarrier']):
+                raise AssertionError('Owned Save activation was not processed')
+        recheck()
+        if api.foreground()!=hwnd:raise AssertionError('Exact owned Save foreground was not observed')
+        entry['phase']='filename-input'
+        # WM_SETTEXT targets only the already-bound real filename HWND.
+        field.set_edit_text(str(output));entry['pathAccepted']=field.window_text()==str(output)
+        if not entry['pathAccepted']:raise AssertionError('Printer output path was not accepted')
+        entry['phase']='save-point-guard';recheck()
+        entry['hitHwnd']=api.hit(point)
+        if entry['hitHwnd']!=button.handle:raise AssertionError('Print Save click point is covered by another HWND')
+        recheck();entry['foregroundAtInput']=api.foreground()
+        if entry['foregroundAtInput']!=hwnd:raise AssertionError('Owned Save foreground changed before physical input')
+        entry['hitHwndAtInput']=api.hit(point)
+        if entry['hitHwndAtInput']!=button.handle:
+            raise AssertionError('Print Save click point changed before physical input')
+        recheck()
+        if api.foreground()!=hwnd:raise AssertionError('Owned Save foreground changed during its final point guard')
+        entry['phase']='save-dispatch'
+        # Dispatch errors escape: never retry a possibly completed save action.
+        button.click_input();entry.update(phase='save-dispatched',passed=True)
+    except BaseException as error:
+        entry['errorType']=type(error).__name__[:64];raise
+    finally:
+        try:entry['foregroundAfter']=api.foreground()
+        except Exception:entry['foregroundAfter']=None
+        if evidence_dir is not None:
+            data=json.dumps(entry,ensure_ascii=True,separators=(',',':')).encode('ascii')
+            if len(data)<=8192:
+                try:(evidence_dir/'print-save-input-diagnostic.json').write_bytes(data)
+                except OSError:pass
+        api.close()
