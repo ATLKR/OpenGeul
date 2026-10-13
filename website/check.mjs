@@ -11,12 +11,12 @@ const home = await root.clone().text();
 assert.ok(home.includes('allenlim@allenlim.net'));
 const storePage = 'https://apps.microsoft.com/detail/9PJH0T3PHRMF';
 const storeApp = 'ms-windows-store://pdp/?ProductId=9PJH0T3PHRMF';
-const releaseTag = 'v1.1.3';
+const releaseTag = 'v1.1.4';
 const releasePage = `https://github.com/ATLKR/OpenGeul/releases/tag/${releaseTag}`;
 const portableZips = ['x64', 'arm64'].map(architecture => ({
   architecture,
-  name: `OpenGeul_1.1.3_windows-${architecture}_unsigned-portable.zip`,
-  url: `https://github.com/ATLKR/OpenGeul/releases/download/${releaseTag}/OpenGeul_1.1.3_windows-${architecture}_unsigned-portable.zip`
+  name: `OpenGeul_1.1.4_windows-${architecture}_unsigned-portable.zip`,
+  url: `https://github.com/ATLKR/OpenGeul/releases/download/${releaseTag}/OpenGeul_1.1.4_windows-${architecture}_unsigned-portable.zip`
 }));
 const links = [...home.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)].map((match) => ({
   href: match[1].match(/\bhref="([^"]*)"/)?.[1],
@@ -37,8 +37,8 @@ assert.ok(home.includes('서명되지 않은 포터블'));
 assert.match(home, /Windows 10 버전 2004 이상 또는 Windows 11의 x64/);
 assert.match(home, /Windows 11의 ARM64/);
 assert.match(home, /시스템 종류/);
-assert.match(home, /1\.1\.3에는 사용량 분석용 텔레메트리가 포함되지 않습니다/);
-assert.doesNotMatch(home, /ARM64와 32비트 전용 빌드는 제공하지 않습니다|v1\.1\.3-dev\./);
+assert.match(home, /1\.1\.4에는 사용량 분석용 텔레메트리가 포함되지 않습니다/);
+assert.doesNotMatch(home, /ARM64와 32비트 전용 빌드는 제공하지 않습니다|v1\.1\.4-dev\./);
 assert.ok(home.includes('Store에서 제공하는 아키텍처는 제품 페이지에서 확인하세요.'));
 assert.doesNotMatch(home, /배포(?:는)? 준비 중|Store 배포를 준비|공개되면/);
 assert.equal(root.headers.get('Content-Type'), 'text/html; charset=utf-8');
@@ -104,7 +104,7 @@ if (process.argv[3] === '--published-links') {
   assert.equal(release.prerelease, false);
   const expectedAssets = ['provenance.json', 'SHA256SUMS.txt'];
   for (const { architecture, name } of portableZips) {
-    expectedAssets.push(name, `OpenGeul_1.1.3.0_${architecture}_development-unsigned.msix`,
+    expectedAssets.push(name, `OpenGeul_1.1.4.0_${architecture}_development-unsigned.msix`,
       `AppxManifest-${architecture}.xml`, `provenance-${architecture}.json`, `SHA256SUMS-${architecture}.txt`,
       `rhwp-help-${architecture}.txt`, `install-${architecture}.json`, `wack-${architecture}.xml`,
       `wack-${architecture}.json`, `wack-context-${architecture}.json`);
