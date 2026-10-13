@@ -131,10 +131,21 @@ def patch_document_cancellation(host: Path) -> None:
       if (context === 'close request') setMessage('창 닫기 취소');
     }
   } catch (error) {""")
+    replace(host/'src/core/desktop-events.ts', """    if (!desktop.hasUnsavedChanges?.()) {
+      await desktop.destroyCurrentWindow();
+    } else {""", """    if (!desktop.hasUnsavedChanges?.()) {
+      try {
+        await desktop.destroyCurrentWindow();
+      } catch (fallbackError) {
+        setMessage(`${errorPrefix}: ${fallbackError}`);
+        await onCancel?.();
+      }
+    } else {""")
     anchor = "  it('uses desktop print integration when available', async () => {"
     replace(host/'src/command/commands/file.test.ts', anchor, DOCUMENT_CANCELLATION_TESTS + anchor)
     anchor = "  it('routes app quit requests through the existing close guard and cancels on refusal', async () => {"
-    replace(host/'src/core/desktop-events.test.ts', anchor, CLOSE_CANCELLATION_TEST + anchor)
+    replace(host/'src/core/desktop-events.test.ts', anchor, CLOSE_CANCELLATION_TEST
+        + (ROOT/'overlay/desktop-close-failure-tests.txt').read_text(encoding='utf-8') + anchor)
 
 def patch_clipboard_document_guard(host: Path) -> None:
     command = host/'src/command/commands/edit.ts'
