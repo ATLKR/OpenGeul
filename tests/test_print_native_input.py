@@ -24,6 +24,10 @@ class Probe:
                           20: dict(pid=20, creation=200, session=2, parentProcessId=10)}
         self.foreground_hwnd = 999
         self.hit_hwnd = 301
+        self.parents = {301: 302, 302: 300, 303: 302}
+        self.styles = {303: 0x50000007}
+        self.child_hwnd = 301
+        self.child_queries = []
         self.activations = []
         self.barriers = []
         self.closed = False
@@ -48,6 +52,11 @@ class Probe:
         report.update(returned=self.barrier_result, timeoutMs=1000)
         return self.barrier_result
     def hit(self, point): return self.hit_hwnd
+    def parent(self, hwnd): return self.parents.get(hwnd, 0)
+    def button_style(self, hwnd): return self.styles.get(hwnd, 0)
+    def real_child(self, parent, screen_point):
+        self.child_queries.append((parent, screen_point))
+        return self.child_hwnd
     def close(self): self.closed = True
 
 
@@ -189,6 +198,106 @@ class PrintNativeInputTests(unittest.TestCase):
         with self.assertRaises(OSError): self.call()
         self.assertEqual(self.button.inputs, [(301, 300)])
         data = self.diagnostic(); self.assertFalse(data['passed']); self.assertEqual(data['errorType'], 'OSError')
+        self.assertNotIn('secret', json.dumps(data)); self.assertTrue(self.probe.closed)
+
+    def groupbox_scene(self):
+        # External Windows boundary for the actual74 layout: groupbox sibling
+        # covers the exact1010 point, while the native child resolver finds1010.
+        # The style7 assumption is tested, not claimed from that old observation.
+        self.probe.windows[302] = dict(hwnd=302, pid=20, tid=21, cls='#32770',
+                                      root=300, owners=[100], visible=True, enabled=True)
+        self.probe.windows[303] = dict(hwnd=303, pid=20, tid=21, cls='Button',
+                                      root=300, owners=[100], visible=True, enabled=True)
+        self.probe.hit_hwnd = 303
+        self.button.rectangle = lambda: types.SimpleNamespace(left=384, top=227, right=459, bottom=250)
+
+    def test_native_groupbox_transparency_resolves_exact_preferences_once(self):
+        self.groupbox_scene(); self.call()
+        self.assertEqual(self.button.inputs, [(301, 300)])
+        self.assertEqual(self.probe.child_queries, [(302, (421, 238))])
+        data = self.diagnostic()
+        self.assertEqual(data['hitHwnd'], 303)
+        self.assertEqual(data['resolvedButtonHwnd'], 301)
+        self.assertEqual(data['groupboxStyle'] & 0xF, 7)
+        self.assertTrue(data['passed'])
+
+    def test_groupbox_fallback_rejects_foreign_overlay_even_if_child_resolves_exactly(self):
+        self.groupbox_scene(); self.probe.windows[303].update(pid=99, root=999)
+        with self.assertRaises(AssertionError): self.call()
+        self.assertEqual(self.button.inputs, [])
+        self.assertEqual(self.probe.child_queries, [])
+
+    def test_groupbox_fallback_rejects_same_dialog_sibling_with_different_parent(self):
+        self.groupbox_scene(); self.probe.parents[303] = 300
+        with self.assertRaises(AssertionError): self.call()
+        self.assertEqual(self.button.inputs, [])
+        self.assertEqual(self.probe.child_queries, [])
+
+    def test_groupbox_fallback_rejects_opaque_or_unknown_native_button_style(self):
+        for style in (0, 0x50000000, 0x50000006, None):
+            with self.subTest(style=style):
+                self.setUp(); self.groupbox_scene(); self.probe.styles[303] = style
+                with self.assertRaises(AssertionError): self.call()
+                self.assertEqual(self.button.inputs, [])
+                self.assertEqual(self.probe.child_queries, [])
+
+    def test_groupbox_fallback_rejects_child_resolution_to_another_button(self):
+        self.groupbox_scene(); self.probe.child_hwnd = 304
+        with self.assertRaises(AssertionError): self.call()
+        self.assertEqual(self.button.inputs, [])
+        self.assertEqual(self.probe.child_queries, [(302, (421, 238))])
+
+    def test_groupbox_fallback_rejects_unready_or_foreign_immediate_parent(self):
+        for change in ({'pid': 99}, {'tid': 99}, {'root': 999}, {'visible': False}, {'enabled': False}, {'cls': 'Button'}):
+            with self.subTest(change=change):
+                self.setUp(); self.groupbox_scene(); self.probe.windows[302].update(change)
+                with self.assertRaises(AssertionError): self.call()
+                self.assertEqual(self.button.inputs, [])
+                self.assertEqual(self.probe.child_queries, [])
+
+    def test_groupbox_fallback_rejects_retargeted_parent_or_groupbox_before_input(self):
+        for change in ('button-parent', 'group-parent', 'group-tid', 'group-style', 'closed-parent'):
+            with self.subTest(change=change):
+                self.setUp(); self.groupbox_scene()
+                def resolution(parent, point):
+                    self.probe.child_queries.append((parent, point))
+                    if change == 'button-parent': self.probe.parents[301] = 300
+                    elif change == 'group-parent': self.probe.parents[303] = 300
+                    elif change == 'group-tid': self.probe.windows[303]['tid'] = 99
+                    elif change == 'group-style': self.probe.styles[303] = 0x50000000
+                    else: del self.probe.windows[302]
+                    return 301
+                self.probe.real_child = resolution
+                with self.assertRaises(AssertionError): self.call()
+                self.assertEqual(self.button.inputs, [])
+                self.assertFalse(self.diagnostic()['passed'])
+
+    def test_groupbox_fallback_rejects_foreground_loss_during_native_child_query(self):
+        self.groupbox_scene()
+        def resolution(parent, point): self.probe.foreground_hwnd = 999; return 301
+        self.probe.real_child = resolution
+        with self.assertRaises(AssertionError): self.call()
+        self.assertEqual(self.button.inputs, [])
+        self.assertFalse(self.diagnostic()['passed'])
+
+    def test_groupbox_fallback_rechecks_global_overlay_after_native_child_resolution(self):
+        self.groupbox_scene()
+        def resolution(parent, point): self.probe.hit_hwnd = 999; return 301
+        self.probe.real_child = resolution
+        with self.assertRaises(AssertionError): self.call()
+        self.assertEqual(self.button.inputs, [])
+        self.assertFalse(self.diagnostic()['passed'])
+
+    def test_groupbox_fallback_native_transform_failure_is_bounded_and_not_retried(self):
+        self.groupbox_scene()
+        def resolution(parent, point):
+            self.probe.child_queries.append((parent, point))
+            raise OSError('secret https://example.invalid/opaque?token=secret')
+        self.probe.real_child = resolution
+        with self.assertRaises(OSError): self.call()
+        self.assertEqual(self.button.inputs, [])
+        self.assertEqual(self.probe.child_queries, [(302, (421, 238))])
+        data = self.diagnostic(); self.assertEqual(data['errorType'], 'OSError')
         self.assertNotIn('secret', json.dumps(data)); self.assertTrue(self.probe.closed)
 
     def test_actual_configure_media_rejects_overlay_before_wait_or_unguarded_click(self):
