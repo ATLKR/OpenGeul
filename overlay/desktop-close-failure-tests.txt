@@ -1,0 +1,64 @@
+  it.each(['close request', 'app quit request'])('reports a failed native fallback and completes the %s handler', async (context) => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { getCloseHandler, windowHandlers } = installTauriMocks();
+    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    installDocumentStub();
+    const messages: string[] = [];
+    let attempts = 0;
+    let quitPending = true;
+    let cancellations = 0;
+    const bridge = {
+      takePendingOpenPaths: async () => [],
+      confirmWindowClose: async () => true,
+      hasUnsavedChanges: () => false,
+      destroyCurrentWindow: async () => {
+        attempts += 1;
+        throw new Error(attempts === 1 ? 'first native failure' : 'fallback native failure');
+      },
+      cancelAppQuit: async () => { cancellations += 1; quitPending = false; },
+    };
+    await setupDesktopEvents({ bridge, dispatcher: { dispatch() {} } as never,
+      eventBus: { emit() {} } as never, setMessage: (message) => messages.push(message), onUpdateState() {} });
+
+    const completed = context === 'close request'
+      ? getCloseHandler()?.({ preventDefault() {} })
+      : windowHandlers.get('hop-app-quit-requested')?.({ payload: null });
+    await expect(completed).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+    expect(messages).toEqual([`${context === 'close request' ? '창 닫기 실패' : '앱 종료 실패'}: Error: fallback native failure`]);
+    expect(cancellations).toBe(context === 'app quit request' ? 1 : 0);
+    expect(quitPending).toBe(context !== 'app quit request');
+  });
+
+  it.each([
+    { name: 'ordinary close', confirm: true, failFirst: false, destroyed: true, cancelled: false },
+    { name: 'successful fallback', confirm: true, failFirst: true, destroyed: true, cancelled: false },
+    { name: 'user refusal', confirm: false, failFirst: false, destroyed: false, cancelled: true },
+  ])('preserves $name during app quit', async ({ confirm, failFirst, destroyed, cancelled }) => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { windowHandlers } = installTauriMocks();
+    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    installDocumentStub();
+    let windowDestroyed = false;
+    let quitCancelled = false;
+    let attempts = 0;
+    const messages: string[] = [];
+    const bridge = {
+      takePendingOpenPaths: async () => [],
+      confirmWindowClose: async () => confirm,
+      hasUnsavedChanges: () => false,
+      destroyCurrentWindow: async () => {
+        attempts += 1;
+        if (failFirst && attempts === 1) throw new Error('transient native failure');
+        windowDestroyed = true;
+      },
+      cancelAppQuit: async () => { quitCancelled = true; },
+    };
+    await setupDesktopEvents({ bridge, dispatcher: { dispatch() {} } as never,
+      eventBus: { emit() {} } as never, setMessage: (message) => messages.push(message), onUpdateState() {} });
+
+    await expect(windowHandlers.get('hop-app-quit-requested')?.({ payload: null })).resolves.toBeUndefined();
+    expect(windowDestroyed).toBe(destroyed);
+    expect(quitCancelled).toBe(cancelled);
+    expect(messages).toEqual([]);
+  });

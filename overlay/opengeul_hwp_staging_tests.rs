@@ -95,3 +95,65 @@ fn save_wrong_destination_extension_keeps_target_and_owned_staging() {
     assert_eq!(std::fs::read(staging).unwrap(), bytes);
     assert!(manager.session(&opened.doc_id).unwrap().dirty);
 }
+
+fn tracked_hwp_save() -> (DocumentSessionManager, DocumentOpenResult, tempfile::TempDir, PathBuf, PathBuf, Vec<u8>) {
+    let (_, _, bytes) = dirty_document();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("tracked.hwp");
+    let staging = owned_stage(&target);
+    std::fs::write(&target, &bytes).unwrap();
+    std::fs::write(&staging, &bytes).unwrap();
+    let mut manager = DocumentSessionManager::default();
+    let opened = manager.open_document_tracking(target.clone(), None).unwrap();
+    manager.mark_document_dirty(&opened.doc_id).unwrap();
+    (manager, opened, dir, target, staging, bytes)
+}
+
+#[test]
+fn save_detects_external_change_after_real_hwp_validation_and_preserves_it() {
+    let (mut manager, opened, _dir, target, staging, _) = tracked_hwp_save();
+    let changed = target.clone();
+    let external = b"external editor changed the original during HWP validation";
+    let parsed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = parsed.clone();
+    let _hook = on_hwp_save_parsed(move || {
+        std::fs::write(changed, external).unwrap();
+        observed.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let result = manager.commit_staged_hwp_save(&opened.doc_id,
+        staging.clone(), target.clone(), Some(opened.revision), false);
+    assert!(parsed.load(std::sync::atomic::Ordering::SeqCst), "the real HWP parser must complete before the external change");
+    let error = result.expect_err("external edits made during validation must not be overwritten");
+    assert!(error.contains("EXTERNAL_MODIFICATION"));
+    assert_eq!(std::fs::read(&target).unwrap(), external);
+    assert!(staging.exists());
+    let session = manager.session(&opened.doc_id).unwrap();
+    assert!(session.dirty);
+    assert_eq!(session.revision, opened.revision);
+    assert_eq!(session.source_path.as_ref(), Some(&target));
+    assert!(session.core.is_none());
+}
+
+#[test]
+fn save_keeps_explicit_external_overwrite_consent_after_validation() {
+    let (mut manager, opened, _dir, target, staging, bytes) = tracked_hwp_save();
+    let changed = target.clone();
+    let _hook = on_hwp_save_parsed(move || std::fs::write(changed, b"external replacement").unwrap());
+    let result = manager.commit_staged_hwp_save(&opened.doc_id,
+        staging.clone(), target.clone(), Some(opened.revision), true).unwrap();
+    assert_eq!(std::fs::read(target).unwrap(), bytes);
+    assert!(!staging.exists());
+    assert!(!result.dirty);
+    assert_eq!(result.revision, opened.revision + 1);
+}
+
+#[test]
+fn save_keeps_unchanged_tracked_hwp_working() {
+    let (mut manager, opened, _dir, target, staging, bytes) = tracked_hwp_save();
+    let result = manager.commit_staged_hwp_save(&opened.doc_id,
+        staging.clone(), target.clone(), Some(opened.revision), false).unwrap();
+    assert_eq!(std::fs::read(target).unwrap(), bytes);
+    assert!(!staging.exists());
+    assert!(!result.dirty);
+    assert_eq!(result.revision, opened.revision + 1);
+}

@@ -41,6 +41,8 @@ class StoreScreenshotImportTests(unittest.TestCase):
 class StoreQualificationTests(unittest.TestCase):
     def setUp(self):
         self.fixture = fixtures.ReleasePairTests(); self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
+        self.version = self.fixture.version
+        self.package_version = self.fixture.package_version
         self.fixture.env['GITHUB_RUN_ID'] = '38181680763'
         for arch in ('x64', 'arm64'):
             def bind_run(provenance):
@@ -68,9 +70,9 @@ class StoreQualificationTests(unittest.TestCase):
             source_msix = next(p for p in self.fixture.packages[arch].iterdir() if p.suffix == '.msix')
             with zipfile.ZipFile(source_msix) as archive:
                 runtime = {n: archive.read(n) for n in archive.namelist()}
-            raw_manifest = manifest(STORE_IDENTITY, '1.1.3', arch).encode()
+            raw_manifest = manifest(STORE_IDENTITY, self.version, arch).encode()
             runtime['AppxManifest.xml'] = raw_manifest
-            name = f'OpenGeul_1.1.3.0_{arch}_store-unsigned.msix'; package = self.store / name
+            name = f'OpenGeul_{self.package_version}_{arch}_store-unsigned.msix'; package = self.store / name
             self.fixture.zip(package, runtime); (self.store / ('AppxManifest-' + arch + '.xml')).write_bytes(raw_manifest)
             hashes = {n: hashlib.sha256(raw).hexdigest() for n, raw in runtime.items()
                 if n not in {'AppxManifest.xml', 'AppxBlockMap.xml', '[Content_Types].xml'}}
@@ -81,8 +83,8 @@ class StoreQualificationTests(unittest.TestCase):
             for p in self.fixture.wacks[arch].iterdir(): (wack / p.name).write_bytes(p.read_bytes())
             xml = (wack / 'wack.xml').read_text().replace('AllenLabs.OpenGeul.Development', STORE_IDENTITY['name']).replace('CN=OpenGeul Development', STORE_IDENTITY['publisher'])
             (wack / 'wack.xml').write_text(xml, encoding='utf-8')
-            self.fixture.write_json(wack / 'wack.json', inspect(wack / 'wack.xml', STORE_IDENTITY['name'], '1.1.3.0', 0))
-            full_name = f"{STORE_IDENTITY['name']}_1.1.3.0_{arch}__{release_pair._publisher_id(STORE_IDENTITY['publisher'])}"
+            self.fixture.write_json(wack / 'wack.json', inspect(wack / 'wack.xml', STORE_IDENTITY['name'], self.package_version, 0))
+            full_name = f"{STORE_IDENTITY['name']}_{self.package_version}_{arch}__{release_pair._publisher_id(STORE_IDENTITY['publisher'])}"
             install = json.loads((wack / 'install.json').read_bytes()); install.update(originalSha256=entries[arch]['sha256'], publisher=STORE_IDENTITY['publisher'], packageFullName=full_name, fileTypes=['.hwp', '.hwpx'])
             install['mcp'] = fixtures.installed_proof(arch, hashes['Tools/rhwp.exe'], full_name,
                 'b' * 40, '9999', '1', len(runtime['Tools/rhwp.exe']))
@@ -105,8 +107,8 @@ class StoreQualificationTests(unittest.TestCase):
             self.fixture.write_json(wack / 'installed-cli.json', {'success': True, 'packageFullName': full_name, 'exitCode': 0,
                 'helpBytes': 10, 'helpSha256': hashlib.sha256(b'rhwp help\n').hexdigest(), 'nativeArchitecture': cli, 'mcp': install['mcp']})
         (self.store / 'source-provenance.json').write_bytes((self.source / 'provenance.json').read_bytes())
-        self.details = {'formatVersion': 2, 'storeAppId': '9PJH0T3PHRMF', 'identity': dict(STORE_IDENTITY), 'version': '1.1.3',
-            'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3-dev.68.2', 'sourceReleaseId': 200,
+        self.details = {'formatVersion': 2, 'storeAppId': '9PJH0T3PHRMF', 'identity': dict(STORE_IDENTITY), 'version': self.version,
+            'sourceRelease': f'https://github.com/ATLKR/OpenGeul/releases/tag/v{self.version}-dev.68.2', 'sourceReleaseId': 200,
             'sourceCommit': 'a' * 40, 'sourceRunId': '38181680763', 'sourceRunAttempt': '2',
             'sourceAssetFingerprintSha256': release_pair.source_fingerprint(self.source),
             'repackageCommit': 'b' * 40, 'repackageRunId': '9999', 'architectures': entries,
@@ -161,20 +163,21 @@ class StoreQualificationTests(unittest.TestCase):
         tag = self.details['sourceRelease'].rsplit('/', 1)[1]
         authorize_release(tag, source, run, run['head_sha'], jobs)
         qual.select('x64', self.store, self.root / 'dev-selected', env=self.env)
-        for changed in ('v1.1.3-dev.38181680763.2', 'v1.1.3-dev.69.2', 'v1.1.3-dev.68.1'):
+        for changed in (f'v{self.version}-dev.38181680763.2', f'v{self.version}-dev.69.2', f'v{self.version}-dev.68.1'):
             with self.subTest(tag=changed), self.assertRaises(ValueError):
                 authorize_release(changed, source, run, run['head_sha'], jobs)
 
     def test_canonical_stable_source_url_remains_accepted(self):
-        self.details['sourceRelease'] = 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3'
+        self.details['sourceRelease'] = f'https://github.com/ATLKR/OpenGeul/releases/tag/v{self.version}'
         self.fixture.write_json(self.store / 'store-provenance.json', self.details); self.fixture.sums(self.store)
         self.rebind_store_split();self.collect('x64'); self.collect('arm64'); self.verify()
 
     def test_noncanonical_or_unbound_source_urls_fail_before_selection(self):
         base = 'https://github.com/ATLKR/OpenGeul/releases/tag/v'
-        urls = [base + '1.1.3-dev.68.1', base + '1.1.4-dev.68.2', base + '1.1.3-dev.068.2',
-            base + '1.1.3-dev.0.2', base + '1.1.3-dev.68.02', base + '1.1.3-dev.68.2?draft=true',
-            base + '01.1.3-dev.68.2', base.replace('ATLKR/OpenGeul', 'outsider/OpenGeul') + '1.1.3-dev.68.2']
+        wrong_version = '.'.join([*self.version.split('.')[:2], str(int(self.version.split('.')[2]) + 1)])
+        urls = [base + self.version + '-dev.68.1', base + wrong_version + '-dev.68.2', base + self.version + '-dev.068.2',
+            base + self.version + '-dev.0.2', base + self.version + '-dev.68.02', base + self.version + '-dev.68.2?draft=true',
+            base + '0' + self.version + '-dev.68.2', base.replace('ATLKR/OpenGeul', 'outsider/OpenGeul') + self.version + '-dev.68.2']
         for i, url in enumerate(urls):
             with self.subTest(url=url):
                 self.details['sourceRelease'] = url
@@ -244,7 +247,7 @@ class StoreQualificationTests(unittest.TestCase):
 
     def test_optional_wack_warning_is_rejected(self):
         w = self.evidence['arm64']; xml = (w / 'wack.xml').read_text().replace('OVERALL_RESULT="PASS"', 'OVERALL_RESULT="WARNING"').replace('<RESULT>PASS</RESULT></TEST></REPORT>', '<RESULT>FAIL</RESULT></TEST></REPORT>')
-        (w / 'wack.xml').write_text(xml); self.fixture.write_json(w / 'wack.json', inspect(w / 'wack.xml', STORE_IDENTITY['name'], '1.1.3.0', 0)); self.rejected_collect()
+        (w / 'wack.xml').write_text(xml); self.fixture.write_json(w / 'wack.json', inspect(w / 'wack.xml', STORE_IDENTITY['name'], self.package_version, 0)); self.rejected_collect()
 
     def test_stale_signed_context_is_rejected(self):
         self.change_json(self.evidence['arm64'] / 'wack-context.json', lambda d: d.update(inputPackageSha256='0' * 64)); self.rejected_collect()

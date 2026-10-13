@@ -136,7 +136,7 @@ class WindowsComponentsTests(unittest.TestCase):
         ledger = {'version': json.loads((ROOT/'config/product.json').read_text())['version'],
                   'source': 'OpenGeul distribution overlays', 'preservedFiles': {},
                   'baselinePreservedFiles': {}, 'changes': ['synthetic owned source'],
-                  'hwpxSaveV1': True, 'extendedFiles': ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts'],
+                  'hwpxSaveV1': True, 'extendedFiles': ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts','document-open.ts'],
                   'compositionFix': {'beforeSha256': 'c'*64,
                      'afterSha256': hashlib.sha256((engine/'input-handler-text.ts').read_text(encoding='utf-8').encode('utf-8')).hexdigest(),
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
@@ -1055,6 +1055,55 @@ class WindowsComponentsTests(unittest.TestCase):
         style.write_text('.md-item { display: flex; }\n.md-item[hidden] { display: none; }\n', encoding='utf-8')
         c.capture('cli', self.payload('cli'), source, folders['cli'], env=self.env)
         self.assert_rejected_without_outputs(folders)
+
+    def test_workers_with_different_password_replacement_loaders_cannot_join(self):
+        c = self.helper()
+        source = self.source()
+        loader = source/'apps/studio-host/src/core/document-open.ts'
+        loader.write_text('export const replacement = "before password guard";\n', encoding='utf-8')
+        folders = {role: self.root/(role+'-component') for role in ('editor', 'cli')}
+        c.capture('editor', self.payload('editor'), source, folders['editor'], env=self.env)
+        loader.write_text('export const replacement = "guard before every password load";\n', encoding='utf-8')
+        c.capture('cli', self.payload('cli'), source, folders['cli'], env=self.env)
+        self.assert_rejected_without_outputs(folders)
+
+    def test_missing_password_replacement_loader_fails_before_capture_output(self):
+        c = self.helper()
+        source = self.source()
+        loader = source/'apps/studio-host/src/core/document-open.ts'
+        loader.write_text('owned loader fixture\n', encoding='utf-8')
+        loader.unlink()
+        out = self.root/'missing-password-loader'
+        with self.assertRaises(FileNotFoundError):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_unchanged_password_loader_hash_is_retained_through_component_join(self):
+        c = self.helper()
+        source = self.source()
+        name = 'apps/studio-host/src/core/document-open.ts'
+        loader = source/name
+        loader.write_text('export const replacement = "unchanged guarded loader";\n', encoding='utf-8')
+        folders = {role: self.root/(role+'-component') for role in ('editor', 'cli')}
+        for role in folders:
+            c.capture(role, self.payload(role), source, folders[role], env=self.env)
+            metadata = json.loads((folders[role]/'provenance.json').read_bytes())
+            self.assertEqual(metadata['source']['preparedFiles'][name], digest(loader))
+        self.combine(folders)
+        self.assertTrue((self.root/'combined/OpenGeul.exe').is_file())
+        self.assertTrue((self.root/'combined/Tools/rhwp.exe').is_file())
+
+    def test_previous_save_ledger_without_password_replacement_guard_is_rejected(self):
+        c = self.helper()
+        source = self.source()
+        path = source/'.opengeul-overlay.json'
+        ledger = json.loads(path.read_text())
+        ledger['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts']
+        write_json(path, ledger)
+        out = self.root/'old-password-ledger'
+        with self.assertRaisesRegex(ValueError, 'overlay ledger'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
 
     def test_previous_save_ledger_without_cut_document_guard_is_rejected(self):
         c = self.helper()

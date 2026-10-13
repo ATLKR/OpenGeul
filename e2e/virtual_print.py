@@ -75,6 +75,25 @@ def capture_failure(folder, error_type):
             (folder/'capture-error.txt').write_text(str(error),encoding='utf-8')
     return False
 
+def print_output_wait(folder,phase,check,seconds):
+    """Preserve the failing output stage without changing its existing wait."""
+    report={'kind':'diagnostic-metadata','phase':phase,'timeoutSeconds':seconds,
+            'passed':False,'sourceQualified':False,'productTelemetry':False}
+    start=time.monotonic()
+    try:
+        result=wait(check,seconds);report['passed']=True;return result
+    except BaseException as error:
+        report['errorType']=type(error).__name__[:64];raise
+    finally:
+        report['durationSeconds']=round(time.monotonic()-start,3)
+        try:(folder/'print-output-progress-diagnostic.json').write_text(json.dumps(report,separators=(',',':')),encoding='utf-8')
+        except OSError:pass
+
+def save_print_output(session,output,folder):
+    save=wait(lambda:visible_dialog('Save Print Output As',session.proc.pid))
+    runtime=json.loads((folder/'session/runtime.json').read_text(encoding='utf-8'))
+    fill_print_output(save,output,session.proc.pid,runtime,app_handle=int(session.proc._handle),evidence_dir=folder)
+
 def stop_session(session):
     # Unblock the native print/modal operation before deleting its owned queue.
     try:
@@ -104,10 +123,9 @@ def print_document(exe,fixture,case,folder):
                 if queue.jobs() or output.exists():raise AssertionError('Cancelled print produced output')
                 report={'cancelled':True,'jobs':[],'queue':queue.name}
             else:
-                control(dialog,'Button',1).click_input();save=wait(lambda:visible_dialog('Save Print Output As'))
-                fill_print_output(save,output)
-                wait(lambda:output.is_file() and output.stat().st_size>100,90)
-                wait(lambda:output.read_bytes().rstrip().endswith(b'%%EOF'),30)
+                control(dialog,'Button',1).click_input();save_print_output(session,output,folder)
+                print_output_wait(folder,'pdf-created',lambda:output.is_file() and output.stat().st_size>100,90)
+                print_output_wait(folder,'pdf-eof',lambda:output.read_bytes().rstrip().endswith(b'%%EOF'),30)
                 def completed():
                     jobs=queue.jobs()
                     if not jobs:return None
@@ -117,7 +135,7 @@ def print_document(exe,fixture,case,folder):
                     (folder/'spooler-latest.json').write_text(json.dumps(observation,ensure_ascii=False,indent=2),encoding='utf-8')
                     job=completed_job(jobs,queue.name,source.name,len(case['pages']),media)
                     return observation if job is not None else None
-                spool=wait(completed,30)
+                spool=print_output_wait(folder,'owned-spooler-completed',completed,30)
                 (folder/'spooler.json').write_text(json.dumps(spool,ensure_ascii=False,indent=2),encoding='utf-8')
                 report=inspect_print_pdf(output,{'pages':case['pages']},folder/'pdf-check',case['name']);report.update(spool)
             if digest(source)!=before:raise AssertionError('Printing modified the source document')

@@ -9,6 +9,7 @@ import unittest
 import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+PRODUCT_VERSION = json.loads((ROOT / 'config/product.json').read_text())['version']
 
 class BuildKitTests(unittest.TestCase):
     def setUp(self):
@@ -178,7 +179,7 @@ class ManifestWriterIntegrationTests(unittest.TestCase):
                 binding,_,observed = fixture.module().source_context(package,fixture.env)
                 self.assertEqual(observed,architecture)
                 self.assertEqual(binding,fixture.binding)
-                self.assertEqual(content,buildkit.manifest(buildkit.DEV_IDENTITY,'1.1.3',architecture).encode())
+                self.assertEqual(content,buildkit.manifest(buildkit.DEV_IDENTITY,PRODUCT_VERSION,architecture).encode())
                 self.assertNotIn(b'\r\n',content)
 
     def test_strict_source_context_still_rejects_self_consistent_crlf_input(self):
@@ -187,7 +188,7 @@ class ManifestWriterIntegrationTests(unittest.TestCase):
         for architecture in ('x64','arm64'):
             with self.subTest(architecture=architecture):
                 package = fixture.package.with_name(architecture)
-                content = buildkit.manifest(buildkit.DEV_IDENTITY,'1.1.3',architecture).encode().replace(b'\n',b'\r\n')
+                content = buildkit.manifest(buildkit.DEV_IDENTITY,PRODUCT_VERSION,architecture).encode().replace(b'\n',b'\r\n')
                 self.replace_manifest(package,content)
                 with self.assertRaisesRegex(ValueError,'manifest'):
                     fixture.module().source_context(package,fixture.env)

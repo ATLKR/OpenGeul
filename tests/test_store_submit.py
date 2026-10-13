@@ -17,7 +17,7 @@ try:
     import store_submit as submitter
 except ImportError:
     submitter = None
-from buildkit import DEV_IDENTITY, manifest
+from buildkit import DEV_IDENTITY, manifest, package_version
 from store_package import STORE_APP_ID, STORE_IDENTITY, REQUIRED_JOBS
 import store_listing
 
@@ -61,34 +61,36 @@ class StoreSubmitTests(unittest.TestCase):
         self.source.mkdir(parents=True)
         self.directory.mkdir()
         self.sha = 'a' * 40
-        self.tag = 'v1.1.3'
+        self.version = json.loads((ROOT / 'config/product.json').read_text())['version']
+        self.package_version = package_version(self.version)
+        self.tag = 'v' + self.version
         pe = bytearray(256)
         pe[:2] = b'MZ'; pe[60:64] = (128).to_bytes(4, 'little')
         pe[128:132] = b'PE\0\0'; pe[132:134] = (0x8664).to_bytes(2, 'little')
         runtime = {'OpenGeul.exe': bytes(pe), 'Tools/rhwp.exe': bytes(pe),
                    'WebView2Loader.dll': bytes(pe) + b'loader', 'Notices/OpenGeul-LICENSE.txt': b'MIT'}
         original = self.source / 'original.msix'
-        packaged = self.directory / 'OpenGeul_1.1.3.0_x64_store-unsigned.msix'
+        packaged = self.directory / f'OpenGeul_{self.package_version}_x64_store-unsigned.msix'
         for path, identity in [(original, DEV_IDENTITY), (packaged, STORE_IDENTITY)]:
             with zipfile.ZipFile(path, 'w') as archive:
                 for name, value in runtime.items(): archive.writestr(name, value)
-                archive.writestr('AppxManifest.xml', manifest(identity, '1.1.3'))
+                archive.writestr('AppxManifest.xml', manifest(identity, self.version))
                 archive.writestr('AppxBlockMap.xml', b'<BlockMap/>')
                 archive.writestr('[Content_Types].xml', b'<Types/>')
         with zipfile.ZipFile(self.source / 'original-portable.zip', 'w') as archive:
             for name, value in runtime.items(): archive.writestr(name, value)
-            archive.writestr('AppxManifest.xml', manifest(DEV_IDENTITY, '1.1.3'))
+            archive.writestr('AppxManifest.xml', manifest(DEV_IDENTITY, self.version))
         original_hash = hashlib.sha256(original.read_bytes()).hexdigest()
-        self.provenance = {'repository': 'ATLKR/OpenGeul', 'version': '1.1.3',
+        self.provenance = {'repository': 'ATLKR/OpenGeul', 'version': self.version,
                            'commit': self.sha, 'runId': '123', 'package': original.name,
                            'sha256': original_hash}
         original_json = json.dumps(self.provenance).encode()
         (self.source / 'provenance.json').write_bytes(original_json)
         (self.directory / 'source-provenance.json').write_bytes(original_json)
-        (self.directory / 'AppxManifest.xml').write_text(manifest(STORE_IDENTITY, '1.1.3'), encoding='utf-8', newline='\n')
+        (self.directory / 'AppxManifest.xml').write_text(manifest(STORE_IDENTITY, self.version), encoding='utf-8', newline='\n')
         self.details = {'storeAppId': STORE_APP_ID, 'identity': STORE_IDENTITY,
-                        'version': '1.1.3', 'sourceReleaseId': 5,
-                        'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3',
+                        'version': self.version, 'sourceReleaseId': 5,
+                        'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/' + self.tag,
                         'sourceCommit': self.sha, 'sourceRunId': '123',
                         'sourceMsixSha256': original_hash, 'package': packaged.name,
                         'sha256': hashlib.sha256(packaged.read_bytes()).hexdigest(),
@@ -168,8 +170,8 @@ class StoreSubmitTests(unittest.TestCase):
                 result['user'] = copy.deepcopy(self.outsider)
             return result
         if path.startswith('tags?'): return self.tags
-        if path == 'releases/tags/v1.1.3': return {'id': 5, 'draft': False, 'tag_name': self.tag}
-        if path == 'commits/v1.1.3': return {'sha': self.sha}
+        if path == 'releases/tags/' + self.tag: return {'id': 5, 'draft': False, 'tag_name': self.tag}
+        if path == 'commits/' + self.tag: return {'sha': self.sha}
         if path == 'actions/runs/123': return self.run
         if path.startswith('actions/runs/123/jobs'): return [{'jobs': [{'name': name, 'conclusion': 'success'} for name in REQUIRED_JOBS]}]
         raise AssertionError((method, path))
@@ -208,7 +210,7 @@ class StoreSubmitTests(unittest.TestCase):
             if self.commit_mode != 'unknown':
                 for package in self.new['applicationPackages']:
                     if package['fileStatus'] == 'PendingUpload':
-                        package.update(version='1.1.3.0', architecture='X64', fileStatus='Uploaded')
+                        package.update(version=self.package_version, architecture='X64', fileStatus='Uploaded')
             if self.commit_mode in ('timeout', 'unknown'): raise submitter.StoreError('commit', None)
             return 200, {'status': 'CommitStarted'}
         if path in ('submissions/30', 'submissions/30/status'):
@@ -227,14 +229,14 @@ class StoreSubmitTests(unittest.TestCase):
         if mode == 'missing_ram': packages[-1].pop('minimumSystemRam')
         if mode == 'duplicate_target': packages.append(copy.deepcopy(packages[-1]))
         if mode == 'server_fields':
-            packages[-1].update(id='31', architecture='X64', version='1.1.3.0')
+            packages[-1].update(id='31', architecture='X64', version=self.package_version)
             packages.reverse()
 
     def upload(self, opener, url, body):
         self.calls.append(('store', 'UPLOAD', 'blob'))
         if self.upload_mode == 'timeout': raise submitter.StoreError('upload', None)
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
-            self.assertEqual(archive.namelist(), ['OpenGeul_1.1.3.0_x64_store-unsigned.msix'])
+            self.assertEqual(archive.namelist(), [f'OpenGeul_{self.package_version}_x64_store-unsigned.msix'])
         return None
 
     def perform(self):
@@ -442,7 +444,7 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertEqual(self.mutations(), [])
 
     def test_development_tag_or_main_source_cannot_submit(self):
-        for tag, branch in [('v1.1.3-dev.40.1', 'main'), ('v1.1.3', 'main')]:
+        for tag, branch in [(self.tag + '-dev.40.1', 'main'), (self.tag, 'main')]:
             with self.subTest(tag=tag):
                 self.tag = tag; self.run['head_branch'] = branch
                 with self.assertRaises(submitter.SubmissionBlocked): self.perform()
@@ -454,7 +456,7 @@ class StoreSubmitTests(unittest.TestCase):
         self.upload_mode = 'success'; self.calls.clear()
         self.assertEqual(self.perform()['status'], 'PreProcessing')
         self.assertEqual(self.mutations(), ['PUT', 'UPLOAD', 'POST'])
-        self.assertEqual(sum(package['fileName'].startswith('OpenGeul_1.1.3') for package in self.new['applicationPackages']), 1)
+        self.assertEqual(sum(package['fileName'].startswith('OpenGeul_' + self.package_version) for package in self.new['applicationPackages']), 1)
         self.assertEqual(self.new['applicationPackages'][0]['version'], '1.1.2.0')
 
     def test_retry_uses_published_template_instead_of_damaged_draft(self):
@@ -468,7 +470,7 @@ class StoreSubmitTests(unittest.TestCase):
         self.assertIn('Keep human notes', self.new['notesForCertification'])
 
     def test_same_version_unowned_pending_is_preserved(self):
-        self.pending['applicationPackages'][0]['version'] = '1.1.3.0'
+        self.pending['applicationPackages'][0]['version'] = self.package_version
         self.assertEqual(self.perform()['outcome'], 'superseded')
         self.assertEqual(self.mutations(), [])
 
@@ -487,7 +489,7 @@ class StoreSubmitTests(unittest.TestCase):
         with self.assertRaises(submitter.SubmissionBlocked): self.perform()
         self.assertEqual(self.mutations(), [])
         self.assertIn('https://github.com/ATLKR/OpenGeul/actions/runs/456', self.issues[0]['body'])
-        self.assertIn('https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3', self.issues[0]['body'])
+        self.assertIn('https://github.com/ATLKR/OpenGeul/releases/tag/' + self.tag, self.issues[0]['body'])
 
     def test_known_failed_older_commit_can_be_replaced_after_delete_proof(self):
         self.baseline['applicationPackages'][0]['version'] = '1.1.1.0'
@@ -616,7 +618,7 @@ class DualStoreSubmitTests(unittest.TestCase):
         for path in self.directory.iterdir(): path.unlink()
         self.provenance = json.loads((self.source / 'provenance.json').read_bytes())
         self.details = {'formatVersion': 2, 'storeAppId': STORE_APP_ID, 'identity': dict(STORE_IDENTITY),
-            'version': '1.1.3', 'sourceReleaseId': 5, 'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/v1.1.3',
+            'version': self.version, 'sourceReleaseId': 5, 'sourceRelease': 'https://github.com/ATLKR/OpenGeul/releases/tag/' + self.tag,
             'sourceCommit': self.sha, 'sourceRunId': '123', 'sourceRunAttempt': '1',
             'repackageCommit': 'b' * 40, 'repackageRunId': '456', 'architectures': {},
             'unsigned': True, 'storeCertified': False}
@@ -626,8 +628,8 @@ class DualStoreSubmitTests(unittest.TestCase):
             original = self.provenance['architectures'][arch]['provenance']
             with zipfile.ZipFile(self.source / original['package']) as archive:
                 files = {name: archive.read(name) for name in archive.namelist()}
-            raw = manifest(STORE_IDENTITY, '1.1.3', arch).encode(); files['AppxManifest.xml'] = raw
-            name = f'OpenGeul_1.1.3.0_{arch}_store-unsigned.msix'
+            raw = manifest(STORE_IDENTITY, self.version, arch).encode(); files['AppxManifest.xml'] = raw
+            name = f'OpenGeul_{self.package_version}_{arch}_store-unsigned.msix'
             with zipfile.ZipFile(self.directory / name, 'w') as archive:
                 for member, content in files.items(): archive.writestr(member, content)
             manifest_name = 'AppxManifest-' + arch + '.xml'; (self.directory / manifest_name).write_bytes(raw)
@@ -665,7 +667,7 @@ class DualStoreSubmitTests(unittest.TestCase):
         self.post_commit_mode = 'success'
 
     def github(self, method, path, data=None, *, pages=False):
-        if path == 'releases/tags/v1.1.3':
+        if path == 'releases/tags/' + self.tag:
             self.calls.append(('github', method, path)); return copy.deepcopy(self.release)
         if path.startswith('actions/runs/123/jobs'):
             self.calls.append(('github', method, path)); return [{'jobs': copy.deepcopy(self.source_jobs)}]
@@ -682,13 +684,13 @@ class DualStoreSubmitTests(unittest.TestCase):
             for arch, entry in self.details['architectures'].items():
                 for package in self.new['applicationPackages']:
                     if package.get('fileName') == entry['package']:
-                        package.update(architecture=arch.upper(), version='1.1.3.0', fileStatus='Uploaded')
+                        package.update(architecture=arch.upper(), version=self.package_version, fileStatus='Uploaded')
             if self.post_commit_mode == 'no_sdk_fields':
                 for package in self.new['applicationPackages']:
                     if package.get('fileStatus') != 'PendingDelete':
                         package.pop('version', None); package.pop('architecture', None)
             if self.post_commit_mode == 'one_package': self.new['applicationPackages'] = self.new['applicationPackages'][:-1]
-            if self.post_commit_mode == 'mixed_version': self.new['applicationPackages'][-1]['version'] = '1.1.4.0'
+            if self.post_commit_mode == 'mixed_version': self.new['applicationPackages'][-1]['version'] = self.baseline['applicationPackages'][0]['version']
             if self.post_commit_mode == 'wrong_arch': self.new['applicationPackages'][-1]['architecture'] = 'X64'
             if self.post_commit_mode == 'pricing': self.new['pricing']['priceId'] = 'Tier1'
             if self.post_commit_mode == 'listings': self.new['listings'] = {}

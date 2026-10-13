@@ -157,3 +157,237 @@
     } finally { release(); }
     await saving;
   });
+
+  function replacementGate() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((ready) => { resolve = ready; });
+    return { promise, resolve };
+  }
+
+  async function replacementSetup() {
+    const bridge = new TauriBridge();
+    const blocked = replacementGate();
+    const entered = replacementGate();
+    let blockRead = false;
+    let blockNative: string | null = null;
+    let failNewCleanup = false;
+    let content = '';
+    getWasmMock(bridge, 'loadDocumentMock').mockImplementation((bytes: Uint8Array) => {
+      content = new TextDecoder().decode(bytes);
+      return { pageCount: 1, fontsUsed: [] };
+    });
+    getWasmMock(bridge, 'createNewDocumentMock').mockImplementation(() => {
+      content = 'BLANK';
+      return { pageCount: 1, fontsUsed: [] };
+    });
+    fsOpenMock.mockImplementation(async (path: string) => {
+      const handle = readHandle(path === '/tmp/old.hwp' ? [79, 76, 68] : [78, 69, 87]);
+      const read = handle.read.getMockImplementation()!;
+      handle.read.mockImplementation(async (bytes: Uint8Array) => {
+        if (blockRead && path === '/tmp/new.hwp') {
+          entered.resolve();
+          await blocked.promise;
+        }
+        return read(bytes);
+      });
+      return handle;
+    });
+    messageMock.mockResolvedValue('저장 안 함');
+    invokeMock.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === blockNative) {
+        entered.resolve();
+        await blocked.promise;
+      }
+      if (command === 'open_document_tracking') {
+        return args.path === '/tmp/old.hwp'
+          ? nativeOpenResult({ docId: 'old-doc', fileName: 'old.hwp', sourcePath: '/tmp/old.hwp' })
+          : nativeOpenResult({ docId: 'incoming-doc', fileName: 'new.hwp', sourcePath: '/tmp/new.hwp' });
+      }
+      if (command === 'create_document') {
+        return nativeOpenResult({ docId: 'incoming-doc', fileName: '새 문서.hwp', sourcePath: null });
+      }
+      if (command === 'close_document' && args.docId === 'incoming-doc' && failNewCleanup) {
+        throw new Error('native cleanup failed');
+      }
+      if (['prepare_document_open', 'mark_document_dirty', 'note_finder_recent_document',
+        'record_recent_document', 'close_document'].includes(command)) return undefined;
+      throw new Error(`unexpected command ${command}`);
+    });
+    await bridge.openDocumentByPath('/tmp/old.hwp');
+    expect(content).toBe('OLD');
+    expect(bridge.hasUnsavedChanges()).toBe(false);
+    // Keep the native transport controlled across the deferred response. The
+    // actual public bridge operations, chunked reads and WASM replacement run.
+    const transport = bridge as unknown as {
+      invoke(command: string, args?: Record<string, unknown>): Promise<unknown>;
+    };
+    vi.spyOn(transport, 'invoke').mockImplementation((command, args = {}) =>
+      Promise.resolve(invokeMock(command, args)));
+    invokeMock.mockClear();
+    getWasmMock(bridge, 'loadDocumentMock').mockClear();
+    return {
+      bridge, blocked, entered,
+      content: () => content,
+      edit: () => { content += ' +EDIT'; bridge.markDocumentDirty(); },
+      deferRead: () => { blockRead = true; },
+      deferNative: (command: string) => { blockNative = command; },
+      rejectNewCleanup: () => { failNewCleanup = true; },
+      deferPassword: () => {
+        getWasmMock(bridge, 'loadDocumentMock').mockImplementation(() => {
+          throw new Error('비밀번호가 필요한 암호 문서');
+        });
+        const wasm = bridge as unknown as {
+          loadDocumentWithPassword(bytes: Uint8Array, password: string, fileName: string): void;
+          getDocumentInfo(): { pageCount: number; fontsUsed: string[] };
+        };
+        const passwordLoad = vi.fn((bytes: Uint8Array) => { content = new TextDecoder().decode(bytes); });
+        wasm.loadDocumentWithPassword = passwordLoad;
+        wasm.getDocumentInfo = () => ({ pageCount: 1, fontsUsed: [] });
+        passwordPrompt.mockImplementation(async () => {
+          entered.resolve();
+          await blocked.promise;
+          return 'correct';
+        });
+        return passwordLoad;
+      },
+    };
+  }
+
+  function expectEditedDocumentPreserved(
+    setup: Awaited<ReturnType<typeof replacementSetup>>, content: string, encryptedAttempt = false,
+  ) {
+    expect(setup.content()).toBe(content);
+    expect(setup.bridge.hasUnsavedChanges()).toBe(true);
+    const native = setup.bridge as unknown as { docId: string; sourcePath: string | null; revision: number };
+    expect(native.docId).toBe('old-doc');
+    expect(native.sourcePath).toBe('/tmp/old.hwp');
+    expect(native.revision).toBe(1);
+    expect(document.title).toBe('• old.hwp - HOP');
+    expect(invokeMock).not.toHaveBeenCalledWith('close_document', { docId: 'old-doc' });
+    expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'incoming-doc' });
+    expect(getWasmMock(setup.bridge, 'loadDocumentMock')).toHaveBeenCalledTimes(encryptedAttempt ? 1 : 0);
+    expect(getWasmMock(setup.bridge, 'createNewDocumentMock')).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith('record_recent_document', { path: '/tmp/new.hwp' });
+  }
+
+  it.each([false, true])('preserves edits during a replacement read after initial dirty=%s consent', async (initialDirty) => {
+    const setup = await replacementSetup();
+    if (initialDirty) setup.edit();
+    setup.deferRead();
+    const opening = setup.bridge.openDocumentByPath('/tmp/new.hwp');
+    await setup.entered.promise;
+    setup.edit();
+    const edited = setup.content();
+    setup.blocked.resolve();
+    await expect(opening).rejects.toThrow('문서 교체를 준비하는 동안 현재 문서가 변경');
+    expectEditedDocumentPreserved(setup, edited);
+    expect(messageMock).toHaveBeenCalledTimes(initialDirty ? 1 : 0);
+  });
+
+  it('opens normally when a deferred replacement read receives no new edits', async () => {
+    const setup = await replacementSetup();
+    setup.deferRead();
+    const opening = setup.bridge.openDocumentByPath('/tmp/new.hwp');
+    await setup.entered.promise;
+    setup.blocked.resolve();
+    expect((await opening)?.message).toBe('new.hwp — 1페이지');
+    expect(setup.content()).toBe('NEW');
+    expect(setup.bridge.hasUnsavedChanges()).toBe(false);
+    expect(document.title).toBe('new.hwp - HOP');
+    expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'old-doc' });
+    expect(invokeMock).not.toHaveBeenCalledWith('close_document', { docId: 'incoming-doc' });
+  });
+
+  it('preserves the dirty document when replacement consent is cancelled', async () => {
+    const setup = await replacementSetup();
+    setup.edit();
+    messageMock.mockResolvedValue('취소');
+    expect(await setup.bridge.openDocumentByPath('/tmp/new.hwp')).toBeNull();
+    expect(setup.content()).toBe('OLD +EDIT');
+    expect(setup.bridge.hasUnsavedChanges()).toBe(true);
+    expect(invokeMock).not.toHaveBeenCalledWith('prepare_document_open', expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith('close_document', expect.anything());
+    expect(getWasmMock(setup.bridge, 'loadDocumentMock')).not.toHaveBeenCalled();
+  });
+
+  it('keeps late edits and the original replacement error when new-session cleanup fails', async () => {
+    const setup = await replacementSetup();
+    setup.deferNative('open_document_tracking');
+    setup.rejectNewCleanup();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const opening = setup.bridge.openDocumentByPath('/tmp/new.hwp');
+    await setup.entered.promise;
+    setup.edit();
+    setup.blocked.resolve();
+    await expect(opening).rejects.toThrow('문서 교체를 준비하는 동안 현재 문서가 변경');
+    expectEditedDocumentPreserved(setup, 'OLD +EDIT');
+    expect(warning).toHaveBeenCalledWith('[TauriBridge] native document cleanup failed:', expect.any(Error));
+  });
+
+  it('preserves edits made while native blank-document creation is pending', async () => {
+    const setup = await replacementSetup();
+    setup.deferNative('create_document');
+    const creating = setup.bridge.createNewDocumentAsync();
+    await setup.entered.promise;
+    setup.edit();
+    setup.blocked.resolve();
+    await expect(creating).rejects.toThrow('문서 교체를 준비하는 동안 현재 문서가 변경');
+    expectEditedDocumentPreserved(setup, 'OLD +EDIT');
+  });
+
+  it('creates a blank document normally when the native response receives no new edits', async () => {
+    const setup = await replacementSetup();
+    setup.deferNative('create_document');
+    const creating = setup.bridge.createNewDocumentAsync();
+    await setup.entered.promise;
+    setup.blocked.resolve();
+    expect((await creating)?.message).toBe('새 문서.hwp — 1페이지');
+    expect(setup.content()).toBe('BLANK');
+    expect(setup.bridge.hasUnsavedChanges()).toBe(false);
+    expect(document.title).toBe('새 문서.hwp - HOP');
+    expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'old-doc' });
+    expect(invokeMock).not.toHaveBeenCalledWith('close_document', { docId: 'incoming-doc' });
+  });
+
+  it('preserves late edits and the generation error when the password dialog completes', async () => {
+    const setup = await replacementSetup();
+    const passwordLoad = setup.deferPassword();
+    const opening = setup.bridge.openDocumentByPath('/tmp/new.hwp');
+    await setup.entered.promise;
+    setup.edit();
+    setup.blocked.resolve();
+    await expect(opening).rejects.toThrow('문서 교체를 준비하는 동안 현재 문서가 변경');
+    expectEditedDocumentPreserved(setup, 'OLD +EDIT', true);
+    expect(passwordLoad).not.toHaveBeenCalled();
+  });
+
+  it('opens an encrypted document when the deferred password receives no new edits', async () => {
+    const setup = await replacementSetup();
+    const passwordLoad = setup.deferPassword();
+    const opening = setup.bridge.openDocumentByPath('/tmp/new.hwp');
+    await setup.entered.promise;
+    setup.blocked.resolve();
+    expect((await opening)?.message).toBe('new.hwp — 1페이지');
+    expect(setup.content()).toBe('NEW');
+    expect(setup.bridge.hasUnsavedChanges()).toBe(false);
+    expect(passwordLoad).toHaveBeenCalledWith(new Uint8Array([78, 69, 87]), 'correct', 'new.hwp');
+    expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'old-doc' });
+    expect(invokeMock).not.toHaveBeenCalledWith('close_document', { docId: 'incoming-doc' });
+  });
+
+  it('checks late edits again after an incorrect-password retry', async () => {
+    const setup = await replacementSetup();
+    const passwordLoad = setup.deferPassword();
+    passwordLoad.mockImplementationOnce(() => {
+      throw new Error('비밀번호가 일치하지 않거나 암호화 데이터가 손상되었습니다');
+    });
+    passwordPrompt.mockResolvedValueOnce('wrong');
+    const opening = setup.bridge.openDocumentByPath('/tmp/new.hwp');
+    await setup.entered.promise;
+    expect(passwordPrompt).toHaveBeenLastCalledWith('new.hwp', expect.stringContaining('다시 입력'));
+    setup.edit();
+    setup.blocked.resolve();
+    await expect(opening).rejects.toThrow('문서 교체를 준비하는 동안 현재 문서가 변경');
+    expectEditedDocumentPreserved(setup, 'OLD +EDIT', true);
+    expect(passwordLoad).toHaveBeenCalledTimes(1);
+  });
