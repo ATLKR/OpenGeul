@@ -212,6 +212,27 @@ def patch(source: Path) -> None:
     bridge = core/'tauri-bridge.ts'
     replace(bridge, "type DocumentFormat = 'hwp' | 'hwpx';", "import { resolveSavePath } from './save-format';\n\ntype DocumentFormat = 'hwp' | 'hwpx';")
     replace(bridge, '  private dirty = false;', '  private dirty = false;\n  private editGeneration = 0;\n  private saveInProgress = false;')
+    # Consent covers the edits present at that moment, not later typing while
+    # native preparation/read/create awaits. Check before replacing WASM content;
+    # the existing catch releases only the newly allocated native session.
+    replace(bridge, '    if (!(await this.confirmReadyForDocumentReplacement())) return null;',
+        '    if (!(await this.confirmReadyForDocumentReplacement())) return null;\n    const replacementGeneration = this.editGeneration;', count=2)
+    replace(bridge, '      const info = await loadDocumentForOpen(this, bytes, result.fileName);',
+        """      const info = await loadDocumentForOpen(
+        this, bytes, result.fileName,
+        () => this.assertDocumentReplacementGeneration(replacementGeneration),
+      );""")
+    replace(bridge, '      const info = super.createNewDocument();',
+        '      this.assertDocumentReplacementGeneration(replacementGeneration);\n      const info = super.createNewDocument();')
+    # Password prompts can also defer replacement. Keep guard failures outside
+    # the password-error translator, including every incorrect-password retry.
+    document_open = core/'document-open.ts'
+    replace(document_open, '  wasm: DocumentLoader, bytes: Uint8Array, fileName: string,',
+        '  wasm: DocumentLoader, bytes: Uint8Array, fileName: string,\n  beforeReplace: () => void = () => undefined,')
+    replace(document_open, '): Promise<DocumentInfo | null> {\n  try {',
+        '): Promise<DocumentInfo | null> {\n  beforeReplace();\n  try {')
+    replace(document_open, '    if (password === null) return null;\n    try {',
+        '    if (password === null) return null;\n    beforeReplace();\n    try {')
     replace(bridge, """    if (this.sourceFormat === 'hwpx') {
       throw new Error('HWPX 원본 저장은 아직 안전하게 지원하지 않습니다. 다른 이름으로 저장에서 HWP 파일로 저장하세요.');
     }
@@ -280,7 +301,14 @@ def patch(source: Path) -> None:
     return this.saveDocument();""", """    if (this.requiresPasswordForSave) return this.saveDocumentAs();
     return this.saveDocument();""")
     replace(bridge, '  private async confirmReadyForDocumentReplacement(): Promise<boolean> {',
-        '  private async confirmReadyForDocumentReplacement(): Promise<boolean> {\n    if (this.saveInProgress) return false;')
+        """  private assertDocumentReplacementGeneration(generation: number): void {
+    if (this.editGeneration !== generation) {
+      throw new Error('문서 교체를 준비하는 동안 현재 문서가 변경되었습니다. 편집 내용을 보존했으니 다시 시도하세요.');
+    }
+  }
+
+  private async confirmReadyForDocumentReplacement(): Promise<boolean> {
+    if (this.saveInProgress) return false;""")
     replace(bridge, '      return result !== null;', '      return result !== null && !result.dirty;')
     for reason in ('document-changed', 'document-mutated'):
         replace(host/'src/main.ts',
@@ -314,8 +342,8 @@ def patch(source: Path) -> None:
     value['preservedFiles'] = {name: digest for name, digest in value['baselinePreservedFiles'].items()
         if hashlib.sha256((source/name).read_bytes()).hexdigest() == digest}
     value['hwpxSaveV1'] = True
-    value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation','native-dialog cancellation completion status','async Cut document replacement guard']
-    value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts']
+    value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation','native-dialog cancellation completion status','async Cut document replacement guard','async document replacement edit preservation']
+    value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts','document-open.ts']
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
 
