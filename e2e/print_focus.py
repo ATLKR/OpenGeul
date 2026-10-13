@@ -607,12 +607,19 @@ def fill_print_output(dialog, output: Path, app_pid, runtime, *, app_handle, evi
         pid=dialog.process_id();hwnd=dialog.handle
         processes,bind=_bind_native_print_processes(api,pid,app_pid,runtime,app_handle)
         window=api.window(hwnd);owners={}
+        def observed_window(row):
+            # Preserve native predicate values without copying a foreign title
+            # or arbitrary class string into retained diagnostic metadata.
+            return {**row,'cls':row['cls'] if row['cls']=='#32770' else 'unexpected-class'}
         entry.update(appPid=app_pid,dialogPid=pid,dialogHwnd=hwnd,dialogTid=window['tid'],
-                     foregroundBefore=api.foreground(),ownerHwnds=window['owners'])
+                     foregroundBefore=api.foreground(),ownerHwnds=window['owners'],initialWindow=observed_window(window),
+                     initialWrapperClassMatched=dialog.class_name()=='#32770',
+                     initialWrapperTitleMatched=dialog.window_text()=='Save Print Output As')
         if (dialog.class_name()!='#32770' or dialog.window_text()!='Save Print Output As'
-                or window['pid']!=pid or window['root']!=hwnd or window['cls']!='#32770'
-                or not window['visible'] or not window['enabled']):
-            raise AssertionError('Print output is not the exact ready owned Save dialog')
+                or window['pid']!=pid or window['root']!=hwnd or window['cls']!='#32770'):
+            raise AssertionError('Print output is not the exact owned Save dialog')
+        identity={k:v for k,v in window.items() if k not in ('visible','enabled')}
+        ready_window=None
         for owner in window['owners']:
             row=api.window(owner);bind(row['pid'])
             if row['root']!=owner:raise AssertionError('Print output native owner is not a root window')
@@ -626,18 +633,29 @@ def fill_print_output(dialog, output: Path, app_pid, runtime, *, app_handle, evi
 
         def dialog_live():
             for owned,record in processes.items():api.verify_process(owned,record)
+            actual=api.window(hwnd);entry['latestWindow']=observed_window(actual)
             if (dialog.handle!=hwnd or dialog.process_id()!=pid or dialog.class_name()!='#32770'
-                    or dialog.window_text()!='Save Print Output As' or api.window(hwnd)!=window):
+                    or dialog.window_text()!='Save Print Output As'
+                    or {k:v for k,v in actual.items() if k not in ('visible','enabled')}!=identity):
                 raise AssertionError('Bound print output dialog identity changed')
+            if ready_window is not None and actual!=ready_window:
+                raise AssertionError('Bound print output dialog readiness changed')
             for owner,row in owners.items():
                 if api.window(owner)!=row:raise AssertionError('Bound print output native owner changed')
+            return actual
 
         deadline = time.monotonic() + 30
         previous = None
         stable_since = 0.0
         entry['phase']='controls-stabilizing'
         while time.monotonic() < deadline:
-            dialog_live()
+            actual=dialog_live()
+            if ready_window is None:
+                if not actual['visible'] or not actual['enabled']:
+                    # Shell creation is observable before it can accept input.
+                    # Consume the existing controls deadline, without any input.
+                    time.sleep(.1);continue
+                ready_window=actual;entry['readyWindow']=actual
             try:
                 field = filename_control(dialog.descendants())
                 buttons = [control for control in dialog.descendants(class_name='Button')
@@ -658,6 +676,7 @@ def fill_print_output(dialog, output: Path, app_pid, runtime, *, app_handle, evi
             time.sleep(.1)
         else:raise AssertionError('Print output filename/Save controls did not stabilize')
 
+        window=ready_window
         combo=field.parent();controls=[(field,'Edit'),(combo,'ComboBox'),(button,'Button')]
         targets=[api.window(control.handle) for control,_cls in controls]
         rects=[_rect(control) for control,_cls in controls]
