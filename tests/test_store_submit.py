@@ -796,6 +796,86 @@ class DualStoreSubmitTests(unittest.TestCase):
                         self.assertEqual(saved[key],state[key])
                     self.assertNotIn(('store','GET','submissions/20/status'),self.calls)
 
+    def test_older_owned_immediate_processing_is_preserved_before_any_store_write(self):
+        processing = ('CommitStarted', 'PreProcessing', 'Certification', 'Release', 'PendingPublication', 'Publishing')
+        for phase in ('draft_ready', 'submitted', 'commit_attempted'):
+            for status in processing:
+                with self.subTest(phase=phase, status=status):
+                    self.calls.clear(); self.issues.clear(); self.new = None
+                    self.app['pendingApplicationSubmission'] = {'id': '20'}
+                    self.pending = {**copy.deepcopy(self.baseline), 'id': '20',
+                        'status': status, 'targetPublishMode': 'Immediate'}
+                    self.pending['applicationPackages'][0]['version'] = '1.1.3.0'
+                    state = {'app_id': STORE_APP_ID, 'phase': phase, 'submission_id': '20',
+                        'tag': 'v1.1.3', 'status': status, 'source_sha': 'c' * 40,
+                        'release_id': '4', 'run_id': '122', 'source_asset_fingerprint_sha256': 'c' * 64,
+                        'source_msix_sha256_by_arch': {'x64': 'd' * 64, 'arm64': 'e' * 64},
+                        'store_msix_sha256_by_arch': {'x64': 'f' * 64, 'arm64': '1' * 64}}
+                    self.issues.append({'number': 1, 'title': submitter.TITLE,
+                        'body': submitter._journal_body(state), 'user': copy.deepcopy(self.bot)})
+                    app = copy.deepcopy(self.app); baseline = copy.deepcopy(self.baseline)
+                    pending = copy.deepcopy(self.pending)
+                    original_store = self.store
+                    def observed(*args, **kwargs):
+                        if args[2:4] == ('GET', 'submissions/20/status') and self.pending['status'] == 'CommitStarted':
+                            self.pending['status'] = 'PreProcessing'
+                        return original_store(*args, **kwargs)
+                    with patch.object(submitter, '_request', side_effect=observed):
+                        with self.assertRaisesRegex(submitter.SubmissionBlocked, 'still processing'):
+                            self.perform()
+                    self.assertEqual(self.mutations(), [])
+                    self.assertIsNone(self.new)
+                    self.assertEqual(self.app, app); self.assertEqual(self.baseline, baseline)
+                    expected = dict(state)
+                    reads = ['', 'submissions/10', 'submissions/20']
+                    if phase == 'commit_attempted':
+                        expected['phase'] = 'submitted'
+                        expected['status'] = 'PreProcessing' if status == 'CommitStarted' else status
+                        pending['status'] = expected['status']
+                        reads = ['submissions/20', 'submissions/20/status', *reads]
+                    self.assertEqual(self.pending, pending)
+                    self.assertEqual(submitter._journal_state(self.issues[0]['body']), expected)
+                    self.assertEqual([path for service, method, path in self.calls
+                        if service == 'store' and method == 'GET'], reads)
+
+    def test_matching_processing_pair_still_recovers_same_id_without_store_writes(self):
+        self.perform()
+        original_store = self.store
+        def observed(*args, **kwargs):
+            if args[2:4] == ('GET', 'submissions/30/status') and self.new['status'] == 'CommitStarted':
+                self.new['status'] = 'PreProcessing'
+            return original_store(*args, **kwargs)
+        for status in ('CommitStarted', 'PreProcessing', 'Certification', 'Release', 'PendingPublication', 'Publishing'):
+            with self.subTest(status=status), patch.object(submitter, '_request', side_effect=observed):
+                self.calls.clear(); self.new['status'] = status
+                result = self.perform()
+                self.assertEqual((result['outcome'], result['submission_id']), ('already_requested', '30'))
+                self.assertTrue(result['packageMetadataObserved'])
+                self.assertEqual(self.mutations(), [])
+                saved = submitter._journal_state(self.issues[0]['body'])
+                self.assertEqual((saved['phase'], saved['tag'], saved['submission_id']), ('submitted', self.tag, '30'))
+                self.assertEqual(saved['status'], 'PreProcessing' if status == 'CommitStarted' else status)
+                self.assertEqual(('store', 'GET', 'submissions/30/status') in self.calls, status == 'CommitStarted')
+
+    def test_same_or_newer_published_baseline_still_supersedes_without_store_writes(self):
+        versions = [int(part) for part in self.package_version.split('.')]
+        versions[2] += 1
+        for version in (self.package_version, '.'.join(map(str, versions))):
+            with self.subTest(version=version):
+                self.calls.clear(); self.issues.clear()
+                self.app['pendingApplicationSubmission'] = None
+                self.baseline['applicationPackages'][0]['version'] = version
+                state = {'app_id': STORE_APP_ID, 'phase': 'submitted', 'submission_id': '10',
+                    'tag': self.tag, 'status': 'Published', 'source_sha': self.sha, 'release_id': '5',
+                    'run_id': '123', **submitter._pair_identity(self.details)}
+                self.issues.append({'number': 1, 'title': submitter.TITLE,
+                    'body': submitter._journal_body(state), 'user': copy.deepcopy(self.bot)})
+                self.assertEqual(self.perform()['outcome'], 'superseded')
+                self.assertEqual(self.mutations(), [])
+                self.assertEqual(submitter._journal_state(self.issues[0]['body']), state)
+                self.assertEqual([path for service, method, path in self.calls
+                    if service == 'store' and method == 'GET'], ['', 'submissions/10'])
+
     def test_pair_manual_put_ack_stops_before_upload_or_commit(self):
         def changed_ack(*args, **kwargs):
             status, result = self.store(*args, **kwargs)

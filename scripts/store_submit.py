@@ -892,6 +892,8 @@ def submit(tag, directory):
                         raise SubmissionBlocked('Existing Store request does not contain the verified target package version')
                     observed = {}
                 return {'outcome': 'already_requested', 'tag': tag, 'submission_id': pending_id, 'status': status, **observed}
+            if pending.get('status') in ACCEPTED | {'CommitStarted'}:
+                raise SubmissionBlocked('An earlier Store submission is still processing; preserve it until publication or confirmed failure')
             owned = matching or (state['phase'] == 'draft_ready' and state.get('submission_id') == pending_id
                      and _journal_matches(state, details))
             if adoption and not state.get('adopted_pending_id'):
