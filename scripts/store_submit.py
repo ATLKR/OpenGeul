@@ -155,10 +155,10 @@ def _newer(version):
     return False
 
 
-def _inspect_qualified(directory, source):
+def _inspect_qualified(directory, source, env=None):
     # 실제 Store 신원/서명/설치/native/raw12 검증은 공유 검사기를 반드시 사용한다.
     from store_qualification import inspect_qualified
-    return inspect_qualified(directory, source)
+    return inspect_qualified(directory, source, env=env)
 
 
 def _actor(actor):
@@ -195,10 +195,13 @@ def _store_workflow(details):
     return attempt
 
 
-def _verify(tag, directory):
+def _verify(tag, directory, *, resume=False):
     from release_pair import verify_pair, source_fingerprint, copy_architecture
     version = _version(tag)
-    if os.getenv('GITHUB_REPOSITORY') != REPOSITORY or os.getenv('GITHUB_REF') != 'refs/heads/main':
+    if resume:
+        from store_resume70 import caller
+        caller()
+    elif os.getenv('GITHUB_REPOSITORY') != REPOSITORY or os.getenv('GITHUB_REF') != 'refs/heads/main':
         raise SubmissionBlocked('Store writes require the owned main workflow')
     product = json.loads((Path(__file__).resolve().parents[1] / 'config/product.json').read_text(encoding='utf-8'))
     if product.get('version') != tag[1:]: raise SubmissionBlocked('Stable submission must match the current product version')
@@ -242,8 +245,14 @@ def _verify(tag, directory):
         raise SubmissionBlocked('Store submission requires the stable tag push source run')
     jobs = [job for page in _gh('GET', f'actions/runs/{run_id}/jobs?per_page=100', pages=True) for job in page['jobs']]
     authorize_release(tag, provenance, run, _gh('GET', f'commits/{tag}')['sha'], jobs)
-    attempt = _store_workflow(details)
-    proof = _inspect_qualified(directory, source)
+    if resume:
+        from store_resume70 import producer
+        context = producer(details, directory)
+        attempt = context['GITHUB_RUN_ATTEMPT']
+        proof = _inspect_qualified(directory, source, context)
+    else:
+        attempt = _store_workflow(details)
+        proof = _inspect_qualified(directory, source)
     if (type(proof.get('formatVersion')) is not int or proof['formatVersion'] != 1
             or proof.get('repository') != REPOSITORY or proof.get('storeCertified') is not False
             or set(proof.get('architectures', {})) != {'x64','arm64'}
@@ -279,7 +288,7 @@ def _verify(tag, directory):
             raw = package.read_bytes()
             if hashlib.sha256(raw).hexdigest() != entry['sha256']:
                 raise SubmissionBlocked('Store package changed while preparing upload')
-            archive.writestr(name, raw)
+            archive.writestr(zipfile.ZipInfo(name, date_time=(1980,1,1,0,0,0)) if resume else name, raw)
     if source_fingerprint(source) != fingerprint: raise SubmissionBlocked('Source pair changed during submission validation')
     body = buffer.getvalue()
     if len(body) > LIMIT: raise SubmissionBlocked('Store ZIP exceeds 96 MiB')
@@ -783,13 +792,18 @@ def _warn(reason):
         print('::error::GitHub warning Issue could not be updated; inspect this Actions failure.')
 
 
-def submit(tag, directory):
+def submit(tag, directory, *, resume=False):
     try:
-        details, version, body = _verify(tag, directory)
-        adoption = _adoption_proof(details)
-        recovery = _recovery_proof(details)
+        details, version, body = _verify(tag, directory, resume=True) if resume else _verify(tag, directory)
+        adoption = None if resume else _adoption_proof(details)
+        recovery = None if resume else _recovery_proof(details)
         journal = _journal()
         state = journal['state']
+        if resume:
+            from store_resume70 import journal_guard, api_guard
+            journal_guard(state, details, body)
+        elif 'resume_upload_state' in state:
+            raise SubmissionBlocked('The fixed resume journal requires the same operator; preserve uncertain writes')
         if recovery:
             if state['phase'] in {'delete_attempted', 'create_attempted'}:
                 raise SubmissionBlocked('An earlier recovery mutation lacks acknowledgment; reconcile without new writes')
@@ -814,7 +828,10 @@ def submit(tag, directory):
         if state['phase'] in {'delete_attempted', 'create_attempted'}:
             raise SubmissionBlocked('An earlier Store mutation lacks acknowledgment; reconcile the app journal before any new submission')
         opener, token = authenticate()
-        def api(method, path, data=None): return _request(opener, token, method, path, data)
+        seen = set()
+        def api(method, path, data=None):
+            if resume: api_guard(method, path, seen)
+            return _request(opener, token, method, path, data)
         paired = details.get('formatVersion') == 2
         if paired and state.get('tag') == tag and state['phase'] in {'draft_ready','commit_attempted','submitted'} and not _journal_matches(state, details):
             raise SubmissionBlocked('Current journal does not own the complete verified package pair')
@@ -847,6 +864,12 @@ def submit(tag, directory):
                 or any(package.get('architecture', '').lower() != 'x64' for package in baseline['applicationPackages'])):
             raise SubmissionBlocked('Automatic updates require the published x64 package template')
         pending_id = _ref(app, 'pendingApplicationSubmission')
+        if resume:
+            from store_resume70 import SID, BASELINE
+            if pending_id not in {SID, None} or baseline_id not in {BASELINE, SID}:
+                raise SubmissionBlocked('The fixed resume app SID or Published baseline changed')
+            if pending_id != SID and baseline_id != SID:
+                raise SubmissionBlocked('The fixed owned SID disappeared; no draft may be created')
         if adoption and (pending_id != adoption['pending_id'] or baseline_id != adoption['baseline_id']):
             raise SubmissionBlocked('Draft adoption may write only the explicitly approved existing SID')
         if state['phase'] in {'draft_ready', 'submitted'} and state['submission_id'] not in {pending_id, baseline_id}:
@@ -963,7 +986,10 @@ def submit(tag, directory):
             metadata.pop(field, None)
         if adoption:
             _fresh_adoption(api, adoption, adoption_baseline_sha256)
-        _, updated = api('PUT', f'submissions/{pending_id}', metadata)
+        if resume and state.get('resume_upload_state') == 'acknowledged':
+            _, updated = api('GET', f'submissions/{pending_id}')
+        else:
+            _, updated = api('PUT', f'submissions/{pending_id}', metadata)
         _immediate(updated)
         if (_id(updated['id']) != pending_id or updated.get('status') != 'PendingCommit'
                 or _marker(details) not in updated.get('notesForCertification', '').splitlines()
@@ -978,7 +1004,13 @@ def submit(tag, directory):
                 adoption_upload_destination_missing=missing_upload)
         if missing_upload:
             raise SubmissionBlocked('Store metadata was acknowledged but no upload destination was returned; preserve this SID for API reconciliation')
-        _upload(opener, upload_url, body)
+        if not (resume and state.get('resume_upload_state') == 'acknowledged'):
+            if resume:
+                _save(journal, 'draft_ready', details, resume_upload_state='attempted',
+                      resume_upload_sha256=hashlib.sha256(body).hexdigest(), resume_producer_run_id='38337436070')
+            _upload(opener, upload_url, body)
+            if resume:
+                _save(journal, 'draft_ready', details, resume_upload_state='acknowledged')
         fresh = _app(api)
         if _ref(fresh, 'pendingApplicationSubmission') != pending_id or _ref(fresh, 'lastPublishedApplicationSubmission') != baseline_id or _newer(version):
             raise SubmissionBlocked('Store or stable tag state changed before commit')
@@ -1009,8 +1041,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--release-tag', required=True)
     parser.add_argument('--package-directory', type=Path, default=Path('store-output'))
+    parser.add_argument('--resume-store70', action='store_true')
     args = parser.parse_args()
-    try: result = submit(args.release_tag, args.package_directory)
+    try: result = submit(args.release_tag, args.package_directory, resume=args.resume_store70)
     except SubmissionBlocked: raise SystemExit(1) from None
     print(json.dumps(result, sort_keys=True))
     if os.getenv('GITHUB_STEP_SUMMARY'):
