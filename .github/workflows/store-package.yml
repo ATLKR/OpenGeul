@@ -10,7 +10,7 @@ concurrency:
   queue: max
 jobs:
   resume-store70:
-    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diagnostic/store70-resume' && github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR' && github.run_attempt == 1
+    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diagnostic/store70-resume' && github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR' && github.run_attempt == 1)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
