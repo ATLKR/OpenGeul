@@ -14,7 +14,7 @@ from driver import Session,digest,edit
 from print_raster import inspect_print_pdf
 from print_queue import VirtualQueue,require_host
 from print_results import completed_job,validate_cases
-from print_focus import open_system_dialog,fill_print_output,prepare_app_for_print
+from print_focus import open_system_dialog,fill_print_output,prepare_app_for_print,click_owned_print_preferences
 
 def wait(check,seconds=30):
     deadline=time.monotonic()+seconds
@@ -56,8 +56,9 @@ def system_dialog(session,queue,folder):
     item=lists[0].get_item(queue.name);item.select();wait(item.is_selected)
     if not item.is_selected():raise AssertionError('Owned printer is not selected')
     return dialog
-def configure_media(dialog,pid,folder):
-    control(dialog,'Button',1010).click_input()
+def configure_media(dialog,pid,folder,*,app_handle):
+    runtime=json.loads((folder/'session/runtime.json').read_text(encoding='utf-8'))
+    click_owned_print_preferences(dialog,pid,runtime,app_handle=app_handle,evidence_dir=folder)
     preferences=wait(lambda:visible_dialog('Printing Preferences',pid))
     control(preferences,'ComboBox',1232).select('Portrait')
     control(preferences,'Button',8000).click_input()
@@ -92,7 +93,7 @@ def print_document(exe,fixture,case,folder):
             resources.callback(stop_session,session)
             resources.push(lambda error_type,error,tb: capture_failure(folder,error_type))
             if queue.jobs():raise AssertionError('Queue contains stale jobs')
-            dialog=system_dialog(session,queue,folder);configure_media(dialog,session.proc.pid,folder)
+            dialog=system_dialog(session,queue,folder);configure_media(dialog,session.proc.pid,folder,app_handle=int(session.proc._handle))
             if case.get('range'):
                 control(dialog,'Button',1059).click_input();control(dialog,'Edit',1152).set_edit_text(case['range'])
             snapshot(folder)

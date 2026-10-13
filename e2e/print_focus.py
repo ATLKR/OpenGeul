@@ -381,6 +381,95 @@ def prepare_app_for_print(app_hwnd,app_pid,runtime,*,app_handle,evidence_dir=Non
         if foreground_changed:raise AssertionError('Initial owned app foreground changed before print input')
 
 
+def click_owned_print_preferences(dialog,app_pid,runtime,*,app_handle,evidence_dir=None,probe=None):
+    """Bind the exact native Print/Preferences target before one physical input."""
+    api=probe or WindowsFocusProbe();processes={}
+    entry={'kind':'diagnostic-metadata','operation':'native-preferences-input',
+           'sourceQualified':False,'productTelemetry':False,'passed':False}
+    try:
+        app=runtime['nativeArchitecture'];web=runtime['webview2Native']
+        if app['processId']!=app_pid or web['rootProcessId']!=app_pid or app_handle is None:
+            raise AssertionError('Native Print input needs the actual owned app handle')
+        api.architecture=app.get('architecture');expected={app_pid:app}
+        if len(web['processes'])>64:raise AssertionError('Owned Print process inventory exceeds its bound')
+        for row in web['processes']:
+            pid=row['processId']
+            if type(pid) is not int or pid<=0 or pid in expected:
+                raise AssertionError('Duplicate or invalid owned Print process identity')
+            expected[pid]=row
+        pid=dialog.process_id();chain=[];current=pid
+        while current!=app_pid:
+            if current in chain or current not in expected:
+                raise AssertionError('Native Print has a foreign process parent chain')
+            chain.append(current);current=expected[current]['parentProcessId']
+        processes[app_pid]=api.bind_process(app_pid,app,app_handle)
+        for child in reversed(chain):
+            parent=expected[child]['parentProcessId']
+            record=api.bind_process(child,expected[child])
+            if record.get('parentProcessId')!=parent or record['creation']<processes[parent]['creation']:
+                raise AssertionError('Native Print process ancestry changed')
+            processes[child]=record
+        hwnd=dialog.handle;window=api.window(hwnd)
+        entry.update({'appPid':app_pid,'dialogHwnd':hwnd,'dialogPid':pid,
+                      'dialogTid':window['tid'],'foregroundBefore':api.foreground()})
+        if (dialog.class_name()!='#32770' or dialog.window_text()!='Print'
+                or window['pid']!=pid or window['root']!=hwnd or window['cls']!='#32770'
+                or not window['visible'] or not window['enabled']):
+            raise AssertionError('Native Print is not the exact ready owned dialog')
+        buttons=[c for c in dialog.descendants(class_name='Button')
+                 if c.control_id()==1010 and c.is_visible()]
+        if len(buttons)!=1:raise AssertionError('Native Preferences button is not uniquely visible')
+        button=buttons[0];target=api.window(button.handle);rect=_rect(button)
+        entry.update({'buttonHwnd':button.handle,'buttonTid':target['tid']})
+        if (rect is None or any(type(n) is not int or not -2**31<=n<2**31 for n in rect)
+                or rect[2]<=rect[0] or rect[3]<=rect[1]):
+            raise AssertionError('Native Preferences rectangle is invalid')
+        point=((rect[0]+rect[2])//2,(rect[1]+rect[3])//2);entry['point']=point
+
+        def recheck():
+            for owned,record in processes.items():api.verify_process(owned,record)
+            if (dialog.handle!=hwnd or dialog.process_id()!=pid or dialog.class_name()!='#32770'
+                    or dialog.window_text()!='Print' or api.window(hwnd)!=window):
+                raise AssertionError('Bound native Print HWND identity changed')
+            if (button.handle!=target['hwnd'] or button.process_id()!=pid
+                    or button.class_name()!='Button' or button.control_id()!=1010
+                    or target['pid']!=pid or target['cls']!='Button' or target['root']!=hwnd
+                    or not target['visible'] or not target['enabled']
+                    or not button.is_visible() or not button.is_enabled()
+                    or api.window(button.handle)!=target or _rect(button)!=rect):
+                raise AssertionError('Bound native Preferences target identity changed')
+
+        recheck()
+        if api.foreground()!=hwnd:
+            entry['setForegroundReturned']=api.set_foreground(hwnd)
+            if not entry['setForegroundReturned']:raise AssertionError('Owned native Print foreground request failed')
+            entry['activationBarrier']={}
+            if not api.sync_activation(hwnd,window,entry['activationBarrier']):
+                raise AssertionError('Owned native Print activation was not processed')
+        recheck()
+        if api.foreground()!=hwnd:raise AssertionError('Exact native Print foreground was not observed')
+        entry['hitHwnd']=api.hit(point)
+        if entry['hitHwnd']!=target['hwnd']:
+            raise AssertionError('Native Preferences click point is covered by another HWND')
+        recheck();entry['foregroundAtInput']=api.foreground()
+        if entry['foregroundAtInput']!=hwnd:
+            raise AssertionError('Native Print foreground changed before physical input')
+        button.click_input();entry['passed']=True
+    except BaseException as error:
+        entry['errorType']=type(error).__name__[:64];raise
+    finally:
+        # A successful click may activate the new Preferences modal. Only record
+        # this value; the existing real-dialog wait verifies the resulting UI.
+        try:entry['foregroundAfter']=api.foreground()
+        except Exception:entry['foregroundAfter']=None
+        if evidence_dir is not None:
+            data=json.dumps(entry,ensure_ascii=True,separators=(',',':')).encode('ascii')
+            if len(data)<=4096:
+                try:(evidence_dir/'print-native-preferences-diagnostic.json').write_bytes(data)
+                except OSError:pass
+        api.close()
+
+
 def _preview_windows(desktop, app_root, app_hwnd: int, pids: set[int]):
     """Find the owned Print/RootView even when UIA exposes it as another top-level root."""
     roots = [app_root]
