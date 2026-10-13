@@ -316,6 +316,12 @@ class OwnedPreviewFocus:
             # through their own UIA patterns and do not send keyboard input.
             entry['targetKeyboardFocusable']=_safe(lambda:bool(control.element_info.element.CurrentIsKeyboardFocusable))
             entry['foregroundAtActivation']=self.probe.foreground()
+            # A retained binding is used only by the conditional menu recovery.
+            # The UIA state RPC may have changed foreground since discovery.
+            if binding is not None:
+                entry['foreignForegroundAtRecovery']=self.foreign_foreground(control,binding)
+                if not entry['foreignForegroundAtRecovery']:
+                    raise AssertionError('Conditional print recovery no longer has foreign foreground')
             if entry['foregroundAtActivation']!=self.preview_window:
                 entry['setForegroundReturned']=self.probe.set_foreground(self.preview_window)
                 if not entry['setForegroundReturned']:raise AssertionError('Owned print foreground request failed')

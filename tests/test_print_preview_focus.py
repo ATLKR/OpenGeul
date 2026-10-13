@@ -527,6 +527,21 @@ class PrintPreviewFocusTests(unittest.TestCase):
         with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
         self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
 
+    def test_owned_popup_focus_during_expand_state_read_never_reactivates(self):
+        module,margins,_=self.lost_dropdown();guard=self.guard()
+        self.probe.windows[300]=dict(hwnd=300,pid=20,tid=21,cls='Popup',visible=True,enabled=True,root=300,owners=[200])
+        pattern=margins.iface_expand_collapse
+        world=self
+        class Pattern:
+            def Expand(self):pattern.Expand()
+            @property
+            def CurrentExpandCollapseState(self):
+                world.probe.foreground_hwnd=300
+                return pattern.CurrentExpandCollapseState
+        margins.iface_expand_collapse=Pattern()
+        with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+
     def test_same_owned_popup_focus_keeps_open_menu_and_clicks_once(self):
         module,margins=self.settings();self.probe.foreground_hwnd=200;guard=self.guard()
         original=margins.iface_expand_collapse.Expand
