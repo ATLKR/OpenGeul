@@ -1,6 +1,36 @@
 //! HWPX persistence. This child module can reuse the existing private session guards.
 use super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    static HWP_SAVE_PARSE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) struct HwpSaveParseHook;
+
+#[cfg(test)]
+impl Drop for HwpSaveParseHook {
+    fn drop(&mut self) {
+        HWP_SAVE_PARSE_HOOK.with(|slot| { slot.borrow_mut().take(); });
+    }
+}
+
+#[cfg(test)]
+pub(super) fn on_hwp_save_parsed(hook: impl FnOnce() + 'static) -> HwpSaveParseHook {
+    HWP_SAVE_PARSE_HOOK.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    HwpSaveParseHook
+}
+
+#[cfg(test)]
+pub(super) fn run_hwp_save_parse_hook() {
+    let hook = HWP_SAVE_PARSE_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook { hook(); }
+}
+
 pub(super) fn validate_staging_path(staged: &Path, target: &Path) -> Result<(), String> {
     let parent = |p: &Path| -> Result<PathBuf, String> {
         std::fs::canonicalize(p.parent().ok_or("저장 상위 경로가 없습니다.")?)

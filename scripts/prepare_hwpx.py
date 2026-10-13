@@ -195,6 +195,16 @@ def patch(source: Path) -> None:
         '#[path = "opengeul_hwpx_state.rs"]\nmod opengeul_hwpx;\n\nuse crate::pending_open::PendingOpenPaths;')
     replace(native/'state.rs', '        let bytes = std::fs::read(&staged_path).map_err(|e| {',
         '        opengeul_hwpx::validate_staging_path(&staged_path, &target_path)?;\n        let bytes = std::fs::read(&staged_path).map_err(|e| {')
+    replace(native/'state.rs', '''        let core =
+            editable_core_from_bytes(&bytes, "저장 바이트 검증 실패", "저장 문서 변환 실패")?;
+        session.finish_hwp_save''', '''        let core =
+            editable_core_from_bytes(&bytes, "저장 바이트 검증 실패", "저장 문서 변환 실패")?;
+        #[cfg(test)]
+        opengeul_hwpx::run_hwp_save_parse_hook();
+        if !allow_external_overwrite {
+            session.check_external_modification_for_path(&target_path)?;
+        }
+        session.finish_hwp_save''')
     replace(native/'state.rs', '        let staged_path = dir.path().join("save.tmp");\n        let target_path = dir.path().join("saved.hwp");',
         '        let target_path = dir.path().join("saved.hwp");\n        let staged_path = target_path.with_file_name(format!("saved.hwp.hop-save-{}.tmp", Uuid::new_v4().simple()));')
     replace(native/'lib.rs', 'tauri::generate_handler![',
