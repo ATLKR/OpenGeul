@@ -379,5 +379,128 @@ class PrintPreviewFocusTests(unittest.TestCase):
         self.assertEqual(self.actions,['expand'])
         self.assertEqual(self.probe.foreground_calls,[200])
 
+    def lost_dropdown(self, *, collapse=True, foreign=True, lose_again=False):
+        """UIA reports a committed A4 and a margin menu closed by focus loss."""
+        module,margins=self.settings();self.probe.foreground_hwnd=200
+        clock=types.SimpleNamespace(now=0.0)
+        clock.monotonic=lambda:clock.now
+        clock.sleep=lambda seconds:setattr(clock,'now',clock.now+seconds)
+        module.time=clock
+        pattern=margins.iface_expand_collapse
+        pattern.CurrentExpandCollapseState=0
+        original=pattern.Expand
+        self.after_loss=lambda:None
+        def expand():
+            original();pattern.CurrentExpandCollapseState=1
+            if self.actions.count('expand')==1 or lose_again:
+                self.preview.children=[c for c in self.preview.children if c.window_text()!='None']
+                if collapse:pattern.CurrentExpandCollapseState=0
+                if foreign:self.probe.foreground_hwnd=999
+                self.after_loss()
+        pattern.Expand=expand
+        return module,margins,clock
+
+    def test_configure_recovers_one_foreign_focus_collapsed_menu_with_one_click(self):
+        module,margins,clock=self.lost_dropdown();guard=self.guard()
+        result=module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand','expand','click'])
+        self.assertEqual(self.probe.foreground_calls,[200])
+        self.assertEqual((result['paper'],result['margins'],result['actualSize']),('A4','None',True))
+        self.assertEqual((result['paperRecoveryCount'],result['marginsRecoveryCount']),(0,1))
+        self.assertEqual(result['marginsLatestExpandState'],0)
+        self.assertLess(clock.now,30)
+
+    def test_collapsed_owned_foreground_never_reopens_or_clicks(self):
+        module,margins,clock=self.lost_dropdown(foreign=False);guard=self.guard()
+        with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+        self.assertGreaterEqual(clock.now,30);self.assertLess(clock.now,30.2)
+
+    def test_expanded_foreign_foreground_never_reopens_or_clicks(self):
+        module,margins,clock=self.lost_dropdown(collapse=False);guard=self.guard()
+        with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+        self.assertGreaterEqual(clock.now,30);self.assertLess(clock.now,30.2)
+
+    def test_second_focus_loss_does_not_repeat_recovery_or_extend_deadline(self):
+        module,margins,clock=self.lost_dropdown(lose_again=True);guard=self.guard()
+        with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand','expand']);self.assertEqual(self.probe.foreground_calls,[200])
+        self.assertGreaterEqual(clock.now,30);self.assertLess(clock.now,30.2)
+
+    def test_recovery_failed_foreground_activation_never_expands_again(self):
+        module,margins,_=self.lost_dropdown();guard=self.guard();self.probe.foreground_result=False
+        with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[200])
+
+    def test_recovery_retained_control_identity_changes_never_dispatch_input(self):
+        mutations=[lambda m:setattr(m,'rid',(99,)),lambda m:setattr(m,'pid',10),
+                   lambda m:setattr(m,'parent_control',self.app),
+                   lambda m:self.probe.processes[20].update(creation=999),
+                   lambda m:self.probe.windows[200].update(tid=99)]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.setUp();module,margins,_=self.lost_dropdown();guard=self.guard()
+                self.after_loss=lambda:mutate(margins)
+                with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+                self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+
+    def test_recovery_observed_source_identity_rejection_never_dispatches_input(self):
+        module,margins,_=self.lost_dropdown();guard=self.guard()
+        def rejected():
+            self.probe.verify_process=lambda *args:(_ for _ in ()).throw(AssertionError('held image changed'))
+        self.after_loss=rejected
+        with self.assertRaisesRegex(AssertionError,'held image changed'):
+            module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+
+    def test_recovery_option_presence_cannot_approve_a_retargeted_dropdown(self):
+        module,margins,_=self.lost_dropdown();guard=self.guard();original=margins.iface_expand_collapse.Expand
+        def expanded():
+            original()
+            if self.actions.count('expand')==2:margins.rid=(99,)
+        margins.iface_expand_collapse.Expand=expanded
+        with self.assertRaisesRegex(AssertionError,'dropdown identity changed'):
+            module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand','expand']);self.assertEqual(self.probe.foreground_calls,[200])
+
+    def test_recovery_target_retargeted_during_activation_never_expands(self):
+        module,margins,_=self.lost_dropdown();guard=self.guard()
+        def processed(hwnd,expected,report):
+            self.probe.activation_barriers.append(hwnd);margins.rid=(99,);return True
+        self.probe.sync_activation=processed
+        with self.assertRaisesRegex(AssertionError,'dropdown identity changed'):
+            module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[200])
+
+    def test_boolean_or_unknown_expand_state_cannot_authorize_recovery(self):
+        for state in [False,-1,4,None,'0']:
+            with self.subTest(state=state):
+                module,margins,clock=self.lost_dropdown();guard=self.guard()
+                self.after_loss=lambda:setattr(margins.iface_expand_collapse,'CurrentExpandCollapseState',state)
+                with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+                self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+                self.assertGreaterEqual(clock.now,30);self.assertLess(clock.now,30.2)
+
+    def test_unknown_zero_foreground_cannot_authorize_menu_recovery(self):
+        module,margins,clock=self.lost_dropdown();guard=self.guard()
+        self.after_loss=lambda:setattr(self.probe,'foreground_hwnd',0)
+        with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+        self.assertGreaterEqual(clock.now,30);self.assertLess(clock.now,30.2)
+
+    def test_same_owned_popup_focus_keeps_open_menu_and_clicks_once(self):
+        module,margins=self.settings();self.probe.foreground_hwnd=200;guard=self.guard()
+        original=margins.iface_expand_collapse.Expand
+        popup=Control((30,),20,300,parent=self.preview,cls='Popup')
+        self.probe.windows[300]=dict(hwnd=300,pid=20,tid=21,cls='Popup',visible=True,enabled=True,root=300,owners=[200])
+        def expanded():
+            original();choice=self.preview.children[-1];choice.parent_control=popup
+            self.probe.foreground_hwnd=300;self.probe.hit_hwnd=300
+        margins.iface_expand_collapse.Expand=expanded
+        result=module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(result['margins'],'None');self.assertEqual(self.actions,['expand','click'])
+        self.assertEqual(self.probe.foreground_calls,[])
+
 
 if __name__ == '__main__':unittest.main()

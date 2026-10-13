@@ -63,15 +63,30 @@ def configure_preview(preview,pids,folder:Path|None=None,*,focus):
     try:
         for label,value,key in (('Paper size','A4','paper'),('Margins','None','margins')):
             target=wait(lambda:dropdown(preview,label,pids))
-            before=selected(target,label);state[key+'Before']=before
+            before=selected(target,label);state[key+'Before']=before;state[key+'RecoveryCount']=0
             if before!=value:
+                binding=focus.target_binding(target);recovered=False
                 focus.prepare(target,key+'-expand')
                 target.iface_expand_collapse.Expand()
                 focus.read(target,key+'-after-expand')
                 def option():
+                    nonlocal recovered
                     focus.read(preview,key+'-option-read')
-                    controls,nodes=rows(preview);i=option_index(nodes,value,pids)
-                    return controls[i] if i is not None else None
+                    controls,nodes=rows(preview);target_index=dropdown_index(nodes,label,pids)
+                    if target_index is None:return None
+                    current=controls[target_index]
+                    foreign=focus.foreign_foreground(current,binding)
+                    state[key+'ForeignForeground']=foreign
+                    i=option_index(nodes,value,pids)
+                    if i is not None:return controls[i]
+                    expanded=current.iface_expand_collapse.CurrentExpandCollapseState
+                    state[key+'LatestExpandState']=expanded if type(expanded)is int and 0<=expanded<=3 else None
+                    if not recovered and foreign and type(expanded)is int and expanded==0:
+                        recovered=True;state[key+'RecoveryCount']=1
+                        focus.prepare(current,key+'-collapsed-focus-recovery',binding=binding)
+                        current.iface_expand_collapse.Expand()
+                        focus.read(current,key+'-after-recovery')
+                    return None
                 choice=wait(option);state[key+'Option']=_node(choice)
                 activate_option(choice,focus)
             wait(lambda:selected(dropdown(preview,label,pids),label)==value)

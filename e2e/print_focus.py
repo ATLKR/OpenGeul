@@ -304,11 +304,13 @@ class OwnedPreviewFocus:
                 try:(self.evidence_dir/'print-focus-diagnostic.json').write_bytes(data)
                 except OSError:pass
 
-    def prepare(self,control,phase):
+    def prepare(self,control,phase,*,binding=None):
         entry={'phase':phase,'operation':'prepare-before-input','foregroundBefore':self.probe.foreground()}
         try:
             # Binding precedes the one activation attempt; actual foreground is never fabricated.
             self._live(control,require_foreground=False)
+            if binding is not None and self.target_binding(control)!=binding:
+                raise AssertionError('Bound print dropdown identity changed')
             entry['targetRuntimeId']=_runtime_id(control)
             # This property is diagnostic only. Expand/Invoke/SelectionItem act
             # through their own UIA patterns and do not send keyboard input.
@@ -321,7 +323,10 @@ class OwnedPreviewFocus:
                 if not self.probe.sync_activation(self.preview_window,self.windows[self.preview_window],entry['activationBarrier']):
                     raise AssertionError('Owned print activation was not processed')
             if self.probe.foreground()!=self.preview_window:raise AssertionError('Owned print foreground was not observed')
-            self._live(control);entry['passed']=True
+            self._live(control)
+            if binding is not None and self.target_binding(control)!=binding:
+                raise AssertionError('Bound print dropdown identity changed')
+            entry['passed']=True
         finally:
             entry['foregroundAfter']=self.probe.foreground()
             foreground_changed=entry.get('passed') is True and entry['foregroundAfter']!=self.preview_window
@@ -349,6 +354,19 @@ class OwnedPreviewFocus:
         entry={'phase':phase,'operation':'read-only-popup-observation','foreground':self.probe.foreground()}
         try:self._live(control,require_foreground=False);entry['passed']=True
         finally:self._record(entry)
+
+    def target_binding(self,control):
+        """Observe a target's exact UIA ancestry without activating a window."""
+        chain,_=self._live(control,require_foreground=False)
+        return tuple((tuple(row['runtimeId']),row['pid'],row['hwnd']) for row in chain)
+
+    def foreign_foreground(self,control,binding):
+        """Recovery may target only the same live control and held owner chain."""
+        chain,top=self._live(control,require_foreground=False)
+        current=tuple((tuple(row['runtimeId']),row['pid'],row['hwnd']) for row in chain)
+        if current!=binding:raise AssertionError('Bound print dropdown identity changed')
+        foreground=self.probe.foreground()
+        return type(foreground)is int and foreground>0 and foreground not in (self.preview_window,top['hwnd'])
 
     def close(self):self.probe.close()
 
