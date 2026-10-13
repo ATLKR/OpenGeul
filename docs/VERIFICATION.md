@@ -1,6 +1,38 @@
 # 검증 기록
 
-## 2026-10-13 — 1.1.4 서명 없는 릴리스 후보와 이전 Store 제출
+## 2026-10-13 — 정규 1.1.4 공개와 Store API 접수 대기
+
+정규 `v1.1.4`의 [Source105](https://github.com/ATLKR/OpenGeul/actions/runs/38381387804)은
+소스 `131ccbf3ac10a82e1d6785b4c906fb836b912e73`·시도 1의 전체 22개 작업 성공입니다.
+세 Windows 환경의 인쇄 24/24와 PDF 21개·24페이지의 기존 기준 대조를 통과했고,
+`previewRecoveryCount`는 24건 모두 0입니다. 실제 복구 실행을 주장하지 않습니다.
+Source105의 실제 Release 병렬도는 x64 편집기 4·CLI 12, ARM64 편집기·CLI 각각
+8개입니다. Source104의 선택값과 구분하며 속도 향상을 보장하지 않습니다.
+
+정규 공개 자산 22개·129,531,074바이트의 서버 SHA256·로컬 체크섬·런타임·
+설치·WACK·전체 소스 실행을 원본까지 대조했습니다. 릴리스 ID는 `411579723`,
+소스 자산 지문은 `983ff285b4f1b6701c019d94794f973b50d4607b201aa37ec0ca60f6436c33e2`입니다.
+자산을 바꾸지 않고 GitHub stable·latest로 승격했습니다. 웹사이트 main
+`a5378df11b7c22730fcf4382a876bb8c21256240`의 실제 배포 7개 경로도 본문 해시가
+일치했습니다. Store 메타데이터는 확인된 Published 1.1.1.0·SID `1152921505702042424`입니다.
+
+Source105 릴리스의 단일 자동 접수 실행 [Store80](https://github.com/ATLKR/OpenGeul/actions/runs/38387455631)은
+같은 소스·시도 1의 패키지·ARM64 네이티브·양쪽 WACK·qualification 5개 게이트를
+통과했습니다. Store 신원 `1.1.4.0`의 두 raw WACK XML은 각각 필수 13개·선택
+11개 PASS·partialRun=FALSE이며, ARM64 설치 MCP 17건과 Source 런타임 일치도
+확인했습니다. 원본 Store ZIP의 서버 SHA256·CRC와 두 MSIX의 런타임을 검산했습니다.
+
+접수는 이전 제출 처리 중 보호 guard에서 중단돼 Store80 전체 결과는 실패입니다.
+Store DELETE·새 제출 POST·PUT·업로드·commit은 0건이며 기존 SID
+`1152921505702110055`와 journal 전체 상태·과거 이력을 보존했습니다. 기존 경고
+처리로 GitHub issue의 안내 본문만 갱신했습니다. 로그는 처리 중이라는 조건만
+출력하므로 현재 Certification이나 Published를 단정하지 않습니다.
+Store ContactProperties의 읽기 전용 제약이 해소됐다고 판단하지 않습니다.
+1.1.4 API 접수는 대기이며 시간별 조건 조회 후속 작업 `OpenGeul 1.1.4 제출 완료`를
+Asia/Seoul 기준으로 활성화했습니다.
+이 설정은 실제 후속 실행·접수·Store 인증·공개 완료의 증거가 아닙니다.
+
+아래 Source104는 이전 개발 후보의 검증입니다.
 
 최종 제품 소스 `2259590acc583b93411c62ab413ceff7241776cf`의
 [Source104](https://github.com/ATLKR/OpenGeul/actions/runs/38373538189)은
@@ -23,9 +55,8 @@ Source102 실패 원인의 확정을 주장하지 않습니다.
 릴리스 ID는 `411525213`입니다. 자산 22개·129,530,817바이트의 서버 SHA256과
 로컬 SHA256SUMS, 런타임·설치·WACK·전체 소스 실행을 원본까지 대조했습니다.
 소스 자산 지문은 `f1f6ba0aa7975279e730cab1ded94ddb0a1a166e47488c3f23dd924997b80364`입니다.
-이는 개발 식별자 `1.1.4.0`의 검증입니다. 정규 `v1.1.4` 태그의 새 전체
-Source와 Store 식별자 패키지 검증·전체 WACK·API 접수는 아직 수행하지 않았습니다.
-문서만 바뀐 최종 커밋도 정규 태그의 새 전체 검증을 통과해야 합니다.
+이는 개발 식별자 `1.1.4.0`의 검증입니다. 후속 정규 Source105와 Store80의
+검증 결과 및 아직 완료하지 않은 API 접수는 위 현재 기록을 따릅니다.
 
 아래는 이전 제출과 단계별 검증의 기록입니다.
 
