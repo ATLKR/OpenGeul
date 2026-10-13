@@ -82,6 +82,7 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
     'apps/studio-host/hop-overrides.ts', 'apps/studio-host/src/style.css',
     'apps/studio-host/src/core/tauri-bridge.ts', 'apps/studio-host/src/main.ts',
     'apps/studio-host/src/core/desktop-events.ts',
+    'apps/studio-host/src/core/document-open.ts',
     'apps/studio-host/src/command/commands/file.ts', 'apps/studio-host/src/opengeul-font-resources.ts',
     'apps/studio-host/src/command/commands/edit.ts',
     'apps/studio-host/src/host/toolbar-labels.ts',
@@ -263,7 +264,7 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
             or not isinstance(ledger.get('changes'), list) or not ledger['changes']
             or not isinstance(ledger.get('preservedFiles'), dict)
             or not isinstance(ledger.get('baselinePreservedFiles'), dict)
-            or ledger.get('extendedFiles') != ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts']):
+            or ledger.get('extendedFiles') != ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts','document-open.ts']):
         raise ValueError('Incomplete prepared source overlay ledger')
     activation = contract.get('nativeActivation')
     if (not isinstance(activation, dict) or not isinstance(activation.get('ledger'), dict)
