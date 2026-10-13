@@ -1,23 +1,23 @@
-name: OpenGeul 대기 Store 제출 읽기 전용 관찰
+name: OpenGeul 고정 미게시 초안 단일 DELETE 진단
 'on':
   workflow_dispatch:
     inputs:
-      expected_pending_id:
-        description: 먼저 관찰한 대기 제출 ID와 일치해야 함; 비우면 현재 ID를 조회
+      delete_pending_id:
+        description: 승인된 미게시 초안 SID1152921505702100805만 입력
         type: string
-        required: false
-        default: ''
+        required: true
 permissions:
   contents: read
+  issues: read
   actions: read
 concurrency:
-  group: opengeul-store-pending-readonly
+  group: opengeul-store
   cancel-in-progress: false
 env:
   PYTHONUTF8: '1'
 jobs:
-  observe:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diagnostic/store-pending-113')
+  delete-diagnostic:
+    if: github.event.repository.private == false && github.repository == 'ATLKR/OpenGeul' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diagnostic/store-delete-reason-113' && github.actor == 'ATLKR' && github.run_attempt == 1 && inputs.delete_pending_id == '1152921505702100805'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -27,57 +27,27 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
-      - name: 실제 GET 경계와 비밀·URL 출력 차단 회귀 검사
+      - name: 단일 DELETE 경계·거부 조건·응답 비밀 제거 검사
         run: |
+          python -m unittest discover -s tests -p test_store_delete_diagnostic.py -v
           python -m unittest discover -s tests -p test_store_pending_observe.py -v
           python -m unittest discover -s tests -p test_store_status_diagnostics.py -v
-      - name: 고정 실패 실행의 공식 로그 바이트 SHA만 관찰
+      - name: 정확한 초안·공개 기준·journal 검증 뒤 DELETE 한 번과 제한된 응답 진단
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          python - <<'PY'
-          import hashlib, json, subprocess, re, os
-          from pathlib import Path
-          r = subprocess.run(['gh', 'api', '--allow-escape-sequences', '--method', 'GET', 'repos/ATLKR/OpenGeul/actions/jobs/115007617322/logs'], capture_output=True, timeout=120)
-          result = {'jobId': 115007617322, 'returncode': r.returncode, 'storeMutationsAttempted': False}
-          if r.returncode == 0:
-              result.update(bytes=len(r.stdout), sha256=hashlib.sha256(r.stdout).hexdigest(), matchesRetainedOriginal=len(r.stdout)==16981 and hashlib.sha256(r.stdout).hexdigest()=='1858029bdb6c40fb10f3114504c07ca4456b9b449e2c03d584f92bd1affcde81')
-          else:
-              error=r.stderr.decode('utf-8',errors='replace')
-              hints=['Resource not accessible by integration','Must have admin rights to Repository','Not Found','Forbidden','unable to parse response','failed to run','HTTP 403','HTTP 404','HTTP 410','HTTP 502','HTTP 503']
-              result.update(stderrBytes=len(r.stderr),stderrSha256=hashlib.sha256(r.stderr).hexdigest(),httpStatusCodes=sorted(set(re.findall(r'HTTP (\d{3})',error))),knownHints=[hint for hint in hints if hint in error],cliFlagHints=sorted(set(re.findall(r'--[a-z][a-z-]{1,60}',error))))
-              if len(r.stderr)<=1024:
-                  message=error.replace(os.environ.get('GH_TOKEN','') or 'UNSET_TOKEN_SENTINEL','[redacted]')
-                  message=re.sub(r'https?://\S+','[redacted-url]',message)
-                  message=re.sub(r'(?i)bearer\s+\S+','[redacted-auth]',message)
-                  message=re.sub(r'[A-Za-z0-9_+/=.-]{24,}','[redacted-long-value]',message)
-                  result['boundedRedactedCliDiagnostic']=message
-          Path('store-failure-log-byte-observation.json').write_text(json.dumps(result,sort_keys=True,indent=2)+'\n',encoding='utf-8')
-          print(json.dumps(result))
-          PY
-      - name: 현재 대기 제출과 공개 기준을 읽기만 수행
-        env:
           STORE_APP_ID: ${{ vars.STORE_APP_ID }}
           STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
           STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
           STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-          EXPECTED_PENDING_ID: ${{ inputs.expected_pending_id }}
-        run: python scripts/store_pending_observe.py --expected-pending-id "$EXPECTED_PENDING_ID" --output store-pending-observation.json
-      - name: 고정 초안·공개 기준·상태의 제한된 오류/경고 GET 관찰
-        env:
-          STORE_APP_ID: ${{ vars.STORE_APP_ID }}
-          STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
-          STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
-          STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-        run: python scripts/store_status_diagnostics.py --output store-status-diagnostics.json
-      - name: 제한된 관측 필드만 보존
+          DELETE_PENDING_ID: ${{ inputs.delete_pending_id }}
+        run: python scripts/store_delete_diagnostic.py --output-dir store-delete-diagnostic
+      - name: 비밀·URL·원문 없는 JSON만 하루 보존
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: opengeul-store-pending-state-${{ github.run_id }}
+          name: opengeul-store-delete-diagnostic-${{ github.run_id }}
           path: |
-            store-pending-observation.json
-            store-failure-log-byte-observation.json
-            store-status-diagnostics.json
+            store-delete-diagnostic/pre-delete-intent.json
+            store-delete-diagnostic/delete-diagnostic.json
           retention-days: 1
           if-no-files-found: warn
