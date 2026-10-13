@@ -59,6 +59,21 @@ class Tests(unittest.TestCase):
         for field,value in [('pendingApplicationSubmission',{'id':self.d.PENDING}),('lastPublishedApplicationSubmission',{'id':'123'})]:
             self.directory=Path(self.temp.name)/field;values=self.values();values[0][field]=value
             _,r=self.run_reconcile(values);self.assertFalse(r['journalPatchAttempted']);self.assertFalse(any(m=='PATCH'for m,p in self.calls))
+    def test_omitted_pending_property_reconciles_with_bounded_reference_schema(self):
+        self.app.pop('pendingApplicationSubmission')
+        o,r=self.run_reconcile()
+        self.assertTrue(r['journalUpdateAcknowledged'])
+        self.assertEqual([q.get_method()for q in o.calls],['GET']*6)
+        self.assertEqual(len(r['applicationReferenceSchema']),2)
+        for schema in r['applicationReferenceSchema']:
+            self.assertEqual(schema['pending'],{'propertyPresent':False,'shape':'omitted','referenceId':None,'referenceValid':True})
+            self.assertEqual(schema['published']['referenceId'],self.d.PUBLISHED)
+        self.assertNotIn('PRIVATE_LISTING',json.dumps(r));self.assertNotIn('https://',json.dumps(r))
+    def test_malformed_or_nonnull_pending_never_reaches_journal_patch(self):
+        for index,value in enumerate(({},[],False,'PRIVATE_BAD_REFERENCE',{'id':'123'},{'id':None},{'id':True})):
+            self.directory=Path(self.temp.name)/('malformed-'+str(index));values=self.values();values[0]['pendingApplicationSubmission']=value
+            o,r=self.run_reconcile(values)
+            self.assertEqual(len(o.calls),1);self.assertFalse(r['journalPatchAttempted'])
     def test_old_sid_still_readable_or_403_prevents_patch(self):
         for index,value in enumerate(({'id':self.d.PENDING},self.missing(403))):
             self.directory=Path(self.temp.name)/str(index);values=self.values();values[1]=value

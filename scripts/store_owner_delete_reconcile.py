@@ -73,8 +73,17 @@ def reconcile(opener,token,github,directory,result=None):
         value=decode(raw);result['storeGets'].append({'pathRole':'app'if not path else'published'if path.endswith(PUBLISHED)else'old-pending',
             'httpStatus':200,'responseSha256':hashlib.sha256(raw).hexdigest()});return value
     def observe():
-        app=get('');require(app.get('id')==w.STORE_APP_ID and app.get('packageIdentityName')==w.STORE_IDENTITY['name']
-            and 'pendingApplicationSubmission'in app and app['pendingApplicationSubmission']is None
+        app=get('');schema={}
+        for field,label in(('pendingApplicationSubmission','pending'),('lastPublishedApplicationSubmission','published')):
+            value=app.get(field);selected={'propertyPresent':field in app,
+                'shape':'omitted'if field not in app else'null'if value is None else'object'if isinstance(value,dict)else'invalid',
+                'referenceId':None,'referenceValid':False}
+            try:selected.update(referenceId=w._ref(app,field),referenceValid=True)
+            except(KeyError,TypeError,ValueError):pass
+            schema[label]=selected
+        result.setdefault('applicationReferenceSchema',[]).append(schema)
+        require(app.get('id')==w.STORE_APP_ID and app.get('packageIdentityName')==w.STORE_IDENTITY['name']
+            and w._ref(app,'pendingApplicationSubmission')is None
             and isinstance(app.get('lastPublishedApplicationSubmission'),dict)and app['lastPublishedApplicationSubmission'].get('id')==PUBLISHED)
         require(get('submissions/'+PENDING,True)is None);baseline=get('submissions/'+PUBLISHED)
         require(baseline.get('id')==PUBLISHED and baseline.get('status')=='Published'and w.draft_semantic_sha256(baseline)==SEMANTIC_SHA
