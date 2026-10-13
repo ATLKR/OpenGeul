@@ -15,6 +15,7 @@ from print_raster import inspect_print_pdf
 from print_queue import VirtualQueue,require_host
 from print_results import completed_job,validate_cases
 from print_focus import open_system_dialog,fill_print_output,prepare_app_for_print,click_owned_print_preferences
+from print_dialog_input import click_owned_print_dialog
 
 def wait(check,seconds=30):
     deadline=time.monotonic()+seconds
@@ -123,7 +124,10 @@ def print_document(exe,fixture,case,folder):
                 if queue.jobs() or output.exists():raise AssertionError('Cancelled print produced output')
                 report={'cancelled':True,'jobs':[],'queue':queue.name}
             else:
-                control(dialog,'Button',1).click_input();save_print_output(session,output,folder)
+                runtime=json.loads((folder/'session/runtime.json').read_text(encoding='utf-8'))
+                click_owned_print_dialog(dialog,session.proc.pid,runtime,
+                                         app_handle=int(session.proc._handle),evidence_dir=folder)
+                save_print_output(session,output,folder)
                 print_output_wait(folder,'pdf-created',lambda:output.is_file() and output.stat().st_size>100,90)
                 print_output_wait(folder,'pdf-eof',lambda:output.read_bytes().rstrip().endswith(b'%%EOF'),30)
                 def completed():
