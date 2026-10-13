@@ -12,6 +12,8 @@ REPOSITORY = 'ATLKR/OpenGeul'
 USER = {'login': 'ATLKR', 'id': 65988341, 'type': 'User'}
 BOT = {'login': 'github-actions[bot]', 'id': 41898282, 'type': 'Bot'}
 PUBLIC = {'full_name': REPOSITORY, 'private': False, 'id': 1405493151}
+PRODUCT_VERSION = json.loads((ROOT / 'config/product.json').read_text())['version']
+NEXT_VERSION = '.'.join([*PRODUCT_VERSION.split('.')[:2], str(int(PRODUCT_VERSION.split('.')[2]) + 1)])
 
 
 def module():
@@ -71,8 +73,7 @@ class ContextTests(unittest.TestCase):
         env = self.context(); self.path.write_text('{"repository":{"private":false,"full_name":"ATLKR/OpenGeul"},"repository":{"private":false,"full_name":"ATLKR/OpenGeul"}}'); self.reject(env)
 
     def test_source_push_supports_main_canonical_and_version_matched_development_tags(self):
-        self.assertEqual(json.loads((ROOT / 'config/product.json').read_text())['version'], '1.1.3')
-        for ref in ('refs/heads/main', 'refs/tags/v1.1.3', 'refs/tags/v1.1.3-dev.72.1'):
+        for ref in ('refs/heads/main', f'refs/tags/v{PRODUCT_VERSION}', f'refs/tags/v{PRODUCT_VERSION}-dev.72.1'):
             for job in ('native-e2e-arm64', 'virtual-print-arm64', 'msix-native-arm64'):
                 with self.subTest(ref=ref, job=job): self.assertEqual(self.value.binding(self.context(ref=ref, job=job))['ref'], ref)
 
@@ -82,16 +83,16 @@ class ContextTests(unittest.TestCase):
         for attempt in ('0', '01', '-1', '2.0', '1' * 21): self.reject(self.context(attempt=attempt))
 
     def test_wrong_tags_refs_and_version_env_override_are_rejected(self):
-        for ref in ('refs/heads/feature', 'refs/tags/v1.1.2', 'refs/tags/v1.1.4-dev.72.1',
-                    'refs/tags/v1.1.3-dev.0.1', 'refs/tags/v1.1.3-dev.72.0', 'refs/tags/v1.1.3-extra'):
-            env = self.context(ref=ref); env['PRODUCT_VERSION'] = '1.1.4'; self.reject(env)
+        for ref in ('refs/heads/feature', 'refs/tags/v1.1.2', f'refs/tags/v{NEXT_VERSION}-dev.72.1',
+                    f'refs/tags/v{PRODUCT_VERSION}-dev.0.1', f'refs/tags/v{PRODUCT_VERSION}-dev.72.0', f'refs/tags/v{PRODUCT_VERSION}-extra'):
+            env = self.context(ref=ref); env['PRODUCT_VERSION'] = NEXT_VERSION; self.reject(env)
         self.reject(self.context(payload={'ref': 'refs/heads/other'}))
         self.reject(self.context(payload={'deleted': True}))
 
     def test_source_manual_and_schedule_support_main_only(self):
         for event in ('workflow_dispatch', 'schedule'):
             self.assertEqual(self.value.binding(self.context(event=event, actor=BOT, attempt='2'))['runAttempt'], '2')
-            self.reject(self.context(event=event, ref='refs/tags/v1.1.3'))
+            self.reject(self.context(event=event, ref=f'refs/tags/v{PRODUCT_VERSION}'))
         self.reject(self.context(event='repository_dispatch'))
 
     def test_source_public_users_and_bots_require_exact_sender_env_identity(self):
@@ -124,7 +125,7 @@ class ContextTests(unittest.TestCase):
         self.value.ROOT = Path(self.tmp.name)
         env = self.context(ref='refs/tags/v1.2.3-dev.72.1'); env['PRODUCT_VERSION'] = '9.9.9'
         self.assertEqual(self.value.binding(env)['productVersion'], '1.2.3')
-        self.reject(self.context(ref='refs/tags/v1.1.3'))
+        self.reject(self.context(ref=f'refs/tags/v{PRODUCT_VERSION}'))
 
     def test_source_sha_run_and_manual_payload_bindings_are_required(self):
         for key, value in (('GITHUB_SHA', '0' * 40), ('GITHUB_SHA', 'A' * 40),
@@ -177,7 +178,7 @@ class ContextTests(unittest.TestCase):
             env=self.context(event='workflow_dispatch',job='store-native-arm64',workflow='store-package.yml'); env['ARCHITECTURE']='arm64'
             if change=='actor': env=self.context(event='workflow_dispatch',actor={'login':'public-contributor','id':91827364,'type':'User'},job='store-native-arm64',workflow='store-package.yml');env['ARCHITECTURE']='arm64'
             elif change=='event': env['GITHUB_EVENT_NAME']='pull_request'
-            elif change=='ref': env['GITHUB_REF']='refs/tags/v1.1.3'
+            elif change=='ref': env['GITHUB_REF']=f'refs/tags/v{PRODUCT_VERSION}'
             elif change=='arch': env['ARCHITECTURE']='x64'
             elif change=='job': env['GITHUB_JOB']='store-package'
             elif change=='workflow': env['GITHUB_WORKFLOW_REF']=f'{REPOSITORY}/.github/workflows/msix.yml@refs/heads/main'

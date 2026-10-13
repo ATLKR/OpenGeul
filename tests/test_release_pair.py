@@ -12,7 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'e2e'), str(ROOT / 'tests')]
 from test_mcp_qualification import installed_proof
-from buildkit import DEV_IDENTITY, manifest
+from buildkit import DEV_IDENTITY, manifest, package_version
 from windows_arch import component_artifact_name, machine_for
 from wack_result import inspect
 import release_pair as pair
@@ -26,6 +26,8 @@ class ReleasePairTests(unittest.TestCase):
                     'GITHUB_RUN_ID': '1234', 'GITHUB_RUN_ATTEMPT': '2'}
         self.packages = {}; self.wacks = {}; self.runtime = {}
         self.upstream = json.loads((ROOT / 'config/upstream.lock.json').read_text())
+        self.version = json.loads((ROOT / 'config/product.json').read_text())['version']
+        self.package_version = package_version(self.version)
         for arch in ('x64', 'arm64'):
             self.make_arch(arch)
 
@@ -44,12 +46,12 @@ class ReleasePairTests(unittest.TestCase):
         folder = self.root / arch; folder.mkdir(); self.packages[arch] = folder
         raw_pe = bytearray(256); raw_pe[:2] = b'MZ'; raw_pe[60:64] = (128).to_bytes(4, 'little')
         raw_pe[128:132] = b'PE\0\0'; raw_pe[132:134] = machine_for(arch).to_bytes(2, 'little')
-        self.runtime[arch] = {'AppxManifest.xml': manifest(DEV_IDENTITY, '1.1.3', arch).encode(),
+        self.runtime[arch] = {'AppxManifest.xml': manifest(DEV_IDENTITY, self.version, arch).encode(),
             'OpenGeul.exe': bytes(raw_pe), 'Tools/rhwp.exe': bytes(raw_pe) + b'cli',
             'Notices/OpenGeul-LICENSE.txt': b'MIT', 'Assets/StoreLogo.png': b'PNG'}
-        msix = folder / f'OpenGeul_1.1.3.0_{arch}_development-unsigned.msix'
+        msix = folder / f'OpenGeul_{self.package_version}_{arch}_development-unsigned.msix'
         self.zip(msix, {**self.runtime[arch], 'AppxBlockMap.xml': b'<BlockMap/>', '[Content_Types].xml': b'<Types/>'})
-        self.zip(folder / f'OpenGeul-1.1.3-{arch}-portable.zip', self.runtime[arch])
+        self.zip(folder / f'OpenGeul-{self.version}-{arch}-portable.zip', self.runtime[arch])
         (folder / 'AppxManifest.xml').write_bytes(self.runtime[arch]['AppxManifest.xml'])
         (folder / 'rhwp-help.txt').write_text('rhwp help\n')
         components = {'formatVersion': 1, 'repository': 'ATLKR/OpenGeul', 'commit': 'a' * 40,
@@ -61,22 +63,22 @@ class ReleasePairTests(unittest.TestCase):
                 'runtime': name, 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
         self.write_json(folder / 'provenance.json', {'unsigned': True, 'architecture': arch, 'members': 7,
             'sha256': hashlib.sha256(msix.read_bytes()).hexdigest(), 'repository': 'ATLKR/OpenGeul',
-            'commit': 'a' * 40, 'runId': '1234', 'version': '1.1.3', 'package': msix.name,
-            'upstream': self.upstream, 'sourceParity': {'version': '1.1.3', 'source': 'OpenGeul distribution overlays'},
+            'commit': 'a' * 40, 'runId': '1234', 'version': self.version, 'package': msix.name,
+            'upstream': self.upstream, 'sourceParity': {'version': self.version, 'source': 'OpenGeul distribution overlays'},
             'manualWindowsUx': 'not-verified', 'storeCertified': False, 'windowsComponents': components})
         self.sums(folder)
         wack = self.root / ('wack-' + arch); wack.mkdir(); self.wacks[arch] = wack
         signed = ('e' if arch == 'x64' else 'f') * 64
         install = {'success': True, 'originalSha256': hashlib.sha256(msix.read_bytes()).hexdigest().upper(),
             'signedTestPackageSha256': signed.upper(), 'publisher': DEV_IDENTITY['publisher'],
-            'packageFullName': f"{DEV_IDENTITY['name']}_1.1.3.0_{arch}__9za217j1njc2t"}
+            'packageFullName': f"{DEV_IDENTITY['name']}_{self.package_version}_{arch}__9za217j1njc2t"}
         install['mcp'] = installed_proof(arch, components['components']['cli']['sha256'], install['packageFullName'],
             'a' * 40, '1234', '2', components['components']['cli']['size'])
         self.write_json(wack / 'install.json', install)
         self.write_json(wack / 'wack-context.json', {'invocationMode': 'documented-appxpackagepath',
             'inputPackageSha256': signed.upper(), 'runnerSessionId': 1, 'wackSessionId': 1})
-        xml = f'''<REPORT OVERALL_RESULT="PASS" PARTIAL_RUN="FALSE" APP_NAME="{DEV_IDENTITY['name']}" APP_VERSION="1.1.3.0" VALIDATION_TYPE="CommandLine" APP_TYPE="Centennial" VERSION="10.0.26100.8249">
-        <APPLICATIONS><Installed_Programs><Program Source="AppxPackage" Name="{DEV_IDENTITY['name']}" Version="1.1.3.0"><Indicators><WindowsStoreAppManifestIndicators><PackageManifest><Package><Identity Name="{DEV_IDENTITY['name']}" Publisher="{DEV_IDENTITY['publisher']}" Version="1.1.3.0" ProcessorArchitecture="{arch}"/></Package></PackageManifest></WindowsStoreAppManifestIndicators></Indicators></Program></Installed_Programs></APPLICATIONS>
+        xml = f'''<REPORT OVERALL_RESULT="PASS" PARTIAL_RUN="FALSE" APP_NAME="{DEV_IDENTITY['name']}" APP_VERSION="{self.package_version}" VALIDATION_TYPE="CommandLine" APP_TYPE="Centennial" VERSION="10.0.26100.8249">
+        <APPLICATIONS><Installed_Programs><Program Source="AppxPackage" Name="{DEV_IDENTITY['name']}" Version="{self.package_version}"><Indicators><WindowsStoreAppManifestIndicators><PackageManifest><Package><Identity Name="{DEV_IDENTITY['name']}" Publisher="{DEV_IDENTITY['publisher']}" Version="{self.package_version}" ProcessorArchitecture="{arch}"/></Package></PackageManifest></WindowsStoreAppManifestIndicators></Indicators></Program></Installed_Programs></APPLICATIONS>
         <TEST NAME="Required"><RESULT>PASS</RESULT></TEST><TEST NAME="Blocked executables" OPTIONAL="TRUE"><RESULT>PASS</RESULT></TEST></REPORT>'''
         (wack / 'wack.xml').write_text(xml, encoding='utf-8'); self.summary(arch)
         if arch=='arm64':self.rebind_split()
@@ -96,7 +98,7 @@ class ReleasePairTests(unittest.TestCase):
 
     def summary(self, arch):
         w = self.wacks[arch]
-        self.write_json(w / 'wack.json', inspect(w / 'wack.xml', DEV_IDENTITY['name'], '1.1.3.0', 0))
+        self.write_json(w / 'wack.json', inspect(w / 'wack.xml', DEV_IDENTITY['name'], self.package_version, 0))
 
     def assemble(self):
         return pair.assemble(self.packages['x64'], self.packages['arm64'], self.wacks['x64'], self.wacks['arm64'], self.output, env=self.env)
@@ -157,8 +159,8 @@ class ReleasePairTests(unittest.TestCase):
 
     def test_wrong_native_machine_is_rejected_even_with_matching_checksums(self):
         payload = dict(self.runtime['arm64']); payload['Tools/rhwp.exe'] = self.runtime['x64']['Tools/rhwp.exe']
-        self.zip(self.packages['arm64'] / 'OpenGeul-1.1.3-arm64-portable.zip', payload)
-        msix = self.packages['arm64'] / 'OpenGeul_1.1.3.0_arm64_development-unsigned.msix'
+        self.zip(self.packages['arm64'] / f'OpenGeul-{self.version}-arm64-portable.zip', payload)
+        msix = self.packages['arm64'] / f'OpenGeul_{self.package_version}_arm64_development-unsigned.msix'
         self.zip(msix, {**payload, 'AppxBlockMap.xml': b'<BlockMap/>', '[Content_Types].xml': b'<Types/>'})
         self.mutate_prov('arm64', lambda d: d.update(sha256=hashlib.sha256(msix.read_bytes()).hexdigest())); self.rejected()
 
@@ -228,7 +230,7 @@ class ReleasePairTests(unittest.TestCase):
 
     def test_full_resource_parity_is_checked_beyond_editor_and_cli(self):
         payload = dict(self.runtime['arm64']); payload['Assets/StoreLogo.png'] = b'different'
-        self.zip(self.packages['arm64'] / 'OpenGeul-1.1.3-arm64-portable.zip', payload)
+        self.zip(self.packages['arm64'] / f'OpenGeul-{self.version}-arm64-portable.zip', payload)
         self.sums(self.packages['arm64']); self.rejected()
 
     def test_reader_reinspects_raw_xml_even_after_global_checksums_recomputed(self):
