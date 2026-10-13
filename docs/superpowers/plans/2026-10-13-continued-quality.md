@@ -86,12 +86,12 @@ Preferences를 통과했으나 Print 이후 Save 창을 관측하지 못했습�
 **Files:** `e2e/preview_settings.py`, `e2e/print_focus.py`의 preview 경계,
 새 native Print 입력 helper, `e2e/virtual_print.py`와 해당 회귀 검사.
 
-- [ ] 실제 전경 상실·여백 popup 닫힘 순서를 configure_preview에서 먼저 재현합니다.
-- [ ] 같은 소유 dropdown의 확정된 전경 상실·닫힘에만 기존 제한 시간 안에서
+- [x] 전경 상실·여백 popup 부재와 명시적 collapsed 상태의 복구 조건을 configure_preview에서 먼저 재현합니다. (실제 실패의 collapsed 숫자는 미수집)
+- [x] 같은 소유 dropdown의 확정된 전경 상실·닫힘에만 기존 제한 시간 안에서
   한 번의 명시적 소유 창 복구를 수행합니다. read-only 관찰은 입력하지 않습니다.
-- [ ] native Print는 실제 앱·WebView process handle, 창·버튼·전경·좌표를
+- [x] native Print는 실제 앱·WebView process handle, 창·버튼·전경·좌표를
   결합한 뒤 한 번만 물리 입력합니다. 다른 창·PID 재사용·좌표 변경은 거부합니다.
-- [ ] 원본 소유권·PDF·스풀러·페이지 기준과 제한 시간을 유지하고 독립 검토합니다.
+- [x] 원본 소유권·PDF·스풀러·페이지 기준과 제한 시간을 유지하고 독립 검토합니다. (자체 팝업 오분류와 UIA 상태 조회 사이 전경 변경도 별도 RED→GREEN)
 - [ ] 통합한 새 후보에서 전체 Windows 소스·설치·MCP·인쇄·전체 WACK를 다시 검증합니다.
 
 동일 소스·입력 22개를 사용한 Source103의 브라우저 전용 진단에서는 세
