@@ -194,6 +194,67 @@ class PrintSaveInputTests(unittest.TestCase):
         self.button.click_input = click; self.call()
         self.assertEqual(len(self.button.inputs), 1); self.assertTrue(self.diagnostic()['passed'])
 
+    def test_owned_shell_readiness_settles_within_the_existing_budget_before_input(self):
+        self.probe.foreground_hwnd=300;original=self.probe.window;reads=[]
+        def window(hwnd):
+            row=original(hwnd)
+            if hwnd==300:
+                row['enabled']=self.clock>=1;reads.append((self.clock,row['enabled']))
+            return row
+        self.probe.window=window;self.call()
+        self.assertTrue(any(not ready for _time,ready in reads))
+        self.assertEqual(len(self.field.inputs),1);self.assertEqual(len(self.button.inputs),1)
+        self.assertGreaterEqual(self.clock,1.75);self.assertLess(self.clock,30)
+        data=self.diagnostic();self.assertFalse(data['initialWindow']['enabled'])
+        self.assertTrue(data['readyWindow']['enabled']);self.assertEqual(self.probe.activations,[])
+
+    def test_owned_shell_never_ready_stays_bounded_and_receives_no_input(self):
+        self.probe.windows[300]['enabled']=False
+        with self.assertRaisesRegex(AssertionError,'stabilize'):self.call()
+        self.assertEqual(self.field.inputs,[]);self.assertEqual(self.button.inputs,[])
+        self.assertGreaterEqual(self.clock,30);self.assertLess(self.clock,32)
+        data=self.diagnostic();self.assertFalse(data['passed']);self.assertFalse(data['initialWindow']['enabled'])
+
+    def test_loading_shell_identity_change_is_rejected_without_input(self):
+        for kind in ('pid','tid','root','class','owner','closed'):
+            with self.subTest(kind=kind):
+                self.setUp();original=self.probe.window
+                def window(hwnd):
+                    row=original(hwnd)
+                    if hwnd==300:
+                        row['enabled']=False
+                        if self.clock>=1:
+                            if kind=='closed':raise AssertionError('Closed native window')
+                            if kind=='class':row['cls']='foreign'
+                            elif kind=='owner':row['owners']=[999]
+                            else:row[kind]=999
+                    return row
+                self.probe.window=window;self.reject();self.assertEqual(self.field.inputs,[])
+                self.assertLess(self.clock,3)
+
+    def test_shell_loses_readiness_after_ready_snapshot_and_no_input_is_sent(self):
+        original=self.probe.window
+        def window(hwnd):
+            row=original(hwnd)
+            if hwnd==300 and self.clock>=1:row['enabled']=False
+            return row
+        self.probe.window=window;self.reject();self.assertEqual(self.field.inputs,[])
+
+    def test_initial_foreign_window_identity_is_rejected_before_any_readiness_wait(self):
+        self.probe.windows[300].update(pid=99,enabled=False);self.reject()
+        self.assertEqual(self.clock,0);self.assertEqual(self.field.inputs,[])
+
+    def test_loading_native_values_are_recorded_even_before_identity_rejection(self):
+        self.probe.windows[300].update(root=999,visible=False,enabled=False);self.reject()
+        data=self.diagnostic();self.assertEqual(data['initialWindow']['root'],999)
+        self.assertFalse(data['initialWindow']['visible']);self.assertFalse(data['initialWindow']['enabled'])
+
+    def test_foreign_title_or_class_is_recorded_only_as_a_safe_mismatch(self):
+        opaque='secret https://example.invalid/opaque?token=secret'
+        self.dialog.window_text=lambda:opaque;self.probe.windows[300]['cls']=opaque;self.reject()
+        data=self.diagnostic();self.assertNotIn('secret',json.dumps(data))
+        self.assertFalse(data['initialWrapperTitleMatched']);self.assertEqual(data['initialWindow']['cls'],'unexpected-class')
+
     def test_actual_print_caller_filters_save_ownership_and_passes_held_runtime(self):
         tree = ast.parse((ROOT/'e2e/virtual_print.py').read_text(encoding='utf8'))
         selected = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'save_print_output')
