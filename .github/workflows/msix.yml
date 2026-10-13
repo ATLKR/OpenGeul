@@ -38,11 +38,20 @@ jobs:
         Get-PrinterDriver -Name 'Microsoft Print To PDF' -ErrorAction Stop | Out-Null
         python -m pip install -r e2e/print-requirements.txt
         ./e2e/ensure-webview2.ps1
-    - name: 공개 Source87 런타임에서 Preferences 입력 없이 hit 관계 읽기
+    - name: 고정 공개 Source87 런타임 검증·준비
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
-      run: python -u ci/native_print_hit_diagnostic.py
+      run: python -u ci/native_print_hit_diagnostic.py --prepare-runtime
+    - name: ARM 러너의 검증된 OS 창과 전경 준비
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python e2e/runner-ready.py --prepare --output runner-ready
+    - name: Preferences 입력 없이 실제 native hit 관계 읽기
+      shell: pwsh
+      run: python -u ci/native_print_hit_diagnostic.py --observe
     - name: 진단 메타데이터만 크기 확인
       id: bounded-evidence
       if: always()

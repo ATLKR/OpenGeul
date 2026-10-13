@@ -193,9 +193,15 @@ def observe(runtime,work,report):
         report.update(observed=True,preferencesPhysicalInputs=0,spoolJobs=0)
 
 def main():
+    require(sys.argv[1:] in (['--prepare-runtime'],['--observe']),'Exactly one fixed diagnostic phase is required')
+    preparing=sys.argv[1]=='--prepare-runtime'
     report={'scope':'native-hit observation only','sourceQualified':False,'wackQualified':False,
         'storeQualified':False,'productTelemetry':False,'observed':False}
-    OUT.mkdir(exist_ok=False);work=ROOT/'.work/native-hit';work.mkdir(parents=True,exist_ok=False)
+    work=ROOT/'.work/native-hit'
+    if preparing:
+        OUT.mkdir(exist_ok=False);work.mkdir(parents=True,exist_ok=False)
+    else:
+        report=json.loads((OUT/'producer-preparation.json').read_bytes())
     try:
         require(os.environ.get('GITHUB_REPOSITORY')=='ATLKR/OpenGeul'
             and os.environ.get('GITHUB_EVENT_NAME')=='workflow_dispatch'
@@ -209,13 +215,31 @@ def main():
         report['controller']={'head':head,'runId':os.environ['GITHUB_RUN_ID'],
             'attempt':os.environ['GITHUB_RUN_ATTEMPT'],'executablePE':verify_executable(Path(sys.executable),'x64'),
             'processMachine':controller['processMachine'],'nativeMachine':controller['nativeMachine']}
-        runtime=prepare_runtime(work,report);observe(runtime,work,report)
+        if preparing:
+            prepare_runtime(work,report)
+        else:
+            require(report['producer']['head']==PRODUCER_HEAD
+                and report['producer']['runId']==PRODUCER_RUN and report['producer']['attempt']==1,
+                'Prepared producer identity changed')
+            prepared=json.loads((OUT/'producer-preparation.json').read_bytes())['controller']
+            require(all(prepared[k]==report['controller'][k] for k in ('head','runId','attempt')),
+                'Prepared diagnostic controller identity changed')
+            runtime=work/'runtime'
+            require(digest(runtime/'OpenGeul.exe')==EDITOR_SHA and digest(runtime/'Tools/rhwp.exe')==CLI_SHA,
+                'Prepared runtime bytes changed before observation')
+            observe(runtime,work,report)
     except BaseException as error:
         report['errorType']=type(error).__name__[:64];raise
     finally:
+        # Keep the exact original bounded first-focus metadata when that stage
+        # rejects before the native Preferences hit can be observed.
+        focus=work/'table--300/print-initial-focus-diagnostic.json'
+        if focus.is_file():
+            raw=focus.read_bytes();require(len(raw)<=4096,'First focus diagnostic exceeds its bound')
+            (OUT/'print-initial-focus-diagnostic.json').write_bytes(raw)
         payload=json.dumps(report,ensure_ascii=True,separators=(',',':')).encode('ascii')
         require(len(payload)<=32*1024,'Diagnostic metadata exceeds its bound')
-        (OUT/'native-hit-observation.json').write_bytes(payload)
+        (OUT/('producer-preparation.json' if preparing else 'native-hit-observation.json')).write_bytes(payload)
         print(json.dumps({'observed':report['observed'],'scope':report['scope'],
             'sourceQualified':False,'wackQualified':False,'storeQualified':False}))
 
