@@ -140,6 +140,19 @@ class MetadataReadbackTests(unittest.TestCase):
         self.assertNotIn('https://', serialized)
         self.assertRegex(serialized, r'[a-f0-9]{64}')
 
+    def test_unknown_ascii_secret_keys_and_noncanonical_filenames_are_hashed(self):
+        expected, details = self.reconstructed()
+        actual = self.actual_for(expected)
+        actual['pricing']['PRIVATE_SECRET'] = None
+        actual['listings']['ko-kr']['baseListing']['PRIVATE_SECRET'] = 'hidden'
+        actual['applicationPackages'][1]['fileName'] = 'PRIVATE_SECRET.msix'
+        result = readback.comparison(expected, actual, details, self.pending)
+        serialized = json.dumps(result)
+        self.assertNotIn('PRIVATE_SECRET', serialized)
+        self.assertNotIn('old.msix', serialized)
+        self.assertIn('OpenGeul_1.1.3.0_x64_store-unsigned.msix', serialized)
+        self.assertIs(result['conditions']['packages'], False)
+
     def test_strict_bounded_json_decode_rejects_duplicates_nonfinite_and_oversize(self):
         for raw in (b'{"id":"one","id":"two"}', b'{"nested":{"x":1,"x":2}}',
                     b'{"value":NaN}', b'{"value":Infinity}', b' ' * (1024 * 1024 + 1)):

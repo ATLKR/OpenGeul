@@ -6,6 +6,14 @@ import store_submit as w
 REF='refs/heads/diagnostic/store-metadata-readback-70'
 PENDING='1152921505702110055';PUBLISHED=w.ADOPTION_BASELINE_ID
 MISSING=object();MAX_RESPONSE=1024*1024
+KNOWN_KEYS=set(('id fileName fileStatus version architecture minimumDirectXVersion minimumSystemRam '
+    'priceId trialPeriod marketSpecificPricings sales isAdvancedPricingModel '
+    'baseListing platformOverrides title description features releaseNotes images keywords '
+    'shortDescription licenseTerms copyrightAndTrademarkInfo supportContact websiteUrl privacyPolicyUrl '
+    'imageType fileName description ').split())|{
+    'ko-kr','en-us','en-gb','ja-jp','zh-cn','zh-tw','de-de','fr-fr','es-es','pt-br','it-it',
+    'US','KR','GB','CA','AU','NZ','JP','CN','TW','HK','DE','FR','ES','IT','BR','IN','MX','NL','SE','NO','FI','DK'}
+CANONICAL_FILES={'OpenGeul_1.1.3.0_'+arch+'_store-unsigned.msix'for arch in('x64','arm64')}
 
 def require(value):
     if not value:raise ValueError('Fixed readback guard mismatch')
@@ -24,7 +32,7 @@ def digest(value):
     return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
 def safe_key(key):
-    return key if isinstance(key,str)and re.fullmatch('[A-Za-z0-9_.-]{1,80}',key)else'[key-sha256:'+digest(key)+']'
+    return key if isinstance(key,str)and key in KNOWN_KEYS else'[key-sha256:'+digest(key)+']'
 
 def shape(value):
     if value is MISSING:return {'present':False}
@@ -68,7 +76,7 @@ def packages_projection(value):
         for field in('fileName','fileStatus','version','architecture','minimumDirectXVersion','minimumSystemRam'):
             raw=package.get(field,MISSING);entry['fields'][field]=shape(raw)
             valid=isinstance(raw,str)and(
-                field=='fileName'and re.fullmatch(r'[A-Za-z0-9_. -]{1,240}\.(?:msix|appx|msixbundle|appxbundle)',raw)
+                field=='fileName'and raw in CANONICAL_FILES
                 or field=='version'and re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){3}',raw)
                 or field=='architecture'and raw.lower()in{'x86','x64','arm','arm64','neutral'}
                 or field=='fileStatus'and raw in{'None','PendingDelete','PendingUpload','Uploaded','Deleted','Invalid'}
