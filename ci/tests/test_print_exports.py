@@ -17,13 +17,22 @@ class Clock:
     def monotonic(self):return self.now
     def sleep(self,seconds):self.now+=seconds
 
+class Combo:
+    handle=13
+    def class_name(self):return 'ComboBox'
+    def process_id(self):return 1
+    def is_visible(self):return True
+    def is_enabled(self):return True
+    def rectangle(self):return types.SimpleNamespace(left=0,top=0,right=200,bottom=20)
+
 class Field:
     handle=11
     def __init__(self):self.text='';self.inputs=0;self.visible=True;self.reject=False
     def class_name(self):return 'Edit'
+    def process_id(self):return 1
     def is_visible(self):return self.visible
     def is_enabled(self):return True
-    def parent(self):return types.SimpleNamespace(class_name=lambda:'ComboBox')
+    def parent(self):return Combo()
     def rectangle(self):return types.SimpleNamespace(left=0,top=0,right=200,bottom=20)
     def set_edit_text(self,text):
         self.inputs+=1
@@ -36,9 +45,25 @@ class Button:
     def is_visible(self):return self.visible
     def is_enabled(self):return True
     def control_id(self):return 1
+    def class_name(self):return 'Button'
+    def process_id(self):return 1
+    def rectangle(self):return types.SimpleNamespace(left=0,top=30,right=100,bottom=60)
     def click_input(self):
         self.clicks+=1
         if self.error:raise OSError('Native input failed after dispatch')
+
+class Probe:
+    """External Win32 boundary only; the real exported readiness helper runs."""
+    def bind_process(self,pid,expected,handle=None):return {'pid':pid,'creation':1,'session':1}
+    def verify_process(self,pid,expected):
+        if pid!=1 or expected!={'pid':1,'creation':1,'session':1}:raise AssertionError('Changed process')
+    def window(self,hwnd):
+        return {'hwnd':hwnd,'pid':1,'tid':2,'root':10,'owners':[],
+                'cls':{10:'#32770',11:'Edit',12:'Button',13:'ComboBox'}[hwnd],
+                'visible':True,'enabled':True}
+    def foreground(self):return 10
+    def hit(self,point):return 12
+    def close(self):pass
 
 class PrintExportsTests(unittest.TestCase):
     def setUp(self):
@@ -52,10 +77,14 @@ class PrintExportsTests(unittest.TestCase):
         spec.loader.exec_module(self.module)
         self.clock=Clock();self.module.time=self.clock
         self.field=Field();self.button=Button()
-        self.dialog=types.SimpleNamespace(descendants=lambda **kw:[self.button] if kw.get('class_name')=='Button' else [self.field])
+        self.dialog=types.SimpleNamespace(handle=10,process_id=lambda:1,class_name=lambda:'#32770',
+            window_text=lambda:'Save Print Output As',
+            descendants=lambda **kw:[self.button] if kw.get('class_name')=='Button' else [self.field])
+        self.runtime={'nativeArchitecture':{'processId':1,'architecture':'arm64'},
+                      'webview2Native':{'rootProcessId':1,'processes':[]}}
     def call(self):
         self.assertTrue(callable(getattr(self.module,'fill_print_output',None)),'Missing native print output function')
-        self.module.fill_print_output(self.dialog,Path('printed.pdf'))
+        self.module.fill_print_output(self.dialog,Path('printed.pdf'),1,self.runtime,app_handle=77,probe=Probe())
     def test_all_print_focus_imports_resolve_before_windows_build(self):
         tree=ast.parse((ROOT/'e2e/virtual_print.py').read_text())
         names=[alias.name for n in ast.walk(tree) if isinstance(n,ast.ImportFrom) and n.module=='print_focus' for alias in n.names]
