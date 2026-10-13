@@ -1,24 +1,17 @@
-name: Store70 동일 원본·동일 SID API 재개
+name: 접수된 Store72 동일 SID 읽기 확인
 'on':
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 concurrency:
   group: opengeul-store
   cancel-in-progress: false
   queue: max
 jobs:
-  resume-store70:
-    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diagnostic/store70-resume' && github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR' && github.run_attempt == 1)
+  readback:
+    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diagnostic/store72-readback' && github.actor == 'ATLKR' && github.triggering_actor == 'ATLKR' && github.run_attempt == 1)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-      issues: write
-    env:
-      PYTHONUTF8: '1'
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -26,23 +19,42 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
-      - name: 고정 Store70 원본 ZIP·6개 성공 gate·실패한 제출 실행 검증
+      - name: 고정 앱과 접수 SID GET만 수행
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python scripts/store_resume70.py --download store-output
-          python ci/evidence.py size --limit-mib 96 store-output
-      - name: 변경되지 않은 canonical Source87 원본22 GET 검증
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python scripts/store_package.py --download-source-release --release-tag v1.1.3 --output .work/store-source
-          python ci/evidence.py size --limit-mib 192 .work/store-source
-      - name: 같은 SID와 같은 두 패키지를 한 번 업로드·커밋
-        env:
-          GH_TOKEN: ${{ github.token }}
           STORE_APP_ID: ${{ vars.STORE_APP_ID }}
           STORE_TENANT_ID: ${{ vars.STORE_TENANT_ID }}
           STORE_CLIENT_ID: ${{ vars.STORE_CLIENT_ID }}
           STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-        run: python scripts/store_submit.py --release-tag v1.1.3 --package-directory store-output --resume-store70
+          PYTHONUTF8: '1'
+        run: |
+          python - <<'CHECK'
+          import sys,json,os
+          sys.path.insert(0,'scripts')
+          import store_submit as s
+          sid='1152921505702110055'
+          opener,token=s.authenticate()
+          def get(path):
+              assert path in ('','submissions/'+sid)
+              return s._request(opener,token,'GET',path)[1]
+          app=get('')
+          assert app['id']==s.STORE_APP_ID and app['packageIdentityName']==s.STORE_IDENTITY['name'] and app['publisherName']==s.STORE_IDENTITY['publisher']
+          assert sid in {s._ref(app,'pendingApplicationSubmission'),s._ref(app,'lastPublishedApplicationSubmission')}
+          current=get('submissions/'+sid)
+          assert current['id']==sid and current['status'] in s.ACCEPTED
+          s._free(current);s._immediate(current)
+          assert current['packageDeliveryOptions']['isMandatoryUpdate'] is False
+          packages=[p for p in current['applicationPackages'] if p['fileStatus']!='PendingDelete']
+          assert len(packages)==2 and {p['architecture'].lower() for p in packages}=={'x64','arm64'}
+          for p in packages:
+              assert p['version']=='1.1.3.0' and p['fileStatus']=='Uploaded'
+              assert p['fileName']=='OpenGeul_1.1.3.0_'+p['architecture'].lower()+'_store-unsigned.msix'
+          result={'submissionId':sid,'status':current['status'],'version':'1.1.3.0','architectures':['x64','arm64'],'targetPublishMode':current['targetPublishMode'],'priceId':current['pricing']['priceId'],'isMandatoryUpdate':False,'serverPackagesUploaded':True,'storeWritesPerformed':False,'runId':os.environ['GITHUB_RUN_ID'],'head':os.environ['GITHUB_SHA']}
+          open('store72-fresh-readback.json','x').write(json.dumps(result,sort_keys=True)+'\n')
+          print(json.dumps(result,sort_keys=True))
+          CHECK
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-store72-fresh-readback-${{ github.run_id }}
+          path: store72-fresh-readback.json
+          if-no-files-found: error
+          retention-days: 1
