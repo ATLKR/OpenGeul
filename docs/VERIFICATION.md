@@ -1,5 +1,34 @@
 # 검증 기록
 
+## 2026-10-13 — 제출된 1.1.3과 다음 개발 후보
+
+정규 `v1.1.3`의 [Source87](https://github.com/ATLKR/OpenGeul/actions/runs/38294374822)은
+태그 소스 `859f676167b258a7a6a57ecdfcb0e224338de01a`·시도 1의 전체 성공입니다.
+x64·ARM64 제품·설치 MCP·전체 WACK와 공개 자산 22개를 검증했습니다.
+[Store72](https://github.com/ATLKR/OpenGeul/actions/runs/38342132174)는 원본 두
+Store 패키지 `1.1.3.0`을 API로 접수했습니다. 별도 읽기 전용
+[Store75](https://github.com/ATLKR/OpenGeul/actions/runs/38349008992)의 원본 ZIP
+417바이트·서버 SHA256·CRC를 확인했고, 상태는 `Certification`, 가격은 무료,
+공개 모드는 `Immediate`, 업로드된 아키텍처는 x64·ARM64입니다.
+인증·실제 공개 완료로 판정하지 않습니다.
+
+다음 개발 후보는 별도 브랜치에서 검증합니다. main `72beaae`의
+[Source100](https://github.com/ATLKR/OpenGeul/actions/runs/38343222054)은
+18개 작업 성공·Windows 인쇄 3개 실패·릴리스 건너뛰기의 전체 실패입니다.
+[읽기 전용 인쇄 진단 Store74](https://github.com/ATLKR/OpenGeul/actions/runs/38348489545)는
+같은 소유 부모의 그룹 컨트롤이 전역 hit 조회에 반환되고, 부모 기준 네이티브
+조회는 정확한 Preferences 버튼을 반환하는 실제 HWND 관계를 확인했습니다.
+좌표·DPI 불일치는 관측되지 않았습니다. 이 진단은 물리 Preferences 입력,
+PDF 출력이나 다음 후보의 제품 통과 근거가 아닙니다.
+
+종료의 두 번째 네이티브 창 닫기 실패를 처리하는 수정은 실제 준비된 HOP의
+함수와 등록된 콜백에 IPC 거부를 주입한 20개 회귀 검사를 통과했습니다.
+그룹 컨트롤 인쇄 guard 수정은 외부 창·부모 변경·입력 직전 오버레이를 포함한
+23개 경계 검사를 통과했습니다. 두 수정을 통합한 브랜치의 필수 로컬 검사는
+CI 229개·제품 837개가 모두 통과했습니다. 실제 Windows PDF·새 후보 전체 검증은
+별도로 수행하며 아래 과거 검증 결과를 대신 사용하지 않습니다.
+
+
 ## 2026-10-12 — 새 x64·ARM64 후보의 사전 검증
 
 새 후보의 실제 제품·설치 MCP·전체 WACK 검증은 아직 완료하지 않았습니다.
