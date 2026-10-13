@@ -116,7 +116,7 @@
     expect(bridge.requiresPasswordForSave).toBe(false);
   });
 
-  it('saves dirty HWPX internally before closing without re-entering the document lock', async () => {
+  it('saves dirty HWPX before consenting to close without releasing the native session', async () => {
     const { bridge } = hwpxSaveSetup();
     messageMock.mockResolvedValue('저장');
     const previousInvoke = invokeMock.getMockImplementation()!;
@@ -124,7 +124,7 @@
       command === 'close_document' ? undefined : previousInvoke(command, args));
     expect(await bridge.confirmWindowClose()).toBe(true);
     expect(invokeMock).toHaveBeenCalledWith('commit_staged_hwpx_save', expect.anything());
-    expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'doc-1' });
+    expect(invokeMock).not.toHaveBeenCalledWith('close_document', expect.anything());
     expect(saveMock).not.toHaveBeenCalled();
   });
 

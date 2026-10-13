@@ -157,6 +157,44 @@ def patch_clipboard_document_guard(host: Path) -> None:
     replace(host/'src/command/commands/edit.test.ts', anchor,
         (ROOT/'overlay/clipboard-document-tests.txt').read_text(encoding='utf-8') + anchor)
 
+def patch_close_session_acceptance(host: Path, native: Path) -> None:
+    bridge = host/'src/core/tauri-bridge.ts'
+    replace(bridge, "await this.invoke<void>('destroy_current_window');",
+        "await this.invoke<void>('destroy_current_window', { docId: this.docId });")
+    replace(bridge, """      const canClose = await this.confirmReadyForDocumentReplacement();
+      if (canClose) await this.releaseCurrentNativeDocument();
+      return canClose;""", """      // Consent does not release a document: native destruction can still fail.
+      return this.confirmReadyForDocumentReplacement();""")
+    replace(native/'commands.rs', """pub fn destroy_current_window(window: WebviewWindow) -> Result<(), String> {
+    window
+        .destroy()
+        .map_err(|e| format!("창을 닫을 수 없습니다: {}", e))
+}""", """pub fn destroy_current_window(
+    window: WebviewWindow,
+    doc_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Acquire cleanup access before destroying the WebView. Destroyed callbacks
+    // use pending-open/quit state, never this document-session mutex.
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "문서 세션 잠금 실패".to_string())?;
+    window
+        .destroy()
+        .map_err(|e| format!("창을 닫을 수 없습니다: {}", e))?;
+    // JavaScript may never resume after accepted destruction. Keep failed
+    // closes intact; an already-absent session needs no further cleanup.
+    if let Some(doc_id) = doc_id {
+        let _ = sessions.close_document(&doc_id);
+    }
+    Ok(())
+}""")
+    test = host/'src/core/tauri-bridge.test.ts'
+    replace(test, "    if (accept) expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'doc-1' });\n    else {",
+        "    expect(invokeMock).not.toHaveBeenCalledWith('close_document', expect.anything());\n    if (!accept) {")
+    shutil.copy2(ROOT/'overlay/desktop-close-session.test.ts', host/'src/core/desktop-close-session.test.ts')
+
 def red_probe(source: Path) -> None:
     path = source / 'apps/studio-host/src/core/tauri-bridge.test.ts'
     original = path.read_bytes()
@@ -335,6 +373,7 @@ def patch(source: Path) -> None:
     replace(test, text[begin:end], (ROOT/'overlay/hwpx-bridge-tests.txt').read_text(encoding='utf-8')+'\n')
     replace(test, "name: 'loadDocumentMock' | 'createNewDocumentMock' | 'exportHwpMock'",
         "name: 'loadDocumentMock' | 'createNewDocumentMock' | 'exportHwpMock' | 'exportHwpxMock'")
+    patch_close_session_acceptance(host, native)
     examples = source/'apps/desktop/src-tauri/examples'
     examples.mkdir(exist_ok=True)
     shutil.copy2(ROOT/'e2e/generate-fixtures.rs', examples/'opengeul-fixtures.rs')
@@ -342,7 +381,7 @@ def patch(source: Path) -> None:
     value['preservedFiles'] = {name: digest for name, digest in value['baselinePreservedFiles'].items()
         if hashlib.sha256((source/name).read_bytes()).hexdigest() == digest}
     value['hwpxSaveV1'] = True
-    value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation','native-dialog cancellation completion status','async Cut document replacement guard','async document replacement edit preservation']
+    value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation','native-dialog cancellation completion status','async Cut document replacement guard','async document replacement edit preservation','native session cleanup after accepted window destruction']
     value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts','document-open.ts']
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
