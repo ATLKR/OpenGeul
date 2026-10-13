@@ -366,7 +366,18 @@ class OwnedPreviewFocus:
         current=tuple((tuple(row['runtimeId']),row['pid'],row['hwnd']) for row in chain)
         if current!=binding:raise AssertionError('Bound print dropdown identity changed')
         foreground=self.probe.foreground()
-        return type(foreground)is int and foreground>0 and foreground not in (self.preview_window,top['hwnd'])
+        if type(foreground)is not int or foreground<=0 or foreground in (self.preview_window,top['hwnd']):return False
+        observed=self.probe.window(foreground)
+        if self.probe.foreground()!=foreground:raise AssertionError('Print foreground changed during its native query')
+        if observed['pid'] not in self.expected:return True
+        popup=self._window(foreground)
+        if (popup['hwnd']!=foreground or popup['root']!=foreground
+                or popup['pid']!=self.preview.process_id()
+                or popup['tid']!=self.windows[self.native_ancestor]['tid']
+                or self.preview_window not in popup['owners']):
+            raise AssertionError('Print foreground is not a proven bound native popup')
+        if self.probe.foreground()!=foreground:raise AssertionError('Owned popup foreground changed during its identity query')
+        return False
 
     def close(self):self.probe.close()
 

@@ -42,7 +42,8 @@ class NativeApi:
     """External query/focus API, not a second implementation of the policy."""
     def __init__(self):
         self.windows = {100: dict(hwnd=100, pid=10, tid=11, cls='Tauri Window', visible=True, enabled=True, root=100, owners=[]),
-                        200: dict(hwnd=200, pid=20, tid=21, cls='RootView', visible=True, enabled=True, root=200, owners=[100])}
+                        200: dict(hwnd=200, pid=20, tid=21, cls='RootView', visible=True, enabled=True, root=200, owners=[100]),
+                        999: dict(hwnd=999, pid=99, tid=91, cls='Foreign', visible=True, enabled=True, root=999, owners=[])}
         self.processes = {10: dict(pid=10, creation=110, session=2),
                           20: dict(pid=20, creation=120, session=2,parentProcessId=10)}
         self.foreground_hwnd = 999
@@ -488,6 +489,43 @@ class PrintPreviewFocusTests(unittest.TestCase):
         with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
         self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
         self.assertGreaterEqual(clock.now,30);self.assertLess(clock.now,30.2)
+
+    def test_collapsed_menu_with_missing_option_and_owned_popup_never_reactivates(self):
+        module,margins,clock=self.lost_dropdown();guard=self.guard()
+        self.probe.windows[300]=dict(hwnd=300,pid=20,tid=21,cls='Popup',visible=True,enabled=True,root=300,owners=[200])
+        self.after_loss=lambda:setattr(self.probe,'foreground_hwnd',300)
+        with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+        self.assertGreaterEqual(clock.now,30);self.assertLess(clock.now,30.2)
+
+    def test_foreground_window_query_failure_never_approves_recovery(self):
+        module,margins,_=self.lost_dropdown();guard=self.guard();window=self.probe.window
+        def queried(hwnd):
+            if hwnd==999:raise OSError('foreground query unavailable')
+            return window(hwnd)
+        self.probe.window=queried
+        with self.assertRaises(OSError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+
+    def test_same_pid_without_bound_popup_thread_or_owner_never_approves_recovery(self):
+        for change in [{'owners':[]},{'tid':99},{'root':100}]:
+            with self.subTest(change=change):
+                module,margins,_=self.lost_dropdown();guard=self.guard()
+                self.probe.windows[300]=dict(hwnd=300,pid=20,tid=21,cls='Popup',visible=True,enabled=True,root=300,owners=[200])
+                self.probe.windows[300].update(change)
+                self.after_loss=lambda:setattr(self.probe,'foreground_hwnd',300)
+                with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+                self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
+
+    def test_foreground_change_during_query_never_approves_recovery(self):
+        module,margins,_=self.lost_dropdown();guard=self.guard();window=self.probe.window
+        def queried(hwnd):
+            result=window(hwnd)
+            if hwnd==999:self.probe.foreground_hwnd=200
+            return result
+        self.probe.window=queried
+        with self.assertRaises(AssertionError):module.configure_preview(self.preview,{10,20},focus=guard)
+        self.assertEqual(self.actions,['expand']);self.assertEqual(self.probe.foreground_calls,[])
 
     def test_same_owned_popup_focus_keeps_open_menu_and_clicks_once(self):
         module,margins=self.settings();self.probe.foreground_hwnd=200;guard=self.guard()
