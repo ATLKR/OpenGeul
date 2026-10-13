@@ -244,6 +244,31 @@ class StoreSubmitTests(unittest.TestCase):
     def mutations(self):
         return [method for service, method, path in self.calls if service == 'store' and method != 'GET']
 
+    def test_documented_readonly_pricing_and_removed_target_platform_are_accepted(self):
+        self.baseline['pricing']['isAdvancedPricingModel'] = True
+        self.baseline['applicationPackages'][0]['targetPlatform'] = 'Windows.Universal'
+        original = self.store
+        def normalized(*args, **kwargs):
+            status, value = original(*args, **kwargs)
+            if isinstance(value, dict) and 'pricing' in value and args[3] != 'submissions/10':
+                value['pricing']['isAdvancedPricingModel'] = False
+                for package in value.get('applicationPackages', []): package.pop('targetPlatform', None)
+            return status, value
+        with patch.object(submitter, '_request', side_effect=normalized):
+            self.assertEqual(self.perform()['outcome'], 'requested')
+
+    def test_readonly_exception_does_not_drop_other_package_or_price_fields(self):
+        expected = [{'fileName': 'old.msix', 'fileStatus': 'PendingDelete',
+                     'targetPlatform': 'Windows.Universal', 'capabilities': ['internetClient']}]
+        for field in ('capabilities', 'fileStatus', 'fileName'):
+            actual = copy.deepcopy(expected); actual[0].pop('targetPlatform'); actual[0].pop(field)
+            self.assertFalse(submitter._packages_match({'applicationPackages': actual}, expected))
+        for field in ('priceId', 'marketSpecificPricings', 'trialPeriod', 'sales'):
+            expected_price = {'priceId':'Free','marketSpecificPricings':{'CN':'NotAvailable'},
+                              'trialPeriod':'NoTrial','sales':[],'isAdvancedPricingModel':True}
+            actual_price = copy.deepcopy(expected_price); actual_price.pop(field)
+            self.assertFalse(submitter._pricing_match(actual_price, expected_price))
+
     def test_replacement_requires_ack_and_fresh_absence(self):
         self.assertEqual(self.perform()['status'], 'PreProcessing')
         self.assertEqual(self.mutations(), ['DELETE', 'POST', 'PUT', 'UPLOAD', 'POST'])
