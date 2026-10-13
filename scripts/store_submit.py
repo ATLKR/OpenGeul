@@ -693,8 +693,16 @@ def _packages_match(submission, expected):
     by_name = {package.get('fileName'): package for package in actual if isinstance(package, dict)}
     return (len(by_name) == len(expected)
             and all(package['fileName'] in by_name
-                    and all(by_name[package['fileName']].get(field) == value for field, value in package.items())
+                    and all(by_name[package['fileName']].get(field) == value for field, value in package.items()
+                            if field != 'targetPlatform')
                     for package in expected))
+
+
+def _pricing_match(actual, expected):
+    # API 문서가 read-only로 명시한 값 하나만 제외한다. Free/시장별 가격 등은 그대로 비교한다.
+    return (isinstance(actual, dict) and isinstance(expected, dict)
+            and {k:v for k,v in actual.items() if k != 'isAdvancedPricingModel'}
+            == {k:v for k,v in expected.items() if k != 'isAdvancedPricingModel'})
 
 
 def _published_architectures(submission):
@@ -724,7 +732,7 @@ def _requested_pair(api, submission_id, details, template):
         _immediate(current); _free(current)
         if (current.get('status') not in ACCEPTED | {'CommitStarted'}
                 or _id(current.get('id')) != submission_id or _marker(details) not in current.get('notesForCertification','').splitlines()
-                or current.get('pricing') != template.get('pricing') or current.get('listings') != template.get('listings')):
+                or not _pricing_match(current.get('pricing'), template.get('pricing')) or current.get('listings') != template.get('listings')):
             raise SubmissionBlocked('Committed Store pair identity, publication control or metadata changed')
         packages = current.get('applicationPackages')
         if not isinstance(packages, list) or any(not isinstance(item, dict) for item in packages):
@@ -941,6 +949,7 @@ def submit(tag, directory):
                 raise SubmissionBlocked('New Store draft was not acknowledged')
             _save(journal, 'draft_ready', details, submission_id=pending_id)
         metadata = template
+        metadata['pricing'].pop('isAdvancedPricingModel', None)
         for package in metadata['applicationPackages']:
             package['fileStatus'] = 'PendingDelete'
         package_names = ([details['architectures'][arch]['package'] for arch in ('x64','arm64')]
@@ -959,7 +968,7 @@ def submit(tag, directory):
         if (_id(updated['id']) != pending_id or updated.get('status') != 'PendingCommit'
                 or _marker(details) not in updated.get('notesForCertification', '').splitlines()
                 or not _packages_match(updated, metadata['applicationPackages'])
-                or updated.get('pricing') != metadata['pricing'] or updated.get('listings') != metadata.get('listings')):
+                or not _pricing_match(updated.get('pricing'), metadata['pricing']) or updated.get('listings') != metadata.get('listings')):
             raise SubmissionBlocked('Store metadata update was not confirmed')
         upload_url = updated.get('fileUploadUrl')
         missing_upload = not isinstance(upload_url, str) or not upload_url
@@ -977,7 +986,7 @@ def submit(tag, directory):
         _immediate(current)
         if (_id(current['id']) != pending_id or current.get('status') != 'PendingCommit' or _marker(details) not in current.get('notesForCertification', '').splitlines()
                 or not _packages_match(current, metadata['applicationPackages'])
-                or current.get('pricing') != updated.get('pricing') or current.get('listings') != updated.get('listings')):
+                or not _pricing_match(current.get('pricing'), updated.get('pricing')) or current.get('listings') != updated.get('listings')):
             raise SubmissionBlocked('Store draft changed before commit')
         _save(journal, 'commit_attempted', details, submission_id=pending_id)
         try: api('POST', f'submissions/{pending_id}/commit')
