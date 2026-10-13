@@ -1008,6 +1008,21 @@ def submit(tag, directory, *, resume=False):
             if resume:
                 _save(journal, 'draft_ready', details, resume_upload_state='attempted',
                       resume_upload_sha256=hashlib.sha256(body).hexdigest(), resume_producer_run_id='38337436070')
+                # journal CAS 동안 Store가 바뀔 수 있다. 마지막 GET이 확인될 때만 한 번 전송한다.
+                fresh = _app(api)
+                if (_ref(fresh, 'pendingApplicationSubmission') != pending_id
+                        or _ref(fresh, 'lastPublishedApplicationSubmission') != baseline_id):
+                    raise SubmissionBlocked('Owned Store references changed during the upload intent acknowledgment')
+                _, current = api('GET', f'submissions/{pending_id}')
+                _immediate(current); _free(current)
+                server = {'id','status','statusDetails','fileUploadUrl','friendlyName','pricing','applicationPackages'}
+                if (_id(current.get('id')) != pending_id or current.get('status') != 'PendingCommit'
+                        or _marker(details) not in current.get('notesForCertification','').splitlines()
+                        or not _packages_match(current, updated['applicationPackages'])
+                        or not _pricing_match(current.get('pricing'), updated.get('pricing'))
+                        or any(current.get(key) != value for key,value in updated.items() if key not in server)
+                        or current.get('fileUploadUrl') != upload_url):
+                    raise SubmissionBlocked('Owned Store draft or upload destination changed before the single upload')
             _upload(opener, upload_url, body)
             if resume:
                 _save(journal, 'draft_ready', details, resume_upload_state='acknowledged')

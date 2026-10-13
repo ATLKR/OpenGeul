@@ -166,5 +166,34 @@ class ResumeTransactionTests(unittest.TestCase):
                 with self.assertRaises(submitter.SubmissionBlocked):self.invoke()
                 self.assertFalse(any(c[0]=='operator' for c in self.calls))
 
+    def test_attempted_journal_cas_races_never_upload_or_commit(self):
+        original_save=submitter._save
+        for change in ('different_sid','missing_sid','Certification','CommitStarted','Published','upload_url'):
+            with self.subTest(change=change):
+                self.issues.clear();self.start_resume()
+                def saving(*args,**kwargs):
+                    original_save(*args,**kwargs)
+                    if kwargs.get('resume_upload_state')=='attempted':
+                        if change=='different_sid':self.app['pendingApplicationSubmission']={'id':'99'}
+                        elif change=='missing_sid':self.app['pendingApplicationSubmission']=None
+                        elif change=='upload_url':self.new['fileUploadUrl']='https://storetest.blob.core.windows.net/ingestion/new?sig=NEW'
+                        else:self.new['status']=change
+                with patch.object(submitter,'_save',side_effect=saving):
+                    with self.assertRaises(submitter.SubmissionBlocked):self.invoke()
+                self.assertFalse(any(c[:2]==('store','UPLOAD') for c in self.calls))
+                self.assertFalse(any(c==('operator','POST','submissions/'+resume.SID+'/commit') for c in self.calls))
+                self.assertEqual(submitter._journal()['state']['resume_upload_state'],'attempted')
+
+    def test_unknown_commit_cannot_be_reclassified_as_an_unconfirmed_submitted_state(self):
+        for status in ('PendingCommit',None):
+            with self.subTest(status=status):
+                self.issues.clear();self.start_resume();self.commit_mode='unknown'
+                with self.assertRaises(submitter.SubmissionBlocked):self.invoke()
+                journal=submitter._journal();submitter._save(journal,'submitted',status=status)
+                before=list(self.calls)
+                with self.assertRaises(submitter.SubmissionBlocked):self.invoke()
+                self.assertFalse(any(c[0]=='operator' for c in self.calls[len(before):]))
+                self.assertEqual(sum(c==('operator','POST','submissions/'+resume.SID+'/commit') for c in self.calls),1)
+
 
 if __name__=='__main__':unittest.main()

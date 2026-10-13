@@ -124,6 +124,8 @@ def journal_guard(state, details, body):
     require(state.get('tag') == 'v1.1.3' and state.get('submission_id') == SID
         and state.get('phase') in {'draft_ready','commit_attempted','submitted'}
         and submission._journal_matches(state,details), 'Resume requires the same owned SID and full pair journal')
+    require(state['phase'] != 'submitted' or state.get('status') in submission.ACCEPTED | submission.FAILED,
+            'A submitted journal requires a confirmed processing or failure status; preserve uncertain commits')
     if 'resume_upload_state' in state:
         require(state['resume_upload_state'] in {'attempted','acknowledged'}
             and state.get('resume_upload_sha256') == hashlib.sha256(body).hexdigest()
