@@ -71,6 +71,9 @@ class WindowsFocusProbe:
                 ('IsWindowEnabled',[W.HWND],W.BOOL),('GetAncestor',[W.HWND,W.UINT],W.HWND),
                 ('GetWindow',[W.HWND,W.UINT],W.HWND),('GetForegroundWindow',[],W.HWND),
                 ('SetForegroundWindow',[W.HWND],W.BOOL),('WindowFromPoint',[W.POINT],W.HWND),
+                ('GetParent',[W.HWND],W.HWND),('GetWindowLongW',[W.HWND,ctypes.c_int],W.LONG),
+                ('ScreenToClient',[W.HWND,ctypes.POINTER(W.POINT)],W.BOOL),
+                ('RealChildWindowFromPoint',[W.HWND,W.POINT],W.HWND),
                 ('SendMessageTimeoutW',[W.HWND,W.UINT,W.WPARAM,W.LPARAM,W.UINT,W.UINT,ctypes.POINTER(ctypes.c_size_t)],ctypes.c_ssize_t),
                 ('GetWindowThreadProcessId',[W.HWND,ctypes.POINTER(W.DWORD)],W.DWORD),
                 ('GetClassNameW',[W.HWND,W.LPWSTR,ctypes.c_int],ctypes.c_int)]:
@@ -170,6 +173,13 @@ class WindowsFocusProbe:
         report['foregroundAfter']=self.foreground();report['foregroundMatched']=report['foregroundAfter']==hwnd
         return report['foregroundMatched']
     def hit(self,point):return int(self.user.WindowFromPoint(self.W.POINT(*point)) or 0)
+    def parent(self,hwnd):return int(self.user.GetParent(hwnd) or 0)
+    def button_style(self,hwnd):return int(self.user.GetWindowLongW(hwnd,-16))
+    def real_child(self,parent,screen_point):
+        point=self.W.POINT(*screen_point)
+        if not self.user.ScreenToClient(parent,self.ctypes.byref(point)):
+            raise AssertionError('Native Preferences parent coordinate transform failed')
+        return int(self.user.RealChildWindowFromPoint(parent,point) or 0)
     def focused(self):
         from pywinauto.uia_defines import IUIA
         from pywinauto.uia_element_info import UIAElementInfo
@@ -426,6 +436,7 @@ def click_owned_print_preferences(dialog,app_pid,runtime,*,app_handle,evidence_d
             raise AssertionError('Native Preferences rectangle is invalid')
         point=((rect[0]+rect[2])//2,(rect[1]+rect[3])//2);entry['point']=point
 
+        fallback=None
         def recheck():
             for owned,record in processes.items():api.verify_process(owned,record)
             if (dialog.handle!=hwnd or dialog.process_id()!=pid or dialog.class_name()!='#32770'
@@ -438,6 +449,14 @@ def click_owned_print_preferences(dialog,app_pid,runtime,*,app_handle,evidence_d
                     or not button.is_visible() or not button.is_enabled()
                     or api.window(button.handle)!=target or _rect(button)!=rect):
                 raise AssertionError('Bound native Preferences target identity changed')
+            if fallback is not None:
+                parent,groupbox,style=fallback
+                if (api.hit(point)!=groupbox['hwnd']
+                        or api.window(parent['hwnd'])!=parent or api.window(groupbox['hwnd'])!=groupbox
+                        or api.parent(button.handle)!=parent['hwnd']
+                        or api.parent(groupbox['hwnd'])!=parent['hwnd']
+                        or api.button_style(groupbox['hwnd'])!=style):
+                    raise AssertionError('Bound native Preferences groupbox/parent identity changed')
 
         recheck()
         if api.foreground()!=hwnd:
@@ -450,7 +469,24 @@ def click_owned_print_preferences(dialog,app_pid,runtime,*,app_handle,evidence_d
         if api.foreground()!=hwnd:raise AssertionError('Exact native Print foreground was not observed')
         entry['hitHwnd']=api.hit(point)
         if entry['hitHwnd']!=target['hwnd']:
-            raise AssertionError('Native Preferences click point is covered by another HWND')
+            # Global hit-testing can select the standard transparent groupbox
+            # over its sibling button. Keep that global overlay check, accepting
+            # only the bound parent's actual BS_GROUPBOX and exact native child.
+            groupbox=api.window(entry['hitHwnd']);parent=api.window(api.parent(button.handle))
+            if (parent['pid']!=pid or parent['tid']!=target['tid'] or parent['root']!=hwnd
+                    or parent['cls']!='#32770' or not parent['visible'] or not parent['enabled']
+                    or groupbox['pid']!=pid or groupbox['tid']!=target['tid'] or groupbox['root']!=hwnd
+                    or groupbox['cls']!='Button' or not groupbox['visible'] or not groupbox['enabled']
+                    or api.parent(groupbox['hwnd'])!=parent['hwnd']):
+                raise AssertionError('Native Preferences click point is covered by another HWND')
+            style=api.button_style(groupbox['hwnd'])
+            if type(style) is not int or style & 0xF!=7:  # GWL_STYLE / BS_GROUPBOX
+                raise AssertionError('Native Preferences click point is covered by an opaque control')
+            fallback=(parent,groupbox,style)
+            entry.update(groupboxStyle=style,buttonParentHwnd=parent['hwnd'])
+            entry['resolvedButtonHwnd']=api.real_child(parent['hwnd'],point)
+            if entry['resolvedButtonHwnd']!=target['hwnd']:
+                raise AssertionError('Native Preferences parent resolves another control at the click point')
         recheck();entry['foregroundAtInput']=api.foreground()
         if entry['foregroundAtInput']!=hwnd:
             raise AssertionError('Native Print foreground changed before physical input')
