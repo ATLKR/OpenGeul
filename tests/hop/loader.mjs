@@ -6,7 +6,8 @@ const hop=process.env.HOP_SOURCE ?? pathResolve('.work/hop');
 const rhwp=process.env.RHWP_SOURCE ?? pathResolve(hop,'third_party/rhwp');
 export async function resolve(specifier, context, next) {
  let path;
- if(specifier.startsWith('@/upstream/')) path=pathResolve(hop,'apps/studio-host/src',specifier.slice(2)+'.ts');
+ if(specifier==='@wasm/rhwp.js') path=pathResolve(hop,'apps/studio-host/vendor/rhwp-core/rhwp.js');
+ else if(specifier.startsWith('@/upstream/')) path=pathResolve(hop,'apps/studio-host/src',specifier.slice(2)+'.ts');
  else if(specifier.startsWith('@upstream/')) path=pathResolve(rhwp,'rhwp-studio/src',specifier.slice(10)+'.ts');
  // The editor uses HOP's shortcut table through its Vite override.
  else if(specifier==='@/command/shortcut-map') path=pathResolve(hop,'apps/studio-host/src/command/shortcut-map.ts');

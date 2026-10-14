@@ -190,6 +190,128 @@ def install_product_information(source: Path) -> None:
     shutil.copy2(ROOT/'overlay/about-dialog.test.ts', target.with_name('about-dialog.test.ts'))
 
 
+def install_async_clipboard_guard(source: Path) -> dict:
+    """고정 clipboard 경로의 대기 작업을 원래 문서·편집 문맥에만 적용한다."""
+    engine = source/'third_party/rhwp/rhwp-studio/src/engine'
+    expected = {
+        'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
+        'input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+    }
+    original = {name: (engine/name).read_bytes() for name in expected}
+    if any(hashlib.sha256(original[name]).hexdigest() != digest for name, digest in expected.items()):
+        raise ValueError('Upstream async clipboard source changed')
+    keyboard = original['input-handler-keyboard.ts'].decode('utf-8')
+    helper = '''/** A pending clipboard conversion owns one document and editing context. */
+function captureAsyncClipboardContext(self: any): { isCurrent(): boolean; dispose(): void } {
+  const wasm = self.wasm;
+  const cursor = self.cursor;
+  const generation = wasm.documentGeneration;
+  const document = wasm.borrowDocumentHandle?.();
+  const readContext = () => JSON.stringify([
+    cursor.getPosition(), cursor.getSelection?.(),
+    cursor.getFootnoteSelection?.(), cursor.getHeaderFooterSelectionOrdered?.(),
+    cursor.captureCellSelection?.(), cursor.blockSelectionPhase?.(),
+    cursor.getSelectedPictureRefs?.(), cursor.getSelectedTableRef?.(),
+    cursor.headerFooterMode, cursor.hfSectionIdx, cursor.hfApplyTo,
+    cursor.hfParaIdx, cursor.hfCharOffset, cursor.hfPreviewPage,
+    cursor.isInFootnote?.(), cursor.fnSectionIdx, cursor.fnParaIdx,
+    cursor.fnControlIdx, cursor.fnInnerParaIdx, cursor.fnCharOffset,
+    self.isFormMode?.(), self.isComposing === true,
+  ], (key, value) => key === 'cursorRect' ? undefined : value);
+  const context = readContext();
+  let cancelled = false;
+  const subscriptions: Array<() => void> = [];
+  const dispose = () => { for (const off of subscriptions.splice(0)) off(); };
+  const cancel = () => { cancelled = true; dispose(); };
+  const isCurrent = () => !cancelled && self.active && self.wasm === wasm
+    && self.cursor === cursor && wasm.documentGeneration === generation
+    && wasm.borrowDocumentHandle?.() === document && readContext() === context;
+  // InputHandler publishes selection refreshes on click, drag and navigation.
+  // A changed selection stays cancelled even if the user moves back before decode.
+  subscriptions.push(self.eventBus.on('clipboard-context-changed', () => {
+    if (!isCurrent()) cancel();
+  }));
+  subscriptions.push(self.eventBus.on('command-state-changed', () => {
+    if (!isCurrent()) cancel();
+  }));
+  subscriptions.push(self.eventBus.on('document-mutated', cancel));
+  // Older property/format commands publish only document-changed.
+  subscriptions.push(self.eventBus.on('document-changed', cancel));
+  subscriptions.push(self.eventBus.on('clipboard-context-invalidated', cancel));
+  return { isCurrent, dispose };
+}
+
+'''
+    keyboard = replace_once(keyboard, 'export function onPaste(this: any, e: ClipboardEvent): void {',
+                            helper + 'export function onPaste(this: any, e: ClipboardEvent): void {')
+    keyboard = replace_once(keyboard, '''      void (async () => {
+        let merged = html;
+        try {
+          merged = await inlineOfficeClipboardImages(html, rtf);
+        } catch (error) {
+          console.warn('[paste] RTF 그림 삽입 실패 — 그림 없이 붙여넣기:', error);
+        }
+        pasteExternalHtml.call(this, merged, text, hasSelection);
+      })();''', '''      const clipboardContext = captureAsyncClipboardContext(this);
+      void (async () => {
+        try {
+          let merged = html;
+          try {
+            merged = await inlineOfficeClipboardImages(html, rtf);
+          } catch (error) {
+            console.warn('[paste] RTF 그림 삽입 실패 — 그림 없이 붙여넣기:', error);
+          }
+          if (!clipboardContext.isCurrent()) return;
+          clipboardContext.dispose();
+          pasteExternalHtml.call(this, merged, text, hasSelection);
+        } finally {
+          clipboardContext.dispose();
+        }
+      })();''')
+    keyboard = replace_once(keyboard, '''async function pasteImageFile(this: any, file: File, hasSelection: boolean): Promise<void> {
+  try {
+    const data = new Uint8Array(await file.arrayBuffer());''', '''async function pasteImageFile(this: any, file: File, hasSelection: boolean): Promise<void> {
+  const clipboardContext = captureAsyncClipboardContext(this);
+  try {
+    const data = new Uint8Array(await file.arrayBuffer());
+    if (!clipboardContext.isCurrent()) return;''')
+    keyboard = replace_once(keyboard, '''      URL.revokeObjectURL(url);
+    }
+
+    // px → HWPUNIT''', '''      URL.revokeObjectURL(url);
+    }
+    if (!clipboardContext.isCurrent()) return;
+    clipboardContext.dispose();
+
+    // px → HWPUNIT''')
+    keyboard = replace_once(keyboard, '''      if (hasSelection) this.deleteSelection();
+      const p = this.cursor.getPosition();
+      // 표 셀 안 paste''', '''      if (hasSelection) this.deleteSelection({ deferRecord: true });
+      const p = this.cursor.getPosition();
+      // 표 셀 안 paste''')
+    keyboard = replace_once(keyboard, '''    console.warn('[InputHandler] 클립보드 이미지 삽입 실패:', err);
+  }
+}''', '''    console.warn('[InputHandler] 클립보드 이미지 삽입 실패:', err);
+  } finally {
+    clipboardContext.dispose();
+  }
+}''')
+    handler = original['input-handler.ts'].decode('utf-8')
+    for anchor, event in [
+        ('  private updateSelection(): void {', 'clipboard-context-changed'),
+        ('  deactivate(): void {', 'clipboard-context-invalidated'),
+        ('  dispose(): void {', 'clipboard-context-invalidated'),
+    ]:
+        handler = replace_once(handler, anchor, anchor + f"\n    this.eventBus.emit('{event}');")
+    prepared = {'input-handler-keyboard.ts': keyboard, 'input-handler.ts': handler}
+    # All contracts and replacements pass before either product file is written.
+    for name, text in prepared.items():
+        (engine/name).write_text(text, encoding='utf-8', newline='\n')
+    return {'beforeSha256': expected,
+            'afterSha256': {name: hashlib.sha256(text.encode('utf-8')).hexdigest()
+                            for name, text in prepared.items()}}
+
+
 def patch(source: Path, version: str) -> None:
     package_version(version)
     protected = ['apps/desktop/src-tauri/src/' + x for x in ('commands.rs','state.rs','pdf_export.rs','pending_open.rs','app_quit.rs','recent_documents.rs')]
@@ -276,6 +398,7 @@ def patch(source: Path, version: str) -> None:
     replace_file(ui/'about-dialog.ts', 'version.textContent = `Version ${__APP_VERSION__}`;',
         'version.textContent = `버전 ${__APP_VERSION__}`;')
     install_product_information(source)
+    async_clipboard_proof = install_async_clipboard_guard(source)
     replace_file(ui/'compare-dialog.ts', 'L: ${this.escape(leftPreview)} / R: ${this.escape(rightPreview)}',
         '왼쪽: ${this.escape(leftPreview)} / 오른쪽: ${this.escape(rightPreview)}')
     replace_file(ui/'history-dialog.ts', 'L: ${this.escape(leftText)} / R: ${this.escape(rightText)}',
@@ -346,7 +469,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:
