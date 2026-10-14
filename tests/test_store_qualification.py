@@ -217,12 +217,48 @@ class StoreQualificationTests(unittest.TestCase):
         paths = [self.evidence['arm64']/name for name in ('install.json','installed-cli.json')]
         original = {p:p.read_bytes() for p in paths}
         for mutate in (lambda p:p.update(sourceCommit='a'*40,sourceRun='38181680763',runAttempt='2'),
-                lambda p:p['cases'][-1]['checks'].update(ciphertextUnchanged=False),
+                lambda p:next(row for row in p['cases'] if row['name']=='password-hwpx-correct')['checks'].update(ciphertextUnchanged=False),
                 lambda p:p['workerIsolation']['worker'].update(sha256='0'*64)):
             with self.subTest(mutate=mutate):
                 for path in paths:
                     path.write_bytes(original[path]);self.change_json(path,lambda d:mutate(d['mcp']))
                 self.rejected_collect()
+
+    def test_store_collect_requires_session_and_workspace_checks_in_each_actual_mcp_receipt(self):
+        paths=[self.evidence['x64']/name for name in ('install.json','installed-cli.json')]
+        originals={p:p.read_bytes() for p in paths}
+        for target in paths:
+            for name,field in (('session-save','independentXmlPassed'),('workspace-journal','saveDigestsMatch')):
+                for mutation in ('missing','false'):
+                    with self.subTest(receipt=target.name,case=name,mutation=mutation):
+                        for path,raw in originals.items():path.write_bytes(raw)
+                        def change(value):
+                            checks=next(row for row in value['mcp']['cases'] if row['name']==name)['checks']
+                            if mutation=='missing':checks.pop(field)
+                            else:checks[field]=False
+                        self.change_json(target,change)
+                        with self.assertRaisesRegex(ValueError,'MCP (판정|필수)'):self.collect('x64')
+                        self.assertFalse(self.outputs['x64'].exists())
+
+    def test_store_verify_rechecks_new_checks_even_when_both_raw_mcp_and_receipt_hashes_are_rebuilt(self):
+        self.collect('x64');self.collect('arm64');folder=self.outputs['x64']
+        paths=[folder/name for name in ('install-x64.json','installed-cli-x64.json')]
+        originals={p:p.read_bytes() for p in paths};receipt_path=folder/'qualification.json';receipt_original=receipt_path.read_bytes()
+        for name,field in (('session-save','independentXmlPassed'),('workspace-journal','saveDigestsMatch')):
+            for mutation in ('missing','false'):
+                with self.subTest(case=name,mutation=mutation):
+                    receipt=json.loads(receipt_original)
+                    for path,raw in originals.items():
+                        value=json.loads(raw);checks=next(row for row in value['mcp']['cases'] if row['name']==name)['checks']
+                        if mutation=='missing':checks.pop(field)
+                        else:checks[field]=False
+                        self.fixture.write_json(path,value)
+                        receipt['raw'][path.name]={'size':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+                    self.fixture.write_json(receipt_path,receipt)
+                    with self.assertRaisesRegex(ValueError,'MCP (판정|필수)'):self.verify()
+                    self.assertFalse((self.store/'store-qualification.json').exists())
+        for path,raw in originals.items():path.write_bytes(raw)
+        receipt_path.write_bytes(receipt_original);self.verify()
 
     def test_qualified_inspector_rejects_mcp_tampering_even_after_all_hashes_rebuilt(self):
         self.collect('x64'); self.collect('arm64'); self.verify()

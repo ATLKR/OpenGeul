@@ -107,9 +107,9 @@ class McpClient:
             except OSError:pass
         self.reader.join(timeout=.5);self.writer.join(timeout=.5)
 
-def tool_records(response):
+def tool_records(response,*,is_error=False):
     result=response.get('result')
-    require(isinstance(result,dict) and result.get('isError') is False,'MCP 도구가 성공한 결과를 반환하지 않았습니다')
+    require(isinstance(result,dict) and result.get('isError') is is_error,'MCP 도구가 성공한 결과를 반환하지 않았습니다')
     content=result.get('content')
     require(isinstance(content,list) and len(content)==1 and content[0].get('type')=='text'
             and isinstance(content[0].get('text'),str),'MCP 도구 JSON content가 올바르지 않습니다')
@@ -316,6 +316,124 @@ def password_inputs(folder):
     require(formats=={'hwp','hwpx'},'두 암호 형식 fixture가 필요합니다')
     return manifest,fixtures,password
 
+def prepare_workspace(work,fixtures):
+    """서버 startup inventory가 만들어지기 전에 소유한 원본 복사본 하나를 둔다."""
+    from hwpx_oracle import inspect_hwpx
+    source=fixtures/'basic.hwpx';workspace=work/'workspace'
+    require(source.is_file() and not source.is_symlink() and 0<source.stat().st_size<=MAX_FRAME,
+            'bounded 원본 basic HWPX가 필요합니다')
+    require(not workspace.exists() and not workspace.is_symlink(),'기존 workspace를 덮어쓰지 않습니다')
+    require(inspect_hwpx(source)['text']==NORMAL_TEXT,'workspace 입력의 독립 원본 XML이 다릅니다')
+    before=sha(source);workspace.mkdir();owned=workspace/'basic.hwpx';shutil.copyfile(source,owned)
+    require(sha(owned)==before and sha(source)==before,'workspace 소유 복사본 또는 원본 바이트가 다릅니다')
+    return workspace
+
+
+def run_session_workspace_cases(client,work,remember,tool):
+    """공개 세션 수명·별도 저장·workspace journal 경계. COM worker 증명은 별도다."""
+    from hwpx_oracle import inspect_hwpx
+    server_pid=client.process.pid;workspace=work/'workspace';workspace_source=workspace/'basic.hwpx'
+    session_source=work/'normal.hwpx';session_output=work/'session-out.hwpx';workspace_output=work/'workspace-out.hwpx'
+    require(workspace.is_dir() and not workspace.is_symlink(),'startup 전에 준비한 소유 workspace가 필요합니다')
+    for source in (session_source,workspace_source):
+        require(source.is_file() and not source.is_symlink() and 0<source.stat().st_size<=MAX_FRAME
+                and inspect_hwpx(source)['text']==NORMAL_TEXT,'세션 원본의 독립 XML text가 다릅니다')
+    workspace_hash=sha(workspace_source);session_hash=sha(session_source)
+    def one(response,*,is_error=False):
+        rows=tool_records(response,is_error=is_error)
+        require(len(rows)==1,'공개 session/workspace 결과는 객체 하나여야 합니다')
+        return rows[0]
+    def unchanged(source,before):require(sha(source)==before,'공개 세션 도구가 원본 입력을 변경했습니다')
+    def doc_match(data,doc_id):require(data.get('docId')==doc_id,'공개 세션 응답이 다른 docId를 사용했습니다')
+    def text_digest(data):
+        # pinned journal algo: 각 실제 text page UTF-8 뒤에 0x00을 더한다.
+        return hashlib.sha256(b''.join(page['text'].encode('utf-8')+b'\0' for page in data['pages'])).hexdigest()
+    def lifecycle(prefix,source,output,open_name,open_arguments,marker):
+        before=sha(source);require(not output.exists() and not output.is_symlink(),'세션 저장 target은 새 소유 경로여야 합니다')
+        opened=tool(open_name,open_arguments);data=one(opened);doc_id=data.get('docId')
+        require(isinstance(doc_id,str) and 0<len(doc_id)<=256 and not any(ord(c)<32 for c in doc_id),
+                '공개 open 응답의 실제 docId가 없습니다')
+        require(isinstance(data.get('source'),str) and Path(data['source']).resolve()==source.resolve()
+                and type(data.get('pageCount')) is int and data['pageCount']>0,'공개 open이 소유 원본을 열지 않았습니다')
+        unchanged(source,before);require(not output.exists(),'open이 저장 전에 target을 만들었습니다')
+        checks={'opened':True,'sourceUnchanged':True,'outputAbsent':True}
+        if prefix=='workspace':checks['listedIdUsed']=True
+        remember(prefix+'-open',opened,checks)
+        read=tool('hwp_doc_text',{'docId':doc_id});data=one(read);doc_match(data,doc_id)
+        require(document_text(data).strip()==NORMAL_TEXT and data.get('truncated') is False
+                and type(data.get('omittedCount')) is int and data['omittedCount']==0,
+                '공개 세션의 원래 text가 합성 입력과 다릅니다')
+        digest_before=text_digest(data);remember(prefix+'-text',read,{'sourceTextMatched':True,'docIdMatched':True})
+        changed=tool('hwp_doc_replace_text',{'docId':doc_id,'find':'OpenGeul fixture','replace':marker})
+        data=one(changed);doc_match(data,doc_id)
+        require(type(data.get('replacedCount')) is int and data['replacedCount']==1,'공개 세션 치환 건수가 1이 아닙니다')
+        unchanged(source,before);require(not output.exists(),'치환이 저장 전에 target을 만들었습니다')
+        remember(prefix+'-replace',changed,{'replacedCount':1,'docIdMatched':True,'sourceUnchanged':True,'outputAbsent':True})
+        read=tool('hwp_doc_text',{'docId':doc_id});data=one(read);doc_match(data,doc_id);edited=document_text(data)
+        expected=NORMAL_TEXT.replace('OpenGeul fixture',marker)
+        require(edited.strip()==expected and edited.count(marker)==1 and data.get('truncated') is False
+                and type(data.get('omittedCount')) is int and data['omittedCount']==0,
+                '공개 세션의 실제 편집 text가 기대값 또는 marker 한 건과 다릅니다')
+        digest_after=text_digest(data);require(digest_before!=digest_after,'공개 세션 치환이 text digest를 바꾸지 않았습니다')
+        unchanged(source,before);require(not output.exists(),'text 조회가 저장 전에 target을 만들었습니다')
+        remember(prefix+'-edited-text',read,{'editedTextMatched':True,'markerCount':1,'docIdMatched':True,'sourceUnchanged':True,'outputAbsent':True})
+        saved=tool('hwp_doc_save',{'docId':doc_id,'output':str(output),'verify':True});data=one(saved);doc_match(data,doc_id)
+        verification=data.get('verify')
+        require(isinstance(verification,dict) and verification.get('identical') is True
+                and type(verification.get('diffCount')) is int and verification['diffCount']==0,
+                '공개 세션 save verify가 실제 성공 판정을 내지 않았습니다')
+        require(output.is_file() and not output.is_symlink() and 0<output.stat().st_size<=MAX_FRAME
+                and isinstance(data.get('output'),str) and Path(data['output']).resolve()==output.resolve()
+                and data.get('outputFormat')=='hwpx' and type(data.get('bytes')) is int
+                and data['bytes']==output.stat().st_size,'공개 save 응답 경로·형식·실제 바이트가 다릅니다')
+        xml=inspect_hwpx(output)['text'];require(xml==expected and xml.count(marker)==1,'공개 세션 저장본의 독립 ZIP/XML text가 다릅니다')
+        unchanged(source,before)
+        remember(prefix+'-save',saved,{'saveVerified':True,'docIdMatched':True,'independentXmlPassed':True,'markerCount':1,
+                                     'sourceUnchanged':True,'outputBytesMatched':True})
+        closed=tool('hwp_close',{'docId':doc_id});data=one(closed);doc_match(data,doc_id)
+        require(data.get('closed') is True,'공개 close가 실제 핸들을 닫지 않았습니다');unchanged(source,before)
+        remember(prefix+'-close',closed,{'closed':True,'docIdMatched':True,'sourceUnchanged':True})
+        return {'docId':doc_id,'digestBefore':digest_before,'digestAfter':digest_after}
+    session=lifecycle('session',session_source,session_output,'hwp_open',{'path':str(session_source)},'SESSION')
+    rejected=tool('hwp_doc_text',{'docId':session['docId']});data=one(rejected,is_error=True)
+    require(isinstance(data.get('nextCall'),dict) and data['nextCall'].get('name')=='hwp_open',
+            '닫힌 docId query가 hwp_open 재호출 안내와 함께 거부되지 않았습니다')
+    remember('session-closed-query',rejected,{'rejected':True,'nextOpenHint':True})
+    ping=client.request('ping');require(ping.get('result')=={} and client.process.poll() is None
+            and client.process.pid==server_pid,'닫힌 docId 오류 뒤 같은 MCP 서버 ping이 실패했습니다')
+    remember('session-ping',ping,{'passed':True,'sameServerAlive':True})
+    listed=tool('hwp_ws_list',{});data=one(listed);entries=data.get('entries')
+    require(type(data.get('count')) is int and data['count']==1 and data.get('truncated') is False
+            and isinstance(entries,list) and len(entries)==1 and isinstance(entries[0],dict)
+            and isinstance(data.get('root'),str) and Path(data['root']).resolve()==workspace.resolve(),
+            'startup workspace inventory가 소유 입력 한 건과 다릅니다')
+    entry=entries[0];entry_id=entry.get('id')
+    require(isinstance(entry_id,str) and 0<len(entry_id)<=256 and not any(ord(c)<32 for c in entry_id)
+            and isinstance(entry.get('path'),str) and Path(entry['path']).resolve()==workspace_source.resolve()
+            and entry.get('format')=='hwpx' and type(entry.get('sizeBytes')) is int
+            and entry['sizeBytes']==workspace_source.stat().st_size,'workspace 실제 id·경로·형식·바이트가 다릅니다')
+    unchanged(workspace_source,workspace_hash)
+    remember('workspace-list',listed,{'entryCount':1,'ownedEntryMatched':True,'sourceUnchanged':True})
+    workspace_doc=lifecycle('workspace',workspace_source,workspace_output,'hwp_ws_open',{'id':entry_id},'WORKSPACE')
+    require(workspace_doc['docId']!=session['docId'],'workspace가 닫힌 세션 docId를 재사용했습니다')
+    journal=tool('hwp_ws_journal',{});data=one(journal);entries=data.get('entries')
+    require(data.get('algo')=='sha256(전 페이지 본문 텍스트, 페이지 경계 0x00)' and type(data.get('count')) is int
+            and data['count']==4 and isinstance(entries,list) and len(entries)==4,'공개 journal에 치환·저장 네 건이 없습니다')
+    for index,(entry,doc) in enumerate(zip(entries,(session,session,workspace_doc,workspace_doc))):
+        is_replace=index%2==0
+        require(isinstance(entry,dict) and set(entry)=={'seq','tool','docId','digestBefore','digestAfter','changed','isError'}
+                and type(entry['seq']) is int and entry['seq']==index+1
+                and entry['tool']==('hwp_doc_replace_text' if is_replace else 'hwp_doc_save')
+                and entry['docId']==doc['docId'] and entry['isError'] is False and entry['changed'] is is_replace,
+                '공개 journal 순서·docId·치환/저장 변경 판정이 다릅니다')
+        require(entry['digestBefore']==doc['digestBefore' if is_replace else 'digestAfter']
+                and entry['digestAfter']==doc['digestAfter'],'공개 journal digest가 실제 세션 text와 다릅니다')
+    unchanged(session_source,session_hash);unchanged(workspace_source,workspace_hash)
+    remember('workspace-journal',journal,{'journalEntries':4,'documentIdsMatched':True,'sequenceMatched':True,
+        'replaceChanged':True,'replaceDigestsDiffer':True,'saveChangedFalse':True,'saveDigestsMatch':True,
+        'noJournalErrors':True,'textDigestsMatched':True})
+
+
 def run_cases(client,executable,work,fixtures,*,password_folder,watch,context,progress=None):
     """공개 원본 도구 이름/인자만 사용한다; 모든 쓰기는 소유 합성 복사본이다."""
     progress={} if progress is None else progress
@@ -334,7 +452,9 @@ def run_cases(client,executable,work,fixtures,*,password_folder,watch,context,pr
     listed=client.request('tools/list');tools=listed.get('result',{}).get('tools')
     require(isinstance(tools,list) and len(tools)<=2000,'MCP 도구 목록 크기가 다릅니다')
     names=[tool.get('name') for tool in tools]
-    required={'hwp_info','hwp_export_text','hwp_replace_text','hwp_batch','hwp_ir_diff'}
+    required={'hwp_info','hwp_export_text','hwp_replace_text','hwp_batch','hwp_ir_diff',
+              'hwp_open','hwp_doc_text','hwp_doc_replace_text','hwp_doc_save','hwp_close',
+              'hwp_ws_list','hwp_ws_open','hwp_ws_journal'}
     require(all(isinstance(name,str) for name in names) and len(set(names))==len(names) and required<=set(names),'원본 MCP 도구 정의가 누락·중복되었습니다')
     remember('tools-list',listed,{'toolsListed':len(names),'requiredToolsPresent':True})
     source=work/'normal.hwpx';shutil.copyfile(fixtures/'basic.hwpx',source);before=sha(source)
@@ -370,6 +490,7 @@ def run_cases(client,executable,work,fixtures,*,password_folder,watch,context,pr
             else:require(response.get('result',{}).get('isError') is True,'틀리거나 누락된 암호가 성공으로 처리됐습니다')
             require(sha(path)==expected_hash,'MCP가 원본 ciphertext를 변경했습니다')
             remember('password-'+format+'-'+label,response,{'expectedResultPassed':True,'ciphertextUnchanged':True})
+    run_session_workspace_cases(client,work,remember,tool)
     stress=work/'stress.hwpx';stress_proof=stress_document(source,stress)
     if context=='portable':fault=fault_recovery(client,watch,stress)
     else:
@@ -429,7 +550,8 @@ def main():
         if args.context=='portable':executable=private_runtime(executable,work/'runtime')
         client=None
         try:
-            client=McpClient([str(executable),'mcp-serve'],cwd=work)
+            workspace=prepare_workspace(work,args.fixtures.resolve())
+            client=McpClient([str(executable),'mcp-serve','--workspace',str(workspace)],cwd=work)
             native=verify_process(client.process.pid,executable,args.architecture,handle=int(client.process._handle),package_full_name=args.package_full_name)
             watch=WorkerWatch(native,executable,args.expected_sha256,args.architecture,context=args.context,package_full_name=args.package_full_name)
             native['createdFileTime']=watch.created(int(client.process._handle));proof['serverNativeArchitecture']=native

@@ -154,6 +154,18 @@ class ReleasePairTests(unittest.TestCase):
                 value = json.loads(original); mutate(value['mcp']); self.write_json(path,value); self.sums(self.output)
                 with self.assertRaises(ValueError): pair.verify_pair(self.output)
 
+    def test_source_verifier_requires_new_session_save_and_workspace_journal_checks_after_rehash(self):
+        self.assemble();path=self.output/'install-x64.json';original=path.read_bytes()
+        for name,field in (('session-save','independentXmlPassed'),('workspace-journal','saveDigestsMatch')):
+            for mutation in ('missing','false'):
+                with self.subTest(case=name,mutation=mutation):
+                    value=json.loads(original);checks=next(row for row in value['mcp']['cases'] if row['name']==name)['checks']
+                    if mutation=='missing':checks.pop(field)
+                    else:checks[field]=False
+                    self.write_json(path,value);self.sums(self.output)
+                    with self.assertRaisesRegex(ValueError,'MCP (판정|필수)'):pair.verify_pair(self.output)
+        path.write_bytes(original);self.sums(self.output);pair.verify_pair(self.output)
+
     def test_wrong_architecture_declaration_rejected(self):
         self.mutate_prov('arm64', lambda d: d.update(architecture='x64')); self.rejected()
 

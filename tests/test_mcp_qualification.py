@@ -19,7 +19,23 @@ except ModuleNotFoundError:
 CASE_NAMES = ['initialize','ping','tools-list','normal-read','normal-write','ir-diff-code3','batch-partial-code1',
     *['malformed-paths-'+str(n) for n in range(4)],
     *['password-'+f+'-'+mode for f in ('hwp','hwpx') for mode in ('missing','wrong','correct')]]
-CASE_IDS = [1,2,3,4,5,6,7,8,10,12,14,16,17,18,19,20,21]
+CASE_NAMES += ['session-open','session-text','session-replace','session-edited-text','session-save',
+    'session-close','session-closed-query','session-ping','workspace-list','workspace-open','workspace-text',
+    'workspace-replace','workspace-edited-text','workspace-save','workspace-close','workspace-journal']
+CASE_IDS = [1,2,3,4,5,6,7,8,10,12,14,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37]
+SESSION_CHECKS = [
+    {'opened':True,'sourceUnchanged':True,'outputAbsent':True},
+    {'sourceTextMatched':True,'docIdMatched':True},
+    {'replacedCount':1,'docIdMatched':True,'sourceUnchanged':True,'outputAbsent':True},
+    {'editedTextMatched':True,'markerCount':1,'docIdMatched':True,'sourceUnchanged':True,'outputAbsent':True},
+    {'saveVerified':True,'docIdMatched':True,'independentXmlPassed':True,'markerCount':1,'sourceUnchanged':True,'outputBytesMatched':True},
+    {'closed':True,'docIdMatched':True,'sourceUnchanged':True}]
+NEW_CHECKS = [*SESSION_CHECKS,{'rejected':True,'nextOpenHint':True},{'passed':True,'sameServerAlive':True},
+    {'entryCount':1,'ownedEntryMatched':True,'sourceUnchanged':True},
+    {**SESSION_CHECKS[0],'listedIdUsed':True},*SESSION_CHECKS[1:],
+    {'journalEntries':4,'documentIdsMatched':True,'sequenceMatched':True,'replaceChanged':True,
+     'replaceDigestsDiffer':True,'saveChangedFalse':True,'saveDigestsMatch':True,'noJournalErrors':True,'textDigestsMatched':True}]
+
 
 
 def installed_proof(architecture='x64', cli_sha256='c'*64, package_full_name=None,
@@ -38,28 +54,28 @@ def installed_proof(architecture='x64', cli_sha256='c'*64, package_full_name=Non
         'native','packageFullName','sha256','sourceCommit','sourceRun','runAttempt')},'processId':101,'createdFileTime':10001,
         'classId':'c6c4d247-b4f0-563d-a649-4765796e3164',
         'binding':'실제 경로·바이트·생성 시각·고정 bootstrap; SCM ancestry를 사용하지 않음'}
-    checks = [{'protocolPassed':True},{'passed':True},{'toolsListed':5,'requiredToolsPresent':True},
+    checks = [{'protocolPassed':True},{'passed':True},{'toolsListed':13,'requiredToolsPresent':True},
         {'sourceTextMatched':True},{'independentXmlPassed':True,'sourceUnchanged':True,'replacedCount':1},
         {'cliExitCode':3,'sameJson':True},{'cliExitCode':1,'records':2,'sameNdjson':True},
         *[{'rejected':True,'serverResponsive':True} for _ in range(4)],
-        *[{'expectedResultPassed':True,'ciphertextUnchanged':True} for _ in range(6)]]
+        *[{'expectedResultPassed':True,'ciphertextUnchanged':True} for _ in range(6)],*copy.deepcopy(NEW_CHECKS)]
     def response(name, request_id, values):
         raw = json.dumps({'jsonrpc':'2.0','id':request_id,'result':{'syntheticCase':name}},sort_keys=True).encode()
         return {'name':name,'requestId':request_id,'responseSha256':hashlib.sha256(raw).hexdigest(),
             'responseBytes':len(raw),'checks':values}
     cases = [response(name,request_id,values) for name,request_id,values in zip(CASE_NAMES,CASE_IDS,checks)]
-    return {'formatVersion':1,'cases':cases,'caseCount':17,**binding,'architecture':architecture,'context':'installed',
+    return {'formatVersion':1,'cases':cases,'caseCount':33,**binding,'architecture':architecture,'context':'installed',
         'productSha256':cli_sha256,'helperSha256':hashlib.sha256((ROOT/'e2e/mcp_worker.py').read_bytes()).hexdigest(),
         'nativeArchitectureHelperSha256':native_helper,'fullSourceQualified':False,'storeCertified':False,'passed':True,
         'scope':'실제 MCP stdio·합성 문서·native COM worker; 전체 도구·개인 문서·Store 인증을 주장하지 않음',
         'limits':{'frameBytes':2*1024*1024,'runtimeBytes':96*1024*1024,'requestTimeoutSeconds':30},
-        'serverNativeArchitecture':server,'phase':'hwp_export_text','lastCompletedCase':'password-hwpx-correct',
+        'serverNativeArchitecture':server,'phase':'hwp_ws_journal','lastCompletedCase':'workspace-journal',
         'stressFixture':{'sha256':'d'*64,'bytes':5000,'addedSyntheticParagraphs':1500,
             'scope':'원본·인쇄 기준과 별개의 작업자 강제 종료용 합성 복사본'},
         'workerIsolation':{'worker':worker,'sameServerAlive':True,'forcedTermination':False,'batchRecords':64,
-            'response':response('installed-worker-batch64',22,{'records':64,'passed':True}),
+            'response':response('installed-worker-batch64',38,{'records':64,'passed':True}),
             'scope':'설치 fixed COM class의 native/package identity 관측; 공유 process 강제 종료 없음'},
-        'framesSent':23,'framesReceived':22}
+        'framesSent':39,'framesReceived':38}
 
 
 class McpQualificationTests(unittest.TestCase):
@@ -75,6 +91,44 @@ class McpQualificationTests(unittest.TestCase):
 
     def test_complete_installed_proof_preserves_input_and_returns_same_object(self):
         before = copy.deepcopy(self.proof);self.assertIs(self.verify(),self.proof);self.assertEqual(self.proof,before)
+
+    def test_old_seventeen_case_proof_cannot_satisfy_session_workspace_gate(self):
+        old=copy.deepcopy(self.proof);old['cases']=old['cases'][:17]
+        old.update(caseCount=17,framesSent=23,framesReceived=22,phase='hwp_export_text',lastCompletedCase='password-hwpx-correct')
+        old['workerIsolation']['response']['requestId']=22
+        with self.assertRaises(ValueError):self.verify(old)
+
+    def test_every_session_workspace_check_is_required_true_and_exact_typed(self):
+        for index in range(17,33):
+            for field,expected in self.proof['cases'][index]['checks'].items():
+                for mutation in ('missing','false','type','extra'):
+                    with self.subTest(case=self.proof['cases'][index]['name'],field=field,mutation=mutation):
+                        def change(p):
+                            checks=p['cases'][index]['checks']
+                            if mutation=='missing':checks.pop(field)
+                            elif mutation=='extra':checks['unverifiedExtra']=True
+                            else:checks[field]=False if mutation=='false' else (1 if type(expected) is bool else True)
+                        self.rejected(change)
+
+    def test_new_cases_cannot_be_missing_duplicated_reordered_reidentified_or_rehashed_as_another_response(self):
+        for index in range(17,33):
+            for mutation in ('missing','duplicate','reorder','id','hash','bytes'):
+                with self.subTest(index=index,mutation=mutation):
+                    def change(p):
+                        if mutation=='missing':p['cases'].pop(index)
+                        elif mutation=='duplicate':p['cases'][index]=copy.deepcopy(p['cases'][index-1])
+                        elif mutation=='reorder':p['cases'][index-1],p['cases'][index]=p['cases'][index],p['cases'][index-1]
+                        elif mutation=='id':p['cases'][index]['requestId']+=1
+                        elif mutation=='hash':p['cases'][index]['responseSha256']=p['cases'][index-1]['responseSha256']
+                        else:p['cases'][index]['responseBytes']=0
+                    self.rejected(change)
+
+    def test_new_transcript_frames_worker_request_and_terminal_phase_are_fixed(self):
+        for change in (lambda p:p.update(framesSent=38),lambda p:p.update(framesReceived=37),
+                lambda p:p.update(phase='hwp_close'),lambda p:p.update(lastCompletedCase='workspace-close'),
+                lambda p:p['workerIsolation']['response'].update(requestId=37),
+                lambda p:p['workerIsolation']['response'].update(responseSha256=p['cases'][-1]['responseSha256'])):
+            with self.subTest(change=change):self.rejected(change)
 
     def test_native_arm64_product_with_x64_controller_is_allowed(self):
         p = installed_proof('arm64');p['serverNativeArchitecture']['controller'].update(processMachine=0x8664,architecture='x64-emulated',native=False)

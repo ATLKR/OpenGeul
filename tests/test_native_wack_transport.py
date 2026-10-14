@@ -128,6 +128,18 @@ class NativeJoinTests(unittest.TestCase):
         self.assertEqual(self.native['launch']['nativeArchitecture']['nativeMachine'],0xaa64)
         self.assertEqual(self.split['controller']['tool']['nativeMachine'],0x8664)
 
+    def test_split_consumer_rejects_new_session_workspace_check_failure_after_complete_transport_rebinding(self):
+        for name,field in (('session-save','independentXmlPassed'),('workspace-journal','saveDigestsMatch')):
+            for mutation in ('missing','false'):
+                with self.subTest(case=name,mutation=mutation):
+                    installation=copy.deepcopy(self.installation);installation.pop('armNativeSplit',None)
+                    checks=next(row for row in installation['mcp']['cases'] if row['name']==name)['checks']
+                    if mutation=='missing':checks.pop(field)
+                    else:checks[field]=False
+                    split,installation,join,_=native_split_fixture.make_split(self.unsigned,installation,self.binding,'source',self.files)
+                    context=copy.deepcopy(self.context);context['nativeSignedJoin']=join
+                    with self.assertRaisesRegex(ValueError,'MCP (판정|필수)'):self.verify(installation,context)
+
     def test_native_missing_failure_old_head_mixed_attempt_and_rehashed_context_are_rejected(self):
         mutators=[lambda d:d.pop('armNativeSplit'),
             lambda d:d['armNativeSplit']['native'].update(success=False),

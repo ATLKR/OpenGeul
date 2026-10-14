@@ -385,6 +385,21 @@ class StorePackageTests(unittest.TestCase):
                     with self.assertRaises(ValueError): store_package.ensure_source_release(f'v{PRODUCT_VERSION}', source)
                     github.assert_not_called(); command.assert_not_called()
 
+    def test_source_publication_requires_session_and_workspace_checks_before_any_remote_operation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source=self.dual_release_directory(Path(temporary)/'assembled');path=source/'install-x64.json';original=path.read_bytes()
+            for name,field in (('session-save','independentXmlPassed'),('workspace-journal','saveDigestsMatch')):
+                for mutation in ('missing','false'):
+                    with self.subTest(case=name,mutation=mutation):
+                        value=json.loads(original);checks=next(row for row in value['mcp']['cases'] if row['name']==name)['checks']
+                        if mutation=='missing':checks.pop(field)
+                        else:checks[field]=False
+                        path.write_text(json.dumps(value)+'\n');self.checksum_directory(source)
+                        with patch.dict(os.environ,self.release_environment(),clear=True), \
+                                patch.object(store_package,'github') as github,patch.object(store_package.subprocess,'run') as command:
+                            with self.assertRaisesRegex(ValueError,'MCP (판정|필수)'):store_package.ensure_source_release(f'v{PRODUCT_VERSION}',source)
+                            github.assert_not_called();command.assert_not_called()
+
     def test_pair_source_publication_revalidates_raw_wack_after_outer_checksums_are_recomputed(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = self.dual_release_directory(Path(temporary) / 'assembled')

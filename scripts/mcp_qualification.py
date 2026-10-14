@@ -27,7 +27,25 @@ STRESS_SCOPE = '원본·인쇄 기준과 별개의 작업자 강제 종료용 �
 CASE_NAMES = ('initialize', 'ping', 'tools-list', 'normal-read', 'normal-write',
     'ir-diff-code3', 'batch-partial-code1', *('malformed-paths-' + str(n) for n in range(4)),
     *('password-' + fmt + '-' + mode for fmt in ('hwp', 'hwpx') for mode in ('missing', 'wrong', 'correct')))
-CASE_IDS = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 17, 18, 19, 20, 21)
+CASE_NAMES += ('session-open', 'session-text', 'session-replace', 'session-edited-text', 'session-save',
+    'session-close', 'session-closed-query', 'session-ping', 'workspace-list', 'workspace-open', 'workspace-text',
+    'workspace-replace', 'workspace-edited-text', 'workspace-save', 'workspace-close', 'workspace-journal')
+CASE_IDS = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 17, 18, 19, 20, 21,
+    22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37)
+SESSION_CHECKS = (
+    {'opened': True, 'sourceUnchanged': True, 'outputAbsent': True},
+    {'sourceTextMatched': True, 'docIdMatched': True},
+    {'replacedCount': 1, 'docIdMatched': True, 'sourceUnchanged': True, 'outputAbsent': True},
+    {'editedTextMatched': True, 'markerCount': 1, 'docIdMatched': True, 'sourceUnchanged': True, 'outputAbsent': True},
+    {'saveVerified': True, 'docIdMatched': True, 'independentXmlPassed': True, 'markerCount': 1,
+        'sourceUnchanged': True, 'outputBytesMatched': True},
+    {'closed': True, 'docIdMatched': True, 'sourceUnchanged': True})
+SESSION_WORKSPACE_CHECKS = (*SESSION_CHECKS, {'rejected': True, 'nextOpenHint': True},
+    {'passed': True, 'sameServerAlive': True}, {'entryCount': 1, 'ownedEntryMatched': True, 'sourceUnchanged': True},
+    {**SESSION_CHECKS[0], 'listedIdUsed': True}, *SESSION_CHECKS[1:],
+    {'journalEntries': 4, 'documentIdsMatched': True, 'sequenceMatched': True, 'replaceChanged': True,
+        'replaceDigestsDiffer': True, 'saveChangedFalse': True, 'saveDigestsMatch': True, 'noJournalErrors': True,
+        'textDigestsMatched': True})
 TOP_KEYS = {'formatVersion', 'cases', 'caseCount', 'sourceCommit', 'sourceRun', 'runAttempt',
     'architecture', 'context', 'productSha256', 'helperSha256', 'nativeArchitectureHelperSha256',
     'fullSourceQualified', 'storeCertified', 'scope', 'passed', 'limits', 'serverNativeArchitecture',
@@ -142,20 +160,20 @@ def verify(proof, architecture, cli_sha256, package_full_name, source_commit, so
     shape(proof, TOP_KEYS, '설치 MCP 증명 필드가 다릅니다')
     for key, expected in {'formatVersion': 1, 'architecture': architecture, 'context': 'installed',
             'productSha256': cli_sha256, **binding, 'fullSourceQualified': False, 'storeCertified': False,
-            'passed': True, 'scope': SCOPE, 'caseCount': 17, 'phase': 'hwp_export_text',
-            'lastCompletedCase': CASE_NAMES[-1], 'framesSent': 23, 'framesReceived': 22,
+            'passed': True, 'scope': SCOPE, 'caseCount': 33, 'phase': 'hwp_ws_journal',
+            'lastCompletedCase': CASE_NAMES[-1], 'framesSent': 39, 'framesReceived': 38,
             'helperSha256': helper_hash('mcp_worker.py'), 'nativeArchitectureHelperSha256': helper_hash('native_architecture.py')}.items():
         exact(proof[key], expected, '현재 설치 MCP 실행/범위/완료 판정이 다릅니다')
     limits = {'frameBytes': FRAME_CAP, 'runtimeBytes': RUNTIME_CAP, 'requestTimeoutSeconds': 30}
     shape(proof['limits'], limits, 'MCP 실행 한도 필드가 다릅니다')
     for key, value in limits.items(): exact(proof['limits'][key], value, 'MCP 실행 한도가 다릅니다')
     cases = proof['cases']
-    require(type(cases) is list and len(cases) == 17, '전체 17개 MCP 사례가 필요합니다')
-    checks = ({'protocolPassed': True}, {'passed': True}, {'toolsListed': (5, 2000), 'requiredToolsPresent': True},
+    require(type(cases) is list and len(cases) == 33, '전체 33개 MCP 사례가 필요합니다')
+    checks = ({'protocolPassed': True}, {'passed': True}, {'toolsListed': (13, 2000), 'requiredToolsPresent': True},
         {'sourceTextMatched': True}, {'independentXmlPassed': True, 'sourceUnchanged': True, 'replacedCount': (1, 2**31 - 1)},
         {'cliExitCode': 3, 'sameJson': True}, {'cliExitCode': 1, 'records': 2, 'sameNdjson': True},
         *({'rejected': True, 'serverResponsive': True} for _ in range(4)),
-        *({'expectedResultPassed': True, 'ciphertextUnchanged': True} for _ in range(6)))
+        *({'expectedResultPassed': True, 'ciphertextUnchanged': True} for _ in range(6)), *SESSION_WORKSPACE_CHECKS)
     for record, name, request_id, values in zip(cases, CASE_NAMES, CASE_IDS, checks):
         response(record, name, request_id, values)
     stress = proof['stressFixture']
@@ -167,9 +185,9 @@ def verify(proof, architecture, cli_sha256, package_full_name, source_commit, so
     shape(isolation, {'worker', 'sameServerAlive', 'forcedTermination', 'batchRecords', 'response', 'scope'}, '설치 worker 증명 필드가 다릅니다')
     for key, value in {'sameServerAlive': True, 'forcedTermination': False, 'batchRecords': 64, 'scope': INSTALLED_SCOPE}.items():
         exact(isolation[key], value, '설치 worker batch/서버 생존/강제 종료 판정이 다릅니다')
-    response(isolation['response'], 'installed-worker-batch64', 22, {'records': 64, 'passed': True})
+    response(isolation['response'], 'installed-worker-batch64', 38, {'records': 64, 'passed': True})
     hashes = [row['responseSha256'] for row in [*cases, isolation['response']]]
-    require(len(set(hashes)) == 18, '서로 다른 request ID의 응답 해시가 중복됩니다')
+    require(len(set(hashes)) == 34, '서로 다른 request ID의 응답 해시가 중복됩니다')
     parent, worker = proof['serverNativeArchitecture'], isolation['worker']
     for record, is_server in ((parent, True), (worker, False)):
         native(record, architecture, cli_sha256, package_full_name, binding, server=is_server,
@@ -210,10 +228,10 @@ def main():
     verify(read_receipt(args.receipt), args.architecture, args.cli_sha256, args.package_full_name,
         args.source_commit, args.source_run, args.run_attempt)
     print(json.dumps({'passed': True, 'context': 'installed', 'architecture': args.architecture,
-        'caseCount': 17, 'fullSourceQualified': False, 'storeCertified': False}, ensure_ascii=False))
+        'caseCount': 33, 'fullSourceQualified': False, 'storeCertified': False}, ensure_ascii=False))
 
 
 if __name__ == '__main__':
     try: main()
     except (ValueError, OSError):
-        raise SystemExit('설치 MCP 증명이 현재 실행·제품 신원·17개 필수 판정을 만족하지 않습니다.') from None
+        raise SystemExit('설치 MCP 증명이 현재 실행·제품 신원·33개 필수 판정을 만족하지 않습니다.') from None
