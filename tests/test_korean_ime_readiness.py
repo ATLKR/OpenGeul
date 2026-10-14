@@ -164,5 +164,55 @@ if($before -ceq (Get-OpenGeulFileSha256 $changing)){throw 'input mutation escape
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertEqual(result.stdout.splitlines(),[hashlib.sha256(raw).hexdigest() for raw in fixtures])
 
+    def test_actual_worker_architecture_initializers_resolve_without_newer_type_aliases(self):
+        powershell=shutil.which('powershell') or shutil.which('pwsh') or '/workspace/OpenGeul-ci-build-progress/.work/powershell746/bin/pwsh'
+        if not Path(powershell).is_file():self.skipTest('PowerShell runtime unavailable')
+        with tempfile.TemporaryDirectory() as directory:
+            script=Path(directory)/'worker-numeric-types.ps1'
+            script.write_text(r'''
+param([string]$Source)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+# Remove the newer built-in before parsing: parsing can populate the process
+# type cache, which must not accidentally preserve the alias being excluded.
+$accelerators=[psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')
+$builtin=$accelerators.GetField('builtinTypeAccelerators',[Reflection.BindingFlags]'NonPublic,Static').GetValue($null)
+$null=$builtin.Remove('ushort')
+if($builtin.ContainsKey('ushort')){throw 'isolated newer alias was not removed'}
+$tokens=$null;$errors=$null
+$tree=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'production parse failure'}
+$assignments=@($tree.FindAll({param($node)
+    if($node -is [Management.Automation.Language.AssignmentStatementAst] -and
+       $node.Left -is [Management.Automation.Language.AttributedExpressionAst]) {
+        $variable=$node.Left.Find({param($child) $child -is [Management.Automation.Language.VariableExpressionAst]},$true)
+        return $null -ne $variable -and @('controllerMachine','nativeMachine') -contains $variable.VariablePath.UserPath
+    }
+    return $false
+},$true) | Sort-Object { $_.Extent.StartOffset })
+if($assignments.Count -ne 2){throw 'actual architecture initialization pair missing/duplicated'}
+# This fresh child models only the documented older alias absence. It never
+# runs the hosted setup script, changes CI identity, or calls Windows APIs.
+$declarations=($assignments | ForEach-Object { $_.Extent.Text }) -join ';'
+try {
+    $types=@(&([scriptblock]::Create($declarations+';$controllerMachine.GetType().FullName;$nativeMachine.GetType().FullName')))
+    if($types.Count -ne 2 -or @($types | Where-Object { $_ -cne 'System.UInt16' }).Count -ne 0){throw 'actual interop initialization types differ'}
+    @{passed=$true;types=$types;actualWindowsPowerShell51=$false;sourceQualified=$false}|ConvertTo-Json -Compress
+} catch {
+    @{passed=$false;failureId=$_.FullyQualifiedErrorId;exceptionType=$_.Exception.GetType().FullName;
+      hresult=$_.Exception.HResult;actualWindowsPowerShell51=$false;sourceQualified=$false}|ConvertTo-Json -Compress
+    exit 1
+}
+''',encoding='utf-8')
+            result=subprocess.run([str(powershell),'-NoLogo','-NoProfile','-NonInteractive','-File',str(script),
+                '-Source',str(ROOT/'scripts/ensure-korean-ime.ps1')],capture_output=True,text=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            import json
+            observed=json.loads(result.stdout)
+            self.assertTrue(observed['passed'])
+            self.assertEqual(observed['types'],['System.UInt16','System.UInt16'])
+            self.assertFalse(observed['actualWindowsPowerShell51'])
+            self.assertFalse(observed['sourceQualified'])
+
 
 if __name__=='__main__':unittest.main(verbosity=2)

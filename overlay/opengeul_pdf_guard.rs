@@ -39,6 +39,45 @@ pub fn enforce(fontdb: &mut usvg::fontdb::Database, pages: &[String]) -> Result<
     Ok(())
 }
 
+/// Keep authored family matches intact, then use an already permitted installed
+/// family when usvg cannot find any base face. Glyph fallback cannot run until
+/// a base face exists. The caller must apply `enforce` before using this resolver.
+pub fn installed_base_font_selector() -> usvg::FontSelectionFn<'static> {
+    let stock = usvg::FontResolver::default_font_selector();
+    Box::new(move |font, fontdb| {
+        if let Some(id) = stock(font, fontdb) {
+            return Some(id);
+        }
+        // Font discovery IDs/order are not a family preference. Use only
+        // resident family metadata and a locale-independent stable ordering.
+        let (family, _, _) = fontdb.faces().flat_map(|face| {
+            face.families.iter().filter(|(name, _)| !name.is_empty()).map(move |(name, _)| {
+                (name.as_str(), face.post_script_name.as_str(), face.index)
+            })
+        }).min()?;
+        let stretch = match font.stretch() {
+            usvg::FontStretch::UltraCondensed => usvg::fontdb::Stretch::UltraCondensed,
+            usvg::FontStretch::ExtraCondensed => usvg::fontdb::Stretch::ExtraCondensed,
+            usvg::FontStretch::Condensed => usvg::fontdb::Stretch::Condensed,
+            usvg::FontStretch::SemiCondensed => usvg::fontdb::Stretch::SemiCondensed,
+            usvg::FontStretch::Normal => usvg::fontdb::Stretch::Normal,
+            usvg::FontStretch::SemiExpanded => usvg::fontdb::Stretch::SemiExpanded,
+            usvg::FontStretch::Expanded => usvg::fontdb::Stretch::Expanded,
+            usvg::FontStretch::ExtraExpanded => usvg::fontdb::Stretch::ExtraExpanded,
+            usvg::FontStretch::UltraExpanded => usvg::fontdb::Stretch::UltraExpanded,
+        };
+        let style = match font.style() {
+            usvg::FontStyle::Normal => usvg::fontdb::Style::Normal,
+            usvg::FontStyle::Italic => usvg::fontdb::Style::Italic,
+            usvg::FontStyle::Oblique => usvg::fontdb::Style::Oblique,
+        };
+        fontdb.query(&usvg::fontdb::Query {
+            families: &[usvg::fontdb::Family::Name(family)],
+            weight: usvg::fontdb::Weight(font.weight()), stretch, style,
+        })
+    })
+}
+
 fn requested_families(svg: &str) -> Vec<String> {
     let mut result=Vec::new();
     for quote in ['"','\''] {

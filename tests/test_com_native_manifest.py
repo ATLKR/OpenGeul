@@ -1,4 +1,4 @@
-"""Keep exact COM compiler prefix and mandatory three-target suffix boundaries."""
+"""Keep exact COM compiler prefix and mandatory four-target suffix boundaries."""
 from pathlib import Path
 import copy
 import hashlib
@@ -13,9 +13,11 @@ sys.path.insert(0, str(ROOT/'scripts'))
 import com_source_contract as contract
 import prepare_native_tests
 
-NEW_PINS = ('839947cf430e2c3587c235a4ef8980195be1c78f9f8ef68e9f60f9968a1e01c6',
-            '8895d687ba3eae0602f2003e0078420b5a844c19f090162b7f4e5315ad262b6c')
-OLD_PINS = ('8fbbc05a985091264101cf14fc4d01563eacef548fd9f7f02e68993e8aebc5e3',
+NEW_PINS = ('3e5a95c7b4b81b208d56844b252f3d1f50077a4ab28f38ec3746b0b51b8541b0',
+            '54781eabb14ad85dbc06d4929b7b6ed00219e4030840e9cfbc8d76aa5ae0e4ca')
+OLD_PINS = ('839947cf430e2c3587c235a4ef8980195be1c78f9f8ef68e9f60f9968a1e01c6',
+            '8895d687ba3eae0602f2003e0078420b5a844c19f090162b7f4e5315ad262b6c',
+            '8fbbc05a985091264101cf14fc4d01563eacef548fd9f7f02e68993e8aebc5e3',
             'db5bb7fa8f838c3597aaed8e4f85ba9acaa5d0f1eca290fe8240d3b045c093a3')
 
 def sha(path):
@@ -39,7 +41,7 @@ def materials():
     return {'ledger':ledger},prepared,{'originalManifestSha256':ledger['patchedFiles']['Cargo.toml']},config
 
 class ComNativeManifestTests(unittest.TestCase):
-    def test_current_manifest_only_accepts_exact_three_target_lf_crlf_pins(self):
+    def test_current_manifest_only_accepts_exact_four_target_lf_crlf_pins(self):
         self.assertEqual(tuple(contract.REFERENCE['preparedManifestSha256']),NEW_PINS)
         record,prepared,native,config=materials()
         for pin in NEW_PINS:
@@ -86,7 +88,7 @@ class ComNativeManifestTests(unittest.TestCase):
             validate.assert_called_once_with(record,prepared,native,config)
         return value
 
-    def test_capture_accepts_actual_registered_third_native_skia_target(self):
+    def test_capture_accepts_actual_registered_fourth_native_skia_target(self):
         self.capture_fixture()
 
     def test_capture_rejects_legacy_two_targets_and_missing_required_native_feature(self):
@@ -94,6 +96,13 @@ class ComNativeManifestTests(unittest.TestCase):
         for change in (lambda body:body.replace(third,''),
                        lambda body:body.replace(third,third.replace('required-features = ["native-skia"]\n','')),
                        lambda body:body+'\n[[test]]\nname = "bypass"\npath = "tests/bypass.rs"\n'):
+            with self.subTest(change=change),self.assertRaisesRegex(ValueError,'native-test suffix'):
+                self.capture_fixture(change)
+
+    def test_capture_rejects_legacy_three_targets_or_missing_font_native_feature(self):
+        fourth='\n[[test]]\nname = "opengeul_pdf_font_resolution"\npath = "tests/opengeul_pdf_font_resolution.rs"\nrequired-features = ["native-skia"]\n'
+        for change in (lambda body:body.replace(fourth,''),
+                       lambda body:body.replace(fourth,fourth.replace('required-features = ["native-skia"]\n',''))):
             with self.subTest(change=change),self.assertRaisesRegex(ValueError,'native-test suffix'):
                 self.capture_fixture(change)
 

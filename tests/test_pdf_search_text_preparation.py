@@ -10,6 +10,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
 import pdf_search_text as pdf
+import pdf_font_resolution as fonts
 
 
 def digest(data):
@@ -31,6 +32,7 @@ class PdfSearchTextPreparationTests(unittest.TestCase):
                          '    x_object.matrix([1.0 / bbox.width(), 0.0, 0.0, 1.0 / bbox.height(), 0.0, 0.0]);\n}\n'
                          '// nested SVG callers still use tree_to_xobject\n'),
             pdf.PDF: ('    opengeul_pdf_guard::enforce(&mut fontdb, svg_pages)?;\n'
+                      '    options.fontdb = std::sync::Arc::new(fontdb);\n'
                       '    svg2pdf::to_chunk(tree, conversion)\n'
                       '        content.transform([pd.width, 0.0, 0.0, pd.height, 0.0, 0.0]);\n'
                       '    opengeul_pdf_guard::reject_direct_export()?;\n'),
@@ -74,6 +76,90 @@ class PdfSearchTextPreparationTests(unittest.TestCase):
         core = {name: value for name, value in files.items() if '/src/' in name}
         helpers = {pdf.HELPER: digest((ROOT/pdf.HELPER).read_bytes())}
         return files, core, helpers
+
+    def owned_font_successor(self):
+        proof = pdf.apply(self.source)
+        for name, overlay in ((fonts.GUARD, 'opengeul_pdf_guard.rs'),
+                              (fonts.POLICY, 'font_policy.rs')):
+            path = self.source/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((ROOT/'overlay'/overlay).read_bytes())
+        before = {name:digest((self.source/name).read_bytes()) for name in fonts.SOURCE_FILES}
+        renderer = (self.source/fonts.PDF).read_bytes()
+        anchor = b'    options.fontdb = std::sync::Arc::new(fontdb);\n'
+        self.assertEqual(renderer.count(anchor), 1)
+        final = renderer.replace(anchor, anchor +
+                b'    options.font_resolver.select_font = opengeul_pdf_guard::installed_base_font_selector();\n')
+        after = {**before, fonts.PDF:digest(final)}
+        # Only immutable references for these small owned files are substituted;
+        # both actual patchers and the actual source validators remain in use.
+        for name, value in (('INPUT_SOURCE_SHA256', before), ('OUTPUT_SOURCE_SHA256', after)):
+            override = patch.object(fonts, name, value)
+            override.start(); self.addCleanup(override.stop)
+        successor = fonts.apply(self.source)
+        files, core, helpers = self.inventory()
+        for name in fonts.SOURCE_FILES:
+            files[name] = core[name] = digest((self.source/name).read_bytes())
+        helpers[fonts.HELPER] = digest((ROOT/fonts.HELPER).read_bytes())
+        return proof, successor, files, core, helpers
+
+    def test_reviewed_font_successor_requires_explicit_handoff_and_actual_final_bytes(self):
+        proof, successor, files, core, helpers = self.owned_font_successor()
+        self.assertEqual(proof['afterSha256'][pdf.PDF], successor['beforeSha256'][pdf.PDF])
+        self.assertNotEqual(proof['afterSha256'][pdf.PDF], files[pdf.PDF])
+        self.assertEqual(files[pdf.PDF], successor['afterSha256'][pdf.PDF])
+        with self.assertRaisesRegex(ValueError, 'PDF search text prepared source hash mismatch'):
+            pdf.validate(proof, files, core, helpers)
+        try:
+            pdf.validate(proof, files, core, helpers, successor=successor)
+        except TypeError as error:
+            self.fail('Actual PDF validator cannot consume the reviewed successor stage: '+str(error))
+
+    def test_font_successor_proof_helper_and_each_actual_dependency_are_strict(self):
+        proof, successor, files, core, helpers = self.owned_font_successor()
+        cases = [('missing-proof', None), ('extra-proof', None), ('helper', None),
+                 ('current-helper', None), ('extra-before', None), ('extra-after', None)]
+        cases += [(kind, name) for name in fonts.SOURCE_FILES
+                  for kind in ('before', 'after', 'prepared', 'core', 'missing-prepared',
+                               'missing-core', 'coherent-legacy')]
+        for change, name in cases:
+            next_proof = deepcopy(successor); prepared = dict(files)
+            actual_core = dict(core); actual_helpers = dict(helpers)
+            if change == 'missing-proof': next_proof = {}
+            elif change == 'extra-proof': next_proof['optional'] = True
+            elif change == 'helper': next_proof['helperSha256'] = '0'*64
+            elif change == 'current-helper': actual_helpers[fonts.HELPER] = '0'*64
+            elif change in ('extra-before', 'extra-after'):
+                next_proof['beforeSha256' if change == 'extra-before' else 'afterSha256']['unreviewed.rs'] = '0'*64
+            elif change in ('before', 'after'): next_proof[change+'Sha256'][name] = '0'*64
+            elif change == 'prepared': prepared[name] = '0'*64
+            elif change == 'core': actual_core[name] = '0'*64
+            elif change == 'missing-prepared': prepared.pop(name)
+            elif change == 'missing-core': actual_core.pop(name)
+            else:
+                next_proof['afterSha256'][name] = '0'*64
+                prepared[name] = actual_core[name] = '0'*64
+            with self.subTest(change=change, source=name), self.assertRaises(ValueError):
+                pdf.validate(proof, prepared, actual_core, actual_helpers, successor=next_proof)
+
+    def test_even_an_internally_exact_successor_cannot_claim_an_unrelated_prior_stage(self):
+        proof, successor, files, core, helpers = self.owned_font_successor()
+        unrelated = {**fonts.INPUT_SOURCE_SHA256, fonts.PDF:'0'*64}
+        forged = deepcopy(successor); forged['beforeSha256'] = unrelated
+        # The current successor validator still accepts its own exact immutable
+        # input fixture; the stage handoff must independently reject this join.
+        with patch.object(fonts, 'INPUT_SOURCE_SHA256', unrelated):
+            fonts.validate_contract(forged, files, helpers)
+            with self.assertRaisesRegex(ValueError, 'PDF.*stage handoff'):
+                pdf.validate(proof, files, core, helpers, successor=forged)
+
+    def test_font_successor_cannot_replace_other_source1_sources_or_original_licenses(self):
+        proof, successor, files, core, helpers = self.owned_font_successor()
+        for name in pdf.SOURCE_FILES:
+            if name == pdf.PDF: continue
+            altered = dict(files); altered[name] = '0'*64
+            with self.subTest(source=name), self.assertRaisesRegex(ValueError, 'PDF search text prepared source hash mismatch'):
+                pdf.validate(proof, altered, core, helpers, successor=successor)
 
     def test_root_conversion_is_additive_and_font_policy_remains_enforced(self):
         proof = pdf.apply(self.source)

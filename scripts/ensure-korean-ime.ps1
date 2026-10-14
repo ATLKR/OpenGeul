@@ -120,7 +120,7 @@ public static class OpenGeulKoreanSetupHost {
     public static extern uint GetSystemDirectoryW(StringBuilder value,uint count);
 }
 '@
-    [ushort]$controllerMachine=0;[ushort]$nativeMachine=0
+    [System.UInt16]$controllerMachine=0;[System.UInt16]$nativeMachine=0
     $hostObservation.architectureQuerySucceeded=[OpenGeulKoreanSetupHost]::IsWow64Process2([OpenGeulKoreanSetupHost]::GetCurrentProcess(),[ref]$controllerMachine,[ref]$nativeMachine)
     $hostObservation.nativeMachine=[int]$nativeMachine
     $hostObservation.controllerMachine=[int]$controllerMachine

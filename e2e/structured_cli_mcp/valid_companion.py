@@ -389,7 +389,7 @@ class Suite:
     def preserve(self,name,raw):
         folder=self.proof_root/'calls'/self.case.get('id','preflight');folder.mkdir(parents=True,exist_ok=True)
         path=folder/(str(self.counter)+'-'+name);self.counter+=1
-        require(not path.exists(),'Original call evidence already exists');path.write_bytes(raw);return str(path.relative_to(self.proof_root))
+        require(not path.exists(),'Original call evidence already exists');path.write_bytes(raw);return path.relative_to(self.proof_root).as_posix()
     def record(self,row,operation,arguments,raw,stderr=None):
         request=canonical({'operation':operation,'arguments':arguments})
         row.update(operation=operation,requestSha256=hashlib.sha256(request).hexdigest(),requestBytes=len(request),requestFile=self.preserve(row['name']+'-request.json',request),responseFile=self.preserve(row['name']+('-response.json' if row['channel']=='mcp' else '-stdout.log'),raw))
@@ -431,7 +431,7 @@ class Suite:
         value=self.tool(name,'hwp_close',{'docId':doc});require(value.get('docId')==doc and value.get('closed') is True,'Actual document close failed')
     def artifact(self,path,kind,details):
         directory=self.proof_root/'artifacts'/self.case.get('id','preflight');directory.mkdir(parents=True,exist_ok=True);saved=directory/(str(len(self.case['artifacts']))+path.suffix);require(not saved.exists(),'Original artifact exists');shutil.copyfile(path,saved)
-        self.case['artifacts'].append({'path':str(saved.relative_to(self.proof_root)),'kind':kind,'sha256':digest(path),'bytes':path.stat().st_size,'independentPassed':True,'details':details})
+        self.case['artifacts'].append({'path':saved.relative_to(self.proof_root).as_posix(),'kind':kind,'sha256':digest(path),'bytes':path.stat().st_size,'independentPassed':True,'details':details})
     def validate_pdf(self,value,source,path):
         # Retain the actual owned output before any manifest or PDFium assertion.
         # A failed capture is evidence only; success still requires every oracle.
@@ -455,7 +455,7 @@ class Suite:
             regular(saved);captured_sha=hashlib.sha256(raw).hexdigest()
             require(saved.stat().st_size==len(raw) and digest(saved)==captured_sha,
                     'Retained PDF bytes differ from the actual output')
-            artifact={'path':str(saved.relative_to(self.proof_root)),'kind':'pdf',
+            artifact={'path':saved.relative_to(self.proof_root).as_posix(),'kind':'pdf',
                       'sha256':captured_sha,'bytes':len(raw),'independentPassed':False,'details':{}}
             self.case['artifacts'].append(artifact)
         with oracle.pdf_phase('pdf-manifest'):
@@ -600,7 +600,7 @@ def main():
                     value=response.get('result',{});lock=json.loads((ROOT/'config/upstream.lock.json').read_bytes());require(value.get('protocolVersion')=='2025-06-18' and value.get('serverInfo',{}).get('name')=='rhwp' and value['serverInfo'].get('version')==lock['rhwp']['version'],'Actual companion initialize differs');client.notify('notifications/initialized')
                 else:
                     definitions=response.get('result',{}).get('tools',[]);proof['_toolDefinitions']=definitions;names=[t.get('name') for t in definitions];require(REQUIRED_TOOLS<=set(names) and len(names)==len(set(names)),'Actual public structured tools missing/duplicate')
-                row=result_receipt(name,response,{});row.pop('checks');row.update(channel='mcp',serverProcessId=client.process.pid,passed=True);raw=canonical(response);request=canonical({'operation':method,'arguments':params});folder=args.out/'calls';folder.mkdir(exist_ok=True);rp=folder/(name+'-request.json');sp=folder/(name+'-response.json');rp.write_bytes(request);sp.write_bytes(raw);row.update(operation=method,requestSha256=hashlib.sha256(request).hexdigest(),requestBytes=len(request),requestFile=str(rp.relative_to(args.out)),responseFile=str(sp.relative_to(args.out)));proof['setup'].append(row)
+                row=result_receipt(name,response,{});row.pop('checks');row.update(channel='mcp',serverProcessId=client.process.pid,passed=True);raw=canonical(response);request=canonical({'operation':method,'arguments':params});folder=args.out/'calls';folder.mkdir(exist_ok=True);rp=folder/(name+'-request.json');sp=folder/(name+'-response.json');rp.write_bytes(request);sp.write_bytes(raw);row.update(operation=method,requestSha256=hashlib.sha256(request).hexdigest(),requestBytes=len(request),requestFile=rp.relative_to(args.out).as_posix(),responseFile=sp.relative_to(args.out).as_posix());proof['setup'].append(row)
             suite=Suite(exe,args.architecture,binding,work,definition,client,watch,proof)
             # CFB is independently converted to XML and checked against the same definition;
             # the converter's output never defines expected markers/styles/geometry.

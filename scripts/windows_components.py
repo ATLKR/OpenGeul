@@ -24,6 +24,7 @@ import zlib
 import native_source_contract
 import com_source_contract
 import pdf_search_text
+import pdf_font_resolution
 import menu_clipboard
 import shape_creation_history
 import nested_line_navigation
@@ -75,7 +76,7 @@ COPIED_OVERLAYS = {
     'third_party/rhwp/src/parser/hwpx/opengeul_namespaces.rs': 'overlay/hwpx_namespaces.rs',
     'third_party/rhwp/rhwp-studio/src/engine/opengeul-composition-final.ts': 'overlay/composition-final.ts',
 }
-SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | set(picture_line_segment_owner.SOURCE_FILES) | set(virtual_picture_layout_admission.SOURCE_FILES) | set(hwpx_persistence_verification.SOURCE_FILES) | {
+SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(pdf_font_resolution.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | set(picture_line_segment_owner.SOURCE_FILES) | set(virtual_picture_layout_admission.SOURCE_FILES) | set(hwpx_persistence_verification.SOURCE_FILES) | {
     com_source_contract.LEDGER_PATH,
     'third_party/rhwp/src/main.rs', 'third_party/rhwp/src/mcp_serve.rs',
     native_source_contract.LEDGER_PATH,
@@ -295,7 +296,11 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     pdf_proof = contract.get('pdfSearchText')
     if ledger.get('pdfSearchText') != pdf_proof:
         raise ValueError('Distribution ledger PDF search text proof mismatch')
-    pdf_search_text.validate(pdf_proof, contract['preparedFiles'], contract['coreSourceFiles'], config['helpers'])
+    font_proof = contract.get('pdfFontResolution')
+    if not isinstance(font_proof, dict) or ledger.get('pdfFontResolution') != font_proof:
+        raise ValueError('PDF font resolution source/ledger proof mismatch')
+    pdf_search_text.validate(pdf_proof, contract['preparedFiles'], contract['coreSourceFiles'],
+                             config['helpers'], successor=font_proof)
     for key in ('preservedFiles', 'baselinePreservedFiles'):
         for name, digest in ledger[key].items():
             safe_name(name)
@@ -415,7 +420,7 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
         selected = [entry for entry in entries if entry.get('name') == name]
         if (len(selected) != 1 or selected[0].get('path') != 'tests/'+name+'.rs'
                 or selected[0].get('required-features', []) != (
-                    ['native-skia'] if name in ('opengeul_pdf_policy', 'opengeul_stored_lineseg_origin') else [])):
+                    ['native-skia'] if name in ('opengeul_pdf_policy', 'opengeul_stored_lineseg_origin', 'opengeul_pdf_font_resolution') else [])):
             raise ValueError('Native integration test is not correctly registered')
     marker = '\n# OpenGeul distribution-only integration gates.\n'
     if manifest.count(marker) != 1 or hashlib.sha256(manifest.split(marker)[0].encode()).hexdigest() != native.get('originalManifestSha256'):
@@ -439,6 +444,7 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
                 'namespacePatch': read_json(core/'.opengeul-namespaces.json'),
                 'wasmRebuild': ledger.get('wasmRebuild'),
                 'pdfSearchText': ledger.get('pdfSearchText'),
+                'pdfFontResolution': ledger.get('pdfFontResolution'),
                 'menuClipboardPaste': ledger.get('menuClipboardPaste'),
                 'shapeCreationHistory':ledger.get('shapeCreationHistory'),
                 'nestedLineNavigation':ledger.get('nestedLineNavigation'),
@@ -641,7 +647,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
         validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
-    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin','pictureLineSegmentOwner','virtualPictureLayoutAdmission','hwpxPersistenceVerification'}
+    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','pdfFontResolution','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin','pictureLineSegmentOwner','virtualPictureLayoutAdmission','hwpxPersistenceVerification'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
         raise ValueError('Invalid prepared source contract')
     _hashes(contract['preparedFiles'], set(SOURCE_FILES) | set(NATIVE_FILES))
@@ -657,7 +663,10 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
     for name, digest in contract['preparedFiles'].items():
         if any(name.startswith(directory+'/') for directory in CORE_TREES) and core_files.get(name) != digest:
             raise ValueError('Complete core source inventory mismatch')
-    pdf_search_text.validate(contract['pdfSearchText'], contract['preparedFiles'], core_files, config['helpers'])
+    if not isinstance(contract['pdfFontResolution'], dict):
+        raise ValueError('PDF font resolution source/ledger proof mismatch')
+    pdf_search_text.validate(contract['pdfSearchText'], contract['preparedFiles'], core_files,
+                             config['helpers'], successor=contract['pdfFontResolution'])
     menu_clipboard.validate_contract(contract['menuClipboardPaste'], contract['preparedFiles'], config['helpers'],shape_required=True)
     shape_creation_history.validate_contract(contract['shapeCreationHistory'],contract['preparedFiles'],config['helpers'])
     nested_line_navigation.validate_contract(contract['nestedLineNavigation'], contract['preparedFiles'], config['helpers'])

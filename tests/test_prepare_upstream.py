@@ -46,6 +46,10 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.pdf_search = pdf_search.start()
         self.pdf_search.return_value = {'testFixture': 'PDF searchable coordinates'}
         self.addCleanup(pdf_search.stop)
+        pdf_font = patch.object(prepare_upstream, 'apply_pdf_font_resolution', create=True)
+        self.pdf_font = pdf_font.start()
+        self.pdf_font.return_value = {'testFixture': 'installed PDF base-family selection'}
+        self.addCleanup(pdf_font.stop)
         menu_clipboard = patch.object(prepare_upstream, 'apply_menu_clipboard', create=True)
         self.menu_clipboard = menu_clipboard.start()
         self.menu_clipboard.return_value = {'testFixture': 'menu clipboard'}
@@ -243,6 +247,36 @@ pub fn layer_trees_to_pdf_with_links(
         self.assertEqual(ledger['shapeCreationHistory'], self.shape_creation.return_value)
         self.assertEqual(ledger['nestedLineNavigation'], self.nested_navigation.return_value)
         self.assertEqual(observed, ['pdf', 'menu', 'shape', 'nested'])
+
+    def test_pdf_font_resolution_runs_after_root_geometry_before_final_ledger(self):
+        observed = []
+        def searchable_boundary(source):
+            observed.append('root-geometry')
+            return self.pdf_search.return_value
+        def font_boundary(source):
+            self.assertEqual(observed, ['root-geometry'])
+            self.assertFalse((source/'.opengeul-overlay.json').exists())
+            for target, overlay in (('opengeul_pdf_guard.rs', 'opengeul_pdf_guard.rs'),
+                                    ('opengeul_font_policy.rs', 'font_policy.rs')):
+                self.assertEqual((source/'third_party/rhwp/src/renderer/pdf'/target).read_bytes(),
+                                 (ROOT/'overlay'/overlay).read_bytes())
+            observed.append('font-resolution')
+            return self.pdf_font.return_value
+        self.pdf_search.side_effect = searchable_boundary
+        self.pdf_font.side_effect = font_boundary
+        prepare_upstream.patch(self.source, '1.1.5')
+        self.pdf_search.assert_called_once_with(self.source)
+        self.pdf_font.assert_called_once_with(self.source)
+        ledger = json.loads((self.source/'.opengeul-overlay.json').read_bytes())
+        self.assertEqual(ledger['pdfSearchText'], self.pdf_search.return_value)
+        self.assertEqual(ledger['pdfFontResolution'], self.pdf_font.return_value)
+        self.assertEqual(observed, ['root-geometry', 'font-resolution'])
+
+    def test_pdf_font_resolution_failure_cannot_publish_a_source_ledger(self):
+        self.pdf_font.side_effect = ValueError('Unreviewed PDF installed-font source')
+        with self.assertRaisesRegex(ValueError, 'Unreviewed PDF installed-font source'):
+            prepare_upstream.patch(self.source, '1.1.5')
+        self.assertFalse((self.source/'.opengeul-overlay.json').exists())
 
     def test_nested_line_preparation_failure_cannot_publish_a_source_ledger(self):
         self.nested_navigation.side_effect = ValueError('Unreviewed nested cursor input')

@@ -28,11 +28,11 @@ REFERENCE = {
         'src/mcp_serve.rs': '205b4dab4f32f3996340c8e237b1b5fec3a39b74e8789bf34297da23902bd471',
         'Cargo.toml': '769745d72376286c03413925eff943af5014db3467e21798d9fc886044d02405',
     },
-    # prepare_native_tests writes host newlines after appending the exact three
+    # prepare_native_tests writes host newlines after appending the exact four
     # integration targets to the pinned COM-patched manifest.
     'preparedManifestSha256': (
-        '839947cf430e2c3587c235a4ef8980195be1c78f9f8ef68e9f60f9968a1e01c6',
-        '8895d687ba3eae0602f2003e0078420b5a844c19f090162b7f4e5315ad262b6c',
+        '3e5a95c7b4b81b208d56844b252f3d1f50077a4ab28f38ec3746b0b51b8541b0',
+        '54781eabb14ad85dbc06d4929b7b6ed00219e4030840e9cfbc8d76aa5ae0e4ca',
     ),
 }
 
@@ -123,7 +123,7 @@ def capture(source: Path, prepared_files, native_tests, config, *, read_json, tr
     expected_tests = ''
     for name in TARGETS:
         expected_tests += '\n[[test]]\nname = "'+name+'"\npath = "tests/'+name+'.rs"\n'
-        if name in ('opengeul_pdf_policy', 'opengeul_stored_lineseg_origin'):
+        if name in ('opengeul_pdf_policy', 'opengeul_stored_lineseg_origin', 'opengeul_pdf_font_resolution'):
             expected_tests += 'required-features = ["native-skia"]\n'
     _require(hashlib.sha256(before.encode('utf-8')).hexdigest() == record['ledger']['patchedFiles']['Cargo.toml']
              and after == expected_tests, 'COM worker compiler manifest or native-test suffix mismatch')

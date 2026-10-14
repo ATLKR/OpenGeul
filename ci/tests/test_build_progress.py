@@ -156,6 +156,7 @@ class BuildProgressTests(unittest.TestCase):
             'cargo test --locked --target $target --test opengeul_table_height',
             'cargo test --locked --target $target --package rhwp --test opengeul_pdf_policy --features native-skia',
             'cargo test --locked --target $target --test opengeul_stored_lineseg_origin --features native-skia',
+            'cargo test --locked --target $target --test opengeul_pdf_font_resolution --features native-skia',
             'cargo test --locked --target $target',
             'cargo test --locked --target $target --package opengeul-native-open',
             "cargo run --locked --target $target --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')",
@@ -166,7 +167,7 @@ class BuildProgressTests(unittest.TestCase):
             if line.startswith(('cargo ', 'rustc ', 'pnpm tauri build ')):
                 expected = 'Set-EditorCargoParallelism -Workload Release' if line.startswith(('cargo build --release ', 'pnpm tauri build ')) else 'Set-EditorCargoParallelism'
                 self.assertEqual(lines[index-1], expected)
-        self.assertEqual(source.count('Set-EditorCargoParallelism\n'), 8)
+        self.assertEqual(source.count('Set-EditorCargoParallelism\n'), 9)
         self.assertEqual(source.count('Set-EditorCargoParallelism -Workload Release\n'), 2)
 
     def test_native_and_release_require_previous_success_before_process_launch(self):

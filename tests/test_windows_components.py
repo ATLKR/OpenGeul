@@ -25,6 +25,7 @@ import com_source_contract
 import wasm_artifacts
 import windows_arch
 import pdf_search_text
+import pdf_font_resolution
 import menu_clipboard
 import shape_creation_history
 import nested_line_navigation
@@ -67,6 +68,173 @@ def pe(machine=0x8664):
 
 
 class WindowsComponentsTests(unittest.TestCase):
+    def test_pdf_font_resolution_actual_renderer_and_readonly_dependencies_are_mandatory(self):
+        expected = (
+            'third_party/rhwp/src/renderer/pdf.rs',
+            'third_party/rhwp/src/renderer/pdf/opengeul_pdf_guard.rs',
+            'third_party/rhwp/src/renderer/pdf/opengeul_font_policy.rs',
+        )
+        self.assertEqual(pdf_font_resolution.SOURCE_FILES, expected)
+        self.assertEqual({name for name in expected
+                          if pdf_font_resolution.INPUT_SOURCE_SHA256[name]
+                          == pdf_font_resolution.OUTPUT_SOURCE_SHA256[name]}, set(expected[1:]))
+        self.assertEqual(pdf_font_resolution.INPUT_SOURCE_SHA256[expected[0]],
+                         pdf_search_text.PATCHED_SHA256[expected[0]])
+        source = self.source(); c = self.helper(); config = c.configured()
+        self.assertEqual(config['helpers'][pdf_font_resolution.HELPER],
+                         digest(ROOT/pdf_font_resolution.HELPER))
+        _, contract = c.source_contract(source, config)
+        for name in expected:
+            with self.subTest(source=name):
+                self.assertIn(name, c.SOURCE_FILES)
+                self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+                self.assertEqual(contract['coreSourceFiles'][name], digest(source/name))
+        self.assertEqual(contract['pdfSearchText']['afterSha256'][expected[0]],
+                         contract['pdfFontResolution']['beforeSha256'][expected[0]])
+        self.assertNotEqual(contract['pdfSearchText']['afterSha256'][expected[0]],
+                            contract['preparedFiles'][expected[0]])
+
+    def test_pdf_font_resolution_native_registration_is_required_before_capture(self):
+        source = self.source(); c = self.helper(); payload = self.payload('editor')
+        manifest = source/'third_party/rhwp/Cargo.toml'; original = manifest.read_text()
+        entry = ('\n[[test]]\nname = "opengeul_pdf_font_resolution"\n'
+                 'path = "tests/opengeul_pdf_font_resolution.rs"\n'
+                 'required-features = ["native-skia"]\n')
+        self.assertEqual(original.count(entry), 1)
+        for i, changed in enumerate((original.replace(entry, ''),
+                                     original.replace(entry, entry.replace('required-features = ["native-skia"]',
+                                                                          'required-features = []')))):
+            manifest.write_text(changed)
+            out = self.root/('invalid-font-native-registration-'+str(i))
+            with self.subTest(case=i), self.assertRaisesRegex(ValueError, 'Native integration test'):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+        manifest.write_text(original)
+
+    def test_pdf_font_resolution_capture_rejects_forged_proof_and_each_source_dependency_drift(self):
+        source = self.source(); c = self.helper(); payload = self.payload('editor')
+        ledger_path = source/'.opengeul-overlay.json'
+        original = json.loads(ledger_path.read_bytes())
+        raw = {name:(source/name).read_bytes() for name in pdf_font_resolution.SOURCE_FILES}
+        cases = [(kind, None) for kind in ('helper', 'extra-proof', 'extra-before-source', 'extra-after-source')]
+        cases += [(kind, name) for name in raw
+                  for kind in ('before', 'after', 'missing-source', 'unreviewed-source', 'coherent-legacy')]
+        for i, (change, name) in enumerate(cases):
+            for path, data in raw.items(): (source/path).write_bytes(data)
+            ledger = copy.deepcopy(original); proof = ledger['pdfFontResolution']
+            if change == 'helper': proof['helperSha256'] = '0'*64
+            elif change == 'extra-proof': proof['optional'] = True
+            elif change in ('extra-before-source', 'extra-after-source'):
+                proof['beforeSha256' if change == 'extra-before-source' else 'afterSha256']['third_party/rhwp/src/unreviewed.rs'] = '0'*64
+            elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+            elif change == 'missing-source': (source/name).unlink()
+            else:
+                (source/name).write_bytes(b'owned former PDF font resolution source or readonly dependency\n')
+                if change == 'coherent-legacy': proof['afterSha256'][name] = digest(source/name)
+            write_json(ledger_path, ledger)
+            out = self.root/('invalid-pdf-font-resolution-'+str(i))
+            with self.subTest(change=change, source=name), self.assertRaises((ValueError, FileNotFoundError)):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+
+    def test_pdf_font_resolution_capture_rejects_each_dependency_change_between_hash_observations(self):
+        source = self.source(); c = self.helper(); actual_tree = c.tree
+        payload = self.payload('editor')
+        raw = {name:(source/name).read_bytes() for name in pdf_font_resolution.SOURCE_FILES}
+        for i, name in enumerate(raw):
+            for path, data in raw.items(): (source/path).write_bytes(data)
+            def changed_core_inventory(folder, cap):
+                if folder == source/'third_party/rhwp/src':
+                    target = source/name
+                    target.write_bytes(target.read_bytes()+b'// changed pdf_font_resolution dependency between observations\n')
+                return actual_tree(folder, cap)
+            out = self.root/('mismatched-pdf_font_resolution-core-observation-'+str(i))
+            expected = 'PDF font resolution complete core source mismatch'
+            with self.subTest(source=name), patch.object(c, 'tree', side_effect=changed_core_inventory), \
+                    self.assertRaisesRegex(ValueError, expected):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+
+    def test_matching_component_pair_cannot_omit_pdf_font_resolution_proof_or_any_dependency(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        cases = [('proof', None)]+[(kind, name) for name in pdf_font_resolution.SOURCE_FILES
+                                  for kind in ('prepared-source', 'core-source')]
+        for change, name in cases:
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                if change == 'proof': source.pop('pdfFontResolution')
+                else: source['preparedFiles' if change == 'prepared-source' else 'coreSourceFiles'].pop(name)
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change, source=name): self.assert_rejected_without_outputs(folders)
+
+
+    def test_matching_component_pair_rejects_pdf_font_resolution_coherent_legacy_and_fixed_proof_drift(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        cases = [(kind, None) for kind in ('helper', 'extra-proof', 'extra-before-source', 'extra-after-source')]
+        cases += [(kind, name) for name in pdf_font_resolution.SOURCE_FILES
+                  for kind in ('before', 'after', 'observed-hash', 'coherent-legacy')]
+        # Only the renderer changes; two compiled policy dependencies stay exact.
+        cases += [('legacy-original-pin', name) for name in (pdf_font_resolution.PDF,)]
+        cases += [('canonical-source1-stage', pdf_font_resolution.PDF)]
+        for change, name in cases:
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                proof = source['pdfFontResolution']
+                if change == 'helper': proof['helperSha256'] = '0'*64
+                elif change == 'extra-proof': proof['optional'] = True
+                elif change in ('extra-before-source', 'extra-after-source'):
+                    proof['beforeSha256' if change == 'extra-before-source' else 'afterSha256']['third_party/rhwp/src/unreviewed.rs'] = '0'*64
+                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                elif change == 'observed-hash':
+                    source['preparedFiles'][name] = source['coreSourceFiles'][name] = '0'*64
+                else:
+                    legacy = ('84bb9980b3a42e42998872bc9112a1714ef82984a5981b59c51d148f90b9e804'
+                              if change == 'canonical-source1-stage' else
+                              pdf_font_resolution.INPUT_SOURCE_SHA256[name] if change == 'legacy-original-pin'
+                              else hashlib.sha256(b'owned former PDF font resolution source or readonly dependency\n').hexdigest())
+                    proof['afterSha256'][name] = legacy
+                    source['preparedFiles'][name] = source['coreSourceFiles'][name] = legacy
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change, source=name): self.assert_rejected_without_outputs(folders)
+
+
+    def test_rehashed_public_ledger_cannot_omit_or_replace_pdf_font_resolution_proof(self):
+        folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
+        original_parity = json.loads(parity_path.read_bytes())
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        for change in ('missing', 'mismatch'):
+            parity = copy.deepcopy(original_parity)
+            if change == 'missing': parity.pop('pdfFontResolution')
+            else: parity['pdfFontResolution']['helperSha256'] = '0'*64
+            write_json(parity_path, parity)
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); value['source']['ledgerSha256'] = digest(parity_path)
+                if role == 'editor':
+                    value['files']['source-parity.json'] = {'size':parity_path.stat().st_size,
+                                                          'sha256':digest(parity_path)}
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders, 'PDF font resolution source/ledger proof mismatch')
+
+
+    def test_pdf_font_resolution_missing_proof_cannot_publish_component(self):
+        source = self.source(); c = self.helper()
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = json.loads(ledger_path.read_bytes())
+        ledger.pop('pdfFontResolution', None)
+        write_json(ledger_path, ledger)
+        out = self.root/'missing-pdf-font-resolution-proof'
+        with self.assertRaisesRegex(ValueError, 'PDF font resolution source/ledger proof mismatch'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
     def test_hwpx_persistence_compiled_and_dependency_sources_are_mandatory(self):
         expected = (
             'third_party/rhwp/src/cli/commands/edit/runtime.rs',
@@ -863,6 +1031,17 @@ class WindowsComponentsTests(unittest.TestCase):
                      'beforeSha256': pdf_search_text.SOURCE_SHA256,
                      'afterSha256': pdf_search_text.PATCHED_SHA256,
                      'preservedSha256': pdf_search_text.PRESERVED_SHA256}
+        font_before = {name:digest(source/name) for name in pdf_font_resolution.SOURCE_FILES}
+        renderer = source/pdf_font_resolution.PDF
+        renderer.write_bytes(renderer.read_bytes()+b'// owned final installed PDF font selector\n')
+        font_after = {name:digest(source/name) for name in pdf_font_resolution.SOURCE_FILES}
+        for name, reference in (('INPUT_SOURCE_SHA256', font_before), ('OUTPUT_SOURCE_SHA256', font_after)):
+            override = patch.object(pdf_font_resolution, name, reference)
+            override.start(); self.addCleanup(override.stop)
+        self.pdf_font_reference_path = self.root/'pdf-font-fixture-reference.json'
+        write_json(self.pdf_font_reference_path, {'before':font_before, 'after':font_after})
+        font_proof = {'beforeSha256':font_before, 'afterSha256':font_after,
+                      'helperSha256':digest(ROOT/pdf_font_resolution.HELPER)}
         for name in shape_creation_history.SOURCE_FILES:
             path=source/name
             if not path.is_file():path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'owned shape transport source fixture')
@@ -944,6 +1123,7 @@ class WindowsComponentsTests(unittest.TestCase):
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
                   'namespacePatch': namespace, 'wasmRebuild': wasm,
                   'pdfSearchText': pdf_proof,
+                  'pdfFontResolution': font_proof,
                   'menuClipboardPaste': menu_proof,
                   'shapeCreationHistory': shape_proof,
                   'nestedLineNavigation': nested_proof,
@@ -1028,7 +1208,7 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission,hwpx_persistence_verification;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,pdf_font_resolution,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission,hwpx_persistence_verification;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
                 "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
                 "pdf_fixture=json.loads(Path(sys.argv[3]).read_text());"
@@ -1042,11 +1222,14 @@ class WindowsComponentsTests(unittest.TestCase):
                 "picture_line_segment_owner.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[8]).read_text());"
                 "virtual_picture_layout_admission.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[9]).read_text());"
                 "hwpx_persistence_verification.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[10]).read_text());"
-                "sys.argv=sys.argv[11:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                "font_fixture=json.loads(Path(sys.argv[11]).read_text());"
+                "pdf_font_resolution.INPUT_SOURCE_SHA256=font_fixture['before'];"
+                "pdf_font_resolution.OUTPUT_SOURCE_SHA256=font_fixture['after'];"
+                "sys.argv=sys.argv[12:];runpy.run_path(sys.argv[0],run_name='__main__')",
                 str(self.native_reference_path),str(self.com_reference_path),str(self.pdf_reference_path),
                 str(self.menu_reference_path),str(self.shape_reference_path),str(self.nested_reference_path),
                 str(self.stored_reference_path),str(self.picture_reference_path),str(self.virtual_reference_path),
-                str(self.persistence_reference_path),str(HELPER),*arguments]
+                str(self.persistence_reference_path),str(self.pdf_font_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')

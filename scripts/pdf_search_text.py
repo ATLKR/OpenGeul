@@ -254,7 +254,8 @@ def apply(source: Path) -> dict:
             'beforeSha256': before, 'afterSha256': after, 'preservedSha256': preserved}
 
 
-def validate(proof: dict, preparedFiles: dict, coreSourceFiles: dict, helpers: dict) -> None:
+def validate(proof: dict, preparedFiles: dict, coreSourceFiles: dict, helpers: dict,
+             *, successor: dict | None = None) -> None:
     if (not isinstance(proof, dict) or set(proof) != {'formatVersion', 'helperSha256',
             'beforeSha256', 'afterSha256', 'preservedSha256'}
             or type(proof['formatVersion']) is not int or proof['formatVersion'] != 1):
@@ -266,7 +267,22 @@ def validate(proof: dict, preparedFiles: dict, coreSourceFiles: dict, helpers: d
         raise ValueError('PDF search text pinned source proof mismatch')
     if proof['preservedSha256'] != PRESERVED_SHA256:
         raise ValueError('PDF search text original license proof mismatch')
+    final_pdf = PATCHED_SHA256[PDF]
+    if successor is not None:
+        # Only this reviewed successor may consume the exact root-geometry
+        # output. Validate real final inventories; never fabricate stage bytes.
+        import pdf_font_resolution
+        pdf_font_resolution.validate_contract(successor, preparedFiles, helpers)
+        if (pdf_font_resolution.INPUT_SOURCE_SHA256.get(PDF) != proof['afterSha256'][PDF]
+                or successor['beforeSha256'].get(PDF) != proof['afterSha256'][PDF]):
+            raise ValueError('PDF source stage handoff mismatch')
+        for name in pdf_font_resolution.SOURCE_FILES:
+            if coreSourceFiles.get(name) != preparedFiles.get(name):
+                raise ValueError('PDF font resolution complete core source mismatch: ' + name)
+        final_pdf = successor['afterSha256'][PDF]
     for name, expected in {**PATCHED_SHA256, **PRESERVED_SHA256}.items():
+        if name == PDF:
+            expected = final_pdf
         if preparedFiles.get(name) != expected:
             raise ValueError('PDF search text prepared source hash mismatch: ' + name)
         if '/src/' in name and coreSourceFiles.get(name) != expected:

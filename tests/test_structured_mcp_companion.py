@@ -1,7 +1,7 @@
 """Portable companion contract units; no native product success is simulated."""
 import importlib.util
-import io,json,sys,tempfile,unittest,zipfile
-from pathlib import Path
+import ast,io,json,sys,tempfile,unittest,zipfile
+from pathlib import Path,PureWindowsPath
 FOLDER=Path(__file__).resolve().parents[1]/'e2e/structured_cli_mcp'
 sys.path.insert(0,str(FOLDER))
 
@@ -10,12 +10,90 @@ def module(name):
     if not path.is_file():return None
     spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
 
+class OwnedWindowsPath:
+    """Test-only Windows relative semantics backed by real owned temporary files."""
+    def __init__(self,actual,windows):self.actual=Path(actual);self.windows=PureWindowsPath(windows)
+    def __truediv__(self,name):return type(self)(self.actual/name,self.windows/name)
+    def __fspath__(self):return str(self.actual)
+    def __getattr__(self,name):return getattr(self.actual,name)
+    def relative_to(self,root):return self.windows.relative_to(root.windows)
+
 class DraftTests(unittest.TestCase):
     def setUp(self):
         self.runner=module('valid_companion');self.oracle=self.runner.oracle if self.runner else module('structured_oracle')
         self.assertIsNotNone(self.runner,'Separate structured companion producer/validator is required')
         self.assertIsNotNone(self.oracle,'Independent bounded structure/render oracle is required')
         self.expected=json.loads((FOLDER/'expected.json').read_bytes())
+    def windows_owned_suite(self,root,case):
+        root=Path(root);work=root/'work';work.mkdir();evidence=root/'evidence';evidence.mkdir()
+        exe=work/'unit.exe';exe.write_bytes(b'owned-unit-exe')
+        suite=self.runner.Suite(exe,'x64',{},work,self.expected,None,None,
+                                {'_evidenceRoot':str(evidence),'_toolDefinitions':[]})
+        suite.proof_root=OwnedWindowsPath(evidence,r'C:\source113\owned-proof')
+        suite.case={'id':case,'calls':[],'artifacts':[]}
+        return suite,work,evidence
+    def owned_evidence(self,root,reference):
+        try:return self.runner.evidence_file(root,reference)
+        except ValueError as error:self.fail('Actual producer reference rejected by actual evidence consumer: '+str(error))
+    def test_windows_owned_call_references_roundtrip_through_actual_evidence_consumer(self):
+        with tempfile.TemporaryDirectory() as t:
+            suite,_,evidence=self.windows_owned_suite(t,'hwp-read')
+            native_arguments=['info',str(PureWindowsPath(r'C:\native\owned.hwp')),'--json']
+            row={'name':'cli-info','channel':'cli'}
+            suite.record(row,'info',native_arguments,b'{"actual":"response"}',b'owned-stderr')
+            for key,raw in (('requestFile',self.runner.canonical({'operation':'info','arguments':native_arguments})),
+                            ('responseFile',b'{"actual":"response"}'),('stderrFile',b'owned-stderr')):
+                with self.subTest(field=key):
+                    path=self.owned_evidence(evidence,row[key])
+                    self.assertEqual(path.read_bytes(),raw)
+                    self.assertNotIn('\\',row[key])
+            request=json.loads(self.owned_evidence(evidence,row['requestFile']).read_bytes())
+            self.assertEqual(request['arguments'],native_arguments)
+            self.assertIn('\\',request['arguments'][1])
+    def test_windows_owned_artifact_reference_roundtrips_through_actual_evidence_consumer(self):
+        with tempfile.TemporaryDirectory() as t:
+            suite,work,evidence=self.windows_owned_suite(t,'hwpx-render')
+            source=work/'owned.svg';raw=b'<svg>owned diagnostic</svg>';source.write_bytes(raw)
+            suite.artifact(source,'svg',{'owned':'details'})
+            record=suite.case['artifacts'][0]
+            self.assertEqual(self.owned_evidence(evidence,record['path']).read_bytes(),raw)
+            self.assertNotIn('\\',record['path'])
+    def test_windows_owned_failed_pdf_reference_roundtrips_without_promoting_success(self):
+        with tempfile.TemporaryDirectory() as t:
+            suite,work,evidence=self.windows_owned_suite(t,'hwp-render')
+            source=work/'owned.pdf';raw=b'%PDF-1.7\nowned diagnostic\n%%EOF\n';source.write_bytes(raw)
+            # Reject before invoking the PDF oracle; the real retention boundary
+            # must still publish a portable reference to its original bytes.
+            manifest={'schemaVersion':'1.0','source':'owned.hwp','format':'pdf','backend':'direct',
+                      'output':str(source),'bytes':len(raw),'pageCount':1,'renderedCount':1}
+            with self.assertRaises(ValueError) as failed:suite.validate_pdf(manifest,'owned.hwp',source)
+            self.assertEqual(self.runner.failure_record(failed.exception)['failureCode'],'pdf-manifest')
+            record=suite.case['artifacts'][0]
+            self.assertFalse(record['independentPassed']);self.assertEqual(record['details'],{})
+            self.assertEqual(self.owned_evidence(evidence,record['path']).read_bytes(),raw)
+            self.assertNotIn('\\',record['path'])
+    def test_windows_owned_setup_serialization_roundtrips_through_actual_evidence_consumer(self):
+        from types import SimpleNamespace
+        tree=ast.parse((FOLDER/'valid_companion.py').read_bytes())
+        main=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='main')
+        updates=[node for node in ast.walk(main) if isinstance(node,ast.Call)
+                 and isinstance(node.func,ast.Attribute) and node.func.attr=='update'
+                 and {'requestFile','responseFile'}<= {key.arg for key in node.keywords}]
+        self.assertEqual(len(updates),1,'Actual setup serialization boundary must remain unique')
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);owned=OwnedWindowsPath(root,r'C:\source113\owned-proof')
+            rp=owned/'calls'/'initialize-request.json';sp=owned/'calls'/'initialize-response.json'
+            rp.parent.mkdir();rp.write_bytes(b'{"operation":"initialize"}');sp.write_bytes(b'{"result":{}}')
+            actual={'rp':rp,'sp':sp,'args':SimpleNamespace(out=owned)}
+            for key in updates[0].keywords:
+                if key.arg not in ('requestFile','responseFile'):continue
+                # Evaluate the exact production expression rather than a
+                # parallel authored spelling; no main/runtime/CI process runs.
+                value=eval(compile(ast.Expression(key.value),'actual-setup-reference','eval'),actual)
+                expected=rp if key.arg=='requestFile' else sp
+                with self.subTest(field=key.arg):
+                    self.assertEqual(self.owned_evidence(root,value).read_bytes(),expected.read_bytes())
+                    self.assertNotIn('\\',value)
     def test_partial_receipt_never_carries_internal_schema_or_success(self):
         proof={'passed':True,'cases':[],'_evidenceRoot':'PRIVATE-PATH','_toolDefinitions':['PRIVATE-BODY']}
         self.assertTrue(hasattr(self.runner,'partial_receipt'),'Fail-closed bounded partial receipt projection is required')
