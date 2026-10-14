@@ -24,6 +24,41 @@ while ($ancestor -and $ancestor.StartsWith($repo,[StringComparison]::OrdinalIgno
     $ancestor=[IO.Path]::GetDirectoryName($ancestor)
 }
 New-Item -ItemType Directory -Path $out -Force | Out-Null
+function Get-OpenGeulDiagnosticBudget([double]$ElapsedSeconds,[bool]$Attempted,[bool]$WorkerLive) {
+    if ([double]::IsNaN($ElapsedSeconds) -or [double]::IsInfinity($ElapsedSeconds) -or
+        $Attempted -or -not $WorkerLive -or $ElapsedSeconds -lt 540 -or $ElapsedSeconds -gt 570) { return 0 }
+    return 5000
+}
+function Invoke-OpenGeulBoundedDiagnosticChild([Diagnostics.ProcessStartInfo]$StartInfo,[int]$WaitMilliseconds) {
+    $diagnosticProcess=$null;$diagnosticStarted=$null
+    $diagnosticClock=[Diagnostics.Stopwatch]::StartNew()
+    $result=[ordered]@{status='collector_unavailable';exitCode=$null}
+    try {
+        if ($WaitMilliseconds -le 0 -or $WaitMilliseconds -gt 5000) { return $result }
+        $StartInfo.UseShellExecute=$false;$StartInfo.CreateNoWindow=$true
+        # Do not publish or parse console streams. The controlled collector is
+        # silent; a noisy/broken child stalls within the same finite pipe budget.
+        $StartInfo.RedirectStandardOutput=$true;$StartInfo.RedirectStandardError=$true
+        $diagnosticProcess=[Diagnostics.Process]::Start($StartInfo)
+        $diagnosticStarted=$diagnosticProcess.StartTime
+        $remaining=[int][Math]::Floor($WaitMilliseconds-$diagnosticClock.Elapsed.TotalMilliseconds)
+        if ($remaining -gt 0 -and $diagnosticProcess.WaitForExit($remaining)) {
+            $result.exitCode=[int]$diagnosticProcess.ExitCode
+            $result.status=if ($result.exitCode -eq 0) { 'collector_completed' } else { 'collector_exit_nonzero' }
+        } else { $result.status='collector_timeout' }
+    } catch { $result.status='collector_unavailable' }
+    finally {
+        if ($null -ne $diagnosticProcess) {
+            try {
+                if (-not $diagnosticProcess.HasExited -and $diagnosticProcess.StartTime -eq $diagnosticStarted) {
+                    $diagnosticProcess.Kill()
+                }
+            } catch { $result.status='collector_cleanup_unavailable' }
+            $diagnosticProcess.Dispose()
+        }
+    }
+    return $result
+}
 if (-not $Worker) {
     # International/DISM run in Windows PowerShell; the parent bounds servicing to ten minutes.
     $arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),
@@ -31,6 +66,7 @@ if (-not $Worker) {
     $child=Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -NoNewWindow `
         -RedirectStandardOutput (Join-Path $out 'setup.log') -RedirectStandardError (Join-Path $out 'setup-error.log')
     $started=$child.StartTime
+    $diagnosticAttempted=$false
     try {
         $clock=[Diagnostics.Stopwatch]::StartNew()
         while ($true) {
@@ -46,6 +82,29 @@ if (-not $Worker) {
             if ($logBytes -gt 1MB) { throw 'Owned Korean setup worker logs exceeded their combined one-MiB bound.' }
             if ($clock.Elapsed.TotalSeconds -ge 600) { throw 'Owned Korean setup worker exceeded its ten-minute bound.' }
             if ($finished) { break }
+            $diagnosticBudget=Get-OpenGeulDiagnosticBudget $clock.Elapsed.TotalSeconds $diagnosticAttempted (-not $child.HasExited)
+            if ($diagnosticBudget -gt 0) {
+                $diagnosticAttempted=$true
+                # A separate read-only diagnostic cannot extend or replace this
+                # worker's original 600-second setup deadline and cleanup.
+                try {
+                    if ($child.StartTime -ne $started) { throw 'Owned setup worker identity changed.' }
+                    $diagnosticInfo=[Diagnostics.ProcessStartInfo]::new()
+                    $diagnosticInfo.FileName='python'
+                    $diagnosticInfo.Arguments='"'+$policy+'" --collect-servicing-diagnostics --source-root "'+$repo+
+                        '" --expected-source '+$ExpectedSource+' --observation-root "'+$out+'" --worker-pid '+$child.Id+
+                        ' --worker-created-filetime '+$started.ToUniversalTime().ToFileTimeUtc()
+                    $diagnosticResult=Invoke-OpenGeulBoundedDiagnosticChild $diagnosticInfo $diagnosticBudget
+                    $diagnosticJson=[ordered]@{formatVersion=1;source=$binding;workerPid=[int]$child.Id;
+                        workerCreatedFiletime=$started.ToUniversalTime().ToFileTimeUtc();
+                        status=$diagnosticResult.status;exitCode=$diagnosticResult.exitCode;
+                        elapsedSeconds=[int]$clock.Elapsed.TotalSeconds;productInputVerified=$false;sourceQualified=$false} |
+                        ConvertTo-Json -Depth 8 -Compress
+                    if ([Text.Encoding]::UTF8.GetByteCount($diagnosticJson) -le 32768) {
+                        [IO.File]::WriteAllText((Join-Path $out 'servicing-diagnostics-collection.json'),$diagnosticJson,[Text.UTF8Encoding]::new($false))
+                    }
+                } catch { }
+            }
             Write-Host ('한국어 입력 준비 진행: 실제 Windows 기능·등록 프로필 확인, '+[int]$clock.Elapsed.TotalSeconds+'초, 로그 '+$logBytes+'바이트')
         }
         if ($child.ExitCode -ne 0) { throw 'Actual Korean capability/profile setup failed; original bounded evidence is retained.' }
@@ -69,6 +128,85 @@ function Get-OpenGeulFileSha256([string]$Path) {
     } finally {
         if ($null -ne $algorithm) { $algorithm.Dispose() }
         if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+function Get-OpenGeulLanguageObservation([AllowNull()][object]$ObservedLanguages,[string]$SelectedTip) {
+    # Observe only the already returned objects. No host read, write, servicing,
+    # tag normalization, readiness value, or verified native TIP is changed.
+    $langDiagStatus='malformed_unavailable'
+    $langDiagUnavailable=[ordered]@{status=$langDiagStatus;collectionKind='unavailable';
+        languageCount=$null;exactFilterLanguageCount=$null;neutralKoreanLanguageCount=$null;
+        otherLanguageCount=$null;tipCount=$null;selectedNativeTipExactMatches=$null;
+        selectedNativeTipIgnoreCaseMatches=$null;outsideExactFilterSelectedTipMatches=$null;
+        languages=@();productInputVerified=$false;sourceQualified=$false}
+    try {
+        $langDiagGuid='\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}'
+        if ($SelectedTip -notmatch ('\A0412:'+ $langDiagGuid + $langDiagGuid +'\z')) { throw 'Finite language observation unavailable.' }
+        if ($null -eq $ObservedLanguages) { $langDiagKind='empty';$langDiagCount=0 }
+        elseif ($ObservedLanguages -is [Collections.IList]) {
+            $langDiagKind=if ($ObservedLanguages -is [Array]) { 'array' } else { 'list' }
+            $langDiagCount=$ObservedLanguages.Count
+            if ($langDiagCount -lt 0 -or $langDiagCount -gt 64) {
+                $langDiagStatus='size_unavailable';throw 'Finite language observation unavailable.'
+            }
+        } else { $langDiagKind='single';$langDiagCount=1 }
+        $langDiagResult=[ordered]@{status='observed';collectionKind=$langDiagKind;
+            languageCount=[int]$langDiagCount;exactFilterLanguageCount=0;neutralKoreanLanguageCount=0;
+            otherLanguageCount=0;tipCount=0;selectedNativeTipExactMatches=0;
+            selectedNativeTipIgnoreCaseMatches=0;outsideExactFilterSelectedTipMatches=0;
+            languages=@();productInputVerified=$false;sourceQualified=$false}
+        for ($langDiagIndex=0;$langDiagIndex -lt $langDiagCount;$langDiagIndex++) {
+            $langDiagItem=if ($langDiagKind -eq 'single') { $ObservedLanguages } else { $ObservedLanguages[$langDiagIndex] }
+            if ($null -eq $langDiagItem) { throw 'Finite language observation unavailable.' }
+            $langDiagTagProperty=$langDiagItem.PSObject.Properties['LanguageTag']
+            $langDiagTipsProperty=$langDiagItem.PSObject.Properties['InputMethodTips']
+            if ($null -eq $langDiagTagProperty -or $null -eq $langDiagTipsProperty) { throw 'Finite language observation unavailable.' }
+            $langDiagTag=$langDiagTagProperty.Value
+            if ($langDiagTag -isnot [string] -or $langDiagTag.Length -gt 64) {
+                if ($langDiagTag -is [string] -and $langDiagTag.Length -gt 64) { $langDiagStatus='size_unavailable' }
+                throw 'Finite language observation unavailable.'
+            }
+            if ($langDiagTag -notmatch '\A[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,6}\z') { throw 'Finite language observation unavailable.' }
+            if ($langDiagTag.Equals('ko-KR',[StringComparison]::OrdinalIgnoreCase)) {
+                $langDiagLanguageKind='exact_filter';$langDiagResult.exactFilterLanguageCount++
+            } elseif ($langDiagTag.Equals('ko',[StringComparison]::OrdinalIgnoreCase)) {
+                $langDiagLanguageKind='neutral_korean';$langDiagResult.neutralKoreanLanguageCount++
+            } else { $langDiagLanguageKind='other';$langDiagResult.otherLanguageCount++ }
+            $langDiagTips=$langDiagTipsProperty.Value
+            if ($null -eq $langDiagTips) { $langDiagTipsKind='empty';$langDiagTipCount=0 }
+            elseif ($langDiagTips -is [string]) { $langDiagTipsKind='single';$langDiagTipCount=1 }
+            elseif ($langDiagTips -is [Collections.IList]) {
+                $langDiagTipsKind=if ($langDiagTips -is [Array]) { 'array' } else { 'list' }
+                $langDiagTipCount=$langDiagTips.Count
+                if ($langDiagTipCount -lt 0 -or $langDiagTipCount -gt 64) {
+                    $langDiagStatus='size_unavailable';throw 'Finite language observation unavailable.'
+                }
+            } else { throw 'Finite language observation unavailable.' }
+            $langDiagExact=0;$langDiagIgnoreCase=0
+            for ($langDiagTipIndex=0;$langDiagTipIndex -lt $langDiagTipCount;$langDiagTipIndex++) {
+                $langDiagTip=if ($langDiagTipsKind -eq 'single') { $langDiagTips } else { $langDiagTips[$langDiagTipIndex] }
+                if ($langDiagTip -isnot [string] -or $langDiagTip.Length -gt 96) {
+                    if ($langDiagTip -is [string] -and $langDiagTip.Length -gt 96) { $langDiagStatus='size_unavailable' }
+                    throw 'Finite language observation unavailable.'
+                }
+                if ($langDiagTip -notmatch ('\A[0-9A-Fa-f]{4}:(?:[0-9A-Fa-f]{8}|'+$langDiagGuid+$langDiagGuid+')\z')) {
+                    throw 'Finite language observation unavailable.'
+                }
+                if ($langDiagTip.Equals($SelectedTip,[StringComparison]::Ordinal)) { $langDiagExact++ }
+                if ($langDiagTip.Equals($SelectedTip,[StringComparison]::OrdinalIgnoreCase)) { $langDiagIgnoreCase++ }
+            }
+            $langDiagResult.tipCount+=[int]$langDiagTipCount
+            $langDiagResult.selectedNativeTipExactMatches+=$langDiagExact
+            $langDiagResult.selectedNativeTipIgnoreCaseMatches+=$langDiagIgnoreCase
+            if ($langDiagLanguageKind -ne 'exact_filter') { $langDiagResult.outsideExactFilterSelectedTipMatches+=$langDiagIgnoreCase }
+            $langDiagResult.languages+=,[ordered]@{languageKind=$langDiagLanguageKind;tipCollectionKind=$langDiagTipsKind;
+                tipCount=[int]$langDiagTipCount;selectedNativeTipExactMatches=$langDiagExact;
+                selectedNativeTipIgnoreCaseMatches=$langDiagIgnoreCase}
+        }
+        return $langDiagResult
+    } catch {
+        $langDiagUnavailable.status=$langDiagStatus
+        return $langDiagUnavailable
     }
 }
 function Get-OpenGeulBuiltinCmdlet([string]$Manifest,[string]$ModuleName,[string]$CommandName,[string]$ImplementationType,[string]$AssemblyName) {
@@ -302,6 +440,11 @@ public static class OpenGeulKoreanSetupHost {
     Set-WinUserLanguageList -LanguageList $languages -Force -ErrorAction Stop
     Set-WinDefaultInputMethodOverride -InputTip $profile.inputTip -ErrorAction Stop
     $observedLanguages=Get-WinUserLanguageList -ErrorAction Stop
+    $languageObservation=Get-OpenGeulLanguageObservation $observedLanguages $profile.inputTip
+    $languageObservationRecord=[ordered]@{formatVersion=1;source=$binding;
+        workerPid=[int]$PID;scriptSha256=$hostObservation.scriptSha256;
+        observation=$languageObservation;productInputVerified=$false;sourceQualified=$false}
+    Save-ObservedJson 'user-language-observation.json' $languageObservationRecord
     $observedTips=@($observedLanguages | Where-Object LanguageTag -eq 'ko-KR' | ForEach-Object { $_.InputMethodTips })
     $default=Get-WinDefaultInputMethodOverride -ErrorAction Stop
     $record=[ordered]@{formatVersion=1;source=$binding;nativeMachine=[int]$nativeMachine;controllerMachine=[int]$controllerMachine;

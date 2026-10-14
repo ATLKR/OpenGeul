@@ -15,6 +15,7 @@ import sys
 import time
 
 MAX_WINDOWS = 64
+MAX_STARTUP_VISITS = 4096  # Stream abort guard; the diagnostic record bound remains 64.
 MAX_UIA = 64
 MAX_PROCESSES = 8
 MAX_JSON = 256 * 1024
@@ -410,6 +411,7 @@ class WindowsProbe:
         for name, args, result in [('EnumWindows', [self.callback, W.LPARAM], W.BOOL),
              ('GetForegroundWindow', [], W.HWND), ('GetWindowThreadProcessId', [W.HWND, ctypes.POINTER(W.DWORD)], W.DWORD),
              ('GetWindowTextW', [W.HWND, W.LPWSTR, ctypes.c_int], ctypes.c_int),
+             ('GetWindowTextLengthW', [W.HWND], ctypes.c_int),
              ('GetClassNameW', [W.HWND, W.LPWSTR, ctypes.c_int], ctypes.c_int),
              ('IsWindowVisible', [W.HWND], W.BOOL), ('IsWindowEnabled', [W.HWND], W.BOOL),
              ('IsWindow', [W.HWND], W.BOOL),
@@ -711,25 +713,210 @@ class WindowsProbe:
             'bound Progman HWND/PID/TID/class/title/상태가 다릅니다')
         return state
 
+    def startup_native_call(self, function, *arguments, deadline):
+        require(time.monotonic() < deadline, '시작 창 native 관찰 시간이 초과했습니다')
+        value = function(*arguments)
+        require(time.monotonic() < deadline, '시작 창 native 관찰 시간이 초과했습니다')
+        return value
+
+    def startup_window(self, hwnd, *, deadline):
+        call = lambda function, *arguments: self.startup_native_call(function, *arguments, deadline=deadline)
+        require(call(self.user.IsWindow, hwnd), '시작 창 HWND를 읽을 수 없습니다')
+        owner = W.DWORD(); thread = call(self.user.GetWindowThreadProcessId, hwnd, ctypes.byref(owner))
+        require(owner.value and thread, '시작 창 PID/TID를 읽을 수 없습니다')
+        ctypes.set_last_error(0)
+        length = call(self.user.GetWindowTextLengthW, hwnd)
+        require(0 <= length <= 256 and not ctypes.get_last_error(), '시작 창 title 길이를 읽을 수 없습니다')
+        title = ctypes.create_unicode_buffer(257); cls = ctypes.create_unicode_buffer(257); rect = W.RECT()
+        ctypes.set_last_error(0)
+        count = call(self.user.GetWindowTextW, hwnd, title, 257)
+        require(not ctypes.get_last_error() and count == length == len(title.value.encode('utf-16-le'))//2, '시작 창 title을 완전히 읽을 수 없습니다')
+        count = call(self.user.GetClassNameW, hwnd, cls, 257)
+        require(0 < count <= 256 and count == len(cls.value.encode('utf-16-le'))//2, '시작 창 class를 완전히 읽을 수 없습니다')
+        require(call(self.user.GetWindowRect, hwnd, ctypes.byref(rect)), '시작 창 rectangle을 읽을 수 없습니다')
+        row = {'hwnd': int(hwnd), 'processId': owner.value, 'threadId': int(thread), 'title': title.value,
+               'className': cls.value, 'visible': bool(call(self.user.IsWindowVisible, hwnd)),
+               'enabled': bool(call(self.user.IsWindowEnabled, hwnd)),
+               'rectangle': [rect.left, rect.top, rect.right, rect.bottom]}
+        fresh_owner = W.DWORD(); fresh_thread = call(self.user.GetWindowThreadProcessId, hwnd, ctypes.byref(fresh_owner))
+        require(call(self.user.IsWindow, hwnd) and fresh_owner.value == row['processId']
+                and fresh_thread == row['threadId'], '시작 창 HWND 소유권이 관찰 중 변경됐습니다')
+        validate_windows({'foregroundHwnd': int(hwnd), 'windows': [row], 'truncated': False})  # Row schema only.
+        return row
+
+    @staticmethod
+    def startup_same_window(left, right):
+        fields = ('hwnd', 'processId', 'threadId', 'title', 'className', 'visible', 'enabled')
+        return left is None and right is None or (type(left) is dict and type(right) is dict
+            and all(left.get(name) == right.get(name) for name in fields))
+
+    def startup_candidates(self, expected_path, *, deadline, observation):
+        """완료된 native stream의 기존 visible/enabled WSL 후보만 별도 관찰한다."""
+        observation.update(readOnly=True, scope='visible-enabled-exact-wsl-startup-candidates',
+            enumerationComplete=False, nativeCompleted=False, visits=0, visitLimit=MAX_STARTUP_VISITS,
+            candidates=[], foregroundHwnd=0, foreground=None, stage='foregroundBefore', errorType=None)
+        seen = set(); stopped = False
+        call = lambda function, *arguments: self.startup_native_call(function, *arguments, deadline=deadline)
+        try:
+            before = int(call(self.user.GetForegroundWindow) or 0)
+            observation['foregroundHwnd'] = before
+            foreground = self.startup_window(before, deadline=deadline) if before else None
+            observation['foreground'] = foreground
+            observation['stage'] = 'nativeEnumeration'
+            def read(hwnd, _):
+                nonlocal stopped
+                try:
+                    require(observation['visits'] < MAX_STARTUP_VISITS, '시작 창 streamed visit 상한을 초과했습니다')
+                    observation['visits'] += 1; hwnd = int(hwnd)
+                    require(hwnd not in seen, '시작 창 stream HWND가 중복됐습니다'); seen.add(hwnd)
+                    require(call(self.user.IsWindow, hwnd), '시작 창 streamed HWND를 읽을 수 없습니다')
+                    owner = W.DWORD(); thread = call(self.user.GetWindowThreadProcessId, hwnd, ctypes.byref(owner))
+                    require(owner.value and thread, 'stream HWND 소유권을 읽을 수 없습니다')
+                    visible = bool(call(self.user.IsWindowVisible, hwnd)); enabled = bool(call(self.user.IsWindowEnabled, hwnd))
+                    def unchanged_omission(class_name=None):
+                        fresh_owner = W.DWORD(); fresh_thread = call(self.user.GetWindowThreadProcessId, hwnd, ctypes.byref(fresh_owner))
+                        require(call(self.user.IsWindow, hwnd) and fresh_owner.value == owner.value and fresh_thread == thread
+                            and bool(call(self.user.IsWindowVisible, hwnd)) == visible
+                            and bool(call(self.user.IsWindowEnabled, hwnd)) == enabled, '생략할 HWND 소유권/eligibility가 변경됐습니다')
+                        if class_name is not None:
+                            fresh_class = ctypes.create_unicode_buffer(257)
+                            count = call(self.user.GetClassNameW, hwnd, fresh_class, 257)
+                            require(0 < count <= 256 and count == len(fresh_class.value.encode('utf-16-le'))//2
+                                and fresh_class.value == class_name, '생략할 HWND class가 변경됐습니다')
+                    if not visible or not enabled:
+                        unchanged_omission()
+                        return True
+                    cls = ctypes.create_unicode_buffer(257)
+                    count = call(self.user.GetClassNameW, hwnd, cls, 257)
+                    require(0 < count <= 256 and count == len(cls.value.encode('utf-16-le'))//2, 'stream class를 읽을 수 없습니다')
+                    if cls.value != 'ConsoleWindowClass':
+                        unchanged_omission(cls.value)
+                        return True
+                    row = self.startup_window(hwnd, deadline=deadline)
+                    require(row['visible'] and row['enabled'] and row['className'] == cls.value,
+                            '시작 창 eligibility가 관찰 중 변경됐습니다')
+                    require(row['processId'] == owner.value and row['threadId'] == thread,
+                            '시작 창 eligibility 전에 HWND 소유권이 변경됐습니다')
+                    if ntpath.normcase(row['title']) != ntpath.normcase(expected_path):
+                        require(self.startup_same_window(row, self.startup_window(hwnd, deadline=deadline)),
+                                '생략할 Console HWND identity가 변경됐습니다')
+                        return True
+                    observation['candidates'].append(row)
+                    require(len(observation['candidates']) <= 1, 'WSL 시작 창 후보가 여러 개입니다')
+                    return True
+                except BaseException as error:
+                    stopped = True; observation.update(stage='callbackUnavailable', errorType=bounded(type(error).__name__))
+                    return False
+            callback = self.callback(read)
+            completed = bool(call(self.user.EnumWindows, callback, 0))
+            observation['nativeCompleted'] = completed
+            require(completed and not stopped, 'WSL 시작 후보 native stream이 완료되지 않았습니다')
+            observation['stage'] = 'foregroundAfter'
+            after = int(call(self.user.GetForegroundWindow) or 0)
+            require(after == before, '시작 후보 stream 중 foreground HWND가 변경됐습니다')
+            fresh = self.startup_window(after, deadline=deadline) if after else None
+            require(self.startup_same_window(foreground, fresh), '시작 후보 stream 중 foreground 소유권이 변경됐습니다')
+            for row in observation['candidates']:
+                require(self.startup_same_window(row, self.startup_window(row['hwnd'], deadline=deadline)),
+                        '시작 후보 HWND가 stream 뒤 변경됐습니다')
+            observation.update(enumerationComplete=True, stage='complete')
+            return observation
+        except BaseException as error:
+            observation['errorType'] = bounded(type(error).__name__)
+            raise ValueError('WSL 시작 후보의 별도 전체 관찰이 완료되지 않았습니다') from None
+
+    def startup_no_candidate_foreground(self, windows, owned_hwnd, *, deadline, selection):
+        foreground = windows['foregroundHwnd']
+        call = lambda function, *arguments: self.startup_native_call(function, *arguments, deadline=deadline)
+        require(int(call(self.user.GetForegroundWindow) or 0) == foreground, '후보 없는 시작 foreground가 변경됐습니다')
+        if foreground == 0:
+            self._startup_activation_guard = {'deadline': deadline, 'allowed': (0, owned_hwnd), 'baseline': None, 'retired': None}
+            return
+        window = next((row for row in windows['windows'] if row['hwnd'] == foreground), None)
+        require(window is not None, '후보 없는 시작 foreground HWND를 읽을 수 없습니다')
+        if foreground == owned_hwnd:
+            pid = int(call(self.kernel.GetCurrentProcessId))
+            require(window['processId'] == pid and window['className'] == f'OpenGeulRunnerReadyOwnedProbe_{pid}'
+                and window['title'] == 'OpenGeul CI owned focus probe'
+                and self.startup_same_window(window, self.startup_window(foreground, deadline=deadline)),
+                '후보 없는 helper foreground 소유권이 다릅니다')
+            self._startup_activation_guard = {'deadline': deadline, 'allowed': (0, owned_hwnd), 'baseline': None, 'retired': None}
+            return
+        require(window['className'] == 'Progman' and window['title'] == 'Program Manager'
+                and window['visible'] and window['enabled'], '후보 없는 시작 foreground가 검증된 Progman이 아닙니다')
+        path = ntpath.join(self.windows_directory(), 'explorer.exe')
+        process = self.startup_bound_process(window, path, deadline=deadline)
+        require(time.monotonic() < deadline, '후보 없는 Progman handle 시간이 초과했습니다')
+        handle = self.kernel.OpenProcess(0x1000, False, process['processId'])
+        handed_off = False
+        try:
+            require(time.monotonic() < deadline and handle, '후보 없는 Progman held handle을 열지 못했습니다')
+            call(self.startup_baseline_state, window, process, handle)
+            image = self.bound_image(path, deadline=deadline)
+            require(image['bytes'] == process['imageBytes'] and image['sha256'] == process['imageSha256']
+                    and image['signature'] == process['signature'], '후보 없는 Progman PE/파일/서명이 다릅니다')
+            call(self.startup_baseline_state, window, process, handle)
+            require(int(call(self.user.GetForegroundWindow) or 0) == foreground,
+                    '후보 없는 Progman foreground가 검증 중 변경됐습니다')
+            selection['noCandidateBaseline'] = {'window': window, 'process': process, 'liveImage': image}
+            self._startup_activation_guard = {'deadline': deadline, 'allowed': (0, owned_hwnd, foreground),
+                'baseline': (window, process, handle), 'retired': None}
+            handed_off = True
+        finally:
+            if handle and not handed_off: self.kernel.CloseHandle(handle)
+
+    def startup_activation_guard(self, owned_hwnd):
+        guard = self._startup_activation_guard; deadline = guard['deadline']
+        call = lambda function, *arguments: self.startup_native_call(function, *arguments, deadline=deadline)
+        foreground = int(call(self.user.GetForegroundWindow) or 0)
+        require(foreground in guard['allowed'], 'owned 활성화 직전 알 수 없는 foreground입니다')
+        if guard['retired'] is not None:
+            require(not call(self.user.IsWindow, guard['retired']), 'owned 활성화 직전 retired WSL HWND가 다시 나타났습니다')
+        if guard['baseline'] is not None:
+            window, process, handle = guard['baseline']
+            call(self.startup_baseline_state, window, process, handle)
+            require(self.startup_same_window(window, self.startup_window(window['hwnd'], deadline=deadline)),
+                    'owned 활성화 직전 Progman HWND 소유권이 변경됐습니다')
+        if foreground == owned_hwnd:
+            row = self.startup_window(owned_hwnd, deadline=deadline)
+            pid = int(call(self.kernel.GetCurrentProcessId))
+            require(row['processId'] == pid and row['className'] == f'OpenGeulRunnerReadyOwnedProbe_{pid}'
+                    and row['title'] == 'OpenGeul CI owned focus probe', 'owned 활성화 직전 helper foreground 소유권이 다릅니다')
+        require(int(call(self.user.GetForegroundWindow) or 0) == foreground,
+                'owned 활성화 직전 foreground가 검증 중 변경됐습니다')
+
     def wait_startup_foreground(self, owned_hwnd, result):
         """첫 owned 활성화 전에 동일 WSL 시작 process의 자연 종료만 최대 65초 읽는다."""
         started = time.monotonic(); deadline = started + 65
+        self._startup_activation_guard = None
         selection = {'readOnly': True, 'stage': 'windowObservation'}
         result['startupSelection'] = selection
         windows = self.windows(); validate_windows(windows)
         selection.update(stage='completeWindowObservation', windowCount=len(windows['windows']),
                          truncated=windows['truncated'], foregroundHwnd=windows['foregroundHwnd'])
-        require(windows['truncated'] is False, 'WSL 시작 창 전체 관찰이 잘렸습니다')
-        selection['stage'] = 'candidateSelection'
+        require(callable(getattr(getattr(self, 'user', None), 'EnumWindows', None)), 'WSL 시작 창 전체 관찰이 잘렸습니다')
+        scoped = {}; result['startupCandidateObservation'] = scoped
         expected_path = ntpath.join(self.windows_directory(), 'System32', 'wsl.exe')
-        candidates = [w for w in windows['windows'] if w['visible'] is True and w['enabled'] is True
-            and w['className'] == 'ConsoleWindowClass' and ntpath.normcase(w['title']) == ntpath.normcase(expected_path)]
+        self.startup_candidates(expected_path, deadline=deadline, observation=scoped)
+        require(scoped['enumerationComplete'] is True, 'WSL 시작 후보 전체 관찰이 잘렸습니다')
+        rows = ([scoped['foreground']] if scoped['foreground'] else []) + scoped['candidates']
+        windows = {'foregroundHwnd': scoped['foregroundHwnd'], 'windows': rows, 'truncated': True}
+        selection['stage'] = 'candidateSelection'
+        candidates = scoped['candidates']
         require(len(candidates) <= 1, 'WSL 시작 창 후보가 여러 개입니다')
         if not candidates:
+            self.startup_no_candidate_foreground(windows, owned_hwnd, deadline=deadline, selection=selection)
             selection['stage'] = 'noCandidate'
             return
         selection['stage'] = 'candidateBinding'
-        foreground = candidates[0]; process = self.startup_bound_process(foreground, expected_path, deadline=deadline)
+        foreground = candidates[0]
+        require(self.startup_same_window(foreground, self.startup_window(foreground['hwnd'], deadline=deadline)),
+                '선택한 WSL HWND가 binding 직전 변경됐습니다')
+        current_foreground = int(self.startup_native_call(self.user.GetForegroundWindow, deadline=deadline) or 0)
+        require(current_foreground == scoped['foregroundHwnd'] and self.startup_same_window(scoped['foreground'],
+            self.startup_window(current_foreground, deadline=deadline) if current_foreground else None),
+            '선택한 foreground가 binding 직전 변경됐습니다')
+        process = self.startup_bound_process(foreground, expected_path, deadline=deadline)
         baseline = None; baseline_process = None; baseline_handle = None; baseline_path = None
         if windows['foregroundHwnd'] not in (0, foreground['hwnd'], owned_hwnd):
             selection['stage'] = 'baselineSelection'
@@ -808,6 +995,9 @@ class WindowsProbe:
                     trace['naturalProcessExitObserved'] = True
                     trace['durationMs'] = round((time.monotonic() - started) * 1000)
                     trace['stage'] = 'naturalExitConfirmed'
+                    self._startup_activation_guard = {'deadline': deadline, 'allowed': retired_foregrounds,
+                        'baseline': (baseline, baseline_process, baseline_handle) if baseline else None,
+                        'retired': foreground['hwnd']}
                     return
                 trace['stage'] = 'foregroundIdentity'
                 live_foregrounds = (0, foreground['hwnd'], owned_hwnd, baseline['hwnd']) if baseline else (0, foreground['hwnd'], owned_hwnd)
@@ -821,7 +1011,9 @@ class WindowsProbe:
                     self.user.TranslateMessage(ctypes.byref(message)); self.user.DispatchMessageW(ctypes.byref(message))
                 time.sleep(min(0.25, remaining))
         finally:
-            if baseline_handle: self.kernel.CloseHandle(baseline_handle)
+            guard = self._startup_activation_guard
+            if baseline_handle and not (guard and guard['baseline'] and guard['baseline'][2] == baseline_handle):
+                self.kernel.CloseHandle(baseline_handle)
             self.kernel.CloseHandle(handle)
 
     def focus_probe(self):
@@ -859,10 +1051,14 @@ class WindowsProbe:
             self.wait_startup_foreground(hwnd, result)
             self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
             require(self.user.IsWindow(hwnd) and owner.value == pid, '기다림 뒤 probe HWND 소유권이 다릅니다')
+            self.startup_activation_guard(hwnd)
             # 처음에는 숨겨 둔다. 관찰/자연 종료가 끝난 뒤에도 표시 자체로 전경을 바꾸지 않는다.
-            self.user.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE; 반환값은 이전 visible 상태다.
-            result['foregroundAtActivation'] = int(self.user.GetForegroundWindow() or 0)
-            result['setForegroundReturned'] = bool(self.user.SetForegroundWindow(hwnd))
+            deadline = self._startup_activation_guard['deadline']
+            self.startup_native_call(self.user.ShowWindow, hwnd, 4, deadline=deadline)  # SW_SHOWNOACTIVATE.
+            result['foregroundAtActivation'] = int(self.startup_native_call(self.user.GetForegroundWindow, deadline=deadline) or 0)
+            self.startup_activation_guard(hwnd)
+            require(time.monotonic() < deadline, 'owned foreground setter 직전 시작 시간이 초과했습니다')
+            result['setForegroundReturned'] = bool(self.startup_native_call(self.user.SetForegroundWindow, hwnd, deadline=deadline))
             message = W.MSG(); deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 for _ in range(64):
@@ -874,12 +1070,17 @@ class WindowsProbe:
             self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
             result['foregroundMatched'] = result['foregroundAfter'] == hwnd and owner.value == pid
         finally:
-            if hwnd and self.user.IsWindow(hwnd):
-                owner = W.DWORD(); self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
-                require(owner.value == pid, 'probe cleanup HWND 소유권이 다릅니다')
-                self.user.DestroyWindow(hwnd)
-            result['ownedWindowRemoved'] = not hwnd or not bool(self.user.IsWindow(hwnd))
-            require(self.user.UnregisterClassW(name, instance), '소유 focus probe class 제거 실패')
+            try:
+                if hwnd and self.user.IsWindow(hwnd):
+                    owner = W.DWORD(); self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                    require(owner.value == pid, 'probe cleanup HWND 소유권이 다릅니다')
+                    self.user.DestroyWindow(hwnd)
+                result['ownedWindowRemoved'] = not hwnd or not bool(self.user.IsWindow(hwnd))
+                require(self.user.UnregisterClassW(name, instance), '소유 focus probe class 제거 실패')
+            finally:
+                guard = getattr(self, '_startup_activation_guard', None)
+                if guard and guard['baseline']:
+                    self.kernel.CloseHandle(guard['baseline'][2]); guard['baseline'] = None
         return result
 
     def screen(self, path):

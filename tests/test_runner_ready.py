@@ -1,5 +1,6 @@
 """읽기 전용 ARM 러너 관찰의 실행 경계·상한·무입력을 검증한다."""
 import importlib.util
+import ctypes
 import copy
 import hashlib
 import json
@@ -19,6 +20,39 @@ def module():
     spec = importlib.util.spec_from_file_location('runner_ready_tested', path)
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
+    # Two legacy phase-diagnostic tests supply only a bounded snapshot and stop
+    # before process binding. Adapt that owned fixture to the now-mandatory
+    # native collector; a truncated snapshot supplies no completion capability.
+    actual_wait = value.WindowsProbe.wait_startup_foreground
+    def wait_with_snapshot_fixture(probe, owned, result):
+        if hasattr(probe, 'user'): return actual_wait(probe, owned, result)
+        original = probe.windows; last_error = [0]
+        def snapshot():
+            observed = original()
+            if not observed['truncated']:
+                rows = {row['hwnd']:row for row in observed['windows']}
+                class NativeSnapshot:
+                    def GetForegroundWindow(self): return observed['foregroundHwnd']
+                    def EnumWindows(self, callback, _):
+                        return all(callback(hwnd, 0) for hwnd in rows)
+                    def IsWindow(self, hwnd): return hwnd in rows
+                    def GetWindowThreadProcessId(self, hwnd, owner): owner._obj.value = rows[hwnd]['processId']; return rows[hwnd]['threadId']
+                    def GetWindowTextLengthW(self, hwnd): return len(rows[hwnd]['title'].encode('utf-16-le'))//2
+                    def GetWindowTextW(self, hwnd, buffer, _): buffer.value = rows[hwnd]['title']; return len(buffer.value.encode('utf-16-le'))//2
+                    def GetClassNameW(self, hwnd, buffer, _): buffer.value = rows[hwnd]['className']; return len(buffer.value.encode('utf-16-le'))//2
+                    def GetWindowRect(self, hwnd, rect):
+                        rect._obj.left, rect._obj.top, rect._obj.right, rect._obj.bottom = rows[hwnd]['rectangle']; return 1
+                    def IsWindowVisible(self, hwnd): return rows[hwnd]['visible']
+                    def IsWindowEnabled(self, hwnd): return rows[hwnd]['enabled']
+                probe.user = NativeSnapshot(); probe.callback = lambda callback: callback
+            return observed
+        probe.windows = snapshot
+        try:
+            with patch.object(value.ctypes, 'set_last_error', lambda number: last_error.__setitem__(0, number), create=True), \
+                 patch.object(value.ctypes, 'get_last_error', lambda: last_error[0], create=True):
+                return actual_wait(probe, owned, result)
+        finally: probe.windows = original
+    value.WindowsProbe.wait_startup_foreground = wait_with_snapshot_fixture
     return value
 
 
@@ -106,6 +140,12 @@ class StartupFixture:
             GetWindowThreadProcessId=api(self.owner), IsWindow=api(self.exists),
             GetForegroundWindow=api(self.foreground), GetWindowTextW=api(self.title),
             GetClassNameW=api(self.class_name), IsWindowVisible=api(self.exists), IsWindowEnabled=api(lambda h: 1))
+        self._enum_active = False; self._enum_rows = {}
+        self.user.EnumWindows = api(self.enum_windows)
+        self.user.GetWindowTextLengthW = api(self.title_length)
+        self.user.GetWindowRect = api(self.rectangle)
+        self.user.IsWindowVisible = api(lambda hwnd: self._enum_rows[hwnd]['visible'] if self._enum_active else self.exists(hwnd))
+        self.user.IsWindowEnabled = api(lambda hwnd: self._enum_rows[hwnd]['enabled'] if self._enum_active else True)
         self.kernel = SimpleNamespace(GetModuleHandleW=api(lambda *a: 1), GetCurrentProcessId=api(lambda: 100),
             OpenProcess=api(lambda *a: self.opened.append(a) or 11), CloseHandle=api(lambda h: self.closed.append(h) or 1),
             GetProcessTimes=api(self.times), IsWow64Process2=api(self.native), GetExitCodeProcess=api(self.exit_code),
@@ -114,6 +154,18 @@ class StartupFixture:
         self.probe.host = lambda: {'processId': 100, 'processMachine': 0, 'nativeMachine': 0xAA64}
         self.probe.windows_directory = lambda: 'C:\\Windows'; self.probe.session_id = lambda: 1
         self.probe.windows = self.windows; self.probe.processes = self.processes
+        self.probe.callback = lambda callback: callback
+    def enum_windows(self, callback, _):
+        observation = self.probe.windows(); self._enum_rows = {row['hwnd']:row for row in observation['windows']}
+        self._enum_active = True
+        try: return all(callback(hwnd, 0) for hwnd in self._enum_rows) and not observation['truncated']
+        finally: self._enum_active = False
+    def title_length(self, hwnd):
+        buffer = ctypes.create_unicode_buffer(257); self.title(hwnd, buffer, 257)
+        return len(buffer.value.encode('utf-16-le'))//2
+    def rectangle(self, hwnd, rect):
+        row = self._enum_rows.get(hwnd, self.desktop if hwnd == 20 and hasattr(self, 'desktop') else self.window)
+        rect._obj.left, rect._obj.top, rect._obj.right, rect._obj.bottom = row['rectangle']; return True
     def create(self, *args): self.probe_exists = True; self.fore = 12; return 500
     def show(self, hwnd, command): self.shows.append((hwnd, command, self.clock)); return 0
     def exists(self, hwnd): return self.probe_exists if hwnd == 500 else self.clock < self.expires
@@ -168,10 +220,13 @@ class StartupFixture:
         return self.file if str(path) == self.process['imagePath'] else Path(path)
     def run(self):
         import ctypes
+        last_error = [0]
         try:
             with patch.object(ctypes, 'WINFUNCTYPE', ctypes.CFUNCTYPE, create=True), \
                  patch.object(self.value.time, 'monotonic', lambda: self.clock), \
                  patch.object(self.value.time, 'sleep', self.sleep), \
+                 patch.object(self.value.ctypes, 'set_last_error', lambda number: last_error.__setitem__(0, number), create=True), \
+                 patch.object(self.value.ctypes, 'get_last_error', lambda: last_error[0], create=True), \
                  patch.object(self.value, 'Path', self.file_for_path), \
                  patch.object(self.value.subprocess, 'run', self.signature):
                 return self.probe.focus_probe()
@@ -889,6 +944,263 @@ class StartupSelectionDiagnosticTests(unittest.TestCase):
         self.assertNotIn('startupWait', result)
         self.assertNotIn('setForegroundReturned', result)
         self.assertNotIn('naturalProcessExitObserved', result)
+
+
+class ScopedStartupEnumerationTests(unittest.TestCase):
+    def stream(self, *, changes=(), foreground=9000, candidates=(9001,), hidden=100, candidate_title='C:\\Windows\\System32\\wsl.exe'):
+        value = module(); probe = value.WindowsProbe.__new__(value.WindowsProbe)
+        clock = [0.0]; errors = [0]; visits = []
+        rows = {hwnd: {'hwnd': hwnd, 'processId': hwnd+100, 'threadId': hwnd+200,
+                       'title': '', 'className': 'IME', 'visible': False, 'enabled': False,
+                       'rectangle': [0, 0, 0, 0]} for hwnd in range(1, hidden+1)}
+        rows[9000] = {'hwnd': 9000, 'processId': 300, 'threadId': 301,
+                      'title': 'Program Manager', 'className': 'Progman',
+                      'visible': True, 'enabled': True, 'rectangle': [0, 0, 1024, 768]}
+        for hwnd in candidates:
+            rows[hwnd] = {'hwnd': hwnd, 'processId': 200, 'threadId': 201,
+                          'title': candidate_title, 'className': 'ConsoleWindowClass',
+                          'visible': True, 'enabled': True, 'rectangle': [31, 104, 1024, 623]}
+        class User:
+            def GetForegroundWindow(self):
+                return 9999 if 'foregroundHwnd' in changes and visits else foreground
+            def EnumWindows(self, callback, _):
+                for hwnd in [*range(1, hidden+1), *candidates]:
+                    visits.append(hwnd)
+                    if 'expired' in changes: clock[0] = 66
+                    if not callback(hwnd, 0): return 0
+                return 0 if 'nativeFailure' in changes else 1
+            def IsWindow(self, hwnd): return hwnd in rows and not ('missing' in changes and hwnd in candidates)
+            def IsWindowVisible(self, hwnd): return rows[hwnd]['visible']
+            def IsWindowEnabled(self, hwnd): return rows[hwnd]['enabled']
+            def GetWindowThreadProcessId(self, hwnd, pid):
+                if 'ownerRace' in changes and visits and hwnd == foreground: pid._obj.value = 999; return 998
+                pid._obj.value = rows[hwnd]['processId']; return rows[hwnd]['threadId']
+            def GetWindowTextLengthW(self, hwnd): return len(rows[hwnd]['title'].encode('utf-16-le'))//2
+            def GetWindowTextW(self, hwnd, buffer, _):
+                if 'titleError' in changes and hwnd in candidates: errors[0] = 5; return 0
+                buffer.value = rows[hwnd]['title']; return len(buffer.value.encode('utf-16-le'))//2
+            def GetClassNameW(self, hwnd, buffer, _):
+                if 'callbackError' in changes and hwnd in candidates: raise OSError('controlled callback read failure')
+                buffer.value = rows[hwnd]['className']; return len(buffer.value)
+            def GetWindowRect(self, hwnd, rect):
+                if 'rectangleError' in changes and hwnd in candidates: return 0
+                rect._obj.left, rect._obj.top, rect._obj.right, rect._obj.bottom = rows[hwnd]['rectangle']; return 1
+        probe.user = User(); probe.callback = lambda callback: callback
+        if 'hiddenRace' in changes:
+            original = probe.user.IsWindowVisible; count = [0]
+            def hidden_race(hwnd):
+                result = original(hwnd)
+                if hwnd == 1:
+                    count[0] += 1
+                    if count[0] == 1: rows[hwnd]['visible'] = True; rows[hwnd]['enabled'] = True
+                return result
+            probe.user.IsWindowVisible = hidden_race
+        if 'classRace' in changes:
+            rows[1].update(visible=True, enabled=True, className='OtherClass')
+            original = probe.user.GetClassNameW; count = [0]
+            def class_race(hwnd, buffer, size):
+                result = original(hwnd, buffer, size)
+                if hwnd == 1:
+                    count[0] += 1
+                    if count[0] == 1: rows[hwnd]['className'] = 'ConsoleWindowClass'; rows[hwnd]['title'] = candidate_title
+                return result
+            probe.user.GetClassNameW = class_race
+        if 'eligibleOwnerRace' in changes:
+            original = probe.user.GetWindowThreadProcessId; count = [0]
+            def eligible_owner_race(hwnd, pid):
+                result = original(hwnd, pid)
+                if hwnd in candidates:
+                    count[0] += 1
+                    if count[0] == 1: rows[hwnd]['processId'] = 999; rows[hwnd]['threadId'] = 998
+                return result
+            probe.user.GetWindowThreadProcessId = eligible_owner_race
+        return value, probe, clock, errors, visits
+
+    def collect(self, fixture, expected_path='C:\\Windows\\System32\\wsl.exe'):
+        value, probe, clock, errors, visits = fixture
+        collector = getattr(probe, 'startup_candidates', None)
+        self.assertTrue(callable(collector), 'Separate complete bounded startup-predicate collector is missing')
+        observed = {}
+        with patch.object(value.time, 'monotonic', lambda: clock[0]), \
+             patch.object(value.ctypes, 'set_last_error', lambda number: errors.__setitem__(0, number), create=True), \
+             patch.object(value.ctypes, 'get_last_error', lambda: errors[0], create=True):
+            collector(expected_path, deadline=65, observation=observed)
+        return observed
+
+    def test_actual_stream_observes_late_wsl_after_more_than64_hidden_windows(self):
+        fixture = self.stream(); observed = self.collect(fixture)
+        self.assertTrue(observed['enumerationComplete'])
+        self.assertEqual(observed['scope'], 'visible-enabled-exact-wsl-startup-candidates')
+        self.assertGreater(observed['visits'], 64)
+        self.assertEqual([row['hwnd'] for row in observed['candidates']], [9001])
+        self.assertEqual(observed['foreground']['hwnd'], 9000)
+        self.assertEqual(fixture[0].MAX_WINDOWS, 64)
+
+    def test_actual_startup_selects_late_candidate_without_changing_general_truncation(self):
+        value, probe, clock, errors, visits = self.stream()
+        selected = []; probe.windows_directory = lambda: 'C:\\Windows'
+        def binding(window, path, *, deadline):
+            selected.append(window['hwnd']); raise ValueError('controlled stop after actual candidate selection')
+        probe.startup_bound_process = binding
+        with patch.object(value.time, 'monotonic', lambda: clock[0]), \
+             patch.object(value.ctypes, 'set_last_error', lambda number: errors.__setitem__(0, number), create=True), \
+             patch.object(value.ctypes, 'get_last_error', lambda: errors[0], create=True):
+            diagnostic = probe.windows()
+            self.assertTrue(diagnostic['truncated']); self.assertEqual(len(diagnostic['windows']), 64)
+            self.assertNotIn(9001, [row['hwnd'] for row in diagnostic['windows']])
+            try: probe.wait_startup_foreground(500, {})
+            except ValueError: pass
+        self.assertEqual(selected, [9001])
+
+    def test_actual_stream_rejects_multiple_late_candidates(self):
+        fixture = self.stream(candidates=(9001, 9002))
+        with self.assertRaises(ValueError): self.collect(fixture)
+
+    def test_actual_stream_rejects_native_callback_and_eligible_row_failures(self):
+        for change in ('nativeFailure', 'callbackError', 'titleError', 'rectangleError', 'missing'):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.collect(self.stream(changes=(change,)))
+
+    def test_actual_stream_rejects_cap_and_original_deadline_expiry(self):
+        fixture = self.stream(hidden=4097)
+        with self.assertRaises(ValueError): self.collect(fixture)
+        self.assertLessEqual(len(fixture[4]), 4097)
+        with self.assertRaises(ValueError): self.collect(self.stream(changes=('expired',)))
+
+    def test_actual_stream_rejects_foreground_handle_and_owner_races(self):
+        for change in ('foregroundHwnd', 'ownerRace'):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.collect(self.stream(changes=(change,)))
+
+    def test_no_candidate_unknown_foreground_never_activates_owned_probe(self):
+        fixture = MaskedStartupFixture(module()); fixture.fore = 777
+        fixture.probe.windows = lambda: {'foregroundHwnd': 777, 'windows': [], 'truncated': False}
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(fixture.shows, []); self.assertEqual(fixture.calls, [])
+        self.assertFalse(fixture.probe_exists)
+
+    def test_native_false_sub64_inventory_never_reaches_binding(self):
+        for candidates in ((), (9001,)):
+            value, probe, clock, errors, visits = self.stream(hidden=3, candidates=candidates, changes=('nativeFailure',))
+            selected = []; probe.windows_directory = lambda: 'C:\\Windows'
+            probe.startup_bound_process = lambda *args, **kwargs: selected.append(True)
+            with patch.object(value.time, 'monotonic', lambda: clock[0]), \
+                 patch.object(value.ctypes, 'set_last_error', lambda number: errors.__setitem__(0, number), create=True), \
+                 patch.object(value.ctypes, 'get_last_error', lambda: errors[0], create=True):
+                try: probe.wait_startup_foreground(500, {})
+                except (ValueError, AttributeError): pass
+            with self.subTest(candidates=candidates): self.assertEqual(selected, [])
+
+    def test_zero_candidate_foreground_native_overrun_rejects(self):
+        value, probe, clock, errors, visits = self.stream(foreground=0, candidates=())
+        def slow_foreground(): clock[0] = 66; return 0
+        probe.user.GetForegroundWindow = slow_foreground
+        with patch.object(value.time, 'monotonic', lambda: clock[0]), self.assertRaises(ValueError):
+            probe.startup_no_candidate_foreground({'foregroundHwnd':0, 'windows':[]}, 500, deadline=65, selection={})
+
+    def test_native_utf16_title_units_support_nonbmp_windows_path(self):
+        expected = 'C:\\Windows-😀\\System32\\wsl.exe'
+        try: observed = self.collect(self.stream(candidate_title=expected), expected_path=expected)
+        except ValueError: observed = None
+        self.assertIsNotNone(observed, 'Valid native UTF16 title was rejected')
+        self.assertTrue(observed['enumerationComplete'])
+        self.assertEqual(observed['candidates'][0]['title'], expected)
+
+    def test_omitted_hidden_and_nonconsole_native_races_reject(self):
+        for change in ('hiddenRace', 'classRace'):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.collect(self.stream(changes=(change,)))
+
+    def test_zero_candidate_verified_progman_and_identity_rejections(self):
+        for change in (None, 'baselineInitialSignature', 'baselineInitialNative', 'baselineInitialSession', 'baselineWrongPath'):
+            fixture = MaskedStartupFixture(module(), baseline=True, change=change, expires=0)
+            fixture.probe.windows = lambda: {'foregroundHwnd':20, 'windows':[copy.deepcopy(fixture.desktop)], 'truncated':False}
+            with self.subTest(change=change):
+                if change is None:
+                    result = fixture.run()
+                    self.assertTrue(result['foregroundMatched']); self.assertEqual(len(fixture.calls), 1)
+                    self.assertIn('noCandidateBaseline', result['startupSelection'])
+                    self.assertEqual(fixture.closed, [22])
+                else:
+                    with self.assertRaises(ValueError): fixture.run()
+                    self.assertEqual(fixture.shows, []); self.assertEqual(fixture.calls, [])
+
+    def test_zero_candidate_final_progman_foreground_overrun_rejects_and_closes_handle(self):
+        fixture = MaskedStartupFixture(module(), baseline=True)
+        fixture.probe.windows = lambda: {'foregroundHwnd':20, 'windows':[copy.deepcopy(fixture.desktop)], 'truncated':False}
+        original = fixture.signature
+        def signature(args, **kwargs):
+            result = original(args, **kwargs)
+            def slow_foreground(): fixture.clock = 66; return 20
+            fixture.user.GetForegroundWindow = ApiCall(slow_foreground)
+            return result
+        fixture.signature = signature
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(fixture.shows, []); self.assertEqual(fixture.calls, [])
+        self.assertEqual(fixture.closed, [22])
+
+    def test_foreign_foreground_after_nocandidate_verification_never_activates(self):
+        fixture = MaskedStartupFixture(module(), baseline=True, expires=0)
+        fixture.probe.windows = lambda: {'foregroundHwnd':20, 'windows':[copy.deepcopy(fixture.desktop)], 'truncated':False}
+        original = fixture.user.GetWindowThreadProcessId; owned_reads = [0]
+        def owner(hwnd, pid):
+            result = original(hwnd, pid)
+            if hwnd == 500:
+                owned_reads[0] += 1
+                if owned_reads[0] == 2: fixture.fore = 777
+            return result
+        fixture.user.GetWindowThreadProcessId = ApiCall(owner)
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(fixture.shows, []); self.assertEqual(fixture.calls, [])
+        self.assertEqual(fixture.closed, [22])
+
+    def test_baseline_creation_after_nocandidate_verification_never_activates(self):
+        fixture = MaskedStartupFixture(module(), baseline=True, expires=0, change='baselineCreation')
+        fixture.probe.windows = lambda: {'foregroundHwnd':20, 'windows':[copy.deepcopy(fixture.desktop)], 'truncated':False}
+        original = fixture.user.GetWindowThreadProcessId; owned_reads = [0]
+        def owner(hwnd, pid):
+            result = original(hwnd, pid)
+            if hwnd == 500:
+                owned_reads[0] += 1
+                if owned_reads[0] == 2: fixture.clock = .25
+            return result
+        fixture.user.GetWindowThreadProcessId = ApiCall(owner)
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(fixture.shows, []); self.assertEqual(fixture.calls, [])
+        self.assertEqual(fixture.closed, [22])
+
+    def test_post_show_foreground_and_deadline_changes_never_call_setter(self):
+        for change in ('foreground', 'showDeadline', 'foregroundReadDeadline'):
+            fixture = MaskedStartupFixture(module(), baseline=True, expires=0)
+            fixture.probe.windows = lambda: {'foregroundHwnd':20, 'windows':[copy.deepcopy(fixture.desktop)], 'truncated':False}
+            original_show = fixture.show; original_foreground = fixture.foreground
+            def show(hwnd, command):
+                result = original_show(hwnd, command)
+                if change == 'foreground': fixture.fore = 777
+                if change == 'showDeadline': fixture.clock = 66
+                return result
+            def foreground():
+                if change == 'foregroundReadDeadline' and fixture.shows: fixture.clock = 66
+                return original_foreground()
+            fixture.user.ShowWindow = ApiCall(show); fixture.user.GetForegroundWindow = ApiCall(foreground)
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError): fixture.run()
+                self.assertEqual(len(fixture.shows), 1); self.assertEqual(fixture.calls, [])
+                self.assertEqual(fixture.closed, [22])
+
+    def test_eligible_callback_owner_generation_change_rejects(self):
+        with self.assertRaises(ValueError): self.collect(self.stream(changes=('eligibleOwnerRace',)))
+
+    def test_one_setter_returning_after_startup_deadline_fails_and_cleans_up(self):
+        fixture = MaskedStartupFixture(module(), baseline=True, expires=0)
+        fixture.probe.windows = lambda: {'foregroundHwnd':20, 'windows':[copy.deepcopy(fixture.desktop)], 'truncated':False}
+        original = fixture.set_foreground
+        def slow_setter(hwnd):
+            result = original(hwnd); fixture.clock = 66; return result
+        fixture.user.SetForegroundWindow = ApiCall(slow_setter)
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(len(fixture.shows), 1); self.assertEqual(len(fixture.calls), 1)
+        self.assertFalse(fixture.probe_exists); self.assertEqual(fixture.closed, [22])
 
 
 if __name__ == '__main__': unittest.main()
