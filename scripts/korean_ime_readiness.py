@@ -104,9 +104,15 @@ def parse_diagnostic_tail(raw,kind,worker_pid,started,observed,*,sessions=()):
          'diagnostic_binding_unavailable')
     truncated=len(raw)>DIAGNOSTIC_TAIL_BYTES
     raw=raw[-DIAGNOSTIC_TAIL_BYTES:]
+    # First rejection counts describe only these bounded host-tail lines, not
+    # servicing activity attributable to the worker or a servicing root cause.
+    gate_counts={'line_too_long':0,'format_unmatched':0,'timestamp_invalid':0,
+        'outside_worker_window':0,'field_marker_mismatch':0,'pid_rejected':0,
+        'session_rejected':0,'ownership_unjoined':0,'hresult_rejected':0,
+        'no_event_fields':0,'record_retained':0,'record_limit_reached':0}
     result={'status':'correlation_unavailable','logKind':kind,'bytesRead':len(raw),
             'tailSha256':hashlib.sha256(raw).hexdigest(),'linesExamined':0,'records':[],
-            'sessions':[],'productInputVerified':False,'sourceQualified':False}
+            'sessions':[],'gateCounts':gate_counts,'productInputVerified':False,'sourceQualified':False}
     try:
         if raw.startswith(b'\xff\xfe'):encoding='utf-16-le';bom=raw[:2]
         elif raw.startswith(b'\xfe\xff'):encoding='utf-16-be';bom=raw[:2]
@@ -123,39 +129,52 @@ def parse_diagnostic_tail(raw,kind,worker_pid,started,observed,*,sessions=()):
     result['linesExamined']=len(lines)
     joined=set(sessions)
     for line,line_bytes in lines:
-        if len(line)>4096:continue
+        if len(line)>4096:
+            gate_counts['line_too_long']+=1;continue
         stamp=_STAMP.match(line)
-        if stamp is None or stamp[3].casefold()!=kind:continue
-        if _BODY_PREFIX.match(line[stamp.end():].lstrip()) is None:continue
+        if stamp is None or stamp[3].casefold()!=kind:
+            gate_counts['format_unmatched']+=1;continue
+        if _BODY_PREFIX.match(line[stamp.end():].lstrip()) is None:
+            gate_counts['format_unmatched']+=1;continue
         try:epoch=datetime.datetime.fromisoformat(stamp[1].replace(',','.')).timestamp()
-        except (ValueError,OverflowError,OSError):continue
-        if not started<=epoch<=observed:continue
+        except (ValueError,OverflowError,OSError):
+            gate_counts['timestamp_invalid']+=1;continue
+        if not started<=epoch<=observed:
+            gate_counts['outside_worker_window']+=1;continue
         pids=_PID.findall(line)
         session_values=_SESSION.findall(line)
         hresult_values=_HRESULT.findall(line)
         # A dangling or malformed field must not disappear and turn a record
         # into an apparently clean PID/session attribution.
         fields={'pid':pids,'session':session_values,'hresult':hresult_values}
-        if any(len(_FIELD_MARKERS[name].findall(line))!=len(values) for name,values in fields.items()):continue
+        if any(len(_FIELD_MARKERS[name].findall(line))!=len(values) for name,values in fields.items()):
+            gate_counts['field_marker_mismatch']+=1;continue
         # Ambiguous or expressly foreign PID records can never inherit a CBS
         # session, even when that session was observed for our worker elsewhere.
         if pids and (len(pids)!=1 or re.fullmatch('[1-9][0-9]{0,9}',pids[0]) is None
-                     or int(pids[0])!=worker_pid):continue
-        if session_values and (len(session_values)!=1 or re.fullmatch(r'[0-9]{1,20}_[0-9]{1,20}',session_values[0]) is None):continue
+                     or int(pids[0])!=worker_pid):
+            gate_counts['pid_rejected']+=1;continue
+        if session_values and (len(session_values)!=1 or re.fullmatch(r'[0-9]{1,20}_[0-9]{1,20}',session_values[0]) is None):
+            gate_counts['session_rejected']+=1;continue
         session=session_values[0] if session_values else None
         bound_pid=bool(pids)
-        if not bound_pid and not (kind=='cbs' and session is not None and session in joined):continue
-        if hresult_values and (len(hresult_values)!=1 or re.fullmatch('0x[0-9a-f]{8}',hresult_values[0],re.I) is None):continue
+        if not bound_pid and not (kind=='cbs' and session is not None and session in joined):
+            gate_counts['ownership_unjoined']+=1;continue
+        if hresult_values and (len(hresult_values)!=1 or re.fullmatch('0x[0-9a-f]{8}',hresult_values[0],re.I) is None):
+            gate_counts['hresult_rejected']+=1;continue
         hresult=hresult_values[0] if hresult_values else None
-        if hresult is None and session is None:continue
+        if hresult is None and session is None:
+            gate_counts['no_event_fields']+=1;continue
         if session is not None and bound_pid:joined.add(session)
         record={'timestamp':stamp[1],'timestampKind':'source-local-time',
                 'eventCode':'hresult' if hresult is not None else 'session_join',
                 'workerPid':worker_pid,'lineSha256':hashlib.sha256(line_bytes).hexdigest()}
         if session is not None:record['session']=session
         if hresult is not None:record['hresult']=hresult.lower()
-        if len(result['records'])<DIAGNOSTIC_RECORDS:result['records'].append(record)
-        else:result['status']='records_truncated';break
+        if len(result['records'])<DIAGNOSTIC_RECORDS:
+            result['records'].append(record);gate_counts['record_retained']+=1
+        else:
+            gate_counts['record_limit_reached']+=1;result['status']='records_truncated';break
     result['sessions']=sorted(joined)[:DIAGNOSTIC_RECORDS]
     if result['records'] and result['status']!='records_truncated':result['status']='available'
     need(len(json.dumps(result,separators=(',',':')).encode())<=DIAGNOSTIC_JSON_BYTES,'diagnostic_size_unavailable')

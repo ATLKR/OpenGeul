@@ -378,6 +378,195 @@ try {
         self.assertTrue(callable(function),'Bounded servicing diagnostics are missing: '+name)
         return function
 
+    def assert_diagnostic_gate_counts(self,result,**nonzero):
+        expected=dict.fromkeys(('line_too_long','format_unmatched','timestamp_invalid',
+            'outside_worker_window','field_marker_mismatch','pid_rejected','session_rejected',
+            'ownership_unjoined','hresult_rejected','no_event_fields','record_retained',
+            'record_limit_reached'),0)
+        expected.update(nonzero)
+        self.assertEqual(result.get('gateCounts'),expected)
+        for value in result['gateCounts'].values():
+            self.assertIs(type(value),int)
+            self.assertGreaterEqual(value,0)
+            self.assertLessEqual(value,512)
+        self.assertLessEqual(sum(result['gateCounts'].values()),result['linesExamined'])
+        self.assertFalse(result['sourceQualified'])
+        self.assertFalse(result['productInputVerified'])
+
+    def test_diagnostic_gate_counts_distinguish_empty_correlations(self):
+        parse=self.diagnostic_api('parse_diagnostic_tail')
+        stamp=datetime.datetime(2026,10,14,19,24,0);start=stamp.timestamp()
+        prefix=stamp.strftime('%Y-%m-%d %H:%M:%S')
+        previous=(stamp-datetime.timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        cases=[('format_unmatched','dism',prefix+', Error DISM unrelated message PID=4452'),
+            ('outside_worker_window','dism',previous+', Error DISM PID=4452 HRESULT=0x800F0954'),
+            ('pid_rejected','dism',prefix+', Error DISM PID=4453 HRESULT=0x800F0954'),
+            ('ownership_unjoined','cbs',prefix+', Error CBS Session: 123_456 HRESULT=0x800F0954'),
+            ('no_event_fields','dism',prefix+', Info DISM PID=4452')]
+        for gate,kind,line in cases:
+            with self.subTest(gate=gate):
+                raw=(line+'\n').encode()
+                result=parse(raw,kind,4452,start,start+60)
+                self.assertEqual(result['status'],'correlation_unavailable')
+                self.assertEqual(result['records'],[])
+                self.assertEqual(result['sessions'],[])
+                self.assert_diagnostic_gate_counts(result,**{gate:1})
+                self.assertEqual({key:value for key,value in result.items() if key!='gateCounts'},
+                    {'status':'correlation_unavailable','logKind':kind,'bytesRead':len(raw),
+                     'tailSha256':hashlib.sha256(raw).hexdigest(),'linesExamined':1,'records':[],
+                     'sessions':[],'productInputVerified':False,'sourceQualified':False})
+
+    def test_diagnostic_gate_counts_classify_first_rejection_without_exporting_tokens(self):
+        parse=self.diagnostic_api('parse_diagnostic_tail')
+        stamp=datetime.datetime(2026,10,14,19,24,0);start=stamp.timestamp()
+        prefix=stamp.strftime('%Y-%m-%d %H:%M:%S')
+        cases=[('line_too_long','x'*4097),
+            ('format_unmatched','https://PRIVATE.invalid/PID=4452?HRESULT=0x800FDEAD'),
+            ('format_unmatched',prefix+', Error CBS PID=4452 HRESULT=0x800FDEAD'),
+            ('format_unmatched',prefix+', Error DISM https://PRIVATE.invalid/PID=4452?HRESULT=0x800FDEAD'),
+            ('format_unmatched','2026-13-14 19:24:00, Error DISM unrelated PID=PRIVATE'),
+            ('timestamp_invalid','2026-13-14 19:24:00, Error DISM PID=4452 HRESULT=0x800FDEAD'),
+            ('timestamp_invalid','2026-13-14 19:24:00, Error DISM PID=PRIVATE Session: PRIVATE HRESULT=PRIVATE'),
+            ('outside_worker_window','2026-10-14 19:25:01, Error DISM PID=4452 HRESULT=0x800FDEAD'),
+            ('outside_worker_window','2026-10-14 19:25:01, Error DISM PID=PRIVATE Session: PRIVATE HRESULT=PRIVATE'),
+            ('field_marker_mismatch',prefix+', Error DISM PID=4452 HRESULT=0x800FDEAD Session:'),
+            ('field_marker_mismatch',prefix+', Error DISM PID=4452 Session: 123_456 HRESULT='),
+            ('field_marker_mismatch',prefix+', Error DISM Session: 123_456 PID='),
+            ('field_marker_mismatch',prefix+', Error DISM PID=PRIVATE Session:'),
+            ('pid_rejected',prefix+', Error DISM PID=4452 PID=4453 Session: 123_456'),
+            ('pid_rejected',prefix+', Error DISM PID=PRIVATE Session: 123_456'),
+            ('pid_rejected',prefix+', Error DISM PID=0 Session: 123_456'),
+            ('pid_rejected',prefix+', Error DISM PID=PRIVATE Session: PRIVATE HRESULT=PRIVATE'),
+            ('session_rejected',prefix+', Error DISM PID=4452 Session: PRIVATE HRESULT=0x800FDEAD'),
+            ('session_rejected',prefix+', Error DISM PID=4452 Session: 123_456 Session: 999_999'),
+            ('session_rejected',prefix+', Error DISM Session: PRIVATE HRESULT=PRIVATE'),
+            ('ownership_unjoined',prefix+', Error DISM Session: 123_456 HRESULT=0x800FDEAD'),
+            ('ownership_unjoined',prefix+', Error DISM Session: 123_456 HRESULT=PRIVATE'),
+            ('hresult_rejected',prefix+', Error DISM PID=4452 HRESULT=PRIVATE'),
+            ('hresult_rejected',prefix+', Error DISM PID=4452 HRESULT=0x800FDEAD HRESULT=0x80070005')]
+        raw=('\n'.join(line for _,line in cases)+'\n').encode()
+        result=parse(raw,'dism',4452,start,start+60)
+        expected={gate:sum(candidate==gate for candidate,_ in cases) for gate,_ in cases}
+        self.assert_diagnostic_gate_counts(result,**expected)
+        self.assertEqual(sum(result['gateCounts'].values()),len(cases))
+        self.assertEqual(result['linesExamined'],len(cases))
+        self.assertEqual(result['status'],'correlation_unavailable')
+        self.assertEqual(result['records'],[])
+        self.assertEqual(result['sessions'],[])
+        encoded=json.dumps(result)
+        for forbidden in ('PRIVATE','https','800FDEAD','80070005','4453','123_456','999_999'):
+            self.assertNotIn(forbidden,encoded)
+
+    def test_diagnostic_gate_counts_cannot_join_foreign_or_dangling_cbs_fields(self):
+        parse=self.diagnostic_api('parse_diagnostic_tail')
+        stamp=datetime.datetime(2026,10,14,19,24,0);start=stamp.timestamp()
+        prefix=stamp.strftime('%Y-%m-%d %H:%M:%S')
+        cases=[('pid_rejected','PID=4453 Session: 123_456 HRESULT=0x800FDEAD'),
+            ('pid_rejected','PID=0 Session: 123_456 HRESULT=0x800FDEAD'),
+            ('field_marker_mismatch','Session: 123_456 HRESULT=0x800FDEAD PID='),
+            ('session_rejected','PID=4452 Session: PRIVATE HRESULT=0x800FDEAD'),
+            ('ownership_unjoined','Session: 999_999 HRESULT=0x800FDEAD')]
+        for gate,body in cases:
+            with self.subTest(gate=gate,body=body):
+                result=parse((prefix+', Error CBS '+body+'\n').encode(),'cbs',4452,
+                    start,start+60,sessions=['123_456'])
+                self.assert_diagnostic_gate_counts(result,**{gate:1})
+                self.assertEqual(result['status'],'correlation_unavailable')
+                self.assertEqual(result['records'],[])
+                self.assertEqual(result['sessions'],['123_456'])
+                self.assertNotIn('800FDEAD',json.dumps(result))
+
+    def test_diagnostic_gate_counts_preserve_owned_records_sessions_and_original_bytes(self):
+        parse=self.diagnostic_api('parse_diagnostic_tail')
+        stamp=datetime.datetime(2026,10,14,19,24,0);start=stamp.timestamp()
+        prefix=stamp.strftime('%Y-%m-%d %H:%M:%S')
+        lines=[prefix+', Info CBS PID=4452 Session: 123_456 한글\r\n',
+            prefix+', Error CBS Session: 123_456 HRESULT=0x800F0954\r\n']
+        raw=b'\xef\xbb\xbf'+''.join(lines).encode()
+        result=parse(raw,'cbs',4452,start,start+60)
+        self.assert_diagnostic_gate_counts(result,record_retained=2)
+        self.assertEqual(result['status'],'available')
+        self.assertEqual(result['sessions'],['123_456'])
+        expected=[]
+        for index,line in enumerate(lines):
+            record={'timestamp':prefix,'timestampKind':'source-local-time',
+                'eventCode':'session_join' if index==0 else 'hresult','workerPid':4452,
+                'lineSha256':hashlib.sha256((b'\xef\xbb\xbf' if index==0 else b'')+line.encode()).hexdigest(),
+                'session':'123_456'}
+            if index==1:record['hresult']='0x800f0954'
+            expected.append(record)
+        self.assertEqual(result['records'],expected)
+        self.assertEqual(result['tailSha256'],hashlib.sha256(raw).hexdigest())
+        self.assertEqual(result['bytesRead'],len(raw))
+        self.assertEqual(result['linesExamined'],2)
+        complete=prefix+', Error DISM PID=4452 HRESULT=0x800F0954 한글\r\n'
+        raw=b'x'*65536+b'\n'+complete.encode()+b'PARTIAL'
+        result=parse(raw,'dism',4452,start,start+60)
+        self.assert_diagnostic_gate_counts(result,record_retained=1)
+        self.assertEqual(result['linesExamined'],1)
+        self.assertEqual(result['records'],[{'timestamp':prefix,'timestampKind':'source-local-time',
+            'eventCode':'hresult','workerPid':4452,'lineSha256':hashlib.sha256(complete.encode()).hexdigest(),
+            'hresult':'0x800f0954'}])
+        self.assertEqual(result['bytesRead'],65536)
+        self.assertEqual(result['tailSha256'],hashlib.sha256(raw[-65536:]).hexdigest())
+
+    def test_diagnostic_gate_counts_preserve_record_limit_break(self):
+        parse=self.diagnostic_api('parse_diagnostic_tail')
+        stamp=datetime.datetime(2026,10,14,19,24,0);start=stamp.timestamp()
+        prefix=stamp.strftime('%Y-%m-%d %H:%M:%S')
+        line=prefix+', Info DISM PID=4452 Session: 123_456\n'
+        result=parse((line*64).encode(),'dism',4452,start,start+60)
+        self.assert_diagnostic_gate_counts(result,record_retained=64)
+        self.assertEqual(result['status'],'available')
+        self.assertEqual(len(result['records']),64)
+        sixty_fifth=prefix+', Info DISM PID=4452 Session: 999_999\n'
+        result=parse((line*64+sixty_fifth+'UNPROCESSED\n'*5).encode(),'dism',4452,start,start+60)
+        self.assert_diagnostic_gate_counts(result,record_retained=64,record_limit_reached=1)
+        self.assertEqual(result['status'],'records_truncated')
+        self.assertEqual(len(result['records']),64)
+        self.assertEqual(result['sessions'],['123_456','999_999'])
+        self.assertEqual(result['linesExamined'],70)
+        self.assertEqual(sum(result['gateCounts'].values()),65)
+
+    def test_diagnostic_gate_counts_cover_only_complete_bounded_lines(self):
+        parse=self.diagnostic_api('parse_diagnostic_tail')
+        stamp=datetime.datetime(2026,10,14,19,24,0);start=stamp.timestamp()
+        for raw,count in [(b'',0),(b'PARTIAL',0),(b'?\r\n'*600+b'PARTIAL',512),
+                (b'x'*65536+b'\n?\r\n'*100,199)]:
+            with self.subTest(raw_bytes=len(raw)):
+                result=parse(raw,'dism',4452,start,start+60)
+                self.assert_diagnostic_gate_counts(result,format_unmatched=count)
+                self.assertEqual(result['linesExamined'],count)
+                self.assertEqual(sum(result['gateCounts'].values()),count)
+                self.assertEqual(result['bytesRead'],min(len(raw),65536))
+                self.assertEqual(result['tailSha256'],hashlib.sha256(raw[-65536:]).hexdigest())
+
+    def test_diagnostic_gate_counts_stay_zero_when_decoding_is_unavailable(self):
+        parse=self.diagnostic_api('parse_diagnostic_tail')
+        stamp=datetime.datetime(2026,10,14,19,24,0);start=stamp.timestamp()
+        for raw in (b'\xff\xff\n',b'\xff\xfe\x00'):
+            with self.subTest(raw=raw):
+                result=parse(raw,'dism',4452,start,start+60)
+                self.assert_diagnostic_gate_counts(result)
+                self.assertEqual(result['status'],'encoding_unavailable')
+                self.assertEqual(result['linesExamined'],0)
+                self.assertEqual(result['records'],[])
+                self.assertEqual(result['sessions'],[])
+
+    def test_diagnostic_gate_counts_do_not_raise_existing_json_size_limit(self):
+        parse=self.diagnostic_api('parse_diagnostic_tail')
+        stamp=datetime.datetime(2026,10,14,19,24,0);start=stamp.timestamp()
+        prefix=stamp.strftime('%Y-%m-%d %H:%M:%S')
+        raw=((prefix+', Error DISM PID=4452 HRESULT=0x800F0954\n')*64).encode()
+        result=parse(raw,'dism',4452,start,start+60)
+        self.assert_diagnostic_gate_counts(result,record_retained=64)
+        encoded_bytes=len(json.dumps(result,separators=(',',':')).encode())
+        self.assertEqual(self.policy.DIAGNOSTIC_JSON_BYTES,32768)
+        self.assertLessEqual(encoded_bytes,32768)
+        with mock.patch.object(self.policy,'DIAGNOSTIC_JSON_BYTES',encoded_bytes-1):
+            with self.assertRaisesRegex(ValueError,'^diagnostic_size_unavailable$'):
+                parse(raw,'dism',4452,start,start+60)
+
     def test_diagnostic_trigger_requires_live_owned_worker_and_reserved_parent_budget(self):
         budget=self.diagnostic_api('diagnostic_budget')
         for elapsed,attempted,live,want in [(539.999,False,True,0),(540,False,True,5000),
@@ -575,6 +764,206 @@ if($result.status -cne 'collector_exit_nonzero' -or $result.exitCode -ne 7){thro
             self.assertFalse(observed['sourceQualified'])
 
 
+    def _actual_language_projection(self,cases):
+        powershell=shutil.which('pwsh') or '/workspace/OpenGeul-ci-build-progress/.work/powershell746/bin/pwsh'
+        if not Path(powershell).is_file():self.skipTest('PowerShell runtime unavailable')
+        with tempfile.TemporaryDirectory() as directory:
+            script=Path(directory)/'language-projection.ps1'
+            script.write_text(r'''
+param([string]$Source)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+class OpenGeulLanguageProjectionTestShape {
+    [object]$LanguageTag
+    [Collections.Generic.List[string]]$InputMethodTips
+    OpenGeulLanguageProjectionTestShape([object]$Tag,[string]$Tip) {
+        $this.LanguageTag=$Tag
+        $this.InputMethodTips=[Collections.Generic.List[string]]::new()
+        if($Tip){$this.InputMethodTips.Add($Tip)}
+    }
+}
+$tokens=$null;$errors=$null
+$tree=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'production parse failure'}
+$predicate=$tree.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-OpenGeulKoreanLanguageTag'},$true)
+if($null -ne $predicate){Invoke-Expression $predicate.Extent.Text}
+$preselection=$tree.FindAll({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq 'korean'},$true)
+$set=$tree.Find({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Set-WinUserLanguageList'},$true)
+$projection=$tree.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq 'observedTips'},$true)
+$postselection=$tree.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq 'observedKorean'},$true)
+$generation=$tree.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq 'generated'},$true)
+$registry=$tree.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq 'registry'},$true)
+if($preselection.Count -ne 2 -or $null -eq $set -or $null -eq $projection -or $null -eq $generation -or $null -eq $registry){throw 'actual production language boundaries missing'}
+$sourceText=$tree.Extent.Text
+$generatedGuardText=$sourceText.Substring($generation.Extent.EndOffset,$registry.Extent.StartOffset-$generation.Extent.EndOffset)
+$configureText=$sourceText.Substring($preselection[0].Extent.StartOffset,$set.Extent.StartOffset-$preselection[0].Extent.StartOffset)
+$projectionStart=if($null -eq $postselection){$projection.Extent.StartOffset}else{$postselection.Extent.StartOffset}
+$projectionText=$sourceText.Substring($projectionStart,$projection.Extent.EndOffset-$projectionStart)
+$selectedTip='0412:{A028AE76-01B1-46C2-99C4-ACD9858AE02F}{B5FE1F02-D5F2-4445-9C03-C568F23C99A1}'
+function Invoke-ActualLanguageProjection([object]$List,[bool]$Configure=$false,[object]$GeneratedList=$null) {
+    $languages=$List;$observedLanguages=$List;$generated=$GeneratedList
+    $profile=@{inputTip=$selectedTip};$korean=@();$observedTips=@()
+    $completed=$false;$failure=$null;$candidateCount=$null
+    try {
+        if($Configure){Invoke-Expression $generatedGuardText}
+        Invoke-Expression $preselection[0].Extent.Text
+        $candidateCount=$korean.Count
+        if($Configure){Invoke-Expression $configureText}
+        Invoke-Expression $projectionText
+        $completed=$true
+    } catch {$failure=$_.Exception.Message}
+    return @{completed=$completed;failure=$failure;tips=@($observedTips);candidateCount=$candidateCount;
+        languageCount=$List.Count;otherTips=@($List[0].InputMethodTips)}
+}
+$results=@()
+'''+cases+r'''
+@{results=$results;actualProductionAst=$true;representativeTypedShapesOnly=$true;
+  actualWindowsCmdletsInvoked=$false;actualWindowsInternationalAssembly=$false;
+  productInputVerified=$false;sourceQualified=$false}|ConvertTo-Json -Depth 12 -Compress
+''',encoding='utf-8')
+            result=subprocess.run([str(powershell),'-NoLogo','-NoProfile','-NonInteractive','-File',str(script),
+                '-Source',str(ROOT/'scripts/ensure-korean-ime.ps1')],capture_output=True,text=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            observed=json.loads(result.stdout)
+            self.assertTrue(observed['actualProductionAst'])
+            self.assertTrue(observed['representativeTypedShapesOnly'])
+            self.assertFalse(observed['actualWindowsCmdletsInvoked'])
+            self.assertFalse(observed['actualWindowsInternationalAssembly'])
+            self.assertFalse(observed['productInputVerified'])
+            self.assertFalse(observed['sourceQualified'])
+            return observed['results']
+
+    def test_actual_language_projection_accepts_exact_regional_and_neutral_tags(self):
+        rows=self._actual_language_projection(r'''
+foreach($tag in @('ko-KR','kO-kR','KO-kr','ko','KO','kO')) {
+    $list=[Collections.Generic.List[OpenGeulLanguageProjectionTestShape]]::new()
+    $list.Add([OpenGeulLanguageProjectionTestShape]::new('en-US','0409:00000409'))
+    $list.Add([OpenGeulLanguageProjectionTestShape]::new($tag,$selectedTip))
+    $results+=,@{tag=$tag;projection=(Invoke-ActualLanguageProjection $list)}
+}
+''')
+        self.assertEqual(len(rows),6)
+        for row in rows:
+            with self.subTest(tag=row['tag']):
+                projection=row['projection']
+                self.assertTrue(projection['completed'],projection['failure'])
+                self.assertEqual(projection['tips'],[self.record['profile']['inputTip']])
+                self.assertEqual(projection['candidateCount'],1)
+                self.assertEqual(projection['languageCount'],2)
+                record=copy.deepcopy(self.record);record['configuredInputTips']=projection['tips']
+                self.assertEqual(self.policy.validate_record(record,self.binding),record)
+
+    def test_actual_language_projection_rejects_unapproved_tags_with_the_selected_tip(self):
+        rows=self._actual_language_projection(r'''
+$tags=@('en-US','ko-KP','ko-x',$null,'',' ko','ko ','ko-KR ',('ko'+[char]10),('ko-KR'+[char]13+[char]10),[cultureinfo]::GetCultureInfo('ko-KR'))
+for($index=0;$index -lt $tags.Count;$index++) {
+    $list=[Collections.Generic.List[OpenGeulLanguageProjectionTestShape]]::new()
+    $list.Add([OpenGeulLanguageProjectionTestShape]::new('en-US','0409:00000409'))
+    $list.Add([OpenGeulLanguageProjectionTestShape]::new($tags[$index],$selectedTip))
+    $results+=,@{case=$index;projection=(Invoke-ActualLanguageProjection $list)}
+}
+''')
+        self.assertEqual(len(rows),11)
+        for row in rows:
+            with self.subTest(case=row['case']):
+                self.assertFalse(row['projection']['completed'])
+                self.assertEqual(row['projection']['tips'],[])
+                self.assertEqual(row['projection']['languageCount'],2)
+
+    def test_actual_language_projection_preserves_raw_tips_for_exact_policy_rejection(self):
+        rows=self._actual_language_projection(r'''
+foreach($tag in @('ko-KR','ko')) {
+    $tips=@('', '0409:00000409',$selectedTip.Substring(0,$selectedTip.Length-1),$selectedTip.ToLowerInvariant(),$selectedTip.Replace('A028AE76','00000000'))
+    for($index=0;$index -lt $tips.Count;$index++) {
+        $list=[Collections.Generic.List[OpenGeulLanguageProjectionTestShape]]::new()
+        $list.Add([OpenGeulLanguageProjectionTestShape]::new('en-US',$selectedTip))
+        $list.Add([OpenGeulLanguageProjectionTestShape]::new($tag,$tips[$index]))
+        $results+=,@{tag=$tag;case=$index;rawTip=$tips[$index];projection=(Invoke-ActualLanguageProjection $list)}
+    }
+}
+''')
+        self.assertEqual(len(rows),10)
+        for row in rows:
+            with self.subTest(tag=row['tag'],case=row['case']):
+                projection=row['projection']
+                self.assertTrue(projection['completed'],projection['failure'])
+                self.assertEqual(projection['candidateCount'],1)
+                self.assertEqual(projection['tips'],[row['rawTip']] if row['rawTip'] else [])
+                record=copy.deepcopy(self.record);record['configuredInputTips']=projection['tips']
+                with self.assertRaises(ValueError):self.policy.validate_record(record,self.binding)
+
+    def test_actual_language_union_rejects_duplicate_and_mixed_entries_before_tip_projection(self):
+        rows=self._actual_language_projection(r'''
+foreach($tags in @(@('ko','ko'),@('ko-KR','ko-KR'),@('ko','ko-KR'))) {
+    foreach($configure in @($false,$true)) {
+        $list=[Collections.Generic.List[OpenGeulLanguageProjectionTestShape]]::new()
+        $list.Add([OpenGeulLanguageProjectionTestShape]::new('en-US','0409:00000409'))
+        $list.Add([OpenGeulLanguageProjectionTestShape]::new($tags[0],$selectedTip))
+        # Ambiguity is about language objects even when only one has the TIP.
+        $list.Add([OpenGeulLanguageProjectionTestShape]::new($tags[1],'0409:00000409'))
+        $generated=@([OpenGeulLanguageProjectionTestShape]::new('ko-KR',$selectedTip))
+        $results+=,@{tags=$tags;configure=$configure;projection=(Invoke-ActualLanguageProjection $list $configure $generated);
+            secondTips=@($list[2].InputMethodTips)}
+    }
+}
+''')
+        self.assertEqual(len(rows),6)
+        for row in rows:
+            with self.subTest(tags=row['tags'],configure=row['configure']):
+                self.assertFalse(row['projection']['completed'])
+                self.assertEqual(row['projection']['tips'],[])
+                self.assertEqual(row['projection']['languageCount'],3)
+                self.assertEqual(row['secondTips'],['0409:00000409'])
+
+    def test_actual_language_configuration_uses_existing_single_allowed_object(self):
+        rows=self._actual_language_projection(r'''
+foreach($tag in @('ko-KR','kO-kR','ko','KO')) {
+    $list=[Collections.Generic.List[OpenGeulLanguageProjectionTestShape]]::new()
+    $list.Add([OpenGeulLanguageProjectionTestShape]::new('en-US',$selectedTip))
+    $existing=[OpenGeulLanguageProjectionTestShape]::new($tag,'0409:00000409')
+    $list.Add($existing)
+    $generated=@([OpenGeulLanguageProjectionTestShape]::new('ko-KR',$selectedTip))
+    $projection=Invoke-ActualLanguageProjection $list $true $generated
+    $results+=,@{tag=$tag;projection=$projection;sameObject=[object]::ReferenceEquals($existing,$list[1]);
+        existingTips=@($existing.InputMethodTips);generatedTips=@($generated[0].InputMethodTips)}
+}
+''')
+        self.assertEqual(len(rows),4)
+        for row in rows:
+            with self.subTest(tag=row['tag']):
+                self.assertTrue(row['projection']['completed'],row['projection']['failure'])
+                self.assertEqual(row['projection']['languageCount'],2)
+                self.assertTrue(row['sameObject'])
+                self.assertEqual(row['projection']['tips'],['0409:00000409',self.record['profile']['inputTip']])
+                self.assertEqual(row['existingTips'],row['projection']['tips'])
+                self.assertEqual(row['projection']['otherTips'],[self.record['profile']['inputTip']])
+                self.assertEqual(row['generatedTips'],[self.record['profile']['inputTip']])
+
+    def test_actual_language_configuration_validates_generated_tag_before_adding(self):
+        rows=self._actual_language_projection(r'''
+$tags=@('ko-KR','KO-kr','ko','KO','en-US','ko-KP','ko-x',$null,' ko',('ko'+[char]10),[cultureinfo]::GetCultureInfo('ko-KR'))
+for($index=0;$index -lt $tags.Count;$index++) {
+    foreach($existingTag in @('absent','ko','ko-KR')) {
+        $list=[Collections.Generic.List[OpenGeulLanguageProjectionTestShape]]::new()
+        $list.Add([OpenGeulLanguageProjectionTestShape]::new('en-US','0409:00000409'))
+        if($existingTag -ne 'absent'){$list.Add([OpenGeulLanguageProjectionTestShape]::new($existingTag,$selectedTip))}
+        $candidate=[OpenGeulLanguageProjectionTestShape]::new($tags[$index],$selectedTip)
+        $projection=Invoke-ActualLanguageProjection $list $true @($candidate)
+        $results+=,@{case=$index;existingTag=$existingTag;projection=$projection;addedActualObject=$list.Contains($candidate)}
+    }
+}
+''')
+        self.assertEqual(len(rows),33)
+        for row in rows:
+            with self.subTest(case=row['case'],existingTag=row['existingTag']):
+                allowed=row['case']<4
+                adding=row['existingTag']=='absent'
+                projection=row['projection']
+                self.assertEqual(projection['completed'],allowed,projection['failure'])
+                self.assertEqual(projection['languageCount'],1+int(not adding)+int(allowed and adding))
+                self.assertEqual(row['addedActualObject'],allowed and adding)
+                self.assertEqual(projection['tips'],[self.record['profile']['inputTip']] if allowed else [])
+
     def _actual_language_observation(self,cases):
         source=(ROOT/'scripts/ensure-korean-ime.ps1').read_text()
         self.assertTrue('function Get-OpenGeulLanguageObservation' in source,
@@ -602,11 +991,16 @@ if($errors.Count){throw 'production parse failure'}
 $helper=$tree.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OpenGeulLanguageObservation'},$true)
 if($null -eq $helper){throw 'production language observation helper missing'}
 Invoke-Expression $helper.Extent.Text
+$predicate=$tree.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-OpenGeulKoreanLanguageTag'},$true)
+if($null -ne $predicate){Invoke-Expression $predicate.Extent.Text}
 $projection=$tree.Find({param($node)
     $node -is [Management.Automation.Language.AssignmentStatementAst] -and
     $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
     $node.Left.VariablePath.UserPath -eq 'observedTips'
 },$true)
+$postselection=$tree.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq 'observedKorean'},$true)
+$projectionStart=if($null -eq $postselection){$projection.Extent.StartOffset}else{$postselection.Extent.StartOffset}
+$projectionText=$tree.Extent.Text.Substring($projectionStart,$projection.Extent.EndOffset-$projectionStart)
 $selectedTip='0412:{A028AE76-01B1-46C2-99C4-ACD9858AE02F}{B5FE1F02-D5F2-4445-9C03-C568F23C99A1}'
 $results=@()
 '''+cases+r'''
@@ -639,12 +1033,12 @@ foreach($shape in @('list','array','single','empty-list','null','selected-outsid
     elseif($shape -eq 'null'){$observedLanguages=$null}
     else{$observedLanguages=$list}
     $beforeOutcome='completed';$observedTips=@()
-    try { Invoke-Expression $projection.Extent.Text }
+    try { Invoke-Expression $projectionText }
     catch { $beforeOutcome=$_.Exception.GetType().FullName+'|'+$_.FullyQualifiedErrorId }
     $before=@($observedTips)
     $row=Get-OpenGeulLanguageObservation $observedLanguages $selectedTip
     $afterOutcome='completed';$observedTips=@()
-    try { Invoke-Expression $projection.Extent.Text }
+    try { Invoke-Expression $projectionText }
     catch { $afterOutcome=$_.Exception.GetType().FullName+'|'+$_.FullyQualifiedErrorId }
     if($beforeOutcome -cne $afterOutcome -or ($before -join '|') -cne ($observedTips -join '|')){throw 'diagnostic changed actual projection'}
     $results+=,@{shape=$shape;observation=$row;projectionPreserved=$true}
@@ -748,7 +1142,7 @@ foreach($shape in @('tag-lf','tip-lf','selected-lf')) {
                         'Actual pre-policy language observation is not retained')
         read=script.index('$observedLanguages=Get-WinUserLanguageList -ErrorAction Stop')
         save=script.index("Save-ObservedJson 'user-language-observation.json'")
-        projection=script.index('$observedTips=@($observedLanguages | Where-Object LanguageTag')
+        projection=script.index('$observedKorean=@($observedLanguages | Where-Object')
         policy=script.index("--record (Join-Path $out 'readiness.json')",read)
         self.assertLess(read,save);self.assertLess(save,projection);self.assertLess(save,policy)
         self.assertIn('workerPid=[int]$PID;scriptSha256=$hostObservation.scriptSha256',script[read:save])

@@ -130,6 +130,11 @@ function Get-OpenGeulFileSha256([string]$Path) {
         if ($null -ne $stream) { $stream.Dispose() }
     }
 }
+function Test-OpenGeulKoreanLanguageTag([AllowNull()][object]$LanguageTag) {
+    return ($LanguageTag -is [string] -and
+        ([string]::Equals($LanguageTag,'ko-KR',[StringComparison]::OrdinalIgnoreCase) -or
+         [string]::Equals($LanguageTag,'ko',[StringComparison]::OrdinalIgnoreCase)))
+}
 function Get-OpenGeulLanguageObservation([AllowNull()][object]$ObservedLanguages,[string]$SelectedTip) {
     # Observe only the already returned objects. No host read, write, servicing,
     # tag normalization, readiness value, or verified native TIP is changed.
@@ -387,6 +392,9 @@ public static class OpenGeulKoreanSetupHost {
     $stage='registered-native-Microsoft-profile'
     $authenticodeCmdlet=Get-OpenGeulAuthenticodeCmdlet $systemPath
     $generated=New-WinUserLanguageList -Language 'ko-KR' -ErrorAction Stop
+    if (-not (Test-OpenGeulKoreanLanguageTag $generated[0].LanguageTag)) {
+        throw 'Generated Korean language entry has an unsupported tag.'
+    }
     $registry=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry64)
     $profiles=@()
     try {
@@ -432,10 +440,11 @@ public static class OpenGeulKoreanSetupHost {
     $profile=$profiles[0]
     $stage='current-user-language-configuration'
     $languages=Get-WinUserLanguageList -ErrorAction Stop
-    $korean=@($languages | Where-Object LanguageTag -eq 'ko-KR')
+    $korean=@($languages | Where-Object { Test-OpenGeulKoreanLanguageTag $_.LanguageTag })
     if ($korean.Count -eq 0) { $languages.Add($generated[0]) }
     elseif ($korean.Count -ne 1) { throw 'Current-user Korean language entries are ambiguous.' }
-    $korean=@($languages | Where-Object LanguageTag -eq 'ko-KR')
+    $korean=@($languages | Where-Object { Test-OpenGeulKoreanLanguageTag $_.LanguageTag })
+    if ($korean.Count -ne 1) { throw 'Current-user Korean language entries are ambiguous.' }
     if ($korean[0].InputMethodTips -notcontains $profile.inputTip) { $korean[0].InputMethodTips.Add($profile.inputTip) }
     Set-WinUserLanguageList -LanguageList $languages -Force -ErrorAction Stop
     Set-WinDefaultInputMethodOverride -InputTip $profile.inputTip -ErrorAction Stop
@@ -445,7 +454,9 @@ public static class OpenGeulKoreanSetupHost {
         workerPid=[int]$PID;scriptSha256=$hostObservation.scriptSha256;
         observation=$languageObservation;productInputVerified=$false;sourceQualified=$false}
     Save-ObservedJson 'user-language-observation.json' $languageObservationRecord
-    $observedTips=@($observedLanguages | Where-Object LanguageTag -eq 'ko-KR' | ForEach-Object { $_.InputMethodTips })
+    $observedKorean=@($observedLanguages | Where-Object { Test-OpenGeulKoreanLanguageTag $_.LanguageTag })
+    if ($observedKorean.Count -ne 1) { throw 'Observed current-user Korean language entries are missing or ambiguous.' }
+    $observedTips=@($observedKorean[0].InputMethodTips)
     $default=Get-WinDefaultInputMethodOverride -ErrorAction Stop
     $record=[ordered]@{formatVersion=1;source=$binding;nativeMachine=[int]$nativeMachine;controllerMachine=[int]$controllerMachine;
         systemDirectory=$systemPath;capabilityName=$capabilityName;capabilityBefore=$before;capabilityAfter=[string]$after[0].State;
