@@ -87,7 +87,7 @@ class StartupFixture:
     """외부 WinAPI만 교체: own 창 생성 중 WSL fore 출현/자연 종료를 재현한다."""
     def __init__(self, value, *, expires=60, setter=True, change=None, exited_path_unavailable=False):
         self.value = value; self.clock = 0; self.expires = expires; self.setter = setter; self.change = change
-        self.fore = 20; self.probe_exists = False; self.calls = []; self.closed = []; self.opened = []; self.signature_timeouts = []
+        self.fore = 20; self.probe_exists = False; self.calls = []; self.shows = []; self.closed = []; self.opened = []; self.signature_timeouts = []
         self.exited_path_unavailable = exited_path_unavailable
         self.directory = tempfile.TemporaryDirectory(); self.file = Path(self.directory.name) / 'synthetic-wsl.exe'
         data = bytearray(512); data[:2] = b'MZ'; data[60:64] = (128).to_bytes(4, 'little')
@@ -100,7 +100,7 @@ class StartupFixture:
         def api(fn): return ApiCall(fn)
         self.user = SimpleNamespace(
             DefWindowProcW=api(lambda *a: 0), RegisterClassW=api(lambda *a: 1), UnregisterClassW=api(lambda *a: 1),
-            CreateWindowExW=api(self.create), SetForegroundWindow=api(self.set_foreground),
+            CreateWindowExW=api(self.create), ShowWindow=api(self.show), SetForegroundWindow=api(self.set_foreground),
             DestroyWindow=api(self.destroy), PeekMessageW=api(lambda *a: 0),
             TranslateMessage=api(lambda *a: 1), DispatchMessageW=api(lambda *a: 0),
             GetWindowThreadProcessId=api(self.owner), IsWindow=api(self.exists),
@@ -115,6 +115,7 @@ class StartupFixture:
         self.probe.windows_directory = lambda: 'C:\\Windows'; self.probe.session_id = lambda: 1
         self.probe.windows = self.windows; self.probe.processes = self.processes
     def create(self, *args): self.probe_exists = True; self.fore = 12; return 500
+    def show(self, hwnd, command): self.shows.append((hwnd, command, self.clock)); return 0
     def exists(self, hwnd): return self.probe_exists if hwnd == 500 else self.clock < self.expires
     def foreground(self):
         if self.change == 'foreignRetirement' and self.clock >= self.expires: return 777
@@ -140,7 +141,7 @@ class StartupFixture:
         self.probe_exists = False; return 1
     def windows(self):
         return {'foregroundHwnd': self.foreground(), 'windows': [copy.deepcopy(self.window)], 'truncated': False}
-    def processes(self, pids):
+    def processes(self, pids, *, deadline=None):
         result = copy.deepcopy(self.process)
         if self.exited_path_unavailable and self.clock >= self.expires:
             result.update(imagePath='', imageBytes=0, imageSha256='', signature={
@@ -163,16 +164,103 @@ class StartupFixture:
         if self.change == 'initialSignature': result['status'] = 'NotSigned'
         if self.change == 'signature' and self.clock: result['status'] = 'NotSigned'
         return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode())
+    def file_for_path(self, path):
+        return self.file if str(path) == self.process['imagePath'] else Path(path)
     def run(self):
         import ctypes
         try:
             with patch.object(ctypes, 'WINFUNCTYPE', ctypes.CFUNCTYPE, create=True), \
                  patch.object(self.value.time, 'monotonic', lambda: self.clock), \
                  patch.object(self.value.time, 'sleep', self.sleep), \
-                 patch.object(self.value, 'Path', lambda path: self.file if str(path) == self.process['imagePath'] else Path(path)), \
+                 patch.object(self.value, 'Path', self.file_for_path), \
                  patch.object(self.value.subprocess, 'run', self.signature):
                 return self.probe.focus_probe()
         finally: self.directory.cleanup()
+
+
+class MaskedStartupFixture(StartupFixture):
+    """실제 visible CreateWindow 자동 활성화와 preexisting Progman/WSL을 재현한다."""
+    def __init__(self, value, *, baseline=False, change=None, expires=1):
+        super().__init__(value, expires=expires, change=change)
+        self.fore = 20 if baseline else 12; self.baseline = baseline; self.styles = []; self.all_signature_timeouts = []
+        self.explorer_file = Path(self.directory.name) / 'synthetic-explorer.exe'
+        self.explorer_file.write_bytes(self.file.read_bytes())
+        self.explorer = {**copy.deepcopy(self.process), 'processId': 300,
+                         'imagePath': 'C:\\Windows\\explorer.exe', 'createdFileTime': 200000}
+        self.desktop = {**copy.deepcopy(self.window), 'hwnd': 20, 'processId': 300, 'threadId': 301,
+                        'title': 'Program Manager', 'className': 'Progman'}
+        self.kernel.OpenProcess = ApiCall(lambda *a: self.opened.append(a) or (22 if a[2] == 300 else 11))
+    def create(self, *args):
+        self.probe_exists = True; self.styles.append(args[3])
+        if args[3] & 0x10000000: self.fore = 500
+        return 500
+    def windows(self):
+        rows = [copy.deepcopy(self.window)]
+        if self.baseline: rows.append(copy.deepcopy(self.desktop))
+        if self.change == 'multiple': rows.append({**copy.deepcopy(self.window), 'hwnd': 13})
+        if self.change == 'hidden': rows[0]['visible'] = False
+        if self.change == 'disabled': rows[0]['enabled'] = False
+        return {'foregroundHwnd': self.foreground(), 'windows': rows, 'truncated': self.change == 'truncated'}
+    def exists(self, hwnd):
+        if hwnd == 20: return self.change != 'baselineGone' or self.clock == 0
+        return super().exists(hwnd)
+    def owner(self, hwnd, pid):
+        if hwnd == 20:
+            pid._obj.value = 999 if self.change == 'baselinePid' and self.clock else 300
+            return 999 if self.change == 'baselineThread' and self.clock else 301
+        return super().owner(hwnd, pid)
+    def title(self, hwnd, buffer, count):
+        if hwnd == 20:
+            buffer.value = 'Other desktop' if self.change == 'baselineTitle' and self.clock else self.desktop['title']
+            return len(buffer.value)
+        return super().title(hwnd, buffer, count)
+    def class_name(self, hwnd, buffer, count):
+        if hwnd == 20:
+            buffer.value = 'OtherClass' if self.change == 'baselineClass' and self.clock else self.desktop['className']
+            return len(buffer.value)
+        return super().class_name(hwnd, buffer, count)
+    def times(self, handle, created, *rest):
+        if handle == 22:
+            changed = self.change == 'baselineCreation' and self.clock or self.change == 'baselineRetirementCreation' and self.clock >= self.expires
+            created._obj.dwLowDateTime = 199999 if changed else 200000
+            return 1
+        return super().times(handle, created, *rest)
+    def native(self, handle, process, native):
+        if handle == 22:
+            native._obj.value = 0x8664 if self.change == 'baselineNative' and self.clock else 0xAA64
+            return 1
+        return super().native(handle, process, native)
+    def session(self, pid, session):
+        if pid == 300:
+            session._obj.value = 2 if self.change == 'baselineSession' and self.clock else 1
+            return 1
+        return super().session(pid, session)
+    def exit_code(self, handle, code):
+        if handle == 22: code._obj.value = 259; return 1
+        return super().exit_code(handle, code)
+    def processes(self, pids, *, deadline=None):
+        if pids == [300]:
+            result = copy.deepcopy(self.explorer)
+            if self.change == 'baselineInitialSignature': result['signature']['status'] = 'NotSigned'
+            if self.change == 'baselineWrongPath': result['imagePath'] = 'C:\\Other\\explorer.exe'
+            if self.change == 'baselineInitialNative': result['nativeMachine'] = 0x8664
+            if self.change == 'baselineInitialSession': result['sessionId'] = 2
+            return [result]
+        return super().processes(pids, deadline=deadline)
+    def sleep(self, duration):
+        super().sleep(duration)
+        if self.change == 'baselineHash':
+            data = bytearray(self.explorer_file.read_bytes()); data[-1] = 1; self.explorer_file.write_bytes(data)
+    def signature(self, args, **kwargs):
+        self.all_signature_timeouts.append(kwargs['timeout'])
+        if self.explorer_file.name in kwargs['input'].decode():
+            result = copy.deepcopy(self.explorer['signature']); result.pop('publisherMicrosoft')
+            if self.change == 'baselinePostSignature' and self.clock: result['status'] = 'NotSigned'
+            return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode())
+        return super().signature(args, **kwargs)
+    def file_for_path(self, path):
+        if str(path) == self.explorer['imagePath']: return self.explorer_file
+        return super().file_for_path(path)
 
 
 class RunnerReadyTests(unittest.TestCase):
@@ -469,6 +557,124 @@ class RunnerReadyTests(unittest.TestCase):
         self.assertGreaterEqual(fixture.calls[0][2], 60)
         self.assertTrue(result['startupWait']['naturalProcessExitObserved'])
         self.assertEqual(result['startupWait']['timeoutSeconds'], 65)
+
+    def test_visible_create_cannot_mask_preexisting_wsl_before_read_only_wait(self):
+        fixture = MaskedStartupFixture(module())
+        result = fixture.run()
+        self.assertIn('startupWait', result)
+        self.assertTrue(result['startupWait']['naturalProcessExitObserved'])
+        self.assertFalse(fixture.styles[0] & 0x10000000)
+        self.assertEqual(fixture.shows, [(500, 4, 1)])
+        self.assertEqual(fixture.calls, [('SetForegroundWindow', 500, 1)])
+        self.assertTrue(result['foregroundMatched']); self.assertTrue(result['ownedWindowRemoved'])
+
+    def test_visible_wsl_not_foreground_waits_with_only_bound_progman_baseline(self):
+        fixture = MaskedStartupFixture(module(), baseline=True)
+        result = fixture.run()
+        self.assertIn('startupWait', result)
+        self.assertTrue(result['startupWait']['naturalProcessExitObserved'])
+        self.assertEqual(result['startupWait']['boundBaselineWindow']['hwnd'], 20)
+        self.assertEqual(fixture.shows, [(500, 4, 1)])
+        self.assertEqual(fixture.calls, [('SetForegroundWindow', 500, 1)])
+        self.assertCountEqual(fixture.closed, [11, 22])
+
+    def test_visible_wsl_selection_is_complete_unique_and_foreground_fail_closed(self):
+        for change in ('multiple', 'truncated', 'foreignForeground', 'foreignRetirement'):
+            fixture = MaskedStartupFixture(module(), baseline=True, change=change)
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError): fixture.run()
+                self.assertEqual(fixture.calls, []); self.assertEqual(fixture.shows, [])
+                self.assertFalse(fixture.probe_exists)
+
+    def test_hidden_disabled_lookalikes_do_not_displace_the_single_visible_wsl(self):
+        for field in ('visible', 'enabled'):
+            fixture = MaskedStartupFixture(module())
+            original = fixture.probe.windows
+            def windows():
+                observed = original()
+                observed['windows'].append({**copy.deepcopy(fixture.window), 'hwnd': 99,
+                    'processId': 999, 'threadId': 998, field: False})
+                return observed
+            fixture.probe.windows = windows
+            with self.subTest(field=field):
+                result = fixture.run()
+                self.assertEqual(result['startupWait']['boundWindow']['hwnd'], 12)
+                self.assertEqual(fixture.opened, [(0x1000, False, 200)])
+                self.assertEqual(fixture.shows, [(500, 4, 1)])
+
+    def test_unbound_initial_foreground_does_not_show_or_activate_owned_probe(self):
+        fixture = MaskedStartupFixture(module()); fixture.fore = 777
+        with self.assertRaises(ValueError): fixture.run()
+        self.assertEqual(fixture.shows, []); self.assertEqual(fixture.calls, [])
+        self.assertFalse(fixture.probe_exists)
+
+    def test_progman_images_share_the_original_65_second_deadline(self):
+        fixture = MaskedStartupFixture(module(), baseline=True, expires=64.75)
+        result = fixture.run()
+        self.assertTrue(result['startupWait']['naturalProcessExitObserved'])
+        self.assertEqual(fixture.all_signature_timeouts, [20, 20, 0.25, 0.25])
+        self.assertEqual(fixture.shows, [(500, 4, 64.75)])
+        self.assertEqual(fixture.calls, [('SetForegroundWindow', 500, 64.75)])
+
+    def test_progman_signature_cannot_extend_deadline_before_show_or_activation(self):
+        for phase in ('live', 'retired'):
+            fixture = MaskedStartupFixture(module(), baseline=True)
+            original = fixture.signature
+            def signature(args, **kwargs):
+                response = original(args, **kwargs)
+                if fixture.explorer_file.name in kwargs['input'].decode() and ((phase == 'live') == (fixture.clock == 0)):
+                    fixture.clock = 65.01
+                return response
+            fixture.signature = signature
+            with self.subTest(phase=phase):
+                with self.assertRaises(ValueError): fixture.run()
+                self.assertEqual(fixture.shows, []); self.assertEqual(fixture.calls, [])
+                self.assertCountEqual(fixture.closed, [11, 22]); self.assertFalse(fixture.probe_exists)
+
+    def test_actual_process_metadata_signature_obeys_startup_remaining_budget(self):
+        fixture = StartupFixture(module()); fixture.clock = 64.75
+        def image(handle, flags, buffer, size): buffer.value = fixture.process['imagePath']; return 1
+        fixture.kernel.QueryFullProcessImageNameW = ApiCall(image)
+        try:
+            with patch.object(fixture.value, 'Path', fixture.file_for_path), \
+                 patch.object(fixture.value.time, 'monotonic', lambda: fixture.clock), \
+                 patch.object(fixture.value.subprocess, 'run', fixture.signature):
+                try: rows = fixture.value.WindowsProbe.processes(fixture.probe, [200], deadline=65)
+                except TypeError: self.fail('실제 process metadata 조회도 시작 deadline을 받아야 합니다')
+            self.assertEqual(fixture.signature_timeouts, [0.25])
+            self.assertEqual(rows[0]['signature']['status'], 'Valid')
+            self.assertEqual(fixture.closed, [11])
+        finally: fixture.directory.cleanup()
+
+    def test_expired_or_overrun_actual_process_metadata_never_proves_signature(self):
+        for expired in (True, False):
+            fixture = StartupFixture(module()); fixture.clock = 65 if expired else 64.75
+            def image(handle, flags, buffer, size): buffer.value = fixture.process['imagePath']; return 1
+            fixture.kernel.QueryFullProcessImageNameW = ApiCall(image)
+            original = fixture.signature
+            def signature(args, **kwargs):
+                response = original(args, **kwargs); fixture.clock = 65.01; return response
+            try:
+                with self.subTest(expired=expired), patch.object(fixture.value, 'Path', fixture.file_for_path), \
+                     patch.object(fixture.value.time, 'monotonic', lambda: fixture.clock), \
+                     patch.object(fixture.value.subprocess, 'run', signature):
+                    try:
+                        with self.assertRaises(ValueError): fixture.value.WindowsProbe.processes(fixture.probe, [200], deadline=65)
+                    except TypeError: self.fail('실제 process metadata deadline 검증이 필요합니다')
+                    self.assertEqual(fixture.signature_timeouts, [] if expired else [0.25])
+                    self.assertEqual(fixture.shows, []); self.assertEqual(fixture.calls, [])
+            finally: fixture.directory.cleanup()
+
+    def test_progman_binding_rejects_identity_signature_and_generation_changes(self):
+        for change in ('baselineInitialSignature', 'baselineWrongPath', 'baselinePid', 'baselineThread',
+                       'baselineClass', 'baselineTitle', 'baselineCreation', 'baselineNative',
+                       'baselineSession', 'baselineGone', 'baselinePostSignature', 'baselineInitialNative',
+                       'baselineInitialSession', 'baselineHash', 'baselineRetirementCreation'):
+            fixture = MaskedStartupFixture(module(), baseline=True, change=change)
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError): fixture.run()
+                self.assertEqual(fixture.calls, []); self.assertEqual(fixture.shows, [])
+                self.assertFalse(fixture.probe_exists)
 
     def test_actual_probe_wsl_deadline_performs_no_activation_or_os_input(self):
         fixture = StartupFixture(module(), expires=1000)

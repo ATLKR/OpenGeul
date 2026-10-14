@@ -164,6 +164,92 @@ if($before -ceq (Get-OpenGeulFileSha256 $changing)){throw 'input mutation escape
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertEqual(result.stdout.splitlines(),[hashlib.sha256(raw).hexdigest() for raw in fixtures])
 
+    def test_actual_builtin_cmdlet_resolution_bypasses_missing_autoload_and_ambient_functions(self):
+        powershell=shutil.which('powershell') or shutil.which('pwsh') or '/workspace/OpenGeul-ci-build-progress/.work/powershell746/bin/pwsh'
+        if not Path(powershell).is_file():self.skipTest('PowerShell runtime unavailable')
+        with tempfile.TemporaryDirectory() as directory:
+            script=Path(directory)/'builtin-command.ps1'
+            script.write_text(r'''
+param([string]$Source)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$tree=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'production parse failure'}
+$resolver=$tree.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OpenGeulBuiltinCmdlet'},$true)
+if($null -eq $resolver){throw 'trusted exported cmdlet resolver missing'}
+Invoke-Expression $resolver.Extent.Text
+# Exercise the actual generic resolver with a real installed built-in cmdlet.
+# Linux has no Authenticode command: this proves resolution, never signatures.
+$manifest=[IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1')
+Remove-Module Microsoft.PowerShell.Utility -Force -ErrorAction SilentlyContinue
+$PSModuleAutoLoadingPreference='None'
+$bareUnavailable=$false
+try { Get-Date -Date '2026-10-14' | Out-Null } catch { $bareUnavailable=$_.Exception -is [Management.Automation.CommandNotFoundException] }
+if(-not $bareUnavailable){throw 'isolated bare command did not reproduce absent autoload'}
+function Get-Date { throw 'ambient function must not execute' }
+$command=Get-OpenGeulBuiltinCmdlet $manifest 'Microsoft.PowerShell.Utility' 'Get-Date' 'Microsoft.PowerShell.Commands.GetDateCommand' 'Microsoft.PowerShell.Commands.Utility'
+if($command -isnot [Management.Automation.CmdletInfo]){throw 'selected command is not real CmdletInfo'}
+$date=& $command -Date '2026-10-14T00:00:00'
+if($date.Year -ne 2026 -or $date.Month -ne 10 -or $date.Day -ne 14){throw 'actual direct cmdlet invocation failed'}
+$rejected=0
+foreach($bad in @(
+    @($manifest+'.missing','Microsoft.PowerShell.Utility','Get-Date','Microsoft.PowerShell.Commands.GetDateCommand','Microsoft.PowerShell.Commands.Utility'),
+    @($manifest,'Microsoft.PowerShell.Security','Get-Date','Microsoft.PowerShell.Commands.GetDateCommand','Microsoft.PowerShell.Commands.Utility'),
+    @($manifest,'Microsoft.PowerShell.Utility','Get-AuthenticodeSignature','Microsoft.PowerShell.Commands.GetDateCommand','Microsoft.PowerShell.Commands.Utility'),
+    @($manifest,'Microsoft.PowerShell.Utility','Get-Date','Other.ImplementingType','Microsoft.PowerShell.Commands.Utility'),
+    @($manifest,'Microsoft.PowerShell.Utility','Get-Date','Microsoft.PowerShell.Commands.GetDateCommand','Other.Assembly')
+)) {
+    try { Get-OpenGeulBuiltinCmdlet $bad[0] $bad[1] $bad[2] $bad[3] $bad[4] | Out-Null }
+    catch { $rejected++ }
+}
+if($rejected -ne 5){throw 'missing/wrong command or assembly origin was accepted'}
+# ConvertTo-Json is now from the same explicitly imported real utility module.
+@{passed=$true;bareUnavailable=$bareUnavailable;actualCmdlet=$command.Name;
+  module=$command.ModuleName;implementation=$command.ImplementingType.FullName;
+  invalidOriginsRejected=$rejected;windowsAuthenticodeQualified=$false;sourceQualified=$false}|ConvertTo-Json -Compress
+''',encoding='utf-8')
+            result=subprocess.run([str(powershell),'-NoLogo','-NoProfile','-NonInteractive','-File',str(script),
+                '-Source',str(ROOT/'scripts/ensure-korean-ime.ps1')],capture_output=True,text=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            import json
+            observed=json.loads(result.stdout)
+            self.assertTrue(observed['passed'])
+            self.assertTrue(observed['bareUnavailable'])
+            self.assertEqual(observed['actualCmdlet'],'Get-Date')
+            self.assertEqual(observed['module'],'Microsoft.PowerShell.Utility')
+            self.assertEqual(observed['implementation'],'Microsoft.PowerShell.Commands.GetDateCommand')
+            self.assertEqual(observed['invalidOriginsRejected'],5)
+            self.assertFalse(observed['windowsAuthenticodeQualified'])
+            self.assertFalse(observed['sourceQualified'])
+
+    def test_signature_call_binds_actual_controller_home_and_exported_cmdlet(self):
+        script=(ROOT/'scripts/ensure-korean-ime.ps1').read_text()
+        self.assertIn('function Get-OpenGeulAuthenticodeCmdlet',script)
+        self.assertIn('[Diagnostics.Process]::GetCurrentProcess()',script)
+        self.assertIn("'powershell.exe'",script)
+        self.assertIn('$PSHOME',script)
+        self.assertIn("'Microsoft.PowerShell.Commands.GetAuthenticodeSignatureCommand'",script)
+        self.assertIn('$authenticodeCmdlet=Get-OpenGeulAuthenticodeCmdlet $systemPath',script)
+        self.assertIn('$signature=& $authenticodeCmdlet -LiteralPath $component',script)
+        self.assertNotIn('$signature=Get-AuthenticodeSignature',script)
+        self.assertNotIn('$env:PSModulePath',script)
+        self.assertNotIn('.Module.Path -',script)
+
+    def test_servicing_observation_bounds_actual_call_and_subsequent_query(self):
+        script=(ROOT/'scripts/ensure-korean-ime.ps1').read_text()
+        call=script.index('$installed=Add-WindowsCapability')
+        query=script.index('$after=@(Get-WindowsCapability')
+        self.assertLess(script.index("'install-entry'"),call)
+        self.assertLess(call,script.index("'install-return'"))
+        self.assertLess(script.index("'after-query-entry'"),query)
+        self.assertLess(query,script.index("'after-query-return'"))
+        self.assertIn("Save-ObservedJson 'servicing-observation.json'",script)
+        self.assertIn('elapsedSeconds=',script)
+        self.assertIn('$clock.Elapsed.TotalSeconds -ge 600',script)
+        self.assertIn('$child.StartTime -eq $started',script)
+        self.assertIn('$json) -gt 32768',script)
+
     def test_actual_worker_architecture_initializers_resolve_without_newer_type_aliases(self):
         powershell=shutil.which('powershell') or shutil.which('pwsh') or '/workspace/OpenGeul-ci-build-progress/.work/powershell746/bin/pwsh'
         if not Path(powershell).is_file():self.skipTest('PowerShell runtime unavailable')

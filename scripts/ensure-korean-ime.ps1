@@ -71,6 +71,75 @@ function Get-OpenGeulFileSha256([string]$Path) {
         if ($null -ne $stream) { $stream.Dispose() }
     }
 }
+function Get-OpenGeulBuiltinCmdlet([string]$Manifest,[string]$ModuleName,[string]$CommandName,[string]$ImplementationType,[string]$AssemblyName) {
+    if (-not [IO.Path]::IsPathRooted($Manifest)) { throw 'Built-in security module path is not absolute.' }
+    $full=[IO.Path]::GetFullPath($Manifest)
+    if (-not [IO.File]::Exists($full)) { throw 'Built-in security module manifest is missing.' }
+    $check=$full
+    while ($check) {
+        if ([IO.File]::GetAttributes($check) -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Built-in security module path has a reparse point.'
+        }
+        $check=[IO.Path]::GetDirectoryName($check)
+    }
+    $modules=@(Import-Module -Name $full -PassThru -ErrorAction Stop)
+    if ($modules.Count -ne 1) { throw 'Built-in security module resolution is ambiguous.' }
+    $module=$modules[0]
+    $origin=[IO.Path]::GetFullPath($module.ModuleBase)
+    if ($module.Name -cne $ModuleName -or
+        -not $module.ExportedCmdlets.ContainsKey($CommandName)) {
+        throw 'Built-in security module origin is unavailable.'
+    }
+    $command=$module.ExportedCmdlets[$CommandName]
+    if ($command -isnot [Management.Automation.CmdletInfo] -or $command.Name -cne $CommandName -or
+        $command.ModuleName -cne $ModuleName -or $null -eq $command.Module -or
+        $command.Module.Guid -ne $module.Guid -or
+        -not [IO.Path]::GetFullPath($command.Module.ModuleBase).Equals($origin,[StringComparison]::OrdinalIgnoreCase) -or
+        $null -eq $command.ImplementingType -or $command.ImplementingType.FullName -cne $ImplementationType) {
+        throw 'Built-in security command implementation is unavailable.'
+    }
+    $assembly=$command.ImplementingType.Assembly
+    $assemblyIdentity=$assembly.GetName()
+    $token=[BitConverter]::ToString($assemblyIdentity.GetPublicKeyToken()).Replace('-','').ToLowerInvariant()
+    $bound=$false
+    foreach ($owner in @($module)+@($module.NestedModules)) {
+        if ([Object]::ReferenceEquals($owner.ImplementingAssembly,$assembly)) { $bound=$true }
+    }
+    if (-not $bound -or $assemblyIdentity.Name -cne $AssemblyName -or $token -cne '31bf3856ad364e35' -or
+        -not [IO.Path]::IsPathRooted($assembly.Location) -or -not [IO.File]::Exists($assembly.Location)) {
+        throw 'Built-in security command assembly is not bound to the imported module.'
+    }
+    # A framework-owned built-in assembly can reside in the GAC. Its actual
+    # imported-module object owns the assembly; no guessed DLL path is used.
+    $check=[IO.Path]::GetFullPath($assembly.Location)
+    while ($check) {
+        if ([IO.File]::GetAttributes($check) -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Built-in security implementation path has a reparse point.'
+        }
+        $check=[IO.Path]::GetDirectoryName($check)
+    }
+    return $command
+}
+function Get-OpenGeulAuthenticodeCmdlet([string]$SystemDirectory) {
+    $process=[Diagnostics.Process]::GetCurrentProcess()
+    try { $executable=[IO.Path]::GetFullPath($process.MainModule.FileName) }
+    finally { $process.Dispose() }
+    $home=[IO.Path]::GetDirectoryName($executable)
+    $windowsRoot=[IO.Path]::GetDirectoryName($SystemDirectory.TrimEnd('\'))
+    $systemHomes=@(
+        [IO.Path]::Combine($windowsRoot,'System32','WindowsPowerShell','v1.0'),
+        [IO.Path]::Combine($windowsRoot,'SysWOW64','WindowsPowerShell','v1.0')
+    )
+    if ([IO.Path]::GetFileName($executable) -ine 'powershell.exe' -or
+        -not $home.Equals([IO.Path]::GetFullPath($PSHOME),[StringComparison]::OrdinalIgnoreCase) -or
+        @($systemHomes | Where-Object { $home.Equals($_,[StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
+        throw 'Actual Windows PowerShell controller home is outside the observed Windows system root.'
+    }
+    # The existing actual controller-machine guard remains authoritative. This
+    # module belongs to that controller, not to the IME DLL's native machine.
+    $manifest=[IO.Path]::Combine($home,'Modules','Microsoft.PowerShell.Security','Microsoft.PowerShell.Security.psd1')
+    return Get-OpenGeulBuiltinCmdlet $manifest 'Microsoft.PowerShell.Security' 'Get-AuthenticodeSignature' 'Microsoft.PowerShell.Commands.GetAuthenticodeSignatureCommand' 'Microsoft.PowerShell.Security'
+}
 $stage='actual-host-observation'
 $hostObservation=[ordered]@{source=$binding;workerPid=[int]$PID;
     scriptSha256=$null;
@@ -157,16 +226,28 @@ public static class OpenGeulKoreanSetupHost {
         productInputVerified=$false;sourceQualified=$false
     })
     $stage='official-capability-install'
+    $servicingClock=[Diagnostics.Stopwatch]::StartNew()
     $restartNeeded=$false
     if ($before -eq 'NotPresent') {
+        Save-ObservedJson 'servicing-observation.json' ([ordered]@{source=$binding;workerPid=[int]$PID;
+            scriptSha256=$hostObservation.scriptSha256;stage='install-entry';elapsedSeconds=[int]$servicingClock.Elapsed.TotalSeconds})
         $installed=Add-WindowsCapability -Online -Name $capabilityName -ErrorAction Stop
         $restartNeeded=[bool]$installed.RestartNeeded
+        Save-ObservedJson 'servicing-observation.json' ([ordered]@{source=$binding;workerPid=[int]$PID;
+            scriptSha256=$hostObservation.scriptSha256;stage='install-return';elapsedSeconds=[int]$servicingClock.Elapsed.TotalSeconds;
+            restartNeeded=$restartNeeded})
     } elseif ($before -ne 'Installed') { throw 'Actual Korean capability is pending/unknown.' }
+    Save-ObservedJson 'servicing-observation.json' ([ordered]@{source=$binding;workerPid=[int]$PID;
+        scriptSha256=$hostObservation.scriptSha256;stage='after-query-entry';elapsedSeconds=[int]$servicingClock.Elapsed.TotalSeconds})
     $after=@(Get-WindowsCapability -Online -Name $capabilityName -ErrorAction Stop | Where-Object Name -eq $capabilityName)
+    Save-ObservedJson 'servicing-observation.json' ([ordered]@{source=$binding;workerPid=[int]$PID;
+        scriptSha256=$hostObservation.scriptSha256;stage='after-query-return';elapsedSeconds=[int]$servicingClock.Elapsed.TotalSeconds;
+        capabilityMatches=$after.Count;capabilityState=if ($after.Count -eq 1) { [string]$after[0].State } else { $null }})
     if ($after.Count -ne 1 -or [string]$after[0].State -ne 'Installed' -or $restartNeeded) {
         throw 'Korean capability did not become Installed without a restart.'
     }
     $stage='registered-native-Microsoft-profile'
+    $authenticodeCmdlet=Get-OpenGeulAuthenticodeCmdlet $systemPath
     $generated=New-WinUserLanguageList -Language 'ko-KR' -ErrorAction Stop
     $registry=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry64)
     $profiles=@()
@@ -190,7 +271,7 @@ public static class OpenGeulKoreanSetupHost {
                 $item=Get-Item -LiteralPath $component
                 if ($item.Length -le 0 -or $item.Length -gt 64MB) { continue }
                 $sha=Get-OpenGeulFileSha256 $component
-                $signature=Get-AuthenticodeSignature -LiteralPath $component
+                $signature=& $authenticodeCmdlet -LiteralPath $component
                 if ([string]$signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { continue }
                 $subject=[string]$signature.SignerCertificate.Subject
                 if ($subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') { continue }

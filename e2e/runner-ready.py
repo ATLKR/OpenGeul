@@ -484,9 +484,10 @@ class WindowsProbe:
             result['error'] = {'type': bounded(type(e).__name__), 'hresult': f'0x{getattr(e, "hresult", 0) & 0xffffffff:08x}'}
         return result
 
-    def processes(self, pids):
+    def processes(self, pids, *, deadline=None):
         rows = []
         for pid in pids:
+            if deadline is not None: require(time.monotonic() < deadline, '시작 process 관찰 시간이 초과했습니다')
             row = {'processId': pid, 'imagePath': '', 'imageBytes': 0, 'imageSha256': '', 'createdFileTime': 0,
                    'sessionId': 0, 'processMachine': None, 'nativeMachine': None,
                    'signature': {'status': 'Unavailable', 'subject': '', 'issuer': '', 'thumbprint': '', 'publisherMicrosoft': False}}
@@ -510,14 +511,21 @@ class WindowsProbe:
                 row['imageBytes'] = path.stat().st_size
                 with path.open('rb') as f:
                     h = hashlib.sha256()
-                    for chunk in iter(lambda: f.read(1024 * 1024), b''): h.update(chunk)
+                    for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                        if deadline is not None: require(time.monotonic() < deadline, '시작 process 이미지 관찰 시간이 초과했습니다')
+                        h.update(chunk)
                 row['imageSha256'] = h.hexdigest()
             rows.append(row)
         # 경로는 stdin JSON으로 전달한다. shell text/argv/env에서 실행하지 않는다.
         script = "$p=[Console]::In.ReadToEnd()|ConvertFrom-Json; @($p|ForEach-Object { try { $s=Get-AuthenticodeSignature -LiteralPath $_ -ErrorAction Stop; @{status=[string]$s.Status;subject=[string]$s.SignerCertificate.Subject;issuer=[string]$s.SignerCertificate.Issuer;thumbprint=[string]$s.SignerCertificate.Thumbprint} } catch { @{status='Unavailable';subject='';issuer='';thumbprint=''} } })|ConvertTo-Json -Compress"
+        timeout = 20
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, '시작 process 서명 관찰 시간이 남아 있지 않습니다')
+            timeout = min(timeout, remaining)
         try:
             completed = subprocess.run(['pwsh', '-NoProfile', '-NonInteractive', '-Command', script],
-                input=json.dumps([r['imagePath'] for r in rows]).encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+                input=json.dumps([r['imagePath'] for r in rows]).encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
             require(completed.returncode == 0 and len(completed.stdout) <= 16384, '서명 관찰 상한을 벗어났습니다')
             signatures = json.loads(completed.stdout.decode('utf-8-sig'))
             if type(signatures) is dict: signatures = [signatures]
@@ -527,6 +535,7 @@ class WindowsProbe:
                 fields['publisherMicrosoft'] = fields['status'] == 'Valid' and bool(re.search(r'(?:CN|O)=Microsoft(?: Windows| Corporation)', fields['subject']))
                 row['signature'] = fields
         except (OSError, subprocess.SubprocessError, ValueError): pass
+        if deadline is not None: require(time.monotonic() <= deadline, '시작 process 서명 관찰 시간이 초과했습니다')
         return rows
 
     def current(self, hwnd):
@@ -673,17 +682,9 @@ class WindowsProbe:
         return {'createdFileTime': (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime,
                 'processMachine': machine.value, 'nativeMachine': native.value, 'sessionId': session.value, 'exitCode': exit_code.value}
 
-    def wait_startup_foreground(self, owned_hwnd, result):
-        """첫 owned 활성화 전에 동일 WSL 시작 process의 자연 종료만 최대 65초 읽는다."""
-        started = time.monotonic(); deadline = started + 65
-        windows = self.windows(); validate_windows(windows)
-        foreground = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
-        expected_path = ntpath.join(self.windows_directory(), 'System32', 'wsl.exe')
-        if not foreground or foreground['className'] != 'ConsoleWindowClass' or ntpath.normcase(foreground['title']) != ntpath.normcase(expected_path):
-            return
-        require(foreground['visible'] is True and foreground['enabled'] is True, 'WSL 시작 창 상태가 다릅니다')
-        processes = self.processes([foreground['processId']])
-        require(len(processes) == 1 and processes[0]['processId'] == foreground['processId'], 'WSL 소유 process가 다릅니다')
+    def startup_bound_process(self, window, expected_path, *, deadline):
+        processes = self.processes([window['processId']], deadline=deadline)
+        require(len(processes) == 1 and processes[0]['processId'] == window['processId'], '시작 창 소유 process가 다릅니다')
         process = processes[0]; signature = process['signature']
         require(ntpath.normcase(process['imagePath']) == ntpath.normcase(expected_path)
             and process['createdFileTime'] > 0 and process['sessionId'] == self.session_id()
@@ -692,13 +693,58 @@ class WindowsProbe:
             and signature['status'] == 'Valid' and signature['publisherMicrosoft'] is True
             and re.search(r'(?:^|,\s*)CN=Microsoft Windows(?:,|$)', signature['subject'])
             and re.search(r'(?:^|,\s*)O=Microsoft Corporation(?:,|$)', signature['subject']),
-            'WSL 실제 경로·native·생성시각·session·Microsoft 서명이 다릅니다')
+            '시작 창 실제 경로·native·생성시각·session·Microsoft 서명이 다릅니다')
+        return process
+
+    def startup_baseline_state(self, window, process, handle):
+        state = self.startup_process_state(handle, process['processId'])
+        require(state['createdFileTime'] == process['createdFileTime'] and state['processMachine'] == 0
+            and state['nativeMachine'] == 0xAA64 and state['sessionId'] == process['sessionId'] == self.session_id()
+            and state['exitCode'] == 259, 'Progman held 생성시각/native/session/live 상태가 다릅니다')
+        require(self.user.IsWindow(window['hwnd']), 'bound Progman 창이 사라졌습니다')
+        owner = W.DWORD(); thread = self.user.GetWindowThreadProcessId(window['hwnd'], ctypes.byref(owner))
+        title = ctypes.create_unicode_buffer(257); cls = ctypes.create_unicode_buffer(257)
+        self.user.GetWindowTextW(window['hwnd'], title, 257); self.user.GetClassNameW(window['hwnd'], cls, 257)
+        require(owner.value == process['processId'] and thread == window['threadId']
+            and title.value == window['title'] and cls.value == window['className']
+            and self.user.IsWindowVisible(window['hwnd']) and self.user.IsWindowEnabled(window['hwnd']),
+            'bound Progman HWND/PID/TID/class/title/상태가 다릅니다')
+        return state
+
+    def wait_startup_foreground(self, owned_hwnd, result):
+        """첫 owned 활성화 전에 동일 WSL 시작 process의 자연 종료만 최대 65초 읽는다."""
+        started = time.monotonic(); deadline = started + 65
+        windows = self.windows(); validate_windows(windows)
+        require(windows['truncated'] is False, 'WSL 시작 창 전체 관찰이 잘렸습니다')
+        expected_path = ntpath.join(self.windows_directory(), 'System32', 'wsl.exe')
+        candidates = [w for w in windows['windows'] if w['visible'] is True and w['enabled'] is True
+            and w['className'] == 'ConsoleWindowClass' and ntpath.normcase(w['title']) == ntpath.normcase(expected_path)]
+        require(len(candidates) <= 1, 'WSL 시작 창 후보가 여러 개입니다')
+        if not candidates: return
+        foreground = candidates[0]; process = self.startup_bound_process(foreground, expected_path, deadline=deadline)
+        baseline = None; baseline_process = None; baseline_handle = None; baseline_path = None
+        if windows['foregroundHwnd'] not in (0, foreground['hwnd'], owned_hwnd):
+            baseline = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
+            require(baseline and baseline['className'] == 'Progman' and baseline['title'] == 'Program Manager'
+                and baseline['visible'] is True and baseline['enabled'] is True, 'WSL 관찰 전 알 수 없는 전경 창입니다')
+            baseline_path = ntpath.join(self.windows_directory(), 'explorer.exe')
+            baseline_process = self.startup_bound_process(baseline, baseline_path, deadline=deadline)
         trace = {'readOnly': True, 'timeoutSeconds': 65, 'boundWindow': foreground, 'boundProcess': process,
                  'samples': [], 'naturalProcessExitObserved': False, 'stage': 'heldIdentity'}
         result['startupWait'] = trace
         handle = self.kernel.OpenProcess(0x1000, False, process['processId'])
         require(handle, 'WSL held 조회 handle을 열지 못했습니다')
         try:
+            if baseline:
+                trace.update(boundBaselineWindow=baseline, boundBaselineProcess=baseline_process)
+                baseline_handle = self.kernel.OpenProcess(0x1000, False, baseline_process['processId'])
+                require(baseline_handle, 'Progman held 조회 handle을 열지 못했습니다')
+                self.startup_baseline_state(baseline, baseline_process, baseline_handle)
+                trace['baselineLiveImage'] = self.bound_image(baseline_path, deadline=deadline)
+                require(trace['baselineLiveImage']['bytes'] == baseline_process['imageBytes']
+                    and trace['baselineLiveImage']['sha256'] == baseline_process['imageSha256']
+                    and trace['baselineLiveImage']['signature'] == baseline_process['signature'],
+                    'live Progman process와 실제 PE/파일/서명이 다릅니다')
             initial = self.startup_process_state(handle, process['processId'])
             require(initial['createdFileTime'] == process['createdFileTime'] and initial['processMachine'] == 0
                 and initial['nativeMachine'] == 0xAA64 and initial['sessionId'] == process['sessionId'] == self.session_id()
@@ -714,6 +760,7 @@ class WindowsProbe:
                 require(state['createdFileTime'] == process['createdFileTime'] and state['processMachine'] == 0
                     and state['nativeMachine'] == 0xAA64 and state['sessionId'] == process['sessionId'] == self.session_id(),
                     'WSL held 생성시각/native/session이 다릅니다')
+                if baseline: self.startup_baseline_state(baseline, baseline_process, baseline_handle)
                 exists = bool(self.user.IsWindow(foreground['hwnd'])); owner = W.DWORD()
                 thread = self.user.GetWindowThreadProcessId(foreground['hwnd'], ctypes.byref(owner)) if exists else 0
                 current_foreground = int(self.user.GetForegroundWindow() or 0)
@@ -730,21 +777,27 @@ class WindowsProbe:
                 require(time.monotonic() <= deadline, 'WSL 자연 종료 준비 시간이 초과했습니다')
                 if state['exitCode'] != 259:
                     require(not exists, '종료된 WSL 창의 소유 상태가 남았습니다')
-                    require(current_foreground in (0, owned_hwnd), 'WSL 자연 종료 순간 알 수 없는 전경 창이 나타났습니다')
+                    retired_foregrounds = (0, owned_hwnd, baseline['hwnd']) if baseline else (0, owned_hwnd)
+                    require(current_foreground in retired_foregrounds, 'WSL 자연 종료 순간 알 수 없는 전경 창이 나타났습니다')
                     trace['postExitHeldIdentity'] = state
                     trace['stage'] = 'postExitBoundImage'
                     trace['postExitImage'] = self.bound_image(expected_path, deadline=deadline)
                     require(trace['postExitImage'] == trace['liveBoundImage'], 'WSL 종료 전후 bound PE/파일/hash/서명이 변경됐습니다')
+                    if baseline:
+                        trace['baselinePostExitImage'] = self.bound_image(baseline_path, deadline=deadline)
+                        require(trace['baselinePostExitImage'] == trace['baselineLiveImage'], 'Progman bound PE/파일/hash/서명이 변경됐습니다')
+                        self.startup_baseline_state(baseline, baseline_process, baseline_handle)
                     require(self.startup_process_state(handle, process['processId']) == state
                         and not self.user.IsWindow(foreground['hwnd']), 'WSL 종료 이미지 검증 뒤 held identity/창이 변경됐습니다')
                     require(time.monotonic() <= deadline, 'WSL 자연 종료 검증 시간이 초과했습니다')
-                    require(int(self.user.GetForegroundWindow() or 0) in (0, owned_hwnd), 'WSL 종료 검증 중 전경 창이 변경됐습니다')
+                    require(int(self.user.GetForegroundWindow() or 0) in retired_foregrounds, 'WSL 종료 검증 중 전경 창이 변경됐습니다')
                     trace['naturalProcessExitObserved'] = True
                     trace['durationMs'] = round((time.monotonic() - started) * 1000)
                     trace['stage'] = 'naturalExitConfirmed'
                     return
                 trace['stage'] = 'foregroundIdentity'
-                require(exists and current_foreground in (0, foreground['hwnd'], owned_hwnd), 'WSL 기다림 중 알 수 없는 전경/창 변경입니다')
+                live_foregrounds = (0, foreground['hwnd'], owned_hwnd, baseline['hwnd']) if baseline else (0, foreground['hwnd'], owned_hwnd)
+                require(exists and current_foreground in live_foregrounds, 'WSL 기다림 중 알 수 없는 전경/창 변경입니다')
                 remaining = deadline - time.monotonic()
                 require(remaining > 0, 'WSL 자연 종료 준비 시간이 초과했습니다')
                 # 대기 중에도 이 helper 자신의 창만 응답한다. WSL/다른 창에는 메시지를 보내지 않는다.
@@ -754,6 +807,7 @@ class WindowsProbe:
                     self.user.TranslateMessage(ctypes.byref(message)); self.user.DispatchMessageW(ctypes.byref(message))
                 time.sleep(min(0.25, remaining))
         finally:
+            if baseline_handle: self.kernel.CloseHandle(baseline_handle)
             self.kernel.CloseHandle(handle)
 
     def focus_probe(self):
@@ -770,6 +824,7 @@ class WindowsProbe:
             ('UnregisterClassW', [W.LPCWSTR, W.HINSTANCE], W.BOOL),
             ('CreateWindowExW', [W.DWORD, W.LPCWSTR, W.LPCWSTR, W.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                 ctypes.c_int, W.HWND, W.HMENU, W.HINSTANCE, W.LPVOID], W.HWND),
+            ('ShowWindow', [W.HWND, ctypes.c_int], W.BOOL),
             ('SetForegroundWindow', [W.HWND], W.BOOL), ('DestroyWindow', [W.HWND], W.BOOL),
             ('PeekMessageW', [ctypes.POINTER(W.MSG), W.HWND, W.UINT, W.UINT, W.UINT], W.BOOL),
             ('TranslateMessage', [ctypes.POINTER(W.MSG)], W.BOOL), ('DispatchMessageW', [ctypes.POINTER(W.MSG)], ctypes.c_ssize_t)]:
@@ -782,7 +837,7 @@ class WindowsProbe:
         hwnd = None; result = {'processId': pid, 'className': name, 'foregroundMatched': False, 'ownedWindowRemoved': False}
         self.last_focus_probe_result = result
         try:
-            hwnd = self.user.CreateWindowExW(0, name, 'OpenGeul CI owned focus probe', 0x10CF0000,
+            hwnd = self.user.CreateWindowExW(0, name, 'OpenGeul CI owned focus probe', 0x00CF0000,
                                             20, 20, 360, 180, None, None, instance, None)
             require(hwnd, '소유 focus probe 창 생성 실패'); hwnd = int(hwnd); owner = W.DWORD()
             self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)); require(owner.value == pid, 'probe PID가 다릅니다')
@@ -790,6 +845,8 @@ class WindowsProbe:
             self.wait_startup_foreground(hwnd, result)
             self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
             require(self.user.IsWindow(hwnd) and owner.value == pid, '기다림 뒤 probe HWND 소유권이 다릅니다')
+            # 처음에는 숨겨 둔다. 관찰/자연 종료가 끝난 뒤에도 표시 자체로 전경을 바꾸지 않는다.
+            self.user.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE; 반환값은 이전 visible 상태다.
             result['foregroundAtActivation'] = int(self.user.GetForegroundWindow() or 0)
             result['setForegroundReturned'] = bool(self.user.SetForegroundWindow(hwnd))
             message = W.MSG(); deadline = time.monotonic() + 2
