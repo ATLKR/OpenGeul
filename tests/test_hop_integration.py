@@ -39,4 +39,17 @@ class HopIntegrationTests(unittest.TestCase):
         text=(ROOT/'THIRD_PARTY_NOTICES.md').read_text()
         self.assertIn('FMsongX2',text)
         self.assertIn('f9bbe8dc66172a1959af1e388e6c28a5b597c5a6',text)
+    def test_preflight_requires_ui_contract_and_oracle_dependencies_at_e2e_pins(self):
+        required = {'PyYAML==6.0.3', 'Pillow==12.3.0', 'playwright==1.55.0',
+                    'pypdfium2==5.8.0', 'reportlab==4.4.9'}
+        declared = [line.strip() for line in (ROOT/'ci/requirements.txt').read_text().splitlines()
+                    if line.strip() and not line.lstrip().startswith('#')]
+        self.assertEqual(set(declared), required)
+        self.assertEqual(len(declared), len(required))
+        ui = (ROOT/'e2e/requirements.txt').read_text().splitlines()
+        printing = (ROOT/'e2e/print-requirements.txt').read_text().splitlines()
+        for dependency in ('Pillow==12.3.0', 'playwright==1.55.0', 'pypdfium2==5.8.0'):
+            self.assertIn(dependency, ui)
+        for dependency in ('pypdfium2==5.8.0', 'reportlab==4.4.9'):
+            self.assertIn(dependency, printing)
 if __name__=='__main__':unittest.main()

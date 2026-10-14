@@ -1,2 +1,7 @@
-# CI-only YAML parsing. No cache, paid service or application dependency.
+# Source preflight의 YAML·UI 계약·독립 oracle 단위검사에 필요한 필수 SDK.
+# 브라우저 실행 파일은 여기서 설치하지 않으며 별도 E2E 작업이 준비합니다.
 PyYAML==6.0.3
+Pillow==12.3.0
+playwright==1.55.0
+pypdfium2==5.8.0
+reportlab==4.4.9
