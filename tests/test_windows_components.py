@@ -29,6 +29,8 @@ import menu_clipboard
 import shape_creation_history
 import nested_line_navigation
 import stored_lineseg_origin
+import picture_line_segment_owner
+import virtual_picture_layout_admission
 
 FONT_SOURCE_PINS = {
     'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
@@ -64,6 +66,252 @@ def pe(machine=0x8664):
 
 
 class WindowsComponentsTests(unittest.TestCase):
+    def test_virtual_picture_layout_admission_compiled_source_is_mandatory(self):
+        source = self.source(); c = self.helper()
+        name = 'third_party/rhwp/src/document_core/commands/text_editing.rs'
+        self.assertEqual(virtual_picture_layout_admission.SOURCE_FILES, (name,))
+        self.assertIn(name, c.SOURCE_FILES,
+                      'Actual virtual picture layout admission source must cross the explicit transport boundary')
+        config = c.configured()
+        self.assertEqual(config['helpers'][virtual_picture_layout_admission.HELPER],
+                         digest(ROOT/virtual_picture_layout_admission.HELPER))
+        _, contract = c.source_contract(source, config)
+        self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+        self.assertEqual(contract['coreSourceFiles'][name], digest(source/name))
+
+    def test_virtual_picture_layout_admission_missing_proof_cannot_publish_component(self):
+        source = self.source(); c = self.helper()
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = json.loads(ledger_path.read_bytes())
+        ledger.pop('virtualPictureLayoutAdmission', None)
+        write_json(ledger_path, ledger)
+        out = self.root/'missing-virtual-picture-layout-proof'
+        with self.assertRaisesRegex(ValueError, 'Virtual picture layout admission source/ledger proof mismatch'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_virtual_picture_layout_capture_rejects_unreviewed_source_and_forged_proof_without_output(self):
+        source = self.source(); c = self.helper(); payload = self.payload('editor')
+        ledger_path = source/'.opengeul-overlay.json'
+        original = json.loads(ledger_path.read_bytes())
+        name, = virtual_picture_layout_admission.SOURCE_FILES
+        original_bytes = (source/name).read_bytes()
+        cases = ('helper', 'before', 'after', 'extra-proof', 'missing-source',
+                 'unreviewed-source', 'coherent-legacy', 'extra-after-source')
+        for i, change in enumerate(cases):
+            (source/name).write_bytes(original_bytes)
+            ledger = copy.deepcopy(original); proof = ledger['virtualPictureLayoutAdmission']
+            if change == 'helper': proof['helperSha256'] = '0'*64
+            elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+            elif change == 'extra-proof': proof['optional'] = True
+            elif change == 'extra-after-source': proof['afterSha256']['third_party/rhwp/src/unreviewed.rs'] = '0'*64
+            elif change == 'missing-source': (source/name).unlink()
+            else:
+                (source/name).write_bytes(b'owned former body-only virtual picture layout source\n')
+                if change == 'coherent-legacy': proof['afterSha256'][name] = digest(source/name)
+            write_json(ledger_path, ledger)
+            out = self.root/('invalid-virtual-picture-layout-'+str(i))
+            with self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_virtual_picture_layout_capture_rejects_actual_core_change_between_hash_observations(self):
+        source = self.source(); c = self.helper(); actual_tree = c.tree
+        name, = virtual_picture_layout_admission.SOURCE_FILES
+        def changed_core_inventory(folder, cap):
+            if folder == source/'third_party/rhwp/src':
+                target = source/name
+                target.write_bytes(target.read_bytes()+b'// changed virtual layout admission between source observations\n')
+            return actual_tree(folder, cap)
+        out = self.root/'mismatched-virtual-layout-core-observation'
+        with patch.object(c, 'tree', side_effect=changed_core_inventory), \
+                self.assertRaisesRegex(ValueError, 'Virtual picture layout admission complete core source mismatch'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_matching_component_pair_cannot_omit_virtual_layout_proof_or_compiled_source(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        name, = virtual_picture_layout_admission.SOURCE_FILES
+        for change in ('proof', 'prepared-source', 'core-source'):
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                if change == 'proof': source.pop('virtualPictureLayoutAdmission')
+                else: source['preparedFiles' if change == 'prepared-source' else 'coreSourceFiles'].pop(name)
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+
+    def test_matching_component_pair_rejects_virtual_layout_coherent_legacy_and_fixed_proof_observation_drift(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        name, = virtual_picture_layout_admission.SOURCE_FILES
+        cases = ('helper', 'before', 'after', 'observed-hash', 'legacy-original-pin',
+                 'coherent-legacy', 'extra-proof', 'extra-before-source', 'extra-after-source')
+        for change in cases:
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                proof = source['virtualPictureLayoutAdmission']
+                if change == 'helper': proof['helperSha256'] = '0'*64
+                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                elif change == 'extra-proof': proof['optional'] = True
+                elif change in ('extra-before-source', 'extra-after-source'):
+                    proof['beforeSha256' if change == 'extra-before-source' else 'afterSha256']['third_party/rhwp/src/unreviewed.rs'] = '0'*64
+                elif change == 'observed-hash':
+                    # Leave the exact declared proof unchanged; only actual
+                    # component observations are coherently altered in both inputs.
+                    source['preparedFiles'][name] = source['coreSourceFiles'][name] = '0'*64
+                else:
+                    legacy = (virtual_picture_layout_admission.INPUT_SOURCE_SHA256[name] if change == 'legacy-original-pin'
+                              else hashlib.sha256(b'owned former body-only virtual picture layout source\n').hexdigest())
+                    proof['afterSha256'][name] = legacy
+                    source['preparedFiles'][name] = source['coreSourceFiles'][name] = legacy
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+
+    def test_rehashed_public_ledger_cannot_omit_or_replace_virtual_picture_layout_proof(self):
+        folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
+        original_parity = json.loads(parity_path.read_bytes())
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        for change in ('missing', 'mismatch'):
+            parity = copy.deepcopy(original_parity)
+            if change == 'missing': parity.pop('virtualPictureLayoutAdmission')
+            else: parity['virtualPictureLayoutAdmission']['helperSha256'] = '0'*64
+            write_json(parity_path, parity)
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); value['source']['ledgerSha256'] = digest(parity_path)
+                if role == 'editor':
+                    value['files']['source-parity.json'] = {'size':parity_path.stat().st_size,
+                                                          'sha256':digest(parity_path)}
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders, 'Virtual picture layout admission source/ledger proof mismatch')
+
+    def test_picture_line_segment_owner_compiled_source_is_mandatory(self):
+        source = self.source(); c = self.helper()
+        name = 'third_party/rhwp/src/document_core/commands/object_ops/picture.rs'
+        self.assertEqual(picture_line_segment_owner.SOURCE_FILES, (name,))
+        self.assertIn(name, c.SOURCE_FILES,
+                      'Actual picture vector replacement source must cross the explicit transport boundary')
+        config = c.configured()
+        self.assertEqual(config['helpers'][picture_line_segment_owner.HELPER],
+                         digest(ROOT/picture_line_segment_owner.HELPER))
+        _, contract = c.source_contract(source, config)
+        self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+        self.assertEqual(contract['coreSourceFiles'][name], digest(source/name))
+
+    def test_picture_line_segment_owner_missing_proof_cannot_publish_component(self):
+        source = self.source(); c = self.helper()
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = json.loads(ledger_path.read_bytes())
+        ledger.pop('pictureLineSegmentOwner', None)
+        write_json(ledger_path, ledger)
+        out = self.root/'missing-picture-line-owner-proof'
+        with self.assertRaisesRegex(ValueError, 'Picture line segment owner source/ledger proof mismatch'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_picture_owner_capture_rejects_unreviewed_source_and_forged_proof_without_output(self):
+        source = self.source(); c = self.helper(); payload = self.payload('editor')
+        ledger_path = source/'.opengeul-overlay.json'
+        original = json.loads(ledger_path.read_bytes())
+        name, = picture_line_segment_owner.SOURCE_FILES
+        original_bytes = (source/name).read_bytes()
+        cases = ('helper', 'before', 'after', 'extra-proof', 'missing-source',
+                 'unreviewed-source', 'coherent-legacy', 'extra-after-source')
+        for i, change in enumerate(cases):
+            (source/name).write_bytes(original_bytes)
+            ledger = copy.deepcopy(original); proof = ledger['pictureLineSegmentOwner']
+            if change == 'helper': proof['helperSha256'] = '0'*64
+            elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+            elif change == 'extra-proof': proof['optional'] = True
+            elif change == 'extra-after-source': proof['afterSha256']['third_party/rhwp/src/unreviewed.rs'] = '0'*64
+            elif change == 'missing-source': (source/name).unlink()
+            else:
+                (source/name).write_bytes(b'owned former stale picture vector source\n')
+                if change == 'coherent-legacy': proof['afterSha256'][name] = digest(source/name)
+            write_json(ledger_path, ledger)
+            out = self.root/('invalid-picture-owner-'+str(i))
+            with self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_picture_owner_capture_rejects_actual_core_change_between_hash_observations(self):
+        source = self.source(); c = self.helper(); actual_tree = c.tree
+        name, = picture_line_segment_owner.SOURCE_FILES
+        def changed_core_inventory(folder, cap):
+            if folder == source/'third_party/rhwp/src':
+                target = source/name
+                target.write_bytes(target.read_bytes()+b'// changed picture ownership between source observations\n')
+            return actual_tree(folder, cap)
+        out = self.root/'mismatched-picture-core-observation'
+        with patch.object(c, 'tree', side_effect=changed_core_inventory), \
+                self.assertRaisesRegex(ValueError, 'Picture line segment owner complete core source mismatch'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_matching_component_pair_cannot_omit_picture_proof_or_compiled_source(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        name, = picture_line_segment_owner.SOURCE_FILES
+        for change in ('proof', 'prepared-source', 'core-source'):
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                if change == 'proof': source.pop('pictureLineSegmentOwner')
+                else: source['preparedFiles' if change == 'prepared-source' else 'coreSourceFiles'].pop(name)
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+
+    def test_matching_component_pair_rejects_picture_coherent_legacy_and_fixed_proof_observation_drift(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        name, = picture_line_segment_owner.SOURCE_FILES
+        cases = ('helper', 'before', 'after', 'observed-hash', 'legacy-original-pin',
+                 'coherent-legacy', 'extra-proof', 'extra-before-source', 'extra-after-source')
+        for change in cases:
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                proof = source['pictureLineSegmentOwner']
+                if change == 'helper': proof['helperSha256'] = '0'*64
+                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                elif change == 'extra-proof': proof['optional'] = True
+                elif change in ('extra-before-source', 'extra-after-source'):
+                    proof['beforeSha256' if change == 'extra-before-source' else 'afterSha256']['third_party/rhwp/src/unreviewed.rs'] = '0'*64
+                elif change == 'observed-hash':
+                    # Leave the exact declared proof unchanged; only actual
+                    # component observations are coherently altered in both inputs.
+                    source['preparedFiles'][name] = source['coreSourceFiles'][name] = '0'*64
+                else:
+                    legacy = (picture_line_segment_owner.INPUT_SOURCE_SHA256[name] if change == 'legacy-original-pin'
+                              else hashlib.sha256(b'owned former stale picture vector source\n').hexdigest())
+                    proof['afterSha256'][name] = legacy
+                    source['preparedFiles'][name] = source['coreSourceFiles'][name] = legacy
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+
+    def test_rehashed_public_ledger_cannot_omit_or_replace_picture_owner_proof(self):
+        folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
+        original_parity = json.loads(parity_path.read_bytes())
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        for change in ('missing', 'mismatch'):
+            parity = copy.deepcopy(original_parity)
+            if change == 'missing': parity.pop('pictureLineSegmentOwner')
+            else: parity['pictureLineSegmentOwner']['helperSha256'] = '0'*64
+            write_json(parity_path, parity)
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); value['source']['ledgerSha256'] = digest(parity_path)
+                if role == 'editor':
+                    value['files']['source-parity.json'] = {'size':parity_path.stat().st_size,
+                                                          'sha256':digest(parity_path)}
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders, 'Picture line segment owner source/ledger proof mismatch')
+
     def test_registered_stored_origin_target_requires_real_native_skia_feature(self):
         source = self.source(); c = self.helper()
         manifest = source/'third_party/rhwp/Cargo.toml'
@@ -509,6 +757,22 @@ class WindowsComponentsTests(unittest.TestCase):
         stored_proof = {'beforeSha256':dict(stored_lineseg_origin.INPUT_SOURCE_SHA256),
                         'afterSha256':stored_output,
                         'helperSha256':digest(ROOT/stored_lineseg_origin.HELPER)}
+        picture_output = {name:digest(source/name) for name in picture_line_segment_owner.SOURCE_FILES}
+        picture_override = patch.object(picture_line_segment_owner, 'OUTPUT_SOURCE_SHA256', picture_output)
+        picture_override.start(); self.addCleanup(picture_override.stop)
+        self.picture_reference_path = self.root/'picture-owner-fixture-reference.json'
+        write_json(self.picture_reference_path, picture_output)
+        picture_proof = {'beforeSha256':dict(picture_line_segment_owner.INPUT_SOURCE_SHA256),
+                         'afterSha256':picture_output,
+                         'helperSha256':digest(ROOT/picture_line_segment_owner.HELPER)}
+        virtual_output = {name:digest(source/name) for name in virtual_picture_layout_admission.SOURCE_FILES}
+        virtual_override = patch.object(virtual_picture_layout_admission, 'OUTPUT_SOURCE_SHA256', virtual_output)
+        virtual_override.start(); self.addCleanup(virtual_override.stop)
+        self.virtual_reference_path = self.root/'virtual-layout-fixture-reference.json'
+        write_json(self.virtual_reference_path, virtual_output)
+        virtual_proof = {'beforeSha256':dict(virtual_picture_layout_admission.INPUT_SOURCE_SHA256),
+                         'afterSha256':virtual_output,
+                         'helperSha256':digest(ROOT/virtual_picture_layout_admission.HELPER)}
         menu_proof = {'beforeSha256': {**menu_clipboard.INPUT_SOURCE_SHA256, **menu_clipboard.INPUT_NATIVE_SHA256},
                       'afterSha256': menu_final,
                       'helperSha256': digest(ROOT/'overlay/menu-clipboard.ts'),
@@ -526,6 +790,8 @@ class WindowsComponentsTests(unittest.TestCase):
                   'shapeCreationHistory': shape_proof,
                   'nestedLineNavigation': nested_proof,
                   'storedLineSegmentOrigin': stored_proof,
+                  'pictureLineSegmentOwner': picture_proof,
+                  'virtualPictureLayoutAdmission': virtual_proof,
                   'asyncClipboardGuard': {
                       'beforeSha256': {
                           'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
@@ -603,7 +869,7 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
                 "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
                 "pdf_fixture=json.loads(Path(sys.argv[3]).read_text());"
@@ -614,10 +880,12 @@ class WindowsComponentsTests(unittest.TestCase):
                 "nested_line_navigation.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[6]).read_text());"
                 "nested_line_navigation.OUTPUT_SHA256=nested_line_navigation.OUTPUT_SOURCE_SHA256[nested_line_navigation.CURSOR];"
                 "stored_lineseg_origin.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[7]).read_text());"
-                "sys.argv=sys.argv[8:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                "picture_line_segment_owner.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[8]).read_text());"
+                "virtual_picture_layout_admission.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[9]).read_text());"
+                "sys.argv=sys.argv[10:];runpy.run_path(sys.argv[0],run_name='__main__')",
                 str(self.native_reference_path),str(self.com_reference_path),str(self.pdf_reference_path),
                 str(self.menu_reference_path),str(self.shape_reference_path),str(self.nested_reference_path),
-                str(self.stored_reference_path),str(HELPER),*arguments]
+                str(self.stored_reference_path),str(self.picture_reference_path),str(self.virtual_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')

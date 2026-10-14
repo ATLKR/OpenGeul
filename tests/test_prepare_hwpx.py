@@ -286,6 +286,8 @@ class StoredLineOriginPreparationTests(unittest.TestCase):
             'third_party/rhwp/src/parser/body_text.rs': '// owned parser fixture\n',
             'third_party/rhwp/src/parser/hwpx/section.rs': '// owned HWPX parser fixture\n',
             'third_party/rhwp/src/serializer/hwpx/section.rs': '// owned HWPX serializer fixture\n',
+            'third_party/rhwp/src/document_core/commands/object_ops/picture.rs': '// owned picture fixture\n',
+            'third_party/rhwp/src/document_core/commands/text_editing.rs': '// owned virtual picture layout fixture\n',
         }
         for name, data in files.items():
             path = self.source/name; path.parent.mkdir(parents=True, exist_ok=True)
@@ -308,9 +310,24 @@ class StoredLineOriginPreparationTests(unittest.TestCase):
         refresh.start(); self.addCleanup(refresh.stop)
         stored = patch.object(prepare_hwpx, 'apply_stored_lineseg_origin')
         self.stored = stored.start(); self.addCleanup(stored.stop)
-        hashes = {name:self.sha(self.source/name) for name in files if name.startswith('third_party/rhwp/')}
+        hashes = {name:self.sha(self.source/name) for name in files
+                  if name.startswith('third_party/rhwp/') and not name.endswith(('/picture.rs', '/text_editing.rs'))}
         self.proof = {'beforeSha256':dict(hashes), 'afterSha256':dict(hashes), 'helperSha256':'a'*64}
         self.stored.return_value = self.proof
+        picture = patch.object(prepare_hwpx, 'apply_picture_line_segment_owner')
+        self.picture = picture.start(); self.addCleanup(picture.stop)
+        name = 'third_party/rhwp/src/document_core/commands/object_ops/picture.rs'
+        picture_hash = self.sha(self.source/name)
+        self.picture_proof = {'beforeSha256':{name:picture_hash},
+                              'afterSha256':{name:picture_hash}, 'helperSha256':'b'*64}
+        self.picture.return_value = self.picture_proof
+        virtual = patch.object(prepare_hwpx, 'apply_virtual_picture_layout_admission')
+        self.virtual = virtual.start(); self.addCleanup(virtual.stop)
+        name = 'third_party/rhwp/src/document_core/commands/text_editing.rs'
+        virtual_hash = self.sha(self.source/name)
+        self.virtual_proof = {'beforeSha256':{name:virtual_hash},
+                              'afterSha256':{name:virtual_hash}, 'helperSha256':'c'*64}
+        self.virtual.return_value = self.virtual_proof
 
     @staticmethod
     def sha(path):
@@ -321,6 +338,70 @@ class StoredLineOriginPreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Unreviewed stored line source'):
             prepare_hwpx.patch(self.source)
         self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+        self.picture.assert_not_called()
+        self.virtual.assert_not_called()
+
+    def test_unreviewed_picture_source_cannot_publish_hwpx_completion_ledger(self):
+        self.picture.side_effect = ValueError('Unreviewed picture line owner source')
+        with self.assertRaisesRegex(ValueError, 'Unreviewed picture line owner source'):
+            prepare_hwpx.patch(self.source)
+        self.stored.assert_called_once_with(self.source)
+        self.picture.assert_called_once_with(self.source)
+        self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+        self.virtual.assert_not_called()
+
+    def test_unreviewed_virtual_layout_source_cannot_publish_hwpx_completion_ledger(self):
+        self.virtual.side_effect = ValueError('Unreviewed virtual picture layout source')
+        with self.assertRaisesRegex(ValueError, 'Unreviewed virtual picture layout source'):
+            prepare_hwpx.patch(self.source)
+        self.stored.assert_called_once_with(self.source)
+        self.picture.assert_called_once_with(self.source)
+        self.virtual.assert_called_once_with(self.source)
+        self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+
+    def test_final_hwpx_ledger_binds_virtual_layout_after_picture_without_rewriting_prior_proofs(self):
+        def virtual(source):
+            self.assertEqual(source, self.source)
+            self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+            self.stored.assert_called_once_with(self.source)
+            self.picture.assert_called_once_with(self.source)
+            self.assertEqual(self.observed, ['menu-final'])
+            return self.virtual_proof
+        self.virtual.side_effect = virtual
+        prepare_hwpx.patch(self.source)
+        value = json.loads(self.ledger.read_bytes())
+        self.assertEqual(value['storedLineSegmentOrigin'], self.proof)
+        self.assertEqual(value['pictureLineSegmentOwner'], self.picture_proof)
+        self.assertEqual(value['virtualPictureLayoutAdmission'], self.virtual_proof)
+        self.assertEqual(value['baselinePreservedFiles'], self.original['preservedFiles'])
+        self.assertEqual(value['preservedFiles'], self.original['preservedFiles'])
+        self.assertTrue(value['hwpxSaveV1'])
+        self.virtual.assert_called_once_with(self.source)
+
+    def test_final_hwpx_ledger_binds_picture_proof_after_stored_origin_without_rewriting_prior_proof(self):
+        def stored(source):
+            self.assertEqual(self.observed, ['menu-final'])
+            self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+            self.observed.append('stored-final')
+            return self.proof
+        def picture(source):
+            self.assertEqual(source, self.source)
+            self.assertEqual(self.observed, ['menu-final', 'stored-final'])
+            self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+            self.observed.append('picture-final')
+            return self.picture_proof
+        self.stored.side_effect = stored
+        self.picture.side_effect = picture
+        prepare_hwpx.patch(self.source)
+        value = json.loads(self.ledger.read_bytes())
+        self.assertEqual(value['storedLineSegmentOrigin'], self.proof)
+        self.assertEqual(value['pictureLineSegmentOwner'], self.picture_proof)
+        self.assertEqual(value['virtualPictureLayoutAdmission'], self.virtual_proof)
+        self.assertEqual(value['baselinePreservedFiles'], self.original['preservedFiles'])
+        self.assertEqual(value['preservedFiles'], self.original['preservedFiles'])
+        self.assertTrue(value['hwpxSaveV1'])
+        self.assertEqual(self.observed, ['menu-final', 'stored-final', 'picture-final'])
+        self.picture.assert_called_once_with(self.source)
 
     def test_final_hwpx_ledger_binds_exact_stored_source_proof_after_prior_features(self):
         def stored(source):
@@ -332,6 +413,8 @@ class StoredLineOriginPreparationTests(unittest.TestCase):
         prepare_hwpx.patch(self.source)
         value = json.loads(self.ledger.read_bytes())
         self.assertEqual(value['storedLineSegmentOrigin'], self.proof)
+        self.assertEqual(value['pictureLineSegmentOwner'], self.picture_proof)
+        self.assertEqual(value['virtualPictureLayoutAdmission'], self.virtual_proof)
         self.assertTrue(value['hwpxSaveV1'])
         self.assertEqual(value['baselinePreservedFiles'], self.original['preservedFiles'])
         self.assertEqual(value['preservedFiles'], self.original['preservedFiles'])

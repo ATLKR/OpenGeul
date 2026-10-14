@@ -9,6 +9,8 @@ import subprocess
 from prepare_upstream import FONT_MAIN, validate_async_font_selection_proof
 import menu_clipboard
 from stored_lineseg_origin import apply as apply_stored_lineseg_origin
+from picture_line_segment_owner import apply as apply_picture_line_segment_owner
+from virtual_picture_layout_admission import apply as apply_virtual_picture_layout_admission
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -396,6 +398,10 @@ def patch(source: Path) -> None:
     menu_clipboard.refresh_hwpx_lib(source, menu_proof)
     value['storedLineSegmentOrigin'] = apply_stored_lineseg_origin(source)
     value['changes'].append('stored parser line segment origin and unchanged source-row preservation')
+    value['pictureLineSegmentOwner'] = apply_picture_line_segment_owner(source)
+    value['changes'].append('picture text-as-character replacement invalidates stored line segment ownership')
+    value['virtualPictureLayoutAdmission'] = apply_virtual_picture_layout_admission(source)
+    value['changes'].append('virtual picture layout admission excludes non-body indices from body-only picture band scanning')
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
 

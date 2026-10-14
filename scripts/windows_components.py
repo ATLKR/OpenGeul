@@ -28,6 +28,8 @@ import menu_clipboard
 import shape_creation_history
 import nested_line_navigation
 import stored_lineseg_origin
+import picture_line_segment_owner
+import virtual_picture_layout_admission
 
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
@@ -72,7 +74,7 @@ COPIED_OVERLAYS = {
     'third_party/rhwp/src/parser/hwpx/opengeul_namespaces.rs': 'overlay/hwpx_namespaces.rs',
     'third_party/rhwp/rhwp-studio/src/engine/opengeul-composition-final.ts': 'overlay/composition-final.ts',
 }
-SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | {
+SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | set(picture_line_segment_owner.SOURCE_FILES) | set(virtual_picture_layout_admission.SOURCE_FILES) | {
     com_source_contract.LEDGER_PATH,
     'third_party/rhwp/src/main.rs', 'third_party/rhwp/src/mcp_serve.rs',
     native_source_contract.LEDGER_PATH,
@@ -354,6 +356,20 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     if any(contract['coreSourceFiles'].get(name) != contract['preparedFiles'].get(name)
            for name in stored_lineseg_origin.SOURCE_FILES):
         raise ValueError('Stored line segment origin complete core source mismatch')
+    picture_proof = contract.get('pictureLineSegmentOwner')
+    if not isinstance(picture_proof, dict) or ledger.get('pictureLineSegmentOwner') != picture_proof:
+        raise ValueError('Picture line segment owner source/ledger proof mismatch')
+    picture_line_segment_owner.validate_contract(picture_proof, contract['preparedFiles'], config['helpers'])
+    if any(contract['coreSourceFiles'].get(name) != contract['preparedFiles'].get(name)
+           for name in picture_line_segment_owner.SOURCE_FILES):
+        raise ValueError('Picture line segment owner complete core source mismatch')
+    virtual_proof = contract.get('virtualPictureLayoutAdmission')
+    if not isinstance(virtual_proof, dict) or ledger.get('virtualPictureLayoutAdmission') != virtual_proof:
+        raise ValueError('Virtual picture layout admission source/ledger proof mismatch')
+    virtual_picture_layout_admission.validate_contract(virtual_proof, contract['preparedFiles'], config['helpers'])
+    if any(contract['coreSourceFiles'].get(name) != contract['preparedFiles'].get(name)
+           for name in virtual_picture_layout_admission.SOURCE_FILES):
+        raise ValueError('Virtual picture layout admission complete core source mismatch')
     namespace = ledger.get('namespacePatch', {})
     if (namespace != contract['namespacePatch'] or not isinstance(namespace, dict)
             or namespace.get('helperSha256') != config['helpers']['overlay/hwpx_namespaces.rs']
@@ -419,6 +435,8 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
                 'shapeCreationHistory':ledger.get('shapeCreationHistory'),
                 'nestedLineNavigation':ledger.get('nestedLineNavigation'),
                 'storedLineSegmentOrigin':ledger.get('storedLineSegmentOrigin'),
+                'pictureLineSegmentOwner':ledger.get('pictureLineSegmentOwner'),
+                'virtualPictureLayoutAdmission':ledger.get('virtualPictureLayoutAdmission'),
                 'nativeActivation': native_source_contract.capture(source, files, config,
                     read_json=read_json, tree=tree, sha=sha),
                 'comWorker': com_source_contract.capture(source, files, native, config,
@@ -614,7 +632,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
         validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
-    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin'}
+    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin','pictureLineSegmentOwner','virtualPictureLayoutAdmission'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
         raise ValueError('Invalid prepared source contract')
     _hashes(contract['preparedFiles'], set(SOURCE_FILES) | set(NATIVE_FILES))
@@ -635,6 +653,8 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
     shape_creation_history.validate_contract(contract['shapeCreationHistory'],contract['preparedFiles'],config['helpers'])
     nested_line_navigation.validate_contract(contract['nestedLineNavigation'], contract['preparedFiles'], config['helpers'])
     stored_lineseg_origin.validate_contract(contract['storedLineSegmentOrigin'], contract['preparedFiles'], config['helpers'])
+    picture_line_segment_owner.validate_contract(contract['pictureLineSegmentOwner'], contract['preparedFiles'], config['helpers'])
+    virtual_picture_layout_admission.validate_contract(contract['virtualPictureLayoutAdmission'], contract['preparedFiles'], config['helpers'])
     native = contract['nativeTests']
     if (not isinstance(native, dict) or set(native) != {'targets','originalManifestSha256'}
             or native['targets'] != {name: config['helpers']['overlay/'+local] for name, local in TARGETS.items()}
