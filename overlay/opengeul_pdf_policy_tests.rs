@@ -179,6 +179,45 @@ fn permitted_svg_export_preserves_all_selected_pages() {
 }
 
 #[test]
+fn small_positioned_text_keeps_svg_units_until_the_page_transform() {
+    let bytes = font_with_flags(0);
+    let family = usable_family(&bytes, 0);
+    let directory = FontDirectory::new(&bytes);
+    let options = directory.compatibility_options(&family);
+    let mut svg = String::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1100">"#,
+    );
+    for (index, character) in "AHTVWAHTVW".chars().enumerate() {
+        svg.push_str(&format!(
+            r#"<text x="{}" y="150" font-family="{family}" font-size="12" textLength="8" lengthAdjust="spacingAndGlyphs">{character}</text>"#,
+            100 + index * 10,
+        ));
+    }
+    svg.push_str("</svg>");
+    let pdf = svgs_to_pdf_with_options(&[svg.clone(), svg], &options).unwrap();
+    let objects = String::from_utf8_lossy(&pdf);
+    // PDFium prunes text whose bounds are <= 0.01 in its containing Form.
+    // A 1/800 root matrix erased these ten real synthetic glyphs before the
+    // parent's compensating scale was applied, although their raster was intact.
+    let forms: Vec<_> = objects
+        .split("endobj")
+        .filter(|object| object.contains("/Subtype /Form"))
+        .collect();
+    assert_eq!(forms.len(), 2, "each selected page has its own root Form");
+    for form in forms {
+        assert!(
+            form.contains("/Matrix [1 0 0 1 0 0]"),
+            "root text bounds must remain in SVG units: {}",
+            form.split("stream\n").next().unwrap_or(form)
+        );
+        assert!(form.contains("/BBox [0 0 800 1100]"));
+    }
+    assert_eq!(objects.matches("0.75 0 0 0.75 0 0 cm").count(), 2);
+    assert_eq!(objects.matches("/MediaBox [0 0 600 825]").count(), 2);
+    assert!(objects.contains("/ToUnicode"));
+}
+
+#[test]
 fn persistent_subset_failure_on_first_middle_or_last_page_rejects_export() {
     let mut incomplete_successes = Vec::new();
     for failed_width in 180..183 {
