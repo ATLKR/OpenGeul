@@ -18,6 +18,7 @@ from com_worker import apply as apply_com_worker
 from pdf_search_text import apply as apply_pdf_search_text
 from menu_clipboard import apply as apply_menu_clipboard
 from shape_creation_history import apply as apply_shape_creation_history
+from nested_line_navigation import apply as apply_nested_line_navigation
 
 
 TAURI_VERSION = "2.11.1"
@@ -767,10 +768,11 @@ def patch(source: Path, version: str) -> None:
                                               image_insertion_proof, async_font_proof)
     shape_creation_history_proof = apply_shape_creation_history(source, async_clipboard_proof,
         image_insertion_proof, async_font_proof, menu_clipboard_proof)
+    nested_line_navigation_proof = apply_nested_line_navigation(source)
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'imageInsertionGuard':image_insertion_proof,'asyncFontSelectionGuard':async_font_proof,'pdfSearchText':pdf_search_text_proof,'menuClipboardPaste':menu_clipboard_proof,'shapeCreationHistory':shape_creation_history_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard','image file insertion document and lifecycle guard','installed font selection document and editing context guard','GUI PDF searchable text root coordinates','native menu clipboard fallback and atomic plain-text paste','public shape creation history and document lifecycle guard']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'imageInsertionGuard':image_insertion_proof,'asyncFontSelectionGuard':async_font_proof,'pdfSearchText':pdf_search_text_proof,'menuClipboardPaste':menu_clipboard_proof,'shapeCreationHistory':shape_creation_history_proof,'nestedLineNavigation':nested_line_navigation_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard','image file insertion document and lifecycle guard','installed font selection document and editing context guard','GUI PDF searchable text root coordinates','native menu clipboard fallback and atomic plain-text paste','public shape creation history and document lifecycle guard','full-path nested cell visual-line Home and End navigation']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:

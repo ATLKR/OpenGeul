@@ -43,6 +43,41 @@ def mutated(name,change):
 VALID_PICTURE_XML = '<ns0:pic xmlns:ns0="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:ns1="http://www.hancom.co.kr/hwpml/2011/core" id="0" zOrder="1" numberingType="NONE" textWrap="SQUARE" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><ns0:offset x="0" y="0" /><ns0:orgSz width="1000" height="1000" /><ns0:curSz width="1000" height="1000" /><ns0:flip horizontal="0" vertical="0" /><ns0:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="0" /><ns0:renderingInfo><ns1:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0" /><ns1:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0" /><ns1:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0" /></ns0:renderingInfo><ns0:imgRect><ns1:pt0 x="0" y="0" /><ns1:pt1 x="1000" y="0" /><ns1:pt2 x="1000" y="1000" /><ns1:pt3 x="0" y="1000" /></ns0:imgRect><ns0:imgClip left="0" right="75" top="0" bottom="75" /><ns0:inMargin left="0" right="0" top="0" bottom="0" /><ns0:imgDim dimwidth="75" dimheight="75" /><ns1:img binaryItemIDRef="image1" bright="0" contrast="0" effect="REAL_PIC" alpha="0" /><ns0:effects /><ns0:sz width="1000" widthRelTo="ABSOLUTE" height="1000" heightRelTo="ABSOLUTE" protect="0" /><ns0:pos treatAsChar="0" affectLSpacing="0" flowWithText="0" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PAPER" horzRelTo="PAPER" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0" /><ns0:outMargin left="0" right="0" top="0" bottom="0" /><ns0:shapeComment>Author-owned 1x1 test pixel</ns0:shapeComment></ns0:pic>'
 
 class AdvancedOracleTests(unittest.TestCase):
+    def test_checkpoint_diagnostic_records_actual_owned_state_without_teaching_expectations(self):
+        import advanced_edit_oracle as oracle
+        import copy
+        result=inspect('owned-field-filled')
+        expected={'body_paragraphs':['FIELD-BODY-HEAD'],'pages':result['pages'],
+                  'population':{'fields':1},'headers':[],'footers':[],'breaks':[]}
+        original=copy.deepcopy(expected)
+        result['paragraphs']['s0/body']=[''];result['body']=''
+        record=oracle.checkpoint_diagnostic(result,phase='next-edit',saved_sha256='1'*64,
+            input_sha256={'owned-field-filled.hwpx':'2'*64},helper_sha256={'advanced_edit_oracle.py':'3'*64},expected=expected)
+        self.assertEqual(record['observed']['bodyParagraphs'],{'s0/body':['']})
+        self.assertEqual(record['observed']['fields'][0]['value'],'ADV-VALUE')
+        self.assertEqual(record['expectedCheckpoint'],original)
+        self.assertEqual(expected,original)
+        with self.assertRaisesRegex(ValueError,'body/paragraph'):
+            oracle.assert_checkpoint(result,**expected)
+        raw=json.dumps(record,ensure_ascii=False,indent=2).encode('utf-8')
+        self.assertLessEqual(len(raw),64*1024)
+        self.assertNotIn(b'Contents/section',raw);self.assertNotIn(b'base64',raw);self.assertNotIn(b'<hp:',raw)
+
+    def test_checkpoint_diagnostic_has_a_hard_utf8_size_limit(self):
+        import advanced_edit_oracle as oracle
+        result=inspect('owned-nested')
+        # Unexpected content is summarized under the fixed limit; expected state
+        # remains the caller's declaration and is never read back from this JSON.
+        result['paragraphs']['s0/body']=['가'*100000]
+        for table in result['tables'].values():
+            for cell in table['cells'].values():cell['paragraphs']=['가'*100000]
+        record=oracle.checkpoint_diagnostic(result,phase='edited',saved_sha256='1'*64,
+            input_sha256={},helper_sha256={},expected={'body_paragraphs':['']})
+        self.assertLessEqual(len(json.dumps(record,ensure_ascii=False,indent=2).encode('utf-8')),64*1024)
+        with self.assertRaisesRegex(ValueError,'metadata exceeds'):
+            oracle.checkpoint_diagnostic(result,phase='edited',saved_sha256='1'*64,
+                input_sha256={},helper_sha256={},expected={'body_paragraphs':['가'*100000]})
+
     def test_owned_package_provenance_is_immutable(self):
         provenance=json.loads((FIX/'provenance.json').read_text())
         for name,sha in provenance['generated'].items():

@@ -26,6 +26,8 @@ import com_source_contract
 import pdf_search_text
 import menu_clipboard
 import shape_creation_history
+import nested_line_navigation
+import stored_lineseg_origin
 
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
@@ -70,7 +72,7 @@ COPIED_OVERLAYS = {
     'third_party/rhwp/src/parser/hwpx/opengeul_namespaces.rs': 'overlay/hwpx_namespaces.rs',
     'third_party/rhwp/rhwp-studio/src/engine/opengeul-composition-final.ts': 'overlay/composition-final.ts',
 }
-SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | {
+SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | {
     com_source_contract.LEDGER_PATH,
     'third_party/rhwp/src/main.rs', 'third_party/rhwp/src/mcp_serve.rs',
     native_source_contract.LEDGER_PATH,
@@ -341,6 +343,17 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     if not isinstance(shape_proof,dict) or ledger.get('shapeCreationHistory')!=shape_proof:
         raise ValueError('Shape creation history source/ledger proof mismatch')
     shape_creation_history.validate_contract(shape_proof,contract['preparedFiles'],config['helpers'])
+    nested_proof = contract.get('nestedLineNavigation')
+    if not isinstance(nested_proof, dict) or ledger.get('nestedLineNavigation') != nested_proof:
+        raise ValueError('Nested line navigation source/ledger proof mismatch')
+    nested_line_navigation.validate_contract(nested_proof, contract['preparedFiles'], config['helpers'])
+    stored_proof = contract.get('storedLineSegmentOrigin')
+    if not isinstance(stored_proof, dict) or ledger.get('storedLineSegmentOrigin') != stored_proof:
+        raise ValueError('Stored line segment origin source/ledger proof mismatch')
+    stored_lineseg_origin.validate_contract(stored_proof, contract['preparedFiles'], config['helpers'])
+    if any(contract['coreSourceFiles'].get(name) != contract['preparedFiles'].get(name)
+           for name in stored_lineseg_origin.SOURCE_FILES):
+        raise ValueError('Stored line segment origin complete core source mismatch')
     namespace = ledger.get('namespacePatch', {})
     if (namespace != contract['namespacePatch'] or not isinstance(namespace, dict)
             or namespace.get('helperSha256') != config['helpers']['overlay/hwpx_namespaces.rs']
@@ -377,7 +390,8 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
     for name in TARGETS:
         selected = [entry for entry in entries if entry.get('name') == name]
         if (len(selected) != 1 or selected[0].get('path') != 'tests/'+name+'.rs'
-                or selected[0].get('required-features', []) != (['native-skia'] if name == 'opengeul_pdf_policy' else [])):
+                or selected[0].get('required-features', []) != (
+                    ['native-skia'] if name in ('opengeul_pdf_policy', 'opengeul_stored_lineseg_origin') else [])):
             raise ValueError('Native integration test is not correctly registered')
     marker = '\n# OpenGeul distribution-only integration gates.\n'
     if manifest.count(marker) != 1 or hashlib.sha256(manifest.split(marker)[0].encode()).hexdigest() != native.get('originalManifestSha256'):
@@ -403,6 +417,8 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
                 'pdfSearchText': ledger.get('pdfSearchText'),
                 'menuClipboardPaste': ledger.get('menuClipboardPaste'),
                 'shapeCreationHistory':ledger.get('shapeCreationHistory'),
+                'nestedLineNavigation':ledger.get('nestedLineNavigation'),
+                'storedLineSegmentOrigin':ledger.get('storedLineSegmentOrigin'),
                 'nativeActivation': native_source_contract.capture(source, files, config,
                     read_json=read_json, tree=tree, sha=sha),
                 'comWorker': com_source_contract.capture(source, files, native, config,
@@ -598,7 +614,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
         validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
-    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','menuClipboardPaste','shapeCreationHistory'}
+    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
         raise ValueError('Invalid prepared source contract')
     _hashes(contract['preparedFiles'], set(SOURCE_FILES) | set(NATIVE_FILES))
@@ -617,6 +633,8 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
     pdf_search_text.validate(contract['pdfSearchText'], contract['preparedFiles'], core_files, config['helpers'])
     menu_clipboard.validate_contract(contract['menuClipboardPaste'], contract['preparedFiles'], config['helpers'],shape_required=True)
     shape_creation_history.validate_contract(contract['shapeCreationHistory'],contract['preparedFiles'],config['helpers'])
+    nested_line_navigation.validate_contract(contract['nestedLineNavigation'], contract['preparedFiles'], config['helpers'])
+    stored_lineseg_origin.validate_contract(contract['storedLineSegmentOrigin'], contract['preparedFiles'], config['helpers'])
     native = contract['nativeTests']
     if (not isinstance(native, dict) or set(native) != {'targets','originalManifestSha256'}
             or native['targets'] != {name: config['helpers']['overlay/'+local] for name, local in TARGETS.items()}

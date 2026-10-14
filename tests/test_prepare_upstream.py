@@ -54,6 +54,10 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.shape_creation = shape_creation.start()
         self.shape_creation.return_value = {'testFixture': 'shape creation history'}
         self.addCleanup(shape_creation.stop)
+        nested_navigation = patch.object(prepare_upstream, 'apply_nested_line_navigation')
+        self.nested_navigation = nested_navigation.start()
+        self.nested_navigation.return_value = {'testFixture': 'path-owned nested line navigation'}
+        self.addCleanup(nested_navigation.stop)
         # 전체 vendor/shim 무결성은 test_native_activation에서 별도로 검사한다.
         activation = patch.object(prepare_upstream, 'apply_native_activation')
         self.activation = activation.start()
@@ -218,20 +222,33 @@ pub fn layer_trees_to_pdf_with_links(
             self.assertIs(menu, self.menu_clipboard.return_value)
             observed.append('shape')
             return self.shape_creation.return_value
+        def nested_boundary(source):
+            self.assertEqual(observed, ['pdf', 'menu', 'shape'])
+            observed.append('nested')
+            return self.nested_navigation.return_value
         self.pdf_search.side_effect = pdf_boundary
         self.menu_clipboard.side_effect = clipboard_boundary
         self.shape_creation.side_effect = shape_boundary
+        self.nested_navigation.side_effect = nested_boundary
         prepare_upstream.patch(self.source, '1.1.5')
         self.pdf_search.assert_called_once_with(self.source)
         self.menu_clipboard.assert_called_once_with(self.source, self.clipboard.return_value,
                                                   self.image.return_value, self.font.return_value)
         self.shape_creation.assert_called_once_with(self.source, self.clipboard.return_value,
             self.image.return_value, self.font.return_value, self.menu_clipboard.return_value)
+        self.nested_navigation.assert_called_once_with(self.source)
         ledger = json.loads((self.source/'.opengeul-overlay.json').read_text())
         self.assertEqual(ledger['pdfSearchText'], self.pdf_search.return_value)
         self.assertEqual(ledger['menuClipboardPaste'], self.menu_clipboard.return_value)
         self.assertEqual(ledger['shapeCreationHistory'], self.shape_creation.return_value)
-        self.assertEqual(observed, ['pdf', 'menu', 'shape'])
+        self.assertEqual(ledger['nestedLineNavigation'], self.nested_navigation.return_value)
+        self.assertEqual(observed, ['pdf', 'menu', 'shape', 'nested'])
+
+    def test_nested_line_preparation_failure_cannot_publish_a_source_ledger(self):
+        self.nested_navigation.side_effect = ValueError('Unreviewed nested cursor input')
+        with self.assertRaisesRegex(ValueError, 'Unreviewed nested cursor input'):
+            prepare_upstream.patch(self.source, '1.1.5')
+        self.assertFalse((self.source/'.opengeul-overlay.json').exists())
 
     def test_changed_upstream_about_is_rejected_without_overwrite(self):
         path = self.source/'apps/studio-host/src/ui/about-dialog.ts'

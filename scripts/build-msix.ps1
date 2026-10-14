@@ -161,7 +161,7 @@ try {
     }
     if ($Phase -eq 'Editor' -and $EditorStage -eq 'Prepare') { exit 0 }
     if ($editorTests) {
-    # Reuse the native test graph for the table and PDF policy regressions.
+    # Reuse the native test graph for the table, PDF and stored line-origin regressions.
     # Keep it separate from the GUI's different feature graph.
     Push-Location 'third_party/rhwp'
     try {
@@ -170,6 +170,8 @@ try {
         cargo test --locked --target $target --test opengeul_table_height
         Set-EditorCargoParallelism
         cargo test --locked --target $target --package rhwp --test opengeul_pdf_policy --features native-skia
+        Set-EditorCargoParallelism
+        cargo test --locked --target $target --test opengeul_stored_lineseg_origin --features native-skia
     } finally {
         $env:CARGO_TARGET_DIR = $editorTarget
         Pop-Location

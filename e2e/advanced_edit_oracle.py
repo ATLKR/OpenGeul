@@ -6,6 +6,7 @@ subList ancestry, never recursive concatenation of all section hp:t nodes.
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 import re
 import zipfile
@@ -253,6 +254,49 @@ def assert_checkpoint(result, *, body_paragraphs, pages, population, headers=(),
                        for row,text in zip(actual,texts))):
             raise ValueError('Saved history checkpoint direct '+key+' differs')
     return result
+
+
+def checkpoint_diagnostic(result, *, phase, saved_sha256, input_sha256, helper_sha256, expected):
+    """Bounded owned-fixture inspection, never document/XML/binary payloads.
+
+    The caller uses only the authored advanced fixtures. This records observed
+    owner text/address/reference summaries before a strict assertion can fail;
+    it never supplies expectations to that assertion.
+    """
+    def text(value):
+        return value[:128] if isinstance(value,str) else value
+    def paragraphs(rows):
+        return [text(value) for value in rows[:8]]
+    population={key:len(result[key]) for key in
+                ('tables','fields','equations','notes','headers','footers','shapes')}
+    record={'phase':phase,'savedSha256':saved_sha256,'inputSha256':input_sha256,
+            'helperSha256':helper_sha256,'expectedCheckpoint':expected,
+            'inspectionLimits':{'textCharacters':128,'paragraphsPerOwner':8,'tables':4,'cellsPerTable':16,'controlRows':8,'utf8Bytes':64*1024},
+            'observed':{'population':population,'pages':result['pages'][:4],
+                'breaks':result['breaks'][:32],
+                'bodyParagraphs':{path:paragraphs(rows) for path,rows in result['paragraphs'].items()
+                    if re.fullmatch(r's\d+/body',path)},
+                'tables':{path:{'rows':table['rows'],'cols':table['cols'],
+                    'cells':[{'address':list(address),'span':list(cell['span']),
+                              'paragraphs':paragraphs(cell['paragraphs'])}
+                             for address,cell in list(table['cells'].items())[:16]]}
+                          for path,table in list(result['tables'].items())[:4]},
+                'fields':[{'owner':row['owner'],'paragraph':row['paragraph'],'offset':row['offset'],
+                           'name':text(row['name']),'value':text(row['value'])} for row in result['fields'][:8]],
+                'equations':[{'owner':row['owner'],'reference':row['reference'],
+                              'script':text(row['script']),'size':row['size']} for row in result['equations'][:8]],
+                'notes':[{'kind':row['kind'],'owner':row['owner'],'reference':row['reference'],
+                          'paragraphs':paragraphs(row['paragraphs'])} for row in result['notes'][:8]],
+                'headers':[{'owner':row['owner'],'paragraphs':paragraphs(row['paragraphs'])} for row in result['headers'][:8]],
+                'footers':[{'owner':row['owner'],'paragraphs':paragraphs(row['paragraphs'])} for row in result['footers'][:8]]}}
+    # A corrupt/oversized saved output must not expand the uploaded inspection.
+    # Keep its counts/binding and the authored expectation, then fail the same
+    # independent checkpoint check in the caller.
+    if len(json.dumps(record,ensure_ascii=False,indent=2).encode('utf-8'))>64*1024:
+        record['observed']={'population':population,'summaryOmitted':'inspection exceeds 64 KiB'}
+    if len(json.dumps(record,ensure_ascii=False,indent=2).encode('utf-8'))>64*1024:
+        raise ValueError('Authored checkpoint diagnostic metadata exceeds 64 KiB')
+    return record
 
 
 def assert_grid(result, path, expected):

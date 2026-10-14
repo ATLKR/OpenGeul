@@ -27,6 +27,8 @@ import windows_arch
 import pdf_search_text
 import menu_clipboard
 import shape_creation_history
+import nested_line_navigation
+import stored_lineseg_origin
 
 FONT_SOURCE_PINS = {
     'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
@@ -62,6 +64,254 @@ def pe(machine=0x8664):
 
 
 class WindowsComponentsTests(unittest.TestCase):
+    def test_registered_stored_origin_target_requires_real_native_skia_feature(self):
+        source = self.source(); c = self.helper()
+        manifest = source/'third_party/rhwp/Cargo.toml'
+        entries = tomllib.loads(manifest.read_text())['test']
+        target = [entry for entry in entries if entry['name'] == 'opengeul_stored_lineseg_origin']
+        self.assertEqual(len(target), 1)
+        self.assertEqual(target[0]['required-features'], ['native-skia'])
+        try:
+            c.source_contract(source, c.configured())
+        except ValueError as error:
+            self.fail('Correct stored-origin native-skia registration was rejected: '+str(error))
+        original = manifest.read_text()
+        block = ('name = "opengeul_stored_lineseg_origin"\n'
+                 'path = "tests/opengeul_stored_lineseg_origin.rs"\n'
+                 'required-features = ["native-skia"]\n')
+        self.assertEqual(original.count(block), 1)
+        manifest.write_text(original.replace(block, block.replace('required-features = ["native-skia"]\n', '')))
+        with self.assertRaisesRegex(ValueError, 'Native integration test is not correctly registered'):
+            c.source_contract(source, c.configured())
+
+    def test_stored_line_origin_three_compiled_sources_and_public_proof_are_mandatory(self):
+        source = self.source(); c = self.helper()
+        self.assertEqual(len(stored_lineseg_origin.SOURCE_FILES), 3)
+        self.assertTrue(set(stored_lineseg_origin.SOURCE_FILES) <= set(c.SOURCE_FILES))
+        _, contract = c.source_contract(source, c.configured())
+        for name in stored_lineseg_origin.SOURCE_FILES:
+            self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+            self.assertEqual(contract['coreSourceFiles'][name], digest(source/name))
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = json.loads(ledger_path.read_bytes()); ledger.pop('storedLineSegmentOrigin')
+        write_json(ledger_path, ledger)
+        out = self.root/'missing-stored-origin-proof'
+        with self.assertRaises(ValueError):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_stored_origin_capture_rejects_proof_forgery_and_each_unreviewed_compiled_source(self):
+        source = self.source(); c = self.helper(); payload = self.payload('editor')
+        ledger_path = source/'.opengeul-overlay.json'
+        original = json.loads(ledger_path.read_bytes())
+        files = {name:(source/name).read_bytes() for name in stored_lineseg_origin.SOURCE_FILES}
+        cases = ['helper', 'extra-proof']
+        cases += [kind+':'+name for name in files
+                  for kind in ('before', 'after', 'missing-source', 'unreviewed-source', 'coherent-legacy')]
+        for i, change in enumerate(cases):
+            for name, data in files.items(): (source/name).write_bytes(data)
+            ledger = copy.deepcopy(original); proof = ledger['storedLineSegmentOrigin']
+            if change == 'helper': proof['helperSha256'] = '0'*64
+            elif change == 'extra-proof': proof['optional'] = True
+            else:
+                kind, name = change.split(':', 1)
+                if kind in ('before', 'after'): proof[kind+'Sha256'][name] = '0'*64
+                elif kind == 'missing-source': (source/name).unlink()
+                else:
+                    (source/name).write_bytes(b'owned former stored-row-dropping core source\n')
+                    if kind == 'coherent-legacy': proof['afterSha256'][name] = digest(source/name)
+            write_json(ledger_path, ledger)
+            out = self.root/('invalid-stored-origin-'+str(i))
+            with self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_stored_origin_capture_rejects_mismatched_complete_core_inventory_before_output(self):
+        source = self.source(); c = self.helper(); actual_tree = c.tree
+        name = stored_lineseg_origin.SOURCE_FILES[0]
+        def changed_core_inventory(folder, cap):
+            if folder == source/'third_party/rhwp/src':
+                target = source/name
+                target.write_bytes(target.read_bytes()+b'// changed between actual source observations\n')
+            return actual_tree(folder, cap)
+        out = self.root/'mismatched-stored-core-observation'
+        with patch.object(c, 'tree', side_effect=changed_core_inventory), \
+                self.assertRaisesRegex(ValueError, 'Stored line segment origin complete core source mismatch'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_matching_component_pair_cannot_omit_stored_proof_or_any_explicit_source(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        for change in ('proof', *stored_lineseg_origin.SOURCE_FILES):
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role])
+                if change == 'proof': value['source'].pop('storedLineSegmentOrigin')
+                else: value['source']['preparedFiles'].pop(change)
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+
+    def test_matching_component_pair_rejects_coherent_stored_legacy_before_after_and_helper(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        cases = ['helper']+[kind+':'+name for name in stored_lineseg_origin.SOURCE_FILES
+                           for kind in ('before', 'after', 'observed-hash', 'legacy-original-pin', 'coherent-legacy')]
+        for change in cases:
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                proof = source['storedLineSegmentOrigin']
+                if change == 'helper': proof['helperSha256'] = '0'*64
+                else:
+                    kind, name = change.split(':', 1)
+                    if kind in ('before', 'after'): proof[kind+'Sha256'][name] = '0'*64
+                    elif kind == 'observed-hash':
+                        source['preparedFiles'][name] = source['coreSourceFiles'][name] = '0'*64
+                    else:
+                        legacy = (stored_lineseg_origin.INPUT_SOURCE_SHA256[name] if kind == 'legacy-original-pin'
+                                  else hashlib.sha256(b'owned former stored-row-dropping core source\n').hexdigest())
+                        proof['afterSha256'][name] = legacy
+                        source['preparedFiles'][name] = source['coreSourceFiles'][name] = legacy
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+
+    def test_rehashed_public_ledger_cannot_omit_or_replace_stored_origin_proof(self):
+        folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
+        original_parity = json.loads(parity_path.read_bytes())
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        for change in ('missing', 'mismatch'):
+            parity = copy.deepcopy(original_parity)
+            if change == 'missing': parity.pop('storedLineSegmentOrigin')
+            else: parity['storedLineSegmentOrigin']['helperSha256'] = '0'*64
+            write_json(parity_path, parity)
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); value['source']['ledgerSha256'] = digest(parity_path)
+                if role == 'editor':
+                    value['files']['source-parity.json'] = {'size':parity_path.stat().st_size,
+                                                          'sha256':digest(parity_path)}
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders, 'Stored line segment origin source/ledger proof mismatch')
+
+    def test_nested_line_source_inventory_and_public_proof_are_mandatory(self):
+        source = self.source(); c = self.helper()
+        self.assertTrue(set(nested_line_navigation.SOURCE_FILES) <= set(c.SOURCE_FILES))
+        config = c.configured()
+        self.assertEqual(config['helpers'][nested_line_navigation.HELPER],
+                         digest(ROOT/nested_line_navigation.HELPER))
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = json.loads(ledger_path.read_bytes())
+        ledger.pop('nestedLineNavigation')
+        write_json(ledger_path, ledger)
+        out = self.root/'missing-nested-proof'
+        with self.assertRaises(ValueError):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_nested_line_capture_rejects_forged_proof_and_missing_or_rehashed_source(self):
+        source = self.source(); c = self.helper(); payload = self.payload('editor')
+        ledger_path = source/'.opengeul-overlay.json'
+        original = json.loads(ledger_path.read_bytes())
+        inputs = {name:(source/name).read_bytes() for name in nested_line_navigation.SOURCE_FILES}
+        cases = ['before', 'after', 'helper', 'extra-proof']
+        cases += [kind+':'+name for name in inputs
+                  for kind in ('missing-source', 'unreviewed-source', 'coherent-mutated-source')]
+        for change in cases:
+            for name, data in inputs.items():
+                (source/name).write_bytes(data)
+            ledger = copy.deepcopy(original)
+            proof = ledger['nestedLineNavigation']
+            if change == 'before': proof['beforeSha256'][next(iter(inputs))] = '0'*64
+            elif change == 'after': proof['afterSha256'][next(iter(inputs))] = '0'*64
+            elif change == 'helper': proof['helperSha256'] = '0'*64
+            elif change == 'extra-proof': proof['optional'] = True
+            else:
+                kind, name = change.split(':', 1)
+                if kind == 'missing-source': (source/name).unlink()
+                else:
+                    (source/name).write_bytes(inputs[name]+b'// coherent unreviewed cursor replacement\n')
+                    if kind == 'coherent-mutated-source': proof['afterSha256'][name] = digest(source/name)
+            write_json(ledger_path, ledger)
+            out = self.root/('invalid-nested-'+str(cases.index(change)))
+            with self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_flat_only_cursor_and_coherent_rehashed_ledger_cannot_capture(self):
+        source = self.source(); c = self.helper()
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = json.loads(ledger_path.read_bytes())
+        name = nested_line_navigation.SOURCE_FILES[0]
+        (source/name).write_bytes(b'owned legacy flat-only cursor source fixture\n')
+        ledger['nestedLineNavigation']['afterSha256'][name] = digest(source/name)
+        write_json(ledger_path, ledger)
+        out = self.root/'legacy-flat-nested-source'
+        with self.assertRaises(ValueError):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_matching_components_cannot_omit_nested_line_proof_or_compiled_path(self):
+        folders = self.pair()
+        originals = {role:json.loads((folder/'provenance.json').read_bytes())
+                     for role, folder in folders.items()}
+        for change in ('proof', *nested_line_navigation.SOURCE_FILES):
+            for role, folder in folders.items():
+                value = copy.deepcopy(originals[role])
+                if change == 'proof': value['source'].pop('nestedLineNavigation')
+                else: value['source']['preparedFiles'].pop(change)
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders)
+
+    def test_matching_components_reject_nested_before_after_helper_and_legacy_forgery(self):
+        folders = self.pair()
+        originals = {role:json.loads((folder/'provenance.json').read_bytes())
+                     for role, folder in folders.items()}
+        cases = ['before', 'after', 'helper', 'coherent-legacy', 'reviewed-original-flat-pin']
+        cases += ['observed-hash:'+name for name in nested_line_navigation.SOURCE_FILES]
+        for change in cases:
+            for role, folder in folders.items():
+                value = copy.deepcopy(originals[role])
+                proof = value['source']['nestedLineNavigation']
+                name = nested_line_navigation.SOURCE_FILES[0]
+                if change == 'before': proof['beforeSha256'][name] = '0'*64
+                elif change == 'after': proof['afterSha256'][name] = '0'*64
+                elif change == 'helper': proof['helperSha256'] = '0'*64
+                elif change.startswith('observed-hash:'):
+                    value['source']['preparedFiles'][change.split(':', 1)[1]] = '0'*64
+                else:
+                    legacy = (nested_line_navigation.INPUT_SOURCE_SHA256[name]
+                              if change == 'reviewed-original-flat-pin' else
+                              hashlib.sha256(b'owned legacy flat-only cursor source fixture\n').hexdigest())
+                    proof['afterSha256'][name] = legacy
+                    value['source']['preparedFiles'][name] = legacy
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders)
+
+    def test_rehashed_public_ledger_cannot_drop_or_replace_nested_line_source_proof(self):
+        folders = self.pair()
+        parity_path = folders['editor']/'source-parity.json'
+        original_parity = json.loads(parity_path.read_bytes())
+        originals = {role:json.loads((folder/'provenance.json').read_bytes())
+                     for role, folder in folders.items()}
+        for change in ('missing', 'mismatch'):
+            parity = copy.deepcopy(original_parity)
+            if change == 'missing': parity.pop('nestedLineNavigation')
+            else: parity['nestedLineNavigation']['helperSha256'] = '0'*64
+            write_json(parity_path, parity)
+            for role, folder in folders.items():
+                value = copy.deepcopy(originals[role])
+                value['source']['ledgerSha256'] = digest(parity_path)
+                if role == 'editor':
+                    value['files']['source-parity.json'] = {
+                        'size':parity_path.stat().st_size, 'sha256':digest(parity_path)}
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders, 'Nested line navigation source/ledger proof mismatch')
+
     def test_full_component_source_requires_shape_proof_and_connector_inventory(self):
         source=self.source();c=self.helper()
         self.assertTrue(set(shape_creation_history.SOURCE_FILES)<=set(c.SOURCE_FILES),'Both compiled shape sources must be explicit')
@@ -240,6 +490,25 @@ class WindowsComponentsTests(unittest.TestCase):
         write_json(self.shape_reference_path,shape_output)
         shape_proof={'beforeSha256':shape_creation_history.INPUT_SOURCE_SHA256,
                      'afterSha256':shape_output,'helperSha256':digest(ROOT/shape_creation_history.HELPER)}
+        nested_output = {name:digest(source/name) for name in nested_line_navigation.SOURCE_FILES}
+        nested_override = patch.object(nested_line_navigation, 'OUTPUT_SOURCE_SHA256', nested_output)
+        nested_override.start(); self.addCleanup(nested_override.stop)
+        nested_scalar = patch.object(nested_line_navigation, 'OUTPUT_SHA256',
+                                     nested_output[nested_line_navigation.CURSOR])
+        nested_scalar.start(); self.addCleanup(nested_scalar.stop)
+        self.nested_reference_path = self.root/'nested-fixture-reference.json'
+        write_json(self.nested_reference_path, nested_output)
+        nested_proof = {'beforeSha256':dict(nested_line_navigation.INPUT_SOURCE_SHA256),
+                        'afterSha256':nested_output,
+                        'helperSha256':digest(ROOT/nested_line_navigation.HELPER)}
+        stored_output = {name:digest(source/name) for name in stored_lineseg_origin.SOURCE_FILES}
+        stored_override = patch.object(stored_lineseg_origin, 'OUTPUT_SOURCE_SHA256', stored_output)
+        stored_override.start(); self.addCleanup(stored_override.stop)
+        self.stored_reference_path = self.root/'stored-origin-fixture-reference.json'
+        write_json(self.stored_reference_path, stored_output)
+        stored_proof = {'beforeSha256':dict(stored_lineseg_origin.INPUT_SOURCE_SHA256),
+                        'afterSha256':stored_output,
+                        'helperSha256':digest(ROOT/stored_lineseg_origin.HELPER)}
         menu_proof = {'beforeSha256': {**menu_clipboard.INPUT_SOURCE_SHA256, **menu_clipboard.INPUT_NATIVE_SHA256},
                       'afterSha256': menu_final,
                       'helperSha256': digest(ROOT/'overlay/menu-clipboard.ts'),
@@ -255,6 +524,8 @@ class WindowsComponentsTests(unittest.TestCase):
                   'pdfSearchText': pdf_proof,
                   'menuClipboardPaste': menu_proof,
                   'shapeCreationHistory': shape_proof,
+                  'nestedLineNavigation': nested_proof,
+                  'storedLineSegmentOrigin': stored_proof,
                   'asyncClipboardGuard': {
                       'beforeSha256': {
                           'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
@@ -332,7 +603,7 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard,shape_creation_history;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
                 "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
                 "pdf_fixture=json.loads(Path(sys.argv[3]).read_text());"
@@ -340,9 +611,13 @@ class WindowsComponentsTests(unittest.TestCase):
                 "pdf_search_text.PRESERVED_SHA256=pdf_fixture['PRESERVED_SHA256'];"
                 "menu_clipboard.PHASE_SOURCE_SHA256=json.loads(Path(sys.argv[4]).read_text());"
                 "shape_creation_history.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[5]).read_text());"
-                "sys.argv=sys.argv[6:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                "nested_line_navigation.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[6]).read_text());"
+                "nested_line_navigation.OUTPUT_SHA256=nested_line_navigation.OUTPUT_SOURCE_SHA256[nested_line_navigation.CURSOR];"
+                "stored_lineseg_origin.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[7]).read_text());"
+                "sys.argv=sys.argv[8:];runpy.run_path(sys.argv[0],run_name='__main__')",
                 str(self.native_reference_path),str(self.com_reference_path),str(self.pdf_reference_path),
-                str(self.menu_reference_path),str(self.shape_reference_path),str(HELPER),*arguments]
+                str(self.menu_reference_path),str(self.shape_reference_path),str(self.nested_reference_path),
+                str(self.stored_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')

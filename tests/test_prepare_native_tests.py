@@ -23,6 +23,7 @@ class NativeTargetTests(unittest.TestCase):
         targets = {item['name']: item for item in value['test']}
         self.assertEqual(set(targets), set(gates.TARGETS))
         self.assertEqual(targets['opengeul_pdf_policy']['required-features'], ['native-skia'])
+        self.assertEqual(targets['opengeul_stored_lineseg_origin']['required-features'], ['native-skia'])
         for name in targets:
             self.assertTrue((self.core/targets[name]['path']).is_file())
 

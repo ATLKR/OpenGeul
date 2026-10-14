@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {
     'opengeul_table_height': 'table_height_test.rs',
     'opengeul_pdf_policy': 'opengeul_pdf_policy_tests.rs',
+    'opengeul_stored_lineseg_origin': 'opengeul_stored_lineseg_tests.rs',
 }
 
 
@@ -23,7 +24,7 @@ def prepare(core: Path) -> None:
     rendered = original + '\n# OpenGeul distribution-only integration gates.\n'
     for name in TARGETS:
         rendered += f'\n[[test]]\nname = "{name}"\npath = "tests/{name}.rs"\n'
-        if name == 'opengeul_pdf_policy':
+        if name in ('opengeul_pdf_policy', 'opengeul_stored_lineseg_origin'):
             rendered += 'required-features = ["native-skia"]\n'
     paths[next(iter(TARGETS))].parent.mkdir(exist_ok=True)
     for name, path in paths.items():
@@ -33,7 +34,7 @@ def prepare(core: Path) -> None:
         'targets': {name: hashlib.sha256(texts[name]).hexdigest() for name in TARGETS},
         'originalManifestSha256': hashlib.sha256(original.encode()).hexdigest(),
     }, indent=2)+'\n', encoding='utf-8')
-    print('Registered native table geometry and PDF embedding-policy integration gates.')
+    print('Registered native table geometry, PDF embedding-policy and stored line-origin integration gates.')
 
 
 if __name__ == '__main__':

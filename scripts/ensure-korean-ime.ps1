@@ -59,17 +59,41 @@ if (-not $Worker) {
 }
 
 $stage='actual-host-observation'
+$hostObservation=[ordered]@{source=$binding;workerPid=[int]$PID;
+    scriptSha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();
+    powerShellVersion=[string]$PSVersionTable.PSVersion;elevated=$null;
+    architectureQuerySucceeded=$null;nativeMachine=$null;controllerMachine=$null;
+    systemDirectory=$null;capabilityMatches=$null;capabilityState=$null;
+    productInputVerified=$false;sourceQualified=$false}
+# These finite, source-owned reasons may be published. Raw exception messages,
+# command invocations and environment values must never enter diagnostics.
+$failureCodes=@{
+    'Official online language capability servicing requires the hosted elevated user.'='elevation_required';
+    'Actual OS/controller architecture is unavailable.'='architecture_query_failed';
+    'Actual OS/controller machine disagrees with the authorized native Source job.'='architecture_mismatch';
+    'Actual system directory is unavailable.'='system_directory_unavailable';
+    'Named Korean Basic capability is absent/ambiguous on the actual host.'='capability_missing_or_ambiguous';
+    'Actual Korean capability is pending/unknown.'='capability_pending_or_unknown';
+    'Korean capability did not become Installed without a restart.'='capability_not_ready';
+    'Exactly one genuinely registered native Microsoft Korean default profile is required.'='registered_native_profile_missing_or_ambiguous';
+    'Current-user Korean language entries are ambiguous.'='user_language_ambiguous';
+    'Observed Korean configuration failed the readiness policy.'='readiness_policy_rejected'
+}
 function Save-ObservedJson([string]$Name,$Value) {
     $json=$Value | ConvertTo-Json -Depth 12 -Compress
     if ([Text.Encoding]::UTF8.GetByteCount($json) -gt 32768) { throw 'Actual Korean setup evidence exceeded its bound.' }
     [IO.File]::WriteAllText((Join-Path $out $Name),$json,[Text.UTF8Encoding]::new($false))
 }
 try {
+    $stage='actual-host-elevation'
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     $principal=[Security.Principal.WindowsPrincipal]::new($identity)
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $hostObservation.elevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Save-ObservedJson 'host-observation.json' $hostObservation
+    if (-not $hostObservation.elevated) {
         throw 'Official online language capability servicing requires the hosted elevated user.'
     }
+    $stage='actual-host-architecture'
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -83,7 +107,11 @@ public static class OpenGeulKoreanSetupHost {
 }
 '@
     [ushort]$controllerMachine=0;[ushort]$nativeMachine=0
-    if (-not [OpenGeulKoreanSetupHost]::IsWow64Process2([OpenGeulKoreanSetupHost]::GetCurrentProcess(),[ref]$controllerMachine,[ref]$nativeMachine)) {
+    $hostObservation.architectureQuerySucceeded=[OpenGeulKoreanSetupHost]::IsWow64Process2([OpenGeulKoreanSetupHost]::GetCurrentProcess(),[ref]$controllerMachine,[ref]$nativeMachine)
+    $hostObservation.nativeMachine=[int]$nativeMachine
+    $hostObservation.controllerMachine=[int]$controllerMachine
+    Save-ObservedJson 'host-observation.json' $hostObservation
+    if (-not $hostObservation.architectureQuerySucceeded) {
         throw 'Actual OS/controller architecture is unavailable.'
     }
     $expectedMachine=if ($binding.architecture -eq 'arm64') { 0xAA64 } else { 0x8664 }
@@ -91,14 +119,22 @@ public static class OpenGeulKoreanSetupHost {
     if ($nativeMachine -ne $expectedMachine -or $allowedController -notcontains [int]$controllerMachine) {
         throw 'Actual OS/controller machine disagrees with the authorized native Source job.'
     }
+    $stage='actual-host-system-directory'
     $system=[Text.StringBuilder]::new(32768)
     $systemLength=[OpenGeulKoreanSetupHost]::GetSystemDirectoryW($system,$system.Capacity)
     if ($systemLength -eq 0 -or $systemLength -ge $system.Capacity) { throw 'Actual system directory is unavailable.' }
     $systemPath=[IO.Path]::GetFullPath($system.ToString())
+    $hostObservation.systemDirectory=$systemPath
+    Save-ObservedJson 'host-observation.json' $hostObservation
+    $stage='actual-host-capability-query'
     $capabilityName='Language.Basic~~~ko-KR~0.0.1.0'
     $capability=@(Get-WindowsCapability -Online -Name $capabilityName -ErrorAction Stop | Where-Object Name -eq $capabilityName)
+    $hostObservation.capabilityMatches=$capability.Count
+    if ($capability.Count -eq 1) { $hostObservation.capabilityState=[string]$capability[0].State }
+    Save-ObservedJson 'host-observation.json' $hostObservation
     if ($capability.Count -ne 1) { throw 'Named Korean Basic capability is absent/ambiguous on the actual host.' }
     $before=[string]$capability[0].State
+    $stage='actual-host-user-language-query'
     $languages=Get-WinUserLanguageList -ErrorAction Stop
     Save-ObservedJson 'before.json' ([ordered]@{
         source=$binding;nativeMachine=[int]$nativeMachine;controllerMachine=[int]$controllerMachine;
@@ -182,7 +218,13 @@ public static class OpenGeulKoreanSetupHost {
     & python $policy --source-root $repo --expected-source $ExpectedSource --record (Join-Path $out 'readiness.json')
     if ($LASTEXITCODE -ne 0) { throw 'Observed Korean configuration failed the readiness policy.' }
 } catch {
+    $message=[string]$_.Exception.Message
+    $failureCode='unclassified'
+    if ($failureCodes.ContainsKey($message)) { $failureCode=$failureCodes[$message] }
+    $scriptLine=if ($null -ne $_.InvocationInfo) { [int]$_.InvocationInfo.ScriptLineNumber } else { 0 }
+    Save-ObservedJson 'host-observation.json' $hostObservation
     Save-ObservedJson 'failure.json' ([ordered]@{source=$binding;stage=$stage;failureType=$_.Exception.GetType().FullName;
+        failureCode=$failureCode;hresult=[int]$_.Exception.HResult;scriptLine=$scriptLine;
         productInputVerified=$false;sourceQualified=$false})
     Write-Error ('Actual hosted Korean setup failed at '+$stage+'; bounded original observations are retained.')
     exit 1

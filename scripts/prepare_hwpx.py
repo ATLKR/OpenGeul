@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from prepare_upstream import FONT_MAIN, validate_async_font_selection_proof
 import menu_clipboard
+from stored_lineseg_origin import apply as apply_stored_lineseg_origin
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -393,6 +394,8 @@ def patch(source: Path) -> None:
     font_proof['afterSha256'][FONT_MAIN] = hashlib.sha256((source/FONT_MAIN).read_bytes()).hexdigest()
     validate_async_font_selection_proof(source, font_proof)
     menu_clipboard.refresh_hwpx_lib(source, menu_proof)
+    value['storedLineSegmentOrigin'] = apply_stored_lineseg_origin(source)
+    value['changes'].append('stored parser line segment origin and unchanged source-row preservation')
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
 

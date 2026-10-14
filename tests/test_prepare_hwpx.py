@@ -1,6 +1,7 @@
 """Cancellation must finish in the application before the native driver continues."""
 import importlib.util
 import ctypes
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -10,6 +11,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT/'scripts'))
+import prepare_hwpx
 
 
 def load_driver():
@@ -259,6 +262,81 @@ class NativePickerReadinessTests(unittest.TestCase):
         self.dialog.window_text.assert_not_called()
         self.dialog.descendants.assert_not_called()
         self.button.click_input.assert_not_called()
+
+
+class StoredLineOriginPreparationTests(unittest.TestCase):
+    """Public ledger assembly only; host patch anchors are separate dependencies.
+
+    This tiny authored source does not qualify Rust parsing or native GUI output.
+    Host replacements and prior feature proof checks are isolated so the real
+    preparation function can exercise its final source-proof/ledger boundary.
+    """
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        self.source = Path(tmp.name)
+        self.ledger = self.source/'.opengeul-overlay.json'
+        files = {
+            'apps/studio-host/src/core/tauri-bridge.ts':
+                '  private async saveHwpThroughStaging(\n  private async confirmExternalOverwriteIfNeeded(\n',
+            'apps/studio-host/src/core/tauri-bridge.test.ts':
+                "  it('blocks direct save for HWPX sources', () => {});\n"
+                "  it.each([false, true])('saves HWP bytes through native state', () => {});\n",
+            'apps/studio-host/src/main.ts': '// owned host fixture\n',
+            'apps/desktop/src-tauri/src/owned-protected.rs': '// owned preserved capability\n',
+            'third_party/rhwp/src/parser/body_text.rs': '// owned parser fixture\n',
+            'third_party/rhwp/src/parser/hwpx/section.rs': '// owned HWPX parser fixture\n',
+            'third_party/rhwp/src/serializer/hwpx/section.rs': '// owned HWPX serializer fixture\n',
+        }
+        for name, data in files.items():
+            path = self.source/name; path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(data, encoding='utf-8')
+        protected = 'apps/desktop/src-tauri/src/owned-protected.rs'
+        self.original = {'preservedFiles': {protected:self.sha(self.source/protected)},
+                         'changes':['owned miniature preparation input'],
+                         'asyncFontSelectionGuard': {'afterSha256':{}},
+                         'menuClipboardPaste': {'testFixture':'owned prior proof'}}
+        self.ledger.write_text(json.dumps(self.original)+'\n', encoding='utf-8')
+        self.original_ledger = self.ledger.read_bytes()
+        self.observed = []
+        for target in ('replace', 'validate_async_font_selection_proof'):
+            control = patch.object(prepare_hwpx, target)
+            control.start(); self.addCleanup(control.stop)
+        menu_validation = patch.object(prepare_hwpx.menu_clipboard, 'validate')
+        menu_validation.start(); self.addCleanup(menu_validation.stop)
+        refresh = patch.object(prepare_hwpx.menu_clipboard, 'refresh_hwpx_lib',
+                               side_effect=lambda source, proof:self.observed.append('menu-final'))
+        refresh.start(); self.addCleanup(refresh.stop)
+        stored = patch.object(prepare_hwpx, 'apply_stored_lineseg_origin')
+        self.stored = stored.start(); self.addCleanup(stored.stop)
+        hashes = {name:self.sha(self.source/name) for name in files if name.startswith('third_party/rhwp/')}
+        self.proof = {'beforeSha256':dict(hashes), 'afterSha256':dict(hashes), 'helperSha256':'a'*64}
+        self.stored.return_value = self.proof
+
+    @staticmethod
+    def sha(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_unreviewed_stored_source_cannot_publish_hwpx_completion_ledger(self):
+        self.stored.side_effect = ValueError('Unreviewed stored line source')
+        with self.assertRaisesRegex(ValueError, 'Unreviewed stored line source'):
+            prepare_hwpx.patch(self.source)
+        self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+
+    def test_final_hwpx_ledger_binds_exact_stored_source_proof_after_prior_features(self):
+        def stored(source):
+            self.assertEqual(self.observed, ['menu-final'])
+            self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+            self.observed.append('stored-final')
+            return self.proof
+        self.stored.side_effect = stored
+        prepare_hwpx.patch(self.source)
+        value = json.loads(self.ledger.read_bytes())
+        self.assertEqual(value['storedLineSegmentOrigin'], self.proof)
+        self.assertTrue(value['hwpxSaveV1'])
+        self.assertEqual(value['baselinePreservedFiles'], self.original['preservedFiles'])
+        self.assertEqual(value['preservedFiles'], self.original['preservedFiles'])
+        self.assertEqual(self.observed, ['menu-final', 'stored-final'])
+        self.stored.assert_called_once_with(self.source)
 
 
 if __name__ == '__main__':
