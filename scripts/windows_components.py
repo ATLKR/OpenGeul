@@ -27,7 +27,7 @@ import com_source_contract
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
 from prepare_native_tests import TARGETS
-from prepare_upstream import ASYNC_CLIPBOARD_SOURCE_SHA256, IMAGE_INSERTION_SOURCE_SHA256
+from prepare_upstream import ASYNC_CLIPBOARD_SOURCE_SHA256, IMAGE_INSERTION_SOURCE_SHA256, ASYNC_FONT_SOURCE_SHA256
 from wasm_artifacts import FILES as WASM_FILES
 from windows_arch import SUPPORTED_ARCHITECTURES, component_artifact_name, require_architecture, target_triple
 
@@ -82,7 +82,7 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
     'apps/studio-host/package.json', 'apps/studio-host/index.html',
     'apps/studio-host/hop-overrides.ts', 'apps/studio-host/src/style.css',
     'apps/studio-host/src/core/tauri-bridge.ts', 'apps/studio-host/src/main.ts',
-    'apps/studio-host/src/core/desktop-events.ts',
+    'apps/studio-host/src/core/desktop-events.ts', 'apps/studio-host/src/ui/toolbar.ts',
     'apps/studio-host/src/core/document-open.ts',
     'apps/studio-host/src/command/commands/file.ts', 'apps/studio-host/src/opengeul-font-resources.ts',
     'apps/studio-host/src/command/commands/edit.ts',
@@ -311,6 +311,15 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     if any(image['afterSha256'][name] != files.get('third_party/rhwp/rhwp-studio/src/'+name)
            for name in IMAGE_INSERTION_SOURCE_SHA256):
         raise ValueError('Image insertion prepared source hash mismatch')
+    font = ledger.get('asyncFontSelectionGuard')
+    if not isinstance(font, dict) or set(font) != {'beforeSha256', 'afterSha256'}:
+        raise ValueError('Incomplete async font selection source ledger')
+    for key in ('beforeSha256', 'afterSha256'):
+        _hashes(font[key], set(ASYNC_FONT_SOURCE_SHA256))
+    if font['beforeSha256'] != ASYNC_FONT_SOURCE_SHA256:
+        raise ValueError('Async font selection pinned source hash mismatch')
+    if any(font['afterSha256'][name] != files.get(name) for name in ASYNC_FONT_SOURCE_SHA256):
+        raise ValueError('Async font selection prepared source hash mismatch')
     namespace = ledger.get('namespacePatch', {})
     if (namespace != contract['namespacePatch'] or not isinstance(namespace, dict)
             or namespace.get('helperSha256') != config['helpers']['overlay/hwpx_namespaces.rs']

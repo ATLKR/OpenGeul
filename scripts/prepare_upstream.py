@@ -33,6 +33,19 @@ IMAGE_INSERTION_SOURCE_SHA256 = {
 }
 # This second transformation must start with the reviewed Task 1 lifecycle bytes.
 IMAGE_INSERTION_CLIPBOARD_HANDLER_SHA256 = 'eacebec707126015bfa92e09e7c1a1cb9df9a33d18218368bd7996266e5dbd3a'
+ASYNC_FONT_SOURCE_SHA256 = {
+    'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
+    'apps/studio-host/src/ui/toolbar.ts': '203dc4cff5d4ce851466f4efb5107d2b138e0b95d4478ee1a2a93a5049bf62fe',
+    **{'third_party/rhwp/rhwp-studio/src/engine/'+name: digest
+       for name, digest in ASYNC_CLIPBOARD_SOURCE_SHA256.items()},
+}
+ASYNC_FONT_INPUT_SHA256 = {
+    **ASYNC_FONT_SOURCE_SHA256,
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts': '99a842d88873ef9baf6286ef0d9925a3992f204fae07b5d8f7aed0984f96c0ba',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts': '8bfd546419fa0fa433f64ea724277f99ae38f95ef4e90ffcf7ad35d7d85f0876',
+}
+FONT_TOOLBAR_TEST_SHA256 = 'e48357f3a39095b06800aa8b75fb9727a3367015f2857243ea6de0b57c2e5f5c'
+FONT_MAIN = 'apps/studio-host/src/main.ts'
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -418,6 +431,174 @@ def install_image_insertion_guard(source: Path, clipboard_proof: dict) -> dict:
     return {'beforeSha256': IMAGE_INSERTION_SOURCE_SHA256, 'afterSha256': after}
 
 
+def install_async_font_selection_guard(source: Path, clipboard_proof: dict, image_proof: dict) -> dict:
+    """설치 글꼴의 await와 실제 main provider를 원래 편집 문맥에 연결한다."""
+    originals = {name: (source/name).read_bytes() for name in ASYNC_FONT_INPUT_SHA256}
+    test_name = 'apps/studio-host/src/ui/toolbar.test.ts'
+    test_original = (source/test_name).read_bytes()
+    if (any(hashlib.sha256(originals[name]).hexdigest() != digest for name, digest in ASYNC_FONT_INPUT_SHA256.items())
+            or hashlib.sha256(test_original).hexdigest() != FONT_TOOLBAR_TEST_SHA256):
+        raise ValueError('Upstream async font selection source changed')
+    for proof, pins, prefix in (
+            (clipboard_proof, ASYNC_CLIPBOARD_SOURCE_SHA256, 'third_party/rhwp/rhwp-studio/src/engine/'),
+            (image_proof, IMAGE_INSERTION_SOURCE_SHA256, 'third_party/rhwp/rhwp-studio/src/')):
+        if (set(proof) != {'beforeSha256', 'afterSha256'} or proof['beforeSha256'] != pins
+                or set(proof['afterSha256']) != set(pins)
+                or any(proof['afterSha256'][name] != hashlib.sha256((source/(prefix+name)).read_bytes()).hexdigest() for name in pins)):
+            raise ValueError('Async font selection requires the current clipboard and image proofs')
+    keyboard_name = 'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts'
+    handler_name = 'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts'
+    toolbar_name = 'apps/studio-host/src/ui/toolbar.ts'
+    prepared = {name: data.decode('utf-8') for name, data in originals.items()}
+    prepared[keyboard_name] = replace_once(prepared[keyboard_name],
+        'function captureAsyncClipboardContext(self: any):', 'export function captureAsyncClipboardContext(self: any):')
+    prepared[handler_name] = replace_once(prepared[handler_name],
+        '  captureImageInsertionContext(', '''  captureAsyncFormattingContext(isCurrentHandler: () => boolean = () => true): { isCurrent(): boolean; dispose(): void } {
+    const context = _keyboard.captureAsyncClipboardContext(this);
+    return { isCurrent: () => !this.isFormMode() && isCurrentHandler() && context.isCurrent(), dispose: context.dispose };
+  }
+
+  captureImageInsertionContext(''')
+    prepared[FONT_MAIN] = replace_once(prepared[FONT_MAIN],
+        "    toolbar = new Toolbar(document.getElementById('style-bar')!, wasm, eventBus, dispatcher);", '''    toolbar = new Toolbar(document.getElementById('style-bar')!, wasm, eventBus, dispatcher, () => {
+      const handler = inputHandler;
+      return handler?.captureAsyncFormattingContext(() => inputHandler === handler) ?? null;
+    });''')
+    toolbar = prepared[toolbar_name]
+    toolbar = replace_once(toolbar, '  private fontApplyRequestId = 0;', '''  private fontApplyRequestId = 0;
+  private fontApplyContext: { isCurrent(): boolean; dispose(): void } | null = null;''')
+    toolbar = replace_once(toolbar, '    private dispatcher: CommandDispatcher,', '''    private dispatcher: CommandDispatcher,
+    private captureFontApplyContext: () => { isCurrent(): boolean; dispose(): void } | null = () => null,''')
+    toolbar = replace_once(toolbar, "    this.fontLang.addEventListener('change', () => {\n      this.updateFontNameByLang();", "    this.fontLang.addEventListener('change', () => {\n      this.beginFontApplyRequest();\n      this.updateFontNameByLang();")
+    toolbar = replace_once(toolbar, '  private beginFontApplyRequest(): number {', '''  private beginFontApplyRequest(): number {
+    this.fontApplyContext?.dispose();
+    this.fontApplyContext = null;''')
+    toolbar = replace_once(toolbar, '  /** 대표 글꼴 세트를 7개 언어에 일괄 적용 */\n  private async applyFontSelection', '''  /** Await installed fonts while retaining the initiating document and editing context. */
+  private async applyFontsInContext(fonts: string[], apply: () => void): Promise<void> {
+    const requestId = this.beginFontApplyRequest();
+    const context = this.captureFontApplyContext();
+    if (!context) return;
+    this.fontApplyContext = context;
+    try {
+      if (!context.isCurrent()) return;
+      await loadWebFonts(fonts).catch(() => undefined);
+      if (!this.isLatestFontApplyRequest(requestId) || !context.isCurrent()) return;
+      // Formatting publishes document mutation itself; stop observing before commit.
+      context.dispose();
+      apply();
+    } finally {
+      context.dispose();
+      if (this.fontApplyContext === context) this.fontApplyContext = null;
+    }
+  }
+
+  private async applyFontSelection''')
+    toolbar = replace_once(toolbar, '''    const requestId = this.beginFontApplyRequest();
+    const authoringName = sanitizeAuthoringFontFamily(name);
+    await loadWebFonts([authoringName]).catch(() => undefined);
+    if (!this.isLatestFontApplyRequest(requestId)) return;
+
+    const langVal = this.fontLang.value;''', '''    const authoringName = sanitizeAuthoringFontFamily(name);
+    const langVal = this.fontLang.value;
+    const families = this.lastFontFamilies?.slice();
+    await this.applyFontsInContext([authoringName], () => {''')
+    toolbar = replace_once(toolbar, '    if (fontId >= 0 && this.lastFontFamilies) {', '    if (fontId >= 0 && families) {')
+    toolbar = replace_once(toolbar, '          const existingName = this.lastFontFamilies[i] || this.lastFontFamilies[0];', '          const existingName = families[i] || families[0];')
+    toolbar = replace_once(toolbar, '''    }
+  }
+
+  private async applyFontSet(fs: FontSet): Promise<void> {
+    const requestId = this.beginFontApplyRequest();''', '''    }
+    });
+  }
+
+  private async applyFontSet(fs: FontSet): Promise<void> {''')
+    toolbar = replace_once(toolbar, '''    await loadWebFonts(authoringFonts).catch(() => undefined);
+    if (!this.isLatestFontApplyRequest(requestId)) return;
+    const ids: number[] = [];''', '''    await this.applyFontsInContext(authoringFonts, () => {
+    const ids: number[] = [];''')
+    toolbar = replace_once(toolbar, "    this.eventBus.emit('format-char', { fontIds: ids } as CharProperties);\n  }\n}", "    this.eventBus.emit('format-char', { fontIds: ids } as CharProperties);\n    });\n  }\n}")
+    toolbar, indented = re.subn(r'(    await this\.applyFontsInContext\([^\n]*, \(\) => \{\n)(.*?)(    \}\);)',
+        lambda match: match[1] + ''.join('  '+line if line.strip() else line for line in match[2].splitlines(keepends=True)) + match[3],
+        toolbar, flags=re.DOTALL)
+    if indented != 2:
+        raise ValueError('Unexpected async font callback boundaries')
+    prepared[toolbar_name] = toolbar
+    host_test = replace_once(test_original.decode('utf-8'), '    fontApplyRequestId: 0,', '''    fontApplyRequestId: 0,
+    captureFontApplyContext: () => ({ isCurrent: () => true, dispose: vi.fn() }),
+    applyFontsInContext: (Toolbar.prototype as unknown as Record<string, (fonts: string[], apply: () => void) => Promise<void>>).applyFontsInContext,''')
+    host_test += '''
+
+describe('Toolbar initiating font context', () => {
+  const apply = (Toolbar.prototype as unknown as Record<string, (this: object, name: string) => Promise<void>>).applyFontSelection;
+  it('checks context before creating font IDs and disposes after cancellation', async () => {
+    const wait = createDeferred();
+    loadWebFontsMock.mockReturnValueOnce(wait.promise);
+    const { toolbar, emit, wasm } = createToolbarHarness();
+    let current = true;
+    const dispose = vi.fn();
+    toolbar.captureFontApplyContext = () => ({ isCurrent: () => current, dispose });
+    const work = apply.call(toolbar, 'Older');
+    current = false;
+    wait.resolve();
+    await work;
+    expect(wasm.findOrCreateFontId).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalled();
+  });
+  it('disposes a successful context and still applies one format event', async () => {
+    loadWebFontsMock.mockResolvedValueOnce(undefined);
+    const { toolbar, emit, wasm } = createToolbarHarness();
+    const dispose = vi.fn();
+    toolbar.captureFontApplyContext = () => ({ isCurrent: () => true, dispose });
+    await apply.call(toolbar, 'Newest');
+    expect(wasm.findOrCreateFontId).toHaveBeenCalledOnce();
+    expect(emit).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalled();
+  });
+  it('real language change listener cancels even after language returns', async () => {
+    const wait = createDeferred();
+    loadWebFontsMock.mockReturnValueOnce(wait.promise);
+    const { toolbar, emit, wasm } = createToolbarHarness();
+    const listeners = new Map<string, () => void>();
+    const control = { value: 'all', addEventListener: (name: string, listener: () => void) => listeners.set(name, listener) };
+    const controls = Object.assign(toolbar, {
+      fontLang: control, fontName: { addEventListener: vi.fn() }, fontSize: { addEventListener: vi.fn() },
+      btnSizeUp: { addEventListener: vi.fn() }, btnSizeDown: { addEventListener: vi.fn() },
+      populateFontSetOptions: vi.fn(), populateLocalFontOptions: vi.fn(), updateFontNameByLang: vi.fn(),
+    });
+    (Toolbar.prototype as unknown as Record<string, (this: object) => void>).setupFontControls.call(controls);
+    const dispose = vi.fn();
+    toolbar.captureFontApplyContext = () => ({ isCurrent: () => true, dispose });
+    const work = apply.call(toolbar, 'Older');
+    control.value = '1'; listeners.get('change')!();
+    control.value = 'all'; listeners.get('change')!();
+    expect(dispose).toHaveBeenCalled();
+    wait.resolve(); await work;
+    expect(wasm.findOrCreateFontId).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+});
+'''
+    prepared[test_name] = host_test
+    # Pin and replace every source before any write, including the original host tests.
+    for name, text in prepared.items():
+        (source/name).write_text(text, encoding='utf-8', newline='\n')
+    after = {name: hashlib.sha256((source/name).read_bytes()).hexdigest() for name in ASYNC_FONT_SOURCE_SHA256}
+    for name in ASYNC_CLIPBOARD_SOURCE_SHA256:
+        clipboard_proof['afterSha256'][name] = after['third_party/rhwp/rhwp-studio/src/engine/'+name]
+    image_proof['afterSha256']['engine/input-handler.ts'] = after[handler_name]
+    return {'beforeSha256': dict(ASYNC_FONT_SOURCE_SHA256), 'afterSha256': after}
+
+
+def validate_async_font_selection_proof(source: Path, proof: dict) -> None:
+    if (not isinstance(proof, dict) or set(proof) != {'beforeSha256', 'afterSha256'}
+            or proof['beforeSha256'] != ASYNC_FONT_SOURCE_SHA256
+            or not isinstance(proof['afterSha256'], dict) or set(proof['afterSha256']) != set(ASYNC_FONT_SOURCE_SHA256)
+            or any(proof['afterSha256'][name] != hashlib.sha256((source/name).read_bytes()).hexdigest() for name in ASYNC_FONT_SOURCE_SHA256)):
+        raise ValueError('Async font selection prepared source hash mismatch')
+
+
 def patch(source: Path, version: str) -> None:
     package_version(version)
     protected = ['apps/desktop/src-tauri/src/' + x for x in ('commands.rs','state.rs','pdf_export.rs','pending_open.rs','app_quit.rs','recent_documents.rs')]
@@ -477,7 +658,6 @@ def patch(source: Path, version: str) -> None:
     shutil.copy2(ROOT/'overlay/opengeul_runtime.rs',native/'src/opengeul_runtime.rs')
     replace_file(native/'src/lib.rs','tauri::generate_handler![','tauri::generate_handler![\n            opengeul_font_resources::open_font_resource,')
     shutil.copy2(ROOT/'overlay/updates.rs',native/'src/updates.rs')
-    install_store_updates(source)
     # Native font scanning remains restricted to installed system/per-user font directories.
     font=native/'src/font_catalog.rs'
     replace_file(font,'use tauri::{AppHandle, Manager};','use tauri::AppHandle;')
@@ -506,6 +686,11 @@ def patch(source: Path, version: str) -> None:
     install_product_information(source)
     async_clipboard_proof = install_async_clipboard_guard(source)
     image_insertion_proof = install_image_insertion_guard(source, async_clipboard_proof)
+    async_font_proof = install_async_font_selection_guard(source, async_clipboard_proof, image_insertion_proof)
+    validate_async_font_selection_proof(source, async_font_proof)
+    install_store_updates(source)
+    # Store integration is the only later upstream preparation transform of main.
+    async_font_proof['afterSha256'][FONT_MAIN] = hashlib.sha256((source/FONT_MAIN).read_bytes()).hexdigest()
     replace_file(ui/'compare-dialog.ts', 'L: ${this.escape(leftPreview)} / R: ${this.escape(rightPreview)}',
         '왼쪽: ${this.escape(leftPreview)} / 오른쪽: ${this.escape(rightPreview)}')
     replace_file(ui/'history-dialog.ts', 'L: ${this.escape(leftText)} / R: ${this.escape(rightText)}',
@@ -576,7 +761,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'imageInsertionGuard':image_insertion_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard','image file insertion document and lifecycle guard']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'imageInsertionGuard':image_insertion_proof,'asyncFontSelectionGuard':async_font_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard','image file insertion document and lifecycle guard','installed font selection document and editing context guard']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:

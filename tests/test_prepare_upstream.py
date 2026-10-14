@@ -33,6 +33,13 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.image = image.start()
         self.image.return_value = {'testFixture': 'image insertion'}
         self.addCleanup(image.stop)
+        font = patch.object(prepare_upstream, 'install_async_font_selection_guard')
+        self.font = font.start()
+        self.font.return_value = {'testFixture': 'font selection', 'afterSha256': {}}
+        self.addCleanup(font.stop)
+        font_validation = patch.object(prepare_upstream, 'validate_async_font_selection_proof')
+        font_validation.start()
+        self.addCleanup(font_validation.stop)
         # 전체 vendor/shim 무결성은 test_native_activation에서 별도로 검사한다.
         activation = patch.object(prepare_upstream, 'apply_native_activation')
         self.activation = activation.start()
@@ -44,6 +51,7 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.addCleanup(worker.stop)
         self.native = self.source / 'apps/desktop/src-tauri'
         files = {
+            'apps/studio-host/src/main.ts': '// manifest-only source fixture\n',
             'apps/desktop/src-tauri/build.rs': 'fn main() {\n    tauri_build::build();\n}\n',
             'apps/desktop/src-tauri/Cargo.toml': '[package]\nname = "hop-desktop"\nversion = "0.4.5"\n[dependencies]\ntauri = { version = "2", features = [] }\n',
             'apps/desktop/src-tauri/Cargo.lock': 'version = 4\n[[package]]\nname = "hop-desktop"\nversion = "0.4.5"\n[[package]]\nname = "tauri"\nversion = "2.10.3"\n',
@@ -167,8 +175,10 @@ pub fn layer_trees_to_pdf_with_links(
         prepare_upstream.patch(self.source, '1.1.3')
         self.clipboard.assert_called_once_with(self.source)
         self.image.assert_called_once_with(self.source, self.clipboard.return_value)
+        self.font.assert_called_once_with(self.source, self.clipboard.return_value, self.image.return_value)
         ledger = json.loads((self.source/'.opengeul-overlay.json').read_text())
         self.assertEqual(ledger['imageInsertionGuard'], self.image.return_value)
+        self.assertEqual(ledger['asyncFontSelectionGuard'], self.font.return_value)
         path = self.source/'apps/studio-host/src/ui/about-dialog.ts'
         self.assertIn('allenlim@allenlim.net', path.read_text(encoding='utf-8'))
         self.assertEqual(path.read_bytes(), (ROOT/'overlay/about-dialog.ts').read_bytes())

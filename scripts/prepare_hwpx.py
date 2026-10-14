@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 import shutil
 import subprocess
+from prepare_upstream import FONT_MAIN, validate_async_font_selection_proof
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -221,6 +222,8 @@ def patch(source: Path) -> None:
     if not ledger.is_file(): raise ValueError('Apply the distribution overlay before HWPX extensions')
     value = json.loads(ledger.read_text(encoding='utf-8'))
     if value.get('hwpxSaveV1'): raise ValueError('HWPX extension already applied')
+    font_proof = value.get('asyncFontSelectionGuard')
+    validate_async_font_selection_proof(source, font_proof)
     native = source/'apps/desktop/src-tauri/src'
     core = source/'apps/studio-host/src/core'
     host = source/'apps/studio-host'
@@ -383,6 +386,8 @@ def patch(source: Path) -> None:
     value['hwpxSaveV1'] = True
     value['changes'] += ['HWPX native staged save and reopen validation','format-aware WASM export','async-save dirty-state preservation','native-dialog cancellation completion status','async Cut document replacement guard','async document replacement edit preservation','native session cleanup after accepted window destruction']
     value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts','document-open.ts']
+    font_proof['afterSha256'][FONT_MAIN] = hashlib.sha256((source/FONT_MAIN).read_bytes()).hexdigest()
+    validate_async_font_selection_proof(source, font_proof)
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
 

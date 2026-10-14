@@ -25,6 +25,13 @@ import com_source_contract
 import wasm_artifacts
 import windows_arch
 
+FONT_SOURCE_PINS = {
+    'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
+    'apps/studio-host/src/ui/toolbar.ts': '203dc4cff5d4ce851466f4efb5107d2b138e0b95d4478ee1a2a93a5049bf62fe',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+}
+
 HELPER = ROOT/'scripts/windows_components.py'
 components = None
 if HELPER.exists():
@@ -139,6 +146,9 @@ class WindowsComponentsTests(unittest.TestCase):
         insert = source/'third_party/rhwp/rhwp-studio/src/command/commands/insert.ts'
         insert.parent.mkdir(parents=True, exist_ok=True)
         insert.write_bytes(b'// owned prepared image insertion fixture\n')
+        toolbar = source/'apps/studio-host/src/ui/toolbar.ts'
+        toolbar.parent.mkdir(parents=True, exist_ok=True)
+        toolbar.write_bytes(b'// owned prepared async font fixture\n')
         ledger = {'version': json.loads((ROOT/'config/product.json').read_text())['version'],
                   'source': 'OpenGeul distribution overlays', 'preservedFiles': {},
                   'baselinePreservedFiles': {}, 'changes': ['synthetic owned source'],
@@ -161,6 +171,10 @@ class WindowsComponentsTests(unittest.TestCase):
                       },
                       'afterSha256': {'command/commands/insert.ts': digest(insert),
                                       'engine/input-handler.ts': digest(engine/'input-handler.ts')},
+                  },
+                  'asyncFontSelectionGuard': {
+                      'beforeSha256': FONT_SOURCE_PINS,
+                      'afterSha256': {name: digest(source/name) for name in FONT_SOURCE_PINS},
                   },
                   'comWorker': json.loads((source/com_source_contract.LEDGER_PATH).read_bytes()),
                   'nativeActivation': json.loads((source/native_source_contract.LEDGER_PATH).read_bytes())}
@@ -1093,6 +1107,82 @@ class WindowsComponentsTests(unittest.TestCase):
             self.assertEqual(ledger['imageInsertionGuard']['afterSha256'][filename], contract['preparedFiles'][name])
         self.assertEqual(ledger['asyncClipboardGuard']['afterSha256']['input-handler.ts'],
                          ledger['imageInsertionGuard']['afterSha256']['engine/input-handler.ts'])
+
+    def test_async_font_selection_files_bind_actual_provider_and_final_shared_bytes(self):
+        c = self.helper()
+        source = self.source()
+        _, contract = c.source_contract(source, c.configured())
+        ledger = c.read_json(source/'.opengeul-overlay.json')
+        for name in FONT_SOURCE_PINS:
+            with self.subTest(file=name):
+                self.assertIn(name, contract['preparedFiles'])
+                self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+                self.assertEqual(ledger['asyncFontSelectionGuard']['afterSha256'][name], contract['preparedFiles'][name])
+        handler = 'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts'
+        self.assertEqual(ledger['asyncFontSelectionGuard']['afterSha256'][handler],
+                         ledger['imageInsertionGuard']['afterSha256']['engine/input-handler.ts'])
+
+    def test_capture_rejects_mutated_async_font_provider_before_output(self):
+        source = self.source()
+        payload = self.payload('editor')
+        for name in ('apps/studio-host/src/main.ts', 'apps/studio-host/src/ui/toolbar.ts'):
+            with self.subTest(file=name):
+                target = source/name
+                original = target.read_bytes()
+                target.write_bytes(original+b'// removed actual font context provider\n')
+                out = self.root/('changed-font-'+target.name)
+                with self.assertRaisesRegex(ValueError, 'Async font selection prepared source hash mismatch'):
+                    self.helper().capture('editor', payload, source, out, env=self.env)
+                self.assertFalse(out.exists())
+                target.write_bytes(original)
+
+    def test_incomplete_or_forged_async_font_ledger_cannot_authorize_capture(self):
+        c = self.helper()
+        source = self.source()
+        path = source/'.opengeul-overlay.json'
+        original = c.read_json(path)
+        payload = self.payload('editor')
+        for change in ('missing', 'missing-before', 'missing-after', 'forged-before', 'forged-after', 'extra-file', 'extra-field'):
+            with self.subTest(change=change):
+                ledger = copy.deepcopy(original)
+                guard = ledger['asyncFontSelectionGuard']
+                if change == 'missing': del ledger['asyncFontSelectionGuard']
+                elif change == 'missing-before': del guard['beforeSha256']
+                elif change == 'missing-after': del guard['afterSha256']['apps/studio-host/src/main.ts']
+                elif change == 'forged-before': guard['beforeSha256']['apps/studio-host/src/main.ts'] = '0'*64
+                elif change == 'forged-after': guard['afterSha256']['apps/studio-host/src/main.ts'] = '0'*64
+                elif change == 'extra-field': guard['unreviewed'] = True
+                else: guard['afterSha256']['unreviewed.ts'] = '0'*64
+                write_json(path, ledger)
+                out = self.root/('invalid-font-'+change)
+                with self.assertRaises(ValueError):
+                    c.capture('editor', payload, source, out, env=self.env)
+                self.assertFalse(out.exists())
+        write_json(path, original)
+
+    def test_matching_workers_with_forged_async_font_hashes_cannot_join(self):
+        folders = self.pair()
+        for folder in folders.values():
+            path = folder/'provenance.json'
+            value = json.loads(path.read_bytes())
+            value['source']['preparedFiles']['apps/studio-host/src/main.ts'] = '0'*64
+            write_json(path, value)
+        self.assert_rejected_without_outputs(folders, 'Async font selection prepared source hash mismatch')
+
+    def test_rehashed_forged_async_font_ledger_cannot_join_matching_workers(self):
+        folders = self.pair()
+        parity_path = folders['editor']/'source-parity.json'
+        ledger = json.loads(parity_path.read_bytes())
+        ledger['asyncFontSelectionGuard']['afterSha256']['apps/studio-host/src/main.ts'] = '0'*64
+        write_json(parity_path, ledger)
+        for role, folder in folders.items():
+            path = folder/'provenance.json'
+            value = json.loads(path.read_bytes())
+            value['source']['ledgerSha256'] = digest(parity_path)
+            if role == 'editor':
+                value['files']['source-parity.json'] = {'size': parity_path.stat().st_size, 'sha256': digest(parity_path)}
+            write_json(path, value)
+        self.assert_rejected_without_outputs(folders, 'Async font selection prepared source hash mismatch')
 
     def test_capture_rejects_mutated_image_insertion_before_output(self):
         source = self.source()
