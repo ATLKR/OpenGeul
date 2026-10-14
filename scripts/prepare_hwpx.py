@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from prepare_upstream import FONT_MAIN, validate_async_font_selection_proof
+import menu_clipboard
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -224,6 +225,8 @@ def patch(source: Path) -> None:
     if value.get('hwpxSaveV1'): raise ValueError('HWPX extension already applied')
     font_proof = value.get('asyncFontSelectionGuard')
     validate_async_font_selection_proof(source, font_proof)
+    menu_proof = value.get('menuClipboardPaste')
+    menu_clipboard.validate(source, menu_proof)
     native = source/'apps/desktop/src-tauri/src'
     core = source/'apps/studio-host/src/core'
     host = source/'apps/studio-host'
@@ -388,6 +391,7 @@ def patch(source: Path) -> None:
     value['extendedFiles'] = ['commands.rs','state.rs','lib.rs','tauri-bridge.ts','main.ts','file.ts','desktop-events.ts','edit.ts','document-open.ts']
     font_proof['afterSha256'][FONT_MAIN] = hashlib.sha256((source/FONT_MAIN).read_bytes()).hexdigest()
     validate_async_font_selection_proof(source, font_proof)
+    menu_clipboard.refresh_hwpx_lib(source, menu_proof)
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
 

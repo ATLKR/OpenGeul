@@ -23,6 +23,8 @@ import xml.etree.ElementTree as ET
 import zlib
 import native_source_contract
 import com_source_contract
+import pdf_search_text
+import menu_clipboard
 
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
@@ -42,6 +44,7 @@ FEATURES = {'editor': 'default', 'cli': 'native-skia'}
 RESERVED = re.compile(r'(?i)(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?\Z')
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 COPIED_OVERLAYS = {
+    menu_clipboard.HELPER: 'overlay/menu-clipboard.ts',
     **{com_source_contract.CORE+'/src/opengeul_com_worker/'+name:
        'overlay/com-worker/src/'+name for name in com_source_contract.FILES},
     **{native_source_contract.NATIVE_ROOT + '/opengeul-native/native-open/' + name:
@@ -65,7 +68,7 @@ COPIED_OVERLAYS = {
     'third_party/rhwp/src/parser/hwpx/opengeul_namespaces.rs': 'overlay/hwpx_namespaces.rs',
     'third_party/rhwp/rhwp-studio/src/engine/opengeul-composition-final.ts': 'overlay/composition-final.ts',
 }
-SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
+SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | {
     com_source_contract.LEDGER_PATH,
     'third_party/rhwp/src/main.rs', 'third_party/rhwp/src/mcp_serve.rs',
     native_source_contract.LEDGER_PATH,
@@ -278,6 +281,10 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     if (not isinstance(worker, dict) or not isinstance(worker.get('ledger'), dict)
             or ledger.get('comWorker') != worker['ledger']):
         raise ValueError('Distribution ledger COM worker proof mismatch')
+    pdf_proof = contract.get('pdfSearchText')
+    if ledger.get('pdfSearchText') != pdf_proof:
+        raise ValueError('Distribution ledger PDF search text proof mismatch')
+    pdf_search_text.validate(pdf_proof, contract['preparedFiles'], contract['coreSourceFiles'], config['helpers'])
     for key in ('preservedFiles', 'baselinePreservedFiles'):
         for name, digest in ledger[key].items():
             safe_name(name)
@@ -320,6 +327,10 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
         raise ValueError('Async font selection pinned source hash mismatch')
     if any(font['afterSha256'][name] != files.get(name) for name in ASYNC_FONT_SOURCE_SHA256):
         raise ValueError('Async font selection prepared source hash mismatch')
+    menu_proof = contract.get('menuClipboardPaste')
+    if ledger.get('menuClipboardPaste') != menu_proof:
+        raise ValueError('Distribution ledger menu clipboard proof mismatch')
+    menu_clipboard.validate_contract(menu_proof, contract['preparedFiles'], config['helpers'])
     namespace = ledger.get('namespacePatch', {})
     if (namespace != contract['namespacePatch'] or not isinstance(namespace, dict)
             or namespace.get('helperSha256') != config['helpers']['overlay/hwpx_namespaces.rs']
@@ -379,6 +390,8 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
     contract = {'ledgerSha256': sha(ledger_path), 'preparedFiles': files, 'coreSourceFiles': core_files, 'nativeTests': native,
                 'namespacePatch': read_json(core/'.opengeul-namespaces.json'),
                 'wasmRebuild': ledger.get('wasmRebuild'),
+                'pdfSearchText': ledger.get('pdfSearchText'),
+                'menuClipboardPaste': ledger.get('menuClipboardPaste'),
                 'nativeActivation': native_source_contract.capture(source, files, config,
                     read_json=read_json, tree=tree, sha=sha),
                 'comWorker': com_source_contract.capture(source, files, native, config,
@@ -574,7 +587,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
         validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
-    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker'}
+    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','menuClipboardPaste'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
         raise ValueError('Invalid prepared source contract')
     _hashes(contract['preparedFiles'], set(SOURCE_FILES) | set(NATIVE_FILES))
@@ -590,6 +603,8 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
     for name, digest in contract['preparedFiles'].items():
         if any(name.startswith(directory+'/') for directory in CORE_TREES) and core_files.get(name) != digest:
             raise ValueError('Complete core source inventory mismatch')
+    pdf_search_text.validate(contract['pdfSearchText'], contract['preparedFiles'], core_files, config['helpers'])
+    menu_clipboard.validate_contract(contract['menuClipboardPaste'], contract['preparedFiles'], config['helpers'])
     native = contract['nativeTests']
     if (not isinstance(native, dict) or set(native) != {'targets','originalManifestSha256'}
             or native['targets'] != {name: config['helpers']['overlay/'+local] for name, local in TARGETS.items()}

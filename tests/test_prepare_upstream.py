@@ -40,6 +40,16 @@ class PrepareNativeManifestTests(unittest.TestCase):
         font_validation = patch.object(prepare_upstream, 'validate_async_font_selection_proof')
         font_validation.start()
         self.addCleanup(font_validation.stop)
+        # These additive feature modules have their own real pinned-source tests;
+        # this manifest fixture checks their place in the shared preparation path.
+        pdf_search = patch.object(prepare_upstream, 'apply_pdf_search_text', create=True)
+        self.pdf_search = pdf_search.start()
+        self.pdf_search.return_value = {'testFixture': 'PDF searchable coordinates'}
+        self.addCleanup(pdf_search.stop)
+        menu_clipboard = patch.object(prepare_upstream, 'apply_menu_clipboard', create=True)
+        self.menu_clipboard = menu_clipboard.start()
+        self.menu_clipboard.return_value = {'testFixture': 'menu clipboard'}
+        self.addCleanup(menu_clipboard.stop)
         # 전체 vendor/shim 무결성은 test_native_activation에서 별도로 검사한다.
         activation = patch.object(prepare_upstream, 'apply_native_activation')
         self.activation = activation.start()
@@ -184,6 +194,31 @@ pub fn layer_trees_to_pdf_with_links(
         self.assertEqual(path.read_bytes(), (ROOT/'overlay/about-dialog.ts').read_bytes())
         self.assertEqual((self.source/'apps/studio-host/src/ui/about-dialog.test.ts').read_bytes(),
                          (ROOT/'overlay/about-dialog.test.ts').read_bytes())
+
+    def test_searchable_pdf_and_menu_clipboard_are_in_the_final_preparation_path(self):
+        observed = []
+        def pdf_boundary(source):
+            pdf = source/'third_party/rhwp/src/renderer/pdf.rs'
+            self.assertIn('opengeul_pdf_guard::enforce', pdf.read_text())
+            self.assertTrue((source/'third_party/rhwp/src/renderer/pdf/opengeul_font_policy.rs').is_file())
+            observed.append('pdf')
+            return self.pdf_search.return_value
+        def clipboard_boundary(source, clipboard, image, font):
+            self.assertEqual(observed, ['pdf'])
+            self.assertNotIn('tauri_plugin_updater::Builder', (source/'apps/desktop/src-tauri/src/lib.rs').read_text())
+            self.assertIn('apps/studio-host/src/main.ts', font['afterSha256'])
+            observed.append('menu')
+            return self.menu_clipboard.return_value
+        self.pdf_search.side_effect = pdf_boundary
+        self.menu_clipboard.side_effect = clipboard_boundary
+        prepare_upstream.patch(self.source, '1.1.5')
+        self.pdf_search.assert_called_once_with(self.source)
+        self.menu_clipboard.assert_called_once_with(self.source, self.clipboard.return_value,
+                                                  self.image.return_value, self.font.return_value)
+        ledger = json.loads((self.source/'.opengeul-overlay.json').read_text())
+        self.assertEqual(ledger['pdfSearchText'], self.pdf_search.return_value)
+        self.assertEqual(ledger['menuClipboardPaste'], self.menu_clipboard.return_value)
+        self.assertEqual(observed, ['pdf', 'menu'])
 
     def test_changed_upstream_about_is_rejected_without_overwrite(self):
         path = self.source/'apps/studio-host/src/ui/about-dialog.ts'

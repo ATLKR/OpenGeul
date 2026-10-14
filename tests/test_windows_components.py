@@ -24,6 +24,8 @@ import com_worker
 import com_source_contract
 import wasm_artifacts
 import windows_arch
+import pdf_search_text
+import menu_clipboard
 
 FONT_SOURCE_PINS = {
     'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
@@ -149,6 +151,36 @@ class WindowsComponentsTests(unittest.TestCase):
         toolbar = source/'apps/studio-host/src/ui/toolbar.ts'
         toolbar.parent.mkdir(parents=True, exist_ok=True)
         toolbar.write_bytes(b'// owned prepared async font fixture\n')
+        # Transport tests use bounded owned source bytes as immutable references.
+        # Real pinned patching is exercised by the dedicated preparation/native tests.
+        pdf_reference = {name: {path: digest(source/path) for path in getattr(pdf_search_text, name)}
+                         for name in ('PATCHED_SHA256', 'PRESERVED_SHA256')}
+        for name, reference in pdf_reference.items():
+            override = patch.object(pdf_search_text, name, reference)
+            override.start()
+            self.addCleanup(override.stop)
+        self.pdf_reference_path = self.root/'pdf-fixture-reference.json'
+        write_json(self.pdf_reference_path, pdf_reference)
+        pdf_proof = {'formatVersion': 1,
+                     'helperSha256': digest(ROOT/pdf_search_text.HELPER),
+                     'beforeSha256': pdf_search_text.SOURCE_SHA256,
+                     'afterSha256': pdf_search_text.PATCHED_SHA256,
+                     'preservedSha256': pdf_search_text.PRESERVED_SHA256}
+        menu_final = {name: digest(source/name) for name in menu_clipboard.SOURCE_FILES}
+        menu_phases = {
+            'prepared': {**menu_final, menu_clipboard.LIB: hashlib.sha256(b'owned prior native fixture').hexdigest()},
+            'hwpx': menu_final,
+            'hwpx-windows': {**menu_final, menu_clipboard.LIB: hashlib.sha256(b'owned CRLF native fixture').hexdigest()},
+        }
+        menu_override = patch.object(menu_clipboard, 'PHASE_SOURCE_SHA256', menu_phases)
+        menu_override.start()
+        self.addCleanup(menu_override.stop)
+        self.menu_reference_path = self.root/'menu-fixture-reference.json'
+        write_json(self.menu_reference_path, menu_phases)
+        menu_proof = {'beforeSha256': {**menu_clipboard.INPUT_SOURCE_SHA256, **menu_clipboard.INPUT_NATIVE_SHA256},
+                      'afterSha256': menu_final,
+                      'helperSha256': digest(ROOT/'overlay/menu-clipboard.ts'),
+                      'hwpxPatcherSha256': digest(ROOT/'scripts/prepare_hwpx.py')}
         ledger = {'version': json.loads((ROOT/'config/product.json').read_text())['version'],
                   'source': 'OpenGeul distribution overlays', 'preservedFiles': {},
                   'baselinePreservedFiles': {}, 'changes': ['synthetic owned source'],
@@ -157,6 +189,8 @@ class WindowsComponentsTests(unittest.TestCase):
                      'afterSha256': hashlib.sha256((engine/'input-handler-text.ts').read_text(encoding='utf-8').encode('utf-8')).hexdigest(),
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
                   'namespacePatch': namespace, 'wasmRebuild': wasm,
+                  'pdfSearchText': pdf_proof,
+                  'menuClipboardPaste': menu_proof,
                   'asyncClipboardGuard': {
                       'beforeSha256': {
                           'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
@@ -234,11 +268,16 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract,com_source_contract;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
                 "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
-                "sys.argv=sys.argv[3:];runpy.run_path(sys.argv[0],run_name='__main__')",
-                str(self.native_reference_path),str(self.com_reference_path),str(HELPER),*arguments]
+                "pdf_fixture=json.loads(Path(sys.argv[3]).read_text());"
+                "pdf_search_text.PATCHED_SHA256=pdf_fixture['PATCHED_SHA256'];"
+                "pdf_search_text.PRESERVED_SHA256=pdf_fixture['PRESERVED_SHA256'];"
+                "menu_clipboard.PHASE_SOURCE_SHA256=json.loads(Path(sys.argv[4]).read_text());"
+                "sys.argv=sys.argv[5:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                str(self.native_reference_path),str(self.com_reference_path),str(self.pdf_reference_path),
+                str(self.menu_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')
@@ -1095,6 +1134,91 @@ class WindowsComponentsTests(unittest.TestCase):
             self.assertEqual(contract['preparedFiles'][name], digest(source/name))
             self.assertEqual(ledger['asyncClipboardGuard']['afterSha256'][filename], contract['preparedFiles'][name])
 
+    def test_pdf_root_geometry_and_original_licenses_bind_both_worker_inputs(self):
+        c = self.helper()
+        source = self.source()
+        _, contract = c.source_contract(source, c.configured())
+        ledger = c.read_json(source/'.opengeul-overlay.json')
+        self.assertEqual(contract['pdfSearchText'], ledger['pdfSearchText'])
+        for name in pdf_search_text.SOURCE_FILES:
+            self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+            if '/src/' in name:
+                self.assertEqual(contract['coreSourceFiles'][name], digest(source/name))
+
+    def test_rehashed_pdf_source_and_ledger_cannot_authorize_capture(self):
+        c = self.helper()
+        source = self.source()
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = c.read_json(ledger_path)
+        target = source/pdf_search_text.PDF
+        target.write_bytes(target.read_bytes()+b'// arbitrary changed PDF behavior\n')
+        ledger['pdfSearchText']['afterSha256'] = dict(ledger['pdfSearchText']['afterSha256'])
+        ledger['pdfSearchText']['afterSha256'][pdf_search_text.PDF] = digest(target)
+        write_json(ledger_path, ledger)
+        out = self.root/'forged-pdf-capture'
+        with self.assertRaisesRegex(ValueError, 'PDF search text pinned source proof mismatch'):
+            c.capture('cli', self.payload('cli'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_matching_workers_cannot_join_with_coordinated_pdf_hash_forgery(self):
+        folders = self.pair()
+        for folder in folders.values():
+            path = folder/'provenance.json'
+            value = json.loads(path.read_bytes())
+            proof = value['source']['pdfSearchText']
+            proof['afterSha256'][pdf_search_text.PDF] = '0'*64
+            value['source']['preparedFiles'][pdf_search_text.PDF] = '0'*64
+            value['source']['coreSourceFiles'][pdf_search_text.PDF] = '0'*64
+            write_json(path, value)
+        self.assert_rejected_without_outputs(folders, 'PDF search text pinned source proof mismatch')
+
+    def test_menu_clipboard_final_engine_native_and_helper_bytes_are_owned(self):
+        c = self.helper()
+        source = self.source()
+        _, contract = c.source_contract(source, c.configured())
+        ledger = c.read_json(source/'.opengeul-overlay.json')
+        self.assertEqual(contract['menuClipboardPaste'], ledger['menuClipboardPaste'])
+        for name in (*menu_clipboard.SOURCE_FILES, menu_clipboard.HELPER):
+            self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+        self.assertEqual(ledger['menuClipboardPaste']['hwpxPatcherSha256'], digest(ROOT/'scripts/prepare_hwpx.py'))
+
+    def test_rehashed_menu_native_source_and_proof_cannot_authorize_capture(self):
+        c = self.helper()
+        source = self.source()
+        target = source/menu_clipboard.LIB
+        target.write_bytes(target.read_bytes()+b'// arbitrary clipboard builder change\n')
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = c.read_json(ledger_path)
+        ledger['menuClipboardPaste']['afterSha256'][menu_clipboard.LIB] = digest(target)
+        write_json(ledger_path, ledger)
+        out = self.root/'forged-menu-capture'
+        with self.assertRaisesRegex(ValueError, 'Menu clipboard reviewed output proof mismatch'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_matching_workers_cannot_join_coordinated_menu_builder_forgery(self):
+        folders = self.pair()
+        for folder in folders.values():
+            path = folder/'provenance.json'
+            value = json.loads(path.read_bytes())
+            value['source']['menuClipboardPaste']['afterSha256'][menu_clipboard.LIB] = '0'*64
+            value['source']['preparedFiles'][menu_clipboard.LIB] = '0'*64
+            write_json(path, value)
+        self.assert_rejected_without_outputs(folders, 'Menu clipboard reviewed output proof mismatch')
+
+    def test_menu_clipboard_requires_the_reviewed_hwpx_transform_before_capture(self):
+        c = self.helper()
+        source = self.source()
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = c.read_json(ledger_path)
+        ledger['menuClipboardPaste']['afterSha256'] = dict(menu_clipboard.PHASE_SOURCE_SHA256['prepared'])
+        ledger['menuClipboardPaste']['hwpxPatcherSha256'] = None
+        write_json(ledger_path, ledger)
+        out = self.root/'premature-menu-capture'
+        with self.assertRaisesRegex(ValueError, 'Menu clipboard reviewed output proof mismatch'):
+            c.capture('cli', self.payload('cli'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
     def test_image_insertion_files_and_shared_handler_bind_final_prepared_bytes(self):
         c = self.helper()
         source = self.source()
@@ -1272,7 +1396,9 @@ class WindowsComponentsTests(unittest.TestCase):
             value = json.loads(path.read_bytes())
             value['source']['preparedFiles'][filename] = '0'*64
             write_json(path, value)
-        self.assert_rejected_without_outputs(folders, 'Async clipboard prepared source hash mismatch')
+        # The additive menu contract now rejects this shared keyboard at the
+        # component boundary, before the older parity-ledger guard runs.
+        self.assert_rejected_without_outputs(folders, 'Menu clipboard prepared source proof mismatch')
 
     def test_rehashed_forged_async_ledger_cannot_join_matching_workers(self):
         folders = self.pair()
