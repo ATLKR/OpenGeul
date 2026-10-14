@@ -27,7 +27,7 @@ import com_source_contract
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
 from prepare_native_tests import TARGETS
-from prepare_upstream import ASYNC_CLIPBOARD_SOURCE_SHA256
+from prepare_upstream import ASYNC_CLIPBOARD_SOURCE_SHA256, IMAGE_INSERTION_SOURCE_SHA256
 from wasm_artifacts import FILES as WASM_FILES
 from windows_arch import SUPPORTED_ARCHITECTURES, component_artifact_name, require_architecture, target_triple
 
@@ -94,6 +94,7 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
     'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts',
     'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts',
     'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts',
+    'third_party/rhwp/rhwp-studio/src/command/commands/insert.ts',
     'third_party/rhwp/rhwp-studio/src/ui/about-dialog.ts',
     'third_party/rhwp/rhwp-studio/src/ui/compare-dialog.ts',
     'third_party/rhwp/rhwp-studio/src/ui/history-dialog.ts',
@@ -300,6 +301,16 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     if any(clipboard['afterSha256'][name] != files.get('third_party/rhwp/rhwp-studio/src/engine/'+name)
            for name in ASYNC_CLIPBOARD_SOURCE_SHA256):
         raise ValueError('Async clipboard prepared source hash mismatch')
+    image = ledger.get('imageInsertionGuard')
+    if not isinstance(image, dict) or set(image) != {'beforeSha256', 'afterSha256'}:
+        raise ValueError('Incomplete image insertion source ledger')
+    for key in ('beforeSha256', 'afterSha256'):
+        _hashes(image[key], set(IMAGE_INSERTION_SOURCE_SHA256))
+    if image['beforeSha256'] != IMAGE_INSERTION_SOURCE_SHA256:
+        raise ValueError('Image insertion pinned source hash mismatch')
+    if any(image['afterSha256'][name] != files.get('third_party/rhwp/rhwp-studio/src/'+name)
+           for name in IMAGE_INSERTION_SOURCE_SHA256):
+        raise ValueError('Image insertion prepared source hash mismatch')
     namespace = ledger.get('namespacePatch', {})
     if (namespace != contract['namespacePatch'] or not isinstance(namespace, dict)
             or namespace.get('helperSha256') != config['helpers']['overlay/hwpx_namespaces.rs']

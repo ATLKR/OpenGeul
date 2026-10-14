@@ -27,6 +27,12 @@ ASYNC_CLIPBOARD_SOURCE_SHA256 = {
     'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
     'input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
 }
+IMAGE_INSERTION_SOURCE_SHA256 = {
+    'command/commands/insert.ts': '29e9c3d98e26a8c7b44cd59af8a31872abf4e618ae37d15e3049178cc5226364',
+    'engine/input-handler.ts': ASYNC_CLIPBOARD_SOURCE_SHA256['input-handler.ts'],
+}
+# This second transformation must start with the reviewed Task 1 lifecycle bytes.
+IMAGE_INSERTION_CLIPBOARD_HANDLER_SHA256 = 'eacebec707126015bfa92e09e7c1a1cb9df9a33d18218368bd7996266e5dbd3a'
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -323,6 +329,95 @@ function captureAsyncClipboardContext(self: any): { isCurrent(): boolean; dispos
                             for name, text in prepared.items()}}
 
 
+def install_image_insertion_guard(source: Path, clipboard_proof: dict) -> dict:
+    """파일 선택부터 실제 배치까지 원래 문서와 IH 수명에 귀속한다."""
+    root = source/'third_party/rhwp/rhwp-studio/src'
+    original = {name: (root/name).read_bytes() for name in IMAGE_INSERTION_SOURCE_SHA256}
+    expected = {**IMAGE_INSERTION_SOURCE_SHA256,
+                'engine/input-handler.ts': IMAGE_INSERTION_CLIPBOARD_HANDLER_SHA256}
+    if any(hashlib.sha256(original[name]).hexdigest() != digest for name, digest in expected.items()):
+        raise ValueError('Upstream image insertion source changed')
+    if (set(clipboard_proof) != {'beforeSha256', 'afterSha256'}
+            or clipboard_proof['beforeSha256'] != ASYNC_CLIPBOARD_SOURCE_SHA256
+            or set(clipboard_proof['afterSha256']) != set(ASYNC_CLIPBOARD_SOURCE_SHA256)
+            or any(clipboard_proof['afterSha256'][name] != hashlib.sha256((root/'engine'/name).read_bytes()).hexdigest()
+                   for name in ASYNC_CLIPBOARD_SOURCE_SHA256)):
+        raise ValueError('Image insertion requires the current async clipboard proof')
+    insert = original['command/commands/insert.ts'].decode('utf-8')
+    insert = replace_once(insert, '''      const input = document.createElement('input');
+      input.type = 'file';''', '''      const imageContext = ih.captureImageInsertionContext(() => services.getInputHandler() === ih);
+      const input = document.createElement('input');
+      input.type = 'file';''')
+    insert = replace_once(insert, '''        if (!file) return;
+        let objectUrl = '';''', '''        if (!file || !imageContext.isCurrent()) return;
+        let objectUrl = '';''')
+    insert = replace_once(insert, '''          const data = new Uint8Array(await file.arrayBuffer());
+          const ext''', '''          const data = new Uint8Array(await file.arrayBuffer());
+          if (!imageContext.isCurrent()) return;
+          const ext''')
+    insert = replace_once(insert, '''          ih.enterImagePlacementMode(data, ext, img.naturalWidth, img.naturalHeight, file.name);''', '''          if (!imageContext.isCurrent()) return;
+          ih.enterImagePlacementMode(data, ext, img.naturalWidth, img.naturalHeight, file.name, imageContext);''')
+    insert = replace_once(insert, '''        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn('[insert:image]''', '''        } catch (err) {
+          if (!imageContext.isCurrent()) return;
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn('[insert:image]''')
+    handler = original['engine/input-handler.ts'].decode('utf-8')
+    handler = replace_once(handler, '''  private imagePlacementMode = false;''', '''  private imageInsertionLifecycle = 0;
+  private imagePlacementContext: { isCurrent(): boolean } | null = null;
+  private imagePlacementMode = false;''')
+    handler = replace_once(handler, '''  /** 그림 배치 모드 진입: 파일 선택 후 호출. 마우스로 영역 지정 대기 */
+  enterImagePlacementMode(data: Uint8Array, ext: string, naturalWidth: number, naturalHeight: number, fileName: string = ''): void {
+    this.imagePlacementMode = true;''', '''  /** Own the document and IH lifetime; the follow-up hitTest chooses the position. */
+  captureImageInsertionContext(isCurrentHandler: () => boolean = () => true): { isCurrent(): boolean } {
+    const wasm = this.wasm;
+    const generation = wasm.documentGeneration;
+    const document = wasm.borrowDocumentHandle();
+    const lifecycle = this.imageInsertionLifecycle;
+    return { isCurrent: () => this.active && this.wasm === wasm
+      && this.imageInsertionLifecycle === lifecycle
+      && wasm.documentGeneration === generation
+      && wasm.borrowDocumentHandle() === document && isCurrentHandler() };
+  }
+
+  /** 그림 배치 모드 진입: 파일 선택 후 호출. 마우스로 영역 지정 대기 */
+  enterImagePlacementMode(data: Uint8Array, ext: string, naturalWidth: number, naturalHeight: number, fileName: string = '', context = this.captureImageInsertionContext()): void {
+    if (!context.isCurrent()) return;
+    this.cancelImagePlacement();
+    this.imagePlacementContext = context;
+    this.imagePlacementMode = true;''')
+    handler = replace_once(handler, '''  private cancelImagePlacement(): void {
+    _table.cancelImagePlacement.call(this);''', '''  private cancelImagePlacement(): void {
+    if (this.imagePlacementDrag) document.removeEventListener('mouseup', this.onMouseUpBound);
+    this.imagePlacementContext = null;
+    _table.cancelImagePlacement.call(this);''')
+    handler = replace_once(handler, '''  private finishImagePlacement(e: MouseEvent): void {
+    _table.finishImagePlacement.call(this, e);
+  }''', '''  private finishImagePlacement(e: MouseEvent): void {
+    if (!this.imagePlacementContext?.isCurrent()) {
+      this.cancelImagePlacement();
+      return;
+    }
+    try { _table.finishImagePlacement.call(this, e); }
+    finally { if (!this.imagePlacementMode) this.imagePlacementContext = null; }
+  }''')
+    for anchor in ('  deactivate(): void {', '  dispose(): void {'):
+        handler = replace_once(handler, anchor, anchor + '''
+    this.imageInsertionLifecycle++;
+    if (this.imagePlacementMode || this.imagePlacementData || this.imagePlacementDrag || this.imagePlacementOverlay) {
+      this.cancelImagePlacement();
+    }''')
+    prepared = {'command/commands/insert.ts': insert, 'engine/input-handler.ts': handler}
+    # Verify every pinned byte and replacement before either source is written.
+    for name, text in prepared.items():
+        (root/name).write_text(text, encoding='utf-8', newline='\n')
+    after = {name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in prepared}
+    # Both ledgers own the final shared handler, including this second transform.
+    clipboard_proof['afterSha256']['input-handler.ts'] = after['engine/input-handler.ts']
+    return {'beforeSha256': IMAGE_INSERTION_SOURCE_SHA256, 'afterSha256': after}
+
+
 def patch(source: Path, version: str) -> None:
     package_version(version)
     protected = ['apps/desktop/src-tauri/src/' + x for x in ('commands.rs','state.rs','pdf_export.rs','pending_open.rs','app_quit.rs','recent_documents.rs')]
@@ -410,6 +505,7 @@ def patch(source: Path, version: str) -> None:
         'version.textContent = `버전 ${__APP_VERSION__}`;')
     install_product_information(source)
     async_clipboard_proof = install_async_clipboard_guard(source)
+    image_insertion_proof = install_image_insertion_guard(source, async_clipboard_proof)
     replace_file(ui/'compare-dialog.ts', 'L: ${this.escape(leftPreview)} / R: ${this.escape(rightPreview)}',
         '왼쪽: ${this.escape(leftPreview)} / 오른쪽: ${this.escape(rightPreview)}')
     replace_file(ui/'history-dialog.ts', 'L: ${this.escape(leftText)} / R: ${this.escape(rightText)}',
@@ -480,7 +576,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'imageInsertionGuard':image_insertion_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard','image file insertion document and lifecycle guard']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:

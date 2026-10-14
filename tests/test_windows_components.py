@@ -136,6 +136,9 @@ class WindowsComponentsTests(unittest.TestCase):
         clipboard_files = ('input-handler-keyboard.ts', 'input-handler.ts')
         for name in clipboard_files:
             (engine/name).write_bytes(('// owned prepared async clipboard fixture: '+name+'\n').encode())
+        insert = source/'third_party/rhwp/rhwp-studio/src/command/commands/insert.ts'
+        insert.parent.mkdir(parents=True, exist_ok=True)
+        insert.write_bytes(b'// owned prepared image insertion fixture\n')
         ledger = {'version': json.loads((ROOT/'config/product.json').read_text())['version'],
                   'source': 'OpenGeul distribution overlays', 'preservedFiles': {},
                   'baselinePreservedFiles': {}, 'changes': ['synthetic owned source'],
@@ -150,6 +153,14 @@ class WindowsComponentsTests(unittest.TestCase):
                           'input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
                       },
                       'afterSha256': {name: digest(engine/name) for name in clipboard_files},
+                  },
+                  'imageInsertionGuard': {
+                      'beforeSha256': {
+                          'command/commands/insert.ts': '29e9c3d98e26a8c7b44cd59af8a31872abf4e618ae37d15e3049178cc5226364',
+                          'engine/input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+                      },
+                      'afterSha256': {'command/commands/insert.ts': digest(insert),
+                                      'engine/input-handler.ts': digest(engine/'input-handler.ts')},
                   },
                   'comWorker': json.loads((source/com_source_contract.LEDGER_PATH).read_bytes()),
                   'nativeActivation': json.loads((source/native_source_contract.LEDGER_PATH).read_bytes())}
@@ -1069,6 +1080,76 @@ class WindowsComponentsTests(unittest.TestCase):
             self.assertIn(name, contract['preparedFiles'])
             self.assertEqual(contract['preparedFiles'][name], digest(source/name))
             self.assertEqual(ledger['asyncClipboardGuard']['afterSha256'][filename], contract['preparedFiles'][name])
+
+    def test_image_insertion_files_and_shared_handler_bind_final_prepared_bytes(self):
+        c = self.helper()
+        source = self.source()
+        _, contract = c.source_contract(source, c.configured())
+        ledger = c.read_json(source/'.opengeul-overlay.json')
+        for filename in ('command/commands/insert.ts', 'engine/input-handler.ts'):
+            name = 'third_party/rhwp/rhwp-studio/src/'+filename
+            self.assertIn(name, contract['preparedFiles'])
+            self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+            self.assertEqual(ledger['imageInsertionGuard']['afterSha256'][filename], contract['preparedFiles'][name])
+        self.assertEqual(ledger['asyncClipboardGuard']['afterSha256']['input-handler.ts'],
+                         ledger['imageInsertionGuard']['afterSha256']['engine/input-handler.ts'])
+
+    def test_capture_rejects_mutated_image_insertion_before_output(self):
+        source = self.source()
+        target = source/'third_party/rhwp/rhwp-studio/src/command/commands/insert.ts'
+        target.write_bytes(target.read_bytes()+b'// removed image ownership\n')
+        out = self.root/'changed-image-insertion'
+        with self.assertRaisesRegex(ValueError, 'Image insertion prepared source hash mismatch'):
+            self.helper().capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_incomplete_or_forged_image_insertion_ledger_cannot_authorize_capture(self):
+        c = self.helper()
+        source = self.source()
+        path = source/'.opengeul-overlay.json'
+        original = c.read_json(path)
+        payload = self.payload('editor')
+        for change in ('missing', 'missing-before', 'missing-after', 'forged-before', 'forged-after', 'extra-file'):
+            with self.subTest(change=change):
+                ledger = copy.deepcopy(original)
+                guard = ledger['imageInsertionGuard']
+                if change == 'missing': del ledger['imageInsertionGuard']
+                elif change == 'missing-before': del guard['beforeSha256']
+                elif change == 'missing-after': del guard['afterSha256']['engine/input-handler.ts']
+                elif change == 'forged-before': guard['beforeSha256']['command/commands/insert.ts'] = '0'*64
+                elif change == 'forged-after': guard['afterSha256']['command/commands/insert.ts'] = '0'*64
+                else: guard['afterSha256']['unreviewed.ts'] = '0'*64
+                write_json(path, ledger)
+                out = self.root/('invalid-image-'+change)
+                with self.assertRaises(ValueError):
+                    c.capture('editor', payload, source, out, env=self.env)
+                self.assertFalse(out.exists())
+        write_json(path, original)
+
+    def test_matching_workers_with_forged_image_insertion_hashes_cannot_join(self):
+        folders = self.pair()
+        filename = 'third_party/rhwp/rhwp-studio/src/command/commands/insert.ts'
+        for folder in folders.values():
+            path = folder/'provenance.json'
+            value = json.loads(path.read_bytes())
+            value['source']['preparedFiles'][filename] = '0'*64
+            write_json(path, value)
+        self.assert_rejected_without_outputs(folders, 'Image insertion prepared source hash mismatch')
+
+    def test_rehashed_forged_image_insertion_ledger_cannot_join_matching_workers(self):
+        folders = self.pair()
+        parity_path = folders['editor']/'source-parity.json'
+        ledger = json.loads(parity_path.read_bytes())
+        ledger['imageInsertionGuard']['afterSha256']['command/commands/insert.ts'] = '0'*64
+        write_json(parity_path, ledger)
+        for role, folder in folders.items():
+            path = folder/'provenance.json'
+            value = json.loads(path.read_bytes())
+            value['source']['ledgerSha256'] = digest(parity_path)
+            if role == 'editor':
+                value['files']['source-parity.json'] = {'size': parity_path.stat().st_size, 'sha256': digest(parity_path)}
+            write_json(path, value)
+        self.assert_rejected_without_outputs(folders, 'Image insertion prepared source hash mismatch')
 
     def test_incomplete_or_forged_async_clipboard_ledger_cannot_authorize_capture(self):
         c = self.helper()

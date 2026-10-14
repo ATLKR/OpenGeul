@@ -29,6 +29,10 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.clipboard = clipboard.start()
         self.clipboard.return_value = {'testFixture': 'async clipboard'}
         self.addCleanup(clipboard.stop)
+        image = patch.object(prepare_upstream, 'install_image_insertion_guard')
+        self.image = image.start()
+        self.image.return_value = {'testFixture': 'image insertion'}
+        self.addCleanup(image.stop)
         # 전체 vendor/shim 무결성은 test_native_activation에서 별도로 검사한다.
         activation = patch.object(prepare_upstream, 'apply_native_activation')
         self.activation = activation.start()
@@ -162,6 +166,9 @@ pub fn layer_trees_to_pdf_with_links(
     def test_preparation_installs_product_contact_and_actual_ui_regressions(self):
         prepare_upstream.patch(self.source, '1.1.3')
         self.clipboard.assert_called_once_with(self.source)
+        self.image.assert_called_once_with(self.source, self.clipboard.return_value)
+        ledger = json.loads((self.source/'.opengeul-overlay.json').read_text())
+        self.assertEqual(ledger['imageInsertionGuard'], self.image.return_value)
         path = self.source/'apps/studio-host/src/ui/about-dialog.ts'
         self.assertIn('allenlim@allenlim.net', path.read_text(encoding='utf-8'))
         self.assertEqual(path.read_bytes(), (ROOT/'overlay/about-dialog.ts').read_bytes())
