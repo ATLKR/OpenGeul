@@ -13,7 +13,8 @@ import tempfile
 import time
 import urllib.request
 from playwright.sync_api import sync_playwright, expect
-from native_controls import filename_control
+from native_controls import filename_control, explorer_window_binding, explorer_item_binding, physical_explorer_selection, require_explorer_selection
+from ui_contract import canonical_local_path
 from webview_debug import MachineRegistry, ScopedDebugOverride, debug_arguments
 from native_architecture import verify_executable, verify_host, verify_process, verify_webview2, require_architecture
 
@@ -292,6 +293,9 @@ class Session:
             raise ValueError('Explorer drag/drop needs an actual owned Windows file')
         from pywinauto import Desktop, mouse
         from print_focus import WindowsFocusProbe, _bind_native_print_processes
+        path = canonical_local_path(path)
+        owned_folder = canonical_local_path(path.parent)
+        diagnostic = {'stage': 'explorer-folder', 'actualPhysicalDrag': False}
         shell_script = '''$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $shell = New-Object -ComObject Shell.Application
 $rows = @($shell.Windows() | ForEach-Object {
@@ -306,23 +310,33 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
                 raise AssertionError('Cannot observe actual Explorer folder ownership')
             rows = json.loads(result.stdout or '[]')
             return rows if isinstance(rows, list) else [rows]
-        before = {row['hwnd'] for row in shell_windows()}
+        def owned_folder_row(row):
+            if not isinstance(row, dict) or type(row.get('hwnd')) is not int or row['hwnd'] <= 0:
+                return False
+            try:
+                return canonical_local_path(row.get('path')) == owned_folder
+            except (ValueError, OSError):
+                return False
+        before = {row['hwnd'] for row in shell_windows() if isinstance(row, dict) and type(row.get('hwnd')) is int}
         # A fresh owned folder prevents accidental selection of a preexisting window.
-        if any(Path(row['path']).resolve() == path.parent.resolve() for row in shell_windows()):
+        if any(owned_folder_row(row) for row in shell_windows()):
             raise AssertionError('Owned DnD fixture folder is already open in Explorer')
         subprocess.Popen(['explorer.exe', '/n,', str(path.parent)])
         owned = None
+        explorer_pid = explorer_record = explorer_window = None
         probe = WindowsFocusProbe()
         try:
             def observed():
                 rows = [row for row in shell_windows() if row['hwnd'] not in before
-                        and Path(row['path']).resolve() == path.parent.resolve()]
+                        and owned_folder_row(row)]
                 if len(rows) > 1:
                     raise AssertionError('Ambiguous owned Explorer window')
                 return rows[0] if rows else False
             owned = until(observed)
             explorer = Desktop(backend='uia').window(handle=owned['hwnd']).wrapper_object()
             explorer_native = Desktop(backend='win32').window(handle=owned['hwnd']).wrapper_object()
+            if explorer.handle != owned['hwnd'] or explorer_native.handle != owned['hwnd']:
+                raise AssertionError('Owned Explorer HWND changed before binding')
             actual = probe.process.inspect(explorer.process_id())
             if Path(actual['imagePath']).name.lower() != 'explorer.exe':
                 raise AssertionError('DnD folder is not an actual Explorer process')
@@ -330,6 +344,9 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
             explorer_proof = verify_process(explorer.process_id(), Path(actual['imagePath']), architecture)
             probe.architecture = architecture
             explorer_record = probe.bind_process(explorer.process_id(), explorer_proof)
+            explorer_pid = explorer.process_id()
+            explorer_window = explorer_window_binding(probe, owned['hwnd'], explorer_pid, explorer_record,
+                                                      diagnostic=diagnostic)
             runtime = json.loads((self.folder/'runtime.json').read_text())
             app_windows = [w for w in Desktop(backend='win32').windows(process=self.proc.pid)
                            if w.is_visible() and w.class_name() in ('Tauri Window', 'Chrome_WidgetWin_1')]
@@ -353,12 +370,14 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
                      and item.window_text() in (path.name, path.stem)]
             if len(items) != 1:
                 raise AssertionError('Owned Explorer file is not exactly one visible native item')
-            item = items[0]; item.click_input()
-            selected = observed()
-            if not selected or selected.get('selected') != [str(path.resolve())]:
-                raise AssertionError('Explorer selection is not the exact owned fixture path')
-            rect = item.rectangle()
-            start = (round((rect.left+rect.right)/2), round((rect.top+rect.bottom)/2))
+            item = items[0]
+            selection = physical_explorer_selection(probe, owned['hwnd'], explorer.process_id(), explorer_record,
+                item, lambda point: mouse.click(coords=point), window_expected=explorer_window, diagnostic=diagnostic)
+            # Selection is asynchronous shell state: observe it without another
+            # physical click, retargeting the HWND, or substituting UIA Select.
+            selected = until(lambda: require_explorer_selection(observed(), path, owned['hwnd'], diagnostic=diagnostic),
+                             pump=lambda n: self.page.wait_for_timeout(n*1000))
+            start = tuple(selection['point'])
             source_window = probe.window(probe.hit(start))
             target_window = probe.window(probe.hit(target))
             bind(target_window['pid'])
@@ -367,8 +386,12 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
             probe.verify_process(explorer.process_id(), explorer_record)
             for pid, record in processes.items():
                 probe.verify_process(pid, record)
-            if observed() != selected or probe.foreground() != explorer.handle or probe.window(probe.hit(start)) != source_window or probe.window(probe.hit(target)) != target_window:
+            explorer_item_binding(probe, owned['hwnd'], explorer.process_id(), explorer_record,
+                                  item, expected=selection, diagnostic=diagnostic)
+            require_explorer_selection(observed(), path, owned['hwnd'], diagnostic=diagnostic)
+            if probe.foreground() != explorer.handle or probe.window(probe.hit(start)) != source_window or probe.window(probe.hit(target)) != target_window:
                 raise AssertionError('Owned drag/drop bindings changed before actual input')
+            diagnostic['dragInputAttempted'] = True
             mouse.press(coords=start)
             try:
                 for index in range(1, 21):
@@ -376,24 +399,62 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
                                        round(start[1]+(target[1]-start[1])*index/20)), duration=.025)
             finally:
                 mouse.release(coords=target)
+            diagnostic['actualPhysicalDrag'] = True
             record = {'explorerHwnd': explorer.handle, 'explorerPid': explorer.process_id(),
                       'folder': str(path.parent.resolve()), 'selectedPath': str(path.resolve()),
+                      'rawSelectedPath': selected['selected'][0], 'selectionBinding': selection,
                       'appHwnd': app.handle, 'appPid': self.proc.pid, 'editorBounds': box,
                       'devicePixelRatio': ratio, 'sourcePoint': start, 'dropPoint': target,
                       'actualPhysicalDrag': True}
             (self.folder/f'explorer-drop-{path.stem}.json').write_text(json.dumps(record, indent=2), encoding='utf-8')
             return record
+        except Exception:
+            # Save bounded ownership/point/readback facts before cleanup. Do not
+            # record another window's private paths or replace the original error.
+            if owned:
+                readback = {}
+                try:
+                    require_explorer_selection(observed(), path, owned['hwnd'], diagnostic=readback)
+                except Exception:
+                    pass
+                for key in ('selectedCount', 'selected', 'folderMatched'):
+                    if key in readback: diagnostic[key] = readback[key]
+            self._record_explorer_failure(diagnostic)
+            raise
         finally:
             try:
                 if owned:
                     rows = [row for row in shell_windows() if row['hwnd'] == owned['hwnd']
-                            and Path(row['path']).resolve() == path.parent.resolve()]
+                            and owned_folder_row(row)]
                     if len(rows) != 1:
                         raise AssertionError('Owned Explorer path/window changed before cleanup')
+                    if explorer_window is None:
+                        raise AssertionError('Explorer cleanup has no verified original window binding')
+                    explorer_window_binding(probe, owned['hwnd'], explorer_pid, explorer_record,
+                                            expected=explorer_window, diagnostic=diagnostic)
                     # Close this window only; Explorer may share a system process.
                     Desktop(backend='win32').window(handle=owned['hwnd']).close()
+            except Exception:
+                diagnostic['cleanupRejected'] = True
+                self._record_explorer_failure(diagnostic)
+                raise
             finally:
                 probe.close()
+
+    def _record_explorer_failure(self, diagnostic):
+        try:
+            data = json.dumps(diagnostic, ensure_ascii=True, separators=(',', ':')).encode('ascii')
+            if len(data) > 16*1024:
+                diagnostic = dict(diagnostic)
+                diagnostic['selected'] = [
+                    {key: value for key, value in row.items() if key != 'raw'}
+                    for row in diagnostic.get('selected', [])[:4]]
+                diagnostic['rawOwnedPathsOmittedForSize'] = True
+                data = json.dumps(diagnostic, ensure_ascii=True, separators=(',', ':')).encode('ascii')
+            if len(data) <= 16*1024:
+                (self.folder/'native-explorer-ownership.json').write_bytes(data)
+        except Exception:
+            pass
 
     def native_dialog(self, target: Path|None, *, cancel=False):
         from pywinauto import Desktop

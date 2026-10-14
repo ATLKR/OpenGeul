@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from collections import Counter
 import hashlib
-from pathlib import Path
+import os
+from pathlib import Path, PureWindowsPath
+import re
 import xml.etree.ElementTree as ET
 
 PREFIX = 'test_hop_followups.OpenGeulFollowups.'
@@ -161,11 +163,49 @@ def require_owned_recent_paths(paths, roots):
     """Outside-owned inventory must fail before selection or clear is dispatched."""
     if not isinstance(paths, list) or len(paths) > 100:
         raise ValueError('Invalid recent-document inventory')
-    owned = [Path(root).resolve() for root in roots]
+    owned = [canonical_local_path(root) for root in roots]
     for value in paths:
-        if not isinstance(value, str) or not Path(value).is_absolute():
+        if not isinstance(value, str):
             raise ValueError('Recent document path must be an observed absolute path')
-        path = Path(value).resolve()
+        path = canonical_local_path(value)
         if not any(path.is_relative_to(root) for root in owned):
             raise ValueError('Outside-owned recent entry; clear is forbidden: '+value)
     return True
+
+
+def local_windows_dos_path(value):
+    """Compare local DOS names, including a legitimate extended drive alias.
+
+    Device/UNC/ADS/traversal names are not aliases of an owned local document.
+    Validate before PureWindowsPath can collapse dot components; extended names
+    must also obey ordinary DOS filename semantics before removing the prefix.
+    """
+    if not isinstance(value, str) or not value or len(value) > 32767:
+        raise ValueError('Invalid local Windows document path')
+    extended = value.startswith('\\\\?\\')
+    raw = value[4:] if extended else value
+    if extended and '/' in raw:
+        raise ValueError('Extended Windows path must use DOS separators')
+    raw = raw.replace('/', '\\')
+    if not re.match(r'^[A-Za-z]:\\', raw):
+        raise ValueError('Only an absolute local Windows DOS drive path is owned')
+    components = raw[3:].split('\\')
+    for component in components:
+        if (not component or component in ('.', '..') or component.endswith((' ', '.'))
+                or any(ord(char) < 32 or char in '<>:"|?*' for char in component)
+                or re.fullmatch(r'CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³]',
+                                component.split('.')[0], re.IGNORECASE)):
+            raise ValueError('Unsafe Windows document path component')
+    return PureWindowsPath(raw)
+
+
+def canonical_local_path(value):
+    """Resolve actual local filesystem identity, retaining the owned-root gate."""
+    raw = str(value) if isinstance(value, Path) else value
+    if os.name == 'nt':
+        path = Path(local_windows_dos_path(raw)).resolve()
+        # A reparse target must remain a local DOS path, too.
+        return Path(local_windows_dos_path(str(path)))
+    if not isinstance(raw, str) or not Path(raw).is_absolute():
+        raise ValueError('Recent document path must be an observed absolute path')
+    return Path(raw).resolve()

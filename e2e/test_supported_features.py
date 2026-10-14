@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from playwright.sync_api import expect
@@ -18,7 +19,7 @@ from supported_feature_oracle import (
     A4, CELL_MARKERS, assert_picture, assert_style, assert_table,
     checkerboard, inspect_gui_pdf, inspect_supported_hwpx, text_fixture,
 )
-from ui_contract import hosted_recent_guard, require_owned_recent_paths
+from ui_contract import canonical_local_path, hosted_recent_guard, require_owned_recent_paths
 from test_editor import FIXTURES, OUTPUT, MODE, EXE, BROWSER
 
 
@@ -348,8 +349,12 @@ class SupportedNativeTests(SupportedTests):
         self.page = self.session.page
         self.assertNotEqual(old_pid, self.session.proc.pid)
         dialog, paths = self.recent_paths()
-        self.assertIn(str(saved), paths)
-        item = dialog.locator('.recent-documents-item').filter(has=self.page.locator('.recent-documents-path', has_text=str(saved)))
+        matching = [raw for raw in paths if canonical_local_path(raw) == canonical_local_path(saved)]
+        self.assertEqual(len(matching), 1)
+        # Select the exact observed public UI entry after checking its actual
+        # local identity; its text can legitimately contain the \\?\ alias.
+        item = dialog.locator('.recent-documents-item').filter(has=self.page.locator(
+            '.recent-documents-path', has_text=re.compile('^'+re.escape(matching[0])+'$')))
         self.assertEqual(item.count(), 1); item.dblclick()
         self.session.wait_loaded(saved.name); self.document = saved
         self.assertEqual(inspect_hwpx(self.save())['text'], 'OWNED-RECENT-MARKER'); self.checked('restart-open')

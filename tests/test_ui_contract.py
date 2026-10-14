@@ -2,7 +2,7 @@
 import copy
 import importlib
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import sys
 import tempfile
@@ -17,7 +17,7 @@ from ui_contract import (
     BASELINE_COMMON, BASELINE_NATIVE, COMMON_CHECKS, NATIVE_CHECKS,
     EXPECTED_COUNTS, HELPERS, PREFIX, discovered_ids, exact_ids,
     helper_hashes, hosted_recent_guard, junit_bytes, manifest, validate_evidence,
-    require_owned_recent_paths,
+    require_owned_recent_paths, local_windows_dos_path, canonical_local_path,
 )
 from driver import Session
 
@@ -294,6 +294,51 @@ class UiContractTests(unittest.TestCase):
             self.assertTrue(require_owned_recent_paths([str(root/'missing-but-owned.hwpx')], [root]))
             for paths in ([str(Path(folder)/'private-document.hwpx')], ['relative.hwpx'], [''], [1], None):
                 with self.subTest(paths=paths), self.assertRaises(ValueError): require_owned_recent_paths(paths, [root])
+
+    def test_local_dos_extended_alias_case_and_unicode_preserve_identity(self):
+        target = PureWindowsPath(r'D:\a\OpenGeul\evidence\견적서 테스트.HWPX')
+        for raw in (str(target), r'\\?\d:\A\OPENgeul\EVIDENCE\견적서 테스트.hwpx',
+                    'D:/a/OpenGeul/evidence/견적서 테스트.HWPX'):
+            with self.subTest(raw=raw):
+                self.assertEqual(local_windows_dos_path(raw), target)
+
+    def test_local_dos_rejects_namespace_devices_ads_and_dot_aliases(self):
+        rejected = [r'\\server\share\file.hwpx', r'\\?\UNC\server\share\file.hwpx',
+            r'\\.\D:\owned\file.hwpx', r'\??\D:\owned\file.hwpx',
+            r'\\?\GLOBALROOT\Device\HarddiskVolume1\file.hwpx', r'D:owned\file.hwpx',
+            r'D:\owned\file.hwpx:stream', r'D:\owned\..\file.hwpx', r'D:\owned\.\file.hwpx',
+            r'\\?\D:\owned\file.hwpx.', r'\\?\D:\owned\file.hwpx ',
+            r'\\?\D:/owned/file.hwpx', r'D:\owned\\file.hwpx', 'D:\\owned\\file\x00.hwpx']
+        rejected += [rf'D:\owned\{device}.hwpx' for device in
+                     ('CON', 'NUL', 'AUX', 'PRN', 'COM1', 'LPT9', 'COM¹', 'LPT³', 'CONIN$', 'CONOUT$')]
+        for raw in rejected:
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                local_windows_dos_path(raw)
+
+    def test_recent_symlink_escape_and_inventory_limit_stay_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)/'owned'; root.mkdir()
+            outside = Path(folder)/'outside'; outside.mkdir()
+            (root/'escape').symlink_to(outside, target_is_directory=True)
+            self.assertEqual(canonical_local_path(root/'safe.hwpx'), (root/'safe.hwpx').resolve())
+            with self.assertRaises(ValueError):
+                require_owned_recent_paths([str(root/'escape'/'document.hwpx')], [root])
+            with self.assertRaises(ValueError):
+                require_owned_recent_paths([str(root/'safe.hwpx')]*101, [root])
+
+    def test_recent_dos_alias_inventory_keeps_outside_rejection(self):
+        # Pure Windows lexical resolution on this offline host. Real filesystem
+        # resolution remains in canonical_local_path and is covered above.
+        class OfflineDosPath(PureWindowsPath):
+            def resolve(self): return self
+        with patch('ui_contract.Path', OfflineDosPath), patch('ui_contract.os', SimpleNamespace(name='nt')):
+            root = r'D:\a\OpenGeul\evidence'
+            self.assertTrue(require_owned_recent_paths(
+                [r'\\?\d:\A\OPENgeul\EVIDENCE\견적서 테스트.HWPX'], [root]))
+            for raw in (r'\\?\D:\a\OpenGeul\private.hwpx', r'D:\a\OpenGeul\evidence-other\file.hwpx',
+                        r'\\?\D:\a\OpenGeul\evidence\..\private.hwpx', r'\\?\UNC\host\share\file.hwpx'):
+                with self.subTest(raw=raw), self.assertRaises(ValueError):
+                    require_owned_recent_paths([raw], [root])
 
 
 if __name__ == '__main__': unittest.main()
