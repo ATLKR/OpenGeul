@@ -160,19 +160,20 @@ class SupportedNativeTests(SupportedTests):
 
     def recent_paths(self):
         self.recent_guard()
-        started = len(self.session.dialogs)
         menu(self.page, 'file:open-recent')
         dialog = self.page.locator('.recent-documents-dialog')
         def observed():
             if dialog.is_visible():
                 return 'list'
-            if (self.page.locator('#sb-message').inner_text() == '최근 문서가 없습니다'
-                    and any(row['type'] == 'alert' and row['message'] == '최근 문서가 없습니다.'
-                            for row in self.session.dialogs[started:])):
+            if self.page.locator('#sb-message').inner_text() == '최근 문서가 없습니다':
                 return 'empty'
             return False
         state = until(observed, pump=lambda n: self.page.wait_for_timeout(n*1000))
         if state == 'empty':
+            # Tauri's public alert is an OS message, not a Playwright JS dialog.
+            # The status alone cannot qualify empty: bind and confirm its exact
+            # native message before accepting the restart-empty observation.
+            self.session.acknowledge_native_information('최근 문서가 없습니다.')
             self.assertEqual(dialog.count(), 0)
             return None, []
         paths = dialog.locator('.recent-documents-path').all_text_contents()

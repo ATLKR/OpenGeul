@@ -56,6 +56,17 @@ class Item:
         return SimpleNamespace(**dict(zip(('left', 'top', 'right', 'bottom'), self.bounds)))
 
 
+class ExplorerViewport:
+    def __init__(self):
+        self.handle = 10; self.pid = 303
+        self.bounds = [0, 0, 350, 300]
+    def process_id(self): return self.pid
+    def class_name(self): return 'CabinetWClass'
+    def client_rect(self):
+        return SimpleNamespace(**dict(zip(('left', 'top', 'right', 'bottom'), self.bounds)))
+    def client_to_screen(self, point): return point
+
+
 class DriverProbe(Probe):
     def __init__(self):
         super().__init__()
@@ -94,6 +105,8 @@ class ExplorerDriverTests(unittest.TestCase):
             def set_focus(self): probe.foreground_hwnd = self.handle
             def move_window(self, **kwargs): pass
             def client_to_screen(self, point): return point
+            def client_rect(self):
+                return SimpleNamespace(left=0, top=0, right=350, bottom=300)
             def close(self): self.closed = True
             def wrapper_object(self): return self
         explorer = Window(10, 303); app = Window(20, 202); self.explorer = explorer
@@ -199,14 +212,41 @@ class ExplorerDriverTests(unittest.TestCase):
 
 
 class ExplorerOwnershipTests(unittest.TestCase):
-    def select(self, probe, item=None, *, diagnostic=None):
+    def select(self, probe, item=None, *, diagnostic=None, viewport=None):
         clicks = []
         def click(point):
             probe.events.append('click'); clicks.append(point)
         self.clicks = clicks
         return native_controls.physical_explorer_selection(
             probe, 10, 303, {'creation': 123, 'session': 1}, item or Item(), click,
-            diagnostic=diagnostic)
+            diagnostic=diagnostic, viewport=viewport or ExplorerViewport())
+
+    def test_clipped_item_uses_owned_visible_intersection_before_physical_click(self):
+        item = Item(); item.bounds = [182, 167, 780, 191]
+        probe = Probe()
+        probe.hit = lambda point: 11 if point[0] < 350 else 20
+        record = self.select(probe, item)
+        self.assertEqual(self.clicks, [(266, 179)])
+        self.assertEqual(record['visibleItemBounds'], [182, 167, 350, 191])
+        self.assertEqual(record['viewportBounds'], [0, 0, 350, 300])
+
+    def test_missing_intersection_or_wrong_viewport_rejects_before_click(self):
+        for bounds, pid, hwnd in (([0, 0, 15, 30], 303, 10), ([0, 0, 350, 300], 999, 10),
+                                  ([0, 0, 350, 300], 303, 20), ([0, 0, 350, 300.5], 303, 10)):
+            with self.subTest(bounds=bounds, pid=pid, hwnd=hwnd):
+                viewport = ExplorerViewport(); viewport.bounds = bounds; viewport.pid = pid; viewport.handle = hwnd
+                with self.assertRaises(AssertionError): self.select(Probe(), viewport=viewport)
+                self.assertEqual(self.clicks, [])
+
+    def test_second_viewport_observation_cannot_move_before_click(self):
+        viewport = ExplorerViewport(); original = viewport.client_rect; reads = []
+        def changing_rect():
+            reads.append(True)
+            if len(reads) == 2: viewport.bounds[2] = 340
+            return original()
+        viewport.client_rect = changing_rect
+        with self.assertRaises(AssertionError): self.select(Probe(), viewport=viewport)
+        self.assertEqual(self.clicks, [])
 
     def test_one_physical_click_follows_two_live_bindings(self):
         probe = Probe(); record = self.select(probe)

@@ -13,7 +13,7 @@ import tempfile
 import time
 import urllib.request
 from playwright.sync_api import sync_playwright, expect
-from native_controls import filename_control, explorer_window_binding, explorer_item_binding, physical_explorer_selection, require_explorer_selection
+from native_controls import filename_control, explorer_window_binding, explorer_item_binding, physical_explorer_selection, require_explorer_selection, acknowledge_information_dialog
 from ui_contract import canonical_local_path
 from webview_debug import MachineRegistry, ScopedDebugOverride, debug_arguments
 from native_architecture import verify_executable, verify_host, verify_process, verify_webview2, require_architecture
@@ -372,7 +372,8 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
                 raise AssertionError('Owned Explorer file is not exactly one visible native item')
             item = items[0]
             selection = physical_explorer_selection(probe, owned['hwnd'], explorer.process_id(), explorer_record,
-                item, lambda point: mouse.click(coords=point), window_expected=explorer_window, diagnostic=diagnostic)
+                item, lambda point: mouse.click(coords=point), viewport=explorer_native,
+                window_expected=explorer_window, diagnostic=diagnostic)
             # Selection is asynchronous shell state: observe it without another
             # physical click, retargeting the HWND, or substituting UIA Select.
             selected = until(lambda: require_explorer_selection(observed(), path, owned['hwnd'], diagnostic=diagnostic),
@@ -387,7 +388,7 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
             for pid, record in processes.items():
                 probe.verify_process(pid, record)
             explorer_item_binding(probe, owned['hwnd'], explorer.process_id(), explorer_record,
-                                  item, expected=selection, diagnostic=diagnostic)
+                                  item, viewport=explorer_native, expected=selection, diagnostic=diagnostic)
             require_explorer_selection(observed(), path, owned['hwnd'], diagnostic=diagnostic)
             if probe.foreground() != explorer.handle or probe.window(probe.hit(start)) != source_window or probe.window(probe.hit(target)) != target_window:
                 raise AssertionError('Owned drag/drop bindings changed before actual input')
@@ -456,6 +457,41 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
         except Exception:
             pass
 
+    def acknowledge_native_information(self, message):
+        """Physically acknowledge an exact informational dialog of this native PID."""
+        if self.mode != 'native' or os.name != 'nt':
+            raise ValueError('Actual Windows information dialog is required')
+        from pywinauto import Desktop, mouse
+        from print_focus import WindowsFocusProbe, _bind_native_print_processes
+        probe = WindowsFocusProbe()
+        try:
+            runtime = json.loads((self.folder/'runtime.json').read_text())
+            records, _ = _bind_native_print_processes(probe, self.proc.pid, self.proc.pid,
+                                                       runtime, int(self.proc._handle))
+            spec = Desktop(backend='win32').window(class_name='#32770', process=self.proc.pid)
+            spec.wait('visible', timeout=20)
+            dialog = spec.wrapper_object(); hwnd = dialog.handle
+            accessible = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
+            dialog.set_focus()
+            record = acknowledge_information_dialog(probe, dialog, accessible, self.proc.pid,
+                records[self.proc.pid], message, lambda point: mouse.click(coords=point))
+            def closed():
+                probe.verify_process(self.proc.pid, records[self.proc.pid])
+                if not probe.user.IsWindow(hwnd): return True
+                current = probe.window(hwnd)
+                if any(current[key] != record['window'][key] for key in ('hwnd', 'root', 'pid', 'tid', 'cls', 'owners')):
+                    raise RuntimeError('Native information HWND identity changed before closure')
+                return not current['visible']
+            until(closed, timeout=20)
+            record['actualPhysicalConfirmation'] = True
+            record['sameOwnedDialogClosed'] = True
+            index = getattr(self, '_native_information_index', 0)+1
+            self._native_information_index = index
+            (self.folder/f'native-information-{index}.json').write_text(json.dumps(record, indent=2), encoding='utf-8')
+            return record
+        finally:
+            probe.close()
+
     def native_dialog(self, target: Path|None, *, cancel=False):
         from pywinauto import Desktop
         from pywinauto.controls.hwndwrapper import InvalidWindowHandle
@@ -518,8 +554,44 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
         if len(buttons)!=1:
             raise AssertionError(f'Expected one native dialog action; found {len(buttons)}')
         dialog.set_focus();buttons[0].click_input()
-        until(lambda: not ctypes.windll.user32.IsWindow(hwnd)
-              or not ctypes.windll.user32.IsWindowVisible(hwnd),timeout=20)
+        try:
+            until(lambda: not ctypes.windll.user32.IsWindow(hwnd)
+                  or not ctypes.windll.user32.IsWindowVisible(hwnd),timeout=20)
+        except Exception:
+            self._record_picker_closure_failure(dialog, hwnd, buttons[0],
+                                                 bound_thread if target is not None else None)
+            raise
+
+    def _record_picker_closure_failure(self, dialog, hwnd, button, expected_thread):
+        """Observe a failed exact-HWND closure; never retry input or read filenames."""
+        probe = None
+        try:
+            from print_focus import WindowsFocusProbe
+            probe = WindowsFocusProbe()
+            value = {'stage': 'native-picker-closure-failure', 'expectedHwnd': hwnd,
+                     'expectedPid': self.proc.pid, 'expectedThread': expected_thread,
+                     'buttonClickReturned': True, 'foreground': probe.foreground(),
+                     'dialogWindow': probe.window(hwnd), 'wrapperHwnd': dialog.handle,
+                     'buttonHwnd': button.handle, 'buttonId': button.control_id()}
+            rect = button.rectangle()
+            bounds = [rect.left, rect.top, rect.right, rect.bottom]
+            if (all(type(part) is int for part in bounds)
+                    and rect.right > rect.left and rect.bottom > rect.top):
+                point = ((rect.left+rect.right)//2, (rect.top+rect.bottom)//2)
+                value['buttonBoundsObservedAfterFailure'] = bounds
+                value['buttonCenterObservedAfterFailure'] = list(point)
+                value['hitAtObservedButtonCenter'] = probe.window(probe.hit(point))
+            value['buttonWindow'] = probe.window(button.handle)
+            data = json.dumps(value, ensure_ascii=True, separators=(',', ':')).encode('ascii')
+            if len(data) <= 16*1024:
+                (self.folder/'native-picker-closure.json').write_bytes(data)
+        except Exception:
+            # Diagnostics cannot replace the original closure failure.
+            pass
+        finally:
+            if probe is not None:
+                try: probe.close()
+                except Exception: pass
 
     def _record_picker_readiness_failure(self, dialog, hwnd):
         """Failure-only control metadata; never read filename or descendant text."""
