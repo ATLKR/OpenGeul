@@ -49,7 +49,7 @@ python -m unittest tests.test_ui_contract tests.test_supported_feature_oracle te
 
 전체 `e2e/run.py` 실행은 승인된 Source Actions의 기존 필수 UI 작업에서 수행합니다. 워크플로가 제품/소유 fixture 경로, mode/browser/architecture와 실제 Source 식별자를 제공합니다. 최근 문서가 포함된 전체 native suite는 일반 로컬 profile이나 self-hosted 실행을 거부하며 이 조건을 환경 변수 위조로 우회하지 않습니다. WebView2 Runtime·실제 Windows 데스크톱과 Explorer가 필요합니다. `ensure-webview2.ps1`과 `msix-install.ps1`도 일반 사용자의 시스템을 변경하지 않도록 GitHub 밖의 실행을 거부합니다.
 
-브라우저 작업은 배포용 프런트엔드를 루프백 7700에서 제공하고 고정한 Chromium/Firefox/WebKit에서 실행합니다. File System Access 저장 선택기를 끄는 기존 다운로드 검사 조건을 유지하며 clipboard 권한을 합성하거나 실제 OS clipboard 성공을 가정하지 않습니다.
+브라우저 작업은 배포용 프런트엔드를 루프백 7700에서 제공하고 고정한 Chromium/Firefox/WebKit에서 실행합니다. 페이지 생성·탐색 전에 `showOpenFilePicker`와 `showSaveFilePicker`의 가용성을 제거하여 세 엔진 모두 실제 공개 메뉴의 HTML 파일 선택기와 다운로드 대체 경로를 검사합니다. File System Access의 OS 열기·저장 대화상자는 이 브라우저 시험 범위에 포함되지 않습니다. clipboard 권한을 합성하거나 실제 OS clipboard 성공을 가정하지 않습니다.
 
 ## 증거와 보안
 
@@ -61,6 +61,6 @@ python -m unittest tests.test_ui_contract tests.test_supported_feature_oracle te
 
 ## 한계
 
-GitHub Windows 레이블은 현재 서버 실행기 이미지를 나타내며, 소비자 Windows 10/11 기기 전체 매트릭스가 아닙니다. 네이티브 테스트는 Windows UI Automation과 범위를 제한한 WebView2 CDP를 사용합니다. 관리자 권한 호스팅 실행에서는 실행 파일별 임시 레지스트리 설정을 사용할 수 있으며 정리 시 복원합니다. 폐기 가능한 GitHub 호스트로만 제한합니다. 브라우저 테스트는 실제 브라우저 간 다운로드 대체 경로를 검사하려고 File System Access 파일 선택기를 명시적으로 끕니다. 네이티브 Windows 대화상자를 검증하지는 않습니다. `insert_text`는 확정된 Unicode를 확인하며 실제 사용자의 Windows IME 조합 세션은 아닙니다. 실제 프린터, 접근성 장치, 합성 지원 형식 사례를 벗어나는 암호 문서, 복잡한 업무 서식, 모든 제3자 글꼴 권리와 Store 인증에는 추가 검증이 필요합니다. HWPX 지원은 고정된 직렬화기를 사용하며 지원하지 않는 원본 기능은 완벽하게 보존되지 않을 수 있습니다. 개발 빌드 평가 시 원본 파일을 유지하세요.
+GitHub Windows 레이블은 현재 서버 실행기 이미지를 나타내며, 소비자 Windows 10/11 기기 전체 매트릭스가 아닙니다. 네이티브 테스트는 Windows UI Automation과 범위를 제한한 WebView2 CDP를 사용합니다. 관리자 권한 호스팅 실행에서는 실행 파일별 임시 레지스트리 설정을 사용할 수 있으며 정리 시 복원합니다. 폐기 가능한 GitHub 호스트로만 제한합니다. 브라우저 시험은 File System Access 열기·저장 API를 끈 실제 HTML 파일 선택기·다운로드 경로만 다루며, File System Access OS 대화상자와 네이티브 Windows 대화상자를 검증하지 않습니다. native 시험에서는 이 브라우저 조건을 적용하지 않고 실제 Tauri/Windows 파일 대화상자를 사용합니다. `insert_text`는 확정된 Unicode를 확인하며 실제 사용자의 Windows IME 조합 세션은 아닙니다. 실제 프린터, 접근성 장치, 합성 지원 형식 사례를 벗어나는 암호 문서, 복잡한 업무 서식, 모든 제3자 글꼴 권리와 Store 인증에는 추가 검증이 필요합니다. HWPX 지원은 고정된 직렬화기를 사용하며 지원하지 않는 원본 기능은 완벽하게 보존되지 않을 수 있습니다. 개발 빌드 평가 시 원본 파일을 유지하세요.
 
 참고 자료: GitHub Actions 청구 문서와 Playwright 공식 WebView2 테스트 안내.

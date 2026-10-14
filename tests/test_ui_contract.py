@@ -3,11 +3,12 @@ import copy
 import importlib
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +89,59 @@ class UiContractTests(unittest.TestCase):
             xml = junit_bytes(list(reversed(payload['tests'])))
             with self.subTest(mode=mode), self.assertRaises(ValueError):
                 self.validate(payload, xml, mode=mode)
+
+    def test_browser_html_picker_scope_precedes_page_and_navigation(self):
+        # Offline lifecycle regression only; this does not launch a browser or
+        # claim coverage of Chromium's File System Access OS dialogs.
+        for browser_name in ('chromium', 'firefox', 'webkit'):
+            with self.subTest(browser=browser_name), tempfile.TemporaryDirectory() as folder:
+                events = []
+                page = Mock()
+                page.evaluate.return_value = {'platform': 'offline', 'userAgent': 'offline'}
+                context = Mock()
+                def install_scope(script):
+                    removed = re.findall(
+                        r"Object\.defineProperty\(window, '([^']+)', \{value: undefined, configurable: true\}\)", script)
+                    self.assertEqual(set(removed), {'showOpenFilePicker', 'showSaveFilePicker'})
+                    self.assertEqual(len(removed), 2)
+                    events.append('scope')
+                context.add_init_script.side_effect = install_scope
+                context.new_page.side_effect = lambda: (events.append('page'), page)[1]
+                page.goto.side_effect = lambda *args, **kwargs: events.append('navigation')
+                browser = Mock(version='offline-browser')
+                browser.new_context.return_value = context
+                playwright = Mock()
+                getattr(playwright, browser_name).launch.return_value = browser
+                with patch('driver.sync_playwright') as start, patch('driver.expect'), \
+                        patch('driver.menu'), patch.object(Session, 'wait_loaded'):
+                    start.return_value.start.return_value = playwright
+                    session = Session('browser', Path(folder), None, browser=browser_name)
+                self.assertEqual(events, ['scope', 'page', 'navigation'])
+                playwright.chromium.connect_over_cdp.assert_not_called()
+                session.close()
+
+    def test_public_replacement_keeps_browser_chooser_and_native_dialog_paths(self):
+        target = ROOT/'owned-document-b.hwpx'
+        for mode in ('browser', 'native'):
+            with self.subTest(mode=mode):
+                session = Session.__new__(Session)
+                session.mode = mode; session.page = MagicMock()
+                session.native_dialog = Mock(); session.wait_loaded = Mock()
+                chooser = Mock()
+                session.page.expect_file_chooser.return_value.__enter__.return_value = SimpleNamespace(value=chooser)
+                with patch('driver.menu') as actual_menu:
+                    session.open_public(target)
+                actual_menu.assert_called_once_with(session.page, 'file:open')
+                session.wait_loaded.assert_called_once_with(target.name)
+                session.page.locator.assert_not_called()  # No direct file-input substitution.
+                if mode == 'browser':
+                    session.page.expect_file_chooser.assert_called_once_with()
+                    chooser.set_files.assert_called_once_with(str(target))
+                    session.native_dialog.assert_not_called()
+                else:
+                    session.native_dialog.assert_called_once_with(target)
+                    session.page.expect_file_chooser.assert_not_called()
+                    chooser.set_files.assert_not_called()
 
     def test_gui_pdf_cancel_preserves_target_in_picker_dispatch(self):
         session = Session.__new__(Session)

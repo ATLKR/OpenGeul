@@ -91,7 +91,11 @@ class Session:
             else:
                 self.browser=getattr(self.pw,browser).launch(headless=True)
                 self.context=self.browser.new_context(accept_downloads=True, viewport={'width':1280,'height':900})
-                self.context.add_init_script("Object.defineProperty(window, 'showSaveFilePicker', {value: undefined, configurable: true});")
+                # Browser jobs cover the public HTML picker/download fallback,
+                # not File System Access OS dialogs. Scope it before any page.
+                self.context.add_init_script(
+                    "Object.defineProperty(window, 'showOpenFilePicker', {value: undefined, configurable: true});"
+                    "Object.defineProperty(window, 'showSaveFilePicker', {value: undefined, configurable: true});")
                 self.page=self.context.new_page()
             # Disable resource capture so traces cannot redistribute installed fonts.
             self.context.tracing.start(screenshots=True,snapshots=False,sources=False)
