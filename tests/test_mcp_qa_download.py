@@ -1,9 +1,13 @@
 """같은 실행 QA ZIP의 서버 SHA·성공 생산자·attempt·안전한 추출 경계를 확인한다."""
+import contextlib
 import copy
 import hashlib
 import importlib.util
 import io
+import errno
 import json
+import runpy
+import subprocess
 from pathlib import Path
 import stat
 import sys
@@ -378,6 +382,324 @@ class McpQaDownloadTests(unittest.TestCase):
         origin=self.output.with_name('mcp-qa-origin')
         self.assertEqual({p.name for p in origin.iterdir()},{'original.zip','receipt.json'})
         self.assertEqual((origin/'original.zip').read_bytes(),self.archive)
+
+
+    def diagnostic_failure(self, module, operation):
+        """실패 예외를 그대로 유지하면서 별도의 안전한 stderr 진단을 검사한다."""
+        stream=io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            with self.assertRaises(Exception) as caught: operation()
+            emitter=getattr(module,'_emit_failure',None)
+            if emitter is not None: emitter(caught.exception)
+        raw=stream.getvalue()
+        self.assertTrue(raw,'실패 원인을 구분할 고정 JSON 진단이 없습니다')
+        self.assertEqual(len(raw.splitlines()),1)
+        self.assertLessEqual(len(raw.encode('utf-8')),2048)
+        diagnostic=json.loads(raw)
+        self.assertEqual(diagnostic['formatVersion'],1)
+        self.assertEqual(set(diagnostic),{'formatVersion','stage','code','exceptionKind',
+                                         'returnCode','errno','winerror','httpStatusHint'})
+        for name in ('returnCode','errno','winerror','httpStatusHint'):
+            self.assertTrue(diagnostic[name] is None or type(diagnostic[name]) is int)
+        for forbidden in ('dummy-private-token','https://private.invalid/',
+                          'dummy-private-body','dummy-private-command','Traceback','\x1b'):
+            self.assertNotIn(forbidden,raw)
+        return diagnostic,caught.exception
+
+    def transport_failure(self, *, stdout=b'{}', stderr=b'', returncode=1, timeout=False,
+                          read_error=False, close_error=False, zip_download=False, kill_error=False):
+        module=self.module();children=[]
+        class BrokenStream(io.BytesIO):
+            def read(self,size=-1):
+                if read_error: raise OSError('dummy-private-token https://private.invalid/')
+                return super().read(size)
+            def close(self):
+                super().close()
+                if close_error: raise OSError('dummy-private-body')
+        class Child:
+            def __init__(self,*args,**kwargs):
+                self.stdout=io.BytesIO(stdout);self.stderr=BrokenStream(stderr)
+                self.returncode=returncode;self.waits=[];self.kills=0;children.append(self)
+            def wait(self,timeout=None):
+                self.waits.append(timeout)
+                if timeout is not None and timed_out:
+                    raise subprocess.TimeoutExpired(['dummy-private-command','https://private.invalid/'],timeout,
+                                                    output=b'dummy-private-body',stderr=b'dummy-private-token')
+                return self.returncode
+            def kill(self):
+                self.kills+=1;self.returncode=-9
+                if kill_error:raise RuntimeError('dummy-private-token https://private.invalid/')
+        timed_out=timeout
+        with patch.object(module.subprocess,'Popen',Child):
+            if zip_download:
+                with patch.object(self.backend,'zip',module.GitHub().zip):
+                    diagnostic,error=self.diagnostic_failure(module,lambda:module._fetch(self.binding,self.qa.wasm,'x64',
+                        self.output,self.output.with_name('mcp-qa-origin'),self.backend,self.run,[self.job]))
+            else:
+                diagnostic,error=self.diagnostic_failure(module,lambda:module._run_jobs(self.binding,module.GitHub()))
+        self.assertIsInstance(error,ValueError)
+        self.assertEqual(diagnostic['stage'],'artifact-zip' if zip_download else 'source-run')
+        self.assertEqual(len(children),1,'자동 재시도는 허용하지 않습니다')
+        self.assertTrue(children[0].stdout.closed);self.assertTrue(children[0].stderr.closed)
+        self.assertEqual(children[0].waits[0],120 if zip_download else 30)
+        return diagnostic,children[0]
+
+    def test_http_failure_emits_only_unique_status_and_static_transport_fields(self):
+        diagnostic,_=self.transport_failure(stderr=b'\x1b[31mdummy-private-token https://private.invalid/?sas=dummy-private-body (HTTP 502)\x1b[0m')
+        self.assertEqual((diagnostic['code'],diagnostic['exceptionKind'],diagnostic['returnCode'],
+                          diagnostic['httpStatusHint']),('return-code','transport',1,502))
+
+    def test_http_hint_is_absent_for_ambiguous_invalid_or_non_stderr_status(self):
+        controls=[b'(HTTP 502) (HTTP 503)',b'(HTTP 502) (HTTP 502)',b'(HTTP 099)',b'(HTTP 600)',
+                  b'(HTTP 502) (HTTP 600)',b'(HTTP 5020)',b'(HTTP abc)',b'HTTP 502']
+        for stderr in controls:
+            with self.subTest(index=controls.index(stderr)):
+                diagnostic,_=self.transport_failure(stdout=b'(HTTP 502)',stderr=stderr)
+                self.assertEqual(diagnostic['code'],'return-code');self.assertIsNone(diagnostic['httpStatusHint'])
+
+    def test_timeout_does_not_leak_command_or_stderr_and_still_reaps_worker(self):
+        diagnostic,child=self.transport_failure(timeout=True,stderr=b'(HTTP 502) dummy-private-token')
+        self.assertEqual((diagnostic['code'],diagnostic['exceptionKind']),('timeout','timeout'))
+        self.assertIsNone(diagnostic['httpStatusHint']);self.assertEqual(child.kills,1)
+        self.assertEqual(child.waits,[30,None])
+
+    def test_actual_stdout_and_stderr_caps_fail_without_http_hint(self):
+        for stdout,stderr,code in ((b'x'*(2*1024*1024+1),b'(HTTP 502)','stdout-limit'),
+                                   (b'{}',b'(HTTP 502)'+b'x'*(64*1024),'stderr-limit')):
+            with self.subTest(code=code):
+                diagnostic,child=self.transport_failure(stdout=stdout,stderr=stderr,returncode=0)
+                self.assertEqual(diagnostic['code'],code);self.assertIsNone(diagnostic['httpStatusHint'])
+                self.assertGreater(child.kills,0)
+
+    def test_zip_transport_keeps_actual_size_cap_and_120_second_timeout(self):
+        diagnostic,child=self.transport_failure(zip_download=True,stdout=b'x'*(16*1024*1024+1),returncode=0)
+        self.assertEqual(diagnostic['code'],'stdout-limit');self.assertGreater(child.kills,0)
+        self.assertIsNone(diagnostic['httpStatusHint'])
+        diagnostic,child=self.transport_failure(zip_download=True,timeout=True)
+        self.assertEqual(diagnostic['code'],'timeout');self.assertEqual(child.waits,[120,None])
+        self.assertFalse(self.output.exists());self.assertFalse(self.output.with_name('mcp-qa-origin').exists())
+
+    def test_exact_stderr_cap_and_http_status_endpoints_remain_valid_hints(self):
+        for status in (100,599):
+            prefix=('(HTTP '+str(status)+')').encode()
+            diagnostic,_=self.transport_failure(stderr=prefix+b'x'*(64*1024-len(prefix)))
+            self.assertEqual(diagnostic['code'],'return-code');self.assertEqual(diagnostic['httpStatusHint'],status)
+
+    def test_return_code_bool_and_out_of_range_values_are_not_recorded(self):
+        for returncode in (True,2**31,-2**31-1):
+            with self.subTest(index=(True,2**31,-2**31-1).index(returncode)):
+                diagnostic,_=self.transport_failure(returncode=returncode)
+                self.assertEqual(diagnostic['code'],'return-code');self.assertIsNone(diagnostic['returnCode'])
+
+    def test_transport_rejects_unapproved_api_path_before_process_start(self):
+        module=self.module()
+        with patch.object(module.subprocess,'Popen') as popen:
+            diagnostic,_=self.diagnostic_failure(module,lambda:module._run_jobs(self.binding,
+                type('InvalidPath',(),{'get':lambda owner,path:module.GitHub().get('releases/123')})()))
+        self.assertEqual((diagnostic['stage'],diagnostic['code']),('source-run','path-rejected'))
+        popen.assert_not_called()
+
+    def test_drain_read_and_close_failures_are_static_without_thread_traceback(self):
+        for option in ('read_error','close_error'):
+            with self.subTest(option=option):
+                diagnostic,_=self.transport_failure(returncode=0,**{option:True})
+                self.assertEqual(diagnostic['code'],'drain-failure');self.assertIsNone(diagnostic['httpStatusHint'])
+
+    def test_drain_kill_failure_does_not_escape_as_a_worker_traceback(self):
+        diagnostic,_=self.transport_failure(read_error=True,kill_error=True,returncode=0)
+        self.assertEqual(diagnostic['code'],'drain-failure');self.assertIsNone(diagnostic['httpStatusHint'])
+
+    def test_empty_and_invalid_json_responses_remain_failures(self):
+        for stdout,code in ((b'','empty-response'),(b'{"dummy-private-token":','json-invalid')):
+            with self.subTest(code=code):
+                diagnostic,_=self.transport_failure(stdout=stdout,returncode=0)
+                self.assertEqual(diagnostic['code'],code)
+                self.assertIsNone(diagnostic['httpStatusHint'])
+
+    def test_unfinished_workers_are_joined_with_existing_bound_and_rejected(self):
+        module=self.module();workers=[]
+        class Worker:
+            def __init__(self,*args,**kwargs):self.joins=[];workers.append(self)
+            def start(self):pass
+            def join(self,timeout=None):self.joins.append(timeout)
+            def is_alive(self):return True
+        class Child:
+            returncode=0
+            def __init__(self,*args,**kwargs):self.stdout=io.BytesIO(b'{}');self.stderr=io.BytesIO()
+            def wait(self,timeout=None):return 0
+        with patch.object(module.subprocess,'Popen',Child),patch.object(module.threading,'Thread',Worker):
+            diagnostic,_=self.diagnostic_failure(module,lambda:module._run_jobs(self.binding,module.GitHub()))
+        self.assertEqual((diagnostic['stage'],diagnostic['code']),('source-run','worker-unfinished'))
+        self.assertEqual([worker.joins for worker in workers],[[5],[5]])
+
+    def test_permission_fields_are_numeric_and_filename_is_never_emitted(self):
+        module=self.module();error=PermissionError(13,'dummy-private-token','https://private.invalid/dummy-private-body')
+        error.winerror=5
+        with patch.object(module.subprocess,'Popen',side_effect=error):
+            diagnostic,caught=self.diagnostic_failure(module,lambda:module._run_jobs(self.binding,module.GitHub()))
+        self.assertIs(caught,error)
+        self.assertEqual((diagnostic['stage'],diagnostic['code'],diagnostic['exceptionKind'],diagnostic['errno'],
+                          diagnostic['winerror']),('source-run','os-error','permission',13,5))
+
+    def test_unknown_exception_names_and_non_numeric_hints_are_never_emitted(self):
+        module=self.module();Unknown=type('dummy-private-token',(Exception,),{})
+        error=Unknown('dummy-private-body https://private.invalid/');error.errno='dummy-private-token';error.winerror=True
+        with patch.object(self.backend,'get',side_effect=error):
+            diagnostic,caught=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                                backend=self.backend,env=self.env))
+        self.assertIs(caught,error);self.assertEqual(diagnostic['exceptionKind'],'unexpected')
+        self.assertEqual(diagnostic['code'],'unexpected');self.assertIsNone(diagnostic['errno']);self.assertIsNone(diagnostic['winerror'])
+
+    def test_invalid_preexisting_diagnostic_attributes_cannot_escape_allowlist(self):
+        module=self.module();error=ValueError('dummy-private-body')
+        error._qa_diagnostic={'stage':'https://private.invalid/','code':'dummy-private-token',
+                              'exceptionKind':'dummy-private-token','returnCode':True,'httpStatusHint':999,
+                              'unapproved':'dummy-private-body'}
+        with patch.object(self.backend,'get',side_effect=error):
+            diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                              backend=self.backend,env=self.env))
+        self.assertEqual((diagnostic['stage'],diagnostic['code'],diagnostic['exceptionKind']),
+                         ('source-run','validation','validation'))
+        self.assertIsNone(diagnostic['returnCode']);self.assertIsNone(diagnostic['httpStatusHint'])
+
+    def test_boundary_diagnostic_does_not_create_missing_output_parent(self):
+        module=self.module();parent=self.root/'missing-parent'
+        diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,parent/'mcp-qa',
+                                                                           backend=self.backend,env=self.env))
+        self.assertEqual((diagnostic['stage'],diagnostic['code']),('boundary','validation'))
+        self.assertFalse(parent.exists());self.assertEqual(self.backend.calls,[])
+
+    def test_source_binding_failure_precedes_all_github_calls(self):
+        module=self.module();(self.package/'AppxManifest.xml').write_bytes(b'dummy-private-body')
+        diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                           backend=self.backend,env=self.env))
+        self.assertEqual(diagnostic['stage'],'source-binding');self.assertEqual(self.backend.calls,[])
+
+    def test_source_jobs_producer_and_artifact_stages_report_narrowest_operation(self):
+        module=self.module();original=copy.deepcopy(self.responses)
+        controls=[('source-run','actions/runs/123',{}),
+                  ('source-jobs','actions/runs/123/attempts/1/jobs?per_page=100',{}),
+                  ('producer','actions/runs/123/attempts/1/jobs?per_page=100',{'total_count':0,'jobs':[]}),
+                  ('artifact-list','actions/runs/123/artifacts?per_page=100',{}),
+                  ('artifact-selected','actions/runs/123/artifacts?per_page=100',{'total_count':0,'artifacts':[]}),
+                  ('artifact-fixed','actions/artifacts/67',{}),
+                  ('artifact-unchanged','actions/artifacts/67',{**self.artifact,'digest':'sha256:'+'0'*64})]
+        for stage,path,response in controls:
+            with self.subTest(stage=stage):
+                self.responses=copy.deepcopy(original);self.responses[path]=response
+                diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                                   backend=self.backend,env=self.env))
+                self.assertEqual(diagnostic['stage'],stage)
+                self.assertFalse(self.output.exists());self.assertFalse(self.output.with_name('mcp-qa-origin').exists())
+
+    def test_zip_download_digest_extract_and_payload_verify_remain_distinct_failures(self):
+        module=self.module()
+        with patch.object(self.backend,'zip',side_effect=ValueError('dummy-private-token https://private.invalid/')):
+            diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                              backend=self.backend,env=self.env))
+        self.assertEqual(diagnostic['stage'],'artifact-zip')
+        self.archive=b'dummy-private-body'
+        diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                           backend=self.backend,env=self.env))
+        self.assertEqual(diagnostic['stage'],'zip-size-digest')
+        self.artifact.update(size_in_bytes=len(self.archive),digest='sha256:'+hashlib.sha256(self.archive).hexdigest());self.refresh()
+        diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                           backend=self.backend,env=self.env))
+        self.assertEqual(diagnostic['stage'],'zip-extract');self.assertEqual(diagnostic['exceptionKind'],'zip')
+        path=self.qa.output/'MCP_FIXTURES.json';proof=json.loads(path.read_bytes());proof['sourceCommit']='b'*40
+        path.write_text(json.dumps(proof)+'\n');self.archive=self.make_zip()
+        self.artifact.update(size_in_bytes=len(self.archive),digest='sha256:'+hashlib.sha256(self.archive).hexdigest());self.refresh()
+        diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                           backend=self.backend,env=self.env))
+        self.assertEqual(diagnostic['stage'],'payload-verify')
+        self.assertFalse(self.output.exists());self.assertFalse(self.output.with_name('mcp-qa-origin').exists())
+
+    def test_receipt_write_failure_is_safe_and_does_not_publish_outputs(self):
+        module=self.module();original=Path.write_bytes
+        def write(path,data):
+            if path.name=='receipt.json':raise PermissionError(13,'dummy-private-token',str(path))
+            return original(path,data)
+        with patch.object(Path,'write_bytes',write):
+            diagnostic,_=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                              backend=self.backend,env=self.env))
+        self.assertEqual((diagnostic['stage'],diagnostic['errno']),('receipt',13))
+        self.assertFalse(self.output.exists());self.assertFalse(self.output.with_name('mcp-qa-origin').exists())
+
+    def test_origin_publication_race_preserves_competing_directory_and_reports_stage(self):
+        module=self.module();original=module._move_new;origin=self.output.with_name('mcp-qa-origin')
+        def race(path,destination):
+            if destination==origin:origin.mkdir();(origin/'keep').write_bytes(b'prior')
+            return original(path,destination)
+        with patch.object(module,'_move_new',race):
+            diagnostic,error=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                                   backend=self.backend,env=self.env))
+        self.assertIsInstance(error,FileExistsError);self.assertEqual(diagnostic['stage'],'origin-publish')
+        self.assertEqual(diagnostic['errno'],errno.EEXIST);self.assertEqual((origin/'keep').read_bytes(),b'prior')
+        self.assertFalse(self.output.exists())
+
+    def test_payload_publication_race_keeps_verified_origin_and_competing_bytes(self):
+        module=self.module();original=module._move_new
+        def race(path,destination):
+            if destination==self.output:self.output.mkdir();(self.output/'keep').write_bytes(b'prior')
+            return original(path,destination)
+        with patch.object(module,'_move_new',race):
+            diagnostic,error=self.diagnostic_failure(module,lambda:module.download_source(self.package,self.output,
+                                                                                   backend=self.backend,env=self.env))
+        self.assertIsInstance(error,FileExistsError);self.assertEqual(diagnostic['stage'],'payload-publish')
+        self.assertEqual((self.output/'keep').read_bytes(),b'prior')
+        origin=self.output.with_name('mcp-qa-origin');self.assertEqual((origin/'original.zip').read_bytes(),self.archive)
+        self.assertEqual({p.name for p in origin.iterdir()},{'original.zip','receipt.json'})
+
+    def test_store_stages_cover_pair_context_fingerprint_repackage_binding_tag_and_gates(self):
+        store,source,env=self.store_inputs();module=self.module()
+        controls=[('source-pair',module.release_pair,'verify_pair'),
+                  ('store-context',module.store_qualification,'_store'),
+                  ('source-fingerprint',module.release_pair,'source_fingerprint'),
+                  ('source-binding',module,'_binding'),('source-tag',self.backend,'get'),
+                  ('source-gates',module.store_package,'authorize_release')]
+        for stage,target,method in controls:
+            def operation():return module.download_store(store,source,'x64',self.output,backend=self.backend,env=env)
+            with self.subTest(stage=stage):
+                if stage=='source-tag':
+                    real_get=self.backend.get
+                    def get(path):
+                        if path.startswith('commits/'):raise ValueError('dummy-private-token')
+                        return real_get(path)
+                    replacement=patch.object(target,method,get)
+                else:replacement=patch.object(target,method,side_effect=ValueError('dummy-private-token'))
+                with replacement:diagnostic,_=self.diagnostic_failure(module,operation)
+                self.assertEqual(diagnostic['stage'],stage)
+        original=module.store_package.verify_repackage
+        for arch in ('x64','arm64'):
+            def verify(*args):
+                if args[-1]==arch:raise ValueError('dummy-private-token')
+                return original(*args)
+            with self.subTest(arch=arch),patch.object(module.store_package,'verify_repackage',verify):
+                diagnostic,_=self.diagnostic_failure(module,lambda:module.download_store(store,source,'x64',self.output,
+                                                                                   backend=self.backend,env=env))
+                self.assertEqual(diagnostic['stage'],'repackage-'+arch)
+
+    def test_cli_emits_one_diagnostic_then_preserves_original_generic_exit1(self):
+        missing=self.root/'missing-parent'/'mcp-qa'
+        result=subprocess.run([sys.executable,str(ROOT/'scripts/mcp_qa_download.py'),'source',
+                               '--package-directory',str(self.package),'--output',str(missing)],capture_output=True)
+        self.assertEqual(result.returncode,1);self.assertEqual(result.stdout,b'')
+        lines=result.stderr.decode().splitlines();self.assertEqual(len(lines),2)
+        self.assertLessEqual(len((lines[0]+'\n').encode()),2048)
+        self.assertEqual(json.loads(lines[0])['stage'],'boundary')
+        self.assertEqual(lines[1],'같은 실행의 MCP QA 다운로드 검증에 실패했습니다. 응답·인증 정보는 출력하지 않습니다.')
+        self.assertFalse(missing.parent.exists())
+
+    def test_diagnostic_write_failure_keeps_original_cli_failure_and_no_traceback(self):
+        class BrokenWriter:
+            def write(self,data):raise OSError('dummy-private-token https://private.invalid/')
+            def flush(self):pass
+        argv=[str(ROOT/'scripts/mcp_qa_download.py'),'source','--package-directory',str(self.package),
+              '--output',str(self.root/'missing-parent'/'mcp-qa')]
+        with patch.object(sys,'argv',argv),patch.object(sys,'stderr',BrokenWriter()),self.assertRaises(SystemExit) as caught:
+            runpy.run_path(str(ROOT/'scripts/mcp_qa_download.py'),run_name='__main__')
+        self.assertEqual(caught.exception.code,'같은 실행의 MCP QA 다운로드 검증에 실패했습니다. 응답·인증 정보는 출력하지 않습니다.')
+        self.assertFalse((self.root/'missing-parent').exists())
 
 
 if __name__=='__main__':unittest.main()

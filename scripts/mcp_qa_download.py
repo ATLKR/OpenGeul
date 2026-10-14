@@ -30,6 +30,81 @@ from windows_components import identity
 REPOSITORY = 'ATLKR/OpenGeul'
 MAX_ZIP = 16*1024*1024
 MAX_METADATA = 2*1024*1024
+DIAGNOSTIC_STAGES = frozenset(('boundary','source-pair','store-context','source-fingerprint',
+    'repackage-x64','repackage-arm64','source-binding','source-run','source-jobs','source-tag',
+    'source-gates','producer','artifact-list','artifact-selected','artifact-fixed',
+    'artifact-unchanged','artifact-zip','zip-size-digest','zip-extract','payload-verify',
+    'receipt','origin-publish','payload-publish'))
+DIAGNOSTIC_CODES = frozenset(('validation','unexpected','os-error','path-rejected','timeout',
+    'stdout-limit','stderr-limit','drain-failure','worker-unfinished','return-code',
+    'empty-response','json-invalid'))
+EXCEPTION_KINDS = frozenset(('validation','unexpected','permission','file-exists','os',
+    'json','zip','transport','timeout'))
+
+
+def _number(value, minimum=0, maximum=2**31-1):
+    return value if type(value) is int and minimum<=value<=maximum else None
+
+
+def _exception_kind(error):
+    for kind,classes in (('permission',(PermissionError,)),('file-exists',(FileExistsError,)),
+            ('timeout',(subprocess.TimeoutExpired,)),('json',(json.JSONDecodeError,)),
+            ('zip',(zipfile.BadZipFile,zipfile.LargeZipFile)),('os',(OSError,)),
+            ('validation',(ValueError,KeyError,TypeError))):
+        if isinstance(error,classes):return kind
+    return 'unexpected'
+
+
+def _diagnostic(error, stage='boundary'):
+    """임의 오류 속성도 다시 허용 목록으로 거른다. 문자열은 절대로 복사하지 않는다."""
+    kind=_exception_kind(error)
+    code='os-error' if isinstance(error,OSError) else 'validation' if kind!='unexpected' else 'unexpected'
+    return_code=http_status=None
+    if isinstance(error,_GetFailure):
+        code=error.code if type(error.code) is str and error.code in DIAGNOSTIC_CODES else 'unexpected'
+        kind='timeout' if code=='timeout' else 'transport'
+        return_code=error.return_code;http_status=error.http_status
+    saved=getattr(error,'_qa_diagnostic',None)
+    if not (type(saved) is dict and type(saved.get('stage')) is str and saved['stage'] in DIAGNOSTIC_STAGES
+            and type(saved.get('code')) is str and saved['code'] in DIAGNOSTIC_CODES
+            and type(saved.get('exceptionKind')) is str and saved['exceptionKind'] in EXCEPTION_KINDS):
+        saved={}
+    stage=stage if type(stage) is str and stage in DIAGNOSTIC_STAGES else 'boundary'
+    return {'formatVersion':1,'stage':saved.get('stage',stage),'code':saved.get('code',code),
+        'exceptionKind':saved.get('exceptionKind',kind),
+        'returnCode':_number(saved.get('returnCode',return_code),-2**31),
+        'errno':_number(getattr(error,'errno',None)),'winerror':_number(getattr(error,'winerror',None)),
+        'httpStatusHint':_number(saved.get('httpStatusHint',http_status),100,599)}
+
+
+@contextlib.contextmanager
+def _stage(stage):
+    try:yield
+    except Exception as error:
+        try:error._qa_diagnostic=_diagnostic(error,stage)
+        except Exception:pass
+        raise
+
+
+def _emit_failure(error):
+    """진단 저장 파일 없이 고정 enum/숫자 JSON 한 줄만 추가한다."""
+    try:
+        data=json.dumps(_diagnostic(error),ensure_ascii=True,separators=(',',':'))+'\n'
+        if len(data.encode('utf-8'))<=2048:sys.stderr.write(data)
+    except Exception:pass  # 진단 출력 실패는 원래 작업 실패·exit1을 바꾸지 않는다.
+
+
+class _GetFailure(ValueError):
+    def __init__(self, code, *, return_code=None, http_status=None):
+        super().__init__('GitHub GET에 실패했습니다. 응답·stderr·인증 정보는 출력하지 않습니다')
+        self.code=code;self.return_code=return_code;self.http_status=http_status
+
+
+def _get_failure(code, *, return_code=None, stderr=b''):
+    hints=re.findall(rb'\(HTTP ([^)\r\n]*)\)',stderr) if code=='return-code' else []
+    hint=int(hints[0]) if len(hints)==1 and re.fullmatch(rb'[0-9]{3}',hints[0]) else None
+    error=_GetFailure(code,return_code=return_code,http_status=_number(hint,100,599))
+    return error
 
 
 def require(value, message):
@@ -39,42 +114,44 @@ def require(value, message):
 class GitHub:
     """고정 저장소 GET만 허용하고 stdout/stderr를 크기·시간 상한 안에서 수집한다."""
     def _bytes(self, path, cap):
-        require(re.fullmatch(r'(?:actions/runs/[1-9][0-9]*(?:/attempts/[1-9][0-9]*/jobs\?per_page=100|/artifacts\?per_page=100)?|actions/artifacts/[1-9][0-9]*(?:/zip)?|commits/(?:[0-9a-f]{40}|v[1-9][0-9]*\.[0-9]+\.[0-9]+(?:-dev\.[1-9][0-9]*\.[1-9][0-9]*)?))', path),
-                '허용하지 않은 GitHub GET 경로입니다')
+        if not re.fullmatch(r'(?:actions/runs/[1-9][0-9]*(?:/attempts/[1-9][0-9]*/jobs\?per_page=100|/artifacts\?per_page=100)?|actions/artifacts/[1-9][0-9]*(?:/zip)?|commits/(?:[0-9a-f]{40}|v[1-9][0-9]*\.[0-9]+\.[0-9]+(?:-dev\.[1-9][0-9]*\.[1-9][0-9]*)?))', path):
+            raise _get_failure('path-rejected')
         command = ['gh','api','--method','GET',f'repos/{REPOSITORY}/{path}']
         process = subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        output = bytearray(); overflow = threading.Event()
-        def drain(stream, destination, limit):
+        output = bytearray(); errors=bytearray()
+        stdout_limit=threading.Event();stderr_limit=threading.Event();drain_failed=threading.Event()
+        def stop():
+            try:process.kill()
+            except Exception:drain_failed.set()
+        def drain(stream, destination, limit, overflow):
             try:
                 for block in iter(lambda: stream.read(64*1024), b''):
-                    if destination is not None:
-                        left = limit-len(destination); destination.extend(block[:left])
-                        if len(block)>left:
-                            overflow.set()
-                            try: process.kill()
-                            except OSError: pass
-                    else:
-                        limit -= len(block)
-                        if limit<0:
-                            overflow.set()
-                            try: process.kill()
-                            except OSError: pass
-            finally: stream.close()
-        workers = [threading.Thread(target=drain,args=(process.stdout,output,cap),daemon=True),
-                   threading.Thread(target=drain,args=(process.stderr,None,64*1024),daemon=True)]
+                    left = limit-len(destination); destination.extend(block[:left])
+                    if len(block)>left:overflow.set();stop()
+            except Exception:
+                drain_failed.set();stop()
+            finally:
+                try:stream.close()
+                except Exception:drain_failed.set();stop()
+        workers = [threading.Thread(target=drain,args=(process.stdout,output,cap,stdout_limit),daemon=True),
+                   threading.Thread(target=drain,args=(process.stderr,errors,64*1024,stderr_limit),daemon=True)]
         for worker in workers: worker.start()
         try:
             process.wait(timeout=120 if path.endswith('/zip') else 30)
         except subprocess.TimeoutExpired:
-            process.kill(); process.wait(); raise ValueError('GitHub GET 제한 시간을 초과했습니다') from None
+            process.kill(); process.wait(); raise _get_failure('timeout',return_code=process.returncode) from None
         finally:
             for worker in workers: worker.join(timeout=5)
-        require(process.returncode==0 and not overflow.is_set() and all(not w.is_alive() for w in workers),
-                'GitHub GET에 실패했습니다. 응답·stderr·인증 정보는 출력하지 않습니다')
-        require(0<len(output)<=cap,'GitHub GET 응답 크기가 올바르지 않습니다')
+        code=('stdout-limit' if stdout_limit.is_set() else 'stderr-limit' if stderr_limit.is_set()
+              else 'drain-failure' if drain_failed.is_set() else 'worker-unfinished' if any(w.is_alive() for w in workers)
+              else 'return-code' if process.returncode!=0 else 'empty-response' if not output else None)
+        if code:raise _get_failure(code,return_code=process.returncode,stderr=bytes(errors))
         return bytes(output)
 
-    def get(self, path): return qa.strict_json(self._bytes(path,MAX_METADATA))
+    def get(self, path):
+        raw=self._bytes(path,MAX_METADATA)
+        try:return qa.strict_json(raw)
+        except Exception:raise _get_failure('json-invalid') from None
     def zip(self, artifact_id): return self._bytes('actions/artifacts/'+str(artifact_id)+'/zip',MAX_ZIP)
 
 
@@ -217,22 +294,24 @@ def _pr_binding(binding, run, backend, env):
 
 def _run_jobs(binding, backend, *, env=None, allow_pr=False):
     run_id = binding['sourceRun']; attempt = int(binding['runAttempt'])
-    run = backend.get('actions/runs/'+run_id)
-    require(isinstance(run,dict) and type(run.get('id')) is int and str(run['id'])==run_id
-            and type(run.get('run_attempt')) is int and run['run_attempt']==attempt
-            and run.get('repository',{}).get('full_name')==REPOSITORY and run['repository'].get('private') is False
-            and run.get('path')=='.github/workflows/msix.yml' and run.get('event') in ('push','pull_request','workflow_dispatch')
-            and (run.get('status')=='in_progress' and run.get('conclusion') is None
-                 or run.get('status')=='completed' and run.get('conclusion')=='success'),
-            '실제 Source GitHub 실행·시도·workflow·결과가 다릅니다')
-    pr=None
-    if run['event']=='pull_request':
-        require(allow_pr,'Store QA는 PR Source를 재사용하지 않습니다')
-        pr=_pr_binding(binding,run,backend,os.environ if env is None else env)
-    else:
-        require(run.get('head_sha')==binding['sourceCommit'],'Source API와 checkout SHA가 다릅니다')
-    _time(run.get('run_started_at'))
-    jobs = _page(backend.get(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100'),'jobs')
+    with _stage('source-run'):
+        run = backend.get('actions/runs/'+run_id)
+        require(isinstance(run,dict) and type(run.get('id')) is int and str(run['id'])==run_id
+                and type(run.get('run_attempt')) is int and run['run_attempt']==attempt
+                and run.get('repository',{}).get('full_name')==REPOSITORY and run['repository'].get('private') is False
+                and run.get('path')=='.github/workflows/msix.yml' and run.get('event') in ('push','pull_request','workflow_dispatch')
+                and (run.get('status')=='in_progress' and run.get('conclusion') is None
+                     or run.get('status')=='completed' and run.get('conclusion')=='success'),
+                '실제 Source GitHub 실행·시도·workflow·결과가 다릅니다')
+        pr=None
+        if run['event']=='pull_request':
+            require(allow_pr,'Store QA는 PR Source를 재사용하지 않습니다')
+            pr=_pr_binding(binding,run,backend,os.environ if env is None else env)
+        else:
+            require(run.get('head_sha')==binding['sourceCommit'],'Source API와 checkout SHA가 다릅니다')
+        _time(run.get('run_started_at'))
+    with _stage('source-jobs'):
+        jobs = _page(backend.get(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100'),'jobs')
     return run,jobs,pr
 
 
@@ -294,73 +373,87 @@ def _move_new(source, destination):
 
 
 def _fetch(binding, wasm, architecture, output, origin, backend, run, jobs, pr=None):
-    producer_name = 'native-e2e (windows-11-arm)' if architecture=='arm64' else 'native-e2e (windows-2025)'
-    candidates = [job for job in jobs if job.get('name')==producer_name]
-    require(len(candidates)==1,'해당 QA 생산자의 성공 job이 정확히 하나여야 합니다')
-    producer=candidates[0]
-    require(producer.get('status')=='completed' and producer.get('conclusion')=='success'
-            and type(producer.get('run_id')) is int and str(producer['run_id'])==binding['sourceRun']
-            and type(producer.get('run_attempt')) is int and str(producer['run_attempt'])==binding['runAttempt']
-            and producer.get('head_sha')==(pr['apiHeadCommit'] if pr else binding['sourceCommit']),'QA 생산자 결과·실행·attempt가 다릅니다')
+    with _stage('producer'):
+        producer_name = 'native-e2e (windows-11-arm)' if architecture=='arm64' else 'native-e2e (windows-2025)'
+        candidates = [job for job in jobs if job.get('name')==producer_name]
+        require(len(candidates)==1,'해당 QA 생산자의 성공 job이 정확히 하나여야 합니다')
+        producer=candidates[0]
+        require(producer.get('status')=='completed' and producer.get('conclusion')=='success'
+                and type(producer.get('run_id')) is int and str(producer['run_id'])==binding['sourceRun']
+                and type(producer.get('run_attempt')) is int and str(producer['run_attempt'])==binding['runAttempt']
+                and producer.get('head_sha')==(pr['apiHeadCommit'] if pr else binding['sourceCommit']),'QA 생산자 결과·실행·attempt가 다릅니다')
     name='opengeul-mcp-fixtures'+('-arm64' if architecture=='arm64' else '')+'-'+binding['sourceRun']
-    matches=[item for item in _page(backend.get('actions/runs/'+binding['sourceRun']+'/artifacts?per_page=100'),'artifacts') if item.get('name')==name]
-    require(len(matches)==1,'QA artifact 이름이 없거나 중복되어 재선택하지 않습니다')
-    selected=_artifact(matches[0],binding,architecture,run,producer,pr)
-    fixed=_artifact(backend.get('actions/artifacts/'+str(selected['id'])),binding,architecture,run,producer,pr)
-    require(fixed==selected,'선택한 QA artifact가 다운로드 전에 변경되었습니다')
-    raw=backend.zip(selected['id'])
-    require(isinstance(raw,bytes) and 0<len(raw)<=MAX_ZIP and len(raw)==selected['size_in_bytes']
-            and 'sha256:'+hashlib.sha256(raw).hexdigest()==selected['digest'],'QA ZIP 실제 크기·서버 SHA256이 다릅니다')
-    with tempfile.TemporaryDirectory(prefix='.opengeul-mcp-download-',dir=output.parent) as temporary:
+    with _stage('artifact-list'):
+        artifacts=_page(backend.get('actions/runs/'+binding['sourceRun']+'/artifacts?per_page=100'),'artifacts')
+    with _stage('artifact-selected'):
+        matches=[item for item in artifacts if item.get('name')==name]
+        require(len(matches)==1,'QA artifact 이름이 없거나 중복되어 재선택하지 않습니다')
+        selected=_artifact(matches[0],binding,architecture,run,producer,pr)
+    with _stage('artifact-fixed'):
+        fixed=_artifact(backend.get('actions/artifacts/'+str(selected['id'])),binding,architecture,run,producer,pr)
+    with _stage('artifact-unchanged'):
+        require(fixed==selected,'선택한 QA artifact가 다운로드 전에 변경되었습니다')
+    with _stage('artifact-zip'):raw=backend.zip(selected['id'])
+    with _stage('zip-size-digest'):
+        require(isinstance(raw,bytes) and 0<len(raw)<=MAX_ZIP and len(raw)==selected['size_in_bytes']
+                and 'sha256:'+hashlib.sha256(raw).hexdigest()==selected['digest'],'QA ZIP 실제 크기·서버 SHA256이 다릅니다')
+    with _stage('zip-extract'), tempfile.TemporaryDirectory(prefix='.opengeul-mcp-download-',dir=output.parent) as temporary:
         base=Path(temporary);payload=base/'payload';_extract(raw,payload)
-        qa.verify(payload,binding,wasm,architecture=architecture)
-        proof=base/'origin';proof.mkdir();(proof/'original.zip').write_bytes(raw)
-        receipt={'formatVersion':1,**binding,'architecture':architecture,'artifact':selected,
-            'run':{key:run.get(key) for key in ('id','head_sha','run_attempt','path','event','status','conclusion','run_started_at')},
-            'producer':{key:producer.get(key) for key in ('id','name','run_id','run_attempt','head_sha','status','conclusion','started_at','completed_at')},
-            'originalZip':{'name':'original.zip','bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()},
-            'fixtureManifestSha256':qa.sha(payload/qa.MANIFEST),'helperSha256':qa.sha(Path(qa.__file__)),
-            'publicQaOnly':True,'fullSourceQualified':False,'verifiedFiles':12}
-        if pr is not None:receipt['pullRequestBinding']=pr
-        data=(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n').encode('utf-8')
-        require(len(data)<=qa.MAX_JSON,'QA origin receipt 크기 상한을 초과했습니다')
-        (proof/'receipt.json').write_bytes(data)
-        require(not output.exists() and not origin.exists(),'QA 출력·origin이 검증 중 생성되어 덮어쓰지 않습니다')
-        _move_new(proof,origin)
+        with _stage('payload-verify'):qa.verify(payload,binding,wasm,architecture=architecture)
+        with _stage('receipt'):
+            proof=base/'origin';proof.mkdir();(proof/'original.zip').write_bytes(raw)
+            receipt={'formatVersion':1,**binding,'architecture':architecture,'artifact':selected,
+                'run':{key:run.get(key) for key in ('id','head_sha','run_attempt','path','event','status','conclusion','run_started_at')},
+                'producer':{key:producer.get(key) for key in ('id','name','run_id','run_attempt','head_sha','status','conclusion','started_at','completed_at')},
+                'originalZip':{'name':'original.zip','bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()},
+                'fixtureManifestSha256':qa.sha(payload/qa.MANIFEST),'helperSha256':qa.sha(Path(qa.__file__)),
+                'publicQaOnly':True,'fullSourceQualified':False,'verifiedFiles':12}
+            if pr is not None:receipt['pullRequestBinding']=pr
+            data=(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n').encode('utf-8')
+            require(len(data)<=qa.MAX_JSON,'QA origin receipt 크기 상한을 초과했습니다')
+            (proof/'receipt.json').write_bytes(data)
+        with _stage('origin-publish'):
+            require(not output.exists() and not origin.exists(),'QA 출력·origin이 검증 중 생성되어 덮어쓰지 않습니다')
+            _move_new(proof,origin)
         # 다음 게시가 실패해도 검증된 원 ZIP/receipt를 보존한다. 공개 경로를
         # 삭제하지 않으므로 다른 호출이 만든 목적지·교체된 디렉터리는 안전하다.
-        _move_new(payload,output)
+        with _stage('payload-publish'):_move_new(payload,output)
     return receipt
 
 
 def download_source(package_directory, output, *, backend=None, env=None):
-    output,origin=_boundary(output,(package_directory,))
-    binding,wasm,architecture=source_context(Path(package_directory),env)
+    with _stage('boundary'):output,origin=_boundary(output,(package_directory,))
+    with _stage('source-binding'):binding,wasm,architecture=source_context(Path(package_directory),env)
     backend=GitHub() if backend is None else backend;run,jobs,pr=_run_jobs(binding,backend,env=env,allow_pr=True)
     return _fetch(binding,wasm,architecture,output,origin,backend,run,jobs,pr)
 
 
 def download_store(store_directory, source_directory, architecture, output, *, backend=None, env=None):
-    architecture=require_architecture(architecture)
-    output,origin=_boundary(output,(store_directory,source_directory))
-    source_directory=qa.safe_path(source_directory);store_directory=qa.safe_path(store_directory)
-    pair=release_pair.verify_pair(source_directory)
-    details,_=store_qualification._store(store_directory,env)
-    require(pair==release_pair.read_json(store_directory/'source-provenance.json')
-            and release_pair.source_fingerprint(source_directory)==details['sourceAssetFingerprintSha256'],
-            'Store가 검증한 실제 Source22 원본과 다릅니다')
+    with _stage('boundary'):
+        architecture=require_architecture(architecture)
+        output,origin=_boundary(output,(store_directory,source_directory))
+        source_directory=qa.safe_path(source_directory);store_directory=qa.safe_path(store_directory)
+    with _stage('source-pair'):pair=release_pair.verify_pair(source_directory)
+    with _stage('store-context'):details,_=store_qualification._store(store_directory,env)
+    with _stage('source-fingerprint'):
+        require(pair==release_pair.read_json(store_directory/'source-provenance.json')
+                and release_pair.source_fingerprint(source_directory)==details['sourceAssetFingerprintSha256'],
+                'Store가 검증한 실제 Source22 원본과 다릅니다')
     for arch in ('x64','arm64'):
-        source=pair['architectures'][arch];entry=details['architectures'][arch]
-        hashes=store_package.verify_repackage(source_directory/source['assets'][source['provenance']['package']],
-                      store_directory/entry['package'],details['version'],arch)
-        require(hashes==entry['runtimeSha256'],'Store runtime이 실제 Source 제품 바이트와 다릅니다')
-    provenance=pair['architectures'][architecture]['provenance'];binding,wasm=_binding(provenance)
-    require(binding=={'repository':pair['repository'],'sourceCommit':pair['commit'],'sourceRun':pair['runId'],'runAttempt':pair['runAttempt']},
-            '선택 아키텍처와 공통 Source 실행이 다릅니다')
+        with _stage('repackage-'+arch):
+            source=pair['architectures'][arch];entry=details['architectures'][arch]
+            hashes=store_package.verify_repackage(source_directory/source['assets'][source['provenance']['package']],
+                          store_directory/entry['package'],details['version'],arch)
+            require(hashes==entry['runtimeSha256'],'Store runtime이 실제 Source 제품 바이트와 다릅니다')
+    with _stage('source-binding'):
+        provenance=pair['architectures'][architecture]['provenance'];binding,wasm=_binding(provenance)
+        require(binding=={'repository':pair['repository'],'sourceCommit':pair['commit'],'sourceRun':pair['runId'],'runAttempt':pair['runAttempt']},
+                '선택 아키텍처와 공통 Source 실행이 다릅니다')
     backend=GitHub() if backend is None else backend;run,jobs,_=_run_jobs(binding,backend,env=env)
-    tag=details['sourceRelease'].rsplit('/',1)[1]
-    tag_sha=backend.get('commits/'+tag).get('sha')
-    store_package.authorize_release(tag,pair,run,tag_sha,jobs)
+    with _stage('source-tag'):
+        tag=details['sourceRelease'].rsplit('/',1)[1]
+        tag_sha=backend.get('commits/'+tag).get('sha')
+    with _stage('source-gates'):store_package.authorize_release(tag,pair,run,tag_sha,jobs)
     return _fetch(binding,wasm,architecture,output,origin,backend,run,jobs)
 
 
@@ -380,4 +473,6 @@ def main():
 
 if __name__=='__main__':
     try: main()
-    except Exception: raise SystemExit('같은 실행의 MCP QA 다운로드 검증에 실패했습니다. 응답·인증 정보는 출력하지 않습니다.') from None
+    except Exception as error:
+        _emit_failure(error)
+        raise SystemExit('같은 실행의 MCP QA 다운로드 검증에 실패했습니다. 응답·인증 정보는 출력하지 않습니다.') from None
