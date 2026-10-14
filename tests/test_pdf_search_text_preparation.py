@@ -35,6 +35,20 @@ class PdfSearchTextPreparationTests(unittest.TestCase):
                       '        content.transform([pd.width, 0.0, 0.0, pd.height, 0.0, 0.0]);\n'
                       '    opengeul_pdf_guard::reject_direct_export()?;\n'),
             pdf.PATCHES: '# Original upstream patch history\n',
+            pdf.SVG: ('fn draw_text() {\n'
+                      '                let common_attrs = attrs_for_cluster(cluster_str, &color);\n'
+                      '                // original positioned glyph emission\n}\n'),
+            pdf.TEXT: ('fn write_font() {\n    let mut flags = FontFlags::empty();\n}\n'
+                       'pub struct Font {\n    pub face_index: u32,\n}\n'
+                       'fn render() {\n'
+                       '            font_names\n'
+                       '                .entry(font.reference)\n'
+                       '                .or_insert_with(|| rc.add_font(font.reference));\n'
+                       '                let name = font_names.get(&font.reference).unwrap();\n'
+                       '                // original outline_transform, set_text_matrix and show remain\n}\n'
+                       'fn fill_fonts() {\n'
+                       '                                            face_index,\n'
+                       '                            font.glyph_remapper.remap(g.id.0);\n}\n'),
         }
         self.original = {name: text.encode() for name, text in self.texts.items()}
         self.licenses = {name: ('Original license: '+name+'\n').encode()
@@ -78,6 +92,21 @@ class PdfSearchTextPreparationTests(unittest.TestCase):
             self.assertEqual((self.source/name).read_bytes(), data)
         self.assertTrue((self.source/pdf.PATCHES).read_text().startswith(self.texts[pdf.PATCHES]))
         pdf.validate(proof, *self.inventory())
+
+    def test_layout_advances_preserve_positioned_glyphs_and_share_existing_font_resources(self):
+        pdf.apply(self.source)
+        svg = (self.source/pdf.SVG).read_text()
+        self.assertIn('original positioned glyph emission', svg)
+        self.assertIn('opengeul-layout-advance-', svg)
+        self.assertIn('advance.to_bits()', svg)
+        text = (self.source/pdf.TEXT).read_text()
+        self.assertIn('original outline_transform, set_text_matrix and show remain', text)
+        self.assertIn('.font_descriptor(descriptor_ref)', text)
+        self.assertIn('.to_unicode(cmap_ref)', text)
+        self.assertIn('font.layout_advances.entry(key)', text)
+        self.assertIn('width.is_finite() && width > 0.0', text)
+        self.assertIn('positioned_glyphs.len()).sum::<usize>() != 1', text)
+        self.assertNotIn('actual_text(', text)
 
     def test_tampered_source_or_license_is_rejected_before_any_write(self):
         for name in pdf.SOURCE_FILES:

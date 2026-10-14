@@ -15,12 +15,16 @@ LIB = CORE + 'vendor/svg2pdf/src/lib.rs'
 RENDER = CORE + 'vendor/svg2pdf/src/render/mod.rs'
 PDF = CORE + 'src/renderer/pdf.rs'
 PATCHES = CORE + 'vendor/svg2pdf/RHWP_PATCHES.md'
+SVG = CORE + 'src/renderer/svg.rs'
+TEXT = CORE + 'vendor/svg2pdf/src/render/text.rs'
 # PDF is pinned after the existing OpenGeul embedding/completeness guards.
 SOURCE_SHA256 = {
     LIB: '15cc41eef2f9d65773a0f0dd2ddd8144331a8304e42425f90adc06ba137c4406',
     RENDER: '040df1fbe7fedd93b65dff234a6091243a61d59b02f92be3eeaf373bbef7cf35',
     PDF: '0d460d7e4944588f79f4ea9a9857598e21a4c10d76cd907067ff2077e5455a04',
     PATCHES: '87293452a2e13bbf6403a0fe07f679d2405e5a248df57a31bdbcde5f325b776c',
+    SVG: 'a5f10616101d31582185eaba2283aa5d44a8529d23a681096d512a1341244829',
+    TEXT: '2c1d3b4890157916bd39c63f6d54ec5ad48422d704c48b5a7ec58e85d052991d',
 }
 PRESERVED_SHA256 = {
     CORE + 'vendor/svg2pdf/LICENSE-APACHE': '62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a',
@@ -33,7 +37,9 @@ PATCHED_SHA256 = {
     LIB: 'dc33760dff462546dec8e47c896a6c278d9533758e21847eda0ddfd8386a5e02',
     RENDER: 'fadb08aa5901d5fb09642c95c37bf0de7b94fa87e23a34ab5c0c41820cd110ae',
     PDF: '84bb9980b3a42e42998872bc9112a1714ef82984a5981b59c51d148f90b9e804',
-    PATCHES: '53e157001c4e24c15f72460d5564455d0f970067403f43e93f6a69a9d3993471',
+    PATCHES: 'bc7f84bb9ecf563dbbcbd766624f54946e9c3020b887b7b239847419ee94de97',
+    SVG: '8f885604bcf4c4e569d3c8ea88835c64c2295df71b72275a76b9b10fa649c661',
+    TEXT: 'f1c567987c73859910adfaca4daa37869924c1b26ac6089a4ff821d90b6b91bf',
 }
 SOURCE_FILES = tuple((*SOURCE_SHA256, *PRESERVED_SHA256))
 
@@ -73,6 +79,65 @@ fn tree_to_xobject_with_matrix(
     tree: &Tree, chunk: &mut Chunk, ctx: &mut Context, matrix: [f32; 6],
 ) -> Result<Ref> {'''
 
+LAYOUT_ADVANCE_API = '''
+// A positioned SVG cluster's logical advance can differ from its fallback
+// glyph's natural width. Declare that advance without altering glyph outlines,
+// matrices, font programs, ToUnicode mappings, or per-character selection boxes.
+fn layout_advance_key(
+    text: &usvg::Text, units_per_em: u16, gid: u16, transform: Transform,
+) -> Option<(u16, u32)> {
+    if text.layouted().iter().map(|span| span.positioned_glyphs.len()).sum::<usize>() != 1 {
+        return None;
+    }
+    let payload = text.id().strip_prefix("opengeul-layout-advance-")?;
+    let (index, hex) = payload.split_once('-')?;
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) || hex.len() != 16 {
+        return None;
+    }
+    let advance = f64::from_bits(u64::from_str_radix(hex, 16).ok()?);
+    // Complex and rotated clusters retain their established font metrics.
+    if !advance.is_finite() || advance <= 0.0 || transform.sx <= 0.0
+        || transform.ky.abs() > 0.000001 || transform.kx.abs() > 0.000001 {
+        return None;
+    }
+    let scale = f64::from(transform.sx) * f64::from(units_per_em);
+    let width = (advance / scale * 1000.0) as f32;
+    (width.is_finite() && width > 0.0).then_some((gid, width.to_bits()))
+}
+
+fn layout_font_reference(font: &Font, text: &usvg::Text, gid: u16, transform: Transform) -> Ref {
+    layout_advance_key(text, font.units_per_em, gid, transform)
+        .and_then(|key| font.layout_advances.get(&key).copied())
+        .unwrap_or(font.reference)
+}
+'''
+
+ALIAS_FONT_WRITER = '''    // Each alias is used only for its one CID at its declared layout advance.
+    // Reuse the original embedded font program, descriptor and Unicode map.
+    // Distinct advances of the same glyph get distinct dictionary references.
+    for (&(old_gid, width), &reference) in &font.layout_advances {
+        let alias_cid_ref = alloc.alloc_ref();
+        let cid_value = glyph_remapper.get(old_gid).ok_or(SubsetError(font.id))?;
+        chunk.type0_font(reference)
+            .base_font(Name(base_font_type0.as_bytes()))
+            .encoding_predefined(Name(IDENTITY_H.as_bytes()))
+            .descendant_font(alias_cid_ref)
+            .to_unicode(cmap_ref);
+        let mut alias = chunk.cid_font(alias_cid_ref);
+        alias.subtype(if is_cff { CidFontType::Type0 } else { CidFontType::Type2 });
+        alias.base_font(Name(base_font.as_bytes()));
+        alias.system_info(SYSTEM_INFO);
+        alias.font_descriptor(descriptor_ref);
+        alias.default_width(0.0);
+        if !is_cff {
+            alias.cid_to_gid_map_predefined(Name(b"Identity"));
+        }
+        alias.widths().same(cid_value, cid_value, f32::from_bits(width));
+        alias.finish();
+    }
+
+'''
+
 PROVENANCE = '''
 
 ## OpenGeul root page Form geometry
@@ -89,6 +154,17 @@ PROVENANCE = '''
 - The regression uses upstream's original MIT `RHWPExactKerningSmoke` fixture
   in `tests/opengeul_pdf_policy.rs`. No font binaries or dependencies are added.
 - Original LICENSE-APACHE, LICENSE-MIT, NOTICE and fixture license are preserved.
+
+## OpenGeul positioned-cluster font advances
+
+- SVG text clusters carry their existing logical layout advance as a named ID.
+  Their original positions, textLength fitting, paints and glyphs are unchanged.
+- svg2pdf uses that advance only for single horizontal glyphs, through a CID
+  font dictionary alias sharing the same font program, descriptor and ToUnicode.
+  Different advances use distinct aliases; unmarked/complex/rotated text retains
+  its original metrics. No ActualText or extra invisible text is introduced.
+- This prevents PDF consumers inferring spaces from fallback-font width mismatch,
+  while preserving the real character bounds used for selection and tail-ink checks.
 '''
 
 
@@ -121,7 +197,41 @@ def patched_texts(texts: dict[str, str]) -> dict[str, str]:
         '        content.transform([pd.width, 0.0, 0.0, pd.height, 0.0, 0.0]);',
         '''        // Root Forms retain SVG coordinates; apply only the 96 DPI -> 72 pt scale.
         content.transform([0.75, 0.0, 0.0, 0.75, 0.0, 0.0]);''')
-    return {LIB: lib, RENDER: render, PDF: pdf, PATCHES: texts[PATCHES] + PROVENANCE}
+    svg = _replace(texts[SVG],
+        '                let common_attrs = attrs_for_cluster(cluster_str, &color);',
+        '''                let mut common_attrs = attrs_for_cluster(cluster_str, &color);
+                let advance = cluster_advance(*char_idx, cluster_str);
+                if advance.is_finite() && advance > 0.0 {
+                    common_attrs.push_str(&format!(
+                        " id=\\"opengeul-layout-advance-{}-{:016x}\\"",
+                        self.output.len(), advance.to_bits(),
+                    ));
+                }''')
+    text = _replace(texts[TEXT], '    let mut flags = FontFlags::empty();',
+        ALIAS_FONT_WRITER + '    let mut flags = FontFlags::empty();')
+    text = _replace(text, '    pub face_index: u32,',
+        '    pub face_index: u32,\n    pub layout_advances: BTreeMap<(u16, u32), Ref>,')
+    text = _replace(text, '                                            face_index,',
+        '                                            face_index,\n                                            layout_advances: BTreeMap::new(),')
+    text = _replace(text, '                            font.glyph_remapper.remap(g.id.0);',
+        '''                            font.glyph_remapper.remap(g.id.0);
+                            if let Some(key) = layout_advance_key(t, font.units_per_em, g.id.0, g.outline_transform()) {
+                                font.layout_advances.entry(key).or_insert_with(|| allocator.alloc_ref());
+                            }''')
+    text = _replace(text,
+        '''            font_names
+                .entry(font.reference)
+                .or_insert_with(|| rc.add_font(font.reference));''',
+        '''            let reference = layout_font_reference(font, text, glyph.id.0, glyph.outline_transform());
+            font_names
+                .entry(reference)
+                .or_insert_with(|| rc.add_font(reference));''')
+    text = _replace(text, '                let name = font_names.get(&font.reference).unwrap();',
+        '''                let reference = layout_font_reference(font, text, glyph.id.0, glyph.outline_transform());
+                let name = font_names.get(&reference).unwrap();''')
+    text += LAYOUT_ADVANCE_API
+    return {LIB: lib, RENDER: render, PDF: pdf, PATCHES: texts[PATCHES] + PROVENANCE,
+            SVG: svg, TEXT: text}
 
 
 def apply(source: Path) -> dict:

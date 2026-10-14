@@ -218,6 +218,59 @@ fn small_positioned_text_keeps_svg_units_until_the_page_transform() {
 }
 
 #[test]
+fn layout_advances_use_distinct_aliases_without_replacing_text_or_font_programs() {
+    use rhwp::renderer::{svg::SvgRenderer, Renderer, TextStyle};
+    let bytes = font_with_flags(0);
+    let family = usable_family(&bytes, 0);
+    let directory = FontDirectory::new(&bytes);
+    let options = directory.compatibility_options(&family);
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 1100.0);
+    let mut style = TextStyle::default();
+    style.font_family = family;
+    style.font_size = 12.0;
+    style.extra_char_spacing = 4.0;
+    renderer.draw_text_positioned("AA", 100.0, 150.0, &style, Some(&[0.0, 10.0, 20.0]));
+    renderer.draw_text_positioned("AA", 100.0, 180.0, &style, Some(&[0.0, 20.0, 40.0]));
+    renderer.end_page();
+    let svg = renderer.output();
+    assert_eq!(svg.matches("opengeul-layout-advance-").count(), 4,
+        "each existing horizontal cluster must retain its own logical advance");
+    assert_eq!(svg.matches("<text ").count(), 4);
+    let pdf = svgs_to_pdf_with_options(&[svg.to_owned()], &options).unwrap();
+    let objects = String::from_utf8_lossy(&pdf);
+    assert_eq!(objects.matches("/Subtype /Type0").count(), 3,
+        "the same glyph at two advances needs two aliases plus its original font");
+    assert_eq!(objects.matches("/FontFile2").count(), 1,
+        "aliases must reuse one original embedded font program");
+    assert_eq!(objects.matches("/Type /FontDescriptor").count(), 1);
+    assert_eq!(objects.matches("/ToUnicode").count(), 3);
+    assert!(!objects.contains("/ActualText"));
+}
+
+#[test]
+fn malformed_or_complex_layout_markers_keep_the_original_font_dictionary() {
+    let bytes = font_with_flags(0);
+    let family = usable_family(&bytes, 0);
+    let directory = FontDirectory::new(&bytes);
+    let options = directory.compatibility_options(&family);
+    for (id, text) in [
+        ("opengeul-layout-advance-1-7ff8000000000000", "A"),
+        ("opengeul-layout-advance-1-bff0000000000000", "A"),
+        ("opengeul-layout-advance-1-0000000000000000", "A"),
+        ("opengeul-layout-advance-x-4024000000000000", "A"),
+        ("opengeul-layout-advance-1-nothex", "A"),
+        ("opengeul-layout-advance-1-4024000000000000", "AH"),
+    ] {
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="180" height="80"><text id="{id}" x="10" y="42" font-family="{family}" font-size="32">{text}</text></svg>"#);
+        let pdf = svgs_to_pdf_with_options(&[svg], &options).unwrap();
+        let objects = String::from_utf8_lossy(&pdf);
+        assert_eq!(objects.matches("/Subtype /Type0").count(), 1, "{id}: {text}");
+        assert!(!objects.contains("/ActualText"));
+    }
+}
+
+#[test]
 fn persistent_subset_failure_on_first_middle_or_last_page_rejects_export() {
     let mut incomplete_successes = Vec::new();
     for failed_width in 180..183 {
