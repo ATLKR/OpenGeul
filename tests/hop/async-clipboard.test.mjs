@@ -83,6 +83,23 @@ function paste(handler,kind,wait) {
   handler.onPaste({preventDefault(){},clipboardData:{getData:(type)=>values[type]??'',items:kind==='rtf'?[]:[{kind:'file',type:file.type,getAsFile:()=>file}]}});
 }
 
+function pointerHarness(h) {
+  const noop=()=>{};
+  document.addEventListener=noop;
+  const content={clientWidth:800,getBoundingClientRect:()=>({left:0,top:0})};
+  h.handler.container={clientWidth:800,clientHeight:1200,style:{},querySelector:()=>content,
+    getBoundingClientRect:()=>({left:0,top:0}),removeEventListener:noop};
+  h.handler.virtualScroll={getPageAtPoint:()=>0,getPageOffset:()=>0,getPageWidth:()=>800,getPageLeftResolved:()=>0};
+  h.handler.canEditHyperlink=()=>false;
+  h.handler.updateFieldMarkers=noop;
+  h.handler.prepareClickHerePointerEntry=noop;
+  return (x,y)=>{
+    const e={clientX:x,clientY:y,button:0,shiftKey:false,ctrlKey:false,metaKey:false,altKey:false,
+      preventDefault(){},target:{closest:()=>null}};
+    h.handler.onClick(e);h.handler.onMouseUp(e);
+  };
+}
+
 const changes={
   replacement:(h)=>h.replace(),
   'reopen identical bytes':(h)=>{const bytes=h.bytes();h.wasm.loadDocument(bytes,'same.hwpx');h.handler.deactivate();h.handler.active=true;h.select();},
@@ -132,6 +149,77 @@ for(const kind of ['image','rtf']) {
   });
 }
 
+for(const kind of ['image','rtf']) {
+  test(`${kind}: real picture selection click and return cancels the pending paste`,async(t)=>{
+    const wait=deferred();browser(t,kind==='rtf'?{rtfRead:wait}:{});const h=harness(t);
+    h.cursor.clearSelection();
+    assert.equal(h.wasm.insertPicture(0,0,18,'',png,7500,7500,100,100,'png','').ok,true);
+    h.wasm.getPageLayerTreeObject(0);
+    h.cursor.moveTo(position(3));const caret=h.cursor.getRect();assert.ok(caret);
+    const click=pointerHarness(h);
+    paste(h.handler,kind,kind==='image'?wait:undefined);
+    click(50,50);assert.equal(h.cursor.isInPictureObjectSelection(),true);
+    click(caret.x,caret.y+4);assert.equal(h.cursor.isInPictureObjectSelection(),false);
+    const current=h.cursor.getPosition();
+    assert.equal(current.sectionIndex,0);assert.equal(current.paragraphIndex,0);assert.equal(current.charOffset,3);
+    assert.equal(h.cursor.getSelection(),null);
+    const beforeText=h.text(),beforeBytes=h.bytes();
+    wait.resolve(png.buffer.slice(png.byteOffset,png.byteOffset+png.byteLength));await tick();
+    assert.equal(h.text(),beforeText);
+    assert.deepEqual(h.bytes(),beforeBytes,'stale paste changed saved bytes after picture selection returned');
+    assert.equal(h.history.canUndo(),false);
+  });
+  test(`${kind}: real table border selection click and return cancels the pending paste`,async(t)=>{
+    const wait=deferred();browser(t,kind==='rtf'?{rtfRead:wait}:{});const h=harness(t);
+    h.cursor.clearSelection();
+    const table=h.wasm.createTable(0,0,18,1,2);assert.equal(table.ok,true);
+    h.wasm.getPageLayerTreeObject(0);h.cursor.moveTo(position(3));
+    const caret=h.cursor.getRect();assert.ok(caret);
+    const bbox=h.wasm.getTableCellBboxes(0,table.paraIdx,table.controlIdx)[0];assert.ok(bbox);
+    const click=pointerHarness(h);
+    paste(h.handler,kind,kind==='image'?wait:undefined);
+    click(bbox.x,bbox.y+2);assert.equal(h.cursor.isInTableObjectSelection(),true);
+    click(caret.x,caret.y+4);assert.equal(h.cursor.isInTableObjectSelection(),false);
+    const current=h.cursor.getPosition();
+    assert.equal(current.sectionIndex,0);assert.equal(current.paragraphIndex,0);assert.equal(current.charOffset,3);
+    assert.equal(h.cursor.getSelection(),null);
+    const beforeText=h.text(),beforeBytes=h.bytes();
+    wait.resolve(png.buffer.slice(png.byteOffset,png.byteOffset+png.byteLength));await tick();
+    assert.equal(h.text(),beforeText);
+    assert.deepEqual(h.bytes(),beforeBytes,'stale paste changed saved bytes after table selection returned');
+    assert.equal(h.history.canUndo(),false);
+  });
+  for(const boundary of ['idle flush','resumable completion']) {
+    test(`${kind}: prior cell edit ${boundary} keeps an unchanged pending paste current`,{timeout:3000},async(t)=>{
+      const wait=deferred();browser(t,kind==='rtf'?{rtfRead:wait}:{});const h=harness(t);
+      h.cursor.clearSelection();const table=h.wasm.createTable(0,0,0,1,2);
+      h.cursor.moveToCellByIndex(0,table.paraIdx,table.controlIdx,undefined,0,'start');
+      const edit=h.wasm.insertTextInCellDeferredPagination(0,table.paraIdx,table.controlIdx,0,0,0,'PRIOR USER EDIT');
+      assert.equal(edit.paginationDeferred,true);assert.equal(edit.cellFlowChanged,false);
+      h.cursor.moveToCellByIndex(0,table.paraIdx,table.controlIdx,undefined,0,'end');
+      h.handler.deferredPaginationRunner={hasPendingWork:()=>false,cancel(){}};
+      h.handler.flushDeferredPaginationIfNeeded=InputHandler.prototype.flushDeferredPaginationIfNeeded;
+      h.handler.cancelDeferredPaginationFlush=InputHandler.prototype.cancelDeferredPaginationFlush;
+      t.after(()=>h.handler.cancelDeferredPaginationFlush());
+      const expected=boundary==='idle flush'?'deferred-pagination-flush:idle-auto':'deferred-pagination-complete';
+      const layoutDone=new Promise((resolve)=>{
+        const off=h.eventBus.on('document-changed',(reason)=>{if(reason===expected){off();resolve();}});
+      });
+      if(boundary==='idle flush')h.handler.scheduleDeferredPaginationFlush();
+      paste(h.handler,kind,kind==='image'?wait:undefined);
+      if(boundary==='resumable completion'){
+        h.wasm.flushDeferredPagination();h.handler.completeResumablePagination(h.wasm.pageCount);
+      }
+      await layoutDone;const before=h.bytes(),beforeText=h.text();
+      wait.resolve(png.buffer.slice(png.byteOffset,png.byteOffset+png.byteLength));await tick();
+      assert.equal(h.history.canUndo(),true,'layout completion cancelled an unchanged paste');
+      assert.notDeepEqual(h.bytes(),before);
+      h.history.undo(h.wasm);assert.equal(h.text(),beforeText,'undo must preserve the earlier cell edit');
+      assert.equal(h.text().includes('PRIOR USER EDIT'),true);
+    });
+  }
+}
+
 test('image: document replacement during decode cancels and releases its object URL',async(t)=>{
   const wait=deferred(),url=browser(t,{decode:wait.promise}),h=harness(t);
   paste(h.handler,'image');await tick();assert.equal(url.created(),1);
@@ -143,6 +231,11 @@ test('image: view refresh with unchanged selection keeps the paste current',asyn
   const wait=deferred();browser(t);const h=harness(t);paste(h.handler,'image',wait);
   h.handler.updateSelection();h.cursor.updateRect();h.handler.updateSelection();
   h.handler.updateCellSelection();
+  for(const [event,payload] of [
+    ['picture-object-selection-changed',false],['table-object-selection-changed',false],
+    ['headerFooterModeChanged','none'],['footnoteModeChanged',false],
+    ['cursor-rect-updated',h.cursor.getRect()],['editing-page-changed',0],
+  ]) h.eventBus.emit(event,payload);
   wait.resolve(png.buffer.slice(png.byteOffset,png.byteOffset+png.byteLength));await tick();
   assert.equal(h.history.canUndo(),true);
 });

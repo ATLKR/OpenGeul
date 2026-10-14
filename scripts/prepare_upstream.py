@@ -229,15 +229,24 @@ function captureAsyncClipboardContext(self: any): { isCurrent(): boolean; dispos
     && wasm.borrowDocumentHandle?.() === document && readContext() === context;
   // InputHandler publishes selection refreshes on click, drag and navigation.
   // A changed selection stays cancelled even if the user moves back before decode.
-  subscriptions.push(self.eventBus.on('clipboard-context-changed', () => {
-    if (!isCurrent()) cancel();
+  const checkContext = () => { if (!isCurrent()) cancel(); };
+  for (const event of [
+    'clipboard-context-changed', 'command-state-changed',
+    'picture-object-selection-changed', 'table-object-selection-changed',
+    'headerFooterModeChanged', 'footnoteModeChanged',
+    'cursor-rect-updated', 'editing-page-changed',
+  ]) subscriptions.push(self.eventBus.on(event, checkContext));
+  // Resumable completion publishes old layout work, not a new content edit.
+  subscriptions.push(self.eventBus.on('document-mutated', (reason: unknown) => {
+    if (reason === 'input-handler-resumable-pagination') checkContext();
+    else cancel();
   }));
-  subscriptions.push(self.eventBus.on('command-state-changed', () => {
-    if (!isCurrent()) cancel();
-  }));
-  subscriptions.push(self.eventBus.on('document-mutated', cancel));
   // Older property/format commands publish only document-changed.
-  subscriptions.push(self.eventBus.on('document-changed', cancel));
+  subscriptions.push(self.eventBus.on('document-changed', (reason: unknown) => {
+    if (reason === 'deferred-pagination-complete'
+      || (typeof reason === 'string' && reason.startsWith('deferred-pagination-flush:'))) checkContext();
+    else cancel();
+  }));
   subscriptions.push(self.eventBus.on('clipboard-context-invalidated', cancel));
   return { isCurrent, dispose };
 }
