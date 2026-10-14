@@ -4,6 +4,7 @@ from playwright.sync_api import expect
 from driver import edit, digest
 from hwpx_oracle import inspect_hwpx
 from test_editor import EditorTests, NativeTests, MODE
+from test_supported_features import SupportedTests, SupportedNativeTests
 
 class FollowupTests:
     def test_plain_p_keyboard_input_and_saved_document(self):
@@ -44,5 +45,6 @@ class FollowupTests:
 
 def suite():
     base = NativeTests if MODE == 'native' else EditorTests
-    combined = type('OpenGeulFollowups', (FollowupTests, base), {})
+    supported = SupportedNativeTests if MODE == 'native' else SupportedTests
+    combined = type('OpenGeulFollowups', (FollowupTests, supported, base), {'__module__': __name__})
     return unittest.defaultTestLoader.loadTestsFromTestCase(combined)

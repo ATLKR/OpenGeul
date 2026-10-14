@@ -1,3 +1,4 @@
 playwright==1.55.0
 pywinauto==0.6.9; sys_platform == 'win32'
 Pillow==12.3.0
+pypdfium2==5.8.0

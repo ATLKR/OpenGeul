@@ -38,8 +38,10 @@ Foundation과 제휴하거나 이들의 승인을 받은 제품은 아닙니다.
 
 고정한 HOP 데스크톱 앱과 rhwp 편집기·엔진 전체를 소스에서 빌드합니다.
 고급 변환·렌더링용 rhwp 명령줄 도구는 native-skia로 함께 빌드합니다.
-Windows x64와 ARM64의 편집기·CLI를 각각 네이티브로 빌드합니다. MCP 서버는
-문서 작업을 별도 작업자 프로세스로 실행해 실패를 격리합니다. ARM64는 실제
+Windows x64와 ARM64의 편집기·CLI를 각각 네이티브로 빌드합니다. MCP의
+stateless 파일 기반 CLI 도구 경로는 별도 작업자 프로세스에서 실행해 해당
+작업자의 실패를 격리합니다. `hwp_open`, `hwp_doc_*`, `hwp_ws_*`의 세션·workspace
+작업은 MCP 서버에서 실행하므로 같은 격리 범위로 설명하지 않습니다. ARM64는 실제
 Windows 11 ARM64에서 제품·WebView2·작업자의 네이티브 실행을 검증하는
 릴리스 게이트를 둡니다. 통과 여부는 해당 릴리스의 원본 증거를 확인하세요.
 소스 버전·커밋은 [upstream.lock.json](config/upstream.lock.json)에 기록하며,

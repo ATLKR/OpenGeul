@@ -8,36 +8,52 @@ Windows 릴리스 워크플로는 공개 저장소의 표준 실행기만 사용
 
 | 검증 | 환경 | 설정된 검사 |
 |---|---|---|
-| 네이티브 앱 | `windows-2025`, `windows-2022` | 실제 WebView2 앱과 네이티브 파일 대화상자를 사용하는 OS별 편집기 UI 16개 및 암호 안전성 8개 사례 |
-| 배포용 브라우저 프런트엔드 | `ubuntu-24.04`의 Chromium, Firefox, WebKit | 실제 WASM 내보내기와 브라우저 다운로드를 사용하는 브라우저별 UI 테스트 10개 |
+| 네이티브 앱 | x64 `windows-2025`, `windows-2022` 및 Windows 11 ARM64 | 실제 WebView2·네이티브 파일 대화상자의 환경별 UI 28개(기존 16개 보존) 및 별도 암호 안전성 8개 사례 |
+| 배포용 브라우저 프런트엔드 | `ubuntu-24.04`의 Chromium, Firefox, WebKit | 실제 WASM 내보내기와 브라우저 다운로드를 사용하는 브라우저별 UI 테스트 14개(기존 10개 보존) |
 | 설치 | `windows-2025` | 임시 테스트 인증서로 사본에 서명하고 선언된 VCLibs 프레임워크 의존성을 준비한 뒤, 패키지 식별자 아래 설치 앱 활성화·설치 CLI 실행·파일 연결 확인·제거 |
 | WACK | 설치 동작 확인과 제거 후 `windows-2025`의 동일한 서명 후보 MSIX | 사용 가능한 Windows App Certification Kit 실행 후 실제 XML 결과·식별자·버전·전체 실행 상태 검증, 키트가 없으면 명시적으로 기록 |
 
-기존 편집기 UI 시나리오 62회는 열기, 확정된 Unicode 입력, HWPX 편집·저장·재열기, 연속 3회 저장·재열기, 실행 취소·다시 실행, 원본 변경 없는 확대·축소, 누락 글꼴, 명시적인 글꼴 도움말과 자동 글꼴 다운로드 방지를 검사합니다. 네이티브 전용 시나리오는 HWP/HWPX 다른 이름으로 저장 변환, 네이티브 대화상자 취소, 기존 HWP 저장, 다중 창과 손상 파일 오류 복구를 추가합니다. 별도의 표준 라이브러리 ZIP/XML 판정기가 rhwp와 독립적으로 저장된 텍스트와 패키지 불변 조건을 확인합니다. 한컴과 픽셀 단위로 완전히 같음을 검증하는 테스트는 아닙니다.
+현재 설정된 편집기 UI는 브라우저 14개 × 3환경과 native 28개 × 3환경, 총 126회입니다. 별도 암호·인쇄·MCP 검사와 합치지 않은 UI 수치입니다. `e2e/ui_contract.py`에 기대 case ID와 고정 수를 명시하며 발견된 suite 길이로 기대값을 다시 계산하지 않습니다. 실행 전 발견 ID가 정확히 일치해야 하고, 실행 후 JSON의 개별 ID·중복 없음·모두 PASS·필수 oracle 판정·skip 없음·JUnit totals/ID/status/time 일치가 필수입니다. 명시한 실제 helper 파일의 SHA-256을 실행 전후 및 저장된 JSON/JUnit 재검증에 사용합니다. 단순 메타데이터 hash 기록으로 통과시키지 않습니다. 기존 필수 `native-e2e`, `native-e2e-arm64`, `browser-e2e` 작업 안에서 실행하므로 누락·실패가 기존 Source→Store gate에 전파됩니다.
 
-Windows 이미지별 암호 안전성 8개 사례를 추가하면 편집기 UI 전체 실행은 78회입니다. 소스와 연결된 WASM은 이 작업에서 작성한 암호 HWP/HWPX 문서만 생성합니다. 독립적인 컨테이너·XML 대조 검사는 UI 사용 전에 잘못되거나 누락된 암호를 거부하고 평문 저장·재열기를 검증합니다. 실제 암호 재입력·취소와 두 가지 다른 이름으로 저장 형식은 암호 원본의 체크섬을 보존해야 합니다. 네이티브 미저장 문서 교체와 실제 Alt+F4 요청은 취소, 평문 저장 동의 취소, 안전한 다른 이름으로 저장 완료 후 정리 전에 원래 PID가 정상 종료하는지 확인합니다. 새 네이티브 프로세스에서 평문 출력을 다시 열고 편집합니다. 패키지의 소스·실행과 기록된 재빌드 엔진은 현재 워크플로와 일치해야 하며, 기존 16개 테스트도 유지합니다.
+기존 사례는 문서 열기, 확정 Unicode, HWPX 저장·재열기, 연속 3회 roundtrip, text undo/redo, 원본 변경 없는 확대, 누락 글꼴, 명시적 글꼴 도움말·자동 다운로드 방지와 toolbar 설정을 검사합니다. native 전용 기존 사례는 HWP/HWPX 변환, 저장 취소, HWP 저장, 다중 창 생성과 손상 파일 오류 복구를 유지합니다.
+
+| 추가 필수 UI 사례 | 대상·독립 판정 |
+|---|---|
+| 2×2 표 작성·아래 줄 삽입 | 공통: 실제 toolbar/grid, 4셀 입력과 Tab 3회 → 3×2 XML·각 셀 marker 위치/횟수, Undo 2×2·Redo 3×2·재열기 |
+| 그림 파일 배치와 history | 공통: 소유 32×16 PNG의 실제 file chooser·page bbox drag → pic/BinData 참조·40×20mm 크기·Pillow 전체 checkerboard, Undo/Redo·재열기 |
+| 그림 배치 중 문서 교체 | 공통: A의 decode·placement 준비 완료 → 같은 Session 파일 메뉴로 B 열기 → B 클릭·저장 → 그림 0개·본문 정확 보존 |
+| 찾기/바꾸기와 기본 서식 | 공통: 실제 모두 바꾸기·Undo/Redo, 선택 범위 굵게·14pt → 독립 XML의 charshape·전체 marker 범위 및 비선택 본문 서식·재열기 |
+| 실제 clipboard 키보드·메뉴 | native 전용 2개: 실제 Windows Ctrl+C/X/V와 편집 메뉴, OS CF_UNICODETEXT 읽기·정확한 삭제 영역·Undo/Redo·저장·재열기 |
+| 설치된 글꼴 선택 | native: 실제 글자 모양 대화상자의 감지된 로컬 글꼴 그룹에서 Arial 클릭 → 독립 fontRef·본문 범위·재열기·원본 SHA; 다운로드/설치 없음 |
+| GUI PDF 기본·복합·취소 | native 전용 3개: 파일 → PDF 내보내기와 소유 picker. HWP/HWPX·Unicode, 명시 생성 2쪽·표·그림과 unsaved marker → PDF magic·A4·정확한 쪽 수·PDFium text/실제 ink·Pillow pattern. 원본 SHA·dirty·다음 편집/저장, 취소 때 기존 target SHA·부분 출력 없음 |
+| 최근 문서 선택·재시작·목록 비우기 | native: 변경 전에 실제 Windows/github-hosted/repository/Source job/run/attempt 1/checkout/native process 확인. 모든 recent path가 이 실행 소유 범위여야 선택/clear 허용. 실제 새 PID에서 목록 유지·선택·clear 후 재시작 빈 목록 |
+| 실제 Windows Explorer DnD | native: 새 소유 folder/window의 HWND·PID·실제 선택 path와 제품 HWND·page bbox·입력점 소유권 확인 후 물리 mouse drag/drop. marker·Save As XML·원본 SHA·invalid drop 후 다음 편집/저장. 합성 DOM/Tauri event·argv open으로 대체하지 않음 |
+
+GUI PDF는 **Print To PDF와 별도 제품 경로**입니다. 입력의 marker·dimension·pattern을 미리 정하며 GUI PDF나 CLI PDF·인쇄 goldens를 정답으로 사용하지 않습니다. 출력이 저장된 뒤 기본 viewer 열기가 실패한 경우는 별도 predicate로 기록하고 실제 PDF oracle는 계속 적용합니다. 새 2쪽 입력은 이 UI 사례의 소유 폴더에서 생성하므로 인쇄 job의 `print-multipage.hwpx`가 UI inputs에 있다고 가정하지 않습니다.
+
+위 추가 사례는 2026-10-14에 구현한 **후속 승인 Source Actions의 필수 대상**이며, 아직 새 Windows/native3 또는 browser3 제품 실행을 하지 않았습니다. 오프라인 oracle/manifest negative unit의 PASS를 제품 UI 성공으로 승격하지 않습니다. 실제 OS clipboard 검증 대상은 Windows 제품의 native3입니다. 현재 Linux headless browser3의 OS clipboard/API 성공은 이 구성으로 검증하지 않으며, native clipboard를 browser mock/합성 event로 대신하지 않습니다. 최근 문서는 native RoamingAppData의 실제 profile을 사용하며 임시 WebView2 profile로 격리됐다고 주장하지 않습니다. local/self-hosted/다른 attempt 또는 outside-owned recent entry는 실패하며 목록을 지우지 않습니다. Explorer/글꼴/clipboard 환경이 준비되지 않아도 native 사례를 skip/PASS로 대체하지 않습니다.
+
+과거 **Source105**의 원본은 UI 78회(공통 10 × browser3 + native16 × native3), 암호 24회, 인쇄 24회, MCP 85회로 총 **211회/49개 정의**입니다. 이는 당시 결과이며 현재 설정된 14/28 UI manifest의 실행 증거가 아닙니다. 기존 62/78 집계는 ARM64를 포함하기 전 2개 x64 환경의 UI/암호 합계였습니다. 과거 원본 receipt, Source22·optional WACK·인쇄 goldens는 바꾸지 않습니다.
+
+암호 검사는 소스와 연결된 WASM이 작성한 소유 HWP/HWPX 입력의 잘못되거나 누락된 암호를 UI 사용 전에 독립 컨테이너/XML로 거부합니다. 실제 암호 재입력·취소와 다른 이름으로 저장 형식은 암호 원본 SHA를 보존해야 합니다. 미저장 문서 교체와 Alt+F4는 취소, 평문 저장 동의 취소, 안전한 다른 이름 저장 뒤 정리 전에 원래 PID의 정상 종료를 확인합니다. 새 native process에서 평문 출력을 다시 열어 편집하며 기존 암호·입력 소유권 gate를 유지합니다.
 
 네이티브 회귀 테스트는 리비전 충돌, 외부 파일 변경, 잘못되거나 형식 표시가 틀린 바이트, 원자적 교체 실패, 임시 저장 파일 소유권과 미저장 상태 보존도 검사합니다. 프런트엔드 회귀 테스트는 두 직렬화 경로, 취소, 쓰기 실패, 동시 저장과 비동기 쓰기·정리 중 편집을 검사합니다. 기준 RED 검사는 원래의 HWPX 저장 거부를 의도적으로 재현한 뒤, 기능 패치를 적용하기 전에 원래 테스트를 복원합니다.
 
 ## 재현
 
-Windows 개발 빌드 후 실행합니다.
+로컬에서는 제품을 시작하지 않는 독립 oracle와 manifest negative 검사부터 실행합니다.
 
-```powershell
-python -m pip install -r e2e/requirements.txt
-python e2e/prepare_payload.py dist .work/e2e-runtime
-$env:E2E_MODE='native'
-$env:E2E_EXE=(Resolve-Path .work/e2e-runtime/OpenGeul.exe).Path
-$env:E2E_FIXTURES=(Resolve-Path .work/e2e-fixtures).Path
-$env:E2E_OUTPUT=Join-Path $pwd '.work/evidence'
-python e2e/run.py
+```bash
+python -m unittest tests.test_ui_contract tests.test_supported_feature_oracle tests.test_hwpx_oracle tests.test_hop_integration -v
 ```
 
-WebView2 Runtime이 설치되어 있어야 합니다. `ensure-webview2.ps1`과 `msix-install.ps1`은 의도적으로 GitHub 밖의 실행을 거부합니다. 일반 사용자의 시스템이 아닌 폐기 가능한 테스트 호스트를 준비하거나 일시적으로 변경하기 때문입니다. 브라우저 테스트는 `.work/hop/apps/studio-host/dist`를 루프백 포트 7700에서 제공하고 `E2E_MODE=browser`와 `E2E_BROWSER=chromium|firefox|webkit`를 설정한 뒤, 먼저 고정된 Playwright 브라우저를 설치합니다.
+전체 `e2e/run.py` 실행은 승인된 Source Actions의 기존 필수 UI 작업에서 수행합니다. 워크플로가 제품/소유 fixture 경로, mode/browser/architecture와 실제 Source 식별자를 제공합니다. 최근 문서가 포함된 전체 native suite는 일반 로컬 profile이나 self-hosted 실행을 거부하며 이 조건을 환경 변수 위조로 우회하지 않습니다. WebView2 Runtime·실제 Windows 데스크톱과 Explorer가 필요합니다. `ensure-webview2.ps1`과 `msix-install.ps1`도 일반 사용자의 시스템을 변경하지 않도록 GitHub 밖의 실행을 거부합니다.
+
+브라우저 작업은 배포용 프런트엔드를 루프백 7700에서 제공하고 고정한 Chromium/Firefox/WebKit에서 실행합니다. File System Access 저장 선택기를 끄는 기존 다운로드 검사 조건을 유지하며 clipboard 권한을 합성하거나 실제 OS clipboard 성공을 가정하지 않습니다.
 
 ## 증거와 보안
 
-크기가 제한된 증거를 하루 보존합니다. 성공한 작업은 텍스트·JSON·JUnit을 최대 1 MiB, 실패한 작업은 스크린샷과 안전한 동작 기록 전용 추적을 포함해 최대 12 MiB 보관합니다. 사례별 진단보다 두 네이티브 테스트의 결과, 암호 테스트의 소스·실행 파일 식별 정보와 작은 합성 테스트 자료 메타데이터를 우선합니다. 실패 사례의 진단은 성공 사례보다 먼저 보존합니다. 누락 내용은 테스트 상태를 바꾸지 않고 기록합니다. 문서와 글꼴 파일은 제외하며 브라우저 프로필은 증거 디렉터리 밖에 둡니다. 추적의 네트워크·DOM 리소스 수집은 비활성화하여 설치된 글꼴 프로그램이 추적 리소스로 재배포되지 않게 합니다. 배포용 테스트 API, 비공개 문서, 서명 키, 인증서와 테스트 서명 MSIX는 함께 배포하지 않습니다. 다운로드한 포터블 편집기·CLI는 검증된 MSIX 안의 실행 파일과 정확히 일치해야 합니다.
+크기가 제한된 증거를 하루 보존합니다. 성공한 작업은 텍스트·JSON·JUnit을 최대 1 MiB, 실패한 작업은 스크린샷과 안전한 동작 기록 전용 추적을 포함해 최대 12 MiB 보관합니다. 사례별 진단보다 native3·browser3의 결과, 암호 테스트의 소스·실행 파일 식별 정보와 작은 합성 테스트 자료 메타데이터를 우선합니다. 실패 사례의 진단은 성공 사례보다 먼저 보존합니다. 누락 내용은 테스트 상태를 바꾸지 않고 기록합니다. 문서와 글꼴 파일은 제외하며 브라우저 프로필은 증거 디렉터리 밖에 둡니다. 추적의 네트워크·DOM 리소스 수집은 비활성화하여 설치된 글꼴 프로그램이 추적 리소스로 재배포되지 않게 합니다. 배포용 테스트 API, 비공개 문서, 서명 키, 인증서와 테스트 서명 MSIX는 함께 배포하지 않습니다. 다운로드한 포터블 편집기·CLI는 검증된 MSIX 안의 실행 파일과 정확히 일치해야 합니다.
 
 실패, 건너뛰기, 예상 테스트 누락이나 설치 실패는 릴리스를 막습니다. 불안정한 결과를 숨기려고 테스트를 자동 재시도하지 않습니다. PR은 릴리스를 게시하지 않습니다. 주간 예약 실행은 테스트만 하며, main/tag/수동 게시도 모든 필수 검증을 통과해야 합니다.
 
