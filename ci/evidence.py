@@ -58,6 +58,19 @@ def safe_trace(path):
     return True
 
 
+def failed_structured_pdf_cases(source):
+    receipt=source/'structured-cli-mcp/structured-result.json'
+    if not receipt.is_file() or receipt.stat().st_size>2*1024*1024:return set()
+    with receipt.open('rb') as stream:raw=stream.read(2*1024*1024+1)
+    if len(raw)>2*1024*1024:return set()
+    try:value=json.loads(raw)
+    except (ValueError,UnicodeError):return set()
+    cases=value.get('cases') if isinstance(value,dict) else None
+    if not isinstance(cases,list) or len(cases)>16:return set()
+    return {row['id'] for row in cases if isinstance(row,dict)
+            and row.get('id') in ('hwp-render','hwpx-render') and row.get('status')=='failed'}
+
+
 def pack(source,destination,status,limit=None):
     if status not in LIMITS:raise ValueError('Unknown job outcome; refusing to mislabel evidence')
     cap=LIMITS[status] if limit is None else limit
@@ -65,6 +78,7 @@ def pack(source,destination,status,limit=None):
     if destination.exists() or destination.is_symlink():raise ValueError('Refusing to overwrite bounded evidence')
     candidates=files(source);stage=None
     failed=set()
+    structured_pdf_cases=failed_structured_pdf_cases(source) if status!='success' else set()
     for name in OUTCOME_PATHS:
         summary=source/name
         if summary.is_file() and summary.stat().st_size<=2*1024*1024:
@@ -78,9 +92,13 @@ def pack(source,destination,status,limit=None):
     def rank(p):
         rel=p.relative_to(source)
         if rel.as_posix() in PRIORITY_PATHS:return (0,len(rel.parts),rel.as_posix())
+        if (len(rel.parts)==4 and rel.parts[:2]==('structured-cli-mcp','artifacts')
+                and rel.parts[2] in structured_pdf_cases and rel.suffix.lower()=='.pdf'
+                and rel.stem.isascii() and rel.stem.isdigit()):
+            return (1,0,rel.as_posix())
         is_failure=any(rel.parts[:len(prefix)]==prefix and case in rel.parts[len(prefix):]
                        for prefix,case in failed)
-        group=1 if is_failure else 3
+        group=2 if is_failure else 3
         kind=0 if p.suffix in TEXT else 1 if p.suffix in ('.png','.pdf') else 2
         return (group,kind,rel.as_posix())
     candidates.sort(key=rank)

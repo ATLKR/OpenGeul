@@ -75,6 +75,71 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual((self.dest/'results.json').read_bytes(),original)
         self.assertEqual(report['status'],'failure')
         self.assertNotIn('structured-cli-mcp/structured-result.json',self.p.OUTCOME_PATHS)
+    def test_failed_structured_pdf_survives_gui_cap_without_rewriting_original_receipts(self):
+        receipt=b'{"passed":false,"cases":[{"id":"hwp-render","status":"failed"},{"id":"hwpx-render","status":"failed"}]}'
+        original=b'{"tests":[{"test":"suite.a_failed","status":"failed"}]}'
+        pdf=b'%PDF-1.7\n'+b'owned synthetic PDF bytes\n'*55+b'%%EOF\n'
+        self.put('structured-cli-mcp/structured-result.json',receipt)
+        self.put('structured-cli-mcp/artifacts/hwp-render/3.pdf',pdf)
+        self.put('structured-cli-mcp/artifacts/hwpx-render/3.pdf',pdf)
+        self.put('a_failed/events.json',b'x'*1800)
+        self.put('a_failed/screen.png',b'x'*1800)
+        for name in ('input.hwp','input.hwpx','font.ttf','key.pem'):
+            self.put('structured-cli-mcp/artifacts/hwp-render/'+name,b'owned excluded input')
+        (self.src/'results.json').write_bytes(original)
+        report=self.p.pack(self.src,self.dest,'failure',limit=8192)
+        for case in ('hwp-render','hwpx-render'):
+            self.assertTrue((self.dest/'structured-cli-mcp/artifacts'/case/'3.pdf').is_file(),
+                            'The failed public PDF was starved by bulky GUI diagnostics')
+            self.assertEqual((self.dest/'structured-cli-mcp/artifacts'/case/'3.pdf').read_bytes(),pdf,
+                             'The failed public PDF bytes must precede bulky GUI diagnostics')
+        self.assertEqual((self.dest/'structured-cli-mcp/structured-result.json').read_bytes(),receipt)
+        self.assertEqual((self.dest/'results.json').read_bytes(),original)
+        self.assertEqual(report['status'],'failure')
+        copied=[row['path'] for row in report['copied']]
+        self.assertLess(copied.index('structured-cli-mcp/structured-result.json'),copied.index('structured-cli-mcp/artifacts/hwp-render/3.pdf'))
+        self.assertFalse((self.dest/'a_failed/events.json').exists())
+        self.assertFalse((self.dest/'a_failed/screen.png').exists())
+        self.assertNotIn('structured-cli-mcp/structured-result.json',self.p.OUTCOME_PATHS)
+        for name in ('input.hwp','input.hwpx','font.ttf','key.pem'):
+            self.assertFalse((self.dest/'structured-cli-mcp/artifacts/hwp-render'/name).exists())
+    def test_structured_pdf_priority_does_not_change_success_visual_exclusion(self):
+        self.put('structured-cli-mcp/structured-result.json',b'{"passed":false,"cases":[{"id":"hwp-render","status":"failed"}]}')
+        self.put('structured-cli-mcp/artifacts/hwp-render/3.pdf',b'%PDF-1.7\nowned\n%%EOF\n')
+        report=self.p.pack(self.src,self.dest,'success')
+        self.assertEqual(report['status'],'success')
+        self.assertFalse((self.dest/'structured-cli-mcp/artifacts/hwp-render/3.pdf').exists())
+        self.assertTrue((self.dest/'structured-cli-mcp/structured-result.json').is_file())
+    def test_unrelated_or_nonfailed_structured_case_does_not_promote_pdf(self):
+        for case,status in (('hwp-read','failed'),('hwp-render','passed'),('unknown-render','failed')):
+            with self.subTest(case=case,status=status):
+                receipt=json.dumps({'cases':[{'id':case,'status':status}]}).encode()
+                self.put('structured-cli-mcp/structured-result.json',receipt)
+                self.put('structured-cli-mcp/artifacts/'+case+'/3.pdf',b'%PDF-1.7\n'+b'x'*1500+b'\n%%EOF\n')
+                self.put('a_failed/events.json',b'x'*1800)
+                self.put('a_failed/screen.png',b'x'*1800)
+                (self.src/'results.json').write_text('{"tests":[{"test":"suite.a_failed","status":"failed"}]}')
+                target=self.root/('bounded-'+case+'-'+status)
+                report=self.p.pack(self.src,target,'failure',limit=8192)
+                self.assertFalse((target/'structured-cli-mcp/artifacts'/case/'3.pdf').exists())
+                self.assertEqual(report['status'],'failure')
+    def test_structured_receipt_priority_reader_is_bounded_and_nonoutcome(self):
+        for label,receipt in (
+                ('oversize',b'{"cases":[{"id":"hwp-render","status":"failed"}],"padding":"'+b'x'*(2*1024*1024)+b'"}'),
+                ('malformed',b'not JSON'),
+                ('wrong-type',b'{"cases":"hwp-render"}')):
+            with self.subTest(label=label):
+                self.put('structured-cli-mcp/structured-result.json',receipt)
+                self.put('structured-cli-mcp/artifacts/hwp-render/3.pdf',b'%PDF-1.7\n'+b'x'*1500+b'\n%%EOF\n')
+                self.put('a_failed/events.json',b'x'*1800)
+                self.put('a_failed/screen.png',b'x'*1800)
+                original=b'{"tests":[{"test":"suite.a_failed","status":"failed"}]}'
+                (self.src/'results.json').write_bytes(original)
+                target=self.root/('bounded-'+label)
+                report=self.p.pack(self.src,target,'failure',limit=8192)
+                self.assertFalse((target/'structured-cli-mcp/artifacts/hwp-render/3.pdf').exists())
+                self.assertEqual((target/'results.json').read_bytes(),original)
+                self.assertEqual(report['status'],'failure')
     def test_failed_case_evidence_has_priority_over_successful_case(self):
         (self.src/'results.json').write_text('{"tests":[{"test":"suite.z_failed","status":"failed"}]}')
         self.put('a_success/large.png',b'a'*1500);self.put('z_failed/screen.png',b'b'*1500)

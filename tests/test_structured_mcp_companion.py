@@ -12,7 +12,7 @@ def module(name):
 
 class DraftTests(unittest.TestCase):
     def setUp(self):
-        self.runner=module('valid_companion');self.oracle=module('structured_oracle')
+        self.runner=module('valid_companion');self.oracle=self.runner.oracle if self.runner else module('structured_oracle')
         self.assertIsNotNone(self.runner,'Separate structured companion producer/validator is required')
         self.assertIsNotNone(self.oracle,'Independent bounded structure/render oracle is required')
         self.expected=json.loads((FOLDER/'expected.json').read_bytes())
@@ -28,6 +28,103 @@ class DraftTests(unittest.TestCase):
             def __str__(self):raise AssertionError('Exception text must not be read')
         self.assertEqual(self.runner.failure_record(PrivateException()),{'failureClass':'unexpected'})
         self.assertEqual(self.runner.failure_record(ValueError('PRIVATE-TOKEN')),{'failureClass':'validation'})
+    def test_pdf_failure_keeps_owned_original_before_independent_validation(self):
+        from unittest.mock import patch
+        self.assertTrue(hasattr(self.runner.Suite,'validate_pdf'),'Actual failed PDF must be retained before its independent oracle')
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);work=root/'work';work.mkdir();proof_root=root/'evidence';proof_root.mkdir()
+            exe=work/'unit.exe';exe.write_bytes(b'owned-unit-exe')
+            path=work/'owned.pdf';original=b'%PDF-1.7\nowned bounded diagnostic\n%%EOF\n';path.write_bytes(original)
+            proof={'_evidenceRoot':str(proof_root),'_toolDefinitions':[]}
+            suite=self.runner.Suite(exe,'x64',{},work,self.expected,None,None,proof)
+            suite.case={'id':'hwp-render','status':'running','artifacts':[]}
+            value={'schemaVersion':'1.0','source':'owned.hwp','format':'pdf','backend':'svg',
+                   'output':str(path),'bytes':len(original),'pageCount':1,'renderedCount':1}
+            def reject(saved,expected):
+                path.unlink()
+                self.assertEqual(Path(saved).read_bytes(),original)
+                raise self.oracle.PdfValidationError('pdf-searchable-markers')
+            with patch.object(self.oracle,'inspect_pdf',side_effect=reject),self.assertRaises(ValueError) as failed:
+                suite.validate_pdf(value,'owned.hwp',path)
+            self.assertEqual(self.runner.failure_record(failed.exception),
+                             {'failureClass':'validation','failureCode':'pdf-searchable-markers'})
+            artifact=suite.case['artifacts'][0]
+            self.assertFalse(artifact['independentPassed']);self.assertEqual(artifact['details'],{})
+            self.assertEqual((proof_root/artifact['path']).read_bytes(),original)
+    def test_pdf_manifest_failure_is_finite_and_never_promotes_captured_bytes(self):
+        self.assertTrue(hasattr(self.runner.Suite,'validate_pdf'),'PDF manifest must remain a separate failure boundary')
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);exe=root/'unit.exe';exe.write_bytes(b'owned')
+            path=root/'owned.pdf';raw=b'%PDF-1.7\n%%EOF\n';path.write_bytes(raw)
+            proof={'_evidenceRoot':str(root/'evidence'),'_toolDefinitions':[]}
+            suite=self.runner.Suite(exe,'x64',{},root,self.expected,None,None,proof)
+            suite.case={'id':'hwpx-render','status':'running','artifacts':[]}
+            value={'schemaVersion':'1.0','source':'owned.hwpx','format':'pdf','backend':'direct',
+                   'output':str(path),'bytes':len(raw),'pageCount':1,'renderedCount':1}
+            with self.assertRaises(ValueError) as failed:suite.validate_pdf(value,'owned.hwpx',path)
+            self.assertEqual(self.runner.failure_record(failed.exception),
+                             {'failureClass':'validation','failureCode':'pdf-manifest'})
+            self.assertFalse(suite.case['artifacts'][0]['independentPassed'])
+    def test_pdf_capture_promotes_only_unchanged_independently_validated_bytes(self):
+        from unittest.mock import patch
+        for mutate in (False,True):
+            with self.subTest(mutate=mutate),tempfile.TemporaryDirectory() as t:
+                root=Path(t);exe=root/'unit.exe';exe.write_bytes(b'owned')
+                path=root/'owned.pdf';raw=b'%PDF-1.7\n%%EOF\n';path.write_bytes(raw)
+                proof={'_evidenceRoot':str(root/'evidence'),'_toolDefinitions':[]}
+                suite=self.runner.Suite(exe,'x64',{},root,self.expected,None,None,proof)
+                suite.case={'id':'hwpx-render','status':'running','artifacts':[]}
+                value={'schemaVersion':'1.0','source':'owned.hwpx','format':'pdf','backend':'svg',
+                       'output':str(path),'bytes':len(raw),'pageCount':1,'renderedCount':1}
+                details={'sha256':self.oracle.sha(raw),'bytes':len(raw),'pageCount':1}
+                def validate(saved,expected):
+                    self.assertEqual(Path(saved).read_bytes(),raw)
+                    if mutate:Path(saved).write_bytes(b'changed')
+                    return details
+                with patch.object(self.oracle,'inspect_pdf',side_effect=validate):
+                    if mutate:
+                        with self.assertRaises(ValueError) as failed:suite.validate_pdf(value,'owned.hwpx',path)
+                        self.assertEqual(self.runner.failure_record(failed.exception),
+                                         {'failureClass':'validation','failureCode':'pdf-retain'})
+                    else:suite.validate_pdf(value,'owned.hwpx',path)
+                artifact=suite.case['artifacts'][0]
+                self.assertEqual(artifact['independentPassed'],not mutate)
+                self.assertEqual(artifact['details'],{} if mutate else details)
+    def test_pdf_phase_codes_are_finite_private_and_preserve_inner_failure(self):
+        class PrivateException(Exception):
+            def __str__(self):raise AssertionError('Exception text must not be read')
+        for code in self.oracle.PDF_FAILURE_CODES:
+            with self.subTest(code=code),self.assertRaises(ValueError) as failed:
+                with self.oracle.pdf_phase(code):raise PrivateException()
+            self.assertEqual(self.runner.failure_record(failed.exception),
+                             {'failureClass':'validation','failureCode':code})
+        with self.assertRaises(ValueError) as failed:
+            with self.oracle.pdf_phase('pdf-open'):
+                with self.oracle.pdf_phase('pdf-raster'):raise PrivateException()
+        self.assertEqual(self.runner.failure_record(failed.exception)['failureCode'],'pdf-raster')
+        error=self.oracle.PdfValidationError('pdf-file');error.code='PRIVATE-TOKEN'
+        self.assertEqual(self.runner.failure_record(error),{'failureClass':'validation'})
+        with self.assertRaises(ValueError):self.oracle.PdfValidationError('PRIVATE-TOKEN')
+        with self.assertRaises(ValueError):
+            with self.oracle.pdf_phase('PRIVATE-TOKEN'):pass
+    def test_pdf_file_rejection_reports_stage_without_requiring_pdfium(self):
+        with tempfile.TemporaryDirectory() as t:
+            path=Path(t)/'bad.pdf';path.write_bytes(b'not a PDF')
+            with self.assertRaises(ValueError) as failed:self.oracle.inspect_pdf(path,self.expected)
+            self.assertEqual(self.runner.failure_record(failed.exception),
+                             {'failureClass':'validation','failureCode':'pdf-file'})
+    def test_pdf_capture_rejects_unowned_and_symlinked_originals(self):
+        self.assertTrue(hasattr(self.runner.Suite,'validate_pdf'),'PDF retention must preserve owned path boundaries')
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);work=root/'work';work.mkdir();exe=work/'unit.exe';exe.write_bytes(b'owned')
+            outside=root/'outside.pdf';outside.write_bytes(b'%PDF-1.7\n%%EOF\n')
+            alias=work/'alias.pdf';alias.symlink_to(outside)
+            for path in (outside,alias):
+                proof={'_evidenceRoot':str(root/path.stem),'_toolDefinitions':[]}
+                suite=self.runner.Suite(exe,'x64',{},work,self.expected,None,None,proof)
+                suite.case={'id':'hwp-render','status':'running','artifacts':[]}
+                with self.subTest(path=path),self.assertRaises(ValueError):suite.validate_pdf({},'owned.hwp',path)
+                self.assertEqual(suite.case['artifacts'],[])
     def test_only_declared_empty_query_can_cross_public_minimum_length(self):
         schema={'type':'object','properties':{'docId':{'type':'string'},'query':{'type':'string','minLength':1}},'required':['docId','query']}
         self.assertTrue(hasattr(self.runner,'validate_tool_arguments'),'Selected negative must reach the actual public handler')
@@ -102,11 +199,55 @@ class DraftTests(unittest.TestCase):
         for value in (None,{}, {'identical':False,'diffCount':0},{'identical':1,'diffCount':0},{'identical':True,'diffCount':True},{'identical':True,'diffCount':1}):
             with self.subTest(value=value),self.assertRaises(ValueError):self.runner.verify_ir(value)
         self.runner.verify_ir({'identical':True,'diffCount':0})
+    def search_value(self,source='doc-owned'):
+        return {'schemaVersion':'1.0','source':source,'query':self.expected['query'],'caseSensitive':True,
+                'matchCount':2,'totalMatchCount':2,'truncated':False,'omittedCount':0,
+                'matches':[{'section':0,'paragraph':0,'charOffset':offset,'length':10,
+                            'text':self.expected['body'],'context':self.expected['body'],'page':0}
+                           for offset in self.expected['search']['offsets']]}
+    def test_public_search_matches_retain_paragraph_and_unicode_scalar_addresses(self):
+        value=self.search_value()
+        self.assertEqual(len(self.expected['body']),41)
+        self.assertEqual(self.expected['search']['offsets'],[20,31])
+        self.runner.verify_search(value,'doc-owned',self.expected,[20,31],last=True)
+    def test_query_only_text_cannot_justify_out_of_bounds_search_addresses(self):
+        value=self.search_value()
+        for row in value['matches']:row['text']=self.expected['query']
+        with self.assertRaises(ValueError):self.runner.verify_search(value,'doc-owned',self.expected,[20,31],last=True)
+    def test_stateless_paragraph_context_is_exact_and_session_context_is_absent(self):
+        import copy
+        value=self.search_value('owned.hwpx')
+        for row in value['matches']:row.update(contextBefore=[],contextAfter=[self.expected['tail']])
+        self.runner.verify_search(value,'owned.hwpx',self.expected,[20,31],last=True,paragraph_context=True)
+        for kind in ('missing-before','missing-after','wrong-before','wrong-after','non-list'):
+            bad=copy.deepcopy(value)
+            for row in bad['matches']:
+                if kind.startswith('missing'):row.pop('contextBefore' if kind.endswith('before') else 'contextAfter')
+                elif kind=='wrong-before':row['contextBefore']=['UNRELATED']
+                elif kind=='wrong-after':row['contextAfter']=['UNRELATED']
+                else:row['contextAfter']=self.expected['tail']
+            with self.subTest(kind=kind),self.assertRaises(ValueError):
+                self.runner.verify_search(bad,'owned.hwpx',self.expected,[20,31],last=True,paragraph_context=True)
+        with self.assertRaises(ValueError):self.runner.verify_search(value,'owned.hwpx',self.expected,[20,31],last=True)
+    def test_search_rejects_false_context_nested_owner_and_utf16_offsets(self):
+        import copy
+        for kind in ('query-only','wrong-body','wrong-context','utf16-offset','bool-length','nested-cell','unexpected-context'):
+            value=self.search_value()
+            row=value['matches'][0]
+            if kind=='query-only':row['text']=self.expected['query']
+            elif kind=='wrong-body':row['text']='UNRELATED '+self.expected['body']
+            elif kind=='wrong-context':row['context']=self.expected['query']
+            elif kind=='utf16-offset':row['charOffset']=21
+            elif kind=='bool-length':row['length']=True
+            elif kind=='nested-cell':row['cell']={'control':0,'cell':0,'paragraph':0}
+            else:row['contextAfter']=[]
+            with self.subTest(kind=kind),self.assertRaises(ValueError):
+                self.runner.verify_search(value,'doc-owned',self.expected,[20,31],last=True)
     def test_last_search_window_uses_next_offset_presence_not_truncated_false(self):
         wanted=self.expected['search']['offsets'][1]
         value={'schemaVersion':'1.0','source':'doc-owned','query':'FIND-OWNED','caseSensitive':True,
                'matchCount':1,'totalMatchCount':2,'truncated':True,'omittedCount':1,'offset':1,
-               'matches':[{'section':0,'paragraph':0,'charOffset':wanted,'length':10,'text':'FIND-OWNED','context':self.expected['body'],'page':0}]}
+               'matches':[{'section':0,'paragraph':0,'charOffset':wanted,'length':10,'text':self.expected['body'],'context':self.expected['body'],'page':0}]}
         self.runner.verify_search(value,'doc-owned',self.expected,[wanted],last=True)
         for change in ({'nextOffset':2},{'totalMatchCount':True},{'source':'other-doc'}):
             with self.subTest(change=change),self.assertRaises(ValueError):self.runner.verify_search({**value,**change},'doc-owned',self.expected,[wanted],last=True)

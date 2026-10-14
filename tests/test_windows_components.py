@@ -31,6 +31,7 @@ import nested_line_navigation
 import stored_lineseg_origin
 import picture_line_segment_owner
 import virtual_picture_layout_admission
+import hwpx_persistence_verification
 
 FONT_SOURCE_PINS = {
     'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
@@ -66,6 +67,155 @@ def pe(machine=0x8664):
 
 
 class WindowsComponentsTests(unittest.TestCase):
+    def test_hwpx_persistence_compiled_and_dependency_sources_are_mandatory(self):
+        expected = (
+            'third_party/rhwp/src/cli/commands/edit/runtime.rs',
+            'third_party/rhwp/src/serializer/hwpx/roundtrip.rs',
+            'third_party/rhwp/src/serializer/hwpx/section.rs',
+            'third_party/rhwp/src/model/identity/walk.rs',
+            'third_party/rhwp/src/model/identity.rs',
+            'third_party/rhwp/src/serializer/hwpx/field.rs',
+        )
+        self.assertEqual(hwpx_persistence_verification.SOURCE_FILES, expected)
+        readonly = {
+            'third_party/rhwp/src/serializer/hwpx/section.rs',
+            'third_party/rhwp/src/model/identity/walk.rs',
+            'third_party/rhwp/src/model/identity.rs',
+        }
+        self.assertEqual({name for name in expected
+                          if hwpx_persistence_verification.INPUT_SOURCE_SHA256[name]
+                          == hwpx_persistence_verification.OUTPUT_SOURCE_SHA256[name]}, readonly)
+        for name in expected:
+            with self.subTest(source=name):
+                self.assertIn(name, self.helper().SOURCE_FILES,
+                              'HWPX persistence code and readonly dependency must cross the explicit transport boundary')
+        source = self.source(); c = self.helper(); config = c.configured()
+        self.assertEqual(config['helpers'][hwpx_persistence_verification.HELPER],
+                         digest(ROOT/hwpx_persistence_verification.HELPER))
+        _, contract = c.source_contract(source, config)
+        for name in expected:
+            with self.subTest(source=name):
+                self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+                self.assertEqual(contract['coreSourceFiles'][name], digest(source/name))
+
+    def test_hwpx_persistence_missing_proof_cannot_publish_component(self):
+        source = self.source(); c = self.helper()
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = json.loads(ledger_path.read_bytes())
+        ledger.pop('hwpxPersistenceVerification', None)
+        write_json(ledger_path, ledger)
+        out = self.root/'missing-hwpx-persistence-proof'
+        with self.assertRaisesRegex(ValueError, 'HWPX persistence verification source/ledger proof mismatch'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_hwpx_persistence_capture_rejects_forged_proof_and_each_source_dependency_drift(self):
+        source = self.source(); c = self.helper(); payload = self.payload('editor')
+        ledger_path = source/'.opengeul-overlay.json'
+        original = json.loads(ledger_path.read_bytes())
+        raw = {name:(source/name).read_bytes() for name in hwpx_persistence_verification.SOURCE_FILES}
+        cases = [(kind, None) for kind in ('helper', 'extra-proof', 'extra-before-source', 'extra-after-source')]
+        cases += [(kind, name) for name in raw
+                  for kind in ('before', 'after', 'missing-source', 'unreviewed-source', 'coherent-legacy')]
+        for i, (change, name) in enumerate(cases):
+            for path, data in raw.items(): (source/path).write_bytes(data)
+            ledger = copy.deepcopy(original); proof = ledger['hwpxPersistenceVerification']
+            if change == 'helper': proof['helperSha256'] = '0'*64
+            elif change == 'extra-proof': proof['optional'] = True
+            elif change in ('extra-before-source', 'extra-after-source'):
+                proof['beforeSha256' if change == 'extra-before-source' else 'afterSha256']['third_party/rhwp/src/unreviewed.rs'] = '0'*64
+            elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+            elif change == 'missing-source': (source/name).unlink()
+            else:
+                (source/name).write_bytes(b'owned former HWPX persistence source or readonly dependency\n')
+                if change == 'coherent-legacy': proof['afterSha256'][name] = digest(source/name)
+            write_json(ledger_path, ledger)
+            out = self.root/('invalid-hwpx-persistence-'+str(i))
+            with self.subTest(change=change, source=name), self.assertRaises((ValueError, FileNotFoundError)):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_hwpx_persistence_capture_rejects_each_dependency_change_between_hash_observations(self):
+        source = self.source(); c = self.helper(); actual_tree = c.tree
+        payload = self.payload('editor')
+        raw = {name:(source/name).read_bytes() for name in hwpx_persistence_verification.SOURCE_FILES}
+        for i, name in enumerate(raw):
+            for path, data in raw.items(): (source/path).write_bytes(data)
+            def changed_core_inventory(folder, cap):
+                if folder == source/'third_party/rhwp/src':
+                    target = source/name
+                    target.write_bytes(target.read_bytes()+b'// changed persistence dependency between observations\n')
+                return actual_tree(folder, cap)
+            out = self.root/('mismatched-persistence-core-observation-'+str(i))
+            # section.rs is also protected by the unchanged earlier Origin3 gate.
+            expected = ('(?:Stored line segment origin|HWPX persistence verification)'
+                        ' complete core source mismatch')
+            with self.subTest(source=name), patch.object(c, 'tree', side_effect=changed_core_inventory), \
+                    self.assertRaisesRegex(ValueError, expected):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_matching_component_pair_cannot_omit_persistence_proof_or_any_dependency(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        cases = [('proof', None)]+[(kind, name) for name in hwpx_persistence_verification.SOURCE_FILES
+                                  for kind in ('prepared-source', 'core-source')]
+        for change, name in cases:
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                if change == 'proof': source.pop('hwpxPersistenceVerification')
+                else: source['preparedFiles' if change == 'prepared-source' else 'coreSourceFiles'].pop(name)
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change, source=name): self.assert_rejected_without_outputs(folders)
+
+    def test_matching_component_pair_rejects_persistence_coherent_legacy_and_fixed_proof_drift(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        cases = [(kind, None) for kind in ('helper', 'extra-proof', 'extra-before-source', 'extra-after-source')]
+        cases += [(kind, name) for name in hwpx_persistence_verification.SOURCE_FILES
+                  for kind in ('before', 'after', 'observed-hash', 'coherent-legacy')]
+        # Only the three changed files have a distinct stale original pin.
+        cases += [('legacy-original-pin', name) for name in hwpx_persistence_verification.REPLACEMENTS]
+        for change, name in cases:
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']
+                proof = source['hwpxPersistenceVerification']
+                if change == 'helper': proof['helperSha256'] = '0'*64
+                elif change == 'extra-proof': proof['optional'] = True
+                elif change in ('extra-before-source', 'extra-after-source'):
+                    proof['beforeSha256' if change == 'extra-before-source' else 'afterSha256']['third_party/rhwp/src/unreviewed.rs'] = '0'*64
+                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                elif change == 'observed-hash':
+                    source['preparedFiles'][name] = source['coreSourceFiles'][name] = '0'*64
+                else:
+                    legacy = (hwpx_persistence_verification.INPUT_SOURCE_SHA256[name] if change == 'legacy-original-pin'
+                              else hashlib.sha256(b'owned former persistence source or readonly dependency\n').hexdigest())
+                    proof['afterSha256'][name] = legacy
+                    source['preparedFiles'][name] = source['coreSourceFiles'][name] = legacy
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change, source=name): self.assert_rejected_without_outputs(folders)
+
+    def test_rehashed_public_ledger_cannot_omit_or_replace_persistence_proof(self):
+        folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
+        original_parity = json.loads(parity_path.read_bytes())
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        for change in ('missing', 'mismatch'):
+            parity = copy.deepcopy(original_parity)
+            if change == 'missing': parity.pop('hwpxPersistenceVerification')
+            else: parity['hwpxPersistenceVerification']['helperSha256'] = '0'*64
+            write_json(parity_path, parity)
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); value['source']['ledgerSha256'] = digest(parity_path)
+                if role == 'editor':
+                    value['files']['source-parity.json'] = {'size':parity_path.stat().st_size,
+                                                          'sha256':digest(parity_path)}
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders, 'HWPX persistence verification source/ledger proof mismatch')
+
     def test_virtual_picture_layout_admission_compiled_source_is_mandatory(self):
         source = self.source(); c = self.helper()
         name = 'third_party/rhwp/src/document_core/commands/text_editing.rs'
@@ -773,6 +923,14 @@ class WindowsComponentsTests(unittest.TestCase):
         virtual_proof = {'beforeSha256':dict(virtual_picture_layout_admission.INPUT_SOURCE_SHA256),
                          'afterSha256':virtual_output,
                          'helperSha256':digest(ROOT/virtual_picture_layout_admission.HELPER)}
+        persistence_output = {name:digest(source/name) for name in hwpx_persistence_verification.SOURCE_FILES}
+        persistence_override = patch.object(hwpx_persistence_verification, 'OUTPUT_SOURCE_SHA256', persistence_output)
+        persistence_override.start(); self.addCleanup(persistence_override.stop)
+        self.persistence_reference_path = self.root/'persistence-fixture-reference.json'
+        write_json(self.persistence_reference_path, persistence_output)
+        persistence_proof = {'beforeSha256':dict(hwpx_persistence_verification.INPUT_SOURCE_SHA256),
+                             'afterSha256':persistence_output,
+                             'helperSha256':digest(ROOT/hwpx_persistence_verification.HELPER)}
         menu_proof = {'beforeSha256': {**menu_clipboard.INPUT_SOURCE_SHA256, **menu_clipboard.INPUT_NATIVE_SHA256},
                       'afterSha256': menu_final,
                       'helperSha256': digest(ROOT/'overlay/menu-clipboard.ts'),
@@ -792,6 +950,7 @@ class WindowsComponentsTests(unittest.TestCase):
                   'storedLineSegmentOrigin': stored_proof,
                   'pictureLineSegmentOwner': picture_proof,
                   'virtualPictureLayoutAdmission': virtual_proof,
+                  'hwpxPersistenceVerification': persistence_proof,
                   'asyncClipboardGuard': {
                       'beforeSha256': {
                           'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
@@ -869,7 +1028,7 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission,hwpx_persistence_verification;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
                 "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
                 "pdf_fixture=json.loads(Path(sys.argv[3]).read_text());"
@@ -882,10 +1041,12 @@ class WindowsComponentsTests(unittest.TestCase):
                 "stored_lineseg_origin.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[7]).read_text());"
                 "picture_line_segment_owner.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[8]).read_text());"
                 "virtual_picture_layout_admission.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[9]).read_text());"
-                "sys.argv=sys.argv[10:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                "hwpx_persistence_verification.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[10]).read_text());"
+                "sys.argv=sys.argv[11:];runpy.run_path(sys.argv[0],run_name='__main__')",
                 str(self.native_reference_path),str(self.com_reference_path),str(self.pdf_reference_path),
                 str(self.menu_reference_path),str(self.shape_reference_path),str(self.nested_reference_path),
-                str(self.stored_reference_path),str(self.picture_reference_path),str(self.virtual_reference_path),str(HELPER),*arguments]
+                str(self.stored_reference_path),str(self.picture_reference_path),str(self.virtual_reference_path),
+                str(self.persistence_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')

@@ -1,7 +1,11 @@
 """Preparation policy tests; no Windows capability/profile success is simulated."""
 import copy
 import importlib.util
+import hashlib
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +117,52 @@ class KoreanImeReadinessTests(unittest.TestCase):
         self.assertIn('$logBytes -gt 1MB',script)
         self.assertIn('한국어 입력 준비 진행',script)
         self.assertIn('$child.StartTime -eq $started',script)
+
+    def test_actual_worker_hashing_does_not_require_the_missing_file_hash_cmdlet(self):
+        self.assertNotIn('Get-FileHash',(ROOT/'scripts/ensure-korean-ime.ps1').read_text())
+        powershell=shutil.which('powershell') or shutil.which('pwsh') or '/workspace/OpenGeul-ci-build-progress/.work/powershell746/bin/pwsh'
+        if not Path(powershell).is_file():self.skipTest('PowerShell runtime unavailable')
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            fixtures=[b'', '한글 입력 준비\n'.encode('utf-8'), bytes(range(256))*257]
+            for index,raw in enumerate(fixtures):(root/f'{index}.bin').write_bytes(raw)
+            script=root/'hash-worker.ps1'
+            script.write_text(r'''
+param([string]$Source,[string]$FixtureRoot)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$tree=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'production parse failure'}
+$function=$tree.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OpenGeulFileSha256'},$true)
+if($null -eq $function){throw 'module-independent worker hashing is missing'}
+function Get-FileHash { throw 'Source112 worker cmdlet is unavailable' }
+Invoke-Expression $function.Extent.Text
+for($index=0;$index -lt 3;$index++) {
+    $path=[IO.Path]::Combine($FixtureRoot,([string]$index+'.bin'))
+    $before=Get-OpenGeulFileSha256 $path
+    [IO.File]::Move($path,$path+'.moved')
+    $after=Get-OpenGeulFileSha256 ($path+'.moved')
+    if($before -cne $after){throw 'fresh hash changed without a byte change'}
+    [IO.File]::Delete($path+'.moved')
+    Write-Output $before
+}
+$missingRejected=$false
+try { Get-OpenGeulFileSha256 ([IO.Path]::Combine($FixtureRoot,'missing.bin')) | Out-Null }
+catch { $missingRejected=$true }
+if(-not $missingRejected){throw 'missing input did not fail closed'}
+$changing=[IO.Path]::Combine($FixtureRoot,'changing.bin')
+[IO.File]::WriteAllBytes($changing,[byte[]]@(0,1,2))
+$before=Get-OpenGeulFileSha256 $changing
+[IO.File]::WriteAllBytes($changing,[byte[]]@(0,1,3))
+if($before -ceq (Get-OpenGeulFileSha256 $changing)){throw 'input mutation escaped fresh hashing'}
+[IO.File]::Delete($changing)
+''',encoding='utf-8')
+            result=subprocess.run([str(powershell),'-NoLogo','-NoProfile','-NonInteractive','-File',str(script),
+                '-Source',str(ROOT/'scripts/ensure-korean-ime.ps1'),'-FixtureRoot',str(root)],
+                capture_output=True,text=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertEqual(result.stdout.splitlines(),[hashlib.sha256(raw).hexdigest() for raw in fixtures])
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

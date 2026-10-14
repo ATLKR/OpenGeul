@@ -38,6 +38,10 @@ BASE_CALLS={
 def require(value,message):
     if not value:raise ValueError(message)
 def failure_record(error):
+    if type(error) is oracle.PdfValidationError:
+        value={'failureClass':'validation'}
+        if type(error.code) is str and error.code in oracle.PDF_FAILURE_CODES:value['failureCode']=error.code
+        return value
     kinds={ValueError:'validation',AssertionError:'assertion',OSError:'os-error',subprocess.TimeoutExpired:'timeout'}
     return {'failureClass':kinds.get(type(error),'unexpected')}
 def partial_receipt(proof):
@@ -66,14 +70,29 @@ def verify_ir(value):
     require(type(value) is dict and value.get('identical') is True and type(value.get('diffCount')) is int and value['diffCount']==0,'Real supported-fixture IR verification failed')
 def source_match(value,source):require(value.get('source')==str(source),'Returned source/docId differs')
 def version(value):require(value.get('schemaVersion')=='1.0','Pinned envelope schemaVersion differs')
-def verify_search(value,source,expected,offsets,*,last=False,zero=False):
+def verify_search(value,source,expected,offsets,*,last=False,zero=False,paragraph_context=False):
     version(value);source_match(value,source);require(value.get('query')==('OWNED-NO-MATCH' if zero else expected['query']) and value.get('caseSensitive') is True,'Search query/case mode differs')
     count=integer(value.get('matchCount'));total=integer(value.get('totalMatchCount'));omitted=integer(value.get('omittedCount'))
     require(count==len(offsets) and total==(0 if zero else 2) and omitted==total-count and type(value.get('truncated')) is bool and value['truncated']==(count<total),'Search counts/window semantics differ')
     rows=value.get('matches');require(type(rows) is list and len(rows)==count,'Search matches are incomplete')
     for row,offset in zip(rows,offsets):
         require(type(row) is dict and all(type(row.get(k)) is int for k in ('section','paragraph','charOffset','length','page')) and row['section']==expected['search']['section'] and row['paragraph']==expected['search']['paragraph'] and row['charOffset']==offset and row['length']==len(expected['query']) and row['page']==0,'Search address does not match independent body position')
-        require(row.get('text')==expected['query'] and type(row.get('context')) is str and expected['query'] in row['context'],'Search actual text/context missing')
+        # GrepMatch.text is the containing paragraph, not the matched substring.
+        # Positions use Unicode scalars; the authored emoji makes UTF-16 offsets
+        # observably different. This short fixture fits the public 40-char context.
+        text=row.get('text');context=row.get('context')
+        require(type(text) is str and text==expected['body'] and
+                text[offset:offset+row['length']]==expected['query'] and
+                type(context) is str and context==expected['body'],
+                'Search paragraph, scalar substring or exact context differs')
+        require(not {'cell','textbox','equation','nestedDepth'} & set(row),
+                'Expected body search unexpectedly reports a nested owner')
+        if paragraph_context:
+            require(row.get('contextBefore')==[] and row.get('contextAfter')==[expected['tail']],
+                    'Stateless search surrounding paragraph inventory differs')
+        else:
+            require(not {'contextBefore','contextAfter'} & set(row),
+                    'Session search unexpectedly includes unrequested paragraph context')
     if last or zero:require('nextOffset' not in value,'Final search window incorrectly advertises another window')
 def verify_tables(value,source,expected):
     version(value);source_match(value,source);require(type(value.get('tableCount')) is int and value['tableCount']==1,'One actual table is required')
@@ -271,7 +290,8 @@ def revalidate_semantics(proof,root,expected):
                 if call['name']=='first-window':offsets=offsets[:1];require(type(value.get('nextOffset')) is int and value['nextOffset']==1,'Re-read first pagination offset differs')
                 elif call['name']=='last-window':offsets=offsets[1:];require(args.get('offset')==1 and type(args.get('offset')) is int,'Re-read actual second window request differs')
                 elif zero:offsets=[]
-                verify_search(value,source,expected,offsets,last=call['name'] in ('search','cli-search','last-window'),zero=zero)
+                verify_search(value,source,expected,offsets,last=call['name'] in ('search','cli-search','last-window'),zero=zero,
+                              paragraph_context=call['name'] in ('search','cli-search'))
             elif operation in ('hwp_fill_fields','hwp_doc_fill_fields','edit fill-fields'):
                 verify_fill(value,source,count=1 if category=='session' else 3,dry=call['name']=='dry-run')
                 if category=='session':require(value.get('docId')==source,'Re-read session field handle differs')
@@ -412,6 +432,40 @@ class Suite:
     def artifact(self,path,kind,details):
         directory=self.proof_root/'artifacts'/self.case.get('id','preflight');directory.mkdir(parents=True,exist_ok=True);saved=directory/(str(len(self.case['artifacts']))+path.suffix);require(not saved.exists(),'Original artifact exists');shutil.copyfile(path,saved)
         self.case['artifacts'].append({'path':str(saved.relative_to(self.proof_root)),'kind':kind,'sha256':digest(path),'bytes':path.stat().st_size,'independentPassed':True,'details':details})
+    def validate_pdf(self,value,source,path):
+        # Retain the actual owned output before any manifest or PDFium assertion.
+        # A failed capture is evidence only; success still requires every oracle.
+        from windows_components import regular,_ancestors
+        with oracle.pdf_phase('pdf-retain'):
+            path=Path(path);regular(path)
+            require(path.resolve().is_relative_to(Path(self.work).resolve()) and
+                    path.suffix=='.pdf' and self.case['id'] in ('hwp-render','hwpx-render'),
+                    'PDF output is outside the current owned render case')
+            before=path.stat();require(0<before.st_size<=oracle.CAP,'PDF output is unbounded')
+            with path.open('rb') as stream:raw=stream.read(oracle.CAP+1)
+            after=path.stat();regular(path)
+            require(len(raw)==before.st_size and
+                    (before.st_size,before.st_mtime_ns,before.st_dev,before.st_ino)==
+                    (after.st_size,after.st_mtime_ns,after.st_dev,after.st_ino),
+                    'PDF output changed during evidence capture')
+            directory=self.proof_root/'artifacts'/self.case['id'];_ancestors(directory)
+            directory.mkdir(parents=True,exist_ok=True);_ancestors(directory)
+            saved=directory/(str(len(self.case['artifacts']))+'.pdf')
+            with saved.open('xb') as stream:stream.write(raw)
+            regular(saved);captured_sha=hashlib.sha256(raw).hexdigest()
+            require(saved.stat().st_size==len(raw) and digest(saved)==captured_sha,
+                    'Retained PDF bytes differ from the actual output')
+            artifact={'path':str(saved.relative_to(self.proof_root)),'kind':'pdf',
+                      'sha256':captured_sha,'bytes':len(raw),'independentPassed':False,'details':{}}
+            self.case['artifacts'].append(artifact)
+        with oracle.pdf_phase('pdf-manifest'):
+            version(value);source_match(value,source)
+            require(value.get('format')=='pdf' and all(type(value.get(k)) is int for k in ('bytes','pageCount','renderedCount')) and value.get('backend')=='svg' and value.get('output')==str(path) and value.get('bytes')==len(raw) and value.get('pageCount')==value.get('renderedCount')==1,'Guarded SVG PDF actual manifest differs')
+        details=oracle.inspect_pdf(saved,self.expected)
+        with oracle.pdf_phase('pdf-retain'):
+            regular(saved);require(saved.stat().st_size==len(raw) and digest(saved)==captured_sha,
+                                   'Retained PDF bytes changed during validation')
+        artifact.update(independentPassed=True,details=details)
     def structure(self,label,path):
         if path.suffix=='.hwp':
             require(path.read_bytes().startswith(bytes.fromhex('d0cf11e0a1b11ae1')),'Actual HWP CFB signature missing')
@@ -434,9 +488,9 @@ class Suite:
             verify_info(self.cli('cli-info',['info',str(source),'--json'],folder),fmt,source);verify_tables(self.cli('cli-tables',['export-tables',str(source),'--json'],folder),source,expected);verify_fields(self.cli('cli-fields',['fields',str(source),'--json'],folder),source,expected);self.close('close',doc)
         elif category=='search':
             doc=self.open('open',source);offsets=expected['search']['offsets']
-            value=self.tool('search','hwp_search',{'path':str(source),'query':expected['query'],'context':1});verify_search(value,source,expected,offsets,last=True)
+            value=self.tool('search','hwp_search',{'path':str(source),'query':expected['query'],'context':1});verify_search(value,source,expected,offsets,last=True,paragraph_context=True)
             require(all(type(row.get('contextBefore')) is list and type(row.get('contextAfter')) is list for row in value['matches']),'Actual search context paragraph arrays missing')
-            verify_search(self.cli('cli-search',['search',str(source),'--json','--context','1','--',expected['query']],folder),source,expected,offsets,last=True)
+            verify_search(self.cli('cli-search',['search',str(source),'--json','--context','1','--',expected['query']],folder),source,expected,offsets,last=True,paragraph_context=True)
             first=self.tool('first-window','hwp_doc_search',{'docId':doc,'query':expected['query'],'maxMatches':1});verify_search(first,doc,expected,[offsets[0]]);require(type(first.get('nextOffset')) is int and first['nextOffset']==1,'Actual first search nextOffset differs')
             last=self.tool('last-window','hwp_doc_search',{'docId':doc,'query':expected['query'],'maxMatches':1,'offset':first['nextOffset']});verify_search(last,doc,expected,[offsets[1]],last=True)
             verify_search(self.tool('zero-match','hwp_doc_search',{'docId':doc,'query':'OWNED-NO-MATCH'}),doc,expected,[],zero=True)
@@ -486,7 +540,7 @@ class Suite:
                 self.artifact(path,'svg',oracle.inspect_svg(path,expected));require(digest(owned)==before,'SVG renderer edited owned input')
             for name,channel in (('export-pdf','mcp'),('cli-pdf','cli')):
                 path=folder/(name+'.pdf');value=self.tool(name,'hwp_export_pdf',{'path':str(source),'output':str(path)}) if channel=='mcp' else self.cli(name,['export-pdf',str(source),'-o',str(path),'--json'],folder)
-                version(value);source_match(value,source);require(value.get('format')=='pdf' and all(type(value.get(k)) is int for k in ('bytes','pageCount','renderedCount')) and value.get('backend')=='svg' and value.get('output')==str(path) and value.get('bytes')==path.stat().st_size and value.get('pageCount')==value.get('renderedCount')==1,'Guarded SVG PDF actual manifest differs');self.artifact(path,'pdf',oracle.inspect_pdf(path,expected))
+                self.validate_pdf(value,source,path)
             pngdir=folder/'png';self.cli('cli-png',['export-png',str(source),'-o',str(pngdir),'-p','0','--dpi','96'],folder,json_output=False);pngs=list(pngdir.glob('*.png'));require(len(pngs)==1,'Direct PNG handler must produce one real page file');self.artifact(pngs[0],'png',oracle.inspect_png(pngs[0],expected))
         elif category=='roundtrip':
             # Fresh edited HWpx seeds per branch; only this category chains conversions.

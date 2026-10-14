@@ -1,9 +1,28 @@
 """Draft independent scoped ZIP/XML/Pillow/PDFium oracles; no rhwp calls."""
 from __future__ import annotations
 import base64,copy,hashlib,io,math,re,zipfile
+from contextlib import contextmanager
 from pathlib import Path,PurePosixPath
 import xml.etree.ElementTree as ET
 CAP=20*1024*1024
+PDF_FAILURE_CODES=frozenset(('pdf-retain','pdf-manifest','pdf-file','pdf-open',
+                           'pdf-page-count','pdf-paper-size','pdf-searchable-markers',
+                           'pdf-raster','pdf-visible-table-text'))
+
+class PdfValidationError(ValueError):
+    def __init__(self,code):
+        if type(code) is not str or code not in PDF_FAILURE_CODES:
+            raise ValueError('Unknown PDF validation stage')
+        self.code=code
+        super().__init__(code)
+
+@contextmanager
+def pdf_phase(code):
+    if type(code) is not str or code not in PDF_FAILURE_CODES:
+        raise ValueError('Unknown PDF validation stage')
+    try:yield
+    except PdfValidationError:raise
+    except Exception:raise PdfValidationError(code) from None
 
 def require(value,message):
     if not value:raise ValueError(message)
@@ -191,30 +210,38 @@ def inspect_png(path,expected):
     return {'sha256':sha(raw),'bytes':len(raw),**proof}
 
 def inspect_pdf(path,expected):
-    import pypdfium2 as pdfium
-    raw=Path(path).read_bytes();require(0<len(raw)<=CAP and raw.startswith(b'%PDF-') and b'%%EOF' in raw[-2048:],'Actual complete bounded PDF required')
-    doc=pdfium.PdfDocument(raw)
+    with pdf_phase('pdf-file'):
+        with Path(path).open('rb') as stream:raw=stream.read(CAP+1)
+        require(0<len(raw)<=CAP and raw.startswith(b'%PDF-') and b'%%EOF' in raw[-2048:],'Actual complete bounded PDF required')
+    with pdf_phase('pdf-open'):
+        import pypdfium2 as pdfium
+        doc=pdfium.PdfDocument(raw)
     try:
-        require(len(doc)==1,'Expected one rendered PDF page');page=doc[0];text=page.get_textpage();bitmap=None
+        with pdf_phase('pdf-page-count'):
+            require(len(doc)==1,'Expected one rendered PDF page');page=doc[0];text=page.get_textpage();bitmap=None
         try:
-            width,height=page.get_size();require(abs(width-210/25.4*72)<2 and abs(height-297/25.4*72)<2,'PDF paper size differs')
-            value=text.get_text_range();markers=[expected['body'].split(' FIND-OWNED')[0],expected['tail'],*expected['cells'].values()]
-            require(all(value.count(marker)==1 for marker in markers) and value.count(expected['query'])==2 and all(value.count(f['value'])==1 for f in expected['fields']),'PDF searchable body/table/field marker inventory differs')
-            bitmap=page.render(scale=2);image=bitmap.to_pil().convert('RGB');proof=raster_check(image,expected,2)
+            with pdf_phase('pdf-paper-size'):
+                width,height=page.get_size();require(abs(width-210/25.4*72)<2 and abs(height-297/25.4*72)<2,'PDF paper size differs')
+            with pdf_phase('pdf-searchable-markers'):
+                value=text.get_text_range();markers=[expected['body'].split(' FIND-OWNED')[0],expected['tail'],*expected['cells'].values()]
+                require(all(value.count(marker)==1 for marker in markers) and value.count(expected['query'])==2 and all(value.count(f['value'])==1 for f in expected['fields']),'PDF searchable body/table/field marker inventory differs')
+            with pdf_phase('pdf-raster'):
+                bitmap=page.render(scale=2);image=bitmap.to_pil().convert('RGB');proof=raster_check(image,expected,2)
             # Independently locate each unique cell marker through PDFium and require
             # visible ink in its text rectangle, beyond the checkerboard-only raster.
-            cells=0
-            for marker in expected['cells'].values():
-                search=text.search(marker,match_case=True)
-                try:
-                    match=search.get_next();require(match is not None and search.get_next() is None,'PDF cell marker search is absent/duplicated');index,count=match
-                    rectangles=text.count_rects(index,count);require(rectangles>0,'PDF cell marker has no real text geometry')
-                    ink=0
-                    for i in range(rectangles):
-                        left,bottom,right,top=text.get_rect(i);require(0<=left<right<=width and 0<=bottom<top<=height,'PDF cell marker rectangle is out of page')
-                        crop=image.crop((max(0,int(left*2)-1),max(0,int((height-top)*2)-1),min(image.width,math.ceil(right*2)+1),min(image.height,math.ceil((height-bottom)*2)+1))).convert('L');ink+=sum(crop.histogram()[:180])
-                    require(ink>=5,'PDF table cell text is not visibly rendered');cells+=1
-                finally:search.close()
+            with pdf_phase('pdf-visible-table-text'):
+                cells=0
+                for marker in expected['cells'].values():
+                    search=text.search(marker,match_case=True)
+                    try:
+                        match=search.get_next();require(match is not None and search.get_next() is None,'PDF cell marker search is absent/duplicated');index,count=match
+                        rectangles=text.count_rects(index,count);require(rectangles>0,'PDF cell marker has no real text geometry')
+                        ink=0
+                        for i in range(rectangles):
+                            left,bottom,right,top=text.get_rect(i);require(0<=left<right<=width and 0<=bottom<top<=height,'PDF cell marker rectangle is out of page')
+                            crop=image.crop((max(0,int(left*2)-1),max(0,int((height-top)*2)-1),min(image.width,math.ceil(right*2)+1),min(image.height,math.ceil((height-bottom)*2)+1))).convert('L');ink+=sum(crop.histogram()[:180])
+                        require(ink>=5,'PDF table cell text is not visibly rendered');cells+=1
+                    finally:search.close()
             proof['visibleTableCellMarkers']=cells
             return {'sha256':sha(raw),'bytes':len(raw),'pageCount':1,'markers':len(markers),**proof}
         finally:

@@ -11,6 +11,7 @@ import menu_clipboard
 from stored_lineseg_origin import apply as apply_stored_lineseg_origin
 from picture_line_segment_owner import apply as apply_picture_line_segment_owner
 from virtual_picture_layout_admission import apply as apply_virtual_picture_layout_admission
+from hwpx_persistence_verification import apply as apply_hwpx_persistence_verification
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -402,6 +403,8 @@ def patch(source: Path) -> None:
     value['changes'].append('picture text-as-character replacement invalidates stored line segment ownership')
     value['virtualPictureLayoutAdmission'] = apply_virtual_picture_layout_admission(source)
     value['changes'].append('virtual picture layout admission excludes non-body indices from body-only picture band scanning')
+    value['hwpxPersistenceVerification'] = apply_hwpx_persistence_verification(source)
+    value['changes'].append('HWPX persistence verification compares independently expected and reloaded content with pinned readonly dependencies')
     ledger.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
     print('Applied checked HWPX extensions. Runtime/round-trip validation must pass separately.')
 

@@ -58,9 +58,22 @@ if (-not $Worker) {
     return
 }
 
+# Windows PowerShell workers cannot depend on the parent's module availability.
+# Use framework APIs shared by Windows PowerShell 5.1 and PowerShell 7.
+function Get-OpenGeulFileSha256([string]$Path) {
+    $stream=$null;$algorithm=$null
+    try {
+        $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        $algorithm=[Security.Cryptography.SHA256]::Create()
+        return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-','').ToLowerInvariant()
+    } finally {
+        if ($null -ne $algorithm) { $algorithm.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
 $stage='actual-host-observation'
 $hostObservation=[ordered]@{source=$binding;workerPid=[int]$PID;
-    scriptSha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant();
+    scriptSha256=$null;
     powerShellVersion=[string]$PSVersionTable.PSVersion;elevated=$null;
     architectureQuerySucceeded=$null;nativeMachine=$null;controllerMachine=$null;
     systemDirectory=$null;capabilityMatches=$null;capabilityState=$null;
@@ -85,6 +98,7 @@ function Save-ObservedJson([string]$Name,$Value) {
     [IO.File]::WriteAllText((Join-Path $out $Name),$json,[Text.UTF8Encoding]::new($false))
 }
 try {
+    $hostObservation.scriptSha256=Get-OpenGeulFileSha256 $PSCommandPath
     $stage='actual-host-elevation'
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     $principal=[Security.Principal.WindowsPrincipal]::new($identity)
@@ -175,7 +189,7 @@ public static class OpenGeulKoreanSetupHost {
                 }
                 $item=Get-Item -LiteralPath $component
                 if ($item.Length -le 0 -or $item.Length -gt 64MB) { continue }
-                $sha=(Get-FileHash -LiteralPath $component -Algorithm SHA256).Hash.ToLowerInvariant()
+                $sha=Get-OpenGeulFileSha256 $component
                 $signature=Get-AuthenticodeSignature -LiteralPath $component
                 if ([string]$signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { continue }
                 $subject=[string]$signature.SignerCertificate.Subject
@@ -185,7 +199,7 @@ public static class OpenGeulKoreanSetupHost {
                 $pe=[BitConverter]::ToInt32($bytes,0x3c)
                 if ($pe -lt 64 -or $pe -gt $bytes.Length-6 -or [BitConverter]::ToUInt32($bytes,$pe) -ne 0x4550) { continue }
                 $machine=[int][BitConverter]::ToUInt16($bytes,$pe+4)
-                if ($machine -ne $nativeMachine -or (Get-FileHash -LiteralPath $component -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha) { continue }
+                if ($machine -ne $nativeMachine -or (Get-OpenGeulFileSha256 $component) -ne $sha) { continue }
                 $profiles+=,[ordered]@{inputTip=[string]$tip;providerClsid=$provider;profileGuid=$profileGuid;languageId=0x0412;
                     registered=$true;registryView='Registry64';component=[ordered]@{path=$component;bytes=[long]$item.Length;
                         sha256=$sha;machine=$machine;signatureStatus=[string]$signature.Status;signerSubject=$subject}}
