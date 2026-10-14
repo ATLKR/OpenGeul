@@ -64,6 +64,10 @@ class NativePickerStaleChildTests(unittest.TestCase):
         self.filename.parent.return_value.class_name.return_value = 'ComboBox'
         self.filename.is_visible.return_value = True
         self.filename.is_enabled.return_value = True
+        # Model the same filename Edit storing input and returning its current
+        # text. A bare Mock readback is not the typed filename.
+        self.filename.window_text.return_value = ''
+        self.filename.set_edit_text.side_effect = lambda value: setattr(self.filename.window_text, 'return_value', value)
         self.button = Mock()
         self.button.control_id.return_value = 1
         self.button.is_visible.return_value = True
@@ -114,8 +118,20 @@ class NativePickerStaleChildTests(unittest.TestCase):
         self.assertEqual(self.sleeps, [.1])
         self.desktop.window.assert_called_once_with(class_name='#32770', process=8028)
         self.filename.set_edit_text.assert_called_once_with('synthetic-output.hwp')
+        self.filename.window_text.assert_called_once_with()
         self.button.click_input.assert_called_once()
         self.session._record_picker_readiness_failure.assert_not_called()
+
+    def test_changed_filename_after_dead_child_readiness_never_clicks(self):
+        self.filename.window_text.side_effect = lambda: 'different-output.hwp'
+        with self.assertRaisesRegex(AssertionError, 'Native filename changed'):
+            self.session.native_dialog(Path('synthetic-output.hwp'))
+        self.assertEqual(self.enum_count, 2)
+        self.assertEqual(self.sleeps, [.1])
+        self.filename.set_edit_text.assert_called_once_with('synthetic-output.hwp')
+        self.filename.window_text.assert_called_once_with()
+        self.dialog.set_focus.assert_not_called()
+        self.button.click_input.assert_not_called()
 
     def test_parent_handle_invalid_exception_is_not_retried(self):
         self.failure = InvalidWindowHandle(983592)

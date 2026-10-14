@@ -73,6 +73,9 @@ class NativePickerReadinessTests(unittest.TestCase):
         self.filename.parent.return_value.class_name.return_value = 'ComboBox'
         self.filename.is_visible.return_value = True
         self.filename.is_enabled.return_value = True
+        # Preserve actual Edit input/readback semantics in this offline fixture.
+        self.filename.window_text.return_value = ''
+        self.filename.set_edit_text.side_effect = lambda value: setattr(self.filename.window_text, 'return_value', value)
         self.button = Mock()
         self.button.control_id.return_value = 1
         self.button.is_visible.return_value = True
@@ -127,8 +130,22 @@ class NativePickerReadinessTests(unittest.TestCase):
         self.session.native_dialog(target)
         self.desktop.window.assert_called_once_with(class_name='#32770', process=123)
         self.filename.set_edit_text.assert_called_once_with(str(target))
+        self.filename.window_text.assert_called_once_with()
         self.button.click_input.assert_called_once()
         self.assertEqual(self.dialog.descendants.call_count, 3)
+        self.assertFalse(self.evidence.exists())
+
+    def test_changed_filename_after_initial_readiness_never_clicks(self):
+        self.dialog.descendants.side_effect = [[], [self.filename]]
+        self.filename.window_text.side_effect = lambda: 'different-output.hwpx'
+        target = Path('selected.hwpx')
+        with self.assertRaisesRegex(AssertionError, 'Native filename changed'):
+            self.session.native_dialog(target)
+        self.filename.set_edit_text.assert_called_once_with(str(target))
+        self.filename.window_text.assert_called_once_with()
+        self.dialog.set_focus.assert_not_called()
+        self.button.click_input.assert_not_called()
+        self.assertEqual(self.dialog.descendants.call_count, 2)
         self.assertFalse(self.evidence.exists())
 
     def test_never_ready_picker_fails_before_setting_or_clicking(self):
