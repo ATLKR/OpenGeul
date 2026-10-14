@@ -95,12 +95,15 @@ class WiringTests(unittest.TestCase):
             with self.subTest(job=name):
                 steps=jobs[name]['steps'];mcp=[(i,s) for i,s in enumerate(steps) if 'e2e/mcp_worker.py' in s.get('run','')]
                 self.assertEqual(len(mcp),1,'모든 실제 native OS에서 휴대용 MCP를 실행해야 합니다')
-                index,step=mcp[0];self.assertNotIn('if',step);self.assertFalse(step.get('continue-on-error',False))
+                index,step=mcp[0];self.assertFalse(step.get('continue-on-error',False))
+                expected="always() && !cancelled() && steps.runtime-ready.outcome == 'success' && steps.mcp-fixtures.outcome == 'success'"
+                if name=='native-e2e-arm64':expected+=" && steps.runner-ready.outcome == 'success'"
+                self.assertEqual(step.get('if'),expected)
                 prepare=next(i for i,s in enumerate(steps) if 'prepare_payload.py package runtime' in s.get('run',''))
                 password=next(i for i,s in enumerate(steps) if 'generate-password-fixtures.mjs' in s.get('run',''))
                 self.assertLess(prepare,password);self.assertLess(password,index)
                 for flag in ('--context portable','--architecture $env:E2E_ARCHITECTURE','--exe runtime/Tools/rhwp.exe',
-                             '--fixtures inputs/e2e-fixtures','--password-fixtures password-fixtures','--expected-sha256 $cliSha','--out evidence/mcp'):
+                             '--fixtures inputs/e2e-fixtures','--password-fixtures mcp-password-fixtures','--expected-sha256 $cliSha','--out evidence/mcp'):
                     self.assertIn(flag,step['run'])
                 self.assertIn('windowsComponents.components.cli.sha256',step['run'])
                 self.assertNotIn('Get-FileHash',step['run'],'기대 CLI 해시는 실행 파일이 아니라 package 증명에서 받아야 합니다')

@@ -525,6 +525,7 @@ jobs:
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs${env:E2E_INPUT_SUFFIX}-$env:GITHUB_RUN_ID" --dir inputs
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
     - name: 시험 도구 설치와 실제 제품 파일 신원 확인
+      id: runtime-ready
       shell: pwsh
       run: |
         $PSNativeCommandUseErrorActionPreference=$true
@@ -534,6 +535,13 @@ jobs:
     - name: WebView2가 없을 때 사용자 안내
       shell: pwsh
       run: python e2e/check_webview2_missing.py --exe runtime/OpenGeul.exe --output evidence
+    - name: GUI 결과와 별개인 MCP 암호 입력 준비
+      id: mcp-fixtures
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures mcp-password-fixtures
     - name: 제품 WebView2와 실제 Windows 파일 대화상자 검사
       shell: pwsh
       run: |
@@ -550,13 +558,14 @@ jobs:
         node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures password-fixtures
         python e2e/password/native.py --source-root . --fixtures password-fixtures --exe runtime/OpenGeul.exe --output evidence/password-native --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID
     - name: 실제 MCP stdio·암호 입력·COM 작업자 실패 격리 검사
+      if: always() && !cancelled() && steps.runtime-ready.outcome == 'success' && steps.mcp-fixtures.outcome == 'success'
       shell: pwsh
       run: |
         $ErrorActionPreference='Stop'
         $PSNativeCommandUseErrorActionPreference=$true
         $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
         $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
-        python e2e/mcp_worker.py --context portable --architecture $env:E2E_ARCHITECTURE --exe runtime/Tools/rhwp.exe --fixtures inputs/e2e-fixtures --password-fixtures password-fixtures --expected-sha256 $cliSha --out evidence/mcp
+        python e2e/mcp_worker.py --context portable --architecture $env:E2E_ARCHITECTURE --exe runtime/Tools/rhwp.exe --fixtures inputs/e2e-fixtures --password-fixtures mcp-password-fixtures --expected-sha256 $cliSha --out evidence/mcp
     - name: 설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비
       if: env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'
       shell: pwsh
@@ -628,6 +637,7 @@ jobs:
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs${env:E2E_INPUT_SUFFIX}-$env:GITHUB_RUN_ID" --dir inputs
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
     - name: 시험 도구 설치와 실제 제품 파일 신원 확인
+      id: runtime-ready
       shell: pwsh
       run: |
         $PSNativeCommandUseErrorActionPreference=$true
@@ -659,6 +669,13 @@ jobs:
     - name: WebView2가 없을 때 사용자 안내
       shell: pwsh
       run: python e2e/check_webview2_missing.py --exe runtime/OpenGeul.exe --output evidence
+    - name: GUI 결과와 별개인 MCP 암호 입력 준비
+      id: mcp-fixtures
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures mcp-password-fixtures
     - name: 제품 WebView2와 실제 Windows 파일 대화상자 검사
       shell: pwsh
       run: |
@@ -675,13 +692,14 @@ jobs:
         node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures password-fixtures
         python e2e/password/native.py --source-root . --fixtures password-fixtures --exe runtime/OpenGeul.exe --output evidence/password-native --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID
     - name: 실제 MCP stdio·암호 입력·COM 작업자 실패 격리 검사
+      if: always() && !cancelled() && steps.runtime-ready.outcome == 'success' && steps.mcp-fixtures.outcome == 'success' && steps.runner-ready.outcome == 'success'
       shell: pwsh
       run: |
         $ErrorActionPreference='Stop'
         $PSNativeCommandUseErrorActionPreference=$true
         $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
         $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
-        python e2e/mcp_worker.py --context portable --architecture $env:E2E_ARCHITECTURE --exe runtime/Tools/rhwp.exe --fixtures inputs/e2e-fixtures --password-fixtures password-fixtures --expected-sha256 $cliSha --out evidence/mcp
+        python e2e/mcp_worker.py --context portable --architecture $env:E2E_ARCHITECTURE --exe runtime/Tools/rhwp.exe --fixtures inputs/e2e-fixtures --password-fixtures mcp-password-fixtures --expected-sha256 $cliSha --out evidence/mcp
     - name: 설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비
       if: env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'
       shell: pwsh

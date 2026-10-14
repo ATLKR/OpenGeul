@@ -20,7 +20,8 @@ FONT_MAGIC=(b'OTTO',b'ttcf',b'wOFF',b'wOF2',b'\x00\x01\x00\x00')
 OUTCOME_PATHS=('results.json','summary.json','password-native/results.json')
 PRIORITY_PATHS={name for name in ('results.json','summary.json','junit.xml')}|{
     'password-native/'+name for name in
-    ('results.json','junit.xml','identity.json','fixture-manifest.json','fixture-verification.json')}
+    ('results.json','junit.xml','identity.json','fixture-manifest.json','fixture-verification.json')}|{
+    'mcp/mcp-result.json'}
 
 
 def files(root):
@@ -73,7 +74,7 @@ def pack(source,destination,status,limit=None):
             for row in records:
                 if row.get('status') in ('failed','error','skipped') or row.get('passed') is False:
                     failed.add((Path(name).parent.parts,str(row.get('test',row.get('name',''))).rsplit('.',1)[-1]))
-    # Both native suites' outcomes and provenance precede bounded diagnostics.
+    # Independent MCP receipts and native outcomes precede bounded diagnostics.
     def rank(p):
         rel=p.relative_to(source)
         if rel.as_posix() in PRIORITY_PATHS:return (0,len(rel.parts),rel.as_posix())

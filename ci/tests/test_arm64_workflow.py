@@ -88,6 +88,7 @@ class Arm64WorkflowTests(unittest.TestCase):
                     # 새 MCP/QA 계약은 test_workflow_wiring이 별도로 검사한다.
                     # 기존 16+암호8·인쇄 전체 단계의 원래 해시는 갱신하지 않는다.
                     additions={'실제 MCP stdio·암호 입력·COM 작업자 실패 격리 검사',
+                               'GUI 결과와 별개인 MCP 암호 입력 준비',
                                '설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비',
                                '동일 실행의 공개 MCP QA 입력을 하루 동안 보존'} if name=='native-e2e' else {
                                    '성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존',
@@ -97,7 +98,16 @@ class Arm64WorkflowTests(unittest.TestCase):
                         additions |= {'ARM 러너의 검증된 OS 창과 전경 준비',
                                       'ARM 러너 준비 원본 증거 크기 제한',
                                       'ARM 러너 준비 원본 관찰 보존'}
-                    steps=json.dumps(bind([step for step in job['steps'] if step.get('name') not in additions]),sort_keys=True,separators=(',',':')).encode()
+                    retained=[]
+                    for step in job['steps']:
+                        if step.get('name') in additions:continue
+                        step=dict(step)
+                        if name=='native-e2e' and step.get('name')=='시험 도구 설치와 실제 제품 파일 신원 확인':
+                            # Only this separately verified outcome ID is additive;
+                            # the original full step body still participates in the digest.
+                            self.assertEqual(step.pop('id',None),'runtime-ready')
+                        retained.append(step)
+                    steps=json.dumps(bind(retained),sort_keys=True,separators=(',',':')).encode()
                     self.assertEqual(hashlib.sha256(steps).hexdigest(),expected)
                     self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
                     self.assertEqual(str(job['timeout-minutes']),'40' if name=='native-e2e' else '30')

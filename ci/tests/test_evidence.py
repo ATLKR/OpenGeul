@@ -48,6 +48,20 @@ class EvidenceTests(unittest.TestCase):
     def test_failure_result_is_preserved_not_rewritten(self):
         data=(self.src/'results.json').read_bytes();self.p.pack(self.src,self.dest,'failure')
         self.assertEqual((self.dest/'results.json').read_bytes(),data)
+    def test_independent_mcp_receipt_survives_failed_gui_diagnostics_cap(self):
+        producer=(Path(__file__).resolve().parents[2]/'e2e/mcp_worker.py').read_text()
+        self.assertIn("args.out/'mcp-result.json'",producer)
+        self.assertIn('mcp/mcp-result.json',self.p.PRIORITY_PATHS)
+        receipt=json.dumps({'passed':False,'caseCount':6,'phase':'hwp_doc_save',
+            'cases':[{'name':'case-'+str(i),'responseSha256':'a'*64,'checks':{'passed':True}}
+                     for i in range(6)]}).encode()
+        self.put('mcp/mcp-result.json',receipt)
+        self.put('a_failed/events.json',b'x'*1500)
+        self.put('a_failed/screen.png',b'x'*1500)
+        (self.src/'results.json').write_text('{"tests":[{"test":"suite.a_failed","status":"failed"}]}')
+        report=self.p.pack(self.src,self.dest,'failure',limit=4096)
+        self.assertEqual((self.dest/'mcp/mcp-result.json').read_bytes(),receipt)
+        self.assertEqual(report['status'],'failure')
     def test_failed_case_evidence_has_priority_over_successful_case(self):
         (self.src/'results.json').write_text('{"tests":[{"test":"suite.z_failed","status":"failed"}]}')
         self.put('a_success/large.png',b'a'*1500);self.put('z_failed/screen.png',b'b'*1500)
