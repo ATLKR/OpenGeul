@@ -26,6 +26,7 @@ import wasm_artifacts
 import windows_arch
 import pdf_search_text
 import pdf_font_resolution
+import equation_dialog_focus
 import menu_clipboard
 import shape_creation_history
 import nested_line_navigation
@@ -68,6 +69,108 @@ def pe(machine=0x8664):
 
 
 class WindowsComponentsTests(unittest.TestCase):
+    def test_equation_dialog_focus_actual_frontend_source_is_explicit(self):
+        name = 'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts'
+        self.assertIn(name, self.helper().SOURCE_FILES)
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, (name,))
+        config = self.helper().configured()
+        self.assertEqual(config['helpers'][equation_dialog_focus.HELPER], digest(ROOT/equation_dialog_focus.HELPER))
+        source = self.source()
+        _, contract = self.helper().source_contract(source, config)
+        self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+        self.assertEqual(contract['equationDialogFocus']['afterSha256'][name], digest(source/name))
+
+    def test_equation_dialog_focus_missing_proof_cannot_publish_component(self):
+        source = self.source()
+        ledger_path = source/'.opengeul-overlay.json'
+        ledger = json.loads(ledger_path.read_bytes())
+        ledger.pop('equationDialogFocus', None)
+        write_json(ledger_path, ledger)
+        with self.assertRaisesRegex(ValueError, 'Equation dialog focus'):
+            self.helper().source_contract(source, self.helper().configured())
+
+    def test_equation_dialog_focus_capture_rejects_forged_proof_and_actual_source_drift(self):
+        source = self.source(); c = self.helper(); payload = self.payload('editor')
+        name, = equation_dialog_focus.SOURCE_FILES
+        path = source/name; raw = path.read_bytes()
+        ledger_path = source/'.opengeul-overlay.json'; original = json.loads(ledger_path.read_bytes())
+        for i, change in enumerate(('helper', 'before', 'after', 'extra-proof', 'missing-source', 'source-drift', 'coherent-legacy')):
+            path.write_bytes(raw); ledger = copy.deepcopy(original); proof = ledger['equationDialogFocus']
+            if change == 'helper': proof['helperSha256'] = '0'*64
+            elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+            elif change == 'extra-proof': proof['optional'] = True
+            elif change == 'missing-source': path.unlink()
+            else:
+                path.write_bytes(b'owned former equation dialog focus source\n')
+                if change == 'coherent-legacy': proof['afterSha256'][name] = digest(path)
+            write_json(ledger_path, ledger)
+            out = self.root/('invalid-equation-focus-'+str(i))
+            with self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+
+    def test_equation_dialog_focus_reobserves_actual_frontend_after_core_capture(self):
+        source = self.source(); c = self.helper(); actual_tree = c.tree
+        name, = equation_dialog_focus.SOURCE_FILES
+        def changed_frontend(folder, cap):
+            if folder == source/'third_party/rhwp/src':
+                path = source/name; path.write_bytes(path.read_bytes()+b'// changed during actual source capture\n')
+            return actual_tree(folder, cap)
+        out = self.root/'changed-equation-focus-source'
+        with patch.object(c, 'tree', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_equation_dialog_focus_reobserves_actual_frontend_after_vendor_validation(self):
+        source = self.source(); c = self.helper(); actual_read = c.read_json
+        name, = equation_dialog_focus.SOURCE_FILES
+        provenance = source/'apps/studio-host/vendor/rhwp-core/PROVENANCE.json'
+        def changed_frontend(path):
+            value = actual_read(path)
+            if path == provenance:
+                current = source/name
+                current.write_bytes(current.read_bytes()+b'// changed during final vendor validation\n')
+            return value
+        out = self.root/'changed-equation-focus-final-source'
+        with patch.object(c, 'read_json', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
+            c.capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_matching_component_pair_requires_equation_focus_fixed_proof_and_observation(self):
+        folders = self.pair()
+        original = {role:json.loads((folder/'provenance.json').read_bytes()) for role, folder in folders.items()}
+        name, = equation_dialog_focus.SOURCE_FILES
+        for change in ('missing-proof', 'missing-source', 'helper', 'before', 'after', 'observed-hash', 'coherent-legacy', 'extra-proof'):
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); source = value['source']; proof = source['equationDialogFocus']
+                if change == 'missing-proof': source.pop('equationDialogFocus')
+                elif change == 'missing-source': source['preparedFiles'].pop(name)
+                elif change == 'helper': proof['helperSha256'] = '0'*64
+                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                elif change == 'observed-hash': source['preparedFiles'][name] = '0'*64
+                elif change == 'extra-proof': proof['optional'] = True
+                else:
+                    legacy = equation_dialog_focus.INPUT_SOURCE_SHA256[name]
+                    proof['afterSha256'][name] = source['preparedFiles'][name] = legacy
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+
+    def test_rehashed_public_ledger_cannot_omit_or_replace_equation_focus_proof(self):
+        folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
+        original_parity = json.loads(parity_path.read_bytes())
+        original = {role:json.loads((folder/'provenance.json').read_bytes()) for role, folder in folders.items()}
+        for change in ('missing', 'mismatch'):
+            parity = copy.deepcopy(original_parity)
+            if change == 'missing': parity.pop('equationDialogFocus')
+            else: parity['equationDialogFocus']['helperSha256'] = '0'*64
+            write_json(parity_path, parity)
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); value['source']['ledgerSha256'] = digest(parity_path)
+                if role == 'editor': value['files']['source-parity.json'] = {'size':parity_path.stat().st_size, 'sha256':digest(parity_path)}
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders, 'Equation dialog focus source/ledger proof mismatch')
+
     def test_pdf_font_resolution_actual_renderer_and_readonly_dependencies_are_mandatory(self):
         expected = (
             'third_party/rhwp/src/renderer/pdf.rs',
@@ -1110,6 +1213,13 @@ class WindowsComponentsTests(unittest.TestCase):
         persistence_proof = {'beforeSha256':dict(hwpx_persistence_verification.INPUT_SOURCE_SHA256),
                              'afterSha256':persistence_output,
                              'helperSha256':digest(ROOT/hwpx_persistence_verification.HELPER)}
+        focus_output = {name:digest(source/name) for name in equation_dialog_focus.SOURCE_FILES}
+        focus_override = patch.object(equation_dialog_focus, 'OUTPUT_SOURCE_SHA256', focus_output)
+        focus_override.start(); self.addCleanup(focus_override.stop)
+        self.focus_reference_path = self.root/'equation-focus-fixture-reference.json'
+        write_json(self.focus_reference_path, focus_output)
+        focus_proof = {'beforeSha256':dict(equation_dialog_focus.INPUT_SOURCE_SHA256),
+                       'afterSha256':focus_output, 'helperSha256':digest(ROOT/equation_dialog_focus.HELPER)}
         menu_proof = {'beforeSha256': {**menu_clipboard.INPUT_SOURCE_SHA256, **menu_clipboard.INPUT_NATIVE_SHA256},
                       'afterSha256': menu_final,
                       'helperSha256': digest(ROOT/'overlay/menu-clipboard.ts'),
@@ -1124,6 +1234,7 @@ class WindowsComponentsTests(unittest.TestCase):
                   'namespacePatch': namespace, 'wasmRebuild': wasm,
                   'pdfSearchText': pdf_proof,
                   'pdfFontResolution': font_proof,
+                  'equationDialogFocus': focus_proof,
                   'menuClipboardPaste': menu_proof,
                   'shapeCreationHistory': shape_proof,
                   'nestedLineNavigation': nested_proof,
@@ -1208,7 +1319,7 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,pdf_font_resolution,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission,hwpx_persistence_verification;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,pdf_font_resolution,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission,hwpx_persistence_verification,equation_dialog_focus;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
                 "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
                 "pdf_fixture=json.loads(Path(sys.argv[3]).read_text());"
@@ -1225,11 +1336,12 @@ class WindowsComponentsTests(unittest.TestCase):
                 "font_fixture=json.loads(Path(sys.argv[11]).read_text());"
                 "pdf_font_resolution.INPUT_SOURCE_SHA256=font_fixture['before'];"
                 "pdf_font_resolution.OUTPUT_SOURCE_SHA256=font_fixture['after'];"
-                "sys.argv=sys.argv[12:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                "equation_dialog_focus.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[12]).read_text());"
+                "sys.argv=sys.argv[13:];runpy.run_path(sys.argv[0],run_name='__main__')",
                 str(self.native_reference_path),str(self.com_reference_path),str(self.pdf_reference_path),
                 str(self.menu_reference_path),str(self.shape_reference_path),str(self.nested_reference_path),
                 str(self.stored_reference_path),str(self.picture_reference_path),str(self.virtual_reference_path),
-                str(self.persistence_reference_path),str(self.pdf_font_reference_path),str(HELPER),*arguments]
+                str(self.persistence_reference_path),str(self.pdf_font_reference_path),str(self.focus_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')

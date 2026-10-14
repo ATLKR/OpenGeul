@@ -50,6 +50,10 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.pdf_font = pdf_font.start()
         self.pdf_font.return_value = {'testFixture': 'installed PDF base-family selection'}
         self.addCleanup(pdf_font.stop)
+        equation_focus = patch.object(prepare_upstream, 'apply_equation_dialog_focus', create=True)
+        self.equation_focus = equation_focus.start()
+        self.equation_focus.return_value = {'testFixture': 'owned equation initial focus'}
+        self.addCleanup(equation_focus.stop)
         menu_clipboard = patch.object(prepare_upstream, 'apply_menu_clipboard', create=True)
         self.menu_clipboard = menu_clipboard.start()
         self.menu_clipboard.return_value = {'testFixture': 'menu clipboard'}
@@ -247,6 +251,20 @@ pub fn layer_trees_to_pdf_with_links(
         self.assertEqual(ledger['shapeCreationHistory'], self.shape_creation.return_value)
         self.assertEqual(ledger['nestedLineNavigation'], self.nested_navigation.return_value)
         self.assertEqual(observed, ['pdf', 'menu', 'shape', 'nested'])
+
+    def test_equation_dialog_focus_is_prepared_before_source_ledger(self):
+        with patch.object(prepare_upstream, 'apply_equation_dialog_focus', create=True) as focus:
+            focus.return_value = {'testFixture': 'owned equation initial focus'}
+            prepare_upstream.patch(self.source, '1.1.5')
+            focus.assert_called_once_with(self.source)
+            ledger = json.loads((self.source/'.opengeul-overlay.json').read_bytes())
+            self.assertEqual(ledger['equationDialogFocus'], focus.return_value)
+
+    def test_equation_dialog_focus_failure_cannot_publish_a_source_ledger(self):
+        self.equation_focus.side_effect = ValueError('Unreviewed equation initial focus source')
+        with self.assertRaisesRegex(ValueError, 'Unreviewed equation initial focus source'):
+            prepare_upstream.patch(self.source, '1.1.5')
+        self.assertFalse((self.source/'.opengeul-overlay.json').exists())
 
     def test_pdf_font_resolution_runs_after_root_geometry_before_final_ledger(self):
         observed = []

@@ -236,6 +236,74 @@ if($rejected -ne 5){throw 'missing/wrong command or assembly origin was accepted
         self.assertNotIn('$env:PSModulePath',script)
         self.assertNotIn('.Module.Path -',script)
 
+    def test_actual_controller_resolver_preserves_read_only_home_before_native_guard(self):
+        powershell=shutil.which('powershell') or shutil.which('pwsh') or '/workspace/OpenGeul-ci-build-progress/.work/powershell746/bin/pwsh'
+        if not Path(powershell).is_file():self.skipTest('PowerShell runtime unavailable')
+        with tempfile.TemporaryDirectory() as directory:
+            script=Path(directory)/'controller-resolver-home.ps1'
+            script.write_text(r'''
+param([string]$Source)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$tree=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'production parse failure'}
+$resolver=$tree.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OpenGeulAuthenticodeCmdlet'},$true)
+if($null -eq $resolver){throw 'actual controller resolver missing'}
+$homeBefore=[string]$HOME
+$homeOptions=(Get-Variable -Name HOME).Options
+if(-not ($homeOptions -band [Management.Automation.ScopedItemOptions]::ReadOnly)){throw 'actual HOME is not read-only'}
+$process=[Diagnostics.Process]::GetCurrentProcess()
+try { $actualExecutable=[IO.Path]::GetFullPath($process.MainModule.FileName) }
+finally { $process.Dispose() }
+# Invoke the complete production resolver without changing its source, process,
+# HOME, PSHOME, or Windows APIs. On this real non-Windows-PowerShell controller,
+# the native controller guard must reject before any security module resolution.
+if([IO.Path]::GetFileName($actualExecutable) -ieq 'powershell.exe') {
+    @{actualWindowsPowerShell=$true;sourceQualified=$false}|ConvertTo-Json -Compress
+    exit 77
+}
+$script:moduleCalls=0
+function Get-OpenGeulBuiltinCmdlet {
+    $script:moduleCalls++
+    throw 'native guard unexpectedly reached module resolution'
+}
+Invoke-Expression $resolver.Extent.Text
+$failure=$null
+try { Get-OpenGeulAuthenticodeCmdlet ([IO.Path]::Combine([IO.Path]::GetDirectoryName($actualExecutable),'System32')) | Out-Null }
+catch { $failure=$_ }
+$homePreserved=([string]$HOME -ceq $homeBefore -and (Get-Variable -Name HOME).Options -eq $homeOptions)
+$nativeGuardRejected=($null -ne $failure -and $failure.Exception.Message -ceq 'Actual Windows PowerShell controller home is outside the observed Windows system root.')
+$forbiddenWrites=@($resolver.FindAll({param($node)
+    if($node -is [Management.Automation.Language.AssignmentStatementAst]) {
+        $variable=$node.Left.Find({param($child) $child -is [Management.Automation.Language.VariableExpressionAst]},$true)
+        return $null -ne $variable -and @('HOME','PSHOME','CODEX_HOME') -icontains $variable.VariablePath.UserPath
+    }
+    return $false
+},$true)).Count
+@{passed=($homePreserved -and $nativeGuardRejected -and $script:moduleCalls -eq 0 -and $forbiddenWrites -eq 0);
+  homePreserved=$homePreserved;homeReadOnly=$true;nativeGuardRejected=$nativeGuardRejected;
+  forbiddenWrites=$forbiddenWrites;moduleCalls=$script:moduleCalls;
+  failureType=if($null -eq $failure){$null}else{$failure.Exception.GetType().FullName};
+  actualWindowsPowerShell51=$false;windowsAuthenticodeQualified=$false;sourceQualified=$false}|ConvertTo-Json -Compress
+if(-not $homePreserved -or -not $nativeGuardRejected -or $script:moduleCalls -ne 0 -or $forbiddenWrites -ne 0){exit 1}
+''',encoding='utf-8')
+            result=subprocess.run([str(powershell),'-NoLogo','-NoProfile','-NonInteractive','-File',str(script),
+                '-Source',str(ROOT/'scripts/ensure-korean-ime.ps1')],capture_output=True,text=True,timeout=30)
+            if result.returncode==77:self.skipTest('This bounded regression requires the actual non-Windows-PowerShell controller')
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            import json
+            observed=json.loads(result.stdout)
+            self.assertTrue(observed['passed'])
+            self.assertTrue(observed['homePreserved'])
+            self.assertTrue(observed['homeReadOnly'])
+            self.assertTrue(observed['nativeGuardRejected'])
+            self.assertEqual(observed['forbiddenWrites'],0)
+            self.assertEqual(observed['moduleCalls'],0)
+            self.assertFalse(observed['actualWindowsPowerShell51'])
+            self.assertFalse(observed['windowsAuthenticodeQualified'])
+            self.assertFalse(observed['sourceQualified'])
+
     def test_servicing_observation_bounds_actual_call_and_subsequent_query(self):
         script=(ROOT/'scripts/ensure-korean-ime.ps1').read_text()
         call=script.index('$installed=Add-WindowsCapability')

@@ -32,6 +32,15 @@ wasmpack="$root/.work/tooling/wasm-pack-v0.14.0-x86_64-unknown-linux-musl/wasm-p
 cp .work/hop/third_party/rhwp/LICENSE .work/rebuilt-wasm/LICENSE
 python scripts/wasm_artifacts.py capture .work/rebuilt-wasm
 python scripts/wasm_artifacts.py install .work/rebuilt-wasm .work/hop
+equation_dom_deps="$root/tests/hop/equation-focus-dom"
+equation_npm_global="$root/.work/equation-focus-empty-global.npmrc"
+: > "$equation_npm_global"
+npm ci --prefix "$equation_dom_deps" --ignore-scripts --no-audit --no-fund \
+  --registry=https://registry.npmjs.org --userconfig=/dev/null --globalconfig="$equation_npm_global"
+export HOP_EQUATION_FOCUS_DEPENDENCY_ROOTS="[\"$equation_dom_deps\"]"
+env -u EQUATION_DIALOG_FOCUS_EDITOR -u RHWP_SOURCE -u HOP_EQUATION_FOCUS_WASM \
+  HOP_EQUATION_FOCUS_PREPARED="$root/.work/hop" \
+  node --test tests/hop/equation-dialog-focus.node.mjs
 python e2e/check_namespaces.py .work/hop .work/hop/apps/studio-host/vendor/rhwp-core .work/namespace-green
 node e2e/table_height.mjs verify .work/hop/apps/studio-host/vendor/rhwp-core .work/table-fixtures
 (cd .work/hop && pnpm run test:studio && pnpm run build:studio)

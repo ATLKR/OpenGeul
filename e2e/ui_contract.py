@@ -3,10 +3,15 @@ from __future__ import annotations
 
 from collections import Counter
 import hashlib
+import json
+import sys
 import os
 from pathlib import Path, PureWindowsPath
 import re
 import xml.etree.ElementTree as ET
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
+import equation_dialog_focus
 
 PREFIX = 'test_hop_followups.OpenGeulFollowups.'
 BASELINE_COMMON = (
@@ -83,6 +88,7 @@ HELPERS = (
     'e2e/native_controls.py', 'e2e/native_architecture.py', 'e2e/print_focus.py',
     'e2e/webview_debug.py', 'e2e/requirements.txt',
     'e2e/uia_snapshot.py', 'scripts/releasekit.py', 'scripts/windows_arch.py',
+    'scripts/equation_dialog_focus.py', 'scripts/prepare_upstream.py',
 )
 
 
@@ -97,6 +103,25 @@ def manifest(mode):
 
 def helper_hashes(root: Path):
     return {name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in HELPERS}
+
+
+def validate_frontend_source(binding, helpers):
+    if (type(binding) is not dict or set(binding) != {'equationDialogFocus', 'preparedFiles', 'helperSha256'}
+            or type(binding['preparedFiles']) is not dict
+            or set(binding['preparedFiles']) != set(equation_dialog_focus.SOURCE_FILES)
+            or binding['helperSha256'] != {equation_dialog_focus.HELPER: helpers.get(equation_dialog_focus.HELPER)}):
+        raise ValueError('Equation dialog focus input source binding mismatch')
+    equation_dialog_focus.validate_contract(binding['equationDialogFocus'], binding['preparedFiles'], helpers)
+
+
+def frontend_source_binding(fixtures: Path, root: Path):
+    path = fixtures/'advanced-owned/provenance.json'
+    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 65536:
+        raise ValueError('Equation dialog focus input provenance is missing or unbounded')
+    value = json.loads(path.read_text(encoding='utf-8'))
+    binding = value.get('frontendSource')
+    validate_frontend_source(binding, helper_hashes(root))
+    return binding
 
 
 def exact_ids(ids, mode):
@@ -125,7 +150,7 @@ def junit_bytes(records):
     return ET.tostring(xml, encoding='utf-8', xml_declaration=True)
 
 
-def validate_evidence(payload, junit, *, mode, root, before):
+def validate_evidence(payload, junit, *, mode, root, before, source_binding):
     """Consume the binding, records and JUnit together; metadata alone is insufficient."""
     expected = manifest(mode)
     if (payload.get('mode') != mode or type(payload.get('expectedTests')) is not int
@@ -136,6 +161,9 @@ def validate_evidence(payload, junit, *, mode, root, before):
     current = helper_hashes(root)
     if before != current or payload.get('helperSha256') != current or set(before) != set(HELPERS):
         raise ValueError('UI actual helper binding changed before/after execution')
+    validate_frontend_source(source_binding, current)
+    if payload.get('frontendSource') != source_binding:
+        raise ValueError('Equation dialog focus serialized/input source binding mismatch')
     records = payload.get('tests')
     if not isinstance(records, list):
         raise ValueError('Missing UI records')

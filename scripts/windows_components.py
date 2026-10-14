@@ -25,6 +25,7 @@ import native_source_contract
 import com_source_contract
 import pdf_search_text
 import pdf_font_resolution
+import equation_dialog_focus
 import menu_clipboard
 import shape_creation_history
 import nested_line_navigation
@@ -76,7 +77,7 @@ COPIED_OVERLAYS = {
     'third_party/rhwp/src/parser/hwpx/opengeul_namespaces.rs': 'overlay/hwpx_namespaces.rs',
     'third_party/rhwp/rhwp-studio/src/engine/opengeul-composition-final.ts': 'overlay/composition-final.ts',
 }
-SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(pdf_font_resolution.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | set(picture_line_segment_owner.SOURCE_FILES) | set(virtual_picture_layout_admission.SOURCE_FILES) | set(hwpx_persistence_verification.SOURCE_FILES) | {
+SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(pdf_font_resolution.SOURCE_FILES) | set(equation_dialog_focus.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | set(picture_line_segment_owner.SOURCE_FILES) | set(virtual_picture_layout_admission.SOURCE_FILES) | set(hwpx_persistence_verification.SOURCE_FILES) | {
     com_source_contract.LEDGER_PATH,
     'third_party/rhwp/src/main.rs', 'third_party/rhwp/src/mcp_serve.rs',
     native_source_contract.LEDGER_PATH,
@@ -296,6 +297,10 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     pdf_proof = contract.get('pdfSearchText')
     if ledger.get('pdfSearchText') != pdf_proof:
         raise ValueError('Distribution ledger PDF search text proof mismatch')
+    focus_proof = contract.get('equationDialogFocus')
+    if not isinstance(focus_proof, dict) or ledger.get('equationDialogFocus') != focus_proof:
+        raise ValueError('Equation dialog focus source/ledger proof mismatch')
+    equation_dialog_focus.validate_contract(focus_proof, contract['preparedFiles'], config['helpers'])
     font_proof = contract.get('pdfFontResolution')
     if not isinstance(font_proof, dict) or ledger.get('pdfFontResolution') != font_proof:
         raise ValueError('PDF font resolution source/ledger proof mismatch')
@@ -445,6 +450,7 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
                 'wasmRebuild': ledger.get('wasmRebuild'),
                 'pdfSearchText': ledger.get('pdfSearchText'),
                 'pdfFontResolution': ledger.get('pdfFontResolution'),
+                'equationDialogFocus': ledger.get('equationDialogFocus'),
                 'menuClipboardPaste': ledger.get('menuClipboardPaste'),
                 'shapeCreationHistory':ledger.get('shapeCreationHistory'),
                 'nestedLineNavigation':ledger.get('nestedLineNavigation'),
@@ -471,7 +477,11 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
     if (read_json(vendor/'package.json').get('version') != config['upstream']['rhwp']['version']
             or read_json(vendor/'PROVENANCE.json').get('opengeulRebuild') != contract['wasmRebuild']):
         raise ValueError('Installed WASM provenance/version mismatch')
-    return ledger_path.read_bytes(), contract
+    ledger_return_bytes = ledger_path.read_bytes()
+    for name in equation_dialog_focus.SOURCE_FILES:
+        if sha(source/name) != files[name]:
+            raise ValueError('Equation dialog focus current source changed during capture')
+    return ledger_return_bytes, contract
 
 
 def fresh(path: Path) -> None:
@@ -647,7 +657,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
         validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
-    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','pdfFontResolution','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin','pictureLineSegmentOwner','virtualPictureLayoutAdmission','hwpxPersistenceVerification'}
+    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','pdfFontResolution','equationDialogFocus','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin','pictureLineSegmentOwner','virtualPictureLayoutAdmission','hwpxPersistenceVerification'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
         raise ValueError('Invalid prepared source contract')
     _hashes(contract['preparedFiles'], set(SOURCE_FILES) | set(NATIVE_FILES))
@@ -663,6 +673,9 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
     for name, digest in contract['preparedFiles'].items():
         if any(name.startswith(directory+'/') for directory in CORE_TREES) and core_files.get(name) != digest:
             raise ValueError('Complete core source inventory mismatch')
+    if not isinstance(contract['equationDialogFocus'], dict):
+        raise ValueError('Equation dialog focus source proof is required')
+    equation_dialog_focus.validate_contract(contract['equationDialogFocus'], contract['preparedFiles'], config['helpers'])
     if not isinstance(contract['pdfFontResolution'], dict):
         raise ValueError('PDF font resolution source/ledger proof mismatch')
     pdf_search_text.validate(contract['pdfSearchText'], contract['preparedFiles'], core_files,

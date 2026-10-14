@@ -714,21 +714,32 @@ class WindowsProbe:
     def wait_startup_foreground(self, owned_hwnd, result):
         """첫 owned 활성화 전에 동일 WSL 시작 process의 자연 종료만 최대 65초 읽는다."""
         started = time.monotonic(); deadline = started + 65
+        selection = {'readOnly': True, 'stage': 'windowObservation'}
+        result['startupSelection'] = selection
         windows = self.windows(); validate_windows(windows)
+        selection.update(stage='completeWindowObservation', windowCount=len(windows['windows']),
+                         truncated=windows['truncated'], foregroundHwnd=windows['foregroundHwnd'])
         require(windows['truncated'] is False, 'WSL 시작 창 전체 관찰이 잘렸습니다')
+        selection['stage'] = 'candidateSelection'
         expected_path = ntpath.join(self.windows_directory(), 'System32', 'wsl.exe')
         candidates = [w for w in windows['windows'] if w['visible'] is True and w['enabled'] is True
             and w['className'] == 'ConsoleWindowClass' and ntpath.normcase(w['title']) == ntpath.normcase(expected_path)]
         require(len(candidates) <= 1, 'WSL 시작 창 후보가 여러 개입니다')
-        if not candidates: return
+        if not candidates:
+            selection['stage'] = 'noCandidate'
+            return
+        selection['stage'] = 'candidateBinding'
         foreground = candidates[0]; process = self.startup_bound_process(foreground, expected_path, deadline=deadline)
         baseline = None; baseline_process = None; baseline_handle = None; baseline_path = None
         if windows['foregroundHwnd'] not in (0, foreground['hwnd'], owned_hwnd):
+            selection['stage'] = 'baselineSelection'
             baseline = next((w for w in windows['windows'] if w['hwnd'] == windows['foregroundHwnd']), None)
             require(baseline and baseline['className'] == 'Progman' and baseline['title'] == 'Program Manager'
                 and baseline['visible'] is True and baseline['enabled'] is True, 'WSL 관찰 전 알 수 없는 전경 창입니다')
             baseline_path = ntpath.join(self.windows_directory(), 'explorer.exe')
+            selection['stage'] = 'baselineBinding'
             baseline_process = self.startup_bound_process(baseline, baseline_path, deadline=deadline)
+        selection['stage'] = 'startupWait'
         trace = {'readOnly': True, 'timeoutSeconds': 65, 'boundWindow': foreground, 'boundProcess': process,
                  'samples': [], 'naturalProcessExitObserved': False, 'stage': 'heldIdentity'}
         result['startupWait'] = trace
@@ -739,12 +750,15 @@ class WindowsProbe:
                 trace.update(boundBaselineWindow=baseline, boundBaselineProcess=baseline_process)
                 baseline_handle = self.kernel.OpenProcess(0x1000, False, baseline_process['processId'])
                 require(baseline_handle, 'Progman held 조회 handle을 열지 못했습니다')
+                trace['stage'] = 'baselineHeldIdentity'
                 self.startup_baseline_state(baseline, baseline_process, baseline_handle)
+                trace['stage'] = 'baselineLiveImage'
                 trace['baselineLiveImage'] = self.bound_image(baseline_path, deadline=deadline)
                 require(trace['baselineLiveImage']['bytes'] == baseline_process['imageBytes']
                     and trace['baselineLiveImage']['sha256'] == baseline_process['imageSha256']
                     and trace['baselineLiveImage']['signature'] == baseline_process['signature'],
                     'live Progman process와 실제 PE/파일/서명이 다릅니다')
+            trace['stage'] = 'heldIdentity'
             initial = self.startup_process_state(handle, process['processId'])
             require(initial['createdFileTime'] == process['createdFileTime'] and initial['processMachine'] == 0
                 and initial['nativeMachine'] == 0xAA64 and initial['sessionId'] == process['sessionId'] == self.session_id()

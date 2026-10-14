@@ -124,20 +124,20 @@ function Get-OpenGeulAuthenticodeCmdlet([string]$SystemDirectory) {
     $process=[Diagnostics.Process]::GetCurrentProcess()
     try { $executable=[IO.Path]::GetFullPath($process.MainModule.FileName) }
     finally { $process.Dispose() }
-    $home=[IO.Path]::GetDirectoryName($executable)
+    $controllerPowerShellHome=[IO.Path]::GetDirectoryName($executable)
     $windowsRoot=[IO.Path]::GetDirectoryName($SystemDirectory.TrimEnd('\'))
     $systemHomes=@(
         [IO.Path]::Combine($windowsRoot,'System32','WindowsPowerShell','v1.0'),
         [IO.Path]::Combine($windowsRoot,'SysWOW64','WindowsPowerShell','v1.0')
     )
     if ([IO.Path]::GetFileName($executable) -ine 'powershell.exe' -or
-        -not $home.Equals([IO.Path]::GetFullPath($PSHOME),[StringComparison]::OrdinalIgnoreCase) -or
-        @($systemHomes | Where-Object { $home.Equals($_,[StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
+        -not $controllerPowerShellHome.Equals([IO.Path]::GetFullPath($PSHOME),[StringComparison]::OrdinalIgnoreCase) -or
+        @($systemHomes | Where-Object { $controllerPowerShellHome.Equals($_,[StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
         throw 'Actual Windows PowerShell controller home is outside the observed Windows system root.'
     }
     # The existing actual controller-machine guard remains authoritative. This
     # module belongs to that controller, not to the IME DLL's native machine.
-    $manifest=[IO.Path]::Combine($home,'Modules','Microsoft.PowerShell.Security','Microsoft.PowerShell.Security.psd1')
+    $manifest=[IO.Path]::Combine($controllerPowerShellHome,'Modules','Microsoft.PowerShell.Security','Microsoft.PowerShell.Security.psd1')
     return Get-OpenGeulBuiltinCmdlet $manifest 'Microsoft.PowerShell.Security' 'Get-AuthenticodeSignature' 'Microsoft.PowerShell.Commands.GetAuthenticodeSignatureCommand' 'Microsoft.PowerShell.Security'
 }
 $stage='actual-host-observation'

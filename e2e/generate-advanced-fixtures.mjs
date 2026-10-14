@@ -10,6 +10,21 @@ const {default:init,HwpDocument}=await import(pathToFileURL(join(vendor,'rhwp.js
 const wasm=readFileSync(join(vendor,'rhwp_bg.wasm'));
 await init({module_or_path:wasm}); mkdirSync(folder,{recursive:true});
 const sha=b=>createHash('sha256').update(b).digest('hex');
+const equationSource='third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts';
+const equationHelper='scripts/equation_dialog_focus.py';
+function observeFrontendSource(){return {
+  equationDialogFocus:JSON.parse(readFileSync(join(prepared,'.opengeul-overlay.json'))).equationDialogFocus,
+  preparedFiles:{[equationSource]:sha(readFileSync(join(prepared,equationSource)))},
+  helperSha256:{[equationHelper]:sha(readFileSync(new URL('../scripts/equation_dialog_focus.py',import.meta.url)))}};}
+const frontendSource=observeFrontendSource();
+const equationProof=frontendSource.equationDialogFocus;
+if(!equationProof || Object.keys(equationProof).sort().join(',')!=='afterSha256,beforeSha256,helperSha256'
+  || Object.keys(equationProof.beforeSha256??{}).join(',')!==equationSource
+  || Object.keys(equationProof.afterSha256??{}).join(',')!==equationSource
+  || equationProof.afterSha256[equationSource]!==frontendSource.preparedFiles[equationSource]
+  || equationProof.helperSha256!==frontendSource.helperSha256[equationHelper]) {
+  throw Error('Equation dialog focus actual prepared source/helper proof mismatch');
+}
 const files={};
 function checked(raw){const value=typeof raw==='string'?JSON.parse(raw):raw;
   if(value?.ok===false)throw Error(JSON.stringify(value));return value;}
@@ -50,5 +65,8 @@ const textbox=checked(doc.createShapeControl(JSON.stringify({sectionIdx:0,paraId
   horzOffset:20000,vertOffset:30000,shapeType:'textbox',treatAsChar:false,textWrap:'InFrontOfText'})));
 checked(doc.insertTextInCell(0,textbox.paraIdx,textbox.controlIdx,0,0,0,'ADV-TEXTBOX'));
 save('owned-textbox',doc);doc.free();
+if(JSON.stringify(observeFrontendSource())!==JSON.stringify(frontendSource)) {
+  throw Error('Equation dialog focus actual prepared source/helper proof changed during input generation');
+}
 writeFileSync(join(folder,'provenance.json'),JSON.stringify({purpose:'Owned synthetic inputs; no GUI claim',
-  vendorWasmSha256:sha(wasm),generated:files},null,2));
+  vendorWasmSha256:sha(wasm),generated:files,frontendSource},null,2));

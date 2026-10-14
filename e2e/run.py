@@ -7,7 +7,7 @@ import time
 import unittest
 from ui_contract import (
     EXPECTED_COUNTS, discovered_ids, exact_ids, helper_hashes,
-    junit_bytes, manifest, validate_evidence,
+    junit_bytes, manifest, validate_evidence, frontend_source_binding,
 )
 
 
@@ -50,7 +50,9 @@ def main():
     try:
         cases = manifest(mode)
         before = helper_hashes(root)
-        payload.update(caseIds=list(cases), helperSha256=before)
+        fixtures = Path(os.environ['E2E_FIXTURES'])
+        source_binding = frontend_source_binding(fixtures, root)
+        payload.update(caseIds=list(cases), helperSha256=before, frontendSource=source_binding)
         from test_hop_followups import suite
         tests = suite()
         # Exact preflight prevents a deleted/renamed/replaced case from executing
@@ -60,7 +62,9 @@ def main():
         payload['tests'] = result.records
         payload['success'] = result.wasSuccessful() and not result.skipped and result.testsRun == EXPECTED_COUNTS[mode]
         xml = junit_bytes(result.records)
-        validate_evidence(payload, xml, mode=mode, root=root, before=before)
+        if frontend_source_binding(fixtures, root) != source_binding:
+            raise ValueError('Equation dialog focus actual input provenance changed during execution')
+        validate_evidence(payload, xml, mode=mode, root=root, before=before, source_binding=source_binding)
     except Exception as error:
         payload.update(success=False, contractError=str(error))
         xml = junit_bytes(payload['tests'])
@@ -71,7 +75,8 @@ def main():
     if payload['success']:
         try:
             validate_evidence(json.loads((output/'results.json').read_text(encoding='utf-8')),
-                              (output/'junit.xml').read_bytes(), mode=mode, root=root, before=before)
+                              (output/'junit.xml').read_bytes(), mode=mode, root=root, before=before,
+                              source_binding=frontend_source_binding(fixtures, root))
         except Exception as error:
             payload.update(success=False, contractError=str(error))
             (output/'results.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
