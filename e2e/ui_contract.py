@@ -38,11 +38,12 @@ NATIVE_CHECKS = {
     'test_supported_menu_clipboard_copy_cut_paste': ('clipboard', 'copy-paste', 'cut', 'undo', 'redo', 'reopen'),
     'test_supported_gui_pdf_basic_hwp_hwpx_unsaved': ('basic.hwp', 'basic.hwpx', 'unicode.hwpx', 'next-save'),
     'test_supported_gui_pdf_explicit_two_pages_table_image': ('two-pages', 'table', 'image-pattern', 'source-dirty', 'next-save'),
-    'test_supported_gui_pdf_cancel_preserves_target_and_dirty': ('target-preserved', 'no-partial-output', 'source-dirty', 'next-save'),
+    'test_supported_gui_pdf_cancel_preserves_target_and_dirty': ('picker-target-entered', 'target-preserved', 'no-partial-output', 'source-dirty', 'next-save', 'next-export'),
     'test_supported_recent_owned_hosted_profile_restart_clear': ('hosted-guard', 'owned-inventory', 'restart-open', 'clear', 'restart-empty'),
     'test_supported_real_explorer_drop_and_invalid_recovery': ('owned-drag', 'drop-open', 'source-sha', 'invalid-drop', 'next-save'),
     'test_supported_installed_font_public_selection_roundtrip': ('installed-option', 'selected-font', 'reopen', 'source-sha'),
 }
+# Canonical lexical order is fixed by these explicit names, never discovery.
 EXPECTED_BROWSER_CASES = tuple(sorted(PREFIX + name for name in (*BASELINE_COMMON, *COMMON_CHECKS)))
 EXPECTED_NATIVE_CASES = tuple(sorted(PREFIX + name for name in (*BASELINE_COMMON, *BASELINE_NATIVE, *COMMON_CHECKS, *NATIVE_CHECKS)))
 # Reviewed counts are independent of test discovery and cannot shrink with deletion.
@@ -71,9 +72,8 @@ def helper_hashes(root: Path):
 
 
 def exact_ids(ids, mode):
-    values = list(ids)
-    if Counter(values) != Counter(manifest(mode)):
-        raise ValueError('UI case IDs differ from the exact reviewed manifest')
+    if tuple(ids) != manifest(mode):
+        raise ValueError('UI case IDs/order differ from the exact canonical manifest')
 
 
 def discovered_ids(suite):

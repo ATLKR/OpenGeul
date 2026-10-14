@@ -306,11 +306,30 @@ class SupportedNativeTests(SupportedTests):
         before = digest(target)
         inventory = {p.name for p in self.folder.iterdir()}
         self.assertIsNone(self.session.export_pdf(target, cancel=True))
+        # The real native helper entered/read back this exact target and clicked
+        # Cancel. Dialog disappearance/CSS alone does not prove bridge unlock.
+        self.checked('picker-target-entered')
         self.assertEqual(digest(target), before); self.checked('target-preserved')
         self.assertEqual({p.name for p in self.folder.iterdir()}, inventory); self.checked('no-partial-output')
         self.assertEqual(digest(self.document), original); self.assertTrue(self.page.title().startswith('• ')); self.checked('source-dirty')
         edit(self.page, ' AFTER-PDF-CANCEL')
-        self.assertIn('AFTER-PDF-CANCEL', inspect_hwpx(self.save())['text']); self.checked('next-save')
+        saved = self.folder/'after-pdf-cancel.hwpx'
+        self.session.save(self.document, saved, save_as=True)
+        text = inspect_hwpx(saved)['text']
+        self.assertEqual(text.count('GUI-PDF-CANCEL'), 1)
+        self.assertEqual(text.count('AFTER-PDF-CANCEL'), 1)
+        self.assertEqual(digest(self.document), original); self.checked('next-save')
+        edit(self.page, ' AFTER-CANCEL-EXPORT')
+        output = self.folder/'after-cancel-new-export.pdf'
+        status = self.session.export_pdf(output)
+        self.assertTrue(status['saved'])
+        result = inspect_gui_pdf(output, {'pages': [{'size_pt': A4,
+            'markers': ['OpenGeul fixture', 'GUI-PDF-CANCEL', 'AFTER-PDF-CANCEL', 'AFTER-CANCEL-EXPORT']}]},
+            self.folder/'after-cancel-pdf-oracle')
+        self.assertEqual(result['pages'], 1)
+        self.assertEqual(digest(target), before)
+        self.assertEqual(digest(self.document), original)
+        self.assertTrue(self.page.title().startswith('• ')); self.checked('next-export')
 
     def test_supported_recent_owned_hosted_profile_restart_clear(self):
         self.recent_guard(); self.checked('hosted-guard')

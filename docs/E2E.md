@@ -13,7 +13,7 @@ Windows 릴리스 워크플로는 공개 저장소의 표준 실행기만 사용
 | 설치 | `windows-2025` | 임시 테스트 인증서로 사본에 서명하고 선언된 VCLibs 프레임워크 의존성을 준비한 뒤, 패키지 식별자 아래 설치 앱 활성화·설치 CLI 실행·파일 연결 확인·제거 |
 | WACK | 설치 동작 확인과 제거 후 `windows-2025`의 동일한 서명 후보 MSIX | 사용 가능한 Windows App Certification Kit 실행 후 실제 XML 결과·식별자·버전·전체 실행 상태 검증, 키트가 없으면 명시적으로 기록 |
 
-현재 설정된 편집기 UI는 브라우저 14개 × 3환경과 native 28개 × 3환경, 총 126회입니다. 별도 암호·인쇄·MCP 검사와 합치지 않은 UI 수치입니다. `e2e/ui_contract.py`에 기대 case ID와 고정 수를 명시하며 발견된 suite 길이로 기대값을 다시 계산하지 않습니다. 실행 전 발견 ID가 정확히 일치해야 하고, 실행 후 JSON의 개별 ID·중복 없음·모두 PASS·필수 oracle 판정·skip 없음·JUnit totals/ID/status/time 일치가 필수입니다. 명시한 실제 helper 파일의 SHA-256을 실행 전후 및 저장된 JSON/JUnit 재검증에 사용합니다. 단순 메타데이터 hash 기록으로 통과시키지 않습니다. 기존 필수 `native-e2e`, `native-e2e-arm64`, `browser-e2e` 작업 안에서 실행하므로 누락·실패가 기존 Source→Store gate에 전파됩니다.
+현재 설정된 편집기 UI는 브라우저 14개 × 3환경과 native 28개 × 3환경, 총 126회입니다. 별도 암호·인쇄·MCP 검사와 합치지 않은 UI 수치입니다. `e2e/ui_contract.py`에 기대 case ID와 고정 수를 명시하며 발견된 suite 길이로 기대값을 다시 계산하지 않습니다. 실행 전 발견 ID가 canonical 명시 순서까지 정확히 일치해야 하고, 실행 후 JSON과 JUnit도 같은 순서여야 합니다. JSON의 개별 ID·중복 없음·모두 PASS·필수 oracle 판정·skip 없음·JUnit totals/ID/status/time 일치가 필수입니다. 명시한 실제 helper 파일의 SHA-256을 실행 전후 및 저장된 JSON/JUnit 재검증에 사용합니다. 단순 메타데이터 hash 기록으로 통과시키지 않습니다. 기존 필수 `native-e2e`, `native-e2e-arm64`, `browser-e2e` 작업 안에서 실행하므로 누락·실패가 기존 Source→Store gate에 전파됩니다.
 
 기존 사례는 문서 열기, 확정 Unicode, HWPX 저장·재열기, 연속 3회 roundtrip, text undo/redo, 원본 변경 없는 확대, 누락 글꼴, 명시적 글꼴 도움말·자동 다운로드 방지와 toolbar 설정을 검사합니다. native 전용 기존 사례는 HWP/HWPX 변환, 저장 취소, HWP 저장, 다중 창 생성과 손상 파일 오류 복구를 유지합니다.
 
@@ -25,7 +25,7 @@ Windows 릴리스 워크플로는 공개 저장소의 표준 실행기만 사용
 | 찾기/바꾸기와 기본 서식 | 공통: 실제 모두 바꾸기·Undo/Redo, 선택 범위 굵게·14pt → 독립 XML의 charshape·전체 marker 범위 및 비선택 본문 서식·재열기 |
 | 실제 clipboard 키보드·메뉴 | native 전용 2개: 실제 Windows Ctrl+C/X/V와 편집 메뉴, OS CF_UNICODETEXT 읽기·정확한 삭제 영역·Undo/Redo·저장·재열기 |
 | 설치된 글꼴 선택 | native: 실제 글자 모양 대화상자의 감지된 로컬 글꼴 그룹에서 Arial 클릭 → 독립 fontRef·본문 범위·재열기·원본 SHA; 다운로드/설치 없음 |
-| GUI PDF 기본·복합·취소 | native 전용 3개: 파일 → PDF 내보내기와 소유 picker. HWP/HWPX·Unicode, 명시 생성 2쪽·표·그림과 unsaved marker → PDF magic·A4·정확한 쪽 수·PDFium text/실제 ink·Pillow pattern. 원본 SHA·dirty·다음 편집/저장, 취소 때 기존 target SHA·부분 출력 없음 |
+| GUI PDF 기본·복합·취소 | native 전용 3개: 파일 → PDF 내보내기와 소유 picker. HWP/HWPX·Unicode, 명시 생성 2쪽·표·그림과 unsaved marker → PDF magic·A4·정확한 쪽 수·PDFium text/실제 ink·Pillow pattern. 원본 SHA·dirty·다음 편집/저장, 취소는 실제 picker에 기존 target 경로 입력·readback 후 Cancel → target SHA·부분 출력 없음 → 실제 Save As XML·새 GUI PDF 내보내기 성공으로 작업 잠금 해제 확인 |
 | 최근 문서 선택·재시작·목록 비우기 | native: 변경 전에 실제 Windows/github-hosted/repository/Source job/run/attempt 1/checkout/native process 확인. 모든 recent path가 이 실행 소유 범위여야 선택/clear 허용. 실제 새 PID에서 목록 유지·선택·clear 후 재시작 빈 목록 |
 | 실제 Windows Explorer DnD | native: 새 소유 folder/window의 HWND·PID·실제 선택 path와 제품 HWND·page bbox·입력점 소유권 확인 후 물리 mouse drag/drop. marker·Save As XML·원본 SHA·invalid drop 후 다음 편집/저장. 합성 DOM/Tauri event·argv open으로 대체하지 않음 |
 

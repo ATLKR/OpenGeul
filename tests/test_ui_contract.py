@@ -5,8 +5,9 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,7 @@ from ui_contract import (
     helper_hashes, hosted_recent_guard, junit_bytes, manifest, validate_evidence,
     require_owned_recent_paths,
 )
+from driver import Session
 
 
 def evidence(mode='native'):
@@ -61,6 +63,92 @@ class UiContractTests(unittest.TestCase):
         for ids in wrong:
             with self.subTest(ids=ids[-1:]), self.assertRaises(ValueError):
                 exact_ids(ids, 'native')
+
+    def test_discovered_reverse_and_adjacent_swap_are_rejected(self):
+        for mode in ('browser', 'native'):
+            cases = list(manifest(mode))
+            adjacent = cases.copy(); adjacent[0], adjacent[1] = adjacent[1], adjacent[0]
+            for wrong in (list(reversed(cases)), adjacent):
+                with self.subTest(mode=mode, ids=wrong[:2]), self.assertRaises(ValueError):
+                    exact_ids(wrong, mode)
+
+    def test_json_reverse_is_rejected_with_original_or_reversed_junit(self):
+        for mode in ('browser', 'native'):
+            for matching_junit in (False, True):
+                payload, xml = evidence(mode)
+                payload['tests'].reverse()
+                if matching_junit:
+                    xml = junit_bytes(payload['tests'])
+                with self.subTest(mode=mode, matching_junit=matching_junit), self.assertRaises(ValueError):
+                    self.validate(payload, xml, mode=mode)
+
+    def test_junit_reverse_alone_is_rejected(self):
+        for mode in ('browser', 'native'):
+            payload, _ = evidence(mode)
+            xml = junit_bytes(list(reversed(payload['tests'])))
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                self.validate(payload, xml, mode=mode)
+
+    def test_gui_pdf_cancel_preserves_target_in_picker_dispatch(self):
+        session = Session.__new__(Session)
+        session.mode = 'native'; session.page = Mock(); session.native_dialog = Mock()
+        target = ROOT/'owned-existing-target.pdf'
+        with patch('driver.menu'), patch('driver.expect') as css_expect:
+            self.assertIsNone(session.export_pdf(target, cancel=True))
+        session.native_dialog.assert_called_once_with(target, cancel=True)
+        css_expect.assert_not_called()  # CSS state is not an operation-lock predicate.
+
+    def test_native_cancel_enters_verified_filename_before_physical_cancel(self):
+        self.picker_cancel_fixture(wrong_readback=False)
+
+    def test_native_cancel_rejects_changed_filename_before_input(self):
+        with self.assertRaisesRegex(AssertionError, 'filename'):
+            self.picker_cancel_fixture(wrong_readback=True)
+
+    def picker_cancel_fixture(self, *, wrong_readback):
+        # Offline control harness only: no real Desktop/process/Windows input.
+        # Exercise the actual helper's target/readback/action/ownership branches.
+        import driver
+        events = []
+        state = {'visible': True, 'typed': None}
+        target = ROOT/'owned-existing-target.pdf'
+        filename = Mock()
+        filename.class_name.return_value = 'Edit'
+        filename.parent.return_value.class_name.return_value = 'ComboBox'
+        filename.is_visible.return_value = filename.is_enabled.return_value = True
+        filename.set_edit_text.side_effect = lambda value: (events.append(('filename', value)), state.update(typed=value))
+        filename.window_text.side_effect = lambda: 'changed-target.pdf' if wrong_readback else state['typed']
+        buttons = []
+        for control_id in (1, 2):
+            button = Mock()
+            button.class_name.return_value = 'Button'
+            button.control_id.return_value = control_id
+            button.is_visible.return_value = button.is_enabled.return_value = True
+            button.click_input.side_effect = lambda action=control_id: (events.append(('click', action)), state.update(visible=False))
+            buttons.append(button)
+        dialog = Mock()
+        dialog.handle = 66; dialog.process_id.return_value = 321
+        dialog.class_name.return_value = '#32770'
+        dialog.descendants.side_effect = lambda **kw: buttons if kw.get('class_name') == 'Button' else [filename, *buttons]
+        spec = Mock(); spec.wrapper_object.return_value = dialog
+        desktop = Mock(); desktop.window.return_value = spec
+        def thread_process(hwnd, reference):
+            reference._obj.value = 321
+            return 99
+        def class_name(hwnd, buffer, length):
+            buffer.value = '#32770'
+            return len(buffer.value)
+        user32 = SimpleNamespace(GetWindowThreadProcessId=thread_process,
+            GetClassNameW=class_name, IsWindow=lambda hwnd: True,
+            IsWindowVisible=lambda hwnd: state['visible'], IsWindowEnabled=lambda hwnd: True)
+        modules = {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
+            'pywinauto.controls': SimpleNamespace(),
+            'pywinauto.controls.hwndwrapper': SimpleNamespace(InvalidWindowHandle=type('InvalidWindowHandle', (Exception,), {}))}
+        session = Session.__new__(Session); session.proc = SimpleNamespace(pid=321)
+        with patch.dict(sys.modules, modules), patch.object(driver.ctypes, 'windll', SimpleNamespace(user32=user32), create=True):
+            session.native_dialog(target, cancel=True)
+        self.assertEqual(events, [('filename', str(target)), ('click', 2)])
+        self.assertEqual(state['typed'], str(target))
 
     def test_postflight_missing_replaced_duplicate_and_extra_are_rejected(self):
         for mutation in ('missing', 'replaced', 'duplicate', 'extra'):

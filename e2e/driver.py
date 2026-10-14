@@ -229,9 +229,10 @@ class Session:
         if self.mode != 'native':
             raise ValueError('GUI PDF export is a native desktop feature')
         menu(self.page, 'file:export-pdf')
-        self.native_dialog(None if cancel else target)
+        self.native_dialog(target, cancel=cancel)
         if cancel:
-            expect(self.page.locator('#style-bar')).to_have_css('pointer-events', 'auto')
+            # Closing the picker is cancellation input completion. Only the
+            # caller's subsequent actual save/export success proves lock release.
             return None
         # Viewer failure is a separate native predicate. A written PDF still has
         # to pass the independent PDFium/raster oracle in the caller.
@@ -390,7 +391,7 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
             finally:
                 probe.close()
 
-    def native_dialog(self, target: Path|None):
+    def native_dialog(self, target: Path|None, *, cancel=False):
         from pywinauto import Desktop
         from pywinauto.controls.hwndwrapper import InvalidWindowHandle
         # UIA can omit these shell dialogs on hosted desktops. Pin the exact HWND:
@@ -444,8 +445,10 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
                 self._record_picker_readiness_failure(dialog,hwnd)
                 raise
             control.set_edit_text(str(target))
+            if identity()!=bound_thread or control.window_text()!=str(target):
+                raise AssertionError('Native filename changed before the requested dialog action')
         buttons=[item for item in dialog.descendants(class_name='Button')
-                 if item.control_id()==(2 if target is None else 1)
+                 if item.control_id()==(2 if cancel or target is None else 1)
                  and item.is_visible() and item.is_enabled()]
         if len(buttons)!=1:
             raise AssertionError(f'Expected one native dialog action; found {len(buttons)}')
