@@ -23,6 +23,10 @@ UPDATE_DEPENDENCIES = '''reqwest = { version = "=0.13.2", default-features = fal
 tokio = { version = "=1.52.1", features = ["time", "sync"] }
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 '''
+ASYNC_CLIPBOARD_SOURCE_SHA256 = {
+    'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
+    'input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+}
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -193,10 +197,7 @@ def install_product_information(source: Path) -> None:
 def install_async_clipboard_guard(source: Path) -> dict:
     """고정 clipboard 경로의 대기 작업을 원래 문서·편집 문맥에만 적용한다."""
     engine = source/'third_party/rhwp/rhwp-studio/src/engine'
-    expected = {
-        'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
-        'input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
-    }
+    expected = ASYNC_CLIPBOARD_SOURCE_SHA256
     original = {name: (engine/name).read_bytes() for name in expected}
     if any(hashlib.sha256(original[name]).hexdigest() != digest for name, digest in expected.items()):
         raise ValueError('Upstream async clipboard source changed')
@@ -299,6 +300,7 @@ function captureAsyncClipboardContext(self: any): { isCurrent(): boolean; dispos
     handler = original['input-handler.ts'].decode('utf-8')
     for anchor, event in [
         ('  private updateSelection(): void {', 'clipboard-context-changed'),
+        ('  private updateCellSelection(): void {', 'clipboard-context-changed'),
         ('  deactivate(): void {', 'clipboard-context-invalidated'),
         ('  dispose(): void {', 'clipboard-context-invalidated'),
     ]:

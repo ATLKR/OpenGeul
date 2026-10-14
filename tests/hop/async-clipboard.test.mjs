@@ -142,6 +142,7 @@ test('image: document replacement during decode cancels and releases its object 
 test('image: view refresh with unchanged selection keeps the paste current',async(t)=>{
   const wait=deferred();browser(t);const h=harness(t);paste(h.handler,'image',wait);
   h.handler.updateSelection();h.cursor.updateRect();h.handler.updateSelection();
+  h.handler.updateCellSelection();
   wait.resolve(png.buffer.slice(png.byteOffset,png.byteOffset+png.byteLength));await tick();
   assert.equal(h.history.canUndo(),true);
 });
@@ -166,3 +167,29 @@ test('rtf: conversion failure after document replacement cannot run its HTML fal
   assert.deepEqual(h.bytes(),before);assert.equal(JSON.parse(h.text()).trim(),'DOCUMENT-B-TARGET');
   assert.equal(h.history.canUndo(),false);
 });
+
+for(const kind of ['image','rtf']) {
+  test(`${kind}: real cell-selection keyboard movement and return cancels the pending paste`,async(t)=>{
+    const wait=deferred();browser(t,kind==='rtf'?{rtfRead:wait}:{});const h=harness(t);
+    h.cursor.clearSelection();
+    const table=h.wasm.createTable(0,0,0,1,2);
+    assert.equal(table.ok,true);
+    h.cursor.moveToCellByIndex(0,table.paraIdx,table.controlIdx,undefined,0,'start');
+    assert.equal(h.cursor.enterCellSelectionMode(),true);
+    h.handler.cellSelectionRenderer={clear(){},render(){}};
+    h.handler.updateCellSelection();
+    const initialSelection=h.cursor.captureCellSelection(),initialPosition=h.cursor.getPosition();
+    paste(h.handler,kind,kind==='image'?wait:undefined);
+    const key=(key)=>({key,code:key,preventDefault(){},shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,isComposing:false,keyCode:0});
+    h.handler.onKeyDown(key('ArrowRight'));
+    assert.notDeepEqual(h.cursor.captureCellSelection(),initialSelection);
+    h.handler.onKeyDown(key('ArrowLeft'));
+    assert.deepEqual(h.cursor.captureCellSelection(),initialSelection);
+    assert.deepEqual(h.cursor.getPosition(),initialPosition);
+    const beforeText=h.text(),beforeBytes=h.bytes();
+    wait.resolve(png.buffer.slice(png.byteOffset,png.byteOffset+png.byteLength));await tick();
+    assert.equal(h.text(),beforeText);
+    assert.deepEqual(h.bytes(),beforeBytes,'stale paste changed saved bytes after cell selection moved away and returned');
+    assert.equal(h.history.canUndo(),false,'stale paste added history after cell selection moved away and returned');
+  });
+}

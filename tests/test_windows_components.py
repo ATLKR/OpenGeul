@@ -133,6 +133,9 @@ class WindowsComponentsTests(unittest.TestCase):
         wasm = json.loads((vendor/'OPEN_GEUL_WASM.json').read_text())
         write_json(vendor/'PROVENANCE.json', {'originalUpstream': {}, 'opengeulRebuild': wasm})
         engine = source/'third_party/rhwp/rhwp-studio/src/engine'
+        clipboard_files = ('input-handler-keyboard.ts', 'input-handler.ts')
+        for name in clipboard_files:
+            (engine/name).write_bytes(('// owned prepared async clipboard fixture: '+name+'\n').encode())
         ledger = {'version': json.loads((ROOT/'config/product.json').read_text())['version'],
                   'source': 'OpenGeul distribution overlays', 'preservedFiles': {},
                   'baselinePreservedFiles': {}, 'changes': ['synthetic owned source'],
@@ -141,6 +144,13 @@ class WindowsComponentsTests(unittest.TestCase):
                      'afterSha256': hashlib.sha256((engine/'input-handler-text.ts').read_text(encoding='utf-8').encode('utf-8')).hexdigest(),
                      'helperSha256': digest(ROOT/'overlay/composition-final.ts'), 'evidence': 'synthetic'},
                   'namespacePatch': namespace, 'wasmRebuild': wasm,
+                  'asyncClipboardGuard': {
+                      'beforeSha256': {
+                          'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
+                          'input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+                      },
+                      'afterSha256': {name: digest(engine/name) for name in clipboard_files},
+                  },
                   'comWorker': json.loads((source/com_source_contract.LEDGER_PATH).read_bytes()),
                   'nativeActivation': json.loads((source/native_source_contract.LEDGER_PATH).read_bytes())}
         write_json(source/'.opengeul-overlay.json', ledger)
@@ -1030,6 +1040,83 @@ class WindowsComponentsTests(unittest.TestCase):
     def test_cut_document_guard_source_is_part_of_every_worker_contract(self):
         self.assertIn('apps/studio-host/src/command/commands/edit.ts', self.helper().SOURCE_FILES,
                       'The actual async Cut document guard must be bound in the receipt contract')
+
+    def test_capture_rejects_mutated_async_clipboard_keyboard_before_output(self):
+        source = self.source()
+        target = source/'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts'
+        target.write_bytes(target.read_bytes()+b'// changed async paste target\n')
+        out = self.root/'changed-async-keyboard'
+        with self.assertRaisesRegex(ValueError, 'Async clipboard prepared source hash mismatch'):
+            self.helper().capture('editor', self.payload('editor'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_capture_rejects_mutated_async_clipboard_lifecycle_before_output(self):
+        source = self.source()
+        target = source/'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts'
+        target.write_bytes(target.read_bytes()+b'// removed context invalidation\n')
+        out = self.root/'changed-async-lifecycle'
+        with self.assertRaisesRegex(ValueError, 'Async clipboard prepared source hash mismatch'):
+            self.helper().capture('cli', self.payload('cli'), source, out, env=self.env)
+        self.assertFalse(out.exists())
+
+    def test_async_clipboard_files_are_captured_with_the_ledger_after_hashes(self):
+        c = self.helper()
+        source = self.source()
+        _, contract = c.source_contract(source, c.configured())
+        ledger = c.read_json(source/'.opengeul-overlay.json')
+        for filename in ('input-handler-keyboard.ts', 'input-handler.ts'):
+            name = 'third_party/rhwp/rhwp-studio/src/engine/'+filename
+            self.assertIn(name, contract['preparedFiles'])
+            self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+            self.assertEqual(ledger['asyncClipboardGuard']['afterSha256'][filename], contract['preparedFiles'][name])
+
+    def test_incomplete_or_forged_async_clipboard_ledger_cannot_authorize_capture(self):
+        c = self.helper()
+        source = self.source()
+        path = source/'.opengeul-overlay.json'
+        original = c.read_json(path)
+        payload = self.payload('editor')
+        for change in ('missing', 'missing-before', 'missing-after', 'forged-before', 'forged-after', 'extra-file'):
+            with self.subTest(change=change):
+                ledger = copy.deepcopy(original)
+                guard = ledger['asyncClipboardGuard']
+                if change == 'missing': del ledger['asyncClipboardGuard']
+                elif change == 'missing-before': del guard['beforeSha256']
+                elif change == 'missing-after': del guard['afterSha256']['input-handler.ts']
+                elif change == 'forged-before': guard['beforeSha256']['input-handler-keyboard.ts'] = '0'*64
+                elif change == 'forged-after': guard['afterSha256']['input-handler.ts'] = '0'*64
+                else: guard['afterSha256']['unreviewed.ts'] = '0'*64
+                write_json(path, ledger)
+                out = self.root/('invalid-async-'+change)
+                with self.assertRaises(ValueError):
+                    c.capture('editor', payload, source, out, env=self.env)
+                self.assertFalse(out.exists())
+        write_json(path, original)
+
+    def test_matching_workers_with_forged_async_file_hashes_cannot_join(self):
+        folders = self.pair()
+        filename = 'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts'
+        for folder in folders.values():
+            path = folder/'provenance.json'
+            value = json.loads(path.read_bytes())
+            value['source']['preparedFiles'][filename] = '0'*64
+            write_json(path, value)
+        self.assert_rejected_without_outputs(folders, 'Async clipboard prepared source hash mismatch')
+
+    def test_rehashed_forged_async_ledger_cannot_join_matching_workers(self):
+        folders = self.pair()
+        parity_path = folders['editor']/'source-parity.json'
+        ledger = json.loads(parity_path.read_bytes())
+        ledger['asyncClipboardGuard']['afterSha256']['input-handler.ts'] = '0'*64
+        write_json(parity_path, ledger)
+        for role, folder in folders.items():
+            path = folder/'provenance.json'
+            value = json.loads(path.read_bytes())
+            value['source']['ledgerSha256'] = digest(parity_path)
+            if role == 'editor':
+                value['files']['source-parity.json'] = {'size': parity_path.stat().st_size, 'sha256': digest(parity_path)}
+            write_json(path, value)
+        self.assert_rejected_without_outputs(folders, 'Async clipboard prepared source hash mismatch')
 
     def test_product_information_is_bound_to_the_reviewed_copied_overlay(self):
         c = self.helper()

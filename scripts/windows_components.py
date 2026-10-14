@@ -27,6 +27,7 @@ import com_source_contract
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
 from prepare_native_tests import TARGETS
+from prepare_upstream import ASYNC_CLIPBOARD_SOURCE_SHA256
 from wasm_artifacts import FILES as WASM_FILES
 from windows_arch import SUPPORTED_ARCHITECTURES, component_artifact_name, require_architecture, target_triple
 
@@ -91,6 +92,8 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | {
     'third_party/rhwp/src/renderer/pdf.rs', 'third_party/rhwp/src/cli/outputs/pdf.rs',
     'third_party/rhwp/src/parser/hwpx/header.rs',
     'third_party/rhwp/rhwp-studio/src/engine/input-handler-text.ts',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts',
     'third_party/rhwp/rhwp-studio/src/ui/about-dialog.ts',
     'third_party/rhwp/rhwp-studio/src/ui/compare-dialog.ts',
     'third_party/rhwp/rhwp-studio/src/ui/history-dialog.ts',
@@ -287,6 +290,16 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
             or composition.get('afterSha256') != contract['compositionTextSha256']
             or not isinstance(composition.get('beforeSha256'), str) or not SHA.fullmatch(composition['beforeSha256'])):
         raise ValueError('Incomplete composition source ledger')
+    clipboard = ledger.get('asyncClipboardGuard')
+    if not isinstance(clipboard, dict) or set(clipboard) != {'beforeSha256', 'afterSha256'}:
+        raise ValueError('Incomplete async clipboard source ledger')
+    for key in ('beforeSha256', 'afterSha256'):
+        _hashes(clipboard[key], set(ASYNC_CLIPBOARD_SOURCE_SHA256))
+    if clipboard['beforeSha256'] != ASYNC_CLIPBOARD_SOURCE_SHA256:
+        raise ValueError('Async clipboard pinned source hash mismatch')
+    if any(clipboard['afterSha256'][name] != files.get('third_party/rhwp/rhwp-studio/src/engine/'+name)
+           for name in ASYNC_CLIPBOARD_SOURCE_SHA256):
+        raise ValueError('Async clipboard prepared source hash mismatch')
     namespace = ledger.get('namespacePatch', {})
     if (namespace != contract['namespacePatch'] or not isinstance(namespace, dict)
             or namespace.get('helperSha256') != config['helpers']['overlay/hwpx_namespaces.rs']
