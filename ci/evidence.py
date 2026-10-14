@@ -21,7 +21,7 @@ OUTCOME_PATHS=('results.json','summary.json','password-native/results.json')
 PRIORITY_PATHS={name for name in ('results.json','summary.json','junit.xml')}|{
     'password-native/'+name for name in
     ('results.json','junit.xml','identity.json','fixture-manifest.json','fixture-verification.json')}|{
-    'mcp/mcp-result.json'}
+    'mcp/mcp-result.json','structured-cli-mcp/structured-result.json'}
 
 
 def files(root):

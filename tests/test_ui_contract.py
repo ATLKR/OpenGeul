@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'e2e'))
 from ui_contract import (
-    BASELINE_COMMON, BASELINE_NATIVE, COMMON_CHECKS, NATIVE_CHECKS,
+    BASELINE_COMMON, BASELINE_NATIVE, BASELINE_NATIVE_CHECKS, COMMON_CHECKS, NATIVE_CHECKS,
     EXPECTED_COUNTS, HELPERS, PREFIX, discovered_ids, exact_ids,
     helper_hashes, hosted_recent_guard, junit_bytes, manifest, validate_evidence,
     require_owned_recent_paths, local_windows_dos_path, canonical_local_path,
@@ -23,7 +23,7 @@ from driver import Session
 
 
 def evidence(mode='native'):
-    checks = {**COMMON_CHECKS, **NATIVE_CHECKS}
+    checks = {**COMMON_CHECKS, **NATIVE_CHECKS, **BASELINE_NATIVE_CHECKS}
     records = [{'test': case, 'status': 'passed', 'seconds': .125, 'message': '',
                 'checks': {key: True for key in checks.get(case.removeprefix(PREFIX), ())}}
                for case in manifest(mode)]
@@ -40,7 +40,9 @@ class UiContractTests(unittest.TestCase):
     def test_reviewed_baseline_and_fixed_counts(self):
         self.assertEqual(len(BASELINE_COMMON), 10)
         self.assertEqual(len(BASELINE_NATIVE), 6)
-        self.assertEqual(EXPECTED_COUNTS, {'browser': 14, 'native': 28})
+        self.assertEqual(EXPECTED_COUNTS, {'browser': 21, 'native': 42})
+        self.assertEqual(len(HELPERS),31)
+        self.assertEqual(set(BASELINE_NATIVE_CHECKS),{'test_multiple_windows_use_real_native_creation'})
         for mode in EXPECTED_COUNTS:
             payload, xml = evidence(mode)
             self.assertTrue(self.validate(payload, xml, mode=mode))
@@ -241,7 +243,7 @@ class UiContractTests(unittest.TestCase):
         for key, value in (('mode', 'browser'), ('expectedTests', 16), ('caseIds', [])):
             payload, xml = evidence(); payload[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError): self.validate(payload, xml)
-        payload, xml = evidence(); payload['expectedTests'] = 28.0
+        payload, xml = evidence(); payload['expectedTests'] = float(EXPECTED_COUNTS['native'])
         with self.assertRaises(ValueError): self.validate(payload, xml)
         with self.assertRaises(ValueError): manifest('other')
         payload, xml = evidence('browser')

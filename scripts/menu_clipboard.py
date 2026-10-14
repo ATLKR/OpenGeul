@@ -49,6 +49,15 @@ PHASE_SOURCE_SHA256['hwpx-windows'] = {
     **PHASE_SOURCE_SHA256['hwpx'],
     LIB: '4d8ae5ce4845e98664ed9e3dc653523287d3f69c4b490979ba1dab5484fa1a99',
 }
+# The shape transform consumes the original prepared handler above. Its exact
+# output is a separate phase, never an alternative input to the menu transform.
+SHAPE_HANDLER_SHA256 = 'bd3e440d6c71f268d58018d5ed84a6f1622d5f15264b267fcd40f5933c51aaac'
+for _phase in ('prepared', 'hwpx', 'hwpx-windows'):
+    PHASE_SOURCE_SHA256[_phase + '-shape-history'] = {
+        **PHASE_SOURCE_SHA256[_phase], HANDLER: SHAPE_HANDLER_SHA256,
+    }
+SHAPE_PHASES = frozenset(('prepared-shape-history', 'hwpx-shape-history', 'hwpx-windows-shape-history'))
+FINAL_PHASES = frozenset(('hwpx', 'hwpx-windows', 'hwpx-shape-history', 'hwpx-windows-shape-history'))
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 
 HANDLER_IMPORT = "import * as _keyboard from './input-handler-keyboard';"
@@ -203,7 +212,8 @@ def validate(source: Path, proof: dict) -> None:
     validate_contract(proof, files, helpers, final=False)
 
 
-def validate_contract(proof: dict, prepared_files: dict, helpers: dict, *, final: bool = True) -> None:
+def validate_contract(proof: dict, prepared_files: dict, helpers: dict, *, final: bool = True,
+                      shape_required: bool = False) -> None:
     """Validate copied source bytes against reviewed outputs, including coordinated forgeries."""
     if not isinstance(prepared_files, dict) or not isinstance(helpers, dict):
         raise ValueError('Incomplete menu clipboard contract inputs')
@@ -222,7 +232,8 @@ def validate_contract(proof: dict, prepared_files: dict, helpers: dict, *, final
         raise ValueError('Menu clipboard reviewed native proof mismatch')
     phase = next((name for name, values in PHASE_SOURCE_SHA256.items()
                   if proof['afterSha256'] == values), None)
-    if phase is None or (final and not phase.startswith('hwpx')):
+    if (phase is None or (final and phase not in FINAL_PHASES)
+            or (shape_required and phase not in SHAPE_PHASES)):
         raise ValueError('Menu clipboard reviewed output proof mismatch')
     if any(proof['afterSha256'][name] != prepared_files.get(name) for name in SOURCE_FILES):
         raise ValueError('Menu clipboard prepared source proof mismatch')
@@ -231,7 +242,7 @@ def validate_contract(proof: dict, prepared_files: dict, helpers: dict, *, final
             or proof['helperSha256'] != helper or prepared_files.get(HELPER) != helper):
         raise ValueError('Menu clipboard helper proof mismatch')
     patcher = helpers.get('scripts/prepare_hwpx.py')
-    if phase.startswith('hwpx'):
+    if phase in FINAL_PHASES:
         if not isinstance(patcher, str) or not SHA.fullmatch(patcher) or proof['hwpxPatcherSha256'] != patcher:
             raise ValueError('Menu clipboard HWPX patcher proof mismatch')
     elif proof['hwpxPatcherSha256'] is not None:
@@ -240,16 +251,24 @@ def validate_contract(proof: dict, prepared_files: dict, helpers: dict, *, final
 
 def refresh_hwpx_lib(source: Path, proof: dict) -> None:
     """Accept only the reviewed subsequent HWPX handler registrations in native lib."""
+    if not isinstance(proof, dict):
+        raise ValueError('Incomplete menu clipboard source proof')
     helpers = {name: digest((ROOT/name).read_bytes()) for name in
                ('overlay/menu-clipboard.ts', 'scripts/prepare_hwpx.py')}
     files = {name: digest((source/name).read_bytes()) for name in (*SOURCE_FILES, HELPER)}
-    old_files = {**files, LIB: PHASE_SOURCE_SHA256['prepared'][LIB]}
+    prior_phase = next((name for name in ('prepared', 'prepared-shape-history')
+                        if proof.get('afterSha256') == PHASE_SOURCE_SHA256.get(name)), None)
+    if prior_phase is None:
+        raise ValueError('Unreviewed HWPX clipboard native transform')
+    old_files = {**files, LIB: PHASE_SOURCE_SHA256[prior_phase][LIB]}
     validate_contract(proof, old_files, helpers, final=False)
-    phase = next((name for name in ('hwpx', 'hwpx-windows')
+    next_phases = (('hwpx-shape-history', 'hwpx-windows-shape-history')
+                   if prior_phase == 'prepared-shape-history' else ('hwpx', 'hwpx-windows'))
+    phase = next((name for name in next_phases
                   if files == {**PHASE_SOURCE_SHA256[name], HELPER: helpers['overlay/menu-clipboard.ts']}), None)
-    if proof['afterSha256'] != PHASE_SOURCE_SHA256['prepared'] or phase is None:
+    if phase is None:
         raise ValueError('Unreviewed HWPX clipboard native transform')
     updated = {**proof, 'afterSha256': dict(PHASE_SOURCE_SHA256[phase]),
                'hwpxPatcherSha256': helpers['scripts/prepare_hwpx.py']}
-    validate_contract(updated, files, helpers)
+    validate_contract(updated, files, helpers, shape_required=prior_phase == 'prepared-shape-history')
     proof.update(updated)

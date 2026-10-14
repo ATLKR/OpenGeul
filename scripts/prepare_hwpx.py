@@ -383,6 +383,7 @@ def patch(source: Path) -> None:
     examples = source/'apps/desktop/src-tauri/examples'
     examples.mkdir(exist_ok=True)
     shutil.copy2(ROOT/'e2e/generate-fixtures.rs', examples/'opengeul-fixtures.rs')
+    shutil.copy2(ROOT/'e2e/structured_cli_mcp/generate_structured.rs', examples/'opengeul-structured-fixtures.rs')
     value['baselinePreservedFiles'] = dict(value.get('preservedFiles', {}))
     value['preservedFiles'] = {name: digest for name, digest in value['baselinePreservedFiles'].items()
         if hashlib.sha256((source/name).read_bytes()).hexdigest() == digest}

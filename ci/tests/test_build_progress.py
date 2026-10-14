@@ -151,12 +151,21 @@ class BuildProgressTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[2]/'scripts/build-msix.ps1').read_text()
         lines = [line.strip() for line in source.splitlines()]
         commands = [line for line in lines if line.startswith(('cargo ', 'rustc '))]
-        self.assertEqual(len(commands), 7)
+        self.assertEqual(commands, [
+            'rustc --target $target --edition=2021 --test overlay/font_policy.rs -o .work/font-policy-tests.exe',
+            'cargo test --locked --target $target --test opengeul_table_height',
+            'cargo test --locked --target $target --package rhwp --test opengeul_pdf_policy --features native-skia',
+            'cargo test --locked --target $target',
+            'cargo test --locked --target $target --package opengeul-native-open',
+            "cargo run --locked --target $target --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')",
+            'cargo build --locked --target $target --example opengeul-structured-fixtures',
+            'cargo build --release --locked --target $target --package rhwp --bin rhwp --features native-skia',
+        ])
         for index, line in enumerate(lines):
             if line.startswith(('cargo ', 'rustc ', 'pnpm tauri build ')):
                 expected = 'Set-EditorCargoParallelism -Workload Release' if line.startswith(('cargo build --release ', 'pnpm tauri build ')) else 'Set-EditorCargoParallelism'
                 self.assertEqual(lines[index-1], expected)
-        self.assertEqual(source.count('Set-EditorCargoParallelism\n'), 6)
+        self.assertEqual(source.count('Set-EditorCargoParallelism\n'), 7)
         self.assertEqual(source.count('Set-EditorCargoParallelism -Workload Release\n'), 2)
 
     def test_native_and_release_require_previous_success_before_process_launch(self):

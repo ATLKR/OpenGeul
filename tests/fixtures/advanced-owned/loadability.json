@@ -1,0 +1,18 @@
+{
+  "allOwnedHwpxLoadedByPreparedWasm": true,
+  "method": "constructor only; no GUI claim",
+  "names": [
+    "owned-blank.hwpx",
+    "owned-grid.hwpx",
+    "owned-merged.hwpx",
+    "owned-split.hwpx",
+    "owned-field-guide.hwpx",
+    "owned-field-filled.hwpx",
+    "owned-equation.hwpx",
+    "owned-notes.hwpx",
+    "owned-page.hwpx",
+    "owned-shape.hwpx",
+    "owned-nested.hwpx",
+    "owned-textbox.hwpx"
+  ]
+}

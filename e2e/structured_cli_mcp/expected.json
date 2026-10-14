@@ -1,0 +1,90 @@
+{
+  "formatVersion": 1,
+  "body": "BODY-한글-😀-Ω-&-<xml> FIND-OWNED FIND-OWNED",
+  "tail": "BODY-TAIL",
+  "query": "FIND-OWNED",
+  "search": {
+    "section": 0,
+    "paragraph": 0,
+    "offsets": [
+      20,
+      31
+    ]
+  },
+  "insert": {
+    "section": 0,
+    "paragraph": 0,
+    "offset": 5,
+    "text": "INSERT-😀-한글"
+  },
+  "cells": {
+    "0,0": "CELL-R0-C0",
+    "0,1": "CELL-R0-C1",
+    "1,0": "CELL-R1-C0",
+    "1,1": "CELL-R1-C1|I-CELL"
+  },
+  "fields": [
+    {
+      "name": "CUSTOMER",
+      "value": "C-INIT",
+      "container": "body",
+      "paragraph": 2
+    },
+    {
+      "name": "ITEM",
+      "value": "I-BODY",
+      "container": "body",
+      "paragraph": 3
+    },
+    {
+      "name": "ITEM",
+      "value": "I-CELL",
+      "container": "cell",
+      "row": 1,
+      "col": 1
+    }
+  ],
+  "styleCell": "0,1",
+  "tableLocation": {"section": 0, "paragraph": 4, "control": 0},
+  "pictureLocation": {"section": 0, "paragraph": 5, "control": 0},
+  "bodyStyle": {"italic": false, "textColor": "#000000"},
+  "style": {
+    "italic": true,
+    "textColor": "#123456"
+  },
+  "pageMm": [
+    210,
+    297
+  ],
+  "pictureMm": [
+    30,
+    100,
+    40,
+    20
+  ],
+  "picturePixels": [
+    32,
+    16
+  ],
+  "pictureColors": [
+    [
+      230,
+      40,
+      40
+    ],
+    [
+      30,
+      80,
+      220
+    ]
+  ],
+  "pictureTilePixels": 4,
+  "bodyParagraphs": [
+    "BODY-한글-😀-Ω-&-<xml> FIND-OWNED FIND-OWNED",
+    "BODY-TAIL",
+    "CUSTOMER:C-INIT",
+    "ITEM:I-BODY",
+    "",
+    ""
+  ]
+}

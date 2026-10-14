@@ -62,6 +62,19 @@ class EvidenceTests(unittest.TestCase):
         report=self.p.pack(self.src,self.dest,'failure',limit=4096)
         self.assertEqual((self.dest/'mcp/mcp-result.json').read_bytes(),receipt)
         self.assertEqual(report['status'],'failure')
+    def test_partial_valid16_receipt_survives_failure_cap_without_overriding_gui(self):
+        receipt=json.dumps({'passed':False,'cases':[{'id':'hwp-read','status':'failed','responseSha256':'a'*64} for _ in range(8)]}).encode()
+        self.put('structured-cli-mcp/structured-result.json',receipt)
+        self.put('a_failed/events.json',b'x'*1500)
+        self.put('a_failed/screen.png',b'x'*1500)
+        original=b'{"tests":[{"test":"suite.a_failed","status":"failed"}]}'
+        (self.src/'results.json').write_bytes(original)
+        report=self.p.pack(self.src,self.dest,'failure',limit=4096)
+        self.assertTrue((self.dest/'structured-cli-mcp/structured-result.json').is_file(),'The actual partial valid16 receipt must survive the cap')
+        self.assertEqual((self.dest/'structured-cli-mcp/structured-result.json').read_bytes(),receipt)
+        self.assertEqual((self.dest/'results.json').read_bytes(),original)
+        self.assertEqual(report['status'],'failure')
+        self.assertNotIn('structured-cli-mcp/structured-result.json',self.p.OUTCOME_PATHS)
     def test_failed_case_evidence_has_priority_over_successful_case(self):
         (self.src/'results.json').write_text('{"tests":[{"test":"suite.z_failed","status":"failed"}]}')
         self.put('a_success/large.png',b'a'*1500);self.put('z_failed/screen.png',b'b'*1500)

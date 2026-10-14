@@ -50,6 +50,10 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.menu_clipboard = menu_clipboard.start()
         self.menu_clipboard.return_value = {'testFixture': 'menu clipboard'}
         self.addCleanup(menu_clipboard.stop)
+        shape_creation = patch.object(prepare_upstream, 'apply_shape_creation_history')
+        self.shape_creation = shape_creation.start()
+        self.shape_creation.return_value = {'testFixture': 'shape creation history'}
+        self.addCleanup(shape_creation.stop)
         # 전체 vendor/shim 무결성은 test_native_activation에서 별도로 검사한다.
         activation = patch.object(prepare_upstream, 'apply_native_activation')
         self.activation = activation.start()
@@ -209,16 +213,25 @@ pub fn layer_trees_to_pdf_with_links(
             self.assertIn('apps/studio-host/src/main.ts', font['afterSha256'])
             observed.append('menu')
             return self.menu_clipboard.return_value
+        def shape_boundary(source, clipboard, image, font, menu):
+            self.assertEqual(observed, ['pdf', 'menu'])
+            self.assertIs(menu, self.menu_clipboard.return_value)
+            observed.append('shape')
+            return self.shape_creation.return_value
         self.pdf_search.side_effect = pdf_boundary
         self.menu_clipboard.side_effect = clipboard_boundary
+        self.shape_creation.side_effect = shape_boundary
         prepare_upstream.patch(self.source, '1.1.5')
         self.pdf_search.assert_called_once_with(self.source)
         self.menu_clipboard.assert_called_once_with(self.source, self.clipboard.return_value,
                                                   self.image.return_value, self.font.return_value)
+        self.shape_creation.assert_called_once_with(self.source, self.clipboard.return_value,
+            self.image.return_value, self.font.return_value, self.menu_clipboard.return_value)
         ledger = json.loads((self.source/'.opengeul-overlay.json').read_text())
         self.assertEqual(ledger['pdfSearchText'], self.pdf_search.return_value)
         self.assertEqual(ledger['menuClipboardPaste'], self.menu_clipboard.return_value)
-        self.assertEqual(observed, ['pdf', 'menu'])
+        self.assertEqual(ledger['shapeCreationHistory'], self.shape_creation.return_value)
+        self.assertEqual(observed, ['pdf', 'menu', 'shape'])
 
     def test_changed_upstream_about_is_rejected_without_overwrite(self):
         path = self.source/'apps/studio-host/src/ui/about-dialog.ts'

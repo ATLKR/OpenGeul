@@ -25,6 +25,7 @@ import native_source_contract
 import com_source_contract
 import pdf_search_text
 import menu_clipboard
+import shape_creation_history
 
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
@@ -44,6 +45,7 @@ FEATURES = {'editor': 'default', 'cli': 'native-skia'}
 RESERVED = re.compile(r'(?i)(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?\Z')
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 COPIED_OVERLAYS = {
+    'apps/desktop/src-tauri/examples/opengeul-structured-fixtures.rs': 'e2e/structured_cli_mcp/generate_structured.rs',
     menu_clipboard.HELPER: 'overlay/menu-clipboard.ts',
     **{com_source_contract.CORE+'/src/opengeul_com_worker/'+name:
        'overlay/com-worker/src/'+name for name in com_source_contract.FILES},
@@ -68,7 +70,7 @@ COPIED_OVERLAYS = {
     'third_party/rhwp/src/parser/hwpx/opengeul_namespaces.rs': 'overlay/hwpx_namespaces.rs',
     'third_party/rhwp/rhwp-studio/src/engine/opengeul-composition-final.ts': 'overlay/composition-final.ts',
 }
-SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | {
+SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | {
     com_source_contract.LEDGER_PATH,
     'third_party/rhwp/src/main.rs', 'third_party/rhwp/src/mcp_serve.rs',
     native_source_contract.LEDGER_PATH,
@@ -195,6 +197,10 @@ def helpers() -> dict:
             if path.is_file() and '__pycache__' not in path.parts and path.suffix in ('.py','.ps1','.sh','.rs','.ts','.txt','.xml','.json','.toml'):
                 paths.append(path)
     paths.append(ROOT/'overlay/native-open/README.md')
+    for name in ('valid_companion.py','structured_oracle.py','stage_structured.py','generate_structured.rs','expected.json'):
+        path=ROOT/'e2e/structured_cli_mcp'/name
+        regular(path)
+        paths.append(path)
     return {p.relative_to(ROOT).as_posix(): sha(p) for p in sorted(paths)}
 
 
@@ -330,7 +336,11 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     menu_proof = contract.get('menuClipboardPaste')
     if ledger.get('menuClipboardPaste') != menu_proof:
         raise ValueError('Distribution ledger menu clipboard proof mismatch')
-    menu_clipboard.validate_contract(menu_proof, contract['preparedFiles'], config['helpers'])
+    menu_clipboard.validate_contract(menu_proof, contract['preparedFiles'], config['helpers'],shape_required=True)
+    shape_proof=contract.get('shapeCreationHistory')
+    if not isinstance(shape_proof,dict) or ledger.get('shapeCreationHistory')!=shape_proof:
+        raise ValueError('Shape creation history source/ledger proof mismatch')
+    shape_creation_history.validate_contract(shape_proof,contract['preparedFiles'],config['helpers'])
     namespace = ledger.get('namespacePatch', {})
     if (namespace != contract['namespacePatch'] or not isinstance(namespace, dict)
             or namespace.get('helperSha256') != config['helpers']['overlay/hwpx_namespaces.rs']
@@ -392,6 +402,7 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
                 'wasmRebuild': ledger.get('wasmRebuild'),
                 'pdfSearchText': ledger.get('pdfSearchText'),
                 'menuClipboardPaste': ledger.get('menuClipboardPaste'),
+                'shapeCreationHistory':ledger.get('shapeCreationHistory'),
                 'nativeActivation': native_source_contract.capture(source, files, config,
                     read_json=read_json, tree=tree, sha=sha),
                 'comWorker': com_source_contract.capture(source, files, native, config,
@@ -587,7 +598,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
         validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
-    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','menuClipboardPaste'}
+    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','menuClipboardPaste','shapeCreationHistory'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
         raise ValueError('Invalid prepared source contract')
     _hashes(contract['preparedFiles'], set(SOURCE_FILES) | set(NATIVE_FILES))
@@ -604,7 +615,8 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         if any(name.startswith(directory+'/') for directory in CORE_TREES) and core_files.get(name) != digest:
             raise ValueError('Complete core source inventory mismatch')
     pdf_search_text.validate(contract['pdfSearchText'], contract['preparedFiles'], core_files, config['helpers'])
-    menu_clipboard.validate_contract(contract['menuClipboardPaste'], contract['preparedFiles'], config['helpers'])
+    menu_clipboard.validate_contract(contract['menuClipboardPaste'], contract['preparedFiles'], config['helpers'],shape_required=True)
+    shape_creation_history.validate_contract(contract['shapeCreationHistory'],contract['preparedFiles'],config['helpers'])
     native = contract['nativeTests']
     if (not isinstance(native, dict) or set(native) != {'targets','originalManifestSha256'}
             or native['targets'] != {name: config['helpers']['overlay/'+local] for name, local in TARGETS.items()}

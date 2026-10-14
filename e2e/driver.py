@@ -106,6 +106,7 @@ class Session:
             self.page.on('request',lambda request:self.requests.append(request.url))
             def dialog_handler(dialog):
                 self.dialogs.append({'type':dialog.type,'message':dialog.message}); dialog.accept()
+            self.dialog_handler=dialog_handler
             self.page.on('dialog',dialog_handler)
             if mode!='native':
                 self.page.goto(url,wait_until='domcontentloaded')
@@ -492,7 +493,7 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
         finally:
             probe.close()
 
-    def native_dialog(self, target: Path|None, *, cancel=False):
+    def native_dialog(self, target: Path|None, *, cancel=False, owner_scope=None):
         from pywinauto import Desktop
         from pywinauto.controls.hwndwrapper import InvalidWindowHandle
         # UIA can omit these shell dialogs on hosted desktops. Pin the exact HWND:
@@ -504,6 +505,8 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
         dialog=spec.wrapper_object();hwnd=dialog.handle
         if dialog.process_id()!=self.proc.pid or dialog.class_name()!='#32770':
             raise AssertionError('Native dialog ownership changed before binding')
+        if owner_scope is not None:
+            owner_scope.bind_dialog(dialog)
         if target is not None:
             # Visibility can precede shell control creation; keep this exact HWND.
             try:
@@ -516,6 +519,8 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
                             or not thread or pid.value!=self.proc.pid
                             or not user32.GetClassNameW(hwnd,name,len(name)) or name.value!='#32770'):
                         raise RuntimeError('Native filename dialog ownership changed')
+                    if owner_scope is not None:
+                        owner_scope.bind_dialog(dialog)
                     return thread
                 bound_thread=identity()
                 def filename_ready():
@@ -545,7 +550,10 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
             except Exception:
                 self._record_picker_readiness_failure(dialog,hwnd)
                 raise
-            control.set_edit_text(str(target))
+            if owner_scope is not None:
+                owner_scope.set_filename(dialog,control,str(target))
+            else:
+                control.set_edit_text(str(target))
             if identity()!=bound_thread or control.window_text()!=str(target):
                 raise AssertionError('Native filename changed before the requested dialog action')
         buttons=[item for item in dialog.descendants(class_name='Button')
@@ -553,7 +561,10 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
                  and item.is_visible() and item.is_enabled()]
         if len(buttons)!=1:
             raise AssertionError(f'Expected one native dialog action; found {len(buttons)}')
-        dialog.set_focus();buttons[0].click_input()
+        if owner_scope is not None:
+            owner_scope.click_dialog_button(dialog,buttons[0],expected_control_id=(2 if cancel or target is None else 1))
+        else:
+            dialog.set_focus();buttons[0].click_input()
         try:
             until(lambda: not ctypes.windll.user32.IsWindow(hwnd)
                   or not ctypes.windll.user32.IsWindowVisible(hwnd),timeout=20)
@@ -561,6 +572,8 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
             self._record_picker_closure_failure(dialog, hwnd, buttons[0],
                                                  bound_thread if target is not None else None)
             raise
+        if owner_scope is not None:
+            owner_scope.finish_dialog(hwnd)
 
     def _record_picker_closure_failure(self, dialog, hwnd, button, expected_thread):
         """Observe a failed exact-HWND closure; never retry input or read filenames."""

@@ -5,6 +5,10 @@ from driver import edit, digest
 from hwpx_oracle import inspect_hwpx
 from test_editor import EditorTests, NativeTests, MODE
 from test_supported_features import SupportedTests, SupportedNativeTests
+from native_document_lifecycle_cases import NativeDocumentLifecycleCases
+from native_clipboard_cases import NativeClipboardCases
+from native_ime_cases import NativeImeCases
+from advanced_edit_cases import AdvancedEditCases
 
 class FollowupTests:
     def test_plain_p_keyboard_input_and_saved_document(self):
@@ -46,5 +50,6 @@ class FollowupTests:
 def suite():
     base = NativeTests if MODE == 'native' else EditorTests
     supported = SupportedNativeTests if MODE == 'native' else SupportedTests
-    combined = type('OpenGeulFollowups', (FollowupTests, supported, base), {'__module__': __name__})
+    native_documents = (NativeDocumentLifecycleCases, NativeClipboardCases, NativeImeCases) if MODE == 'native' else ()
+    combined = type('OpenGeulFollowups', (FollowupTests, AdvancedEditCases, supported, *native_documents, base), {'__module__': __name__})
     return unittest.defaultTestLoader.loadTestsFromTestCase(combined)

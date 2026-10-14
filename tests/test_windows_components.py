@@ -26,6 +26,7 @@ import wasm_artifacts
 import windows_arch
 import pdf_search_text
 import menu_clipboard
+import shape_creation_history
 
 FONT_SOURCE_PINS = {
     'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
@@ -61,6 +62,54 @@ def pe(machine=0x8664):
 
 
 class WindowsComponentsTests(unittest.TestCase):
+    def test_full_component_source_requires_shape_proof_and_connector_inventory(self):
+        source=self.source();c=self.helper()
+        self.assertTrue(set(shape_creation_history.SOURCE_FILES)<=set(c.SOURCE_FILES),'Both compiled shape sources must be explicit')
+        path=source/'.opengeul-overlay.json';ledger=json.loads(path.read_bytes());ledger.pop('shapeCreationHistory',None);write_json(path,ledger)
+        out=self.root/'missing-shape-proof'
+        with self.assertRaises(ValueError):c.capture('editor',self.payload('editor'),source,out,env=self.env)
+        self.assertFalse(out.exists())
+    def test_rehashed_shape_before_after_or_helper_cannot_authorize_capture(self):
+        source=self.source();path=source/'.opengeul-overlay.json';original=json.loads(path.read_bytes());c=self.helper();payload=self.payload('editor')
+        for key in ('beforeSha256','afterSha256','helperSha256'):
+            ledger=copy.deepcopy(original)
+            if key=='helperSha256':ledger['shapeCreationHistory'][key]='0'*64
+            else:ledger['shapeCreationHistory'][key][shape_creation_history.SOURCE_FILES[0]]='0'*64
+            write_json(path,ledger);out=self.root/('invalid-shape-'+key)
+            with self.subTest(key=key),self.assertRaises(ValueError):c.capture('editor',payload,source,out,env=self.env)
+            self.assertFalse(out.exists())
+    def test_legacy_menu_phase_cannot_replace_current_shape_source_contract(self):
+        source=self.source();path=source/'.opengeul-overlay.json';ledger=json.loads(path.read_bytes())
+        legacy=dict(menu_clipboard.PHASE_SOURCE_SHA256['hwpx'])
+        ledger['menuClipboardPaste']['afterSha256']=legacy
+        for name,value in legacy.items():
+            if name==menu_clipboard.HANDLER:
+                (source/name).write_bytes(b'owned prior shape handler')
+        ledger['shapeCreationHistory']['afterSha256'][menu_clipboard.HANDLER]=legacy[menu_clipboard.HANDLER]
+        ledger['asyncClipboardGuard']['afterSha256']['input-handler.ts']=legacy[menu_clipboard.HANDLER]
+        ledger['imageInsertionGuard']['afterSha256']['engine/input-handler.ts']=legacy[menu_clipboard.HANDLER]
+        ledger['asyncFontSelectionGuard']['afterSha256'][menu_clipboard.HANDLER]=legacy[menu_clipboard.HANDLER]
+        # Make every other controlled fixture proof coherent. The production
+        # Source caller must independently reject a legacy menu phase.
+        shape_creation_history.OUTPUT_SOURCE_SHA256=dict(ledger['shapeCreationHistory']['afterSha256'])
+        write_json(path,ledger)
+        out=self.root/'legacy-final-menu'
+        with self.assertRaises(ValueError):self.helper().capture('editor',self.payload('editor'),source,out,env=self.env)
+        self.assertFalse(out.exists())
+    def test_consumer_rejects_missing_shape_proof_even_when_both_components_agree(self):
+        folders=self.pair()
+        for folder in folders.values():
+            path=folder/'provenance.json';value=json.loads(path.read_bytes());value['source'].pop('shapeCreationHistory');write_json(path,value)
+        self.assert_rejected_without_outputs(folders)
+    def test_rehashed_component_shape_proof_stays_bound_to_each_compiled_source(self):
+        folders=self.pair();original={role:json.loads((folder/'provenance.json').read_bytes()) for role,folder in folders.items()}
+        for key in ('beforeSha256','afterSha256','helperSha256'):
+            for role,folder in folders.items():
+                value=copy.deepcopy(original[role])
+                if key=='helperSha256':value['source']['shapeCreationHistory'][key]='0'*64
+                else:value['source']['shapeCreationHistory'][key][shape_creation_history.SOURCE_FILES[1]]='0'*64
+                write_json(folder/'provenance.json',value)
+            with self.subTest(key=key):self.assert_rejected_without_outputs(folders)
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -166,17 +215,31 @@ class WindowsComponentsTests(unittest.TestCase):
                      'beforeSha256': pdf_search_text.SOURCE_SHA256,
                      'afterSha256': pdf_search_text.PATCHED_SHA256,
                      'preservedSha256': pdf_search_text.PRESERVED_SHA256}
+        for name in shape_creation_history.SOURCE_FILES:
+            path=source/name
+            if not path.is_file():path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'owned shape transport source fixture')
         menu_final = {name: digest(source/name) for name in menu_clipboard.SOURCE_FILES}
+        legacy_menu={**menu_final,menu_clipboard.HANDLER:hashlib.sha256(b'owned prior shape handler').hexdigest()}
         menu_phases = {
-            'prepared': {**menu_final, menu_clipboard.LIB: hashlib.sha256(b'owned prior native fixture').hexdigest()},
-            'hwpx': menu_final,
-            'hwpx-windows': {**menu_final, menu_clipboard.LIB: hashlib.sha256(b'owned CRLF native fixture').hexdigest()},
+            'prepared': {**legacy_menu, menu_clipboard.LIB: hashlib.sha256(b'owned prior native fixture').hexdigest()},
+            'hwpx': legacy_menu,
+            'hwpx-windows': {**legacy_menu, menu_clipboard.LIB: hashlib.sha256(b'owned CRLF native fixture').hexdigest()},
+            'prepared-shape-history': {**menu_final, menu_clipboard.LIB: hashlib.sha256(b'owned prior native fixture').hexdigest()},
+            'hwpx-shape-history':menu_final,
+            'hwpx-windows-shape-history':{**menu_final,menu_clipboard.LIB:hashlib.sha256(b'owned CRLF native fixture').hexdigest()},
         }
         menu_override = patch.object(menu_clipboard, 'PHASE_SOURCE_SHA256', menu_phases)
         menu_override.start()
         self.addCleanup(menu_override.stop)
         self.menu_reference_path = self.root/'menu-fixture-reference.json'
         write_json(self.menu_reference_path, menu_phases)
+        shape_output={name:digest(source/name) for name in shape_creation_history.SOURCE_FILES}
+        shape_override=patch.object(shape_creation_history,'OUTPUT_SOURCE_SHA256',shape_output)
+        shape_override.start();self.addCleanup(shape_override.stop)
+        self.shape_reference_path=self.root/'shape-fixture-reference.json'
+        write_json(self.shape_reference_path,shape_output)
+        shape_proof={'beforeSha256':shape_creation_history.INPUT_SOURCE_SHA256,
+                     'afterSha256':shape_output,'helperSha256':digest(ROOT/shape_creation_history.HELPER)}
         menu_proof = {'beforeSha256': {**menu_clipboard.INPUT_SOURCE_SHA256, **menu_clipboard.INPUT_NATIVE_SHA256},
                       'afterSha256': menu_final,
                       'helperSha256': digest(ROOT/'overlay/menu-clipboard.ts'),
@@ -191,6 +254,7 @@ class WindowsComponentsTests(unittest.TestCase):
                   'namespacePatch': namespace, 'wasmRebuild': wasm,
                   'pdfSearchText': pdf_proof,
                   'menuClipboardPaste': menu_proof,
+                  'shapeCreationHistory': shape_proof,
                   'asyncClipboardGuard': {
                       'beforeSha256': {
                           'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
@@ -268,16 +332,17 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,menu_clipboard,shape_creation_history;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
                 "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
                 "pdf_fixture=json.loads(Path(sys.argv[3]).read_text());"
                 "pdf_search_text.PATCHED_SHA256=pdf_fixture['PATCHED_SHA256'];"
                 "pdf_search_text.PRESERVED_SHA256=pdf_fixture['PRESERVED_SHA256'];"
                 "menu_clipboard.PHASE_SOURCE_SHA256=json.loads(Path(sys.argv[4]).read_text());"
-                "sys.argv=sys.argv[5:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                "shape_creation_history.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[5]).read_text());"
+                "sys.argv=sys.argv[6:];runpy.run_path(sys.argv[0],run_name='__main__')",
                 str(self.native_reference_path),str(self.com_reference_path),str(self.pdf_reference_path),
-                str(self.menu_reference_path),str(HELPER),*arguments]
+                str(self.menu_reference_path),str(self.shape_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')

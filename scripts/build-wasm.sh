@@ -37,3 +37,6 @@ node e2e/table_height.mjs verify .work/hop/apps/studio-host/vendor/rhwp-core .wo
 (cd .work/hop && pnpm run test:studio && pnpm run build:studio)
 python scripts/buildkit.py frontend .work/hop/apps/studio-host/dist
 node e2e/generate-browser-fixtures.mjs .work/hop .work/e2e-fixtures
+node e2e/generate-advanced-fixtures.mjs .work/hop .work/e2e-fixtures/advanced-owned
+PYTHONPATH=e2e python e2e/advanced_edit_fixtures.py .work/e2e-fixtures/advanced-owned
+node e2e/verify-advanced-fixtures.mjs .work/hop .work/e2e-fixtures/advanced-owned

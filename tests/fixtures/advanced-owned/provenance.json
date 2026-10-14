@@ -1,0 +1,37 @@
+{
+  "purpose": "Owned synthetic inputs; no GUI claim",
+  "vendorWasmSha256": "5a77a0f5156c7fbf6db1745095d7886d057b5d05bfba25759112cb46be8e97ec",
+  "generated": {
+    "owned-blank.hwpx": "d1c00086ba46c246a4fc562008ace0b791638d8b95a07cfa29b21f0b805a600d",
+    "owned-grid.hwpx": "f3c2d69fc38094574dbdf63b666bddbb9bfc66105f1f3ad5d488766bedad0a6f",
+    "owned-merged.hwpx": "2485154edcec895629f710cc21c4989959e8c5c649321cff0c9e8278ffad5c84",
+    "owned-split.hwpx": "ad0cef912986bb473824ff9924d80456f9568e5daca73c0dd5eb4e6c23e7b9e7",
+    "owned-field-guide.hwpx": "d03495170adff88e9bff86821cb4f4572e2ef2de0c0c8be0c0116ebdbd9a14b5",
+    "owned-field-filled.hwpx": "d34face8d999acb63069ef97072ec6e1d25ac74ff6d04e4e4a987979abc29057",
+    "owned-equation.hwpx": "81b129086786a49f063bcc6855e26c13dc35a1d7f9ee7b38b246ec625ddcd2ed",
+    "owned-notes.hwpx": "5e84ac90e9271fc330ac3647a13c673f91737c0178270bfbdbf8e747015784cc",
+    "owned-page.hwpx": "11c456092fa60d0a6305f45e6f3edc7257fcab36c585674c82434a4e24441389",
+    "owned-shape.hwpx": "64d749d1d8c64a359255b2e4d7cd65a4ba49705edc7df93c73dacf55891b844e",
+    "owned-nested.hwpx": "4ea949ddf52ce5fc4eb2c0434d2f344a980cfa538d02eb62399a78e8293824c4",
+    "owned-textbox.hwpx": "a58546bce68283292f83192b3a78d7b95db9b28f94b123f2da26668ecdb7a837"
+  },
+  "nestedAuthoring": {
+    "from": "owned-grid.hwpx",
+    "sourceSha256": "f3c2d69fc38094574dbdf63b666bddbb9bfc66105f1f3ad5d488766bedad0a6f",
+    "method": "owned XML nesting; no personal corpus",
+    "outerWidthHU": 48000,
+    "outerRowsHU": [
+      18000,
+      6000
+    ],
+    "innerWidthHU": 18000,
+    "innerRowsHU": [
+      4000,
+      4000
+    ]
+  },
+  "sourceLoadability": {
+    "allOwnedHwpxLoadedByPreparedWasm": true,
+    "method": "constructor only; no GUI claim"
+  }
+}

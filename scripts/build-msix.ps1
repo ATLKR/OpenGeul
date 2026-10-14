@@ -182,6 +182,12 @@ try {
         cargo test --locked --target $target --package opengeul-native-open
         Set-EditorCargoParallelism
         cargo run --locked --target $target --example opengeul-fixtures -- (Join-Path $root '.work/e2e-fixtures')
+        Set-EditorCargoParallelism
+        cargo build --locked --target $target --example opengeul-structured-fixtures
+        $structuredGenerator = Join-Path $editorTarget "$target/debug/examples/opengeul-structured-fixtures.exe"
+        $structuredSha = (Get-FileHash $structuredGenerator -Algorithm SHA256).Hash.ToLowerInvariant()
+        python -m pip install Pillow==12.3.0
+        python (Join-Path $root 'e2e/structured_cli_mcp/stage_structured.py') generate --generator-exe $structuredGenerator --expected-generator-sha256 $structuredSha --prepared-source $source --architecture $Architecture --out (Join-Path $root '.work/structured-fixtures')
     } finally { Pop-Location }
     }
     if ($editorRelease) {
@@ -227,6 +233,9 @@ Copy-Item (Join-Path $cliRelease 'rhwp.exe') (Join-Path $stage 'Tools/rhwp.exe')
 if ($Phase -in @('Editor','Cli')) {
     $role = $Phase.ToLowerInvariant()
     python scripts/windows_components.py capture --role $role --payload $stage --source $source --out (Join-Path $root ".work/$role-component") --architecture $Architecture
+    if ($role -eq 'editor') {
+        python e2e/structured_cli_mcp/stage_structured.py seal --generator-exe (Join-Path $editorTarget "$target/debug/examples/opengeul-structured-fixtures.exe") --editor-component (Join-Path $root '.work/editor-component') --fixtures (Join-Path $root '.work/structured-fixtures') --architecture $Architecture --out (Join-Path $root '.work/structured-input-binding.json')
+    }
     Write-Host "Built and source-bound $role component; release gates remain pending."
     exit 0
 }

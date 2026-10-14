@@ -30,12 +30,26 @@ BASELINE_NATIVE = (
     'test_corrupt_open_leaves_original_document_usable',
 )
 COMMON_CHECKS = {
+    'test_advanced_table_merge_split_history_reopen': ('grid', 'merged', 'merge-undo', 'merge-redo', 'split', 'split-undo', 'split-redo', 'reopen', 'next-edit', 'source-sha'),
+    'test_advanced_existing_nested_cell_edit_history_reopen': ('nested', 'edited', 'undo', 'redo', 'selection-delete', 'delete-undo', 'delete-redo', 'reopen', 'next-edit', 'source-sha'),
+    'test_advanced_field_insert_fill_history_reopen': ('inserted', 'insert-undo', 'insert-redo', 'filled', 'fill-undo', 'fill-redo', 'reopen', 'next-edit', 'source-sha'),
+    'test_advanced_equation_chord_doubleclick_history_reopen': ('inserted', 'property-undo', 'create-undo', 'create-redo', 'property-redo', 'doubleclick-edit', 'edit-undo', 'edit-redo', 'ink', 'reopen', 'next-edit', 'source-sha'),
+    'test_advanced_footnote_endnote_history_reopen': ('footnote', 'foot-text-undo', 'foot-create-undo', 'foot-create-redo', 'foot-text-redo', 'endnote', 'end-text-undo', 'end-create-undo', 'end-create-redo', 'end-text-redo', 'reopen', 'next-edit', 'source-sha'),
+    'test_advanced_header_footer_landscape_page_history_reopen': ('header', 'header-undo', 'header-redo', 'footer', 'footer-undo', 'footer-redo', 'page', 'page-undo', 'page-redo', 'page-break', 'break-undo', 'break-redo', 'reopen', 'next-edit', 'source-sha'),
+    'test_advanced_textbox_create_edit_history_reopen': ('created', 'create-undo', 'create-redo', 'text', 'text-undo', 'text-redo', 'properties', 'property-undo', 'property-redo', 'reopen', 'next-edit', 'source-sha'),
     'test_supported_table_cells_row_undo_redo_reopen': ('cells', 'row-added', 'undo', 'redo', 'reopen'),
     'test_supported_image_picker_placement_undo_redo_reopen': ('placed', 'undo', 'redo', 'reopen'),
     'test_supported_image_placement_cannot_cross_documents': ('placement-ready', 'replacement-clean'),
     'test_supported_find_replace_and_selected_format': ('replace', 'undo', 'redo', 'selected-style', 'plain-style', 'reopen'),
 }
 NATIVE_CHECKS = {
+    'test_supported_real_windows_korean_ime_commit_cancel_replace_roundtrip': ('actual-Microsoft-profile', 'physical-ascii-korean-switch', 'trusted-composition-commit', 'selected-replacement', 'single-undo-redo', 'actual-os-cancel-preserves-body-selection-history', 'save-as-real-reopen', 'source-sha'),
+    'test_supported_external_os_html_menu_keyboard_atomic_roundtrip': ('menu-paste', 'menu-single-undo', 'menu-single-redo', 'menu-source-sha', 'menu-reopen', 'keyboard-paste', 'keyboard-single-undo', 'keyboard-single-redo', 'keyboard-source-sha', 'keyboard-reopen'),
+    'test_supported_external_os_bitmap_menu_keyboard_atomic_roundtrip': ('menu-paste', 'menu-single-undo', 'menu-single-redo', 'menu-source-sha', 'menu-reopen', 'keyboard-paste', 'keyboard-single-undo', 'keyboard-single-redo', 'keyboard-source-sha', 'keyboard-reopen'),
+    'test_native_new_document_first_save_hwp_cancel_success_reopen': ('new-dirty', 'first-picker-cancel', 'first-save-format-body', 'clean-native-close', 'reopen-next-direct-save'),
+    'test_native_new_document_first_save_hwpx_cancel_success_reopen': ('new-dirty', 'first-picker-cancel', 'first-save-format-body', 'clean-native-close', 'reopen-next-direct-save'),
+    'test_native_dirty_new_cancel_then_safety_save_preserves_document': ('new-cancel-keeps-source-dirty', 'new-safety-save-before-blank', 'blank-next-save-has-no-old-document', 'safety-saved-source-real-reopen'),
+    'test_native_dirty_new_cancelled_safety_picker_keeps_document': ('unsaved-new-dirty', 'safety-picker-cancel-keeps-new-dirty', 'next-real-save-retains-unsaved-text', 'cancelled-safety-real-reopen'),
     'test_supported_keyboard_clipboard_copy_cut_paste': ('clipboard', 'copy-paste', 'cut', 'undo', 'redo', 'reopen'),
     'test_supported_menu_clipboard_copy_cut_paste': ('clipboard', 'copy-paste', 'cut', 'undo', 'redo', 'reopen'),
     'test_supported_gui_pdf_basic_hwp_hwpx_unsaved': ('basic.hwp', 'basic.hwpx', 'unicode.hwpx', 'next-save'),
@@ -46,11 +60,23 @@ NATIVE_CHECKS = {
     'test_supported_installed_font_public_selection_roundtrip': ('installed-option', 'selected-font', 'reopen', 'source-sha'),
 }
 # Canonical lexical order is fixed by these explicit names, never discovery.
+BASELINE_NATIVE_CHECKS = {
+    'test_multiple_windows_use_real_native_creation': ('two-native-page-hwnds', 'b-save-keeps-a-source-dirty', 'independent-two-saved-bodies', 'b-close-cancel-keeps-b-dirty-a-live', 'b-close-save-keeps-a-live', 'a-next-edit-save-after-b-close', 'a-clean-close-after-b-close', 'both-real-native-reopens'),
+}
 EXPECTED_BROWSER_CASES = tuple(sorted(PREFIX + name for name in (*BASELINE_COMMON, *COMMON_CHECKS)))
 EXPECTED_NATIVE_CASES = tuple(sorted(PREFIX + name for name in (*BASELINE_COMMON, *BASELINE_NATIVE, *COMMON_CHECKS, *NATIVE_CHECKS)))
 # Reviewed counts are independent of test discovery and cannot shrink with deletion.
-EXPECTED_COUNTS = {'browser': 14, 'native': 28}
+EXPECTED_COUNTS = {'browser': 21, 'native': 42}
 HELPERS = (
+    'scripts/ensure-korean-ime.ps1', 'scripts/korean_ime_readiness.py',
+    'e2e/advanced_edit_oracle.py', 'e2e/advanced_edit_cases.py',
+    'e2e/generate-advanced-fixtures.mjs', 'e2e/advanced_edit_fixtures.py',
+    'e2e/verify-advanced-fixtures.mjs',
+    'e2e/windows_ime.py', 'e2e/native_clipboard.py',
+    'e2e/native_ime_cases.py', 'e2e/native_clipboard_cases.py',
+    'e2e/native_document_policy.py',
+    'e2e/native_document_windows.py',
+    'e2e/native_document_lifecycle_cases.py',
     'e2e/run.py', 'e2e/ui_contract.py', 'e2e/driver.py', 'e2e/test_editor.py',
     'e2e/test_hop_followups.py', 'e2e/test_supported_features.py',
     'e2e/hwpx_oracle.py', 'e2e/supported_feature_oracle.py', 'e2e/print_oracle.py',
@@ -116,7 +142,7 @@ def validate_evidence(payload, junit, *, mode, root, before):
     exact_ids((row.get('test') for row in records), mode)
     for row in records:
         name = row['test'].removeprefix(PREFIX)
-        checks = (*COMMON_CHECKS.get(name, ()), *NATIVE_CHECKS.get(name, ()))
+        checks = (*COMMON_CHECKS.get(name, ()), *NATIVE_CHECKS.get(name, ()), *BASELINE_NATIVE_CHECKS.get(name, ()))
         actual = row.get('checks', {})
         if row.get('status') != 'passed' or set(actual) != set(checks) or any(value is not True for value in actual.values()):
             raise ValueError('UI failure/skip or missing/false required oracle check')

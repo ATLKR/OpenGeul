@@ -198,6 +198,7 @@ jobs:
       shell: pwsh
       run: |
         python -c "import shutil; shutil.copytree('.work/e2e-fixtures', '.work/native-inputs/e2e-fixtures')"
+        python -c "import shutil; shutil.copytree('.work/structured-fixtures', '.work/native-inputs/structured-fixtures'); shutil.copyfile('.work/structured-input-binding.json', '.work/native-inputs/structured-input-binding.json')"
         python ci/evidence.py size --limit-mib 16 .work/native-inputs
     - name: 네이티브 합성 시험 문서 전달
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -296,6 +297,7 @@ jobs:
       shell: pwsh
       run: |
         python -c "import shutil; shutil.copytree('.work/e2e-fixtures', '.work/native-inputs/e2e-fixtures')"
+        python -c "import shutil; shutil.copytree('.work/structured-fixtures', '.work/native-inputs/structured-fixtures'); shutil.copyfile('.work/structured-input-binding.json', '.work/native-inputs/structured-input-binding.json')"
         python ci/evidence.py size --limit-mib 16 .work/native-inputs
     - name: 네이티브 합성 시험 문서 전달
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -542,6 +544,9 @@ jobs:
         $ErrorActionPreference='Stop'
         $PSNativeCommandUseErrorActionPreference=$true
         node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures mcp-password-fixtures
+    - name: 한국어 IME의 실제 Windows 기능·사용자 프로필 준비
+      shell: pwsh
+      run: ./scripts/ensure-korean-ime.ps1 -ExpectedSource $env:GITHUB_SHA -Output evidence/korean-ime-readiness
     - name: 제품 WebView2와 실제 Windows 파일 대화상자 검사
       shell: pwsh
       run: |
@@ -566,6 +571,15 @@ jobs:
         $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
         $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
         python e2e/mcp_worker.py --context portable --architecture $env:E2E_ARCHITECTURE --exe runtime/Tools/rhwp.exe --fixtures inputs/e2e-fixtures --password-fixtures mcp-password-fixtures --expected-sha256 $cliSha --out evidence/mcp
+    - name: 구조 문서의 유효 CLI·MCP 16개 필수 검사
+      if: always() && !cancelled() && steps.runtime-ready.outcome == 'success' && steps.mcp-fixtures.outcome == 'success'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
+        $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
+        python e2e/structured_cli_mcp/valid_companion.py --exe runtime/Tools/rhwp.exe --architecture $env:E2E_ARCHITECTURE --expected-sha256 $cliSha --fixtures inputs/structured-fixtures --binding inputs/structured-input-binding.json --package-provenance package/provenance.json --out evidence/structured-cli-mcp
     - name: 설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비
       if: env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'
       shell: pwsh
@@ -676,6 +690,9 @@ jobs:
         $ErrorActionPreference='Stop'
         $PSNativeCommandUseErrorActionPreference=$true
         node e2e/password/generate-password-fixtures.mjs wasm-input inputs/e2e-fixtures mcp-password-fixtures
+    - name: 한국어 IME의 실제 Windows 기능·사용자 프로필 준비
+      shell: pwsh
+      run: ./scripts/ensure-korean-ime.ps1 -ExpectedSource $env:GITHUB_SHA -Output evidence/korean-ime-readiness
     - name: 제품 WebView2와 실제 Windows 파일 대화상자 검사
       shell: pwsh
       run: |
@@ -700,6 +717,15 @@ jobs:
         $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
         $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
         python e2e/mcp_worker.py --context portable --architecture $env:E2E_ARCHITECTURE --exe runtime/Tools/rhwp.exe --fixtures inputs/e2e-fixtures --password-fixtures mcp-password-fixtures --expected-sha256 $cliSha --out evidence/mcp
+    - name: 구조 문서의 유효 CLI·MCP 16개 필수 검사
+      if: always() && !cancelled() && steps.runtime-ready.outcome == 'success' && steps.mcp-fixtures.outcome == 'success' && steps.runner-ready.outcome == 'success'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        $provenance=Get-Content package/provenance.json -Raw | ConvertFrom-Json
+        $cliSha=[string]$provenance.windowsComponents.components.cli.sha256
+        python e2e/structured_cli_mcp/valid_companion.py --exe runtime/Tools/rhwp.exe --architecture $env:E2E_ARCHITECTURE --expected-sha256 $cliSha --fixtures inputs/structured-fixtures --binding inputs/structured-input-binding.json --package-provenance package/provenance.json --out evidence/structured-cli-mcp
     - name: 설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비
       if: env.E2E_ARCHITECTURE == 'arm64' || matrix.os == 'windows-2025'
       shell: pwsh
