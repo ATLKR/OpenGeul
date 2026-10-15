@@ -50,6 +50,16 @@ class UiContractTests(unittest.TestCase):
                                  root=ROOT, before=before or helper_hashes(ROOT),
                                  source_binding=frontend_binding() if source_binding is None else source_binding)
 
+    def test_native_advanced_input_stager_bytes_are_bound_for_both_ui_modes(self):
+        name = 'e2e/native_advanced_inputs.py'
+        self.assertIn(name, HELPERS)
+        self.assertEqual(helper_hashes(ROOT)[name], hashlib.sha256((ROOT/name).read_bytes()).hexdigest())
+        for mode in ('browser', 'native'):
+            payload, xml = evidence(mode)
+            payload['helperSha256'][name] = '0'*64
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'helper'):
+                self.validate(payload, xml, mode=mode)
+
     def test_equation_dialog_focus_helper_and_preparation_are_bound_for_both_modes(self):
         for name in ('scripts/equation_dialog_focus.py', 'scripts/prepare_upstream.py'):
             with self.subTest(helper=name):
@@ -150,7 +160,7 @@ class UiContractTests(unittest.TestCase):
         self.assertEqual(len(BASELINE_COMMON), 10)
         self.assertEqual(len(BASELINE_NATIVE), 6)
         self.assertEqual(EXPECTED_COUNTS, {'browser': 21, 'native': 42})
-        self.assertEqual(len(HELPERS),33)  # Original31 + Source8 helper/preparation; cases remain21/42.
+        self.assertEqual(len(HELPERS),34)  # Source8 helper/preparation plus native input stager; cases remain21/42.
         self.assertEqual(set(BASELINE_NATIVE_CHECKS),{'test_multiple_windows_use_real_native_creation'})
         for mode in EXPECTED_COUNTS:
             payload, xml = evidence(mode)

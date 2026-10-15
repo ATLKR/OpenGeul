@@ -76,7 +76,7 @@ HELPERS = (
     'scripts/ensure-korean-ime.ps1', 'scripts/korean_ime_readiness.py',
     'e2e/advanced_edit_oracle.py', 'e2e/advanced_edit_cases.py',
     'e2e/generate-advanced-fixtures.mjs', 'e2e/advanced_edit_fixtures.py',
-    'e2e/verify-advanced-fixtures.mjs',
+    'e2e/verify-advanced-fixtures.mjs', 'e2e/native_advanced_inputs.py',
     'e2e/windows_ime.py', 'e2e/native_clipboard.py',
     'e2e/native_ime_cases.py', 'e2e/native_clipboard_cases.py',
     'e2e/native_document_policy.py',

@@ -1203,4 +1203,190 @@ class ScopedStartupEnumerationTests(unittest.TestCase):
         self.assertFalse(fixture.probe_exists); self.assertEqual(fixture.closed, [22])
 
 
+class InitialHeldDiagnosticTests(unittest.TestCase):
+    APIS = ('GetProcessTimes', 'IsWow64Process2', 'GetExitCodeProcess', 'ProcessIdToSessionId')
+
+    def test_actual_startup_retains_initial_tuple_without_observing_later_queries(self):
+        fixture = StartupFixture(module(), expires=1)
+        result = fixture.run()
+        trace = result['startupWait']
+        self.assertIn('initialHeldObservation', trace,
+                      'The actual initial WSL held tuple must survive before the first wait sample')
+        observed = trace['initialHeldObservation']
+        self.assertEqual(observed['state'], {'createdFileTime': 100000, 'processMachine': 0,
+                         'nativeMachine': 0xAA64, 'sessionId': 1, 'exitCode': 259})
+        self.assertEqual(observed['apiCalls'], [
+            {'api': name, 'succeeded': True, 'lastError': None} for name in self.APIS])
+        self.assertEqual(observed['validation'], {'createdFileTime': True, 'processMachine': True,
+                         'nativeMachine': True, 'sessionId': True, 'live': True})
+        self.assertIsNone(observed['failureCode'])
+        self.assertTrue(trace['naturalProcessExitObserved'])
+        self.assertTrue(result['ownedWindowRemoved'])
+        self.assertLess(len(json.dumps(observed).encode()), 4096)
+
+    def test_each_failed_initial_api_stops_queries_and_retains_only_finite_error(self):
+        for failed_index, failed_api in enumerate(self.APIS):
+            with self.subTest(api=failed_api):
+                fixture = StartupFixture(module()); calls = []
+                for name in self.APIS:
+                    original = getattr(fixture.kernel, name)
+                    def call(*args, name=name, original=original):
+                        calls.append(name)
+                        if name == failed_api:
+                            fixture.value.ctypes.set_last_error(87)
+                            return False
+                        return original(*args)
+                    setattr(fixture.kernel, name, ApiCall(call))
+                with self.assertRaises(ValueError): fixture.run()
+                result = fixture.probe.last_focus_probe_result
+                observed = result['startupWait'].get('initialHeldObservation')
+                self.assertIsNotNone(observed, 'Initial API rejection must retain its finite observation')
+                self.assertEqual(calls, list(self.APIS[:failed_index+1]))
+                self.assertEqual(observed['apiCalls'], [
+                    {'api': name, 'succeeded': index != failed_index,
+                     'lastError': 87 if index == failed_index else None}
+                    for index, name in enumerate(self.APIS[:failed_index+1])])
+                self.assertEqual(observed['failureCode'], failed_api + '_failed')
+                self.assertIsNone(observed['state']); self.assertEqual(observed['validation'], {})
+                self.assertEqual(result['startupWait']['samples'], [])
+                self.assertTrue(result['ownedWindowRemoved']); self.assertFalse(fixture.probe_exists)
+                self.assertEqual(fixture.calls, []); self.assertEqual(fixture.shows, [])
+                self.assertEqual(fixture.closed, [11])
+
+    def test_successful_initial_api_query_does_not_read_stale_last_error(self):
+        fixture = StartupFixture(module()); observed = {}
+        try:
+            with patch.object(fixture.value.ctypes, 'get_last_error',
+                              side_effect=AssertionError('No successful API last-error read'), create=True):
+                state = fixture.probe.startup_process_state(11, 200, observation=observed)
+            self.assertEqual(observed['state'], state)
+            self.assertEqual([row['api'] for row in observed['apiCalls']], list(self.APIS))
+            self.assertTrue(all(row['succeeded'] and row['lastError'] is None for row in observed['apiCalls']))
+        finally: fixture.directory.cleanup()
+
+    def test_each_initial_api_exception_retains_attempt_without_reading_last_error(self):
+        for failed_index, failed_api in enumerate(self.APIS):
+            with self.subTest(api=failed_api):
+                fixture = StartupFixture(module()); observed = {}; calls = []
+                failure = ValueError('private native argument/path ' * 500)
+                for name in self.APIS:
+                    original = getattr(fixture.kernel, name)
+                    def call(*args, name=name, original=original):
+                        calls.append(name)
+                        if name == failed_api: raise failure
+                        return original(*args)
+                    setattr(fixture.kernel, name, ApiCall(call))
+                try:
+                    with patch.object(fixture.value.ctypes, 'get_last_error',
+                                      side_effect=AssertionError('No last-error query for exception'), create=True):
+                        with self.assertRaises(ValueError) as raised:
+                            fixture.probe.startup_process_state(11, 200, observation=observed)
+                    self.assertIs(raised.exception, failure)
+                    self.assertEqual(calls, list(self.APIS[:failed_index+1]))
+                    self.assertEqual(observed['apiCalls'], [
+                        {'api': name, 'succeeded': True, 'lastError': None}
+                        for name in self.APIS[:failed_index]] + [
+                        {'api': failed_api, 'succeeded': None, 'lastError': None, 'callException': True}])
+                    self.assertEqual(observed['failureCode'], failed_api + '_exception')
+                    self.assertIsNone(observed['state']); self.assertEqual(observed['validation'], {})
+                    self.assertNotIn('private', json.dumps(observed))
+                    self.assertLessEqual(len(observed['apiCalls']), 4)
+                    self.assertLess(len(json.dumps(observed).encode()), 4096)
+                finally: fixture.directory.cleanup()
+
+    def test_unavailable_or_non_dword_last_error_is_null_without_raw_exception(self):
+        for error in (None, -1, 2**32, True):
+            with self.subTest(error=error):
+                fixture = StartupFixture(module()); observed = {}
+                fixture.kernel.GetProcessTimes = ApiCall(lambda *args: False)
+                try:
+                    with patch.object(fixture.value.ctypes, 'get_last_error', create=True,
+                                      side_effect=OSError('private path/environment ' * 500) if error is None else None,
+                                      return_value=error):
+                        with self.assertRaises(ValueError):
+                            fixture.probe.startup_process_state(11, 200, observation=observed)
+                    self.assertEqual(observed['apiCalls'], [
+                        {'api': 'GetProcessTimes', 'succeeded': False, 'lastError': None}])
+                    self.assertIsNone(observed['state'])
+                    self.assertNotIn('private', json.dumps(observed))
+                    self.assertLess(len(json.dumps(observed).encode()), 4096)
+                finally: fixture.directory.cleanup()
+
+    def test_initial_identity_rejection_records_first_failed_predicate(self):
+        changes = (
+            ('createdFileTime', 'created_file_time_mismatch', 'GetProcessTimes',
+             lambda handle, created, *rest: setattr(created._obj, 'dwLowDateTime', 99999) or 1),
+            ('processMachine', 'process_machine_mismatch', 'IsWow64Process2',
+             lambda handle, process, native: (setattr(process._obj, 'value', 0x8664),
+                                               setattr(native._obj, 'value', 0xAA64), 1)[-1]),
+            ('nativeMachine', 'native_machine_mismatch', 'IsWow64Process2',
+             lambda handle, process, native: setattr(native._obj, 'value', 0x8664) or 1),
+            ('sessionId', 'session_mismatch', 'ProcessIdToSessionId',
+             lambda pid, session: setattr(session._obj, 'value', 2) or 1),
+            ('live', 'process_not_live', 'GetExitCodeProcess',
+             lambda handle, code: setattr(code._obj, 'value', 0) or 1))
+        order = ('createdFileTime', 'processMachine', 'nativeMachine', 'sessionId', 'live')
+        for field, failure, api, callback in changes:
+            with self.subTest(field=field):
+                fixture = StartupFixture(module()); setattr(fixture.kernel, api, ApiCall(callback))
+                with self.assertRaises(ValueError): fixture.run()
+                result = fixture.probe.last_focus_probe_result
+                observed = result['startupWait'].get('initialHeldObservation')
+                self.assertIsNotNone(observed, 'The rejecting initial predicate must retain its observed tuple')
+                self.assertEqual(observed['failureCode'], failure)
+                self.assertEqual(observed['validation'], {
+                    key: key != field for key in order[:order.index(field)+1]})
+                self.assertEqual(len(observed['apiCalls']), 4)
+                self.assertEqual(result['firstFailure']['failureCode'], failure)
+                self.assertIsNotNone(observed['state']); self.assertTrue(result['ownedWindowRemoved'])
+                self.assertEqual(fixture.calls, []); self.assertEqual(fixture.shows, [])
+                self.assertNotIn('foregroundAtActivation', result)
+                self.assertEqual(result['startupWait']['samples'], [])
+
+    def test_actual_focus_probe_preserves_first_failure_when_unregister_also_fails(self):
+        fixture = StartupFixture(module())
+        fixture.kernel.GetExitCodeProcess = ApiCall(lambda *args: False)
+        fixture.user.UnregisterClassW = ApiCall(lambda *args: False)
+        with self.assertRaisesRegex(ValueError, '소유 focus probe class 제거 실패'): fixture.run()
+        result = fixture.probe.last_focus_probe_result
+        self.assertIn('firstFailure', result, 'A cleanup exception must not erase the first failure receipt')
+        self.assertEqual(result['firstFailure'], {'errorType': 'ValueError',
+                         'failureCode': 'GetExitCodeProcess_failed'})
+        self.assertEqual(result['cleanupFailure'], {'errorType': 'ValueError', 'stage': 'unregisterClass'})
+        self.assertTrue(result['ownedWindowRemoved']); self.assertFalse(fixture.probe_exists)
+        self.assertEqual(fixture.calls, []); self.assertEqual(fixture.shows, [])
+        self.assertEqual(fixture.closed, [11])
+        self.assertLess(len(json.dumps(result).encode()), fixture.value.MAX_JSON)
+
+    def test_existing_controller_session_query_failure_has_finite_initial_reason(self):
+        fixture = StartupFixture(module()); queried = [False]
+        original = fixture.kernel.GetProcessTimes
+        def times(*args):
+            queried[0] = True
+            return original(*args)
+        def session_id():
+            if queried[0]: raise ValueError('private controller query detail')
+            return 1
+        fixture.kernel.GetProcessTimes = ApiCall(times); fixture.probe.session_id = session_id
+        with self.assertRaises(ValueError): fixture.run()
+        result = fixture.probe.last_focus_probe_result
+        observed = result['startupWait']['initialHeldObservation']
+        self.assertEqual(observed['failureCode'], 'controller_session_query_failed')
+        self.assertEqual(len(observed['apiCalls']), 4)
+        self.assertEqual(observed['validation'], {'createdFileTime': True,
+                         'processMachine': True, 'nativeMachine': True})
+        self.assertNotIn('private', json.dumps(result))
+        self.assertTrue(result['ownedWindowRemoved']); self.assertEqual(fixture.calls, [])
+
+    def test_unregister_failure_keeps_its_stage_after_baseline_handle_release(self):
+        fixture = MaskedStartupFixture(module(), baseline=True)
+        fixture.user.UnregisterClassW = ApiCall(lambda *args: False)
+        with self.assertRaisesRegex(ValueError, '소유 focus probe class 제거 실패'): fixture.run()
+        result = fixture.probe.last_focus_probe_result
+        self.assertIsNone(result['firstFailure'])
+        self.assertEqual(result['cleanupFailure'], {'errorType': 'ValueError', 'stage': 'unregisterClass'})
+        self.assertTrue(result['ownedWindowRemoved']); self.assertFalse(fixture.probe_exists)
+        self.assertCountEqual(fixture.closed, [11, 22])
+
+
 if __name__ == '__main__': unittest.main()

@@ -675,14 +675,37 @@ class WindowsProbe:
         signature['publisherMicrosoft'] = signature['status'] == 'Valid' and bool(re.search(r'(?:CN|O)=Microsoft(?: Windows| Corporation)', signature['subject']))
         return {'path': path, 'peMachine': machine, 'bytes': size, 'sha256': h.hexdigest(), 'signature': signature}
 
-    def startup_process_state(self, handle, pid):
+    def startup_process_state(self, handle, pid, *, observation=None):
         times = [W.FILETIME() for _ in range(4)]; machine = W.WORD(); native = W.WORD(); exit_code = W.DWORD(); session = W.DWORD()
-        require(self.kernel.GetProcessTimes(handle, *[ctypes.byref(t) for t in times])
-            and self.kernel.IsWow64Process2(handle, ctypes.byref(machine), ctypes.byref(native))
-            and self.kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            and self.kernel.ProcessIdToSessionId(pid, ctypes.byref(session)), 'WSL held 생성시각/native/session/exit 조회 실패')
-        return {'createdFileTime': (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime,
+        if observation is not None:
+            observation.update(readOnly=True, apiCalls=[], state=None, validation={}, failureCode=None)
+        def call(name, *arguments):
+            try: succeeded = bool(getattr(self.kernel, name)(*arguments))
+            except Exception:
+                if observation is not None:
+                    observation['apiCalls'].append({'api': name, 'succeeded': None,
+                        'lastError': None, 'callException': True})
+                    observation['failureCode'] = name + '_exception'
+                raise
+            if observation is not None:
+                last_error = None
+                if not succeeded:
+                    try:
+                        code = ctypes.get_last_error()
+                        if type(code) is int and 0 <= code < 2**32: last_error = code
+                    except Exception: pass  # Unavailable diagnostics never replace the original rejection.
+                observation['apiCalls'].append({'api': name, 'succeeded': succeeded, 'lastError': last_error})
+                if not succeeded: observation['failureCode'] = name + '_failed'
+            return succeeded
+        # Four fixed APIs, in the original short-circuit order; no query follows a failed BOOL.
+        require(call('GetProcessTimes', handle, *[ctypes.byref(t) for t in times])
+            and call('IsWow64Process2', handle, ctypes.byref(machine), ctypes.byref(native))
+            and call('GetExitCodeProcess', handle, ctypes.byref(exit_code))
+            and call('ProcessIdToSessionId', pid, ctypes.byref(session)), 'WSL held 생성시각/native/session/exit 조회 실패')
+        state = {'createdFileTime': (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime,
                 'processMachine': machine.value, 'nativeMachine': native.value, 'sessionId': session.value, 'exitCode': exit_code.value}
+        if observation is not None: observation['state'] = dict(state)
+        return state
 
     def startup_bound_process(self, window, expected_path, *, deadline):
         processes = self.processes([window['processId']], deadline=deadline)
@@ -946,10 +969,23 @@ class WindowsProbe:
                     and trace['baselineLiveImage']['signature'] == baseline_process['signature'],
                     'live Progman process와 실제 PE/파일/서명이 다릅니다')
             trace['stage'] = 'heldIdentity'
-            initial = self.startup_process_state(handle, process['processId'])
-            require(initial['createdFileTime'] == process['createdFileTime'] and initial['processMachine'] == 0
-                and initial['nativeMachine'] == 0xAA64 and initial['sessionId'] == process['sessionId'] == self.session_id()
-                and initial['exitCode'] == 259, 'live WSL held identity가 다릅니다')
+            initial_observation = {}; trace['initialHeldObservation'] = initial_observation
+            initial = self.startup_process_state(handle, process['processId'], observation=initial_observation)
+            def matches(field, code, matched):
+                initial_observation['validation'][field] = matched
+                if not matched: initial_observation['failureCode'] = code
+                return matched
+            def same_session():
+                if initial['sessionId'] != process['sessionId']: return False
+                try: return process['sessionId'] == self.session_id()
+                except Exception:
+                    initial_observation['failureCode'] = 'controller_session_query_failed'
+                    raise
+            require(matches('createdFileTime', 'created_file_time_mismatch', initial['createdFileTime'] == process['createdFileTime'])
+                and matches('processMachine', 'process_machine_mismatch', initial['processMachine'] == 0)
+                and matches('nativeMachine', 'native_machine_mismatch', initial['nativeMachine'] == 0xAA64)
+                and matches('sessionId', 'session_mismatch', same_session())
+                and matches('live', 'process_not_live', initial['exitCode'] == 259), 'live WSL held identity가 다릅니다')
             trace['stage'] = 'liveBoundImage'
             trace['liveBoundImage'] = self.bound_image(expected_path, deadline=deadline)
             require(trace['liveBoundImage']['bytes'] == process['imageBytes']
@@ -1040,7 +1076,8 @@ class WindowsProbe:
         name = f'OpenGeulRunnerReadyOwnedProbe_{pid}'; window_class = WindowClass()
         window_class.proc = callback; window_class.instance = instance; window_class.name = name
         require(self.user.RegisterClassW(ctypes.byref(window_class)), '소유 focus probe class 생성 실패')
-        hwnd = None; result = {'processId': pid, 'className': name, 'foregroundMatched': False, 'ownedWindowRemoved': False}
+        hwnd = None; result = {'processId': pid, 'className': name, 'foregroundMatched': False, 'ownedWindowRemoved': False,
+                               'firstFailure': None, 'cleanupFailure': None}
         self.last_focus_probe_result = result
         try:
             hwnd = self.user.CreateWindowExW(0, name, 'OpenGeul CI owned focus probe', 0x00CF0000,
@@ -1069,18 +1106,35 @@ class WindowsProbe:
             result['foregroundAfter'] = int(self.user.GetForegroundWindow() or 0)
             self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
             result['foregroundMatched'] = result['foregroundAfter'] == hwnd and owner.value == pid
+        except Exception as error:
+            result['firstFailure'] = {'errorType': bounded(type(error).__name__),
+                'failureCode': result.get('startupWait', {}).get('initialHeldObservation', {}).get('failureCode')}
+            raise
         finally:
+            cleanup_stage = 'ownedWindowObservation'
             try:
-                if hwnd and self.user.IsWindow(hwnd):
-                    owner = W.DWORD(); self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
-                    require(owner.value == pid, 'probe cleanup HWND 소유권이 다릅니다')
-                    self.user.DestroyWindow(hwnd)
-                result['ownedWindowRemoved'] = not hwnd or not bool(self.user.IsWindow(hwnd))
-                require(self.user.UnregisterClassW(name, instance), '소유 focus probe class 제거 실패')
-            finally:
-                guard = getattr(self, '_startup_activation_guard', None)
-                if guard and guard['baseline']:
-                    self.kernel.CloseHandle(guard['baseline'][2]); guard['baseline'] = None
+                try:
+                    if hwnd and self.user.IsWindow(hwnd):
+                        cleanup_stage = 'ownedWindowOwnership'
+                        owner = W.DWORD(); self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                        require(owner.value == pid, 'probe cleanup HWND 소유권이 다릅니다')
+                        cleanup_stage = 'ownedWindowDestroy'
+                        self.user.DestroyWindow(hwnd)
+                    cleanup_stage = 'ownedWindowRemoved'
+                    result['ownedWindowRemoved'] = not hwnd or not bool(self.user.IsWindow(hwnd))
+                    cleanup_stage = 'unregisterClass'
+                    require(self.user.UnregisterClassW(name, instance), '소유 focus probe class 제거 실패')
+                finally:
+                    guard = getattr(self, '_startup_activation_guard', None)
+                    if guard and guard['baseline']:
+                        try:
+                            self.kernel.CloseHandle(guard['baseline'][2]); guard['baseline'] = None
+                        except Exception:
+                            cleanup_stage = 'baselineHandleRelease'
+                            raise
+            except Exception as error:
+                result['cleanupFailure'] = {'errorType': bounded(type(error).__name__), 'stage': cleanup_stage}
+                raise
         return result
 
     def screen(self, path):

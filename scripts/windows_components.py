@@ -204,6 +204,10 @@ def helpers() -> dict:
             if path.is_file() and '__pycache__' not in path.parts and path.suffix in ('.py','.ps1','.sh','.rs','.ts','.txt','.xml','.json','.toml'):
                 paths.append(path)
     paths.append(ROOT/'overlay/native-open/README.md')
+    for name in ('native_advanced_inputs.py',):
+        path=ROOT/'e2e'/name
+        regular(path)
+        paths.append(path)
     for name in ('valid_companion.py','structured_oracle.py','stage_structured.py','generate_structured.rs','expected.json'):
         path=ROOT/'e2e/structured_cli_mcp'/name
         regular(path)

@@ -91,6 +91,7 @@ class Arm64WorkflowTests(unittest.TestCase):
                                'GUI 결과와 별개인 MCP 암호 입력 준비',
                                '구조 문서의 유효 CLI·MCP 16개 필수 검사',
                                '한국어 IME의 실제 Windows 기능·사용자 프로필 준비',
+                               '동일 소스의 고급 편집 입력 준비',
                                '설치 MCP 시험에 사용할 동일 실행의 공개 QA 원본 준비',
                                '동일 실행의 공개 MCP QA 입력을 하루 동안 보존'} if name=='native-e2e' else {
                                    '성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존',
@@ -100,6 +101,14 @@ class Arm64WorkflowTests(unittest.TestCase):
                         additions |= {'ARM 러너의 검증된 OS 창과 전경 준비',
                                       'ARM 러너 준비 원본 증거 크기 제한',
                                       'ARM 러너 준비 원본 관찰 보존'}
+                    if name == 'native-e2e':
+                        advanced_name = '동일 소스의 고급 편집 입력 준비'
+                        self.assertEqual([step for step in job['steps'] if step.get('name') == advanced_name], [{
+                            'name': advanced_name, 'shell': 'pwsh',
+                            'env': {'GH_TOKEN': '${{ github.token }}'},
+                            'run': 'python e2e/native_advanced_inputs.py --package package --wasm wasm-input '
+                                   '--fixtures inputs/e2e-fixtures --receipt evidence/native-advanced-inputs.json',
+                        }])
                     retained=[]
                     for step in job['steps']:
                         if step.get('name') in additions:continue

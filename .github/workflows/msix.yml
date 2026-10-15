@@ -547,6 +547,11 @@ jobs:
     - name: 한국어 IME의 실제 Windows 기능·사용자 프로필 준비
       shell: pwsh
       run: ./scripts/ensure-korean-ime.ps1 -ExpectedSource $env:GITHUB_SHA -Output evidence/korean-ime-readiness
+    - name: 동일 소스의 고급 편집 입력 준비
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python e2e/native_advanced_inputs.py --package package --wasm wasm-input --fixtures inputs/e2e-fixtures --receipt evidence/native-advanced-inputs.json
     - name: 제품 WebView2와 실제 Windows 파일 대화상자 검사
       shell: pwsh
       run: |
@@ -693,6 +698,11 @@ jobs:
     - name: 한국어 IME의 실제 Windows 기능·사용자 프로필 준비
       shell: pwsh
       run: ./scripts/ensure-korean-ime.ps1 -ExpectedSource $env:GITHUB_SHA -Output evidence/korean-ime-readiness
+    - name: 동일 소스의 고급 편집 입력 준비
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python e2e/native_advanced_inputs.py --package package --wasm wasm-input --fixtures inputs/e2e-fixtures --receipt evidence/native-advanced-inputs.json
     - name: 제품 WebView2와 실제 Windows 파일 대화상자 검사
       shell: pwsh
       run: |

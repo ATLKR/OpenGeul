@@ -69,6 +69,13 @@ def pe(machine=0x8664):
 
 
 class WindowsComponentsTests(unittest.TestCase):
+    def test_native_advanced_input_stager_is_bound_to_current_component_helpers(self):
+        name = 'e2e/native_advanced_inputs.py'
+        helpers = self.helper().configured()['helpers']
+        self.assertTrue(name in helpers, 'Native advanced input stager must be included in component helpers')
+        self.assertEqual(helpers[name], digest(ROOT/name))
+        self.assertEqual(len(helpers), 102)
+
     def test_equation_dialog_focus_actual_frontend_source_is_explicit(self):
         name = 'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts'
         self.assertIn(name, self.helper().SOURCE_FILES)
