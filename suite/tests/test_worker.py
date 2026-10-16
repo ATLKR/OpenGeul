@@ -19,6 +19,27 @@ MODULES = {
 }
 
 
+def bootstrap_services(calls):
+    """Fake only the public UNO factory/configuration boundaries."""
+    from types import SimpleNamespace as NS
+    def mark(name, value):
+        calls.append((name,))
+        return value
+    element = NS(getRealInterface=lambda: mark('ui-window', object()),
+                 dispose=lambda: calls.append(('ui-dispose',)))
+    def create(url, properties):
+        calls.append(('ui-create', url, {prop.Name: prop.Value for prop in properties}))
+        return element
+    config = NS(hasSettings=lambda url: False)
+    factory = NS(createUIElement=create)
+    services = {
+        'com.sun.star.ui.ModuleUIConfigurationManagerSupplier': NS(
+            getUIConfigurationManager=lambda module: mark('ui-config', config)),
+        'com.sun.star.ui.UIElementFactoryManager': NS(getFactory=lambda url, module: mark('ui-factory', factory)),
+    }
+    return services, config, factory, element
+
+
 class FakeBackend:
     def __init__(self, runtime):
         self.modified = False
@@ -466,6 +487,8 @@ class NativeBoundaryTests(unittest.TestCase):
         toolkit = SimpleNamespace(createSystemChild=lambda *a: calls.append(('child', a)) or peer)
         services = {'com.sun.star.awt.Toolkit': toolkit, 'com.sun.star.frame.Frame': frame,
                     'com.sun.star.frame.Desktop': desktop}
+        ui_services, config, factory, element = bootstrap_services(calls)
+        services.update(ui_services)
         context = SimpleNamespace(ServiceManager=SimpleNamespace(createInstanceWithContext=lambda n, c: services[n]))
         uno = SimpleNamespace(Any=lambda t, value: (t, value), createUnoStruct=lambda name: SimpleNamespace())
         windows = SimpleNamespace(validate_parent=lambda hwnd: None, validate_child=lambda child, parent: calls.append(('validated', child, parent)))
@@ -485,7 +508,14 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertEqual(0, props['MacroExecutionMode'])
         self.assertEqual(0, props['UpdateDocMode'])
         self.assertFalse(props['ReadOnly'])
+        self.assertFalse(props['Hidden'])
         self.assertTrue(calls.index(('append', frame)) < next(i for i, c in enumerate(calls) if c[0] == 'load'))
+        self.assertLess(calls.index(('ui-window',)), calls.index(('ui-dispose',)))
+        self.assertLess(calls.index(('ui-dispose',)), next(i for i, c in enumerate(calls) if c[0] == 'load'))
+        created = next(call for call in calls if call[0] == 'ui-create')
+        self.assertTrue(created[1].startswith('private:resource/toolbar/opengeul_bootstrap_'))
+        self.assertIs(config, created[2]['ConfigurationSource'])
+        self.assertIs(frame, created[2]['Frame'])
 
     def test_native_save_failure_keeps_model_and_discard_close_veto_restores_dirty(self):
         from types import SimpleNamespace
@@ -719,6 +749,42 @@ class NativeBoundaryTests(unittest.TestCase):
             self.assertEqual('unsupported_platform', caught.exception.code)
 
 
+class UiBootstrapBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        from types import SimpleNamespace as NS
+        self.native = importlib.import_module('native')
+        self.calls = []
+        self.backend = self.native.UnoBackend(Path(tempfile.gettempdir()))
+        self.backend.frame = object()
+        self.backend.uno = NS(createUnoStruct=lambda name: NS())
+        self.services, self.config, self.factory, self.element = bootstrap_services(self.calls)
+
+    def service(self, name):
+        return self.services[name]
+
+    def test_bootstrap_disposes_created_element_when_native_window_is_missing(self):
+        self.element.getRealInterface = lambda: None
+        with self.assertRaises(self.native.WorkerError) as caught:
+            self.backend._bootstrap_ui(self.service, MODULES['calc'])
+        self.assertEqual('ui_bootstrap_failed', caught.exception.code)
+        self.assertIn(('ui-dispose',), self.calls)
+
+    def test_factory_failure_is_not_swallowed_and_preserves_its_cause(self):
+        failure = RuntimeError('configuration factory failed')
+        def fail(*args): raise failure
+        self.factory.createUIElement = fail
+        with self.assertRaises(self.native.WorkerError) as caught:
+            self.backend._bootstrap_ui(self.service, MODULES['calc'])
+        self.assertEqual('ui_bootstrap_failed', caught.exception.code)
+        self.assertIs(failure, caught.exception.__cause__)
+
+    def test_existing_toolbar_settings_cannot_create_actionable_bootstrap_controls(self):
+        self.config.hasSettings = lambda url: True
+        with self.assertRaises(self.native.WorkerError):
+            self.backend._bootstrap_ui(self.service, MODULES['calc'])
+        self.assertFalse(any(call[0] == 'ui-create' for call in self.calls))
+
+
 class NewBaseBoundaryTests(unittest.TestCase):
     def setUp(self):
         from types import SimpleNamespace as NS
@@ -742,13 +808,16 @@ class NewBaseBoundaryTests(unittest.TestCase):
         self.live = NS(isModified=lambda: False, getTitle=lambda: '새 데이터베이스',
                        setModified=lambda value: self.fail('live user model modified flag must not be cleared'),
                        dispose=lambda: self.fail('live user model must not be disposed during creation'))
-        peer = NS(setPosSize=lambda *a: None, setVisible=lambda value: None, getWindowHandle=lambda *a: 456)
+        peer = NS(setPosSize=lambda *a: None, setVisible=lambda value: self.calls.append(('visible', value)), getWindowHandle=lambda *a: 456)
         frame = NS(initialize=lambda p: None, setName=lambda name: self.calls.append(('frame', name)),
-                   registerDispatchProviderInterceptor=lambda interceptor: None, activate=lambda: None)
+                   registerDispatchProviderInterceptor=lambda interceptor: None, activate=lambda: self.calls.append(('activate',)))
         desktop = NS(getFrames=lambda: NS(append=lambda f: None),
                      loadComponentFromURL=lambda *args: self.calls.append(('load', args)) or self.live)
         services = {'com.sun.star.frame.Desktop': desktop, 'com.sun.star.awt.Toolkit': NS(createSystemChild=lambda *a: peer),
                     'com.sun.star.frame.Frame': frame, 'com.sun.star.sdb.OfficeDatabaseDocument': self.generated}
+        ui_services, config, factory, element = bootstrap_services(self.calls)
+        self.ui_factory = factory
+        services.update(ui_services)
         context = NS(ServiceManager=NS(createInstanceWithContext=lambda name, ctx: services[name]))
         uno = NS(Any=lambda kind, value: value, createUnoStruct=lambda name: NS())
         windows = NS(validate_parent=lambda hwnd: None, validate_child=lambda *a: None)
@@ -791,6 +860,15 @@ class NewBaseBoundaryTests(unittest.TestCase):
         self.assertFalse(any(call[0] in ('store', 'source', 'generated-close') for call in self.calls))
         self.assertEqual(existing.as_uri(), next(call[1][0] for call in self.calls if call[0] == 'load'))
         self.assertEqual(b'user document', existing.read_bytes())
+
+    def test_ui_bootstrap_failure_never_creates_loads_or_shows_a_document(self):
+        def fail(*args):
+            raise RuntimeError('bootstrap factory failure')
+        self.ui_factory.createUIElement = fail
+        with self.assertRaises(self.native.WorkerError) as caught:
+            self.backend.attach(123, self.module, 640, 480, None)
+        self.assertEqual('ui_bootstrap_failed', caught.exception.code)
+        self.assertFalse(any(call[0] in ('load', 'source', 'store', 'visible', 'activate') for call in self.calls))
 
     def test_new_base_failure_disposes_only_generated_model_and_never_loads(self):
         def failed_store(*args):

@@ -201,15 +201,17 @@ class NativeDiagnosticsTests(unittest.TestCase):
         backend._start_runtime = lambda: None
         evidence = self.root / 'evidence'
         with patch.dict(os.environ, {'OPENGEUL_SUITE_DIAGNOSTICS': str(evidence)}), \
+                patch.object(backend, '_bootstrap_ui', return_value=None), \
                 patch.object(native, 'make_interceptor', return_value=object()), \
                 patch.object(native, 'make_interaction_handler', return_value=object()), redirect_stderr(io.StringIO()):
             with self.assertRaises(RuntimeError) as caught:
                 backend.attach(123, {'factory': 'private:factory/scalc'}, 640, 480, self.root / 'test.xlsx')
         self.assertIs(original, caught.exception)
         events = [json.loads(line) for line in next(evidence.glob('*/events.jsonl')).read_text().splitlines()]
-        self.assertEqual(['before-load', 'load-exception'], [event['phase'] for event in events])
+        self.assertEqual(['before-ui-bootstrap', 'after-ui-bootstrap', 'before-load', 'load-exception'],
+                         [event['phase'] for event in events])
         self.assertTrue(events[0]['processes'][0]['alive'])
-        self.assertEqual(0xC0000005, events[1]['processes'][0]['exitCode'])
+        self.assertEqual(0xC0000005, events[-1]['processes'][0]['exitCode'])
         backend.diagnostics.close()
 
 
