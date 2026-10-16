@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "version": "0.1.0-dev",
+  "productName": "OpenGeul Office",
+  "vendor": "ATLKR",
+  "runtime": {
+    "directory": "Office",
+    "executable": "program/soffice.exe",
+    "python": "program/python.exe",
+    "profileDirectory": "OpenGeul/Office/4"
+  },
+  "modules": {
+    "hwp": {
+      "displayName": "OpenGeul HWP",
+      "factory": null,
+      "extensions": ["hwp", "hwpx"],
+      "filters": {},
+      "executable": "HWP/OpenGeul.exe"
+    },
+    "writer": {
+      "displayName": "OpenGeul Writer",
+      "factory": "private:factory/swriter",
+      "extensions": ["odt", "docx", "doc", "rtf", "txt"],
+      "filters": {
+        "odt": "writer8", "docx": "Office Open XML Text", "doc": "MS Word 97",
+        "rtf": "Rich Text Format", "txt": "Text"
+      }
+    },
+    "calc": {
+      "displayName": "OpenGeul Calc",
+      "factory": "private:factory/scalc",
+      "extensions": ["ods", "xlsx", "xls", "csv"],
+      "filters": {
+        "ods": "calc8", "xlsx": "Calc MS Excel 2007 XML", "xls": "MS Excel 97",
+        "csv": "Text - txt - csv (StarCalc)"
+      }
+    },
+    "impress": {
+      "displayName": "OpenGeul Impress",
+      "factory": "private:factory/simpress",
+      "extensions": ["odp", "pptx", "ppt"],
+      "filters": {"odp": "impress8", "pptx": "Impress MS PowerPoint 2007 XML", "ppt": "MS PowerPoint 97"}
+    },
+    "draw": {
+      "displayName": "OpenGeul Draw",
+      "factory": "private:factory/sdraw",
+      "extensions": ["odg"],
+      "filters": {"odg": "draw8"}
+    },
+    "math": {
+      "displayName": "OpenGeul Math",
+      "factory": "private:factory/smath",
+      "extensions": ["odf"],
+      "filters": {"odf": "math8"}
+    },
+    "base": {
+      "displayName": "OpenGeul Base",
+      "factory": "private:factory/sdatabase",
+      "extensions": ["odb"],
+      "filters": {"odb": "StarOffice XML (Base)"}
+    }
+  }
+}
