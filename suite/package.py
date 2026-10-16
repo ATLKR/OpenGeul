@@ -59,6 +59,8 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
     shutil.copy2(product_path, output/'suite-product.json')
     notices = output/'Notices'; notices.mkdir()
     shutil.copy2(ROOT/'LICENSE', notices/'OpenGeul-Office-LICENSE.txt')
+    for notice in sorted((ROOT/'suite/notices').glob('*.txt')):
+        shutil.copy2(notice, notices/notice.name)
     licenses = sorted(path for path in runtime.iterdir() if path.is_file()
                       and path.name.casefold() in ('license', 'license.txt', 'license.html'))
     if not licenses: raise ValueError('Original Office runtime license is missing')
