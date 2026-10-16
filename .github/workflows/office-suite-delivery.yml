@@ -110,12 +110,16 @@ jobs:
               # This separate anonymous request never receives the GitHub credential.
               try:
                   anonymous_request = urllib.request.Request(location, headers={'User-Agent': 'OpenGeul-draft-delivery'})
-                  with opener.open(anonymous_request, timeout=120) as response, target.open('xb') as output:
+                  with urllib.request.urlopen(anonymous_request, timeout=120) as response, target.open('xb') as output:
                       while block := response.read(1024 * 1024):
                           count += len(block)
                           require(count <= expected_size, 'Artifact exceeds the pinned size')
                           digest.update(block)
                           output.write(block)
+              except urllib.error.HTTPError as error:
+                  code = error.code
+                  error.close()
+                  raise RuntimeError('Anonymous artifact download failed: HTTP ' + str(code)) from None
               except Exception as error:
                   # Signed storage URLs must never appear in exception logs.
                   raise RuntimeError('Anonymous artifact download failed: ' + type(error).__name__) from None
