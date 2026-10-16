@@ -54,7 +54,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         file.DropDownItems.Add(new ToolStripMenuItem("닫기", null, (_, _) => Close()));
         menu.Items.Add(file);
         MainMenuStrip = menu;
-        var status = new StatusStrip();
+        var status = new StatusStrip { ShowItemToolTips = true };
         status.Items.Add(statusLabel);
         status.Items.Add(new ToolStripStatusLabel(module.DisplayName));
         Controls.Add(editorPanel);
@@ -175,7 +175,11 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         var title = result.TryGetProperty("title", out var titleValue) ? titleValue.GetString() : null;
         if (string.IsNullOrWhiteSpace(title)) title = path is null ? "새 문서" : Path.GetFileName(path);
         Text = $"{(modified ? "* " : "")}{title} — {module.DisplayName}";
-        SetStatus(modified ? "변경 내용이 있습니다." : path is null ? "준비 · 새 문서" : "준비 · 저장됨");
+        string? readinessMessage = null;
+        if (result.TryGetProperty("readiness", out var readiness) && readiness.ValueKind == JsonValueKind.Object
+            && readiness.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String)
+            readinessMessage = message.GetString();
+        SetStatus(DocumentStatusText.Format(module.Id, modified, path is not null, readinessMessage));
     }
 
     private async Task<bool> SaveDocumentAsync(bool saveAs)
@@ -297,7 +301,12 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         catch (Exception e) { SetStatus("문서 작업자 종료를 확인하지 못했습니다. " + e.Message); }
     }
 
-    private void SetStatus(string text) { if (!IsDisposed) statusLabel.Text = text.Replace('\r', ' ').Replace('\n', ' '); }
+    private void SetStatus(string text)
+    {
+        if (IsDisposed) return;
+        statusLabel.Text = text.Replace('\r', ' ').Replace('\n', ' ');
+        statusLabel.ToolTipText = text;
+    }
     private void EnableSave(bool enabled) { saveMenu.Enabled = enabled; saveAsMenu.Enabled = enabled; }
 }
 

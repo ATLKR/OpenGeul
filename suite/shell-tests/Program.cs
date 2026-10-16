@@ -124,6 +124,21 @@ Test("worker launch keeps unicode paths in structured arguments and UTF-8 protoc
     Equal("1", start.Environment["PYTHONDONTWRITEBYTECODE"]);
     Equal("utf-8", start.Environment["PYTHONIOENCODING"]);
 });
+Test("Base clean status preserves unverified connection readiness message", () =>
+    Equal("저장됨 · 연결과 Java 사용 가능 여부가 확인되지 않았습니다.",
+        DocumentStatusText.Format("base", false, true, "연결과 Java 사용 가능 여부가 확인되지 않았습니다.")));
+Test("Base dirty status keeps the worker readiness message visible", () =>
+    Equal("변경 내용이 있습니다. · 데이터베이스 연결을 확인해 주세요.",
+        DocumentStatusText.Format("base", true, true, "데이터베이스 연결을 확인해 주세요.")));
+Test("Base missing readiness does not claim database is ready", () =>
+    Equal("새 문서 · 데이터베이스 연결과 추가 구성 요소의 준비 상태가 확인되지 않았습니다.",
+        DocumentStatusText.Format("base", false, false, null)));
+Test("ordinary module status is unchanged by Base readiness metadata", () =>
+{
+    Equal("준비 · 저장됨", DocumentStatusText.Format("writer", false, true, "연결 확인 필요"));
+    Equal("준비 · 새 문서", DocumentStatusText.Format("calc", false, false, null));
+    Equal("변경 내용이 있습니다.", DocumentStatusText.Format("impress", true, true, null));
+});
 
 // Removing a cancel branch or closing after a failed save must break these close-flow tests.
 AsyncTest("cancel dirty close preserves the document", async () =>
