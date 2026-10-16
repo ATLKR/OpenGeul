@@ -1,0 +1,120 @@
+name: OpenGeul embedded startup diagnosis
+'on':
+  push:
+    branches: [work/suite-startup-diagnostics]
+permissions:
+  contents: read
+  actions: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  startup:
+    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        repetition: [1, 2, 3]
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Observe genuine hosted Korean input availability
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        New-Item -ItemType Directory -Path .work/probe -Force | Out-Null
+        $probe = [ordered]@{
+          computer = $env:COMPUTERNAME
+          basicKorean = @(Get-WindowsCapability -Online -Name 'Language.Basic~~~ko-KR~0.0.1.0' | Select-Object Name,State)
+          koreanFonts = @(Get-WindowsCapability -Online -Name 'Language.Fonts.Kore~~~und-KORE~0.0.1.0' | Select-Object Name,State)
+          languages = @(Get-WinUserLanguageList | ForEach-Object { [ordered]@{tag=$_.LanguageTag; tips=@($_.InputMethodTips)} })
+          koreanImeDirectory = Test-Path "$env:windir/System32/InputMethod/IME/ko-KR"
+          keyboardRegistration = Test-Path 'Registry::HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Control/Keyboard Layouts/00000412'
+          koreanTips = @(Get-ChildItem 'Registry::HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/CTF/TIP' -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '0x00000412' } | ForEach-Object {$_.Name})
+        }
+        $probe | ConvertTo-Json -Depth 8 | Set-Content .work/probe/host-korean.json -Encoding UTF8
+    - name: Recover exact previously validated runtime without rebuilding it
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      shell: python
+      run: |
+        import hashlib, json, os, pathlib, urllib.error, urllib.parse, urllib.request, zipfile
+        repository = 'ATLKR/OpenGeul'
+        expected_head = '579511489f9def03dd8d894ef249fd8ed9c8fa10'
+        api = 'https://api.github.com/repos/' + repository
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args): return None
+        authenticated = urllib.request.build_opener(NoRedirect())
+        headers = {'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'], 'Accept': 'application/vnd.github+json', 'User-Agent': 'OpenGeul-startup-diagnosis'}
+        def metadata(path):
+            with authenticated.open(urllib.request.Request(api + path, headers=headers), timeout=60) as response:
+                return json.load(response)
+        run = metadata('/actions/runs/38909448104')
+        assert run['conclusion'] == 'success' and run['head_sha'] == expected_head
+        artifact = metadata('/actions/artifacts/12049897911')
+        assert artifact['workflow_run']['id'] == 38909448104 and artifact['workflow_run']['head_sha'] == expected_head and not artifact['expired']
+        request = urllib.request.Request(api + '/actions/artifacts/12049897911/zip', headers=headers)
+        try:
+            authenticated.open(request, timeout=60)
+            raise RuntimeError('Expected archive redirect')
+        except urllib.error.HTTPError as error:
+            assert error.code == 302
+            location = error.headers['Location']
+            error.close()
+        parsed = urllib.parse.urlsplit(location)
+        assert parsed.scheme == 'https' and parsed.hostname.endswith(('.blob.core.windows.net', '.githubusercontent.com'))
+        root = pathlib.Path('.work/runtime-input'); root.mkdir(parents=True)
+        outer = root / 'original-artifact.zip'
+        try:
+            with urllib.request.urlopen(location, timeout=120) as response, outer.open('xb') as target:
+                while block := response.read(1024 * 1024): target.write(block)
+        except urllib.error.HTTPError as error:
+            raise RuntimeError('Anonymous storage HTTP ' + str(error.code)) from None
+        except Exception as error:
+            raise RuntimeError('Anonymous storage download failed: ' + type(error).__name__) from None
+        assert outer.stat().st_size == 592780912
+        with outer.open('rb') as stream:
+            assert hashlib.file_digest(stream, 'sha256').hexdigest() == 'e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d'
+        with zipfile.ZipFile(outer) as archive:
+            assert archive.namelist() == ['OpenGeul-Office-0.1.0-dev-windows-x64.zip']
+            archive.extract(archive.namelist()[0], root)
+        inner = root / 'OpenGeul-Office-0.1.0-dev-windows-x64.zip'
+        with inner.open('rb') as stream:
+            assert hashlib.file_digest(stream, 'sha256').hexdigest() == '87571bfa914950876837bc79e431168056a65fa357fadcafb0030463b9b25995'
+        with zipfile.ZipFile(inner) as archive:
+            assert archive.testzip() is None
+            archive.extractall('.work/runtime')
+        provenance = json.loads(pathlib.Path('.work/runtime/suite-provenance.json').read_text(encoding='utf-8'))
+        assert provenance['sourceCommit'] == expected_head
+    - name: Create fresh exact engine fixtures
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py .work/runtime
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned diagnostic runtime inventory failed.' }
+        & ./.work/runtime/Office/program/python.exe suite/e2e/engine_smoke.py --suite .work/runtime --output .work/startup-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh engine fixtures failed.' }
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Diagnostic GUI prerequisites failed.' }
+    - name: Require every one of forty independent native startups
+      shell: pwsh
+      run: |
+        python suite/e2e/startup_smoke.py --suite .work/runtime --fixtures .work/startup-engine/fixtures --output .work/startup-native --attempts 40
+        if ($LASTEXITCODE -ne 0) { throw 'At least one independent startup failed; original diagnostics retained.' }
+        python suite/scripts/verify-suite.py .work/runtime
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during diagnostic starts.' }
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: opengeul-startup-${{ matrix.repetition }}-${{ github.run_id }}
+        path: |
+          .work/probe/
+          .work/startup-engine/
+          .work/startup-native/
+        retention-days: 1
+        if-no-files-found: error
