@@ -547,17 +547,16 @@ def failed_saveas(case):
             observed = native.wait_for(expected_error, 35)
         kind, dialog, owner, accessible, texts = observed
         assert kind == 'failure', 'Save As did not produce a real recognized write denial'
-        buttons = [item for item in accessible.descendants(control_type='Button') if item.element_info.automation_id == '1' and item.is_visible() and item.is_enabled()]
-        assert len(buttons) == 1, 'Expected actual save-error OK control 1 is missing'
         caption = case.api.title(dialog)
         native.require_dialog_identity(case.api.pid(dialog), case.process.pid, case.api.user.GetWindow(dialog, 4), owner,
                                        caption, caption, case.api.class_name(dialog))
+        button = owned_dialog_button(accessible, case.process.pid, ('OK', '&OK', '확인'))
         case.screenshot(dialog, 'actual-saveas-error')
         case.record.update(actualSaveAsFailureVerified=True, failureSurface='suite-worker' if owner == hwnd else 'native-picker',
                            saveErrorCaption=caption, saveErrorText=texts)
         Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
         case.api.require_foreground(dialog)
-        buttons[0].click_input()
+        button.click_input()
         native.wait_for(lambda: not case.api.user.IsWindow(dialog), 20)
         if case.api.user.IsWindow(picker):
             # The attempted write was denied by the standard picker before dispatch.
