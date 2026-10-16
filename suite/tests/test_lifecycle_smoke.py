@@ -232,7 +232,7 @@ class LifecycleSmokeTests(unittest.TestCase):
                 return 1
             def clock(self, pointer):
                 pointer._obj.dwLowDateTime, pointer._obj.dwHighDateTime = 1000, 1
-        executable = Path('/owned/OpenGeul.exe')
+        executable = Path('/owned/OpenGeul.exe').resolve()
         rows = [(106, 99, 'OpenGeul.exe', str(executable)),
                 (107, 31, 'OpenGeul.exe', '/foreign/OpenGeul.exe'),
                 (108, 31, 'OpenGeul.exe', str(executable)),
