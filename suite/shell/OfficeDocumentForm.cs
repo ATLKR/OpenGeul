@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using OpenGeul.Office.Core;
@@ -82,15 +81,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         loading = true;
         try
         {
-            var runtime = Path.Combine(packageRoot, "Office");
-            var start = new ProcessStartInfo(Path.Combine(runtime, "program", "python.exe"))
-            {
-                WorkingDirectory = packageRoot,
-                ArgumentList = { "-u", Path.Combine(packageRoot, "worker", "office_worker.py"), "--runtime", runtime }
-            };
-            start.Environment["PYTHONDONTWRITEBYTECODE"] = "1";
-            start.Environment["PYTHONIOENCODING"] = "utf-8";
-            worker = WorkerClient.Start(start);
+            worker = WorkerClient.Start(WorkerLaunch.Create(packageRoot));
             worker.CommandReceived += OnWorkerCommand;
             var size = EditorSize();
             var request = new Dictionary<string, object>

@@ -91,6 +91,39 @@ Test("CLI rejects conflicting module and file", () =>
     Throws<SuiteException>(() => StartupRequest.Parse(["--module", "writer", "--file", "C:\\문서\\a.xlsx"], SuiteManifest.Parse(manifestJson))));
 Test("CLI rejects unknown arguments without shell interpretation", () =>
     Throws<SuiteException>(() => StartupRequest.Parse(["--module", "writer", "--unknown"], SuiteManifest.Parse(manifestJson))));
+Test("worker launch prepends bundled program to process-local PATH", () =>
+{
+    var inheritedPath = Environment.GetEnvironmentVariable("PATH");
+    var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
+    var start = WorkerLaunch.Create(root);
+    var program = Path.Combine(root, "Office", "program");
+    Equal(program + (string.IsNullOrEmpty(inheritedPath) ? "" : Path.PathSeparator + inheritedPath), start.Environment["PATH"]);
+    Equal(inheritedPath, Environment.GetEnvironmentVariable("PATH"));
+});
+Test("worker launch preserves inherited environment without exposing values", () =>
+{
+    var start = WorkerLaunch.Create(Path.Combine(Path.GetTempPath(), "OpenGeul"));
+    foreach (System.Collections.DictionaryEntry variable in Environment.GetEnvironmentVariables())
+    {
+        var name = (string)variable.Key;
+        if (new[] { "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONIOENCODING" }.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+        Equal(true, start.Environment.TryGetValue(name, out var value) && value == (string?)variable.Value);
+    }
+});
+Test("worker launch keeps unicode paths in structured arguments and UTF-8 protocol", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
+    var start = WorkerLaunch.Create(root);
+    Equal(Path.Combine(root, "Office", "program", "python.exe"), start.FileName);
+    Equal(root, start.WorkingDirectory);
+    Equal("", start.Arguments);
+    Equal("-u", start.ArgumentList[0]);
+    Equal(Path.Combine(root, "worker", "office_worker.py"), start.ArgumentList[1]);
+    Equal("--runtime", start.ArgumentList[2]);
+    Equal(Path.Combine(root, "Office"), start.ArgumentList[3]);
+    Equal("1", start.Environment["PYTHONDONTWRITEBYTECODE"]);
+    Equal("utf-8", start.Environment["PYTHONIOENCODING"]);
+});
 
 // Removing a cancel branch or closing after a failed save must break these close-flow tests.
 AsyncTest("cancel dirty close preserves the document", async () =>
