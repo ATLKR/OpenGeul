@@ -10,9 +10,11 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from suite.payload import create_inventory, verify_payload
+from suite import payload
 
 
 def digest(data):
@@ -347,6 +349,61 @@ class PayloadTests(unittest.TestCase):
     def test_managed_x86_executable_cannot_replace_native_x64_apphost(self):
         self.write('OpenGeul.Office.exe', pe(0x14c, managed=True))
         with self.assertRaisesRegex(ValueError, 'x64|architecture'):
+            create_inventory(self.root)
+
+    def test_exact_pinned_companion_remains_completely_inventoried(self):
+        name = 'Office/program/twain32shim.exe'
+        data = pe(0x14c)
+        self.write(name, data)
+        with patch.dict(payload.COMPANION_PE_ADMISSIONS, {name: {
+                'machine': 0x14c, 'sha256': digest(data), 'role': 'x86CompatibilityHelper'}}):
+            receipt = create_inventory(self.root)
+            self.assertEqual(receipt['files'][name], {'size': len(data), 'sha256': digest(data)})
+            verify_payload(self.root, receipt)
+            self.write(name, data+b'altered')
+            with self.assertRaisesRegex(ValueError, 'companion'):
+                create_inventory(self.root)
+
+    def test_companion_path_and_expected_machine_cannot_be_substituted(self):
+        name = 'Office/program/twain32shim.exe'
+        data = pe(0xaa64)
+        self.write(name, data)
+        with patch.dict(payload.COMPANION_PE_ADMISSIONS, {name: {
+                'machine': 0x14c, 'sha256': digest(data), 'role': 'x86CompatibilityHelper'}}):
+            with self.assertRaisesRegex(ValueError, 'companion'):
+                create_inventory(self.root)
+        (self.root/name).unlink()
+        self.write('Office/program/renamed-helper.exe', pe(0x14c))
+        with self.assertRaisesRegex(ValueError, 'x64|architecture'):
+            create_inventory(self.root)
+
+    def test_official_companion_path_alone_does_not_allow_unreviewed_bytes(self):
+        self.write('Office/program/twain32shim.exe', pe(0x14c))
+        with self.assertRaises(ValueError):
+            create_inventory(self.root)
+
+    def test_pinned_publisher_policy_can_be_x86_required_without_weakening_anycpu_rule(self):
+        name = 'Office/program/policy.1.0.cli_cppuhelper.dll'
+        data = pe(0x14c, managed=True, flags=0xb, dll=True)
+        self.write(name, data)
+        with patch.dict(payload.COMPANION_PE_ADMISSIONS, {name: {
+                'machine': 0x14c, 'sha256': digest(data), 'role': 'managedPublisherPolicy'}}):
+            create_inventory(self.root)
+        self.write('OpenGeul.Office.dll', data)
+        (self.root/name).unlink()
+        with self.assertRaises(ValueError):
+            create_inventory(self.root)
+
+    def test_pinned_arm64_launcher_template_is_a_named_hashed_asset_only(self):
+        name = 'Office/program/python-core-3.13.15/lib/setuptools/cli-arm64.exe'
+        data = pe(0xaa64)
+        self.write(name, data)
+        with patch.dict(payload.COMPANION_PE_ADMISSIONS, {name: {
+                'machine': 0xaa64, 'sha256': digest(data), 'role': 'pythonLauncherTemplate'}}):
+            create_inventory(self.root)
+        (self.root/name).unlink()
+        self.write('Office/program/python.exe', data)
+        with self.assertRaises(ValueError):
             create_inventory(self.root)
 
     def test_source_archive_requires_safe_source_entries_and_matching_git_commit(self):

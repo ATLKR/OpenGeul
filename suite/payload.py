@@ -40,6 +40,52 @@ RESERVED = re.compile(r'(?i)(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:
 CULTURE = re.compile(r'[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*\Z')
 MAX_FILES = 100_000
 MAX_METADATA = 8 * 1024 * 1024
+# Exact companion bytes from the authenticated LibreOffice 26.8.1.1 x64 MSI:
+# c6298b10cfa1748bcbedad94c62ce771e240e5021bfd6d7a967cd571b04b5312.
+# These optional compatibility components and Python cross-platform launcher
+# templates are not Suite native hosts. New paths/versions require review.
+# Inventory schema stays unchanged: every admitted asset still has its full hash.
+COMPANION_PE_ADMISSIONS = {
+    'Office/program/twain32shim.exe': {
+        'machine': 0x14c, 'role': 'x86CompatibilityHelper',
+        'sha256': 'e8c0e07120c789b8c59e6723a9b11d638982805549d46247566847dd7b51a06e'},
+    'Office/program/spsupp_x86.dll': {
+        'machine': 0x14c, 'role': 'x86CompatibilityHelper',
+        'sha256': '79f39ee0c430d9129dc33905f47d5d89b87a2268055807888fcee77d239119c9'},
+    'Office/program/policy.1.0.cli_cppuhelper.dll': {
+        'machine': 0x14c, 'role': 'managedPublisherPolicy',
+        'sha256': 'b72b73d325847ecb8dae62bead73b58d9c79dd718d797664bcfde790753dcb00'},
+    'Office/program/python-core-3.13.15/lib/setuptools/gui-32.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c'},
+    'Office/program/python-core-3.13.15/lib/setuptools/gui.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c'},
+    'Office/program/python-core-3.13.15/lib/setuptools/cli.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb'},
+    'Office/program/python-core-3.13.15/lib/setuptools/gui-arm64.exe': {
+        'machine': 0xaa64, 'role': 'pythonLauncherTemplate',
+        'sha256': 'e694f4743405c8b5926ff457db6fe7f1a12dec7c16a9c3864784d3f4e07ae097'},
+    'Office/program/python-core-3.13.15/lib/setuptools/cli-32.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb'},
+    'Office/program/python-core-3.13.15/lib/setuptools/cli-arm64.exe': {
+        'machine': 0xaa64, 'role': 'pythonLauncherTemplate',
+        'sha256': 'b9a7d08da880dfac8bcf548eba4b06fb59b6f09b17d33148a0f6618328926c61'},
+    'Office/program/python-core-3.13.15/lib/pip/_vendor/distlib/t64-arm.exe': {
+        'machine': 0xaa64, 'role': 'pythonLauncherTemplate',
+        'sha256': 'ebc4c06b7d95e74e315419ee7e88e1d0f71e9e9477538c00a93a9ff8c66a6cfc'},
+    'Office/program/python-core-3.13.15/lib/pip/_vendor/distlib/w32.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '47872cc77f8e18cf642f868f23340a468e537e64521d9a3a416c8b84384d064b'},
+    'Office/program/python-core-3.13.15/lib/pip/_vendor/distlib/w64-arm.exe': {
+        'machine': 0xaa64, 'role': 'pythonLauncherTemplate',
+        'sha256': 'c5dc9884a8f458371550e09bd396e5418bf375820a31b9899f6499bf391c7b2e'},
+    'Office/program/python-core-3.13.15/lib/pip/_vendor/distlib/t32.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '6b4195e640a85ac32eb6f9628822a622057df1e459df7c17a12f97aeabc9415b'},
+}
 
 
 def _name(name: str) -> str:
@@ -273,8 +319,8 @@ def _metadata(root: Path, files: dict):
         aliases.add(name.casefold())
 
 
-def _pe(path: Path):
-    """Accept native AMD64 or an actual IL-only AnyCPU DLL, never ARM64."""
+def _pe(path: Path, *, companion: dict | None = None):
+    """Keep x64 hosts strict; admit only explicitly pinned optional companions."""
     size = path.stat().st_size
     with path.open('rb') as stream:
         def read(offset, length):
@@ -305,6 +351,17 @@ def _pe(path: Path):
             if raw_offset+raw_size > size:
                 raise ValueError(f'Truncated PE section: {path.name}')
             section_ranges.append((rva, raw_size, raw_offset))
+        role = None
+        if companion is not None:
+            role = companion['role']
+            expected_magic = 0x10b if companion['machine'] == 0x14c else 0x20b
+            if (machine != companion['machine'] or magic != expected_magic
+                    or _hash(path) != companion['sha256']
+                    or role not in ('x86CompatibilityHelper', 'pythonLauncherTemplate', 'managedPublisherPolicy')
+                    or (role != 'pythonLauncherTemplate' and machine != 0x14c)):
+                raise ValueError(f'Pinned Office companion bytes/architecture mismatch: {path.name}')
+            if role in ('x86CompatibilityHelper', 'pythonLauncherTemplate'):
+                return
         if machine == 0x8664 and magic == 0x20b:
             return
         if machine != 0x14c or magic != 0x10b or path.suffix.lower() != '.dll' or not characteristics & 0x2000:
@@ -324,7 +381,10 @@ def _pe(path: Path):
         clr = at_rva(clr_rva, 72)
         cb = struct.unpack_from('<I', clr)[0]
         metadata_rva, metadata_size, flags = struct.unpack_from('<III', clr, 8)
-        if (cb < 72 or cb > clr_size or not flags & 1 or flags & (2 | 16 | 0x20000)
+        # The pinned publisher policy is an upstream strong-named x86 assembly
+        # (0x0b), not an AnyCPU host; retain its CLR metadata checks separately.
+        invalid_flags = flags != 0xb if role == 'managedPublisherPolicy' else not flags & 1 or flags & (2 | 16 | 0x20000)
+        if (cb < 72 or cb > clr_size or invalid_flags
                 or metadata_size < 16 or at_rva(metadata_rva, metadata_size)[:4] != b'BSJB'):
             raise ValueError(f'Non-x64 DLL must be IL-only AnyCPU: {path.name}')
 
@@ -336,7 +396,7 @@ def _validate(root: Path, files: dict):
         with path.open('rb') as stream:
             magic = stream.read(2)
         if magic == b'MZ' or path.suffix.lower() in ('.exe', '.dll', '.pyd') or name == 'Office/program/soffice.bin':
-            _pe(path)
+            _pe(path, companion=COMPANION_PE_ADMISSIONS.get(name))
 
 
 def create_inventory(root: Path) -> dict:
