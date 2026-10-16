@@ -20,6 +20,13 @@ UI_MODULE_SERVICES = {
     'private:factory/sdatabase': 'com.sun.star.sdb.OfficeDatabaseDocument',
 }
 
+TABBED_MODULES = {
+    'private:factory/swriter': 'Writer',
+    'private:factory/scalc': 'Calc',
+    'private:factory/simpress': 'Impress',
+    'private:factory/sdraw': 'Draw',
+}
+
 
 class PrivateProfile:
     """Explicit cleanup only: losing stdin must never delete a live office profile."""
@@ -141,6 +148,7 @@ class UnoBackend:
         self.command_handler = lambda command, target_module=None: None
         self.module_factory = None
         self.diagnostics = None
+        self.ui_style_isolation = None
 
     def _diagnose(self, phase):
         if self.diagnostics is None and not os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS'):
@@ -156,7 +164,10 @@ class UnoBackend:
                     print('OpenGeul native diagnostics directory: ' + str(self.diagnostics.directory),
                           file=sys.stderr, flush=True)
             if self.diagnostics is not None:
-                self.diagnostics.record(phase)
+                if phase == 'after-ui-bootstrap' and self.ui_style_isolation is not None:
+                    self.diagnostics.record(phase, metadata={'toolbarStyleIsolation': self.ui_style_isolation})
+                else:
+                    self.diagnostics.record(phase)
         except Exception as exc:
             print('OpenGeul native diagnostics: ' + type(exc).__name__ + ': ' + str(exc),
                   file=sys.stderr, flush=True)
@@ -229,6 +240,62 @@ class UnoBackend:
         except Exception as exc:
             raise WorkerError('ui_bootstrap_failed', 'Office 편집기 UI 설정을 초기화하지 못했습니다.') from exc
 
+    def _isolate_legacy_style_controls(self, service, module):
+        """Exclude the redundant legacy style combo in our standard Tabbed UI.
+
+        Pinned 26.8.1.1 can update a disposed StyleToolBoxControl inner widget.
+        ModuleUIConfigurationManager.getSettings(True) returns a writable copy;
+        replaceSettings changes its in-memory user layer. Never call store().
+        Tabbed Writer's StylesPreview controller remains; alternative Notebookbar
+        layouts and document-embedded UI configuration are outside this scope.
+        """
+        self.ui_style_isolation = None
+        application_name = TABBED_MODULES.get(module['factory'])
+        if application_name is None:
+            return None
+        try:
+            provider = service('com.sun.star.configuration.ConfigurationProvider')
+            access = provider.createInstanceWithArguments(
+                'com.sun.star.configuration.ConfigurationAccess',
+                (self._property('nodepath', '/org.openoffice.Office.UI.ToolbarMode'),))
+            application = access.getByName('Applications').getByName(application_name)
+            tabbed = application.getByName('Modes').getByName('Tabbed')
+            mode = {'active': application.getPropertyValue('Active'),
+                    'globalActive': access.getPropertyValue('Active' + application_name),
+                    'tabbedCommandArg': tabbed.getPropertyValue('CommandArg'),
+                    'hasNotebookbar': tabbed.getPropertyValue('HasNotebookbar')}
+            if (any(mode[key] != 'notebookbar.ui'
+                    for key in ('active', 'globalActive', 'tabbedCommandArg'))
+                    or mode['hasNotebookbar'] is not True):
+                raise RuntimeError('Legacy style isolation requires the standard Tabbed UI')
+            module_service = UI_MODULE_SERVICES[module['factory']]
+            supplier = service('com.sun.star.ui.ModuleUIConfigurationManagerSupplier')
+            config = supplier.getUIConfigurationManager(module_service)
+            removed = []
+            # UIElementType.TOOLBAR == 3. Do not alter menus or .ui widgets.
+            for info in config.getUIElementsInfo(3):
+                resource = {prop.Name: prop.Value for prop in info}.get('ResourceURL')
+                if not isinstance(resource, str) or not resource.startswith('private:resource/toolbar/'):
+                    continue
+                settings = config.getSettings(resource, True)
+                indices = [index for index in range(settings.getCount())
+                           if {prop.Name: prop.Value for prop in settings.getByIndex(index)}
+                           .get('CommandURL') == '.uno:StyleApply']
+                if not indices:
+                    continue
+                for index in reversed(indices):
+                    settings.removeByIndex(index)
+                config.replaceSettings(resource, settings)
+                removed.append({'resourceURL': resource, 'indices': indices,
+                                'commands': ['.uno:StyleApply'] * len(indices)})
+            receipt = {'schemaVersion': 1, 'moduleService': module_service,
+                       'moduleName': application_name, 'mode': mode,
+                       'removed': removed, 'stored': False}
+            self.ui_style_isolation = receipt
+            return receipt
+        except Exception as exc:
+            raise WorkerError('ui_style_isolation_failed', 'Office 리본의 스타일 도구 구성을 확인하지 못했습니다.') from exc
+
     def _new_base_url(self, service, module, interaction):
         # A noninteractive Base factory leaves URL="jdbc:" and selects Tables,
         # which can attempt that invalid connection. Initialize a local Firebird
@@ -291,6 +358,7 @@ class UnoBackend:
         self.desktop.getFrames().append(self.frame)
         self.peer.setPosSize(0, 0, width, height, 15)
         self._diagnose('before-ui-bootstrap')
+        self._isolate_legacy_style_controls(service, module)
         self._bootstrap_ui(service, module)
         self._diagnose('after-ui-bootstrap')
         self.interceptor = make_interceptor(self.command_handler)

@@ -129,7 +129,7 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         record.update(accessibilitySnapshot=snapshot_name,
                       accessibleControlCount=snapshot['nativeAccessibleContextCount'],
                       osScreenReaderExposureCertified=False)
-        assert not api.windows(office_pid), 'Office created an unowned visible top-level window'
+        assert not api.windows(office_pid), api.external_window_message(office_pid, 'Office created an unowned visible top-level window')
         record['noExternalOfficeWindow'] = True
         if not probe_only:
             record['stage'] = 'assert-korean-tabbed-ui'

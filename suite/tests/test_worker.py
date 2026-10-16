@@ -19,6 +19,50 @@ MODULES = {
 }
 
 
+class ToolbarSettings:
+    """Mutable clone at the UNO settings boundary, without mutating defaults."""
+    def __init__(self, items):
+        self.items = list(items)
+
+    def getCount(self):
+        return len(self.items)
+
+    def getByIndex(self, index):
+        return self.items[index]
+
+    def removeByIndex(self, index):
+        del self.items[index]
+
+
+class ModuleToolbarConfiguration:
+    def __init__(self, calls, resources=None):
+        self.calls = calls
+        self.defaults = resources or {}
+        self.replacements = {}
+
+    def hasSettings(self, resource):
+        return resource in self.defaults or resource in self.replacements
+
+    def getUIElementsInfo(self, element_type):
+        from types import SimpleNamespace as NS
+        if element_type != 3:
+            raise AssertionError('Only legacy TOOLBAR configuration may be queried')
+        self.calls.append(('ui-style-info', element_type))
+        return tuple((NS(Name='ResourceURL', Value=url),) for url in self.defaults)
+
+    def getSettings(self, resource, writable):
+        self.calls.append(('ui-style-settings', resource, writable))
+        items = self.replacements.get(resource, self.defaults[resource])
+        return ToolbarSettings(items)
+
+    def replaceSettings(self, resource, settings):
+        self.calls.append(('ui-style-replace', resource))
+        self.replacements[resource] = tuple(settings.items)
+
+    def store(self):
+        raise AssertionError('Settings must never be persisted')
+
+
 def bootstrap_services(calls):
     """Fake only the public UNO factory/configuration boundaries."""
     from types import SimpleNamespace as NS
@@ -30,12 +74,21 @@ def bootstrap_services(calls):
     def create(url, properties):
         calls.append(('ui-create', url, {prop.Name: prop.Value for prop in properties}))
         return element
-    config = NS(hasSettings=lambda url: False)
+    config = ModuleToolbarConfiguration(calls)
+    tabbed = NS(getPropertyValue=lambda name: {'CommandArg': 'notebookbar.ui', 'HasNotebookbar': True}[name])
+    application = NS(getPropertyValue=lambda name: 'notebookbar.ui',
+                     getByName=lambda name: NS(getByName=lambda mode: tabbed))
+    modes = NS(getPropertyValue=lambda name: 'notebookbar.ui',
+               getByName=lambda name: NS(getByName=lambda module: application))
+    def configuration(service, arguments):
+        calls.append(('ui-mode', service, {arg.Name: arg.Value for arg in arguments}))
+        return modes
     factory = NS(createUIElement=create)
     services = {
         'com.sun.star.ui.ModuleUIConfigurationManagerSupplier': NS(
             getUIConfigurationManager=lambda module: mark('ui-config', config)),
         'com.sun.star.ui.UIElementFactoryManager': NS(getFactory=lambda url, module: mark('ui-factory', factory)),
+        'com.sun.star.configuration.ConfigurationProvider': NS(createInstanceWithArguments=configuration),
     }
     return services, config, factory, element
 
@@ -514,6 +567,8 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertTrue(calls.index(('append', frame)) < next(i for i, c in enumerate(calls) if c[0] == 'load'))
         self.assertLess(calls.index(('ui-window',)), calls.index(('ui-dispose',)))
         self.assertLess(calls.index(('ui-dispose',)), next(i for i, c in enumerate(calls) if c[0] == 'load'))
+        self.assertIn(('ui-style-info', 3), calls)
+        self.assertLess(calls.index(('ui-style-info', 3)), next(i for i, c in enumerate(calls) if c[0] == 'ui-create'))
         self.assertLess(next(i for i, c in enumerate(calls) if c[0] == 'load'), calls.index(('validated', 456, 123)))
         self.assertLess(calls.index(('validated', 456, 123)), calls.index(('visible', True)))
         self.assertLess(calls.index(('visible', True)), calls.index(('activate',)))
@@ -811,6 +866,113 @@ class NativeAccessibleNameBoundaryTests(unittest.TestCase):
                 self.assertNotIn(('initialize',), self.events)
                 self.assertNotIn(('load',), self.events)
                 self.assertNotIn(('visible', True), self.events)
+
+
+class StyleToolbarIsolationTests(unittest.TestCase):
+    def setUp(self):
+        from types import SimpleNamespace as NS
+        self.NS = NS
+        self.native = importlib.import_module('native')
+        self.backend = self.native.UnoBackend(Path(tempfile.gettempdir()))
+        self.backend.uno = NS(createUnoStruct=lambda name: NS())
+        self.calls = []
+        self.services, self.config, _, _ = bootstrap_services(self.calls)
+
+    def isolate(self, module=None):
+        method = getattr(self.backend, '_isolate_legacy_style_controls', None)
+        self.assertTrue(callable(method), 'missing pre-load legacy style controller isolation')
+        with redirect_stderr(io.StringIO()) as output:
+            receipt = method(self.services.__getitem__, module or MODULES['writer'])
+        return receipt, output.getvalue()
+
+    def descriptor(self, command=None, **properties):
+        if command is not None:
+            properties['CommandURL'] = command
+        return tuple(self.NS(Name=name, Value=value) for name, value in properties.items())
+
+    def test_filters_exact_generic_style_items_from_writable_clones_and_preserves_defaults(self):
+        url = 'private:resource/toolbar/textobjectbar'
+        keep = [self.descriptor('.uno:Bold', Visible=True), self.descriptor(Type=1),
+                self.descriptor('.uno:StyleApply?Style:string=Heading 1'),
+                self.descriptor('.uno:StylesPreview'), self.descriptor('.uno:StyleApplyExtra')]
+        before = tuple([keep[0], self.descriptor('.uno:StyleApply', Visible=False),
+                        keep[1], self.descriptor('.uno:StyleApply'), *keep[2:]])
+        self.config.defaults[url] = before
+        receipt, output = self.isolate()
+        self.assertEqual(before, self.config.defaults[url], 'default settings were mutated')
+        self.assertEqual(tuple(keep), self.config.replacements[url])
+        self.assertTrue(all(a is b for a, b in zip(keep, self.config.replacements[url])))
+        self.assertIn(('ui-style-settings', url, True), self.calls)
+        self.assertEqual([{'resourceURL': url, 'indices': [1, 3],
+                           'commands': ['.uno:StyleApply', '.uno:StyleApply']}], receipt['removed'])
+        self.assertFalse(receipt['stored'])
+        self.assertEqual('notebookbar.ui', receipt['mode']['active'])
+        self.assertEqual('notebookbar.ui', receipt['mode']['globalActive'])
+        self.assertTrue(receipt['mode']['hasNotebookbar'])
+        self.assertEqual(receipt, self.backend.ui_style_isolation)
+        self.assertEqual('', output)
+
+    def test_keeps_other_resources_and_does_not_replace_unchanged_toolbar(self):
+        toolbar = 'private:resource/toolbar/notebookbarshortcuts'
+        menu = 'private:resource/menubar/menubar'
+        self.config.defaults[toolbar] = (self.descriptor('.uno:StylesPreview'),)
+        self.config.defaults[menu] = (self.descriptor('.uno:StyleApply'),)
+        receipt, _ = self.isolate()
+        self.assertEqual([], receipt['removed'])
+        self.assertEqual({}, self.config.replacements)
+        self.assertNotIn(('ui-style-settings', menu, True), self.calls)
+
+    def test_mode_proof_covers_each_supported_module_before_any_toolbar_mutation(self):
+        for factory, application in (('swriter', 'Writer'), ('scalc', 'Calc'),
+                                     ('simpress', 'Impress'), ('sdraw', 'Draw')):
+            with self.subTest(application=application):
+                self.calls.clear()
+                receipt, _ = self.isolate({'factory': 'private:factory/' + factory})
+                self.assertEqual(application, receipt['moduleName'])
+                self.assertEqual(self.native.UI_MODULE_SERVICES['private:factory/' + factory], receipt['moduleService'])
+                mode_call = next(call for call in self.calls if call[0] == 'ui-mode')
+                self.assertEqual('com.sun.star.configuration.ConfigurationAccess', mode_call[1])
+                self.assertEqual('/org.openoffice.Office.UI.ToolbarMode', mode_call[2]['nodepath'])
+                self.assertLess(self.calls.index(mode_call), self.calls.index(('ui-style-info', 3)))
+
+    def test_different_or_incomplete_mode_fails_before_filtering(self):
+        for changed in ({'active': 'notebookbar_compact.ui'}, {'globalActive': 'Default'},
+                        {'tabbedCommandArg': 'other.ui'}, {'hasNotebookbar': False}):
+            with self.subTest(changed=changed):
+                facts = dict(active='notebookbar.ui', globalActive='notebookbar.ui',
+                             tabbedCommandArg='notebookbar.ui', hasNotebookbar=True)
+                facts.update(changed)
+                tabbed = self.NS(getPropertyValue=lambda name: {
+                    'CommandArg': facts['tabbedCommandArg'], 'HasNotebookbar': facts['hasNotebookbar']}[name])
+                application = self.NS(getPropertyValue=lambda name: facts['active'],
+                                      getByName=lambda name: self.NS(getByName=lambda mode: tabbed))
+                root = self.NS(getPropertyValue=lambda name: facts['globalActive'],
+                               getByName=lambda name: self.NS(getByName=lambda module: application))
+                self.services['com.sun.star.configuration.ConfigurationProvider'].createInstanceWithArguments = lambda *args: root
+                self.calls.clear()
+                with self.assertRaises(self.native.WorkerError) as caught:
+                    self.isolate()
+                self.assertEqual('ui_style_isolation_failed', caught.exception.code)
+                self.assertEqual([], self.calls)
+                self.assertEqual({}, self.config.replacements)
+
+    def test_math_and_base_never_query_or_modify_module_toolbar_configuration(self):
+        for factory in ('smath', 'sdatabase'):
+            with self.subTest(factory=factory):
+                receipt, output = self.isolate({'factory': 'private:factory/' + factory})
+                self.assertIsNone(receipt)
+                self.assertEqual('', output)
+                self.assertEqual([], self.calls)
+
+    def test_configuration_failure_preserves_cause(self):
+        failure = RuntimeError('private configuration not writable')
+        def fail(*args):
+            raise failure
+        self.config.getUIElementsInfo = fail
+        with self.assertRaises(self.native.WorkerError) as caught:
+            self.isolate()
+        self.assertEqual('ui_style_isolation_failed', caught.exception.code)
+        self.assertIs(failure, caught.exception.__cause__)
 
 
 class UiBootstrapBoundaryTests(unittest.TestCase):

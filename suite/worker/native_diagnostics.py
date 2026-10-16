@@ -48,8 +48,10 @@ class NativeDiagnostics:
         (self.directory / 'manifest.json').write_text(
             json.dumps(self.manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
-    def record(self, phase):
+    def record(self, phase, metadata=None):
         event = {'phase': phase, 'utc': datetime.now(timezone.utc).isoformat()}
+        if metadata is not None:
+            event['metadata'] = metadata
         try:
             if self.process is not None:
                 if self.witnesses is None:

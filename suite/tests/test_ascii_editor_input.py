@@ -1,0 +1,280 @@
+"""Physical ASCII input: exact case, Win64 ABI, preconditions and fail-closed delivery."""
+import copy
+import ctypes
+import importlib.util
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+
+SOURCE = Path(__file__).resolve().parents[1] / 'e2e' / 'ascii_editor_input.py'
+if SOURCE.exists():
+    SPEC = importlib.util.spec_from_file_location('suite_ascii_editor_input_tests', SOURCE)
+    keyboard = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(keyboard)
+else:
+    keyboard = None
+
+
+class FakeWindows:
+    def __init__(self, counts=()):
+        self.sent, self.counts, self.focus_checks = [], list(counts), []
+        self.layout, self.current_layout, self.down, self.caps = 0x04090409, 0x04090409, set(), 0
+        self.focus = 33
+        self.user = SimpleNamespace(
+            GetKeyboardLayout=lambda tid: self.layout if tid else self.current_layout,
+            GetAsyncKeyState=lambda key: 0x8000 if key in self.down else 0,
+            GetKeyState=lambda key: self.caps,
+            GetWindowThreadProcessId=lambda hwnd, _: 44,
+            GetForegroundWindow=lambda: 11,
+            GetAncestor=lambda hwnd, kind: 11,
+            SendInput=lambda count, payload, size: self.send(count, payload, size))
+
+    def require_foreground(self, hwnd):
+        if hwnd != 11: raise AssertionError('foreign foreground')
+
+    def require_editor_focus(self, hwnd, child):
+        self.focus_checks.append((hwnd, child))
+        if not self.focus: raise AssertionError('foreign editor focus')
+        return self.focus
+
+    def send(self, count, payload, size):
+        self.sent.append((count, bytes(payload), size))
+        value = self.counts.pop(0) if self.counts else count
+        if isinstance(value, Exception): raise value
+        return value
+
+
+class AsciiEditorInputTests(unittest.TestCase):
+    def setUp(self):
+        self.assertIsNotNone(keyboard, 'Missing source-supported physical ASCII editor injector')
+
+    def inject(self, text='aA-09 ', api=None, **kw):
+        api, record = api or FakeWindows(), {}
+        kw.setdefault('pause', 0.025)
+        with patch.object(keyboard.time, 'sleep') as sleep:
+            keyboard.type_ascii(api, 11, 22, text, record, **kw)
+        return api, record['asciiEditorInputs'][0], sleep
+
+    def test_win64_input_abi_has_keyboard_offset_eight_and_size_forty(self):
+        self.assertEqual(ctypes.sizeof(keyboard.Input), 40)
+        self.assertEqual(keyboard.Input.payload.offset, 8)
+        self.assertEqual(ctypes.sizeof(keyboard.KeyboardInput), 24)
+        self.assertEqual(keyboard.KeyboardInput.dwExtraInfo.offset, 16)
+
+    def test_uppercase_requires_explicit_shift_and_lowercase_does_not(self):
+        lower, upper = keyboard.ascii_actions('aA')
+        self.assertEqual(lower['events'], [{'vk': 0, 'scan': 0x1e, 'flags': 8}, {'vk': 0, 'scan': 0x1e, 'flags': 10}])
+        self.assertEqual(upper['events'], [{'vk': 0, 'scan': 0x2a, 'flags': 8}, *lower['events'], {'vk': 0, 'scan': 0x2a, 'flags': 10}])
+
+    def test_digits_hyphen_and_space_have_unshifted_us_scans(self):
+        actions = keyboard.ascii_actions('1234567890- ')
+        self.assertEqual([row['events'][0]['scan'] for row in actions], list(range(2, 12)) + [12, 57])
+        self.assertTrue(all(len(row['events']) == 2 for row in actions))
+
+    def test_rejects_unicode_key_syntax_newlines_empty_and_unbounded_input_before_any_event(self):
+        for text in ('한글', 'x\n', '{F6}', '+', '', 'a' * 257):
+            api = FakeWindows()
+            with self.subTest(text=text[:20]), self.assertRaises((ValueError, AssertionError)):
+                self.inject(text, api)
+            self.assertEqual(api.sent, [])
+
+    def test_exact_case_receipt_has_actual_buffers_counts_focus_and_original_pause(self):
+        api, receipt, sleep = self.inject(pause=0.025)
+        self.assertEqual(len(api.sent), 6)
+        self.assertEqual([row[0] for row in api.sent], [2, 4, 2, 2, 2, 2])
+        self.assertEqual(sleep.call_args_list, [((0.025,),)] * 6)
+        self.assertEqual(len(api.focus_checks), 12)
+        self.assertEqual(receipt['text'], 'aA-09 ')
+        self.assertEqual(receipt['inputMethod'], 'SendInput-scancode')
+        self.assertIs(receipt['unicodeInputUsed'], False)
+        for sent, action in zip(api.sent, receipt['actions']):
+            self.assertEqual(sent[1].hex(), action['bufferHex'])
+            self.assertEqual(sent[2], 40)
+            self.assertEqual(action['inserted'], action['requested'])
+            self.assertEqual(action['before']['focusHwnd'], 33)
+            self.assertIs(action['before']['editorFocusVerified'], True)
+        keyboard.require_ascii_receipt(receipt, 'aA-09 ', 11, 22)
+
+    def test_rejects_target_or_current_thread_layout_change_without_mutating_it(self):
+        for attribute in ('layout', 'current_layout'):
+            api = FakeWindows()
+            setattr(api, attribute, 0x04120412)
+            with self.subTest(attribute=attribute), self.assertRaisesRegex(AssertionError, 'English'):
+                self.inject(api=api)
+            self.assertEqual(api.sent, [])
+            self.assertEqual(getattr(api, attribute), 0x04120412)
+
+    def test_rejects_physical_modifiers_and_capslock_without_releasing_them(self):
+        for key in (0x10, 0x11, 0x12, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x14):
+            api = FakeWindows()
+            api.down.add(key)
+            with self.subTest(key=key), self.assertRaisesRegex(AssertionError, 'neutral'):
+                self.inject(api=api)
+            self.assertEqual(api.sent, [])
+            self.assertEqual(api.down, {key})
+        api = FakeWindows()
+        api.caps = 1
+        with self.assertRaisesRegex(AssertionError, 'Caps Lock'): self.inject(api=api)
+        self.assertEqual(api.sent, [])
+        self.assertEqual(api.caps, 1)
+
+    def test_rejects_foreign_focus_without_any_typing(self):
+        api = FakeWindows()
+        api.focus = 0
+        with self.assertRaisesRegex(AssertionError, 'foreign editor focus'): self.inject(api=api)
+        self.assertEqual(api.sent, [])
+
+    def test_partial_character_fails_and_releases_only_inserted_own_downs(self):
+        # Prefix [Shift down, A down] needs A up then Shift up. No text retry.
+        api, record = FakeWindows([2]), {}
+        with self.assertRaisesRegex(AssertionError, 'inserted 2 of 4'):
+            keyboard.type_ascii(api, 11, 22, 'Ab', record, pause=0.025)
+        receipt = record['asciiEditorInputs'][0]
+        self.assertIs(receipt['success'], False)
+        self.assertEqual(len(receipt['actions']), 1)
+        self.assertEqual(len(api.sent), 2)
+        self.assertEqual(receipt['actions'][0]['cleanup']['events'], [
+            {'vk': 0, 'scan': 0x1e, 'flags': 10}, {'vk': 0, 'scan': 0x2a, 'flags': 10}])
+        self.assertEqual(receipt['actions'][0]['cleanup']['inserted'], 2)
+        self.assertIn('inserted 2 of 4', receipt['error'])
+
+    def test_partial_zero_or_completed_keyup_never_releases_foreign_keys(self):
+        for inserted, expected in ((0, []), (1, [0x2a]), (3, [0x2a])):
+            api, record = FakeWindows([inserted]), {}
+            with self.subTest(inserted=inserted), self.assertRaises(AssertionError):
+                keyboard.type_ascii(api, 11, 22, 'A', record, pause=0.025)
+            cleanup = record['asciiEditorInputs'][0]['actions'][0].get('cleanup', {})
+            self.assertEqual([row['scan'] for row in cleanup.get('events', [])], expected)
+            self.assertEqual(len(api.sent), 2 if expected else 1)
+
+    def test_cleanup_failure_retains_original_partial_input_failure(self):
+        api, record = FakeWindows([2, RuntimeError('cleanup failed')]), {}
+        with self.assertRaisesRegex(AssertionError, 'inserted 2 of 4'):
+            keyboard.type_ascii(api, 11, 22, 'A', record, pause=0.025)
+        receipt = record['asciiEditorInputs'][0]
+        self.assertIn('inserted 2 of 4', receipt['error'])
+        self.assertIn('cleanup failed', receipt['actions'][0]['cleanup']['error'])
+        self.assertIs(receipt['success'], False)
+
+    def test_lost_focus_after_input_fails_original_action_without_retry(self):
+        api, record = FakeWindows(), {}
+        def send(count, payload, size):
+            api.sent.append((count, bytes(payload), size))
+            api.focus = 0
+            return count
+        api.user.SendInput = send
+        with self.assertRaisesRegex(AssertionError, 'foreign editor focus'):
+            keyboard.type_ascii(api, 11, 22, 'ab', record, pause=0.025)
+        self.assertEqual(len(api.sent), 1)
+        self.assertIs(record['asciiEditorInputs'][0]['success'], False)
+
+    def test_owned_editor_thread_change_stops_before_typing_another_character(self):
+        api, record = FakeWindows(), {}
+        api.user.GetWindowThreadProcessId = lambda hwnd, _: 99 if api.sent else 44
+        with self.assertRaisesRegex(AssertionError, 'thread changed'):
+            keyboard.type_ascii(api, 11, 22, 'ab', record, pause=0.025)
+        self.assertEqual(len(api.sent), 1)
+        self.assertIs(record['asciiEditorInputs'][0]['success'], False)
+
+    def test_independent_replay_rejects_case_buffers_unicode_counts_layout_and_foreign_identity(self):
+        _, receipt, _ = self.inject('Aa-0', pause=0.04)
+        changes = [lambda x: x.update(text='aa-0'), lambda x: x.update(unicodeInputUsed=True),
+                   lambda x: x.update(documentHwnd=999), lambda x: x.update(childHwnd=999),
+                   lambda x: x.update(inputSize=32), lambda x: x.update(success=False),
+                   lambda x: x['actions'][0].update(inserted=3),
+                   lambda x: x['actions'][0].update(bufferHex='00'),
+                   lambda x: x['actions'][0]['events'][0].update(flags=4),
+                   lambda x: x['actions'][0]['before'].update(targetLayout=0x04120412),
+                   lambda x: x['actions'][0]['after'].update(editorFocusVerified=False),
+                   lambda x: x['actions'][0]['after'].update(editorThreadId=99),
+                   lambda x: x['actions'][1]['before'].update(editorThreadId=99),
+                   lambda x: x['actions'].pop()]
+        for change in changes:
+            altered = copy.deepcopy(receipt)
+            change(altered)
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                keyboard.require_ascii_receipt(altered, 'Aa-0', 11, 22)
+
+
+def load_sibling(name):
+    spec = importlib.util.spec_from_file_location('ascii_test_' + name, SOURCE.with_name(name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class AsciiEditorIntegrationTests(unittest.TestCase):
+    def test_lifecycle_keeps_navigation_and_dirty_check_but_routes_only_marker_to_physical_ascii(self):
+        lifecycle = load_sibling('lifecycle_smoke')
+        self.assertTrue(hasattr(lifecycle.native, 'ascii_input'), 'Lifecycle lacks physical ASCII sibling helper')
+        case = object.__new__(lifecycle.Case)
+        case.record, case.api = {}, FakeWindows()
+        case.api.title = lambda hwnd: '* OpenGeul Writer'
+        window = SimpleNamespace(set_focus=Mock(), click_input=Mock())
+        desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: window))
+        send_keys, type_ascii = Mock(), Mock()
+        with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
+                                       'pywinauto.keyboard': SimpleNamespace(send_keys=send_keys)}), \
+                patch.object(lifecycle.native.ascii_input, 'type_ascii', type_ascii):
+            case.edit(11, 22, '-LIFECYCLE-NEW-')
+        type_ascii.assert_called_once_with(case.api, 11, 22, '-LIFECYCLE-NEW-', case.record, pause=0.025)
+        self.assertEqual([call.args[0] for call in send_keys.call_args_list], ['^{F6}', '^{END}'])
+        self.assertEqual(case.record['stage'], 'physical-editor-input')
+        self.assertGreaterEqual(len(case.api.focus_checks), 3)
+
+    def test_general_gui_routes_three_exact_markers_with_original_pacing_and_keeps_save_checks(self):
+        native = load_sibling('windows_smoke')
+        self.assertTrue(hasattr(native, 'ascii_input'), 'GUI lacks physical ASCII sibling helper')
+        for module, extension in native.INPUT_CASES:
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / ('OpenGeul-' + module + '.' + extension)
+                source.write_text('Engine-OpenGeul-' + module)
+                marker = 'UI-OpenGeul-' + module
+                api = FakeWindows()
+                api.title, api.windows = lambda hwnd: 'OpenGeul ' + module, lambda pid: []
+                api.external_window_message = lambda *args: 'unexpected external window'
+                process = SimpleNamespace(pid=77)
+                window = SimpleNamespace(maximize=Mock(), set_focus=Mock(), click_input=Mock(),
+                                         capture_as_image=lambda: SimpleNamespace(save=lambda _: None))
+                desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: window))
+                def send(keys, **kw):
+                    if keys == '^s': source.write_text('Engine-OpenGeul-' + module + marker)
+                send_keys, type_ascii = Mock(side_effect=send), Mock()
+                with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
+                                               'pywinauto.keyboard': SimpleNamespace(send_keys=send_keys)}), \
+                        patch.object(native, 'require_engine_fixture', return_value=source), \
+                        patch.object(native, 'package_text', side_effect=lambda path: path.read_text()), \
+                        patch.object(native, 'launch_suite', return_value=process), \
+                        patch.object(native, 'Windows', return_value=api), \
+                        patch.object(native, 'verified_attachment', return_value=(11, 12, 22, 88)), \
+                        patch.object(native.ascii_input, 'type_ascii', type_ascii), \
+                        patch.object(native, 'close_document'), patch.object(native, 'close_home'), \
+                        patch.object(native, 'stop_owned_test_process'):
+                    result = native.document_case(root, root, root, module, extension, True)
+                type_ascii.assert_called_once_with(api, 11, 22, marker, result, pause=0.04)
+                sent = [call.args[0] for call in send_keys.call_args_list]
+                self.assertNotIn(marker, sent)
+                self.assertIn('^{F6}', sent)
+                self.assertIn('^s', sent)
+                self.assertIs(result['keyboardInputVerified'], True)
+                self.assertIs(result['contentMutationVerified'], True)
+                self.assertNotEqual(result['beforeSha256'], result['afterSha256'])
+
+    def test_exact_source_marker_maps_cover_only_existing_ascii_editor_cases(self):
+        lifecycle, native = load_sibling('lifecycle_smoke'), load_sibling('windows_smoke')
+        self.assertTrue(hasattr(lifecycle, 'ASCII_EDITOR_MARKERS'), 'Lifecycle markers cannot be independently derived')
+        self.assertEqual(lifecycle.ASCII_EDITOR_MARKERS, {
+            'dirty-writer-cancel-save': ('-LIFECYCLE-CANCEL-SAVE-', '-AFTER-CANCEL-'),
+            'dirty-writer-discard': ('-LIFECYCLE-DISCARD-',),
+            'new-writer-saveas-cancel': ('-LIFECYCLE-NEW-', '-AFTER-PICKER-CANCEL-'),
+            'failed-saveas-retains-editor': ('-FAILED-SAVEAS-DIRTY-', '-AFTER-SAVEAS-ERROR-'),
+            'home-two-documents-cancel': ('-HOME-CANCEL-DIRTY-', '-REMAINDER-EDIT-'),
+            'resize-minimize-restore': ('-AFTER-RESIZE-MINIMIZE-RESTORE-',)})
+        self.assertEqual(native.EDITOR_MARKERS, {name: 'UI-OpenGeul-' + name for name in ('writer', 'calc', 'impress')})
+
+
+if __name__ == '__main__': unittest.main()

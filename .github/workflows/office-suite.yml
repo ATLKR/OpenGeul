@@ -99,6 +99,22 @@ jobs:
         path: .work/suite-korean-ui/
         retention-days: 1
         if-no-files-found: error
+    - name: 실제 Writer 제목 1 단축키·저장·독립 재열기
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/writer_style_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-writer-style
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Writer Heading 1 save and independent reopen failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Writer 스타일 원본 검증 기록 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-writer-style-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-writer-style/
+        retention-days: 1
+        if-no-files-found: error
     - name: 저장·취소·실패·창 복원·HWP 실행 수명 검사
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
@@ -128,7 +144,11 @@ jobs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-startup-${{ github.run_id }}-${{ github.run_attempt }}
-        path: .work/suite-startup/
+        include-hidden-files: true
+        path: |
+          .work/suite-startup/
+          .work/suite-engine/
+          .work/suite-worker-diagnostics/
         retention-days: 1
         if-no-files-found: error
     - name: 첫 번째 전체 Suite GUI·편집 후 의미 검증
@@ -157,6 +177,43 @@ jobs:
         python suite/scripts/verify-suite.py $package
         if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during the complete native validation.' }
       if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 모든 네이티브 진단 보존·해시와 크래시 부재 확인
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: python
+      run: |
+        from pathlib import Path, PurePosixPath
+        import hashlib, json, os, re
+        def check_native_archives(root):
+            assert root.is_dir() and not root.is_symlink(), 'Owned native diagnostics are missing'
+            manifests = sorted(root.glob('*/manifest.json'))
+            assert manifests, 'No owned native diagnostic manifests were archived'
+            for path in root.rglob('*'):
+                assert not path.is_symlink(), 'Linked native diagnostic paths are not accepted'
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        signature = stream.read(4)
+                    assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
+            files = 0
+            for manifest in manifests:
+                record = json.loads(manifest.read_text(encoding='utf-8'))
+                assert record.get('schemaVersion') == 1 and record.get('archiveComplete') is True, 'Incomplete native archive: ' + str(manifest)
+                assert isinstance(record.get('files'), list), 'Native archive file list is missing'
+                seen = set()
+                for item in record['files']:
+                    name = item['path']
+                    relative = PurePosixPath(name)
+                    assert name and '\\' not in name and ':' not in name and not relative.is_absolute() and '..' not in relative.parts and relative.as_posix() == name and name not in seen, 'Unsafe or duplicate native archive member'
+                    seen.add(name)
+                    path = manifest.parent.joinpath(*relative.parts)
+                    assert path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve()), 'Native archive member is missing or escaped its profile'
+                    assert type(item['bytes']) is int and path.stat().st_size == item['bytes'], 'Native archive file size differs'
+                    assert re.fullmatch('[a-f0-9]{64}', item['sha256']) and hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256'], 'Native archive file hash differs'
+                    files += 1
+            return dict(schemaVersion=1, kind='native-archive-integrity', success=True, completeArchives=len(manifests), verifiedFiles=files, crashDumps=0)
+        result = check_native_archives(Path('.work/suite-worker-diagnostics'))
+        result.update(sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'])
+        Path('.work/suite-native-integrity.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+        print(json.dumps(result))
     - name: 원본 GUI·엔진·IME·반복 검증 기록 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -172,9 +229,11 @@ jobs:
           !.work/suite-korean-readiness/fod-source/**/*.cab
           .work/suite-korean-ime/
           .work/suite-korean-ui/
+          .work/suite-writer-style/
           .work/suite-lifecycle/
           .work/suite-startup/
           .work/suite-worker-diagnostics/
+          .work/suite-native-integrity.json
           .work/office-suite/msi.msi.log
         retention-days: 1
         if-no-files-found: warn

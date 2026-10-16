@@ -20,17 +20,64 @@ SPEC.loader.exec_module(smoke)
 
 
 class NativeSmokeTests(unittest.TestCase):
+    def test_harness_can_load_by_sibling_path_in_an_isolated_interpreter(self):
+        code = ('import importlib.util,sys; '
+                'spec=importlib.util.spec_from_file_location("owned_windows_smoke",sys.argv[1]); '
+                'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)')
+        result = smoke.subprocess.run([sys.executable, '-I', '-c', code, str(SOURCE)],
+                                      capture_output=True, text=True, timeout=10, shell=False)
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_suite_launch_captures_child_stderr_after_parent_stream_is_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             command = [sys.executable, '-c', 'import sys; sys.stderr.buffer.write(b"worker traceback retained\\n")']
-            with patch.object(smoke.subprocess, 'Popen', wraps=smoke.subprocess.Popen) as launched:
+            with patch.object(smoke, 'prepare_launch_pointer', create=True), \
+                    patch.object(smoke.subprocess, 'Popen', wraps=smoke.subprocess.Popen) as launched:
                 process = smoke.launch_suite(command, output, output, 'calc')
             self.assertTrue(launched.call_args.kwargs['stderr'].closed)
             self.assertFalse(launched.call_args.kwargs['shell'])
             self.assertEqual(launched.call_args.args[0], command)
             self.assertEqual(process.wait(timeout=10), 0)
             self.assertEqual((output / 'calc-stderr.log').read_bytes(), b'worker traceback retained\n')
+
+    def test_pointer_precondition_is_completed_once_before_suite_process_launch(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            process = SimpleNamespace()
+            with patch.object(smoke, 'prepare_launch_pointer', side_effect=lambda *a: calls.append('pointer'), create=True), \
+                    patch.object(smoke.subprocess, 'Popen', side_effect=lambda *a, **kw: calls.append('launch') or process):
+                smoke.launch_suite(['owned.exe'], output, output, 'owned')
+        self.assertEqual(['pointer', 'launch'], calls)
+
+    def test_pointer_precondition_failure_never_launches_suite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with patch.object(smoke, 'prepare_launch_pointer', side_effect=RuntimeError('taskbar unavailable'), create=True), \
+                    patch.object(smoke.subprocess, 'Popen') as launched:
+                with self.assertRaisesRegex(RuntimeError, 'taskbar unavailable'):
+                    smoke.launch_suite(['owned.exe'], output, output, 'owned')
+            launched.assert_not_called()
+
+    def test_external_window_gate_rejects_tooltip_like_popup_and_retains_snapshot(self):
+        api = object.__new__(smoke.Windows)
+        api.attached = lambda process: (11, 22, 33)
+        api.pid = lambda hwnd: 88
+        api.title = lambda hwnd: 'OpenGeul Writer'
+        api.windows = lambda pid: [44]
+        api._last_window_enumerations = {88: [44]}
+        census = {'officePid': 88, 'windows': [{'hwnd': 44, 'className': 'SALTMPSUBFRAME',
+                   'ownerHwnd': 11, 'style': 0x80000000, 'exStyle': 0x88, 'queryErrors': []}]}
+        with tempfile.TemporaryDirectory() as directory:
+            process = SimpleNamespace(pid=77, opengeul_evidence_output=Path(directory), opengeul_evidence_case='attempt-007')
+            with patch.object(smoke, 'NativeWindowProbe', return_value=SimpleNamespace(window_census=lambda handles, pid: census), create=True):
+                with self.assertRaises(AssertionError) as caught:
+                    smoke.verified_attachment(api, process, 'writer')
+            self.assertIn('SALTMPSUBFRAME', str(caught.exception))
+            evidence = Path(directory) / 'attempt-007-offending-windows.json'
+            self.assertTrue(evidence.is_file(), 'offending HWND census was not retained')
+            self.assertEqual(census, json.loads(evidence.read_text()))
 
     def test_owned_startup_error_requires_exact_native_dialog_identity(self):
         self.assertTrue(smoke.is_owned_startup_error(31, 31, 31, 'OpenGeul Office', '#32770'))

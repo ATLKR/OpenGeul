@@ -1,7 +1,7 @@
 """Actual Suite home, six existing/new embedded frames, and three keyboard edits.
 
-Only generated fixtures under --fixtures are opened. Unicode SendInput is not an
-IME-composition test; engine/model tests and native keyboard tests stay separate.
+Only generated fixtures under --fixtures are opened. ASCII editor markers use
+physical US scans; separate Korean IME cases prove actual composition.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from collections import Counter
 import ctypes
 from ctypes import wintypes
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,16 +20,30 @@ import traceback
 import xml.etree.ElementTree as ET
 import zipfile
 
+_evidence_spec = importlib.util.spec_from_file_location(
+    'suite_native_window_evidence', Path(__file__).with_name('native_window_evidence.py'))
+_evidence = importlib.util.module_from_spec(_evidence_spec)
+_evidence_spec.loader.exec_module(_evidence)
+NativeWindowProbe, prepare_launch_pointer = _evidence.NativeWindowProbe, _evidence.prepare_launch_pointer
+_ascii_spec = importlib.util.spec_from_file_location(
+    'suite_ascii_editor_input', Path(__file__).with_name('ascii_editor_input.py'))
+ascii_input = importlib.util.module_from_spec(_ascii_spec)
+_ascii_spec.loader.exec_module(ascii_input)
+
 INPUT_CASES = (('writer', 'docx'), ('calc', 'xlsx'), ('impress', 'pptx'))
+EDITOR_MARKERS = {module: 'UI-OpenGeul-' + module for module, _ in INPUT_CASES}
 ATTACH_CASES = (('draw', 'odg'), ('math', 'odf'), ('base', 'odb'))
 MODULE_LABELS = tuple('OpenGeul ' + name for name in ('HWP', 'Writer', 'Calc', 'Impress', 'Draw', 'Math', 'Base'))
 NEW_MODULES = tuple(module for module, _ in INPUT_CASES + ATTACH_CASES)
 
 
 def launch_suite(command, suite, output, name):
+    prepare_launch_pointer(output, name)
     # Popen duplicates the file handle for the child; the parent's stream closes here.
     with (output / (name + '-stderr.log')).open('xb') as stderr:
-        return subprocess.Popen(command, cwd=suite, shell=False, stderr=stderr)
+        process = subprocess.Popen(command, cwd=suite, shell=False, stderr=stderr)
+    process.opengeul_evidence_output, process.opengeul_evidence_case = output, name
+    return process
 
 
 def is_owned_startup_error(dialog_pid, shell_pid, owner_pid, caption, class_name):
@@ -180,7 +195,27 @@ class Windows:
             return True
         callback = self.callback(visit)
         if not self.user.EnumWindows(callback, 0): raise ctypes.WinError(ctypes.get_last_error())
+        if not hasattr(self, '_last_window_enumerations'):
+            self._last_window_enumerations = {}
+        self._last_window_enumerations[pid] = list(found)
         return found
+
+    def external_window_message(self, pid, message):
+        handles = self._last_window_enumerations[pid]
+        try:
+            census = NativeWindowProbe().window_census(handles, pid)
+        except Exception as exc:
+            census = {'officePid': pid, 'enumeratedHwnds': handles,
+                      'censusError': type(exc).__name__ + ': ' + str(exc)}
+        output, case = getattr(self, 'evidence_output', None), getattr(self, 'evidence_case', None)
+        if output is not None and case is not None:
+            try:
+                with (Path(output) / (case + '-offending-windows.json')).open('x', encoding='utf-8') as stream:
+                    json.dump(census, stream, ensure_ascii=False, indent=2)
+                    stream.write('\n')
+            except Exception as exc:
+                census['censusWriteError'] = type(exc).__name__ + ': ' + str(exc)
+        return message + '\nOffending Office HWND census: ' + json.dumps(census, ensure_ascii=False)
 
     def title(self, hwnd):
         text = ctypes.create_unicode_buffer(2048)
@@ -296,11 +331,13 @@ def close_document(api, process, hwnd, child, record):
 
 
 def verified_attachment(api, process, module):
+    api.evidence_output = getattr(process, 'opengeul_evidence_output', None)
+    api.evidence_case = getattr(process, 'opengeul_evidence_case', None)
     hwnd, parent, child = wait_for(lambda: api.attached(process), seconds=150)
     office_pid = api.pid(child)
     assert office_pid and office_pid != process.pid, 'Editor must belong to the separate native Office engine'
     assert 'OpenGeul ' + module.title() in api.title(hwnd), 'Document title is not OpenGeul branded'
-    assert not api.windows(office_pid), 'Office created an unowned visible top-level window'
+    assert not api.windows(office_pid), api.external_window_message(office_pid, 'Office created an unowned visible top-level window')
     return hwnd, parent, child, office_pid
 
 
@@ -411,7 +448,7 @@ def new_module(suite, output, module, *, fixtures=None):
         screenshot = name + '-attached.png'
         record['stage'] = 'capture-attached'
         window.capture_as_image().save(output / screenshot)
-        assert not api.windows(office_pid), 'New document opened an unowned visible Office window'
+        assert not api.windows(office_pid), api.external_window_message(office_pid, 'New document opened an unowned visible Office window')
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid,
                       title=api.title(hwnd), screenshot=screenshot, nativeParentVerified=True,
                       noExternalOfficeWindow=True)
@@ -510,10 +547,10 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
             if module == 'writer': send_keys('^{END}', pause=0.1)
             elif module == 'calc': send_keys('^{HOME}{F2}^{END}', pause=0.1)
             else: send_keys('{TAB}{F2}^{END}', pause=0.1)
-            marker = 'UI-OpenGeul-' + module
+            marker = EDITOR_MARKERS[module]
             focus = api.require_editor_focus(hwnd, child)
             record['stage'] = 'type-marker'
-            send_keys(marker, pause=0.04, with_spaces=True)
+            ascii_input.type_ascii(api, hwnd, child, marker, record, pause=0.04)
             if module == 'calc': send_keys('{ENTER}', pause=0.1)
             api.require_editor_focus(hwnd, child)
             record['stage'] = 'save-keyboard'
@@ -526,7 +563,7 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
             window.capture_as_image().save(output / (module + '-edited.png'))
             record.update(keyboardMarker=marker, keyboardFocusHwnd=focus,
                           keyboardInputVerified=True, contentMutationVerified=True)
-        assert not api.windows(office_pid), 'Office created an unowned visible top-level window during the test'
+        assert not api.windows(office_pid), api.external_window_message(office_pid, 'Office created an unowned visible top-level window during the test')
         record.update(nativeParentVerified=True, noExternalOfficeWindow=True, screenshot=screenshot)
         close_document(api, process, hwnd, child, record)
         close_home(api, process, record)

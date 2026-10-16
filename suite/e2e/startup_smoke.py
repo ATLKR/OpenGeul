@@ -136,7 +136,7 @@ def run_native_attempt(suite, fixtures, output, attempt):
         screenshot = attempt['case'] + '-attached.png'
         Desktop(backend='win32').window(handle=hwnd).wrapper_object().capture_as_image().save(output / screenshot)
         record.update(screenshot=screenshot, screenshotCaptured=True)
-        assert not api.windows(office_pid), 'Office created an unowned visible top-level window'
+        assert not api.windows(office_pid), api.external_window_message(office_pid, 'Office created an unowned visible top-level window')
         mark_stage(record, 'close-document')
         api.request_close(hwnd, process.pid)
         mark_stage(record, 'wait-document-close')

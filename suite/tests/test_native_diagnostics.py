@@ -32,6 +32,27 @@ class NativeDiagnosticsTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual({'payload', 'profile'}, {p.name for p in self.root.iterdir()})
 
+    def test_after_bootstrap_event_retains_style_receipt_without_adding_phases(self):
+        from types import SimpleNamespace
+        native = importlib.import_module('native')
+        backend = native.UnoBackend(self.payload / 'Office')
+        backend.profile = SimpleNamespace(name=str(self.profile))
+        receipt = {'schemaVersion': 1, 'moduleName': 'Writer',
+                   'mode': {'active': 'notebookbar.ui', 'hasNotebookbar': True},
+                   'removed': [{'resourceURL': 'private:resource/toolbar/textobjectbar',
+                                'indices': [0], 'commands': ['.uno:StyleApply']}], 'stored': False}
+        backend.ui_style_isolation = receipt
+        evidence = self.root / 'evidence'
+        with patch.dict(os.environ, {'OPENGEUL_SUITE_DIAGNOSTICS': str(evidence)}), redirect_stderr(io.StringIO()):
+            backend._diagnose('before-ui-bootstrap')
+            backend._diagnose('after-ui-bootstrap')
+        events = [json.loads(line) for line in next(evidence.glob('*/events.jsonl')).read_text().splitlines()]
+        self.assertEqual(['before-ui-bootstrap', 'after-ui-bootstrap'], [e['phase'] for e in events])
+        self.assertNotIn('metadata', events[0])
+        self.assertIn('metadata', events[1], 'successful diagnostics did not retain the policy receipt')
+        self.assertEqual({'toolbarStyleIsolation': receipt}, events[1]['metadata'])
+        backend.diagnostics.close()
+
     def test_archive_copies_only_owned_crash_and_records_exact_hashes(self):
         import hashlib
         crash = self.profile / 'crash'
@@ -170,6 +191,53 @@ class NativeDiagnosticsTests(unittest.TestCase):
             backend.cleanup()
         self.assertEqual(['terminate', 'wait', 'close', 'profile'], calls)
 
+    def test_style_configuration_failure_has_preparation_witness_and_original_cause(self):
+        from types import SimpleNamespace as NS
+        native = importlib.import_module('native')
+        calls = []
+        original = RuntimeError('bridge disposed during style configuration')
+        class Witness:
+            def snapshot(self):
+                calls.append('snapshot')
+                return [{'pid': 7, 'image': 'soffice.bin', 'creationTime': 456,
+                         'alive': True, 'exitCode': 259}]
+            def close(self): pass
+        def fail_configuration(*args):
+            calls.append('configuration')
+            raise original
+        properties = {}
+        peer = NS(setPosSize=lambda *args: None,
+                  setProperty=properties.__setitem__, getProperty=properties.get)
+        frame = NS(initialize=lambda peer: None, setName=lambda name: None)
+        desktop = NS(getFrames=lambda: NS(append=lambda frame: None),
+                     loadComponentFromURL=lambda *args: self.fail('document loaded after configuration failure'))
+        services = {'com.sun.star.frame.Desktop': desktop, 'com.sun.star.frame.Frame': frame,
+                    'com.sun.star.awt.Toolkit': NS(createSystemChild=lambda *args: peer),
+                    'com.sun.star.configuration.ConfigurationProvider': NS(createInstanceWithArguments=fail_configuration)}
+        context = NS(ServiceManager=NS(createInstanceWithContext=lambda name, ctx: services[name]))
+        uno = NS(Any=lambda name, value: value, createUnoStruct=lambda name: NS())
+        backend = native.UnoBackend(self.payload / 'Office', uno_loader=lambda: uno,
+                                    connector=lambda *args: context,
+                                    window_api=NS(validate_parent=lambda hwnd: None))
+        backend.process = NS(open_diagnostic_witnesses=lambda: Witness())
+        backend.profile = NS(name=str(self.profile))
+        backend._start_runtime = lambda: None
+        evidence = self.root / 'evidence'
+        with patch.dict(os.environ, {'OPENGEUL_SUITE_DIAGNOSTICS': str(evidence)}), \
+                patch.object(backend, '_bootstrap_ui', side_effect=AssertionError('bootstrap ran after failure')), \
+                redirect_stderr(io.StringIO()):
+            with self.assertRaises(native.WorkerError) as caught:
+                backend.attach(123, {'factory': 'private:factory/swriter', 'displayName': 'OpenGeul Writer'},
+                               640, 480, self.root / 'test.docx')
+        self.assertEqual('ui_style_isolation_failed', caught.exception.code)
+        self.assertIs(original, caught.exception.__cause__)
+        self.assertEqual(['snapshot', 'configuration'], calls)
+        events = [json.loads(line) for line in next(evidence.glob('*/events.jsonl')).read_text().splitlines()]
+        self.assertEqual(['before-ui-bootstrap'], [event['phase'] for event in events])
+        self.assertEqual(456, events[0]['processes'][0]['creationTime'])
+        self.assertTrue(events[0]['processes'][0]['alive'])
+        backend.diagnostics.close()
+
     def test_load_exception_is_recorded_before_cleanup_and_original_error_survives(self):
         from types import SimpleNamespace
         native = importlib.import_module('native')
@@ -203,6 +271,7 @@ class NativeDiagnosticsTests(unittest.TestCase):
         backend._start_runtime = lambda: None
         evidence = self.root / 'evidence'
         with patch.dict(os.environ, {'OPENGEUL_SUITE_DIAGNOSTICS': str(evidence)}), \
+                patch.object(backend, '_isolate_legacy_style_controls', return_value=None), \
                 patch.object(backend, '_bootstrap_ui', return_value=None), \
                 patch.object(native, 'make_interceptor', return_value=object()), \
                 patch.object(native, 'make_interaction_handler', return_value=object()), redirect_stderr(io.StringIO()):

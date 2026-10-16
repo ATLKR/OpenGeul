@@ -584,7 +584,7 @@ def case(suite, fixtures, output, readiness, module, extension):
         wait_for(lambda: not api.title(hwnd).startswith('* '), 10)
         record['savedText'] = package_text(source)
         window.capture_as_image().save(output / (name + '-saved.png'))
-        assert not api.windows(office_pid), 'IME opened an external Office document window'
+        assert not api.windows(office_pid), api.external_window_message(office_pid, 'IME opened an external Office document window')
         close_document(api, process, hwnd, child, record)
         close_home(api, process, record)
         record['stage'] = 'actual-uno-reopen'
