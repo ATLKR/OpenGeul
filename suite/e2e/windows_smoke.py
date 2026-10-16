@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+import traceback
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -140,6 +141,8 @@ class Windows:
         self.user.IsWindowVisible.restype = wintypes.BOOL
         self.user.IsWindow.argtypes = (wintypes.HWND,)
         self.user.IsWindow.restype = wintypes.BOOL
+        self.user.PostMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+        self.user.PostMessageW.restype = wintypes.BOOL
         self.user.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
         self.user.GetWindowTextW.restype = ctypes.c_int
         self.user.GetGUIThreadInfo.argtypes = (wintypes.DWORD, ctypes.POINTER(GuiThreadInfo))
@@ -149,6 +152,13 @@ class Windows:
         pid = wintypes.DWORD()
         self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         return pid.value
+
+    def request_close(self, hwnd, shell_pid):
+        assert self.user.IsWindow(hwnd), 'Close target is not a live window'
+        assert self.pid(hwnd) == shell_pid, 'Close target belongs to a different process'
+        assert self.user.GetAncestor(hwnd, 2) == hwnd, 'Only the owned top-level Suite form may close'
+        if not self.user.PostMessageW(hwnd, 0x0010, 0, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
 
     def windows(self, pid):
         found = []
@@ -211,7 +221,8 @@ def write_result(output, name, record):
 
 
 def capture_failure(output, name, record, exc):
-    record.update(success=False, error=type(exc).__name__ + ': ' + str(exc))
+    record.update(success=False, error=type(exc).__name__ + ': ' + str(exc),
+                  traceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     try:
         from PIL import ImageGrab
         ImageGrab.grab().save(output / (name + '-failure.png'))
@@ -226,15 +237,36 @@ def stop_owned_test_process(process, record):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
         process.wait(timeout=5)
     except Exception as exc:
-        record.update(success=False, cleanupError=type(exc).__name__ + ': ' + str(exc))
+        exit_code = process.poll()
+        if isinstance(exc, subprocess.CalledProcessError) and exc.returncode == 128 and exit_code == 0:
+            # The owned shell completed normal shutdown between poll and taskkill.
+            # Preserve any original case failure; this is only secondary cleanup evidence.
+            record.update(cleanupExitRaceVerified=True, cleanupProcessExitCode=exit_code)
+            return
+        record.update(success=False, cleanupError=type(exc).__name__ + ': ' + str(exc),
+                      cleanupProcessExitCode=exit_code,
+                      cleanupTraceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
 
 
-def close_home(api, process):
-    from pywinauto import Desktop
+def close_home(api, process, record):
+    record['stage'] = 'find-home'
     home = wait_for(lambda: api.home(process), seconds=10)
-    Desktop(backend='win32').window(handle=home).wrapper_object().close()
+    record['stage'] = 'close-home'
+    api.request_close(home, process.pid)
+    record['stage'] = 'wait-shell-exit'
     process.wait(timeout=25)
     assert process.returncode == 0, 'Suite did not close cleanly'
+
+
+def close_document(api, process, hwnd, child, record):
+    # HwndWrapper.close() adds a 2s deadline before our async teardown waits.
+    # Post the same owned WM_CLOSE once, then use the explicit lifecycle bounds.
+    record['stage'] = 'close-document'
+    api.request_close(hwnd, process.pid)
+    record['stage'] = 'wait-document-close'
+    wait_for(lambda: not api.user.IsWindow(hwnd), seconds=20)
+    record['stage'] = 'wait-editor-close'
+    wait_for(lambda: not api.user.IsWindow(child), seconds=10)
 
 
 def verified_attachment(api, process, module):
@@ -277,6 +309,7 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     target = new_base_target(fixtures)
     caption = 'OpenGeul Base — 다른 이름으로 저장'
     record['newBaseSaveAsVerified'] = False
+    record['stage'] = 'focus-save-menu'
     api.require_foreground(hwnd)
     shell = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
     menus = [item for item in shell.descendants(control_type='MenuItem')
@@ -298,6 +331,7 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
                                 api.title(dialog), caption, native.class_name())
         return dialog, native
 
+    record['stage'] = 'wait-save-dialog'
     dialog, native = wait_for(own_save_dialog, seconds=20)
     accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
     edits = [item for item in accessible.descendants(control_type='Edit')
@@ -309,6 +343,7 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     api.require_foreground(dialog)
     require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
                             api.title(dialog), caption, native.class_name())
+    record['stage'] = 'type-save-path'
     edits[0].click_input()
     api.require_foreground(dialog)
     send_keys('^a', pause=0.1)
@@ -319,8 +354,11 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
                             api.title(dialog), caption, native.class_name())
     api.require_foreground(dialog)
     assert not target.exists(), 'Save As target appeared before the verified Save click'
+    record['stage'] = 'click-save'
     buttons[0].click_input()
+    record['stage'] = 'wait-save-dialog-close'
     wait_for(lambda: not api.user.IsWindow(dialog), seconds=20)
+    record['stage'] = 'validate-saved-base'
     evidence = wait_for(lambda: saved_base_evidence(target), seconds=30)
     wait_for(lambda: not api.title(hwnd).startswith('* '), seconds=10)
     record.update(saveAsDialogVerified=True, saveAsDialogHwnd=int(dialog), saveAsFilenameAutomationId='1001',
@@ -336,14 +374,16 @@ def new_module(suite, output, module, *, fixtures=None):
     api = Windows()
     record = {'module': module, 'kind': 'new-document', 'shellPid': process.pid, 'success': False,
               'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False,
-              'discardPromptHandled': False}
+              'discardPromptHandled': False, 'stage': 'attach'}
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
+        record['stage'] = 'prepare-window'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
         window.set_focus()
         wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
         screenshot = name + '-attached.png'
+        record['stage'] = 'capture-attached'
         window.capture_as_image().save(output / screenshot)
         assert not api.windows(office_pid), 'New document opened an unowned visible Office window'
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid,
@@ -353,19 +393,19 @@ def new_module(suite, output, module, *, fixtures=None):
         if module == 'base':
             assert fixtures is not None, 'New Base Save As requires owned generated fixtures'
             saved_base = save_new_base(api, process, hwnd, fixtures, output, record)
+            record['stage'] = 'capture-saved-base'
             window.capture_as_image().save(output / 'new-base-saved.png')
-        window.close()
         # A Save As failure never falls back to discarding the unsaved Base document.
-        wait_for(lambda: not api.user.IsWindow(hwnd), seconds=20)
-        wait_for(lambda: not api.user.IsWindow(child), seconds=10)
-        close_home(api, process)
+        close_document(api, process, hwnd, child, record)
+        close_home(api, process, record)
         if saved_base is not None:
+            record['stage'] = 'verify-base-after-cleanup'
             final = saved_base_evidence(saved_base)
             assert not record['discardPromptHandled'], 'Saved Base must close normally without discard'
             record.update(newBaseSaveAsVerified=True, savedFileSurvivedCleanup=True,
                           savedFileSha256=final['sha256'], savedFileBytes=final['bytes'],
                           savedDatabaseUrl=final['connection'])
-        record.update(success=True, cleanClose=True, newDocumentVerified=True)
+        record.update(success=True, cleanClose=True, newDocumentVerified=True, stage='complete')
         return record
     except Exception as exc:
         capture_failure(output, name, record, exc)
@@ -379,20 +419,23 @@ def capture_home(suite, output):
     from pywinauto import Desktop
     process = subprocess.Popen([str(suite / 'OpenGeul.Office.exe')], cwd=suite, shell=False)
     api = Windows()
-    record = {'kind': 'home', 'shellPid': process.pid, 'success': False, 'keyboardInputVerified': False}
+    record = {'kind': 'home', 'shellPid': process.pid, 'success': False, 'keyboardInputVerified': False, 'stage': 'find-home'}
     try:
         hwnd = wait_for(lambda: api.home(process), seconds=30)
         assert api.windows(process.pid) == [hwnd], 'No-argument startup opened an unexpected document or dialog'
         assert not api.user.GetPropW(hwnd, 'OpenGeul.Office.ChildHwnd'), 'Home must not contain an editor frame'
+        record['stage'] = 'prepare-home'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
         window.set_focus()
+        record['stage'] = 'verify-home-labels'
         home_uia = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
         labels = require_home_labels([button.element_info.name for button in home_uia.descendants(control_type='Button')])
+        record['stage'] = 'capture-home'
         window.capture_as_image().save(output / 'home.png')
         record.update(windowHwnd=int(hwnd), title=api.title(hwnd), moduleLabels=labels, screenshot='home.png')
-        close_home(api, process)
-        record.update(success=True, cleanClose=True)
+        close_home(api, process, record)
+        record.update(success=True, cleanClose=True, stage='complete')
         return record
     except Exception as exc:
         capture_failure(output, 'home', record, exc)
@@ -416,50 +459,57 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
     api = Windows()
     record = {'module': module, 'kind': 'keyboard-edit' if physical_input else 'native-attach',
               'shellPid': process.pid, 'file': source.name, 'success': False,
-              'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False}
+              'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False, 'stage': 'attach'}
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid, title=api.title(hwnd))
+        record['stage'] = 'prepare-window'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
         window.set_focus()
         wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
         screenshot = module + ('-before.png' if physical_input else '-attached.png')
+        record['stage'] = 'capture-attached'
         window.capture_as_image().save(output / screenshot)
         if physical_input:
+            record['stage'] = 'focus-editor'
             api.require_foreground(hwnd)
             # A physical click gives the embedded process focus; Ctrl+F6 enters its document.
             Desktop(backend='win32').window(handle=child).wrapper_object().click_input()
             send_keys('^{F6}', pause=0.1)
             api.require_editor_focus(hwnd, child)
+            record['stage'] = 'navigate-editor'
             if module == 'writer': send_keys('^{END}', pause=0.1)
             elif module == 'calc': send_keys('^{HOME}{F2}^{END}', pause=0.1)
             else: send_keys('{TAB}{F2}^{END}', pause=0.1)
             marker = 'UI-OpenGeul-' + module
             focus = api.require_editor_focus(hwnd, child)
+            record['stage'] = 'type-marker'
             send_keys(marker, pause=0.04, with_spaces=True)
             if module == 'calc': send_keys('{ENTER}', pause=0.1)
             api.require_editor_focus(hwnd, child)
+            record['stage'] = 'save-keyboard'
             send_keys('^s', pause=0.1)
+            record['stage'] = 'wait-saved-marker'
             wait_for(lambda: marker in package_text(source), seconds=30)
             assert hashlib.sha256(source.read_bytes()).hexdigest() != before, 'Saved file bytes did not change'
             wait_for(lambda: not api.title(hwnd).startswith('* '), seconds=10)
+            record['stage'] = 'capture-edited'
             window.capture_as_image().save(output / (module + '-edited.png'))
             record.update(keyboardMarker=marker, keyboardFocusHwnd=focus,
                           keyboardInputVerified=True, contentMutationVerified=True)
         assert not api.windows(office_pid), 'Office created an unowned visible top-level window during the test'
         record.update(nativeParentVerified=True, noExternalOfficeWindow=True, screenshot=screenshot)
-        window.close()
-        wait_for(lambda: not api.user.IsWindow(hwnd), seconds=20)
-        wait_for(lambda: not api.user.IsWindow(child), seconds=10)
-        close_home(api, process)
+        close_document(api, process, hwnd, child, record)
+        close_home(api, process, record)
+        record['stage'] = 'verify-final-content'
         after = hashlib.sha256(source.read_bytes()).hexdigest()
         if physical_input:
             assert marker in package_text(source), 'Physical input marker disappeared after close'
             content_status = {'fixtureUnchanged': after == before}
         else:
             content_status = attach_only_content_status(module, before, after)
-        record.update(success=True, cleanClose=True, beforeSha256=before, afterSha256=after,
+        record.update(success=True, cleanClose=True, beforeSha256=before, afterSha256=after, stage='complete',
                       **content_status)
         return record
     except Exception as exc:
@@ -492,9 +542,11 @@ def collect_cases(cases, output):
                     if not isinstance(record, dict): raise ValueError('Case record must be an object')
                 except Exception as read_error:
                     record = {'recordReadError': type(read_error).__name__ + ': ' + str(read_error)}
-            record.update(success=False, caseException=type(exc).__name__ + ': ' + str(exc))
+            record.update(success=False, caseException=type(exc).__name__ + ': ' + str(exc),
+                          caseTraceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
             record.setdefault('error', record['caseException'])
         record['case'] = name
+        record.setdefault('stage', 'case-setup')
         if record.get('success') is not True:
             record['success'] = False
             record.setdefault('error', 'Case did not report success')

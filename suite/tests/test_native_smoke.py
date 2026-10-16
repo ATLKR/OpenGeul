@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 import zipfile
@@ -18,6 +19,70 @@ SPEC.loader.exec_module(smoke)
 
 
 class NativeSmokeTests(unittest.TestCase):
+    def test_taskkill_not_found_is_secondary_exit_race_only_after_verified_exit_zero(self):
+        process = SimpleNamespace(pid=123, poll=Mock(side_effect=[None, 0]))
+        record = {'success': False, 'error': 'original close timeout'}
+        error = smoke.subprocess.CalledProcessError(128, ['taskkill.exe'])
+        with patch.object(smoke.subprocess, 'run', side_effect=error):
+            smoke.stop_owned_test_process(process, record)
+        self.assertTrue(record['cleanupExitRaceVerified'])
+        self.assertEqual(record['cleanupProcessExitCode'], 0)
+        self.assertNotIn('cleanupError', record)
+        self.assertFalse(record['success'])
+        self.assertEqual(record['error'], 'original close timeout')
+
+    def test_taskkill_not_found_still_fails_if_owned_process_has_not_exited(self):
+        process = SimpleNamespace(pid=123, poll=Mock(side_effect=[None, None]))
+        record = {'success': True}
+        error = smoke.subprocess.CalledProcessError(128, ['taskkill.exe'])
+        with patch.object(smoke.subprocess, 'run', side_effect=error):
+            smoke.stop_owned_test_process(process, record)
+        self.assertFalse(record['success'])
+        self.assertIn('CalledProcessError', record['cleanupError'])
+        self.assertNotIn('cleanupExitRaceVerified', record)
+
+    def test_owned_close_posts_once_and_refuses_foreign_or_child_windows(self):
+        calls = []
+        api = object.__new__(smoke.Windows)
+        api.user = SimpleNamespace(IsWindow=lambda hwnd: True, GetAncestor=lambda hwnd, flag: hwnd,
+            PostMessageW=lambda *args: calls.append(args) or True)
+        api.pid = lambda hwnd: 123
+        api.request_close(456, 123)
+        self.assertEqual(calls, [(456, 0x0010, 0, 0)])
+        api.pid = lambda hwnd: 999
+        with self.assertRaises(AssertionError):
+            api.request_close(456, 123)
+        api.pid = lambda hwnd: 123
+        api.user.GetAncestor = lambda hwnd, flag: 789
+        with self.assertRaises(AssertionError):
+            api.request_close(456, 123)
+        self.assertEqual(len(calls), 1)
+
+    def test_close_waits_for_teardown_longer_than_wrapper_two_second_timeout(self):
+        elapsed = [0]
+        calls = []
+        api = SimpleNamespace(request_close=lambda hwnd, pid: calls.append((hwnd, pid)),
+            user=SimpleNamespace(IsWindow=lambda hwnd: elapsed[0] < (3 if hwnd == 456 else 2.5)))
+        record = {}
+        with patch.object(smoke.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                patch.object(smoke.time, 'sleep', side_effect=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)):
+            smoke.close_document(api, SimpleNamespace(pid=123), 456, 789, record)
+        self.assertEqual(calls, [(456, 123)])
+        self.assertGreaterEqual(elapsed[0], 3)
+        self.assertEqual(record['stage'], 'wait-editor-close')
+
+    def test_failure_preserves_stage_and_full_python_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = {'stage': 'wait-document-close'}
+            try:
+                raise RuntimeError('teardown failure')
+            except RuntimeError as exc:
+                smoke.capture_failure(Path(directory), 'draw', record, exc)
+            self.assertFalse(record['success'])
+            self.assertEqual(record['stage'], 'wait-document-close')
+            self.assertIn('RuntimeError: teardown failure', record['traceback'])
+            self.assertIn('test_failure_preserves_stage', record['traceback'])
+
     def test_collector_continues_and_preserves_failed_case_record_and_exception(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -37,6 +102,7 @@ class NativeSmokeTests(unittest.TestCase):
             self.assertEqual(records[0]['childHwnd'], 1234)
             self.assertEqual(records[0]['error'], 'native marker failed')
             self.assertIn('RuntimeError: case exception', records[0]['caseException'])
+            self.assertIn('RuntimeError: case exception', records[0]['caseTraceback'])
             self.assertEqual(records[0]['case'], 'writer')
             self.assertTrue(records[1]['success'])
 
