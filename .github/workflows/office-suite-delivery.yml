@@ -1,168 +1,293 @@
-name: OpenGeul validated artifact delivery
-'on':
+name: OpenGeul Office unpublished draft delivery
+
+on:
   push:
-    branches: [work/suite-artifact-delivery]
+    branches:
+      - work/suite-artifact-delivery
+    paths:
+      - .github/workflows/office-suite-delivery.yml
+
 permissions:
-  contents: read
+  contents: write
   actions: read
+
 jobs:
-  deliver-validated-artifact:
-    if: github.event.repository.private == false
+  deliver:
+    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
-    - name: Verify successful source and split its unchanged artifact
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-      shell: python
-      run: |
-        import hashlib
-        import json
-        import os
-        from pathlib import Path
-        import urllib.error
-        import urllib.parse
-        import urllib.request
+      - name: Verify exact successful artifacts and create unpublished draft only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import base64
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import zipfile
 
-        REPOSITORY = 'ATLKR/OpenGeul'
-        RUN_ID = 38909448104
-        HEAD_SHA = '579511489f9def03dd8d894ef249fd8ed9c8fa10'
-        ARTIFACT_ID = 12049897911
-        ARCHIVE_BYTES = 592780912
-        ARCHIVE_SHA256 = 'e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d'
-        CHUNK_BYTES = 256 * 1024 * 1024
-        API = 'https://api.github.com/repos/' + REPOSITORY
-        if os.environ.get('GITHUB_REPOSITORY') != REPOSITORY:
-            raise RuntimeError('This delivery workflow is restricted to the source repository')
+          REPOSITORY = 'ATLKR/OpenGeul'
+          SOURCE_RUN = 38909448104
+          SOURCE_HEAD = '579511489f9def03dd8d894ef249fd8ed9c8fa10'
+          TAG = 'opengeul-office-0.1.0-dev'
+          OUT = Path('draft-delivery')
+          OUT.mkdir(exist_ok=False)
+          TOKEN = os.environ['GITHUB_TOKEN']
+          API = 'https://api.github.com/repos/' + REPOSITORY
 
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                return None
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, message, headers, new_url):
+                  return None
 
-        # Authorization is sent only to api.github.com. Signed storage URLs are
-        # neither logged nor given the repository token.
-        api_client = urllib.request.build_opener(NoRedirect())
-        headers = {'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'],
-                   'Accept': 'application/vnd.github+json',
-                   'X-GitHub-Api-Version': '2022-11-28',
-                   'User-Agent': 'OpenGeul-validated-artifact-delivery'}
+          opener = urllib.request.build_opener(NoRedirect())
 
-        def api_json(path):
-            request = urllib.request.Request(API + path, headers=headers)
-            try:
-                with api_client.open(request, timeout=60) as response:
-                    return json.load(response)
-            except urllib.error.HTTPError as error:
-                raise RuntimeError('Source metadata API failed: HTTP ' + str(error.code)) from None
-            except Exception:
-                raise RuntimeError('Source metadata API could not be read') from None
+          def request_json(path, payload=None):
+              if not path.startswith('/') or path.startswith('//'):
+                  raise RuntimeError('Invalid API path')
+              data = None if payload is None else json.dumps(payload).encode('utf-8')
+              request = urllib.request.Request(API + path, data=data, headers={
+                  'Authorization': 'Bearer ' + TOKEN,
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'User-Agent': 'OpenGeul-draft-delivery',
+                  'Content-Type': 'application/json',
+              })
+              try:
+                  with opener.open(request, timeout=120) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  code = error.code
+                  error.close()
+                  raise RuntimeError('GitHub API request failed: HTTP ' + str(code)) from None
 
-        source_run = api_json('/actions/runs/' + str(RUN_ID))
-        if not (source_run.get('id') == RUN_ID and source_run.get('status') == 'completed'
-                and source_run.get('conclusion') == 'success' and source_run.get('head_sha') == HEAD_SHA):
-            raise RuntimeError('The exact source run must be completed, successful and at the pinned commit')
-        artifact = api_json('/actions/artifacts/' + str(ARTIFACT_ID))
-        binding = artifact.get('workflow_run', {})
-        if not (artifact.get('id') == ARTIFACT_ID and artifact.get('size_in_bytes') == ARCHIVE_BYTES
-                and artifact.get('expired') is False and binding.get('id') == RUN_ID
-                and binding.get('head_sha') == HEAD_SHA):
-            raise RuntimeError('The exact unexpired artifact must belong to the pinned successful run')
-        if artifact.get('digest') not in (None, 'sha256:' + ARCHIVE_SHA256):
-            raise RuntimeError('Source artifact metadata digest differs from the pinned digest')
+          def require(condition, message):
+              if not condition:
+                  raise RuntimeError(message)
 
-        archive_request = urllib.request.Request(
-            API + '/actions/artifacts/' + str(ARTIFACT_ID) + '/zip', headers=headers)
-        try:
-            with api_client.open(archive_request, timeout=60):
-                raise RuntimeError('Expected a signed artifact-download redirect')
-        except urllib.error.HTTPError as error:
-            if error.code != 302:
-                raise RuntimeError('Artifact download API failed: HTTP ' + str(error.code)) from None
-            location = error.headers.get('Location', '')
-            error.close()
-        except Exception:
-            raise RuntimeError('Artifact download redirect could not be obtained') from None
-        parsed = urllib.parse.urlsplit(location)
-        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
-            raise RuntimeError('Artifact download requires an HTTPS storage URL without user credentials')
-        if not parsed.hostname.lower().endswith(('.blob.core.windows.net', '.githubusercontent.com')):
-            raise RuntimeError('Artifact redirect is not an allowed GitHub artifact storage host')
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open('rb') as source:
+                  while block := source.read(1024 * 1024):
+                      digest.update(block)
+              return digest.hexdigest()
 
-        output = Path('delivery')
-        output.mkdir(exist_ok=False)
-        archive = output / 'source-artifact.zip'
-        digest = hashlib.sha256()
-        received = 0
-        try:
-            # This new request deliberately has no Authorization header.
-            storage_request = urllib.request.Request(location, headers={
-                'User-Agent': 'OpenGeul-validated-artifact-delivery'})
-            with urllib.request.urlopen(storage_request, timeout=60) as response, archive.open('xb') as target:
-                while block := response.read(1024 * 1024):
-                    received += len(block)
-                    if received > ARCHIVE_BYTES:
-                        raise RuntimeError('Artifact exceeded its pinned byte count')
-                    target.write(block)
-                    digest.update(block)
-        except Exception as error:
-            # Exception text can contain the signed URL; report only its type.
-            raise RuntimeError('Artifact content download failed: ' + type(error).__name__) from None
-        if received != ARCHIVE_BYTES or digest.hexdigest() != ARCHIVE_SHA256:
-            raise RuntimeError('Downloaded source archive size or SHA256 differs from the pinned bytes')
+          def download_artifact(artifact_id, expected_size, expected_hash, name):
+              metadata = request_json('/actions/artifacts/' + str(artifact_id))
+              require(metadata['id'] == artifact_id and not metadata['expired'], 'Artifact is missing or expired')
+              require(metadata['size_in_bytes'] == expected_size, 'Artifact size metadata differs')
+              require(metadata['workflow_run']['id'] == SOURCE_RUN, 'Artifact source run differs')
+              require(metadata['workflow_run']['head_sha'] == SOURCE_HEAD, 'Artifact source commit differs')
+              require(metadata.get('digest') in (None, 'sha256:' + expected_hash), 'Artifact digest metadata differs')
+              request = urllib.request.Request(API + '/actions/artifacts/' + str(artifact_id) + '/zip', headers={
+                  'Authorization': 'Bearer ' + TOKEN,
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'User-Agent': 'OpenGeul-draft-delivery',
+              })
+              try:
+                  response = opener.open(request, timeout=120)
+              except urllib.error.HTTPError as error:
+                  require(error.code == 302, 'Artifact API did not return the expected redirect')
+                  location = error.headers.get('Location', '')
+                  error.close()
+              else:
+                  response.close()
+                  raise RuntimeError('Artifact API did not return the expected redirect')
+              parsed = urllib.parse.urlsplit(location)
+              require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password,
+                      'Artifact storage location is invalid')
+              require(parsed.hostname.endswith(('.blob.core.windows.net', '.githubusercontent.com')),
+                      'Artifact storage host is unexpected')
+              target = OUT / name
+              digest = hashlib.sha256()
+              count = 0
+              # This separate anonymous request never receives the GitHub credential.
+              try:
+                  anonymous_request = urllib.request.Request(location, headers={'User-Agent': 'OpenGeul-draft-delivery'})
+                  with opener.open(anonymous_request, timeout=120) as response, target.open('xb') as output:
+                      while block := response.read(1024 * 1024):
+                          count += len(block)
+                          require(count <= expected_size, 'Artifact exceeds the pinned size')
+                          digest.update(block)
+                          output.write(block)
+              except Exception as error:
+                  # Signed storage URLs must never appear in exception logs.
+                  raise RuntimeError('Anonymous artifact download failed: ' + type(error).__name__) from None
+              require(count == expected_size and digest.hexdigest() == expected_hash, 'Artifact bytes do not match the pin')
+              return target
 
-        parts = []
-        rebuilt_digest = hashlib.sha256()
-        with archive.open('rb') as source:
-            for number in range(1, 4):
-                content = source.read(CHUNK_BYTES)
-                expected = min(CHUNK_BYTES, ARCHIVE_BYTES - (number - 1) * CHUNK_BYTES)
-                if len(content) != expected or not content:
-                    raise RuntimeError('Unexpected source chunk size')
-                name = 'OpenGeul-Office-validated-artifact.zip.part' + str(number).zfill(3)
-                (output / name).write_bytes(content)
-                rebuilt_digest.update(content)
-                parts.append({'file': name, 'bytes': len(content),
-                              'sha256': hashlib.sha256(content).hexdigest()})
-            if source.read(1):
-                raise RuntimeError('Unexpected trailing archive bytes')
-        if sum(part['bytes'] for part in parts) != ARCHIVE_BYTES or rebuilt_digest.hexdigest() != ARCHIVE_SHA256:
-            raise RuntimeError('Ordered chunks do not reproduce the original source archive')
-        manifest = {'schemaVersion': 1, 'kind': 'byte-exact-validated-artifact-delivery',
-                    'source': {'repository': REPOSITORY, 'runId': RUN_ID, 'headSha': HEAD_SHA,
-                               'artifactId': ARTIFACT_ID, 'artifactName': artifact.get('name'),
-                               'bytes': ARCHIVE_BYTES, 'sha256': ARCHIVE_SHA256},
-                    'chunkBytes': CHUNK_BYTES, 'parts': parts,
-                    'reassembly': 'Concatenate the listed part files in order, then verify source.bytes and source.sha256. The result is the original outer artifact ZIP.'}
-        (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-        print('Verified source run, commit, archive size/SHA256 and three byte-exact chunks.')
+          def extract_member(archive, member, output_name, size=None, expected_hash=None):
+              with zipfile.ZipFile(archive) as source:
+                  matches = [entry for entry in source.infolist() if entry.filename == member]
+                  require(len(matches) == 1 and not matches[0].is_dir(), 'Expected archive member is not unique')
+                  if size is not None:
+                      require(matches[0].file_size == size, 'Archive member size differs')
+                  target = OUT / output_name
+                  with source.open(matches[0]) as entry, target.open('xb') as output:
+                      while block := entry.read(1024 * 1024):
+                          output.write(block)
+                  # Reading the entire member also validates its ZIP CRC.
+              if expected_hash is not None:
+                  require(sha256(target) == expected_hash, 'Archive member SHA-256 differs')
+              return target
 
-    - name: Deliver original archive part 1 of 3
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-validated-12049897911-part-1
-        path: |
-          delivery/OpenGeul-Office-validated-artifact.zip.part001
-          delivery/manifest.json
-        compression-level: 0
-        retention-days: 1
-        if-no-files-found: error
-    - name: Deliver original archive part 2 of 3
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-validated-12049897911-part-2
-        path: |
-          delivery/OpenGeul-Office-validated-artifact.zip.part002
-          delivery/manifest.json
-        compression-level: 0
-        retention-days: 1
-        if-no-files-found: error
-    - name: Deliver original archive part 3 of 3
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-validated-12049897911-part-3
-        path: |
-          delivery/OpenGeul-Office-validated-artifact.zip.part003
-          delivery/manifest.json
-        compression-level: 0
-        retention-days: 1
-        if-no-files-found: error
+          run = request_json('/actions/runs/' + str(SOURCE_RUN))
+          require(run['id'] == SOURCE_RUN and run['status'] == 'completed' and run['conclusion'] == 'success',
+                  'The source run is not successful')
+          require(run['head_sha'] == SOURCE_HEAD and run['repository']['full_name'] == REPOSITORY,
+                  'The source run identity differs')
+          package_artifact = download_artifact(12049897911, 592780912,
+              'e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d', 'source-artifact.zip')
+          package = extract_member(package_artifact, 'OpenGeul-Office-0.1.0-dev-windows-x64.zip',
+              'OpenGeul-Office-0.1.0-dev-windows-x64.zip', 592780716,
+              '87571bfa914950876837bc79e431168056a65fa357fadcafb0030463b9b25995')
+          evidence = download_artifact(12049558509, 2546436,
+              '8876ce85241bb512f1d68e4c03332a269aa52398cb9ed1fcb1d737435bed7080',
+              'OpenGeul-Office-validation-evidence.zip')
+          with zipfile.ZipFile(evidence) as archive:
+              engine = json.loads(archive.read('suite-engine/engine-smoke.json'))
+              native = json.loads(archive.read('suite-native/results.json'))
+              reopened = json.loads(archive.read('suite-engine/ui-engine-verification.json'))
+              require(engine['passed'] is True and len(engine['cases']) == 6, 'Engine evidence differs')
+              require(native['success'] is True and native['passedCaseCount'] == 13, 'GUI evidence differs')
+              require(reopened['passed'] is True and len(reopened['cases']) == 6, 'Post-GUI evidence differs')
+              expected_modules = {'writer', 'calc', 'impress', 'draw', 'math', 'base'}
+              require(set(native['nativeAttachmentModules']) == expected_modules, 'Attachment evidence differs')
+              require(set(native['newDocumentModules']) == expected_modules, 'New-document evidence differs')
+              require(set(native['physicalInputModules']) == {'writer', 'calc', 'impress'}, 'Physical-input evidence differs')
+          home = extract_member(evidence, 'suite-native/home.png', 'OpenGeul-Office-home.png', 28164,
+              'b41b28fda2606e800151d9e6a01b0b277c3a42f145c1344eebe3ef4850eda1fc')
+          writer = extract_member(evidence, 'suite-native/writer-edited.png', 'OpenGeul-Office-Writer.png', 43286,
+              'be4bfd61f4f67b7dcafbdf23de179e30030df3dd16c861d3c3a13e22e6ef8d61')
+
+          # The exact reviewed guide and report are embedded by the preparation script.
+          EMBEDDED_ASSETS = {'OpenGeul-Office-사용안내.txt': 'T3BlbkdldWwgT2ZmaWNlIDAuMS4wLWRldiDigJQgV2luZG93cyB4NjQKClpJUCDsoITssrTrpbwg7IOIIO2PtOuNlCjsmIg6IEM6XE9wZW5HZXVsT2ZmaWNlKeyXkCDtkoDqs6AgT3BlbkdldWwuT2ZmaWNlLmV4ZeulvCDsi6TtlontlZjshLjsmpQuCuyLnOyekSDtmZTrqbTsnZgg7JWx7J2EIOuIhOultOuptCDsg4gg66y47ISc66W8IOunjOuTpOqzoCwgJ+2MjOydvCDsl7TquLAn66GcIOq4sOyhtCDrrLjshJzrpbwg7Je964uI64ukLgoKT3BlbkdldWwgSFdQOiBIV1AsIEhXUFgKT3BlbkdldWwgV3JpdGVyOiBET0NYLCBET0MsIE9EVCwgUlRGLCBUWFQKT3BlbkdldWwgQ2FsYzogWExTWCwgWExTLCBPRFMsIENTVgpPcGVuR2V1bCBJbXByZXNzOiBQUFRYLCBQUFQsIE9EUApPcGVuR2V1bCBEcmF3OiBPREcKT3BlbkdldWwgTWF0aDogT0RGIOyImOyLnSDtjIzsnbwoLm9kZikKT3BlbkdldWwgQmFzZTogT0RCCgpXcml0ZXLCt0NhbGPCt0ltcHJlc3PCt0RyYXfCt01hdGjCt0Jhc2XripQg6rCBIE9wZW5HZXVsIOusuOyEnCDssL0g7JWI7JeQ7IScIOyngeygkSDtjrjsp5Htlanri4jri6QuCkhXUC9IV1BY64qUIOuzhOuPhOydmCBPcGVuR2V1bCBIV1Ag7Y647KeR6riwIOywveyXkOyEnCDsl7Trpr3ri4jri6QuCldyaXRlcsK3Q2FsY8K3SW1wcmVzc8K3RHJhd+uKlCDtg60gVUkoTm90ZWJvb2tiYXIp66W8IOq4sOuzuCDshKTsoJXsnLzroZwg7KCc6rO17ZWp64uI64ukLgrtmITsnqwg6rCc67Cc7YyQ7J2AIFN1aXRlIOuplOuJtOqwgCDtlZzqta3slrTsnbTrqbAsIE9mZmljZSDtjrjsp5HquLDsnZgg7YOtwrfrqZTribTCt+uPhOybgOunkCDsnbzrtoDripQg7JiB7Ja066GcIO2RnOyLnOuQqeuLiOuLpC4K7J2867CYIOyggOyepeydgCDtmITsnqwg7ZiV7Iud7J2EIOycoOyngO2VqeuLiOuLpC4g64uk66W4IO2YleyLneydgCAn64uk66W4IOydtOumhOycvOuhnCDsoIDsnqUn7JeQ7IScIOyEoO2Dne2VmOyEuOyalC4KSFdQL0hXUFjsmYAgRE9DWCDsgqzsnbTsnZgg7J6Q64+ZIOuzgO2ZmOydgCDsoJzqs7XtlZjsp4Ag7JWK7Iq164uI64ukLgrsg4ggQmFzZSDrrLjshJzripQg64K07J6lIEZpcmViaXJk66W8IOyCrOyaqe2VmOupsCwg7LKY7J2MIOyggOyepe2VoCDrlYwg7Iuk7KCcIOuztOq0gO2VoCDtjIzsnbwg6rK966Gc66W8IOyEoO2Dne2VtOyVvCDtlanri4jri6QuCkhXUCDtjrjsp5HquLDsl5DripQgV2luZG93cyBXZWJWaWV3MuqwgCDtlYTsmpTtlanri4jri6QuIEpEQkPCt+q1rO2YlSBIU1FMREIg65Ox7JeQIO2VhOyalO2VnCBKYXZhwrfrk5zrnbzsnbTrsoTsmYAK7Jm467aAIOuNsOydtO2EsOuyoOydtOyKpCDshJzrsoTripQg67OE64+E66GcIOykgOu5hO2VtOyVvCDtlanri4jri6QuCgrsnbQg67KE7KCE7J2AIHBvcnRhYmxlIOqwnOuwnO2MkOyeheuLiOuLpC4g7KSR7JqU7ZWcIOybkOuzuOydhCDrs7TqtIDtlZjqs6Ag7KCA7J6lIOqysOqzvOulvCDtmZXsnbjtlZjshLjsmpQuCuydtOyghCBXaW5kb3dzIOqygOymneyXkOyEnCBDYWxjIOy0iOq4sO2ZlOqwgCDtlZwg7LCo66GAIOyLpO2MqO2WiOyKteuLiOuLpC4g7LWc7IugIOu5jOuTnOydmCDsoITssrQg6rKA7Kad7J2AIO2GteqzvO2WiOyngOunjCwK7ZW064u5IOqwhO2XkOyggSDsmKTrpZjsnZgg7JuQ7J247J2AIOyVhOyngSDtmZXsoJXtlZjsp4Ag66q77ZaI7Iq164uI64ukLgrqsJXsoJwg7KKF66OMIO2bhCDsnpDrj5kg67O16rWsLCDtlZzqta3slrQgSU1FIOyghOyytCDsobDtlaksIEFSTTY0LCDsi6TsoJwg7ZSE66aw7YSwLCBTdG9yZSDrsLDtj6zripQg67OE64+EIOqygOymnSDrjIDsg4HsnoXri4jri6QuCjMy67mE7Yq4IFRXQUlOIOyKpOy6kOuEiOyZgCBTaGFyZVBvaW50IENPTSDsl7Drj5nsnYAg7KeA7JuQ7ZWY7KeAIOyViuyKteuLiOuLpC4K66qo65OgIOusuOyEnCDtmJXsi50g7IKs7J207J2YIOyZhOyghO2VnCDsmZXrs7Ug7Zi47ZmY7ISx7J2EIOuztOyepe2VmOyngCDslYrsirXri4jri6QuCgrsoJztkojrqoXCt+uqqOuTiCDtkZzsi5zCt+yLnOyekSDtmZTrqbTqs7wgU3VpdGUg7Iuk7ZaJIOyVhOydtOy9mOydgCBPcGVuR2V1bOuhnCDqtazshLHtlojsirXri4jri6QuCuybkOuzuCDsl5Tsp4TsnZgg7KCA7J6R6raMwrfrnbzsnbTshKDsiqTsmYAg67CU7J2064SI66asIOygnOyekeyCrCDrqZTtg4DrjbDsnbTthLDripQg67O07KG07ZWp64uI64ukLgrsu7TtjIzsnbzrkJwg7J2867aAIOuPhOybgOunkMK37KCV67O0IO2ZlOuptOyXkOuKlCDsm5Drs7gg7JeU7KeEIOydtOumhOydtCDrgqjslYQg7J6I7J2EIOyImCDsnojsirXri4jri6QuCuudvOydtOyEoOyKpMK364yA7J2RIOyGjOyKpDog7Yyo7YKk7KeA7J2YIE5vdGljZXMvQ09SUkVTUE9ORElOR19TT1VSQ0UubWQKT3BlbkdldWwg7LaU6rCAIOy9lOuTnOuKlCBNSVTsnbTrqbAg6rCBIOq1rOyEsSDsmpTshozsl5DripQg7JuQ656YIOudvOydtOyEoOyKpOqwgCDsoIHsmqnrkKnri4jri6QuClRoZSBEb2N1bWVudCBGb3VuZGF0aW9uwrftlZzsu7Tqs7wg7KCc7Zy07ZWY6rGw64KYIOyKueyduOydhCDrsJvsnYAg7KCc7ZKI7J2AIOyVhOuLmeuLiOuLpC4K', 'OpenGeul-Office-검증결과.md': 'IyBPcGVuR2V1bCBPZmZpY2UgMC4xLjAtZGV2IOqygOymnSDqsrDqs7wKCldpbmRvd3MgeDY0IHBvcnRhYmxlIOqwnOuwnO2MkOyeheuLiOuLpC4gT3BlbkdldWwgSFdQLCBXcml0ZXIsIENhbGMsIEltcHJlc3MsIERyYXcsIE1hdGgsIEJhc2Xrpbwg7ZWY64KY7J2YIOyLnOyekSDtmZTrqbTsl5DshJwg7Je964uI64ukLiBXcml0ZXLCt0NhbGPCt0ltcHJlc3PCt0RyYXfsl5DripQg7YOtIFVJ66W8IOq4sOuzuCDsoIHsmqntlojsirXri4jri6QuCgpaSVAg7KCE7LK066W8IOyDiCDtj7TrjZTsl5Ag7ZKA6rOgIGBPcGVuR2V1bC5PZmZpY2UuZXhlYOulvCDsi6TtlontlZjshLjsmpQuIEhXUCDtjrjsp5HquLDsl5DripQgV2ViVmlldzLqsIAg7ZWE7JqU7ZWp64uI64ukLiDsnpDshLjtlZwg64K07Jqp7J2AIO2VqOq7mCDsoJzqs7XtlZwg7IKs7JqpIOyViOuCtOulvCDssLjqs6DtlZjshLjsmpQuCgojIyDsi6TsoJwg6rKA7KadCgotIFdpbmRvd3Mg7Iuk7ZaJOiBbR2l0SHViIEFjdGlvbnMgMzg5MDk0NDgxMDRdKGh0dHBzOi8vZ2l0aHViLmNvbS9BVExLUi9PcGVuR2V1bC9hY3Rpb25zL3J1bnMvMzg5MDk0NDgxMDQpLCDrqqjrk6Ag64uo6rOEIOyEseqztS4KLSDshozsiqQ6IFs1Nzk1MTE0ODlmOWRlZjAzZGQ4ZDg5NGVmMjQ5ZmQ4ZWQ5YzhmYTEwXShodHRwczovL2dpdGh1Yi5jb20vQVRMS1IvT3BlbkdldWwvY29tbWl0LzU3OTUxMTQ4OWY5ZGVmMDNkZDhkODk0ZWYyNDlmZDhlZDljOGZhMTApLgotIFB5dGhvbiDqsoDsgqwgMTc26rCcOiAxNzXqsJwg7Ya16rO8LCDshKDtg53soIEg65+w7YOA7J6EIO2ZmOqyvSDqsoDsgqwgMeqwnCDsoJzsmbguIEMjIOqygOyCrCA0MeqwnCDrqqjrkZAg7Ya16rO8LgotIOyLpOygnCBPZmZpY2Ug7JeU7KeEIDbqsJw6IOyDneyEscK37Y647KeRwrfsoIDsnqXCt+yerOyXtOq4sCDrqqjrkZAg7Ya16rO8LgotIEdVSSAxM+qwnDog7Iuc7J6RIO2ZlOuptCwg6riw7KG0IOusuOyEnCA26rCcLCDsg4gg66y47IScIDbqsJwg66qo65GQIO2GteqzvC4gMTPqsJwg7Jik66WYIOuhnOq3uOuKlCDrqqjrkZAg67mE7Ja0IOyeiOyKteuLiOuLpC4KLSBHVUkg7Iuk7ZaJIO2bhCDrrLjshJwgNuqwnOulvCDsl5Tsp4Tsl5DshJwg64uk7IucIOyXtOyWtCDrgrTsmqkg67O07KG0IO2ZleyduC4KLSDsoITri6wgWklQ7J2YIOyghOyytCBDUkMsIEdpdEh1YiDsm5Drs7gg7JWE7Lm07J2067iMIFNIQS0yNTYsIO2PrO2VqOuQnCDshozsiqQg7Luk67CL6rO8IO2MjOydvCAyMSwzMzLqsJzsnZgg66y06rKw7ISx7J2EIOuzhOuPhOuhnCDtmZXsnbjtlojsirXri4jri6QuCgp8IOyVsSB8IOyLpOygnCDtmZXsnbjtlZwg67KU7JyEIHwKfC0tLXwtLS18CnwgV3JpdGVyIHwgT3BlbkdldWwg7LC9IOuCtOu2gOyXkCDtjrjsp5HquLAg67aA7LCpLCDtgqTrs7Trk5wg7J6F66ClwrfsoIDsnqUsIERPQ1gg7JuQ66y46rO8IOyeheugpSDrgrTsmqkg7J6s7Je06riwIHwKfCBDYWxjIHwg7LC9IOuCtOu2gCDrtoDssKksIO2CpOuztOuTnCDsnoXroKXCt+yggOyepSwgWExTWCDrgrTsmqnCt1NVTSDsiJjsi53Ct+qzhOyCsOqwkiA0MiDrs7TsobQgfAp8IEltcHJlc3MgfCDssL0g64K067aAIOu2gOywqSwg7YKk67O065OcIOyeheugpcK37KCA7J6lLCBQUFRYIO2FjeyKpO2KuMK37Iqs65287J2065OcIOyImCDrs7TsobQgfAp8IERyYXcgfCDquLDsobTCt+yDiCDrrLjshJwg7LC9IOu2gOywqcK37KKF66OMLCDsl5Tsp4Qg7Y647KeRIO2bhCBPREcg7YWN7Iqk7Yq4wrfrj4TtmJUg7JyE7LmY7JmAIO2BrOq4sCDrs7TsobQgfAp8IE1hdGggfCDquLDsobTCt+yDiCDrrLjshJwg7LC9IOu2gOywqcK37KKF66OMLCDsl5Tsp4Qg7Y647KeRIO2bhCDsiJjsi50g67O07KG0IHwKfCBCYXNlIHwg7LC9IOu2gOywqSwg6riw7KG0IEZpcmViaXJkIOuNsOydtO2EsOydmCDsi6TsoJwgU1FMIO2WiSDrs7TsobQsIOyDiCDruYggT0RC7J2YIEdVSSDri6Trpbgg7J2066aE7Jy866GcIOyggOyepeqzvCDsnpHsl4Ug7KKF66OMIO2bhCDtjIzsnbwg7KG07IaNIHwKfCBIV1AgfCDquLDsobQgT3BlbkdldWwgMS4xLjQg7Y647KeR6riw66W8IOuzhOuPhCDqtazshLEg7JqU7IaM66GcIO2PrO2VqC4g7JyEIEdVSSAxM+qwnCDqsoDsgqzsl5DripQgSFdQ6rCAIO2PrO2VqOuQmOyngCDslYrsirXri4jri6QuIHwKCiMjIO2MjOydvCDtmZXsnbgKCu2MjOydvDogYE9wZW5HZXVsLU9mZmljZS0wLjEuMC1kZXYtd2luZG93cy14NjQuemlwYAoK7YGs6riwOiA1OTIsNzgwLDcxNuuwlOydtO2KuAoKU0hBLTI1NjogYDg3NTcxYmZhOTE0OTUwODc2ODM3YmM3OWU0MzExNjgwNTZhNjVmYTM1N2ZhZGNhZmIwMDMwNDYzYjliMjU5OTVgCgrqsoDspp0g7JuQ67O4IFpJUOydmCBTSEEtMjU2OiBgODg3NmNlODUyNDFiYjUxMmYxZDY4ZTRjMDMzMzJhMjY5YWE1MjM5OGNiOWVkMWZjYjFkNzM3NDM1YmVkNzA4MGAKCuuMgOydkSDshozsiqTsmYAg65287J207ISg7Iqk64qUIO2MqO2CpOyngOydmCBgU291cmNlcy9g7JmAIGBOb3RpY2VzL0NPUlJFU1BPTkRJTkdfU09VUkNFLm1kYOyXkCDtj6ztlajtlojsirXri4jri6QuCgojIyDqsJzrsJztjJDsnZgg67KU7JyECgrsnbTsoIQgV2luZG93cyDqsoDspp3sl5DshJwgQ2FsYyDstIjquLDtmZTqsIAg7ZWcIOywqOuhgCDsi6TtjKjtlojsirXri4jri6QuIOy1nOyLoCDsp4Tri6gg7LaU6rCAIOu5jOuTnOyXkOyEnOuKlCDsnqztmITrkJjsp4Ag7JWK7JWY7Jy866mwLCDsm5DsnbjsnbQg7ZmV7KCV65CY6rGw64KYIOyImOygleuQnCDqsoPsnLzroZwg7ZGc7Iuc7ZWY7KeAIOyViuyKteuLiOuLpC4KCu2VnOq1reyWtCBJTUUg7KCE7LK0IOyhsO2VqSwgQVJNNjQsIOyLpOygnCDtlITrprDthLAsIOqwleygnCDsooXro4wg7ZuEIOuzteq1rCwgU3RvcmUg67Cw7Y+s64qUIOqygOymne2VmOyngCDslYrslZjsirXri4jri6QuIERyYXfCt01hdGjCt0Jhc2XsnZggR1VJIO2CpOuztOuTnCDtjrjsp5Eg7KCE7LK066W8IOqygOymne2VnCDqsoPsnYAg7JWE64uZ64uI64ukLiDsg4ggQmFzZeydmCBHVUkg7KCA7J6lIOqygOyCrOuKlCDruYggRmlyZWJpcmQg6rWs7ISxIE9EQuydmCDrs7TqtIDsnYQg7ZmV7J247ZWcIOqyg+ycvOuhnCwgR1VJ7JeQ7IScIO2FjOydtOu4lOqzvCDrjbDsnbTthLDrpbwg66eM65Oc64qUIOyekeyXheq5jOyngCDqsoDspp3tlZjsp4Ag7JWK7JWY7Iq164uI64ukLgoKSFdQL0hXUFjsmYAgRE9DWCDsnpDrj5kg67OA7ZmY7J2EIOygnOqzte2VmOyngCDslYrsnLzrqbAsIOuqqOuToCDtmJXsi53snZgg7JmE7KCE7ZWcIOyZleuztSDtmLjtmZjshLHsnYQg67O07J6l7ZWY7KeAIOyViuyKteuLiOuLpC4g7KSR7JqU7ZWcIOybkOuzuOydhCDrs7TqtIDtlZjqs6Ag7KCA7J6lIOqysOqzvOulvCDtmZXsnbjtlZjshLjsmpQuCgrslbEg7KCc7ZKI66qF6rO8IOyjvOyalCDtkZzsi5zripQgT3BlbkdldWzroZwg6rWs7ISx7ZaI7Iq164uI64ukLiDtjrjsp5HquLDsnZgg7J2867aAIOuplOuJtOuKlCDsmIHslrTsnbTrqbAsIOy7tO2MjOydvOuQnCDsnbzrtoAg64+E7JuA66eQwrfsoJXrs7Qg7ZmU66m06rO8IOuwlOydtOuEiOumrCDsoJzsnpHsgqwg66mU7YOA642w7J207YSw7JeQ64qUIOybkOuzuCDsl5Tsp4Qg7J2066aE7J20IOuCqOyVhCDsnojsnYQg7IiYIOyeiOyKteuLiOuLpC4g7JuQ67O4IOyggOyekeq2jMK365287J207ISg7Iqk64qUIOuztOyhtO2WiOyKteuLiOuLpC4KCuydtCDqsrDqs7zripQg7ZWcIOuyiOydmCDsoITssrQg7Ya16rO8IOyLpO2WieqzvCDqt7gg7IKw7Lac66y8IOqygOymneydhCDquLDroZ3tlanri4jri6QuIOygleyLnSDqs7XqsJwg66a066as7Iqk64KYIFN0b3JlIOuwsO2PrOulvCDsmYTro4ztlZwg7IOB7YOc64qUIOyVhOuLmeuLiOuLpC4K'}
+          embedded = []
+          for name, encoded in EMBEDDED_ASSETS.items():
+              target = OUT / name
+              target.write_bytes(base64.b64decode(encoded, validate=True))
+              embedded.append(target)
+          assets = [package, *embedded, home, writer, evidence]
+          asset_manifest = [{'name': asset.name, 'bytes': asset.stat().st_size, 'sha256': sha256(asset)} for asset in assets]
+          attestation = OUT / 'OpenGeul-Office-delivery-attestation.json'
+          attestation.write_text(json.dumps({
+              'repository': REPOSITORY, 'sourceRun': SOURCE_RUN, 'sourceCommit': SOURCE_HEAD,
+              'sourceArtifact': {'id': 12049897911, 'bytes': 592780912,
+                  'sha256': 'e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d'},
+              'evidenceArtifact': {'id': 12049558509, 'bytes': 2546436,
+                  'sha256': '8876ce85241bb512f1d68e4c03332a269aa52398cb9ed1fcb1d737435bed7080'},
+              'checks': {'engineModules': 6, 'guiCases': 13, 'postGuiModules': 6,
+                  'physicalInputModules': ['writer', 'calc', 'impress']},
+              'delivery': 'Unpublished draft only; original validated package, no rebuild',
+              'assets': asset_manifest,
+          }, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          assets.append(attestation)
+
+          body = '''Windows x64 portable 개발판 — **미공개 초안**입니다. 공개 릴리스나 Store 배포를 수행하지 않습니다.
+
+          검증된 원본 패키지를 재빌드 없이 전달합니다. ZIP 전체를 새 폴더에 풀고 `OpenGeul.Office.exe`를 실행하세요. 사용 안내, 검증 결과, 실제 화면 및 원본 검증 자료를 첨부했습니다.
+
+          - 전체 성공 실행: https://github.com/ATLKR/OpenGeul/actions/runs/38909448104
+          - 정확한 테스트 소스: https://github.com/ATLKR/OpenGeul/commit/579511489f9def03dd8d894ef249fd8ed9c8fa10
+          - 작업 브랜치: https://github.com/ATLKR/OpenGeul/tree/work/opengeul-office-suite
+          - Python 검사: 175개 통과, 선택적 환경 검사 1개 제외. C# 검사: 41개 통과.
+          - 실제 엔진 6개, GUI 13개, GUI 이후 내용 재검증 6개 통과.
+          - GUI 키보드 입력·저장은 Writer·Calc·Impress에서 검증했습니다. Draw·Math·Base의 GUI 편집 전체를 검증한 것은 아닙니다. HWP는 이 GUI 13개 검사에 포함되지 않습니다.
+          - 새 Base는 GUI 다른 이름으로 저장과 종료 후 파일 존속을 확인했습니다.
+
+          패키지: `OpenGeul-Office-0.1.0-dev-windows-x64.zip` (592,780,716바이트)
+          SHA-256: `87571bfa914950876837bc79e431168056a65fa357fadcafb0030463b9b25995`
+          원본 Actions 아카이브: 592,780,912바이트, SHA-256 `e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d`.
+
+          이전 Windows 검증에서 Calc 초기화가 한 차례 실패했습니다. 최신 전체 실행은 통과했지만 원인이 확정되거나 수정된 것으로 표시하지 않습니다. 한국어 IME 전체 조합, ARM64, 실제 프린터, 강제 종료 후 복구, Store 배포는 검증하지 않았습니다. 중요한 원본을 보관하고 저장 결과를 확인하세요. 일부 엔진 메뉴는 영어이며 원본 저작권·라이선스와 바이너리 제작사 메타데이터는 보존합니다.
+          '''
+
+          matches = []
+          for page in range(1, 101):
+              releases = request_json('/releases?per_page=100&page=' + str(page))
+              matches.extend(item for item in releases if item['tag_name'] == TAG)
+              if len(releases) < 100:
+                  break
+          else:
+              raise RuntimeError('Release pagination limit exceeded')
+          require(len(matches) <= 1, 'Multiple releases use the delivery tag')
+
+          def check_draft(release):
+              require(release['draft'] is True and release['published_at'] is None,
+                      'Refusing to modify a published release')
+              require(release['tag_name'] == TAG and release['target_commitish'] == SOURCE_HEAD,
+                      'Existing draft targets a different commit')
+              require(release['prerelease'] is True, 'Existing draft is not the expected prerelease')
+
+          if matches:
+              release = matches[0]
+              check_draft(release)
+          else:
+              # No git-ref API call and no publish/update call: creating an unpublished draft only.
+              release = request_json('/releases', {
+                  'tag_name': TAG, 'target_commitish': SOURCE_HEAD,
+                  'name': 'OpenGeul Office 0.1.0-dev', 'body': body,
+                  'draft': True, 'prerelease': True,
+              })
+              check_draft(release)
+
+          release_id = release['id']
+          existing = []
+          for page in range(1, 101):
+              batch = request_json('/releases/' + str(release_id) + '/assets?per_page=100&page=' + str(page))
+              existing.extend(batch)
+              if len(batch) < 100:
+                  break
+          else:
+              raise RuntimeError('Asset pagination limit exceeded')
+
+          upload_base = release['upload_url'].split('{', 1)[0]
+          parsed = urllib.parse.urlsplit(upload_base)
+          require(parsed.scheme == 'https' and parsed.netloc == 'uploads.github.com' and not parsed.query
+                  and not parsed.fragment and parsed.path == '/repos/' + REPOSITORY + '/releases/' + str(release_id) + '/assets',
+                  'Unexpected release upload destination')
+          for asset in assets:
+              check_draft(request_json('/releases/' + str(release_id)))
+              expected_size, expected_hash = asset.stat().st_size, sha256(asset)
+              same_name = [item for item in existing if item['name'] == asset.name]
+              require(len(same_name) <= 1, 'Duplicate release asset name')
+              if same_name:
+                  require(same_name[0]['state'] == 'uploaded' and same_name[0]['size'] == expected_size
+                          and same_name[0].get('digest') == 'sha256:' + expected_hash,
+                          'Existing asset differs or cannot be verified; refusing overwrite')
+                  print('Reused verified draft asset: ' + asset.name)
+                  continue
+              content_type = 'application/zip' if asset.suffix == '.zip' else (
+                  'image/png' if asset.suffix == '.png' else 'application/json' if asset.suffix == '.json' else 'text/plain; charset=utf-8')
+              with asset.open('rb') as data:
+                  upload = urllib.request.Request(upload_base + '?' + urllib.parse.urlencode({'name': asset.name}),
+                      data=data, method='POST', headers={
+                          'Authorization': 'Bearer ' + TOKEN, 'Accept': 'application/vnd.github+json',
+                          'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'OpenGeul-draft-delivery',
+                          'Content-Type': content_type, 'Content-Length': str(expected_size),
+                      })
+                  try:
+                      # NoRedirect ensures credentials cannot follow any upload redirect.
+                      with opener.open(upload, timeout=600) as response:
+                          uploaded = json.load(response)
+                  except urllib.error.HTTPError as error:
+                      code = error.code
+                      error.close()
+                      raise RuntimeError('GitHub asset upload failed: HTTP ' + str(code)) from None
+              require(uploaded['name'] == asset.name and uploaded['state'] == 'uploaded'
+                      and uploaded['size'] == expected_size and uploaded.get('digest') == 'sha256:' + expected_hash,
+                      'Uploaded asset metadata does not match its bytes')
+              print('Uploaded verified draft asset: ' + asset.name)
+          check_draft(request_json('/releases/' + str(release_id)))
+          print('Unpublished draft delivery: ' + release['html_url'])
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
+              summary.write('Unpublished draft: ' + release['html_url'] + '\n\n')
+              summary.write('Tested source: `' + SOURCE_HEAD + '`\n\n')
+              for asset in assets:
+                  summary.write('- ' + asset.name + ': ' + str(asset.stat().st_size) + ' bytes; SHA-256 `' + sha256(asset) + '`\n')
