@@ -396,7 +396,10 @@ def _validate(root: Path, files: dict):
         with path.open('rb') as stream:
             magic = stream.read(2)
         if magic == b'MZ' or path.suffix.lower() in ('.exe', '.dll', '.pyd') or name == 'Office/program/soffice.bin':
-            _pe(path, companion=COMPANION_PE_ADMISSIONS.get(name))
+            try:
+                _pe(path, companion=COMPANION_PE_ADMISSIONS.get(name))
+            except ValueError as error:
+                raise ValueError(f'{name}: {error}') from error
 
 
 def create_inventory(root: Path) -> dict:
