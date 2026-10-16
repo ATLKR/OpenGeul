@@ -6,6 +6,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationIcon>opengeul.ico</ApplicationIcon>
     <AssemblyName>OpenGeul.Office</AssemblyName>
     <RootNamespace>OpenGeul.Office</RootNamespace>
     <Version>0.1.0</Version>

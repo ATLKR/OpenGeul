@@ -16,6 +16,7 @@ internal sealed class HomeForm : Form
         this.packageRoot = packageRoot;
         this.manifest = manifest;
         Text = manifest.ProductName;
+        SuiteWindowIcon.Apply(this);
         Name = "OpenGeulOfficeHome";
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;

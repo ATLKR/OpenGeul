@@ -36,6 +36,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         this.create = create;
         Text = $"{(path is null ? "새 문서" : Path.GetFileName(path))} — {module.DisplayName}";
         Name = "OpenGeulOfficeDocument";
+        SuiteWindowIcon.Apply(this);
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
         StartPosition = FormStartPosition.CenterScreen;
