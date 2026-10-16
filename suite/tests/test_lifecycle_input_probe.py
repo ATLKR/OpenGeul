@@ -213,6 +213,32 @@ class LifecycleInputProbeTests(unittest.TestCase):
                          {'focus': focus, 'caret': caret, 'active': active, 'foreground': foreground})
         self.assertEqual((result['pid'], result['tid'], result['layout']), (31, 41, 0x04090409))
 
+    def queue_state(self, flags, version):
+        State = probe.DeliveryObserver.receipt.__globals__['State']
+        state = State(magic=0x4f474b44, version=version, pid=31, tid=41, count=len(flags))
+        for index, value in enumerate(flags):
+            row = state.messages[index]
+            row.sequence, row.message, row.pid, row.tid = index + 1, 0x102, 31, 41
+            row.remove, row.retrievalFlags = bool(value & 1), value
+        observer = object.__new__(probe.DeliveryObserver)
+        observer.mapping, observer.pid, observer.tid, observer.child = bytes(state), 31, 41, 61
+        observer.calls = []
+        observer.library = SimpleNamespace(identity={'stateVersion': 2})
+        return observer
+
+    def test_queue_receipt_retains_full_raw_flags_without_counting_nonremoving_peeks(self):
+        # GetMsgProc documents 0/1. Preserve other raw WPARAM values for evidence
+        # rather than claiming that combined PeekMessage flags reached this hook.
+        flags = [0, 1, 2, 3, 0x100000003]
+        rows = self.queue_state(flags, 2).receipt()['messages']
+        self.assertEqual([row.get('retrievalFlags') for row in rows], flags)
+        self.assertEqual([row['remove'] for row in rows], [False, True, False, True, True])
+
+    def test_new_raw_flag_receipt_rejects_the_old_boolean_protocol(self):
+        observer = self.queue_state([0, 1], 1)
+        with self.assertRaisesRegex(AssertionError, 'protocol'):
+            observer.receipt()
+
 
 if __name__ == '__main__':
     unittest.main()

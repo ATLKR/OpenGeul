@@ -30,7 +30,8 @@ class Message(ctypes.Structure):
                 ('foreground', ctypes.c_uint64),
                 ('extraInfo', ctypes.c_uint64), ('counter', ctypes.c_uint64),
                 ('messageTime', ctypes.c_uint32), ('unicodeWindow', ctypes.c_uint32),
-                ('shift', ctypes.c_uint32), ('control', ctypes.c_uint32), ('alt', ctypes.c_uint32)]
+                ('shift', ctypes.c_uint32), ('control', ctypes.c_uint32), ('alt', ctypes.c_uint32),
+                ('retrievalFlags', ctypes.c_uint64)]
 
 
 class State(ctypes.Structure):
@@ -46,7 +47,7 @@ SOURCE = r'''
 #include <stdio.h>
 struct Message { uint32_t sequence,message,remove,pid,tid;
     uint64_t hwnd,wparam,lparam,layout,focus,caret,foreground,extraInfo,counter;
-    uint32_t messageTime,unicodeWindow,shift,control,alt; };
+    uint32_t messageTime,unicodeWindow,shift,control,alt; uint64_t retrievalFlags; };
 struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow; Message messages[2048]; };
 static State* shared=nullptr;
 static HANDLE mapping=nullptr;
@@ -58,7 +59,7 @@ static bool connect() {
         if(!mapping) return false;
         shared=(State*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(State));
     }
-    return shared && shared->magic==0x4f474b44 && shared->version==1
+    return shared && shared->magic==0x4f474b44 && shared->version==2
         && shared->pid==GetCurrentProcessId() && shared->tid==GetCurrentThreadId();
 }
 static void observe(MSG* message, WPARAM remove) {
@@ -71,7 +72,10 @@ static void observe(MSG* message, WPARAM remove) {
     LONG index=InterlockedIncrement(&shared->count)-1;
     if(index<0 || index>=2048) { InterlockedExchange(&shared->overflow,1); return; }
     Message* row=&shared->messages[index];
-    row->message=id; row->remove=(remove==PM_REMOVE); row->pid=pid; row->tid=GetCurrentThreadId();
+    // Retain the complete hook WPARAM. GetMsgProc documents 0/1; whether other
+    // PeekMessage flags reach this Windows hook must be established by evidence.
+    row->retrievalFlags=(uint64_t)remove;
+    row->message=id; row->remove=((remove&PM_REMOVE)!=0); row->pid=pid; row->tid=GetCurrentThreadId();
     row->hwnd=(uint64_t)(UINT_PTR)message->hwnd; row->wparam=(uint64_t)message->wParam;
     row->lparam=(uint64_t)message->lParam; row->layout=(uint64_t)(UINT_PTR)GetKeyboardLayout(0);
     row->focus=(uint64_t)(UINT_PTR)GetFocus(); row->foreground=(uint64_t)(UINT_PTR)GetForegroundWindow();
@@ -134,7 +138,7 @@ class ObserverLibrary:
         assert self.dll.StateSize() == ctypes.sizeof(State), 'Native queue observer memory layout differs'
         self.identity = {'sourceSha256': hashlib.sha256(source.read_bytes()).hexdigest(),
                          'dllSha256': hashlib.sha256(library.read_bytes()).hexdigest(),
-                         'stateBytes': ctypes.sizeof(State), 'hook': 'WH_GETMESSAGE',
+                         'stateBytes': ctypes.sizeof(State), 'stateVersion': 2, 'hook': 'WH_GETMESSAGE',
                          'scope': 'owned-editor-thread', 'compileBeforeTrials': True}
 
 
@@ -146,7 +150,7 @@ class DeliveryObserver:
         assert api.user.IsChild(root, child), 'Queue observer editor escaped the owned Suite window'
         self.calls, self.hook, self.mapping = [], None, None
         self.mapping = mmap.mmap(-1, ctypes.sizeof(State), tagname=library.prefix + '_' + str(pid) + '_' + str(self.tid))
-        state = State(magic=0x4f474b44, version=1, pid=pid, tid=self.tid)
+        state = State(magic=0x4f474b44, version=2, pid=pid, tid=self.tid)
         self.mapping[:] = bytes(state)
         user = api.user
         user.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, W.HINSTANCE, W.DWORD]
@@ -209,12 +213,15 @@ class DeliveryObserver:
 
     def receipt(self):
         state = State.from_buffer_copy(self.mapping[:])
+        assert (state.magic, state.version, state.pid, state.tid) == (0x4f474b44, 2, self.pid, self.tid), 'Native queue observer protocol or identity differs'
         rows = []
         for index in range(min(max(state.count, 0), 2048)):
             item = state.messages[index]
             if item.sequence != index + 1: break
             row = {name: int(getattr(item, name)) for name, _ in Message._fields_}
-            row['remove'] = bool(item.remove)
+            removed = bool(item.retrievalFlags & 1)  # PM_REMOVE; PM_NOREMOVE remains excluded.
+            assert item.remove in (0, 1) and bool(item.remove) == removed, 'Native queue removal classification differs from raw hook flags'
+            row['remove'] = removed
             rows.append(row)
         return {'officePid': self.pid, 'editorTid': self.tid, 'childHwnd': self.child,
                 'messages': rows, 'sendInputCalls': self.calls, 'overflow': bool(state.overflow),
