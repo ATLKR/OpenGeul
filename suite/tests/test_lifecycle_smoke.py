@@ -232,7 +232,7 @@ class LifecycleSmokeTests(unittest.TestCase):
                 return 1
             def clock(self, pointer):
                 pointer._obj.dwLowDateTime, pointer._obj.dwHighDateTime = 1000, 1
-        executable = Path('/owned/OpenGeul.exe')
+        executable = Path('/owned/OpenGeul.exe').resolve()
         rows = [(106, 99, 'OpenGeul.exe', str(executable)),
                 (107, 31, 'OpenGeul.exe', '/foreign/OpenGeul.exe'),
                 (108, 31, 'OpenGeul.exe', str(executable)),
@@ -322,6 +322,48 @@ class LifecycleSmokeTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'creation'):
                 smoke.BoundHwpProcess(108, Path('/owned/OpenGeul.exe'), expected_creation=(1 << 32) + 107)
         self.assertEqual(closed, [1108])
+
+    def test_hwp_readiness_requires_real_postload_toolbar_and_enabled_offscreen_input(self):
+        self.assertTrue(hasattr(smoke, 'hwp_postload_observation'), 'Post-load HWP readiness policy is missing')
+        def row(name, kind, identity, *, enabled=True, visible=True, bounds=(10, 10, 70, 30)):
+            return {'name': name, 'controlType': kind, 'automationId': identity, 'enabled': enabled,
+                    'visible': visible, 'bounds': list(bounds), 'processId': 31, 'runtimeId': [31, len(identity)]}
+        rows = [row('경로 확인 & 한글 문서.hwpx', 'Text', 'sb-message'),
+                row('문서 편집 입력', 'Edit', '', visible=False, bounds=(-9999, 0, -9998, 1)),
+                row('글자 크기 (pt)', 'Edit', 'font-size'), row('대표', 'Button', ''), row('바탕글', 'Button', '')]
+        proof = smoke.hwp_postload_observation(rows)
+        self.assertTrue(proof['postLoadEditorVerified'])
+        self.assertTrue(proof['toolbarEnabled'])
+        self.assertEqual(proof['editorInput']['name'], '문서 편집 입력')
+        self.assertFalse(proof['editorInput']['visible'], 'Production IME textarea is deliberately offscreen')
+        self.assertEqual(proof['fontSize']['automationId'], 'font-size')
+        self.assertEqual(proof['fontLanguage']['name'], '대표')
+        for invalid in (rows[:2], rows[:3], rows[:4]):
+            self.assertIsNone(smoke.hwp_postload_observation(invalid), 'Filename and attached WebView do not prove document readiness')
+        for index, key, value in ((1, 'enabled', False), (2, 'enabled', False), (2, 'visible', False),
+                                  (2, 'controlType', 'Text'), (3, 'visible', False), (4, 'enabled', False)):
+            invalid = [item.copy() for item in rows]
+            invalid[index][key] = value
+            self.assertIsNone(smoke.hwp_postload_observation(invalid))
+        with self.assertRaises(AssertionError): smoke.hwp_postload_observation(rows + [rows[2]])
+
+    def test_hwp_raw_snapshot_retains_unavailable_metadata_without_certifying_a_control(self):
+        class COMError(Exception): hresult = -2147220991
+        class Stale:
+            name, control_type, automation_id, process_id, runtime_id = '글자 크기 (pt)', 'Edit', 'font-size', None, None
+            @property
+            def rectangle(self): raise COMError('Element is no longer available')
+        info = SimpleNamespace(name='Owned HWP root', control_type='Window', automation_id='', process_id=31,
+                               runtime_id=[31], enabled=True, visible=True,
+                               rectangle=SimpleNamespace(left=0, top=0, right=800, bottom=600), descendants=lambda: [Stale()])
+        with patch.dict('sys.modules', {'comtypes': SimpleNamespace(COMError=COMError)}):
+            try: rows = smoke.hwp_accessibility_snapshot(SimpleNamespace(element_info=info))
+            except COMError: self.fail('Unavailable UIA metadata must be retained as failed observation, never certify readiness')
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]['name'], '글자 크기 (pt)')
+        self.assertEqual(rows[1]['metadataError']['hresult'], -2147220991)
+        self.assertFalse(rows[1]['enabled'])
+        self.assertIsNone(smoke.hwp_postload_observation(rows))
 
     def test_targets_are_fresh_direct_children_and_never_links(self):
         if not hasattr(smoke, 'owned_target'): self.skipTest('RED: policy API not implemented')
