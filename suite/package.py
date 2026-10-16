@@ -93,6 +93,7 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
         'Writer/Calc/Impress/Draw/Math/Base는 OpenGeul 창 내부의 Office 엔진을 사용합니다.\n'
         'HWP/HWPX는 기존 OpenGeul HWP 편집기에서 열립니다.\n'
         '원본 형식을 유지하며 다른 형식은 다른 이름으로 저장에서 선택합니다.\n'
+        '새 Base 문서는 내장 Firebird를 사용하며, 다른 이름으로 저장해야 보관됩니다.\n'
         'HWP에는 WebView2가 필요합니다. 외부 데이터베이스/Java 의존성은 별도입니다.\n'
         '32비트 TWAIN 스캐너·SharePoint COM 연동은 이 portable 개발판에서 지원하지 않습니다.\n'
         '이 개발판은 Store 배포판이 아닙니다. 원본을 보관하고 저장 결과를 확인하세요.\n'
