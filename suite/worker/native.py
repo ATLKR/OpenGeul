@@ -149,6 +149,36 @@ class UnoBackend:
         prop.Name, prop.Value = name, value
         return prop
 
+    def _new_base_url(self, service, module, interaction):
+        # A noninteractive Base factory leaves URL="jdbc:" and selects Tables,
+        # which can attempt that invalid connection. Initialize a local Firebird
+        # document first, then use the existing-file loader in our named frame.
+        owned = Path(self.profile.name) / '새 데이터베이스.odb'
+        if owned.exists() or owned.is_symlink():
+            raise WorkerError('new_database_failed', '새 데이터베이스의 임시 경로가 이미 존재합니다.')
+        generated = None
+        try:
+            generated = service('com.sun.star.sdb.OfficeDatabaseDocument')
+            generated.initNew()
+            generated.DataSource.setPropertyValue('URL', 'sdbc:embedded:firebird')
+            props = tuple(self._property(name, value) for name, value in (
+                ('FilterName', module['filters']['odb']), ('Overwrite', False),
+                ('MacroExecutionMode', 0), ('UpdateDocMode', 0), ('InteractionHandler', interaction)))
+            generated.storeAsURL(owned.as_uri(), props)
+            if owned.is_symlink() or not owned.is_file() or not owned.stat().st_size or generated.isModified():
+                raise WorkerError('new_database_failed', '새 데이터베이스의 초기 저장을 확인하지 못했습니다.')
+            generated.close(False)
+            return owned.as_uri()
+        except Exception as exc:
+            # This model was generated here and has never been shown to the user.
+            # Never clear/dispose the subsequently loaded user document's state.
+            if generated is not None:
+                try:
+                    generated.dispose()
+                except Exception:
+                    pass
+            raise WorkerError('new_database_failed', '새 Firebird 데이터베이스를 만들지 못했습니다.') from exc
+
     def attach(self, hwnd, module, width, height, path):
         self.module_factory = module['factory']
         if self.window_api is None:
@@ -181,6 +211,8 @@ class UnoBackend:
             ('MacroExecutionMode', 0), ('UpdateDocMode', 0), ('ReadOnly', False),
             ('Hidden', False), ('PickListEntry', False), ('InteractionHandler', interaction)))
         url = path.as_uri() if path is not None else module['factory']
+        if path is None and module['factory'] == 'private:factory/sdatabase':
+            url = self._new_base_url(service, module, interaction)
         self.document = self.desktop.loadComponentFromURL(url, frame_name, 4, props)
         if self.document is None:
             raise WorkerError('open_failed', '문서를 열 수 없습니다. 파일 형식과 암호 여부를 확인해 주세요.')

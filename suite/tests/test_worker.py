@@ -621,5 +621,96 @@ class NativeBoundaryTests(unittest.TestCase):
             self.assertEqual('unsupported_platform', caught.exception.code)
 
 
+class NewBaseBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        from types import SimpleNamespace as NS
+        self.native = importlib.import_module('native')
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.profile = self.root / 'private-profile'
+        self.profile.mkdir()
+        self.calls = []
+        self.module = {'factory': 'private:factory/sdatabase', 'displayName': 'OpenGeul Base',
+                       'extensions': ['odb'], 'filters': {'odb': 'StarOffice XML (Base)'}}
+        self.generated = NS(DataSource=NS(setPropertyValue=lambda name, value: self.calls.append(('source', name, value))),
+                            initNew=lambda: self.calls.append(('init-new',)),
+                            close=lambda ownership: self.calls.append(('generated-close', ownership)),
+                            dispose=lambda: self.calls.append(('generated-dispose',)), isModified=lambda: False)
+        def store(url, props):
+            self.calls.append(('store', url, {p.Name: p.Value for p in props}))
+            (self.profile / '새 데이터베이스.odb').write_bytes(b'owned generated database')
+        self.generated.storeAsURL = store
+        self.live = NS(isModified=lambda: False, getTitle=lambda: '새 데이터베이스',
+                       setModified=lambda value: self.fail('live user model modified flag must not be cleared'),
+                       dispose=lambda: self.fail('live user model must not be disposed during creation'))
+        peer = NS(setPosSize=lambda *a: None, setVisible=lambda value: None, getWindowHandle=lambda *a: 456)
+        frame = NS(initialize=lambda p: None, setName=lambda name: self.calls.append(('frame', name)),
+                   registerDispatchProviderInterceptor=lambda interceptor: None, activate=lambda: None)
+        desktop = NS(getFrames=lambda: NS(append=lambda f: None),
+                     loadComponentFromURL=lambda *args: self.calls.append(('load', args)) or self.live)
+        services = {'com.sun.star.frame.Desktop': desktop, 'com.sun.star.awt.Toolkit': NS(createSystemChild=lambda *a: peer),
+                    'com.sun.star.frame.Frame': frame, 'com.sun.star.sdb.OfficeDatabaseDocument': self.generated}
+        context = NS(ServiceManager=NS(createInstanceWithContext=lambda name, ctx: services[name]))
+        uno = NS(Any=lambda kind, value: value, createUnoStruct=lambda name: NS())
+        windows = NS(validate_parent=lambda hwnd: None, validate_child=lambda *a: None)
+        self.backend = self.native.UnoBackend(self.root, window_api=windows, uno_loader=lambda: uno, connector=lambda *a: context)
+        self.backend._start_runtime = lambda: setattr(self.backend, 'profile', NS(name=str(self.profile)))
+        self.addCleanup(patch.stopall)
+        patch.object(self.native, 'make_interceptor', return_value=object()).start()
+        self.interaction = object()
+        patch.object(self.native, 'make_interaction_handler', return_value=self.interaction).start()
+
+    def test_new_base_initializes_owned_firebird_file_and_loads_named_frame(self):
+        session = importlib.import_module('session').DocumentSession(self.root, {'base': self.module},
+                    backend_factory=lambda runtime: self.backend)
+        result = session.dispatch('attach', {'parentHwnd': 123, 'module': 'base', 'width': 640, 'height': 480})
+        self.assertIn(('source', 'URL', 'sdbc:embedded:firebird'), self.calls)
+        self.assertTrue(self.calls.index(('init-new',)) < self.calls.index(('source', 'URL', 'sdbc:embedded:firebird')))
+        stored = next(call for call in self.calls if call[0] == 'store')
+        owned = self.profile / '새 데이터베이스.odb'
+        self.assertEqual(owned.as_uri(), stored[1])
+        self.assertEqual('StarOffice XML (Base)', stored[2]['FilterName'])
+        self.assertFalse(stored[2]['Overwrite'])
+        self.assertIs(self.interaction, stored[2]['InteractionHandler'])
+        self.assertIn(('generated-close', False), self.calls)
+        load = next(call[1] for call in self.calls if call[0] == 'load')
+        self.assertEqual(owned.as_uri(), load[0])
+        self.assertTrue(load[1].startswith('OpenGeul_'))
+        self.assertEqual(4, load[2])
+        self.assertTrue(self.calls.index(('generated-close', False)) < next(i for i, call in enumerate(self.calls) if call[0] == 'load'))
+        self.assertIsNone(result['path'])
+        self.assertIsNone(session.path)
+        self.assertFalse(result['modified'])
+        with self.assertRaises(importlib.import_module('session').WorkerError):
+            session.dispatch('save', {})
+
+    def test_existing_base_path_does_not_create_or_reconfigure_database(self):
+        existing = self.root / 'user.odb'
+        existing.write_bytes(b'user document')
+        self.backend.attach(123, self.module, 640, 480, existing)
+        self.assertFalse(any(call[0] in ('store', 'source', 'generated-close') for call in self.calls))
+        self.assertEqual(existing.as_uri(), next(call[1][0] for call in self.calls if call[0] == 'load'))
+        self.assertEqual(b'user document', existing.read_bytes())
+
+    def test_new_base_failure_disposes_only_generated_model_and_never_loads(self):
+        def failed_store(*args):
+            raise RuntimeError('storage unavailable')
+        self.generated.storeAsURL = failed_store
+        with self.assertRaises(self.native.WorkerError):
+            self.backend.attach(123, self.module, 640, 480, None)
+        self.assertIn(('generated-dispose',), self.calls)
+        self.assertFalse(any(call[0] == 'load' for call in self.calls))
+        self.assertIsNone(self.backend.document)
+
+    def test_owned_new_database_path_must_be_fresh(self):
+        owned = self.profile / '새 데이터베이스.odb'
+        owned.write_bytes(b'preserve')
+        with self.assertRaises(self.native.WorkerError):
+            self.backend.attach(123, self.module, 640, 480, None)
+        self.assertEqual(b'preserve', owned.read_bytes())
+        self.assertFalse(any(call[0] in ('store', 'source', 'load') for call in self.calls))
+
+
 if __name__ == '__main__':
     unittest.main()
