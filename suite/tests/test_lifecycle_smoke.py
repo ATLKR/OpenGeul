@@ -18,6 +18,116 @@ SPEC.loader.exec_module(smoke)
 
 
 class LifecycleSmokeTests(unittest.TestCase):
+    def picker_fixture(self, *, wrong_readback=False, readonly=False, method_error=None):
+        calls = []
+        class Value:
+            CurrentIsReadOnly = readonly
+            def __init__(self): self.text = '새 문서.odt'
+            @property
+            def CurrentValue(self):
+                calls.append(('read',self.text))
+                if method_error == 'read': raise RuntimeError('value read failed')
+                return self.text
+            def SetValue(self, text):
+                calls.append(('assign',text))
+                if method_error == 'assign': raise RuntimeError('value assignment failed')
+                self.text = text[:-1] if wrong_readback else text
+        value = Value()
+        root_info = SimpleNamespace(handle=500, process_id=31, runtime_id=[42,500],
+                                    name='OpenGeul Writer — 다른 이름으로 저장', control_type='Window')
+        field_info = SimpleNamespace(handle=510, process_id=31, runtime_id=[42,510],
+                                     name='File name:', control_type='Edit', automation_id='1001')
+        accessible = SimpleNamespace(element_info=root_info)
+        field = SimpleNamespace(element_info=field_info, iface_value=value,is_visible=lambda: True,is_enabled=lambda: True)
+        api = SimpleNamespace(pid=lambda handle: 31,title=lambda handle: 'OpenGeul Writer — 다른 이름으로 저장',
+                              class_name=lambda handle: '#32770' if handle==500 else 'Edit', require_foreground=lambda handle: None,
+                              user=SimpleNamespace(IsWindow=lambda handle: True,GetWindow=lambda handle,relation: 100,
+                                                   IsChild=lambda parent,child: parent==500 and child==510,
+                                                   GetAncestor=lambda handle,relation: 500))
+        return api,accessible,field,calls
+
+    def test_picker_filename_uses_one_owned_value_assignment_and_retains_exact_readback(self):
+        self.assertTrue(hasattr(smoke,'set_owned_picker_filename'),'Owned native ValuePattern assignment is missing')
+        api,root,field,calls = self.picker_fixture()
+        record = {}
+        expected = 'D:\\owned\\새 문서 저장 결과 & 한글.docx'
+        smoke.set_owned_picker_filename(api,31,100,500,root,field,expected,record)
+        evidence, = record['pickerFilenameInputs']
+        self.assertEqual(calls,[('read','새 문서.odt'),('assign',expected),('read',expected)])
+        self.assertTrue(evidence['success'])
+        self.assertEqual((evidence['expected'],evidence['before'],evidence['after']), (expected,'새 문서.odt',expected))
+        self.assertEqual(evidence['assignmentAttempts'],1)
+        self.assertEqual(evidence['field']['runtimeId'],[42,510])
+        self.assertEqual(evidence['dialogUia']['nativeHandle'],500)
+
+    def test_picker_filename_rejects_foreign_or_readonly_controls_before_assignment(self):
+        self.assertTrue(hasattr(smoke,'set_owned_picker_filename'),'Owned native ValuePattern assignment is missing')
+        invalids = ('dialog-pid','document-dead','owner','class','caption','uia-root','field-pid','field-id','runtime-id','native-parent','readonly')
+        for invalid in invalids:
+            with self.subTest(invalid=invalid):
+                api,root,field,calls = self.picker_fixture(readonly=invalid=='readonly')
+                if invalid=='dialog-pid': api.pid=lambda handle: 99 if handle==500 else 31
+                if invalid=='document-dead': api.user.IsWindow=lambda handle: handle!=100
+                if invalid=='owner': api.user.GetWindow=lambda handle,relation: 999
+                if invalid=='class': api.class_name=lambda handle: 'Foreign'
+                if invalid=='caption': api.title=lambda handle: 'Foreign'
+                if invalid=='uia-root': root.element_info.handle=999
+                if invalid=='field-pid': field.element_info.process_id=99
+                if invalid=='field-id': field.element_info.automation_id='other'
+                if invalid=='runtime-id': field.element_info.runtime_id=[]
+                if invalid=='native-parent': api.user.IsChild=lambda parent,child: False
+                record = {}
+                with self.assertRaises(AssertionError):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+                self.assertFalse(any(c[0]=='assign' for c in calls))
+                evidence, = record['pickerFilenameInputs']
+                self.assertFalse(evidence['success'])
+                self.assertEqual(evidence['assignmentAttempts'],0)
+                self.assertIn('error',evidence)
+
+    def test_picker_filename_preserves_mismatched_value_and_method_failure_without_retry(self):
+        self.assertTrue(hasattr(smoke,'set_owned_picker_filename'),'Owned native ValuePattern assignment is missing')
+        for mode in ('wrong-readback','assign','read'):
+            with self.subTest(mode=mode):
+                api,root,field,calls = self.picker_fixture(wrong_readback=mode=='wrong-readback',method_error=mode)
+                expected,record='D:\\owned\\새 문서 & 한글.docx',{}
+                with self.assertRaises((AssertionError,RuntimeError)):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,expected,record)
+                evidence, = record['pickerFilenameInputs']
+                self.assertFalse(evidence['success'])
+                self.assertEqual(sum(c[0]=='assign' for c in calls),0 if mode=='read' else 1)
+                self.assertEqual(evidence['expected'],expected)
+                self.assertIn('before',evidence)
+                self.assertIn('after',evidence)
+                if mode=='wrong-readback':
+                    self.assertEqual(evidence['after'],expected[:-1])
+                    self.assertIn('Picker filename differs',evidence['error'])
+
+    def test_actual_picker_assigns_fixture_then_physically_selects_save_or_cancel(self):
+        for cancel in (False,True):
+            with self.subTest(cancel=cancel):
+                api,root,field,calls = self.picker_fixture()
+                field.click_input=lambda: None
+                case=SimpleNamespace(api=api,process=SimpleNamespace(pid=31),record={},
+                                     dialog=lambda hwnd,caption:(500,root),screenshot=lambda *args:None)
+                action_id='2' if cancel else '1'
+                def click():
+                    self.assertTrue(case.record['pickerFilenameInputs'][0]['success'])
+                    calls.append(('click',action_id))
+                action=SimpleNamespace(element_info=SimpleNamespace(automation_id=action_id),
+                                       is_visible=lambda:True,is_enabled=lambda:True,click_input=click)
+                root.descendants=lambda **options:[field] if options.get('control_type')=='Edit' else [action]
+                native_root=SimpleNamespace(set_focus=lambda:None)
+                desktop=SimpleNamespace(window=lambda **options:SimpleNamespace(wrapper_object=lambda:native_root))
+                def unexpected_keyboard(*args,**kwargs):
+                    raise AssertionError('Fixture filename must not use the unreliable keyboard path')
+                modules={'pywinauto':SimpleNamespace(Desktop=lambda **kwargs:desktop),
+                         'pywinauto.keyboard':SimpleNamespace(send_keys=unexpected_keyboard)}
+                with patch.dict('sys.modules',modules):
+                    self.assertEqual(smoke.Case.picker(case,100,'D:\\owned\\새 문서 & 한글.docx',cancel=cancel),500)
+                self.assertEqual(calls[-1],('click',action_id))
+                self.assertEqual(sum(c[0]=='assign' for c in calls),1)
+
     def test_policy_api_is_present(self):
         for name in ('CASE_REQUIREMENTS', 'lifecycle_report', 'writer_evidence',
                      'owned_target', 'require_dialog_action', 'require_child_bounds',

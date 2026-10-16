@@ -1,10 +1,12 @@
 """Reject no-op style shortcuts and mismatched saved/reopened Writer evidence."""
 import copy
+import ctypes
 import hashlib
 import importlib.util
 import json
 from pathlib import Path, PureWindowsPath
 import tempfile
+from types import SimpleNamespace
 import unittest
 import zipfile
 from unittest import mock
@@ -16,6 +18,22 @@ if SOURCE.is_file():
     spec.loader.exec_module(smoke)
 else:
     smoke = None
+
+# Actual run38951093947/source98f metadata, retained without inventing OS-image evidence.
+ACTUAL_98_SUITE_ROOT = 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64'
+ACTUAL_98_PYTHON_OBSERVATION = {'implementation': 'cpython',
+ 'version': [3, 13, 15],
+ 'executable': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\python-core-3.13.15',
+ 'prefix': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\\\python-core-3.13.15',
+ 'basePrefix': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\\\python-core-3.13.15',
+ 'pythonDll': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\python313.dll',
+ 'moduleFiles': {'uno': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\uno.py',
+                 'pyuno': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\pyuno.pyd',
+                 'encodings': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\python-core-3.13.15\\lib\\encodings\\__init__.py',
+                 'os': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\python-core-3.13.15\\Lib\\os.py'},
+ 'moduleOrigins': {'uno': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\uno.py',
+                   'pyuno': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\pyuno.pyd',
+                   'encodings': 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64\\Office\\program\\python-core-3.13.15\\lib\\encodings\\__init__.py'}}
 
 
 class WriterStyleEvidenceTests(unittest.TestCase):
@@ -169,6 +187,7 @@ class PackagedPythonIdentityTests(unittest.TestCase):
         self.observed = {
             'implementation': 'cpython', 'version': [3, 13, 15],
             'executable': str(self.suite / self.paths['executable']),
+            'processImage': str(self.suite / self.paths['executable']),
             'prefix': str(self.core), 'basePrefix': str(self.core),
             'pythonDll': str(self.suite / self.paths['pythonDll']),
             'moduleFiles': {name: str(self.suite / self.paths[name]) for name in ('uno', 'pyuno', 'encodings', 'os')},
@@ -195,13 +214,72 @@ class PackagedPythonIdentityTests(unittest.TestCase):
         root = PureWindowsPath('D:/a/OpenGeul/dist/OpenGeul-Office')
         observed = copy.deepcopy(self.observed)
         observed['prefix'] = observed['basePrefix'] = str(root / 'Office/program/python-core-3.13.15')
-        for role in ('executable', 'pythonDll'): observed[role] = str(root / self.paths[role])
+        for role in ('executable', 'processImage', 'pythonDll'):
+            observed[role] = str(root / self.paths['executable' if role == 'processImage' else role])
         for field in ('moduleFiles', 'moduleOrigins'):
             observed[field] = {role: str(root / self.paths[role]) for role in observed[field]}
         self.assertEqual(smoke.validate_python_observation(str(root), observed, self.inventory), self.paths)
         observed['moduleOrigins']['uno'] = str(root / 'Office/program/../foreign/uno.py')
         with self.assertRaisesRegex(AssertionError, 'origin'):
             smoke.validate_python_observation(str(root), observed, self.inventory)
+
+    def test_actual_launcher_core_directory_metadata_requires_new_native_image_evidence(self):
+        observed = copy.deepcopy(ACTUAL_98_PYTHON_OBSERVATION)
+        with self.assertRaisesRegex(AssertionError, 'process image'):
+            smoke.validate_python_observation(ACTUAL_98_SUITE_ROOT, observed, self.inventory)
+        # Synthetic NEW capture for a pure unit test; no old run is backfilled.
+        observed['processImage'] = str(PureWindowsPath(ACTUAL_98_SUITE_ROOT) / self.paths['executable'])
+        self.assertEqual(smoke.validate_python_observation(ACTUAL_98_SUITE_ROOT, observed, self.inventory), self.paths)
+        self.assertEqual(observed['executable'], ACTUAL_98_PYTHON_OBSERVATION['executable'])
+
+    def test_core_directory_metadata_is_accepted_only_with_exact_native_process_image(self):
+        observed = copy.deepcopy(self.observed)
+        observed['executable'] = str(self.core)
+        self.assertTrue(self.verify(observed)['verified'])
+        observed['processImage'] = str(self.suite / 'foreign/python.exe')
+        with self.assertRaisesRegex(AssertionError, 'process image'):
+            self.verify(observed)
+
+    def test_launcher_or_missing_native_image_never_qualifies(self):
+        for image in (None, str(self.suite / self.paths['launcher']), str(self.core)):
+            observed = copy.deepcopy(self.observed)
+            observed['processImage'] = image
+            with self.subTest(image=image), self.assertRaisesRegex(AssertionError, 'process image'):
+                self.verify(observed)
+
+    def test_native_image_capture_uses_null_module_and_preserves_full_python_dll_handle(self):
+        self.assertTrue(callable(getattr(smoke, '_windows_python_images', None)), 'Native Python process image capture is missing')
+        calls = []
+        images = ['D:\\Office\\python-core-3.13.15\\bin\\python.exe', 'D:\\Office\\python313.dll']
+        class ModuleName:
+            def __call__(self, handle, buffer, capacity):
+                calls.append((handle.value, capacity))
+                buffer.value = images[len(calls) - 1]
+                return len(buffer.value)
+        api = ModuleName()
+        with mock.patch.object(ctypes, 'WinDLL', return_value=SimpleNamespace(GetModuleFileNameW=api), create=True) as load, \
+                mock.patch.object(smoke.sys, 'dllhandle', 0x12345678ABCDEF01, create=True):
+            self.assertEqual(smoke._windows_python_images(), {'processImage': images[0], 'pythonDll': images[1]})
+        load.assert_called_once_with('kernel32', use_last_error=True)
+        self.assertEqual(api.argtypes, [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32])
+        self.assertIs(api.restype, ctypes.c_uint32)
+        self.assertEqual(calls, [(None, 32768), (0x12345678ABCDEF01, 32768)])
+
+    def test_failed_or_truncated_native_image_api_cannot_create_identity_receipt(self):
+        self.assertTrue(callable(getattr(smoke, '_windows_python_images', None)), 'Native Python process image capture is missing')
+        for bad_call, returned in ((0, 0), (0, 32768), (1, 0), (1, 32768)):
+            calls = []
+            class ModuleName:
+                def __call__(self, handle, buffer, capacity):
+                    index = len(calls)
+                    calls.append(handle.value)
+                    buffer.value = 'D:\\known.exe'
+                    return returned if index == bad_call else len(buffer.value)
+            with self.subTest(call=bad_call, returned=returned), \
+                    mock.patch.object(ctypes, 'WinDLL', return_value=SimpleNamespace(GetModuleFileNameW=ModuleName()), create=True), \
+                    mock.patch.object(smoke.sys, 'dllhandle', 0x12345678ABCDEF01, create=True), \
+                    self.assertRaisesRegex(AssertionError, 'observe'):
+                smoke._windows_python_images()
 
     def test_public_launcher_is_not_mistaken_for_actual_interpreter(self):
         observed = copy.deepcopy(self.observed)

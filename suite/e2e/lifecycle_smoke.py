@@ -164,14 +164,62 @@ def owned_dialog_button(accessible, pid, labels):
     return candidates[0]
 
 
-def dialog_uia_identity(accessible, dialog, shell_pid):
+def dialog_uia_identity(accessible, dialog, shell_pid, evidence=None):
     info = accessible.element_info
     observed = {'nativeHandle': int(info.handle or 0), 'processId': info.process_id,
                 'runtimeId': list(info.runtime_id), 'name': info.name, 'controlType': info.control_type}
+    if evidence is not None: evidence.update(observed)
     assert observed['nativeHandle'] == dialog and dialog > 0, 'UIA root differs from the selected native dialog'
     assert observed['processId'] == shell_pid and shell_pid > 0, 'UIA dialog belongs to a foreign process'
     assert observed['runtimeId'], 'UIA dialog has no runtime identity'
     return observed
+
+
+def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, field, target, record):
+    """Assign only the verified fixture filename; document text still uses physical input."""
+    receipt = {'method': 'UIA-ValuePattern-SetValue', 'expected': str(target), 'before': None, 'after': None,
+               'assignmentAttempts': 0, 'success': False, 'document': {}, 'dialog': {}, 'dialogUia': {}, 'field': {}}
+    record.setdefault('pickerFilenameInputs', []).append(receipt)
+    try:
+        receipt['document'] = {'hwnd': int(document), 'pid': api.pid(document), 'live': bool(api.user.IsWindow(document))}
+        receipt['dialog'] = {'hwnd': int(dialog), 'pid': api.pid(dialog), 'live': bool(api.user.IsWindow(dialog)),
+                             'owner': int(api.user.GetWindow(dialog, 4) or 0),
+                             'title': api.title(dialog), 'class': api.class_name(dialog)}
+        info = field.element_info
+        field_handle = int(info.handle or 0)
+        receipt['field'] = {'nativeHandle': field_handle, 'processId': info.process_id,
+                            'runtimeId': list(info.runtime_id or ()), 'automationId': info.automation_id,
+                            'controlType': info.control_type, 'name': info.name,
+                            'visible': bool(field.is_visible()), 'enabled': bool(field.is_enabled()),
+                            'nativePid': api.pid(field_handle), 'nativeLive': bool(api.user.IsWindow(field_handle)),
+                            'nativeClass': api.class_name(field_handle),
+                            'nativeRoot': int(api.user.GetAncestor(field_handle, 2) or 0),
+                            'nativeChildOfDialog': bool(api.user.IsChild(dialog, field_handle))}
+        dialog_uia_identity(accessible, dialog, shell_pid, receipt['dialogUia'])
+        assert document > 0 and receipt['document']['live'] and receipt['document']['pid'] == shell_pid > 0, 'Picker document is not the live owned Suite form'
+        native_dialog = receipt['dialog']
+        assert dialog != document and native_dialog['live'], 'Picker is not a distinct live native dialog'
+        native.require_dialog_identity(native_dialog['pid'], shell_pid, native_dialog['owner'], document,
+                                       native_dialog['title'], 'OpenGeul Writer — 다른 이름으로 저장', native_dialog['class'])
+        observed = receipt['field']
+        assert observed['processId'] == observed['nativePid'] == shell_pid and observed['runtimeId'], 'Filename field belongs to a foreign process or lacks runtime identity'
+        assert observed['automationId'] == '1001' and observed['controlType'] == 'Edit', 'Exact native filename Edit 1001 is required'
+        assert field_handle > 0 and observed['nativeLive'] and observed['nativeChildOfDialog'] and observed['nativeRoot'] == dialog, 'Filename field is outside the owned native picker'
+        assert observed['visible'] and observed['enabled'], 'Filename field is not visible and enabled'
+        value = field.iface_value
+        receipt['readOnly'] = bool(value.CurrentIsReadOnly)
+        assert receipt['readOnly'] is False, 'Filename ValuePattern is read-only'
+        receipt['before'] = value.CurrentValue
+        api.require_foreground(dialog)
+        receipt['assignmentAttempts'] = 1
+        value.SetValue(receipt['expected'])
+        receipt['after'] = value.CurrentValue
+        assert receipt['after'] == receipt['expected'], 'Picker filename differs from owned target'
+        receipt['success'] = True
+        return receipt
+    except Exception as exc:
+        receipt['error'] = type(exc).__name__ + ': ' + str(exc)
+        raise
 
 
 def require_dialog_button_ancestry(api, accessible, button, shell_pid, dialog, evidence=None):
@@ -525,7 +573,6 @@ class Case:
 
     def picker(self, hwnd, target, *, cancel=False):
         from pywinauto import Desktop
-        from pywinauto.keyboard import send_keys
         caption = 'OpenGeul Writer — 다른 이름으로 저장'
         dialog, accessible = self.dialog(hwnd, caption)
         edits = [item for item in accessible.descendants(control_type='Edit')
@@ -533,10 +580,7 @@ class Case:
         assert len(edits) == 1, 'Exact filename Edit 1001 is required'
         Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
         self.api.require_foreground(dialog)
-        edits[0].click_input()
-        send_keys('^a', pause=0.1)
-        send_keys(native.literal_keys(str(target)), with_spaces=True, pause=0.01)
-        assert edits[0].iface_value.CurrentValue == str(target), 'Picker filename differs from owned target'
+        set_owned_picker_filename(self.api, self.process.pid, hwnd, dialog, accessible, edits[0], target, self.record)
         self.screenshot(dialog, 'picker-' + ('cancel' if cancel else 'save'))
         action_id = '2' if cancel else '1'
         buttons = [item for item in accessible.descendants(control_type='Button')

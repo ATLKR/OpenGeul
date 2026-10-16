@@ -243,7 +243,13 @@ def validate_python_observation(suite_root, observed, inventory):
         assert isinstance(actual, str) and actual, description + ' path is missing'
         path = type(root)(actual)
         assert path.is_absolute() and path == root / relative, description + ' path differs from packaged identity'
-    exact(observed.get('executable'), executable, 'Packaged Python interpreter')
+    exact(observed.get('processImage'), executable, 'Native Python process image')
+    # LO's launcher deliberately supplies pythonhome as argv[0]. CPython's
+    # getpath.py may expose that directory as sys.executable, so retain it as
+    # metadata while the native process image above proves executable identity.
+    metadata = observed.get('executable')
+    assert isinstance(metadata, str) and type(root)(metadata).is_absolute(), 'Python interpreter metadata path is missing'
+    assert type(root)(metadata) in (root / core, root / executable), 'Python interpreter metadata differs from the packaged launcher or binary'
     for field in ('prefix', 'basePrefix'): exact(observed.get(field), core, 'Packaged Python ' + field + ' prefix')
     exact(observed.get('pythonDll'), paths['pythonDll'], 'Loaded Python DLL')
     modules, origins = observed.get('moduleFiles'), observed.get('moduleOrigins')
@@ -289,21 +295,28 @@ def require_packaged_python(suite, observed):
             'inventorySha256': inventory_file['sha256'], 'observed': observed, 'files': files}
 
 
-def observe_packaged_python():
+def _windows_python_images():
     import ctypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    kernel.GetModuleFileNameW.restype = ctypes.c_uint32
+    images = {}
+    for name, handle in (('processImage', None), ('pythonDll', sys.dllhandle)):
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = kernel.GetModuleFileNameW(ctypes.c_void_p(handle), buffer, len(buffer))
+        assert 0 < length < len(buffer), 'Cannot observe native Python ' + name + ' path'
+        images[name] = buffer.value
+    return images
+
+
+def observe_packaged_python():
     import encodings
     import uno
     import pyuno
     modules = {'uno': uno, 'pyuno': pyuno, 'encodings': encodings, 'os': os}
-    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    kernel.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
-    kernel.GetModuleFileNameW.restype = ctypes.c_uint32
-    buffer = ctypes.create_unicode_buffer(32768)
-    length = kernel.GetModuleFileNameW(ctypes.c_void_p(sys.dllhandle), buffer, len(buffer))
-    assert 0 < length < len(buffer), 'Cannot observe the loaded Python DLL path'
     return {'implementation': sys.implementation.name, 'version': list(sys.version_info[:3]),
             'executable': sys.executable, 'prefix': sys.prefix, 'basePrefix': sys.base_prefix,
-            'pythonDll': buffer.value,
+            **_windows_python_images(),
             'moduleFiles': {name: module.__file__ for name, module in modules.items()},
             'moduleOrigins': {name: modules[name].__spec__.origin for name in ('uno', 'pyuno', 'encodings')}}
 

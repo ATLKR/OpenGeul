@@ -16,6 +16,9 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly ToolStripMenuItem saveAsMenu = new("다른 이름으로 저장…", null, null, Keys.Control | Keys.Shift | Keys.S);
     private readonly System.Windows.Forms.Timer resizeTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1500 };
+    private readonly bool closeDiagnostics = CloseDiagnosticsEnabled();
+    private readonly int uiThreadId = Environment.CurrentManagedThreadId;
+    private int closeDiagnosticCount;
     private WorkerClient? worker;
     private string? path;
     private bool attached;
@@ -233,30 +236,55 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     async Task<DocumentStatus> IDocumentSession.StatusAsync()
     {
-        var result = await worker!.SendAsync("status", new { });
-        ApplyStatus(result);
-        return new DocumentStatus(result.GetProperty("modified").GetBoolean(), Text);
+        TraceClose("status.begin");
+        try
+        {
+            var result = await worker!.SendAsync("status", new { });
+            ApplyStatus(result);
+            var status = new DocumentStatus(result.GetProperty("modified").GetBoolean(), Text);
+            TraceClose("status.end", new { modified = status.Modified });
+            return status;
+        }
+        catch (Exception e)
+        {
+            TraceClose("status.error", new { exceptionType = e.GetType().FullName });
+            throw;
+        }
     }
 
     async Task<bool> IDocumentSession.CloseAsync(bool discard)
     {
-        var result = await worker!.SendAsync("close", new { discard });
-        return result.TryGetProperty("closed", out var closed) && closed.GetBoolean()
-            && (!result.TryGetProperty("closeCancelled", out var cancelled) || !cancelled.GetBoolean());
+        TraceClose("sessionClose.begin", new { discard });
+        try
+        {
+            var result = await worker!.SendAsync("close", new { discard });
+            var closed = result.TryGetProperty("closed", out var closedValue) && closedValue.GetBoolean()
+                && (!result.TryGetProperty("closeCancelled", out var cancelled) || !cancelled.GetBoolean());
+            TraceClose("sessionClose.end", new { discard, closed });
+            return closed;
+        }
+        catch (Exception e)
+        {
+            TraceClose("sessionClose.error", new { discard, exceptionType = e.GetType().FullName });
+            throw;
+        }
     }
 
     internal async Task<bool> RequestCloseAsync()
     {
-        if (IsDisposed || closeApproved) return true;
-        if (closing) return false;
-        if (loading || busy) { SetStatus("진행 중인 문서 작업이 끝난 후 다시 닫아 주세요."); return false; }
+        TraceClose("requestClose.enter");
+        if (IsDisposed || closeApproved) { TraceClose("requestClose.guarded", new { guard = "disposedOrApproved" }); return true; }
+        if (closing) { TraceClose("requestClose.guarded", new { guard = "closing" }); return false; }
+        if (loading || busy) { TraceClose("requestClose.guarded", new { guard = "loadingOrBusy" }); SetStatus("진행 중인 문서 작업이 끝난 후 다시 닫아 주세요."); return false; }
         closing = true;
         resizeTimer.Stop(); statusTimer.Stop(); EnableSave(false);
         try
         {
             if (attached)
             {
+                TraceClose("documentClose.begin");
                 var result = await DocumentClose.TryAsync(this, () => Task.FromResult(ChooseClose()), () => SaveDocumentAsync(false));
+                TraceClose("documentClose.result", new { closed = result.Closed, hasError = result.Error is not null });
                 if (!result.Closed)
                 {
                     if (result.Error is not null) Program.ShowError(result.Error, this);
@@ -275,6 +303,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         {
             closing = false;
             if (!closeApproved && attached) { EnableSave(true); statusTimer.Start(); QueueResize(); }
+            TraceClose("requestClose.finally");
         }
     }
 
@@ -290,15 +319,63 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             Buttons = { save, discard, cancel }, DefaultButton = save, AllowCancel = true,
             Icon = TaskDialogIcon.Information
         };
-        var selected = TaskDialog.ShowDialog(this, page);
-        return selected == save ? CloseChoice.Save : selected == discard ? CloseChoice.Discard : CloseChoice.Cancel;
+        TraceClose("chooseClose.before");
+        try
+        {
+            var selected = TaskDialog.ShowDialog(this, page);
+            var choice = selected == save ? CloseChoice.Save : selected == discard ? CloseChoice.Discard : CloseChoice.Cancel;
+            TraceClose("chooseClose.after", new { choice = choice.ToString() });
+            return choice;
+        }
+        catch (Exception e)
+        {
+            TraceClose("chooseClose.error", new { exceptionType = e.GetType().FullName });
+            throw;
+        }
     }
 
     private async void OnDocumentClosing(object? sender, FormClosingEventArgs e)
     {
+        TraceClose("formClosing.enter", new { reason = e.CloseReason.ToString(), cancel = e.Cancel });
         if (closeApproved) return;
         e.Cancel = true;
         await RequestCloseAsync();
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x0010) TraceClose("wmClose.received", new { messageHwnd = m.HWnd.ToInt64() });
+        base.WndProc(ref m);
+    }
+
+    private static bool CloseDiagnosticsEnabled()
+    {
+        try { return !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OPENGEUL_SUITE_DIAGNOSTICS")); }
+        catch (Exception) { return false; }
+    }
+
+    private void TraceClose(string stage, object? details = null)
+    {
+        if (!closeDiagnostics) return;
+        try
+        {
+            // Limit diagnostic output per form, including failed output attempts.
+            var sequence = Interlocked.Increment(ref closeDiagnosticCount);
+            if (sequence > 128) return;
+            var managedThreadId = Environment.CurrentManagedThreadId;
+            Console.Error.WriteLine(JsonSerializer.Serialize(new
+            {
+                @event = "suite.documentClose", stage, sequence, utc = DateTimeOffset.UtcNow,
+                processId = Environment.ProcessId, module = module.Id,
+                managedThreadId, uiThreadId, isUiThread = managedThreadId == uiThreadId,
+                hwnd = IsHandleCreated ? Handle.ToInt64() : 0,
+                loading, busy, closing, attached, closeApproved, statusBusy, resizeBusy,
+                disposed = IsDisposed, disposing = Disposing, workerPresent = worker is not null,
+                details
+            }));
+            Console.Error.Flush();
+        }
+        catch (Exception) { /* Diagnostic failures must not change document close behavior. */ }
     }
 
     private async Task ReleaseWorkerAsync()
