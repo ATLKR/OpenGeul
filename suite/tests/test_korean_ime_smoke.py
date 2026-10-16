@@ -3,7 +3,10 @@ import copy
 import importlib.util
 from pathlib import Path
 import sys
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[1] / 'e2e' / 'korean_ime_smoke.py'
 sys.path.insert(0, str(SOURCE.parent))
@@ -13,6 +16,24 @@ SPEC.loader.exec_module(ime)
 
 
 class KoreanImePolicyTests(unittest.TestCase):
+    def test_cpp_discovery_failure_preserves_original_output_and_bounded_failure_receipt(self):
+        failures = [subprocess.TimeoutExpired('vswhere.exe', 60, output=b'original stdout\n', stderr=b'original stderr\n'),
+                    subprocess.CompletedProcess(['vswhere.exe'], 2, 'original stdout\n', 'original stderr\n')]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory:
+                folder = Path(directory)
+                kwargs = {'side_effect': failure} if isinstance(failure, Exception) else {'return_value': failure}
+                with patch.object(ime.shutil, 'which', return_value=None), patch.object(ime.subprocess, 'run', **kwargs) as run:
+                    with self.assertRaises((subprocess.TimeoutExpired, subprocess.CalledProcessError)):
+                        ime.compile_observer(folder, 'Local\\owned-test', self.readiness()['profile'])
+                self.assertEqual((folder/'compiler-discovery.log').read_bytes(), b'original stdout\noriginal stderr\n')
+                import json
+                receipt = json.loads((folder/'compiler-discovery.json').read_text())
+                self.assertEqual(receipt['stage'], 'discover-msvc')
+                self.assertEqual(receipt['timeoutSeconds'], 60)
+                self.assertEqual(receipt['outcome'], 'timeout' if isinstance(failure, Exception) else 'nonzero-exit')
+                self.assertEqual(run.call_count, 1, 'Discovery must not silently retry or skip failure')
+
     def readiness(self):
         return {'suiteOnly': True, 'capabilityAfter': 'Installed', 'restartNeeded': False,
                   'userLanguageConfigured': True,
@@ -51,12 +72,36 @@ class KoreanImePolicyTests(unittest.TestCase):
                                   'activeProfile': '{B2B2B2B2-1111-2222-3333-444444444444}'},
                 'savedText': 'Engine-OpenGeul-writer 한글\nime-opengeul-writer:한글',
                 'reopened': {'text': 'Engine-OpenGeul-writer 한글\nime-opengeul-writer:한글'},
+                'asciiPrefix': ' ime-opengeul-writer:', 'prefixInputLayout': 0x04090409,
                 'layoutRestored': True, 'restoration': self.restoration()}
 
     def test_real_dubeolsik_commit_backspace_save_and_reopen_satisfy_policy(self):
         result = ime.validate_ime_evidence(self.record())
         self.assertTrue(result['imeVerified'])
         self.assertTrue(result['backspaceCompositionVerified'])
+
+    def test_ascii_scaffold_precedes_korean_activation_on_verified_original_english_layout(self):
+        from types import SimpleNamespace
+        for layout in (0x04090409, 0x04120412):
+            calls, record = [], {}
+            observer = SimpleNamespace(tid=41,
+                api=SimpleNamespace(user=SimpleNamespace(GetKeyboardLayout=lambda tid: layout)),
+                require_target=lambda: calls.append('owned-focus'),
+                command=lambda value: calls.append(('command', value)) or {'command': value})
+            if layout & 0xffff == 0x0409:
+                result = ime.activate_after_ascii_prefix(observer, 'writer', record, lambda text: calls.append(('ascii', text)))
+                self.assertEqual(calls, ['owned-focus', ('ascii', ' ime-opengeul-writer:'), ('command', 1)])
+                self.assertEqual(result, {'command': 1})
+                self.assertEqual(record['prefixInputLayout'], layout)
+            else:
+                with self.assertRaises(AssertionError):
+                    ime.activate_after_ascii_prefix(observer, 'writer', record, lambda text: calls.append(('ascii', text)))
+                self.assertEqual(calls, ['owned-focus'])
+
+    def test_missing_or_non_english_ascii_setup_receipt_cannot_pass(self):
+        for patch in ({'asciiPrefix': ''}, {'prefixInputLayout': 0x04120412}, {'prefixInputLayout': 0}):
+            with self.subTest(patch=patch), self.assertRaises(AssertionError):
+                ime.validate_ime_evidence({**self.record(), **patch})
 
     def test_restore_requires_successful_native_calls_and_exact_original_hkl_and_tsf_identity(self):
         for patch in ({'activateProfileHresult': -2147467259}, {'status': -6},
@@ -104,7 +149,7 @@ class KoreanImePolicyTests(unittest.TestCase):
 
     def test_calc_reopen_must_preserve_formula_and_original_marker(self):
         record = self.record()
-        record.update(module='calc', savedText=record['savedText'].replace('writer', 'calc'))
+        record.update(module='calc', asciiPrefix=' ime-opengeul-calc:', savedText=record['savedText'].replace('writer', 'calc'))
         record['reopened'] = {'text': record['savedText'], 'formula': '=SUM(B1:C1)', 'value': 42}
         self.assertTrue(ime.validate_ime_evidence(record)['imeVerified'])
         record['reopened']['value'] = 0

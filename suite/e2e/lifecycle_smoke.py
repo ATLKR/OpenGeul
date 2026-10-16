@@ -111,6 +111,24 @@ def require_dialog_action(*, pid, shell_pid, owner, document, title, expected_ti
     assert button in allowed, 'Dialog action is outside the explicit expected choices'
 
 
+def require_saveas_overwrite_owner(dialog, picker, document, shell_pid, target_name):
+    """Validate both observed Windows common-dialog owner chains, never a foreign owner."""
+    assert document['live'] is True and document['pid'] == shell_pid and shell_pid > 0, 'Save As document is not the live owned Suite form'
+    assert type(document['hwnd']) is int and document['hwnd'] > 0, 'Save As document HWND is invalid'
+    assert picker['live'] is True and picker['hwnd'] > 0 and picker['hwnd'] != document['hwnd'], 'Save As picker is not a distinct live owned window'
+    native.require_dialog_identity(picker['pid'], shell_pid, picker['owner'], document['hwnd'],
+        picker['title'], 'OpenGeul Writer — 다른 이름으로 저장', picker['class'])
+    assert dialog['live'] is True and dialog['hwnd'] > 0 and dialog['hwnd'] not in (document['hwnd'], picker['hwnd']), 'Overwrite confirmation is not a distinct live dialog'
+    assert dialog['owner'] in (document['hwnd'], picker['hwnd']), 'Overwrite confirmation belongs to a foreign owner'
+    assert dialog['title'] in ('Confirm Save As', 'Save As', '다른 이름으로 저장', '다른 이름으로 저장 확인',
+                               'OpenGeul Writer — 다른 이름으로 저장'), 'Unexpected overwrite confirmation title'
+    native.require_dialog_identity(dialog['pid'], shell_pid, dialog['owner'], dialog['owner'],
+        dialog['title'], dialog['title'], dialog['class'])
+    prompt = '\n'.join(dialog['texts'])
+    assert target_name and target_name in prompt and ('already exists' in prompt or '이미 있습니다' in prompt), 'Overwrite confirmation does not name the exact owned target'
+    return 'picker-owned' if dialog['owner'] == picker['hwnd'] else 'document-owned'
+
+
 def owned_menu_items(desktop, pid, name):
     """A UIA Desktop enumerates windows; descendants belong to each wrapper."""
     found, seen = [], set()
@@ -592,8 +610,17 @@ def failed_saveas(case):
         observed = native.wait_for(expected_error, 35)
         if observed[0] == 'overwrite':
             _, dialog, owner, accessible, texts = observed
-            native.require_dialog_identity(case.api.pid(dialog), case.process.pid, owner, picker,
-                case.api.title(dialog), case.api.title(dialog), case.api.class_name(dialog))
+            def identity(handle):
+                return {'hwnd': int(handle), 'pid': case.api.pid(handle), 'live': bool(case.api.user.IsWindow(handle)),
+                        'owner': int(case.api.user.GetWindow(handle, 4) or 0),
+                        'title': case.api.title(handle), 'class': case.api.class_name(handle)}
+            ownership = {'dialog': {**identity(dialog), 'texts': texts}, 'picker': identity(picker), 'document': identity(hwnd)}
+            # A Windows common-dialog overwrite prompt can be owned directly by
+            # the document form while its live picker is owned by that same form.
+            # Retain the full observed chain before validation or any button input.
+            case.record['saveAsOverwriteOwnership'] = ownership
+            case.record['saveAsOverwriteOwnerChain'] = require_saveas_overwrite_owner(
+                ownership['dialog'], ownership['picker'], ownership['document'], case.process.pid, target.name)
             button = owned_dialog_button(accessible, case.process.pid, ('Yes', '&Yes', '예', '예(&Y)'))
             Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
             case.api.require_foreground(dialog)

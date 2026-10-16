@@ -72,6 +72,17 @@ jobs:
         python suite/e2e/korean_ime_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime
         if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and content verification failed.' }
       if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+    - name: IME 입력·엔진 크래시 원본 기록 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-korean-ime-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-korean-ime/
+          .work/suite-worker-diagnostics/
+        retention-days: 1
+        if-no-files-found: error
     - name: 한국어 탭 메뉴의 실제 접근성·화면 확인
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics

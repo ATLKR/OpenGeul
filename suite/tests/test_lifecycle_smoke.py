@@ -390,6 +390,26 @@ class LifecycleSmokeTests(unittest.TestCase):
                            ('class_name', 'Foreign'), ('text', ['foreign']), ('button', '확인')):
             with self.assertRaises(AssertionError): smoke.require_dialog_action(**{**identity, key: value})
 
+    def test_saveas_overwrite_accepts_only_complete_live_document_or_picker_owner_chain(self):
+        self.assertTrue(hasattr(smoke, 'require_saveas_overwrite_owner'), 'Explicit common-dialog ownership policy is missing')
+        document = {'hwnd': 100, 'pid': 31, 'live': True}
+        picker = {'hwnd': 500, 'pid': 31, 'live': True, 'owner': 100, 'title': 'OpenGeul Writer — 다른 이름으로 저장', 'class': '#32770'}
+        dialog = {'hwnd': 600, 'pid': 31, 'live': True, 'owner': 500, 'title': 'Confirm Save As', 'class': '#32770',
+                  'texts': ['잠긴 저장 대상 & 한글.docx already exists.', 'Do you want to replace it?']}
+        for owner, chain in ((500, 'picker-owned'), (100, 'document-owned')):
+            observed = {**dialog, 'owner': owner}
+            self.assertEqual(smoke.require_saveas_overwrite_owner(observed, picker, document, 31, '잠긴 저장 대상 & 한글.docx'), chain)
+        for target, key, value in (('dialog', 'owner', 999), ('dialog', 'pid', 99), ('dialog', 'live', False),
+                                   ('dialog', 'class', 'Foreign'), ('dialog', 'title', 'Foreign'),
+                                   ('dialog', 'texts', ['A different document already exists.']),
+                                   ('picker', 'owner', 999), ('picker', 'pid', 99), ('picker', 'live', False),
+                                   ('picker', 'class', 'Foreign'), ('picker', 'title', 'Foreign'),
+                                   ('document', 'pid', 99), ('document', 'live', False)):
+            fixtures = {'dialog': dialog.copy(), 'picker': picker.copy(), 'document': document.copy()}
+            fixtures[target][key] = value
+            with self.assertRaises(AssertionError):
+                smoke.require_saveas_overwrite_owner(fixtures['dialog'], fixtures['picker'], fixtures['document'], 31, '잠긴 저장 대상 & 한글.docx')
+
     def test_bounds_require_child_to_fill_host_client_after_screen_mapping(self):
         if not hasattr(smoke, 'require_child_bounds'): self.skipTest('RED: policy API not implemented')
         self.assertEqual(smoke.require_child_bounds((0, 0, 900, 600), (0, 0, 900, 600)), [900, 600])
