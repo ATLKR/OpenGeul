@@ -13,7 +13,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 5
     steps:
-    - name: 공식 Metalink에 등록된 MSI 미러의 최대 1 MiB 읽기
+    - name: 공식 Metalink에 등록된 MSI 미러의 중간 구간 최대 32 MiB 읽기
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -29,7 +29,7 @@ jobs:
         )
         curl.exe --version
         foreach ($target in $targets) {
-          $format = '{"mirror":"' + $target.name + '","size_download":%{size_download},"speed_download":%{speed_download},"http_code":"%{http_code}","url_effective":"%{url_effective}","exitcode":%{exitcode}}\n'
-          & curl.exe --silent --show-error --range 0-1048575 --max-time 20 --connect-timeout 10 --max-filesize 1048576 --location --output NUL --write-out $format $target.url
+          $format = '{"mirror":"' + $target.name + '","size_download":%{size_download},"speed_download":%{speed_download},"time_total":%{time_total},"http_code":"%{http_code}","url_effective":"%{url_effective}","exitcode":%{exitcode}}\n'
+          & curl.exe --silent --show-error --range 67108864-100663295 --max-time 30 --connect-timeout 10 --max-filesize 33554432 --location --output NUL --write-out $format $target.url
           Write-Host ('curl_exit=' + $LASTEXITCODE)
         }
