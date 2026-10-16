@@ -109,6 +109,8 @@ function Test-SuiteKoreanLanguageTag([AllowNull()][object]$Tag) {
         $Tag.Equals('ko',[StringComparison]::OrdinalIgnoreCase)))
 }
 $stage='native-host'
+$servicingFailed=$false
+$servicingStartedUtc=$null
 try {
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     $principal=[Security.Principal.WindowsPrincipal]::new($identity)
@@ -154,8 +156,35 @@ public static class SuiteKoreanSetupHost {
         suiteOnly=$true;productInputVerified=$false;storeQualified=$false})
     $stage='capability-install'
     $restartNeeded=$false
+    $acquisition='already-installed'
     if ($before -eq 'NotPresent') {
-        $installed=@(Dism\Add-WindowsCapability -Online -Name $capabilityName -LogPath $dismLog -ErrorAction Stop)
+        $stage='matching-official-server-media'
+        $version=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        if ($nativeMachine -ne 0x8664 -or $version.CurrentBuildNumber -cne '26100' -or
+            $version.InstallationType -notin @('Server','Server Core')) {
+            throw 'Pinned offline language FOD media requires actual Server 2025 amd64 build 26100.'
+        }
+        $sourceRoot=Join-Path $out 'fod-source'
+        $sourceHelper=Join-Path $PSScriptRoot 'korean_fod_source.py'
+        & python $sourceHelper --output $sourceRoot
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned official Server language FOD source acquisition failed.' }
+        $sourceReceipt=Get-Content -LiteralPath (Join-Path $sourceRoot 'source-acquisition.json') -Raw | ConvertFrom-Json
+        $sourceDirectory=Join-Path $sourceRoot 'LanguagesAndOptionalFeatures'
+        Assert-SuitePlainPath $sourceDirectory
+        if ($sourceReceipt.success -ne $true -or $sourceReceipt.productInputVerified -ne $false -or
+            $sourceReceipt.storeQualified -ne $false -or $sourceReceipt.packages.Count -ne 9 -or
+            [IO.Path]::GetFullPath($sourceReceipt.sourceDirectory) -cne [IO.Path]::GetFullPath($sourceDirectory)) {
+            throw 'Official offline FOD acquisition receipt does not identify the owned source.'
+        }
+        $acquisition='pinned-official-Server2025-amd64-26100-language-FOD-source'
+        $stage='offline-capability-install'
+        # Language FODs are complete monolithic CABs. Preserve selected original
+        # Server metadata too; DISM validates package catalogs and must prove
+        # this source is sufficient. Never query WU or alter its host policy.
+        $servicingStartedUtc=[DateTime]::UtcNow
+        $servicingFailed=$true
+        $installed=@(Dism\Add-WindowsCapability -Online -Name $capabilityName -Source $sourceDirectory -LimitAccess -LogPath $dismLog -ErrorAction Stop)
+        $servicingFailed=$false
         if ($installed.Count -ne 1 -or $installed[0].RestartNeeded -isnot [bool]) { throw 'Windows servicing restart status is unavailable.' }
         $restartNeeded=$installed[0].RestartNeeded
     } elseif ($before -ne 'Installed') { throw 'Korean Basic capability is pending or unknown.' }
@@ -230,13 +259,49 @@ public static class SuiteKoreanSetupHost {
     }
     Save-SuiteObservation 'readiness.json' ([ordered]@{formatVersion=1;source=$binding;
         nativeMachine=[int]$nativeMachine;systemDirectory=$systemPath;capabilityName=$capabilityName;
-        capabilityBefore=$before;capabilityAfter=[string]$after[0].State;restartNeeded=$restartNeeded;
+        capabilityBefore=$before;capabilityAfter=[string]$after[0].State;restartNeeded=$restartNeeded;acquisition=$acquisition;
         userLanguageConfigured=$true;configuredInputTips=@($observedKorean[0].InputMethodTips);profile=$profile;
         profileScope='current-user configured; target HWND/thread unverified';
         suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false})
 } catch {
-    Save-SuiteObservation 'failure.json' ([ordered]@{source=$binding;stage=$stage;message=$_.Exception.Message;
-        failureType=$_.Exception.GetType().FullName;scriptLine=[int]$_.InvocationInfo.ScriptLineNumber;
+    $originalFailure=$_
+    Save-SuiteObservation 'failure.json' ([ordered]@{source=$binding;stage=$stage;message=$originalFailure.Exception.Message;
+        failureType=$originalFailure.Exception.GetType().FullName;scriptLine=[int]$originalFailure.InvocationInfo.ScriptLineNumber;
         suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false})
-    throw
+    if ($servicingFailed -and $null -ne $servicingStartedUtc) {
+        # One owned, read-only collector runs only after the actual DISM call
+        # throws. It cannot replace the original error or extend setup retries.
+        $diagnosticProcess=$null
+        $diagnosticStarted=$null
+        $collection=[ordered]@{source=$binding;status='collector-unavailable';exitCode=$null;
+            suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false}
+        try {
+            $collector=Join-Path $PSScriptRoot 'korean_servicing_diagnostics.py'
+            $diagnostics=Join-Path $out 'servicing-diagnostics'
+            $arguments=@(('"'+$collector+'"'),'--output',('"'+$diagnostics+'"'),
+                '--since-utc',$servicingStartedUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ'))
+            $python=(Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            $diagnosticProcess=Start-Process -FilePath $python -ArgumentList $arguments -PassThru -NoNewWindow `
+                -RedirectStandardOutput (Join-Path $out 'diagnostic-collector.log') `
+                -RedirectStandardError (Join-Path $out 'diagnostic-collector-error.log')
+            $diagnosticStarted=$diagnosticProcess.StartTime
+            if ($diagnosticProcess.WaitForExit(10000)) {
+                $collection.exitCode=[int]$diagnosticProcess.ExitCode
+                $collection.status=if ($collection.exitCode -eq 0) { 'collector-completed' } else { 'collector-failed' }
+            } else { $collection.status='collector-timeout' }
+        } catch { $collection.status='collector-unavailable' }
+        finally {
+            if ($null -ne $diagnosticProcess) {
+                try {
+                    if (-not $diagnosticProcess.HasExited -and $diagnosticProcess.StartTime -eq $diagnosticStarted) {
+                        $diagnosticProcess.Kill()
+                        [void]$diagnosticProcess.WaitForExit(2000)
+                    }
+                } catch { $collection.status='collector-cleanup-unavailable' }
+                $diagnosticProcess.Dispose()
+            }
+            try { Save-SuiteObservation 'diagnostic-collection.json' $collection } catch { }
+        }
+    }
+    throw $originalFailure
 }

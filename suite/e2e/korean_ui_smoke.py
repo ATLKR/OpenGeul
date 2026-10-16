@@ -2,18 +2,17 @@
 
 Only copied engine fixtures are opened; no input or save commands are sent.
 --probe-only records accessibility without claiming Korean UI verification.
-The accessibility reader runs in its own bounded process so an unresponsive
-provider cannot hold the owned Suite lifecycle open indefinitely.
+Actual VCL objects are read through the exact owned process's private pipe.
+The OS UIA tree is retained separately as diagnostic evidence. Each reader runs
+in its own bounded process so a provider cannot hold the Suite lifecycle open.
 """
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -21,38 +20,17 @@ import time
 
 import startup_smoke as startup
 import windows_smoke as native
+import native_accessibility as accessible
 
 MODULES = {'writer': 'docx', 'calc': 'xlsx', 'impress': 'pptx', 'draw': 'odg'}
-REQUIRED_TABS = {'홈', '삽입'}
 
 
 def normalize_label(value):
-    return re.sub(r'\s*\([~&_]?[A-Za-z]\)\s*$', '', value).translate(
-        str.maketrans('', '', '~&_')).strip()
+    return accessible.normalize_label(value)
 
 
 def require_korean_tabs(snapshot, office_pid, child):
-    assert snapshot.get('officePid') == office_pid and snapshot.get('rootProcessId') == office_pid, 'Accessibility root is not the owned Office process'
-    assert snapshot.get('childHwnd') == child, 'Accessibility root is not the verified embedded editor'
-    assert not snapshot.get('truncated'), 'Accessibility snapshot exceeded the finite control bound'
-    groups = defaultdict(dict)
-    for item in snapshot.get('controls', []):
-        assert item.get('processId') == office_pid, 'Foreign accessibility names are not eligible'
-        is_tab = item.get('controlType') == 'TabItem' or item.get('legacyRole') == 37
-        is_tab_container = item.get('parentControlType') == 'Tab' or item.get('parentLegacyRole') == 60
-        if not (is_tab and is_tab_container and item.get('visible') is True
-                and item.get('parentProcessId') == office_pid):
-            continue
-        parent, identity = item.get('parentRuntimeId'), item.get('runtimeId')
-        if not parent or not identity:
-            continue
-        groups[tuple(parent)][normalize_label(item.get('name', ''))] = item
-    matching = [labels for labels in groups.values() if REQUIRED_TABS <= labels.keys()]
-    assert matching, 'Native Office must expose Korean Home and Insert tabs in one actual tab control'
-    labels = matching[0]
-    assert labels['홈']['runtimeId'] != labels['삽입']['runtimeId'], 'Distinct Korean tabs require distinct accessible elements'
-    return dict(koreanUiVerified=True, tabbedUiVerified=True,
-                koreanTabLabels=sorted(REQUIRED_TABS), tabControls=[labels[name] for name in sorted(REQUIRED_TABS)])
+    return accessible.require_native_tabs(snapshot, office_pid, child, snapshot.get('module'))
 
 
 def _legacy(wrapper):
@@ -128,15 +106,23 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         from pywinauto import Desktop
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
-        record['stage'] = 'capture-native-controls'
-        snapshot_name = case + '-accessibility.json'
-        snapshot = capture_bounded(child, office_pid, output / snapshot_name)
-        assert api.user.IsWindow(child) and api.pid(child) == office_pid, 'Owned editor changed during accessibility capture'
-        record.update(accessibilitySnapshot=snapshot_name, accessibleControlCount=snapshot['controlCount'])
         record['stage'] = 'capture-screenshot'
         screenshot = case + '-attached.png'
         window.capture_as_image().save(output / screenshot)
         record.update(screenshot=screenshot, screenshotCaptured=True)
+        record['stage'] = 'capture-os-accessibility-diagnostic'
+        os_name = case + '-os-accessibility.json'
+        os_snapshot = capture_bounded(child, office_pid, output / os_name)
+        record.update(osAccessibilitySnapshot=os_name, osAccessibleControlCount=os_snapshot['controlCount'])
+        record['stage'] = 'capture-native-accessible-objects'
+        snapshot_name = case + '-accessibility.json'
+        snapshot = accessible.capture_bounded(suite, child, office_pid, engine.creation_time,
+                                              module, output / snapshot_name)
+        assert api.user.IsWindow(child) and api.pid(child) == office_pid, 'Owned editor changed during accessibility capture'
+        assert snapshot['module'] == module, 'Native accessible objects belong to another requested module'
+        record.update(accessibilitySnapshot=snapshot_name,
+                      accessibleControlCount=snapshot['nativeAccessibleContextCount'],
+                      osScreenReaderExposureCertified=False)
         assert not api.windows(office_pid), 'Office created an unowned visible top-level window'
         record['noExternalOfficeWindow'] = True
         if not probe_only:

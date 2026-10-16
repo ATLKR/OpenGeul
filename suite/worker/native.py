@@ -1,13 +1,24 @@
 """Actual GUI UNO embedding. No headless or external-window fallback exists."""
 import importlib
+import os
 from pathlib import Path
 import shutil
 import tempfile
+import sys
 import time
 import uuid
 
 from dispatch import DispatchRouter, make_interceptor, make_interaction_handler
 from session import WorkerError
+
+UI_MODULE_SERVICES = {
+    'private:factory/swriter': 'com.sun.star.text.TextDocument',
+    'private:factory/scalc': 'com.sun.star.sheet.SpreadsheetDocument',
+    'private:factory/simpress': 'com.sun.star.presentation.PresentationDocument',
+    'private:factory/sdraw': 'com.sun.star.drawing.DrawingDocument',
+    'private:factory/smath': 'com.sun.star.formula.FormulaProperties',
+    'private:factory/sdatabase': 'com.sun.star.sdb.OfficeDatabaseDocument',
+}
 
 
 class PrivateProfile:
@@ -129,6 +140,41 @@ class UnoBackend:
         self.pipe = 'OpenGeul_' + uuid.uuid4().hex
         self.command_handler = lambda command, target_module=None: None
         self.module_factory = None
+        self.diagnostics = None
+
+    def _diagnose(self, phase):
+        if self.diagnostics is None and not os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS'):
+            return
+        try:
+            if self.diagnostics is None:
+                if self.profile is None:
+                    return
+                from native_diagnostics import create_diagnostics
+                self.diagnostics = create_diagnostics(os.environ, self.runtime.parent,
+                                                      self.profile.name, self.process)
+                if self.diagnostics is not None:
+                    print('OpenGeul native diagnostics directory: ' + str(self.diagnostics.directory),
+                          file=sys.stderr, flush=True)
+            if self.diagnostics is not None:
+                self.diagnostics.record(phase)
+        except Exception as exc:
+            print('OpenGeul native diagnostics: ' + type(exc).__name__ + ': ' + str(exc),
+                  file=sys.stderr, flush=True)
+
+    def _finish_diagnostics(self, archive=True):
+        if self.diagnostics is None:
+            return
+        try:
+            if archive:
+                self.diagnostics.archive_crash()
+        except Exception as exc:
+            print('OpenGeul crash evidence archive: ' + type(exc).__name__ + ': ' + str(exc),
+                  file=sys.stderr, flush=True)
+        finally:
+            try:
+                self.diagnostics.close()
+            except Exception as exc:
+                print('OpenGeul diagnostic handle close: ' + str(exc), file=sys.stderr, flush=True)
 
     def set_command_handler(self, handler):
         self.command_handler = handler
@@ -150,6 +196,38 @@ class UnoBackend:
         prop = self.uno.createUnoStruct('com.sun.star.beans.PropertyValue')
         prop.Name, prop.Value = name, value
         return prop
+
+    def _bootstrap_ui(self, service, module):
+        """Initialize global icon settings before document UI construction.
+
+        The public toolbar factory constructs ToolBarManager (and SvtMiscOptions)
+        before reading resource settings. An absent custom resource is an empty
+        transient toolbar. Explicit ConfigurationSource avoids identifying our
+        still-empty frame; the element is never shown or stored.
+        """
+        element = None
+        try:
+            module_service = UI_MODULE_SERVICES[module['factory']]
+            supplier = service('com.sun.star.ui.ModuleUIConfigurationManagerSupplier')
+            config = supplier.getUIConfigurationManager(module_service)
+            resource = 'private:resource/toolbar/opengeul_bootstrap_' + uuid.uuid4().hex
+            if config.hasSettings(resource):
+                raise RuntimeError('The bootstrap toolbar must have no configured items')
+            manager = service('com.sun.star.ui.UIElementFactoryManager')
+            factory = manager.getFactory(resource, module_service)
+            if factory is None:
+                raise RuntimeError('The native toolbar factory is unavailable')
+            props = tuple(self._property(name, value) for name, value in (
+                ('Frame', self.frame), ('ConfigurationSource', config)))
+            try:
+                element = factory.createUIElement(resource, props)
+                if element is None or element.getRealInterface() is None:
+                    raise RuntimeError('The native bootstrap toolbar was not initialized')
+            finally:
+                if element is not None:
+                    element.dispose()
+        except Exception as exc:
+            raise WorkerError('ui_bootstrap_failed', 'Office 편집기 UI 설정을 초기화하지 못했습니다.') from exc
 
     def _new_base_url(self, service, module, interaction):
         # A noninteractive Base factory leaves URL="jdbc:" and selects Tables,
@@ -200,12 +278,21 @@ class UnoBackend:
         self.peer = toolkit.createSystemChild(self.uno.Any('hyper', hwnd), (), 1)
         if self.peer is None:
             raise WorkerError('attach_failed', 'Windows 내장 편집기 패널을 만들 수 없습니다.')
+        # The Windows MSAA bridge ignores already-open VCL windows whose
+        # accessible name is empty (msaaservice_impl.cxx). Frame.setName below
+        # is only a routing identifier; name the actual owned editor peer.
+        self.peer.setProperty('AccessibleName', module['displayName'])
+        if self.peer.getProperty('AccessibleName') != module['displayName']:
+            raise WorkerError('accessibility_failed', '내장 편집기의 접근성 이름을 확인하지 못했습니다.')
         self.frame = service('com.sun.star.frame.Frame')
         self.frame.initialize(self.peer)
         frame_name = 'OpenGeul_' + uuid.uuid4().hex
         self.frame.setName(frame_name)
         self.desktop.getFrames().append(self.frame)
         self.peer.setPosSize(0, 0, width, height, 15)
+        self._diagnose('before-ui-bootstrap')
+        self._bootstrap_ui(service, module)
+        self._diagnose('after-ui-bootstrap')
         self.interceptor = make_interceptor(self.command_handler)
         self.frame.registerDispatchProviderInterceptor(self.interceptor)
         interaction = make_interaction_handler()
@@ -215,8 +302,14 @@ class UnoBackend:
         url = path.as_uri() if path is not None else module['factory']
         if path is None and module['factory'] == 'private:factory/sdatabase':
             url = self._new_base_url(service, module, interaction)
-        self.document = self.desktop.loadComponentFromURL(url, frame_name, 4, props)
+        self._diagnose('before-load')
+        try:
+            self.document = self.desktop.loadComponentFromURL(url, frame_name, 4, props)
+        except Exception:
+            self._diagnose('load-exception')
+            raise
         if self.document is None:
+            self._diagnose('load-returned-none')
             raise WorkerError('open_failed', '문서를 열 수 없습니다. 파일 형식과 암호 여부를 확인해 주세요.')
         child = int(self.peer.getWindowHandle((), 1))
         self.window_api.validate_child(child, hwnd)
@@ -265,6 +358,7 @@ class UnoBackend:
         self.document = None
 
     def cleanup(self):
+        self._diagnose('before-owned-shutdown')
         if self.desktop is not None:
             try:
                 self.desktop.terminate()
@@ -277,11 +371,15 @@ class UnoBackend:
                 self.process.wait(timeout=5)
             except Exception:
                 # Keep the live profile when process death was not confirmed.
+                self._diagnose('shutdown-unconfirmed')
+                self._finish_diagnostics(archive=False)
                 return
+            self._diagnose('after-owned-shutdown')
             self.process.close()
             self.process = None
         self.context = self.document = self.desktop = self.frame = self.peer = self.interceptor = None
         if self.profile is not None:
+            self._finish_diagnostics()
             try:
                 self.profile.cleanup()
                 self.profile = None

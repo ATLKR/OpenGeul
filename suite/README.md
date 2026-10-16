@@ -73,13 +73,23 @@ python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.1-dev-windows-x64
 `e2e/windows_smoke.py`는 실제 native 자식 창·키보드 입력·저장을 검사합니다.
 영문 키 입력이나 Unicode SendInput 통과를 한국어 IME 조합 전체 통과로 해석하지 않습니다.
 한국어 UI를 기본 선택하며 네 모듈의 원본 번역에서 빠진 탭 표시 66개를 한국어로 제공합니다.
-`e2e/korean_ui_smoke.py`는 실제 Office 접근성 트리의 한국어 탭을 확인합니다.
+`e2e/korean_ui_smoke.py`는 실제 Office 창의 VCL 접근성 객체와 화면에서 한국어 탭을 확인합니다.
+검사기는 정확히 소유한 엔진의 실행 파일·생성 시각·HWND를 전후 검증하고,
+그 프로세스의 비공개 파이프로 실제 탭 역할·부모 객체·자식 인덱스·표시 영역을 읽습니다.
+Windows UIA/MSAA 기록은 별도 진단이며 OS 화면 읽기 프로그램 지원 인증을 뜻하지 않습니다.
 `e2e/korean_ime_smoke.py`는 실제 Microsoft IME의 조합 메시지·백스페이스·저장·UNO 재열기를
 확인합니다. `e2e/lifecycle_smoke.py`는 저장·취소·실패·창 복원·HWP 실행의 7개 시나리오,
 `e2e/startup_smoke.py`는 독립된 문서 초기화와 프로세스 종료 40회를 검사합니다.
 워크플로는 새 문서 집합으로 전체 13개 GUI 검사와 6개 문서의 의미 재검증을 두 번 실행합니다.
 실패 기록은 보존하며 하나라도 실패하면 배포 ZIP 업로드를 수행하지 않습니다.
 ARM64, 전체 WACK/Store, 실제 프린터와 모든 문서의 호환성도 별도 검증 대상입니다.
+
+Suite CI의 한국어 입력 환경은 `scripts/ensure-korean-ime.ps1`로 준비합니다.
+실제 Windows Server 2025 x64 호스트에서만 Microsoft 공식 미디어의 고정한 CAB와
+구성 정보를 받아 오프라인 원본으로 설치합니다. Windows Update 정책은 바꾸지 않으며,
+설치 상태·재시작 필요 여부·등록된 입력기와 Microsoft 서명을 직접 확인합니다.
+이 준비 결과와 실제 편집기에서의 IME 조합 결과는 구분해서 기록합니다.
+원본 로그는 단계별로 보존하고, 입력기 설치용 CAB는 전달 패키지에 포함하지 않습니다.
 
 공식 런타임에 포함된 32비트 TWAIN 스캐너 도구와 SharePoint COM 구성 요소는 이
 portable 개발판에서 지원하지 않습니다. TWAIN 도구에는 별도 32비트 DLL 격리가 필요하고,

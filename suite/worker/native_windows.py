@@ -68,6 +68,104 @@ class ProcessInfo(ctypes.Structure):
                 ('dwProcessId', wt.DWORD), ('dwThreadId', wt.DWORD)]
 
 
+class ProcessDiagnosticsApi:
+    """Queries only the supplied private job, with read-only process handles."""
+    def __init__(self):
+        kernel = windows_dll('kernel32')
+        self.query_job = bind(kernel, 'QueryInformationJobObject',
+            [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD)], wt.BOOL)
+        self.open_process = bind(kernel, 'OpenProcess', [wt.DWORD, wt.BOOL, wt.DWORD], wt.HANDLE)
+        self.is_in_job = bind(kernel, 'IsProcessInJob', [wt.HANDLE, wt.HANDLE, ctypes.POINTER(wt.BOOL)], wt.BOOL)
+        self.query_image = bind(kernel, 'QueryFullProcessImageNameW',
+            [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)], wt.BOOL)
+        self.get_times = bind(kernel, 'GetProcessTimes', [wt.HANDLE] + [ctypes.POINTER(wt.FILETIME)] * 4, wt.BOOL)
+        self.get_exit = bind(kernel, 'GetExitCodeProcess', [wt.HANDLE, ctypes.POINTER(wt.DWORD)], wt.BOOL)
+        self.wait_for = bind(kernel, 'WaitForSingleObject', [wt.HANDLE, wt.DWORD], wt.DWORD)
+        self.close_handle = bind(kernel, 'CloseHandle', [wt.HANDLE], wt.BOOL)
+
+    def job_pids(self, job):
+        # The explicit finite capacity avoids unbounded enumeration/allocation.
+        class Pids(ctypes.Structure):
+            _fields_ = [('assigned', wt.DWORD), ('count', wt.DWORD), ('pids', ctypes.c_size_t * 128)]
+        result, used = Pids(), wt.DWORD()
+        if not self.query_job(job, 3, ctypes.byref(result), ctypes.sizeof(result), ctypes.byref(used)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if result.count > 128 or result.assigned > result.count:
+            raise RuntimeError('Private job process list exceeded diagnostic capacity')
+        return [int(result.pids[i]) for i in range(result.count)]
+
+    def open_owned(self, pid, job):
+        handle = self.open_process(0x00100000 | 0x1000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        member = wt.BOOL()
+        if not self.is_in_job(handle, job, ctypes.byref(member)):
+            error = ctypes.WinError(ctypes.get_last_error())
+            self.close_handle(handle)
+            raise error
+        if not member.value:
+            self.close_handle(handle)
+            raise RuntimeError('PID no longer belongs to the private Office job')
+        return handle
+
+    def identity(self, handle):
+        image, length = ctypes.create_unicode_buffer(32768), wt.DWORD(32768)
+        if not self.query_image(handle, 0, image, ctypes.byref(length)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        creation, exit_time, kernel, user = wt.FILETIME(), wt.FILETIME(), wt.FILETIME(), wt.FILETIME()
+        if not self.get_times(handle, ctypes.byref(creation), ctypes.byref(exit_time),
+                              ctypes.byref(kernel), ctypes.byref(user)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return {'image': image.value, 'creationTime': (creation.dwHighDateTime << 32) | creation.dwLowDateTime}
+
+    def state(self, handle):
+        waited = self.wait_for(handle, 0)
+        if waited not in (0, 258):
+            raise ctypes.WinError(ctypes.get_last_error())
+        code = wt.DWORD()
+        if not self.get_exit(handle, ctypes.byref(code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return {'alive': waited == 258, 'exitCode': int(code.value), 'exitCodeHex': f'0x{code.value:08x}'}
+
+    def close(self, handle):
+        self.close_handle(handle)
+
+
+class JobProcessWitnesses:
+    """Retain members' identities/exit codes across a load failure and cleanup."""
+    def __init__(self, job, api=None):
+        self.job, self.api, self.members = job, api or ProcessDiagnosticsApi(), {}
+
+    def snapshot(self):
+        errors = []
+        for pid in self.api.job_pids(self.job):
+            if pid in self.members:
+                continue
+            handle = None
+            try:
+                handle = self.api.open_owned(pid, self.job)
+                identity = dict(self.api.identity(handle), pid=pid)
+                self.members[pid] = (handle, identity)
+            except Exception as exc:
+                if handle is not None:
+                    self.api.close(handle)
+                errors.append({'pid': pid, 'error': {'type': type(exc).__name__, 'message': str(exc),
+                                                    'winerror': getattr(exc, 'winerror', None)}})
+        result = []
+        for handle, identity in self.members.values():
+            try:
+                result.append(dict(identity, **self.api.state(handle)))
+            except Exception as exc:
+                result.append(dict(identity, error={'type': type(exc).__name__, 'message': str(exc),
+                                                   'winerror': getattr(exc, 'winerror', None)}))
+        return result + errors
+
+    def close(self):
+        for handle, identity in self.members.values():
+            self.api.close(handle)
+        self.members.clear()
+
+
 class OwnedOfficeProcess:
     def __init__(self, argv, cwd):
         env = canonicalize_temp_environment(os.environ)
@@ -117,6 +215,9 @@ class OwnedOfficeProcess:
         if not self.get_exit(self.handle, ctypes.byref(result)):
             raise ctypes.WinError(ctypes.get_last_error())
         return None if result.value == 259 else result.value
+
+    def open_diagnostic_witnesses(self):
+        return JobProcessWitnesses(self.job)
 
     def wait(self, timeout):
         result = self.wait_for(self.handle, int(timeout * 1000))

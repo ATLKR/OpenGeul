@@ -1,0 +1,150 @@
+name: OpenGeul live native accessibility structural probe
+'on':
+  push:
+    branches:
+    - work/suite-msaa-native-probe
+permissions:
+  contents: read
+  actions: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/native-worker-diagnostics
+jobs:
+  native-accessibility:
+    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private ==
+      false
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Verify source and boundary contracts
+      shell: pwsh
+      run: 'python -m unittest discover -s suite/tests -v
+
+        if ($LASTEXITCODE -ne 0) { throw ''Suite source boundary tests failed.'' }
+
+        New-Item -ItemType Directory -Path .work/probe -Force | Out-Null
+
+        '
+    - name: Recover exact previously validated runtime without rebuilding it
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      shell: python
+      run: "import hashlib, json, os, pathlib, urllib.error, urllib.parse, urllib.request,\
+        \ zipfile\nrepository = 'ATLKR/OpenGeul'\nexpected_head = '579511489f9def03dd8d894ef249fd8ed9c8fa10'\n\
+        api = 'https://api.github.com/repos/' + repository\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n\
+        \    def redirect_request(self, *args): return None\nauthenticated = urllib.request.build_opener(NoRedirect())\n\
+        headers = {'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'], 'Accept':\
+        \ 'application/vnd.github+json', 'User-Agent': 'OpenGeul-startup-diagnosis'}\n\
+        def metadata(path):\n    with authenticated.open(urllib.request.Request(api\
+        \ + path, headers=headers), timeout=60) as response:\n        return json.load(response)\n\
+        run = metadata('/actions/runs/38909448104')\nassert run['conclusion'] == 'success'\
+        \ and run['head_sha'] == expected_head\nartifact = metadata('/actions/artifacts/12049897911')\n\
+        assert artifact['workflow_run']['id'] == 38909448104 and artifact['workflow_run']['head_sha']\
+        \ == expected_head and not artifact['expired']\nrequest = urllib.request.Request(api\
+        \ + '/actions/artifacts/12049897911/zip', headers=headers)\ntry:\n    authenticated.open(request,\
+        \ timeout=60)\n    raise RuntimeError('Expected archive redirect')\nexcept\
+        \ urllib.error.HTTPError as error:\n    assert error.code == 302\n    location\
+        \ = error.headers['Location']\n    error.close()\nparsed = urllib.parse.urlsplit(location)\n\
+        assert parsed.scheme == 'https' and parsed.hostname.endswith(('.blob.core.windows.net',\
+        \ '.githubusercontent.com'))\nroot = pathlib.Path('.work/runtime-input');\
+        \ root.mkdir(parents=True)\nouter = root / 'original-artifact.zip'\ntry:\n\
+        \    with urllib.request.urlopen(location, timeout=120) as response, outer.open('xb')\
+        \ as target:\n        while block := response.read(1024 * 1024): target.write(block)\n\
+        except urllib.error.HTTPError as error:\n    raise RuntimeError('Anonymous\
+        \ storage HTTP ' + str(error.code)) from None\nexcept Exception as error:\n\
+        \    raise RuntimeError('Anonymous storage download failed: ' + type(error).__name__)\
+        \ from None\nassert outer.stat().st_size == 592780912\nwith outer.open('rb')\
+        \ as stream:\n    assert hashlib.file_digest(stream, 'sha256').hexdigest()\
+        \ == 'e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d'\n\
+        with zipfile.ZipFile(outer) as archive:\n    assert archive.namelist() ==\
+        \ ['OpenGeul-Office-0.1.0-dev-windows-x64.zip']\n    archive.extract(archive.namelist()[0],\
+        \ root)\ninner = root / 'OpenGeul-Office-0.1.0-dev-windows-x64.zip'\nwith\
+        \ inner.open('rb') as stream:\n    assert hashlib.file_digest(stream, 'sha256').hexdigest()\
+        \ == '87571bfa914950876837bc79e431168056a65fa357fadcafb0030463b9b25995'\n\
+        with zipfile.ZipFile(inner) as archive:\n    assert archive.testzip() is None\n\
+        \    archive.extractall('.work/runtime')\nprovenance = json.loads(pathlib.Path('.work/runtime/suite-provenance.json').read_text(encoding='utf-8'))\n\
+        assert provenance['sourceCommit'] == expected_head\n"
+    - name: Record and apply opt-in worker diagnostic overlay to the verified runtime
+      shell: python
+      run: "import hashlib, json, os, shutil, subprocess\nfrom pathlib import Path\n\
+        subprocess.run(['python','suite/scripts/verify-suite.py','.work/runtime'],check=True)\n\
+        root=Path('.work/runtime')\nchanges=[]\nfor name in ('native.py','native_windows.py','native_diagnostics.py'):\n\
+        \ source=Path('suite/worker')/name\n target=root/'worker'/name\n changes.append({'path':'worker/'+name,'beforeSha256':hashlib.sha256(target.read_bytes()).hexdigest()\
+        \ if target.exists() else None,'afterSha256':hashlib.sha256(source.read_bytes()).hexdigest()})\n\
+        \ shutil.copy2(source,target)\nPath('.work/probe/diagnostic-overlay.json').write_text(json.dumps({'diagnosticOnly':True,'deliverable':False,'runtimeSource':'579511489f9def03dd8d894ef249fd8ed9c8fa10','overlaySource':os.environ['GITHUB_SHA'],'overlayTree':subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip(),'collectorFiles':{str(p):hashlib.sha256(p.read_bytes()).hexdigest()\
+        \ for p in (Path('suite/e2e/native_accessibility.py'),Path('suite/e2e/korean_ui_smoke.py'))},'changes':changes},indent=2),encoding='utf-8')\n"
+    - name: Create six exact fresh baseline engine fixtures
+      id: fixtures
+      shell: pwsh
+      run: '& ./.work/runtime/Office/program/python.exe suite/e2e/engine_smoke.py
+        --suite .work/runtime --output .work/native-accessibility-engine
+
+        if ($LASTEXITCODE -ne 0) { throw ''Fresh six engine fixtures failed.'' }
+
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+
+        if ($LASTEXITCODE -ne 0) { throw ''Native observation prerequisites failed.''
+        }
+
+        '
+    - name: Observe four actual native notebookbar trees without Korean qualification
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      run: 'python suite/e2e/korean_ui_smoke.py --suite .work/runtime --fixtures .work/native-accessibility-engine/fixtures
+        --output .work/native-accessibility-ui --probe-only
+
+        if ($LASTEXITCODE -ne 0) { throw ''At least one actual native accessibility
+        diagnostic failed.'' }
+
+        '
+    - name: Verify actual English Home and Insert live-object structure
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: python
+      run: "import json, pathlib, sys\nsys.path.insert(0,'suite/e2e')\nfrom native_accessibility\
+        \ import normalize_label, inside, PAGE_TAB, PAGE_TAB_LIST\nroot=pathlib.Path('.work/native-accessibility-ui')\n\
+        report=json.loads((root/'results.json').read_text(encoding='utf-8'))\nassert\
+        \ report['probeOnly'] and not report['koreanUiVerified'] and report['success']\n\
+        assert report['expectedModules']==['writer','calc','impress','draw']\nassert\
+        \ len(report['tests'])==4\nverified=[]\nfor row in report['tests']:\n assert\
+        \ row['success'] and row['probeOnly'] and not row['koreanUiVerified'] and\
+        \ row['cleanClose']\n data=json.loads((root/row['accessibilitySnapshot']).read_text(encoding='utf-8'))\n\
+        \ assert data['officePid']==row['officePid'] and data['childHwnd']==row['childHwnd']\
+        \ and data['sameLiveFrameVerified']\n assert data['module']==row['module']\
+        \ and data['peerToBorderLiveParentVerified'] and not data['truncated']\n matches=[]\n\
+        \ for container in data['tabContainers']:\n  if container['role']!=PAGE_TAB_LIST\
+        \ or not container['visible'] or not inside(container['rectangle'],data['rootRectangle']):\
+        \ continue\n  assert container['sameLiveParentVerified'] and container['distinctLiveObjectsVerified']\
+        \ and container['indexReadbackVerified']\n  tabs={normalize_label(tab['name']):tab\
+        \ for tab in container['tabs'] if tab['role']==PAGE_TAB and tab['visible']\
+        \ and inside(tab['rectangle'],data['rootRectangle'])}\n  if {'Home','Insert'}<=tabs.keys():\
+        \ matches.append((container,tabs))\n assert matches, 'Actual English Home\
+        \ and Insert native tab objects are absent: '+row['module']\n container,tabs=matches[0]\n\
+        \ assert tabs['Home']['index']!=tabs['Insert']['index']\n for name in ('Home','Insert'):\n\
+        \  tab=tabs[name]\n  assert tab['liveParentVerified'] and tab['liveIndexReadbackVerified']\n\
+        \  assert tab['parentIndexPath']==container['indexPath'] and tab['indexPath']==container['indexPath']+[tab['index']]\n\
+        \ verified.append(row['module'])\n(root/'english-structural-proof.json').write_text(json.dumps({'diagnosticOnly':True,'deliverable':False,'koreanUiVerified':False,'englishNativeStructureVerified':True,'verifiedModules':verified},indent=2),encoding='utf-8')\n\
+        print('Actual English native notebookbar parent/roles/indices/ownership verified\
+        \ for '+', '.join(verified))\n"
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: opengeul-native-accessibility-${{ github.run_id }}
+        path: '.work/probe/
+
+          .work/native-accessibility-engine/
+
+          .work/native-accessibility-ui/
+
+          .work/native-worker-diagnostics/
+
+          '
+        retention-days: 1
+        if-no-files-found: error
+        include-hidden-files: true
