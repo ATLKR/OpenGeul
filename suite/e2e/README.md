@@ -126,6 +126,9 @@ The E2E-only reader verifies the retained PID's image, creation time and editor
 HWND before and after collection; no product worker API is added. The pipe is
 obtained from a bounded native query of only that retained process, passed to the
 packaged Python through stdin, and recorded only as a SHA256 fingerprint.
+The harness establishes the owned Suite foreground and physically focuses its
+verified editor before observing native focus events. It sends no document text
+or save command, and both fixture copies and their originals must remain intact.
 
 The authoritative `*-accessibility.json` records UNO `AccessibleRole.PAGE_TAB`
 (38) children of one real `PAGE_TAB_LIST` (39), live parent/object equality,

@@ -106,6 +106,12 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         from pywinauto import Desktop
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
+        record['stage'] = 'prepare-owned-native-focus'
+        window.set_focus()
+        api.require_foreground(hwnd)
+        Desktop(backend='win32').window(handle=child).wrapper_object().click_input()
+        record['keyboardFocusHwnd'] = native.wait_for(lambda: api.require_editor_focus(hwnd, child), seconds=10)
+        record['nativeInputFocusPrepared'] = True
         record['stage'] = 'capture-screenshot'
         screenshot = case + '-attached.png'
         window.capture_as_image().save(output / screenshot)
