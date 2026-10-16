@@ -68,13 +68,27 @@ After existing-document checks, all six Office modules also launch with
 `--module MODULE` and no file argument. Each blank document must attach under the
 Suite panel, retain its OpenGeul title, avoid external Office windows, produce
 `new-MODULE-attached.png` / `new-MODULE-result.json`, and close along with its home
-with process exit 0. These cases perform no typing or saving and claim no content
-mutation. New Base alone may require discarding initialized database settings:
-the harness physically clicks only the exact Korean discard button in the exact
-save/discard/cancel TaskDialog owned by that launched process and document. It
-records `discardPromptHandled=true`; it never dismisses arbitrary dialogs or
-clears production modified state. All six successful cases are listed separately
-as `newDocumentModules` in the aggregate report.
+with process exit 0. The first five cases perform no typing or saving and claim
+no content mutation. All six successful cases are listed separately as
+`newDocumentModules` in the aggregate report.
+
+New Base additionally proves the database survives its private profile cleanup.
+The harness physically focuses the unique shell-owned Korean File menu and sends
+Ctrl+S. It requires the exact `OpenGeul Base — 다른 이름으로 저장` native dialog,
+launched shell PID, document HWND owner, unique filename Edit automation ID `1001`
+and Save button ID `1`. It physically types the fresh
+`fixtures/New-OpenGeul-base.odb` path and clicks Save; existing fixtures are never
+overwritten. The saved ZIP must have the database mimetype, valid `content.xml`
+and the embedded Firebird connection. After normal close and process/profile
+cleanup, the same file must still exist and pass validation. Evidence includes
+`new-base-save-as.png`, `new-base-saved.png`, saved-file SHA256/size and
+`newBaseSaveAsVerified=true` / `savedFileSurvivedCleanup=true` only after success.
+
+The explicit-discard helper remains independently guarded by exact dialog
+identity, heading and Korean button text. It is never a fallback in the New Base
+Save As case: a save failure, unexpected selector/dialog or subsequent discard
+prompt fails that case. The harness does not clear modified state, auto-dismiss
+arbitrary dialogs, or claim Base SQL/keyboard-content editing from this save test.
 
 After the GUI has saved and closed each document, run:
 

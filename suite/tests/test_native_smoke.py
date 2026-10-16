@@ -16,6 +16,52 @@ SPEC.loader.exec_module(smoke)
 
 
 class NativeSmokeTests(unittest.TestCase):
+    def test_new_base_target_is_fresh_and_distinct_from_engine_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixtures = Path(directory) / 'fixtures'
+            fixtures.mkdir()
+            target = smoke.new_base_target(fixtures)
+            self.assertEqual(target.name, 'New-OpenGeul-base.odb')
+            self.assertEqual(target.parent, fixtures.resolve())
+            self.assertFalse(target.exists())
+            target.write_bytes(b'keep existing bytes')
+            with self.assertRaises(AssertionError):
+                smoke.new_base_target(fixtures)
+            self.assertEqual(target.read_bytes(), b'keep existing bytes')
+
+    def test_saved_base_requires_real_database_zip_and_firebird_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'New-OpenGeul-base.odb'
+            for url, accepted in (('sdbc:embedded:firebird', True), ('jdbc:', False)):
+                with zipfile.ZipFile(target, 'w') as archive:
+                    archive.writestr('mimetype', 'application/vnd.oasis.opendocument.database')
+                    archive.writestr('content.xml', '<database xmlns:xlink="http://www.w3.org/1999/xlink"><connection xlink:href="' + url + '"/></database>')
+                if accepted:
+                    evidence = smoke.saved_base_evidence(target)
+                    self.assertEqual(evidence['connection'], url)
+                    self.assertEqual(evidence['sha256'], hashlib.sha256(target.read_bytes()).hexdigest())
+                    self.assertGreater(evidence['bytes'], 0)
+                else:
+                    with self.assertRaises(AssertionError):
+                        smoke.saved_base_evidence(target)
+            with zipfile.ZipFile(target, 'w') as archive:
+                archive.writestr('content.xml', '<database/>')
+            with self.assertRaises((AssertionError, KeyError)):
+                smoke.saved_base_evidence(target)
+
+    def test_physical_path_keys_escape_key_syntax_as_literal_text(self):
+        self.assertEqual(smoke.literal_keys('a+^%~(){}'), 'a{+}{^}{%}{~}{(}{)}{{}{}}')
+        self.assertEqual(smoke.literal_keys('C:\\생성 문서\\new.odb'), 'C:\\생성 문서\\new.odb')
+
+    def test_save_and_explicit_discard_dialog_identity_rejects_foreign_or_wrong_prompts(self):
+        valid = (31, 31, 400, 400, 'OpenGeul Base', 'OpenGeul Base', '#32770')
+        smoke.require_dialog_identity(*valid)
+        for index, wrong in ((0, 99), (2, 999), (4, '다른 대화 상자'), (6, 'OtherWindow')):
+            observed = list(valid)
+            observed[index] = wrong
+            with self.assertRaises(AssertionError):
+                smoke.require_dialog_identity(*observed)
+
     def test_new_document_launch_opens_exact_six_modules_without_a_file_argument(self):
         suite = Path('generated-suite')
         for module in ('writer', 'calc', 'impress', 'draw', 'math', 'base'):

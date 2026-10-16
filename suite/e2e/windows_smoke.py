@@ -28,6 +28,39 @@ def new_document_command(suite, module):
     return [str(suite / 'OpenGeul.Office.exe'), '--module', module]
 
 
+def new_base_target(fixtures):
+    assert fixtures.is_dir() and not fixtures.is_symlink() and not getattr(fixtures, 'is_junction', lambda: False)(), 'New Base save requires the owned fixture directory'
+    target = fixtures / 'New-OpenGeul-base.odb'
+    assert not target.exists() and not target.is_symlink(), 'New Base Save As must never overwrite a document'
+    target = target.resolve()
+    assert target.parent == fixtures.resolve(), 'New Base target escaped generated fixtures'
+    return target
+
+
+def saved_base_evidence(path):
+    assert not path.is_symlink(), 'Saved Base evidence must not link to another document'
+    with zipfile.ZipFile(path) as archive:
+        assert archive.testzip() is None, 'Saved ODB has corrupt ZIP members'
+        assert archive.read('mimetype') == b'application/vnd.oasis.opendocument.database', 'Saved file is not an ODF database'
+        content = ET.fromstring(archive.read('content.xml'))
+        connections = [value for item in content.iter() for key, value in item.attrib.items()
+                       if key == '{http://www.w3.org/1999/xlink}href']
+        assert 'sdbc:embedded:firebird' in connections, 'Saved ODB lost its embedded Firebird connection'
+    payload = path.read_bytes()
+    assert payload, 'Saved ODB is empty'
+    return {'sha256': hashlib.sha256(payload).hexdigest(), 'bytes': len(payload), 'connection': 'sdbc:embedded:firebird'}
+
+
+def literal_keys(text):
+    return ''.join('{' + char + '}' if char in '+^%~(){}' else char for char in text)
+
+
+def require_dialog_identity(pid, shell_pid, owner, document, title, expected_title, class_name):
+    assert pid == shell_pid and pid > 0, 'Dialog belongs to a different process'
+    assert owner == document and document > 0, 'Dialog is not owned by the tested document'
+    assert title == expected_title and class_name == '#32770', 'Dialog is not the exact expected native prompt'
+
+
 def wait_for(check, seconds=60):
     deadline = time.monotonic() + seconds
     last = None
@@ -214,7 +247,8 @@ def base_new_closed(api, process, hwnd, record):
     assert len(dialogs) == 1, 'Expected exactly one owned Base close prompt'
     dialog = dialogs[0]
     native = Desktop(backend='win32').window(handle=dialog).wrapper_object()
-    assert native.class_name() == '#32770', 'Base close prompt is not a native TaskDialog'
+    require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
+                            api.title(dialog), 'OpenGeul Base', native.class_name())
     accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
     assert '변경 내용을 저장하시겠습니까?' in [item.element_info.name for item in accessible.descendants()], 'Base dialog is not the exact save/discard/cancel prompt'
     buttons = [button for button in accessible.descendants(control_type='Button')
@@ -228,7 +262,65 @@ def base_new_closed(api, process, hwnd, record):
     return not api.user.IsWindow(hwnd)
 
 
-def new_module(suite, output, module):
+def save_new_base(api, process, hwnd, fixtures, output, record):
+    from pywinauto import Desktop
+    from pywinauto.keyboard import send_keys
+    target = new_base_target(fixtures)
+    caption = 'OpenGeul Base — 다른 이름으로 저장'
+    record['newBaseSaveAsVerified'] = False
+    api.require_foreground(hwnd)
+    shell = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
+    menus = [item for item in shell.descendants(control_type='MenuItem')
+             if item.element_info.name == '파일' and item.element_info.process_id == process.pid
+             and item.is_visible() and item.is_enabled()]
+    assert len(menus) == 1, 'The exact shell-owned File menu is required for the Save shortcut'
+    menus[0].click_input()
+    api.require_foreground(hwnd)
+    send_keys('^s', pause=0.1)
+
+    def own_save_dialog():
+        matches = [dialog for dialog in api.windows(process.pid)
+                   if api.title(dialog) == caption and api.user.GetWindow(dialog, 4) == hwnd]
+        assert len(matches) <= 1, 'Save As dialog is ambiguous'
+        if not matches: return None
+        dialog = matches[0]
+        native = Desktop(backend='win32').window(handle=dialog).wrapper_object()
+        require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
+                                api.title(dialog), caption, native.class_name())
+        return dialog, native
+
+    dialog, native = wait_for(own_save_dialog, seconds=20)
+    accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
+    edits = [item for item in accessible.descendants(control_type='Edit')
+             if item.element_info.automation_id == '1001' and item.is_visible() and item.is_enabled()]
+    buttons = [item for item in accessible.descendants(control_type='Button')
+               if item.element_info.automation_id == '1' and item.is_visible() and item.is_enabled()]
+    assert len(edits) == 1 and len(buttons) == 1, 'Exact standard filename Edit 1001 and Save Button 1 are required'
+    native.set_focus()
+    api.require_foreground(dialog)
+    require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
+                            api.title(dialog), caption, native.class_name())
+    edits[0].click_input()
+    api.require_foreground(dialog)
+    send_keys('^a', pause=0.1)
+    send_keys(literal_keys(str(target)), with_spaces=True, pause=0.01)
+    assert edits[0].iface_value.CurrentValue == str(target), 'Save As filename differs from the fresh owned target'
+    native.capture_as_image().save(output / 'new-base-save-as.png')
+    require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
+                            api.title(dialog), caption, native.class_name())
+    api.require_foreground(dialog)
+    assert not target.exists(), 'Save As target appeared before the verified Save click'
+    buttons[0].click_input()
+    wait_for(lambda: not api.user.IsWindow(dialog), seconds=20)
+    evidence = wait_for(lambda: saved_base_evidence(target), seconds=30)
+    wait_for(lambda: not api.title(hwnd).startswith('* '), seconds=10)
+    record.update(saveAsDialogVerified=True, saveAsDialogHwnd=int(dialog), saveAsFilenameAutomationId='1001',
+                  saveAsButtonAutomationId='1', saveShortcutViaOwnedMenu=True,
+                  savedFile=target.name, beforeCleanupSha256=evidence['sha256'])
+    return target
+
+
+def new_module(suite, output, module, *, fixtures=None):
     from pywinauto import Desktop
     name = 'new-' + module
     process = subprocess.Popen(new_document_command(suite, module), cwd=suite, shell=False)
@@ -248,13 +340,22 @@ def new_module(suite, output, module):
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid,
                       title=api.title(hwnd), screenshot=screenshot, nativeParentVerified=True,
                       noExternalOfficeWindow=True)
-        window.close()
+        saved_base = None
         if module == 'base':
-            wait_for(lambda: base_new_closed(api, process, hwnd, record), seconds=20)
-        else:
-            wait_for(lambda: not api.user.IsWindow(hwnd), seconds=20)
+            assert fixtures is not None, 'New Base Save As requires owned generated fixtures'
+            saved_base = save_new_base(api, process, hwnd, fixtures, output, record)
+            window.capture_as_image().save(output / 'new-base-saved.png')
+        window.close()
+        # A Save As failure never falls back to discarding the unsaved Base document.
+        wait_for(lambda: not api.user.IsWindow(hwnd), seconds=20)
         wait_for(lambda: not api.user.IsWindow(child), seconds=10)
         close_home(api, process)
+        if saved_base is not None:
+            final = saved_base_evidence(saved_base)
+            assert not record['discardPromptHandled'], 'Saved Base must close normally without discard'
+            record.update(newBaseSaveAsVerified=True, savedFileSurvivedCleanup=True,
+                          savedFileSha256=final['sha256'], savedFileBytes=final['bytes'],
+                          savedDatabaseUrl=final['connection'])
         record.update(success=True, cleanClose=True, newDocumentVerified=True)
         return record
     except Exception as exc:
@@ -391,7 +492,7 @@ def main():
         for module, extension in ATTACH_CASES:
             results.append(attach_module(suite, fixtures, output, module, extension))
         for module in NEW_MODULES:
-            results.append(new_module(suite, output, module))
+            results.append(new_module(suite, output, module, fixtures=fixtures))
         report.update(success=True, homeVerified=True,
                       nativeAttachmentModules=[case[0] for case in INPUT_CASES + ATTACH_CASES],
                       physicalInputModules=[case[0] for case in INPUT_CASES],
