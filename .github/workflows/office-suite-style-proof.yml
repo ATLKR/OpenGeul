@@ -1,0 +1,298 @@
+# Work-only draft for .github/workflows/office-suite-style-proof.yml.
+# Root must replace both candidate placeholders after review.
+# No control/off variant, retry loop, release upload, or delivery ZIP upload.
+name: OpenGeul StyleApply toolbar candidate proof
+'on':
+  push:
+    branches: [work/suite-style-toolbar-proof]
+  workflow_dispatch: null
+permissions:
+  contents: read
+concurrency:
+  group: style-toolbar-proof-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+  # Candidate origin is distinct from the final workflow/harness HEAD.
+  FILTER_CANDIDATE_SOURCE: 4a2b260cb594aa126c09c88b4158fd65ae6aea8a
+  FILTER_NATIVE_SHA256: bf518ea17d202f0464ca4d8c09293e6c57a90d919ce55aec61f42c9f70a06761
+  SUITE_PACKAGE: dist/OpenGeul-Office-0.1.1-dev-windows-x64
+jobs:
+  windows-suite:
+    if: github.event.repository.private == false && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/suite-style-toolbar-proof' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: windows-2025
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        repetition: [1, 2, 3]
+    env:
+      PROOF_REPETITION: ${{ matrix.repetition }}
+      PROOF_ROOT: .work/style-toolbar-proof/host-${{ matrix.repetition }}
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Bind this independent host to the exact committed candidate
+      id: source
+      shell: python
+      run: |
+        from pathlib import Path
+        import hashlib,json,os,re,subprocess
+        def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+        def sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        head=git('rev-parse','HEAD')
+        assert re.fullmatch('[a-f0-9]{40}',head) and head==os.environ['GITHUB_SHA']
+        assert not git('status','--porcelain','--untracked-files=normal'), 'Committed clean source is required'
+        assert os.environ['GITHUB_JOB']=='windows-suite' and os.environ['GITHUB_RUN_ATTEMPT']=='1'
+        assert re.fullmatch('[a-f0-9]{40}',os.environ['FILTER_CANDIDATE_SOURCE']), 'Fill the reviewed candidate source placeholder'
+        assert re.fullmatch('[a-f0-9]{64}',os.environ['FILTER_NATIVE_SHA256']), 'Fill the reviewed candidate native hash placeholder'
+        assert sha('suite/worker/native.py')==os.environ['FILTER_NATIVE_SHA256'], 'Candidate filter bytes differ'
+        root=Path(os.environ['PROOF_ROOT']); root.mkdir(parents=True,exist_ok=False)
+        source=root/'source'; source.mkdir()
+        paths=subprocess.check_output(['git','ls-files','-z','suite']).decode().split('\0')
+        files={name:sha(name) for name in paths if name and Path(name).is_file()}
+        record=dict(schemaVersion=1,kind='style-toolbar-proof-source',diagnosticOnly=True,deliverable=False,sourceCommit=head,sourceTree=git('rev-parse','HEAD^{tree}'),candidateOrigin=os.environ['FILTER_CANDIDATE_SOURCE'],frozenNativeSha256=os.environ['FILTER_NATIVE_SHA256'],repository=os.environ['GITHUB_REPOSITORY'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],job=os.environ['GITHUB_JOB'],repetition=int(os.environ['PROOF_REPETITION']),runnerName=os.environ.get('RUNNER_NAME'),computerName=os.environ.get('COMPUTERNAME'),suiteFiles=files)
+        (source/'source-binding.json').write_text(json.dumps(record,indent=2)+'\n',encoding='utf-8')
+    - name: Candidate Suite unit/schema tests and Core shell tests
+      id: unit_core
+      shell: pwsh
+      run: |
+        python -m unittest discover -s suite/tests -v
+        if ($LASTEXITCODE -ne 0) { throw 'Candidate Suite unit/schema tests failed.' }
+        dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+        if ($LASTEXITCODE -ne 0) { throw 'Candidate Core shell tests failed.' }
+    - name: Fresh package from the pinned inputs on this host
+      id: build
+      shell: pwsh
+      run: |
+        ./suite/scripts/build-suite.ps1 -WorkDirectory "$env:PROOF_ROOT/build" -OutputDirectory $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh pinned candidate package build failed.' }
+    - name: Verify whole inventory and bind packaged bytes to this source
+      id: package
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      shell: python
+      run: |
+        from pathlib import Path
+        import hashlib,json,os,shutil,subprocess,zipfile
+        def sha(data): return hashlib.sha256(data).hexdigest()
+        root=Path(os.environ['PROOF_ROOT']); package=Path(os.environ['SUITE_PACKAGE'])
+        subprocess.run(['python','suite/scripts/verify-suite.py',str(package)],check=True)
+        provenance=json.loads((package/'suite-provenance.json').read_text(encoding='utf-8'))
+        assert provenance['sourceCommit']==os.environ['GITHUB_SHA']
+        records={}
+        with zipfile.ZipFile(package/'Sources/OpenGeul-Office-source.zip') as archive:
+            assert archive.comment.decode('ascii')==os.environ['GITHUB_SHA']
+            for source in sorted(Path('suite/worker').glob('*.py')):
+                packaged=package/'worker'/source.name
+                a=sha(source.read_bytes()); b=sha(packaged.read_bytes()); c=sha(archive.read(source.as_posix()))
+                assert a==b==c,(source.name,a,b,c)
+                records[source.name]=a
+        assert records['native.py']==os.environ['FILTER_NATIVE_SHA256']
+        destination=root/'package'; destination.mkdir(exist_ok=False)
+        for name in ('suite-inventory.json','suite-provenance.json','suite-product.json','runtime-branding.json'):
+            shutil.copyfile(package/name,destination/name)
+        (destination/'source-byte-binding.json').write_text(json.dumps(dict(schemaVersion=1,diagnosticOnly=True,deliverable=False,sourceCommit=os.environ['GITHUB_SHA'],candidateOrigin=os.environ['FILTER_CANDIDATE_SOURCE'],workerSha256=records,wholeInventoryVerified=True),indent=2)+'\n',encoding='utf-8')
+    - name: Actual hosted elevated Korean input readiness
+      id: readiness
+      if: '!cancelled() && steps.package.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI prerequisites failed.' }
+        ./suite/scripts/ensure-korean-ime.ps1 -Output "$env:PROOF_ROOT/korean-readiness"
+        if ($LASTEXITCODE -ne 0) { throw 'Actual hosted Korean input readiness failed.' }
+    - name: Bind actual readiness receipt to this host and source run
+      id: readiness_binding
+      if: '!cancelled() && steps.readiness.outcome == ''success'''
+      shell: python
+      run: |
+        from pathlib import Path
+        import json,os
+        path=Path(os.environ['PROOF_ROOT'])/'korean-readiness/readiness.json'
+        source=json.loads(path.read_text(encoding='utf-8-sig'))['source']
+        for key,env in (('sourceCommit','GITHUB_SHA'),('job','GITHUB_JOB'),('repository','GITHUB_REPOSITORY'),('sourceRun','GITHUB_RUN_ID'),('runAttempt','GITHUB_RUN_ATTEMPT')):
+            assert str(source[key])==os.environ[env],(key,source[key])
+    - name: One original engine six-module fixture generation and reopen
+      id: fixtures
+      if: '!cancelled() && steps.package.outcome == ''success'''
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output "$env:PROOF_ROOT/engine"
+        if ($LASTEXITCODE -ne 0) { throw 'Original six-module engine baseline failed.' }
+    - name: Korean native standard Tabbed UI once
+      id: korean_ui
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/style-toolbar-proof/host-${{ matrix.repetition }}/worker-diagnostics
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ui_smoke.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/korean-ui"
+        if ($LASTEXITCODE -ne 0) { throw 'Korean native standard Tabbed UI proof failed.' }
+    - name: Physical Writer Heading 1 regression proof once
+      id: writer_style
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/style-toolbar-proof/host-${{ matrix.repetition }}/worker-diagnostics
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/writer_style_smoke.py --suite $package --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/writer-style"
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Writer Heading 1 save/reopen proof failed.' }
+    - name: Forty independent existing and new Calc and Writer startups once
+      id: startup
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/style-toolbar-proof/host-${{ matrix.repetition }}/worker-diagnostics
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python suite/e2e/startup_smoke.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/startup" --attempts 40
+        if ($LASTEXITCODE -ne 0) { throw 'At least one of the forty independent startups failed.' }
+    - name: Preserve startup, original baseline, filter receipts and native dumps immediately
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-style-toolbar-startup-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.repetition }}
+        include-hidden-files: true
+        path: |
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/source/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/package/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/engine/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/startup/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/worker-diagnostics/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: One full thirteen-case native GUI run
+      id: gui
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/style-toolbar-proof/host-${{ matrix.repetition }}/worker-diagnostics
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python suite/e2e/windows_smoke.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/gui"
+        if ($LASTEXITCODE -ne 0) { throw 'At least one of the thirteen native GUI cases failed.' }
+    - name: One post-GUI six-module semantic reopen, even after a GUI failure
+      id: semantic
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output "$env:PROOF_ROOT/engine" --verify-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Post-GUI six-module semantic verification failed.' }
+    - name: Reverify the complete package inventory after all native work
+      id: inventory
+      if: '!cancelled() && steps.package.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        $inventoryExit = $LASTEXITCODE
+        @{sourceCommit=$env:GITHUB_SHA;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;repetition=[int]$env:PROOF_REPETITION;exitCode=$inventoryExit;passed=($inventoryExit -eq 0)} | ConvertTo-Json | Set-Content -Encoding utf8 "$env:PROOF_ROOT/package/final-inventory-result.json"
+        if ($inventoryExit -ne 0) { throw 'Complete package inventory changed during native verification.' }
+    - name: Retain and validate exact case counts and StyleApply module-mode receipts
+      id: proof
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      env:
+        PROOF_STEP_OUTCOMES: >-
+          {"source":"${{ steps.source.outcome }}","unit_core":"${{ steps.unit_core.outcome }}","build":"${{ steps.build.outcome }}","package":"${{ steps.package.outcome }}","readiness":"${{ steps.readiness.outcome }}","readiness_binding":"${{ steps.readiness_binding.outcome }}","fixtures":"${{ steps.fixtures.outcome }}","korean_ui":"${{ steps.korean_ui.outcome }}","writer_style":"${{ steps.writer_style.outcome }}","startup":"${{ steps.startup.outcome }}","gui":"${{ steps.gui.outcome }}","semantic":"${{ steps.semantic.outcome }}","inventory":"${{ steps.inventory.outcome }}"}
+      shell: python
+      run: |
+        from pathlib import Path
+        from collections import Counter
+        import hashlib,json,os,traceback
+        root=Path(os.environ['PROOF_ROOT']); result=dict(schemaVersion=1,kind='style-toolbar-proof',diagnosticOnly=True,deliverable=False,sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],repetition=int(os.environ['PROOF_REPETITION']),success=False)
+        def read(path): return json.loads(path.read_text(encoding='utf-8-sig'))
+        try:
+            outcomes=json.loads(os.environ['PROOF_STEP_OUTCOMES']); result['requiredStepOutcomes']=outcomes
+            assert outcomes and all(value=='success' for value in outcomes.values()),outcomes
+            readiness=read(root/'korean-readiness/readiness.json')
+            for key,env in (('sourceCommit','GITHUB_SHA'),('job','GITHUB_JOB'),('repository','GITHUB_REPOSITORY'),('sourceRun','GITHUB_RUN_ID'),('runAttempt','GITHUB_RUN_ATTEMPT')):
+                assert str(readiness['source'][key])==os.environ[env],key
+            assert readiness['suiteOnly'] is True and readiness['productInputVerified'] is False and readiness['storeQualified'] is False
+            assert readiness['capabilityAfter']=='Installed' and readiness['restartNeeded'] is False and readiness['userLanguageConfigured'] is True and readiness['profile']['registered'] is True
+            baseline=read(root/'engine/engine-smoke.json')
+            assert baseline['passed'] is True and len(baseline['cases'])==6 and all(c['status']=='passed' for c in baseline['cases'])
+            startup=read(root/'startup/results.json')
+            assert startup['success'] is True and startup['expectedAttemptCount']==startup['completedAttemptCount']==startup['passedAttemptCount']==40
+            assert not any(startup[k] for k in ('failedAttempts','missingAttempts','duplicateAttempts','unexpectedAttempts','invalidEvidence')) and startup['outOfOrder'] is False
+            assert [(a['attempt'],a['module'],a['mode']) for a in startup['attempts']]==[(i+1,*[('calc','existing'),('calc','new'),('writer','existing'),('writer','new')][i%4]) for i in range(40)]
+            gui=read(root/'gui/results.json')
+            assert gui['success'] is True and len(gui['tests'])==13 and all(c['success'] is True for c in gui['tests'])
+            assert [c['case'] for c in gui['tests']]==['home','writer','calc','impress','draw','math','base','new-writer','new-calc','new-impress','new-draw','new-math','new-base']
+            semantic=read(root/'engine/ui-engine-verification.json')
+            assert semantic['passed'] is True and len(semantic['cases'])==6 and all(c['status']=='passed' for c in semantic['cases'])
+            style=read(root/'writer-style/results.json')
+            assert style['schemaVersion']==1 and style['kind']=='native-writer-style-regression' and style['success'] is True
+            assert len(style['tests'])==1 and style['tests'][0]['case']=='writer-heading1' and style['tests'][0]['success'] is True
+            korean=read(root/'korean-ui/results.json')
+            assert korean['kind']=='native-korean-tabbed-ui' and korean['success'] is True and korean['koreanUiVerified'] is True
+            assert [c['module'] for c in korean['tests']]==['writer','calc','impress','draw']
+            inventory=read(root/'package/final-inventory-result.json'); assert inventory['passed'] is True
+            archives=[]; receipts=[]; dumps=[]
+            for manifest_path in sorted((root/'worker-diagnostics').glob('*/manifest.json')):
+                manifest=read(manifest_path)
+                events=[json.loads(line) for line in (manifest_path.parent/'events.jsonl').read_text().splitlines()]
+                assert manifest['archiveComplete'] is True,manifest_path
+                for item in manifest['files']:
+                    path=manifest_path.parent/item['path']
+                    assert path.stat().st_size==item['bytes'] and hashlib.sha256(path.read_bytes()).hexdigest()==item['sha256']
+                    if path.suffix.lower() in ('.dmp','.mdmp'): dumps.append(str(path))
+                archives.append((manifest_path.parent.name,events))
+                for event in events:
+                    if event['phase']=='after-ui-bootstrap' and 'toolbarStyleIsolation' in event.get('metadata',{}):
+                        receipt=event['metadata']['toolbarStyleIsolation']; mode=receipt['mode']; module=receipt['moduleName']
+                        assert receipt['schemaVersion']==1 and receipt['stored'] is False
+                        assert mode==dict(active='notebookbar.ui',globalActive='notebookbar.ui',tabbedCommandArg='notebookbar.ui',hasNotebookbar=True)
+                        services={'Writer':'com.sun.star.text.TextDocument','Calc':'com.sun.star.sheet.SpreadsheetDocument','Impress':'com.sun.star.presentation.PresentationDocument','Draw':'com.sun.star.drawing.DrawingDocument'}
+                        assert receipt['moduleService']==services[module]
+                        resources=[]
+                        for removed in receipt['removed']:
+                            assert removed['commands']==['.uno:StyleApply']*len(removed['indices']) and removed['indices']
+                            assert removed['indices']==sorted(set(removed['indices'])) and all(type(i) is int and i>=0 for i in removed['indices'])
+                            assert removed['resourceURL'].startswith('private:resource/toolbar/')
+                            resources.append(removed['resourceURL'].removeprefix('private:resource/toolbar/'))
+                        expected={'Writer':{'textobjectbar','textstylebar','singlemode-text','singlemode-table'},'Calc':{'formatobjectbar','singlemode'},'Impress':set(),'Draw':set()}
+                        assert set(resources)==expected[module] and len(resources)==len(set(resources)),(module,resources)
+                        receipts.append(dict(archive=manifest_path.parent.name,utc=event['utc'],receipt=receipt))
+            assert not dumps,dumps
+            # Exact source- and runtime-specific receipt counts: startup40 + UI4 + style1 + GUI8.
+            assert Counter(r['receipt']['moduleName'] for r in receipts)==dict(Writer=24,Calc=23,Impress=3,Draw=3)
+            for attempt in startup['attempts']:
+                matches=[identifier for identifier,events in archives if any(p.get('pid')==attempt['officePid'] and p.get('creationTime')==attempt['officeCreationTime'] for event in events for p in event['processes'] if p['image'].endswith('soffice.bin'))]
+                assert len(matches)==1 and sum(r['archive']==matches[0] for r in receipts)==1,attempt['case']
+            result.update(success=True,actualKoreanInputReadinessVerified=True,enginePassed=6,startupPassed=40,guiPassed=13,postGuiSemanticPassed=6,physicalWriterStylePassed=1,koreanUiPassed=4,filterReceipts=receipts,nativeArchiveCount=len(archives),nativeMinidumps=dumps)
+        except Exception as error:
+            result.update(exception=type(error).__name__+': '+str(error),traceback=traceback.format_exc())
+        finally:
+            (root/'proof-result.json').write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
+        assert result['success'],result.get('exception')
+    - name: Always preserve raw evidence, original failures and source/inventory receipts
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-style-toolbar-raw-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.repetition }}
+        include-hidden-files: true
+        path: |
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/source/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/package/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/korean-readiness/
+          !.work/style-toolbar-proof/host-${{ matrix.repetition }}/korean-readiness/fod-source/**/*.cab
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/engine/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/korean-ui/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/writer-style/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/startup/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/gui/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/worker-diagnostics/
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/proof-result.json
+          .work/style-toolbar-proof/host-${{ matrix.repetition }}/build/msi.msi.log
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
