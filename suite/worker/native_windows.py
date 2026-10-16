@@ -7,9 +7,23 @@ user process enumeration, or kill-on-worker-exit policy is used.
 import ctypes
 from ctypes import wintypes as wt
 import os
+from pathlib import Path
 import subprocess
 
 from session import WorkerError
+
+
+def canonicalize_temp_environment(inherited, *, resolver=None):
+    """Copy child env with canonical TEMP/TMP; never change global Firebird policy."""
+    environment = dict(inherited)
+    resolve = resolver or (lambda value: str(Path(value).resolve()))
+    for name, value in inherited.items():
+        if name.upper() in ('TEMP', 'TMP') and value:
+            # LO 26.8 preserves 8.3 temp paths in DatabaseAccess=Restrict, while
+            # Firebird 3.0.13 expands database paths to long names before checking.
+            # Give both libraries the same path without weakening Restrict.
+            environment[name] = str(resolve(value))
+    return environment
 
 
 def windows_dll(name):
@@ -56,6 +70,7 @@ class ProcessInfo(ctypes.Structure):
 
 class OwnedOfficeProcess:
     def __init__(self, argv, cwd):
+        env = canonicalize_temp_environment(os.environ)
         kernel = windows_dll('kernel32')
         self.close_handle = bind(kernel, 'CloseHandle', [wt.HANDLE], wt.BOOL)
         self.get_exit = bind(kernel, 'GetExitCodeProcess', [wt.HANDLE, ctypes.POINTER(wt.DWORD)], wt.BOOL)
@@ -75,7 +90,6 @@ class OwnedOfficeProcess:
         info, startup = ProcessInfo(), StartupInfo()
         startup.cb = ctypes.sizeof(startup)
         # Set a private DLL search path without changing the worker's environment.
-        env = dict(os.environ)
         env['PATH'] = str(cwd) + os.pathsep + env.get('PATH', '')
         env_block = ctypes.create_unicode_buffer('\0'.join(k + '=' + v for k, v in sorted(env.items())) + '\0\0')
         command = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
