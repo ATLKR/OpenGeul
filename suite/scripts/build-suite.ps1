@@ -1,6 +1,6 @@
 param(
     [string]$WorkDirectory = '.work/office-suite',
-    [string]$OutputDirectory = 'dist/OpenGeul-Office-0.1.0-dev-windows-x64'
+    [string]$OutputDirectory = 'dist/OpenGeul-Office-0.1.1-dev-windows-x64'
 )
 $ErrorActionPreference = 'Stop'
 $suiteRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path

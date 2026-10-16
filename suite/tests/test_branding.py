@@ -67,6 +67,8 @@ def make_runtime(root):
         '<oor:component-data oor:package="org.openoffice.Office.UI" oor:name="ToolbarMode">'
         '<node oor:name="Applications">' + applications + '</node>'
         '</oor:component-data></oor:data>', encoding='utf-8')
+    (root / 'share/registry/localization.xcd').write_bytes(
+        (SUITE / 'tests/fixtures/localization-26.8.1.xcd').read_bytes())
     (root / 'share/config/soffice.cfg/sfx/ui/startcenter.ui').write_text(
         '<interface><object class="GtkButton" id="writer_all"><property name="label" translatable="yes">'
         '_Writer Document</property></object><object class="GtkLabel" id="example"><property name="label" '

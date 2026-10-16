@@ -1,7 +1,8 @@
 name: OpenGeul Office Suite 개발 검증
 'on':
   push:
-    branches: [work/opengeul-office-suite]
+    branches:
+    - work/opengeul-office-suite
   workflow_dispatch: null
 permissions:
   contents: read
@@ -17,7 +18,7 @@ jobs:
   windows-suite:
     if: github.event.repository.private == false
     runs-on: windows-2025
-    timeout-minutes: 40
+    timeout-minutes: 75
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
@@ -30,48 +31,99 @@ jobs:
       run: |
         python -m unittest discover -s suite/tests -v
         if ($LASTEXITCODE -ne 0) { throw 'Suite unit tests failed.' }
-        dotnet --info
         dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
         if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
       shell: pwsh
-      run: |
-        ./suite/scripts/build-suite.ps1
-    - name: 실제 Office 엔진의 생성·편집·저장·재열기
-      shell: pwsh
-      run: |
-        $package = (Resolve-Path dist/OpenGeul-Office-0.1.0-dev-windows-x64).Path
-        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
-        if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine smoke tests failed.' }
-    - name: Suite 홈·6개 모듈 내장 창·3개 모듈 키보드 편집과 저장
+      run: ./suite/scripts/build-suite.ps1
+      id: build
+    - name: 실제 한국어 IME와 네이티브 UI 검사 준비
       shell: pwsh
       run: |
         python -m pip install pywinauto==0.6.9 Pillow==12.3.0
-        if ($LASTEXITCODE -ne 0) { throw 'Native UI test dependencies failed.' }
-        python suite/e2e/windows_smoke.py --suite dist/OpenGeul-Office-0.1.0-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-native
-        if ($LASTEXITCODE -ne 0) { throw 'Actual Suite home, native attachment or keyboard tests failed.' }
-        $package = (Resolve-Path dist/OpenGeul-Office-0.1.0-dev-windows-x64).Path
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
+        ./suite/scripts/ensure-korean-ime.ps1 -Output .work/suite-korean-readiness
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
+      id: readiness
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 실제 Office 엔진의 생성·편집·저장·재열기
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path dist/OpenGeul-Office-0.1.1-dev-windows-x64).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
+      id: fixtures
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 실제 한국어 조합·백스페이스·저장·재열기
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and content verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+    - name: 한국어 탭 메뉴의 실제 접근성·화면 확인
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ui_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean native Tabbed UI verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: 저장·취소·실패·창 복원·HWP 실행 수명 검사
+      shell: pwsh
+      run: |
+        python suite/e2e/lifecycle_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-lifecycle
+        if ($LASTEXITCODE -ne 0) { throw 'Actual native document lifecycle verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: 독립 문서 초기화와 종료 40회 모두 통과
+      shell: pwsh
+      run: |
+        python suite/e2e/startup_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-startup --attempts 40
+        if ($LASTEXITCODE -ne 0) { throw 'At least one independent startup failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: 첫 번째 전체 Suite GUI·편집 후 의미 검증
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path dist/OpenGeul-Office-0.1.1-dev-windows-x64).Path
+        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine/fixtures --output .work/suite-native
+        if ($LASTEXITCODE -ne 0) { throw 'First complete native UI verification failed.' }
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine --verify-ui
-        if ($LASTEXITCODE -ne 0) { throw 'Reopened UI-edited document contents failed verification.' }
+        if ($LASTEXITCODE -ne 0) { throw 'First post-GUI semantic verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: 새 문서 집합으로 전체 UI·E2E를 두 번째 독립 실행
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path dist/OpenGeul-Office-0.1.1-dev-windows-x64).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine-2
+        if ($LASTEXITCODE -ne 0) { throw 'Second fresh engine fixtures failed.' }
+        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine-2/fixtures --output .work/suite-native-2
+        if ($LASTEXITCODE -ne 0) { throw 'Second complete native UI verification failed.' }
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine-2 --verify-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Second post-GUI semantic verification failed.' }
         python suite/scripts/verify-suite.py $package
-        if ($LASTEXITCODE -ne 0) { throw 'Runtime files changed during GUI validation.' }
-    - name: 원본 GUI·엔진 검증 기록 보존
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during the complete native validation.' }
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 원본 GUI·엔진·IME·반복 검증 기록 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}
         path: |
           .work/suite-engine/
+          .work/suite-engine-2/
           .work/suite-native/
+          .work/suite-native-2/
+          .work/suite-korean-readiness/
+          .work/suite-korean-ime/
+          .work/suite-korean-ui/
+          .work/suite-lifecycle/
+          .work/suite-startup/
           .work/office-suite/msi.msi.log
         retention-days: 1
         if-no-files-found: warn
         compression-level: 6
-    - name: 검증한 Suite 개발 패키지 전달
+    - name: 모든 검증을 통과한 Suite 개발 패키지 전달
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-office-suite-x64-${{ github.run_id }}
-        path: dist/OpenGeul-Office-0.1.0-dev-windows-x64.zip
+        path: dist/OpenGeul-Office-0.1.1-dev-windows-x64.zip
         retention-days: 1
         if-no-files-found: error
         compression-level: 0

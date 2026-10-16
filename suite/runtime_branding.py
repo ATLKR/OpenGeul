@@ -34,6 +34,23 @@ START_BUTTONS = {'writer_all': 'writer', 'calc_all': 'calc', 'impress_all': 'imp
 MODULES = {'hwp', 'writer', 'calc', 'impress', 'draw', 'math', 'base'}
 BRAND_IMAGES = ('intro.png', 'intro-highres.png', 'logo.svg', 'logo_inverted.svg',
                 'logo-sc.svg', 'logo-sc_inverted.svg', 'about.svg', 'donate1.png', 'donate2.png')
+NOTEBOOKBAR_CONTEXTS = {f'soffice.cfg/modules/{module}/ui/notebookbar.ui': context
+                        for module, context in (('swriter', 'TabbedWriter'), ('scalc', 'TabbedCalc'),
+                                                ('simpress', 'TabbedImpress'), ('sdraw', 'TabbedDraw'))}
+KOREAN_TAB_LABELS = {
+    'File': ('파일', ('FileLabel',)), 'Home': ('홈', ('HomeLabel',)),
+    'Insert': ('삽입', ('InsertLabel',)), 'Layout': ('레이아웃', ('LayoutLabel',)),
+    'References': ('참조', ('ReferencesLabel',)), 'Review': ('검토', ('ReviewLabel',)),
+    'View': ('보기', ('ViewLabel',)), 'Table': ('표', ('TableLabel',)),
+    'Image': ('이미지', ('ImageLabel',)), 'Draw': ('그리기', ('DrawLabel',)),
+    'Object': ('개체', ('ObjectLabel',)), 'Media': ('미디어', ('MediaLabel',)),
+    'Print': ('인쇄', ('PrintLabel',)), 'Form': ('폼', ('FormLabel',)),
+    'Tools': ('도구', ('ToolsLabel', 'DevLabel')), 'Data': ('데이터', ('DataLabel',)),
+    'Functions': ('함수', ('FunctionsLabel1',)), 'Design': ('디자인', ('DesignLabel',)),
+    'Slide': ('슬라이드 쇼', ('SlideShowLabel',)), 'Master': ('마스터', ('MasterLabel',)),
+    'Outline': ('개요', ('OutlineLabel',)), '3D': ('3D', ('3DObjectLabel', '3DLabel')),
+    'Extension': ('확장 기능', ('ExtensionLabel',)),
+}
 for prefix, uri in [('oor', OOR[1:-1]), ('xs', 'http://www.w3.org/2001/XMLSchema'),
                     ('xsi', 'http://www.w3.org/2001/XMLSchema-instance'),
                     ('install', 'http://openoffice.org/2004/installation')]:
@@ -166,12 +183,16 @@ def _brand_registry_display_labels(root: ET.Element, manifest: dict) -> bool:
 def _brand_registry(runtime: Path, manifest: dict) -> None:
     product_found = False
     modules_found = set()
+    korean_installed = False
     for path in sorted((runtime / 'share/registry').rglob('*')):
         if path.suffix not in ('.xcd', '.xcu'):
             continue
         tree = _xml(path)
         changed = False
         for component in _component(tree.getroot(), 'org.openoffice', 'Setup'):
+            office = _child(component, 'node', 'Office')
+            locales = _child(office, 'node', 'InstalledLocales') if office is not None else None
+            korean_installed |= locales is not None and _child(locales, 'node', 'ko') is not None
             product = _child(component, 'node', 'Product')
             if product is not None and _child(product, 'prop', 'ooName') is not None:
                 product_found = True
@@ -213,6 +234,32 @@ def _brand_registry(runtime: Path, manifest: dict) -> None:
             _write_xml(path, tree)
     if not product_found or modules_found != MODULES - {'hwp'}:
         raise ValueError('Runtime product or six Office factory registrations were not recognized')
+    if not korean_installed:
+        raise ValueError('The Korean UI language must already be installed in the runtime')
+    _write_korean_defaults(runtime)
+
+
+def _write_korean_defaults(runtime: Path) -> None:
+    # Pinned bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1:
+    # desktop/source/app/langselect.cxx:78-118 reads Linguistic/General/UILocale
+    # before writing Setup/L10N/ooLocale. Setting only ooLocale is overwritten
+    # by the host UI language. The bundled language pack's installed ID is ko;
+    # the regional locale is ko-KR (officecfg/registry/schema/.../Setup.xcs).
+    # A shared, non-finalized layer reaches each isolated profile while allowing
+    # that profile to override the defaults through normal Office preferences.
+    root = ET.Element(OOR + 'data')
+    ET.SubElement(root, 'dependency', {'file': 'main'})
+    for package, name, group, prop, value in (
+        ('org.openoffice.Office', 'Linguistic', 'General', 'UILocale', 'ko'),
+        ('org.openoffice', 'Setup', 'L10N', 'ooSetupSystemLocale', 'ko-KR'),
+    ):
+        component = ET.SubElement(root, OOR + 'component-data',
+                                  {OOR + 'package': package, OOR + 'name': name})
+        node = ET.SubElement(component, 'node', {OOR + 'name': group})
+        property_node = ET.SubElement(node, 'prop', {OOR + 'name': prop})
+        ET.SubElement(property_node, 'value').text = value
+    ET.ElementTree(root).write(runtime / 'share/registry/opengeul.xcd',
+                               encoding='utf-8', xml_declaration=True)
 
 
 def _brand_text(text: str, manifest: dict) -> str:
@@ -236,6 +283,30 @@ def _brand_ui(runtime: Path, manifest: dict) -> None:
                 if label != node.text:
                     node.text = label
                     changed = True
+        # All 66 Tabbed* tab contexts in the pinned 26.8.1.1 UI are absent
+        # from its Korean sw/sc/sd gettext catalogs. VclBuilder uses that exact
+        # context/msgid pair and SetPageText, so they otherwise remain English
+        # even with UILocale=ko. Supply curated display defaults only at these
+        # four known paths, exact contexts, GtkLabel IDs and label properties.
+        expected_context = NOTEBOOKBAR_CONTEXTS.get(path.relative_to(runtime / 'share/config').as_posix())
+        if expected_context:
+            for obj in tree.iter('object'):
+                if obj.get('class') != 'GtkLabel':
+                    continue
+                for prop in obj.findall('property'):
+                    prefix, _, context = prop.get('context', '').partition('|')
+                    definition = KOREAN_TAB_LABELS.get(context.removesuffix('TabLabel'))
+                    if prop.get('name') != 'label' or prefix != expected_context or \
+                            not context.endswith('TabLabel') or definition is None or \
+                            obj.get('id') not in definition[1]:
+                        continue
+                    label = definition[0]
+                    mnemonic = re.search(r'([~_])(.)', prop.text or '')
+                    if mnemonic:
+                        label += '(' + mnemonic[1] + mnemonic[2].upper() + ')'
+                    if prop.text != label:
+                        prop.text = label
+                        changed = True
         if path.name == 'startcenter.ui':
             for obj in tree.iter('object'):
                 module = START_BUTTONS.get(obj.get('id'))

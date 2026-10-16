@@ -1,7 +1,7 @@
 # OpenGeul Office 개발판
 
 OpenGeul Office는 한 제품군 안에서 서로 다른 문서 엔진을 사용하는 Windows Suite입니다.
-이 디렉터리는 **0.1.0-dev 개발 소스**이며 기존 OpenGeul HWP Store 상품이나 정규
+이 디렉터리는 **0.1.1-dev 개발 소스**이며 기존 OpenGeul HWP Store 상품이나 정규
 릴리스를 교체하지 않습니다. 실제 Windows 검증 결과는 Suite workflow의 동일 소스
 실행과 원본 evidence를 확인해야 합니다.
 
@@ -62,7 +62,7 @@ dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
 소스 커밋의 ZIP과 제3자 고지가 들어갑니다. 다음 명령은 패키지 전체를 다시 검사합니다.
 
 ```powershell
-python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.0-dev-windows-x64
+python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.1-dev-windows-x64
 ```
 
 ## 검증을 읽는 방법
@@ -72,6 +72,13 @@ python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.0-dev-windows-x64
 `e2e/engine_smoke.py`는 실제 엔진의 생성·저장·재열기를 검사하고,
 `e2e/windows_smoke.py`는 실제 native 자식 창·키보드 입력·저장을 검사합니다.
 영문 키 입력이나 Unicode SendInput 통과를 한국어 IME 조합 전체 통과로 해석하지 않습니다.
+한국어 UI를 기본 선택하며 네 모듈의 원본 번역에서 빠진 탭 표시 66개를 한국어로 제공합니다.
+`e2e/korean_ui_smoke.py`는 실제 Office 접근성 트리의 한국어 탭을 확인합니다.
+`e2e/korean_ime_smoke.py`는 실제 Microsoft IME의 조합 메시지·백스페이스·저장·UNO 재열기를
+확인합니다. `e2e/lifecycle_smoke.py`는 저장·취소·실패·창 복원·HWP 실행의 7개 시나리오,
+`e2e/startup_smoke.py`는 독립된 문서 초기화와 프로세스 종료 40회를 검사합니다.
+워크플로는 새 문서 집합으로 전체 13개 GUI 검사와 6개 문서의 의미 재검증을 두 번 실행합니다.
+실패 기록은 보존하며 하나라도 실패하면 배포 ZIP 업로드를 수행하지 않습니다.
 ARM64, 전체 WACK/Store, 실제 프린터와 모든 문서의 호환성도 별도 검증 대상입니다.
 
 공식 런타임에 포함된 32비트 TWAIN 스캐너 도구와 SharePoint COM 구성 요소는 이

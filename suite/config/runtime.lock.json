@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.0-dev",
+  "version": "0.1.1-dev",
   "architecture": "x64",
   "shellRuntime": {
     "name": ".NET Windows Desktop",

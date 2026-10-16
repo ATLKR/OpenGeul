@@ -1,0 +1,235 @@
+"""Finite native Korean Tabbed UI evidence for four embedded Office modules.
+
+Only copied engine fixtures are opened; no input or save commands are sent.
+--probe-only records accessibility without claiming Korean UI verification.
+The accessibility reader runs in its own bounded process so an unresponsive
+provider cannot hold the owned Suite lifecycle open indefinitely.
+"""
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+import startup_smoke as startup
+import windows_smoke as native
+
+MODULES = {'writer': 'docx', 'calc': 'xlsx', 'impress': 'pptx', 'draw': 'odg'}
+REQUIRED_TABS = {'홈', '삽입'}
+
+
+def normalize_label(value):
+    return re.sub(r'\s*\([~&_]?[A-Za-z]\)\s*$', '', value).translate(
+        str.maketrans('', '', '~&_')).strip()
+
+
+def require_korean_tabs(snapshot, office_pid, child):
+    assert snapshot.get('officePid') == office_pid and snapshot.get('rootProcessId') == office_pid, 'Accessibility root is not the owned Office process'
+    assert snapshot.get('childHwnd') == child, 'Accessibility root is not the verified embedded editor'
+    assert not snapshot.get('truncated'), 'Accessibility snapshot exceeded the finite control bound'
+    groups = defaultdict(dict)
+    for item in snapshot.get('controls', []):
+        assert item.get('processId') == office_pid, 'Foreign accessibility names are not eligible'
+        is_tab = item.get('controlType') == 'TabItem' or item.get('legacyRole') == 37
+        is_tab_container = item.get('parentControlType') == 'Tab' or item.get('parentLegacyRole') == 60
+        if not (is_tab and is_tab_container and item.get('visible') is True
+                and item.get('parentProcessId') == office_pid):
+            continue
+        parent, identity = item.get('parentRuntimeId'), item.get('runtimeId')
+        if not parent or not identity:
+            continue
+        groups[tuple(parent)][normalize_label(item.get('name', ''))] = item
+    matching = [labels for labels in groups.values() if REQUIRED_TABS <= labels.keys()]
+    assert matching, 'Native Office must expose Korean Home and Insert tabs in one actual tab control'
+    labels = matching[0]
+    assert labels['홈']['runtimeId'] != labels['삽입']['runtimeId'], 'Distinct Korean tabs require distinct accessible elements'
+    return dict(koreanUiVerified=True, tabbedUiVerified=True,
+                koreanTabLabels=sorted(REQUIRED_TABS), tabControls=[labels[name] for name in sorted(REQUIRED_TABS)])
+
+
+def _legacy(wrapper):
+    try:
+        return wrapper.legacy_properties().get('Role')
+    except Exception:
+        return None
+
+
+def capture_controls(child, office_pid):
+    from pywinauto import Desktop
+    root = Desktop(backend='uia').window(handle=child).wrapper_object()
+    assert root.element_info.process_id == office_pid, 'UIA root changed native process ownership'
+    wrappers = [root] + root.descendants()
+    assert len(wrappers) <= 6000, 'Native accessibility tree exceeds the finite control bound'
+    controls = []
+    for wrapper in wrappers:
+        info = wrapper.element_info
+        if info.process_id != office_pid:
+            continue  # Do not read or record shell or other-process labels.
+        role = _legacy(wrapper)
+        item = dict(name=info.name, processId=int(info.process_id), controlType=info.control_type,
+                    automationId=info.automation_id, className=info.class_name,
+                    runtimeId=list(info.runtime_id or []), legacyRole=role,
+                    visible=bool(wrapper.is_visible()))
+        rect = info.rectangle
+        item['rectangle'] = [int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)]
+        if info.control_type == 'TabItem' or role == 37:
+            parent = wrapper.parent()
+            parent_info = parent.element_info
+            item.update(parentProcessId=int(parent_info.process_id),
+                        parentRuntimeId=list(parent_info.runtime_id or []),
+                        parentControlType=parent_info.control_type,
+                        parentLegacyRole=_legacy(parent) if parent_info.process_id == office_pid else None)
+        controls.append(item)
+    return dict(schemaVersion=1, kind='owned-native-accessibility', childHwnd=child,
+                officePid=office_pid, rootProcessId=int(root.element_info.process_id),
+                controlCount=len(controls), truncated=False, controls=controls)
+
+
+def capture_bounded(child, office_pid, destination):
+    command = [sys.executable, str(Path(__file__).resolve()), '--capture-child', str(child),
+               '--office-pid', str(office_pid), '--snapshot', str(destination)]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=45, shell=False)
+    assert result.returncode == 0, 'Native accessibility collector failed: ' + result.stderr
+    return json.loads(destination.read_text(encoding='utf-8'))
+
+
+def run_case(suite, fixtures, output, module, *, probe_only=False):
+    case = 'korean-ui-' + module
+    record = dict(case=case, module=module, success=False, stage='verify-fixture',
+                  koreanUiVerified=False, tabbedUiVerified=False, cleanClose=False,
+                  probeOnly=probe_only, stderrLog=case + '-stderr.log')
+    process = api = engine = original = copy = before = None
+    started = time.monotonic()
+    try:
+        original = native.require_engine_fixture(fixtures, module, MODULES[module])
+        before = hashlib.sha256(original.read_bytes()).hexdigest()
+        copy = output / (case + '-fixture.' + MODULES[module])
+        assert not copy.exists(), 'The UI fixture copy must be fresh'
+        shutil.copyfile(original, copy)
+        record.update(originalFixture=str(original), copiedFixture=copy.name, beforeSha256=before)
+        record['stage'] = 'launch'
+        process = native.launch_suite([str(suite/'OpenGeul.Office.exe'), '--module', module,
+                                       '--file', str(copy)], suite, output, case)
+        api = native.Windows()
+        record['shellPid'] = process.pid
+        record['stage'] = 'attach'
+        hwnd, parent, child, office_pid = native.verified_attachment(api, process, module)
+        engine = startup.EngineProcessWitness(office_pid)
+        record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid,
+                      officeCreationTime=engine.creation_time, nativeParentVerified=True)
+        from pywinauto import Desktop
+        window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
+        window.maximize()
+        record['stage'] = 'capture-native-controls'
+        snapshot_name = case + '-accessibility.json'
+        snapshot = capture_bounded(child, office_pid, output / snapshot_name)
+        assert api.user.IsWindow(child) and api.pid(child) == office_pid, 'Owned editor changed during accessibility capture'
+        record.update(accessibilitySnapshot=snapshot_name, accessibleControlCount=snapshot['controlCount'])
+        record['stage'] = 'capture-screenshot'
+        screenshot = case + '-attached.png'
+        window.capture_as_image().save(output / screenshot)
+        record.update(screenshot=screenshot, screenshotCaptured=True)
+        assert not api.windows(office_pid), 'Office created an unowned visible top-level window'
+        record['noExternalOfficeWindow'] = True
+        if not probe_only:
+            record['stage'] = 'assert-korean-tabbed-ui'
+            record.update(require_korean_tabs(snapshot, office_pid, child))
+        record['stage'] = 'close-document'
+        native.close_document(api, process, hwnd, child, record)
+        native.close_home(api, process, record)
+        record['stage'] = 'wait-engine-exit'
+        record['officeExited'] = engine.exited(10)
+        assert record['officeExited'], 'Owned Office engine survived normal shutdown'
+        record['officeExitCode'] = engine.code()
+        record['stage'] = 'verify-final-fixtures'
+        record['fixtureUnchanged'] = hashlib.sha256(copy.read_bytes()).hexdigest() == before
+        record['originalFixtureUnchanged'] = hashlib.sha256(original.read_bytes()).hexdigest() == before
+        assert record['fixtureUnchanged'] and record['originalFixtureUnchanged'], 'Read-only UI observation changed a generated fixture'
+        record.update(success=True, cleanClose=True, stage='complete')
+    except Exception as exc:
+        native.capture_failure(output, case, record, exc)
+    finally:
+        if process is not None:
+            record['forcedCleanupRequired'] = process.poll() is None
+            native.stop_owned_test_process(process, record)
+            record['shellExitCode'] = process.poll()
+            if record.get('success') and record['shellExitCode'] != 0:
+                record.update(success=False, cleanupError='Owned Suite shell did not exit cleanly')
+        if engine is not None:
+            try:
+                record['officeExitedAfterCleanup'] = engine.exited(5)
+                if not record['officeExitedAfterCleanup']:
+                    record.update(success=False, cleanupError='Owned Office engine survived bounded cleanup')
+            except Exception as cleanup_error:
+                record.update(success=False, cleanupError=type(cleanup_error).__name__ + ': ' + str(cleanup_error))
+            finally:
+                engine.close()
+        record['elapsedSeconds'] = round(time.monotonic() - started, 3)
+        native.write_result(output, case, record)
+    return record
+
+
+def run_modules(suite, fixtures, output, modules, *, probe_only=False):
+    records = []
+    for module in modules:
+        try:
+            record = run_case(suite, fixtures, output, module, probe_only=probe_only)
+        except Exception as exc:
+            record = dict(case='korean-ui-' + module, module=module, success=False)
+            native.capture_failure(output, record['case'], record, exc)
+            native.write_result(output, record['case'], record)
+        records.append(record)
+        print(module + ': ' + ('captured' if probe_only and record['success'] else
+              'passed' if record['success'] else 'FAILED: ' + str(record.get('error'))), flush=True)
+    verified = [record['module'] for record in records if record.get('success') is True
+                and record.get('koreanUiVerified') is True and record.get('tabbedUiVerified') is True]
+    report = dict(schemaVersion=1, kind='native-korean-ui-probe' if probe_only else 'native-korean-tabbed-ui',
+                  success=all(record.get('success') is True for record in records), probeOnly=probe_only,
+                  koreanUiVerified=not probe_only and len(verified) == len(modules),
+                  expectedModules=list(modules), verifiedModules=verified, tests=records)
+    (output/'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--suite', type=Path)
+    parser.add_argument('--fixtures', type=Path)
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--modules', choices=tuple(MODULES), nargs='+', default=list(MODULES))
+    parser.add_argument('--probe-only', action='store_true')
+    parser.add_argument('--capture-child', type=int, help=argparse.SUPPRESS)
+    parser.add_argument('--office-pid', type=int, help=argparse.SUPPRESS)
+    parser.add_argument('--snapshot', type=Path, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if os.name != 'nt' or not __debug__:
+        raise RuntimeError('Actual Windows GUI execution with assertions enabled is required')
+    if args.capture_child is not None:
+        assert args.capture_child > 0 and args.office_pid and args.office_pid > 0 and args.snapshot
+        snapshot = capture_controls(args.capture_child, args.office_pid)
+        with args.snapshot.open('x', encoding='utf-8') as stream:
+            json.dump(snapshot, stream, ensure_ascii=False, indent=2, allow_nan=False)
+        return 0
+    assert args.suite and args.fixtures and args.output, '--suite, --fixtures and --output are required'
+    for path in (args.suite, args.fixtures, args.output):
+        assert not path.is_symlink() and not getattr(path, 'is_junction', lambda: False)(), 'Linked input or evidence directories are not accepted'
+    suite, fixtures, output = args.suite.resolve(), args.fixtures.resolve(), args.output.resolve()
+    assert suite != output and suite not in output.parents, 'Evidence must be outside the payload'
+    assert fixtures != output and fixtures not in output.parents, 'Evidence must be outside generated fixtures'
+    assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
+    assert len(args.modules) == len(set(args.modules)), 'Each module may be observed once'
+    output.mkdir(parents=True, exist_ok=False)
+    report = run_modules(suite, fixtures, output, args.modules, probe_only=args.probe_only)
+    return 0 if report['success'] else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

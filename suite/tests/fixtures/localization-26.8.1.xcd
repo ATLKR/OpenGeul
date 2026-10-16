@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<oor:data xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <!-- SPDX-License-Identifier: MPL-2.0; upstream registry excerpts from LibreOffice build bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1 (26.8.1.1). Schema and labels copied without semantic changes from MSI main.xcd, Langpack-ko.xcd, Langpack-en-US.xcd and res/registry_ko.xcd. Sources: officecfg/registry/schema/org/openoffice/Setup.xcs; officecfg/registry/schema/org/openoffice/Office/Linguistic.xcs; officecfg/registry/data/org/openoffice/Office/UI/GenericCommands.xcu. -->
+  <oor:component-schema oor:package="org.openoffice" oor:name="Setup" xml:lang="en-US">
+    <templates>
+      <group oor:name="InstalledLocale">
+        <info>
+        Describes a language pack that is installed to provide a localized
+        office UI.
+      </info>
+        <prop oor:name="Origin" oor:type="xs:string">
+          <info>
+          Identifies the organization, group or person that provided this
+          language pack.
+        </info>
+        </prop>
+      </group>
+    </templates>
+    <component>
+      <group oor:name="Office">
+        <set oor:name="InstalledLocales" oor:node-type="InstalledLocale">
+          <info>
+          Enumerates the application languages that are installed, if a
+          multilingual version is used.
+        </info>
+        </set>
+      </group>
+      <group oor:name="L10N">
+        <prop oor:name="ooLocale" oor:type="xs:string" oor:nillable="false">
+          <info>
+          Indicates the Office language selected by the user.
+          Locale
+        </info>
+          <value />
+        </prop>
+        <prop oor:name="ooSetupSystemLocale" oor:type="xs:string" oor:nillable="false">
+          <info>
+          Indicates the locale setting defined by the user. By default,
+          this label is empty and the system locale is used.
+        </info>
+          <value />
+        </prop>
+      </group>
+    </component>
+  </oor:component-schema>
+  <oor:component-schema oor:package="org.openoffice.Office" oor:name="Linguistic" xml:lang="en-US">
+    <component>
+      <group oor:name="General">
+        <prop oor:name="UILocale" oor:type="xs:string" oor:nillable="false">
+          <info>
+          Specifies the UI language. An empty string means: use the
+          desktop's UI language if possible.
+        </info>
+          <value />
+        </prop>
+      </group>
+    </component>
+  </oor:component-schema>
+  <oor:component-data oor:name="Setup" oor:package="org.openoffice">
+    <node oor:name="Office">
+      <node oor:name="InstalledLocales">
+        <node oor:name="en-US" oor:op="replace">
+          <prop oor:name="Origin">
+            <value>OpenOffice.org</value>
+          </prop>
+        </node>
+      </node>
+    </node>
+  </oor:component-data>
+  <oor:component-data oor:name="Setup" oor:package="org.openoffice">
+    <node oor:name="Office">
+      <node oor:name="InstalledLocales">
+        <node oor:name="ko" oor:op="replace">
+          <prop oor:name="Origin">
+            <value>OpenOffice.org</value>
+          </prop>
+        </node>
+      </node>
+    </node>
+  </oor:component-data>
+  <oor:component-data oor:name="GenericCommands" oor:package="org.openoffice.Office.UI">
+    <node oor:name="UserInterface">
+      <node oor:name="Popups">
+        <node oor:name=".uno:PickList" oor:op="replace">
+          <prop oor:name="Label" oor:type="xs:string">
+            <value xml:lang="en-US">~File</value>
+          </prop>
+        </node>
+        <node oor:name=".uno:EditMenu" oor:op="replace">
+          <prop oor:name="Label" oor:type="xs:string">
+            <value xml:lang="en-US">~Edit</value>
+          </prop>
+        </node>
+        <node oor:name=".uno:InsertMenu" oor:op="replace">
+          <prop oor:name="Label" oor:type="xs:string">
+            <value xml:lang="en-US">~Insert</value>
+          </prop>
+        </node>
+      </node>
+    </node>
+  </oor:component-data>
+  <oor:component-data oor:name="GenericCommands" oor:package="org.openoffice.Office.UI">
+    <node oor:name="UserInterface">
+      <node oor:name="Popups">
+        <node oor:name=".uno:PickList">
+          <prop oor:name="Label" oor:type="xs:string">
+            <value xml:lang="ko">파일(~F)</value>
+          </prop>
+        </node>
+        <node oor:name=".uno:EditMenu">
+          <prop oor:name="Label" oor:type="xs:string">
+            <value xml:lang="ko">편집(~E)</value>
+          </prop>
+        </node>
+        <node oor:name=".uno:InsertMenu">
+          <prop oor:name="Label" oor:type="xs:string">
+            <value xml:lang="ko">삽입(~I)</value>
+          </prop>
+        </node>
+      </node>
+    </node>
+  </oor:component-data>
+</oor:data>

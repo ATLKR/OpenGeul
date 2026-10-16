@@ -75,6 +75,11 @@ Suite docs and `docs/VERIFICATION.md` with explicit development status.
 
 - [x] payload 누락·변조·혼합 아키텍처·소스/라이선스 누락 검사를 먼저 실패시킨다.
 - [x] 새 경로의 추출·빌드·브랜딩·inventory·ZIP과 소스 묶음을 구현한다.
-- [ ] Windows x64에서 실제 자식 HWND와 Writer/Calc/Impress 입력·저장·재열기를 검증한다.
+- [x] Windows x64에서 실제 자식 HWND와 Writer/Calc/Impress 입력·저장·재열기를 검증한다.
 - [x] 기존 HWP 정책/단위 검사와 전체 변경의 독립 리뷰를 수행한다.
-- [ ] 확인한 결과물과 미완의 GUI·IME·ARM64·공개 배포 항목을 구분해 보고한다.
+- [x] 확인한 결과물과 검증 범위 밖의 IME·ARM64·공개 배포 항목을 구분해 보고한다.
+
+초기 Windows 기준선은 소스 `579511489f9def03dd8d894ef249fd8ed9c8fa10`,
+Actions 실행 `38909448104`의 6개 엔진·13개 GUI·6개 재열기 전체 통과로 확인했다.
+이 기준선은 한국어 IME 검증을 포함하지 않는다. 0.1.1 개발판의 확장된 완료 기준과
+각 실행의 실제 결과는 Suite 워크플로 및 업로드된 원본 검증 자료로 확인한다.

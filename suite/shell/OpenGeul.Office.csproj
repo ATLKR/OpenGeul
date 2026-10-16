@@ -9,7 +9,7 @@
     <ApplicationIcon>opengeul.ico</ApplicationIcon>
     <AssemblyName>OpenGeul.Office</AssemblyName>
     <RootNamespace>OpenGeul.Office</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Product>OpenGeul Office</Product>
     <Company>ATLKR</Company>
     <Copyright>OpenGeul contributors</Copyright>
