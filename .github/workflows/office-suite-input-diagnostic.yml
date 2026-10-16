@@ -2,7 +2,11 @@ name: OpenGeul owned keyboard delivery diagnostic
 'on':
   push:
     branches: [work/suite-lifecycle-input-diagnostic]
-    paths: [.github/workflows/office-suite-input-diagnostic.yml]
+    paths:
+      - .github/workflows/office-suite-input-diagnostic.yml
+      - suite/e2e/keyboard_delivery.py
+      - suite/e2e/lifecycle_input_probe.py
+      - suite/tests/test_lifecycle_input_probe.py
 permissions:
   contents: read
 concurrency:
