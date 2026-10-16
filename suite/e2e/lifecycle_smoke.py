@@ -112,7 +112,7 @@ def require_dialog_action(*, pid, shell_pid, owner, document, title, expected_ti
 
 
 def require_saveas_overwrite_owner(dialog, picker, document, shell_pid, target_name):
-    """Validate both observed Windows common-dialog owner chains, never a foreign owner."""
+    """Validate the explicit document/picker owner chains, never a foreign owner."""
     assert document['live'] is True and document['pid'] == shell_pid and shell_pid > 0, 'Save As document is not the live owned Suite form'
     assert type(document['hwnd']) is int and document['hwnd'] > 0, 'Save As document HWND is invalid'
     assert picker['live'] is True and picker['hwnd'] > 0 and picker['hwnd'] != document['hwnd'], 'Save As picker is not a distinct live owned window'
@@ -154,6 +154,61 @@ def owned_dialog_button(accessible, pid, labels):
                   and item.is_visible() and item.is_enabled()]
     assert len(candidates) == 1, 'Exact owned dialog button is missing or ambiguous: ' + repr(labels)
     return candidates[0]
+
+
+def dialog_uia_identity(accessible, dialog, shell_pid):
+    info = accessible.element_info
+    observed = {'nativeHandle': int(info.handle or 0), 'processId': info.process_id,
+                'runtimeId': list(info.runtime_id), 'name': info.name, 'controlType': info.control_type}
+    assert observed['nativeHandle'] == dialog and dialog > 0, 'UIA root differs from the selected native dialog'
+    assert observed['processId'] == shell_pid and shell_pid > 0, 'UIA dialog belongs to a foreign process'
+    assert observed['runtimeId'], 'UIA dialog has no runtime identity'
+    return observed
+
+
+def require_dialog_button_ancestry(api, accessible, button, shell_pid, dialog, evidence=None):
+    """Bind an action to its first UIA Window and independently to the native root."""
+    root = dialog_uia_identity(accessible, dialog, shell_pid)
+    path, info = evidence if evidence is not None else [], button.element_info
+    for _ in range(64):
+        assert info is not None, 'Dialog button has no owned Window ancestor'
+        row = {'nativeHandle': int(info.handle or 0), 'processId': info.process_id,
+               'runtimeId': list(info.runtime_id), 'name': info.name, 'controlType': info.control_type}
+        path.append(row)
+        assert row['processId'] == shell_pid and row['runtimeId'], 'Dialog button ancestry is foreign or lacks runtime identity'
+        if row['nativeHandle']:
+            handle = row['nativeHandle']
+            assert api.user.IsWindow(handle) and api.pid(handle) == shell_pid, 'Dialog button ancestry is not a live owned native window'
+            row['nativeRoot'] = int(api.user.GetAncestor(handle, 2) or 0)
+            assert row['nativeRoot'] == dialog, 'Dialog button native ancestry reaches another window'
+        if row['controlType'] == 'Window':
+            assert row['nativeHandle'] == dialog and row['runtimeId'] == root['runtimeId'], 'Dialog button belongs to another UIA Window'
+            return path
+        info = info.parent
+    raise AssertionError('Dialog button ancestry exceeds its bounded dialog scope')
+
+
+def saveas_error_surface(api, shell_pid, document, picker, target_name, desktop):
+    for dialog in api.windows(shell_pid):
+        # Owned common dialogs appear inside their picker's UIA descendants.
+        # The picker itself must never qualify from that aggregate prompt text.
+        if dialog in (document, picker): continue
+        owner = api.user.GetWindow(dialog, 4)
+        if (not api.user.IsWindow(dialog) or api.pid(dialog) != shell_pid
+            or owner not in (document, picker) or api.class_name(dialog) != '#32770'): continue
+        caption = api.title(dialog)
+        if caption not in ('OpenGeul Office', 'OpenGeul Writer — 다른 이름으로 저장',
+            'Confirm Save As', 'Save As', '다른 이름으로 저장', '다른 이름으로 저장 확인'): continue
+        accessible = desktop.window(handle=dialog).wrapper_object()
+        dialog_uia_identity(accessible, dialog, shell_pid)
+        texts = [item.element_info.name for item in accessible.descendants()]
+        combined = '\n'.join(texts)
+        if target_name in combined and ('already exists' in combined or '이미 있습니다' in combined):
+            return 'overwrite', dialog, owner, accessible, texts
+        if (('문서를 저장하지 못했습니다. 문서 창을 유지합니다.' in combined and caption == 'OpenGeul Office')
+            or (target_name in combined and any(token in combined.lower() for token in ('in use', 'being used', 'access is denied', 'read-only', 'permission', '사용 중', '액세스', '읽기 전용')))):
+            return 'failure', dialog, owner, accessible, texts
+    return None
 
 
 def accessibility_names(window):
@@ -593,20 +648,7 @@ def failed_saveas(case):
         picker = case.picker(hwnd, target)
         case.record['stage'] = 'wait-real-saveas-error'
         def expected_error():
-            for dialog in case.api.windows(case.process.pid):
-                owner = case.api.user.GetWindow(dialog, 4)
-                if owner not in (hwnd, picker) or case.api.class_name(dialog) != '#32770': continue
-                if case.api.title(dialog) not in ('OpenGeul Office', 'OpenGeul Writer — 다른 이름으로 저장',
-                    'Confirm Save As', 'Save As', '다른 이름으로 저장', '다른 이름으로 저장 확인'): continue
-                accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
-                texts = [item.element_info.name for item in accessible.descendants()]
-                combined = '\n'.join(texts)
-                if target.name in combined and ('already exists' in combined or '이미 있습니다' in combined):
-                    return 'overwrite', dialog, owner, accessible, texts
-                if (('문서를 저장하지 못했습니다. 문서 창을 유지합니다.' in combined and case.api.title(dialog) == 'OpenGeul Office')
-                    or (target.name in combined and any(token in combined.lower() for token in ('in use', 'being used', 'access is denied', 'read-only', 'permission', '사용 중', '액세스', '읽기 전용')))):
-                    return 'failure', dialog, owner, accessible, texts
-            return None
+            return saveas_error_surface(case.api, case.process.pid, hwnd, picker, target.name, Desktop(backend='uia'))
         observed = native.wait_for(expected_error, 35)
         if observed[0] == 'overwrite':
             _, dialog, owner, accessible, texts = observed
@@ -614,7 +656,9 @@ def failed_saveas(case):
                 return {'hwnd': int(handle), 'pid': case.api.pid(handle), 'live': bool(case.api.user.IsWindow(handle)),
                         'owner': int(case.api.user.GetWindow(handle, 4) or 0),
                         'title': case.api.title(handle), 'class': case.api.class_name(handle)}
-            ownership = {'dialog': {**identity(dialog), 'texts': texts}, 'picker': identity(picker), 'document': identity(hwnd)}
+            ownership = {'dialog': {**identity(dialog), 'texts': texts,
+                                    'uia': dialog_uia_identity(accessible, dialog, case.process.pid)},
+                         'picker': identity(picker), 'document': identity(hwnd)}
             # A Windows common-dialog overwrite prompt can be owned directly by
             # the document form while its live picker is owned by that same form.
             # Retain the full observed chain before validation or any button input.
@@ -622,6 +666,11 @@ def failed_saveas(case):
             case.record['saveAsOverwriteOwnerChain'] = require_saveas_overwrite_owner(
                 ownership['dialog'], ownership['picker'], ownership['document'], case.process.pid, target.name)
             button = owned_dialog_button(accessible, case.process.pid, ('Yes', '&Yes', '예', '예(&Y)'))
+            case.record['saveAsOverwriteYesAncestry'] = []
+            # Retain each checked ancestor even if a later node fails closed.
+            require_dialog_button_ancestry(case.api, accessible, button, case.process.pid, dialog,
+                                          case.record['saveAsOverwriteYesAncestry'])
+            case.screenshot(dialog, 'overwrite-confirmation')
             Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
             case.api.require_foreground(dialog)
             button.click_input()
@@ -630,6 +679,7 @@ def failed_saveas(case):
         kind, dialog, owner, accessible, texts = observed
         assert kind == 'failure', 'Save As did not produce a real recognized write denial'
         caption = case.api.title(dialog)
+        case.record['saveErrorUia'] = dialog_uia_identity(accessible, dialog, case.process.pid)
         native.require_dialog_identity(case.api.pid(dialog), case.process.pid, case.api.user.GetWindow(dialog, 4), owner,
                                        caption, caption, case.api.class_name(dialog))
         button = owned_dialog_button(accessible, case.process.pid, ('OK', '&OK', '확인'))

@@ -156,13 +156,118 @@ class LifecycleSmokeTests(unittest.TestCase):
             accessible = SimpleNamespace(descendants=lambda **kw: controls)
             with self.assertRaises(AssertionError): smoke.owned_dialog_button(accessible, 31, ('Yes', '예', '예(&Y)'))
 
+    def test_saveas_surface_skips_picker_with_real_nested_confirmation_text(self):
+        # Run 38937322964 reported the outer picker HWND 1442708 as its own
+        # overwrite confirmation because UIA descendants include owned dialogs.
+        self.assertTrue(hasattr(smoke, 'saveas_error_surface'), 'Distinct native Save As surface selector is missing')
+        document, picker, confirmation, pid = 918474, 1442708, 1550000, 1160
+        target = '잠긴 저장 대상 & 한글.docx'
+        texts = ['Confirm Save As', target + ' already exists.\r\nDo you want to replace it?', 'Yes', 'No']
+        root_info = SimpleNamespace(handle=confirmation, process_id=pid, runtime_id=[42, confirmation],
+                                    name='Confirm Save As', control_type='Window')
+        root = SimpleNamespace(element_info=root_info, descendants=lambda: [SimpleNamespace(element_info=SimpleNamespace(name=text)) for text in texts])
+        queried = []
+        def window(**options):
+            queried.append(options['handle'])
+            self.assertEqual(options['handle'], confirmation, 'Never classify aggregate picker/document descendants as a new dialog')
+            return SimpleNamespace(wrapper_object=lambda: root)
+        api = SimpleNamespace(windows=lambda owned_pid: [picker, document, confirmation],
+                              pid=lambda handle: pid, class_name=lambda handle: '#32770',
+                              title=lambda handle: 'Confirm Save As',
+                              user=SimpleNamespace(GetWindow=lambda handle, relation: picker if handle == confirmation else document,
+                                                   IsWindow=lambda handle: True))
+        desktop = SimpleNamespace(window=window)
+        observed = smoke.saveas_error_surface(api, pid, document, picker, target, desktop)
+        self.assertEqual(observed[:3], ('overwrite', confirmation, picker))
+        self.assertEqual(queried, [confirmation])
+        for invalid in ({'handle': picker}, {'process_id': 99}, {'runtime_id': []}):
+            original = root_info.__dict__.copy()
+            root_info.__dict__.update(invalid)
+            with self.assertRaises(AssertionError):
+                smoke.saveas_error_surface(api, pid, document, picker, target, desktop)
+            root_info.__dict__.clear()
+            root_info.__dict__.update(original)
+        for foreign_pid, owner in ((99, picker), (pid, 777)):
+            api.pid = lambda handle, value=foreign_pid: value
+            api.user.GetWindow = lambda handle, relation, value=owner: value
+            self.assertIsNone(smoke.saveas_error_surface(api, pid, document, picker, target, desktop))
+
+    def test_failed_saveas_real_picker_first_order_reaches_only_distinct_confirmation_yes(self):
+        class ReachedOwnedYes(Exception): pass
+        def click_yes(): raise ReachedOwnedYes('distinct confirmation Yes selected')
+        document, picker, confirmation, pid = 918474, 1442708, 1550000, 1160
+        prompt = '잠긴 저장 대상 & 한글.docx already exists.\r\nDo you want to replace it?'
+        info = SimpleNamespace(handle=confirmation, process_id=pid, runtime_id=[42, confirmation],
+                               name='Confirm Save As', control_type='Window', parent=None)
+        yes_info = SimpleNamespace(handle=700, process_id=pid, runtime_id=[42, 700],
+                                   name='Yes', control_type='Button', parent=info)
+        yes = SimpleNamespace(element_info=yes_info, is_visible=lambda: True, is_enabled=lambda: True, click_input=click_yes)
+        text = SimpleNamespace(element_info=SimpleNamespace(name=prompt))
+        confirmation_root = SimpleNamespace(element_info=info, descendants=lambda **kw: [yes] if kw else [text, yes], set_focus=lambda: None)
+        picker_root = SimpleNamespace(element_info=SimpleNamespace(handle=picker, process_id=pid),
+                                      descendants=lambda **kw: [text, yes, SimpleNamespace(element_info=SimpleNamespace(name='File name:'))])
+        roots = {picker: picker_root, confirmation: confirmation_root}
+        desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: roots[kw['handle']]))
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            source = folder / 'original.docx'
+            source.write_bytes(b'owned original')
+            case = SimpleNamespace(source=source, folder=folder, record={}, process=SimpleNamespace(pid=pid),
+                                   attach=lambda: (document, 200, 300), edit=lambda *args: None,
+                                   shell_command=lambda *args: None, picker=lambda *args: picker,
+                                   screenshot=lambda *args: None)
+            owners = {document: 0, picker: document, confirmation: picker}
+            case.api = SimpleNamespace(windows=lambda owned_pid: [picker, confirmation], pid=lambda handle: pid,
+                title=lambda handle: 'OpenGeul Writer — 다른 이름으로 저장' if handle == picker else 'Confirm Save As',
+                class_name=lambda handle: '#32770', require_foreground=lambda handle: None,
+                user=SimpleNamespace(GetWindow=lambda handle, relation: owners[handle], IsWindow=lambda handle: True,
+                                     GetAncestor=lambda handle, relation: confirmation))
+            with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop)}), \
+                 patch.object(smoke, 'ExclusiveRead', return_value=SimpleNamespace(close=lambda: None)):
+                with self.assertRaisesRegex(ReachedOwnedYes, 'distinct confirmation Yes selected'):
+                    smoke.failed_saveas(case)
+            self.assertEqual(case.record['saveAsOverwriteOwnership']['dialog']['hwnd'], confirmation)
+
+    def test_overwrite_button_ancestry_binds_uia_and_native_confirmation_roots(self):
+        self.assertTrue(hasattr(smoke, 'require_dialog_button_ancestry'), 'Exact confirmation button ancestry is missing')
+        root = SimpleNamespace(handle=600, process_id=31, runtime_id=[42, 600],
+                               name='Confirm Save As', control_type='Window', parent=None)
+        pane = SimpleNamespace(handle=700, process_id=31, runtime_id=[42, 700],
+                               name='', control_type='Pane', parent=root)
+        button = SimpleNamespace(handle=0, process_id=31, runtime_id=[42, 6],
+                                 name='Yes', control_type='Button', parent=pane)
+        api = SimpleNamespace(pid=lambda handle: 31,
+                              user=SimpleNamespace(IsWindow=lambda handle: True,
+                                                   GetAncestor=lambda handle, relation: 600))
+        accessible = SimpleNamespace(element_info=root)
+        action = SimpleNamespace(element_info=button)
+        proof = smoke.require_dialog_button_ancestry(api, accessible, action, 31, 600)
+        self.assertEqual([row['nativeHandle'] for row in proof], [0, 700, 600])
+        self.assertEqual(proof[1]['nativeRoot'], 600)
+        for element, changes in ((pane, {'control_type': 'Window', 'handle': 800}),
+                                 (pane, {'process_id': 99}), (button, {'runtime_id': []}),
+                                 (root, {'handle': 500}), (pane, {'parent': None})):
+            original = element.__dict__.copy()
+            element.__dict__.update(changes)
+            with self.assertRaises(AssertionError):
+                smoke.require_dialog_button_ancestry(api, accessible, action, 31, 600)
+            element.__dict__.clear()
+            element.__dict__.update(original)
+        api.user.GetAncestor = lambda handle, relation: 999
+        failed_path = []
+        with self.assertRaises(AssertionError):
+            smoke.require_dialog_button_ancestry(api, accessible, action, 31, 600, failed_path)
+        self.assertEqual(failed_path[-1]['nativeHandle'], 700)
+        self.assertEqual(failed_path[-1]['nativeRoot'], 999, 'Keep the raw failing ancestry before any input')
+
     def test_real_save_error_action_targets_exact_owned_ok_without_assuming_automation_id(self):
         class ReachedOwnedOk(Exception): pass
         def click_ok(): raise ReachedOwnedOk('owned OK selected')
         okay = SimpleNamespace(element_info=SimpleNamespace(name='OK', process_id=31, automation_id='CommandButton_1'),
                                is_visible=lambda: True, is_enabled=lambda: True, click_input=click_ok)
         prompt = SimpleNamespace(element_info=SimpleNamespace(name='문서를 저장하지 못했습니다. 문서 창을 유지합니다.'))
-        accessible = SimpleNamespace(descendants=lambda **kw: [okay] if kw else [prompt, okay], set_focus=lambda: None)
+        info = SimpleNamespace(handle=600, process_id=31, runtime_id=[42, 600], name='OpenGeul Office', control_type='Window')
+        accessible = SimpleNamespace(element_info=info, descendants=lambda **kw: [okay] if kw else [prompt, okay], set_focus=lambda: None)
         desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: accessible))
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
@@ -175,7 +280,7 @@ class LifecycleSmokeTests(unittest.TestCase):
             case.api = SimpleNamespace(windows=lambda pid: [600], pid=lambda hwnd: 31,
                                        title=lambda hwnd: 'OpenGeul Office', class_name=lambda hwnd: '#32770',
                                        require_foreground=lambda hwnd: None,
-                                       user=SimpleNamespace(GetWindow=lambda hwnd, relation: 100))
+                                       user=SimpleNamespace(GetWindow=lambda hwnd, relation: 100, IsWindow=lambda handle: True))
             with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop)}), \
                  patch.object(smoke, 'ExclusiveRead', return_value=SimpleNamespace(close=lambda: None)):
                 with self.assertRaisesRegex(ReachedOwnedOk, 'owned OK selected'):

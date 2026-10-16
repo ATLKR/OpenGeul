@@ -1,0 +1,140 @@
+name: OpenGeul owned keyboard delivery diagnostic
+'on':
+  push:
+    branches: [work/suite-lifecycle-input-diagnostic]
+    paths: [.github/workflows/office-suite-input-diagnostic.yml]
+permissions:
+  contents: read
+concurrency:
+  group: office-suite-owned-input-diagnostic
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  windows-suite:
+    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false
+    runs-on: windows-2025
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Freeze original input path and diagnostic-only scope
+        shell: python
+        run: |
+          import ast, hashlib, json, os, pathlib, subprocess
+          baseline = '1fe5b06156bb26fa8fb4b0f21489a688c726a215'
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True)
+          assert git('rev-parse', 'HEAD').strip() == os.environ['GITHUB_SHA']
+          allowed = {'.github/workflows/office-suite-input-diagnostic.yml',
+                     'suite/e2e/lifecycle_smoke.py', 'suite/tests/test_lifecycle_smoke.py',
+                     'suite/e2e/keyboard_delivery.py', 'suite/e2e/lifecycle_input_probe.py',
+                     'suite/tests/test_lifecycle_input_probe.py'}
+          changed = git('diff', '--name-only', baseline, 'HEAD').splitlines()
+          assert set(changed) <= allowed, changed
+          def original_edit(source):
+              cls = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == 'Case')
+              method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'edit')
+              return ast.dump(method, include_attributes=False)
+          before = original_edit(git('show', baseline + ':suite/e2e/lifecycle_smoke.py'))
+          after = original_edit(pathlib.Path('suite/e2e/lifecycle_smoke.py').read_text(encoding='utf-8'))
+          assert before == after, 'The original Case.edit input algorithm/pacing changed'
+          out = pathlib.Path('.work')
+          out.mkdir(exist_ok=True)
+          (out / 'input-diagnostic-scope.json').write_text(json.dumps({
+              'diagnosticOnly': True, 'deliverable': False, 'sourceCommit': os.environ['GITHUB_SHA'],
+              'sourceRun': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'originalProductSource': baseline, 'unchangedProductRuntime': True,
+              'originalCaseEditAstSha256': hashlib.sha256(after.encode()).hexdigest(),
+              'trialCount': 20, 'observedTrials': 10, 'unobservedControlTrials': 10,
+              'changedPaths': changed}, indent=2), encoding='utf-8')
+      - name: Check diagnostic and unchanged Suite boundaries
+        shell: pwsh
+        run: |
+          python -m unittest discover -s suite/tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Suite diagnostic unit checks failed.' }
+          dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Suite shell checks failed.' }
+      - name: Build fresh pinned Korean UI product
+        id: build
+        shell: pwsh
+        run: ./suite/scripts/build-suite.ps1
+      - name: Prepare actual Microsoft Korean input environment
+        id: readiness
+        if: '!cancelled() && steps.build.outcome == ''success'''
+        shell: pwsh
+        run: |
+          python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+          if ($LASTEXITCODE -ne 0) { throw 'Native test dependencies failed.' }
+          ./suite/scripts/ensure-korean-ime.ps1 -Output .work/input-readiness
+          if ($LASTEXITCODE -ne 0) { throw 'Actual Korean environment preparation failed.' }
+      - name: Create original six engine fixtures
+        id: fixtures
+        if: '!cancelled() && steps.build.outcome == ''success'''
+        shell: pwsh
+        run: |
+          $package = (Resolve-Path dist/OpenGeul-Office-0.1.1-dev-windows-x64).Path
+          & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/input-engine
+          if ($LASTEXITCODE -ne 0) { throw 'Original engine fixture generation failed.' }
+      - name: Observe twenty original new Writer input actions without retry
+        if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+        env:
+          OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/input-worker-diagnostics
+        shell: pwsh
+        run: |
+          python suite/e2e/lifecycle_input_probe.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/input-engine/fixtures --readiness .work/input-readiness/readiness.json --output .work/lifecycle-input-probe --trials 20
+          if ($LASTEXITCODE -ne 0) { throw 'An original keyboard delivery trial failed; retain every trial and first-failure evidence.' }
+      - name: Retain original input observations immediately
+        if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-owned-input-observations-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            .work/input-diagnostic-scope.json
+            .work/lifecycle-input-probe/
+            .work/input-worker-diagnostics/
+      - name: Check corrected distinct confirmation with original lifecycle gates
+        if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+        env:
+          OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/input-worker-diagnostics
+        shell: pwsh
+        run: |
+          python suite/e2e/lifecycle_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/input-engine/fixtures --output .work/input-lifecycle
+          if ($LASTEXITCODE -ne 0) { throw 'An original lifecycle gate failed; inspect the exact original evidence.' }
+      - name: Verify product inventory after diagnostics
+        if: '!cancelled() && steps.build.outcome == ''success'''
+        shell: pwsh
+        run: |
+          python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.1-dev-windows-x64 2>&1 | Tee-Object -FilePath .work/input-inventory.log
+          $verifiedExit = $LASTEXITCODE
+          @{ sourceCommit=$env:GITHUB_SHA; diagnosticOnly=$true; deliverable=$false; exitCode=$verifiedExit; log='input-inventory.log'; logSha256=(Get-FileHash -Algorithm SHA256 .work/input-inventory.log).Hash.ToLowerInvariant() } | ConvertTo-Json | Set-Content -Encoding utf8 .work/input-inventory-result.json
+          if ($verifiedExit -ne 0) { throw 'Full diagnostic product inventory differs.' }
+      - name: Retain all original diagnostic evidence without delivery qualification
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-owned-input-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            .work/input-diagnostic-scope.json
+            .work/input-readiness/
+            !.work/input-readiness/fod-source/**/*.cab
+            .work/input-engine/
+            .work/lifecycle-input-probe/
+            .work/input-lifecycle/
+            .work/input-worker-diagnostics/
+            .work/input-inventory.log
+            .work/input-inventory-result.json
