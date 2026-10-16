@@ -377,6 +377,7 @@ class NativeBoundaryTests(unittest.TestCase):
         with patch.object(self.native, 'make_interceptor', return_value=object()), patch.object(self.native, 'make_interaction_handler', return_value=object()):
             handles = backend.attach(123, MODULES['writer'], 640, 480, None)
         self.assertEqual({'parentHwnd': 123, 'childHwnd': 456}, handles)
+        self.assertIs(context, backend.context)
         self.assertEqual(('hyper', 123), next(c[1][0] for c in calls if c[0] == 'child'))
         load = next(c[1] for c in calls if c[0] == 'load')
         self.assertEqual('private:factory/swriter', load[0])
@@ -493,6 +494,123 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertEqual('unverified', result['readiness']['state'])
         self.assertEqual('Database', result['title'])
         self.assertFalse(result['readiness']['fullyVerified'])
+
+    def base_probe_boundary(self, url, driver=True, *, enabled=True, started=False,
+                            driver_error=False, enabled_error=False):
+        from types import SimpleNamespace
+        calls = []
+        def forbidden(*args):
+            calls.append(('forbidden_connection_or_jvm_start',))
+            raise AssertionError('A readiness probe must not connect a database or start Java')
+        def get_driver(value):
+            calls.append(('driver_url', value))
+            if driver_error:
+                raise RuntimeError('The driver registry could not be inspected')
+            return SimpleNamespace(connect=forbidden) if driver else None
+        def is_enabled():
+            calls.append(('java_enabled',))
+            if enabled_error:
+                raise RuntimeError('The Java settings could not be inspected')
+            return enabled
+        vm = SimpleNamespace(isVMEnabled=is_enabled,
+                             isVMStarted=lambda: calls.append(('java_started',)) or started,
+                             getJavaVM=forbidden)
+        manager = SimpleNamespace(getDriverByURL=get_driver, getConnection=forbidden,
+                                  getConnectionWithInfo=forbidden)
+        def create_service(name, context):
+            calls.append(('service', name))
+            return {'com.sun.star.sdbc.DriverManager': manager,
+                    'com.sun.star.java.JavaVirtualMachine': vm}[name]
+        context = SimpleNamespace(ServiceManager=SimpleNamespace(createInstanceWithContext=create_service))
+        source = SimpleNamespace(getPropertyValue=lambda name: url, getConnection=forbidden)
+        document = SimpleNamespace(DataSource=source,
+                                   getCurrentController=lambda: SimpleNamespace(isConnected=lambda: False))
+        return document, context, calls
+
+    def test_base_native_driver_is_observed_without_connection_or_java_start(self):
+        document, context, calls = self.base_probe_boundary('sdbc:embedded:firebird')
+        readiness = self.native.base_readiness(document, context)
+        self.assertTrue(readiness['driverAvailable'])
+        self.assertFalse(readiness['javaRequired'])
+        self.assertIsNone(readiness['javaAvailable'])
+        self.assertIsNone(readiness['javaEnabled'])
+        self.assertIsNone(readiness['javaStarted'])
+        self.assertFalse(readiness['connectionVerified'])
+        self.assertFalse(readiness['fullyVerified'])
+        self.assertEqual([('service', 'com.sun.star.sdbc.DriverManager'),
+                          ('driver_url', 'sdbc:embedded:firebird')], calls)
+        self.assertIn('네이티브 드라이버', readiness['message'])
+        self.assertIn('연결은 확인되지', readiness['message'])
+
+    def test_base_missing_driver_is_a_fact_and_not_an_unknown_probe(self):
+        document, context, calls = self.base_probe_boundary('sdbc:embedded:firebird', driver=False)
+        readiness = self.native.base_readiness(document, context)
+        self.assertIs(readiness['driverAvailable'], False)
+        self.assertIn('드라이버를 찾지 못했습니다', readiness['message'])
+        self.assertNotIn(('forbidden_connection_or_jvm_start',), calls)
+
+    def test_base_java_enabled_but_not_started_does_not_establish_a_usable_jre(self):
+        document, context, calls = self.base_probe_boundary('sdbc:embedded:hsqldb', enabled=True, started=False)
+        readiness = self.native.base_readiness(document, context)
+        self.assertTrue(readiness['driverAvailable'])
+        self.assertTrue(readiness['javaRequired'])
+        self.assertIs(readiness['javaEnabled'], True)
+        self.assertIs(readiness['javaStarted'], False)
+        self.assertIsNone(readiness['javaAvailable'])
+        self.assertIn('JRE는 검증되지', readiness['message'])
+        self.assertNotIn(('forbidden_connection_or_jvm_start',), calls)
+
+    def test_base_disabled_java_explains_why_no_hsqldb_driver_accepts_the_url(self):
+        document, context, calls = self.base_probe_boundary('sdbc:embedded:hsqldb', driver=False,
+                                                          enabled=False, started=False)
+        readiness = self.native.base_readiness(document, context)
+        self.assertIs(readiness['driverAvailable'], False)
+        self.assertIs(readiness['javaEnabled'], False)
+        self.assertIs(readiness['javaStarted'], False)
+        self.assertIsNone(readiness['javaAvailable'])
+        self.assertIn('Java 사용이 꺼져', readiness['message'])
+        self.assertNotIn(('forbidden_connection_or_jvm_start',), calls)
+
+    def test_base_running_java_observation_survives_settings_probe_failure(self):
+        document, context, calls = self.base_probe_boundary('jdbc:example:local', started=True, enabled_error=True)
+        readiness = self.native.base_readiness(document, context)
+        self.assertTrue(readiness['driverAvailable'])
+        self.assertIsNone(readiness['javaEnabled'])
+        self.assertIs(readiness['javaStarted'], True)
+        self.assertIs(readiness['javaAvailable'], True)
+        self.assertFalse(readiness['connectionVerified'])
+        self.assertFalse(readiness['fullyVerified'])
+        self.assertNotIn(('forbidden_connection_or_jvm_start',), calls)
+
+    def test_base_driver_probe_failure_stays_unknown_and_java_is_still_observed(self):
+        document, context, calls = self.base_probe_boundary('jdbc:example:local', driver_error=True,
+                                                          enabled=True, started=False)
+        readiness = self.native.base_readiness(document, context)
+        self.assertIsNone(readiness['driverAvailable'])
+        self.assertIs(readiness['javaEnabled'], True)
+        self.assertIs(readiness['javaStarted'], False)
+        self.assertIsNone(readiness['javaAvailable'])
+        self.assertIn('드라이버 준비 상태를 확인하지 못했습니다', readiness['message'])
+        self.assertNotIn(('forbidden_connection_or_jvm_start',), calls)
+
+    def test_base_backend_status_uses_the_attached_runtime_context_for_readiness(self):
+        document, context, calls = self.base_probe_boundary('sdbc:embedded:firebird')
+        document.isModified = lambda: False
+        document.getTitle = lambda: 'Base'
+        backend = self.native.UnoBackend(self.root)
+        backend.document, backend.context = document, context
+        backend.module_factory = 'private:factory/sdatabase'
+        self.assertTrue(backend.status()['readiness']['driverAvailable'])
+        self.assertIn(('driver_url', 'sdbc:embedded:firebird'), calls)
+
+    def test_base_missing_controller_does_not_turn_unknown_connection_into_disconnected(self):
+        document, context, calls = self.base_probe_boundary('sdbc:embedded:firebird')
+        document.getCurrentController = lambda: None
+        readiness = self.native.base_readiness(document, context)
+        self.assertEqual('unverified', readiness['state'])
+        self.assertTrue(readiness['driverAvailable'])
+        self.assertFalse(readiness['connectionVerified'])
+        self.assertFalse(readiness['fullyVerified'])
 
     def test_uno_import_is_lazy_and_nonwindows_native_host_fails_closed(self):
         import os

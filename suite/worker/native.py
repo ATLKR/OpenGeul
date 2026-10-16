@@ -33,10 +33,18 @@ def connect_uno(uno, pipe, process, timeout=30, clock=time.monotonic, sleeper=ti
     raise WorkerError('connect_timeout', 'Office 런타임 연결 시간이 초과되었습니다.')
 
 
-def base_readiness(document):
-    """Observe existing state only; never connect a database or start a JVM."""
+def base_readiness(document, context=None):
+    """Observe existing state only; never connect a database or start a JVM.
+
+    DriverManager.getDriverByURL asks registered drivers' acceptsURL methods;
+    it does not invoke connect (connectivity/source/manager/mdrivermanager.cxx).
+    XJavaVM.isVMEnabled/isVMStarted only observe flags. getJavaVM would start it
+    and is deliberately excluded (udkapi/com/sun/star/java/XJavaVM.idl).
+    """
     readiness = {'state': 'unverified', 'dataSourceConfigured': None,
-                 'connectionVerified': False, 'javaRequired': None, 'javaAvailable': None,
+                 'connectionVerified': False, 'driverAvailable': None,
+                 'javaRequired': None, 'javaAvailable': None,
+                 'javaEnabled': None, 'javaStarted': None,
                  'fullyVerified': False,
                  'message': 'Base 데이터 원본과 Java 준비 상태를 확인하지 못했습니다.'}
     try:
@@ -54,15 +62,54 @@ def base_readiness(document):
         elif driver.startswith(('sdbc:embedded:firebird', 'sdbc:firebird:', 'sdbc:odbc:',
                                 'sdbc:postgresql:', 'sdbc:mysql:mysqlc:')):
             readiness['javaRequired'] = False
-        connected = bool(document.getCurrentController().isConnected())
-        readiness['connectionVerified'] = connected
-        readiness['state'] = 'connected' if connected else 'not_connected'
-        readiness['message'] = ('데이터베이스 연결을 확인했습니다. Java와 추가 기능은 별도 확인이 필요합니다.'
-                                if connected else
-                                '데이터베이스 연결은 확인되지 않았습니다. Java 등 필요한 구성 요소를 확인해 주세요.')
     except Exception:
-        # A missing readiness API does not make the document clean or fully ready.
+        return readiness
+    try:
+        readiness['connectionVerified'] = bool(document.getCurrentController().isConnected())
+        readiness['state'] = 'connected' if readiness['connectionVerified'] else 'not_connected'
+    except Exception:
+        # A missing controller does not erase the independently observed URL.
         pass
+    if context is not None:
+        try:
+            manager = context.ServiceManager.createInstanceWithContext('com.sun.star.sdbc.DriverManager', context)
+            readiness['driverAvailable'] = manager.getDriverByURL(url) is not None
+        except Exception:
+            # Probe failure is unknown; an observed null driver is False.
+            pass
+        if readiness['javaRequired']:
+            try:
+                vm = context.ServiceManager.createInstanceWithContext('com.sun.star.java.JavaVirtualMachine', context)
+            except Exception:
+                vm = None
+            if vm is not None:
+                # Keep partial facts if one of these independent getters fails.
+                for field, method in (('javaEnabled', 'isVMEnabled'), ('javaStarted', 'isVMStarted')):
+                    try:
+                        value = getattr(vm, method)()
+                        if type(value) is bool:
+                            readiness[field] = value
+                    except Exception:
+                        pass
+                if readiness['javaStarted'] is True:
+                    readiness['javaAvailable'] = True
+    connection = ('현재 데이터베이스 연결을 확인했습니다. 추가 기능은 별도 확인이 필요합니다.'
+                  if readiness['connectionVerified'] else '데이터베이스 연결은 확인되지 않았습니다.')
+    if readiness['javaRequired'] and readiness['javaEnabled'] is False:
+        # HSQLDB/JDBC acceptsURL itself returns False when Java is disabled.
+        readiness['message'] = 'Java 사용이 꺼져 있습니다. 이 데이터 원본에 필요한 Java 설정을 확인해 주세요. ' + connection
+    elif readiness['driverAvailable'] is False:
+        readiness['message'] = '이 데이터 원본에 맞는 Base 드라이버를 찾지 못했습니다. 드라이버 구성을 확인해 주세요. ' + connection
+    elif readiness['driverAvailable'] is None:
+        readiness['message'] = 'Base 드라이버 준비 상태를 확인하지 못했습니다. ' + connection
+    elif readiness['javaRequired'] and readiness['javaAvailable'] is None:
+        readiness['message'] = 'Base 드라이버는 확인했지만 사용 가능한 JRE는 검증되지 않았습니다. ' + connection
+    elif readiness['javaRequired']:
+        readiness['message'] = 'Base 드라이버와 실행 중인 Java VM을 확인했습니다. ' + connection
+    elif readiness['javaRequired'] is False:
+        readiness['message'] = 'Base 네이티브 드라이버를 확인했습니다. ' + connection
+    else:
+        readiness['message'] = 'Base 드라이버를 확인했습니다. Java 필요 여부는 확인되지 않았습니다. ' + connection
     return readiness
 
 
@@ -74,6 +121,7 @@ class UnoBackend:
         self.uno_loader = uno_loader or (lambda: importlib.import_module('uno'))
         self.connector = connector or connect_uno
         self.process = self.profile = self.document = self.desktop = self.frame = self.peer = None
+        self.context = None
         self.uno = None
         self.interceptor = None
         self.pipe = 'OpenGeul_' + uuid.uuid4().hex
@@ -113,6 +161,7 @@ class UnoBackend:
             raise WorkerError('uno_unavailable', 'Office에 포함된 program/python.exe로 작업자를 실행해 주세요.') from exc
         self._start_runtime()
         context = self.connector(self.uno, self.pipe, self.process)
+        self.context = context
         service = lambda name: context.ServiceManager.createInstanceWithContext(name, context)
         self.desktop = service('com.sun.star.frame.Desktop')
         toolkit = service('com.sun.star.awt.Toolkit')
@@ -147,7 +196,7 @@ class UnoBackend:
         # Missing XModifiable is an error, never an assumption that the file is clean.
         result = {'modified': bool(self.document.isModified()), 'title': str(self.document.getTitle())}
         if self.module_factory == 'private:factory/sdatabase':
-            result['readiness'] = base_readiness(self.document)
+            result['readiness'] = base_readiness(self.document, self.context)
         return result
 
     def resize(self, width, height):
@@ -197,7 +246,7 @@ class UnoBackend:
                 return
             self.process.close()
             self.process = None
-        self.document = self.desktop = self.frame = self.peer = self.interceptor = None
+        self.context = self.document = self.desktop = self.frame = self.peer = self.interceptor = None
         if self.profile is not None:
             try:
                 self.profile.cleanup()
