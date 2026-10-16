@@ -758,7 +758,7 @@ class LifecycleSmokeTests(unittest.TestCase):
                 self.OpenProcess = Function(self.open)
                 self.QueryFullProcessImageNameW = Function(self.image)
                 self.GetProcessTimes = Function(self.times)
-                self.GetSystemTimeAsFileTime = Function(self.clock)
+                self.GetSystemTimePreciseAsFileTime = Function(self.clock)
                 self.WaitForSingleObject = Function(lambda handle, timeout: 258)
                 self.CloseHandle = Function(lambda handle: self.closed.append(handle) or 1)
             def entry(self, pointer, position):
@@ -866,7 +866,7 @@ class LifecycleSmokeTests(unittest.TestCase):
             length._obj.value = len(buffer.value)
             return 1
         kernel = SimpleNamespace(**{name: Function(lambda *args: 1) for name in (
-            'CreateToolhelp32Snapshot', 'Process32FirstW', 'Process32NextW', 'WaitForSingleObject', 'GetSystemTimeAsFileTime')},
+            'CreateToolhelp32Snapshot', 'Process32FirstW', 'Process32NextW', 'WaitForSingleObject', 'GetSystemTimePreciseAsFileTime')},
             OpenProcess=Function(lambda *args: 1108), GetProcessTimes=Function(times),
             QueryFullProcessImageNameW=Function(image), CloseHandle=Function(lambda handle: closed.append(handle) or 1))
         with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True):
