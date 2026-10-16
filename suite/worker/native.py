@@ -248,7 +248,7 @@ class UnoBackend:
         interaction = make_interaction_handler()
         props = tuple(self._property(name, value) for name, value in (
             ('MacroExecutionMode', 0), ('UpdateDocMode', 0), ('ReadOnly', False),
-            ('Hidden', False), ('PickListEntry', False), ('InteractionHandler', interaction)))
+            ('Hidden', True), ('PickListEntry', False), ('InteractionHandler', interaction)))
         url = path.as_uri() if path is not None else module['factory']
         if path is None and module['factory'] == 'private:factory/sdatabase':
             url = self._new_base_url(service, module, interaction)
@@ -263,6 +263,12 @@ class UnoBackend:
             raise WorkerError('open_failed', '문서를 열 수 없습니다. 파일 형식과 암호 여부를 확인해 주세요.')
         child = int(self.peer.getWindowHandle((), 1))
         self.window_api.validate_child(child, hwnd)
+        # Hidden loading still constructs and connects a real controller. Show
+        # only that initialized view in our existing, verified native child.
+        controller = self.frame.getController()
+        if (controller is None or controller.getModel() != self.document
+                or self.frame.getComponentWindow() is None):
+            raise WorkerError('attach_failed', 'Office 문서의 내장 편집 보기를 확인하지 못했습니다.')
         self.peer.setVisible(True)
         self.frame.activate()
         return {'parentHwnd': hwnd, 'childHwnd': child}

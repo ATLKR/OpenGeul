@@ -461,6 +461,8 @@ class NativeBoundaryTests(unittest.TestCase):
                                 registerDispatchProviderInterceptor=lambda i: calls.append(('interceptor', i)),
                                 activate=lambda: None)
         document = SimpleNamespace(isModified=lambda: False, getTitle=lambda: 'Test')
+        frame.getController = lambda: SimpleNamespace(getModel=lambda: document)
+        frame.getComponentWindow = lambda: object()
         desktop = SimpleNamespace(getFrames=lambda: SimpleNamespace(append=lambda f: calls.append(('append', f))),
                                   loadComponentFromURL=lambda *a: calls.append(('load', a)) or document)
         toolkit = SimpleNamespace(createSystemChild=lambda *a: calls.append(('child', a)) or peer)
@@ -719,6 +721,66 @@ class NativeBoundaryTests(unittest.TestCase):
             self.assertEqual('unsupported_platform', caught.exception.code)
 
 
+class HiddenAttachmentBoundaryTests(unittest.TestCase):
+    def boundary(self, view='valid'):
+        from types import SimpleNamespace as NS
+        native = importlib.import_module('native')
+        calls, document = [], object()
+        def mark(name, result):
+            calls.append(name)
+            return result
+        peer = NS(setPosSize=lambda *args: None, getWindowHandle=lambda *args: 456,
+                  setVisible=lambda visible: calls.append('show' if visible else 'hide'))
+        controller = None if view == 'no-controller' else NS(
+            getModel=lambda: mark('model', object() if view == 'wrong-model' else document))
+        frame = NS(initialize=lambda peer: None, setName=lambda name: None,
+            registerDispatchProviderInterceptor=lambda interceptor: calls.append('interceptor'),
+            getController=lambda: mark('controller', controller),
+            getComponentWindow=lambda: mark('component', None if view == 'no-window' else object()),
+            activate=lambda: calls.append('activate'))
+        def load(url, name, flags, props):
+            calls.append(('load', {prop.Name: prop.Value for prop in props}))
+            return document
+        desktop = NS(getFrames=lambda: NS(append=lambda frame: None), loadComponentFromURL=load)
+        services = {'com.sun.star.awt.Toolkit': NS(createSystemChild=lambda *args: peer),
+                    'com.sun.star.frame.Frame': frame, 'com.sun.star.frame.Desktop': desktop}
+        context = NS(ServiceManager=NS(createInstanceWithContext=lambda name, ctx: services[name]))
+        uno = NS(Any=lambda kind, value: value, createUnoStruct=lambda name: NS())
+        backend = native.UnoBackend(Path(tempfile.gettempdir()), uno_loader=lambda: uno,
+            connector=lambda *args: context, window_api=NS(validate_parent=lambda hwnd: None,
+                validate_child=lambda child, parent: calls.append('child-validated')))
+        backend._start_runtime = lambda: None
+        return native, backend, calls
+
+    def attach(self, native, backend):
+        with patch.object(native, 'make_interceptor', return_value=object()), \
+                patch.object(native, 'make_interaction_handler', return_value=object()):
+            return backend.attach(123, MODULES['calc'], 640, 480, Path(tempfile.gettempdir()) / 'owned.xlsx')
+
+    def test_hidden_model_load_keeps_interception_and_verifies_owned_view_before_showing(self):
+        native, backend, calls = self.boundary()
+        result = self.attach(native, backend)
+        load_index = next(i for i, value in enumerate(calls) if isinstance(value, tuple))
+        self.assertTrue(calls[load_index][1]['Hidden'])
+        self.assertLess(calls.index('interceptor'), load_index)
+        self.assertLess(load_index, calls.index('controller'))
+        self.assertLess(calls.index('model'), calls.index('show'))
+        self.assertLess(calls.index('component'), calls.index('show'))
+        self.assertLess(calls.index('child-validated'), calls.index('show'))
+        self.assertLess(calls.index('show'), calls.index('activate'))
+        self.assertEqual({'parentHwnd': 123, 'childHwnd': 456}, result)
+
+    def test_hidden_load_without_its_owned_controller_or_component_cannot_claim_attachment(self):
+        for view in ('no-controller', 'wrong-model', 'no-window'):
+            with self.subTest(view=view):
+                native, backend, calls = self.boundary(view)
+                with self.assertRaises(native.WorkerError) as caught:
+                    self.attach(native, backend)
+                self.assertEqual('attach_failed', caught.exception.code)
+                self.assertNotIn('show', calls)
+                self.assertNotIn('activate', calls)
+
+
 class NewBaseBoundaryTests(unittest.TestCase):
     def setUp(self):
         from types import SimpleNamespace as NS
@@ -744,7 +806,8 @@ class NewBaseBoundaryTests(unittest.TestCase):
                        dispose=lambda: self.fail('live user model must not be disposed during creation'))
         peer = NS(setPosSize=lambda *a: None, setVisible=lambda value: None, getWindowHandle=lambda *a: 456)
         frame = NS(initialize=lambda p: None, setName=lambda name: self.calls.append(('frame', name)),
-                   registerDispatchProviderInterceptor=lambda interceptor: None, activate=lambda: None)
+                   registerDispatchProviderInterceptor=lambda interceptor: None, activate=lambda: None,
+                   getController=lambda: NS(getModel=lambda: self.live), getComponentWindow=lambda: object())
         desktop = NS(getFrames=lambda: NS(append=lambda f: None),
                      loadComponentFromURL=lambda *args: self.calls.append(('load', args)) or self.live)
         services = {'com.sun.star.frame.Desktop': desktop, 'com.sun.star.awt.Toolkit': NS(createSystemChild=lambda *a: peer),
