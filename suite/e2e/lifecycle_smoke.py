@@ -69,7 +69,13 @@ def writer_evidence(path, required=(), forbidden=()):
         document = ET.fromstring(package.read('word/document.xml'))
         body = document.find(WRITER_NS + 'body')
         assert body is not None, 'Saved Writer document has no body'
-        paragraphs = [''.join(node.text or '' for node in paragraph.iter(WRITER_NS + 't'))
+        # UNO Text.getString() includes soft line breaks and tabs. The generated
+        # Writer baseline itself ends with w:br, so discarding these tokens loses
+        # real body content before the independent exact-text comparison.
+        text_tokens = {WRITER_NS + 't': None, WRITER_NS + 'br': '\n',
+                       WRITER_NS + 'cr': '\n', WRITER_NS + 'tab': '\t'}
+        paragraphs = [''.join((node.text or '') if text_tokens[node.tag] is None else text_tokens[node.tag]
+                              for node in paragraph.iter() if node.tag in text_tokens)
                       for paragraph in body.iter(WRITER_NS + 'p')]
         text = '\n'.join(paragraphs)
     for marker in required:
@@ -103,6 +109,33 @@ def require_dialog_action(*, pid, shell_pid, owner, document, title, expected_ti
     native.require_dialog_identity(pid, shell_pid, owner, document, title, expected_title, class_name)
     assert expected_text in text, 'Dialog does not contain the exact expected prompt text'
     assert button in allowed, 'Dialog action is outside the explicit expected choices'
+
+
+def owned_menu_items(desktop, pid, name):
+    """A UIA Desktop enumerates windows; descendants belong to each wrapper."""
+    found, seen = [], set()
+    for root in desktop.windows(process=pid):
+        if root.element_info.process_id != pid: continue
+        for item in root.descendants(control_type='MenuItem'):
+            if (item.element_info.name != name or item.element_info.process_id != pid
+                or not item.is_visible() or not item.is_enabled()): continue
+            identity = tuple(item.element_info.runtime_id)
+            assert identity, 'Owned menu item has no UIA runtime identity'
+            if identity not in seen:
+                found.append(item)
+                seen.add(identity)
+    return found
+
+
+def owned_dialog_button(accessible, pid, labels):
+    # The observed hosted-Windows picker displayed Yes without exposing
+    # automation_id=6. Its exact label, process and verified dialog identity
+    # identify the intended action independently of that implementation detail.
+    candidates = [item for item in accessible.descendants(control_type='Button')
+                  if item.element_info.process_id == pid and item.element_info.name in labels
+                  and item.is_visible() and item.is_enabled()]
+    assert len(candidates) == 1, 'Exact owned dialog button is missing or ambiguous: ' + repr(labels)
+    return candidates[0]
 
 
 def require_child_bounds(host, child):
@@ -159,25 +192,33 @@ def verify_saved_with_uno(suite, output):
         engine.start()
         for record in records:
             if record.get('success') is not True or 'packagedUnoVerified' not in CASE_REQUIREMENTS.get(record.get('case'), ()): continue
-            saved = record.get('savedDocuments', [])
-            assert saved, 'Successful Writer lifecycle case has no saved document evidence'
             case_result = {'case': record['case'], 'success': False, 'documents': []}
             result['cases'].append(case_result)
-            for expected in saved:
-                path = Path(expected['path'])
-                unlinked(path)
-                assert path.resolve().is_relative_to((output / 'fixtures').resolve()), 'UNO verification escaped case-owned fixtures'
-                before = digest(path)
-                document = None
-                try:
-                    document = engine.load(path.resolve().as_uri())
-                    assert document.supportsService('com.sun.star.text.TextDocument'), 'UNO did not reopen a Writer document'
-                    observed = document.getText().getString()
-                finally: engine.close_document(document)
-                proof = require_uno_observation(expected, observed, before, digest(path))
-                case_result['documents'].append({'path': str(path), **proof})
-            case_result['success'] = True
-        result['success'] = all(row['success'] is True for row in result['cases'])
+            try:
+                saved = record.get('savedDocuments', [])
+                assert saved, 'Successful Writer lifecycle case has no saved document evidence'
+                for expected in saved:
+                    path = Path(expected['path'])
+                    unlinked(path)
+                    assert path.resolve().is_relative_to((output / 'fixtures').resolve()), 'UNO verification escaped case-owned fixtures'
+                    before = digest(path)
+                    document = None
+                    try:
+                        document = engine.load(path.resolve().as_uri())
+                        assert document.supportsService('com.sun.star.text.TextDocument'), 'UNO did not reopen a Writer document'
+                        observed = document.getText().getString()
+                    finally: engine.close_document(document)
+                    # Keep actual observations even when exact-text or byte
+                    # validation fails; later independent cases still execute.
+                    document_result = {'path': str(path), 'observedBodyText': observed,
+                                       'expectedBodyText': expected['bodyText'],
+                                       'beforeSha256': before, 'afterSha256': digest(path)}
+                    case_result['documents'].append(document_result)
+                    document_result.update(require_uno_observation(expected, observed, before, document_result['afterSha256']))
+                case_result['success'] = True
+            except Exception as exc:
+                native.capture_failure(output, 'packaged-uno-' + record['case'], case_result, exc)
+        result['success'] = bool(result['cases']) and all(row['success'] is True for row in result['cases'])
     except Exception as exc:
         native.capture_failure(output, 'packaged-uno', result, exc)
     finally:
@@ -300,9 +341,7 @@ class Case:
     def new_from_menu(self, hwnd):
         from pywinauto import Desktop
         self.shell_command(hwnd, '')
-        candidates = [item for item in Desktop(backend='uia').descendants(control_type='MenuItem')
-                      if item.element_info.name == '새 문서' and item.element_info.process_id == self.process.pid
-                      and item.is_visible() and item.is_enabled()]
+        candidates = owned_menu_items(Desktop(backend='uia'), self.process.pid, '새 문서')
         assert len(candidates) == 1, 'Exact owned shell New Document menu item must be unique'
         self.api.require_foreground(hwnd)
         candidates[0].click_input()
@@ -498,13 +537,12 @@ def failed_saveas(case):
         observed = native.wait_for(expected_error, 35)
         if observed[0] == 'overwrite':
             _, dialog, owner, accessible, texts = observed
-            buttons = [item for item in accessible.descendants(control_type='Button') if item.element_info.automation_id == '6' and item.is_visible() and item.is_enabled()]
-            assert len(buttons) == 1, 'Owned overwrite confirmation requires exact Yes control 6'
             native.require_dialog_identity(case.api.pid(dialog), case.process.pid, owner, picker,
                 case.api.title(dialog), case.api.title(dialog), case.api.class_name(dialog))
+            button = owned_dialog_button(accessible, case.process.pid, ('Yes', '&Yes', '예', '예(&Y)'))
             Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
             case.api.require_foreground(dialog)
-            buttons[0].click_input()
+            button.click_input()
             native.wait_for(lambda: not case.api.user.IsWindow(dialog), 20)
             observed = native.wait_for(expected_error, 35)
         kind, dialog, owner, accessible, texts = observed
