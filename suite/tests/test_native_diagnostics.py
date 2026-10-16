@@ -184,7 +184,9 @@ class NativeDiagnosticsTests(unittest.TestCase):
         def fail_load(*args):
             alive[0] = False
             raise original
-        peer = SimpleNamespace(setPosSize=lambda *args: None)
+        peer_properties = {}
+        peer = SimpleNamespace(setPosSize=lambda *args: None,
+                               setProperty=peer_properties.__setitem__, getProperty=peer_properties.get)
         frame = SimpleNamespace(initialize=lambda peer: None, setName=lambda name: None,
                                 registerDispatchProviderInterceptor=lambda interceptor: None)
         desktop = SimpleNamespace(getFrames=lambda: SimpleNamespace(append=lambda frame: None),
@@ -205,7 +207,8 @@ class NativeDiagnosticsTests(unittest.TestCase):
                 patch.object(native, 'make_interceptor', return_value=object()), \
                 patch.object(native, 'make_interaction_handler', return_value=object()), redirect_stderr(io.StringIO()):
             with self.assertRaises(RuntimeError) as caught:
-                backend.attach(123, {'factory': 'private:factory/scalc'}, 640, 480, self.root / 'test.xlsx')
+                backend.attach(123, {'factory': 'private:factory/scalc', 'displayName': 'OpenGeul Calc'},
+                               640, 480, self.root / 'test.xlsx')
         self.assertIs(original, caught.exception)
         events = [json.loads(line) for line in next(evidence.glob('*/events.jsonl')).read_text().splitlines()]
         self.assertEqual(['before-ui-bootstrap', 'after-ui-bootstrap', 'before-load', 'load-exception'],

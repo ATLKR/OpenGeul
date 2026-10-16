@@ -278,6 +278,12 @@ class UnoBackend:
         self.peer = toolkit.createSystemChild(self.uno.Any('hyper', hwnd), (), 1)
         if self.peer is None:
             raise WorkerError('attach_failed', 'Windows 내장 편집기 패널을 만들 수 없습니다.')
+        # The Windows MSAA bridge ignores already-open VCL windows whose
+        # accessible name is empty (msaaservice_impl.cxx). Frame.setName below
+        # is only a routing identifier; name the actual owned editor peer.
+        self.peer.setProperty('AccessibleName', module['displayName'])
+        if self.peer.getProperty('AccessibleName') != module['displayName']:
+            raise WorkerError('accessibility_failed', '내장 편집기의 접근성 이름을 확인하지 못했습니다.')
         self.frame = service('com.sun.star.frame.Frame')
         self.frame.initialize(self.peer)
         frame_name = 'OpenGeul_' + uuid.uuid4().hex

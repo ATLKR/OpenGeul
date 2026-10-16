@@ -1,8 +1,8 @@
-name: OpenGeul early toolbar settings lifecycle experiment
+name: OpenGeul named peer normal and hidden startup experiment
 'on':
   push:
     branches:
-    - work/suite-toolbar-bootstrap
+    - work/suite-named-startup
 permissions:
   contents: read
   actions: read
