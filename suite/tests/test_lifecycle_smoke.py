@@ -20,6 +20,7 @@ SPEC.loader.exec_module(smoke)
 class LifecycleSmokeTests(unittest.TestCase):
     def picker_fixture(self, *, wrong_readback=False, readonly=False, method_error=None):
         calls = []
+        focus = SimpleNamespace(hwnd=500,steal_after_assignment=False,native_override=None,native_override_after_assignment=False)
         class Value:
             CurrentIsReadOnly = readonly
             def __init__(self): self.text = '새 문서.odt'
@@ -32,6 +33,8 @@ class LifecycleSmokeTests(unittest.TestCase):
                 calls.append(('assign',text))
                 if method_error == 'assign': raise RuntimeError('value assignment failed')
                 self.text = text[:-1] if wrong_readback else text
+                if focus.steal_after_assignment: focus.hwnd=999
+                if focus.native_override_after_assignment: focus.native_override='stale native filename'
         value = Value()
         root_info = SimpleNamespace(handle=500, process_id=31, runtime_id=[42,500],
                                     name='OpenGeul Writer — 다른 이름으로 저장', control_type='Window')
@@ -44,6 +47,30 @@ class LifecycleSmokeTests(unittest.TestCase):
                               user=SimpleNamespace(IsWindow=lambda handle: True,GetWindow=lambda handle,relation: 100,
                                                    IsChild=lambda parent,child: parent==500 and child==510,
                                                    GetAncestor=lambda handle,relation: 500))
+        def click_field():
+            calls.append(('focus',510))
+            focus.hwnd=510
+        field.click_input=click_field
+        def gui_info(thread,pointer):
+            pointer._obj.hwndActive=500
+            pointer._obj.hwndFocus=focus.hwnd
+            pointer._obj.hwndCapture=0
+            pointer._obj.hwndMenuOwner=0
+            return 1
+        def native_text(handle,message,capacity,buffer,flags,timeout,result):
+            self.assertEqual((handle,message,flags,timeout),(510,13,3,1000))
+            actual=value.text if focus.native_override is None else focus.native_override
+            import ctypes
+            destination=ctypes.cast(buffer,ctypes.POINTER(ctypes.c_wchar))
+            for index,char in enumerate(actual): destination[index]=char
+            destination[len(actual)]='\0'
+            result._obj.value=len(actual)
+            return 1
+        api.user.GetGUIThreadInfo=gui_info
+        api.user.GetWindowThreadProcessId=lambda handle,pointer:111
+        api.user.GetForegroundWindow=lambda:500
+        api.user.SendMessageTimeoutW=native_text
+        api.focus_state=focus
         return api,accessible,field,calls
 
     def test_picker_filename_uses_one_owned_value_assignment_and_retains_exact_readback(self):
@@ -53,7 +80,7 @@ class LifecycleSmokeTests(unittest.TestCase):
         expected = 'D:\\owned\\새 문서 저장 결과 & 한글.docx'
         smoke.set_owned_picker_filename(api,31,100,500,root,field,expected,record)
         evidence, = record['pickerFilenameInputs']
-        self.assertEqual(calls,[('read','새 문서.odt'),('assign',expected),('read',expected)])
+        self.assertEqual(calls,[('read','새 문서.odt'),('focus',510),('assign',expected),('read',expected)])
         self.assertTrue(evidence['success'])
         self.assertEqual((evidence['expected'],evidence['before'],evidence['after']), (expected,'새 문서.odt',expected))
         self.assertEqual(evidence['assignmentAttempts'],1)
@@ -79,7 +106,7 @@ class LifecycleSmokeTests(unittest.TestCase):
                 record = {}
                 with self.assertRaises(AssertionError):
                     smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
-                self.assertFalse(any(c[0]=='assign' for c in calls))
+                self.assertFalse(any(c[0] in ('focus','assign') for c in calls))
                 evidence, = record['pickerFilenameInputs']
                 self.assertFalse(evidence['success'])
                 self.assertEqual(evidence['assignmentAttempts'],0)
@@ -103,11 +130,64 @@ class LifecycleSmokeTests(unittest.TestCase):
                     self.assertEqual(evidence['after'],expected[:-1])
                     self.assertIn('Picker filename differs',evidence['error'])
 
+    def test_picker_focus_is_actual_native_edit_before_one_assignment_and_readback(self):
+        api,root,field,calls=self.picker_fixture()
+        record={}
+        smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+        receipt,=record['pickerFilenameInputs']
+        self.assertEqual(receipt['focusBefore']['focusHwnd'],500)
+        self.assertEqual(receipt['focusAfterClick']['focusHwnd'],510)
+        self.assertEqual(receipt['focusAfterAssignment']['focusHwnd'],510)
+        self.assertEqual(receipt['focusAfterAssignment']['nativeText'],receipt['after'])
+        self.assertEqual(receipt['focusAfterAssignment']['threadId'],111)
+        self.assertEqual(receipt['focusClickAttempts'],1)
+        self.assertLess(calls.index(('focus',510)),next(i for i,c in enumerate(calls) if c[0]=='assign'))
+
+    def test_picker_stolen_focus_and_native_text_mismatch_fail_without_repeat(self):
+        for mode in ('focus-not-acquired','focus-stolen-after-assignment','native-text-mismatch','native-stale-after-assignment'):
+            with self.subTest(mode=mode):
+                api,root,field,calls=self.picker_fixture()
+                if mode=='focus-not-acquired': field.click_input=lambda:calls.append(('focus-missed',510))
+                if mode=='focus-stolen-after-assignment': api.focus_state.steal_after_assignment=True
+                if mode=='native-text-mismatch': api.focus_state.native_override='stale native filename'
+                if mode=='native-stale-after-assignment': api.focus_state.native_override_after_assignment=True
+                record={}
+                with self.assertRaises(AssertionError):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+                receipt,=record['pickerFilenameInputs']
+                self.assertFalse(receipt['success'])
+                self.assertIn('error',receipt)
+                self.assertEqual(receipt['assignmentAttempts'],0 if mode in ('focus-not-acquired','native-text-mismatch') else 1)
+                self.assertEqual(sum(c[0]=='assign' for c in calls),receipt['assignmentAttempts'])
+
+    def test_picker_rechecks_fresh_ownership_and_foreground_before_physical_focus(self):
+        for mode in ('changed-pid','foreign-foreground'):
+            with self.subTest(mode=mode):
+                api,root,field,calls=self.picker_fixture()
+                if mode=='changed-pid':
+                    queries=[]
+                    def pid(handle):
+                        if handle==510:
+                            queries.append(handle)
+                            return 31 if len(queries)==1 else 99
+                        return 31
+                    api.pid=pid
+                else:
+                    api.user.GetForegroundWindow=lambda:999
+                    api.user.GetAncestor=lambda handle,relation:999 if handle==999 else 500
+                record={}
+                with self.assertRaises(AssertionError):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+                receipt,=record['pickerFilenameInputs']
+                self.assertEqual(receipt['focusClickAttempts'],0)
+                self.assertEqual(receipt['assignmentAttempts'],0)
+                self.assertFalse(any(c[0] in ('focus','assign') for c in calls))
+                self.assertIn('error',receipt)
+
     def test_actual_picker_assigns_fixture_then_physically_selects_save_or_cancel(self):
         for cancel in (False,True):
             with self.subTest(cancel=cancel):
                 api,root,field,calls = self.picker_fixture()
-                field.click_input=lambda: None
                 case=SimpleNamespace(api=api,process=SimpleNamespace(pid=31),record={},
                                      dialog=lambda hwnd,caption:(500,root),screenshot=lambda *args:None)
                 action_id='2' if cancel else '1'

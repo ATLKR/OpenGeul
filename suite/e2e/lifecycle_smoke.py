@@ -178,7 +178,8 @@ def dialog_uia_identity(accessible, dialog, shell_pid, evidence=None):
 def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, field, target, record):
     """Assign only the verified fixture filename; document text still uses physical input."""
     receipt = {'method': 'UIA-ValuePattern-SetValue', 'expected': str(target), 'before': None, 'after': None,
-               'assignmentAttempts': 0, 'success': False, 'document': {}, 'dialog': {}, 'dialogUia': {}, 'field': {}}
+               'assignmentAttempts': 0, 'focusClickAttempts': 0, 'success': False, 'document': {}, 'dialog': {},
+               'dialogUia': {}, 'field': {}, 'focusBefore': {}, 'focusAfterClick': {}, 'focusAfterAssignment': {}}
     record.setdefault('pickerFilenameInputs', []).append(receipt)
     try:
         receipt['document'] = {'hwnd': int(document), 'pid': api.pid(document), 'live': bool(api.user.IsWindow(document))}
@@ -210,16 +211,71 @@ def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, fiel
         receipt['readOnly'] = bool(value.CurrentIsReadOnly)
         assert receipt['readOnly'] is False, 'Filename ValuePattern is read-only'
         receipt['before'] = value.CurrentValue
+        picker_filename_state(api, shell_pid, dialog, field_handle, receipt['focusBefore'])
+        assert receipt['focusBefore']['nativeText'] == receipt['before'], 'Native filename differs from UIA before assignment'
+        require_picker_filename_context(receipt['focusBefore'], shell_pid, dialog)
+        receipt['focusClickAttempts'] = 1
+        field.click_input()
+        picker_filename_state(api, shell_pid, dialog, field_handle, receipt['focusAfterClick'])
+        require_picker_filename_focus(receipt['focusAfterClick'], shell_pid, dialog, field_handle,
+                                      receipt['focusBefore']['threadId'])
         api.require_foreground(dialog)
         receipt['assignmentAttempts'] = 1
         value.SetValue(receipt['expected'])
         receipt['after'] = value.CurrentValue
+        picker_filename_state(api, shell_pid, dialog, field_handle, receipt['focusAfterAssignment'])
         assert receipt['after'] == receipt['expected'], 'Picker filename differs from owned target'
+        assert receipt['focusAfterAssignment']['nativeText'] == receipt['after'], 'Native filename differs from exact UIA readback'
+        require_picker_filename_focus(receipt['focusAfterAssignment'], shell_pid, dialog, field_handle,
+                                      receipt['focusBefore']['threadId'])
         receipt['success'] = True
         return receipt
     except Exception as exc:
         receipt['error'] = type(exc).__name__ + ': ' + str(exc)
         raise
+
+
+def picker_filename_state(api, shell_pid, dialog, field, evidence):
+    """Read the owned UI thread and Edit text; GetWindowText cannot read a foreign-process Edit."""
+    api.user.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    api.user.GetWindowThreadProcessId.restype = wintypes.DWORD
+    evidence.update(threadId=int(api.user.GetWindowThreadProcessId(field, None)),
+                    fieldLive=bool(api.user.IsWindow(field)), fieldPid=api.pid(field),
+                    fieldRoot=int(api.user.GetAncestor(field, 2) or 0))
+    assert evidence['threadId'] > 0 and evidence['fieldLive'], 'Filename native field disappeared before focus observation'
+    assert evidence['fieldPid'] == shell_pid > 0 and evidence['fieldRoot'] == dialog, 'Filename ownership changed before native text observation'
+    info = native.GuiThreadInfo(cbSize=ctypes.sizeof(native.GuiThreadInfo))
+    if not api.user.GetGUIThreadInfo(evidence['threadId'], ctypes.byref(info)):
+        raise OSError(getattr(ctypes, 'get_last_error', lambda: 0)(), 'GetGUIThreadInfo for owned filename field failed')
+    foreground = int(api.user.GetForegroundWindow() or 0)
+    evidence.update(activeHwnd=int(info.hwndActive or 0), focusHwnd=int(info.hwndFocus or 0),
+                    captureHwnd=int(info.hwndCapture or 0), menuOwnerHwnd=int(info.hwndMenuOwner or 0),
+                    flags=int(info.flags), foregroundHwnd=foreground,
+                    foregroundRoot=int(api.user.GetAncestor(foreground, 2) or 0))
+    require_picker_filename_context(evidence, shell_pid, dialog)
+    # WM_GETTEXT is bounded and addressed only to the already verified native Edit.
+    # LPARAM and the result pointer must retain their full Win64 pointer width.
+    send = api.user.SendMessageTimeoutW
+    send.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+                     wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t))
+    send.restype = ctypes.c_ssize_t
+    text, count = ctypes.create_unicode_buffer(4096), ctypes.c_size_t()
+    if not send(field, 0x000D, len(text), ctypes.addressof(text), 3, 1000, ctypes.byref(count)):
+        raise OSError(getattr(ctypes, 'get_last_error', lambda: 0)(), 'Bounded WM_GETTEXT for owned filename field failed')
+    evidence.update(nativeText=text.value, nativeTextLength=int(count.value), nativeTextTimeoutMs=1000)
+    assert count.value < len(text) - 1, 'Owned filename text exceeds bounded fixture scope'
+    return evidence
+
+
+def require_picker_filename_context(observed, shell_pid, dialog):
+    assert observed['fieldLive'] is True and observed['fieldPid'] == shell_pid, 'Filename focus field is not live in the owned process'
+    assert observed['fieldRoot'] == observed['foregroundRoot'] == dialog, 'Filename focus is outside the owned picker root'
+    assert observed['threadId'] > 0, 'Filename native input thread is invalid'
+
+
+def require_picker_filename_focus(observed, shell_pid, dialog, field, thread):
+    require_picker_filename_context(observed, shell_pid, dialog)
+    assert observed['threadId'] == thread and observed['focusHwnd'] == field, 'Physical filename focus is outside the exact native Edit'
 
 
 def require_dialog_button_ancestry(api, accessible, button, shell_pid, dialog, evidence=None):
