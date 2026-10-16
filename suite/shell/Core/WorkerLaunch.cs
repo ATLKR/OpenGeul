@@ -14,11 +14,7 @@ public static class WorkerLaunch
         };
         start.Environment["PYTHONDONTWRITEBYTECODE"] = "1";
         start.Environment["PYTHONIOENCODING"] = "utf-8";
-        start.Environment.TryGetValue("PATH", out var inheritedPath);
-        var program = Path.Combine(runtime, "program");
-        start.Environment["PATH"] = string.IsNullOrEmpty(inheritedPath)
-            ? program
-            : program + Path.PathSeparator + inheritedPath;
+        RuntimeEnvironment.PrependProgramDirectory(start, packageRoot);
         return start;
     }
 }

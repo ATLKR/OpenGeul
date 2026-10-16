@@ -99,9 +99,7 @@ internal sealed class HomeForm : Form
             {
                 var executable = Path.Combine(packageRoot, "HWP", "OpenGeul.exe");
                 if (!File.Exists(executable)) throw new SuiteException("HWP 구성 요소가 이 패키지에 포함되어 있지 않습니다. 검증된 OpenGeul HWP 구성 요소를 포함한 패키지를 사용해 주세요.");
-                var start = new ProcessStartInfo(executable) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(executable)! };
-                if (path is not null) start.ArgumentList.Add(path);
-                using var launched = Process.Start(start) ?? throw new SuiteException("OpenGeul HWP를 시작할 수 없습니다.");
+                using var launched = Process.Start(HwpLaunch.Create(packageRoot, path)) ?? throw new SuiteException("OpenGeul HWP를 시작할 수 없습니다.");
                 return;
             }
             if (!File.Exists(Path.Combine(packageRoot, "Office", "program", "python.exe")) || !File.Exists(Path.Combine(packageRoot, "Office", "program", "soffice.exe")) || !File.Exists(Path.Combine(packageRoot, "worker", "office_worker.py")))

@@ -139,6 +139,38 @@ Test("ordinary module status is unchanged by Base readiness metadata", () =>
     Equal("준비 · 새 문서", DocumentStatusText.Format("calc", false, false, null));
     Equal("변경 내용이 있습니다.", DocumentStatusText.Format("impress", true, true, null));
 });
+Test("HWP launch prepends shared CRT directory to process-local PATH", () =>
+{
+    var inheritedPath = Environment.GetEnvironmentVariable("PATH");
+    var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
+    var start = HwpLaunch.Create(root, null);
+    Equal(Path.Combine(root, "Office", "program") + (string.IsNullOrEmpty(inheritedPath) ? "" : Path.PathSeparator + inheritedPath), start.Environment["PATH"]);
+    Equal(inheritedPath, Environment.GetEnvironmentVariable("PATH"));
+});
+Test("HWP launch uses only fixed original executable and one structured document argument", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
+    var document = "C:\\문서 폴더\\a & b $(x).hwpx";
+    var start = HwpLaunch.Create(root, document);
+    Equal(Path.Combine(root, "HWP", "OpenGeul.exe"), start.FileName);
+    Equal(Path.Combine(root, "HWP"), start.WorkingDirectory);
+    Equal(false, start.UseShellExecute);
+    Equal("", start.Arguments);
+    Equal(1, start.ArgumentList.Count);
+    Equal(document, start.ArgumentList[0]);
+});
+Test("HWP new-document launch has no document argument", () =>
+    Equal(0, HwpLaunch.Create(Path.Combine(Path.GetTempPath(), "OpenGeul"), null).ArgumentList.Count));
+Test("HWP launch preserves every inherited non-PATH environment entry", () =>
+{
+    var start = HwpLaunch.Create(Path.Combine(Path.GetTempPath(), "OpenGeul"), null);
+    foreach (System.Collections.DictionaryEntry variable in Environment.GetEnvironmentVariables())
+    {
+        var name = (string)variable.Key;
+        if (name.Equals("PATH", StringComparison.OrdinalIgnoreCase)) continue;
+        Equal(true, start.Environment.TryGetValue(name, out var value) && value == (string?)variable.Value);
+    }
+});
 
 // Removing a cancel branch or closing after a failed save must break these close-flow tests.
 AsyncTest("cancel dirty close preserves the document", async () =>
