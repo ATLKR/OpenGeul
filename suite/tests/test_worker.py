@@ -455,6 +455,8 @@ class NativeBoundaryTests(unittest.TestCase):
         calls = []
         peer = SimpleNamespace(setPosSize=lambda *a: calls.append(('resize', a)),
                                setVisible=lambda visible: calls.append(('visible', visible)),
+                               setProperty=lambda name, value: None,
+                               getProperty=lambda name: 'OpenGeul Writer',
                                getWindowHandle=lambda *a: 456)
         frame = SimpleNamespace(initialize=lambda p: calls.append(('initialize', p)),
                                 setName=lambda n: calls.append(('name', n)),
@@ -719,6 +721,64 @@ class NativeBoundaryTests(unittest.TestCase):
             self.assertEqual('unsupported_platform', caught.exception.code)
 
 
+class NativeAccessibleNameBoundaryTests(unittest.TestCase):
+    """Native UNO boundary only; actual MSAA/UIA proof stays in Windows E2E."""
+    def setUp(self):
+        self.native = importlib.import_module('native')
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+
+    def attach(self, *, returned_name=None):
+        from types import SimpleNamespace as NS
+        self.events, self.properties = [], {}
+
+        def set_property(name, value):
+            self.events.append(('property', name, value))
+            self.properties[name] = value
+
+        def get_property(name):
+            self.events.append(('read-property', name))
+            return self.properties.get(name, '') if returned_name is None else returned_name
+
+        peer = NS(setProperty=set_property, getProperty=get_property,
+                  setPosSize=lambda *args: None, getWindowHandle=lambda *args: 456,
+                  setVisible=lambda visible: self.events.append(('visible', visible)))
+        frame = NS(initialize=lambda value: self.events.append(('initialize',)),
+                   setName=lambda name: None, registerDispatchProviderInterceptor=lambda value: None,
+                   activate=lambda: None)
+        desktop = NS(getFrames=lambda: NS(append=lambda frame: None),
+                     loadComponentFromURL=lambda *args: self.events.append(('load',)) or object())
+        services = {'com.sun.star.frame.Desktop': desktop, 'com.sun.star.frame.Frame': frame,
+                    'com.sun.star.awt.Toolkit': NS(createSystemChild=lambda *args: peer)}
+        context = NS(ServiceManager=NS(createInstanceWithContext=lambda name, ctx: services[name]))
+        uno = NS(Any=lambda kind, value: value, createUnoStruct=lambda name: NS())
+        windows = NS(validate_parent=lambda hwnd: None, validate_child=lambda *args: None)
+        backend = self.native.UnoBackend(self.root, window_api=windows, uno_loader=lambda: uno,
+                                         connector=lambda *args: context)
+        backend._start_runtime = lambda: None
+        with patch.object(self.native, 'make_interceptor', return_value=object()), patch.object(
+                self.native, 'make_interaction_handler', return_value=object()):
+            return backend.attach(123, MODULES['writer'], 640, 480, None)
+
+    def test_native_peer_is_named_before_frame_load_and_visibility(self):
+        self.attach()
+        self.assertEqual('OpenGeul Writer', self.properties.get('AccessibleName'))
+        verified = self.events.index(('read-property', 'AccessibleName'))
+        for later in (('initialize',), ('load',), ('visible', True)):
+            self.assertLess(verified, self.events.index(later))
+
+    def test_missing_native_accessible_name_fails_before_loading_user_document(self):
+        for returned_name in ('', 'foreign editor'):
+            with self.subTest(returned_name=returned_name):
+                with self.assertRaises(self.native.WorkerError) as caught:
+                    self.attach(returned_name=returned_name)
+                self.assertEqual('accessibility_failed', caught.exception.code)
+                self.assertNotIn(('initialize',), self.events)
+                self.assertNotIn(('load',), self.events)
+                self.assertNotIn(('visible', True), self.events)
+
+
 class NewBaseBoundaryTests(unittest.TestCase):
     def setUp(self):
         from types import SimpleNamespace as NS
@@ -742,7 +802,8 @@ class NewBaseBoundaryTests(unittest.TestCase):
         self.live = NS(isModified=lambda: False, getTitle=lambda: '새 데이터베이스',
                        setModified=lambda value: self.fail('live user model modified flag must not be cleared'),
                        dispose=lambda: self.fail('live user model must not be disposed during creation'))
-        peer = NS(setPosSize=lambda *a: None, setVisible=lambda value: None, getWindowHandle=lambda *a: 456)
+        peer = NS(setPosSize=lambda *a: None, setVisible=lambda value: None, getWindowHandle=lambda *a: 456,
+                  setProperty=lambda name, value: None, getProperty=lambda name: self.module['displayName'])
         frame = NS(initialize=lambda p: None, setName=lambda name: self.calls.append(('frame', name)),
                    registerDispatchProviderInterceptor=lambda interceptor: None, activate=lambda: None)
         desktop = NS(getFrames=lambda: NS(append=lambda f: None),

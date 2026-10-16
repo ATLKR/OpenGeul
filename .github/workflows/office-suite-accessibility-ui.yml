@@ -1,0 +1,82 @@
+name: OpenGeul native accessibility UI diagnostic
+'on':
+  push:
+    branches:
+      - work/suite-accessibility-ui
+permissions:
+  contents: read
+concurrency:
+  group: suite-accessibility-ui-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  windows-ui-accessibility:
+    if: github.event.repository.private == false
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Verify exact source and unit boundaries
+        shell: pwsh
+        run: |
+          python -m unittest discover -s suite/tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Suite unit tests failed.' }
+          dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
+          New-Item -ItemType Directory -Path .work/suite-accessibility-source | Out-Null
+          python -c 'import hashlib,json,os,pathlib,subprocess; sha=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(); assert sha==os.environ["GITHUB_SHA"]; paths=["suite/worker/native.py","suite/e2e/korean_ui_smoke.py","suite/runtime_branding.py"]; result={"schemaVersion":1,"diagnosticOnly":True,"deliverable":False,"sourceCommit":sha,"sourceTree":subprocess.check_output(["git","rev-parse","HEAD^{tree}"],text=True).strip(),"files":{p:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in paths}}; pathlib.Path(".work/suite-accessibility-source/source.json").write_text(json.dumps(result,indent=2),encoding="utf-8")'
+          if ($LASTEXITCODE -ne 0) { throw 'Exact source recording failed.' }
+      - name: Build fresh pinned 0.1.1 package
+        id: build
+        shell: pwsh
+        run: ./suite/scripts/build-suite.ps1
+      - name: Install native observation dependencies
+        id: dependencies
+        if: '!cancelled() && steps.build.outcome == ''success'''
+        shell: pwsh
+        run: |
+          python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+          if ($LASTEXITCODE -ne 0) { throw 'Native observation dependencies failed.' }
+      - name: Create and reopen six fresh engine fixtures
+        id: fixtures
+        if: '!cancelled() && steps.build.outcome == ''success'' && steps.dependencies.outcome == ''success'''
+        shell: pwsh
+        run: |
+          $package = (Resolve-Path dist/OpenGeul-Office-0.1.1-dev-windows-x64).Path
+          & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
+          if ($LASTEXITCODE -ne 0) { throw 'Fresh actual engine fixture verification failed.' }
+      - name: Strict Korean UI tabs in all four native editors
+        if: '!cancelled() && steps.fixtures.outcome == ''success'''
+        shell: pwsh
+        run: |
+          python suite/e2e/korean_ui_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui
+          if ($LASTEXITCODE -ne 0) { throw 'Strict actual Korean native tab verification failed.' }
+      - name: Verify complete runtime inventory after observation
+        if: '!cancelled() && steps.build.outcome == ''success'''
+        shell: pwsh
+        run: |
+          python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.1-dev-windows-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime inventory changed during observation.' }
+      - name: Preserve all original diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-ui-accessibility-${{ github.run_id }}
+          path: |
+            .work/suite-accessibility-source/
+            .work/suite-engine/
+            .work/suite-korean-ui/
+            .work/office-suite/msi.msi.log
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: warn
+          compression-level: 6
