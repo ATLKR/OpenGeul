@@ -62,7 +62,8 @@ class PayloadTests(unittest.TestCase):
                      'Office/program/soffice.bin', 'Office/program/python.exe', 'hostfxr.dll'):
             self.write(name, pe())
         self.write('OpenGeul.Office.dll', pe(0x14c, managed=True, dll=True))
-        for name in ('worker/office_worker.py', 'worker/session.py'):
+        for name in ('worker/office_worker.py', 'worker/session.py', 'worker/native.py',
+                     'worker/native_windows.py', 'worker/dispatch.py'):
             self.write(name, b'# worker source\n')
         for name in ('Notices/OpenGeul-Office-LICENSE.txt', 'Notices/LibreOffice-LICENSE.txt',
                      'Notices/CORRESPONDING_SOURCE.md', 'Office/LICENSE', 'Office/NOTICE'):
@@ -106,9 +107,11 @@ class PayloadTests(unittest.TestCase):
 
     def save_metadata(self):
         self.write_json('suite-product.json', self.product)
-        self.write_json('suite-provenance.json', self.provenance)
         self.write_json('runtime-branding.json', self.branding)
         self.write_json('Office/opengeul-branding.json', self.branding)
+        self.provenance['sourceArchiveSha256'] = digest(self.read('Sources/OpenGeul-Office-source.zip'))
+        self.provenance['brandingReceiptSha256'] = digest(self.read('runtime-branding.json'))
+        self.write_json('suite-provenance.json', self.provenance)
 
     def test_complete_inventory_covers_native_managed_worker_and_legal_files(self):
         receipt = create_inventory(self.root)
@@ -225,6 +228,27 @@ class PayloadTests(unittest.TestCase):
                 create_inventory(self.root)
             path.write_bytes(original)
 
+    def test_every_worker_implementation_module_is_required(self):
+        for name in ('worker/native.py', 'worker/native_windows.py', 'worker/dispatch.py'):
+            path = self.root/name
+            original = path.read_bytes()
+            path.unlink()
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'Missing required'):
+                create_inventory(self.root)
+            path.write_bytes(original)
+
+    def test_source_and_branding_provenance_hashes_bind_the_actual_packaged_bytes(self):
+        for field in ('sourceArchiveSha256', 'brandingReceiptSha256'):
+            for value in (None, 'bad-hash', 'f'*64):
+                changed = copy.deepcopy(self.provenance)
+                if value is None:
+                    changed.pop(field)
+                else:
+                    changed[field] = value
+                self.write_json('suite-provenance.json', changed)
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, 'provenance'):
+                    create_inventory(self.root)
+
     def test_unexpected_top_level_files_and_worker_binaries_rejected(self):
         for name in ('unreviewed.txt', 'worker/download.exe', 'other/private.txt'):
             self.write(name, pe() if name.endswith('.exe') else b'extra')
@@ -333,9 +357,11 @@ class PayloadTests(unittest.TestCase):
             ('a'*40, {'suite/a.py': b'source', 'suite/A.py': b'alias'}),
         ):
             self.source_archive(commit=commit, entries=entries)
+            self.save_metadata()
             with self.subTest(commit=commit, entries=entries), self.assertRaises(ValueError):
                 create_inventory(self.root)
         self.write('Sources/OpenGeul-Office-source.zip', b'not a source archive')
+        self.save_metadata()
         with self.assertRaises(ValueError):
             create_inventory(self.root)
 

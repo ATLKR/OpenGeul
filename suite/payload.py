@@ -21,7 +21,8 @@ REQUIRED = frozenset({
     'OpenGeul.Office.exe', 'OpenGeul.Office.dll', 'suite-product.json',
     'suite-provenance.json', 'runtime-branding.json', 'Office/opengeul-branding.json',
     'Office/program/soffice.exe', 'Office/program/soffice.bin', 'Office/program/python.exe',
-    'worker/office_worker.py', 'worker/session.py', 'Notices/OpenGeul-Office-LICENSE.txt',
+    'worker/office_worker.py', 'worker/session.py', 'worker/native.py',
+    'worker/native_windows.py', 'worker/dispatch.py', 'Notices/OpenGeul-Office-LICENSE.txt',
     'Notices/LibreOffice-LICENSE.txt', 'Notices/CORRESPONDING_SOURCE.md',
     'Sources/OpenGeul-Office-source.zip',
 })
@@ -221,6 +222,10 @@ def _metadata(root: Path, files: dict):
             or not isinstance(provenance.get('version'), str) or not VERSION.fullmatch(provenance['version'])
             or not isinstance(provenance.get('sourceCommit'), str) or not COMMIT.fullmatch(provenance['sourceCommit'])):
         raise ValueError('Invalid Suite source/version provenance')
+    for field, name in (('sourceArchiveSha256', 'Sources/OpenGeul-Office-source.zip'),
+                        ('brandingReceiptSha256', 'runtime-branding.json')):
+        if not _sha(provenance.get(field)) or provenance[field] != files[name]['sha256']:
+            raise ValueError('Suite source/branding provenance hash mismatch: '+field)
     runtime = provenance.get('runtime')
     if (not isinstance(runtime, dict) or not _sha(runtime.get('sha256')) or not _sha(runtime.get('sourceSha256'))
             or not _https(runtime.get('url')) or not _https(runtime.get('sourceUrl'))):
