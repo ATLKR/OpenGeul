@@ -16,6 +16,17 @@ SPEC.loader.exec_module(smoke)
 
 
 class NativeSmokeTests(unittest.TestCase):
+    def test_new_document_launch_opens_exact_six_modules_without_a_file_argument(self):
+        suite = Path('generated-suite')
+        for module in ('writer', 'calc', 'impress', 'draw', 'math', 'base'):
+            self.assertEqual(smoke.new_document_command(suite, module),
+                             [str(suite / 'OpenGeul.Office.exe'), '--module', module])
+
+    def test_new_document_launch_rejects_unowned_modules(self):
+        for module in ('hwp', 'unknown', '../writer'):
+            with self.assertRaises(AssertionError):
+                smoke.new_document_command(Path('generated-suite'), module)
+
     def test_missing_file_does_not_satisfy_save_wait(self):
         check = Mock(side_effect=[FileNotFoundError('still writing'), False, True])
         with patch.object(smoke.time, 'monotonic', side_effect=[0, 0.1, 0.2, 0.3]), \

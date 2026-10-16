@@ -64,6 +64,18 @@ three physical-input cases. No case establishes IME composition, and Linux helpe
 tests do not establish actual Windows GUI success. Failure screenshots/records
 remain failure evidence even if earlier cases passed.
 
+After existing-document checks, all six Office modules also launch with
+`--module MODULE` and no file argument. Each blank document must attach under the
+Suite panel, retain its OpenGeul title, avoid external Office windows, produce
+`new-MODULE-attached.png` / `new-MODULE-result.json`, and close along with its home
+with process exit 0. These cases perform no typing or saving and claim no content
+mutation. New Base alone may require discarding initialized database settings:
+the harness physically clicks only the exact Korean discard button in the exact
+save/discard/cancel TaskDialog owned by that launched process and document. It
+records `discardPromptHandled=true`; it never dismisses arbitrary dialogs or
+clears production modified state. All six successful cases are listed separately
+as `newDocumentModules` in the aggregate report.
+
 After the GUI has saved and closed each document, run:
 
 ```powershell

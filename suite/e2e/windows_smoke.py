@@ -1,4 +1,4 @@
-"""Actual Suite home, six embedded frames, and three physical keyboard edits.
+"""Actual Suite home, six existing/new embedded frames, and three keyboard edits.
 
 Only generated fixtures under --fixtures are opened. Unicode SendInput is not an
 IME-composition test; engine/model tests and native keyboard tests stay separate.
@@ -20,6 +20,12 @@ import zipfile
 INPUT_CASES = (('writer', 'docx'), ('calc', 'xlsx'), ('impress', 'pptx'))
 ATTACH_CASES = (('draw', 'odg'), ('math', 'odf'), ('base', 'odb'))
 MODULE_LABELS = tuple('OpenGeul ' + name for name in ('HWP', 'Writer', 'Calc', 'Impress', 'Draw', 'Math', 'Base'))
+NEW_MODULES = tuple(module for module, _ in INPUT_CASES + ATTACH_CASES)
+
+
+def new_document_command(suite, module):
+    assert module in NEW_MODULES, 'Only the six owned Office modules may create blank test documents'
+    return [str(suite / 'OpenGeul.Office.exe'), '--module', module]
 
 
 def wait_for(check, seconds=60):
@@ -82,6 +88,8 @@ class Windows:
         self.user.GetWindowThreadProcessId.restype = wintypes.DWORD
         self.user.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
         self.user.GetAncestor.restype = wintypes.HWND
+        self.user.GetWindow.argtypes = (wintypes.HWND, wintypes.UINT)
+        self.user.GetWindow.restype = wintypes.HWND
         self.user.GetForegroundWindow.restype = wintypes.HWND
         self.user.GetForegroundWindow.argtypes = ()
         self.user.IsChild.argtypes = (wintypes.HWND, wintypes.HWND)
@@ -187,6 +195,76 @@ def close_home(api, process):
     assert process.returncode == 0, 'Suite did not close cleanly'
 
 
+def verified_attachment(api, process, module):
+    hwnd, parent, child = wait_for(lambda: api.attached(process), seconds=75)
+    office_pid = api.pid(child)
+    assert office_pid and office_pid != process.pid, 'Editor must belong to the separate native Office engine'
+    assert 'OpenGeul ' + module.title() in api.title(hwnd), 'Document title is not OpenGeul branded'
+    assert not api.windows(office_pid), 'Office created an unowned visible top-level window'
+    return hwnd, parent, child, office_pid
+
+
+def base_new_closed(api, process, hwnd, record):
+    if not api.user.IsWindow(hwnd): return True
+    if record.get('discardPromptHandled'): return False
+    from pywinauto import Desktop
+    dialogs = [dialog for dialog in api.windows(process.pid)
+               if api.title(dialog) == 'OpenGeul Base' and api.user.GetWindow(dialog, 4) == hwnd]
+    if not dialogs: return False
+    assert len(dialogs) == 1, 'Expected exactly one owned Base close prompt'
+    dialog = dialogs[0]
+    native = Desktop(backend='win32').window(handle=dialog).wrapper_object()
+    assert native.class_name() == '#32770', 'Base close prompt is not a native TaskDialog'
+    accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
+    assert '변경 내용을 저장하시겠습니까?' in [item.element_info.name for item in accessible.descendants()], 'Base dialog is not the exact save/discard/cancel prompt'
+    buttons = [button for button in accessible.descendants(control_type='Button')
+               if button.element_info.name == '저장하지 않음' and button.is_visible() and button.is_enabled()]
+    assert len(buttons) == 1, 'The exact Base discard button is missing or ambiguous'
+    native.set_focus()
+    assert api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == dialog, 'Discard requires the owned prompt foreground'
+    assert api.pid(dialog) == process.pid and api.title(dialog) == 'OpenGeul Base' and api.user.GetWindow(dialog, 4) == hwnd, 'Discard prompt ownership changed before physical input'
+    buttons[0].click_input()  # Explicit physical user action, only for this blank Base document.
+    record.update(discardPromptHandled=True, discardDialogHwnd=int(dialog), discardButton='저장하지 않음')
+    return not api.user.IsWindow(hwnd)
+
+
+def new_module(suite, output, module):
+    from pywinauto import Desktop
+    name = 'new-' + module
+    process = subprocess.Popen(new_document_command(suite, module), cwd=suite, shell=False)
+    api = Windows()
+    record = {'module': module, 'kind': 'new-document', 'shellPid': process.pid, 'success': False,
+              'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False,
+              'discardPromptHandled': False}
+    try:
+        hwnd, parent, child, office_pid = verified_attachment(api, process, module)
+        window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
+        window.move_window(x=15, y=15, width=1120, height=710)
+        window.set_focus()
+        wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
+        screenshot = name + '-attached.png'
+        window.capture_as_image().save(output / screenshot)
+        assert not api.windows(office_pid), 'New document opened an unowned visible Office window'
+        record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid,
+                      title=api.title(hwnd), screenshot=screenshot, nativeParentVerified=True,
+                      noExternalOfficeWindow=True)
+        window.close()
+        if module == 'base':
+            wait_for(lambda: base_new_closed(api, process, hwnd, record), seconds=20)
+        else:
+            wait_for(lambda: not api.user.IsWindow(hwnd), seconds=20)
+        wait_for(lambda: not api.user.IsWindow(child), seconds=10)
+        close_home(api, process)
+        record.update(success=True, cleanClose=True, newDocumentVerified=True)
+        return record
+    except Exception as exc:
+        capture_failure(output, name, record, exc)
+        raise
+    finally:
+        stop_owned_test_process(process, record)
+        write_result(output, name, record)
+
+
 def capture_home(suite, output):
     from pywinauto import Desktop
     process = subprocess.Popen([str(suite / 'OpenGeul.Office.exe')], cwd=suite, shell=False)
@@ -230,12 +308,8 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
               'shellPid': process.pid, 'file': source.name, 'success': False,
               'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False}
     try:
-        hwnd, parent, child = wait_for(lambda: api.attached(process), seconds=75)
-        office_pid = api.pid(child)
-        assert office_pid and office_pid != process.pid, 'Editor must belong to the separate native Office engine'
+        hwnd, parent, child, office_pid = verified_attachment(api, process, module)
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid, title=api.title(hwnd))
-        assert 'OpenGeul ' + module.title() in api.title(hwnd), 'Document title is not OpenGeul branded'
-        assert not api.windows(office_pid), 'Office created an unowned visible top-level window'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.move_window(x=15, y=15, width=1120, height=710)
         window.set_focus()
@@ -316,11 +390,14 @@ def main():
             results.append(edit_module(suite, fixtures, output, module, extension))
         for module, extension in ATTACH_CASES:
             results.append(attach_module(suite, fixtures, output, module, extension))
+        for module in NEW_MODULES:
+            results.append(new_module(suite, output, module))
         report.update(success=True, homeVerified=True,
                       nativeAttachmentModules=[case[0] for case in INPUT_CASES + ATTACH_CASES],
                       physicalInputModules=[case[0] for case in INPUT_CASES],
-                      attachOnlyModules=[case[0] for case in ATTACH_CASES])
-        print('Actual Suite home, 6 native attachments and 3 physical keyboard/save checks passed')
+                      attachOnlyModules=[case[0] for case in ATTACH_CASES],
+                      newDocumentModules=list(NEW_MODULES))
+        print('Actual Suite home, 6 existing/new native modules and 3 keyboard/save checks passed')
     except Exception as exc:
         report['error'] = type(exc).__name__ + ': ' + str(exc)
         raise
