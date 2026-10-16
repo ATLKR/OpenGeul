@@ -119,6 +119,37 @@ class BrandingTests(unittest.TestCase):
             self.destination / 'share/registry/main.xcd', events=('start-ns',)))
         self.assertEqual(namespaces.get('xs'), 'http://www.w3.org/2001/XMLSchema')
 
+    def test_localized_display_labels_change_without_renaming_donation_or_internal_ids(self):
+        path = self.source/'share/registry/res/registry_nl.xcd'
+        path.parent.mkdir()
+        xml = ('<oor:data xmlns:oor="http://openoffice.org/2001/registry">'
+               '<oor:component-data oor:package="org.openoffice.Office.UI" oor:name="GenericCommands">'
+               '<node oor:name="Commands"><node oor:name=".uno:Notebookbar">'
+               '<prop oor:name="Label"><value>LibreOffice lint</value></prop>'
+               '<prop oor:name="InternalName"><value>LibreOffice.Internal.Token</value></prop></node>'
+               '<node oor:name=".uno:Donation"><prop oor:name="Label">'
+               '<value>Aan LibreOffice doneren</value></prop></node></node></oor:component-data>'
+               '<oor:component-data oor:package="org.openoffice.Office.UI" oor:name="WriterWindowState">'
+               '<node oor:name="private:resource/toolbar/notebookbarshortcuts">'
+               '<prop oor:name="UIName"><value>LibreOffice lint sneltoetsen</value></prop></node>'
+               '</oor:component-data><oor:component-data oor:package="org.openoffice.Office.UI" '
+               'oor:name="ToolbarMode"><node oor:name="TabbedCompact"><prop oor:name="Label">'
+               '<value>LibreOffice lint compact</value></prop><prop oor:name="UIName">'
+               '<value>Copyright LibreOffice contributors</value></prop></node>'
+               '</oor:component-data></oor:data>')
+        path.write_text(xml, encoding='utf-8')
+        before_ids = [node.get(OOR+'name') for node in ET.fromstring(xml).iter()]
+        branding.brand_runtime(self.source, self.destination, self.manifest)
+        tree = ET.parse(self.destination/path.relative_to(self.source))
+        self.assertEqual([node.get(OOR+'name') for node in tree.iter()], before_ids)
+        text = [node.text for node in tree.iter('value')]
+        for label in ('OpenGeul Office lint', 'OpenGeul Office lint sneltoetsen', 'OpenGeul Office lint compact'):
+            self.assertIn(label, text)
+        self.assertIn('Aan LibreOffice doneren', text)
+        self.assertIn('LibreOffice.Internal.Token', text)
+        self.assertIn('Copyright LibreOffice contributors', text)
+        self.assertEqual(path.read_text(encoding='utf-8'), xml)
+
     def test_source_legal_and_binaries_are_unchanged_and_receipt_hashes_match(self):
         before = tree_hashes(self.source)
         receipt = branding.brand_runtime(self.source, self.destination, self.manifest)

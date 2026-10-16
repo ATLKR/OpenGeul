@@ -6,6 +6,7 @@ IME-composition test; engine/model tests and native keyboard tests stay separate
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -468,6 +469,64 @@ def attach_module(suite, fixtures, output, module, extension):
     return document_case(suite, fixtures, output, module, extension, physical_input=False)
 
 
+def collect_cases(cases, output):
+    results = []
+    for name, run in cases:
+        try:
+            record = dict(run())
+        except Exception as exc:
+            record = {}
+            saved = output / (name + '-result.json')
+            if saved.is_file() and not saved.is_symlink():
+                try:
+                    record = json.loads(saved.read_text(encoding='utf-8'))
+                    if not isinstance(record, dict): raise ValueError('Case record must be an object')
+                except Exception as read_error:
+                    record = {'recordReadError': type(read_error).__name__ + ': ' + str(read_error)}
+            record.update(success=False, caseException=type(exc).__name__ + ': ' + str(exc))
+            record.setdefault('error', record['caseException'])
+        record['case'] = name
+        if record.get('success') is not True:
+            record['success'] = False
+            record.setdefault('error', 'Case did not report success')
+        try:
+            write_result(output, name, record)
+        except Exception as exc:
+            record.update(success=False, recordWriteError=type(exc).__name__ + ': ' + str(exc))
+        results.append(record)
+        print(name + ': ' + ('passed' if record['success'] else 'FAILED: ' + record.get('error', 'Evidence write failed')), flush=True)
+    return results
+
+
+def suite_report(results):
+    expected = ('home',) + NEW_MODULES + tuple('new-' + module for module in NEW_MODULES)
+    counts = Counter(record['case'] for record in results)
+    missing = [name for name in expected if name not in counts]
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    unexpected = sorted(set(counts) - set(expected))
+    passed = {record['case']: record for record in results if record.get('success') is True}
+    failed = [record['case'] for record in results if record.get('success') is not True]
+    success = not missing and not duplicates and not unexpected and not failed
+    report = {'success': success, 'imeVerified': False, 'tests': results,
+              'expectedCaseCount': len(expected), 'completedCaseCount': len(results),
+              'passedCaseCount': sum(record.get('success') is True for record in results),
+              'failedCases': failed, 'missingCases': missing, 'duplicateCases': duplicates,
+              'unexpectedCases': unexpected, 'homeVerified': 'home' in passed,
+              'nativeAttachmentModules': [module for module in NEW_MODULES if module in passed and passed[module].get('nativeParentVerified') is True],
+              'physicalInputModules': [module for module, _ in INPUT_CASES if module in passed and passed[module].get('keyboardInputVerified') is True and passed[module].get('contentMutationVerified') is True],
+              'attachOnlyModules': [module for module, _ in ATTACH_CASES if module in passed],
+              'newDocumentModules': [module for module in NEW_MODULES if 'new-' + module in passed and passed['new-' + module].get('newDocumentVerified') is True]}
+    if not success: report['error'] = 'One or more GUI cases failed or required case coverage is incomplete'
+    return report
+
+
+def run_cases(cases, output):
+    report = suite_report(collect_cases(cases, output))
+    (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    print(f"GUI cases: {report['passedCaseCount']}/{report['expectedCaseCount']} passed", flush=True)
+    return 0 if report['success'] else 1
+
+
 def main():
     if os.name != 'nt': raise RuntimeError('Actual Windows GUI execution is required')
     if not __debug__: raise RuntimeError('Do not disable native GUI assertions with Python -O')
@@ -483,27 +542,14 @@ def main():
     assert fixtures != output and fixtures not in output.parents, 'Evidence must be outside generated fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
     output.mkdir(parents=True, exist_ok=False)
-    results = []
-    report = {'success': False, 'imeVerified': False, 'tests': results}
-    try:
-        results.append(capture_home(suite, output))
-        for module, extension in INPUT_CASES:
-            results.append(edit_module(suite, fixtures, output, module, extension))
-        for module, extension in ATTACH_CASES:
-            results.append(attach_module(suite, fixtures, output, module, extension))
-        for module in NEW_MODULES:
-            results.append(new_module(suite, output, module, fixtures=fixtures))
-        report.update(success=True, homeVerified=True,
-                      nativeAttachmentModules=[case[0] for case in INPUT_CASES + ATTACH_CASES],
-                      physicalInputModules=[case[0] for case in INPUT_CASES],
-                      attachOnlyModules=[case[0] for case in ATTACH_CASES],
-                      newDocumentModules=list(NEW_MODULES))
-        print('Actual Suite home, 6 existing/new native modules and 3 keyboard/save checks passed')
-    except Exception as exc:
-        report['error'] = type(exc).__name__ + ': ' + str(exc)
-        raise
-    finally:
-        (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    cases = [('home', lambda: capture_home(suite, output))]
+    for module, extension in INPUT_CASES:
+        cases.append((module, lambda module=module, extension=extension: edit_module(suite, fixtures, output, module, extension)))
+    for module, extension in ATTACH_CASES:
+        cases.append((module, lambda module=module, extension=extension: attach_module(suite, fixtures, output, module, extension)))
+    for module in NEW_MODULES:
+        cases.append(('new-' + module, lambda module=module: new_module(suite, output, module, fixtures=fixtures)))
+    return run_cases(cases, output)
 
 
-if __name__ == '__main__': main()
+if __name__ == '__main__': raise SystemExit(main())

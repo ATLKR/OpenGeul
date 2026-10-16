@@ -1,6 +1,8 @@
 """Platform-neutral checks for the actual-Windows smoke harness helpers."""
 import importlib.util
+from contextlib import redirect_stdout
 import hashlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -16,6 +18,82 @@ SPEC.loader.exec_module(smoke)
 
 
 class NativeSmokeTests(unittest.TestCase):
+    def test_collector_continues_and_preserves_failed_case_record_and_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            calls = []
+            def fails():
+                calls.append('writer')
+                smoke.write_result(output, 'writer', {'module': 'writer', 'success': False,
+                    'childHwnd': 1234, 'error': 'native marker failed'})
+                raise RuntimeError('case exception')
+            def passes():
+                calls.append('calc')
+                return {'module': 'calc', 'success': True}
+            with redirect_stdout(io.StringIO()):
+                records = smoke.collect_cases([('writer', fails), ('calc', passes)], output)
+            self.assertEqual(calls, ['writer', 'calc'])
+            self.assertFalse(records[0]['success'])
+            self.assertEqual(records[0]['childHwnd'], 1234)
+            self.assertEqual(records[0]['error'], 'native marker failed')
+            self.assertIn('RuntimeError: case exception', records[0]['caseException'])
+            self.assertEqual(records[0]['case'], 'writer')
+            self.assertTrue(records[1]['success'])
+
+    def test_collector_keeps_returned_cleanup_failure_as_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with redirect_stdout(io.StringIO()):
+                records = smoke.collect_cases([
+                    ('home', lambda: {'success': False, 'cleanupError': 'worker remained alive'}),
+                    ('writer', lambda: {'success': True})], Path(directory))
+            self.assertFalse(records[0]['success'])
+            self.assertEqual(records[0]['cleanupError'], 'worker remained alive')
+            self.assertTrue(records[1]['success'])
+
+    def case_record(self, name):
+        module = name.removeprefix('new-')
+        return {'case': name, 'module': module, 'success': True,
+                'kind': 'home' if name == 'home' else 'new-document' if name.startswith('new-') else 'keyboard-edit' if name in ('writer', 'calc', 'impress') else 'native-attach',
+                'nativeParentVerified': name != 'home', 'newDocumentVerified': name.startswith('new-'),
+                'keyboardInputVerified': name in ('writer', 'calc', 'impress'),
+                'contentMutationVerified': name in ('writer', 'calc', 'impress')}
+
+    def case_names(self):
+        modules = ('writer', 'calc', 'impress', 'draw', 'math', 'base')
+        return ('home',) + modules + tuple('new-' + module for module in modules)
+
+    def test_aggregate_exit_and_module_claims_require_thirteen_passing_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            cases = [(name, lambda name=name: self.case_record(name)) for name in self.case_names()]
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(smoke.run_cases(cases, output), 0)
+            report = json.loads((output / 'results.json').read_text(encoding='utf-8'))
+            self.assertTrue(report['success'])
+            self.assertEqual(report['passedCaseCount'], 13)
+            self.assertEqual(len(report['newDocumentModules']), 6)
+            def failure():
+                return {**self.case_record('writer'), 'success': False, 'error': 'marker missing'}
+            cases[1] = ('writer', failure)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(smoke.run_cases(cases, output), 1)
+            report = json.loads((output / 'results.json').read_text(encoding='utf-8'))
+            self.assertFalse(report['success'])
+            self.assertEqual(report['passedCaseCount'], 12)
+            self.assertEqual(report['failedCases'], ['writer'])
+            self.assertNotIn('writer', report['physicalInputModules'])
+            self.assertNotIn('writer', report['nativeAttachmentModules'])
+            self.assertEqual(len(report['tests']), 13)
+
+    def test_aggregate_rejects_missing_or_duplicate_case_coverage(self):
+        complete = [self.case_record(name) for name in self.case_names()]
+        missing = smoke.suite_report(complete[:-1])
+        self.assertFalse(missing['success'])
+        self.assertEqual(missing['missingCases'], ['new-base'])
+        duplicate = smoke.suite_report(complete + [complete[1]])
+        self.assertFalse(duplicate['success'])
+        self.assertEqual(duplicate['duplicateCases'], ['writer'])
+
     def test_new_base_target_is_fresh_and_distinct_from_engine_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
             fixtures = Path(directory) / 'fixtures'

@@ -64,6 +64,14 @@ three physical-input cases. No case establishes IME composition, and Linux helpe
 tests do not establish actual Windows GUI success. Failure screenshots/records
 remain failure evidence even if earlier cases passed.
 
+The GUI harness attempts all 13 independent cases (home, six existing documents,
+six blank documents), preserving each case's strict checks and owned cleanup.
+A failed case does not stop later processes/fixtures from being observed.
+`results.json` retains the failed function's evidence and exception, lists failed,
+missing or duplicate cases, and reports successful module claims only for passing
+cases. Any failure or incomplete coverage produces `success=false` and process
+exit 1; the validated-package gate is unchanged.
+
 After existing-document checks, all six Office modules also launch with
 `--module MODULE` and no file argument. Each blank document must attach under the
 Suite panel, retain its OpenGeul title, avoid external Office windows, produce

@@ -142,6 +142,27 @@ def _write_xml(path: Path, tree: ET.ElementTree) -> None:
     path.write_text('<?xml version="1.0" encoding="utf-8"?>\n' + opening + data[end:], encoding='utf-8')
 
 
+def _brand_registry_display_labels(root: ET.Element, manifest: dict) -> bool:
+    """Brand display-only registry properties while retaining upstream recipients."""
+    changed = False
+
+    def visit(node: ET.Element, donation: bool = False) -> None:
+        nonlocal changed
+        donation = donation or node.get(OOR+'name') == '.uno:Donation'
+        if not donation and node.tag == 'prop' and node.get(OOR+'name') in ('Label', 'UIName'):
+            for value in node.findall('value'):
+                if value.text:
+                    label = _brand_text(value.text, manifest)
+                    if value.text != label:
+                        value.text = label
+                        changed = True
+        for child in node:
+            visit(child, donation)
+
+    visit(root)
+    return changed
+
+
 def _brand_registry(runtime: Path, manifest: dict) -> None:
     product_found = False
     modules_found = set()
@@ -183,6 +204,7 @@ def _brand_registry(runtime: Path, manifest: dict) -> None:
                     if application is not None:
                         changed |= _value(application, 'Active', 'Tabbed')
                         changed |= _value(component, 'Active' + name, 'notebookbar.ui')
+        changed |= _brand_registry_display_labels(tree.getroot(), manifest)
         if changed:
             _write_xml(path, tree)
     if not product_found or modules_found != MODULES - {'hwp'}:
