@@ -681,7 +681,8 @@ class NewBaseBoundaryTests(unittest.TestCase):
         self.assertTrue(self.calls.index(('generated-close', False)) < next(i for i, call in enumerate(self.calls) if call[0] == 'load'))
         self.assertIsNone(result['path'])
         self.assertIsNone(session.path)
-        self.assertFalse(result['modified'])
+        self.assertTrue(result['modified'])
+        self.assertFalse(self.live.isModified())
         with self.assertRaises(importlib.import_module('session').WorkerError):
             session.dispatch('save', {})
 
@@ -710,6 +711,72 @@ class NewBaseBoundaryTests(unittest.TestCase):
             self.backend.attach(123, self.module, 640, 480, None)
         self.assertEqual(b'preserve', owned.read_bytes())
         self.assertFalse(any(call[0] in ('store', 'source', 'load') for call in self.calls))
+
+
+class NewBaseSessionGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.session_module = importlib.import_module('session')
+        self.worker_module = importlib.import_module('office_worker')
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.backend = FakeBackend(self.root)
+        self.registry = {'base': {'factory': 'private:factory/sdatabase', 'extensions': ['odb'],
+                                 'filters': {'odb': 'StarOffice XML (Base)'}}}
+        self.session = self.session_module.DocumentSession(self.root, self.registry,
+                            backend_factory=lambda runtime: self.backend)
+
+    def attach(self, path=None):
+        args = {'parentHwnd': 123, 'module': 'base', 'width': 640, 'height': 480}
+        if path is not None:
+            args['path'] = str(path)
+        return self.session.dispatch('attach', args)
+
+    def test_clean_native_model_still_protects_unsaved_base_without_mutating_status(self):
+        native_status = {'modified': False, 'title': 'Database', 'readiness': {'state': 'not_connected'}}
+        self.backend.status = lambda: native_status
+        self.assertTrue(self.attach()['modified'])
+        self.assertTrue(self.session.dispatch('status', {})['modified'])
+        self.assertFalse(native_status['modified'])
+        self.assertEqual({'closed': False, 'closeCancelled': True}, self.session.dispatch('close', {}))
+        self.assertFalse(any(call[0] in ('close', 'cleanup') for call in self.backend.calls))
+
+    def test_shutdown_and_eof_preserve_unsaved_base_with_clean_native_model(self):
+        self.attach()
+        self.assertTrue(self.session.dispatch('shutdown', {})['closeCancelled'])
+        self.worker_module.serve(self.session, io.StringIO(''), io.StringIO())
+        self.assertEqual('attached', self.session.state)
+        self.assertTrue(self.session.dispatch('status', {})['modified'])
+        self.assertFalse(any(call[0] in ('close', 'cleanup') for call in self.backend.calls))
+
+    def test_explicit_discard_closes_unsaved_base(self):
+        self.attach()
+        self.assertTrue(self.session.dispatch('close', {'discard': True})['closed'])
+        self.assertIn(('close', True), self.backend.calls)
+        self.assertIn(('cleanup',), self.backend.calls)
+
+    def test_failed_save_as_preserves_guard_and_success_releases_it(self):
+        self.attach()
+        path = self.root / '사용자 데이터베이스.odb'
+        self.backend.fail_save = True
+        with self.assertRaises(self.session_module.WorkerError):
+            self.session.dispatch('save', {'path': str(path)})
+        self.assertIsNone(self.session.path)
+        self.assertTrue(self.session.dispatch('status', {})['modified'])
+        self.assertTrue(self.session.dispatch('close', {})['closeCancelled'])
+        self.backend.fail_save = False
+        result = self.session.dispatch('save', {'path': str(path)})
+        self.assertEqual(str(path), result['path'])
+        self.assertFalse(result['modified'])
+        self.assertTrue(self.session.dispatch('close', {})['closed'])
+
+    def test_existing_clean_odb_closes_without_new_document_guard(self):
+        path = self.root / 'existing.odb'
+        path.write_bytes(b'existing database')
+        self.assertFalse(self.attach(path)['modified'])
+        self.assertTrue(self.session.dispatch('close', {})['closed'])
+        self.assertIn(('close', False), self.backend.calls)
+        self.assertEqual(b'existing database', path.read_bytes())
 
 
 if __name__ == '__main__':

@@ -119,9 +119,16 @@ class DocumentSession:
         self.handles, self.state = handles, 'attached'
         return self._status({})
 
+    def _document_status(self):
+        state = dict(self.backend.status())
+        # New Base is backed by an owned temporary ODB. Its clean engine flag
+        # does not mean the user has chosen a durable Save As destination.
+        state['modified'] = bool(state['modified'] or (self.module == 'base' and self.path is None))
+        return state
+
     def _status(self, args):
         self._require_attached()
-        state = self.backend.status()
+        state = self._document_status()
         return dict(state, module=self.module, path=str(self.path) if self.path else None, **self.handles)
 
     def _resize(self, args):
@@ -156,7 +163,7 @@ class DocumentSession:
         discard = args.get('discard', False)
         if type(discard) is not bool:
             raise WorkerError('invalid_request', 'discard는 true 또는 false여야 합니다.')
-        if not discard and self.backend.status()['modified']:
+        if not discard and self._document_status()['modified']:
             return {'closed': False, 'closeCancelled': True}
         try:
             self.backend.close(discard)
