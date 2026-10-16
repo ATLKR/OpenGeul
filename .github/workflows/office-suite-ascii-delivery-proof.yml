@@ -1,0 +1,540 @@
+name: OpenGeul physical ASCII delivery diagnostic
+'on':
+  push:
+    branches:
+    - work/suite-physical-ascii-diagnostic
+    paths:
+    - .github/workflows/office-suite-ascii-delivery-proof.yml
+permissions:
+  contents: read
+concurrency:
+  group: ascii-delivery-proof-${{ github.run_id }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+  NATIVE_SHA256: bf518ea17d202f0464ca4d8c09293e6c57a90d919ce55aec61f42c9f70a06761
+  STYLE_SHA256: 8df9debdf31a84c9fb4205af0f51ecd221dace06d886d1029d35c839a5b368d3
+  WINDOWS_SHA256: fdd7521e32d77cd3e5a9e74b163d97c06f2d2ac5b94de0257718f6e4da68e7d3
+  LIFECYCLE_SHA256: dab91bc160c7a04601860384d426db7ace5a4d217c7832c6c0b8c879092e0d9c
+  SUITE_PACKAGE: dist/OpenGeul-Office-0.1.1-dev-windows-x64
+  BASELINE_SOURCE: 299c9e4cc244b47b0e11d8b96040395a1ac76220
+  CANDIDATE_SOURCE: b17faaf18442dcb105b8c9b2b90275a1f042e03c
+  DIAGNOSTIC_SOURCE_SHA256_JSON: '{"suite/e2e/physical_ascii_probe.py":"9dc92cef09fe4a8349b56b22bfe88059f0ca5cf7ed8d43a6aba76a058b111893","suite/e2e/keyboard_delivery.py":"0a08413dce9cccd9c63247f9f92911075318f04e8b4de3eafd32bec67e6c1042","suite/tests/test_physical_ascii_probe.py":"314adb385fadc26879b393cd66c7f8a137e0fcdef9ade7a912d0216c7c47bd74"}'
+  PROOF_ROOT: .work/ascii-delivery-proof
+jobs:
+  windows-suite:
+    if: github.event.repository.private == false && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/suite-physical-ascii-diagnostic' && github.event_name == 'push'
+    runs-on: windows-2025
+    timeout-minutes: 75
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 3
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Bind clean source and unchanged Suite299 baseline
+      shell: python
+      run: |
+        from pathlib import Path
+        import hashlib,json,os,subprocess
+        if not __debug__: raise RuntimeError('Assertions must remain enabled')
+        def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+        def sha(data): return hashlib.sha256(data).hexdigest()
+        head=git('rev-parse','HEAD'); candidate=os.environ['CANDIDATE_SOURCE']; baseline=os.environ['BASELINE_SOURCE']
+        assert head==os.environ['GITHUB_SHA'] and not git('status','--porcelain','--untracked-files=normal')
+        assert git('rev-parse','HEAD^')==candidate and git('rev-parse',candidate+'^')==baseline
+        assert git('rev-parse','HEAD:suite')==git('rev-parse',candidate+':suite')
+        assert os.environ['GITHUB_JOB']=='windows-suite' and os.environ['GITHUB_RUN_ATTEMPT']=='1'
+        baseline_files=git('ls-tree','-r','--name-only',baseline,'--','suite').splitlines()
+        current_files=git('ls-tree','-r','--name-only',head,'--','suite').splitlines()
+        assert baseline_files and set(baseline_files)<=set(current_files)
+        additions=json.loads(os.environ['DIAGNOSTIC_SOURCE_SHA256_JSON'])
+        assert len(additions)==3 and sorted(set(current_files)-set(baseline_files))==sorted(additions)
+        assert all(sha(Path(path).read_bytes())==value for path,value in additions.items()), 'Frozen diagnostic source differs'
+        for path in baseline_files:
+            assert Path(path).read_bytes()==subprocess.check_output(['git','show',baseline+':'+path]), 'Existing Suite299 file changed: '+path
+        for path,key in [('suite/worker/native.py','NATIVE_SHA256'),('suite/e2e/writer_style_smoke.py','STYLE_SHA256'),('suite/e2e/lifecycle_smoke.py','LIFECYCLE_SHA256'),('suite/e2e/windows_smoke.py','WINDOWS_SHA256')]:
+            assert sha(Path(path).read_bytes())==os.environ[key]
+        root=Path(os.environ['PROOF_ROOT'])/'source'; root.mkdir(parents=True,exist_ok=False)
+        files={path:sha(Path(path).read_bytes()) for path in current_files}
+        record=dict(schemaVersion=1,kind='physical-ascii-diagnostic-source',diagnosticOnly=True,deliverable=False,sourceCommit=head,sourceTree=git('rev-parse','HEAD^{tree}'),candidateOrigin=candidate,baselineSource=baseline,baselineSuiteFilesUnchanged=len(baseline_files),diagnosticSourceSha256=additions,suiteFiles=files,repository=os.environ['GITHUB_REPOSITORY'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],job=os.environ['GITHUB_JOB'])
+        (root/'source-binding.json').write_text(json.dumps(record,indent=2)+'\n',encoding='utf-8')
+        subprocess.run(['git','archive','--format=zip','--output',str(root/'committed-source.zip'),head,'suite','.github/workflows/office-suite-ascii-delivery-proof.yml'],check=True)
+      id: source
+    - name: Run all unchanged Suite contracts and diagnostic unit tests
+      shell: pwsh
+      run: |
+        python -m unittest discover -s suite/tests -v
+        if ($LASTEXITCODE -ne 0) { throw 'Suite baseline and diagnostic unit contracts failed.' }
+        dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+        if ($LASTEXITCODE -ne 0) { throw 'Suite shell contracts failed.' }
+      id: unit
+    - name: Fresh pinned Suite package build
+      shell: pwsh
+      run: |
+        ./suite/scripts/build-suite.ps1 -WorkDirectory "$env:PROOF_ROOT/build" -OutputDirectory $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh pinned package build failed.' }
+      id: build
+    - name: Verify complete inventory and every packaged source file
+      shell: python
+      run: |
+        from pathlib import Path
+        import hashlib,json,os,shutil,subprocess,zipfile
+        root=Path(os.environ['PROOF_ROOT']); package=Path(os.environ['SUITE_PACKAGE']); output=root/'package'; output.mkdir(exist_ok=False)
+        subprocess.run(['python','suite/scripts/verify-suite.py',str(package)],check=True)
+        binding=json.loads((root/'source/source-binding.json').read_text(encoding='utf-8'))
+        provenance=json.loads((package/'suite-provenance.json').read_text(encoding='utf-8'))
+        assert provenance['sourceCommit']==os.environ['GITHUB_SHA']
+        def sha(data): return hashlib.sha256(data).hexdigest()
+        workflow='.github/workflows/office-suite-ascii-delivery-proof.yml'
+        with zipfile.ZipFile(package/'Sources/OpenGeul-Office-source.zip') as archive:
+            assert archive.comment.decode('ascii')==os.environ['GITHUB_SHA']
+            for path,value in binding['suiteFiles'].items():
+                assert sha(Path(path).read_bytes())==sha(archive.read(path))==value, 'Packaged source differs: '+path
+            assert sha(Path(workflow).read_bytes())==sha(archive.read(workflow))
+        workers={}
+        for path in sorted(Path('suite/worker').glob('*.py')):
+            workers[path.name]=sha(path.read_bytes()); assert workers[path.name]==sha((package/'worker'/path.name).read_bytes())
+        assert workers['native.py']==os.environ['NATIVE_SHA256']
+        for name in ('suite-inventory.json','suite-provenance.json','suite-product.json'):
+            shutil.copyfile(package/name,output/name)
+        record=dict(schemaVersion=1,diagnosticOnly=True,deliverable=False,sourceCommit=os.environ['GITHUB_SHA'],wholeInventoryVerified=True,sourceFilesVerified=len(binding['suiteFiles']),sourceArchiveSha256=sha((package/'Sources/OpenGeul-Office-source.zip').read_bytes()),workerSha256=workers,workflowSha256=sha(Path(workflow).read_bytes()))
+        (output/'source-byte-binding.json').write_text(json.dumps(record,indent=2)+'\n',encoding='utf-8')
+      id: package
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Prepare actual Microsoft Korean IME and native UI
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
+        ./suite/scripts/ensure-korean-ime.ps1 -Output "$env:PROOF_ROOT/korean-readiness"
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
+      id: readiness
+      if: '!cancelled() && steps.package.outcome == ''success'''
+    - name: Immediately retain original Korean readiness observations
+      if: '!cancelled() && steps.package.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ascii-delivery-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/ascii-delivery-proof/korean-readiness/
+          !.work/ascii-delivery-proof/korean-readiness/fod-source/**/*.cab
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 6
+    - name: Fresh original six-module engine baseline
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output "$env:PROOF_ROOT/engine"
+        if ($LASTEXITCODE -ne 0) { throw 'Six-module engine baseline failed.' }
+      id: fixtures
+      if: '!cancelled() && steps.package.outcome == ''success'''
+    - name: Original actual Korean IME composition and Backspace cases
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --readiness "$env:PROOF_ROOT/korean-readiness/readiness.json" --output "$env:PROOF_ROOT/korean-ime"
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and content verification failed.' }
+      id: korean_ime
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/ascii-delivery-proof/worker-diagnostics
+      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+    - name: Immediately retain actual Korean IME and native originals
+      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ascii-delivery-ime-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/ascii-delivery-proof/korean-ime/
+          .work/ascii-delivery-proof/worker-diagnostics/
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 6
+    - name: Original four-module Korean native Tabbed UI observation
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ui_smoke.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/korean-ui"
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean native Tabbed UI verification failed.' }
+      id: korean_ui
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/ascii-delivery-proof/worker-diagnostics
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Immediately retain original Korean UI observations
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ascii-delivery-ui-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/ascii-delivery-proof/korean-ui/
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 6
+    - name: Original physical Writer Heading1 save and packaged UNO reopen
+      shell: pwsh
+      run: |
+        python suite/e2e/writer_style_smoke.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/writer-style"
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Writer Heading1 save and independent reopen failed.' }
+      id: writer_style
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/ascii-delivery-proof/worker-diagnostics
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Immediately retain original physical Writer style observations
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ascii-delivery-style-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/ascii-delivery-proof/writer-style/
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 6
+    - name: Fixed20 alternating observed and pristine original dirty-close trials
+      shell: pwsh
+      run: |
+        python suite/e2e/physical_ascii_probe.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/physical-ascii" --trials 20
+        if ($LASTEXITCODE -ne 0) { throw 'At least one original dirty-close case failed; all predetermined trials and raw observations remain retained.' }
+      id: physical_ascii
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/ascii-delivery-proof/worker-diagnostics
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Reverify complete unchanged package inventory
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Package inventory changed during diagnostic execution.' }
+      id: inventory
+      if: '!cancelled() && steps.package.outcome == ''success'''
+    - name: Preserve an independent positive style and native-image proof
+      id: style_proof
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: python
+      run: |
+        from pathlib import Path, PurePosixPath, PureWindowsPath
+        import hashlib,json,os,sys
+        root=Path(os.environ['PROOF_ROOT']); package=Path(os.environ['SUITE_PACKAGE']).resolve()
+        style=json.loads((root/'writer-style/results.json').read_text(encoding='utf-8'))
+        assert style['schemaVersion']==1 and style['kind']=='native-writer-style-regression' and style['success'] is True
+        assert len(style['tests'])==1 and style['tests'][0]['case']=='writer-heading1' and style['tests'][0]['success'] is True
+        case=style['tests'][0]; uno=json.loads((root/'writer-style/packaged-uno-result.json').read_text(encoding='utf-8')); assert uno['success'] is True
+        sys.path.insert(0,str(Path('suite/e2e').resolve())); import writer_style_smoke, windows_smoke
+        readiness=case['editorFocusReadinessRecords']; assert len(readiness)==1 and case['editorFocusReadiness']==readiness[0]
+        windows_smoke.require_editor_focus_readiness(readiness[0],case['windowHwnd'],case['childHwnd'],case['shellPid'],case['officePid'])
+        assert writer_style_smoke.require_packaged_python(package,uno['pythonIdentity']['observed'])==uno['pythonIdentity']
+        matches=[]
+        for manifest in (root/'worker-diagnostics').glob('*/manifest.json'):
+            events=[json.loads(line) for line in (manifest.parent/'events.jsonl').read_text(encoding='utf-8').splitlines()]
+            if any(any(p.get('pid')==case['officePid'] and p.get('creationTime')==case['officeCreationTime'] for p in event.get('processes',[])) for event in events): matches.append((manifest,events))
+        assert len(matches)==1, 'One exact style PID and creation-time archive is required'
+        manifest,events=matches[0]; record=json.loads(manifest.read_text(encoding='utf-8'))
+        assert record['schemaVersion']==1 and record['archiveComplete'] is True
+        assert [event['phase'] for event in events]==['before-ui-bootstrap','after-ui-bootstrap','before-load','before-owned-shutdown','after-owned-shutdown']
+        for event in events:
+            engine=[p for p in event['processes'] if p['pid']==case['officePid'] and p['creationTime']==case['officeCreationTime']]
+            assert len(engine)==1 and PureWindowsPath(engine[0]['image'])==PureWindowsPath(package)/'Office/program/soffice.bin'
+        for path in manifest.parent.rglob('*'):
+            assert not path.is_symlink() and not getattr(path,'is_junction',lambda:False)(), 'Linked style evidence'
+            if path.is_file(): assert path.suffix.lower() not in ('.dmp','.mdmp') and path.read_bytes()[:4]!=b'MDMP', 'Style engine crash dump found'
+        seen=set()
+        for item in record['files']:
+            name=item['path']; relative=PurePosixPath(name)
+            assert name and '\\' not in name and ':' not in name and not relative.is_absolute() and '..' not in relative.parts and relative.as_posix()==name and name not in seen
+            seen.add(name); path=manifest.parent.joinpath(*relative.parts)
+            assert path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve()) and type(item['bytes']) is int and path.stat().st_size==item['bytes'] and hashlib.sha256(path.read_bytes()).hexdigest()==item['sha256']
+        proof=dict(schemaVersion=1,diagnosticOnly=True,deliverable=False,success=True,sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],writerStyleCases=1,styleNativeArchive=manifest.relative_to(root).as_posix(),officePid=case['officePid'],officeCreationTime=case['officeCreationTime'],manifestSha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),eventsSha256=hashlib.sha256((manifest.parent/'events.jsonl').read_bytes()).hexdigest(),pythonIdentity=uno['pythonIdentity'])
+        (root/'writer-style/proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+    - name: Independently replay the unchanged full presequence receipts
+      shell: python
+      run: |
+        from pathlib import Path
+        import hashlib,json,os,sys
+        root=Path(os.environ['PROOF_ROOT']); package=Path(os.environ['SUITE_PACKAGE']).resolve()
+        sys.path.insert(0,str(Path('suite/e2e').resolve()))
+        import engine_smoke,korean_ime_smoke,korean_ui_smoke,native_accessibility,writer_style_smoke
+        def load(path): return json.loads(path.read_text(encoding='utf-8-sig'))
+        def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+        baseline=load(root/'engine/engine-smoke.json')
+        assert baseline['schemaVersion']==1 and baseline['kind']=='engine' and baseline['passed'] is True and baseline['guiVerified'] is False
+        assert [row['module'] for row in baseline['cases']]==list(engine_smoke.FILES)
+        fixture_hashes={}
+        for row in baseline['cases']:
+            module=row['module']; fixture=root/'engine/fixtures'/engine_smoke.FILES[module]
+            assert row==load(root/'engine'/('engine-'+module+'.json')) and row['status']=='passed'
+            assert Path(row['fixture']).resolve()==fixture.resolve() and fixture.stat().st_size==row['bytes'] and sha(fixture)==row['sha256']
+            engine_smoke.verify_content(module,row['observed']); fixture_hashes[fixture.name]=row['sha256']
+        ready=korean_ime_smoke.require_readiness(load(root/'korean-readiness/readiness.json'))
+        assert ready['source']==dict(sourceCommit=os.environ['GITHUB_SHA'],job='windows-suite',repository=os.environ['GITHUB_REPOSITORY'],sourceRun=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'])
+        assert ready['formatVersion']==1 and ready['nativeMachine']==0x8664 and ready['capabilityName']=='Language.Basic~~~ko-KR~0.0.1.0'
+        assert ready['productInputVerified'] is False and ready['sourceQualified'] is False and ready['storeQualified'] is False
+        profile=ready['profile']; component=profile['component']; component_path=Path(component['path'])
+        assert profile['registryView']=='Registry64' and profile['languageId']==0x0412 and profile['inputTip'] in ready['configuredInputTips']
+        assert component_path.is_file() and component_path.stat().st_size==component['bytes'] and sha(component_path)==component['sha256']
+        ime=load(root/'korean-ime/results.json')
+        assert ime['schemaVersion']==1 and ime['kind']=='native-korean-ime' and ime['success'] is True and ime['imeVerified'] is True and ime['suiteOnly'] is True
+        assert ime['expectedCaseCount']==ime['passedCaseCount']==len(ime['tests'])==3
+        assert [row['case'] for row in ime['tests']]==['ime-'+module for module in ('writer','calc','impress')]
+        for row in ime['tests']:
+            assert row==load(root/'korean-ime'/(row['case']+'-result.json')) and row['success'] is True and row['readiness']==ready
+            assert row['cleanClose'] is True and row['originalFixtureUnchanged'] is True
+            korean_ime_smoke.validate_ime_evidence(row)
+        ui=load(root/'korean-ui/results.json'); modules=list(korean_ui_smoke.MODULES)
+        assert ui['schemaVersion']==1 and ui['kind']=='native-korean-tabbed-ui' and ui['success'] is True and ui['probeOnly'] is False and ui['koreanUiVerified'] is True
+        assert ui['expectedModules']==ui['verifiedModules']==modules and [row['module'] for row in ui['tests']]==modules
+        for row in ui['tests']:
+            assert row==load(root/'korean-ui'/(row['case']+'-result.json')) and row['success'] is True
+            assert all(row[key] is True for key in ('cleanClose','fixtureUnchanged','originalFixtureUnchanged','officeExited','noExternalOfficeWindow'))
+            assert row['shellExitCode']==0 and row['forcedCleanupRequired'] is False and row['osScreenReaderExposureCertified'] is False
+            assert sha(root/'korean-ui'/row['copiedFixture'])==row['beforeSha256']
+            snapshot=load(root/'korean-ui'/row['accessibilitySnapshot'])
+            native_accessibility.require_native_tabs(snapshot,row['officePid'],row['childHwnd'],row['module'])
+        style=load(root/'writer-style/results.json'); case=style['tests'][0]
+        assert len(style['tests'])==1 and case==load(root/'writer-style/writer-heading1-result.json')
+        assert all(case[key] is True for key in ('success','guiVerified','cleanClose','physicalStyleShortcutSent','docxHeading1Verified','textUnchanged','retainedProcessVerified','engineImageVerified','nativeParentVerified','noExternalOfficeWindow','originalFixtureUnchanged','packagedUnoVerified','officeExited'))
+        assert case['shellExitCode']==0 and case['forcedCleanupRequired'] is False and case['packagedUnoExitCode']==0
+        assert case['inputMethod']=='physical-keyboard' and case['unicodeInputUsed'] is False and case['keyboardKeys']==['CTRL+HOME','CTRL+1']
+        original=root/'engine/fixtures'/engine_smoke.FILES['writer']; saved=writer_style_smoke.owned_saved_path(root/'writer-style',case)
+        assert writer_style_smoke.docx_style_evidence(original)==case['baseline'] and sha(original)==case['originalSha256']
+        assert writer_style_smoke.docx_style_evidence(saved)==case['savedDocument']
+        writer_style_smoke.require_saved_style(case['baseline'],case['savedDocument']); writer_style_smoke.require_office_exit(case['officeExitCode'])
+        uno=load(root/'writer-style/packaged-uno-result.json'); assert uno['success'] is True and uno['readOnlyModelVerified'] is True
+        writer_style_smoke.require_uno_style(case['savedDocument'],uno['observed'],uno['beforeSha256'],sha(saved))
+        proof=dict(schemaVersion=1,kind='physical-ascii-diagnostic-presequence',diagnosticOnly=True,deliverable=False,success=True,sourceCommit=os.environ['GITHUB_SHA'],engineCases=6,actualKoreanImeCases=3,koreanUiCases=4,physicalWriterStyleCases=1,baselineFixtureSha256=fixture_hashes)
+        (root/'presequence-proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+      id: presequence
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Independently verify every complete native archive and absence of dumps
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: python
+      run: |
+        from pathlib import Path, PurePosixPath, PureWindowsPath
+        import hashlib,json,os,sys
+        root=Path(os.environ['PROOF_ROOT']); package=Path(os.environ['SUITE_PACKAGE']).resolve()
+        diagnostics=root/'worker-diagnostics'; manifests=list(diagnostics.glob('*/manifest.json')); assert manifests
+        for path in diagnostics.rglob('*'):
+            assert not path.is_symlink() and not getattr(path,'is_junction',lambda:False)(), 'Linked native evidence'
+            if path.is_file(): assert path.suffix.lower() not in ('.dmp','.mdmp') and path.read_bytes()[:4]!=b'MDMP', 'Native crash dump found'
+        verified=0
+        for manifest in manifests:
+            record=json.loads(manifest.read_text(encoding='utf-8')); assert record['schemaVersion']==1 and record['archiveComplete'] is True
+            seen=set()
+            for item in record['files']:
+                name=item['path']; relative=PurePosixPath(name)
+                assert name and '\\' not in name and ':' not in name and not relative.is_absolute() and '..' not in relative.parts and relative.as_posix()==name and name not in seen
+                seen.add(name); path=manifest.parent.joinpath(*relative.parts)
+                assert path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve())
+                assert type(item['bytes']) is int and path.stat().st_size==item['bytes'] and hashlib.sha256(path.read_bytes()).hexdigest()==item['sha256']
+                verified+=1
+        proof=dict(schemaVersion=1,kind='native-archive-integrity',diagnosticOnly=True,deliverable=False,success=True,sourceCommit=os.environ['GITHUB_SHA'],completeNativeArchives=len(manifests),verifiedNativeFiles=verified,crashDumps=0)
+        (root/'native-integrity.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+      id: native_integrity
+    - name: Replay all20 raw original cases and separate queue, model and saved observations
+      shell: python
+      run: |
+        """Offline receipt replay after all fixed trials; never send Windows input."""
+        from pathlib import Path, PureWindowsPath
+        import hashlib
+        import inspect
+        import json
+        import nturl2path
+        import os
+        import re
+        import sys
+        import traceback
+        import urllib.parse
+
+        sys.path.insert(0, str(Path('suite/e2e').resolve()))
+        import physical_ascii_probe as probe
+        import keyboard_delivery as delivery
+        import writer_style_smoke as style
+
+
+        def require_original(row, plan, persisted):
+            assert all(row[key] == value for key, value in plan.items()), 'Trial preregistration differs'
+            assert row['originalRecord'] == persisted and persisted['case'] == probe.CASE
+            assert type(persisted['success']) is bool and row['originalActionSuccess'] is persisted['success'], 'Original failure was replaced'
+            assert row['originalSaveAssertionPassed'] is (persisted.get('closeSavePersisted') is True), 'Candidate existence was relabeled as Save'
+            if persisted['success']:
+                assert all(persisted.get(key) is True for key in probe.lifecycle.CASE_REQUIREMENTS[probe.CASE] if key != 'packagedUnoVerified')
+                assert len(persisted['savedDocuments']) == 1
+            if not plan['instrumented']:
+                assert 'physicalObservation' not in persisted and 'boundaryAnalysis' not in row, 'Control was instrumented'
+            return persisted
+
+
+        def replay_inputs(record):
+            markers = probe.lifecycle.ASCII_EDITOR_MARKERS[probe.CASE]
+            readiness, typed = record['editorFocusReadinessRecords'], record['asciiEditorInputs']
+            assert len(readiness) == len(typed) == len(markers) == 2
+            assert record['editorFocusReadiness'] == readiness[-1] and [item['text'] for item in typed] == list(markers)
+            for receipt, inputs, marker in zip(readiness, typed, markers):
+                matches = [a for a in record['attachments'] if (a['hwnd'], a['child']) == (receipt['suiteHwnd'], receipt['childHwnd'])]
+                assert len(matches) == 1
+                attachment = matches[0]
+                probe.lifecycle.native.require_editor_focus_readiness(receipt, attachment['hwnd'], attachment['child'], record['shellPid'], attachment['officePid'])
+                probe.lifecycle.native.ascii_input.require_ascii_receipt(inputs, marker, attachment['hwnd'], attachment['child'])
+            return len(typed)
+
+
+        def replay_observed(row, identity, package, source):
+            record = row['originalRecord']; observation = record['physicalObservation']
+            assert observation['instrumented'] is True and observation['liveGetterAttempts'] == 1
+            assert all(observation.get(key) is True for key in ('hookInstalledBeforeFirstEdit', 'hookUninstalledBeforeOriginalSave', 'privatePipeVerifiedAfter'))
+            attachments = [a for a in record['attachments'] if (a['officePid'], a['child']) == (observation['officePid'], observation['childHwnd'])]
+            assert len(attachments) == 1
+            assert all(action['before']['editorThreadId'] == action['after']['editorThreadId'] == observation['editorTid'] for receipt in record['asciiEditorInputs'] for action in receipt['actions'])
+            witness = observation['processWitness']; expected_image = package / 'Office/program/soffice.bin'
+            assert (witness['officePid'], witness['childHwnd'], witness['officeCreationTime']) == (observation['officePid'], observation['childHwnd'], observation['officeCreationTime'])
+            assert PureWindowsPath(witness['expectedImage']) == PureWindowsPath(expected_image)
+            assert all(witness.get(key) is True for key in ('retainedProcessHandle', 'imageVerified', 'creationTimeVerified', 'hwndVerifiedBefore', 'hwndVerifiedAfter', 'generationVerifiedAfter'))
+            assert observation['expectedBodyText'] == row['expectedBodyText']
+            for prefix in observation['prefixes']:
+                assert prefix['queue']['observer'] == identity, 'Queue receipts refer to another compiler output'
+            analysis = probe.analyze_observation(observation)
+            assert row['boundaryAnalysis'] == analysis and analysis['applicationConsumptionCertified'] is False
+            model = observation['model']
+            probe.require_model_witness(model, observation['officePid'], observation['childHwnd'], observation['officeCreationTime'], expected_image, observation['pipe'])
+            assert model['getterClock']['scope'] == 'packaged-python-getString-RPC'
+            url = urllib.parse.urlsplit(model['documentUrl'])
+            assert url.scheme == 'file' and not url.netloc and PureWindowsPath(nturl2path.url2pathname(url.path)) == PureWindowsPath(source), 'Live getter read another case file'
+            assert type(model['modified']) is bool
+            assert style.require_packaged_python(package, model['pythonIdentity']['observed']) == model['pythonIdentity']
+            choices = observation['originalCloseChoiceWindows']; assert [entry['choice'] for entry in choices] == ['취소', '저장']
+            frequency = observation['prefixes'][0]['qpcBegin']['frequency']
+            def tick(value): return probe._clock(value, frequency)
+            hook, unhook = observation['hookWindow'], observation['unhookWindow']
+            first, before, after = observation['prefixes']
+            assert tick(hook['begin']) <= tick(hook['end']) <= tick(first['qpcBegin']) <= tick(first['qpcEnd']) <= tick(choices[0]['begin']) <= tick(choices[0]['end']) <= tick(before['qpcBegin'])
+            assert tick(after['qpcEnd']) <= tick(unhook['begin']) <= tick(unhook['end']) <= tick(choices[1]['begin']) <= tick(choices[1]['end'])
+            return analysis
+
+
+        def main():
+            if not __debug__: raise RuntimeError('Receipt replay requires assertions')
+            root = Path(os.environ['PROOF_ROOT']); package = Path(os.environ['SUITE_PACKAGE']).resolve()
+            output = root / 'physical-ascii'; target = root / 'coverage-proof.json'
+            proof = dict(schemaVersion=1, kind='physical-ascii-diagnostic-coverage', diagnosticOnly=True,
+                         deliverable=False, acceptanceGateReplaced=False, experimentCompleted=False,
+                         receiptReplaySuccess=False, applicationConsumptionCertified=False,
+                         previousFailureCauseEstablished=False, productFixEstablished=False,
+                         sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'])
+            def load(path): return json.loads(path.read_text(encoding='utf-8'))
+            def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+            try:
+                report = load(output / 'results.json'); recomputed = probe.require_experiment_coverage(report)
+                proof.update({key: value for key, value in recomputed.items() if key not in ('tests', 'kind')})
+                proof['diagnosticOriginalCasesPassed'] = proof.pop('success')
+                preregistration = load(output / 'preregistration.json')
+                baseline = probe.lifecycle.writer_evidence(root / 'engine/fixtures/OpenGeul-writer.docx')
+                plan = probe.trial_plan_with_body(baseline['bodyText'])
+                assert preregistration['sourceCommit'] == os.environ['GITHUB_SHA'] and preregistration['expectedTrials'] == 20 and preregistration['plan'] == plan
+                assert preregistration['baseline'] == baseline and report['originalFixtureUnchanged'] is True
+                assert preregistration['diagnosticOnly'] is True and preregistration['deliverable'] is False and preregistration['acceptanceGateReplaced'] is False
+                assert preregistration['originalActionSha256'] == hashlib.sha256(inspect.getsource(probe.lifecycle.dirty_cancel_save).encode()).hexdigest()
+                assert preregistration['originalEditSha256'] == hashlib.sha256(inspect.getsource(probe.lifecycle.Case.edit).encode()).hexdigest()
+                assert preregistration['sources'] == {name: sha(Path('suite/e2e') / name) for name in probe.SOURCE_FILES}
+                assert preregistration['workers'] == {p.name: sha(p) for p in sorted((package / 'worker').glob('*.py'))}
+                observer = output / 'observer'; cpp = observer / 'delivery-observer.cpp'; dll = observer / 'delivery-observer.dll'
+                generated_pattern = re.escape(delivery.SOURCE).replace('__PREFIX__', r'Local\\\\OpenGeulDelivery_[0-9a-f]{32}')
+                assert re.fullmatch(generated_pattern, cpp.read_text(encoding='utf-8')), 'Native observer differs from pinned source template'
+                identity = dict(sourceSha256=sha(cpp), dllSha256=sha(dll), stateBytes=262168, stateVersion=2, hook='WH_GETMESSAGE', scope='owned-editor-thread', compileBeforeTrials=True)
+                inputs = observed = exact = saved = 0
+                boundaries = []
+                for row, expected in zip(report['tests'], plan):
+                    trial = output / 'trials' / expected['trialId']; probe.lifecycle.unlinked(trial)
+                    assert load(trial / 'preregistered-trial.json') == expected and load(trial / 'trial-result.json') == row
+                    assert row['originalResult'] == probe.CASE + '-result.json'
+                    record = require_original(row, expected, load(trial / row['originalResult']))
+                    inputs += replay_inputs(record)
+                    source = probe.owned_source(trial)
+                    post = load(trial / 'saved-readonly-uno.json'); assert post == row['postSave'] and post['observationComplete'] is True
+                    assert post['expectedBodyText'] == expected['expectedBodyText']
+                    xml = probe.lifecycle.writer_evidence(source); assert post['xml'] == xml
+                    assert post['readOnlyModel'] is True and post['modifiedBefore'] is post['modifiedAfter'] is False
+                    assert post['beforeSha256'] == post['afterCloseSha256'] == post['afterCleanupSha256'] == sha(source)
+                    probe.lifecycle.require_uno_observation(xml, post['observedBodyText'], post['beforeSha256'], post['afterCleanupSha256'])
+                    assert post['expectedBodyMatches'] is (xml['bodyText'] == expected['expectedBodyText'])
+                    assert style.require_packaged_python(package, post['pythonIdentity']['observed']) == post['pythonIdentity']
+                    saved += 1; exact += post['expectedBodyMatches'] is True
+                    if record['success']:
+                        evidence = record['savedDocuments'][0]
+                        assert PureWindowsPath(evidence['path']) == PureWindowsPath(source)
+                        assert {k: v for k, v in evidence.items() if k != 'path'} == probe.lifecycle.writer_evidence(source, evidence['requiredMarkers'], evidence['forbiddenMarkers'])
+                    if expected['instrumented']:
+                        assert load(trial / 'fixtures' / probe.CASE / 'model-before-close-save.json') == record['physicalObservation']['model']
+                        analysis = replay_observed(row, identity, package, source)
+                        observed += 1; boundaries.append(dict(trialId=row['trialId'], **analysis))
+                assert saved == recomputed['postSaveObservedTrialCount'] == 20 and exact == recomputed['postSaveExactBodyTrialCount']
+                assert inputs == 40 and observed == recomputed['observedBoundaryAnalyzedTrialCount'] == 10
+                proof.update(receiptReplaySuccess=True, replayedPhysicalAsciiMarkers=inputs, independentlyReadSavedFiles=saved,
+                             independentlyReadExactSavedBodies=exact, replayedObservedTrials=observed, boundaries=boundaries,
+                             observerIdentity=identity, baselineSha256=baseline['sha256'], success=proof['diagnosticOriginalCasesPassed'])
+            except BaseException as exc:
+                proof.update(success=False, error=type(exc).__name__ + ': ' + str(exc), traceback=traceback.format_exc())
+                raise
+            finally:
+                target.write_text(json.dumps(proof, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+
+
+        if __name__ == '__main__':
+            main()
+      id: coverage
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Require original-case success while retaining diagnostic-only scope
+      shell: python
+      run: |
+        from pathlib import Path
+        import hashlib,json,os,traceback
+        root=Path(os.environ['PROOF_ROOT'])
+        proof=dict(schemaVersion=1,kind='physical-ascii-delivery-diagnostic',diagnosticOnly=True,deliverable=False,acceptanceGateReplaced=False,success=False,previousFailureCauseEstablished=False,productFixEstablished=False,applicationConsumptionCertified=False,sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],stepOutcomes=json.loads(os.environ['STEP_OUTCOMES']))
+        try:
+            coverage=json.loads((root/'coverage-proof.json').read_text(encoding='utf-8'))
+            for key in ('expectedTrialCount','completedTrialCount','observedTrialCount','controlTrialCount','originalActionPassedTrialCount','postSaveObservedTrialCount','postSaveExactBodyTrialCount','observedBoundaryAnalyzedTrialCount','completeObservedPrefixTrialCount'):
+                proof[key]=coverage[key]
+            assert coverage['receiptReplaySuccess'] is True and coverage['experimentCompleted'] is True and coverage['diagnosticOriginalCasesPassed'] is True and coverage['success'] is True
+            assert proof['originalActionPassedTrialCount']==proof['postSaveObservedTrialCount']==proof['postSaveExactBodyTrialCount']==20 and proof['observedBoundaryAnalyzedTrialCount']==10
+            assert all(value=='success' for value in proof['stepOutcomes'].values()), 'An original prerequisite, case or integrity step failed'
+            for name in ('presequence-proof.json','native-integrity.json','writer-style/proof.json'):
+                record=json.loads((root/name).read_text(encoding='utf-8')); assert record['success'] is True and record['sourceCommit']==os.environ['GITHUB_SHA']
+            proof.update(success=True,wholeInventoryUnchanged=True,inventorySha256=hashlib.sha256((Path(os.environ['SUITE_PACKAGE'])/'suite-inventory.json').read_bytes()).hexdigest(),coverageReceipt='coverage-proof.json',presequenceReceipt='presequence-proof.json',nativeIntegrityReceipt='native-integrity.json')
+        except BaseException as exc:
+            proof.update(error=type(exc).__name__+': '+str(exc),traceback=traceback.format_exc()); raise
+        finally:
+            (root/'proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+      id: aggregate
+      env:
+        STEP_OUTCOMES: '{"source":"${{ steps.source.outcome }}","unit":"${{ steps.unit.outcome }}","build":"${{ steps.build.outcome }}","package":"${{ steps.package.outcome }}","readiness":"${{ steps.readiness.outcome }}","fixtures":"${{ steps.fixtures.outcome }}","korean_ime":"${{ steps.korean_ime.outcome }}","korean_ui":"${{ steps.korean_ui.outcome }}","writer_style":"${{ steps.writer_style.outcome }}","physical_ascii":"${{ steps.physical_ascii.outcome }}","inventory":"${{ steps.inventory.outcome }}","style_proof":"${{ steps.style_proof.outcome }}","presequence":"${{ steps.presequence.outcome }}","native_integrity":"${{ steps.native_integrity.outcome }}","coverage":"${{ steps.coverage.outcome }}"}'
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Always retain bound source, package receipts and every original diagnostic
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ascii-delivery-raw-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/ascii-delivery-proof/source/
+          .work/ascii-delivery-proof/package/
+          .work/ascii-delivery-proof/korean-readiness/
+          !.work/ascii-delivery-proof/korean-readiness/fod-source/**/*.cab
+          .work/ascii-delivery-proof/engine/
+          .work/ascii-delivery-proof/korean-ime/
+          .work/ascii-delivery-proof/korean-ui/
+          .work/ascii-delivery-proof/writer-style/
+          .work/ascii-delivery-proof/physical-ascii/
+          .work/ascii-delivery-proof/worker-diagnostics/
+          .work/ascii-delivery-proof/presequence-proof.json
+          .work/ascii-delivery-proof/native-integrity.json
+          .work/ascii-delivery-proof/coverage-proof.json
+          .work/ascii-delivery-proof/proof.json
+          .work/ascii-delivery-proof/build/msi.msi.log
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 6
