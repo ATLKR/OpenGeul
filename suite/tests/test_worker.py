@@ -352,6 +352,63 @@ class NativeBoundaryTests(unittest.TestCase):
             self.native.connect_uno(uno, 'unique', SimpleNamespace(poll=lambda: 1), timeout=2)
         self.assertEqual('engine_exited', caught.exception.code)
 
+    def test_default_connect_wait_accepts_cold_start_after_thirty_seconds(self):
+        from types import SimpleNamespace
+        now, attempts = [0.0], []
+        ready = object()
+
+        def resolve(url):
+            attempts.append((now[0], url))
+            if now[0] < 45:
+                raise RuntimeError('cold runtime not listening yet')
+            return ready
+
+        resolver = SimpleNamespace(resolve=resolve)
+        local = SimpleNamespace(ServiceManager=SimpleNamespace(createInstanceWithContext=lambda *args: resolver))
+        uno = SimpleNamespace(getComponentContext=lambda: local)
+        process = SimpleNamespace(poll=lambda: None)
+        result = self.native.connect_uno(uno, 'cold_start', process, clock=lambda: now[0],
+                                         sleeper=lambda duration: now.__setitem__(0, now[0] + 15))
+        self.assertIs(ready, result)
+        self.assertEqual([0, 15, 30, 45], [at for at, url in attempts])
+        self.assertTrue(all('pipe,name=cold_start;' in url for at, url in attempts))
+
+    def test_explicit_connect_deadline_preserves_last_resolver_cause_and_owned_cleanup(self):
+        from types import SimpleNamespace
+        calls = []
+        failures = [RuntimeError('first connection refusal'), OSError('last pipe refusal')]
+        last_failure = failures[-1]
+        ticks = iter([0.0, 0.0, 1.0, 3.0])
+
+        def resolve(url):
+            raise failures.pop(0)
+
+        resolver = SimpleNamespace(resolve=resolve)
+        local = SimpleNamespace(ServiceManager=SimpleNamespace(createInstanceWithContext=lambda *args: resolver))
+        uno = SimpleNamespace(getComponentContext=lambda: local)
+        process = SimpleNamespace(poll=lambda: None, terminate=lambda: calls.append('terminate'),
+                                  wait=lambda timeout: calls.append('wait'), close=lambda: calls.append('handles'))
+        backend = self.native.UnoBackend(self.root, uno_loader=lambda: uno,
+            window_api=SimpleNamespace(validate_parent=lambda hwnd: None),
+            connector=lambda uno, pipe, owned: self.native.connect_uno(
+                uno, pipe, owned, timeout=2, clock=lambda: next(ticks), sleeper=lambda duration: None))
+
+        def start():
+            backend.process = process
+            backend.profile = SimpleNamespace(cleanup=lambda: calls.append('profile'))
+
+        backend._start_runtime = start
+        session = importlib.import_module('session').DocumentSession(
+            self.root, MODULES, backend_factory=lambda runtime: backend)
+        with self.assertRaises(self.native.WorkerError) as caught:
+            session.dispatch('attach', {'parentHwnd': 1, 'module': 'writer', 'width': 1, 'height': 1})
+        self.assertEqual('connect_timeout', caught.exception.code)
+        self.assertEqual('Office 런타임 연결 시간이 초과되었습니다.', str(caught.exception))
+        self.assertIs(last_failure, caught.exception.__cause__)
+        self.assertEqual(['terminate', 'wait', 'handles', 'profile'], calls)
+        self.assertIsNone(backend.process)
+        self.assertIsNone(backend.profile)
+
     def test_attach_registers_named_frame_and_loads_through_desktop(self):
         from types import SimpleNamespace
         calls = []

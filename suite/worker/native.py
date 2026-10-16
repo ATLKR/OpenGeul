@@ -19,18 +19,20 @@ class PrivateProfile:
         shutil.rmtree(self.name)
 
 
-def connect_uno(uno, pipe, process, timeout=30, clock=time.monotonic, sleeper=time.sleep):
+def connect_uno(uno, pipe, process, timeout=90, clock=time.monotonic, sleeper=time.sleep):
     local = uno.getComponentContext()
     resolver = local.ServiceManager.createInstanceWithContext('com.sun.star.bridge.UnoUrlResolver', local)
     deadline = clock() + timeout
+    last_error = None
     while clock() < deadline:
         if process.poll() is not None:
             raise WorkerError('engine_exited', 'Office 런타임이 시작 중 종료되었습니다.')
         try:
             return resolver.resolve('uno:pipe,name=' + pipe + ';urp;StarOffice.ComponentContext')
-        except Exception:
+        except Exception as exc:
+            last_error = exc
             sleeper(0.1)
-    raise WorkerError('connect_timeout', 'Office 런타임 연결 시간이 초과되었습니다.')
+    raise WorkerError('connect_timeout', 'Office 런타임 연결 시간이 초과되었습니다.') from last_error
 
 
 def base_readiness(document, context=None):

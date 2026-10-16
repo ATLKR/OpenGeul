@@ -51,7 +51,7 @@ public sealed class WorkerClient : IAsyncDisposable
         }
     }
 
-    public async Task<JsonElement> SendAsync(string command, object args)
+    public async Task<JsonElement> SendAsync(string command, object args, TimeSpan? requestTimeout = null)
     {
         if (Volatile.Read(ref disposed) != 0) throw new SuiteException("문서 작업자가 이미 종료되었습니다.");
         if (terminalError is not null) throw new SuiteException("문서 작업자와 연결이 끊어졌습니다. 문서 창을 유지합니다.", terminalError);
@@ -61,7 +61,7 @@ public sealed class WorkerClient : IAsyncDisposable
         try
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopped.Token);
-            deadline.CancelAfter(timeout);
+            deadline.CancelAfter(requestTimeout ?? timeout);
             await writeLock.WaitAsync(deadline.Token);
             try
             {

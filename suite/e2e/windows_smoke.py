@@ -270,7 +270,7 @@ def close_document(api, process, hwnd, child, record):
 
 
 def verified_attachment(api, process, module):
-    hwnd, parent, child = wait_for(lambda: api.attached(process), seconds=75)
+    hwnd, parent, child = wait_for(lambda: api.attached(process), seconds=150)
     office_pid = api.pid(child)
     assert office_pid and office_pid != process.pid, 'Editor must belong to the separate native Office engine'
     assert 'OpenGeul ' + module.title() in api.title(hwnd), 'Document title is not OpenGeul branded'

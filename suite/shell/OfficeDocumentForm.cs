@@ -91,7 +91,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 ["width"] = size.Width, ["height"] = size.Height
             };
             if (path is not null) request["path"] = path;
-            var result = await worker.SendAsync("attach", request);
+            var result = await worker.SendAsync("attach", request, requestTimeout: TimeSpan.FromSeconds(120));
             var childHwnd = result.GetProperty("childHwnd").GetInt64();
             var parentHwnd = result.GetProperty("parentHwnd").GetInt64();
             if (parentHwnd != editorPanel.Handle.ToInt64() || childHwnd == 0 || !NativeWindowProperties.IsChild(editorPanel.Handle, checked((nint)childHwnd)))

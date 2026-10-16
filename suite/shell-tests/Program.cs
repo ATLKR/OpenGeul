@@ -10,6 +10,8 @@ if (args.Contains("--fake-worker"))
         var root = request.RootElement;
         var id = root.GetProperty("id").GetInt64();
         var command = root.GetProperty("command").GetString();
+        if (command == "delay")
+            await Task.Delay(root.GetProperty("args").GetProperty("delayMs").GetInt32());
         if (command == "timeout") continue;
         if (command == "exit") return 0;
         if (command == "event")
@@ -223,11 +225,11 @@ AsyncTest("worker close failure preserves window", async () =>
     Equal(false, result.Closed); Equal(true, result.Error is not null);
 });
 
-WorkerClient StartWorker() => WorkerClient.Start(new ProcessStartInfo
+WorkerClient StartWorker(TimeSpan? timeout = null) => WorkerClient.Start(new ProcessStartInfo
 {
     FileName = Environment.ProcessPath!,
     ArgumentList = { typeof(TestSession).Assembly.Location, "--fake-worker" }
-}, TimeSpan.FromSeconds(2));
+}, timeout ?? TimeSpan.FromSeconds(2));
 
 // A real child process verifies wire framing, request correlation, timeout and owned cleanup.
 AsyncTest("worker JSON preserves Korean paths and correlates concurrent replies", async () =>
@@ -257,6 +259,16 @@ AsyncTest("worker timeout is bounded and later replies still correlate", async (
     await using var client = StartWorker();
     await ThrowsAsync<SuiteException>(() => client.SendAsync("timeout", new { }));
     Equal(7, (await client.SendAsync("echo", new { value = 7 })).GetProperty("value").GetInt32());
+});
+AsyncTest("per-request timeout permits a slow reply without changing the default deadline", async () =>
+{
+    await using var client = StartWorker(TimeSpan.FromMilliseconds(150));
+    await client.SendAsync("echo", new { }, requestTimeout: TimeSpan.FromSeconds(5));
+    Equal("startup", (await client.SendAsync("delay", new { delayMs = 600, value = "startup" },
+        requestTimeout: TimeSpan.FromSeconds(3))).GetProperty("value").GetString());
+    await ThrowsAsync<SuiteException>(() => client.SendAsync("delay", new { delayMs = 600 }));
+    Equal("after default timeout", (await client.SendAsync("echo", new { value = "after default timeout" },
+        requestTimeout: TimeSpan.FromSeconds(3))).GetProperty("value").GetString());
 });
 AsyncTest("worker unexpected exit fails pending operation", async () =>
 {
