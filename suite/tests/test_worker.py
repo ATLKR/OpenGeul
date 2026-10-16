@@ -482,7 +482,7 @@ class NativeBoundaryTests(unittest.TestCase):
         frame = SimpleNamespace(initialize=lambda p: calls.append(('initialize', p)),
                                 setName=lambda n: calls.append(('name', n)),
                                 registerDispatchProviderInterceptor=lambda i: calls.append(('interceptor', i)),
-                                activate=lambda: None)
+                                activate=lambda: calls.append(('activate',)))
         document = SimpleNamespace(isModified=lambda: False, getTitle=lambda: 'Test')
         desktop = SimpleNamespace(getFrames=lambda: SimpleNamespace(append=lambda f: calls.append(('append', f))),
                                   loadComponentFromURL=lambda *a: calls.append(('load', a)) or document)
@@ -510,10 +510,13 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertEqual(0, props['MacroExecutionMode'])
         self.assertEqual(0, props['UpdateDocMode'])
         self.assertFalse(props['ReadOnly'])
-        self.assertFalse(props['Hidden'])
+        self.assertTrue(props['Hidden'])
         self.assertTrue(calls.index(('append', frame)) < next(i for i, c in enumerate(calls) if c[0] == 'load'))
         self.assertLess(calls.index(('ui-window',)), calls.index(('ui-dispose',)))
         self.assertLess(calls.index(('ui-dispose',)), next(i for i, c in enumerate(calls) if c[0] == 'load'))
+        self.assertLess(next(i for i, c in enumerate(calls) if c[0] == 'load'), calls.index(('validated', 456, 123)))
+        self.assertLess(calls.index(('validated', 456, 123)), calls.index(('visible', True)))
+        self.assertLess(calls.index(('visible', True)), calls.index(('activate',)))
         created = next(call for call in calls if call[0] == 'ui-create')
         self.assertTrue(created[1].startswith('private:resource/toolbar/opengeul_bootstrap_'))
         self.assertIs(config, created[2]['ConfigurationSource'])

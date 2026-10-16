@@ -645,37 +645,104 @@ def resize_restore(case):
     case.finish(hwnd, child)
 
 
-def _hwp_child_process(shell_pid, executable):
-    # Read-only process census; only an exact new child and executable may receive close.
-    command = '$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=' + str(int(shell_pid)) + '"; @($p | Select-Object ProcessId,ParentProcessId,ExecutablePath) | ConvertTo-Json -Compress'
-    result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
-                            capture_output=True, encoding='utf-8', errors='strict', check=True, timeout=12)
-    rows = json.loads(result.stdout.lstrip('\ufeff') or '[]')
-    if isinstance(rows, dict): rows = [rows]
-    matches = [row for row in rows if row.get('ExecutablePath') and Path(row['ExecutablePath']).resolve() == executable.resolve()]
+class ProcessEntry32W(ctypes.Structure):
+    _fields_ = [('dwSize', ctypes.c_uint32), ('cntUsage', ctypes.c_uint32),
+                ('th32ProcessID', ctypes.c_uint32), ('th32DefaultHeapID', ctypes.c_size_t),
+                ('th32ModuleID', ctypes.c_uint32), ('cntThreads', ctypes.c_uint32),
+                ('th32ParentProcessID', ctypes.c_uint32), ('pcPriClassBase', ctypes.c_int32),
+                ('dwFlags', ctypes.c_uint32), ('szExeFile', wintypes.WCHAR * 260)]
+
+
+def hwp_kernel():
+    assert ctypes.sizeof(ctypes.c_void_p) == 8, 'Native HWP census requires the x64 harness'
+    if os.name == 'nt': assert ctypes.sizeof(ProcessEntry32W) == 568, 'PROCESSENTRY32W x64 layout is invalid'
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    bindings = {
+        'CreateToolhelp32Snapshot': ((wintypes.DWORD, wintypes.DWORD), wintypes.HANDLE),
+        'Process32FirstW': ((wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)), wintypes.BOOL),
+        'Process32NextW': ((wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)), wintypes.BOOL),
+        'OpenProcess': ((wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), wintypes.HANDLE),
+        'QueryFullProcessImageNameW': ((wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
+        'GetProcessTimes': ((wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4, wintypes.BOOL),
+        'GetSystemTimeAsFileTime': ((ctypes.POINTER(wintypes.FILETIME),), None),
+        'WaitForSingleObject': ((wintypes.HANDLE, wintypes.DWORD), wintypes.DWORD),
+        'CloseHandle': ((wintypes.HANDLE,), wintypes.BOOL),
+    }
+    for name, (arguments, result) in bindings.items():
+        function = getattr(kernel, name)
+        function.argtypes, function.restype = arguments, result
+    return kernel
+
+
+def valid_pid(pid):
+    assert type(pid) is int and 0 < pid <= 0xffffffff, 'Native process PID must fit a positive DWORD'
+    return pid
+
+
+def process_identity(kernel, handle):
+    buffer, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
+    if not kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    assert 0 < size.value < 32768 and len(buffer.value.encode('utf-16-le', errors='surrogatepass')) // 2 == size.value, 'Native process image path is invalid or truncated'
+    creation, exit_time, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+    if not kernel.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exit_time), ctypes.byref(kernel_time), ctypes.byref(user_time)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    created = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+    assert 0 < created <= 0xffffffffffffffff, 'Native process creation FILETIME is invalid'
+    return Path(buffer.value).resolve(), created
+
+
+def _hwp_child_process(shell_pid, executable, *, shell_creation):
+    # A native snapshot avoids starting PowerShell and WMI just to observe an
+    # already-owned child. Only exact PPID/name/image matches become witnesses.
+    valid_pid(shell_pid)
+    assert type(shell_creation) is int and 0 < shell_creation <= 0xffffffffffffffff, 'Retained Suite creation FILETIME is required'
+    kernel = hwp_kernel()
+    clock = wintypes.FILETIME()
+    kernel.GetSystemTimeAsFileTime(ctypes.byref(clock))
+    snapshot_started = (int(clock.dwHighDateTime) << 32) | int(clock.dwLowDateTime)
+    assert shell_creation <= snapshot_started <= 0xffffffffffffffff, 'Native snapshot timestamp precedes the retained Suite shell'
+    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS; read only.
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    matches = []
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        present = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while present:
+            if entry.th32ParentProcessID == shell_pid and entry.szExeFile.casefold() == executable.name.casefold():
+                pid = valid_pid(int(entry.th32ProcessID))
+                handle = kernel.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION.
+                if not handle: raise ctypes.WinError(ctypes.get_last_error())
+                try:
+                    image, created = process_identity(kernel, handle)
+                    # A PID can recycle between snapshot and OpenProcess. A
+                    # process born after snapshot start cannot prove that PPID;
+                    # a process predating our shell cannot be its new child.
+                    if image == executable.resolve() and shell_creation <= created <= snapshot_started:
+                        matches.append({'pid': pid, 'parentPid': shell_pid, 'executable': str(image), 'creationFileTime': created})
+                finally:
+                    if not kernel.CloseHandle(handle): raise ctypes.WinError(ctypes.get_last_error())
+            present = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+        if ctypes.get_last_error() != 18: raise ctypes.WinError(ctypes.get_last_error())  # ERROR_NO_MORE_FILES.
+    finally:
+        if not kernel.CloseHandle(snapshot): raise ctypes.WinError(ctypes.get_last_error())
     assert len(matches) <= 1, 'Bundled HWP launch produced multiple matching child processes'
-    return int(matches[0]['ProcessId']) if matches else None
+    return matches[0] if matches else None
 
 
 class BoundHwpProcess:
-    def __init__(self, pid, executable):
-        self.pid = pid
-        self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-        self.kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        self.kernel.OpenProcess.restype = wintypes.HANDLE
-        self.kernel.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
-        self.kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
-        self.kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-        self.kernel.WaitForSingleObject.restype = wintypes.DWORD
-        self.kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-        self.kernel.CloseHandle.restype = wintypes.BOOL
+    def __init__(self, pid, executable, *, expected_creation=None):
+        self.pid = valid_pid(pid)
+        self.kernel = hwp_kernel()
         self.handle = self.kernel.OpenProcess(0x100000 | 0x1000, False, pid)
         if not self.handle: raise ctypes.WinError(ctypes.get_last_error())
         try:
-            buffer, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
-            if not self.kernel.QueryFullProcessImageNameW(self.handle, 0, buffer, ctypes.byref(size)):
-                raise ctypes.WinError(ctypes.get_last_error())
-            assert Path(buffer.value).resolve() == executable.resolve(), 'HWP process executable changed before binding its native handle'
+            image, self.creation = process_identity(self.kernel, self.handle)
+            assert image == executable.resolve(), 'Owned process executable changed before binding its native handle'
+            if expected_creation is not None:
+                assert self.creation == expected_creation, 'HWP process creation changed before binding its native handle'
         except Exception:
             self.close()
             raise
@@ -707,11 +774,30 @@ def hwp_route(case):
 
     def verify_and_close(shell, *, path=None):
         case.record['stage'] = 'hwpx-route-native-readiness' if path else 'hwp-tile-native-readiness'
-        pid = native.wait_for(lambda: _hwp_child_process(shell.pid, executable), 45)
-        case.record.setdefault('ownedHwpPids', []).append(pid)
-        bound = BoundHwpProcess(pid, executable)
+        shell_executable = case.suite / 'OpenGeul.Office.exe'
+        shell_bound = BoundHwpProcess(shell.pid, shell_executable)
+        try:
+            assert shell.poll() is None and shell_bound.live(), 'Owned Suite shell exited before HWP child binding'
+            # Popen retains the actual launched process handle. Compare creation
+            # time so a recycled numeric PID cannot substitute another process.
+            assert process_identity(shell_bound.kernel, int(shell._handle))[1] == shell_bound.creation, 'Suite shell creation changed before HWP observation'
+            case.record.setdefault('hwpShellWitnesses', []).append({'pid': shell.pid, 'creationFileTime': shell_bound.creation,
+                                                                   'executable': str(shell_executable)})
+            def owned_child():
+                assert shell_bound.live(), 'Retained Suite shell exited during child census'
+                observed = _hwp_child_process(shell.pid, executable, shell_creation=shell_bound.creation)
+                assert shell_bound.live(), 'Retained Suite shell exited after child census'
+                return observed
+            observation = native.wait_for(owned_child, 45)
+            pid = observation['pid']
+            bound = BoundHwpProcess(pid, executable, expected_creation=observation['creationFileTime'])
+            case.record.setdefault('ownedHwpPids', []).append(pid)
+        except Exception:
+            shell_bound.close()
+            raise
         try:
             def ready():
+                assert bound.live(), 'Bound bundled HWP process exited before native readiness'
                 roots = [hwnd for hwnd in case.api.windows(pid) if case.api.class_name(hwnd) in ('Tauri Window', 'Chrome_WidgetWin_1')]
                 assert len(roots) <= 1, 'Bundled HWP editor root is ambiguous'
                 if not roots: return None
@@ -727,7 +813,8 @@ def hwp_route(case):
                 return hwnd, [int(child.handle) for child in webviews], labels
             hwnd, webviews, labels = native.wait_for(ready, 75)
             case.screenshot(hwnd, 'hwpx-route' if path else 'hwp-tile')
-            launches.append({'pid': pid, 'parentPid': shell.pid, 'executable': str(executable), 'hwnd': int(hwnd),
+            launches.append({'pid': pid, 'parentPid': shell.pid, 'creationFileTime': bound.creation,
+                             'parentCreationFileTime': shell_bound.creation, 'executable': str(executable), 'hwnd': int(hwnd),
                              'webviewHwnds': webviews, 'title': case.api.title(hwnd), 'routedFile': path.name if path else None,
                              'filenameObserved': path is None or any(path.name in text for text in [case.api.title(hwnd)] + labels)})
             case.api.request_close(hwnd, pid)
@@ -739,7 +826,9 @@ def hwp_route(case):
             native.capture_failure(case.output, case.name + ('-hwpx-route' if path else '-hwp-tile'), case.record, exc)
             bound.stop()
             raise
-        finally: bound.close()
+        finally:
+            try: bound.close()
+            finally: shell_bound.close()
 
     buttons = [item for item in Desktop(backend='uia').window(handle=home).descendants(control_type='Button')
                if item.element_info.name == 'OpenGeul HWP' and item.element_info.process_id == case.process.pid]

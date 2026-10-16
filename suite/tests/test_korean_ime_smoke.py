@@ -49,8 +49,8 @@ class KoreanImePolicyTests(unittest.TestCase):
                 'activeProfile': {'activeLanguage': 0x0412,
                                   'activeClsid': '{A1A1A1A1-1111-2222-3333-444444444444}',
                                   'activeProfile': '{B2B2B2B2-1111-2222-3333-444444444444}'},
-                'savedText': 'Engine-OpenGeul-writer 한글\nIME-OpenGeul-writer:한글',
-                'reopened': {'text': 'Engine-OpenGeul-writer 한글\nIME-OpenGeul-writer:한글'},
+                'savedText': 'Engine-OpenGeul-writer 한글\nime-opengeul-writer:한글',
+                'reopened': {'text': 'Engine-OpenGeul-writer 한글\nime-opengeul-writer:한글'},
                 'layoutRestored': True, 'restoration': self.restoration()}
 
     def test_real_dubeolsik_commit_backspace_save_and_reopen_satisfy_policy(self):

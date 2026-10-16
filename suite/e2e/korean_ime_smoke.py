@@ -63,7 +63,9 @@ def require_readiness(record):
 
 def marker(module):
     assert module in dict(INPUT_CASES)
-    return 'IME-OpenGeul-' + module + ':한글'
+    # Keep the ASCII prefix literal in the IME's alphanumeric mode, without
+    # relying on synthetic implicit Shift state. Saved XML and UNO must match.
+    return 'ime-opengeul-' + module + ':한글'
 
 
 def validate_restoration(receipt):
