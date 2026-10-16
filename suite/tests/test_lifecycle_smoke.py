@@ -775,7 +775,7 @@ class LifecycleSmokeTests(unittest.TestCase):
                 return 1000 + pid
             def image(self, handle, flags, buffer, length):
                 buffer.value = next(row[3] for row in self.rows if row[0] == handle - 1000)
-                length._obj.value = len(buffer.value)
+                length._obj.value = len(buffer.value.encode('utf-16-le')) // 2
                 return 1
             def times(self, handle, creation, exit_time, kernel_time, user_time):
                 created = self.creation_overrides.get(handle - 1000, (1 << 32) + handle - 1000)
@@ -784,10 +784,15 @@ class LifecycleSmokeTests(unittest.TestCase):
             def clock(self, pointer):
                 pointer._obj.dwLowDateTime, pointer._obj.dwHighDateTime = 1000, 1
         executable = Path('/owned/OpenGeul.exe').resolve()
+        foreign = Path('/foreign/OpenGeul.exe').resolve()
+        foreign_unicode = Path('/foreign/한글 😀/OpenGeul.exe').resolve()
         rows = [(106, 99, 'OpenGeul.exe', str(executable)),
-                (107, 31, 'OpenGeul.exe', '/foreign/OpenGeul.exe'),
+                (107, 31, 'OpenGeul.exe', str(foreign)),
                 (108, 31, 'OpenGeul.exe', str(executable)),
-                (109, 31, 'Foreign.exe', '/foreign/Foreign.exe')]
+                (109, 31, 'Foreign.exe', str(Path('/foreign/Foreign.exe').resolve())),
+                (111, 31, 'OpenGeul.exe', str(foreign_unicode))]
+        self.assertTrue(all(Path(row[3]).is_absolute() and Path(row[3]).resolve() == Path(row[3]) for row in rows),
+                        'Fake QueryFullProcessImageNameW must emit canonical full paths')
         for additional, expected in (([], 108), ([(110, 31, 'OpenGeul.exe', str(executable))], None)):
             kernel = Kernel(rows + additional)
             with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
@@ -796,9 +801,15 @@ class LifecycleSmokeTests(unittest.TestCase):
                 if additional:
                     with self.assertRaises(AssertionError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
                 else:
-                    observed = smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+                    census = {}
+                    observed = smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31, evidence=census)
                     self.assertEqual(observed, {'pid': expected, 'parentPid': 31, 'creationFileTime': (1 << 32) + expected,
                                                 'executable': str(executable)})
+                    unicode_candidate, = [candidate for candidate in census['candidates'] if candidate['pid'] == 111]
+                    self.assertEqual(unicode_candidate['nativeImage'], str(foreign_unicode))
+                    self.assertEqual(unicode_candidate['nativeImageLength'], len(str(foreign_unicode).encode('utf-16-le')) // 2)
+                    self.assertGreater(unicode_candidate['nativeImageLength'], len(str(foreign_unicode)))
+                    self.assertFalse(unicode_candidate['matched'], 'A Unicode foreign full image remains a rejected negative')
             self.assertEqual(kernel.opened[:2], [107, 108])
             self.assertIn(777, kernel.closed)
             self.assertIn(1107, kernel.closed)
@@ -862,8 +873,8 @@ class LifecycleSmokeTests(unittest.TestCase):
             creation._obj.dwLowDateTime, creation._obj.dwHighDateTime = 108, 1
             return 1
         def image(handle, flags, buffer, length):
-            buffer.value = '/owned/OpenGeul.exe'
-            length._obj.value = len(buffer.value)
+            buffer.value = str(Path('/owned/OpenGeul.exe').resolve())
+            length._obj.value = len(buffer.value.encode('utf-16-le')) // 2
             return 1
         kernel = SimpleNamespace(**{name: Function(lambda *args: 1) for name in (
             'CreateToolhelp32Snapshot', 'Process32FirstW', 'Process32NextW', 'WaitForSingleObject', 'GetSystemTimePreciseAsFileTime')},
