@@ -1,77 +1,35 @@
-name: OpenGeul Office Suite 개발 검증
+name: OpenGeul 공식 미러 속도 진단
 'on':
   push:
-    branches: [work/opengeul-office-suite]
-  workflow_dispatch: null
+    branches: [work/suite-network-probe]
 permissions:
   contents: read
 concurrency:
-  group: office-suite-${{ github.ref }}
+  group: office-suite-network-probe-${{ github.ref }}
   cancel-in-progress: true
-env:
-  PYTHONUTF8: '1'
-  PYTHONDONTWRITEBYTECODE: '1'
-  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-  DOTNET_NOLOGO: '1'
 jobs:
-  windows-suite:
+  official-mirrors:
     if: github.event.repository.private == false
     runs-on: windows-2025
-    timeout-minutes: 40
+    timeout-minutes: 5
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        persist-credentials: false
-    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-      with:
-        python-version: '3.12'
-    - name: Suite 단위 검사와 Windows shell 빌드 검사
+    - name: 공식 Metalink에 등록된 MSI 미러의 최대 1 MiB 읽기
       shell: pwsh
       run: |
-        python -m unittest discover -s suite/tests -v
-        if ($LASTEXITCODE -ne 0) { throw 'Suite unit tests failed.' }
-        dotnet --info
-        dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
-        if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
-    - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      shell: pwsh
-      run: |
-        ./suite/scripts/build-suite.ps1
-    - name: 실제 Office 엔진의 생성·편집·저장·재열기
-      shell: pwsh
-      run: |
-        $package = (Resolve-Path dist/OpenGeul-Office-0.1.0-dev-windows-x64).Path
-        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
-        if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine smoke tests failed.' }
-    - name: Suite 홈·6개 모듈 내장 창·3개 모듈 키보드 편집과 저장
-      shell: pwsh
-      run: |
-        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
-        if ($LASTEXITCODE -ne 0) { throw 'Native UI test dependencies failed.' }
-        python suite/e2e/windows_smoke.py --suite dist/OpenGeul-Office-0.1.0-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-native
-        if ($LASTEXITCODE -ne 0) { throw 'Actual Suite home, native attachment or keyboard tests failed.' }
-        $package = (Resolve-Path dist/OpenGeul-Office-0.1.0-dev-windows-x64).Path
-        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine --verify-ui
-        if ($LASTEXITCODE -ne 0) { throw 'Reopened UI-edited document contents failed verification.' }
-        python suite/scripts/verify-suite.py $package
-        if ($LASTEXITCODE -ne 0) { throw 'Runtime files changed during GUI validation.' }
-    - name: 원본 GUI·엔진 검증 기록 보존
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-        path: |
-          .work/suite-engine/
-          .work/suite-native/
-          .work/office-suite/msi.msi.log
-        retention-days: 1
-        if-no-files-found: warn
-        compression-level: 6
-    - name: 검증한 Suite 개발 패키지 전달
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: opengeul-office-suite-x64-${{ github.run_id }}
-        path: dist/OpenGeul-Office-0.1.0-dev-windows-x64.zip
-        retention-days: 1
-        if-no-files-found: error
-        compression-level: 0
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $false
+        # URLs verified against the official per-file .meta4 on 2026-10-16:
+        # https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi.meta4
+        # No checkout, caches, payload execution, retained payload or artifacts.
+        $targets = @(
+          @{ name = 'canonical'; url = 'https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi' },
+          @{ name = 'komogoto-fr'; url = 'https://mirrors.komogoto.com/tdf/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi' },
+          @{ name = 'clarkson-us'; url = 'https://mirror.clarkson.edu/tdf/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi' },
+          @{ name = 'fcix-us'; url = 'https://mirror.fcix.net/tdf/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi' }
+        )
+        curl.exe --version
+        foreach ($target in $targets) {
+          $format = '{"mirror":"' + $target.name + '","size_download":%{size_download},"speed_download":%{speed_download},"http_code":"%{http_code}","url_effective":"%{url_effective}","exitcode":%{exitcode}}\n'
+          & curl.exe --silent --show-error --range 0-1048575 --max-time 20 --connect-timeout 10 --max-filesize 1048576 --location --output NUL --write-out $format $target.url
+          Write-Host ('curl_exit=' + $LASTEXITCODE)
+        }
