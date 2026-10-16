@@ -1,0 +1,168 @@
+name: OpenGeul validated artifact delivery
+'on':
+  push:
+    branches: [work/suite-artifact-delivery]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  deliver-validated-artifact:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - name: Verify successful source and split its unchanged artifact
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      shell: python
+      run: |
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        REPOSITORY = 'ATLKR/OpenGeul'
+        RUN_ID = 38909448104
+        HEAD_SHA = '579511489f9def03dd8d894ef249fd8ed9c8fa10'
+        ARTIFACT_ID = 12049897911
+        ARCHIVE_BYTES = 592780912
+        ARCHIVE_SHA256 = 'e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d'
+        CHUNK_BYTES = 256 * 1024 * 1024
+        API = 'https://api.github.com/repos/' + REPOSITORY
+        if os.environ.get('GITHUB_REPOSITORY') != REPOSITORY:
+            raise RuntimeError('This delivery workflow is restricted to the source repository')
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        # Authorization is sent only to api.github.com. Signed storage URLs are
+        # neither logged nor given the repository token.
+        api_client = urllib.request.build_opener(NoRedirect())
+        headers = {'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'],
+                   'Accept': 'application/vnd.github+json',
+                   'X-GitHub-Api-Version': '2022-11-28',
+                   'User-Agent': 'OpenGeul-validated-artifact-delivery'}
+
+        def api_json(path):
+            request = urllib.request.Request(API + path, headers=headers)
+            try:
+                with api_client.open(request, timeout=60) as response:
+                    return json.load(response)
+            except urllib.error.HTTPError as error:
+                raise RuntimeError('Source metadata API failed: HTTP ' + str(error.code)) from None
+            except Exception:
+                raise RuntimeError('Source metadata API could not be read') from None
+
+        source_run = api_json('/actions/runs/' + str(RUN_ID))
+        if not (source_run.get('id') == RUN_ID and source_run.get('status') == 'completed'
+                and source_run.get('conclusion') == 'success' and source_run.get('head_sha') == HEAD_SHA):
+            raise RuntimeError('The exact source run must be completed, successful and at the pinned commit')
+        artifact = api_json('/actions/artifacts/' + str(ARTIFACT_ID))
+        binding = artifact.get('workflow_run', {})
+        if not (artifact.get('id') == ARTIFACT_ID and artifact.get('size_in_bytes') == ARCHIVE_BYTES
+                and artifact.get('expired') is False and binding.get('id') == RUN_ID
+                and binding.get('head_sha') == HEAD_SHA):
+            raise RuntimeError('The exact unexpired artifact must belong to the pinned successful run')
+        if artifact.get('digest') not in (None, 'sha256:' + ARCHIVE_SHA256):
+            raise RuntimeError('Source artifact metadata digest differs from the pinned digest')
+
+        archive_request = urllib.request.Request(
+            API + '/actions/artifacts/' + str(ARTIFACT_ID) + '/zip', headers=headers)
+        try:
+            with api_client.open(archive_request, timeout=60):
+                raise RuntimeError('Expected a signed artifact-download redirect')
+        except urllib.error.HTTPError as error:
+            if error.code != 302:
+                raise RuntimeError('Artifact download API failed: HTTP ' + str(error.code)) from None
+            location = error.headers.get('Location', '')
+            error.close()
+        except Exception:
+            raise RuntimeError('Artifact download redirect could not be obtained') from None
+        parsed = urllib.parse.urlsplit(location)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+            raise RuntimeError('Artifact download requires an HTTPS storage URL without user credentials')
+        if not parsed.hostname.lower().endswith(('.blob.core.windows.net', '.githubusercontent.com')):
+            raise RuntimeError('Artifact redirect is not an allowed GitHub artifact storage host')
+
+        output = Path('delivery')
+        output.mkdir(exist_ok=False)
+        archive = output / 'source-artifact.zip'
+        digest = hashlib.sha256()
+        received = 0
+        try:
+            # This new request deliberately has no Authorization header.
+            storage_request = urllib.request.Request(location, headers={
+                'User-Agent': 'OpenGeul-validated-artifact-delivery'})
+            with urllib.request.urlopen(storage_request, timeout=60) as response, archive.open('xb') as target:
+                while block := response.read(1024 * 1024):
+                    received += len(block)
+                    if received > ARCHIVE_BYTES:
+                        raise RuntimeError('Artifact exceeded its pinned byte count')
+                    target.write(block)
+                    digest.update(block)
+        except Exception as error:
+            # Exception text can contain the signed URL; report only its type.
+            raise RuntimeError('Artifact content download failed: ' + type(error).__name__) from None
+        if received != ARCHIVE_BYTES or digest.hexdigest() != ARCHIVE_SHA256:
+            raise RuntimeError('Downloaded source archive size or SHA256 differs from the pinned bytes')
+
+        parts = []
+        rebuilt_digest = hashlib.sha256()
+        with archive.open('rb') as source:
+            for number in range(1, 4):
+                content = source.read(CHUNK_BYTES)
+                expected = min(CHUNK_BYTES, ARCHIVE_BYTES - (number - 1) * CHUNK_BYTES)
+                if len(content) != expected or not content:
+                    raise RuntimeError('Unexpected source chunk size')
+                name = 'OpenGeul-Office-validated-artifact.zip.part' + str(number).zfill(3)
+                (output / name).write_bytes(content)
+                rebuilt_digest.update(content)
+                parts.append({'file': name, 'bytes': len(content),
+                              'sha256': hashlib.sha256(content).hexdigest()})
+            if source.read(1):
+                raise RuntimeError('Unexpected trailing archive bytes')
+        if sum(part['bytes'] for part in parts) != ARCHIVE_BYTES or rebuilt_digest.hexdigest() != ARCHIVE_SHA256:
+            raise RuntimeError('Ordered chunks do not reproduce the original source archive')
+        manifest = {'schemaVersion': 1, 'kind': 'byte-exact-validated-artifact-delivery',
+                    'source': {'repository': REPOSITORY, 'runId': RUN_ID, 'headSha': HEAD_SHA,
+                               'artifactId': ARTIFACT_ID, 'artifactName': artifact.get('name'),
+                               'bytes': ARCHIVE_BYTES, 'sha256': ARCHIVE_SHA256},
+                    'chunkBytes': CHUNK_BYTES, 'parts': parts,
+                    'reassembly': 'Concatenate the listed part files in order, then verify source.bytes and source.sha256. The result is the original outer artifact ZIP.'}
+        (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+        print('Verified source run, commit, archive size/SHA256 and three byte-exact chunks.')
+
+    - name: Deliver original archive part 1 of 3
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-validated-12049897911-part-1
+        path: |
+          delivery/OpenGeul-Office-validated-artifact.zip.part001
+          delivery/manifest.json
+        compression-level: 0
+        retention-days: 1
+        if-no-files-found: error
+    - name: Deliver original archive part 2 of 3
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-validated-12049897911-part-2
+        path: |
+          delivery/OpenGeul-Office-validated-artifact.zip.part002
+          delivery/manifest.json
+        compression-level: 0
+        retention-days: 1
+        if-no-files-found: error
+    - name: Deliver original archive part 3 of 3
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-validated-12049897911-part-3
+        path: |
+          delivery/OpenGeul-Office-validated-artifact.zip.part003
+          delivery/manifest.json
+        compression-level: 0
+        retention-days: 1
+        if-no-files-found: error
