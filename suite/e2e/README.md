@@ -1,0 +1,46 @@
+# Suite engine and GUI content verification
+
+Run the real engine harness with the packaged UNO Python on Windows:
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE = '1'
+& "$suite\Office\program\python.exe" "$repo\suite\e2e\engine_smoke.py" --suite $suite --output $evidence
+```
+
+Evidence must be outside the payload. The evidence directory may exist, but its
+`fixtures` directory and engine report must be absent. No user document is read,
+overwritten or discarded. Each case owns a headless process/job, profile and
+random local named pipe using the packaged worker's native process helpers.
+Macros and automatic document updates are disabled. Every case writes a JSON
+record and the aggregate `engine-smoke.json`; failures remain failures even when
+the other modules pass. Exit codes: 0 all cases passed; 1 case failure; 2 setup
+or evidence-path failure. A missing native engine/pyuno/Firebird is not skipped.
+
+Generated files are `fixtures/OpenGeul-writer.docx`, `OpenGeul-calc.xlsx`,
+`OpenGeul-impress.pptx`, `OpenGeul-draw.odg`, `OpenGeul-math.odf`, and
+`OpenGeul-base.odb`. Saved files are closed and reopened through UNO, then their
+text, spreadsheet formula/result, drawing geometry, math expression or embedded
+Firebird row is compared. Base uses the OfficeDatabaseDocument service and native
+embedded Firebird, avoiding the interactive database wizard and external Java.
+
+For the separate real GUI harness, open the first three fixtures in the Suite:
+
+- Writer: append `UI-OpenGeul-writer` and save.
+- Calc: append `UI-OpenGeul-calc` to A1, preserving the original marker, and save.
+  D1 must retain `=SUM(B1:C1)` with result 42.
+- Impress: append `UI-OpenGeul-impress` to a first-slide text shape and save.
+  The only generated text shape starts at (2500,2500), size (20000,6000), in
+  hundredths of a millimetre. A new text shape on that slide is also accepted.
+
+After the GUI has saved and closed each document, run:
+
+```powershell
+& "$suite\Office\program\python.exe" "$repo\suite\e2e\engine_smoke.py" --suite $suite --output $evidence --verify-ui
+```
+
+This writes `ui-engine-{module}.json` and `ui-engine-verification.json`. Both the
+original marker and expected suffix must persist. `guiVerified` remains false in
+these engine reports: child-HWND ownership, physical input, focus and the actual
+save action must be established separately by the GUI harness. The supplied Linux
+headless runtime has no pyuno and does not establish packaged Windows engine or
+GUI success.
