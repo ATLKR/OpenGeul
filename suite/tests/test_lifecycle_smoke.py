@@ -136,9 +136,10 @@ class LifecycleSmokeTests(unittest.TestCase):
             self.assertEqual(message,13)
             actual=value.text if focus.native_override is None else focus.native_override
             import ctypes
-            destination=ctypes.cast(buffer,ctypes.POINTER(ctypes.c_wchar))
-            for index,char in enumerate(actual): destination[index]=char
-            destination[len(actual)]='\0'
+            source=ctypes.create_unicode_buffer(actual)
+            self.assertLessEqual(len(actual.encode('utf-16-le'))//2+1,capacity)
+            self.assertLessEqual(ctypes.sizeof(source),capacity*ctypes.sizeof(ctypes.c_wchar))
+            ctypes.memmove(buffer,ctypes.addressof(source),ctypes.sizeof(source))
             result._obj.value=len(actual.encode('utf-16-le'))//2
             return 1
         api.user.GetGUIThreadInfo=gui_info
@@ -229,6 +230,26 @@ class LifecycleSmokeTests(unittest.TestCase):
         self.assertIs(api.user.SendMessageTimeoutW.restype,smoke.ctypes.c_ssize_t)
         self.assertEqual(api.user.SendMessageTimeoutW.argtypes[-1],smoke.ctypes.POINTER(smoke.ctypes.c_size_t))
         self.assertIs(api.user.GetWindowLongW.restype,smoke.ctypes.c_int32)
+
+    def test_native_text_fixture_copies_native_wchar_buffer_and_nul_with_declared_capacity(self):
+        api,root,field,calls=self.picker_fixture()
+        actual='가😀.odt'
+        field.iface_value.text=actual
+        source=smoke.ctypes.create_unicode_buffer(actual)
+        destination=smoke.ctypes.create_unicode_buffer(32)
+        smoke.ctypes.memset(smoke.ctypes.addressof(destination),0xa5,smoke.ctypes.sizeof(destination))
+        count=smoke.ctypes.c_size_t()
+        api.user.SendMessageTimeoutW(510,13,len(destination),smoke.ctypes.addressof(destination),3,1000,smoke.ctypes.byref(count))
+        self.assertEqual(destination.value,actual)
+        self.assertEqual(bytes(destination)[:smoke.ctypes.sizeof(source)],bytes(source))
+        self.assertEqual(bytes(destination)[smoke.ctypes.sizeof(source):],b'\xa5'*(smoke.ctypes.sizeof(destination)-smoke.ctypes.sizeof(source)))
+        self.assertEqual(count.value,len(actual.encode('utf-16-le'))//2)
+        self.assertEqual(len(source),(len(actual.encode('utf-16-le'))//2 if smoke.ctypes.sizeof(smoke.ctypes.c_wchar)==2 else len(actual))+1)
+        before=bytes(destination)
+        for capacity in (1,len(actual.encode('utf-16-le'))//2):
+            with self.subTest(capacity=capacity),self.assertRaises(AssertionError):
+                api.user.SendMessageTimeoutW(510,13,capacity,smoke.ctypes.addressof(destination),3,1000,smoke.ctypes.byref(count))
+        self.assertEqual(bytes(destination),before,'A declared capacity failure must not write any buffer bytes')
 
     def test_picker_native_edit_rechecks_live_ownership_focus_and_foreground_before_text_mutation(self):
         for mode in ('pid','dead','root','focus','foreground','unicode','native-edit-class'):
