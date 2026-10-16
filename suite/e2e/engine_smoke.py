@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import time
+import traceback
 import uuid
 
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
@@ -203,7 +204,9 @@ def populate(engine, module, document):
     elif module == 'math':
         document.setPropertyValue('Formula', FORMULA)
     elif module == 'base':
-        connection = document.DataSource.getConnection('', '')
+        # XIsolatedConnection permits transaction control; pooled shared
+        # connections deliberately reject setAutoCommit/commit/rollback.
+        connection = document.DataSource.getIsolatedConnection('', '')
         try:
             connection.setAutoCommit(False)
             statement = connection.createStatement()
@@ -307,7 +310,8 @@ def run_case(suite, output, module, specification, verify_ui=False):
         result.update(status='passed', observed=observed,
                       sha256=hashlib.sha256(path.read_bytes()).hexdigest(), bytes=path.stat().st_size)
     except Exception as exc:
-        result['error'] = {'type': type(exc).__name__, 'message': str(exc)}
+        result['error'] = {'type': type(exc).__name__, 'message': str(exc),
+                           'traceback': traceback.format_exc()}
     finally:
         try:
             engine.close_document(document)
