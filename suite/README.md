@@ -34,7 +34,8 @@ Office 문서 창은 Suite가 만든 Panel HWND 아래의 UNO 프레임에서 �
 문서 창을 유지합니다. 갑작스러운 shell/운영체제 실패 후의 복구와 자동 저장은 별도
 개발 과제입니다. 개발판에서는 원본을 보관하고 중요한 저장 결과를 확인하세요.
 
-Base는 데이터베이스 URL과 현재 연결 상태를 표시합니다. JDBC/구형 HSQLDB 등에 필요한
+Base는 데이터베이스 URL·현재 연결·등록된 드라이버와 Java 사용/실행 상태를 확인해 표시합니다.
+확인을 위해 새 연결을 만들거나 Java VM을 시작하지 않습니다. JDBC/구형 HSQLDB 등에 필요한
 외부 Java·드라이버·서버는 함께 제공하지 않으며 단순히 창을 열었다는 이유로 연결
 준비가 완료됐다고 표시하지 않습니다. 원격 데이터베이스에 자동으로 연결하지 않습니다.
 
@@ -52,7 +53,7 @@ dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
 ```
 
 빌드 스크립트는 MSI를 관리자 설치 이미지로 **추출**하며 사용자 PC에 LibreOffice를
-설치하지 않습니다. MSI에서 나온 VC++ 구성 요소도 native x64를 확인해 app-local로
+설치하지 않습니다. MSI의 원래 cabinet에서 정확한 AMD64 File ID를 찾아 VC++ 구성 요소를 app-local로
 준비합니다. 서로 다른 아키텍처나 기존 출력과 충돌하면 거부합니다. Office 런타임은
 공유하므로 모듈마다 전체 엔진을 중복 배포하지 않습니다.
 
@@ -71,6 +72,11 @@ python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.0-dev-windows-x64
 `e2e/windows_smoke.py`는 실제 native 자식 창·키보드 입력·저장을 검사합니다.
 영문 키 입력이나 Unicode SendInput 통과를 한국어 IME 조합 전체 통과로 해석하지 않습니다.
 ARM64, 전체 WACK/Store, 실제 프린터와 모든 문서의 호환성도 별도 검증 대상입니다.
+
+공식 런타임에 포함된 32비트 TWAIN 스캐너 도구와 SharePoint COM 구성 요소는 이
+portable 개발판에서 지원하지 않습니다. TWAIN 도구에는 별도 32비트 DLL 격리가 필요하고,
+SharePoint 구성 요소에는 별도 등록과 의존성이 필요합니다. 이 파일들을 원본 그대로
+보존했다는 사실을 해당 기능의 지원·검증으로 해석하지 않습니다.
 
 ## 이름과 라이선스
 
