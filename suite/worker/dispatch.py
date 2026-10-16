@@ -1,4 +1,8 @@
 """Route native document-management actions back to the owning Suite form."""
+from session import FACTORIES
+
+FACTORY_MODULES = {factory: module for module, factory in FACTORIES.items()}
+
 COMMANDS = {'.uno:Open': 'open', '.uno:OpenUrl': 'open', '.uno:OpenRemote': 'open',
             '.uno:NewDoc': 'new', '.uno:NewWindow': 'new', '.uno:Save': 'save',
             '.uno:SaveAll': 'save', '.uno:SaveAs': 'saveAs', '.uno:SaveAsTemplate': 'saveAs',
@@ -26,8 +30,13 @@ class DispatchRouter:
 
     def dispatch(self, url, arguments):
         name = url.Complete.split('?', 1)[0]
-        command = ('new' if name.startswith('private:factory/') else
-                   'open' if name.startswith('file:') else COMMANDS.get(name))
+        if name.startswith('private:factory/'):
+            target_module = FACTORY_MODULES.get(url.Complete)
+            if target_module is not None:
+                self.on_command('new', target_module)
+            # Unknown factories and query arguments never reach a native launcher.
+            return
+        command = 'open' if name.startswith('file:') else COMMANDS.get(name)
         if command:
             self.on_command(command)
 

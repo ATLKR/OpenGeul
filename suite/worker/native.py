@@ -33,6 +33,39 @@ def connect_uno(uno, pipe, process, timeout=30, clock=time.monotonic, sleeper=ti
     raise WorkerError('connect_timeout', 'Office 런타임 연결 시간이 초과되었습니다.')
 
 
+def base_readiness(document):
+    """Observe existing state only; never connect a database or start a JVM."""
+    readiness = {'state': 'unverified', 'dataSourceConfigured': None,
+                 'connectionVerified': False, 'javaRequired': None, 'javaAvailable': None,
+                 'fullyVerified': False,
+                 'message': 'Base 데이터 원본과 Java 준비 상태를 확인하지 못했습니다.'}
+    try:
+        url = document.DataSource.getPropertyValue('URL')
+        if not isinstance(url, str):
+            return readiness
+        readiness['dataSourceConfigured'] = bool(url.strip())
+        if not url.strip():
+            readiness.update(state='not_configured',
+                             message='Base 데이터 원본이 설정되지 않았습니다. 데이터베이스 연결과 Java 준비 상태를 확인해 주세요.')
+            return readiness
+        driver = url.lower()
+        if driver.startswith('jdbc:') or ':jdbc:' in driver or 'hsqldb' in driver:
+            readiness['javaRequired'] = True
+        elif driver.startswith(('sdbc:embedded:firebird', 'sdbc:firebird:', 'sdbc:odbc:',
+                                'sdbc:postgresql:', 'sdbc:mysql:mysqlc:')):
+            readiness['javaRequired'] = False
+        connected = bool(document.getCurrentController().isConnected())
+        readiness['connectionVerified'] = connected
+        readiness['state'] = 'connected' if connected else 'not_connected'
+        readiness['message'] = ('데이터베이스 연결을 확인했습니다. Java와 추가 기능은 별도 확인이 필요합니다.'
+                                if connected else
+                                '데이터베이스 연결은 확인되지 않았습니다. Java 등 필요한 구성 요소를 확인해 주세요.')
+    except Exception:
+        # A missing readiness API does not make the document clean or fully ready.
+        pass
+    return readiness
+
+
 class UnoBackend:
     def __init__(self, runtime, process_factory=None, window_api=None, uno_loader=None, connector=None):
         self.runtime = Path(runtime)
@@ -44,7 +77,8 @@ class UnoBackend:
         self.uno = None
         self.interceptor = None
         self.pipe = 'OpenGeul_' + uuid.uuid4().hex
-        self.command_handler = lambda command: None
+        self.command_handler = lambda command, target_module=None: None
+        self.module_factory = None
 
     def set_command_handler(self, handler):
         self.command_handler = handler
@@ -68,6 +102,7 @@ class UnoBackend:
         return prop
 
     def attach(self, hwnd, module, width, height, path):
+        self.module_factory = module['factory']
         if self.window_api is None:
             from native_windows import WindowApi
             self.window_api = WindowApi()
@@ -110,7 +145,10 @@ class UnoBackend:
         if self.process is not None and self.process.poll() is not None:
             raise WorkerError('engine_exited', 'Office 런타임이 종료되었습니다.')
         # Missing XModifiable is an error, never an assumption that the file is clean.
-        return {'modified': bool(self.document.isModified()), 'title': str(self.document.getTitle())}
+        result = {'modified': bool(self.document.isModified()), 'title': str(self.document.getTitle())}
+        if self.module_factory == 'private:factory/sdatabase':
+            result['readiness'] = base_readiness(self.document)
+        return result
 
     def resize(self, width, height):
         self.peer.setPosSize(0, 0, width, height, 15)

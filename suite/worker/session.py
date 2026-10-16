@@ -99,8 +99,13 @@ class DocumentSession:
             factory = self.backend_factory
         backend = factory(self.runtime)
         if hasattr(backend, 'set_command_handler'):
-            backend.set_command_handler(lambda command: self.event_sink(
-                {'event': 'command', 'command': command, 'module': module_id}))
+            def forward_command(command, target_module=None):
+                selected_module = module_id if target_module is None else target_module
+                if (selected_module not in self.modules or selected_module not in FACTORIES
+                        or self.modules[selected_module].get('factory') != FACTORIES[selected_module]):
+                    return
+                self.event_sink({'event': 'command', 'command': command, 'module': selected_module})
+            backend.set_command_handler(forward_command)
         try:
             handles = backend.attach(hwnd, module, width, height, path)
             if not handles.get('childHwnd'):

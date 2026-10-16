@@ -262,6 +262,47 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual({'event': 'command', 'command': 'saveAs', 'module': 'writer'}, lines[0])
         self.assertEqual([1, 2], [line['id'] for line in lines[1:]])
 
+
+    def test_new_calc_from_writer_preserves_validated_target_module(self):
+        native = importlib.import_module('native')
+        from types import SimpleNamespace
+        events = []
+        self.session.event_sink = events.append
+        self.backend.set_command_handler = lambda handler: setattr(self.backend, 'handler', handler)
+        self.attach()
+        router = native.DispatchRouter(self.backend.handler)
+        url = SimpleNamespace(Complete='private:factory/scalc')
+        router.queryDispatch(url, '_blank', 0).dispatch(url, ())
+        self.assertEqual([{'event': 'command', 'command': 'new', 'module': 'calc'}], events)
+
+    def test_generic_new_preserves_current_writer_module(self):
+        native = importlib.import_module('native')
+        from types import SimpleNamespace
+        events = []
+        self.session.event_sink = events.append
+        self.backend.set_command_handler = lambda handler: setattr(self.backend, 'handler', handler)
+        self.attach()
+        router = native.DispatchRouter(self.backend.handler)
+        url = SimpleNamespace(Complete='.uno:NewDoc')
+        router.queryDispatch(url, '_blank', 0).dispatch(url, ())
+        self.assertEqual([{'event': 'command', 'command': 'new', 'module': 'writer'}], events)
+
+    def test_malicious_factory_cannot_launch_or_reach_slave(self):
+        native = importlib.import_module('native')
+        from types import SimpleNamespace
+        events, delegated = [], []
+        self.session.event_sink = events.append
+        self.backend.set_command_handler = lambda handler: setattr(self.backend, 'handler', handler)
+        self.attach()
+        router = native.DispatchRouter(self.backend.handler)
+        router.setSlaveDispatchProvider(SimpleNamespace(queryDispatch=lambda *args: delegated.append(args)))
+        for factory in ('private:factory/evil', 'private:factory/scalc?Interactive',
+                        'private:factory/scalc/../../evil', 'private:factory/sdatabase?Interactive'):
+            url = SimpleNamespace(Complete=factory)
+            router.queryDispatch(url, '_blank', 0).dispatch(url, ())
+        self.assertEqual([], events)
+        self.assertEqual([], delegated)
+
     def test_protocol_eof_does_not_discard_dirty_document(self):
         self.attach()
         self.backend.modified = True
@@ -391,7 +432,7 @@ class NativeBoundaryTests(unittest.TestCase):
     def test_interceptor_routes_document_commands_and_delegates_formatting(self):
         from types import SimpleNamespace
         events, delegated = [], []
-        router = self.native.DispatchRouter(events.append)
+        router = self.native.DispatchRouter(lambda command, target_module=None: events.append(command))
         sentinel = object()
         router.setSlaveDispatchProvider(SimpleNamespace(queryDispatch=lambda *a: delegated.append(a) or sentinel))
         url = lambda name: SimpleNamespace(Complete=name)
@@ -407,6 +448,51 @@ class NativeBoundaryTests(unittest.TestCase):
             self.assertEqual(command, events[-1])
         router.setSlaveDispatchProvider(router)
         self.assertIsNone(router.queryDispatch(url('.uno:Italic'), '_self', 0))
+
+
+    def test_base_readiness_reports_configured_but_unconnected_java_driver(self):
+        from types import SimpleNamespace
+        data_source = SimpleNamespace(getPropertyValue=lambda name: 'sdbc:embedded:hsqldb')
+        document = SimpleNamespace(DataSource=data_source,
+                                   getCurrentController=lambda: SimpleNamespace(isConnected=lambda: False))
+        readiness = self.native.base_readiness(document)
+        self.assertTrue(readiness['dataSourceConfigured'])
+        self.assertFalse(readiness['connectionVerified'])
+        self.assertTrue(readiness['javaRequired'])
+        self.assertIsNone(readiness['javaAvailable'])
+        self.assertFalse(readiness['fullyVerified'])
+        self.assertEqual('not_connected', readiness['state'])
+        self.assertTrue(readiness['message'])
+
+    def test_base_connected_flag_does_not_claim_all_module_dependencies_ready(self):
+        from types import SimpleNamespace
+        data_source = SimpleNamespace(getPropertyValue=lambda name: 'sdbc:embedded:firebird')
+        document = SimpleNamespace(DataSource=data_source,
+                                   getCurrentController=lambda: SimpleNamespace(isConnected=lambda: True))
+        readiness = self.native.base_readiness(document)
+        self.assertEqual('connected', readiness['state'])
+        self.assertTrue(readiness['connectionVerified'])
+        self.assertFalse(readiness['javaRequired'])
+        self.assertIsNone(readiness['javaAvailable'])
+        self.assertFalse(readiness['fullyVerified'])
+
+    def test_base_missing_configuration_and_probe_failure_fail_gracefully(self):
+        from types import SimpleNamespace
+        document = SimpleNamespace(DataSource=SimpleNamespace(getPropertyValue=lambda name: ''),
+                                   getCurrentController=lambda: SimpleNamespace(isConnected=lambda: False))
+        readiness = self.native.base_readiness(document)
+        self.assertEqual('not_configured', readiness['state'])
+        self.assertFalse(readiness['dataSourceConfigured'])
+        del document.DataSource
+        backend = self.native.UnoBackend(self.root)
+        backend.document = document
+        backend.module_factory = 'private:factory/sdatabase'
+        document.isModified = lambda: False
+        document.getTitle = lambda: 'Database'
+        result = backend.status()
+        self.assertEqual('unverified', result['readiness']['state'])
+        self.assertEqual('Database', result['title'])
+        self.assertFalse(result['readiness']['fullyVerified'])
 
     def test_uno_import_is_lazy_and_nonwindows_native_host_fails_closed(self):
         import os
