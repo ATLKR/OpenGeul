@@ -172,7 +172,7 @@ public static class SuiteKoreanSetupHost {
         $sourceDirectory=Join-Path $sourceRoot 'LanguagesAndOptionalFeatures'
         Assert-SuitePlainPath $sourceDirectory
         if ($sourceReceipt.success -ne $true -or $sourceReceipt.productInputVerified -ne $false -or
-            $sourceReceipt.storeQualified -ne $false -or $sourceReceipt.packages.Count -ne 8 -or
+            $sourceReceipt.storeQualified -ne $false -or $sourceReceipt.packages.Count -ne 9 -or
             [IO.Path]::GetFullPath($sourceReceipt.sourceDirectory) -cne [IO.Path]::GetFullPath($sourceDirectory)) {
             throw 'Official offline FOD acquisition receipt does not identify the owned source.'
         }

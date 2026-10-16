@@ -59,6 +59,14 @@ PACKAGES = [
         "sha256": "b825461369a531e76f3dda84840ec457d5f8062afd84381dd40938f69a60305b"
     },
     {
+        # The neutral Build CompDB maps language features to their canonical
+        # CAB payloads. The separate Metadata CompDB contains descriptions.
+        "relativePath": "LanguagesAndOptionalFeatures/metadata/ServerTargetCompDB_FOD_Neutral.xml.cab",
+        "start": 6193278976,
+        "bytes": 47763,
+        "sha256": "057bcf0ac6d870ba9fca2b60aa40e78c901e4a3ffafea5b7b567c06d89bf632e"
+    },
+    {
         "relativePath": "LanguagesAndOptionalFeatures/metadata/ServerTargetCompDB_FOD_Metadata_Neutral.xml.cab",
         "start": 6192836608,
         "bytes": 441350,
