@@ -108,6 +108,56 @@ def extract_hwp_zip(archive: Path, destination: Path, *, limit: int = 512 * 1024
                     while chunk := reader.read(1024 * 1024): writer.write(chunk)
 
 
+def normalize_admin_runtime(source: Path, destination: Path, *, admin_metadata: bool = False, msi_name: str | None = None) -> Path:
+    """Project INSTALLLOCATION content from the pinned MSI's admin source image.
+
+    Windows honors DefaultDir's source name '.' and places program at TARGETDIR;
+    System/System64 and the administrative MSI are not application-root files.
+    The original extraction remains unchanged, including non-native merge modules.
+    """
+    directories = {'help', 'presets', 'program', 'readmes', 'share'}
+    files = {'CREDITS.fodt', 'LICENSE.html', 'NOTICE', 'license.txt', 'update-settings.ini'}
+    allowed = directories | files
+    administrative = {'System', 'System64', 'Fonts', 'Windows', 'Templates'} if admin_metadata else set()
+    if admin_metadata and msi_name:
+        if Path(msi_name).name != msi_name or not msi_name.lower().endswith('.msi'):
+            raise ValueError('Invalid administrative MSI filename')
+        administrative.add(msi_name)
+    if destination.exists() or destination.is_symlink():
+        raise ValueError('Normalized MSI runtime output already exists')
+    if (source.is_symlink() or not source.is_dir() or source.resolve() == destination.absolute()
+            or source.resolve() in destination.absolute().parents):
+        raise ValueError('MSI runtime projection requires separate regular directories')
+    entries = {path.name: path for path in source.iterdir()}
+    unexpected = set(entries) - allowed - administrative
+    if unexpected:
+        raise ValueError('Unexpected MSI runtime root entries: '+', '.join(sorted(unexpected)))
+    missing = allowed - entries.keys()
+    if missing:
+        raise ValueError('Missing pinned MSI application root entries: '+', '.join(sorted(missing)))
+    for name, path in entries.items():
+        info = path.lstat()
+        if path.is_symlink() or getattr(info, 'st_file_attributes', 0) & 0x400:
+            raise ValueError('MSI runtime root symlink/reparse point: '+name)
+        if name not in allowed:
+            continue
+        if (name in directories and not path.is_dir()) or (name in files and not path.is_file()):
+            raise ValueError('Invalid MSI application root entry kind: '+name)
+        for child in path.rglob('*') if path.is_dir() else ():
+            child_info = child.lstat()
+            if child.is_symlink() or getattr(child_info, 'st_file_attributes', 0) & 0x400:
+                raise ValueError('MSI runtime symlink/reparse point: '+str(child))
+            if not (child.is_dir() or child.is_file()):
+                raise ValueError('MSI runtime special file: '+str(child))
+    destination.mkdir(parents=True)
+    for name in sorted(allowed):
+        if name in directories:
+            shutil.copytree(entries[name], destination/name)
+        else:
+            shutil.copy2(entries[name], destination/name)
+    return destination
+
+
 def extract_msi(archive: Path, destination: Path) -> Path:
     if os.name != 'nt': raise ValueError('GUI MSI extraction requires Windows')
     if destination.exists(): raise ValueError('MSI extraction output already exists')
@@ -121,6 +171,8 @@ def extract_msi(archive: Path, destination: Path) -> Path:
     if len(matches) != 1: raise ValueError('MSI must contain one Office runtime')
     runtime = matches[0].parent.parent
     if not (runtime/'program/python.exe').is_file(): raise ValueError('Runtime has no bundled UNO Python')
+    runtime = normalize_admin_runtime(runtime, destination.with_name(destination.name+'-runtime'),
+                                      admin_metadata=runtime == destination, msi_name=archive.name)
     # Administrative images may flatten ARM64 and AMD64 merge-module rows onto
     # the same System64 filenames. Recover the exact native AMD64 File IDs from
     # the authenticated original cabinet instead of trusting those paths.

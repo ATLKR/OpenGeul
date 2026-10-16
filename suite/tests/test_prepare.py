@@ -28,16 +28,67 @@ def implementation():
 
 
 class PrepareTests(unittest.TestCase):
+    def app_root_fixture(self, runtime):
+        for name in ('help', 'presets', 'program', 'readmes', 'share'):
+            (runtime/name).mkdir(parents=True, exist_ok=True)
+        for name in ('CREDITS.fodt', 'LICENSE.html', 'NOTICE', 'license.txt', 'update-settings.ini'):
+            (runtime/name).write_bytes(('original '+name).encode())
+        for name in ('soffice.exe', 'python.exe'):
+            (runtime/'program'/name).write_bytes(pe())
+
+    def test_flat_admin_image_projects_only_official_runtime_root_without_modifying_source(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder)/'admin'; source.mkdir()
+            self.app_root_fixture(source)
+            for name, machine in (('System', 0x14c), ('System64', 0xaa64)):
+                (source/name).mkdir(); (source/name/'concrt140.dll').write_bytes(pe(machine, dll=True))
+            (source/'Fonts').mkdir(); (source/'Fonts/font.txt').write_bytes(b'admin font payload')
+            (source/'input.msi').write_bytes(b'original MSI copy')
+            before = {p.relative_to(source).as_posix(): p.read_bytes() for p in source.rglob('*') if p.is_file()}
+            target = Path(folder)/'runtime'
+            module.normalize_admin_runtime(source, target, admin_metadata=True, msi_name='input.msi')
+            self.assertEqual({p.name for p in target.iterdir()}, {
+                'help', 'presets', 'program', 'readmes', 'share', 'CREDITS.fodt',
+                'LICENSE.html', 'NOTICE', 'license.txt', 'update-settings.ini'})
+            self.assertEqual((target/'NOTICE').read_bytes(), b'original NOTICE')
+            self.assertEqual(before, {p.relative_to(source).as_posix(): p.read_bytes() for p in source.rglob('*') if p.is_file()})
+
+    def test_nested_source_root_is_copied_to_fresh_runtime_without_including_admin_siblings(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder)/'admin/LibreOffice'; self.app_root_fixture(source)
+            (source.parent/'System').mkdir(); (source.parent/'System/concrt140.dll').write_bytes(pe(0x14c, dll=True))
+            target = Path(folder)/'runtime'
+            module.normalize_admin_runtime(source, target)
+            self.assertTrue((target/'program/soffice.exe').is_file())
+            self.assertFalse((target/'System').exists())
+            with self.assertRaises(ValueError): module.normalize_admin_runtime(source, target)
+
+    def test_unknown_admin_root_entry_is_rejected_before_projection(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder)/'admin'; self.app_root_fixture(source)
+            (source/'unexpected.dll').write_bytes(pe(0x14c, dll=True))
+            target = Path(folder)/'runtime'
+            with self.assertRaisesRegex(ValueError, 'Unexpected'):
+                module.normalize_admin_runtime(source, target, admin_metadata=True, msi_name='input.msi')
+            self.assertFalse(target.exists())
+
     def test_msi_extraction_uses_exact_cabinet_members_instead_of_flattened_system64(self):
         module = implementation()
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); archive = root/'input.msi'; archive.write_bytes(b'authenticated-msi')
             def admin(*args, **kwargs):
-                runtime = root/'extracted/LibreOffice/program'; runtime.mkdir(parents=True)
+                self.app_root_fixture(root/'extracted')
+                runtime = root/'extracted/program'
                 (runtime/'soffice.exe').write_bytes(b'office')
                 (runtime/'python.exe').write_bytes(b'python')
                 raw = root/'extracted/System64'; raw.mkdir()
                 for name in module.MSI_VC_DEPENDENCIES: (raw/name).write_bytes(b'flattened ARM64')
+                x86 = root/'extracted/System'; x86.mkdir()
+                (x86/'concrt140.dll').write_bytes(pe(0x14c, dll=True))
+                (root/'extracted/input.msi').write_bytes(archive.read_bytes())
                 return SimpleNamespace(returncode=0)
             def recover(msi, destination):
                 self.assertEqual(msi, archive)
@@ -52,6 +103,11 @@ class PrepareTests(unittest.TestCase):
                  patch('suite.msi_cab.recover_x64_crt', side_effect=recover) as recovered:
                 runtime = module.extract_msi(archive, root/'extracted')
             self.assertEqual(recovered.call_count, 1)
+            self.assertEqual(runtime, root/'extracted-runtime')
+            self.assertFalse((runtime/'System').exists())
+            self.assertFalse((runtime/'System64').exists())
+            self.assertFalse((runtime/'input.msi').exists())
+            self.assertEqual((root/'extracted/System/concrt140.dll').read_bytes(), pe(0x14c, dll=True))
             receipt = json.loads((runtime/'opengeul-msi-dependencies.json').read_text())
             self.assertEqual(receipt['inputMsiSha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
             for name in module.MSI_VC_DEPENDENCIES:
@@ -146,6 +202,7 @@ class PrepareTests(unittest.TestCase):
             def administrative_extract(*args, **kwargs):
                 # extract_msi owns an existing fresh output directory at this point.
                 runtime = output/'LibreOffice'; (runtime/'program').mkdir(parents=True)
+                self.app_root_fixture(runtime)
                 (output/'System64').mkdir()
                 for name in VC_DLLS: (output/'System64'/name).write_bytes(pe(dll=True))
                 for name in ('soffice.exe', 'python.exe'): (runtime/'program'/name).write_bytes(pe())
