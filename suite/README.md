@@ -81,6 +81,13 @@ python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.1-dev-windows-x64
 실패 기록은 보존하며 하나라도 실패하면 배포 ZIP 업로드를 수행하지 않습니다.
 ARM64, 전체 WACK/Store, 실제 프린터와 모든 문서의 호환성도 별도 검증 대상입니다.
 
+Suite CI의 한국어 입력 환경은 `scripts/ensure-korean-ime.ps1`로 준비합니다.
+실제 Windows Server 2025 x64 호스트에서만 Microsoft 공식 미디어의 고정한 CAB와
+구성 정보를 받아 오프라인 원본으로 설치합니다. Windows Update 정책은 바꾸지 않으며,
+설치 상태·재시작 필요 여부·등록된 입력기와 Microsoft 서명을 직접 확인합니다.
+이 준비 결과와 실제 편집기에서의 IME 조합 결과는 구분해서 기록합니다.
+원본 로그는 단계별로 보존하고, 입력기 설치용 CAB는 전달 패키지에 포함하지 않습니다.
+
 공식 런타임에 포함된 32비트 TWAIN 스캐너 도구와 SharePoint COM 구성 요소는 이
 portable 개발판에서 지원하지 않습니다. TWAIN 도구에는 별도 32비트 DLL 격리가 필요하고,
 SharePoint 구성 요소에는 별도 등록과 의존성이 필요합니다. 이 파일들을 원본 그대로

@@ -155,6 +155,40 @@ class LifecycleSmokeTests(unittest.TestCase):
             accessible = SimpleNamespace(descendants=lambda **kw: controls)
             with self.assertRaises(AssertionError): smoke.owned_dialog_button(accessible, 31, ('Yes', '예', '예(&Y)'))
 
+    def test_real_save_error_action_targets_exact_owned_ok_without_assuming_automation_id(self):
+        class ReachedOwnedOk(Exception): pass
+        def click_ok(): raise ReachedOwnedOk('owned OK selected')
+        okay = SimpleNamespace(element_info=SimpleNamespace(name='OK', process_id=31, automation_id='CommandButton_1'),
+                               is_visible=lambda: True, is_enabled=lambda: True, click_input=click_ok)
+        prompt = SimpleNamespace(element_info=SimpleNamespace(name='문서를 저장하지 못했습니다. 문서 창을 유지합니다.'))
+        accessible = SimpleNamespace(descendants=lambda **kw: [okay] if kw else [prompt, okay], set_focus=lambda: None)
+        desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: accessible))
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            source = folder / 'original.docx'
+            source.write_bytes(b'owned original')
+            case = SimpleNamespace(source=source, folder=folder, record={}, process=SimpleNamespace(pid=31),
+                                   attach=lambda: (100, 200, 300), edit=lambda *args: None,
+                                   shell_command=lambda *args: None, picker=lambda *args: 500,
+                                   screenshot=lambda *args: None)
+            case.api = SimpleNamespace(windows=lambda pid: [600], pid=lambda hwnd: 31,
+                                       title=lambda hwnd: 'OpenGeul Office', class_name=lambda hwnd: '#32770',
+                                       require_foreground=lambda hwnd: None,
+                                       user=SimpleNamespace(GetWindow=lambda hwnd, relation: 100))
+            with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop)}), \
+                 patch.object(smoke, 'ExclusiveRead', return_value=SimpleNamespace(close=lambda: None)):
+                with self.assertRaisesRegex(ReachedOwnedOk, 'owned OK selected'):
+                    smoke.failed_saveas(case)
+
+    def test_read_only_hwp_label_census_keeps_names_without_instantiating_control_wrappers(self):
+        self.assertTrue(hasattr(smoke, 'accessibility_names'), 'Raw accessibility label census is missing')
+        children = [SimpleNamespace(name='경로 확인 & 한글 문서.hwpx', control_type=None),
+                    SimpleNamespace(name='OpenGeul', control_type='Text')]
+        info = SimpleNamespace(name='Owned HWP root', descendants=lambda: children)
+        def wrapped_descendants(): raise KeyError(None)
+        root = SimpleNamespace(element_info=info, descendants=wrapped_descendants)
+        self.assertEqual(smoke.accessibility_names(root), ['Owned HWP root', '경로 확인 & 한글 문서.hwpx', 'OpenGeul'])
+
     def test_targets_are_fresh_direct_children_and_never_links(self):
         if not hasattr(smoke, 'owned_target'): self.skipTest('RED: policy API not implemented')
         with tempfile.TemporaryDirectory() as directory:

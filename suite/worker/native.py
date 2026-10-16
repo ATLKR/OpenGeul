@@ -11,6 +11,15 @@ import uuid
 from dispatch import DispatchRouter, make_interceptor, make_interaction_handler
 from session import WorkerError
 
+UI_MODULE_SERVICES = {
+    'private:factory/swriter': 'com.sun.star.text.TextDocument',
+    'private:factory/scalc': 'com.sun.star.sheet.SpreadsheetDocument',
+    'private:factory/simpress': 'com.sun.star.presentation.PresentationDocument',
+    'private:factory/sdraw': 'com.sun.star.drawing.DrawingDocument',
+    'private:factory/smath': 'com.sun.star.formula.FormulaProperties',
+    'private:factory/sdatabase': 'com.sun.star.sdb.OfficeDatabaseDocument',
+}
+
 
 class PrivateProfile:
     """Explicit cleanup only: losing stdin must never delete a live office profile."""
@@ -188,6 +197,38 @@ class UnoBackend:
         prop.Name, prop.Value = name, value
         return prop
 
+    def _bootstrap_ui(self, service, module):
+        """Initialize global icon settings before document UI construction.
+
+        The public toolbar factory constructs ToolBarManager (and SvtMiscOptions)
+        before reading resource settings. An absent custom resource is an empty
+        transient toolbar. Explicit ConfigurationSource avoids identifying our
+        still-empty frame; the element is never shown or stored.
+        """
+        element = None
+        try:
+            module_service = UI_MODULE_SERVICES[module['factory']]
+            supplier = service('com.sun.star.ui.ModuleUIConfigurationManagerSupplier')
+            config = supplier.getUIConfigurationManager(module_service)
+            resource = 'private:resource/toolbar/opengeul_bootstrap_' + uuid.uuid4().hex
+            if config.hasSettings(resource):
+                raise RuntimeError('The bootstrap toolbar must have no configured items')
+            manager = service('com.sun.star.ui.UIElementFactoryManager')
+            factory = manager.getFactory(resource, module_service)
+            if factory is None:
+                raise RuntimeError('The native toolbar factory is unavailable')
+            props = tuple(self._property(name, value) for name, value in (
+                ('Frame', self.frame), ('ConfigurationSource', config)))
+            try:
+                element = factory.createUIElement(resource, props)
+                if element is None or element.getRealInterface() is None:
+                    raise RuntimeError('The native bootstrap toolbar was not initialized')
+            finally:
+                if element is not None:
+                    element.dispose()
+        except Exception as exc:
+            raise WorkerError('ui_bootstrap_failed', 'Office 편집기 UI 설정을 초기화하지 못했습니다.') from exc
+
     def _new_base_url(self, service, module, interaction):
         # A noninteractive Base factory leaves URL="jdbc:" and selects Tables,
         # which can attempt that invalid connection. Initialize a local Firebird
@@ -249,6 +290,9 @@ class UnoBackend:
         self.frame.setName(frame_name)
         self.desktop.getFrames().append(self.frame)
         self.peer.setPosSize(0, 0, width, height, 15)
+        self._diagnose('before-ui-bootstrap')
+        self._bootstrap_ui(service, module)
+        self._diagnose('after-ui-bootstrap')
         self.interceptor = make_interceptor(self.command_handler)
         self.frame.registerDispatchProviderInterceptor(self.interceptor)
         interaction = make_interaction_handler()
