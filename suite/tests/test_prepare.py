@@ -150,7 +150,14 @@ class PrepareTests(unittest.TestCase):
                 for name in VC_DLLS: (output/'System64'/name).write_bytes(pe(dll=True))
                 for name in ('soffice.exe', 'python.exe'): (runtime/'program'/name).write_bytes(pe())
                 return type('Result', (), {'returncode': 0})()
-            with patch.object(module.os, 'name', 'nt'), patch.object(module.subprocess, 'run', side_effect=administrative_extract):
+            def recover(msi, destination):
+                destination.mkdir()
+                for name in VC_DLLS: (destination/name).write_bytes(pe(dll=True))
+                return {name: {'path': destination/name, 'fileId': name+'_amd64.GUID',
+                               'cabinet': '#official.cab'} for name in VC_DLLS}
+            with patch.object(module, 'os', SimpleNamespace(name='nt')), \
+                 patch.object(module.subprocess, 'run', side_effect=administrative_extract), \
+                 patch('suite.msi_cab.recover_x64_crt', side_effect=recover):
                 runtime = module.extract_msi(archive, output)
             receipt = json.loads((runtime/'opengeul-msi-dependencies.json').read_text())
             self.assertEqual(receipt['schemaVersion'], 1)
