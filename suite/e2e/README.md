@@ -78,6 +78,23 @@ missing or duplicate cases, and reports successful module claims only for passin
 cases. Any failure or incomplete coverage produces `success=false` and process
 exit 1; the validated-package gate is unchanged.
 
+Writer lifecycle edits additionally use `writer_model_barrier.py` and the E2E-only
+`writer_model_reader.py`. Before the original physical input, the harness freezes
+the independent OOXML body (or a known blank factory body), cumulative ordered
+markers, exact attachment and original process generations. A bounded read-only
+helper reads only that retained Writer model. Only the exact prior body or a
+nondecreasing exact append prefix may remain pending; full-body equality and
+normal observer-job cleanup must complete under the same absolute twelve-second
+budget before the original save/close action. Original input buffers, pacing,
+focus actions, saved XML and independent UNO reopen checks remain mandatory.
+Portable receipt replay validates raw Windows paths against an explicit verified
+payload inventory without Windows APIs or local path resolution. It joins the
+same reader PID/creation/image/HANDLE/job and original native handles through
+every read and final cleanup. This is an acceptance synchronization correction.
+The earlier fixed20 physical-input diagnostic retained two control failures
+(trials10/12, interior L/C loss); their cause remains unproved. A passing new
+harness does not establish a historical physical-input or product fix.
+
 After existing-document checks, all six Office modules also launch with
 `--module MODULE` and no file argument. Each blank document must attach under the
 Suite panel, retain its OpenGeul title, avoid external Office windows, produce

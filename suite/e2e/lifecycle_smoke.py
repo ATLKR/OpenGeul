@@ -17,6 +17,8 @@ import os
 from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
+import time
+import traceback
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 import zipfile
@@ -609,12 +611,130 @@ class LifecycleWindows(native.Windows):
         return (host.left, host.top, host.right, host.bottom), (points[0].x, points[0].y, points[1].x, points[1].y)
 
 
+def retained_writer_shell(process, suite, evidence):
+    """Query the actual Popen HANDLE without replacing or closing that handle."""
+    evidence.update(kind='retained-suite-popen-process',handleValue=int(process._handle))
+    assert evidence['handleValue']>0
+    kernel=hwp_kernel()
+    kernel.GetProcessId.argtypes=(wintypes.HANDLE,);kernel.GetProcessId.restype=wintypes.DWORD
+    kernel.GetExitCodeProcess.argtypes=(wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD));kernel.GetExitCodeProcess.restype=wintypes.BOOL
+    evidence['pid']=int(kernel.GetProcessId(evidence['handleValue']))
+    if not evidence['pid']:raise ctypes.WinError(ctypes.get_last_error())
+    image,creation=process_identity(kernel,evidence['handleValue'],evidence)
+    evidence['waitResult']=int(kernel.WaitForSingleObject(evidence['handleValue'],0))
+    code=wintypes.DWORD()
+    if not kernel.GetExitCodeProcess(evidence['handleValue'],ctypes.byref(code)):raise ctypes.WinError(ctypes.get_last_error())
+    evidence['exitCode']=int(code.value)
+    assert evidence['pid']==process.pid and image==(suite/'OpenGeul.Office.exe').resolve(), 'Original Suite Popen HANDLE identifies another process'
+    assert evidence['waitResult']==258 and evidence['exitCode']==259 and process.poll() is None, 'Original Suite Popen process is no longer alive'
+    return creation
+
+
+class WriterModelContext:
+    """One attachment's independent baseline and cumulative completion ledger.
+
+    Each edit gets a fresh bounded read-only helper. No helper survives into an
+    original close/save action, and a failed edit cannot be retried here.
+    """
+    def __init__(self, case, attachment):
+        self.case, self.attachment = case, dict(attachment)
+        self.baseline = case.writer_model_baseline['bodyText']
+        self.expected_url = case.source.resolve().as_uri() if case.source else ''
+        self.completed_markers = []
+        self.native_binding = None
+        self.reader = self.plan = self.receipt = None
+        self.failed = False
+
+    def begin(self, marker):
+        from writer_model_barrier import freeze_expectation, BINDING_KEYS
+        from writer_model_reader import OwnedWriterReader
+        from writer_style_smoke import _packaged_identity_file
+        assert not self.failed and self.reader is None, 'Completion context cannot retry an edit'
+        started = time.monotonic()
+        self.deadline = started + 12.0
+        receipts = self.case.record.setdefault('writerModelCompletions', [])
+        expected = ASCII_EDITOR_MARKERS[self.case.name]
+        assert len(receipts) < len(expected) and marker == expected[len(receipts)], 'Original case edit order changed'
+        self.receipt = {'schemaVersion': 1, 'kind': 'writer-model-completion', 'success': False,
+                        'startedAt': started, 'deadline': self.deadline,
+                        'originalPhysicalAsciiLossCauseEstablished': False, 'productFixEstablished': False}
+        receipts.append(self.receipt)  # Keep startup and before-input failures too.
+        try:
+            self.receipt['originalShell']={}
+            shell_creation=retained_writer_shell(self.case.process,self.case.suite,self.receipt['originalShell'])
+            inventory_file, data = _packaged_identity_file(self.case.suite, 'suite-inventory.json')
+            self.inventory, self.inventory_sha256 = json.loads(data), inventory_file['sha256']
+            attachment = self.attachment
+            destination = self.case.output / 'writer-model-readers' / self.case.name / ('edit-%02d' % len(receipts))
+            self.receipt['readerOutput'] = str(destination)
+            self.reader = OwnedWriterReader(self.case.suite, destination, shell_pid=self.case.process.pid,
+                suite_hwnd=attachment['hwnd'], parent_hwnd=attachment['parent'], child_hwnd=attachment['child'],
+                office_pid=attachment['officePid'], expected_shell_creation=shell_creation,expected_url=self.expected_url)
+            before = self.reader.start(self.deadline)
+            self.receipt['beforeInput'] = before
+            binding = before['bindingBefore']
+            native_binding = {key: binding[key] for key in BINDING_KEYS - {'frameIdentity','controllerIdentity','modelIdentity'}}
+            if self.native_binding is not None:
+                assert native_binding == self.native_binding, 'Original frame generation changed between edits'
+            self.plan = freeze_expectation(binding, self.baseline, self.completed_markers, marker, before,
+                suite_root=self.case.suite,original_shell=self.receipt['originalShell'], inventory=self.inventory, inventory_sha256=self.inventory_sha256,
+                started_at=started, timeout_seconds=12.0)
+            self.native_binding = native_binding
+            self.receipt['expectation'] = self.plan.receipt()
+            return self.plan
+        except BaseException as exc:
+            self.abort(exc)
+            raise
+
+    def complete(self, plan):
+        from writer_model_barrier import await_completion, finalize_completion
+        assert plan is self.plan and not self.failed and self.reader is not None
+        try:
+            await_completion(plan, self.reader.read, clock=time.monotonic, pause=time.sleep, record=self.receipt)
+            cleanup = self.reader.close(self.deadline)
+            self.reader = None
+            finalize_completion(plan, self.receipt, cleanup, time.monotonic())
+            self.completed_markers.append(plan.next_marker)
+        except BaseException as exc:
+            self.abort(exc)
+            raise
+        finally:
+            if not self.failed: self.persist()
+
+    def persist(self):
+        if self.receipt is None: return
+        destination = Path(self.receipt['readerOutput'])
+        if destination.is_dir():
+            (destination / 'completion.json').write_text(json.dumps(self.receipt, ensure_ascii=False,
+                indent=2, allow_nan=False), encoding='utf-8')
+
+    def abort(self, exc):
+        self.failed = True
+        if self.receipt is not None:
+            self.receipt.update(success=False, state='failed')
+            self.receipt.setdefault('error', type(exc).__name__ + ': ' + str(exc))
+            self.receipt.setdefault('traceback', traceback.format_exc())
+        if self.reader is not None:
+            try: self.receipt['cleanup'] = self.reader.close(self.deadline)
+            except BaseException as later:
+                self.receipt.setdefault('cleanupErrors', []).append(type(later).__name__ + ': ' + str(later))
+            finally: self.reader = None
+        try: self.persist()
+        except BaseException as later:
+            # Preserve the first failure; final case JSON still retains this
+            # secondary write error even if the reader directory is unavailable.
+            self.receipt.setdefault('persistenceErrors', []).append(type(later).__name__ + ': ' + str(later))
+
+
 class Case:
     def __init__(self, suite, fixtures, output, name, *, blank=False, home=False):
         self.suite, self.fixtures, self.output, self.name = suite, fixtures, output, name
         self.folder = output / 'fixtures' / name
         self.folder.mkdir()
         self.source = None if blank or home else copy_writer_fixture(fixtures, self.folder, '원본 문서 & ' + name + '.docx')
+        # Freeze the independent original OOXML body before the editor starts.
+        self.writer_model_baseline = writer_evidence(self.source) if self.source else {'bodyText': '', 'kind': 'known-blank-factory'}
+        self.writer_model_contexts = {}
         command = [str(suite / 'OpenGeul.Office.exe')]
         if not home: command += ['--module', 'writer'] + (['--file', str(self.source)] if self.source else [])
         self.process = native.launch_suite(command, suite, output, name)
@@ -625,12 +745,23 @@ class Case:
     def run(self, action):
         try:
             action(self)
+            from writer_model_barrier import replay_case_completions
+            from writer_style_smoke import _packaged_identity_file
+            inventory_file, inventory_data = _packaged_identity_file(self.suite, 'suite-inventory.json')
+            urls = {key: context.expected_url for key, context in self.writer_model_contexts.items()}
+            self.record['writerModelReplay'] = replay_case_completions(self.record, suite_root=self.suite,
+                inventory=json.loads(inventory_data), inventory_sha256=inventory_file['sha256'],
+                baseline_body=self.writer_model_baseline['bodyText'], expected_urls=urls)
             self.record.update(success=True, stage='complete')
             return self.record
         except Exception as exc:
             native.capture_failure(self.output, self.name, self.record, exc)
             raise
         finally:
+            for context in self.writer_model_contexts.values():
+                if context.reader is not None:
+                    context.abort(AssertionError('Case exited before its owned observation helper was released'))
+                    self.record['success'] = False
             native.stop_owned_test_process(self.process, self.record)
             native.write_result(self.output, self.name, self.record)
 
@@ -664,24 +795,39 @@ class Case:
         Desktop(backend='win32').window(handle=hwnd).wrapper_object().capture_as_image().save(self.output / filename)
         self.record.setdefault('screenshots', []).append(filename)
 
+    def _writer_model_context(self, hwnd, child):
+        key = (hwnd, child)
+        if key not in self.writer_model_contexts:
+            matches = [row for row in self.record.get('attachments', []) if (row['hwnd'], row['child']) == key]
+            assert len(matches) == 1, 'Model completion requires one original attachment'
+            self.writer_model_contexts[key] = WriterModelContext(self, matches[0])
+        return self.writer_model_contexts[key]
+
     def edit(self, hwnd, child, marker):
         from pywinauto import Desktop
         from pywinauto.keyboard import send_keys
         self.record['stage'] = 'physical-editor-input'
-        window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-        window.set_focus()
-        self.api.require_foreground(hwnd)
         attachments = [row for row in self.record.get('attachments', [])
                        if row['hwnd'] == hwnd and row['child'] == child]
         assert len(attachments) == 1, 'Editor input requires one exact previously owned attachment'
-        native.prepare_editor_focus(self.api, hwnd, child, self.process.pid, attachments[0]['officePid'], self.record,
-            lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
-            lambda: send_keys('^{F6}', pause=0.1))
-        self.api.require_editor_focus(hwnd, child)
-        send_keys('^{END}', pause=0.1)
-        self.api.require_editor_focus(hwnd, child)
-        native.ascii_input.type_ascii(self.api, hwnd, child, marker, self.record, pause=0.025)
-        self.api.require_editor_focus(hwnd, child)
+        context = self._writer_model_context(hwnd, child)
+        plan = context.begin(marker)
+        try:
+            window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
+            window.set_focus()
+            self.api.require_foreground(hwnd)
+            native.prepare_editor_focus(self.api, hwnd, child, self.process.pid, attachments[0]['officePid'], self.record,
+                lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
+                lambda: send_keys('^{F6}', pause=0.1))
+            self.api.require_editor_focus(hwnd, child)
+            send_keys('^{END}', pause=0.1)
+            self.api.require_editor_focus(hwnd, child)
+            native.ascii_input.type_ascii(self.api, hwnd, child, marker, self.record, pause=0.025)
+            self.api.require_editor_focus(hwnd, child)
+            context.complete(plan)
+        except BaseException as exc:
+            context.abort(exc)
+            raise
         native.wait_for(lambda: self.api.title(hwnd).startswith('* '), 12)
 
     def shell_command(self, hwnd, keys):

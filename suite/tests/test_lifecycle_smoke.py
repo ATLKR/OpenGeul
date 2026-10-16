@@ -22,6 +22,10 @@ class LifecycleSmokeTests(unittest.TestCase):
         case = object.__new__(smoke.Case)
         case.record = {'attachments': [{'hwnd': 11, 'child': 22, 'officePid': 88}]}
         case.process = SimpleNamespace(pid=77)
+        # This test isolates the unchanged focus/input protocol. Real completion
+        # and stale-title rejection are exercised by test_writer_model_barrier.
+        completion = SimpleNamespace(begin=Mock(return_value=object()), complete=Mock(), abort=Mock())
+        case._writer_model_context = lambda hwnd, child: completion
         case.api = SimpleNamespace(require_foreground=lambda hwnd: None, require_editor_focus=lambda hwnd, child: 22,
                                    title=lambda hwnd: '* OpenGeul Writer', pid=lambda hwnd: 999)
         window = SimpleNamespace(set_focus=Mock(), click_input=Mock())

@@ -225,6 +225,10 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
         case = object.__new__(lifecycle.Case)
         case.record = {'attachments': [{'hwnd': 11, 'child': 22, 'officePid': 88}]}
         case.process, case.api = SimpleNamespace(pid=77), FakeWindows()
+        # Isolate this existing navigation/input contract. Completion itself is
+        # covered by the real-policy regressions in test_writer_model_barrier.
+        completion = SimpleNamespace(begin=Mock(return_value=object()), complete=Mock(), abort=Mock())
+        case._writer_model_context = lambda hwnd, child: completion
         case.api.title = lambda hwnd: '* OpenGeul Writer'
         window = SimpleNamespace(set_focus=Mock(), click_input=Mock())
         desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: window))
