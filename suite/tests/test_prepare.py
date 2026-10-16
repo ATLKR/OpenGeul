@@ -5,7 +5,14 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
+
+from suite.tests.test_payload import pe
+
+VC_DLLS = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+           'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
+           'vcruntime140_1.dll', 'vcruntime140_threads.dll')
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -20,6 +27,107 @@ def implementation():
 
 
 class PrepareTests(unittest.TestCase):
+    def msi_fixture(self, folder):
+        root = Path(folder)/'extract'
+        runtime = root/'LibreOffice'
+        (runtime/'program').mkdir(parents=True)
+        (root/'System64').mkdir()
+        (root/'System').mkdir()
+        for name in VC_DLLS:
+            (root/'System64'/name).write_bytes(pe(dll=True))
+            (root/'System'/name).write_bytes(pe(0x14c, dll=True))
+        return root, runtime
+
+    def test_msi_dependencies_are_copied_original_and_receipted(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root, runtime = self.msi_fixture(folder)
+            original = {name: (root/'System64'/name).read_bytes() for name in VC_DLLS}
+            receipt = module.stage_msi_dependencies(root, runtime)
+            self.assertEqual(set(receipt), {'program/'+name for name in VC_DLLS})
+            for name, data in original.items():
+                self.assertEqual((root/'System64'/name).read_bytes(), data)
+                self.assertEqual((runtime/'program'/name).read_bytes(), data)
+                self.assertEqual(receipt['program/'+name], {
+                    'source': 'System64/'+name, 'size': len(data),
+                    'sha256': hashlib.sha256(data).hexdigest()})
+
+    def test_missing_x64_dependency_never_falls_back_to_system_x86_or_writes(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root, runtime = self.msi_fixture(folder)
+            (root/'System64/vcruntime140_1.dll').unlink()
+            with self.assertRaisesRegex(ValueError, 'missing|Missing'):
+                module.stage_msi_dependencies(root, runtime)
+            self.assertEqual(list((runtime/'program').iterdir()), [])
+
+    def test_conflicting_existing_runtime_dll_is_preserved_before_any_copy(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root, runtime = self.msi_fixture(folder)
+            target = runtime/'program/vcruntime140_threads.dll'
+            target.write_bytes(b'preserve conflicting user bytes')
+            with self.assertRaisesRegex(ValueError, 'conflict|Conflict'):
+                module.stage_msi_dependencies(root, runtime)
+            self.assertEqual(list((runtime/'program').iterdir()), [target])
+            self.assertEqual(target.read_bytes(), b'preserve conflicting user bytes')
+
+    def test_identical_existing_dependency_is_accepted_without_replacement(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root, runtime = self.msi_fixture(folder)
+            target = runtime/'program/concrt140.dll'
+            target.write_bytes((root/'System64/concrt140.dll').read_bytes())
+            before = target.stat().st_mtime_ns
+            module.stage_msi_dependencies(root, runtime)
+            self.assertEqual(target.stat().st_mtime_ns, before)
+
+    def test_mixed_architecture_dependency_fails_before_any_copy(self):
+        module = implementation()
+        for machine in (0x14c, 0xaa64):
+            with self.subTest(machine=machine), tempfile.TemporaryDirectory() as folder:
+                root, runtime = self.msi_fixture(folder)
+                (root/'System64/vcruntime140_threads.dll').write_bytes(pe(machine, dll=True))
+                with self.assertRaisesRegex(ValueError, 'x64|architecture'):
+                    module.stage_msi_dependencies(root, runtime)
+                self.assertEqual(list((runtime/'program').iterdir()), [])
+
+    def test_symlink_dependency_rejected_without_touching_its_target(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root, runtime = self.msi_fixture(folder)
+            path = root/'System64/concrt140.dll'
+            data = path.read_bytes()
+            outside = Path(folder)/'original.dll'; outside.write_bytes(data)
+            path.unlink()
+            try: path.symlink_to(outside)
+            except OSError: self.skipTest('Symlink creation unavailable')
+            with self.assertRaisesRegex(ValueError, 'link|reparse'):
+                module.stage_msi_dependencies(root, runtime)
+            self.assertEqual(outside.read_bytes(), data)
+            self.assertEqual(list((runtime/'program').iterdir()), [])
+
+    def test_extract_msi_stages_dependencies_and_writes_runtime_input_receipt(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            archive = Path(folder)/'input.msi'; archive.write_bytes(b'authenticated input unchanged')
+            output = Path(folder)/'extract'
+            def administrative_extract(*args, **kwargs):
+                # extract_msi owns an existing fresh output directory at this point.
+                runtime = output/'LibreOffice'; (runtime/'program').mkdir(parents=True)
+                (output/'System64').mkdir()
+                for name in VC_DLLS: (output/'System64'/name).write_bytes(pe(dll=True))
+                for name in ('soffice.exe', 'python.exe'): (runtime/'program'/name).write_bytes(pe())
+                return type('Result', (), {'returncode': 0})()
+            with patch.object(module.os, 'name', 'nt'), patch.object(module.subprocess, 'run', side_effect=administrative_extract):
+                runtime = module.extract_msi(archive, output)
+            receipt = json.loads((runtime/'opengeul-msi-dependencies.json').read_text())
+            self.assertEqual(receipt['schemaVersion'], 1)
+            self.assertEqual(receipt['architecture'], 'x64')
+            self.assertEqual(set(receipt['files']), {'program/'+name for name in VC_DLLS})
+            self.assertTrue(all((runtime/path).is_file() for path in receipt['files']))
+            self.assertEqual(archive.read_bytes(), b'authenticated input unchanged')
+
     def test_matching_cached_download_is_reused_without_network(self):
         module = implementation()
         with tempfile.TemporaryDirectory() as folder:

@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
+import struct
 import subprocess
 import sys
 import urllib.parse
@@ -15,6 +17,11 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+MSI_VC_DEPENDENCIES = frozenset({
+    'concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+    'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
+    'vcruntime140_1.dll', 'vcruntime140_threads.dll',
+})
 
 
 def sha256(path: Path) -> str:
@@ -111,7 +118,83 @@ def extract_msi(archive: Path, destination: Path) -> Path:
     if len(matches) != 1: raise ValueError('MSI must contain one Office runtime')
     runtime = matches[0].parent.parent
     if not (runtime/'program/python.exe').is_file(): raise ValueError('Runtime has no bundled UNO Python')
+    files = stage_msi_dependencies(destination, runtime)
+    receipt = runtime/'opengeul-msi-dependencies.json'
+    with receipt.open('x', encoding='utf-8') as stream:
+        json.dump({'schemaVersion': 1, 'architecture': 'x64', 'files': files}, stream, indent=2)
+        stream.write('\n')
     return runtime
+
+
+def stage_msi_dependencies(extraction_root: Path, runtime_root: Path) -> dict:
+    """Copy the pinned MSI's native x64 VC++ DLLs into its scratch runtime.
+
+    Administrative extraction puts these files in System64 rather than program.
+    Validate every source and existing destination before copying any dependency;
+    never use the sibling System directory containing x86 binaries.
+    """
+    try:
+        from suite.payload import _pe
+    except ModuleNotFoundError:
+        from payload import _pe
+
+    def regular(path, *, directory=False):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+            raise ValueError('MSI dependency symlink/reparse point: '+str(path))
+        if not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
+            raise ValueError('MSI dependency requires a regular '+('directory' if directory else 'file'))
+        return info
+
+    source = extraction_root/'System64'
+    target = runtime_root/'program'
+    for directory in (extraction_root, source, runtime_root, target):
+        regular(directory, directory=True)
+    candidates = {}
+    for path in source.iterdir():
+        name = path.name.lower()
+        if not re.fullmatch(r'(?:msvcp140[^/]*|vcruntime140[^/]*|concrt140)\.dll', name):
+            continue
+        if name in candidates:
+            raise ValueError('MSI dependency source case collision: '+name)
+        candidates[name] = path
+    missing = MSI_VC_DEPENDENCIES - candidates.keys()
+    if missing:
+        raise ValueError('Missing pinned MSI System64 dependencies: '+', '.join(sorted(missing)))
+    existing = {}
+    for path in target.iterdir():
+        name = path.name.lower()
+        if name in candidates:
+            if name in existing:
+                raise ValueError('MSI dependency destination case collision: '+name)
+            existing[name] = path
+    result = {}
+    for name, path in sorted(candidates.items()):
+        info = regular(path)
+        _pe(path)
+        with path.open('rb') as stream:
+            stream.seek(60)
+            pe_offset = struct.unpack('<I', stream.read(4))[0]
+            stream.seek(pe_offset+4)
+            if struct.unpack('<H', stream.read(2))[0] != 0x8664:
+                raise ValueError('MSI dependency must use native x64 architecture: '+name)
+        digest = sha256(path)
+        if name in existing:
+            other = existing[name]
+            other_info = regular(other)
+            if other_info.st_size != info.st_size or sha256(other) != digest:
+                raise ValueError('Conflicting runtime MSI dependency: '+name)
+        result['program/'+name] = {'source': 'System64/'+path.name,
+                                  'size': info.st_size, 'sha256': digest}
+    # All dependency and collision checks have succeeded before any runtime write.
+    for name, path in sorted(candidates.items()):
+        if name not in existing:
+            with path.open('rb') as reader, (target/name).open('xb') as writer:
+                shutil.copyfileobj(reader, writer)
+            record = result['program/'+name]
+            if (target/name).stat().st_size != record['size'] or sha256(target/name) != record['sha256']:
+                raise ValueError('Staged MSI dependency differs from its input: '+name)
+    return result
 
 
 def main() -> None:
