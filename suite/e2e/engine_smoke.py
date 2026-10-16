@@ -203,7 +203,7 @@ def populate(engine, module, document):
     elif module == 'math':
         document.setPropertyValue('Formula', FORMULA)
     elif module == 'base':
-        connection = document.getDataSource().getConnection('', '')
+        connection = document.DataSource.getConnection('', '')
         try:
             connection.setAutoCommit(False)
             statement = connection.createStatement()
@@ -245,7 +245,7 @@ def observe(module, document):
     if module == 'math':
         return {'formula': document.getPropertyValue('Formula')}
     if module == 'base':
-        source = document.getDataSource()
+        source = document.DataSource
         connection = source.getConnection('', '')
         try:
             result = connection.createStatement().executeQuery(
@@ -287,7 +287,8 @@ def run_case(suite, output, module, specification, verify_ui=False):
             if module == 'base':
                 # Direct service creation avoids the interactive database wizard.
                 document = engine.service('com.sun.star.sdb.OfficeDatabaseDocument')
-                document.getDataSource().setPropertyValue('URL', 'sdbc:embedded:firebird')
+                document.initNew()
+                document.DataSource.setPropertyValue('URL', 'sdbc:embedded:firebird')
                 engine.store_new(document, path, specification['filters']['odb'])
             else:
                 document = engine.load(specification['factory'])
@@ -311,7 +312,7 @@ def run_case(suite, output, module, specification, verify_ui=False):
         try:
             engine.close_document(document)
         except Exception as exc:
-            engine.cleanup_errors.append('generated document: ' + str(exc))
+            engine.cleanup_errors.append('generated document: ' + type(exc).__name__ + ': ' + str(exc))
         engine.cleanup()
         if engine.cleanup_errors:
             result['cleanupErrors'] = engine.cleanup_errors
