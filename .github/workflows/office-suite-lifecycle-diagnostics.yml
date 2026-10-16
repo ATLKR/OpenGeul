@@ -1,0 +1,130 @@
+name: OpenGeul finite native lifecycle diagnosis
+'on':
+  push:
+    branches:
+    - work/suite-lifecycle-runtime
+permissions:
+  contents: read
+  actions: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  lifecycle:
+    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private ==
+      false
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Recover exact previously validated runtime without rebuilding it
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      shell: python
+      run: "import hashlib, json, os, pathlib, urllib.error, urllib.parse, urllib.request,\
+        \ zipfile\nrepository = 'ATLKR/OpenGeul'\nexpected_head = '579511489f9def03dd8d894ef249fd8ed9c8fa10'\n\
+        api = 'https://api.github.com/repos/' + repository\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n\
+        \    def redirect_request(self, *args): return None\nauthenticated = urllib.request.build_opener(NoRedirect())\n\
+        headers = {'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'], 'Accept':\
+        \ 'application/vnd.github+json', 'User-Agent': 'OpenGeul-startup-diagnosis'}\n\
+        def metadata(path):\n    with authenticated.open(urllib.request.Request(api\
+        \ + path, headers=headers), timeout=60) as response:\n        return json.load(response)\n\
+        run = metadata('/actions/runs/38909448104')\nassert run['conclusion'] == 'success'\
+        \ and run['head_sha'] == expected_head\nartifact = metadata('/actions/artifacts/12049897911')\n\
+        assert artifact['workflow_run']['id'] == 38909448104 and artifact['workflow_run']['head_sha']\
+        \ == expected_head and not artifact['expired']\nrequest = urllib.request.Request(api\
+        \ + '/actions/artifacts/12049897911/zip', headers=headers)\ntry:\n    authenticated.open(request,\
+        \ timeout=60)\n    raise RuntimeError('Expected archive redirect')\nexcept\
+        \ urllib.error.HTTPError as error:\n    assert error.code == 302\n    location\
+        \ = error.headers['Location']\n    error.close()\nparsed = urllib.parse.urlsplit(location)\n\
+        assert parsed.scheme == 'https' and parsed.hostname.endswith(('.blob.core.windows.net',\
+        \ '.githubusercontent.com'))\nroot = pathlib.Path('.work/runtime-input');\
+        \ root.mkdir(parents=True)\nouter = root / 'original-artifact.zip'\ntry:\n\
+        \    with urllib.request.urlopen(location, timeout=120) as response, outer.open('xb')\
+        \ as target:\n        while block := response.read(1024 * 1024): target.write(block)\n\
+        except urllib.error.HTTPError as error:\n    raise RuntimeError('Anonymous\
+        \ storage HTTP ' + str(error.code)) from None\nexcept Exception as error:\n\
+        \    raise RuntimeError('Anonymous storage download failed: ' + type(error).__name__)\
+        \ from None\nassert outer.stat().st_size == 592780912\nwith outer.open('rb')\
+        \ as stream:\n    assert hashlib.file_digest(stream, 'sha256').hexdigest()\
+        \ == 'e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d'\n\
+        with zipfile.ZipFile(outer) as archive:\n    assert archive.namelist() ==\
+        \ ['OpenGeul-Office-0.1.0-dev-windows-x64.zip']\n    archive.extract(archive.namelist()[0],\
+        \ root)\ninner = root / 'OpenGeul-Office-0.1.0-dev-windows-x64.zip'\nwith\
+        \ inner.open('rb') as stream:\n    assert hashlib.file_digest(stream, 'sha256').hexdigest()\
+        \ == '87571bfa914950876837bc79e431168056a65fa357fadcafb0030463b9b25995'\n\
+        with zipfile.ZipFile(inner) as archive:\n    assert archive.testzip() is None\n\
+        \    archive.extractall('.work/runtime')\nprovenance = json.loads(pathlib.Path('.work/runtime/suite-provenance.json').read_text(encoding='utf-8'))\n\
+        assert provenance['sourceCommit'] == expected_head\n"
+      id: runtime
+    - name: Verify immutable baseline and record diagnostic provenance
+      shell: python
+      run: 'import hashlib, json, os, subprocess
+
+        from pathlib import Path
+
+        subprocess.run([''python'',''suite/scripts/verify-suite.py'',''.work/runtime''],check=True)
+
+        root=Path(''.work/probe'');root.mkdir(parents=True)
+
+        provenance=json.loads(Path(''.work/runtime/suite-provenance.json'').read_text(encoding=''utf-8''))
+
+        assert provenance[''sourceCommit'']==''579511489f9def03dd8d894ef249fd8ed9c8fa10''
+
+        names=(''suite/e2e/lifecycle_smoke.py'',''suite/e2e/engine_smoke.py'',''suite/e2e/windows_smoke.py'')
+
+        (root/''diagnostic-provenance.json'').write_text(json.dumps({''diagnosticOnly'':True,''deliverable'':False,''runtimeSource'':provenance[''sourceCommit''],''harnessSource'':os.environ[''GITHUB_SHA''],''unchangedRuntime'':True,''harnessSha256'':{name:hashlib.sha256(Path(name).read_bytes()).hexdigest()
+        for name in names}},indent=2),encoding=''utf-8'')
+
+        '
+    - name: Create six fresh engine fixtures
+      id: fixtures
+      shell: pwsh
+      run: '& ./.work/runtime/Office/program/python.exe suite/e2e/engine_smoke.py
+        --suite .work/runtime --output .work/lifecycle-engine
+
+        if ($LASTEXITCODE -ne 0) { throw ''Six fresh engine fixtures failed.'' }
+
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+
+        if ($LASTEXITCODE -ne 0) { throw ''Diagnostic GUI prerequisites failed.''
+        }
+
+        '
+    - name: Run all seven native lifecycle cases and independent UNO reopen
+      shell: pwsh
+      run: 'python suite/e2e/lifecycle_smoke.py --suite .work/runtime --fixtures .work/lifecycle-engine/fixtures
+        --output .work/lifecycle-native
+
+        if ($LASTEXITCODE -ne 0) { throw ''Native lifecycle acceptance failed; all
+        original failures retained.'' }
+
+        '
+    - name: Verify complete baseline payload remains unchanged
+      if: '!cancelled() && steps.runtime.outcome == ''success'''
+      shell: pwsh
+      run: 'python suite/scripts/verify-suite.py .work/runtime
+
+        if ($LASTEXITCODE -ne 0) { throw ''Diagnostic changed baseline runtime bytes.''
+        }
+
+        '
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: opengeul-lifecycle-${{ github.run_id }}
+        path: '.work/probe/
+
+          .work/lifecycle-engine/
+
+          .work/lifecycle-native/
+
+          '
+        retention-days: 1
+        if-no-files-found: error
+        include-hidden-files: true

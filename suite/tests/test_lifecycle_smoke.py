@@ -3,7 +3,9 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -66,6 +68,38 @@ class LifecycleSmokeTests(unittest.TestCase):
                                      (expected['bodyText'], 'abc123', 'changed')):
             with self.assertRaises(AssertionError): smoke.require_uno_observation(expected, actual, before, after)
 
+    def test_independent_uno_reopen_retains_each_case_and_observed_text_after_one_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            fixtures = output / 'fixtures'
+            fixtures.mkdir()
+            records = []
+            for name in ('dirty-writer-cancel-save', 'dirty-writer-discard'):
+                target = fixtures / (name + '.docx')
+                with zipfile.ZipFile(target, 'w') as package:
+                    package.writestr('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Owned body</w:t></w:r></w:p></w:body></w:document>')
+                records.append({'case': name, 'success': True,
+                                'savedDocuments': [{'path': str(target), **smoke.writer_evidence(target)}]})
+            (output / 'results.json').write_text(json.dumps({'tests': records}), encoding='utf-8')
+            class Engine:
+                cleanup_errors = []
+                def __init__(self, suite): pass
+                def start(self): pass
+                def cleanup(self): pass
+                def close_document(self, document): pass
+                def load(self, url):
+                    text = 'Wrong observed body' if 'cancel-save' in url else 'Owned body'
+                    return SimpleNamespace(supportsService=lambda name: True,
+                                           getText=lambda: SimpleNamespace(getString=lambda: text))
+            with patch.object(smoke, '_sibling', return_value=SimpleNamespace(Engine=Engine)):
+                self.assertEqual(smoke.verify_saved_with_uno(output, output), 1)
+            result = json.loads((output / 'packaged-uno-result.json').read_text(encoding='utf-8'))
+            self.assertEqual(len(result['cases']), 2, 'One failed document must not hide another case\'s independent result')
+            self.assertFalse(result['success'])
+            self.assertFalse(result['cases'][0]['success'])
+            self.assertTrue(result['cases'][1]['success'])
+            self.assertEqual(result['cases'][0]['documents'][0]['observedBodyText'], 'Wrong observed body')
+
     def test_writer_evidence_reads_only_body_text_and_exact_marker_counts(self):
         if not hasattr(smoke, 'writer_evidence'): self.skipTest('RED: policy API not implemented')
         with tempfile.TemporaryDirectory() as directory:
@@ -78,6 +112,48 @@ class LifecycleSmokeTests(unittest.TestCase):
             self.assertEqual(len(evidence['sha256']), 64)
             with self.assertRaises(AssertionError): smoke.writer_evidence(source, ('MISSING',))
             with self.assertRaises(AssertionError): smoke.writer_evidence(source, (), ('MARKER',))
+
+    def test_writer_evidence_keeps_actual_soft_breaks_and_tabs_for_exact_uno_comparison(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'owned.docx'
+            with zipfile.ZipFile(source, 'w') as package:
+                package.writestr('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Engine-OpenGeul-writer 한글</w:t><w:br/><w:t>-LIFECYCLE-</w:t><w:tab/><w:t>끝</w:t></w:r></w:p><w:p><w:r><w:t>다음 문단</w:t><w:cr/></w:r></w:p></w:body></w:document>')
+            evidence = smoke.writer_evidence(source, ('-LIFECYCLE-',))
+            expected = 'Engine-OpenGeul-writer 한글\n-LIFECYCLE-\t끝\n다음 문단\n'
+            self.assertEqual(evidence['bodyText'], expected)
+            self.assertEqual(evidence['bodyParagraphs'], ['Engine-OpenGeul-writer 한글\n-LIFECYCLE-\t끝', '다음 문단\n'])
+            smoke.require_uno_observation(evidence, expected, evidence['sha256'], evidence['sha256'])
+
+    def test_owned_menu_search_uses_supported_window_roots_and_deduplicates_runtime_identity(self):
+        self.assertTrue(hasattr(smoke, 'owned_menu_items'), 'Owned menu enumeration is missing')
+        def item(name, pid, identity, visible=True, enabled=True):
+            return SimpleNamespace(element_info=SimpleNamespace(name=name, process_id=pid, runtime_id=identity),
+                                   is_visible=lambda: visible, is_enabled=lambda: enabled)
+        expected = item('새 문서', 31, [42, 1])
+        children = [expected, item('새 문서', 99, [42, 2]), item('다른 이름으로 저장...', 31, [42, 3]),
+                    item('새 문서', 31, [42, 4], visible=False)]
+        root = SimpleNamespace(element_info=SimpleNamespace(process_id=31), descendants=lambda **kw: children)
+        class Desktop:
+            def windows(self, **options):
+                self.options = options
+                return [root, root]
+        desktop = Desktop()
+        self.assertEqual(smoke.owned_menu_items(desktop, 31, '새 문서'), [expected])
+        self.assertEqual(desktop.options, {'process': 31})
+
+    def test_overwrite_yes_button_uses_exact_observed_label_and_owned_process(self):
+        self.assertTrue(hasattr(smoke, 'owned_dialog_button'), 'Owned exact-label dialog selection is missing')
+        def button(name, pid, automation_id, visible=True, enabled=True):
+            return SimpleNamespace(element_info=SimpleNamespace(name=name, process_id=pid, automation_id=automation_id),
+                                   is_visible=lambda: visible, is_enabled=lambda: enabled)
+        expected = button('Yes', 31, 'CommandButton_6')
+        controls = [button('No', 31, '7'), button('Yes', 99, '6'), expected,
+                    button('Yes', 31, '6', visible=False)]
+        accessible = SimpleNamespace(descendants=lambda **kw: controls)
+        self.assertIs(smoke.owned_dialog_button(accessible, 31, ('Yes', '예', '예(&Y)')), expected)
+        for controls in ([button('No', 31, '6')], [expected, expected], [button('Yes', 99, '6')]):
+            accessible = SimpleNamespace(descendants=lambda **kw: controls)
+            with self.assertRaises(AssertionError): smoke.owned_dialog_button(accessible, 31, ('Yes', '예', '예(&Y)'))
 
     def test_targets_are_fresh_direct_children_and_never_links(self):
         if not hasattr(smoke, 'owned_target'): self.skipTest('RED: policy API not implemented')
