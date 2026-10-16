@@ -42,7 +42,8 @@ def saved_base_evidence(path):
     assert not path.is_symlink(), 'Saved Base evidence must not link to another document'
     with zipfile.ZipFile(path) as archive:
         assert archive.testzip() is None, 'Saved ODB has corrupt ZIP members'
-        assert archive.read('mimetype') == b'application/vnd.oasis.opendocument.database', 'Saved file is not an ODF database'
+        # Pinned LibreOffice documentconstants.hxx: MIMETYPE_OASIS_OPENDOCUMENT_DATABASE.
+        assert archive.read('mimetype') == b'application/vnd.oasis.opendocument.base', 'Saved file is not an ODF database'
         content = ET.fromstring(archive.read('content.xml'))
         connections = [value for item in content.iter() for key, value in item.attrib.items()
                        if key == '{http://www.w3.org/1999/xlink}href']
@@ -50,6 +51,13 @@ def saved_base_evidence(path):
     payload = path.read_bytes()
     assert payload, 'Saved ODB is empty'
     return {'sha256': hashlib.sha256(payload).hexdigest(), 'bytes': len(payload), 'connection': 'sdbc:embedded:firebird'}
+
+
+def attach_only_content_status(module, before, after):
+    assert module in ('draw', 'math', 'base'), 'Byte policy applies only to attach-only fixtures'
+    unchanged = before == after
+    assert module == 'base' or unchanged, 'Attach-only test changed the generated document'
+    return {'fixtureUnchanged': unchanged, 'contentVerificationRequired': module == 'base'}
 
 
 def literal_keys(text):
@@ -332,7 +340,7 @@ def new_module(suite, output, module, *, fixtures=None):
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-        window.move_window(x=15, y=15, width=1120, height=710)
+        window.maximize()
         window.set_focus()
         wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
         screenshot = name + '-attached.png'
@@ -377,7 +385,7 @@ def capture_home(suite, output):
         assert api.windows(process.pid) == [hwnd], 'No-argument startup opened an unexpected document or dialog'
         assert not api.user.GetPropW(hwnd, 'OpenGeul.Office.ChildHwnd'), 'Home must not contain an editor frame'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-        window.move_window(x=15, y=15, width=1120, height=820)
+        window.maximize()
         window.set_focus()
         home_uia = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
         labels = require_home_labels([button.element_info.name for button in home_uia.descendants(control_type='Button')])
@@ -413,7 +421,7 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid, title=api.title(hwnd))
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-        window.move_window(x=15, y=15, width=1120, height=710)
+        window.maximize()
         window.set_focus()
         wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
         screenshot = module + ('-before.png' if physical_input else '-attached.png')
@@ -448,10 +456,11 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
         after = hashlib.sha256(source.read_bytes()).hexdigest()
         if physical_input:
             assert marker in package_text(source), 'Physical input marker disappeared after close'
+            content_status = {'fixtureUnchanged': after == before}
         else:
-            assert after == before, 'Attach-only test changed the generated document'
+            content_status = attach_only_content_status(module, before, after)
         record.update(success=True, cleanClose=True, beforeSha256=before, afterSha256=after,
-                      fixtureUnchanged=not physical_input)
+                      **content_status)
         return record
     except Exception as exc:
         capture_failure(output, module, record, exc)

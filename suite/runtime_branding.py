@@ -202,7 +202,11 @@ def _brand_registry(runtime: Path, manifest: dict) -> None:
                 for name in ('Writer', 'Calc', 'Impress', 'Draw'):
                     application = _child(applications, 'node', name)
                     if application is not None:
-                        changed |= _value(application, 'Active', 'Tabbed')
+                        # SfxNotebookBar::IsActive compares Active with CommandArg,
+                        # not the mode's node name (Tabbed). Pinned source build
+                        # bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1:
+                        # sfx2/source/notebookbar/SfxNotebookBar.cxx:269-287.
+                        changed |= _value(application, 'Active', 'notebookbar.ui')
                         changed |= _value(component, 'Active' + name, 'notebookbar.ui')
         changed |= _brand_registry_display_labels(tree.getroot(), manifest)
         if changed:

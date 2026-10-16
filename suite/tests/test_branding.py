@@ -48,15 +48,24 @@ def make_runtime(root):
     factories = ''.join('<node oor:name="' + service + '"><prop oor:name="ooSetupFactoryUIName">'
                         '<value>' + module.title() + '</value></prop><prop oor:name="ooSetupFactoryShortName">'
                         '<value>s' + module + '</value></prop></node>' for module, service in SERVICES.items())
+    applications = ''
+    for module in ('Writer', 'Calc', 'Impress', 'Draw', 'Formula', 'Base'):
+        modes = ('<node oor:name="Default"><prop oor:name="CommandArg"><value>Default</value></prop>'
+                 '<prop oor:name="HasNotebookbar"><value>false</value></prop></node>')
+        if module in ('Writer', 'Calc', 'Impress', 'Draw'):
+            # Pinned ToolbarMode.xcu: the Tabbed node's CommandArg is its UI filename.
+            modes += ('<node oor:name="Tabbed"><prop oor:name="CommandArg">'
+                      '<value>notebookbar.ui</value></prop><prop oor:name="HasNotebookbar">'
+                      '<value>true</value></prop></node>')
+        applications += ('<node oor:name="' + module + '"><prop oor:name="Active">'
+                         '<value>Default</value></prop><node oor:name="Modes">' + modes + '</node></node>')
     (root / 'share/registry/main.xcd').write_text(
         '<?xml version="1.0"?><oor:data xmlns:oor="http://openoffice.org/2001/registry">'
         '<oor:component-data oor:package="org.openoffice" oor:name="Setup"><node oor:name="Product">'
         '<prop oor:name="ooName"><value>LibreOffice</value></prop></node><node oor:name="Office">'
         '<node oor:name="Factories">' + factories + '</node></node></oor:component-data>'
         '<oor:component-data oor:package="org.openoffice.Office.UI" oor:name="ToolbarMode">'
-        '<node oor:name="Applications">' + ''.join(
-            '<node oor:name="' + m + '"><prop oor:name="Active"><value>Default</value></prop></node>'
-            for m in ('Writer', 'Calc', 'Impress', 'Draw', 'Formula', 'Base')) + '</node>'
+        '<node oor:name="Applications">' + applications + '</node>'
         '</oor:component-data></oor:data>', encoding='utf-8')
     (root / 'share/config/soffice.cfg/sfx/ui/startcenter.ui').write_text(
         '<interface><object class="GtkButton" id="writer_all"><property name="label" translatable="yes">'
@@ -106,8 +115,21 @@ class BrandingTests(unittest.TestCase):
         self.assertEqual(names, ['OpenGeul Office'])
         applications = next(n for n in tree.iter('node') if n.get(OOR + 'name') == 'Applications')
         modes = {n.get(OOR + 'name'): n.find('prop/value').text for n in applications.findall('node')}
-        self.assertEqual(modes, dict.fromkeys(('Writer', 'Calc', 'Impress', 'Draw'), 'Tabbed') |
+        self.assertEqual(modes, dict.fromkeys(('Writer', 'Calc', 'Impress', 'Draw'), 'notebookbar.ui') |
                          {'Formula': 'Default', 'Base': 'Default'})
+        # SfxNotebookBar::IsActive matches Active against CommandArg, not the node name.
+        # bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/sfx2/source/notebookbar/SfxNotebookBar.cxx:269-287
+        for application in applications.findall('node'):
+            if application.get(OOR + 'name') not in ('Writer', 'Calc', 'Impress', 'Draw'):
+                continue
+            definitions = next(n for n in application.findall('node') if n.get(OOR + 'name') == 'Modes')
+            active = modes[application.get(OOR + 'name')]
+            matching = [n for n in definitions.findall('node') if
+                        next(p.find('value').text for p in n.findall('prop')
+                             if p.get(OOR + 'name') == 'CommandArg') == active]
+            self.assertEqual([n.get(OOR + 'name') for n in matching], ['Tabbed'])
+            self.assertEqual(next(p.find('value').text for p in matching[0].findall('prop')
+                                  if p.get(OOR + 'name') == 'HasNotebookbar'), 'true')
 
     def test_registry_preserves_namespaces_used_in_type_attribute_values(self):
         path = self.source / 'share/registry/main.xcd'

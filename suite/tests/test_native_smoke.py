@@ -112,7 +112,7 @@ class NativeSmokeTests(unittest.TestCase):
             target = Path(directory) / 'New-OpenGeul-base.odb'
             for url, accepted in (('sdbc:embedded:firebird', True), ('jdbc:', False)):
                 with zipfile.ZipFile(target, 'w') as archive:
-                    archive.writestr('mimetype', 'application/vnd.oasis.opendocument.database')
+                    archive.writestr('mimetype', 'application/vnd.oasis.opendocument.base')
                     archive.writestr('content.xml', '<database xmlns:xlink="http://www.w3.org/1999/xlink"><connection xlink:href="' + url + '"/></database>')
                 if accepted:
                     evidence = smoke.saved_base_evidence(target)
@@ -126,6 +126,26 @@ class NativeSmokeTests(unittest.TestCase):
                 archive.writestr('content.xml', '<database/>')
             with self.assertRaises((AssertionError, KeyError)):
                 smoke.saved_base_evidence(target)
+
+    def test_saved_base_rejects_other_odf_mime_even_with_firebird_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'wrong-type.odb'
+            with zipfile.ZipFile(target, 'w') as archive:
+                archive.writestr('mimetype', 'application/vnd.oasis.opendocument.text')
+                archive.writestr('content.xml', '<database xmlns:xlink="http://www.w3.org/1999/xlink"><connection xlink:href="sdbc:embedded:firebird"/></database>')
+            with self.assertRaises(AssertionError):
+                smoke.saved_base_evidence(target)
+
+    def test_base_byte_rewrite_requires_semantic_verification_and_reports_actual_immutability(self):
+        self.assertEqual(smoke.attach_only_content_status('base', 'before', 'after'),
+                         {'fixtureUnchanged': False, 'contentVerificationRequired': True})
+        self.assertEqual(smoke.attach_only_content_status('base', 'same', 'same'),
+                         {'fixtureUnchanged': True, 'contentVerificationRequired': True})
+        for module in ('draw', 'math'):
+            with self.assertRaises(AssertionError):
+                smoke.attach_only_content_status(module, 'before', 'after')
+            self.assertEqual(smoke.attach_only_content_status(module, 'same', 'same'),
+                             {'fixtureUnchanged': True, 'contentVerificationRequired': False})
 
     def test_physical_path_keys_escape_key_syntax_as_literal_text(self):
         self.assertEqual(smoke.literal_keys('a+^%~(){}'), 'a{+}{^}{%}{~}{(}{)}{{}{}}')

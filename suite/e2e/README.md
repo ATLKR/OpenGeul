@@ -56,7 +56,13 @@ clipboard, DOM or programmatic document-mutation fallback in this GUI harness.
 
 Draw, Math and Base are **attach-only GUI checks**. They write
 `draw-attached.png`, `math-attached.png`, `base-attached.png` and corresponding
-`*-result.json`, and must leave their generated fixture bytes unchanged. These
+`*-result.json`. Draw and Math must leave generated fixture bytes unchanged.
+Base may commit an embedded Firebird backup into its ODB when the model closes;
+its record reports the actual `fixtureUnchanged` value and
+`contentVerificationRequired=true`, preserving both SHA256 values. Base is not
+allowed to claim byte immutability when those hashes differ. The mandatory
+post-GUI `--verify-ui` engine gate reopens all six fixtures and checks their
+original semantics, including Base's persisted SQL row. These
 records explicitly keep `keyboardInputVerified` and `contentMutationVerified`
 false; they do not establish keyboard editing, a Base connection or Java/driver
 readiness. `results.json` records all six native attachments separately from the
@@ -86,7 +92,9 @@ Ctrl+S. It requires the exact `OpenGeul Base — 다른 이름으로 저장` nat
 launched shell PID, document HWND owner, unique filename Edit automation ID `1001`
 and Save button ID `1`. It physically types the fresh
 `fixtures/New-OpenGeul-base.odb` path and clicks Save; existing fixtures are never
-overwritten. The saved ZIP must have the database mimetype, valid `content.xml`
+overwritten. The saved ZIP must have the pinned database mimetype
+`application/vnd.oasis.opendocument.base` (see
+[LibreOffice 26.8.1.1's database constant](https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/include/comphelper/documentconstants.hxx#L51)), valid `content.xml`
 and the embedded Firebird connection. After normal close and process/profile
 cleanup, the same file must still exist and pass validation. Evidence includes
 `new-base-save-as.png`, `new-base-saved.png`, saved-file SHA256/size and

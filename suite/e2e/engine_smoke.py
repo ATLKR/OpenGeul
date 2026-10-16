@@ -50,7 +50,7 @@ def verify_content(module, observed, verify_ui=False):
     if module in ('writer', 'calc', 'impress', 'draw'):
         text = observed.get('text', '')
         assert marker(module) in text, 'The persisted original marker is missing'
-        if verify_ui:
+        if verify_ui and module in UI_MODULES:
             assert 'UI-OpenGeul-' + module in text, 'The GUI edit was not persisted'
     if module == 'calc':
         assert observed.get('formula') == '=SUM(B1:C1)', 'The spreadsheet formula was lost'
@@ -280,7 +280,7 @@ def run_case(suite, output, module, specification, verify_ui=False):
     elif module == 'base':
         result['expected'].update(databaseUrl='sdbc:embedded:firebird',
                                   rows=[{'id': 1, 'text': marker('base'), 'amount': 42}])
-    if verify_ui:
+    if verify_ui and module in UI_MODULES:
         result['expected']['uiSuffix'] = 'UI-OpenGeul-' + module
     engine = Engine(suite)
     document = None
@@ -310,8 +310,7 @@ def run_case(suite, output, module, specification, verify_ui=False):
             document = engine.load(path.as_uri())
         observed = observe(module, document)
         verify_content(module, observed, verify_ui)
-        result.update(status='passed', observed=observed,
-                      sha256=hashlib.sha256(path.read_bytes()).hexdigest(), bytes=path.stat().st_size)
+        result.update(status='passed', observed=observed)
     except Exception as exc:
         result['error'] = {'type': type(exc).__name__, 'message': str(exc),
                            'traceback': traceback.format_exc()}
@@ -324,6 +323,16 @@ def run_case(suite, output, module, specification, verify_ui=False):
         if engine.cleanup_errors:
             result['cleanupErrors'] = engine.cleanup_errors
             result['status'] = 'failed'
+        if result['status'] == 'passed':
+            try:
+                # Embedded Firebird persists its backup during disposal. Hash
+                # only after model close and the owned process has exited.
+                final_bytes = path.read_bytes()
+                result.update(sha256=hashlib.sha256(final_bytes).hexdigest(), bytes=len(final_bytes))
+            except Exception as exc:
+                result['status'] = 'failed'
+                result['error'] = {'type': type(exc).__name__, 'message': str(exc),
+                                   'traceback': traceback.format_exc()}
         result['elapsedSeconds'] = round(time.monotonic() - started, 3)
     return result
 
@@ -364,12 +373,12 @@ def main(argv=None):
         if args.verify_ui:
             baseline = json.loads((output / 'engine-smoke.json').read_text(encoding='utf-8'))
             passed = {case['module'] for case in baseline['cases'] if case['status'] == 'passed'}
-            if not set(UI_MODULES) <= passed:
-                raise ValueError('Writer/Calc/Impress engine baseline must pass before GUI verification')
+            if not set(FILES) <= passed:
+                raise ValueError('All six engine modules must pass before post-GUI verification')
         else:
             (output / 'fixtures').mkdir(exist_ok=False)
         results = []
-        for module in UI_MODULES if args.verify_ui else FILES:
+        for module in FILES:
             try:
                 result = run_case(suite, output, module, modules[module], args.verify_ui)
             except Exception as exc:
