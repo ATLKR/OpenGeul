@@ -154,8 +154,32 @@ public static class SuiteKoreanSetupHost {
         suiteOnly=$true;productInputVerified=$false;storeQualified=$false})
     $stage='capability-install'
     $restartNeeded=$false
+    $acquisition='already-installed'
     if ($before -eq 'NotPresent') {
-        $installed=@(Dism\Add-WindowsCapability -Online -Name $capabilityName -LogPath $dismLog -ErrorAction Stop)
+        $stage='matching-official-server-media'
+        $version=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        if ($nativeMachine -ne 0x8664 -or $version.CurrentBuildNumber -cne '26100' -or
+            $version.InstallationType -notin @('Server','Server Core')) {
+            throw 'Pinned offline language FOD media requires actual Server 2025 amd64 build 26100.'
+        }
+        $sourceRoot=Join-Path $out 'fod-source'
+        $sourceHelper=Join-Path $PSScriptRoot 'korean_fod_source.py'
+        & python $sourceHelper --output $sourceRoot
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned official Server language FOD source acquisition failed.' }
+        $sourceReceipt=Get-Content -LiteralPath (Join-Path $sourceRoot 'source-acquisition.json') -Raw | ConvertFrom-Json
+        $sourceDirectory=Join-Path $sourceRoot 'LanguagesAndOptionalFeatures'
+        Assert-SuitePlainPath $sourceDirectory
+        if ($sourceReceipt.success -ne $true -or $sourceReceipt.productInputVerified -ne $false -or
+            $sourceReceipt.storeQualified -ne $false -or $sourceReceipt.packages.Count -ne 8 -or
+            [IO.Path]::GetFullPath($sourceReceipt.sourceDirectory) -cne [IO.Path]::GetFullPath($sourceDirectory)) {
+            throw 'Official offline FOD acquisition receipt does not identify the owned source.'
+        }
+        $acquisition='pinned-official-Server2025-amd64-26100-language-FOD-source'
+        $stage='offline-capability-install'
+        # Language FODs are complete monolithic CABs. Preserve selected original
+        # Server metadata too; DISM validates package catalogs and must prove
+        # this source is sufficient. Never query WU or alter its host policy.
+        $installed=@(Dism\Add-WindowsCapability -Online -Name $capabilityName -Source $sourceDirectory -LimitAccess -LogPath $dismLog -ErrorAction Stop)
         if ($installed.Count -ne 1 -or $installed[0].RestartNeeded -isnot [bool]) { throw 'Windows servicing restart status is unavailable.' }
         $restartNeeded=$installed[0].RestartNeeded
     } elseif ($before -ne 'Installed') { throw 'Korean Basic capability is pending or unknown.' }
@@ -230,7 +254,7 @@ public static class SuiteKoreanSetupHost {
     }
     Save-SuiteObservation 'readiness.json' ([ordered]@{formatVersion=1;source=$binding;
         nativeMachine=[int]$nativeMachine;systemDirectory=$systemPath;capabilityName=$capabilityName;
-        capabilityBefore=$before;capabilityAfter=[string]$after[0].State;restartNeeded=$restartNeeded;
+        capabilityBefore=$before;capabilityAfter=[string]$after[0].State;restartNeeded=$restartNeeded;acquisition=$acquisition;
         userLanguageConfigured=$true;configuredInputTips=@($observedKorean[0].InputMethodTips);profile=$profile;
         profileScope='current-user configured; target HWND/thread unverified';
         suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false})

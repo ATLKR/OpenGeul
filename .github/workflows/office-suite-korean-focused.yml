@@ -1,0 +1,96 @@
+name: OpenGeul Korean native diagnostics
+'on':
+  push:
+    branches: [work/suite-korean-focused]
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+jobs:
+  windows-suite:
+    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Validate exact diagnostic source
+      id: units
+      shell: pwsh
+      run: |
+        python -m unittest discover -s suite/tests -v
+        if ($LASTEXITCODE -ne 0) { throw 'Diagnostic source tests failed.' }
+    - name: Install actual Korean IME from matching official offline media
+      id: readiness
+      if: '!cancelled() && steps.units.outcome == ''success'''
+      shell: pwsh
+      run: ./suite/scripts/ensure-korean-ime.ps1 -Output .work/suite-korean-readiness
+    - name: Preserve actual readiness and original servicing logs immediately
+      if: '!cancelled() && steps.units.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-focused-readiness-${{ github.run_id }}
+        path: |
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
+        retention-days: 1
+        if-no-files-found: error
+    - name: Build exact diagnostic package
+      id: build
+      if: '!cancelled() && steps.units.outcome == ''success'''
+      shell: pwsh
+      run: ./suite/scripts/build-suite.ps1
+    - name: Create actual engine fixtures
+      id: fixtures
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Native prerequisites failed.' }
+        & ./dist/OpenGeul-Office-0.1.1-dev-windows-x64/Office/program/python.exe suite/e2e/engine_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --output .work/suite-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Engine fixtures failed.' }
+    - name: Observe real Korean composition and saved content
+      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime
+        if ($LASTEXITCODE -ne 0) { throw 'Real Korean composition failed.' }
+    - name: Preserve IME receipts immediately
+      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-focused-ime-${{ github.run_id }}
+        path: .work/suite-korean-ime/
+        retention-days: 1
+        if-no-files-found: error
+    - name: Observe actual Korean native tabs independently
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ui_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean native tabs failed.' }
+    - name: Preserve all original diagnostic evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-focused-evidence-${{ github.run_id }}
+        path: |
+          .work/suite-engine/
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
+          .work/suite-korean-ime/
+          .work/suite-korean-ui/
+          .work/suite-worker-diagnostics/
+        retention-days: 1
+        include-hidden-files: true
+        if-no-files-found: error
