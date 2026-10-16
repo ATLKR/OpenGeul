@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 import zipfile
 
@@ -27,6 +28,36 @@ def implementation():
 
 
 class PrepareTests(unittest.TestCase):
+    def test_msi_extraction_uses_exact_cabinet_members_instead_of_flattened_system64(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); archive = root/'input.msi'; archive.write_bytes(b'authenticated-msi')
+            def admin(*args, **kwargs):
+                runtime = root/'extracted/LibreOffice/program'; runtime.mkdir(parents=True)
+                (runtime/'soffice.exe').write_bytes(b'office')
+                (runtime/'python.exe').write_bytes(b'python')
+                raw = root/'extracted/System64'; raw.mkdir()
+                for name in module.MSI_VC_DEPENDENCIES: (raw/name).write_bytes(b'flattened ARM64')
+                return SimpleNamespace(returncode=0)
+            def recover(msi, destination):
+                self.assertEqual(msi, archive)
+                destination.mkdir()
+                result = {}
+                for name in module.MSI_VC_DEPENDENCIES:
+                    destination.joinpath(name).write_bytes(pe(dll=True))
+                    result[name] = {'path': destination/name, 'fileId': name+'_amd64.GUID', 'cabinet':'#official.cab'}
+                return result
+            with patch.object(module, 'os', SimpleNamespace(name='nt')), \
+                 patch.object(module.subprocess, 'run', side_effect=admin), \
+                 patch('suite.msi_cab.recover_x64_crt', side_effect=recover) as recovered:
+                runtime = module.extract_msi(archive, root/'extracted')
+            self.assertEqual(recovered.call_count, 1)
+            receipt = json.loads((runtime/'opengeul-msi-dependencies.json').read_text())
+            self.assertEqual(receipt['inputMsiSha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
+            for name in module.MSI_VC_DEPENDENCIES:
+                self.assertEqual((runtime/'program'/name).read_bytes(), pe(dll=True))
+                self.assertEqual(receipt['files']['program/'+name]['fileId'], name+'_amd64.GUID')
+
     def msi_fixture(self, folder):
         root = Path(folder)/'extract'
         runtime = root/'LibreOffice'

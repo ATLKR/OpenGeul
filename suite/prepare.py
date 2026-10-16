@@ -118,10 +118,23 @@ def extract_msi(archive: Path, destination: Path) -> Path:
     if len(matches) != 1: raise ValueError('MSI must contain one Office runtime')
     runtime = matches[0].parent.parent
     if not (runtime/'program/python.exe').is_file(): raise ValueError('Runtime has no bundled UNO Python')
-    files = stage_msi_dependencies(destination, runtime)
+    # Administrative images may flatten ARM64 and AMD64 merge-module rows onto
+    # the same System64 filenames. Recover the exact native AMD64 File IDs from
+    # the authenticated original cabinet instead of trusting those paths.
+    try:
+        from suite.msi_cab import recover_x64_crt
+    except ModuleNotFoundError:
+        from msi_cab import recover_x64_crt
+    crt = destination.with_name(destination.name + '-native-crt')
+    crt.mkdir(exist_ok=False)
+    recovered = recover_x64_crt(archive, crt/'System64')
+    files = stage_msi_dependencies(crt, runtime)
+    for name, record in recovered.items():
+        files['program/'+name].update(fileId=record['fileId'], cabinet=record['cabinet'])
     receipt = runtime/'opengeul-msi-dependencies.json'
     with receipt.open('x', encoding='utf-8') as stream:
-        json.dump({'schemaVersion': 1, 'architecture': 'x64', 'files': files}, stream, indent=2)
+        json.dump({'schemaVersion': 1, 'architecture': 'x64', 'inputMsiSha256': sha256(archive),
+                   'recovery': 'embedded-amd64-file-ids', 'files': files}, stream, indent=2)
         stream.write('\n')
     return runtime
 
