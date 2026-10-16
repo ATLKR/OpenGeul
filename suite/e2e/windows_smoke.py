@@ -138,11 +138,12 @@ def require_engine_fixture(fixtures, module, extension):
 
 
 class GuiThreadInfo(ctypes.Structure):
-    _fields_ = [('cbSize', wintypes.DWORD), ('flags', wintypes.DWORD),
+    # Fixed Win32 widths also let non-Windows receipt replay check the x64 ABI.
+    _fields_ = [('cbSize', ctypes.c_uint32), ('flags', ctypes.c_uint32),
                 ('hwndActive', wintypes.HWND), ('hwndFocus', wintypes.HWND),
                 ('hwndCapture', wintypes.HWND), ('hwndMenuOwner', wintypes.HWND),
                 ('hwndMoveSize', wintypes.HWND), ('hwndCaret', wintypes.HWND),
-                ('rcCaret', wintypes.RECT)]
+                ('rcCaret', _evidence.Rect)]
 
 
 class Windows:
@@ -255,10 +256,51 @@ class Windows:
     def require_editor_focus(self, hwnd, child):
         self.require_foreground(hwnd)
         thread = self.user.GetWindowThreadProcessId(child, None)
+        assert thread > 0, 'Owned editor thread is not live; foreground-thread fallback is forbidden'
         info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
         if not self.user.GetGUIThreadInfo(thread, ctypes.byref(info)): raise ctypes.WinError(ctypes.get_last_error())
         assert info.hwndFocus and (info.hwndFocus == child or self.user.IsChild(child, info.hwndFocus)), 'Keyboard focus is outside the embedded Office editor'
         return int(info.hwndFocus)
+
+    def _focus_window(self, hwnd):
+        hwnd = int(hwnd or 0)
+        live = bool(hwnd and self.user.IsWindow(hwnd))
+        pid = wintypes.DWORD()
+        thread = self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) if live else 0
+        return {'hwnd': hwnd, 'isWindow': live, 'pid': int(pid.value), 'threadId': int(thread),
+                'rootHwnd': int(self.user.GetAncestor(hwnd, 2) or 0) if live else 0,
+                'className': self.class_name(hwnd) if live else ''}
+
+    def editor_focus_snapshot(self, hwnd, child, shell_pid, office_pid):
+        """Observe the explicit editor thread; never substitute foreground TID 0.
+
+        GetGUIThreadInfo is a snapshot, not an input-completion acknowledgement.
+        Retain both surrounding ownership/foreground observations for diagnosis.
+        """
+        def binding():
+            return {'suite': self._focus_window(hwnd), 'editor': self._focus_window(child),
+                    'foreground': self._focus_window(self.user.GetForegroundWindow()),
+                    'editorWithinSuite': bool(self.user.IsChild(hwnd, child))}
+        before = binding()
+        thread = before['editor']['threadId']
+        info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
+        suite, editor = before['suite'], before['editor']
+        allowed = bool(suite['isWindow'] and suite['pid'] == shell_pid and suite['rootHwnd'] == hwnd
+            and editor['isWindow'] and editor['pid'] == office_pid and editor['rootHwnd'] == hwnd
+            and before['editorWithinSuite'] and thread > 0)
+        if allowed: getattr(ctypes, 'set_last_error', lambda value: None)(0)
+        queried = bool(allowed and self.user.GetGUIThreadInfo(thread, ctypes.byref(info)))
+        error = getattr(ctypes, 'get_last_error', lambda: 0)() if not queried else 0
+        return {'before': before, 'after': binding(), 'queriedThreadId': thread,
+                'cbSize': int(info.cbSize), 'queryAttempted': allowed, 'querySucceeded': queried,
+                'lastError': int(error),
+                'flags': int(info.flags), 'active': self._focus_window(info.hwndActive),
+                'focus': self._focus_window(info.hwndFocus), 'capture': self._focus_window(info.hwndCapture),
+                'menuOwner': self._focus_window(info.hwndMenuOwner),
+                'moveSize': self._focus_window(info.hwndMoveSize), 'caret': self._focus_window(info.hwndCaret),
+                'caretRect': [info.rcCaret.left, info.rcCaret.top, info.rcCaret.right, info.rcCaret.bottom],
+                'focusWithinEditor': bool(info.hwndFocus and
+                    (info.hwndFocus == child or self.user.IsChild(child, info.hwndFocus)))}
 
     def home(self, process):
         homes = [hwnd for hwnd in self.windows(process.pid) if self.title(hwnd) == 'OpenGeul Office']
@@ -266,6 +308,115 @@ class Windows:
         if homes: return homes[0]
         if process.poll() is not None: raise AssertionError('Suite exited before showing its home')
         return None
+
+
+def _editor_focus_snapshot_ready(snapshot, hwnd, child, shell_pid, office_pid, thread):
+    for edge in ('before', 'after'):
+        suite, editor, foreground = (snapshot[edge][key] for key in ('suite', 'editor', 'foreground'))
+        assert (suite['isWindow'] and suite['hwnd'] == hwnd and suite['pid'] == shell_pid
+                and suite['rootHwnd'] == hwnd), 'Owned Suite window identity changed during focus preparation'
+        assert (editor['isWindow'] and editor['hwnd'] == child and editor['pid'] == office_pid
+                and editor['threadId'] > 0 and editor['rootHwnd'] == hwnd
+                and snapshot[edge]['editorWithinSuite']), 'Owned editor window identity changed during focus preparation'
+        assert editor['threadId'] == thread, 'Owned editor thread identity changed during focus preparation'
+        assert (foreground['isWindow'] and foreground['rootHwnd'] == hwnd
+                and foreground['pid'] in (shell_pid, office_pid)), 'Physical input requires the owned Suite foreground during focus preparation'
+    assert snapshot['queriedThreadId'] == thread and snapshot['cbSize'] == 72, 'Owned editor query thread or Win64 structure size changed'
+    assert snapshot['queryAttempted'] is True, 'Owned editor native query was not attempted'
+    if snapshot['querySucceeded'] is not True:
+        raise OSError(snapshot['lastError'], 'GetGUIThreadInfo for owned editor failed')
+    assert snapshot['lastError'] == 0, 'Successful editor focus query has a nonzero native error'
+    focus = snapshot['focus']
+    if focus['hwnd']:
+        assert (focus['isWindow'] and focus['rootHwnd'] == hwnd
+                and focus['pid'] in (shell_pid, office_pid)), 'Observed foreign or dead keyboard focus during editor preparation'
+    ready = bool(snapshot['focusWithinEditor'] and focus['isWindow'] and focus['pid'] == office_pid)
+    if snapshot['focusWithinEditor']:
+        assert ready, 'Observed foreign keyboard focus inside the editor hierarchy'
+        assert focus['threadId'] == thread, 'Observed keyboard focus belongs to another editor thread'
+    return focus['hwnd'] if ready else None
+
+
+def require_editor_focus_readiness(evidence, hwnd, child, shell_pid, office_pid):
+    """Replay successful raw readiness evidence without Windows APIs or input."""
+    assert evidence['schemaVersion'] == 1 and evidence['kind'] == 'owned-editor-focus-readiness', 'Invalid editor readiness receipt'
+    assert evidence['ready'] is True, 'Editor focus was not ready'
+    assert (evidence['suiteHwnd'], evidence['childHwnd'], evidence['shellPid'], evidence['officePid']) == (hwnd, child, shell_pid, office_pid), 'Readiness receipt belongs to another editor generation'
+    assert 0 < evidence['deadlineSeconds'] <= 10, 'Editor readiness deadline is not bounded'
+    assert all(type(evidence[key]) is int and evidence[key] == 1 for key in ('clickAttempts', 'controlF6Attempts')), 'Editor setup input was repeated or omitted'
+    assert evidence['clickCompleted'] is True and evidence['controlF6Completed'] is True, 'Original editor setup input did not complete'
+    rows = evidence['snapshots']
+    assert len(rows) >= 3 and [row['phase'] for row in rows[:3]] == ['before-click', 'after-click', 'after-control-f6'], 'Editor setup snapshots are incomplete or reordered'
+    assert all(row['phase'] == 'wait' for row in rows[3:]), 'Unexpected readiness input or snapshot phase'
+    assert evidence['pollStartedSeconds'] == rows[2]['elapsedSeconds'], 'Focus poll deadline is not bound to the original setup observation'
+    previous, focus = -1, None
+    for index, row in enumerate(rows):
+        assert row['elapsedSeconds'] >= 0 and row['elapsedSeconds'] >= previous, 'Editor focus observation time moved backwards'
+        previous = row['elapsedSeconds']
+        observed = _editor_focus_snapshot_ready(row, hwnd, child, shell_pid, office_pid, evidence['editorThreadId'])
+        if index >= 2:
+            if index < len(rows) - 1: assert not observed, 'Focus polling continued after readiness'
+            focus = observed
+        if index >= 3:
+            assert row['elapsedSeconds'] <= evidence['pollStartedSeconds'] + evidence['deadlineSeconds'], 'Editor focus became ready after the bounded deadline'
+    assert focus and focus == evidence['focusHwnd'], 'Final strict focus differs from the ready owned editor'
+    return evidence
+
+
+def prepare_editor_focus(api, hwnd, child, shell_pid, office_pid, record,
+                         click_editor, enter_document, seconds=5):
+    """Send the original single click/Ctrl+F6, then only observe readiness.
+
+    A missing focus or a live setup control within this Suite may be pending.
+    Foreign foreground/focus, changed ownership, and native query errors fail
+    immediately. This does not establish the cause of a previous focus failure.
+    """
+    assert 0 < seconds <= 10, 'Editor focus readiness must have a bounded deadline'
+    started = time.monotonic()
+    evidence = {'schemaVersion': 1, 'kind': 'owned-editor-focus-readiness', 'ready': False,
+                'suiteHwnd': hwnd, 'childHwnd': child, 'shellPid': shell_pid,
+                'officePid': office_pid, 'deadlineSeconds': seconds, 'snapshots': [],
+                'clickAttempts': 0, 'clickCompleted': False,
+                'controlF6Attempts': 0, 'controlF6Completed': False}
+    record['editorFocusReadiness'] = evidence
+    record.setdefault('editorFocusReadinessRecords', []).append(evidence)
+
+    def observe(phase):
+        snapshot = api.editor_focus_snapshot(hwnd, child, shell_pid, office_pid)
+        snapshot.update(phase=phase, elapsedSeconds=round(time.monotonic() - started, 6))
+        evidence['snapshots'].append(snapshot)
+        evidence.setdefault('editorThreadId', snapshot['before']['editor']['threadId'])
+        return _editor_focus_snapshot_ready(snapshot, hwnd, child, shell_pid, office_pid, evidence['editorThreadId'])
+
+    try:
+        observe('before-click')
+        evidence['clickAttempts'] += 1
+        click_editor()
+        evidence['clickCompleted'] = True
+        observe('after-click')
+        evidence['controlF6Attempts'] += 1
+        enter_document()
+        evidence['controlF6Completed'] = True
+        focus = observe('after-control-f6')
+        evidence['pollStartedSeconds'] = evidence['snapshots'][-1]['elapsedSeconds']
+        deadline = started + evidence['pollStartedSeconds'] + seconds
+        while not focus and time.monotonic() < deadline:
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
+            focus = observe('wait')
+            if time.monotonic() > deadline: focus = None
+        assert focus, 'Owned editor keyboard focus did not become ready before the deadline'
+        # Preserve the original strict guard immediately before callers type.
+        strict_focus = api.require_editor_focus(hwnd, child)
+        assert strict_focus == focus, 'Owned editor focus changed before physical input'
+        assert api.pid(focus) == office_pid, 'Observed foreign keyboard focus before editor input'
+        evidence.update(ready=True, focusHwnd=focus)
+        require_editor_focus_readiness(evidence, hwnd, child, shell_pid, office_pid)
+        return focus
+    except Exception:
+        evidence['ready'] = False
+        raise
+    finally:
+        evidence['elapsedSeconds'] = round(time.monotonic() - started, 6)
 
 
 def package_text(path):
@@ -540,9 +691,9 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
             record['stage'] = 'focus-editor'
             api.require_foreground(hwnd)
             # A physical click gives the embedded process focus; Ctrl+F6 enters its document.
-            Desktop(backend='win32').window(handle=child).wrapper_object().click_input()
-            send_keys('^{F6}', pause=0.1)
-            api.require_editor_focus(hwnd, child)
+            prepare_editor_focus(api, hwnd, child, process.pid, office_pid, record,
+                lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
+                lambda: send_keys('^{F6}', pause=0.1))
             record['stage'] = 'navigate-editor'
             if module == 'writer': send_keys('^{END}', pause=0.1)
             elif module == 'calc': send_keys('^{HOME}{F2}^{END}', pause=0.1)

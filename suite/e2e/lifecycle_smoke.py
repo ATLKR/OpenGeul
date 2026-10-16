@@ -177,9 +177,10 @@ def dialog_uia_identity(accessible, dialog, shell_pid, evidence=None):
 
 def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, field, target, record):
     """Assign only the verified fixture filename; document text still uses physical input."""
-    receipt = {'method': 'UIA-ValuePattern-SetValue', 'expected': str(target), 'before': None, 'after': None,
-               'assignmentAttempts': 0, 'focusClickAttempts': 0, 'success': False, 'document': {}, 'dialog': {},
-               'dialogUia': {}, 'field': {}, 'focusBefore': {}, 'focusAfterClick': {}, 'focusAfterAssignment': {}}
+    receipt = {'method': 'Win32-Edit-EM_REPLACESEL', 'expected': str(target), 'before': None, 'after': None,
+               'assignmentAttempts': 0, 'selectionSetAttempts': 0, 'focusClickAttempts': 0, 'success': False,
+               'document': {}, 'dialog': {}, 'dialogUia': {}, 'field': {}, 'nativeEdit': {},
+               'focusBefore': {}, 'focusAfterClick': {}, 'focusAfterAssignment': {}}
     record.setdefault('pickerFilenameInputs', []).append(receipt)
     try:
         receipt['document'] = {'hwnd': int(document), 'pid': api.pid(document), 'live': bool(api.user.IsWindow(document))}
@@ -205,11 +206,29 @@ def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, fiel
         observed = receipt['field']
         assert observed['processId'] == observed['nativePid'] == shell_pid and observed['runtimeId'], 'Filename field belongs to a foreign process or lacks runtime identity'
         assert observed['automationId'] == '1001' and observed['controlType'] == 'Edit', 'Exact native filename Edit 1001 is required'
+        assert observed['nativeClass'] == 'Edit', 'Filename must be a standard native Edit control'
         assert field_handle > 0 and observed['nativeLive'] and observed['nativeChildOfDialog'] and observed['nativeRoot'] == dialog, 'Filename field is outside the owned native picker'
         assert observed['visible'] and observed['enabled'], 'Filename field is not visible and enabled'
         value = field.iface_value
         receipt['readOnly'] = bool(value.CurrentIsReadOnly)
         assert receipt['readOnly'] is False, 'Filename ValuePattern is read-only'
+        encoded = receipt['expected'].encode('utf-16-le')
+        assert '\0' not in receipt['expected'] and 0 < len(encoded) // 2 < 4095, 'Fixture filename exceeds the bounded Unicode Edit scope'
+        edit = receipt['nativeEdit']
+        api.user.IsWindowUnicode.argtypes = (wintypes.HWND,)
+        api.user.IsWindowUnicode.restype = wintypes.BOOL
+        api.user.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+        api.user.GetWindowLongW.restype = ctypes.c_int32
+        edit['unicodeWindow'] = bool(api.user.IsWindowUnicode(field_handle))
+        getattr(ctypes, 'set_last_error', lambda error: None)(0)
+        style = int(api.user.GetWindowLongW(field_handle, -16))
+        edit['styleRaw'] = style & 0xffffffff
+        edit['multiline'] = bool(style & 0x0004)
+        if not style and getattr(ctypes, 'get_last_error', lambda: 0)():
+            raise OSError(getattr(ctypes, 'get_last_error')(), 'Reading owned filename GWL_STYLE failed')
+        assert edit['unicodeWindow'], 'Filename native Edit must be Unicode'
+        edit.update(timeoutFlags=3, timeoutMs=1000, replacementUtf16Units=len(encoded) // 2,
+                    replacementUtf16LeHex=encoded.hex())
         receipt['before'] = value.CurrentValue
         picker_filename_state(api, shell_pid, dialog, field_handle, receipt['focusBefore'])
         assert receipt['focusBefore']['nativeText'] == receipt['before'], 'Native filename differs from UIA before assignment'
@@ -220,14 +239,41 @@ def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, fiel
         require_picker_filename_focus(receipt['focusAfterClick'], shell_pid, dialog, field_handle,
                                       receipt['focusBefore']['threadId'])
         api.require_foreground(dialog)
-        receipt['assignmentAttempts'] = 1
-        value.SetValue(receipt['expected'])
+        thread = receipt['focusBefore']['threadId']
+        before_length = receipt['focusAfterClick']['nativeTextLength']
+        assert before_length < 4095, 'Old filename exceeds bounded packed Edit selection scope'
+        assert before_length == len(receipt['focusAfterClick']['nativeText'].encode('utf-16-le')) // 2, 'Native old filename length is not its exact UTF16 length'
+        selection = edit['selectionBefore'] = {}
+        picker_edit_message(api, shell_pid, dialog, field_handle, thread, 0x00B0, 0, 0, selection)
+        assert 0 <= selection['messageReturn'] <= 0xffffffff, 'Native Edit selection exceeded its packed DWORD scope'
+        selection.update(packedResult=selection['messageReturn'], start=selection['messageReturn'] & 0xffff,
+                         end=(selection['messageReturn'] >> 16) & 0xffff)
+        edit['selectReadOnly'] = bool(value.CurrentIsReadOnly)
+        assert edit['selectReadOnly'] is False, 'Filename became read-only before native selection'
+        picker_edit_message(api, shell_pid, dialog, field_handle, thread, 0x00B1, 0, -1,
+                            edit.setdefault('selectResult', {}), (receipt, 'selectionSetAttempts'))
+        selection = edit['selectionAfterSelect'] = {}
+        picker_edit_message(api, shell_pid, dialog, field_handle, thread, 0x00B0, 0, 0, selection)
+        assert 0 <= selection['messageReturn'] <= 0xffffffff, 'Native Edit selection exceeded its packed DWORD scope'
+        selection.update(packedResult=selection['messageReturn'], start=selection['messageReturn'] & 0xffff,
+                         end=(selection['messageReturn'] >> 16) & 0xffff)
+        assert (selection['start'], selection['end']) == (0, before_length), 'Native Edit did not select the entire old filename'
+        replacement = ctypes.create_unicode_buffer(receipt['expected'])
+        edit['replaceReadOnly'] = bool(value.CurrentIsReadOnly)
+        assert edit['replaceReadOnly'] is False, 'Filename became read-only before native replacement'
+        # These standard Edit messages are below WM_USER and Windows marshals the
+        # Unicode replacement buffer across processes. No synthetic WM_COMMAND
+        # or value-change notification is sent; the native Edit performs one edit.
+        picker_edit_message(api, shell_pid, dialog, field_handle, thread, 0x00C2, 1,
+                            ctypes.addressof(replacement), edit.setdefault('replaceResult', {}),
+                            (receipt, 'assignmentAttempts'))
         receipt['after'] = value.CurrentValue
         picker_filename_state(api, shell_pid, dialog, field_handle, receipt['focusAfterAssignment'])
         assert receipt['after'] == receipt['expected'], 'Picker filename differs from owned target'
         assert receipt['focusAfterAssignment']['nativeText'] == receipt['after'], 'Native filename differs from exact UIA readback'
         require_picker_filename_focus(receipt['focusAfterAssignment'], shell_pid, dialog, field_handle,
                                       receipt['focusBefore']['threadId'])
+        require_picker_native_edit_receipt(receipt, shell_pid, dialog, field_handle)
         receipt['success'] = True
         return receipt
     except Exception as exc:
@@ -235,15 +281,16 @@ def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, fiel
         raise
 
 
-def picker_filename_state(api, shell_pid, dialog, field, evidence):
-    """Read the owned UI thread and Edit text; GetWindowText cannot read a foreign-process Edit."""
+def picker_filename_context(api, shell_pid, dialog, field, evidence):
+    """Read a fresh native owner and input-thread context before touching an Edit."""
     api.user.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
     api.user.GetWindowThreadProcessId.restype = wintypes.DWORD
     evidence.update(threadId=int(api.user.GetWindowThreadProcessId(field, None)),
                     fieldLive=bool(api.user.IsWindow(field)), fieldPid=api.pid(field),
-                    fieldRoot=int(api.user.GetAncestor(field, 2) or 0))
+                    fieldRoot=int(api.user.GetAncestor(field, 2) or 0), fieldClass=api.class_name(field))
     assert evidence['threadId'] > 0 and evidence['fieldLive'], 'Filename native field disappeared before focus observation'
     assert evidence['fieldPid'] == shell_pid > 0 and evidence['fieldRoot'] == dialog, 'Filename ownership changed before native text observation'
+    assert evidence['fieldClass'] == 'Edit', 'Filename stopped being a standard native Edit'
     info = native.GuiThreadInfo(cbSize=ctypes.sizeof(native.GuiThreadInfo))
     if not api.user.GetGUIThreadInfo(evidence['threadId'], ctypes.byref(info)):
         raise OSError(getattr(ctypes, 'get_last_error', lambda: 0)(), 'GetGUIThreadInfo for owned filename field failed')
@@ -253,6 +300,12 @@ def picker_filename_state(api, shell_pid, dialog, field, evidence):
                     flags=int(info.flags), foregroundHwnd=foreground,
                     foregroundRoot=int(api.user.GetAncestor(foreground, 2) or 0))
     require_picker_filename_context(evidence, shell_pid, dialog)
+    return evidence
+
+
+def picker_filename_state(api, shell_pid, dialog, field, evidence):
+    """Read the owned UI thread and Edit text; GetWindowText cannot read a foreign-process Edit."""
+    picker_filename_context(api, shell_pid, dialog, field, evidence)
     # WM_GETTEXT is bounded and addressed only to the already verified native Edit.
     # LPARAM and the result pointer must retain their full Win64 pointer width.
     send = api.user.SendMessageTimeoutW
@@ -260,11 +313,34 @@ def picker_filename_state(api, shell_pid, dialog, field, evidence):
                      wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t))
     send.restype = ctypes.c_ssize_t
     text, count = ctypes.create_unicode_buffer(4096), ctypes.c_size_t()
+    getattr(ctypes, 'set_last_error', lambda error: None)(0)
     if not send(field, 0x000D, len(text), ctypes.addressof(text), 3, 1000, ctypes.byref(count)):
         raise OSError(getattr(ctypes, 'get_last_error', lambda: 0)(), 'Bounded WM_GETTEXT for owned filename field failed')
     evidence.update(nativeText=text.value, nativeTextLength=int(count.value), nativeTextTimeoutMs=1000)
     assert count.value < len(text) - 1, 'Owned filename text exceeds bounded fixture scope'
     return evidence
+
+
+def picker_edit_message(api, shell_pid, dialog, field, thread, message, wparam, lparam, evidence, attempt=None):
+    """One bounded standard Edit message, with fresh ownership/focus retained first."""
+    evidence.update(message=message, wParam=wparam, lParam=lparam, timeoutFlags=3, timeoutMs=1000,
+                    sendReturn=None, messageReturn=None, context={})
+    picker_filename_context(api, shell_pid, dialog, field, evidence['context'])
+    require_picker_filename_focus(evidence['context'], shell_pid, dialog, field, thread)
+    evidence['unicodeWindow'] = bool(api.user.IsWindowUnicode(field))
+    assert evidence['unicodeWindow'], 'Filename Edit stopped being Unicode before native mutation'
+    send = api.user.SendMessageTimeoutW
+    send.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+                     wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t))
+    send.restype = ctypes.c_ssize_t
+    result = ctypes.c_size_t()
+    if attempt is not None: attempt[0][attempt[1]] = 1
+    getattr(ctypes, 'set_last_error', lambda error: None)(0)
+    returned = send(field, message, wparam, lparam, 3, 1000, ctypes.byref(result))
+    evidence.update(sendReturn=int(returned or 0), messageReturn=int(result.value))
+    if not returned:
+        raise OSError(getattr(ctypes, 'get_last_error', lambda: 0)(), 'Bounded native filename Edit message failed: ' + hex(message))
+    return int(result.value)
 
 
 def require_picker_filename_context(observed, shell_pid, dialog):
@@ -276,6 +352,46 @@ def require_picker_filename_context(observed, shell_pid, dialog):
 def require_picker_filename_focus(observed, shell_pid, dialog, field, thread):
     require_picker_filename_context(observed, shell_pid, dialog)
     assert observed['threadId'] == thread and observed['focusHwnd'] == field, 'Physical filename focus is outside the exact native Edit'
+
+
+def require_picker_native_edit_receipt(receipt, shell_pid, dialog, field):
+    """Replay one native edit's evidence; callers independently bind its expected fixture target."""
+    assert receipt['method'] == 'Win32-Edit-EM_REPLACESEL', 'Unexpected fixture filename edit method'
+    assert receipt['selectionSetAttempts'] == receipt['assignmentAttempts'] == receipt['focusClickAttempts'] == 1, 'Fixture filename edit must execute once'
+    assert receipt['readOnly'] is False and receipt['field']['nativeClass'] == 'Edit'
+    edit = receipt['nativeEdit']
+    expected = receipt['expected'].encode('utf-16-le')
+    assert '\0' not in receipt['expected'] and 0 < len(expected) // 2 < 4095
+    assert edit['unicodeWindow'] is True and edit['selectReadOnly'] is edit['replaceReadOnly'] is False
+    assert type(edit['styleRaw']) is int and 0 <= edit['styleRaw'] <= 0xffffffff
+    assert edit['multiline'] is bool(edit['styleRaw'] & 0x0004)
+    assert (edit['timeoutFlags'], edit['timeoutMs']) == (3, 1000)
+    assert edit['replacementUtf16LeHex'] == expected.hex() and edit['replacementUtf16Units'] == len(expected) // 2
+    before, clicked, assigned = (receipt[key] for key in ('focusBefore', 'focusAfterClick', 'focusAfterAssignment'))
+    thread = before['threadId']
+    require_picker_filename_context(before, shell_pid, dialog)
+    for observed in (before, clicked, assigned):
+        assert observed['fieldClass'] == 'Edit'
+        assert observed['nativeTextTimeoutMs'] == 1000
+        assert observed['nativeTextLength'] == len(observed['nativeText'].encode('utf-16-le')) // 2 < 4095
+    for observed in (clicked, assigned): require_picker_filename_focus(observed, shell_pid, dialog, field, thread)
+    assert before['nativeText'] == receipt['before']
+    assert assigned['nativeText'] == receipt['after'] == receipt['expected']
+    for name, message, wparam, lparam in (('selectionBefore', 0x00B0, 0, 0), ('selectResult', 0x00B1, 0, -1),
+                                         ('selectionAfterSelect', 0x00B0, 0, 0), ('replaceResult', 0x00C2, 1, None)):
+        observed = edit[name]
+        assert (observed['message'], observed['wParam'], observed['timeoutFlags'], observed['timeoutMs']) == (message, wparam, 3, 1000)
+        assert type(observed['lParam']) is int and (observed['lParam'] == lparam if lparam is not None else observed['lParam'] > 0)
+        assert type(observed['sendReturn']) is int and observed['sendReturn'] != 0
+        assert type(observed['messageReturn']) is int and observed['unicodeWindow'] is True
+        assert observed['context']['fieldClass'] == 'Edit'
+        require_picker_filename_focus(observed['context'], shell_pid, dialog, field, thread)
+    for name in ('selectionBefore', 'selectionAfterSelect'):
+        observed = edit[name]
+        assert 0 <= observed['messageReturn'] <= 0xffffffff and observed['packedResult'] == observed['messageReturn']
+        assert (observed['start'], observed['end']) == (observed['packedResult'] & 0xffff, (observed['packedResult'] >> 16) & 0xffff)
+    assert (edit['selectionAfterSelect']['start'], edit['selectionAfterSelect']['end']) == (0, clicked['nativeTextLength'])
+    return edit
 
 
 def require_dialog_button_ancestry(api, accessible, button, shell_pid, dialog, evidence=None):
@@ -555,8 +671,12 @@ class Case:
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.set_focus()
         self.api.require_foreground(hwnd)
-        Desktop(backend='win32').window(handle=child).wrapper_object().click_input()
-        send_keys('^{F6}', pause=0.1)
+        attachments = [row for row in self.record.get('attachments', [])
+                       if row['hwnd'] == hwnd and row['child'] == child]
+        assert len(attachments) == 1, 'Editor input requires one exact previously owned attachment'
+        native.prepare_editor_focus(self.api, hwnd, child, self.process.pid, attachments[0]['officePid'], self.record,
+            lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
+            lambda: send_keys('^{F6}', pause=0.1))
         self.api.require_editor_focus(hwnd, child)
         send_keys('^{END}', pause=0.1)
         self.api.require_editor_focus(hwnd, child)

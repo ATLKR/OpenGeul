@@ -40,6 +40,18 @@ class FakeWindows:
         if not self.focus: raise AssertionError('foreign editor focus')
         return self.focus
 
+    def pid(self, hwnd): return 77 if hwnd == 11 else 88
+
+    def editor_focus_snapshot(self, hwnd, child, shell_pid, office_pid):
+        def window(handle):
+            return {'hwnd': handle, 'isWindow': True, 'pid': self.pid(handle),
+                    'threadId': 44, 'rootHwnd': hwnd, 'className': 'Owned-test-window'}
+        binding = {'suite': window(hwnd), 'editor': window(child),
+                   'foreground': window(hwnd), 'editorWithinSuite': True}
+        return {'before': binding, 'after': binding, 'querySucceeded': True,
+                'queryAttempted': True, 'queriedThreadId': 44, 'cbSize': 72, 'lastError': 0,
+                'focus': window(self.focus), 'focusWithinEditor': True}
+
     def send(self, count, payload, size):
         self.sent.append((count, bytes(payload), size))
         value = self.counts.pop(0) if self.counts else count
@@ -211,7 +223,8 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
         lifecycle = load_sibling('lifecycle_smoke')
         self.assertTrue(hasattr(lifecycle.native, 'ascii_input'), 'Lifecycle lacks physical ASCII sibling helper')
         case = object.__new__(lifecycle.Case)
-        case.record, case.api = {}, FakeWindows()
+        case.record = {'attachments': [{'hwnd': 11, 'child': 22, 'officePid': 88}]}
+        case.process, case.api = SimpleNamespace(pid=77), FakeWindows()
         case.api.title = lambda hwnd: '* OpenGeul Writer'
         window = SimpleNamespace(set_focus=Mock(), click_input=Mock())
         desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: window))
@@ -258,7 +271,9 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                 type_ascii.assert_called_once_with(api, 11, 22, marker, result, pause=0.04)
                 sent = [call.args[0] for call in send_keys.call_args_list]
                 self.assertNotIn(marker, sent)
-                self.assertIn('^{F6}', sent)
+                self.assertEqual(sent.count('^{F6}'), 1)
+                window.click_input.assert_called_once_with()
+                self.assertTrue(result['editorFocusReadiness']['ready'])
                 self.assertIn('^s', sent)
                 self.assertIs(result['keyboardInputVerified'], True)
                 self.assertIs(result['contentMutationVerified'], True)

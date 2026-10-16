@@ -154,9 +154,10 @@ def run_gui(suite, fixtures, output):
         window.maximize()
         window.set_focus()
         api.require_foreground(hwnd)
-        Desktop(backend='win32').window(handle=child).wrapper_object().click_input()
-        send_keys('^{F6}', pause=0.1, vk_packet=False)
-        api.require_editor_focus(hwnd, child)
+        record['stage'] = 'focus-editor'
+        native.prepare_editor_focus(api, hwnd, child, process.pid, pid, record,
+            lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
+            lambda: send_keys('^{F6}', pause=0.1, vk_packet=False))
         record['stage'] = 'physical-heading1-shortcut'
         send_keys('^{HOME}', pause=0.1, vk_packet=False)
         api.require_editor_focus(hwnd, child)

@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -18,9 +18,65 @@ SPEC.loader.exec_module(smoke)
 
 
 class LifecycleSmokeTests(unittest.TestCase):
-    def picker_fixture(self, *, wrong_readback=False, readonly=False, method_error=None):
+    def test_lifecycle_observes_shared_focus_readiness_once_before_navigation_and_marker_input(self):
+        case = object.__new__(smoke.Case)
+        case.record = {'attachments': [{'hwnd': 11, 'child': 22, 'officePid': 88}]}
+        case.process = SimpleNamespace(pid=77)
+        case.api = SimpleNamespace(require_foreground=lambda hwnd: None, require_editor_focus=lambda hwnd, child: 22,
+                                   title=lambda hwnd: '* OpenGeul Writer', pid=lambda hwnd: 999)
+        window = SimpleNamespace(set_focus=Mock(), click_input=Mock())
+        desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: window))
+        observed = []
+        def keyboard(keys, **options):
+            if keys == '^{END}': self.assertIn('ready', observed, 'Navigation must follow actual focus readiness')
+            observed.append(keys)
+        def prepare(api, hwnd, child, shell_pid, office_pid, record, click_editor, enter_document):
+            self.assertEqual((hwnd, child, shell_pid, office_pid), (11, 22, 77, 88))
+            click_editor()
+            enter_document()
+            observed.append('ready')
+            return 22
+        readiness = Mock(side_effect=prepare)
+        def inject(*args, **options):
+            self.assertIn('ready', observed)
+            observed.append('marker')
+        ascii_input = Mock(side_effect=inject)
+        with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
+                                       'pywinauto.keyboard': SimpleNamespace(send_keys=keyboard)}), \
+             patch.object(smoke.native, 'prepare_editor_focus', readiness), \
+             patch.object(smoke.native.ascii_input, 'type_ascii', ascii_input):
+            case.edit(11, 22, '-LIFECYCLE-NEW-')
+        readiness.assert_called_once()
+        window.click_input.assert_called_once()
+        ascii_input.assert_called_once_with(case.api,11,22,'-LIFECYCLE-NEW-',case.record,pause=0.025)
+        self.assertEqual(observed, ['^{F6}', 'ready', '^{END}', 'marker'])
+
+    def test_lifecycle_rejects_missing_or_ambiguous_attachment_before_editor_input(self):
+        attachment = {'hwnd':11, 'child':22, 'officePid':88}
+        for attachments in ([], [attachment, attachment.copy()], [{**attachment,'child':999}]):
+            with self.subTest(attachments=attachments):
+                case = object.__new__(smoke.Case)
+                case.record, case.process = {'attachments':attachments}, SimpleNamespace(pid=77)
+                case.api = SimpleNamespace(require_foreground=lambda hwnd:None, require_editor_focus=lambda *args:22,
+                                           title=lambda hwnd:'* OpenGeul Writer')
+                window = SimpleNamespace(set_focus=Mock(), click_input=Mock())
+                desktop = SimpleNamespace(window=lambda **kw:SimpleNamespace(wrapper_object=lambda:window))
+                keyboard, ascii_input, readiness = Mock(), Mock(), Mock()
+                with patch.dict('sys.modules', {'pywinauto':SimpleNamespace(Desktop=lambda **kw:desktop),
+                                               'pywinauto.keyboard':SimpleNamespace(send_keys=keyboard)}), \
+                     patch.object(smoke.native,'prepare_editor_focus',readiness), \
+                     patch.object(smoke.native.ascii_input,'type_ascii',ascii_input):
+                    with self.assertRaises(AssertionError): case.edit(11,22,'-LIFECYCLE-NEW-')
+                window.click_input.assert_not_called()
+                keyboard.assert_not_called()
+                ascii_input.assert_not_called()
+                readiness.assert_not_called()
+
+    def picker_fixture(self, *, wrong_readback=False, readonly=False, method_error=None,
+                       unicode_window=True, wrong_selection=False, missed_assignment=False, native_failure=None):
         calls = []
-        focus = SimpleNamespace(hwnd=500,steal_after_assignment=False,native_override=None,native_override_after_assignment=False)
+        focus = SimpleNamespace(hwnd=500,steal_after_assignment=False,native_override=None,native_override_after_assignment=False,
+                                selection=(2,4), messages=[],unicode_window=unicode_window,style=0x50810080)
         class Value:
             CurrentIsReadOnly = readonly
             def __init__(self): self.text = '새 문서.odt'
@@ -30,11 +86,7 @@ class LifecycleSmokeTests(unittest.TestCase):
                 if method_error == 'read': raise RuntimeError('value read failed')
                 return self.text
             def SetValue(self, text):
-                calls.append(('assign',text))
-                if method_error == 'assign': raise RuntimeError('value assignment failed')
-                self.text = text[:-1] if wrong_readback else text
-                if focus.steal_after_assignment: focus.hwnd=999
-                if focus.native_override_after_assignment: focus.native_override='stale native filename'
+                raise AssertionError('ValuePattern.SetValue must not perform this native Edit transaction')
         value = Value()
         root_info = SimpleNamespace(handle=500, process_id=31, runtime_id=[42,500],
                                     name='OpenGeul Writer — 다른 이름으로 저장', control_type='Window')
@@ -58,38 +110,220 @@ class LifecycleSmokeTests(unittest.TestCase):
             pointer._obj.hwndMenuOwner=0
             return 1
         def native_text(handle,message,capacity,buffer,flags,timeout,result):
-            self.assertEqual((handle,message,flags,timeout),(510,13,3,1000))
+            self.assertEqual((handle,flags,timeout),(510,3,1000))
+            focus.messages.append(message)
+            if native_failure == message: return 0
+            if message==0xB0:
+                self.assertEqual((capacity,buffer),(0,0))
+                result._obj.value=focus.selection[0] | (focus.selection[1]<<16)
+                return 1
+            if message==0xB1:
+                self.assertEqual((capacity,buffer),(0,-1))
+                calls.append(('select',0,-1))
+                if not wrong_selection: focus.selection=(0,len(value.text.encode('utf-16-le'))//2)
+                result._obj.value=0
+                return 1
+            if message==0xC2:
+                self.assertEqual(capacity,1,'EM_REPLACESEL must retain undo information')
+                text=smoke.ctypes.wstring_at(buffer)
+                calls.append(('assign',text))
+                if method_error == 'assign': raise RuntimeError('native assignment failed')
+                if not missed_assignment: value.text=text[:-1] if wrong_readback else text
+                if focus.steal_after_assignment: focus.hwnd=999
+                if focus.native_override_after_assignment: focus.native_override='stale native filename'
+                result._obj.value=0
+                return 1
+            self.assertEqual(message,13)
             actual=value.text if focus.native_override is None else focus.native_override
             import ctypes
             destination=ctypes.cast(buffer,ctypes.POINTER(ctypes.c_wchar))
             for index,char in enumerate(actual): destination[index]=char
             destination[len(actual)]='\0'
-            result._obj.value=len(actual)
+            result._obj.value=len(actual.encode('utf-16-le'))//2
             return 1
         api.user.GetGUIThreadInfo=gui_info
         api.user.GetWindowThreadProcessId=lambda handle,pointer:111
         api.user.GetForegroundWindow=lambda:500
         api.user.SendMessageTimeoutW=native_text
+        api.user.IsWindowUnicode=lambda handle:focus.unicode_window
+        api.user.GetWindowLongW=lambda handle,index:focus.style
         api.focus_state=focus
         return api,accessible,field,calls
 
-    def test_picker_filename_uses_one_owned_value_assignment_and_retains_exact_readback(self):
-        self.assertTrue(hasattr(smoke,'set_owned_picker_filename'),'Owned native ValuePattern assignment is missing')
+    def test_picker_filename_uses_one_native_selection_replacement_and_exact_readback(self):
         api,root,field,calls = self.picker_fixture()
         record = {}
         expected = 'D:\\owned\\새 문서 저장 결과 & 한글.docx'
         smoke.set_owned_picker_filename(api,31,100,500,root,field,expected,record)
         evidence, = record['pickerFilenameInputs']
-        self.assertEqual(calls,[('read','새 문서.odt'),('focus',510),('assign',expected),('read',expected)])
+        self.assertEqual(calls,[('read','새 문서.odt'),('focus',510),('select',0,-1),('assign',expected),('read',expected)])
         self.assertTrue(evidence['success'])
         self.assertEqual((evidence['expected'],evidence['before'],evidence['after']), (expected,'새 문서.odt',expected))
         self.assertEqual(evidence['assignmentAttempts'],1)
+        self.assertEqual(evidence['selectionSetAttempts'],1)
+        self.assertEqual(evidence['method'],'Win32-Edit-EM_REPLACESEL')
+        self.assertEqual(evidence['nativeEdit']['selectionBefore']['packedResult'],2|(4<<16))
+        self.assertEqual(evidence['nativeEdit']['selectionAfterSelect']['start'],0)
+        self.assertEqual(evidence['nativeEdit']['selectionAfterSelect']['end'],len('새 문서.odt'))
+        self.assertEqual(evidence['nativeEdit']['replaceResult']['messageReturn'],0,
+                         'A zero EM_REPLACESEL message return is normal; exact readback proves mutation')
+        self.assertEqual(evidence['nativeEdit']['replacementUtf16LeHex'],expected.encode('utf-16-le').hex())
+        self.assertEqual(api.focus_state.messages,[13,13,0xB0,0xB1,0xB0,0xC2,13])
         self.assertEqual(evidence['field']['runtimeId'],[42,510])
         self.assertEqual(evidence['dialogUia']['nativeHandle'],500)
 
+    def test_picker_native_edit_rejects_nonunicode_wrong_selection_and_missing_assignment(self):
+        for mode in ('non-unicode','wrong-selection','missed-assignment','truncated-readback'):
+            with self.subTest(mode=mode):
+                api,root,field,calls=self.picker_fixture(unicode_window=mode!='non-unicode',
+                    wrong_selection=mode=='wrong-selection',missed_assignment=mode=='missed-assignment',
+                    wrong_readback=mode=='truncated-readback')
+                record={}
+                with self.assertRaises(AssertionError):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+                receipt,=record['pickerFilenameInputs']
+                self.assertFalse(receipt['success'])
+                self.assertEqual(receipt['assignmentAttempts'],int(mode in ('missed-assignment','truncated-readback')))
+                self.assertEqual(receipt['selectionSetAttempts'],int(mode!='non-unicode'))
+                self.assertEqual(sum(c[0]=='assign' for c in calls),receipt['assignmentAttempts'])
+                self.assertIn('error',receipt)
+
+    def test_picker_native_edit_failure_retains_raw_result_and_never_retries(self):
+        for message in (0xB0,0xB1,0xC2):
+            with self.subTest(message=message):
+                api,root,field,calls=self.picker_fixture(native_failure=message)
+                record={}
+                with self.assertRaises(OSError):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+                receipt,=record['pickerFilenameInputs']
+                self.assertFalse(receipt['success'])
+                self.assertEqual(api.focus_state.messages.count(message),1)
+                key={0xB0:'selectionBefore',0xB1:'selectResult',0xC2:'replaceResult'}[message]
+                self.assertEqual(receipt['nativeEdit'][key]['sendReturn'],0)
+                self.assertIn('error',receipt)
+
+    def test_picker_native_edit_rejects_nul_and_utf16_overflow_before_any_mutation(self):
+        for target in ('D:\\owned\\bad\0name.docx','x'*4095,'😀'*2048):
+            with self.subTest(target_length=len(target)):
+                api,root,field,calls=self.picker_fixture()
+                record={}
+                with self.assertRaises(AssertionError):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,target,record)
+                receipt,=record['pickerFilenameInputs']
+                self.assertEqual(receipt['selectionSetAttempts'],0)
+                self.assertEqual(receipt['assignmentAttempts'],0)
+                self.assertFalse(any(c[0] in ('select','assign') for c in calls))
+
+    def test_picker_native_edit_uses_utf16_selection_lengths_and_retains_multiline_style_as_diagnostic(self):
+        api,root,field,calls=self.picker_fixture()
+        field.iface_value.text='가😀.odt'
+        api.focus_state.style |= 4
+        record={}
+        target='D:\\owned\\한글 😀.docx'
+        smoke.set_owned_picker_filename(api,31,100,500,root,field,target,record)
+        receipt,=record['pickerFilenameInputs']
+        self.assertTrue(receipt['success'])
+        self.assertEqual(receipt['nativeEdit']['selectionAfterSelect']['end'],len('가😀.odt'.encode('utf-16-le'))//2)
+        self.assertEqual(receipt['nativeEdit']['replacementUtf16Units'],len(target.encode('utf-16-le'))//2)
+        self.assertTrue(receipt['nativeEdit']['multiline'],'Style is retained, not assumed to explain Windows behavior')
+        self.assertIs(api.user.SendMessageTimeoutW.restype,smoke.ctypes.c_ssize_t)
+        self.assertEqual(api.user.SendMessageTimeoutW.argtypes[-1],smoke.ctypes.POINTER(smoke.ctypes.c_size_t))
+        self.assertIs(api.user.GetWindowLongW.restype,smoke.ctypes.c_int32)
+
+    def test_picker_native_edit_rechecks_live_ownership_focus_and_foreground_before_text_mutation(self):
+        for mode in ('pid','dead','root','focus','foreground','unicode','native-edit-class'):
+            with self.subTest(mode=mode):
+                api,root,field,calls=self.picker_fixture()
+                original=api.user.SendMessageTimeoutW
+                queries=[]
+                def send(*args):
+                    result=original(*args)
+                    if args[1]==0xB0:
+                        queries.append(1)
+                        if len(queries)==2:
+                            if mode=='pid': api.pid=lambda handle:99
+                            if mode=='dead': api.user.IsWindow=lambda handle:False
+                            if mode=='root': api.user.GetAncestor=lambda handle,relation:999
+                            if mode=='focus': api.focus_state.hwnd=999
+                            if mode=='foreground': api.user.GetForegroundWindow=lambda:999
+                            if mode=='foreground': api.user.GetAncestor=lambda handle,relation:999 if handle==999 else 500
+                            if mode=='unicode': api.focus_state.unicode_window=False
+                            if mode=='native-edit-class': api.class_name=lambda handle:'RichEdit50W'
+                    return result
+                api.user.SendMessageTimeoutW=send
+                record={}
+                with self.assertRaises(AssertionError):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+                receipt,=record['pickerFilenameInputs']
+                self.assertEqual(receipt['selectionSetAttempts'],1)
+                self.assertEqual(receipt['assignmentAttempts'],0)
+                self.assertEqual(receipt['nativeEdit']['replaceResult']['sendReturn'],None)
+                self.assertNotIn(0xC2,api.focus_state.messages)
+                self.assertFalse(any(c[0]=='assign' for c in calls))
+
+    def test_picker_timeout_without_native_error_does_not_report_stale_last_error(self):
+        api,root,field,calls=self.picker_fixture(native_failure=0xC2)
+        original=api.user.GetGUIThreadInfo
+        state={'lastError':5}
+        def context(*args):
+            state['lastError']=5
+            return original(*args)
+        api.user.GetGUIThreadInfo=context
+        record={}
+        with patch.object(smoke.ctypes,'set_last_error',side_effect=lambda code:state.update(lastError=code),create=True), \
+             patch.object(smoke.ctypes,'get_last_error',side_effect=lambda:state['lastError'],create=True):
+            with self.assertRaises(OSError) as failure:
+                smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+        self.assertEqual(failure.exception.errno,0)
+        self.assertEqual(record['pickerFilenameInputs'][0]['nativeEdit']['replaceResult']['sendReturn'],0)
+
+    def test_picker_rejects_oversized_packed_selection_and_readonly_changes_before_mutation(self):
+        for mode in ('packed-before','packed-after','readonly-before-select','readonly-before-replace'):
+            with self.subTest(mode=mode):
+                api,root,field,calls=self.picker_fixture()
+                original=api.user.SendMessageTimeoutW
+                queries=[]
+                def send(*args):
+                    returned=original(*args)
+                    if args[1]==0xB0:
+                        queries.append(1)
+                        if mode=='packed-before' and len(queries)==1: args[-1]._obj.value |= 1<<32
+                        if mode=='packed-after' and len(queries)==2: args[-1]._obj.value |= 1<<32
+                        if mode=='readonly-before-select' and len(queries)==1: field.iface_value.CurrentIsReadOnly=True
+                        if mode=='readonly-before-replace' and len(queries)==2: field.iface_value.CurrentIsReadOnly=True
+                    return returned
+                api.user.SendMessageTimeoutW=send
+                record={}
+                with self.assertRaises(AssertionError):
+                    smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+                receipt,=record['pickerFilenameInputs']
+                self.assertEqual(receipt['assignmentAttempts'],0)
+                self.assertEqual(receipt['selectionSetAttempts'],int(mode in ('packed-after','readonly-before-replace')))
+                self.assertNotIn(0xC2,api.focus_state.messages)
+
+    def test_native_edit_pure_receipt_replay_rejects_changed_intent_results_and_context(self):
+        api,root,field,calls=self.picker_fixture()
+        record={}
+        smoke.set_owned_picker_filename(api,31,100,500,root,field,'D:\\owned\\한글.docx',record)
+        receipt,=record['pickerFilenameInputs']
+        smoke.require_picker_native_edit_receipt(receipt,31,500,510)
+        for key,value in [('method','UIA-ValuePattern-SetValue'),('selectionSetAttempts',2),('assignmentAttempts',2)]:
+            invalid=json.loads(json.dumps(receipt));invalid[key]=value
+            with self.assertRaises(AssertionError): smoke.require_picker_native_edit_receipt(invalid,31,500,510)
+        for key,value in [('unicodeWindow',False),('replaceReadOnly',True),('replacementUtf16LeHex','00')]:
+            invalid=json.loads(json.dumps(receipt));invalid['nativeEdit'][key]=value
+            with self.assertRaises(AssertionError): smoke.require_picker_native_edit_receipt(invalid,31,500,510)
+        for node,key,value in [('selectResult','lParam',0),('replaceResult','wParam',0),
+                               ('replaceResult','sendReturn',0),('selectionAfterSelect','packedResult',0),
+                               ('selectionAfterSelect','messageReturn',1<<32)]:
+            invalid=json.loads(json.dumps(receipt));invalid['nativeEdit'][node][key]=value
+            with self.assertRaises(AssertionError): smoke.require_picker_native_edit_receipt(invalid,31,500,510)
+        invalid=json.loads(json.dumps(receipt));invalid['nativeEdit']['replaceResult']['context']['fieldPid']=99
+        with self.assertRaises(AssertionError): smoke.require_picker_native_edit_receipt(invalid,31,500,510)
+
     def test_picker_filename_rejects_foreign_or_readonly_controls_before_assignment(self):
         self.assertTrue(hasattr(smoke,'set_owned_picker_filename'),'Owned native ValuePattern assignment is missing')
-        invalids = ('dialog-pid','document-dead','owner','class','caption','uia-root','field-pid','field-id','runtime-id','native-parent','readonly')
+        invalids = ('dialog-pid','document-dead','owner','class','native-edit-class','caption','uia-root','field-pid','field-id','runtime-id','native-parent','readonly')
         for invalid in invalids:
             with self.subTest(invalid=invalid):
                 api,root,field,calls = self.picker_fixture(readonly=invalid=='readonly')
@@ -97,6 +331,7 @@ class LifecycleSmokeTests(unittest.TestCase):
                 if invalid=='document-dead': api.user.IsWindow=lambda handle: handle!=100
                 if invalid=='owner': api.user.GetWindow=lambda handle,relation: 999
                 if invalid=='class': api.class_name=lambda handle: 'Foreign'
+                if invalid=='native-edit-class': api.class_name=lambda handle: '#32770' if handle==500 else 'RichEdit50W'
                 if invalid=='caption': api.title=lambda handle: 'Foreign'
                 if invalid=='uia-root': root.element_info.handle=999
                 if invalid=='field-pid': field.element_info.process_id=99
