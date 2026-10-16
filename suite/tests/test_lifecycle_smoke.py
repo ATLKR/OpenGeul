@@ -180,6 +180,15 @@ class LifecycleSmokeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ReachedOwnedOk, 'owned OK selected'):
                     smoke.failed_saveas(case)
 
+    def test_read_only_hwp_label_census_keeps_names_without_instantiating_control_wrappers(self):
+        self.assertTrue(hasattr(smoke, 'accessibility_names'), 'Raw accessibility label census is missing')
+        children = [SimpleNamespace(name='경로 확인 & 한글 문서.hwpx', control_type=None),
+                    SimpleNamespace(name='OpenGeul', control_type='Text')]
+        info = SimpleNamespace(name='Owned HWP root', descendants=lambda: children)
+        def wrapped_descendants(): raise KeyError(None)
+        root = SimpleNamespace(element_info=info, descendants=wrapped_descendants)
+        self.assertEqual(smoke.accessibility_names(root), ['Owned HWP root', '경로 확인 & 한글 문서.hwpx', 'OpenGeul'])
+
     def test_targets_are_fresh_direct_children_and_never_links(self):
         if not hasattr(smoke, 'owned_target'): self.skipTest('RED: policy API not implemented')
         with tempfile.TemporaryDirectory() as directory:

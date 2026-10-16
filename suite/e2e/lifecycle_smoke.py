@@ -138,6 +138,14 @@ def owned_dialog_button(accessible, pid, labels):
     return candidates[0]
 
 
+def accessibility_names(window):
+    # Labels need no control-specific wrappers. During WebView startup a raw
+    # element can have no ControlType, which pywinauto 0.6.9 cannot wrap even
+    # though its name is available. Keep that real name in the owned census.
+    info = window.element_info
+    return [info.name] + [item.name for item in info.descendants()]
+
+
 def require_child_bounds(host, child):
     assert host[0:2] == (0, 0) and host[2] > 0 and host[3] > 0, 'Host client bounds must be nonempty'
     assert tuple(child) == tuple(host), 'Embedded child must fill the actual host client bounds: ' + str((host, child))
@@ -698,6 +706,7 @@ def hwp_route(case):
     launches = []
 
     def verify_and_close(shell, *, path=None):
+        case.record['stage'] = 'hwpx-route-native-readiness' if path else 'hwp-tile-native-readiness'
         pid = native.wait_for(lambda: _hwp_child_process(shell.pid, executable), 45)
         case.record.setdefault('ownedHwpPids', []).append(pid)
         bound = BoundHwpProcess(pid, executable)
@@ -711,7 +720,9 @@ def hwp_route(case):
                 children = tree.descendants()
                 webviews = [child for child in children if child.class_name() in ('Chrome_WidgetWin_0', 'Chrome_WidgetWin_1', 'Chrome_RenderWidgetHostHWND')]
                 if not webviews: return None
-                labels = [item.element_info.name for item in Desktop(backend='uia').window(handle=hwnd).descendants()]
+                labels = accessibility_names(Desktop(backend='uia').window(handle=hwnd).wrapper_object())
+                case.record['hwpReadiness'] = {'hwnd': int(hwnd), 'pid': pid, 'webviewHwnds': [int(child.handle) for child in webviews],
+                                             'labelCount': len(labels), 'filenameObserved': path is None or any(path.name in text for text in [case.api.title(hwnd)] + labels)}
                 if path and not any(path.name in text for text in [case.api.title(hwnd)] + labels): return None
                 return hwnd, [int(child.handle) for child in webviews], labels
             hwnd, webviews, labels = native.wait_for(ready, 75)
@@ -722,8 +733,10 @@ def hwp_route(case):
             case.api.request_close(hwnd, pid)
             native.wait_for(lambda: not case.api.user.IsWindow(hwnd), 25)
             native.wait_for(lambda: not bound.live(), 25)
-        except Exception:
+        except Exception as exc:
             # Bound process and exact packaged executable were verified above.
+            # Capture the actual HWP surface before failure cleanup closes it.
+            native.capture_failure(case.output, case.name + ('-hwpx-route' if path else '-hwp-tile'), case.record, exc)
             bound.stop()
             raise
         finally: bound.close()
