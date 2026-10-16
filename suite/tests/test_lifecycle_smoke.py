@@ -1,5 +1,6 @@
 """Evidence-policy tests for the Windows lifecycle acceptance harness."""
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 import tempfile
@@ -188,6 +189,139 @@ class LifecycleSmokeTests(unittest.TestCase):
         def wrapped_descendants(): raise KeyError(None)
         root = SimpleNamespace(element_info=info, descendants=wrapped_descendants)
         self.assertEqual(smoke.accessibility_names(root), ['Owned HWP root', '경로 확인 & 한글 문서.hwpx', 'OpenGeul'])
+
+    def test_hwp_child_census_uses_native_parent_and_exact_image_without_starting_wmi(self):
+        self.assertIn('shell_creation', inspect.signature(smoke._hwp_child_process).parameters,
+                      'Snapshot PID reuse is not rejected against retained shell creation')
+        class Function:
+            def __init__(self, operation): self.operation = operation
+            def __call__(self, *args): return self.operation(*args)
+        class Kernel:
+            def __init__(self, rows, creation_overrides=None):
+                self.rows, self.position, self.error = rows, -1, 0
+                self.creation_overrides = creation_overrides or {}
+                self.opened, self.closed = [], []
+                self.CreateToolhelp32Snapshot = Function(lambda flags, pid: 777)
+                self.Process32FirstW = Function(lambda handle, entry: self.entry(entry, 0))
+                self.Process32NextW = Function(lambda handle, entry: self.entry(entry, self.position + 1))
+                self.OpenProcess = Function(self.open)
+                self.QueryFullProcessImageNameW = Function(self.image)
+                self.GetProcessTimes = Function(self.times)
+                self.GetSystemTimeAsFileTime = Function(self.clock)
+                self.WaitForSingleObject = Function(lambda handle, timeout: 258)
+                self.CloseHandle = Function(lambda handle: self.closed.append(handle) or 1)
+            def entry(self, pointer, position):
+                self.position = position
+                if position >= len(self.rows):
+                    self.error = 18
+                    return 0
+                pid, parent, name, _ = self.rows[position]
+                pointer._obj.th32ProcessID, pointer._obj.th32ParentProcessID = pid, parent
+                pointer._obj.szExeFile = name
+                return 1
+            def open(self, access, inherit, pid):
+                self.opened.append(pid)
+                return 1000 + pid
+            def image(self, handle, flags, buffer, length):
+                buffer.value = next(row[3] for row in self.rows if row[0] == handle - 1000)
+                length._obj.value = len(buffer.value)
+                return 1
+            def times(self, handle, creation, exit_time, kernel_time, user_time):
+                created = self.creation_overrides.get(handle - 1000, (1 << 32) + handle - 1000)
+                creation._obj.dwLowDateTime, creation._obj.dwHighDateTime = created & 0xffffffff, created >> 32
+                return 1
+            def clock(self, pointer):
+                pointer._obj.dwLowDateTime, pointer._obj.dwHighDateTime = 1000, 1
+        executable = Path('/owned/OpenGeul.exe')
+        rows = [(106, 99, 'OpenGeul.exe', str(executable)),
+                (107, 31, 'OpenGeul.exe', '/foreign/OpenGeul.exe'),
+                (108, 31, 'OpenGeul.exe', str(executable)),
+                (109, 31, 'Foreign.exe', '/foreign/Foreign.exe')]
+        for additional, expected in (([], 108), ([(110, 31, 'OpenGeul.exe', str(executable))], None)):
+            kernel = Kernel(rows + additional)
+            with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True), \
+                 patch.object(smoke.subprocess, 'run', side_effect=AssertionError('WMI subprocess must not run')):
+                if additional:
+                    with self.assertRaises(AssertionError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+                else:
+                    observed = smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+                    self.assertEqual(observed, {'pid': expected, 'parentPid': 31, 'creationFileTime': (1 << 32) + expected,
+                                                'executable': str(executable)})
+            self.assertEqual(kernel.opened[:2], [107, 108])
+            self.assertIn(777, kernel.closed)
+            self.assertIn(1107, kernel.closed)
+            self.assertIn(1108, kernel.closed)
+            self.assertIs(kernel.CreateToolhelp32Snapshot.restype, smoke.wintypes.HANDLE)
+            self.assertEqual(kernel.Process32FirstW.argtypes, (smoke.wintypes.HANDLE, smoke.ctypes.POINTER(smoke.ProcessEntry32W)))
+        self.assertEqual(smoke.ProcessEntry32W.th32DefaultHeapID.offset, 16)
+        self.assertEqual(smoke.ProcessEntry32W.th32ParentProcessID.offset, 32)
+        self.assertEqual(smoke.ProcessEntry32W.szExeFile.offset, 44)
+        kernel = Kernel([rows[0]])
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+             patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True):
+            self.assertIsNone(smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31))
+        self.assertEqual(kernel.closed, [777])
+        self.assertFalse(kernel.opened)
+        kernel = Kernel(rows)
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True):
+            for invalid in (-1, 0, 1 << 32, True):
+                with self.assertRaises(AssertionError): smoke._hwp_child_process(invalid, executable, shell_creation=(1 << 32) + 31)
+        kernel = Kernel(rows)
+        kernel.OpenProcess = Function(lambda *args: 0)
+        kernel.error = 5
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+             patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True), \
+             patch.object(smoke.ctypes, 'WinError', side_effect=lambda error: OSError(error, 'native failure'), create=True):
+            with self.assertRaises(OSError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+        self.assertEqual(kernel.closed, [777], 'Snapshot must close after a candidate handle failure')
+        kernel = Kernel(rows)
+        kernel.CreateToolhelp32Snapshot = Function(lambda *args: smoke.ctypes.c_void_p(-1).value)
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+             patch.object(smoke.ctypes, 'get_last_error', return_value=5, create=True), \
+             patch.object(smoke.ctypes, 'WinError', side_effect=lambda error: OSError(error, 'native failure'), create=True):
+            with self.assertRaises(OSError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+        self.assertFalse(kernel.closed, 'An invalid snapshot is never passed to CloseHandle')
+        for created in ((1 << 32) + 1, (1 << 32) + 2000):
+            kernel = Kernel([rows[2]], {108: created})
+            with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True):
+                self.assertIsNone(smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31),
+                                  'Stale PPID or post-snapshot recycled same-image process must never match')
+            self.assertEqual(kernel.closed, [1108, 777])
+        for failed in ('Process32FirstW', 'Process32NextW', 'QueryFullProcessImageNameW', 'GetProcessTimes'):
+            kernel = Kernel(rows)
+            setattr(kernel, failed, Function(lambda *args: 0))
+            kernel.error = 5
+            with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True), \
+                 patch.object(smoke.ctypes, 'WinError', side_effect=lambda error: OSError(error, 'native failure'), create=True):
+                with self.assertRaises(OSError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+            self.assertIn(777, kernel.closed, failed)
+            if failed in ('QueryFullProcessImageNameW', 'GetProcessTimes'): self.assertIn(1107, kernel.closed, failed)
+
+    def test_retained_hwp_handle_rejects_pid_reuse_with_changed_creation_time(self):
+        self.assertIn('expected_creation', inspect.signature(smoke.BoundHwpProcess).parameters,
+                      'Retained handle does not verify the native snapshot creation witness')
+        class Function:
+            def __init__(self, operation): self.operation = operation
+            def __call__(self, *args): return self.operation(*args)
+        closed = []
+        def times(handle, creation, *args):
+            creation._obj.dwLowDateTime, creation._obj.dwHighDateTime = 108, 1
+            return 1
+        def image(handle, flags, buffer, length):
+            buffer.value = '/owned/OpenGeul.exe'
+            length._obj.value = len(buffer.value)
+            return 1
+        kernel = SimpleNamespace(**{name: Function(lambda *args: 1) for name in (
+            'CreateToolhelp32Snapshot', 'Process32FirstW', 'Process32NextW', 'WaitForSingleObject', 'GetSystemTimeAsFileTime')},
+            OpenProcess=Function(lambda *args: 1108), GetProcessTimes=Function(times),
+            QueryFullProcessImageNameW=Function(image), CloseHandle=Function(lambda handle: closed.append(handle) or 1))
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True):
+            with self.assertRaisesRegex(AssertionError, 'creation'):
+                smoke.BoundHwpProcess(108, Path('/owned/OpenGeul.exe'), expected_creation=(1 << 32) + 107)
+        self.assertEqual(closed, [1108])
 
     def test_targets_are_fresh_direct_children_and_never_links(self):
         if not hasattr(smoke, 'owned_target'): self.skipTest('RED: policy API not implemented')
