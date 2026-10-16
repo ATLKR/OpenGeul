@@ -63,7 +63,7 @@ class WorkerTests(unittest.TestCase):
         self.worker_module = importlib.import_module('office_worker')
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.backend = FakeBackend(self.root)
         self.session = self.session_module.DocumentSession(
             self.root, MODULES, backend_factory=lambda runtime: self.backend)
@@ -317,7 +317,7 @@ class NativeBoundaryTests(unittest.TestCase):
         self.native = importlib.import_module('native')
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
 
     def test_owned_runtime_launch_uses_unique_profile_and_private_pipe(self):
         from types import SimpleNamespace

@@ -192,7 +192,8 @@ class RecoveryTests(unittest.TestCase):
                 self.implementation.subprocess, 'run', side_effect=lambda *a, **kw: calls.append((a, kw))):
             self.implementation.expand_file(Path('input cab.cab'), 'exact_amd64.Id', Path('target path'))
         args, kwargs = calls[0]
-        self.assertEqual(['C:/Windows/System32/expand.exe', '-F:exact_amd64.Id', 'input cab.cab', 'target path'], args[0])
+        self.assertEqual([str(Path('C:/Windows/System32/expand.exe')), '-F:exact_amd64.Id',
+                          str(Path('input cab.cab')), str(Path('target path'))], args[0])
         self.assertFalse(kwargs.get('shell', False))
         self.assertTrue(kwargs['check'])
         self.assertGreater(kwargs['timeout'], 0)

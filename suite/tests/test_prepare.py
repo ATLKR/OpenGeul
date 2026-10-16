@@ -194,7 +194,12 @@ class PrepareTests(unittest.TestCase):
     def archive(self, folder, names):
         path = Path(folder)/'input.zip'
         with zipfile.ZipFile(path, 'w') as archive:
-            for name, data in names: archive.writestr(name, data)
+            for name, data in names:
+                # Set the exact archive bytes after ZipInfo's OS path normalization.
+                info = zipfile.ZipInfo('fixture')
+                info.filename = name
+                info.orig_filename = name
+                archive.writestr(info, data)
         return path
 
     def test_hwp_archive_extracts_original_relative_paths(self):
@@ -213,6 +218,22 @@ class PrepareTests(unittest.TestCase):
                 path = self.archive(folder, [('OpenGeul.exe',b'editor'),(name,b'bad')])
                 destination = Path(folder)/'out'
                 with self.assertRaises(ValueError): module.extract_hwp_zip(path, destination)
+                self.assertFalse(destination.exists())
+
+
+    def test_raw_zip_names_remain_rejected_after_windows_reader_normalization(self):
+        module = implementation()
+        original_init = zipfile.ZipInfo.__init__
+        def windows_init(info, *args, **kwargs):
+            original_init(info, *args, **kwargs)
+            info.filename = info.filename.replace('\\', '/')
+        for name in ('bad\\file', 'nul\x00truncated.txt'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
+                path = self.archive(folder, [('OpenGeul.exe', b'editor'), (name, b'bad')])
+                destination = Path(folder)/'out'
+                with patch.object(zipfile.ZipInfo, '__init__', windows_init):
+                    with self.assertRaises(ValueError):
+                        module.extract_hwp_zip(path, destination)
                 self.assertFalse(destination.exists())
 
     def test_case_collision_and_over_limit_archives_are_rejected(self):

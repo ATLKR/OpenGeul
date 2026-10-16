@@ -87,6 +87,9 @@ def extract_hwp_zip(archive: Path, destination: Path, *, limit: int = 512 * 1024
         members = source.infolist()
         if not members or len(members) > 10000: raise ValueError('Invalid HWP archive member count')
         for member in members:
+            # ZipInfo may normalize Windows separators or truncate at NUL.
+            # Admit the raw central-directory name before using its normalized name.
+            archive_path(member.orig_filename)
             name = archive_path(member.filename)
             if name.casefold() in seen: raise ValueError('Archive path collision')
             seen.add(name.casefold())
