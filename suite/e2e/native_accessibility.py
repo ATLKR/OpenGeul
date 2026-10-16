@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 ROLE_NAMESPACE = 'com.sun.star.accessibility.AccessibleRole'
 PAGE_TAB, PAGE_TAB_LIST = 38, 39  # Pinned 26.8.1.1 AccessibleRole.idl.
@@ -56,7 +57,10 @@ def require_native_tabs(snapshot, office_pid, child, module):
     assert witness.get('hwndVerifiedBefore') and witness.get('hwndVerifiedAfter'), 'Native editor HWND ownership changed'
     assert snapshot.get('boundsDpiContext') == 'per-monitor-v2' and witness.get('boundsDpiContextRestored'), 'Rendered bounds require a verified scoped physical-pixel DPI context'
     assert snapshot.get('sameLiveFrameVerified') and snapshot.get('containerHwnd') == child, 'Actual UNO frame is outside the verified editor'
-    assert snapshot.get('peerToBorderLiveParentVerified'), 'Actual native peer border parent is missing'
+    binding = snapshot.get('nativeNotebookbarBinding', {})
+    assert (binding.get('ownedPeerWidgetVerified') and binding.get('targetWidgetType') == 'TabControlUIObject'
+            and binding.get('targetWidgetId') == 'ContextContainer' and binding.get('nextFocusMatchesTargetWidget')
+            and binding.get('focusRestored') and binding.get('selectionUnchanged')), 'Actual notebookbar widget is not bound to the verified native editor'
     assert snapshot.get('truncated') is False, 'Native accessibility search exceeded its finite bound'
     outer = snapshot.get('rootRectangle', [])
     assert len(outer) == 4 and inside(outer, outer), 'Native editor rendered bounds are invalid'
@@ -205,6 +209,136 @@ def _physical_window_rectangle(api, child):
         assert equal(current(), previous), 'Collector thread DPI context restoration was not verified'
 
 
+def _native_notebookbar(context, frame, peer, diagnostic):
+    """Reach the real sibling widget through public UITest and focus events.
+
+    XUIObject.equals compares the underlying VCL window pointer. The public
+    FocusEvent.NextFocus carries that same window's actual XWindowPeer; its
+    XAccessible then supplies real native tab roles, parents and page indices.
+    """
+    import unohelper
+    from com.sun.star.awt import XFocusListener
+    ui = context.ServiceManager.createInstanceWithContext('com.sun.star.ui.test.UITest', context)
+    owner = ui.getWindow(peer)
+    assert owner.equals(ui.getWindow(frame.getContainerWindow())), 'UITest owner differs from the verified frame peer'
+    target = owner.getChild('ContextContainer')
+    target_state = {item.Name: item.Value for item in target.getState()}
+    assert target.getType() == 'TabControlUIObject' and target_state['ID'] == 'ContextContainer', 'Actual notebookbar is not the expected native TabControl'
+    assert target_state['Visible'] == 'true' and target_state['ReallyVisible'] == 'true', 'Native notebookbar widget is not rendered'
+    original = ui.getFocusWindow()
+    component = frame.getComponentWindow()
+    assert component is not None, 'Owned native document component window is missing'
+    events, listeners, windows = [], [], []
+
+    class Listener(unohelper.Base, XFocusListener):
+        def focusGained(self, event):
+            pass
+
+        def focusLost(self, event):
+            if event.NextFocus is not None:
+                events.append(event.NextFocus)
+
+        def disposing(self, event):
+            pass
+
+    listener = Listener()
+    toolkit = context.ServiceManager.createInstanceWithContext('com.sun.star.awt.Toolkit', context)
+    try:
+        pending = [peer, component]
+        while pending:
+            window = pending.pop()
+            if any(window == earlier for earlier in windows):
+                continue
+            windows.append(window)
+            assert len(windows) <= 128, 'Owned native window focus census exceeded its finite bound'
+            window.addFocusListener(listener)
+            listeners.append(window)
+            try:
+                children = window.getWindows()
+            except AttributeError:
+                children = ()
+            pending.extend(children)
+        toolkit.addFocusListener(listener)
+    except Exception:
+        for window in listeners:
+            try:
+                window.removeFocusListener(listener)
+            except Exception:
+                pass  # Preserve the registration failure; no focus action ran.
+        raise
+    evidence = dict(targetType=str(target.getType()), targetState=target_state,
+                    ownedWindowListenerCount=len(windows), nextFocusCandidates=[])
+    matched = binding = None
+    try:
+        component.setFocus()
+        target.executeAction('FOCUS', ())
+        deadline = time.monotonic() + 3
+        seen = 0
+        while time.monotonic() < deadline and matched is None:
+            while seen < len(events):
+                candidate = events[seen]
+                seen += 1
+                widget = ui.getWindow(candidate)
+                equal = bool(widget.equals(target))
+                state = {item.Name: item.Value for item in widget.getState()}
+                evidence['nextFocusCandidates'].append(dict(widgetType=str(widget.getType()), widgetState=state,
+                                                            equalsNativeNotebookbar=equal))
+                if equal:
+                    matched = candidate
+                    break
+            if matched is None:
+                time.sleep(0.02)
+        evidence['focusedWidgetMatchesTarget'] = bool(ui.getFocusWindow().equals(target))
+        assert matched is not None and evidence['focusedWidgetMatchesTarget'], 'No actual notebookbar XWindowPeer was witnessed in native focus events'
+        accessible = matched.getProperty('XAccessible')
+        assert int(accessible.getAccessibleContext().getAccessibleRole()) == PAGE_TAB_LIST, 'Actual focused notebookbar does not expose the native PAGE_TAB_LIST role'
+        assert ui.getWindow(matched).equals(target), 'Native notebookbar widget identity changed'
+        parent = accessible.getAccessibleContext().getAccessibleParent()
+        assert parent is not None, 'Native notebookbar has no actual live accessible parent'
+        chain, current, held = [], accessible, [accessible]
+        while True:
+            current_context = current.getAccessibleContext()
+            parent_object = current_context.getAccessibleParent()
+            if parent_object is None:
+                break
+            index = int(current_context.getAccessibleIndexInParent())
+            assert index >= 0 and parent_object.getAccessibleContext().getAccessibleChild(index) == current, 'Actual notebookbar ancestor index round trip failed'
+            assert not any(parent_object == earlier for earlier in held), 'Native notebookbar ancestor identity cycle'
+            chain.append(index)
+            held.append(parent_object)
+            assert len(chain) <= 32, 'Native notebookbar parent chain exceeded its finite bound'
+            current = parent_object
+        binding = dict(ownedPeerWidgetVerified=True, targetWidgetType='TabControlUIObject',
+                       targetWidgetId='ContextContainer', nextFocusMatchesTargetWidget=True,
+                       focusRestored=False, selectionUnchanged=False)
+        return accessible, list(reversed(chain)), parent, binding
+    finally:
+        cleanup_errors = []
+        try:
+            toolkit.removeFocusListener(listener)
+        except Exception as exc:
+            cleanup_errors.append('Toolkit listener removal: ' + type(exc).__name__)
+        for window in listeners:
+            try:
+                window.removeFocusListener(listener)
+            except Exception as exc:
+                cleanup_errors.append('Window listener removal: ' + type(exc).__name__)
+        try:
+            original.executeAction('FOCUS', ())
+            evidence['focusRestored'] = bool(ui.getFocusWindow().equals(original))
+            final_state = {item.Name: item.Value for item in target.getState()}
+            evidence['selectionUnchanged'] = final_state['CurrPagePos'] == target_state['CurrPagePos']
+        except Exception as exc:
+            cleanup_errors.append('Focus restoration: ' + type(exc).__name__)
+        evidence['cleanupErrors'] = cleanup_errors
+        diagnostic.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding='utf-8')
+        assert not cleanup_errors, 'Native focus observer cleanup failed: ' + str(cleanup_errors)
+        assert evidence.get('focusRestored'), 'Original native focus was not restored'
+        assert evidence.get('selectionUnchanged'), 'Read-only notebookbar observation changed the selected tab'
+        if binding is not None:
+            binding.update(focusRestored=True, selectionUnchanged=True)
+
+
 def collect_live(request):
     import uno
     child, pid = request['childHwnd'], request['officePid']
@@ -237,8 +371,9 @@ def collect_live(request):
         # XAccessible. Its native border parent also owns the notebookbar sibling.
         peer_accessible = peer.getProperty('XAccessible')
         peer_context = peer_accessible.getAccessibleContext()
-        border = peer_context.getAccessibleParent()
-        assert border is not None and peer_context.getAccessibleParent() == border, 'Owned editor has no stable native accessible border parent'
+        peer_parent_absent = peer_context.getAccessibleParent() is None
+        accessible, actual_path, actual_parent, notebookbar_binding = _native_notebookbar(
+            context, frame, peer, Path(request['snapshot']).with_name(Path(request['snapshot']).stem + '-focus-diagnostic.json'))
         visited, tab_containers = [0], []
         skipped = {int(uno.getConstantByName(ROLE_NAMESPACE + '.' + role)) for role in
                    ('DOCUMENT', 'DOCUMENT_TEXT', 'DOCUMENT_SPREADSHEET', 'DOCUMENT_PRESENTATION',
@@ -255,6 +390,8 @@ def collect_live(request):
             count = int(current.getAccessibleChildCount())
             assert 0 <= count <= 512, 'Native chrome container has an excessive child count'
             if role == PAGE_TAB_LIST:
+                visited[0] += count
+                assert visited[0] <= 3000, 'Native tab context count exceeded its finite bound'
                 assert parent is not None and current.getAccessibleParent() == parent, 'Native tab list belongs to another live parent'
                 assert int(current.getAccessibleIndexInParent()) == path[-1], 'Native tab-list index differs from its actual parent path'
                 tabs, held = [], []
@@ -282,7 +419,7 @@ def collect_live(request):
             for index in range(count):
                 visit(current.getAccessibleChild(index), path+[index], accessible, ancestors+(accessible,))
 
-        visit(border, [])
+        visit(accessible, actual_path, actual_parent)
         assert int(peer.getWindowHandle((), 1)) == child and controller.getFrame() == frame, 'Native frame changed during accessibility capture'
         assert not retained.exited(0) and api.user.IsWindow(child) and api.pid(child) == pid, 'Owned editor changed during accessibility capture'
         rectangle = _physical_window_rectangle(api, child)
@@ -291,7 +428,8 @@ def collect_live(request):
                         childHwnd=child, containerHwnd=child, module=request['module'], loadedModuleService=service,
                         officeCreationTime=request['creationTime'], pipeNameSha256=hashlib.sha256(request['pipe'].encode('ascii')).hexdigest(),
                         rootRectangle=rectangle, boundsDpiContext='per-monitor-v2',
-                        sameLiveFrameVerified=True, peerToBorderLiveParentVerified=True,
+                        sameLiveFrameVerified=True, ownedPeerAccessibleParentAbsent=peer_parent_absent,
+                        nativeNotebookbarBinding=notebookbar_binding,
                         nativeAccessibleContextCount=visited[0], truncated=False, tabContainers=tab_containers,
                         osScreenReaderExposureCertified=False,
                         witness=dict(retainedProcessHandle=True, imageVerified=True, creationTimeVerified=True,

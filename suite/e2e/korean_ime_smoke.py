@@ -68,6 +68,20 @@ def marker(module):
     return 'ime-opengeul-' + module + ':한글'
 
 
+def activate_after_ascii_prefix(observer, module, record, send_ascii):
+    # The marker scaffold belongs to setup, before switching input language or
+    # IME conversion mode. Only the Hangul below is typed through Korean IME.
+    record['stage'] = 'type-ascii-prefix-before-ime'
+    observer.require_target()
+    layout = int(observer.api.user.GetKeyboardLayout(observer.tid) or 0)
+    assert layout & 0xffff == 0x0409, 'ASCII setup requires the verified original English input layout'
+    prefix = ' ' + marker(module).split('한글')[0]
+    send_ascii(prefix)
+    record.update(asciiPrefix=prefix, prefixInputLayout=layout,
+                  stage='activate-microsoft-korean-profile')
+    return observer.command(1)
+
+
 def validate_restoration(receipt):
     assert isinstance(receipt, dict) and receipt.get('command') == 4 and receipt.get('status') == 0, 'Native restoration command did not succeed'
     assert all(receipt.get(key) == 0 for key in ('profileManagerHresult', 'previousProfileHresult', 'activateProfileHresult', 'activeProfileHresult', 'activateLayoutError')), 'Native restoration API failed or its result is missing'
@@ -104,12 +118,14 @@ def validate_ime_evidence(record):
     assert all(any(value == expected for value in pending) for expected in ('ㅎ', '하', '한', 'ㄱ', '그', '글', '그', '글')), 'Live Dubeolsik/Backspace composition transitions are missing'
     assert ''.join(results) == '한글', 'The IME did not commit the exact Korean result'
     expected = marker(record['module'])
+    assert record.get('asciiPrefix') == ' ' + expected.split('한글')[0] and record.get('prefixInputLayout', 0) & 0xffff == 0x0409, 'ASCII setup was not captured before Korean activation on the original English layout'
     assert expected in record.get('savedText', ''), 'Saved XML has no distinct newly typed Korean marker'
     observed = record.get('reopened', {})
     verify_content(record['module'], observed)
     assert expected in observed.get('text', ''), 'Actual UNO reopen lost the Korean marker'
     assert record.get('layoutRestored') is True, 'Owned input thread state was not restored'
     validate_restoration(record.get('restoration'))
+    assert record['prefixInputLayout'] == record['restoration']['previousLayout'], 'ASCII setup and original input-state capture used different layouts'
     return {'imeVerified': True, 'backspaceCompositionVerified': True,
             'savedKoreanVerified': True, 'reopenedKoreanVerified': True}
 
@@ -349,6 +365,7 @@ class CompositionObserver:
         api.user.GetKeyboardLayout.argtypes = [W.DWORD]
         api.user.GetKeyboardLayout.restype = W.HANDLE
         self.hooks, self.commands, self.restored = [], [], False
+        self.activation_attempted = False
         try:
             for kind, name in ((4, 'HookCall'), (3, 'HookGet')):
                 address = ctypes.cast(getattr(self.dll, name), ctypes.c_void_p)
@@ -368,6 +385,8 @@ class CompositionObserver:
 
     def command(self, command):
         self.require_target()
+        if command == 1:
+            self.activation_attempted = True
         self.mapping[NativeState.command.offset:NativeState.command.offset + 4] = command.to_bytes(4, 'little')
         result = ctypes.c_size_t()
         if not self.api.user.SendMessageTimeoutW(self.focus, 0x8351, command, 0, 2, 5000, ctypes.byref(result)):
@@ -504,16 +523,14 @@ def case(suite, fixtures, output, readiness, module, extension):
         record['stage'] = 'install-owned-thread-observer'
         observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'])
         record.update(editorTid=observer.tid, keyboardFocusHwnd=focus)
-        record['stage'] = 'activate-microsoft-korean-profile'
-        active = observer.command(1)
+        active = activate_after_ascii_prefix(observer, module, record,
+            lambda prefix: send_keys(prefix, with_spaces=True, pause=0.04, vk_packet=False))
         wait_for(lambda: int(api.user.GetKeyboardLayout(observer.tid) or 0) & 0xffff == 0x0412, 10)
         profile = readiness['profile']
         assert active['activeLanguage'] == 0x0412 and active['activeClsid'].lower() == profile['providerClsid'].lower() and active['activeProfile'].lower() == profile['profileGuid'].lower(), 'Focused editor TSF profile differs from the attested Microsoft IME'
         record['activeLayout'] = int(api.user.GetKeyboardLayout(observer.tid) or 0)
         record['activeProfile'] = active
-        observer.command(2)  # ASCII prefix in native IME's alphanumeric mode.
-        observer.require_target()
-        send_keys(' ' + marker(module).split('한글')[0], with_spaces=True, pause=0.04, vk_packet=False)
+        observer.command(2)  # Exercise the owned IME's alphanumeric-mode switch.
         observer.command(3)
         record['stage'] = 'physical-dubeolsik-composition'
         for token, expected in zip(EXPECTED_KEYS[:-1], ('ㅎ', '하', '한', 'ㄱ', '그', '글', '그', '글')):
@@ -563,7 +580,7 @@ def case(suite, fixtures, output, readiness, module, extension):
         if observer is not None:
             try:
                 record['events'] = observer.events()
-                if api.user.IsWindow(observer.focus):
+                if observer.activation_attempted and api.user.IsWindow(observer.focus):
                     record['restoration'] = observer.command(4)
                     record['layoutRestored'] = observer.restored
             except Exception as exc:

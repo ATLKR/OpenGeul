@@ -37,7 +37,7 @@ CASE_REQUIREMENTS = {
     'failed-saveas-retains-editor': ('actualSaveAsFailureVerified', 'originalShaPreservedOnFailure', 'subsequentEditSavePersisted', 'packagedUnoVerified', 'cleanClose'),
     'home-two-documents-cancel': ('homeCancelPreservedRemainder', 'remainingEditorSavePersisted', 'packagedUnoVerified', 'cleanClose'),
     'resize-minimize-restore': ('childBoundsFollowedHost', 'minimizeRestoreVerified', 'restoredEditorSavePersisted', 'packagedUnoVerified', 'cleanClose'),
-    'hwp-tile-hwpx-route': ('hwpTileBundledProcessVerified', 'hwpxRouteBundledProcessVerified', 'webview2Verified', 'generatedHwpxUnchanged', 'cleanClose'),
+    'hwp-tile-hwpx-route': ('hwpTileBundledProcessVerified', 'hwpxRouteBundledProcessVerified', 'webview2Verified', 'postLoadEditorVerified', 'toolbarEnabled', 'generatedHwpxUnchanged', 'cleanClose'),
 }
 WRITER_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 HWPX_MARKER = 'Suite-HWPX-route-한글 & 123'
@@ -144,6 +144,53 @@ def accessibility_names(window):
     # though its name is available. Keep that real name in the owned census.
     info = window.element_info
     return [info.name] + [item.name for item in info.descendants()]
+
+
+def hwp_accessibility_snapshot(window):
+    """Read public metadata below the already-bound native HWP root, without wrappers."""
+    from comtypes import COMError
+    infos = [window.element_info] + window.element_info.descendants()
+    assert len(infos) <= 4096, 'Owned HWP accessibility census exceeds its bounded fixture scope'
+    rows = []
+    for info in infos:
+        row = {'name': '', 'controlType': None, 'automationId': '', 'processId': None, 'runtimeId': [],
+               'enabled': False, 'visible': False, 'bounds': [0, 0, 0, 0]}
+        try:
+            name = info.name or ''
+            assert isinstance(name, str) and len(name) <= 4096, 'Owned HWP accessibility name exceeds its bounded fixture scope'
+            row.update(name=name, controlType=info.control_type, automationId=info.automation_id or '',
+                       processId=info.process_id, runtimeId=list(info.runtime_id or ()))
+            rectangle = info.rectangle
+            row.update(enabled=bool(info.enabled), visible=bool(info.visible),
+                       bounds=[int(rectangle.left), int(rectangle.top), int(rectangle.right), int(rectangle.bottom)])
+        except COMError as exc:
+            # A provider may invalidate a node during its normal startup. Keep
+            # the failed read in raw evidence; it cannot satisfy readiness.
+            row.update(enabled=False, visible=False, metadataError={'hresult': exc.hresult, 'message': str(exc)})
+        rows.append(row)
+    return rows
+
+
+def hwp_postload_observation(rows):
+    """Pinned HWP releases its inert style bar only after canvas.loadDocument()."""
+    def one(kind, match, *, visible):
+        candidates = [row for row in rows if row['controlType'] == kind and match(row)
+                      and type(row['processId']) is int and row['processId'] > 0 and row['runtimeId']
+                      and row['enabled'] is True and (not visible or (row['visible'] is True
+                          and row['bounds'][2] > row['bounds'][0] and row['bounds'][3] > row['bounds'][1]))]
+        assert len(candidates) <= 1, 'Owned HWP post-load control identity is ambiguous'
+        return candidates[0] if candidates else None
+    # RHWP deliberately places this IME textarea offscreen (left:-9999px,
+    # opacity:0). Requiring its visual bounds would reject the real editor.
+    editor = one('Edit', lambda row: row['name'] == '문서 편집 입력', visible=False)
+    size = one('Edit', lambda row: row['automationId'] == 'font-size' or row['name'] == '글자 크기 (pt)', visible=True)
+    # The pinned custom-select component exposes actual Button triggers using
+    # the selected text, rather than visible native ComboBox controls.
+    language = one('Button', lambda row: row['name'] == '대표', visible=True)
+    style = one('Button', lambda row: row['name'] == '바탕글', visible=True)
+    if any(row is None for row in (editor, size, language, style)): return None
+    return {'postLoadEditorVerified': True, 'toolbarEnabled': True, 'editorInput': editor,
+            'fontSize': size, 'fontLanguage': language, 'style': style}
 
 
 def require_child_bounds(host, child):
@@ -796,6 +843,8 @@ def hwp_route(case):
             shell_bound.close()
             raise
         try:
+            trace_seen = set()
+            trace_name = case.name + '-hwpx-route-readiness.jsonl'
             def ready():
                 assert bound.live(), 'Bound bundled HWP process exited before native readiness'
                 roots = [hwnd for hwnd in case.api.windows(pid) if case.api.class_name(hwnd) in ('Tauri Window', 'Chrome_WidgetWin_1')]
@@ -806,10 +855,25 @@ def hwp_route(case):
                 children = tree.descendants()
                 webviews = [child for child in children if child.class_name() in ('Chrome_WidgetWin_0', 'Chrome_WidgetWin_1', 'Chrome_RenderWidgetHostHWND')]
                 if not webviews: return None
-                labels = accessibility_names(Desktop(backend='uia').window(handle=hwnd).wrapper_object())
+                accessible = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
+                rows = hwp_accessibility_snapshot(accessible) if path else None
+                labels = [row['name'] for row in rows] if path else accessibility_names(accessible)
                 case.record['hwpReadiness'] = {'hwnd': int(hwnd), 'pid': pid, 'webviewHwnds': [int(child.handle) for child in webviews],
                                              'labelCount': len(labels), 'filenameObserved': path is None or any(path.name in text for text in [case.api.title(hwnd)] + labels)}
+                if path:
+                    serialized = json.dumps(rows, ensure_ascii=False, sort_keys=True, allow_nan=False)
+                    signature = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+                    if signature not in trace_seen:
+                        trace_seen.add(signature)
+                        with (case.output / trace_name).open('a', encoding='utf-8') as trace:
+                            trace.write(json.dumps({'observation': len(trace_seen), 'hwnd': int(hwnd), 'pid': pid,
+                                'rowsSha256': signature, 'rows': rows}, ensure_ascii=False, allow_nan=False) + '\n')
+                    case.record['hwpReadinessEvidence'] = trace_name
                 if path and not any(path.name in text for text in [case.api.title(hwnd)] + labels): return None
+                if path:
+                    postload = hwp_postload_observation(rows)
+                    if postload is None: return None
+                    case.record.update(postLoadEditorVerified=True, toolbarEnabled=True, hwpEditorControls=postload)
                 return hwnd, [int(child.handle) for child in webviews], labels
             hwnd, webviews, labels = native.wait_for(ready, 75)
             case.screenshot(hwnd, 'hwpx-route' if path else 'hwp-tile')

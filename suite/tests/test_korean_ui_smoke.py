@@ -24,7 +24,10 @@ def snapshot(controls):
     return dict(kind='owned-native-vcl-accessibility', roleNamespace='com.sun.star.accessibility.AccessibleRole',
                 roleConstants={'PAGE_TAB':38, 'PAGE_TAB_LIST':39}, officePid=200, childHwnd=123,
                 module='writer', loadedModuleService='com.sun.star.text.TextDocument',
-                containerHwnd=123, sameLiveFrameVerified=True, peerToBorderLiveParentVerified=True,
+                containerHwnd=123, sameLiveFrameVerified=True, ownedPeerAccessibleParentAbsent=True,
+                nativeNotebookbarBinding=dict(ownedPeerWidgetVerified=True,targetWidgetType='TabControlUIObject',
+                                             targetWidgetId='ContextContainer',nextFocusMatchesTargetWidget=True,
+                                             focusRestored=True,selectionUnchanged=True),
                 rootRectangle=[0, 0, 1024, 768], boundsDpiContext='per-monitor-v2', truncated=False,
                 witness=dict(retainedProcessHandle=True,imageVerified=True,creationTimeVerified=True,
                              hwndVerifiedBefore=True,hwndVerifiedAfter=True,boundsDpiContextRestored=True),
@@ -116,12 +119,21 @@ class KoreanUiEvidenceTests(unittest.TestCase):
     def test_wrong_frame_module_or_role_namespace_cannot_supply_korean_text(self):
         baseline = snapshot([tab('홈', 1), tab('삽입', 2)])
         for change in ({'loadedModuleService': 'com.sun.star.sheet.SpreadsheetDocument'},
-                       {'sameLiveFrameVerified': False}, {'peerToBorderLiveParentVerified': False},
+                       {'sameLiveFrameVerified': False},
                        {'roleNamespace': 'Microsoft.ActiveAccessibility'},
                        {'roleConstants': {'PAGE_TAB':37, 'PAGE_TAB_LIST':60}}):
             data = deepcopy(baseline)
             data.update(change)
             with self.subTest(change=change), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(data, 200, 123)
+
+    def test_foreign_widget_focus_or_unrestored_selection_cannot_bind_native_tabs(self):
+        for key, value in (('ownedPeerWidgetVerified', False), ('targetWidgetType', 'ButtonUIObject'),
+                           ('targetWidgetId', 'foreign frame'), ('nextFocusMatchesTargetWidget', False),
+                           ('focusRestored', False), ('selectionUnchanged', False)):
+            data = snapshot([tab('홈', 1), tab('삽입', 2)])
+            data['nativeNotebookbarBinding'][key] = value
+            with self.subTest(key=key), self.assertRaises(AssertionError):
                 smoke.require_korean_tabs(data, 200, 123)
 
     def test_required_tab_outside_owned_native_window_cannot_qualify(self):

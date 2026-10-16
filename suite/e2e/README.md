@@ -126,6 +126,9 @@ The E2E-only reader verifies the retained PID's image, creation time and editor
 HWND before and after collection; no product worker API is added. The pipe is
 obtained from a bounded native query of only that retained process, passed to the
 packaged Python through stdin, and recorded only as a SHA256 fingerprint.
+The harness establishes the owned Suite foreground and physically focuses its
+verified editor before observing native focus events. It sends no document text
+or save command, and both fixture copies and their originals must remain intact.
 
 The authoritative `*-accessibility.json` records UNO `AccessibleRole.PAGE_TAB`
 (38) children of one real `PAGE_TAB_LIST` (39), live parent/object equality,
@@ -142,6 +145,13 @@ hierarchy: [the notebookbar is a border-window child](https://github.com/LibreOf
 while [WorkWindow grafts only its menubar into accessible children](https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/vcl/source/window/accessibility.cxx#L196).
 The E2E reader uses the existing
 [XVclWindowPeer XAccessible test property](https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/toolkit/source/awt/vclxwindow.cxx#L1938)
-to reach the real border parent and its actual notebookbar objects. These are
-native UNO roles, not MSAA role numbers; passing this UI gate does not certify
-that the upstream OS accessibility bridge exposes the notebookbar.
+on the actual notebookbar peer. For undecorated system-child windows the owned
+WorkWindow's accessible parent may be null. The reader obtains the real
+`TabControlUIObject` with `XUITest.getWindow(verifiedPeer).getChild`, then uses a
+passive public focus listener to retain `FocusEvent.NextFocus`. `XUIObject.equals`
+verifies that this next peer wraps the same underlying native VCL tab control.
+The original focus is restored and verified, and the selected tab is required
+to remain unchanged; no document content is edited. That peer's `XAccessible` supplies the actual native roles,
+parents, child indices and rendered tab names. These are native UNO roles, not
+MSAA role numbers; passing this UI gate does not certify that the upstream OS
+accessibility bridge exposes the notebookbar.

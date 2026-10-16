@@ -1,0 +1,206 @@
+name: Suite controlled actual Korean IME diagnosis
+'on':
+  push:
+    branches: [work/suite-ime-diagnostic]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: suite-ime-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+  OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/ime-diagnostic-worker
+jobs:
+  windows-suite:
+    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Validate exact diagnostic harness source
+      shell: pwsh
+      run: |
+        $actual = (git rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $actual -cne $env:GITHUB_SHA -or $env:GITHUB_REF -cne 'refs/heads/work/suite-ime-diagnostic') { throw 'Exact isolated diagnostic source is required.' }
+        python -m unittest discover -s suite/tests -v
+        if ($LASTEXITCODE -ne 0) { throw 'Suite units failed.' }
+        dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+        if ($LASTEXITCODE -ne 0) { throw 'Suite shell units failed.' }
+    - name: Install actual Microsoft Korean IME from matching official media
+      id: readiness
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Actual UI prerequisites failed.' }
+        ./suite/scripts/ensure-korean-ime.ps1 -Output .work/ime-diagnostic-readiness
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME readiness failed.' }
+    - name: Preserve original readiness evidence immediately
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ime-diagnostic-readiness-${{ github.run_id }}
+        include-hidden-files: true
+        path: |
+          .work/ime-diagnostic-readiness/
+          !.work/ime-diagnostic-readiness/fod-source/**/*.cab
+        retention-days: 1
+        if-no-files-found: warn
+    - name: Recover exact verified baseline runtime without rebuilding it
+      id: recover
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      shell: python
+      run: |
+        # Focused recovery protocol from the existing named-startup diagnosis.
+        import hashlib, json, os, pathlib, shutil, time, urllib.error, urllib.parse, urllib.request, zipfile
+        repository = 'ATLKR/OpenGeul'
+        expected_head = '579511489f9def03dd8d894ef249fd8ed9c8fa10'
+        expected_bytes = 592780912
+        expected_outer = 'e3d1d7bc9cae3ff18038d9d93be05b9c7af44541999169e93761b8d0c725de0d'
+        expected_inner = '87571bfa914950876837bc79e431168056a65fa357fadcafb0030463b9b25995'
+        api = 'https://api.github.com/repos/' + repository
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args): return None
+        authenticated = urllib.request.build_opener(NoRedirect())
+        headers = {'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'], 'Accept': 'application/vnd.github+json', 'User-Agent': 'OpenGeul-IME-diagnosis'}
+        def metadata(path):
+            with authenticated.open(urllib.request.Request(api + path, headers=headers), timeout=60) as response:
+                return json.load(response)
+        run = metadata('/actions/runs/38909448104')
+        assert run['conclusion'] == 'success' and run['head_sha'] == expected_head
+        artifact = metadata('/actions/artifacts/12049897911')
+        assert artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == expected_head and not artifact['expired']
+        assert artifact['size_in_bytes'] == expected_bytes and artifact['digest'] == 'sha256:' + expected_outer
+        request = urllib.request.Request(api + '/actions/artifacts/12049897911/zip', headers=headers)
+        try:
+            authenticated.open(request, timeout=60)
+            raise RuntimeError('Expected archive redirect')
+        except urllib.error.HTTPError as error:
+            assert error.code == 302
+            location = error.headers['Location']
+            error.close()
+        parsed = urllib.parse.urlsplit(location)
+        assert parsed.scheme == 'https' and parsed.hostname.endswith(('.blob.core.windows.net', '.githubusercontent.com'))
+        root = pathlib.Path('.work/runtime-input'); root.mkdir(parents=True)
+        outer = root / 'original-artifact.zip'
+        deadline = time.monotonic() + 240
+        total = 0
+        try:
+            with urllib.request.urlopen(location, timeout=120) as response, outer.open('xb') as target:
+                while block := response.read(1024 * 1024):
+                    total += len(block)
+                    assert total <= expected_bytes and time.monotonic() < deadline, 'Runtime input exceeded its exact size or deadline'
+                    target.write(block)
+        except urllib.error.HTTPError as error:
+            raise RuntimeError('Anonymous storage HTTP ' + str(error.code)) from None
+        except Exception as error:
+            raise RuntimeError('Anonymous storage download failed: ' + type(error).__name__) from None
+        assert total == expected_bytes
+        def digest(path):
+            with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
+        assert digest(outer) == expected_outer
+        with zipfile.ZipFile(outer) as archive:
+            assert archive.namelist() == ['OpenGeul-Office-0.1.0-dev-windows-x64.zip']
+            archive.extract(archive.namelist()[0], root)
+        inner = root / 'OpenGeul-Office-0.1.0-dev-windows-x64.zip'
+        assert digest(inner) == expected_inner
+        with zipfile.ZipFile(inner) as archive:
+            for entry in archive.infolist():
+                name = entry.filename.replace('\\', '/')
+                path = pathlib.PurePosixPath(name)
+                assert not path.is_absolute() and '..' not in path.parts and ':' not in name
+                assert (entry.external_attr >> 16) & 0o170000 != 0o120000, 'Linked runtime ZIP entry is forbidden'
+            assert archive.testzip() is None
+            archive.extractall('.work/runtime')
+        provenance = json.loads(pathlib.Path('.work/runtime/suite-provenance.json').read_text(encoding='utf-8'))
+        assert provenance['sourceCommit'] == expected_head
+        proof = pathlib.Path('.work/ime-proof'); proof.mkdir(parents=True)
+        (proof/'runtime-input.json').write_text(json.dumps({'diagnosticOnly': True, 'deliverable': False,
+            'runtimeSource': expected_head, 'artifactId': 12049897911, 'runId': run['id'],
+            'outerSha256': expected_outer, 'innerSha256': expected_inner, 'bytes': total}, indent=2), encoding='utf-8')
+        # Retain pinned receipts, not duplicate 593 MB ZIP inputs, on this VM.
+        outer.unlink(); inner.unlink()
+    - name: Verify full original inventory before exact three-file worker overlay
+      id: overlay
+      if: '!cancelled() && steps.recover.outcome == ''success'''
+      shell: python
+      run: |
+        import hashlib, json, os, shutil, subprocess
+        from pathlib import Path
+        root, proof = Path('.work/runtime'), Path('.work/ime-proof')
+        verified = subprocess.run(['python', 'suite/scripts/verify-suite.py', str(root)], capture_output=True, text=True, timeout=120)
+        (proof/'inventory-before-overlay.log').write_text(verified.stdout + verified.stderr, encoding='utf-8')
+        assert verified.returncode == 0, 'The entire original runtime inventory must verify before any overlay'
+        for name in ('suite-inventory.json', 'suite-provenance.json'):
+            shutil.copyfile(root/name, proof/('original-' + name))
+        expected = {
+            'native.py': '0e7e0f453fce023d96d89ff0c0b7204c34fd54f718e336e3c2ab358ae4a80dc8',
+            'native_windows.py': 'cab735cda16aea6c2832c6339a77f7b9611b08808bdbc30b566f7d5694e4805d',
+            'native_diagnostics.py': '37e8fd09108e88e04147b56f3724effb937575cfedaf9d2097f8f94f679b00f3'}
+        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        changes = []
+        for name, pinned in expected.items():
+            source, target = Path('suite/worker')/name, root/'worker'/name
+            assert digest(source) == pinned, 'Worker overlay differs from reviewed root source'
+            before = digest(target) if target.exists() else None
+            shutil.copyfile(source, target)
+            assert digest(target) == pinned
+            changes.append({'path': 'worker/' + name, 'beforeSha256': before, 'afterSha256': pinned})
+        harness = Path('suite/e2e/korean_ime_smoke.py')
+        assert digest(harness) == '577c5609cb2b909a97144c2a459667299e7f796c895c54002b4b9aac6ff8de7b'
+        (proof/'diagnostic-overlay.json').write_text(json.dumps({'diagnosticOnly': True, 'deliverable': False,
+            'runtimeSource': '579511489f9def03dd8d894ef249fd8ed9c8fa10',
+            'reviewedCodeSource': '9f02c9b6b5cd89f7fdb3deb83a4855075379d5d3', 'harnessSource': os.environ['GITHUB_SHA'],
+            'harnessSha256': digest(harness), 'originalFullInventoryVerified': True,
+            'originalInventorySha256': digest(proof/'original-suite-inventory.json'), 'changes': changes,
+            'koreanUiVerified': False, 'sourceQualified': False}, indent=2), encoding='utf-8')
+    - name: Generate six actual baseline engine fixtures
+      id: fixtures
+      if: '!cancelled() && steps.overlay.outcome == ''success'''
+      shell: pwsh
+      run: |
+        & ./.work/runtime/Office/program/python.exe suite/e2e/engine_smoke.py --suite .work/runtime --output .work/ime-diagnostic-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh actual engine fixtures failed.' }
+    - name: Observe strict native Korean composition restoration save and UNO reopen
+      id: ime
+      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite .work/runtime --fixtures .work/ime-diagnostic-engine/fixtures --readiness .work/ime-diagnostic-readiness/readiness.json --output .work/ime-diagnostic-native
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and persisted content failed.' }
+    - name: Preserve original native receipts and owned crash archives immediately
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ime-diagnostic-native-${{ github.run_id }}
+        include-hidden-files: true
+        path: |
+          .work/ime-proof/
+          .work/ime-diagnostic-native/
+          .work/ime-diagnostic-worker/
+        retention-days: 1
+        if-no-files-found: warn
+    - name: Preserve all raw diagnostic proof
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ime-diagnostic-all-${{ github.run_id }}
+        include-hidden-files: true
+        path: |
+          .work/ime-proof/
+          .work/ime-diagnostic-readiness/
+          !.work/ime-diagnostic-readiness/fod-source/**/*.cab
+          .work/ime-diagnostic-engine/
+          .work/ime-diagnostic-native/
+          .work/ime-diagnostic-worker/
+        retention-days: 1
+        if-no-files-found: warn
