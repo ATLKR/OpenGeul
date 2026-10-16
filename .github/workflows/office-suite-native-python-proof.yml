@@ -1,0 +1,486 @@
+name: OpenGeul native Python and Writer style diagnostic
+'on':
+  push:
+    branches: [work/suite-native-python-proof]
+    paths: [.github/workflows/office-suite-native-python-proof.yml]
+permissions:
+  contents: read
+concurrency:
+  group: native-python-proof-${{ github.run_id }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+  CANDIDATE_SOURCE: d2c0ce292b3880031d7bacd96c87fc79a3ec0c67
+  NATIVE_SHA256: bf518ea17d202f0464ca4d8c09293e6c57a90d919ce55aec61f42c9f70a06761
+  STYLE_SHA256: 8df9debdf31a84c9fb4205af0f51ecd221dace06d886d1029d35c839a5b368d3
+  WINDOWS_SHA256: fdd7521e32d77cd3e5a9e74b163d97c06f2d2ac5b94de0257718f6e4da68e7d3
+  LIFECYCLE_SHA256: a22b2cedc14069a324e8ff2f4f5408a624ef97b920bd692bda865f1b10301a02
+  DEFAULT_CLOSE_SHA256: 1a8dc9325557edab81743cb3384c01cd863e6e9f7b86f509f73c4bc4c764589b
+  PROOF_ROOT: .work/native-python-proof
+  SUITE_PACKAGE: dist/OpenGeul-Office-0.1.1-dev-windows-x64
+jobs:
+  windows-style-proof:
+    if: github.event.repository.private == false && github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/suite-native-python-proof' && github.event_name == 'push'
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 2
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Bind clean committed source and exact style helper
+      id: source
+      shell: python
+      run: |
+        from pathlib import Path
+        import hashlib,json,os,subprocess
+        def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+        def sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        head=git('rev-parse','HEAD')
+        assert head==os.environ['GITHUB_SHA'] and not git('status','--porcelain','--untracked-files=normal')
+        assert git('rev-parse','HEAD^')==os.environ['CANDIDATE_SOURCE']
+        assert git('rev-parse','HEAD:suite')==git('rev-parse',os.environ['CANDIDATE_SOURCE']+':suite')
+        assert os.environ['GITHUB_JOB']=='windows-style-proof' and os.environ['GITHUB_RUN_ATTEMPT']=='1'
+        for path,key in [('suite/worker/native.py','NATIVE_SHA256'),('suite/e2e/writer_style_smoke.py','STYLE_SHA256'),('suite/e2e/lifecycle_smoke.py','LIFECYCLE_SHA256'),('suite/e2e/windows_smoke.py','WINDOWS_SHA256')]:
+            assert sha(path)==os.environ[key], 'Reviewed source bytes differ: '+path
+        root=Path(os.environ['PROOF_ROOT'])/'source'; root.mkdir(parents=True,exist_ok=False)
+        files={p:sha(p) for p in subprocess.check_output(['git','ls-files','-z','suite']).decode().split('\0') if p and Path(p).is_file()}
+        record=dict(schemaVersion=1,diagnosticOnly=True,deliverable=False,sourceCommit=head,sourceTree=git('rev-parse','HEAD^{tree}'),candidateOrigin=os.environ['CANDIDATE_SOURCE'],nativeSha256=os.environ['NATIVE_SHA256'],styleSha256=os.environ['STYLE_SHA256'],windowsSha256=os.environ['WINDOWS_SHA256'],lifecycleSha256=os.environ['LIFECYCLE_SHA256'],defaultCloseControlSha256=os.environ['DEFAULT_CLOSE_SHA256'],repository=os.environ['GITHUB_REPOSITORY'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],job=os.environ['GITHUB_JOB'],suiteFiles=files)
+        (root/'source-binding.json').write_text(json.dumps(record,indent=2)+'\n',encoding='utf-8')
+        subprocess.run(['git','archive','--format=zip','--output',str(root/'committed-source.zip'),head,'suite','.github/workflows/office-suite-native-python-proof.yml'],check=True)
+        code = r'''"""Two predetermined original dirty-close controls with diagnostics absent.
+
+        This diagnostic is separate from the seven-case lifecycle qualification. Exit 1
+        proves owned-job teardown only; it is never labeled a natural engine exit.
+        """
+        import argparse
+        import hashlib
+        import json
+        import os
+        from pathlib import Path, PureWindowsPath
+        import subprocess
+        import sys
+
+        KEY = 'OPENGEUL_SUITE_DIAGNOSTICS'
+        NAMES = ('dirty-writer-cancel-save', 'dirty-writer-discard')
+
+
+        def require_diagnostics_off(environment):
+            assert KEY not in environment, 'Diagnostics must be absent; even the string 0 enables diagnostics'
+
+
+        def require_identity(identity, shell_pid, suite):
+            assert identity['shellPid'] == shell_pid and type(shell_pid) is int and shell_pid > 0
+            assert type(identity['officePid']) is int and identity['officePid'] > 0 and identity['officePid'] != shell_pid
+            assert identity['childPid'] == identity['officePid'], 'Retained editor PID changed'
+            assert identity['documentPid'] == identity['parentPid'] == shell_pid, 'Retained document or host panel belongs to another shell'
+            assert type(identity['expectedCreationTime']) is int and identity['expectedCreationTime'] > 0
+            assert identity['retainedCreationTime'] == identity['expectedCreationTime'], 'Retained engine generation changed'
+            assert identity['retainedProcessHandle'] is True and identity['imageVerified'] is True and identity['nativeParentVerified'] is True
+            assert PureWindowsPath(identity['expectedImage']) == PureWindowsPath(suite) / 'Office/program/soffice.bin'
+
+
+        def require_shutdown(observation):
+            assert observation['beforeCaseCleanup'] is True and observation['retainedProcessHandle'] is True
+            assert type(observation['shellExitCode']) is int and observation['shellExitCode'] == 0, 'Suite did not exit normally before Case cleanup'
+            assert observation['engineSignaled'] is True, 'Retained engine HANDLE was not signaled within ten seconds'
+            assert type(observation['engineExitCode']) is int and observation['engineExitCode'] in (0, 1), 'Retained engine has an active or native exception status'
+            return 'owned-job-teardown' if observation['engineExitCode'] == 1 else 'engine-exit-zero'
+
+
+        def require_coverage(records, uno, requirements, suite):
+            assert [row.get('case') for row in records] == list(NAMES), 'Exactly the two predetermined original cases must complete once'
+            assert uno.get('kind') == 'packaged-uno-lifecycle-reopen' and uno.get('success') is True
+            assert [row.get('case') for row in uno.get('cases', [])] == list(NAMES), 'Independent UNO must cover exactly both original identities'
+            for row, reopened in zip(records, uno['cases']):
+                assert row.get('success') is True, 'Original dirty-close action failed: ' + row['case']
+                assert all(row.get(flag) is True for flag in requirements[row['case']] if flag != 'packagedUnoVerified'), 'An original lifecycle flag is missing'
+                assert row.get('diagnosticsEnvironmentAbsentBeforeLaunch') is True and row.get('retainedEngineShutdownVerified') is True
+                require_identity(row['retainedEngineIdentity'], row['shellPid'], suite)
+                require_shutdown(row['shutdownBeforeCaseCleanup'])
+                saved = row.get('savedDocuments', [])
+                assert len(saved) == 1 and reopened.get('success') is True and len(reopened.get('documents', [])) == 1, 'Each original case needs exactly one XML save and one UNO reopen'
+                original, observed = saved[0], reopened['documents'][0]
+                assert PureWindowsPath(observed['path']) == PureWindowsPath(original['path']), 'UNO reopened another generated document'
+                assert observed['beforeSha256'] == observed['afterSha256'] == original['sha256'], 'Independent UNO bytes changed'
+                text = observed['observedBodyText'].replace('\r\n', '\n').replace('\r', '\n')
+                assert observed['expectedBodyText'] == original['bodyText'] == text == observed['bodyText'], 'Independent UNO body differs from original XML evidence'
+
+
+        def require_unchanged(before, after, description):
+            assert before == after, description + ' changed during diagnostics-off control'
+
+
+        def snapshot_diagnostics(root):
+            if not root.exists(): return {'sessions': [], 'files': {}}
+            files = {}
+            for path in root.rglob('*'):
+                assert not path.is_symlink() and not getattr(path, 'is_junction', lambda: False)(), 'Linked diagnostics snapshot'
+                if path.is_file(): files[path.relative_to(root).as_posix()] = {'bytes': path.stat().st_size, 'sha256': digest(path)}
+            return {'sessions': sorted(path.name for path in root.iterdir() if path.is_dir()), 'files': files}
+
+
+        def digest(path):
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+        def case_type(lifecycle, startup, accessible):
+            class DefaultCloseCase(lifecycle.Case):
+                retained = None
+
+                def attach(self, **kwargs):
+                    hwnd, parent, child = super().attach(**kwargs)
+                    assert self.retained is None, 'One original control must attach exactly one engine'
+                    pid = self.api.pid(child)
+                    initial = startup.EngineProcessWitness(pid)
+                    try:
+                        _, self.retained = accessible._owned_process(child, pid, initial.creation_time, self.suite / 'Office/program/soffice.bin')
+                        identity = dict(shellPid=self.process.pid, documentPid=self.api.pid(hwnd), parentPid=self.api.pid(parent),
+                            officePid=pid, childPid=self.api.pid(child), childHwnd=child,
+                            parentHwnd=parent, documentHwnd=hwnd, expectedCreationTime=initial.creation_time,
+                            retainedCreationTime=self.retained.creation_time, expectedImage=str(self.suite / 'Office/program/soffice.bin'),
+                            retainedProcessHandle=True, imageVerified=True,
+                            nativeParentVerified=bool(self.api.user.IsChild(hwnd, parent) and self.api.user.IsChild(parent, child)))
+                        self.record['retainedEngineIdentity'] = identity
+                        require_identity(identity, self.process.pid, self.suite)
+                    finally:
+                        initial.close()
+                    return hwnd, parent, child
+
+                def finish(self, *args, **kwargs):
+                    super().finish(*args, **kwargs)
+                    assert self.retained is not None, 'Original close control has no retained engine witness'
+                    observation = dict(beforeCaseCleanup=True, retainedProcessHandle=True, shellExitCode=self.process.poll(), engineSignaled=None, engineExitCode=None)
+                    self.record['shutdownBeforeCaseCleanup'] = observation
+                    observation['engineSignaled'] = self.retained.exited(10)
+                    observation['engineExitCode'] = self.retained.code()
+                    observation['engineExitCodeHex'] = '0x%08X' % observation['engineExitCode']
+                    observation['exitStatusMeaning'] = require_shutdown(observation)
+                    self.record['retainedEngineShutdownVerified'] = True
+            return DefaultCloseCase
+
+
+        def main(argv=None):
+            if not __debug__: raise RuntimeError('Diagnostics-off control requires assertions before any runtime I/O')
+            if os.name != 'nt': raise RuntimeError('Diagnostics-off control requires actual Windows execution')
+            parser = argparse.ArgumentParser(description=__doc__)
+            for name in ('suite', 'fixtures', 'output', 'source-root', 'diagnostics-root'):
+                parser.add_argument('--' + name, type=Path, required=True)
+            args = parser.parse_args(argv)
+            for path in vars(args).values():
+                assert not path.is_symlink() and not getattr(path, 'is_junction', lambda: False)()
+            suite, fixtures, output, source_root, diagnostics_root = (getattr(args, name).resolve() for name in ('suite', 'fixtures', 'output', 'source_root', 'diagnostics_root'))
+            assert not output.exists() and output != suite and suite not in output.parents and output != fixtures and fixtures not in output.parents
+            sys.path.insert(0, str(source_root / 'suite/e2e'))
+            import lifecycle_smoke as lifecycle
+            import native_accessibility as accessible
+            import startup_smoke as startup
+            from engine_smoke import FILES
+            native = lifecycle.native
+            wrapper_sha = hashlib.sha256(Path(__file__).read_text(encoding='utf-8').replace('\r\n', '\n').encode('utf-8')).hexdigest()
+            assert wrapper_sha == os.environ['DEFAULT_CLOSE_SHA256']
+            assert digest(source_root / 'suite/e2e/lifecycle_smoke.py') == os.environ['LIFECYCLE_SHA256']
+            assert json.loads((suite / 'suite-provenance.json').read_text(encoding='utf-8'))['sourceCommit'] == os.environ['GITHUB_SHA']
+            before_present = KEY in os.environ
+            removed = os.environ.pop(KEY, None)
+            require_diagnostics_off(os.environ)
+            baseline = {path.name: digest(path) for path in fixtures.iterdir() if path.is_file()}
+            assert set(baseline) == set(FILES.values()), 'Exactly six original baseline fixtures are required'
+            diagnostic_before = snapshot_diagnostics(diagnostics_root)
+            output.mkdir(parents=True, exist_ok=False)
+            (output / 'fixtures').mkdir()
+            report = dict(schemaVersion=1, kind='diagnostics-off-original-dirty-close-control', diagnosticOnly=True, deliverable=False,
+                success=False, sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
+                wrapperSha256=wrapper_sha, lifecycleSha256=os.environ['LIFECYCLE_SHA256'], inventorySha256=digest(suite / 'suite-inventory.json'),
+                expectedCaseCount=2, expectedCases=list(NAMES), diagnosticsEnvironment=dict(beforePresent=before_present, removedValue=removed, presentAfterRemoval=KEY in os.environ),
+                baselineBefore=baseline, diagnosticsBefore=diagnostic_before, tests=[])
+            ControlledCase = case_type(lifecycle, startup, accessible)
+            def once(name, action):
+                require_diagnostics_off(os.environ)
+                case = ControlledCase(suite, fixtures, output, name)
+                case.record['diagnosticsEnvironmentAbsentBeforeLaunch'] = True
+                try:
+                    return case.run(action)
+                finally:
+                    if case.retained is not None:
+                        try: case.retained.close()
+                        except Exception as exc:
+                            case.record.update(success=False, witnessCloseError=type(exc).__name__ + ': ' + str(exc))
+                        native.write_result(output, name, case.record)
+            planned = [(name, lambda name=name, action=action: once(name, action)) for name, action in zip(NAMES, (lifecycle.dirty_cancel_save, lifecycle.dirty_discard))]
+            records = native.collect_cases(planned, output)
+            report.update(tests=records, completedCaseCount=len(records))
+            result_path = output / 'results.json'
+            result_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            try:
+                require_diagnostics_off(os.environ)
+                with (output / 'packaged-uno.log').open('xb') as log:
+                    reopened = subprocess.run([str(suite / 'Office/program/python.exe'), str(source_root / 'suite/e2e/lifecycle_smoke.py'),
+                        '--suite', str(suite), '--output', str(output), '--verify-saved'], cwd=suite, stdout=log, stderr=subprocess.STDOUT, timeout=180, shell=False)
+                report['packagedUnoExitCode'] = reopened.returncode
+                uno = json.loads((output / 'packaged-uno-result.json').read_text(encoding='utf-8'))
+                assert reopened.returncode == 0, 'Existing packaged lifecycle UNO reopen failed'
+                require_coverage(records, uno, lifecycle.CASE_REQUIREMENTS, suite)
+                for row in records:
+                    saved, = row['savedDocuments']
+                    target = output / 'fixtures' / row['case'] / ('원본 문서 & ' + row['case'] + '.docx')
+                    assert Path(saved['path']).resolve() == target.resolve() and not target.is_symlink()
+                    actual = lifecycle.writer_evidence(target, saved['requiredMarkers'], saved['forbiddenMarkers'])
+                    assert all(actual[key] == saved[key] for key in actual), 'Original XML evidence changed after UNO reopen'
+                    row['packagedUnoVerified'] = True
+                    assert all(row.get(flag) is True for flag in lifecycle.CASE_REQUIREMENTS[row['case']])
+                    native.write_result(output, row['case'], row)
+                report['originalCaseFlagsVerified'] = True
+                report['actualUnoCaseCount'] = len(uno['cases'])
+                report['success'] = True
+            except Exception as exc:
+                report.update(success=False, controlValidationError=type(exc).__name__ + ': ' + str(exc))
+            finally:
+                try:
+                    report['baselineAfter'] = {path.name: digest(path) for path in fixtures.iterdir() if path.is_file()}
+                    report['diagnosticsAfter'] = snapshot_diagnostics(diagnostics_root)
+                    require_unchanged(baseline, report['baselineAfter'], 'Six original baseline fixtures')
+                    require_unchanged(diagnostic_before, report['diagnosticsAfter'], 'Diagnostics sessions and original files')
+                    require_diagnostics_off(os.environ)
+                    report.update(baselineSixUnchanged=True, diagnosticSessionsUnchanged=True, diagnosticsEnvironmentAbsentAfter=True)
+                except Exception as exc:
+                    report.update(success=False, controlIsolationError=type(exc).__name__ + ': ' + str(exc))
+                report['passedCaseCount'] = sum(row.get('success') is True and all(row.get(flag) is True for flag in lifecycle.CASE_REQUIREMENTS.get(row['case'], ())) for row in records)
+                report['failedCases'] = [row['case'] for row in records if row.get('success') is not True or not all(row.get(flag) is True for flag in lifecycle.CASE_REQUIREMENTS.get(row['case'], ()))]
+                report['tests'] = records
+                result_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+            return 0 if report['success'] else 1
+
+
+        if __name__ == '__main__':
+            raise SystemExit(main())
+        '''
+        code=code.replace('\r\n','\n')
+        assert hashlib.sha256(code.encode('utf-8')).hexdigest()==os.environ['DEFAULT_CLOSE_SHA256']
+        (root/'default-close-control.py').write_text(code,encoding='utf-8',newline='\n')
+    - name: Physical style, interpreter identity and lifecycle unit tests
+      id: unit
+      shell: pwsh
+      run: |
+        python -m unittest discover -s suite/tests -p test_writer_style_smoke.py -v
+        if ($LASTEXITCODE -ne 0) { throw 'Focused Writer style and Python identity unit tests failed.' }
+        python -m unittest discover -s suite/tests -p test_lifecycle_smoke.py -v
+        if ($LASTEXITCODE -ne 0) { throw 'Focused lifecycle identity, picker and report unit tests failed.' }
+        python -m unittest discover -s suite/tests -p test_editor_focus_readiness.py -v
+        if ($LASTEXITCODE -ne 0) { throw 'Bounded single-input editor focus readiness tests failed.' }
+        python -m unittest discover -s suite/tests -p test_ascii_editor_input.py -v
+        if ($LASTEXITCODE -ne 0) { throw 'Original physical ASCII input tests failed.' }
+    - name: Fresh pinned package build
+      id: build
+      shell: pwsh
+      run: |
+        ./suite/scripts/build-suite.ps1 -WorkDirectory "$env:PROOF_ROOT/build" -OutputDirectory $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh pinned package build failed.' }
+    - name: Verify complete inventory and packaged source bytes
+      id: package
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      shell: python
+      run: |
+        from pathlib import Path
+        import hashlib,json,os,shutil,subprocess,zipfile
+        package=Path(os.environ['SUITE_PACKAGE']); root=Path(os.environ['PROOF_ROOT'])/'package'; root.mkdir(exist_ok=False)
+        subprocess.run(['python','suite/scripts/verify-suite.py',str(package)],check=True)
+        provenance=json.loads((package/'suite-provenance.json').read_text(encoding='utf-8'))
+        assert provenance['sourceCommit']==os.environ['GITHUB_SHA']
+        def sha(data): return hashlib.sha256(data).hexdigest()
+        records={}
+        with zipfile.ZipFile(package/'Sources/OpenGeul-Office-source.zip') as archive:
+            assert archive.comment.decode('ascii')==os.environ['GITHUB_SHA']
+            for path in sorted(Path('suite/worker').glob('*.py')):
+                value=sha(path.read_bytes()); assert value==sha((package/'worker'/path.name).read_bytes())==sha(archive.read(path.as_posix()))
+                records[path.name]=value
+            style='suite/e2e/writer_style_smoke.py'
+            assert sha(Path(style).read_bytes())==sha(archive.read(style))==os.environ['STYLE_SHA256']
+            lifecycle='suite/e2e/lifecycle_smoke.py'; assert sha(Path(lifecycle).read_bytes())==sha(archive.read(lifecycle))==os.environ['LIFECYCLE_SHA256']
+            windows='suite/e2e/windows_smoke.py'; assert sha(Path(windows).read_bytes())==sha(archive.read(windows))==os.environ['WINDOWS_SHA256']
+            workflow='.github/workflows/office-suite-native-python-proof.yml'; assert sha(Path(workflow).read_bytes())==sha(archive.read(workflow))
+        assert records['native.py']==os.environ['NATIVE_SHA256']
+        for name in ('suite-inventory.json','suite-provenance.json','suite-product.json'):
+            shutil.copyfile(package/name,root/name)
+        (root/'source-byte-binding.json').write_text(json.dumps(dict(schemaVersion=1,diagnosticOnly=True,deliverable=False,sourceCommit=os.environ['GITHUB_SHA'],wholeInventoryVerified=True,workerSha256=records,styleSha256=os.environ['STYLE_SHA256'],windowsSha256=sha(Path(windows).read_bytes()),lifecycleSha256=sha(Path(lifecycle).read_bytes()),defaultCloseControlSha256=os.environ['DEFAULT_CLOSE_SHA256'],workflowSha256=sha(Path(workflow).read_bytes())),indent=2)+'\n',encoding='utf-8')
+    - name: Install pinned native UI test prerequisites
+      id: prerequisites
+      if: '!cancelled() && steps.package.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
+    - name: Fresh original six-module engine baseline
+      id: fixtures
+      if: '!cancelled() && steps.prerequisites.outcome == ''success'''
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output "$env:PROOF_ROOT/engine"
+        if ($LASTEXITCODE -ne 0) { throw 'Six-module engine baseline failed.' }
+    - name: One physical Writer style edit and exact packaged UNO reopen
+      id: writer_style
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/native-python-proof/worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/writer_style_smoke.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/writer-style"
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Writer style and native Python identity proof failed.' }
+    - name: Preserve an independent positive style and native-image proof
+      id: style_proof
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: python
+      run: |
+        from pathlib import Path, PurePosixPath, PureWindowsPath
+        import hashlib,json,os,sys
+        root=Path(os.environ['PROOF_ROOT']); package=Path(os.environ['SUITE_PACKAGE']).resolve()
+        style=json.loads((root/'writer-style/results.json').read_text(encoding='utf-8'))
+        assert style['schemaVersion']==1 and style['kind']=='native-writer-style-regression' and style['success'] is True
+        assert len(style['tests'])==1 and style['tests'][0]['case']=='writer-heading1' and style['tests'][0]['success'] is True
+        case=style['tests'][0]; uno=json.loads((root/'writer-style/packaged-uno-result.json').read_text(encoding='utf-8')); assert uno['success'] is True
+        sys.path.insert(0,str(Path('suite/e2e').resolve())); import writer_style_smoke, windows_smoke
+        readiness=case['editorFocusReadinessRecords']; assert len(readiness)==1 and case['editorFocusReadiness']==readiness[0]
+        windows_smoke.require_editor_focus_readiness(readiness[0],case['windowHwnd'],case['childHwnd'],case['shellPid'],case['officePid'])
+        assert writer_style_smoke.require_packaged_python(package,uno['pythonIdentity']['observed'])==uno['pythonIdentity']
+        matches=[]
+        for manifest in (root/'worker-diagnostics').glob('*/manifest.json'):
+            events=[json.loads(line) for line in (manifest.parent/'events.jsonl').read_text(encoding='utf-8').splitlines()]
+            if any(any(p.get('pid')==case['officePid'] and p.get('creationTime')==case['officeCreationTime'] for p in event.get('processes',[])) for event in events): matches.append((manifest,events))
+        assert len(matches)==1, 'One exact style PID and creation-time archive is required'
+        manifest,events=matches[0]; record=json.loads(manifest.read_text(encoding='utf-8'))
+        assert record['schemaVersion']==1 and record['archiveComplete'] is True
+        assert [event['phase'] for event in events]==['before-ui-bootstrap','after-ui-bootstrap','before-load','before-owned-shutdown','after-owned-shutdown']
+        for event in events:
+            engine=[p for p in event['processes'] if p['pid']==case['officePid'] and p['creationTime']==case['officeCreationTime']]
+            assert len(engine)==1 and PureWindowsPath(engine[0]['image'])==PureWindowsPath(package)/'Office/program/soffice.bin'
+        for path in manifest.parent.rglob('*'):
+            assert not path.is_symlink() and not getattr(path,'is_junction',lambda:False)(), 'Linked style evidence'
+            if path.is_file(): assert path.suffix.lower() not in ('.dmp','.mdmp') and path.read_bytes()[:4]!=b'MDMP', 'Style engine crash dump found'
+        seen=set()
+        for item in record['files']:
+            name=item['path']; relative=PurePosixPath(name)
+            assert name and '\\' not in name and ':' not in name and not relative.is_absolute() and '..' not in relative.parts and relative.as_posix()==name and name not in seen
+            seen.add(name); path=manifest.parent.joinpath(*relative.parts)
+            assert path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve()) and type(item['bytes']) is int and path.stat().st_size==item['bytes'] and hashlib.sha256(path.read_bytes()).hexdigest()==item['sha256']
+        proof=dict(schemaVersion=1,diagnosticOnly=True,deliverable=False,success=True,sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],writerStyleCases=1,styleNativeArchive=manifest.relative_to(root).as_posix(),officePid=case['officePid'],officeCreationTime=case['officeCreationTime'],manifestSha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),eventsSha256=hashlib.sha256((manifest.parent/'events.jsonl').read_bytes()).hexdigest(),pythonIdentity=uno['pythonIdentity'])
+        (root/'writer-style/proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+    - name: Two original dirty-close controls with diagnostics absent
+      id: default_close
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python "$env:PROOF_ROOT/source/default-close-control.py" --source-root . --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/default-close" --diagnostics-root "$env:PROOF_ROOT/worker-diagnostics"
+        if ($LASTEXITCODE -ne 0) { throw 'At least one diagnostics-off original close control failed.' }
+    - name: Original seven lifecycle cases with close-stage diagnostics
+      id: lifecycle
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/native-python-proof/worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/lifecycle_smoke.py --suite $env:SUITE_PACKAGE --fixtures "$env:PROOF_ROOT/engine/fixtures" --output "$env:PROOF_ROOT/lifecycle"
+        if ($LASTEXITCODE -ne 0) { throw 'At least one original lifecycle case failed; retain close-stage diagnostics.' }
+    - name: Reverify entire package inventory after native execution
+      id: inventory
+      if: '!cancelled() && steps.package.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Package inventory changed during native execution.' }
+    - name: Require lifecycle success and integrity of every native archive
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      env:
+        STEP_OUTCOMES: '{"source":"${{ steps.source.outcome }}","unit":"${{ steps.unit.outcome }}","build":"${{ steps.build.outcome }}","package":"${{ steps.package.outcome }}","prerequisites":"${{ steps.prerequisites.outcome }}","fixtures":"${{ steps.fixtures.outcome }}","writer_style":"${{ steps.writer_style.outcome }}","style_proof":"${{ steps.style_proof.outcome }}","default_close":"${{ steps.default_close.outcome }}","lifecycle":"${{ steps.lifecycle.outcome }}","inventory":"${{ steps.inventory.outcome }}"}'
+      shell: python
+      run: |
+        from pathlib import Path, PurePosixPath, PureWindowsPath
+        import hashlib,json,os,sys
+        root=Path(os.environ['PROOF_ROOT']); package=Path(os.environ['SUITE_PACKAGE']).resolve()
+        diagnostics=root/'worker-diagnostics'; manifests=list(diagnostics.glob('*/manifest.json')); assert manifests
+        for path in diagnostics.rglob('*'):
+            assert not path.is_symlink() and not getattr(path,'is_junction',lambda:False)(), 'Linked native evidence'
+            if path.is_file(): assert path.suffix.lower() not in ('.dmp','.mdmp') and path.read_bytes()[:4]!=b'MDMP', 'Native crash dump found'
+        verified=0
+        for manifest in manifests:
+            record=json.loads(manifest.read_text(encoding='utf-8')); assert record['schemaVersion']==1 and record['archiveComplete'] is True
+            seen=set()
+            for item in record['files']:
+                name=item['path']; relative=PurePosixPath(name)
+                assert name and '\\' not in name and ':' not in name and not relative.is_absolute() and '..' not in relative.parts and relative.as_posix()==name and name not in seen
+                seen.add(name); path=manifest.parent.joinpath(*relative.parts)
+                assert path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve())
+                assert type(item['bytes']) is int and path.stat().st_size==item['bytes'] and hashlib.sha256(path.read_bytes()).hexdigest()==item['sha256']
+                verified+=1
+        style=json.loads((root/'writer-style/proof.json').read_text(encoding='utf-8')); assert style['success'] is True
+        lifecycle=json.loads((root/'lifecycle/results.json').read_text(encoding='utf-8'))
+        assert lifecycle['kind']=='native-lifecycle' and lifecycle['success'] is True and lifecycle['completedCaseCount']==lifecycle['passedCaseCount']==7 and len(lifecycle['tests'])==7
+        default=json.loads((root/'default-close/results.json').read_text(encoding='utf-8'))
+        assert default['kind']=='diagnostics-off-original-dirty-close-control' and default['diagnosticOnly'] is True and default['deliverable'] is False and default['success'] is True
+        assert default['expectedCaseCount']==default['completedCaseCount']==default['passedCaseCount']==default['actualUnoCaseCount']==2 and len(default['tests'])==2
+        assert default['wrapperSha256']==os.environ['DEFAULT_CLOSE_SHA256'] and default['lifecycleSha256']==os.environ['LIFECYCLE_SHA256']
+        assert default['sourceCommit']==os.environ['GITHUB_SHA'] and default['inventorySha256']==hashlib.sha256((package/'suite-inventory.json').read_bytes()).hexdigest()
+        assert default['diagnosticsEnvironment']['presentAfterRemoval'] is False and default['diagnosticsEnvironmentAbsentAfter'] is True and default['diagnosticsBefore']==default['diagnosticsAfter']
+        assert len(default['baselineBefore'])==6 and default['baselineBefore']==default['baselineAfter'] and all(hashlib.sha256((root/'engine/fixtures'/name).read_bytes()).hexdigest()==value for name,value in default['baselineAfter'].items())
+        sys.path.insert(0,str(Path('suite/e2e').resolve())); import lifecycle_smoke
+        picker_targets={'new-writer-saveas-cancel':('새 문서 저장 결과 & 한글.docx',(2,)), 'failed-saveas-retains-editor':('잠긴 저장 대상 & 한글.docx',(1,2)), 'home-two-documents-cancel':('홈 취소 뒤 남은 문서 & 저장.docx',(1,))}
+        focus_receipts=picker_receipts=0; focus_counts={'default-close':0,'lifecycle':0}
+        for group,rows in (('default-close',default['tests']),('lifecycle',lifecycle['tests'])):
+            for row in rows:
+                readiness=row.get('editorFocusReadinessRecords',[])
+                markers=lifecycle_smoke.ASCII_EDITOR_MARKERS.get(row['case'],()); typed=row.get('asciiEditorInputs',[])
+                assert len(readiness)==len(typed)==len(markers) and [item['text'] for item in typed]==list(markers), 'Original physical markers or readiness receipts are missing or reordered'
+                if readiness: assert row['editorFocusReadiness']==readiness[-1]
+                for receipt,ascii_receipt,marker in zip(readiness,typed,markers):
+                    matches=[a for a in row['attachments'] if a['hwnd']==receipt['suiteHwnd'] and a['child']==receipt['childHwnd']]
+                    assert len(matches)==1, 'Editor focus receipt must match one actual case attachment'
+                    attached=matches[0]
+                    lifecycle_smoke.native.require_editor_focus_readiness(receipt,attached['hwnd'],attached['child'],row['shellPid'],attached['officePid'])
+                    lifecycle_smoke.native.ascii_input.require_ascii_receipt(ascii_receipt,marker,attached['hwnd'],attached['child'])
+                    focus_receipts+=1; focus_counts[group]+=1
+                inputs=row.get('pickerFilenameInputs',[]); expected=picker_targets.get(row['case'])
+                if expected is None: assert not inputs
+                else:
+                    assert group=='lifecycle' and len(inputs) in expected[1]
+                    target=root/group/'fixtures'/row['case']/expected[0]
+                    for receipt in inputs:
+                        assert receipt['success'] is True and PureWindowsPath(receipt['expected'])==PureWindowsPath(target.resolve())
+                        document=receipt['document']; dialog=receipt['dialog']; field=receipt['field']
+                        assert len([a for a in row['attachments'] if a['hwnd']==document['hwnd']])==1
+                        assert document['live'] is True and document['pid']==row['shellPid'] and dialog['live'] is True
+                        lifecycle_smoke.native.require_dialog_identity(dialog['pid'],row['shellPid'],dialog['owner'],document['hwnd'],dialog['title'],'OpenGeul Writer — 다른 이름으로 저장',dialog['class'])
+                        assert receipt['dialogUia']['nativeHandle']==dialog['hwnd'] and receipt['dialogUia']['processId']==row['shellPid'] and receipt['dialogUia']['runtimeId']
+                        assert field['nativeHandle']>0 and field['processId']==field['nativePid']==row['shellPid'] and field['runtimeId'] and field['automationId']=='1001' and field['controlType']=='Edit'
+                        assert field['nativeLive'] is True and field['nativeChildOfDialog'] is True and field['nativeRoot']==dialog['hwnd'] and field['visible'] is True and field['enabled'] is True
+                        lifecycle_smoke.require_picker_native_edit_receipt(receipt,row['shellPid'],dialog['hwnd'],field['nativeHandle'])
+                        picker_receipts+=1
+        assert focus_counts=={'default-close':3,'lifecycle':10}, 'Every original editor marker needs one ordered readiness/input pair'
+        assert all(value=='success' for value in json.loads(os.environ['STEP_OUTCOMES']).values())
+        proof=dict(schemaVersion=1,diagnosticOnly=True,deliverable=False,success=True,sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],writerStyleCases=1,defaultCloseCases=2,lifecycleCases=7,replayedEditorFocusReceipts=focus_receipts,editorFocusReceiptCounts=focus_counts,replayedPickerNativeEditReceipts=picker_receipts,completeNativeArchives=len(manifests),verifiedNativeFiles=verified,crashDumps=0,styleProof='writer-style/proof.json')
+        (root/'proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+    - name: Always retain diagnostic source, package receipts and all original native evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-native-python-proof-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/native-python-proof/source/
+          .work/native-python-proof/package/
+          .work/native-python-proof/engine/
+          .work/native-python-proof/writer-style/
+          .work/native-python-proof/lifecycle/
+          .work/native-python-proof/default-close/
+          .work/native-python-proof/worker-diagnostics/
+          .work/native-python-proof/proof.json
+          .work/native-python-proof/build/msi.msi.log
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 6
