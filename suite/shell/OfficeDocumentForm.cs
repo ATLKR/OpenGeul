@@ -107,7 +107,16 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         catch (Exception e)
         {
             SetStatus("문서를 열지 못했습니다.");
+            var failedWorker = worker;
             await ReleaseWorkerAsync();
+            try
+            {
+                Console.Error.WriteLine($"OpenGeul Office attach failed ({module.Id}).");
+                Console.Error.WriteLine(e.ToString());
+                Console.Error.WriteLine("Office worker stderr:\n" + (failedWorker?.Diagnostics ?? "작업자를 시작하지 못했습니다."));
+                Console.Error.Flush();
+            }
+            catch (IOException) { /* Missing diagnostic output must not prevent the error dialog. */ }
             Program.ShowError("문서를 열지 못했습니다. 원본 파일은 변경하지 않았습니다.\n" + e.Message, this);
         }
         finally { loading = false; }

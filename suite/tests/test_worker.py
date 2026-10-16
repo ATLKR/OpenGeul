@@ -1,5 +1,6 @@
 """Worker tests use fake UNO only at native/process boundaries; no GUI proof."""
 import importlib
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 from pathlib import Path
@@ -217,6 +218,46 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual('invalid_json', lines[0]['error']['code'])
         self.assertEqual('unknown_command', lines[1]['error']['code'])
         self.assertTrue(lines[2]['ok'])
+
+    def test_operational_attach_failure_logs_cause_to_stderr_and_keeps_json_protocol(self):
+        self.backend.fail_attach = True
+        incoming = io.StringIO(json.dumps({'id': 'calc-open', 'command': 'attach',
+            'args': {'parentHwnd': 123, 'module': 'calc', 'width': 640, 'height': 480}}) + '\n'
+            + json.dumps({'id': 2, 'command': 'shutdown', 'args': {}}) + '\n')
+        outgoing, errors, process_stdout = io.StringIO(), io.StringIO(), io.StringIO()
+        with redirect_stderr(errors), redirect_stdout(process_stdout):
+            self.worker_module.serve(self.session, incoming, outgoing)
+        responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
+        self.assertEqual({'id': 'calc-open', 'ok': False, 'error': {
+            'code': 'attach_failed', 'message': 'Office 내장 편집기를 시작하지 못했습니다.'}}, responses[0])
+        self.assertTrue(responses[1]['ok'])
+        self.assertEqual('', process_stdout.getvalue())
+        self.assertIn('Traceback (most recent call last)', errors.getvalue())
+        self.assertIn('RuntimeError: connection unavailable', errors.getvalue())
+        self.assertIn('direct cause of the following exception', errors.getvalue())
+        self.assertIn('WorkerError: Office 내장 편집기를 시작하지 못했습니다.', errors.getvalue())
+
+    def test_unexpected_dispatch_failure_logs_trace_and_preserves_generic_json_error(self):
+        def fails(command, args):
+            raise ValueError('unexpected UNO boundary failure')
+        self.session.dispatch = fails
+        errors, output = io.StringIO(), io.StringIO()
+        with redirect_stderr(errors), redirect_stdout(output):
+            response = self.worker_module.handle_request(self.session,
+                {'id': 4, 'command': 'status', 'args': {}})
+        self.assertEqual({'id': 4, 'ok': False, 'error': {'code': 'engine_error',
+            'message': 'Office 작업에 실패했습니다. 문서 상태를 확인해 주세요.'}}, response)
+        self.assertIn('ValueError: unexpected UNO boundary failure', errors.getvalue())
+        self.assertIn('in fails', errors.getvalue())
+        self.assertEqual('', output.getvalue())
+
+    def test_expected_request_validation_failure_stays_quiet(self):
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            response = self.worker_module.handle_request(self.session,
+                {'id': 8, 'command': 'resize', 'args': {'width': 0, 'height': 10}})
+        self.assertEqual('invalid_state', response['error']['code'])
+        self.assertEqual('', errors.getvalue())
 
     def test_protocol_rejects_nonobject_args_and_ambiguous_ids(self):
         for request in ({'id': True, 'command': 'status', 'args': {}},

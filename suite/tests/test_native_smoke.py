@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -19,6 +20,38 @@ SPEC.loader.exec_module(smoke)
 
 
 class NativeSmokeTests(unittest.TestCase):
+    def test_suite_launch_captures_child_stderr_after_parent_stream_is_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            command = [sys.executable, '-c', 'import sys; sys.stderr.buffer.write(b"worker traceback retained\\n")']
+            with patch.object(smoke.subprocess, 'Popen', wraps=smoke.subprocess.Popen) as launched:
+                process = smoke.launch_suite(command, output, output, 'calc')
+            self.assertTrue(launched.call_args.kwargs['stderr'].closed)
+            self.assertFalse(launched.call_args.kwargs['shell'])
+            self.assertEqual(launched.call_args.args[0], command)
+            self.assertEqual(process.wait(timeout=10), 0)
+            self.assertEqual((output / 'calc-stderr.log').read_bytes(), b'worker traceback retained\n')
+
+    def test_owned_startup_error_requires_exact_native_dialog_identity(self):
+        self.assertTrue(smoke.is_owned_startup_error(31, 31, 31, 'OpenGeul Office', '#32770'))
+        for observed in ((99, 31, 31, 'OpenGeul Office', '#32770'),
+                         (31, 31, 99, 'OpenGeul Office', '#32770'),
+                         (31, 31, 31, 'OpenGeul Calc', '#32770'),
+                         (31, 31, 31, 'OpenGeul Office', 'WinForms')):
+            self.assertFalse(smoke.is_owned_startup_error(*observed))
+
+    def test_attachment_detects_owned_startup_error_before_reading_child_properties(self):
+        api = object.__new__(smoke.Windows)
+        api.windows = lambda pid: [44]
+        api.pid = lambda hwnd: 31
+        api.title = lambda hwnd: 'OpenGeul Office'
+        api.class_name = lambda hwnd: '#32770'
+        api.user = SimpleNamespace(GetWindow=lambda hwnd, flag: 55, IsWindow=lambda hwnd: True,
+            GetAncestor=lambda hwnd, flag: hwnd, GetPropW=Mock(side_effect=AssertionError('properties must not be polled')))
+        with self.assertRaisesRegex(AssertionError, 'startup-error dialog'):
+            api.attached(SimpleNamespace(pid=31, poll=lambda: None))
+        api.user.GetPropW.assert_not_called()
+
     def test_taskkill_not_found_is_secondary_exit_race_only_after_verified_exit_zero(self):
         process = SimpleNamespace(pid=123, poll=Mock(side_effect=[None, 0]))
         record = {'success': False, 'error': 'original close timeout'}

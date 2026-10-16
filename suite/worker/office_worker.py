@@ -4,10 +4,24 @@ import json
 from pathlib import Path
 import sys
 import threading
+import traceback
 
 from session import DocumentSession, FACTORIES, WorkerError
 
 MAX_REQUEST_BYTES = 1024 * 1024
+REQUEST_ERROR_CODES = frozenset({
+    'invalid_request', 'invalid_json', 'request_too_large', 'unknown_command',
+    'invalid_state', 'invalid_path', 'unsupported_module', 'unsupported_format',
+    'invalid_manifest', 'close_cancelled',
+})
+
+
+def _log_failure(exc):
+    # Operational diagnostics belong on stderr. Keep JSONL and localized UI
+    # errors stable, while retaining UNO/native exception chains for evidence.
+    if not isinstance(exc, WorkerError) or exc.code not in REQUEST_ERROR_CODES:
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
 
 
 def load_modules(path):
@@ -50,8 +64,10 @@ def handle_request(session, request):
         result = session.dispatch(request['command'], request['args'])
         return {'id': request_id, 'ok': True, 'result': result}
     except WorkerError as exc:
+        _log_failure(exc)
         return {'id': request_id, 'ok': False, 'error': {'code': exc.code, 'message': exc.message}}
-    except Exception:
+    except Exception as exc:
+        _log_failure(exc)
         return {'id': request_id, 'ok': False,
                 'error': {'code': 'engine_error', 'message': 'Office 작업에 실패했습니다. 문서 상태를 확인해 주세요.'}}
 
@@ -103,6 +119,7 @@ def main(argv=None):
         serve(session, sys.stdin, sys.stdout)
         return 0 if session.state == 'stopped' else 2
     except WorkerError as exc:
+        _log_failure(exc)
         sys.stdout.write(json.dumps({'id': None, 'ok': False,
                                     'error': {'code': exc.code, 'message': exc.message}}, ensure_ascii=False) + '\n')
         sys.stdout.flush()

@@ -25,6 +25,17 @@ MODULE_LABELS = tuple('OpenGeul ' + name for name in ('HWP', 'Writer', 'Calc', '
 NEW_MODULES = tuple(module for module, _ in INPUT_CASES + ATTACH_CASES)
 
 
+def launch_suite(command, suite, output, name):
+    # Popen duplicates the file handle for the child; the parent's stream closes here.
+    with (output / (name + '-stderr.log')).open('xb') as stderr:
+        return subprocess.Popen(command, cwd=suite, shell=False, stderr=stderr)
+
+
+def is_owned_startup_error(dialog_pid, shell_pid, owner_pid, caption, class_name):
+    return shell_pid > 0 and dialog_pid == shell_pid and owner_pid == shell_pid \
+        and caption == 'OpenGeul Office' and class_name == '#32770'
+
+
 def new_document_command(suite, module):
     assert module in NEW_MODULES, 'Only the six owned Office modules may create blank test documents'
     return [str(suite / 'OpenGeul.Office.exe'), '--module', module]
@@ -145,6 +156,8 @@ class Windows:
         self.user.PostMessageW.restype = wintypes.BOOL
         self.user.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
         self.user.GetWindowTextW.restype = ctypes.c_int
+        self.user.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+        self.user.GetClassNameW.restype = ctypes.c_int
         self.user.GetGUIThreadInfo.argtypes = (wintypes.DWORD, ctypes.POINTER(GuiThreadInfo))
         self.user.GetGUIThreadInfo.restype = wintypes.BOOL
 
@@ -174,8 +187,21 @@ class Windows:
         self.user.GetWindowTextW(hwnd, text, len(text))
         return text.value
 
+    def class_name(self, hwnd):
+        name = ctypes.create_unicode_buffer(256)
+        self.user.GetClassNameW(hwnd, name, len(name))
+        return name.value
+
     def attached(self, process):
-        for hwnd in self.windows(process.pid):
+        windows = self.windows(process.pid)
+        for hwnd in windows:
+            caption = self.title(hwnd)
+            if caption != 'OpenGeul Office' or self.class_name(hwnd) != '#32770': continue
+            owner = self.user.GetWindow(hwnd, 4)
+            if not owner or not self.user.IsWindow(owner) or self.user.GetAncestor(owner, 2) != owner: continue
+            if is_owned_startup_error(self.pid(hwnd), process.pid, self.pid(owner), caption, self.class_name(hwnd)):
+                raise AssertionError(f'Owned Suite startup-error dialog HWND {int(hwnd)} owner {int(owner)}; inspect case stderr log')
+        for hwnd in windows:
             parent = self.user.GetPropW(hwnd, 'OpenGeul.Office.ParentHwnd')
             child = self.user.GetPropW(hwnd, 'OpenGeul.Office.ChildHwnd')
             if parent and child:
@@ -370,11 +396,11 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
 def new_module(suite, output, module, *, fixtures=None):
     from pywinauto import Desktop
     name = 'new-' + module
-    process = subprocess.Popen(new_document_command(suite, module), cwd=suite, shell=False)
+    process = launch_suite(new_document_command(suite, module), suite, output, name)
     api = Windows()
     record = {'module': module, 'kind': 'new-document', 'shellPid': process.pid, 'success': False,
               'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False,
-              'discardPromptHandled': False, 'stage': 'attach'}
+              'discardPromptHandled': False, 'stage': 'attach', 'stderrLog': name + '-stderr.log'}
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
         record['stage'] = 'prepare-window'
@@ -417,9 +443,10 @@ def new_module(suite, output, module, *, fixtures=None):
 
 def capture_home(suite, output):
     from pywinauto import Desktop
-    process = subprocess.Popen([str(suite / 'OpenGeul.Office.exe')], cwd=suite, shell=False)
+    process = launch_suite([str(suite / 'OpenGeul.Office.exe')], suite, output, 'home')
     api = Windows()
-    record = {'kind': 'home', 'shellPid': process.pid, 'success': False, 'keyboardInputVerified': False, 'stage': 'find-home'}
+    record = {'kind': 'home', 'shellPid': process.pid, 'success': False, 'keyboardInputVerified': False,
+              'stage': 'find-home', 'stderrLog': 'home-stderr.log'}
     try:
         hwnd = wait_for(lambda: api.home(process), seconds=30)
         assert api.windows(process.pid) == [hwnd], 'No-argument startup opened an unexpected document or dialog'
@@ -454,12 +481,13 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
         assert 'Engine-OpenGeul-' + module in package_text(source), 'Generated source marker is missing'
         assert 'UI-OpenGeul-' + module not in package_text(source), 'UI marker must be absent before actual input'
     before = hashlib.sha256(source.read_bytes()).hexdigest()
-    process = subprocess.Popen([str(suite/'OpenGeul.Office.exe'), '--module', module, '--file', str(source)],
-                               cwd=suite, shell=False)
+    process = launch_suite([str(suite/'OpenGeul.Office.exe'), '--module', module, '--file', str(source)],
+                           suite, output, module)
     api = Windows()
     record = {'module': module, 'kind': 'keyboard-edit' if physical_input else 'native-attach',
               'shellPid': process.pid, 'file': source.name, 'success': False,
-              'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False, 'stage': 'attach'}
+              'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False,
+              'stage': 'attach', 'stderrLog': module + '-stderr.log'}
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid, title=api.title(hwnd))
@@ -547,6 +575,7 @@ def collect_cases(cases, output):
             record.setdefault('error', record['caseException'])
         record['case'] = name
         record.setdefault('stage', 'case-setup')
+        if (output / (name + '-stderr.log')).is_file(): record.setdefault('stderrLog', name + '-stderr.log')
         if record.get('success') is not True:
             record['success'] = False
             record.setdefault('error', 'Case did not report success')
