@@ -117,7 +117,7 @@ jobs:
         \ row['cleanClose']\n data=json.loads((root/row['accessibilitySnapshot']).read_text(encoding='utf-8'))\n\
         \ assert data['officePid']==row['officePid'] and data['childHwnd']==row['childHwnd']\
         \ and data['sameLiveFrameVerified']\n assert data['module']==row['module']\
-        \ and data['peerToBorderLiveParentVerified'] and not data['truncated']\n matches=[]\n\
+        \ and data['nativeNotebookbarBinding']['nextFocusMatchesTargetWidget'] and not data['truncated']\n matches=[]\n\
         \ for container in data['tabContainers']:\n  if container['role']!=PAGE_TAB_LIST\
         \ or not container['visible'] or not inside(container['rectangle'],data['rootRectangle']):\
         \ continue\n  assert container['sameLiveParentVerified'] and container['distinctLiveObjectsVerified']\

@@ -296,9 +296,14 @@ class UnoBackend:
         self.interceptor = make_interceptor(self.command_handler)
         self.frame.registerDispatchProviderInterceptor(self.interceptor)
         interaction = make_interaction_handler()
+        # Complete the model/controller before revealing its UI. Normal loading
+        # can show legacy toolbars (and start their status-update timers) while
+        # Notebookbar is replacing them. Hidden loading suppresses that automatic
+        # Show; the validated owned peer is explicitly revealed below. The early
+        # toolbar bootstrap also initializes icon settings before this reveal.
         props = tuple(self._property(name, value) for name, value in (
             ('MacroExecutionMode', 0), ('UpdateDocMode', 0), ('ReadOnly', False),
-            ('Hidden', False), ('PickListEntry', False), ('InteractionHandler', interaction)))
+            ('Hidden', True), ('PickListEntry', False), ('InteractionHandler', interaction)))
         url = path.as_uri() if path is not None else module['factory']
         if path is None and module['factory'] == 'private:factory/sdatabase':
             url = self._new_base_url(service, module, interaction)

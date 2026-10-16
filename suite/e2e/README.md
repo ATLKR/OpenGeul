@@ -142,6 +142,13 @@ hierarchy: [the notebookbar is a border-window child](https://github.com/LibreOf
 while [WorkWindow grafts only its menubar into accessible children](https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/vcl/source/window/accessibility.cxx#L196).
 The E2E reader uses the existing
 [XVclWindowPeer XAccessible test property](https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/toolkit/source/awt/vclxwindow.cxx#L1938)
-to reach the real border parent and its actual notebookbar objects. These are
-native UNO roles, not MSAA role numbers; passing this UI gate does not certify
-that the upstream OS accessibility bridge exposes the notebookbar.
+on the actual notebookbar peer. For undecorated system-child windows the owned
+WorkWindow's accessible parent may be null. The reader obtains the real
+`TabControlUIObject` with `XUITest.getWindow(verifiedPeer).getChild`, then uses a
+passive public focus listener to retain `FocusEvent.NextFocus`. `XUIObject.equals`
+verifies that this next peer wraps the same underlying native VCL tab control.
+The original focus and selected tab are restored and verified; no document
+content is edited. That peer's `XAccessible` supplies the actual native roles,
+parents, child indices and rendered tab names. These are native UNO roles, not
+MSAA role numbers; passing this UI gate does not certify that the upstream OS
+accessibility bridge exposes the notebookbar.
