@@ -210,8 +210,11 @@ def populate(engine, module, document):
         try:
             connection.setAutoCommit(False)
             statement = connection.createStatement()
-            statement.executeUpdate('CREATE TABLE "OPENGEUL_SMOKE" '
-                                    '("ID" INTEGER NOT NULL PRIMARY KEY, "TEXT_VALUE" VARCHAR(128), "AMOUNT" INTEGER)')
+            # Firebird auto-commits DDL and disposes its statement handles.
+            # executeUpdate would then query the disposed handle for a row
+            # count. Use execute for DDL, and a fresh prepared DML statement.
+            statement.execute('CREATE TABLE "OPENGEUL_SMOKE" '
+                              '("ID" INTEGER NOT NULL PRIMARY KEY, "TEXT_VALUE" VARCHAR(128), "AMOUNT" INTEGER)')
             prepared = connection.prepareStatement('INSERT INTO "OPENGEUL_SMOKE" VALUES (?, ?, ?)')
             prepared.setInt(1, 1)
             prepared.setString(2, marker(module))
