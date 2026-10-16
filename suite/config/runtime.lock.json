@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "0.1.0-dev",
+  "architecture": "x64",
+  "runtime": {
+    "name": "LibreOffice",
+    "version": "26.8.1.1",
+    "url": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi",
+    "size": 374870016,
+    "sha256": "c6298b10cfa1748bcbedad94c62ce771e240e5021bfd6d7a967cd571b04b5312",
+    "checksumUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi.sha256",
+    "sourceUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
+    "sourceSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785"
+  },
+  "hwp": {
+    "version": "1.1.4",
+    "sourceCommit": "131ccbf3ac10a82e1d6785b4c906fb836b912e73",
+    "url": "https://github.com/ATLKR/OpenGeul/releases/download/v1.1.4/OpenGeul_1.1.4_windows-x64_unsigned-portable.zip",
+    "size": 33362247,
+    "sha256": "6bda733fba96ae692c504630eceb1113f5f11f7cac9208158531960e5d822764",
+    "sourceUrl": "https://github.com/ATLKR/OpenGeul/tree/131ccbf3ac10a82e1d6785b4c906fb836b912e73",
+    "provenanceUrl": "https://github.com/ATLKR/OpenGeul/releases/download/v1.1.4/provenance-x64.json"
+  }
+}

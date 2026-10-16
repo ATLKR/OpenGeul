@@ -50,10 +50,10 @@ Commands: `attach` (parentHwnd,module,width,height,path?), `resize`, `status` (m
 Worker startup CLI: `--runtime PATH`; stdin/stdout carry protocol only. Attach creates an owned
 office process/profile/pipe and UNO Frame under the supplied HWND. No TCP UNO endpoint.
 
-- [ ] パーサ/状態遷移/close cancel/save failure/ローカルパスとfilter allowlist testsを先に失敗させる。
-- [ ] UNO importsを遅延し実際のWindows frame、private process、owned cleanupを実装する。
-- [ ] real local engine editing proofとWindows-only child frame proofを区別して記録する。
-- [ ] 関連ファイルだけをコミットする。
+- [ ] 요청 파서·상태 전이·닫기 취소·저장 실패·로컬 경로와 필터 검사를 먼저 실패시킨다.
+- [ ] UNO를 지연 로드하고 실제 Windows 프레임·전용 프로세스와 소유한 자원 정리를 구현한다.
+- [ ] 로컬 엔진 편집 증거와 Windows 자식 창 증거를 구분해 기록한다.
+- [ ] 관련 파일만 커밋한다.
 
 ### Task 3: OpenGeul native Suite shell
 
@@ -62,19 +62,19 @@ office process/profile/pipe and UNO Frame under the supplied HWND. No TCP UNO en
 **Produces:** `OpenGeul.Office.exe`; home module tiles/open dialog, Office forms with native Panel HWND,
 worker JSON protocol, resize synchronization, close save/discard/cancel and worker errors.
 
-- [ ] module routingとclose decisionsのテストを先に失敗させる。
-- [ ] thin Windows shellを実装する。文書操作はworkerに委ねる。
-- [ ] .NET Windows cross buildと可能なheadless testsを実行する。
-- [ ] 関連ファイルだけをコミットする。
+- [ ] 모듈 라우팅과 종료 결정 검사를 먼저 실패시킨다.
+- [ ] 얇은 Windows shell을 구현하고 문서 작업은 작업자에게 맡긴다.
+- [ ] .NET Windows 교차 빌드와 로컬에서 실행 가능한 검사를 수행한다.
+- [ ] 관련 파일만 커밋한다.
 
-### Task 4: 固定入力・Windows検証・開発パッケージ
+### Task 4: 고정 입력·Windows 검증·개발 패키지
 
 **Files:** `suite/config/runtime.lock.json`, `suite/scripts/`, `suite/e2e/`, Suite workflow,
 Suite docs and `docs/VERIFICATION.md` with explicit development status.
 **Consumes:** Tasks 1–3, official runtime + optional verified existing HWP component.
 
-- [ ] payload検証の欠落・改変・混在architecture・source/license欠落を失敗させる。
-- [ ] fresh-path extraction/build/branding/inventory/zipとsource bundleを実装する。
-- [ ] Windows x64で実際のowned child HWNDとWriter/Calc/Impress入力・保存・再開を検証する。
-- [ ] 既存HWPのpolicy/単体検査を実行し、全差分の独立レビューを受ける。
-- [ ] 確認済み成果物と未完のGUI/IME/ARM64/公開配布項目を区別して報告する。
+- [ ] payload 누락·변조·혼합 아키텍처·소스/라이선스 누락 검사를 먼저 실패시킨다.
+- [ ] 새 경로의 추출·빌드·브랜딩·inventory·ZIP과 소스 묶음을 구현한다.
+- [ ] Windows x64에서 실제 자식 HWND와 Writer/Calc/Impress 입력·저장·재열기를 검증한다.
+- [ ] 기존 HWP 정책/단위 검사와 전체 변경의 독립 리뷰를 수행한다.
+- [ ] 확인한 결과물과 미완의 GUI·IME·ARM64·공개 배포 항목을 구분해 보고한다.
