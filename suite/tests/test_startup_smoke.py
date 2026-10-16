@@ -1,9 +1,12 @@
 """Platform-neutral coverage for strict native startup stress evidence."""
 from contextlib import redirect_stdout
 from collections import Counter
+from datetime import datetime, timezone
+import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -135,6 +138,75 @@ class StartupSmokeTests(unittest.TestCase):
         self.assertFalse(report['success'])
         self.assertEqual(report['attempts'][0]['cleanupError'], 'owned process stayed live')
         self.assertEqual(report['completedAttemptCount'], 20)
+
+    def test_fixture_snapshot_reads_only_bounded_generated_lock_files(self):
+        self.assertTrue(hasattr(self.smoke, 'fixture_snapshot'), 'Generated lock evidence is missing')
+        with tempfile.TemporaryDirectory() as directory:
+            fixtures = Path(directory) / 'fixtures'
+            fixtures.mkdir()
+            profile = Path(directory) / 'owned-profile'
+            profile.mkdir()
+            lock = fixtures / '.~lock.OpenGeul-calc.xlsx#'
+            contents = ',test,owned-host,now,' + profile.as_uri() + ';'
+            lock.write_text(contents, encoding='utf-8')
+            (fixtures / 'OpenGeul-calc.xlsx').write_bytes(b'fixture bytes must not be collected')
+            (fixtures / '~$large.xlsx').write_bytes(b'x' * 8193)
+            nested = fixtures / 'nested'
+            nested.mkdir()
+            (nested / 'unrelated.txt').write_text('never enumerate nested documents')
+            snapshot = self.smoke.fixture_snapshot(fixtures)
+            entries = {entry['name']: entry for entry in snapshot['entries']}
+            self.assertEqual(set(entries), {lock.name, 'OpenGeul-calc.xlsx', '~$large.xlsx', 'nested'})
+            self.assertEqual(entries[lock.name]['lockContent'], contents)
+            self.assertEqual(entries[lock.name]['sha256'], hashlib.sha256(lock.read_bytes()).hexdigest())
+            self.assertEqual(entries[lock.name]['profiles'][0]['url'], profile.as_uri())
+            self.assertTrue(entries[lock.name]['profiles'][0]['exists'])
+            self.assertNotIn('lockContent', entries['OpenGeul-calc.xlsx'])
+            self.assertTrue(entries['~$large.xlsx']['lockContentOmitted'])
+            self.assertNotIn('lockContent', entries['~$large.xlsx'])
+
+    @unittest.skipIf(os.name == 'nt', 'Link creation may require Windows developer mode')
+    def test_fixture_snapshot_never_follows_links(self):
+        self.assertTrue(hasattr(self.smoke, 'fixture_snapshot'), 'Generated lock evidence is missing')
+        with tempfile.TemporaryDirectory() as directory:
+            fixtures = Path(directory) / 'fixtures'
+            fixtures.mkdir()
+            outside = Path(directory) / 'unrelated.txt'
+            outside.write_text('unrelated user contents')
+            (fixtures / '.lock').symlink_to(outside)
+            entry = self.smoke.fixture_snapshot(fixtures)['entries'][0]
+            self.assertTrue(entry['isSymlink'])
+            self.assertNotIn('lockContent', entry)
+            profile_alias = Path(directory) / 'profile-alias'
+            profile_alias.symlink_to(outside.parent, target_is_directory=True)
+            (fixtures / '.lock-profile').write_text(profile_alias.as_uri() + ';', encoding='utf-8')
+            entries = {item['name']: item for item in self.smoke.fixture_snapshot(fixtures)['entries']}
+            self.assertIsNone(entries['.lock-profile']['profiles'][0]['exists'])
+            self.assertIn('probeSkipped', entries['.lock-profile']['profiles'][0])
+            alias = Path(directory) / 'alias'
+            alias.symlink_to(fixtures, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                self.smoke.fixture_snapshot(alias)
+
+    def test_wer_metadata_requires_owned_image_and_run_time_without_copying_dumps(self):
+        self.assertTrue(hasattr(self.smoke, 'matching_wer_reports'), 'Owned crash metadata is missing')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = r'C:\owned\Office\program\soffice.bin'
+            for name, image in (('owned', runtime.upper()), ('unrelated', r'C:\other\soffice.bin'), ('stale', runtime)):
+                report = root / name
+                report.mkdir()
+                (report / 'Report.wer').write_text('EventType=APPCRASH\nAppPath=' + image +
+                    '\nReportIdentifier=owned-id\nSig[0].Name=Application Name\nSig[0].Value=soffice.bin\n' +
+                    'PrivateData=must not be copied\n', encoding='utf-16')
+                (report / 'memory.hdmp').write_bytes(b'never read crash dumps')
+            os.utime(root / 'stale' / 'Report.wer', (1, 1))
+            now = datetime.now(timezone.utc).timestamp()
+            reports = self.smoke.matching_wer_reports([root], runtime, now - 60, now + 60)
+            self.assertEqual(len(reports), 1)
+            self.assertEqual(reports[0]['metadata']['ReportIdentifier'], 'owned-id')
+            self.assertNotIn('PrivateData', reports[0]['metadata'])
+            self.assertNotIn('dump', json.dumps(reports).lower())
 
 
 if __name__ == '__main__':

@@ -10,17 +10,185 @@ import argparse
 from collections import Counter
 import ctypes
 from ctypes import wintypes
+from datetime import datetime, timezone
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
+import re
+import stat
+import subprocess
 import time
 import traceback
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import windows_smoke as native
 
 CYCLE = (('calc', 'existing'), ('calc', 'new'), ('writer', 'existing'), ('writer', 'new'))
 EXTENSIONS = {'calc': 'xlsx', 'writer': 'docx'}
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def profile_existence(profile):
+    """Probe local path components without following links or network paths."""
+    if not profile.is_absolute() or str(profile).startswith(('\\\\', '//')):
+        return dict(exists=None, probeSkipped='Nonlocal profile path')
+    current = Path(profile.anchor)
+    try:
+        for part in profile.parts[1:]:
+            current = current / part
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                return dict(exists=None, probeSkipped='Linked profile path component')
+        return dict(exists=True)
+    except FileNotFoundError:
+        return dict(exists=False)
+    except OSError as exc:
+        return dict(exists=None, probeError=type(exc).__name__ + ': ' + str(exc))
+
+
+def fixture_snapshot(fixtures):
+    """Nonrecursive listing; only generated lock siblings may expose contents."""
+    if fixtures.is_symlink() or getattr(fixtures, 'is_junction', lambda: False)() or not fixtures.is_dir():
+        raise ValueError('Fixture evidence requires the real generated directory')
+    entries = []
+    for path in sorted(fixtures.iterdir(), key=lambda item: item.name):
+        try:
+            info = path.lstat()
+            linked = stat.S_ISLNK(info.st_mode) or getattr(path, 'is_junction', lambda: False)()
+            entry = dict(name=path.name, bytes=info.st_size, modifiedTimeNs=info.st_mtime_ns,
+                         isSymlink=linked, isDirectory=stat.S_ISDIR(info.st_mode))
+            lock = path.name.casefold().startswith(('.lock', '.~lock.', '~$'))
+            if lock and not linked and stat.S_ISREG(info.st_mode):
+                if info.st_size > 8192:
+                    entry['lockContentOmitted'] = True
+                else:
+                    with path.open('rb') as stream:
+                        payload = stream.read(8193)
+                    if len(payload) > 8192:
+                        entry['lockContentOmitted'] = True
+                    else:
+                        text = payload.decode('utf-8', errors='replace')
+                        profiles = []
+                        for url in re.findall(r'file://[^,;\s]+', text):
+                            parsed = urlparse(url)
+                            # Lock metadata is read, never used to load or alter a profile.
+                            if parsed.netloc not in ('', 'localhost'): continue
+                            profile = Path(url2pathname(parsed.path))
+                            profiles.append(dict(url=url, path=str(profile), **profile_existence(profile)))
+                        entry.update(lockContent=text, sha256=hashlib.sha256(payload).hexdigest(), profiles=profiles)
+            entries.append(entry)
+        except OSError as exc:
+            entries.append(dict(name=path.name, error=type(exc).__name__ + ': ' + str(exc)))
+    return dict(capturedAtUtc=utc_now(), entries=entries)
+
+
+def capture_fixture_snapshot(record, key, fixtures):
+    try:
+        record[key] = fixture_snapshot(fixtures)
+    except Exception as exc:
+        record[key] = dict(error=type(exc).__name__ + ': ' + str(exc), capturedAtUtc=utc_now())
+
+
+def matching_wer_reports(roots, runtime_image, started, ended):
+    """Read small Report.wer metadata only, matched to our image and time range."""
+    matched = []
+    image = ntpath.normcase(ntpath.normpath(str(runtime_image)))
+    for root in roots:
+        if root.is_symlink() or getattr(root, 'is_junction', lambda: False)() or not root.is_dir(): continue
+        try:
+            folders = list(root.iterdir())
+        except OSError:
+            continue
+        for folder in folders:
+            report = folder / 'Report.wer'
+            try:
+                if folder.is_symlink() or getattr(folder, 'is_junction', lambda: False)() or not folder.is_dir(): continue
+                if report.is_symlink() or not report.is_file(): continue
+                info = report.stat()
+                if not started <= info.st_mtime <= ended or info.st_size > 1024 * 1024: continue
+                raw = report.read_bytes()
+                text = raw.decode('utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig', errors='replace')
+                fields = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+                if ntpath.normcase(ntpath.normpath(fields.get('AppPath', ''))) != image: continue
+                metadata = {key: value for key, value in fields.items() if key in (
+                    'EventType', 'ReportIdentifier', 'ReportStatus', 'AppName', 'AppPath') or
+                    re.fullmatch(r'Sig\[\d+\]\.(Name|Value)', key)}
+                matched.append(dict(reportPath=str(report), modifiedTimeNs=info.st_mtime_ns, metadata=metadata))
+            except OSError:
+                continue
+    return matched
+
+
+APPLICATION_EVENTS_SCRIPT = r'''param(
+    [Parameter(Mandatory=$true)][string]$RuntimeImage,
+    [Parameter(Mandatory=$true)][string]$StartedAt,
+    [Parameter(Mandatory=$true)][string]$EndedAt,
+    [Parameter(Mandatory=$true)][string]$OutputDirectory
+)
+$ErrorActionPreference = 'Stop'
+$start = [DateTimeOffset]::Parse($StartedAt).UtcDateTime
+$end = [DateTimeOffset]::Parse($EndedAt).UtcDateTime
+$image = [IO.Path]::GetFullPath($RuntimeImage)
+$events = @()
+$queryErrors = @()
+$candidates = @(Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001,1002; StartTime=$start; EndTime=$end} -ErrorAction SilentlyContinue -ErrorVariable queryErrors)
+foreach ($event in $candidates) {
+    $original = $event.ToXml()
+    [xml]$xml = $original
+    $owned = $false
+    foreach ($data in @($xml.Event.EventData.Data)) {
+        if ([string]::Equals([string]$data.InnerText, $image, [StringComparison]::OrdinalIgnoreCase)) { $owned = $true }
+    }
+    if (-not $owned) { continue }
+    $filename = 'application-event-' + [string]$event.RecordId + '.xml'
+    [IO.File]::WriteAllText((Join-Path $OutputDirectory $filename), $original, [Text.UTF8Encoding]::new($false))
+    $events += @{eventId=$event.Id; recordId=$event.RecordId; provider=$event.ProviderName; timeCreatedUtc=$event.TimeCreated.ToUniversalTime().ToString('o'); xmlFile=$filename}
+}
+$errors = @($queryErrors | Where-Object { $_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*' } | ForEach-Object { $_.ToString() })
+@{runtimeImage=$image; startedAtUtc=$start.ToString('o'); endedAtUtc=$end.ToString('o'); events=$events; errors=$errors} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'application-events.json') -Encoding UTF8
+'''
+
+
+def collect_crash_diagnostics(suite, output, started_at, ended_at):
+    """Best-effort evidence never changes or hides the native attempt outcome."""
+    target = output / 'crash-diagnostics'
+    runtime_image = suite / 'Office' / 'program' / 'soffice.bin'
+    result = dict(runtimeImage=str(runtime_image), startedAtUtc=started_at, endedAtUtc=ended_at)
+    script = target / 'collect-application-events.ps1'
+    try:
+        target.mkdir(exist_ok=False)
+        script.write_text(APPLICATION_EVENTS_SCRIPT, encoding='utf-8-sig')
+    except Exception as exc:
+        result['collectorSetupError'] = type(exc).__name__ + ': ' + str(exc)
+        return result
+    try:
+        with (target / 'collector-stdout.log').open('xb') as stdout, (target / 'collector-stderr.log').open('xb') as stderr:
+            process = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-File', str(script), '-RuntimeImage', str(runtime_image), '-StartedAt', started_at,
+                '-EndedAt', ended_at, '-OutputDirectory', str(target)], cwd=suite, shell=False,
+                stdout=stdout, stderr=stderr, timeout=45, check=False)
+        result['eventCollectorExitCode'] = process.returncode
+        events = json.loads((target / 'application-events.json').read_text(encoding='utf-8-sig'))
+        result.update(applicationEvents=events, applicationEventsFile='crash-diagnostics/application-events.json')
+    except Exception as exc:
+        result['eventCollectorError'] = type(exc).__name__ + ': ' + str(exc)
+    try:
+        roots = [Path(base) / 'Microsoft' / 'Windows' / 'WER' / name
+                 for base in (os.environ.get('ProgramData'), os.environ.get('LOCALAPPDATA')) if base
+                 for name in ('ReportArchive', 'ReportQueue')]
+        reports = matching_wer_reports(roots, runtime_image,
+            datetime.fromisoformat(started_at).timestamp(), datetime.fromisoformat(ended_at).timestamp())
+        (target / 'wer-metadata.json').write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding='utf-8')
+        result.update(werMetadataFile='crash-diagnostics/wer-metadata.json', matchedWerReportCount=len(reports))
+    except Exception as exc:
+        result['werCollectorError'] = type(exc).__name__ + ': ' + str(exc)
+    return result
 
 
 def build_plan(attempts):
@@ -107,6 +275,8 @@ def run_native_attempt(suite, fixtures, output, attempt):
                   nativeParentVerified=False, noExternalOfficeWindow=False,
                   stderrLog=attempt['case'] + '-stderr.log', stderrCaptured=False,
                   screenshot=None, screenshotCaptured=False, forcedCleanupRequired=False)
+    record['startedAtUtc'] = utc_now()
+    capture_fixture_snapshot(record, 'fixtureDirectoryBeforeLaunch', fixtures)
     process = api = source = before = engine = None
     started = time.monotonic()
     try:
@@ -168,6 +338,7 @@ def run_native_attempt(suite, fixtures, output, attempt):
         record['success'] = True
     except Exception as exc:
         record_exception(record, exc)
+        capture_fixture_snapshot(record, 'fixtureDirectoryAtFailure', fixtures)
         if api is not None and process is not None:
             try:
                 record['ownedWindowsAtFailure'] = owned_windows(api, process)
@@ -200,6 +371,8 @@ def run_native_attempt(suite, fixtures, output, attempt):
                 record.update(stderrCaptured=True, stderrText=stderr.read_text(encoding='utf-8', errors='replace'))
         except Exception as stderr_error:
             record.update(success=False, stderrReadError=type(stderr_error).__name__ + ': ' + str(stderr_error))
+        capture_fixture_snapshot(record, 'fixtureDirectoryAfterCleanup', fixtures)
+        record['endedAtUtc'] = utc_now()
         record['elapsedSeconds'] = round(time.monotonic() - started, 3)
     return record
 
@@ -286,8 +459,15 @@ def main():
     assert fixtures != output and fixtures not in output.parents, 'Evidence must be outside generated fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
     output.mkdir(parents=True, exist_ok=False)
+    started_at = utc_now()
+    initial_snapshot = {}
+    capture_fixture_snapshot(initial_snapshot, 'initialFixtureDirectory', fixtures)
     plan = build_plan(args.attempts)
     report = run_attempts(plan, lambda attempt: run_native_attempt(suite, fixtures, output, attempt), output, args.attempts)
+    ended_at = utc_now()
+    report.update(startedAtUtc=started_at, endedAtUtc=ended_at, **initial_snapshot,
+                  diagnostics=collect_crash_diagnostics(suite, output, started_at, ended_at))
+    (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     return 0 if report['success'] else 1
 
 

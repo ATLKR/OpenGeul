@@ -1,13 +1,15 @@
-name: OpenGeul embedded startup diagnosis
+name: OpenGeul owned Calc crash evidence
 'on':
   push:
-    branches: [work/suite-startup-diagnostics]
+    branches:
+    - work/suite-calc-crash-diagnostics
 permissions:
   contents: read
   actions: read
 env:
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
+  OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/native-worker-diagnostics
 jobs:
   startup:
     if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false
@@ -16,7 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        repetition: [1, 2, 3]
+        repetition:
+        - 1
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
@@ -92,29 +95,37 @@ jobs:
             archive.extractall('.work/runtime')
         provenance = json.loads(pathlib.Path('.work/runtime/suite-provenance.json').read_text(encoding='utf-8'))
         assert provenance['sourceCommit'] == expected_head
+    - name: Record and apply opt-in worker diagnostic overlay to the verified runtime
+      shell: python
+      run: |
+        import hashlib, json, os, shutil, subprocess
+        from pathlib import Path
+        subprocess.run(['python','suite/scripts/verify-suite.py','.work/runtime'],check=True)
+        root=Path('.work/runtime')
+        changes=[]
+        for name in ('native.py','native_windows.py','native_diagnostics.py'):
+         source=Path('suite/worker')/name
+         target=root/'worker'/name
+         changes.append({'path':'worker/'+name,'beforeSha256':hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None,'afterSha256':hashlib.sha256(source.read_bytes()).hexdigest()})
+         shutil.copy2(source,target)
+        Path('.work/probe/diagnostic-overlay.json').write_text(json.dumps({'diagnosticOnly':True,'deliverable':False,'runtimeSource':'579511489f9def03dd8d894ef249fd8ed9c8fa10','overlaySource':os.environ['GITHUB_SHA'],'changes':changes},indent=2),encoding='utf-8')
     - name: Create fresh exact engine fixtures
       shell: pwsh
       run: |
-        python suite/scripts/verify-suite.py .work/runtime
-        if ($LASTEXITCODE -ne 0) { throw 'Pinned diagnostic runtime inventory failed.' }
         & ./.work/runtime/Office/program/python.exe suite/e2e/engine_smoke.py --suite .work/runtime --output .work/startup-engine
         if ($LASTEXITCODE -ne 0) { throw 'Fresh engine fixtures failed.' }
         python -m pip install pywinauto==0.6.9 Pillow==12.3.0
         if ($LASTEXITCODE -ne 0) { throw 'Diagnostic GUI prerequisites failed.' }
-    - name: Require every one of forty independent native startups
+    - name: Retain all twenty starts, process exit codes, locks and owned crash reports
       shell: pwsh
       run: |
-        python suite/e2e/startup_smoke.py --suite .work/runtime --fixtures .work/startup-engine/fixtures --output .work/startup-native --attempts 40
+        python suite/e2e/startup_smoke.py --suite .work/runtime --fixtures .work/startup-engine/fixtures --output .work/startup-native --attempts 20
         if ($LASTEXITCODE -ne 0) { throw 'At least one independent startup failed; original diagnostics retained.' }
-        python suite/scripts/verify-suite.py .work/runtime
-        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during diagnostic starts.' }
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
         name: opengeul-startup-${{ matrix.repetition }}-${{ github.run_id }}
-        path: |
-          .work/probe/
-          .work/startup-engine/
-          .work/startup-native/
+        path: ".work/probe/\n.work/startup-engine/\n.work/startup-native/\n  \n.work/native-worker-diagnostics/\n"
         retention-days: 1
         if-no-files-found: error
+        include-hidden-files: true

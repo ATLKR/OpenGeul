@@ -1,8 +1,10 @@
 """Actual GUI UNO embedding. No headless or external-window fallback exists."""
 import importlib
+import os
 from pathlib import Path
 import shutil
 import tempfile
+import sys
 import time
 import uuid
 
@@ -129,6 +131,41 @@ class UnoBackend:
         self.pipe = 'OpenGeul_' + uuid.uuid4().hex
         self.command_handler = lambda command, target_module=None: None
         self.module_factory = None
+        self.diagnostics = None
+
+    def _diagnose(self, phase):
+        if self.diagnostics is None and not os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS'):
+            return
+        try:
+            if self.diagnostics is None:
+                if self.profile is None:
+                    return
+                from native_diagnostics import create_diagnostics
+                self.diagnostics = create_diagnostics(os.environ, self.runtime.parent,
+                                                      self.profile.name, self.process)
+                if self.diagnostics is not None:
+                    print('OpenGeul native diagnostics directory: ' + str(self.diagnostics.directory),
+                          file=sys.stderr, flush=True)
+            if self.diagnostics is not None:
+                self.diagnostics.record(phase)
+        except Exception as exc:
+            print('OpenGeul native diagnostics: ' + type(exc).__name__ + ': ' + str(exc),
+                  file=sys.stderr, flush=True)
+
+    def _finish_diagnostics(self, archive=True):
+        if self.diagnostics is None:
+            return
+        try:
+            if archive:
+                self.diagnostics.archive_crash()
+        except Exception as exc:
+            print('OpenGeul crash evidence archive: ' + type(exc).__name__ + ': ' + str(exc),
+                  file=sys.stderr, flush=True)
+        finally:
+            try:
+                self.diagnostics.close()
+            except Exception as exc:
+                print('OpenGeul diagnostic handle close: ' + str(exc), file=sys.stderr, flush=True)
 
     def set_command_handler(self, handler):
         self.command_handler = handler
@@ -215,8 +252,14 @@ class UnoBackend:
         url = path.as_uri() if path is not None else module['factory']
         if path is None and module['factory'] == 'private:factory/sdatabase':
             url = self._new_base_url(service, module, interaction)
-        self.document = self.desktop.loadComponentFromURL(url, frame_name, 4, props)
+        self._diagnose('before-load')
+        try:
+            self.document = self.desktop.loadComponentFromURL(url, frame_name, 4, props)
+        except Exception:
+            self._diagnose('load-exception')
+            raise
         if self.document is None:
+            self._diagnose('load-returned-none')
             raise WorkerError('open_failed', '문서를 열 수 없습니다. 파일 형식과 암호 여부를 확인해 주세요.')
         child = int(self.peer.getWindowHandle((), 1))
         self.window_api.validate_child(child, hwnd)
@@ -265,6 +308,7 @@ class UnoBackend:
         self.document = None
 
     def cleanup(self):
+        self._diagnose('before-owned-shutdown')
         if self.desktop is not None:
             try:
                 self.desktop.terminate()
@@ -277,11 +321,15 @@ class UnoBackend:
                 self.process.wait(timeout=5)
             except Exception:
                 # Keep the live profile when process death was not confirmed.
+                self._diagnose('shutdown-unconfirmed')
+                self._finish_diagnostics(archive=False)
                 return
+            self._diagnose('after-owned-shutdown')
             self.process.close()
             self.process = None
         self.context = self.document = self.desktop = self.frame = self.peer = self.interceptor = None
         if self.profile is not None:
+            self._finish_diagnostics()
             try:
                 self.profile.cleanup()
                 self.profile = None
