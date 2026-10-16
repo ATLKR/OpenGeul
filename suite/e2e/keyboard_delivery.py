@@ -21,8 +21,6 @@ import subprocess
 import time
 import uuid
 
-from windows_smoke import GuiThreadInfo
-
 
 class Message(ctypes.Structure):
     _fields_ = [('sequence', ctypes.c_uint32), ('message', ctypes.c_uint32),
@@ -166,7 +164,11 @@ class DeliveryObserver:
             raise
 
     def snapshot(self):
-        info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
+        # Lifecycle loads windows_smoke through its own importlib module. Its
+        # bound ctypes structure has the same layout as a separate import, but
+        # ctypes requires the exact pointer type declared by this supplied API.
+        info_type = self.api.user.GetGUIThreadInfo.argtypes[1]._type_
+        info = info_type(cbSize=ctypes.sizeof(info_type))
         if not self.api.user.GetGUIThreadInfo(self.tid, ctypes.byref(info)): raise ctypes.WinError(ctypes.get_last_error())
         return {'focus': int(info.hwndFocus or 0), 'caret': int(info.hwndCaret or 0), 'active': int(info.hwndActive or 0),
                 'foreground': int(self.api.user.GetForegroundWindow() or 0),

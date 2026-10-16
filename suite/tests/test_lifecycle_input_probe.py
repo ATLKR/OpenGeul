@@ -178,6 +178,41 @@ class LifecycleInputProbeTests(unittest.TestCase):
         self.assertEqual(observer.calls[0]['inserted'], 1)
         self.assertEqual([row['scan'] for row in observer.calls[0]['events']], [ord('F'), ord('F')])
 
+    def test_snapshot_uses_the_supplied_typed_api_structure_with_full_width_hwnds(self):
+        # lifecycle._sibling loads windows_smoke separately from this observer's
+        # import. Identical structure names/layouts are different ctypes types.
+        fields = probe.lifecycle.native.GuiThreadInfo._fields_
+        FirstInfo = type('GuiThreadInfo', (ctypes.Structure,), {'_fields_': fields})
+        BoundInfo = type('GuiThreadInfo', (ctypes.Structure,), {'_fields_': fields})
+        self.assertIsNot(FirstInfo, BoundInfo)
+        self.assertEqual(ctypes.sizeof(FirstInfo), ctypes.sizeof(BoundInfo))
+        focus, caret, active, foreground = (0x1234567800000031, 0x1234567800000041,
+                                            0x1234567800000021, 0x1234567800000011)
+        calls = []
+        signature = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_uint32, ctypes.POINTER(BoundInfo))
+        @signature
+        def get_info(tid, pointer):
+            calls.append((tid, pointer.contents.cbSize))
+            pointer.contents.hwndFocus, pointer.contents.hwndCaret = focus, caret
+            pointer.contents.hwndActive = active
+            return 1
+        # Establish that this is a real typed boundary, not a permissive mock.
+        with self.assertRaises(ctypes.ArgumentError):
+            get_info(41, ctypes.byref(FirstInfo()))
+        self.assertFalse(calls)
+        observer = object.__new__(probe.DeliveryObserver)
+        observer.tid, observer.pid = 41, 31
+        observer.api = SimpleNamespace(user=SimpleNamespace(GetGUIThreadInfo=get_info,
+            GetForegroundWindow=lambda: foreground, GetKeyboardLayout=lambda tid: 0x04090409))
+        try:
+            result = observer.snapshot()
+        except ctypes.ArgumentError as exc:
+            self.fail('Snapshot rejected the supplied API structure before its native callback: ' + str(exc))
+        self.assertEqual(calls, [(41, ctypes.sizeof(BoundInfo))])
+        self.assertEqual({key: result[key] for key in ('focus', 'caret', 'active', 'foreground')},
+                         {'focus': focus, 'caret': caret, 'active': active, 'foreground': foreground})
+        self.assertEqual((result['pid'], result['tid'], result['layout']), (31, 41, 0x04090409))
+
 
 if __name__ == '__main__':
     unittest.main()
