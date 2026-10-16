@@ -118,3 +118,40 @@ these engine reports: child-HWND ownership, physical input, focus and the actual
 save action must be established separately by the GUI harness. The supplied Linux
 headless runtime has no pyuno and does not establish packaged Windows engine or
 GUI success.
+
+`korean_ui_smoke.py` validates the four actual Tabbed native editors separately.
+It retains a screenshot and the Windows UIA tree, then reads the instantiated VCL
+accessibility objects through that exact Office process's existing private pipe.
+The E2E-only reader verifies the retained PID's image, creation time and editor
+HWND before and after collection; no product worker API is added. The pipe is
+obtained from a bounded native query of only that retained process, passed to the
+packaged Python through stdin, and recorded only as a SHA256 fingerprint.
+The harness establishes the owned Suite foreground and physically focuses its
+verified editor before observing native focus events. It sends no document text
+or save command, and both fixture copies and their originals must remain intact.
+
+The authoritative `*-accessibility.json` records UNO `AccessibleRole.PAGE_TAB`
+(38) children of one real `PAGE_TAB_LIST` (39), live parent/object equality,
+actual child-index round trips, VISIBLE/SHOWING state and positive rendered bounds
+inside the verified Office HWND. Required Korean Home/Insert tabs must have
+distinct actual child indices. Native window bounds use a scoped per-monitor-v2
+DPI context on the collector thread, with verified restoration. Document/table
+subtrees are not enumerated.
+`*-os-accessibility.json` is a diagnostic snapshot and does not establish OS
+screen-reader support. A `--probe-only` run never claims Korean UI verification.
+
+This distinction addresses the pinned upstream Windows bridge's notebookbar
+hierarchy: [the notebookbar is a border-window child](https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/vcl/source/window/brdwin.cxx#L1948),
+while [WorkWindow grafts only its menubar into accessible children](https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/vcl/source/window/accessibility.cxx#L196).
+The E2E reader uses the existing
+[XVclWindowPeer XAccessible test property](https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/toolkit/source/awt/vclxwindow.cxx#L1938)
+on the actual notebookbar peer. For undecorated system-child windows the owned
+WorkWindow's accessible parent may be null. The reader obtains the real
+`TabControlUIObject` with `XUITest.getWindow(verifiedPeer).getChild`, then uses a
+passive public focus listener to retain `FocusEvent.NextFocus`. `XUIObject.equals`
+verifies that this next peer wraps the same underlying native VCL tab control.
+The original focus is restored and verified, and the selected tab is required
+to remain unchanged; no document content is edited. That peer's `XAccessible` supplies the actual native roles,
+parents, child indices and rendered tab names. These are native UNO roles, not
+MSAA role numbers; passing this UI gate does not certify that the upstream OS
+accessibility bridge exposes the notebookbar.

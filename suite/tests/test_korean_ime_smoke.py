@@ -23,6 +23,18 @@ class KoreanImePolicyTests(unittest.TestCase):
                               'sha256': 'a' * 64, 'machine': 0x8664,
                               'signerSubject': 'CN=Microsoft Windows, O=Microsoft Corporation, C=US'}}}
 
+    def restoration(self):
+        return {'command': 4, 'status': 0, 'layout': 0x04090409,
+                'previousLayout': 0x04090409, 'previousProfileType': 2,
+                'previousLanguage': 0x0409, 'previousClsid': '{00000000-0000-0000-0000-000000000000}',
+                'previousProfile': '{00000000-0000-0000-0000-000000000000}',
+                'previousProfileLayout': 0x04090409, 'activeProfileType': 2,
+                'activeLanguage': 0x0409, 'activeClsid': '{00000000-0000-0000-0000-000000000000}',
+                'activeProfile': '{00000000-0000-0000-0000-000000000000}',
+                'activeProfileLayout': 0x04090409, 'profileManagerHresult': 0,
+                'previousProfileHresult': 0, 'activateProfileHresult': 0,
+                'activeProfileHresult': 0, 'activateLayoutError': 0}
+
     def record(self):
         events = []
         for composition, result in [('ㅎ', ''), ('하', ''), ('한', ''), ('ㄱ', '한'),
@@ -37,14 +49,24 @@ class KoreanImePolicyTests(unittest.TestCase):
                 'activeProfile': {'activeLanguage': 0x0412,
                                   'activeClsid': '{A1A1A1A1-1111-2222-3333-444444444444}',
                                   'activeProfile': '{B2B2B2B2-1111-2222-3333-444444444444}'},
-                'savedText': 'Engine-OpenGeul-writer 한글\nIME-OpenGeul-writer:한글',
-                'reopened': {'text': 'Engine-OpenGeul-writer 한글\nIME-OpenGeul-writer:한글'},
-                'layoutRestored': True}
+                'savedText': 'Engine-OpenGeul-writer 한글\nime-opengeul-writer:한글',
+                'reopened': {'text': 'Engine-OpenGeul-writer 한글\nime-opengeul-writer:한글'},
+                'layoutRestored': True, 'restoration': self.restoration()}
 
     def test_real_dubeolsik_commit_backspace_save_and_reopen_satisfy_policy(self):
         result = ime.validate_ime_evidence(self.record())
         self.assertTrue(result['imeVerified'])
         self.assertTrue(result['backspaceCompositionVerified'])
+
+    def test_restore_requires_successful_native_calls_and_exact_original_hkl_and_tsf_identity(self):
+        for patch in ({'activateProfileHresult': -2147467259}, {'status': -6},
+                      {'layout': 0x04120412}, {'activeLanguage': 0x0412},
+                      {'activeClsid': '{A028AE76-01B1-46C2-99C4-ACD9858AE02F}'},
+                      {'activeProfileType': 1}, {'activeProfileLayout': 0}):
+            record = self.record()
+            record['restoration'].update(patch)
+            with self.subTest(patch=patch), self.assertRaises(AssertionError):
+                ime.validate_ime_evidence(record)
 
     def test_unicode_only_input_cannot_claim_ime(self):
         for patch in ({'inputMethod': 'Unicode-SendInput'}, {'unicodeInputUsed': True},

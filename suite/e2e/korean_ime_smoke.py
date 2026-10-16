@@ -63,7 +63,23 @@ def require_readiness(record):
 
 def marker(module):
     assert module in dict(INPUT_CASES)
-    return 'IME-OpenGeul-' + module + ':한글'
+    # Keep the ASCII prefix literal in the IME's alphanumeric mode, without
+    # relying on synthetic implicit Shift state. Saved XML and UNO must match.
+    return 'ime-opengeul-' + module + ':한글'
+
+
+def validate_restoration(receipt):
+    assert isinstance(receipt, dict) and receipt.get('command') == 4 and receipt.get('status') == 0, 'Native restoration command did not succeed'
+    assert all(receipt.get(key) == 0 for key in ('profileManagerHresult', 'previousProfileHresult', 'activateProfileHresult', 'activeProfileHresult', 'activateLayoutError')), 'Native restoration API failed or its result is missing'
+    assert receipt.get('previousLayout', 0) and receipt.get('layout') == receipt['previousLayout'], 'Original owned-thread HKL was not restored'
+    assert receipt.get('previousProfileType') in (1, 2) and receipt.get('previousLanguage', 0), 'Original TSF identity was not captured'
+    guid = r'\{[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}'
+    for previous, active in (('previousProfileType', 'activeProfileType'), ('previousLanguage', 'activeLanguage'),
+                             ('previousProfileLayout', 'activeProfileLayout')):
+        assert previous in receipt and receipt.get(active) == receipt[previous], 'Original TSF profile was not restored'
+    for previous, active in (('previousClsid', 'activeClsid'), ('previousProfile', 'activeProfile')):
+        assert re.fullmatch(guid, receipt.get(previous, '')) and receipt.get(active, '').lower() == receipt[previous].lower(), 'Original TSF GUID identity was not restored'
+    return receipt
 
 
 def validate_ime_evidence(record):
@@ -93,6 +109,7 @@ def validate_ime_evidence(record):
     verify_content(record['module'], observed)
     assert expected in observed.get('text', ''), 'Actual UNO reopen lost the Korean marker'
     assert record.get('layoutRestored') is True, 'Owned input thread state was not restored'
+    validate_restoration(record.get('restoration'))
     return {'imeVerified': True, 'backspaceCompositionVerified': True,
             'savedKoreanVerified': True, 'reopenedKoreanVerified': True}
 
@@ -117,6 +134,12 @@ class NativeState(ctypes.Structure):
                 ('previousConversion', ctypes.c_uint32), ('previousSentence', ctypes.c_uint32),
                 ('status', ctypes.c_int32), ('activeLanguage', ctypes.c_uint32),
                 ('activeClsid', ctypes.c_uint16 * 40), ('activeProfile', ctypes.c_uint16 * 40),
+                ('previousProfileType', ctypes.c_uint32), ('previousLanguage', ctypes.c_uint32),
+                ('previousClsid', ctypes.c_uint16 * 40), ('previousProfile', ctypes.c_uint16 * 40),
+                ('previousProfileLayout', ctypes.c_uint64), ('activeProfileType', ctypes.c_uint32),
+                ('activeProfileLayout', ctypes.c_uint64), ('profileManagerHresult', ctypes.c_int32),
+                ('previousProfileHresult', ctypes.c_int32), ('activateProfileHresult', ctypes.c_int32),
+                ('activeProfileHresult', ctypes.c_int32), ('activateLayoutError', ctypes.c_uint32),
                 ('events', NativeEvent * 512)]
 
 
@@ -130,7 +153,11 @@ struct Event { uint32_t sequence,message,flags,pid,tid; uint64_t hwnd,layout;
     int32_t compositionBytes,resultBytes; uint32_t origin; WCHAR composition[256],result[256]; };
 struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     uint32_t command,ack; uint64_t previousLayout; uint32_t previousOpen,previousConversion,previousSentence;
-    int32_t status; uint32_t activeLanguage; WCHAR activeClsid[40],activeProfile[40]; Event events[512]; };
+    int32_t status; uint32_t activeLanguage; WCHAR activeClsid[40],activeProfile[40];
+    uint32_t previousProfileType,previousLanguage; WCHAR previousClsid[40],previousProfile[40];
+    uint64_t previousProfileLayout; uint32_t activeProfileType; uint64_t activeProfileLayout;
+    int32_t profileManagerHresult,previousProfileHresult,activateProfileHresult,activeProfileHresult;
+    uint32_t activateLayoutError; Event events[512]; };
 static State* shared = nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
@@ -150,7 +177,7 @@ static ITfInputProcessorProfileMgr* profiles() {
     CLSIDFromString(L"{33C53A50-F456-4884-B049-85FD643ECFED}",&clsid);
     CLSIDFromString(L"{71C6E74C-0F28-11D8-A82A-00065B84435C}",&iid);
     ITfInputProcessorProfileMgr* mgr=nullptr;
-    CoCreateInstance(clsid,nullptr,CLSCTX_INPROC_SERVER,iid,(void**)&mgr);
+    shared->profileManagerHresult=CoCreateInstance(clsid,nullptr,CLSCTX_INPROC_SERVER,iid,(void**)&mgr);
     return mgr;
 }
 static void command(HWND hwnd, UINT sequence) {
@@ -168,12 +195,26 @@ static void command(HWND hwnd, UINT sequence) {
     ITfInputProcessorProfileMgr* mgr=profiles();
     GUID category; CLSIDFromString(L"{34745C63-B2F0-4784-8B67-5E12C8701A31}",&category);
     if (sequence==1) {
-        if (mgr) haveOldProfile=(mgr->GetActiveProfile(category,&oldProfile)==S_OK);
-        HKL korean=LoadKeyboardLayoutW(L"00000412",0);
-        if (!korean || ((UINT_PTR)korean & 0xffff)!=0x0412 || !ActivateKeyboardLayout(korean,0)) shared->status=-1;
-        GUID clsid,profile;
-        CLSIDFromString(L"__CLSID__",&clsid); CLSIDFromString(L"__PROFILE__",&profile);
-        if (!mgr || mgr->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0412,clsid,profile,nullptr,0)!=S_OK) shared->status=-2;
+        shared->previousProfileHresult=mgr ? mgr->GetActiveProfile(category,&oldProfile) : E_UNEXPECTED;
+        haveOldProfile=(shared->previousProfileHresult==S_OK);
+        if (haveOldProfile) {
+            shared->previousProfileType=oldProfile.dwProfileType; shared->previousLanguage=oldProfile.langid;
+            shared->previousProfileLayout=(uint64_t)(UINT_PTR)oldProfile.hkl;
+            StringFromGUID2(oldProfile.clsid,shared->previousClsid,40);
+            StringFromGUID2(oldProfile.guidProfile,shared->previousProfile,40);
+        }
+        if (!haveOldProfile) { shared->status=-8; shared->activateProfileHresult=E_UNEXPECTED; }
+        else {
+            SetLastError(0);
+            HKL korean=LoadKeyboardLayoutW(L"00000412",0);
+            if (!korean || ((UINT_PTR)korean & 0xffff)!=0x0412 || !ActivateKeyboardLayout(korean,0)) {
+                shared->activateLayoutError=GetLastError(); shared->status=-1;
+            } else shared->activateLayoutError=0;
+            GUID clsid,profile;
+            CLSIDFromString(L"__CLSID__",&clsid); CLSIDFromString(L"__PROFILE__",&profile);
+            shared->activateProfileHresult=mgr->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0412,clsid,profile,nullptr,0);
+            if (shared->activateProfileHresult!=S_OK && !shared->status) shared->status=-2;
+        }
     } else if (sequence==2 || sequence==3) {
         DWORD conversion=0,sentence=0;
         if (!himc || !ImmGetConversionStatus(himc,&conversion,&sentence)) shared->status=-3;
@@ -183,18 +224,30 @@ static void command(HWND hwnd, UINT sequence) {
             if (!ImmSetConversionStatus(himc, sequence==3 ? conversion|IME_CMODE_NATIVE : conversion&~IME_CMODE_NATIVE,sentence)) shared->status=-5;
         }
     } else if (sequence==4) {
-        if (mgr && haveOldProfile && mgr->ActivateProfile(oldProfile.dwProfileType,oldProfile.langid,
+        // With flags 0 ActivateProfile requires the current input language to match.
+        // Restore this owned thread's HKL before its exact original TSF profile:
+        // https://learn.microsoft.com/windows/win32/api/msctf/nf-msctf-itfinputprocessorprofilemgr-activateprofile
+        SetLastError(0);
+        if (!ActivateKeyboardLayout((HKL)(UINT_PTR)shared->previousLayout,0)) {
+            shared->activateLayoutError=GetLastError(); shared->status=-7;
+        } else shared->activateLayoutError=0;
+        shared->activateProfileHresult=(mgr && haveOldProfile) ? mgr->ActivateProfile(oldProfile.dwProfileType,oldProfile.langid,
             oldProfile.clsid,oldProfile.guidProfile,
-            oldProfile.dwProfileType==TF_PROFILETYPE_INPUTPROCESSOR ? nullptr : oldProfile.hkl,0)!=S_OK) shared->status=-6;
-        if (!ActivateKeyboardLayout((HKL)(UINT_PTR)shared->previousLayout,0)) shared->status=-7;
+            oldProfile.dwProfileType==TF_PROFILETYPE_INPUTPROCESSOR ? nullptr : oldProfile.hkl,0) : E_UNEXPECTED;
+        if (shared->activateProfileHresult!=S_OK && !shared->status) shared->status=-6;
         if (himc) { ImmSetOpenStatus(himc,shared->previousOpen);
             ImmSetConversionStatus(himc,shared->previousConversion,shared->previousSentence); }
     }
     if (himc) ImmReleaseContext(hwnd,himc);
+    TF_INPUTPROCESSORPROFILE current={};
+    shared->activeLanguage=0; shared->activeProfileType=0; shared->activeProfileLayout=0;
+    shared->activeClsid[0]=0; shared->activeProfile[0]=0;
+    shared->activeProfileHresult=mgr ? mgr->GetActiveProfile(category,&current) : E_UNEXPECTED;
     if (mgr) {
-        TF_INPUTPROCESSORPROFILE current={};
-        if (mgr->GetActiveProfile(category,&current)==S_OK) {
+        if (shared->activeProfileHresult==S_OK) {
             shared->activeLanguage=current.langid;
+            shared->activeProfileType=current.dwProfileType;
+            shared->activeProfileLayout=(uint64_t)(UINT_PTR)current.hkl;
             StringFromGUID2(current.clsid,shared->activeClsid,40);
             StringFromGUID2(current.guidProfile,shared->activeProfile,40);
         }
@@ -323,10 +376,17 @@ class CompositionObserver:
         self.commands.append({'command': command, 'status': state.status,
             'layout': int(self.api.user.GetKeyboardLayout(self.tid) or 0),
             'activeLanguage': state.activeLanguage, 'activeClsid': utf16(state.activeClsid),
-            'activeProfile': utf16(state.activeProfile)})
+            'activeProfile': utf16(state.activeProfile), 'previousLayout': state.previousLayout,
+            'previousProfileType': state.previousProfileType, 'previousLanguage': state.previousLanguage,
+            'previousClsid': utf16(state.previousClsid), 'previousProfile': utf16(state.previousProfile),
+            'previousProfileLayout': state.previousProfileLayout, 'activeProfileType': state.activeProfileType,
+            'activeProfileLayout': state.activeProfileLayout, 'profileManagerHresult': state.profileManagerHresult,
+            'previousProfileHresult': state.previousProfileHresult, 'activateProfileHresult': state.activateProfileHresult,
+            'activeProfileHresult': state.activeProfileHresult, 'activateLayoutError': state.activateLayoutError})
         assert state.status == 0, 'Owned native IME command failed: ' + str(self.commands[-1])
         if command == 4:
             wait_for(lambda: int(self.api.user.GetKeyboardLayout(self.tid) or 0) == state.previousLayout, 5)
+            validate_restoration(self.commands[-1])
             self.restored = True
         return self.commands[-1]
 
@@ -466,7 +526,7 @@ def case(suite, fixtures, output, readiness, module, extension):
         wait_for(lambda: any(row['result'] == '글' for row in observer.events()), 10)
         record['events'] = observer.events()
         record['stage'] = 'restore-owned-input-thread'
-        observer.command(4)
+        record['restoration'] = observer.command(4)
         record['layoutRestored'] = observer.restored
         record['imeCommands'] = observer.commands
         observer.close()
@@ -504,7 +564,7 @@ def case(suite, fixtures, output, readiness, module, extension):
             try:
                 record['events'] = observer.events()
                 if api.user.IsWindow(observer.focus):
-                    observer.command(4)
+                    record['restoration'] = observer.command(4)
                     record['layoutRestored'] = observer.restored
             except Exception as exc:
                 record.update(success=False, imeCleanupError=type(exc).__name__ + ': ' + str(exc))

@@ -46,6 +46,16 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
       id: readiness
       if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 한국어 입력 환경의 준비·실패 기록 즉시 보존
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-korean-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
+        retention-days: 1
+        if-no-files-found: error
     - name: 실제 Office 엔진의 생성·편집·저장·재열기
       shell: pwsh
       run: |
@@ -55,30 +65,64 @@ jobs:
       id: fixtures
       if: '!cancelled() && steps.build.outcome == ''success'''
     - name: 실제 한국어 조합·백스페이스·저장·재열기
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
         python suite/e2e/korean_ime_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime
         if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and content verification failed.' }
       if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
     - name: 한국어 탭 메뉴의 실제 접근성·화면 확인
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
         python suite/e2e/korean_ui_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui
         if ($LASTEXITCODE -ne 0) { throw 'Actual Korean native Tabbed UI verification failed.' }
       if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: korean-ui 원본 검증 기록 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-korean-ui-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-korean-ui/
+        retention-days: 1
+        if-no-files-found: error
     - name: 저장·취소·실패·창 복원·HWP 실행 수명 검사
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
         python suite/e2e/lifecycle_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-lifecycle
         if ($LASTEXITCODE -ne 0) { throw 'Actual native document lifecycle verification failed.' }
       if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: lifecycle 원본 검증 기록 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-lifecycle/
+        retention-days: 1
+        if-no-files-found: error
     - name: 독립 문서 초기화와 종료 40회 모두 통과
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
         python suite/e2e/startup_smoke.py --suite dist/OpenGeul-Office-0.1.1-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-startup --attempts 40
         if ($LASTEXITCODE -ne 0) { throw 'At least one independent startup failed.' }
       if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: startup 원본 검증 기록 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-startup-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-startup/
+        retention-days: 1
+        if-no-files-found: error
     - name: 첫 번째 전체 Suite GUI·편집 후 의미 검증
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
         $package = (Resolve-Path dist/OpenGeul-Office-0.1.1-dev-windows-x64).Path
@@ -88,6 +132,8 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'First post-GUI semantic verification failed.' }
       if: '!cancelled() && steps.fixtures.outcome == ''success'''
     - name: 새 문서 집합으로 전체 UI·E2E를 두 번째 독립 실행
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
         $package = (Resolve-Path dist/OpenGeul-Office-0.1.1-dev-windows-x64).Path
@@ -105,16 +151,19 @@ jobs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
         path: |
           .work/suite-engine/
           .work/suite-engine-2/
           .work/suite-native/
           .work/suite-native-2/
           .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
           .work/suite-korean-ime/
           .work/suite-korean-ui/
           .work/suite-lifecycle/
           .work/suite-startup/
+          .work/suite-worker-diagnostics/
           .work/office-suite/msi.msi.log
         retention-days: 1
         if-no-files-found: warn

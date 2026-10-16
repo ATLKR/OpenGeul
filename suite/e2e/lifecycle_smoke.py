@@ -37,7 +37,7 @@ CASE_REQUIREMENTS = {
     'failed-saveas-retains-editor': ('actualSaveAsFailureVerified', 'originalShaPreservedOnFailure', 'subsequentEditSavePersisted', 'packagedUnoVerified', 'cleanClose'),
     'home-two-documents-cancel': ('homeCancelPreservedRemainder', 'remainingEditorSavePersisted', 'packagedUnoVerified', 'cleanClose'),
     'resize-minimize-restore': ('childBoundsFollowedHost', 'minimizeRestoreVerified', 'restoredEditorSavePersisted', 'packagedUnoVerified', 'cleanClose'),
-    'hwp-tile-hwpx-route': ('hwpTileBundledProcessVerified', 'hwpxRouteBundledProcessVerified', 'webview2Verified', 'generatedHwpxUnchanged', 'cleanClose'),
+    'hwp-tile-hwpx-route': ('hwpTileBundledProcessVerified', 'hwpxRouteBundledProcessVerified', 'webview2Verified', 'postLoadEditorVerified', 'toolbarEnabled', 'generatedHwpxUnchanged', 'cleanClose'),
 }
 WRITER_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 HWPX_MARKER = 'Suite-HWPX-route-한글 & 123'
@@ -69,7 +69,13 @@ def writer_evidence(path, required=(), forbidden=()):
         document = ET.fromstring(package.read('word/document.xml'))
         body = document.find(WRITER_NS + 'body')
         assert body is not None, 'Saved Writer document has no body'
-        paragraphs = [''.join(node.text or '' for node in paragraph.iter(WRITER_NS + 't'))
+        # UNO Text.getString() includes soft line breaks and tabs. The generated
+        # Writer baseline itself ends with w:br, so discarding these tokens loses
+        # real body content before the independent exact-text comparison.
+        text_tokens = {WRITER_NS + 't': None, WRITER_NS + 'br': '\n',
+                       WRITER_NS + 'cr': '\n', WRITER_NS + 'tab': '\t'}
+        paragraphs = [''.join((node.text or '') if text_tokens[node.tag] is None else text_tokens[node.tag]
+                              for node in paragraph.iter() if node.tag in text_tokens)
                       for paragraph in body.iter(WRITER_NS + 'p')]
         text = '\n'.join(paragraphs)
     for marker in required:
@@ -103,6 +109,88 @@ def require_dialog_action(*, pid, shell_pid, owner, document, title, expected_ti
     native.require_dialog_identity(pid, shell_pid, owner, document, title, expected_title, class_name)
     assert expected_text in text, 'Dialog does not contain the exact expected prompt text'
     assert button in allowed, 'Dialog action is outside the explicit expected choices'
+
+
+def owned_menu_items(desktop, pid, name):
+    """A UIA Desktop enumerates windows; descendants belong to each wrapper."""
+    found, seen = [], set()
+    for root in desktop.windows(process=pid):
+        if root.element_info.process_id != pid: continue
+        for item in root.descendants(control_type='MenuItem'):
+            if (item.element_info.name != name or item.element_info.process_id != pid
+                or not item.is_visible() or not item.is_enabled()): continue
+            identity = tuple(item.element_info.runtime_id)
+            assert identity, 'Owned menu item has no UIA runtime identity'
+            if identity not in seen:
+                found.append(item)
+                seen.add(identity)
+    return found
+
+
+def owned_dialog_button(accessible, pid, labels):
+    # The observed hosted-Windows picker displayed Yes without exposing
+    # automation_id=6. Its exact label, process and verified dialog identity
+    # identify the intended action independently of that implementation detail.
+    candidates = [item for item in accessible.descendants(control_type='Button')
+                  if item.element_info.process_id == pid and item.element_info.name in labels
+                  and item.is_visible() and item.is_enabled()]
+    assert len(candidates) == 1, 'Exact owned dialog button is missing or ambiguous: ' + repr(labels)
+    return candidates[0]
+
+
+def accessibility_names(window):
+    # Labels need no control-specific wrappers. During WebView startup a raw
+    # element can have no ControlType, which pywinauto 0.6.9 cannot wrap even
+    # though its name is available. Keep that real name in the owned census.
+    info = window.element_info
+    return [info.name] + [item.name for item in info.descendants()]
+
+
+def hwp_accessibility_snapshot(window):
+    """Read public metadata below the already-bound native HWP root, without wrappers."""
+    from comtypes import COMError
+    infos = [window.element_info] + window.element_info.descendants()
+    assert len(infos) <= 4096, 'Owned HWP accessibility census exceeds its bounded fixture scope'
+    rows = []
+    for info in infos:
+        row = {'name': '', 'controlType': None, 'automationId': '', 'processId': None, 'runtimeId': [],
+               'enabled': False, 'visible': False, 'bounds': [0, 0, 0, 0]}
+        try:
+            name = info.name or ''
+            assert isinstance(name, str) and len(name) <= 4096, 'Owned HWP accessibility name exceeds its bounded fixture scope'
+            row.update(name=name, controlType=info.control_type, automationId=info.automation_id or '',
+                       processId=info.process_id, runtimeId=list(info.runtime_id or ()))
+            rectangle = info.rectangle
+            row.update(enabled=bool(info.enabled), visible=bool(info.visible),
+                       bounds=[int(rectangle.left), int(rectangle.top), int(rectangle.right), int(rectangle.bottom)])
+        except COMError as exc:
+            # A provider may invalidate a node during its normal startup. Keep
+            # the failed read in raw evidence; it cannot satisfy readiness.
+            row.update(enabled=False, visible=False, metadataError={'hresult': exc.hresult, 'message': str(exc)})
+        rows.append(row)
+    return rows
+
+
+def hwp_postload_observation(rows):
+    """Pinned HWP releases its inert style bar only after canvas.loadDocument()."""
+    def one(kind, match, *, visible):
+        candidates = [row for row in rows if row['controlType'] == kind and match(row)
+                      and type(row['processId']) is int and row['processId'] > 0 and row['runtimeId']
+                      and row['enabled'] is True and (not visible or (row['visible'] is True
+                          and row['bounds'][2] > row['bounds'][0] and row['bounds'][3] > row['bounds'][1]))]
+        assert len(candidates) <= 1, 'Owned HWP post-load control identity is ambiguous'
+        return candidates[0] if candidates else None
+    # RHWP deliberately places this IME textarea offscreen (left:-9999px,
+    # opacity:0). Requiring its visual bounds would reject the real editor.
+    editor = one('Edit', lambda row: row['name'] == '문서 편집 입력', visible=False)
+    size = one('Edit', lambda row: row['automationId'] == 'font-size' or row['name'] == '글자 크기 (pt)', visible=True)
+    # The pinned custom-select component exposes actual Button triggers using
+    # the selected text, rather than visible native ComboBox controls.
+    language = one('Button', lambda row: row['name'] == '대표', visible=True)
+    style = one('Button', lambda row: row['name'] == '바탕글', visible=True)
+    if any(row is None for row in (editor, size, language, style)): return None
+    return {'postLoadEditorVerified': True, 'toolbarEnabled': True, 'editorInput': editor,
+            'fontSize': size, 'fontLanguage': language, 'style': style}
 
 
 def require_child_bounds(host, child):
@@ -159,25 +247,33 @@ def verify_saved_with_uno(suite, output):
         engine.start()
         for record in records:
             if record.get('success') is not True or 'packagedUnoVerified' not in CASE_REQUIREMENTS.get(record.get('case'), ()): continue
-            saved = record.get('savedDocuments', [])
-            assert saved, 'Successful Writer lifecycle case has no saved document evidence'
             case_result = {'case': record['case'], 'success': False, 'documents': []}
             result['cases'].append(case_result)
-            for expected in saved:
-                path = Path(expected['path'])
-                unlinked(path)
-                assert path.resolve().is_relative_to((output / 'fixtures').resolve()), 'UNO verification escaped case-owned fixtures'
-                before = digest(path)
-                document = None
-                try:
-                    document = engine.load(path.resolve().as_uri())
-                    assert document.supportsService('com.sun.star.text.TextDocument'), 'UNO did not reopen a Writer document'
-                    observed = document.getText().getString()
-                finally: engine.close_document(document)
-                proof = require_uno_observation(expected, observed, before, digest(path))
-                case_result['documents'].append({'path': str(path), **proof})
-            case_result['success'] = True
-        result['success'] = all(row['success'] is True for row in result['cases'])
+            try:
+                saved = record.get('savedDocuments', [])
+                assert saved, 'Successful Writer lifecycle case has no saved document evidence'
+                for expected in saved:
+                    path = Path(expected['path'])
+                    unlinked(path)
+                    assert path.resolve().is_relative_to((output / 'fixtures').resolve()), 'UNO verification escaped case-owned fixtures'
+                    before = digest(path)
+                    document = None
+                    try:
+                        document = engine.load(path.resolve().as_uri())
+                        assert document.supportsService('com.sun.star.text.TextDocument'), 'UNO did not reopen a Writer document'
+                        observed = document.getText().getString()
+                    finally: engine.close_document(document)
+                    # Keep actual observations even when exact-text or byte
+                    # validation fails; later independent cases still execute.
+                    document_result = {'path': str(path), 'observedBodyText': observed,
+                                       'expectedBodyText': expected['bodyText'],
+                                       'beforeSha256': before, 'afterSha256': digest(path)}
+                    case_result['documents'].append(document_result)
+                    document_result.update(require_uno_observation(expected, observed, before, document_result['afterSha256']))
+                case_result['success'] = True
+            except Exception as exc:
+                native.capture_failure(output, 'packaged-uno-' + record['case'], case_result, exc)
+        result['success'] = bool(result['cases']) and all(row['success'] is True for row in result['cases'])
     except Exception as exc:
         native.capture_failure(output, 'packaged-uno', result, exc)
     finally:
@@ -300,9 +396,7 @@ class Case:
     def new_from_menu(self, hwnd):
         from pywinauto import Desktop
         self.shell_command(hwnd, '')
-        candidates = [item for item in Desktop(backend='uia').descendants(control_type='MenuItem')
-                      if item.element_info.name == '새 문서' and item.element_info.process_id == self.process.pid
-                      and item.is_visible() and item.is_enabled()]
+        candidates = owned_menu_items(Desktop(backend='uia'), self.process.pid, '새 문서')
         assert len(candidates) == 1, 'Exact owned shell New Document menu item must be unique'
         self.api.require_foreground(hwnd)
         candidates[0].click_input()
@@ -498,28 +592,26 @@ def failed_saveas(case):
         observed = native.wait_for(expected_error, 35)
         if observed[0] == 'overwrite':
             _, dialog, owner, accessible, texts = observed
-            buttons = [item for item in accessible.descendants(control_type='Button') if item.element_info.automation_id == '6' and item.is_visible() and item.is_enabled()]
-            assert len(buttons) == 1, 'Owned overwrite confirmation requires exact Yes control 6'
             native.require_dialog_identity(case.api.pid(dialog), case.process.pid, owner, picker,
                 case.api.title(dialog), case.api.title(dialog), case.api.class_name(dialog))
+            button = owned_dialog_button(accessible, case.process.pid, ('Yes', '&Yes', '예', '예(&Y)'))
             Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
             case.api.require_foreground(dialog)
-            buttons[0].click_input()
+            button.click_input()
             native.wait_for(lambda: not case.api.user.IsWindow(dialog), 20)
             observed = native.wait_for(expected_error, 35)
         kind, dialog, owner, accessible, texts = observed
         assert kind == 'failure', 'Save As did not produce a real recognized write denial'
-        buttons = [item for item in accessible.descendants(control_type='Button') if item.element_info.automation_id == '1' and item.is_visible() and item.is_enabled()]
-        assert len(buttons) == 1, 'Expected actual save-error OK control 1 is missing'
         caption = case.api.title(dialog)
         native.require_dialog_identity(case.api.pid(dialog), case.process.pid, case.api.user.GetWindow(dialog, 4), owner,
                                        caption, caption, case.api.class_name(dialog))
+        button = owned_dialog_button(accessible, case.process.pid, ('OK', '&OK', '확인'))
         case.screenshot(dialog, 'actual-saveas-error')
         case.record.update(actualSaveAsFailureVerified=True, failureSurface='suite-worker' if owner == hwnd else 'native-picker',
                            saveErrorCaption=caption, saveErrorText=texts)
         Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
         case.api.require_foreground(dialog)
-        buttons[0].click_input()
+        button.click_input()
         native.wait_for(lambda: not case.api.user.IsWindow(dialog), 20)
         if case.api.user.IsWindow(picker):
             # The attempted write was denied by the standard picker before dispatch.
@@ -600,37 +692,104 @@ def resize_restore(case):
     case.finish(hwnd, child)
 
 
-def _hwp_child_process(shell_pid, executable):
-    # Read-only process census; only an exact new child and executable may receive close.
-    command = '$p=Get-CimInstance Win32_Process -Filter "ParentProcessId=' + str(int(shell_pid)) + '"; @($p | Select-Object ProcessId,ParentProcessId,ExecutablePath) | ConvertTo-Json -Compress'
-    result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
-                            capture_output=True, encoding='utf-8', errors='strict', check=True, timeout=12)
-    rows = json.loads(result.stdout.lstrip('\ufeff') or '[]')
-    if isinstance(rows, dict): rows = [rows]
-    matches = [row for row in rows if row.get('ExecutablePath') and Path(row['ExecutablePath']).resolve() == executable.resolve()]
+class ProcessEntry32W(ctypes.Structure):
+    _fields_ = [('dwSize', ctypes.c_uint32), ('cntUsage', ctypes.c_uint32),
+                ('th32ProcessID', ctypes.c_uint32), ('th32DefaultHeapID', ctypes.c_size_t),
+                ('th32ModuleID', ctypes.c_uint32), ('cntThreads', ctypes.c_uint32),
+                ('th32ParentProcessID', ctypes.c_uint32), ('pcPriClassBase', ctypes.c_int32),
+                ('dwFlags', ctypes.c_uint32), ('szExeFile', wintypes.WCHAR * 260)]
+
+
+def hwp_kernel():
+    assert ctypes.sizeof(ctypes.c_void_p) == 8, 'Native HWP census requires the x64 harness'
+    if os.name == 'nt': assert ctypes.sizeof(ProcessEntry32W) == 568, 'PROCESSENTRY32W x64 layout is invalid'
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    bindings = {
+        'CreateToolhelp32Snapshot': ((wintypes.DWORD, wintypes.DWORD), wintypes.HANDLE),
+        'Process32FirstW': ((wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)), wintypes.BOOL),
+        'Process32NextW': ((wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)), wintypes.BOOL),
+        'OpenProcess': ((wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), wintypes.HANDLE),
+        'QueryFullProcessImageNameW': ((wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
+        'GetProcessTimes': ((wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4, wintypes.BOOL),
+        'GetSystemTimeAsFileTime': ((ctypes.POINTER(wintypes.FILETIME),), None),
+        'WaitForSingleObject': ((wintypes.HANDLE, wintypes.DWORD), wintypes.DWORD),
+        'CloseHandle': ((wintypes.HANDLE,), wintypes.BOOL),
+    }
+    for name, (arguments, result) in bindings.items():
+        function = getattr(kernel, name)
+        function.argtypes, function.restype = arguments, result
+    return kernel
+
+
+def valid_pid(pid):
+    assert type(pid) is int and 0 < pid <= 0xffffffff, 'Native process PID must fit a positive DWORD'
+    return pid
+
+
+def process_identity(kernel, handle):
+    buffer, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
+    if not kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    assert 0 < size.value < 32768 and len(buffer.value.encode('utf-16-le', errors='surrogatepass')) // 2 == size.value, 'Native process image path is invalid or truncated'
+    creation, exit_time, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+    if not kernel.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exit_time), ctypes.byref(kernel_time), ctypes.byref(user_time)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    created = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+    assert 0 < created <= 0xffffffffffffffff, 'Native process creation FILETIME is invalid'
+    return Path(buffer.value).resolve(), created
+
+
+def _hwp_child_process(shell_pid, executable, *, shell_creation):
+    # A native snapshot avoids starting PowerShell and WMI just to observe an
+    # already-owned child. Only exact PPID/name/image matches become witnesses.
+    valid_pid(shell_pid)
+    assert type(shell_creation) is int and 0 < shell_creation <= 0xffffffffffffffff, 'Retained Suite creation FILETIME is required'
+    kernel = hwp_kernel()
+    clock = wintypes.FILETIME()
+    kernel.GetSystemTimeAsFileTime(ctypes.byref(clock))
+    snapshot_started = (int(clock.dwHighDateTime) << 32) | int(clock.dwLowDateTime)
+    assert shell_creation <= snapshot_started <= 0xffffffffffffffff, 'Native snapshot timestamp precedes the retained Suite shell'
+    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS; read only.
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    matches = []
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        present = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while present:
+            if entry.th32ParentProcessID == shell_pid and entry.szExeFile.casefold() == executable.name.casefold():
+                pid = valid_pid(int(entry.th32ProcessID))
+                handle = kernel.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION.
+                if not handle: raise ctypes.WinError(ctypes.get_last_error())
+                try:
+                    image, created = process_identity(kernel, handle)
+                    # A PID can recycle between snapshot and OpenProcess. A
+                    # process born after snapshot start cannot prove that PPID;
+                    # a process predating our shell cannot be its new child.
+                    if image == executable.resolve() and shell_creation <= created <= snapshot_started:
+                        matches.append({'pid': pid, 'parentPid': shell_pid, 'executable': str(image), 'creationFileTime': created})
+                finally:
+                    if not kernel.CloseHandle(handle): raise ctypes.WinError(ctypes.get_last_error())
+            present = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+        if ctypes.get_last_error() != 18: raise ctypes.WinError(ctypes.get_last_error())  # ERROR_NO_MORE_FILES.
+    finally:
+        if not kernel.CloseHandle(snapshot): raise ctypes.WinError(ctypes.get_last_error())
     assert len(matches) <= 1, 'Bundled HWP launch produced multiple matching child processes'
-    return int(matches[0]['ProcessId']) if matches else None
+    return matches[0] if matches else None
 
 
 class BoundHwpProcess:
-    def __init__(self, pid, executable):
-        self.pid = pid
-        self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-        self.kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        self.kernel.OpenProcess.restype = wintypes.HANDLE
-        self.kernel.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
-        self.kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
-        self.kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-        self.kernel.WaitForSingleObject.restype = wintypes.DWORD
-        self.kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-        self.kernel.CloseHandle.restype = wintypes.BOOL
+    def __init__(self, pid, executable, *, expected_creation=None):
+        self.pid = valid_pid(pid)
+        self.kernel = hwp_kernel()
         self.handle = self.kernel.OpenProcess(0x100000 | 0x1000, False, pid)
         if not self.handle: raise ctypes.WinError(ctypes.get_last_error())
         try:
-            buffer, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
-            if not self.kernel.QueryFullProcessImageNameW(self.handle, 0, buffer, ctypes.byref(size)):
-                raise ctypes.WinError(ctypes.get_last_error())
-            assert Path(buffer.value).resolve() == executable.resolve(), 'HWP process executable changed before binding its native handle'
+            image, self.creation = process_identity(self.kernel, self.handle)
+            assert image == executable.resolve(), 'Owned process executable changed before binding its native handle'
+            if expected_creation is not None:
+                assert self.creation == expected_creation, 'HWP process creation changed before binding its native handle'
         except Exception:
             self.close()
             raise
@@ -661,11 +820,33 @@ def hwp_route(case):
     launches = []
 
     def verify_and_close(shell, *, path=None):
-        pid = native.wait_for(lambda: _hwp_child_process(shell.pid, executable), 45)
-        case.record.setdefault('ownedHwpPids', []).append(pid)
-        bound = BoundHwpProcess(pid, executable)
+        case.record['stage'] = 'hwpx-route-native-readiness' if path else 'hwp-tile-native-readiness'
+        shell_executable = case.suite / 'OpenGeul.Office.exe'
+        shell_bound = BoundHwpProcess(shell.pid, shell_executable)
         try:
+            assert shell.poll() is None and shell_bound.live(), 'Owned Suite shell exited before HWP child binding'
+            # Popen retains the actual launched process handle. Compare creation
+            # time so a recycled numeric PID cannot substitute another process.
+            assert process_identity(shell_bound.kernel, int(shell._handle))[1] == shell_bound.creation, 'Suite shell creation changed before HWP observation'
+            case.record.setdefault('hwpShellWitnesses', []).append({'pid': shell.pid, 'creationFileTime': shell_bound.creation,
+                                                                   'executable': str(shell_executable)})
+            def owned_child():
+                assert shell_bound.live(), 'Retained Suite shell exited during child census'
+                observed = _hwp_child_process(shell.pid, executable, shell_creation=shell_bound.creation)
+                assert shell_bound.live(), 'Retained Suite shell exited after child census'
+                return observed
+            observation = native.wait_for(owned_child, 45)
+            pid = observation['pid']
+            bound = BoundHwpProcess(pid, executable, expected_creation=observation['creationFileTime'])
+            case.record.setdefault('ownedHwpPids', []).append(pid)
+        except Exception:
+            shell_bound.close()
+            raise
+        try:
+            trace_seen = set()
+            trace_name = case.name + '-hwpx-route-readiness.jsonl'
             def ready():
+                assert bound.live(), 'Bound bundled HWP process exited before native readiness'
                 roots = [hwnd for hwnd in case.api.windows(pid) if case.api.class_name(hwnd) in ('Tauri Window', 'Chrome_WidgetWin_1')]
                 assert len(roots) <= 1, 'Bundled HWP editor root is ambiguous'
                 if not roots: return None
@@ -674,22 +855,44 @@ def hwp_route(case):
                 children = tree.descendants()
                 webviews = [child for child in children if child.class_name() in ('Chrome_WidgetWin_0', 'Chrome_WidgetWin_1', 'Chrome_RenderWidgetHostHWND')]
                 if not webviews: return None
-                labels = [item.element_info.name for item in Desktop(backend='uia').window(handle=hwnd).descendants()]
+                accessible = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
+                rows = hwp_accessibility_snapshot(accessible) if path else None
+                labels = [row['name'] for row in rows] if path else accessibility_names(accessible)
+                case.record['hwpReadiness'] = {'hwnd': int(hwnd), 'pid': pid, 'webviewHwnds': [int(child.handle) for child in webviews],
+                                             'labelCount': len(labels), 'filenameObserved': path is None or any(path.name in text for text in [case.api.title(hwnd)] + labels)}
+                if path:
+                    serialized = json.dumps(rows, ensure_ascii=False, sort_keys=True, allow_nan=False)
+                    signature = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+                    if signature not in trace_seen:
+                        trace_seen.add(signature)
+                        with (case.output / trace_name).open('a', encoding='utf-8') as trace:
+                            trace.write(json.dumps({'observation': len(trace_seen), 'hwnd': int(hwnd), 'pid': pid,
+                                'rowsSha256': signature, 'rows': rows}, ensure_ascii=False, allow_nan=False) + '\n')
+                    case.record['hwpReadinessEvidence'] = trace_name
                 if path and not any(path.name in text for text in [case.api.title(hwnd)] + labels): return None
+                if path:
+                    postload = hwp_postload_observation(rows)
+                    if postload is None: return None
+                    case.record.update(postLoadEditorVerified=True, toolbarEnabled=True, hwpEditorControls=postload)
                 return hwnd, [int(child.handle) for child in webviews], labels
             hwnd, webviews, labels = native.wait_for(ready, 75)
             case.screenshot(hwnd, 'hwpx-route' if path else 'hwp-tile')
-            launches.append({'pid': pid, 'parentPid': shell.pid, 'executable': str(executable), 'hwnd': int(hwnd),
+            launches.append({'pid': pid, 'parentPid': shell.pid, 'creationFileTime': bound.creation,
+                             'parentCreationFileTime': shell_bound.creation, 'executable': str(executable), 'hwnd': int(hwnd),
                              'webviewHwnds': webviews, 'title': case.api.title(hwnd), 'routedFile': path.name if path else None,
                              'filenameObserved': path is None or any(path.name in text for text in [case.api.title(hwnd)] + labels)})
             case.api.request_close(hwnd, pid)
             native.wait_for(lambda: not case.api.user.IsWindow(hwnd), 25)
             native.wait_for(lambda: not bound.live(), 25)
-        except Exception:
+        except Exception as exc:
             # Bound process and exact packaged executable were verified above.
+            # Capture the actual HWP surface before failure cleanup closes it.
+            native.capture_failure(case.output, case.name + ('-hwpx-route' if path else '-hwp-tile'), case.record, exc)
             bound.stop()
             raise
-        finally: bound.close()
+        finally:
+            try: bound.close()
+            finally: shell_bound.close()
 
     buttons = [item for item in Desktop(backend='uia').window(handle=home).descendants(control_type='Button')
                if item.element_info.name == 'OpenGeul HWP' and item.element_info.process_id == case.process.pid]

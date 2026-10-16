@@ -1,9 +1,12 @@
 """Evidence-policy tests for the Windows lifecycle acceptance harness."""
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -66,6 +69,38 @@ class LifecycleSmokeTests(unittest.TestCase):
                                      (expected['bodyText'], 'abc123', 'changed')):
             with self.assertRaises(AssertionError): smoke.require_uno_observation(expected, actual, before, after)
 
+    def test_independent_uno_reopen_retains_each_case_and_observed_text_after_one_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            fixtures = output / 'fixtures'
+            fixtures.mkdir()
+            records = []
+            for name in ('dirty-writer-cancel-save', 'dirty-writer-discard'):
+                target = fixtures / (name + '.docx')
+                with zipfile.ZipFile(target, 'w') as package:
+                    package.writestr('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Owned body</w:t></w:r></w:p></w:body></w:document>')
+                records.append({'case': name, 'success': True,
+                                'savedDocuments': [{'path': str(target), **smoke.writer_evidence(target)}]})
+            (output / 'results.json').write_text(json.dumps({'tests': records}), encoding='utf-8')
+            class Engine:
+                cleanup_errors = []
+                def __init__(self, suite): pass
+                def start(self): pass
+                def cleanup(self): pass
+                def close_document(self, document): pass
+                def load(self, url):
+                    text = 'Wrong observed body' if 'cancel-save' in url else 'Owned body'
+                    return SimpleNamespace(supportsService=lambda name: True,
+                                           getText=lambda: SimpleNamespace(getString=lambda: text))
+            with patch.object(smoke, '_sibling', return_value=SimpleNamespace(Engine=Engine)):
+                self.assertEqual(smoke.verify_saved_with_uno(output, output), 1)
+            result = json.loads((output / 'packaged-uno-result.json').read_text(encoding='utf-8'))
+            self.assertEqual(len(result['cases']), 2, 'One failed document must not hide another case\'s independent result')
+            self.assertFalse(result['success'])
+            self.assertFalse(result['cases'][0]['success'])
+            self.assertTrue(result['cases'][1]['success'])
+            self.assertEqual(result['cases'][0]['documents'][0]['observedBodyText'], 'Wrong observed body')
+
     def test_writer_evidence_reads_only_body_text_and_exact_marker_counts(self):
         if not hasattr(smoke, 'writer_evidence'): self.skipTest('RED: policy API not implemented')
         with tempfile.TemporaryDirectory() as directory:
@@ -78,6 +113,257 @@ class LifecycleSmokeTests(unittest.TestCase):
             self.assertEqual(len(evidence['sha256']), 64)
             with self.assertRaises(AssertionError): smoke.writer_evidence(source, ('MISSING',))
             with self.assertRaises(AssertionError): smoke.writer_evidence(source, (), ('MARKER',))
+
+    def test_writer_evidence_keeps_actual_soft_breaks_and_tabs_for_exact_uno_comparison(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'owned.docx'
+            with zipfile.ZipFile(source, 'w') as package:
+                package.writestr('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Engine-OpenGeul-writer 한글</w:t><w:br/><w:t>-LIFECYCLE-</w:t><w:tab/><w:t>끝</w:t></w:r></w:p><w:p><w:r><w:t>다음 문단</w:t><w:cr/></w:r></w:p></w:body></w:document>')
+            evidence = smoke.writer_evidence(source, ('-LIFECYCLE-',))
+            expected = 'Engine-OpenGeul-writer 한글\n-LIFECYCLE-\t끝\n다음 문단\n'
+            self.assertEqual(evidence['bodyText'], expected)
+            self.assertEqual(evidence['bodyParagraphs'], ['Engine-OpenGeul-writer 한글\n-LIFECYCLE-\t끝', '다음 문단\n'])
+            smoke.require_uno_observation(evidence, expected, evidence['sha256'], evidence['sha256'])
+
+    def test_owned_menu_search_uses_supported_window_roots_and_deduplicates_runtime_identity(self):
+        self.assertTrue(hasattr(smoke, 'owned_menu_items'), 'Owned menu enumeration is missing')
+        def item(name, pid, identity, visible=True, enabled=True):
+            return SimpleNamespace(element_info=SimpleNamespace(name=name, process_id=pid, runtime_id=identity),
+                                   is_visible=lambda: visible, is_enabled=lambda: enabled)
+        expected = item('새 문서', 31, [42, 1])
+        children = [expected, item('새 문서', 99, [42, 2]), item('다른 이름으로 저장...', 31, [42, 3]),
+                    item('새 문서', 31, [42, 4], visible=False)]
+        root = SimpleNamespace(element_info=SimpleNamespace(process_id=31), descendants=lambda **kw: children)
+        class Desktop:
+            def windows(self, **options):
+                self.options = options
+                return [root, root]
+        desktop = Desktop()
+        self.assertEqual(smoke.owned_menu_items(desktop, 31, '새 문서'), [expected])
+        self.assertEqual(desktop.options, {'process': 31})
+
+    def test_overwrite_yes_button_uses_exact_observed_label_and_owned_process(self):
+        self.assertTrue(hasattr(smoke, 'owned_dialog_button'), 'Owned exact-label dialog selection is missing')
+        def button(name, pid, automation_id, visible=True, enabled=True):
+            return SimpleNamespace(element_info=SimpleNamespace(name=name, process_id=pid, automation_id=automation_id),
+                                   is_visible=lambda: visible, is_enabled=lambda: enabled)
+        expected = button('Yes', 31, 'CommandButton_6')
+        controls = [button('No', 31, '7'), button('Yes', 99, '6'), expected,
+                    button('Yes', 31, '6', visible=False)]
+        accessible = SimpleNamespace(descendants=lambda **kw: controls)
+        self.assertIs(smoke.owned_dialog_button(accessible, 31, ('Yes', '예', '예(&Y)')), expected)
+        for controls in ([button('No', 31, '6')], [expected, expected], [button('Yes', 99, '6')]):
+            accessible = SimpleNamespace(descendants=lambda **kw: controls)
+            with self.assertRaises(AssertionError): smoke.owned_dialog_button(accessible, 31, ('Yes', '예', '예(&Y)'))
+
+    def test_real_save_error_action_targets_exact_owned_ok_without_assuming_automation_id(self):
+        class ReachedOwnedOk(Exception): pass
+        def click_ok(): raise ReachedOwnedOk('owned OK selected')
+        okay = SimpleNamespace(element_info=SimpleNamespace(name='OK', process_id=31, automation_id='CommandButton_1'),
+                               is_visible=lambda: True, is_enabled=lambda: True, click_input=click_ok)
+        prompt = SimpleNamespace(element_info=SimpleNamespace(name='문서를 저장하지 못했습니다. 문서 창을 유지합니다.'))
+        accessible = SimpleNamespace(descendants=lambda **kw: [okay] if kw else [prompt, okay], set_focus=lambda: None)
+        desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: accessible))
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            source = folder / 'original.docx'
+            source.write_bytes(b'owned original')
+            case = SimpleNamespace(source=source, folder=folder, record={}, process=SimpleNamespace(pid=31),
+                                   attach=lambda: (100, 200, 300), edit=lambda *args: None,
+                                   shell_command=lambda *args: None, picker=lambda *args: 500,
+                                   screenshot=lambda *args: None)
+            case.api = SimpleNamespace(windows=lambda pid: [600], pid=lambda hwnd: 31,
+                                       title=lambda hwnd: 'OpenGeul Office', class_name=lambda hwnd: '#32770',
+                                       require_foreground=lambda hwnd: None,
+                                       user=SimpleNamespace(GetWindow=lambda hwnd, relation: 100))
+            with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop)}), \
+                 patch.object(smoke, 'ExclusiveRead', return_value=SimpleNamespace(close=lambda: None)):
+                with self.assertRaisesRegex(ReachedOwnedOk, 'owned OK selected'):
+                    smoke.failed_saveas(case)
+
+    def test_read_only_hwp_label_census_keeps_names_without_instantiating_control_wrappers(self):
+        self.assertTrue(hasattr(smoke, 'accessibility_names'), 'Raw accessibility label census is missing')
+        children = [SimpleNamespace(name='경로 확인 & 한글 문서.hwpx', control_type=None),
+                    SimpleNamespace(name='OpenGeul', control_type='Text')]
+        info = SimpleNamespace(name='Owned HWP root', descendants=lambda: children)
+        def wrapped_descendants(): raise KeyError(None)
+        root = SimpleNamespace(element_info=info, descendants=wrapped_descendants)
+        self.assertEqual(smoke.accessibility_names(root), ['Owned HWP root', '경로 확인 & 한글 문서.hwpx', 'OpenGeul'])
+
+    def test_hwp_child_census_uses_native_parent_and_exact_image_without_starting_wmi(self):
+        self.assertIn('shell_creation', inspect.signature(smoke._hwp_child_process).parameters,
+                      'Snapshot PID reuse is not rejected against retained shell creation')
+        class Function:
+            def __init__(self, operation): self.operation = operation
+            def __call__(self, *args): return self.operation(*args)
+        class Kernel:
+            def __init__(self, rows, creation_overrides=None):
+                self.rows, self.position, self.error = rows, -1, 0
+                self.creation_overrides = creation_overrides or {}
+                self.opened, self.closed = [], []
+                self.CreateToolhelp32Snapshot = Function(lambda flags, pid: 777)
+                self.Process32FirstW = Function(lambda handle, entry: self.entry(entry, 0))
+                self.Process32NextW = Function(lambda handle, entry: self.entry(entry, self.position + 1))
+                self.OpenProcess = Function(self.open)
+                self.QueryFullProcessImageNameW = Function(self.image)
+                self.GetProcessTimes = Function(self.times)
+                self.GetSystemTimeAsFileTime = Function(self.clock)
+                self.WaitForSingleObject = Function(lambda handle, timeout: 258)
+                self.CloseHandle = Function(lambda handle: self.closed.append(handle) or 1)
+            def entry(self, pointer, position):
+                self.position = position
+                if position >= len(self.rows):
+                    self.error = 18
+                    return 0
+                pid, parent, name, _ = self.rows[position]
+                pointer._obj.th32ProcessID, pointer._obj.th32ParentProcessID = pid, parent
+                pointer._obj.szExeFile = name
+                return 1
+            def open(self, access, inherit, pid):
+                self.opened.append(pid)
+                return 1000 + pid
+            def image(self, handle, flags, buffer, length):
+                buffer.value = next(row[3] for row in self.rows if row[0] == handle - 1000)
+                length._obj.value = len(buffer.value)
+                return 1
+            def times(self, handle, creation, exit_time, kernel_time, user_time):
+                created = self.creation_overrides.get(handle - 1000, (1 << 32) + handle - 1000)
+                creation._obj.dwLowDateTime, creation._obj.dwHighDateTime = created & 0xffffffff, created >> 32
+                return 1
+            def clock(self, pointer):
+                pointer._obj.dwLowDateTime, pointer._obj.dwHighDateTime = 1000, 1
+        executable = Path('/owned/OpenGeul.exe').resolve()
+        rows = [(106, 99, 'OpenGeul.exe', str(executable)),
+                (107, 31, 'OpenGeul.exe', '/foreign/OpenGeul.exe'),
+                (108, 31, 'OpenGeul.exe', str(executable)),
+                (109, 31, 'Foreign.exe', '/foreign/Foreign.exe')]
+        for additional, expected in (([], 108), ([(110, 31, 'OpenGeul.exe', str(executable))], None)):
+            kernel = Kernel(rows + additional)
+            with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True), \
+                 patch.object(smoke.subprocess, 'run', side_effect=AssertionError('WMI subprocess must not run')):
+                if additional:
+                    with self.assertRaises(AssertionError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+                else:
+                    observed = smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+                    self.assertEqual(observed, {'pid': expected, 'parentPid': 31, 'creationFileTime': (1 << 32) + expected,
+                                                'executable': str(executable)})
+            self.assertEqual(kernel.opened[:2], [107, 108])
+            self.assertIn(777, kernel.closed)
+            self.assertIn(1107, kernel.closed)
+            self.assertIn(1108, kernel.closed)
+            self.assertIs(kernel.CreateToolhelp32Snapshot.restype, smoke.wintypes.HANDLE)
+            self.assertEqual(kernel.Process32FirstW.argtypes, (smoke.wintypes.HANDLE, smoke.ctypes.POINTER(smoke.ProcessEntry32W)))
+        self.assertEqual(smoke.ProcessEntry32W.th32DefaultHeapID.offset, 16)
+        self.assertEqual(smoke.ProcessEntry32W.th32ParentProcessID.offset, 32)
+        self.assertEqual(smoke.ProcessEntry32W.szExeFile.offset, 44)
+        kernel = Kernel([rows[0]])
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+             patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True):
+            self.assertIsNone(smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31))
+        self.assertEqual(kernel.closed, [777])
+        self.assertFalse(kernel.opened)
+        kernel = Kernel(rows)
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True):
+            for invalid in (-1, 0, 1 << 32, True):
+                with self.assertRaises(AssertionError): smoke._hwp_child_process(invalid, executable, shell_creation=(1 << 32) + 31)
+        kernel = Kernel(rows)
+        kernel.OpenProcess = Function(lambda *args: 0)
+        kernel.error = 5
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+             patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True), \
+             patch.object(smoke.ctypes, 'WinError', side_effect=lambda error: OSError(error, 'native failure'), create=True):
+            with self.assertRaises(OSError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+        self.assertEqual(kernel.closed, [777], 'Snapshot must close after a candidate handle failure')
+        kernel = Kernel(rows)
+        kernel.CreateToolhelp32Snapshot = Function(lambda *args: smoke.ctypes.c_void_p(-1).value)
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+             patch.object(smoke.ctypes, 'get_last_error', return_value=5, create=True), \
+             patch.object(smoke.ctypes, 'WinError', side_effect=lambda error: OSError(error, 'native failure'), create=True):
+            with self.assertRaises(OSError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+        self.assertFalse(kernel.closed, 'An invalid snapshot is never passed to CloseHandle')
+        for created in ((1 << 32) + 1, (1 << 32) + 2000):
+            kernel = Kernel([rows[2]], {108: created})
+            with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True):
+                self.assertIsNone(smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31),
+                                  'Stale PPID or post-snapshot recycled same-image process must never match')
+            self.assertEqual(kernel.closed, [1108, 777])
+        for failed in ('Process32FirstW', 'Process32NextW', 'QueryFullProcessImageNameW', 'GetProcessTimes'):
+            kernel = Kernel(rows)
+            setattr(kernel, failed, Function(lambda *args: 0))
+            kernel.error = 5
+            with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 patch.object(smoke.ctypes, 'get_last_error', side_effect=lambda: kernel.error, create=True), \
+                 patch.object(smoke.ctypes, 'WinError', side_effect=lambda error: OSError(error, 'native failure'), create=True):
+                with self.assertRaises(OSError): smoke._hwp_child_process(31, executable, shell_creation=(1 << 32) + 31)
+            self.assertIn(777, kernel.closed, failed)
+            if failed in ('QueryFullProcessImageNameW', 'GetProcessTimes'): self.assertIn(1107, kernel.closed, failed)
+
+    def test_retained_hwp_handle_rejects_pid_reuse_with_changed_creation_time(self):
+        self.assertIn('expected_creation', inspect.signature(smoke.BoundHwpProcess).parameters,
+                      'Retained handle does not verify the native snapshot creation witness')
+        class Function:
+            def __init__(self, operation): self.operation = operation
+            def __call__(self, *args): return self.operation(*args)
+        closed = []
+        def times(handle, creation, *args):
+            creation._obj.dwLowDateTime, creation._obj.dwHighDateTime = 108, 1
+            return 1
+        def image(handle, flags, buffer, length):
+            buffer.value = '/owned/OpenGeul.exe'
+            length._obj.value = len(buffer.value)
+            return 1
+        kernel = SimpleNamespace(**{name: Function(lambda *args: 1) for name in (
+            'CreateToolhelp32Snapshot', 'Process32FirstW', 'Process32NextW', 'WaitForSingleObject', 'GetSystemTimeAsFileTime')},
+            OpenProcess=Function(lambda *args: 1108), GetProcessTimes=Function(times),
+            QueryFullProcessImageNameW=Function(image), CloseHandle=Function(lambda handle: closed.append(handle) or 1))
+        with patch.object(smoke.ctypes, 'WinDLL', return_value=kernel, create=True):
+            with self.assertRaisesRegex(AssertionError, 'creation'):
+                smoke.BoundHwpProcess(108, Path('/owned/OpenGeul.exe'), expected_creation=(1 << 32) + 107)
+        self.assertEqual(closed, [1108])
+
+    def test_hwp_readiness_requires_real_postload_toolbar_and_enabled_offscreen_input(self):
+        self.assertTrue(hasattr(smoke, 'hwp_postload_observation'), 'Post-load HWP readiness policy is missing')
+        def row(name, kind, identity, *, enabled=True, visible=True, bounds=(10, 10, 70, 30)):
+            return {'name': name, 'controlType': kind, 'automationId': identity, 'enabled': enabled,
+                    'visible': visible, 'bounds': list(bounds), 'processId': 31, 'runtimeId': [31, len(identity)]}
+        rows = [row('경로 확인 & 한글 문서.hwpx', 'Text', 'sb-message'),
+                row('문서 편집 입력', 'Edit', '', visible=False, bounds=(-9999, 0, -9998, 1)),
+                row('글자 크기 (pt)', 'Edit', 'font-size'), row('대표', 'Button', ''), row('바탕글', 'Button', '')]
+        proof = smoke.hwp_postload_observation(rows)
+        self.assertTrue(proof['postLoadEditorVerified'])
+        self.assertTrue(proof['toolbarEnabled'])
+        self.assertEqual(proof['editorInput']['name'], '문서 편집 입력')
+        self.assertFalse(proof['editorInput']['visible'], 'Production IME textarea is deliberately offscreen')
+        self.assertEqual(proof['fontSize']['automationId'], 'font-size')
+        self.assertEqual(proof['fontLanguage']['name'], '대표')
+        for invalid in (rows[:2], rows[:3], rows[:4]):
+            self.assertIsNone(smoke.hwp_postload_observation(invalid), 'Filename and attached WebView do not prove document readiness')
+        for index, key, value in ((1, 'enabled', False), (2, 'enabled', False), (2, 'visible', False),
+                                  (2, 'controlType', 'Text'), (3, 'visible', False), (4, 'enabled', False)):
+            invalid = [item.copy() for item in rows]
+            invalid[index][key] = value
+            self.assertIsNone(smoke.hwp_postload_observation(invalid))
+        with self.assertRaises(AssertionError): smoke.hwp_postload_observation(rows + [rows[2]])
+
+    def test_hwp_raw_snapshot_retains_unavailable_metadata_without_certifying_a_control(self):
+        class COMError(Exception): hresult = -2147220991
+        class Stale:
+            name, control_type, automation_id, process_id, runtime_id = '글자 크기 (pt)', 'Edit', 'font-size', None, None
+            @property
+            def rectangle(self): raise COMError('Element is no longer available')
+        info = SimpleNamespace(name='Owned HWP root', control_type='Window', automation_id='', process_id=31,
+                               runtime_id=[31], enabled=True, visible=True,
+                               rectangle=SimpleNamespace(left=0, top=0, right=800, bottom=600), descendants=lambda: [Stale()])
+        with patch.dict('sys.modules', {'comtypes': SimpleNamespace(COMError=COMError)}):
+            try: rows = smoke.hwp_accessibility_snapshot(SimpleNamespace(element_info=info))
+            except COMError: self.fail('Unavailable UIA metadata must be retained as failed observation, never certify readiness')
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]['name'], '글자 크기 (pt)')
+        self.assertEqual(rows[1]['metadataError']['hresult'], -2147220991)
+        self.assertFalse(rows[1]['enabled'])
+        self.assertIsNone(smoke.hwp_postload_observation(rows))
 
     def test_targets_are_fresh_direct_children_and_never_links(self):
         if not hasattr(smoke, 'owned_target'): self.skipTest('RED: policy API not implemented')
