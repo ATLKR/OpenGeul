@@ -1,0 +1,77 @@
+name: OpenGeul Office Suite 개발 검증
+'on':
+  push:
+    branches: [work/opengeul-office-suite]
+  workflow_dispatch: null
+permissions:
+  contents: read
+concurrency:
+  group: office-suite-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  windows-suite:
+    if: github.event.repository.private == false
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Suite 단위 검사와 Windows shell 빌드 검사
+      shell: pwsh
+      run: |
+        python -m unittest discover -s suite/tests -v
+        if ($LASTEXITCODE -ne 0) { throw 'Suite unit tests failed.' }
+        dotnet --info
+        dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+        if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
+    - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
+      shell: pwsh
+      run: |
+        ./suite/scripts/build-suite.ps1
+    - name: 실제 Office 엔진의 생성·편집·저장·재열기
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path dist/OpenGeul-Office-0.1.0-dev-windows-x64).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine smoke tests failed.' }
+    - name: OpenGeul 창 내부의 실제 키보드 편집과 저장
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI test dependencies failed.' }
+        python suite/e2e/windows_smoke.py --suite dist/OpenGeul-Office-0.1.0-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-native
+        if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Windows keyboard tests failed.' }
+        $package = (Resolve-Path dist/OpenGeul-Office-0.1.0-dev-windows-x64).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine --verify-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Reopened UI-edited document contents failed verification.' }
+        python suite/scripts/verify-suite.py $package
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime files changed during GUI validation.' }
+    - name: 원본 GUI·엔진 검증 기록 보존
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-engine/
+          .work/suite-native/
+          .work/office-suite/msi.msi.log
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 6
+    - name: 검증한 Suite 개발 패키지 전달
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-office-suite-x64-${{ github.run_id }}
+        path: dist/OpenGeul-Office-0.1.0-dev-windows-x64.zip
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 0
