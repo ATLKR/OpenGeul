@@ -43,13 +43,13 @@ jobs:
         $package = (Resolve-Path dist/OpenGeul-Office-0.1.0-dev-windows-x64).Path
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine smoke tests failed.' }
-    - name: OpenGeul 창 내부의 실제 키보드 편집과 저장
+    - name: Suite 홈·6개 모듈 내장 창·3개 모듈 키보드 편집과 저장
       shell: pwsh
       run: |
         python -m pip install pywinauto==0.6.9 Pillow==12.3.0
         if ($LASTEXITCODE -ne 0) { throw 'Native UI test dependencies failed.' }
         python suite/e2e/windows_smoke.py --suite dist/OpenGeul-Office-0.1.0-dev-windows-x64 --fixtures .work/suite-engine/fixtures --output .work/suite-native
-        if ($LASTEXITCODE -ne 0) { throw 'Actual embedded Windows keyboard tests failed.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Suite home, native attachment or keyboard tests failed.' }
         $package = (Resolve-Path dist/OpenGeul-Office-0.1.0-dev-windows-x64).Path
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine --verify-ui
         if ($LASTEXITCODE -ne 0) { throw 'Reopened UI-edited document contents failed verification.' }

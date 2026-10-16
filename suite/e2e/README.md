@@ -23,7 +23,23 @@ text, spreadsheet formula/result, drawing geometry, math expression or embedded
 Firebird row is compared. Base uses the OfficeDatabaseDocument service and native
 embedded Firebird, avoiding the interactive database wizard and external Java.
 
-For the separate real GUI harness, open the first three fixtures in the Suite:
+Run the separate real GUI harness with the normal workflow Python and its pinned
+`pywinauto`/Pillow dependencies:
+
+```powershell
+python "$repo\suite\e2e\windows_smoke.py" --suite $suite --fixtures "$evidence\fixtures" --output $nativeEvidence
+```
+
+Use a fresh native evidence directory outside the Suite payload and fixtures.
+The harness first starts the Suite without arguments, checks the exact seven
+module accessibility labels and writes `home.png` and `home-result.json`.
+It then opens all six engine-generated Office fixtures, requiring each file to
+match its passing `engine-smoke.json` baseline path and SHA256 before launch.
+Every module must report a live child HWND beneath the Suite-owned native panel,
+an OpenGeul document title and no visible top-level Office process window. Each
+document and its remaining Suite home must close cleanly.
+
+Only the first three modules receive actual physical clicks and keyboard input:
 
 - Writer: append `UI-OpenGeul-writer` and save.
 - Calc: append `UI-OpenGeul-calc` to A1, preserving the original marker, and save.
@@ -31,6 +47,22 @@ For the separate real GUI harness, open the first three fixtures in the Suite:
 - Impress: append `UI-OpenGeul-impress` to a first-slide text shape and save.
   The only generated text shape starts at (2500,2500), size (20000,6000), in
   hundredths of a millimetre. A new text shape on that slide is also accepted.
+
+Keyboard input requires the Suite foreground window and focus inside its
+embedded editor. Saved OOXML must contain the new suffix, its bytes must change,
+and the marker must remain after close. Missing or partially written ZIP files
+keep the save wait pending; they cannot satisfy the predicate. There is no UNO,
+clipboard, DOM or programmatic document-mutation fallback in this GUI harness.
+
+Draw, Math and Base are **attach-only GUI checks**. They write
+`draw-attached.png`, `math-attached.png`, `base-attached.png` and corresponding
+`*-result.json`, and must leave their generated fixture bytes unchanged. These
+records explicitly keep `keyboardInputVerified` and `contentMutationVerified`
+false; they do not establish keyboard editing, a Base connection or Java/driver
+readiness. `results.json` records all six native attachments separately from the
+three physical-input cases. No case establishes IME composition, and Linux helper
+tests do not establish actual Windows GUI success. Failure screenshots/records
+remain failure evidence even if earlier cases passed.
 
 After the GUI has saved and closed each document, run:
 
