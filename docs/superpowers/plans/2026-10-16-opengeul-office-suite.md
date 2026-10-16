@@ -35,10 +35,10 @@
 `brand_runtime(source: Path, destination: Path, manifest: dict) -> dict` copies into a fresh directory,
 sets OpenGeul product/factory names and isolated profile, preserves legal files and returns a receipt.
 
-- [ ] 테스트를 먼저 작성하고 누락된 브랜딩·원본 불변·기존 출력 거부·license 보존의 실패를 관측한다.
-- [ ] 실제 registry/ini/zip 설정을 구조적으로 바꾸고 manifest/receipt를 생성한다.
-- [ ] synthetic runtime과 실제 로컬 런타임에서 검증한다. Windows GUI 확인은 별도로 남긴다.
-- [ ] 관련 파일만 커밋한다.
+- [x] 테스트를 먼저 작성하고 누락된 브랜딩·원본 불변·기존 출력 거부·license 보존의 실패를 관측한다.
+- [x] 실제 registry/ini/zip 설정을 구조적으로 바꾸고 manifest/receipt를 생성한다.
+- [x] synthetic runtime과 실제 로컬 런타임에서 검증한다. Windows GUI 확인은 별도로 남긴다.
+- [x] 관련 파일만 커밋한다.
 
 ### Task 2: 격리된 UNO 작업자와 내장 문서 세션
 
@@ -50,10 +50,10 @@ Commands: `attach` (parentHwnd,module,width,height,path?), `resize`, `status` (m
 Worker startup CLI: `--runtime PATH`; stdin/stdout carry protocol only. Attach creates an owned
 office process/profile/pipe and UNO Frame under the supplied HWND. No TCP UNO endpoint.
 
-- [ ] 요청 파서·상태 전이·닫기 취소·저장 실패·로컬 경로와 필터 검사를 먼저 실패시킨다.
-- [ ] UNO를 지연 로드하고 실제 Windows 프레임·전용 프로세스와 소유한 자원 정리를 구현한다.
-- [ ] 로컬 엔진 편집 증거와 Windows 자식 창 증거를 구분해 기록한다.
-- [ ] 관련 파일만 커밋한다.
+- [x] 요청 파서·상태 전이·닫기 취소·저장 실패·로컬 경로와 필터 검사를 먼저 실패시킨다.
+- [x] UNO를 지연 로드하고 실제 Windows 프레임·전용 프로세스와 소유한 자원 정리를 구현한다.
+- [x] 로컬 엔진 편집 증거와 Windows 자식 창 증거를 구분해 기록한다.
+- [x] 관련 파일만 커밋한다.
 
 ### Task 3: OpenGeul native Suite shell
 
@@ -62,10 +62,10 @@ office process/profile/pipe and UNO Frame under the supplied HWND. No TCP UNO en
 **Produces:** `OpenGeul.Office.exe`; home module tiles/open dialog, Office forms with native Panel HWND,
 worker JSON protocol, resize synchronization, close save/discard/cancel and worker errors.
 
-- [ ] 모듈 라우팅과 종료 결정 검사를 먼저 실패시킨다.
-- [ ] 얇은 Windows shell을 구현하고 문서 작업은 작업자에게 맡긴다.
-- [ ] .NET Windows 교차 빌드와 로컬에서 실행 가능한 검사를 수행한다.
-- [ ] 관련 파일만 커밋한다.
+- [x] 모듈 라우팅과 종료 결정 검사를 먼저 실패시킨다.
+- [x] 얇은 Windows shell을 구현하고 문서 작업은 작업자에게 맡긴다.
+- [x] .NET Windows 교차 빌드와 로컬에서 실행 가능한 검사를 수행한다.
+- [x] 관련 파일만 커밋한다.
 
 ### Task 4: 고정 입력·Windows 검증·개발 패키지
 
@@ -73,8 +73,8 @@ worker JSON protocol, resize synchronization, close save/discard/cancel and work
 Suite docs and `docs/VERIFICATION.md` with explicit development status.
 **Consumes:** Tasks 1–3, official runtime + optional verified existing HWP component.
 
-- [ ] payload 누락·변조·혼합 아키텍처·소스/라이선스 누락 검사를 먼저 실패시킨다.
-- [ ] 새 경로의 추출·빌드·브랜딩·inventory·ZIP과 소스 묶음을 구현한다.
+- [x] payload 누락·변조·혼합 아키텍처·소스/라이선스 누락 검사를 먼저 실패시킨다.
+- [x] 새 경로의 추출·빌드·브랜딩·inventory·ZIP과 소스 묶음을 구현한다.
 - [ ] Windows x64에서 실제 자식 HWND와 Writer/Calc/Impress 입력·저장·재열기를 검증한다.
-- [ ] 기존 HWP 정책/단위 검사와 전체 변경의 독립 리뷰를 수행한다.
+- [x] 기존 HWP 정책/단위 검사와 전체 변경의 독립 리뷰를 수행한다.
 - [ ] 확인한 결과물과 미완의 GUI·IME·ARM64·공개 배포 항목을 구분해 보고한다.
