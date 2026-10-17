@@ -21,7 +21,7 @@
   },
   "portPatch": {
     "filename": "firebird-windows-arm64.patch",
-    "sha256": "0e3eaf847a82269c0c2e1b5935327e7e628e2c1df9e488c9f642768f307854f2",
+    "sha256": "9217750cc5261d2aae28d42c0b644f6f8cddcb4a706d0e14060f62a584b5ef06",
     "strip": 0,
     "appliesAfter": "All pinned LibreOffice Windows Firebird patches"
   },
@@ -220,5 +220,33 @@
       "firebird-cygwin-msvc-warnings.patch"
     ],
     "beforeStage": "After all25 locked upstream Windows patches"
+  },
+  "remoteArchitecture": {
+    "upstreamCommit": "c02ba31824f5cee34cc8966fc44b38e6b395152a",
+    "identity": {
+      "name": "arch_winnt_arm64",
+      "value": 44
+    },
+    "beforeStage": "After all25 locked upstream Windows patches; neither remote header is changed by those patches",
+    "headers": [
+      {
+        "path": "src/remote/remote_def.h",
+        "beforeBytes": 3339,
+        "beforeSha256": "375df38ca00c2aa43f3fff3a28175d77ffb9b79c4aced9d130201308f9840ab3",
+        "afterBytes": 3425,
+        "afterSha256": "753dc75502e0696d20ebeca9def5104836f9d2a97f3e2596cbf01b940b06ebe5",
+        "upstreamUrl": "https://raw.githubusercontent.com/FirebirdSQL/firebird/c02ba31824f5cee34cc8966fc44b38e6b395152a/src/remote/remote_def.h",
+        "upstreamSha256": "b3524addff39577d5760859f88ff0f5d77ca5c79b5a89bc6420d9e8c27d64c35"
+      },
+      {
+        "path": "src/remote/protocol.h",
+        "beforeBytes": 20762,
+        "beforeSha256": "3c98b1e9cd49c10f593b74ca9ae52851cfecd49f973e902d1683f3e5b066aa5b",
+        "afterBytes": 20786,
+        "afterSha256": "6ff9f5138f68403c35c9f11f42c3968ca8389e712ef24ddd87ac58646636e2eb",
+        "upstreamUrl": "https://raw.githubusercontent.com/FirebirdSQL/firebird/c02ba31824f5cee34cc8966fc44b38e6b395152a/src/remote/protocol.h",
+        "upstreamSha256": "47566aa027acb25dcad56d2d2d4618cb401883b906acef9dfca6cc740557bc64"
+      }
+    ]
   }
 }

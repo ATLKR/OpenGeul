@@ -21,7 +21,7 @@ that assignment: `--enable-firebird-sdbc` alone therefore does not enable it.
 The installer adds an ARM64-only Firebird patch after the existing upstream
 patches. The patch recognizes `_M_ARM64` and selects the existing `CpuArm64 = 15`
 implementation identity instead of incorrectly falling through to Intel/I386.
-It leaves atomics, assembly, database formats and protocol numbers unchanged.
+It leaves atomics, assembly and database formats unchanged.
 The only inline x86 assembly found in the pinned source is legacy Win9x code,
 guarded by `WIN9X_SUPPORT`; no speculative assembly replacement is included.
 
@@ -49,6 +49,21 @@ Mandatory source checks compile the real fixed header and CPU branch for all
 three target macro sets. They establish source selection and definitions;
 actual Windows ABI, ODS comparison and complete native Base qualification remain
 required.
+
+The remote client code also requires a Windows ARM64 protocol architecture
+identity. The port backports Firebird's existing `arch_winnt_arm64 = 44` and
+the `WIN_NT && ARM64` selection from upstream commit
+`c02ba31824f5cee34cc8966fc44b38e6b395152a`. The manifest pins both upstream
+source URLs and SHA256 values and the before/after bytes of the two local
+headers. Existing architecture IDs retain their values; only the terminal
+`arch_max` sentinel advances to 45. The generic/canonical protocol negotiation
+stays unchanged. ARM64 must have a distinct identity because equality with the
+local architecture enables raw symmetric record transfer; aliasing it to the
+generic, 32-bit ARM or x64 identity would change that decision. The source check
+reproduces the missing declaration using the real fixed MSVC header, Windows
+common branch, remote header and protocol enum, then compiles ARM64, x64 and
+x86 selections. It proves source selection and preserves negotiation bytes;
+actual native transport interoperability and Base persistence remain required.
 
 Run the build on actual Windows ARM64 and verify the native host before using
 these options in `autogen.input`:

@@ -68,3 +68,26 @@
  #else
  #error unknown target platform
  #endif
+--- src/remote/remote_def.h
++++ src/remote/remote_def.h
+@@ -64,6 +64,8 @@
+ const P_ARCH ARCHITECTURE	= arch_darwin_ppc;
+ #elif defined(WIN_NT) && defined(AMD64)
+ const P_ARCH ARCHITECTURE	= arch_winnt_64;
++#elif defined(WIN_NT) && defined(ARM64)
++const P_ARCH ARCHITECTURE	= arch_winnt_arm64;
+ #elif defined(I386)
+ const P_ARCH ARCHITECTURE	= arch_intel_32;
+ #elif defined(DARWIN64)
+--- src/remote/protocol.h
++++ src/remote/protocol.h
+@@ -106,7 +106,8 @@
+ 	arch_darwin_x64		= 41,
+ 	arch_darwin_ppc64	= 42,
+ 	arch_arm            = 43,
+-	arch_max			= 44	// Keep this at the end
++	arch_winnt_arm64	= 44,
++	arch_max			= 45	// Keep this at the end
+ };
+ 
+ #include "../remote/remote_def.h"

@@ -253,6 +253,63 @@ class AuthenticatedSource(unittest.TestCase):
                 self.assertNotEqual(0,result.returncode,'Unsupported target was accepted as pure ARM64')
                 self.assertIn('unknown target platform',result.stderr)
 
+    def compile_remote_architecture(self, root, architecture, protocol, remote):
+        if not self.cxx:
+            if self.required:self.fail('Mandatory C++ compiler for the remote architecture source check is missing')
+            self.skipTest('A C++ compiler is required for the remote architecture source check')
+        macros={'arm64':'#define _M_ARM64 1\n','x64':'#define _M_AMD64 1\n#define _M_X64 1\n',
+                'x86':'#define _M_IX86 1\n'}
+        start=protocol.index('enum P_ARCH\n')
+        enum=protocol[start:protocol.index('};',start)+2]
+        common=(root/'src/common/common.h').read_text()
+        start=common.index('#ifdef WIN_NT')
+        windows=common[start:common.index('#endif /* WIN_NT */',start)+len('#endif /* WIN_NT */')]
+        # Compile the complete real remote header and its exact protocol enum.
+        # The already-tested fixed MSVC header supplies the Windows/CPU macros.
+        # Skip unrelated common declarations; this check claims no Windows ABI.
+        text=('#define _MSC_VER 1940\n'+macros[architecture]+
+              '#include "'+str(root/'src/include/gen/autoconfig_msvc.h')+'"\n'+
+              windows+'\n#define COMMON_COMMON_H\ntypedef unsigned short USHORT;\n'+enum+'\n'+remote+'\n'+
+              'static_assert(ARCHITECTURE=='+str({'arm64':44,'x64':40,'x86':29}[architecture])+',"wrong remote architecture");\n')
+        return subprocess.run([self.cxx,'-std=c++11','-Wno-unknown-pragmas','-x','c++','-fsyntax-only',
+                               '-I'+str(root/'src/remote'),'-'],input=text,text=True,capture_output=True)
+
+    def test_real_remote_architecture_backports_upstream_arm64_identity_without_reusing_old_ids(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.source_tree(folder)
+            paths=('src/remote/remote_def.h','src/remote/protocol.h')
+            original={path:(root/path).read_bytes() for path in paths}
+            self.apply(root,PORT/'firebird-windows-arm64.patch')
+            before=self.compile_remote_architecture(root,'arm64',original[paths[1]].decode(),original[paths[0]].decode())
+            self.assertNotEqual(0,before.returncode,'Original remote header no longer reproduces the ARM64 identity gap')
+            self.assertIn('ARCHITECTURE',before.stderr)
+            for architecture in ('x64','x86'):
+                result=self.compile_remote_architecture(root,architecture,original[paths[1]].decode(),original[paths[0]].decode())
+                self.assertEqual(0,result.returncode,architecture+': '+result.stderr)
+            for architecture in ('arm64','x64','x86'):
+                result=self.compile_remote_architecture(root,architecture,(root/paths[1]).read_text(),(root/paths[0]).read_text())
+                self.assertEqual(0,result.returncode,architecture+': '+result.stderr)
+            lock=json.loads((PORT/'source-build.json').read_text())['remoteArchitecture']
+            self.assertEqual('c02ba31824f5cee34cc8966fc44b38e6b395152a',lock['upstreamCommit'])
+            self.assertEqual({'name':'arch_winnt_arm64','value':44},lock['identity'])
+            branch=(b'#elif defined(WIN_NT) && defined(ARM64)\n'
+                    b'const P_ARCH ARCHITECTURE\t= arch_winnt_arm64;\n')
+            self.assertEqual(original[paths[0]].replace(b'#elif defined(I386)\n',branch+b'#elif defined(I386)\n'),
+                             (root/paths[0]).read_bytes(),'Only the native Windows ARM64 identity branch may change')
+            self.assertEqual(original[paths[1]].replace(b'\tarch_max\t\t\t= 44\t',
+                             b'\tarch_winnt_arm64\t= 44,\n\tarch_max\t\t\t= 45\t'),
+                             (root/paths[1]).read_bytes(),'Existing protocol identities and negotiation must remain unchanged')
+            with tarfile.open(self.archive,'r:bz2') as archive:
+                archived={path:archive.extractfile(next(item for item in archive.getmembers()
+                          if item.isfile() and item.name.endswith('/'+path))).read() for path in paths}
+            for item in lock['headers']:
+                path=item['path'];effective=(root/path).read_bytes()
+                self.assertEqual(archived[path],original[path],'Upstream patches unexpectedly changed the pinned remote header')
+                self.assertEqual(item['beforeBytes'],len(original[path]))
+                self.assertEqual(item['beforeSha256'],hashlib.sha256(original[path]).hexdigest())
+                self.assertEqual(item['afterBytes'],len(effective))
+                self.assertEqual(item['afterSha256'],hashlib.sha256(effective).hexdigest())
+
     def test_explicit_enable_flag_is_not_overwritten_by_arm64_defaults(self):
         autoconf = shutil.which('autoconf')
         if not autoconf:
