@@ -46,6 +46,18 @@ loading, resolve every possible dependency failure or qualify Base. Missing
 that message file after its message database, so copying a message file does
 not repair the demonstrated loader path.
 
+The standalone `isql` proof runs outside that make child. It validates the
+compiled internal ICU 78.3 release triplet as owned native ARM64 DLLs and
+retains each file's size and SHA256. Only the create/reopen child processes
+receive the compiled ICU directory before the inherited Windows `PATH`, plus
+their explicit `FIREBIRD` root. The controller environment stays unchanged.
+Command receipts retain hashes of those effective values and the proof records
+the selected prefix/root, without dumping the inherited host environment.
+Even ASCII database creation prepares Unicode system metadata and loads ICU;
+this provisioning is required independently of the integer SQL fixture. The
+source and portable command checks do not establish an actual Windows ICU
+load or native Base qualification.
+
 The same ARM64-only patch selects Firebird's existing `_controlfp` path for
 the three Windows floating-point save/mask/restore guards, as newer upstream
 Firebird does for ARM64. Microsoft restricts `__control87_2` to x86; its UCRT

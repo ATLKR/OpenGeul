@@ -274,7 +274,7 @@ function Get-CommandCreationIdentity($Process) {
         creationIdentityUnavailableReason=$reason}
 }
 
-function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350) {
+function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350,[hashtable]$EnvironmentOverrides=@{}) {
     $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null;
         timeoutMinutes=$TimeoutMinutes;pipeDrainComplete=$false;forcedTermination=$false;directProcessDeathVerified=$false;processTreeCleanup='not-requested';cleanupErrors=@()}
     $stdout=$LogPrefix+'.stdout.log';$stderr=$LogPrefix+'.stderr.log'
@@ -288,6 +288,17 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$FilePath;$info.WorkingDirectory=$WorkingDirectory
         $info.UseShellExecute=$false;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
         foreach($argument in $Arguments) {$info.ArgumentList.Add($argument)}
+        if($EnvironmentOverrides.Count) {
+            # Only these two explicitly selected loader values may differ.
+            # Retain their digests without dumping the inherited host PATH.
+            $receipt.environmentOverrideSha256=[ordered]@{}
+            foreach($name in $EnvironmentOverrides.Keys) {
+                if($name -cnotin @('PATH','FIREBIRD') -or $EnvironmentOverrides[$name] -isnot [string] -or $EnvironmentOverrides[$name].Contains([char]0)) {throw 'Unsupported child environment override.'}
+                $value=$EnvironmentOverrides[$name]
+                $info.Environment[$name]=$value
+                $receipt.environmentOverrideSha256[$name]=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($value))).ToLowerInvariant()
+            }
+        }
         $process=[Diagnostics.Process]::new();$process.StartInfo=$info
         $outStream=[IO.File]::Open($stdout,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
         $errStream=[IO.File]::Open($stderr,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
@@ -697,6 +708,28 @@ QUIT;
     return [ordered]@{create=$create;verify=$verify}
 }
 
+function Get-IsqlIcuPlan([string]$SourceDirectory,[Collections.IDictionary]$Configuration) {
+    # This source pin builds ICU 78.3 in release mode. Do not silently use an
+    # ambient/system or debug ICU, or substitute foreign product DLLs.
+    foreach($entry in @(@('ICU_MAJOR','78'),@('ICU_MINOR','3'),@('SYSTEM_ICU',''),@('MSVC_USE_DEBUG_RUNTIME',''))) {
+        if(-not $Configuration.Contains($entry[0]) -or $Configuration[$entry[0]] -cne $entry[1]) {throw 'Standalone isql requires the pinned internal release ICU 78.3 configuration.'}
+    }
+    $directory=[IO.Path]::GetFullPath((Join-Path $SourceDirectory 'workdir/UnpackedTarball/icu/source/lib'))
+    if($directory -match '[;\r\n]') {throw 'Compiled ICU directory cannot be a loader-path list.'}
+    Assert-UnlinkedPath $directory
+    if(-not(Test-Path -LiteralPath $directory -PathType Container)) {throw 'Compiled ICU directory is missing.'}
+    $files=@()
+    foreach($name in @('icudt78.dll','icuuc78.dll','icuin78.dll')) {
+        $path=Join-Path $directory $name;Assert-UnlinkedPath $path
+        if(-not(Test-Path -LiteralPath $path -PathType Leaf)) {throw "Compiled ICU DLL is missing: $name"}
+        $identity=Get-ProductPeIdentity $path
+        $bytes=[IO.File]::ReadAllBytes($path);$offset=[BitConverter]::ToUInt32($bytes,60)
+        if($identity.role -cne 'nativeArm64' -or $identity.machine -ne 0xaa64 -or -not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw "Compiled ICU must be a native ARM64 DLL: $name"}
+        $identity.name=$name;$files+=$identity
+    }
+    return [ordered]@{directory=$directory;version='78.3';architecture='arm64';origin='compiled internal ICU from authenticated pinned source';files=$files}
+}
+
 function Assert-IsqlOutput([string]$Path) {
     $text=Get-Content -LiteralPath $Path -Raw
     foreach($pair in @(@('ROW_COUNT',2),@('TOTAL',68),@('ROW_ONE',1),@('ROW_THREE',1))) {
@@ -1094,13 +1127,13 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                     $sql=Get-IsqlSql (Join-Path $work 'isql-proof.fdb')
                     $createSql=Join-Path $work 'isql-create.sql';$verifySql=Join-Path $work 'isql-verify.sql'
                     $sql.create|Set-Content $createSql -Encoding ascii;$sql.verify|Set-Content $verifySql -Encoding ascii
-                    $oldFirebird=$env:FIREBIRD
-                    try {
-                        $env:FIREBIRD=$fbOutput
-                        Invoke-LoggedCommand $isql @('-b','-q','-i',$createSql) $fbOutput (Join-Path $evidence 'isql-create')|Out-Null
-                        $query=Invoke-LoggedCommand $isql @('-b','-q','-user','SYSDBA','-password','masterkey','-i',$verifySql,(Join-Path $work 'isql-proof.fdb')) $fbOutput (Join-Path $evidence 'isql-reopen')
-                        Assert-IsqlOutput $query.stdout;$receipt.isql.verified=$true
-                    } finally {$env:FIREBIRD=$oldFirebird}
+                    $receipt.isql.icu=Get-IsqlIcuPlan $source $receipt.configuration
+                    Write-BuildJson (Join-Path $evidence 'isql-icu.json') $receipt.isql.icu
+                    $isqlEnvironment=@{PATH=$receipt.isql.icu.directory+[IO.Path]::PathSeparator+$env:PATH;FIREBIRD=$fbOutput}
+                    $receipt.isql.environment=[ordered]@{PATH=@{prepend=$receipt.isql.icu.directory;separator=[string][IO.Path]::PathSeparator;inheritParent=$true};FIREBIRD=$fbOutput;scope='isql-create and isql-reopen children only'}
+                    Invoke-LoggedCommand $isql @('-b','-q','-i',$createSql) $fbOutput (Join-Path $evidence 'isql-create') -EnvironmentOverrides $isqlEnvironment|Out-Null
+                    $query=Invoke-LoggedCommand $isql @('-b','-q','-user','SYSDBA','-password','masterkey','-i',$verifySql,(Join-Path $work 'isql-proof.fdb')) $fbOutput (Join-Path $evidence 'isql-reopen') -EnvironmentOverrides $isqlEnvironment
+                    Assert-IsqlOutput $query.stdout;$receipt.isql.verified=$true
                 }
             }
         }
