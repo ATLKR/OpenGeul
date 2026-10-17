@@ -1,0 +1,33 @@
+name: OpenGeul native ARM64 CRT ABI diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-native-crt-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-crt-diagnostic:
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - name: Preserve source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Compile and observe only the native ARM64 CRT ABI
+        shell: pwsh
+        run: |
+          ./suite/scripts/probe-native-crt.ps1 -Output .work/native-crt-probe
+          if ($LASTEXITCODE -ne 0) { throw 'Native CRT diagnostic failed; preserve its original evidence.' }
+      - name: Retain original diagnostics including evidence-only suspect bytes
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-crt-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .work/native-crt-probe/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
