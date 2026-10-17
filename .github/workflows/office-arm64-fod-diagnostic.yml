@@ -1,0 +1,34 @@
+name: OpenGeul ARM64 Korean FoD diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-arm64-fod-diagnostic]
+permissions:
+  contents: read
+jobs:
+  arm64-fod-diagnostic:
+    runs-on: windows-11-arm
+    timeout-minutes: 40
+    steps:
+      - name: Keep checkout line endings LF
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw 'Could not disable checkout newline conversion.' }
+          git config --global core.eol lf
+          if ($LASTEXITCODE -ne 0) { throw 'Could not configure LF checkout.' }
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: One bounded native ARM64 online capability diagnostic
+        shell: pwsh
+        run: |
+          ./suite/scripts/diagnose-arm64-korean-fod.ps1 -Output .work/arm64-fod-diagnostic
+      - name: Retain all original bounded diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-arm64-fod-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .work/arm64-fod-diagnostic/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
