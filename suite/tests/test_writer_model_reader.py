@@ -72,7 +72,7 @@ def native_fixture(binding, suite_root):
 def cleanup_fixture(binding,suite_root):
     raw=native_fixture(binding,suite_root)
     member=copy.deepcopy(raw['readerProcess']);member.update(waitResult=0,exitCode=0)
-    return dict(kind='owned-writer-reader-cleanup',binding=copy.deepcopy(binding),cleanupSucceeded=True,physicalCleanupSucceeded=True,contextQualified=True,
+    value=dict(kind='owned-writer-reader-cleanup',binding=copy.deepcopy(binding),cleanupSucceeded=True,physicalCleanupSucceeded=True,contextQualified=True,
         startedAt=1.0,finishedAt=1.1,deadline=12.0,terminated=False,
         releaseAcknowledgement=dict(action='release',readerPid=99,proxiesReleased=True,
             profileDirectory=copy.deepcopy(raw['nativeSnapshots']['helperBefore']['profileDirectory']),
@@ -83,6 +83,30 @@ def cleanup_fixture(binding,suite_root):
         handleClosures=[dict(kind='member',handleValue=301,result=True),dict(kind='member',handleValue=304,result=True),dict(kind='process',handleValue=302,result=True),
             dict(kind='job',handleValue=401,result=True),dict(kind='shell',handleValue=101,result=True),
             dict(kind='office',handleValue=102,result=True),dict(kind='profile-directory',handleValue=601,result=True),dict(kind='system-console-file',handleValue=501,result=True)],errors=[])
+    for index,row in enumerate(value['readerMembers']):state_sample_fixture(row,index)
+    value.update(state_receipt_fixture(value['readerMembers']))
+    return value
+
+
+def state_sample_fixture(row,index):
+    at=1.01+index*.001;handle=row['handleValue']
+    row.update(sampleIndex=index,phase='release',sampleStartedAt=at,sampleFinishedAt=at,
+        membershipCall=dict(api='IsProcessInJob',handleValue=handle,jobHandleValue=row['jobHandleValue'],result=True,inOwnedJob=True,lastError=0,observedAt=at),
+        stateCalls=[dict(api='WaitForSingleObject',handleValue=handle,timeoutMilliseconds=0,result=row['waitResult'],lastError=0,observedAt=at),
+            dict(api='GetExitCodeProcess',handleValue=handle,result=True,exitCode=row['exitCode'],lastError=0,observedAt=at)])
+    return row
+
+
+def state_receipt_fixture(rows):
+    identities=[];samples=[]
+    for row in rows:
+        identity={key:row[key] for key in ('pid','creationTime','image','handleValue','jobHandleValue')}
+        if identity not in identities:identities.append(identity)
+        m=row['membershipCall'];w,e=row['stateCalls']
+        samples.append(dict(index=row['sampleIndex'],member=identities.index(identity),phase=row['phase'],times=[row['sampleStartedAt'],row['sampleFinishedAt']],
+            calls=[[m['api'],m['observedAt'],m['result'],m['inOwnedJob'],m['lastError']],
+                [w['api'],w['observedAt'],w['result'],w['lastError']],[e['api'],e['observedAt'],e['result'],e['exitCode'],e['lastError']]]))
+    return dict(memberStateIdentities=identities,memberStateSamples=samples)
 
 
 def binding_fixture():
@@ -112,6 +136,186 @@ class ReaderContracts(unittest.TestCase):
 
     def setUp(self):
         self.binding=binding_fixture();self.value=observation_fixture(self.binding)
+
+    def _exit_script(self,pairs,*,release=True,job_stays=False,close_ok=True):
+        """Actual controller/RPC/typed diagnostics, with only Windows DLL/file peers faked."""
+        from types import SimpleNamespace
+        api=self.api;binding=binding_fixture();fixture=cleanup_fixture(binding,'C:/Suite')
+        members=copy.deepcopy(fixture['readerMembers'])
+        members.append(dict(copy.deepcopy(members[0]),pid=100,handleValue=305,image=fixture['systemConsoleHost']['path']))
+        script={row['handleValue']:list(pairs) for row in members};current={};events=[];clock=[1.0];last=[0];forced=[False]
+        class Function:
+            def __init__(self,function):self.function=function
+            def __call__(self,*args):return self.function(*args)
+        def wait(handle,milliseconds):
+            self.assertEqual(milliseconds,0);events.append(('wait',handle))
+            pair=(0,1) if forced[0] else script[handle].pop(0) if len(script[handle])>1 else script[handle][0]
+            current[handle]=pair;last[0]=6 if pair[0]==0xffffffff else 0;return pair[0]
+        def get_exit(handle,output):
+            events.append(('exit',handle));code=current[handle][1]
+            if code is None:last[0]=5;return False
+            output._obj.value=code;last[0]=0;return True
+        def membership(handle,job,output):output._obj.value=True;return True
+        dll=SimpleNamespace(**{name:Function(lambda *args:True) for name in ('QueryInformationJobObject','OpenProcess','QueryFullProcessImageNameW','GetProcessTimes','CloseHandle')},
+            IsProcessInJob=Function(membership),WaitForSingleObject=Function(wait),GetExitCodeProcess=Function(get_exit))
+        native=api._worker_native()
+        with patch.object(native,'windows_dll',lambda name:dll):diagnostics=native.ProcessDiagnosticsApi()
+        diagnostics.job_pids=lambda job: [r['pid'] for r in members] if job_stays or any(current.get(r['handleValue'],(258,259))[0]==258 for r in members) else []
+        self.assertEqual(diagnostics.wait_for.argtypes,[native.wt.HANDLE,native.wt.DWORD])
+        self.assertEqual(diagnostics.get_exit.restype,native.wt.BOOL)
+        class Job:
+            job=401;handle=302;pid=98
+            def poll(self):return None
+            def terminate(self):forced[0]=True;events.append('terminate-owned-job')
+            def close_handle(self,handle):events.append(('close',handle));return close_ok
+            def close(self):self.close_handle(self.handle);self.close_handle(self.job);self.handle=self.job=None
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        reader=api.OwnedWriterReader(Path('C:/Suite'),Path(temporary.name),shell_pid=77,expected_shell_creation=111,suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url=binding['documentUrl'],clock=lambda:clock[0])
+        reader.deadline=12.0;reader.binding=binding;reader.process=Job();reader.diagnostics=diagnostics;reader.helper_launch=fixture['helperLaunch']
+        reader.members={row['pid']:(row['handleValue'],{key:row[key] for key in ('creationTime','image')}) for row in members}
+        reader.anchor=SimpleNamespace(base={key:value for key,value in binding.items() if key not in ('frameIdentity','controllerIdentity','modelIdentity','documentUrl')},
+            snapshot=lambda:copy.deepcopy(fixture['nativeBefore']),close=lambda:[copy.deepcopy(row) for row in fixture['handleClosures'] if row['kind'] in ('shell','office','profile-directory')])
+        reader.console=SimpleNamespace(witness=fixture['systemConsoleHost'],recheck=lambda:copy.deepcopy(fixture['systemConsoleHostRecheck']),close=lambda:dict(kind='system-console-file',handleValue=501,result=True))
+        original=api._atomic_json
+        def atomic(path,value):
+            original(path,value)
+            if path.name.startswith('request-'):
+                ack=dict(fixture['releaseAcknowledgement'],ok=True,sequence=value['sequence'])
+                original(path.parent/f"reply-{value['sequence']:03d}.json",ack)
+        def sleep(seconds):clock[0]+=seconds
+        with patch.object(api,'_atomic_json',atomic),patch.object(api.time,'sleep',sleep),patch.object(api,'_clear_last_error',lambda:last.__setitem__(0,0)),patch.object(api,'_last_error',lambda:last[0]),patch.object(api.ctypes,'WinError',lambda code:OSError(code,'fake native API failure'),create=True):
+            if release:result=reader.close(12.0)
+            else:
+                try:reader._member_snapshots();result=None
+                except BaseException as exc:result=exc
+        return result,reader,events
+
+    def test_release_transition_needs_fresh_signaled_zero_for_all_same_handles(self):
+        cleanup,reader,events=self._exit_script([(258,0),(0,0)])
+        self.assertTrue(cleanup['cleanupSucceeded'],cleanup['errors'])
+        self.assertNotIn('terminate-owned-job',events)
+        samples=[self.api._expand_member_sample(s,cleanup['memberStateIdentities']) for s in cleanup['memberStateSamples']];self.assertEqual(len(samples),6)
+        self.assertEqual([(row['waitResult'],row['exitCode']) for row in samples],[(258,0)]*3+[(0,0)]*3)
+        for row in cleanup['readerMembers']:
+            first=next(r for r in samples if r['pid']==row['pid']);self.assertEqual(first['handleValue'],row['handleValue'])
+            self.assertEqual([c['api'] for c in row['stateCalls']],['WaitForSingleObject','GetExitCodeProcess'])
+        self.api.require_reader_cleanup(cleanup,self.binding,12.0)
+
+    def test_read_transition_remains_failure_and_preserves_original_pair(self):
+        failure,reader,events=self._exit_script([(258,0)],release=False)
+        self.assertIsInstance(failure,AssertionError)
+        self.assertEqual((reader.member_state_samples[0]['waitResult'],reader.member_state_samples[0]['exitCode']),(258,0))
+
+    def test_exit_api_failures_and_crash_keep_first_raw_sample_during_forced_cleanup(self):
+        for pair in ((258,0xc0000005),(0,259),(0xffffffff,0),(258,None)):
+            with self.subTest(pair=pair):
+                cleanup,reader,events=self._exit_script([pair])
+                self.assertFalse(cleanup['cleanupSucceeded']);self.assertIn('terminate-owned-job',events)
+                first=cleanup['memberStateSamples'][0];calls=first['calls']
+                self.assertEqual(calls[1][2],pair[0])
+                if pair[1] is None:
+                    self.assertFalse(calls[2][2]);self.assertEqual(calls[2][4],5)
+                    self.assertIsNone(calls[2][3])
+                if pair[0]==0xffffffff:self.assertEqual(calls[1][3],6)
+                elif pair[1] is not None:self.assertEqual(calls[2][3],pair[1])
+                self.assertEqual(reader.member_state_samples[0]['sampleIndex'],first['index'])
+                self.assertGreaterEqual(len(cleanup['errors']),2)
+
+    def test_exit_pending_and_nonempty_job_cannot_extend_original_budget(self):
+        for pair,job_stays in (((258,0),False),((0,0),True)):
+            with self.subTest(pair=pair,job_stays=job_stays):
+                cleanup,reader,events=self._exit_script([pair],job_stays=job_stays)
+                self.assertFalse(cleanup['cleanupSucceeded']);self.assertTrue(cleanup['terminated'])
+                self.assertEqual(reader.deadline,12.0);self.assertGreaterEqual(cleanup['finishedAt'],12.0)
+                self.assertLessEqual(len(cleanup['memberStateSamples']),4096)
+
+    def test_cleanup_replay_requires_final_raw_pair_and_same_retained_sample(self):
+        for change in ('missing','handle','wait','exit','bool','order','time','generation','pending-read'):
+            value=cleanup_fixture(self.binding,'C:/Suite');row=value['readerMembers'][0]
+            if change=='missing':value.pop('memberStateSamples')
+            elif change=='handle':row['stateCalls'][0]['handleValue']=999
+            elif change=='wait':row['stateCalls'][0]['result']=258
+            elif change=='exit':row['stateCalls'][1]['exitCode']=3
+            elif change=='bool':row['stateCalls'][1]['result']=1
+            elif change=='order':row['stateCalls'].reverse()
+            elif change=='time':row['stateCalls'][1]['observedAt']=0
+            elif change=='generation':value['memberStateIdentities'][0]['creationTime']+=1
+            else:
+                early=copy.deepcopy(value['memberStateSamples'][0]);early.update(phase='read');early['calls'][1][2]=258
+                value['memberStateSamples'].insert(0,early)
+                for index,sample in enumerate(value['memberStateSamples']):sample['index']=index
+                for row in value['readerMembers']:row['sampleIndex']+=1
+            with self.subTest(change=change),self.assertRaises(AssertionError):self.api.require_reader_cleanup(value,self.binding,12.0)
+
+    def test_individual_sample_cap_fails_before_next_native_call(self):
+        result,reader,events=self._exit_script([(258,259)],release=False)
+        sample=reader.member_state_samples[0]
+        reader.member_state_samples=[sample]*4096
+        before=len(events)
+        with self.assertRaisesRegex(AssertionError,'sample bound'):reader._member_snapshots()
+        self.assertEqual(len(events),before)
+
+    def test_maximum_individual_history_fits_original_transport_bound(self):
+        value=cleanup_fixture(self.binding,'C:/Suite');rows=[]
+        for index in range(4096):
+            row=copy.deepcopy(value['readerMembers'][index%2]);state_sample_fixture(row,index)
+            rows.append(row)
+        value['readerMembers']=rows[-2:];value.update(self.api._member_samples_receipt(rows));value['finishedAt']=6.0
+        self.api.require_reader_cleanup(value,self.binding,12.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'bounded.json';self.api._atomic_json(path,value)
+            self.assertLess(path.stat().st_size,2*1024*1024)
+            self.assertEqual(self.api._read_json(path),value)
+
+    def test_state_identity_table_cannot_hide_an_unobserved_member(self):
+        value=cleanup_fixture(self.binding,'C:/Suite')
+        value['memberStateIdentities'].append(dict(value['memberStateIdentities'][0],pid=101,handleValue=306))
+        with self.assertRaises(AssertionError):self.api.require_reader_cleanup(value,self.binding,12.0)
+
+    def test_release_pending_sample_cannot_be_backdated_into_read_phase(self):
+        value=cleanup_fixture(self.binding,'C:/Suite')
+        early=copy.deepcopy(value['readerMembers'][0]);state_sample_fixture(early,0)
+        early.update(sampleStartedAt=.9,sampleFinishedAt=.9,waitResult=258,exitCode=0)
+        early['membershipCall']['observedAt']=.9
+        for call in early['stateCalls']:call['observedAt']=.9
+        early['stateCalls'][0]['result']=258
+        for row in value['readerMembers']:row['sampleIndex']+=1
+        value.update(state_receipt_fixture([early]+value['readerMembers']))
+        with self.assertRaises(AssertionError):self.api.require_reader_cleanup(value,self.binding,12.0)
+
+    def test_release_reply_published_during_exit_poll_is_rechecked_exactly(self):
+        from types import SimpleNamespace
+        api=self.api
+        for variant in ('valid','missing','wrong-sequence','wrong-action','error','read'):
+            with self.subTest(variant=variant),tempfile.TemporaryDirectory() as directory:
+                output=Path(directory);action='read' if variant=='read' else 'release'
+                reply=dict(cleanup_fixture(self.binding,'C:/Suite')['releaseAcknowledgement'],sequence=0,ok=True)
+                reply['action']=action
+                if variant=='wrong-sequence':reply['sequence']=1
+                elif variant=='wrong-action':reply['action']='read'
+                elif variant=='error':reply.update(ok=False,error='original helper error')
+                reader=api.OwnedWriterReader(Path('C:/Suite'),output,shell_pid=77,expected_shell_creation=111,suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url=self.binding['documentUrl'],clock=lambda:1.0)
+                reader.deadline=12.0;polls=[]
+                def poll():
+                    polls.append('poll')
+                    if variant!='missing':api._atomic_json(output/'reply-000.json',reply)
+                    return 0
+                reader.process=SimpleNamespace(poll=poll)
+                with patch.object(reader,'_member_snapshots',lambda **kwargs:[]),patch.object(api.time,'sleep',side_effect=AssertionError('Exit reply recheck must not add a wait')):
+                    if variant=='valid':self.assertEqual(reader._rpc(action,12.0),reply)
+                    else:
+                        with self.assertRaises(AssertionError):reader._rpc(action,12.0)
+                self.assertEqual(polls,['poll']);self.assertEqual(reader.deadline,12.0)
+                self.assertEqual(api._read_json(output/'request-000.json'),dict(sequence=0,action=action))
+                self.assertFalse((output/'request-001.json').exists())
+
+    def test_terminal_retained_process_cannot_revive_in_raw_history(self):
+        for revived_exit in (259,0):
+            value=cleanup_fixture(self.binding,'C:/Suite');core,launcher=value['readerMembers'];rows=[]
+            for index,(original,wait,exit_code) in enumerate(((core,0,0),(core,258,revived_exit),(core,0,0),(launcher,0,0))):
+                row=dict(copy.deepcopy(original),waitResult=wait,exitCode=exit_code);state_sample_fixture(row,index);rows.append(row)
+            value['readerMembers']=rows[-2:];value.update(state_receipt_fixture(rows))
+            with self.subTest(revived_exit=revived_exit),self.assertRaises(AssertionError):self.api.require_reader_cleanup(value,self.binding,12.0)
 
     def test_portable_windows_identity_and_real_raw_shapes(self):
         with patch.object(Path,'resolve',side_effect=AssertionError('pure replay performed IO')):
@@ -270,7 +474,8 @@ class RuntimeBoundaryContracts(unittest.TestCase):
             def open_owned(self,pid,job):events.append(('open-private-member',pid,job));return pid+300
             def identity(self,handle):return dict(image='C:/Suite/Office/program/'+('python.exe' if handle==398 else 'python-core-3.13.15/bin/python.exe'),creationTime=handle)
             def is_in_job(self,handle,job,result):result._obj.value=True;return True
-            def state(self,handle):return dict(alive=active,exitCode=259 if active else 0)
+            def wait_for(self,handle,milliseconds):return 258 if active else 0
+            def get_exit(self,handle,output):output._obj.value=259 if active else 0;return True
             def close_handle(self,handle):events.append(('close',handle));return True
         def atomic(path,value):
             nonlocal active
@@ -442,7 +647,9 @@ class WindowsReaderFailureFixContracts(unittest.TestCase):
     def test_mixed_private_job_allows_only_frozen_system_console_and_never_as_reader(self):
         api=self.api;binding=binding_fixture();cleanup=cleanup_fixture(binding,'C:/Suite')
         console=dict(copy.deepcopy(cleanup['readerMembers'][0]),pid=100,creationTime=335,handleValue=305,image=cleanup['systemConsoleHost']['path'])
+        state_sample_fixture(console,2)
         cleanup['readerMembers'].append(console);cleanup['handleClosures'].append(dict(kind='member',handleValue=305,result=True))
+        cleanup.update(state_receipt_fixture(cleanup['readerMembers']))
         api.require_reader_cleanup(cleanup,binding,12.0)
         for change in ('foreign','second','foreignjob','crash','reader','witnesspath','witnesshash','fileid','size'):
             value=copy.deepcopy(cleanup)
@@ -546,6 +753,7 @@ class ConstructorAndAncillaryEvidenceContracts(unittest.TestCase):
         from types import SimpleNamespace
         api=self.api;binding=binding_fixture();cleanup=cleanup_fixture(binding,'C:/Suite')
         console=dict(copy.deepcopy(cleanup['readerMembers'][0]),pid=100,creationTime=335,handleValue=305,image=cleanup['systemConsoleHost']['path'])
+        state_sample_fixture(console,2)
         members=cleanup['readerMembers']+[console]
         class Job:
             handle=302;job=401;pid=98
@@ -564,7 +772,12 @@ class ConstructorAndAncillaryEvidenceContracts(unittest.TestCase):
             reader.console=SimpleNamespace(witness=cleanup['systemConsoleHost'],recheck=lambda:copy.deepcopy(cleanup['systemConsoleHostRecheck']),close=lambda:dict(kind='system-console-file',handleValue=501,result=True))
             reader.diagnostics=SimpleNamespace(job_pids=lambda job:[],close_handle=lambda handle:True)
             reader.members={r['pid']:(r['handleValue'],dict(image=r['image'],creationTime=r['creationTime'])) for r in members}
-            with patch.object(reader,'_rpc',lambda action,deadline:copy.deepcopy(cleanup['releaseAcknowledgement'])),patch.object(reader,'_member_snapshots',lambda:copy.deepcopy(members)):
+            for row in members:
+                row['sampleStartedAt']=row['sampleFinishedAt']=1.0
+                row['membershipCall']['observedAt']=1.0
+                for call in row['stateCalls']:call['observedAt']=1.0
+            reader.member_state_samples=copy.deepcopy(members)
+            with patch.object(reader,'_rpc',lambda action,deadline:copy.deepcopy(cleanup['releaseAcknowledgement'])),patch.object(reader,'_member_snapshots',lambda **kwargs:copy.deepcopy(members)):
                 result=reader.close(12.0)
             self.assertTrue(result['physicalCleanupSucceeded']);self.assertFalse(result['contextQualified']);self.assertFalse(result['cleanupSucceeded'])
             self.assertEqual(result['errors'],[]);self.assertEqual(result['binding'],binding if established else None)

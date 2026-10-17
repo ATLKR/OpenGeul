@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_BODY_BYTES = 1024 * 1024
+MAX_MEMBER_STATE_SAMPLES = 4096
 PROFILE_DIRECTORY_ACCESS = 0x80  # FILE_READ_ATTRIBUTES
 PROFILE_DIRECTORY_SHARE = 1 | 2 | 4  # FILE_SHARE_READ | WRITE | DELETE
 PROFILE_DIRECTORY_FLAGS = 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
@@ -204,7 +205,7 @@ def _require_uno(raw,binding):
     assert raw.get('modelService')=='com.sun.star.text.TextDocument' and raw.get('documentUrl')==binding['documentUrl'], 'Foreign Writer model or URL'
 
 
-def _reader_member(row,binding,suite_root,alive):
+def _reader_member(row,binding,suite_root,alive,*,exiting=False):
     assert isinstance(row,dict) and row.get('inOwnedJob') is True and row.get('isInJobApiSucceeded') is True
     _positive(row.get('jobHandleValue'))
     assert _positive(row.get('pid')) not in (binding['shellPid'],binding['officePid'])
@@ -215,7 +216,63 @@ def _reader_member(row,binding,suite_root,alive):
     tail=image[len(root)+1:].replace('\\','/')
     assert tail=='python.exe' or re.fullmatch(r'python-core-3\.13\.15/bin/python\.exe',tail), 'Reader job contains a foreign executable'
     assert type(row.get('waitResult')) is int and type(row.get('exitCode')) is int
-    assert row.get('waitResult')==(258 if alive else 0) and row.get('exitCode')==(259 if alive else 0), 'Reader did not exit normally' if not alive else 'Reader is not alive'
+    assert row.get('waitResult')==(258 if alive else 0) and row.get('exitCode')==(0 if exiting else 259 if alive else 0), 'Reader did not exit normally' if not alive else 'Reader is not alive'
+    assert not exiting or alive, 'Only an unsignaled release sample can be pending'
+
+
+def _require_member_state_sample(row):
+    """Replay the ordered native pair; never project a later exit back into Wait."""
+    assert type(row.get('sampleIndex')) is int and 0<=row['sampleIndex']<MAX_MEMBER_STATE_SAMPLES
+    assert row.get('phase') in ('read','release')
+    started=_finite(row.get('sampleStartedAt'));finished=_finite(row.get('sampleFinishedAt'))
+    assert started<=finished
+    membership=row.get('membershipCall',{})
+    assert membership.get('api')=='IsProcessInJob' and membership.get('result') is True and membership.get('inOwnedJob') is True
+    assert membership.get('handleValue')==row['handleValue'] and membership.get('jobHandleValue')==row['jobHandleValue']
+    calls=row.get('stateCalls')
+    assert isinstance(calls,list) and len(calls)==2
+    wait,exit_=calls
+    assert wait.get('api')=='WaitForSingleObject' and wait.get('timeoutMilliseconds')==0
+    assert type(wait.get('result')) is int and wait['result'] in (0,258) and row.get('waitResult')==wait['result']
+    assert exit_.get('api')=='GetExitCodeProcess' and exit_.get('result') is True
+    assert type(exit_.get('exitCode')) is int and 0<=exit_['exitCode']<=0xffffffff and row.get('exitCode')==exit_['exitCode']
+    previous=started
+    for call in (membership,wait,exit_):
+        assert call.get('handleValue')==row['handleValue']
+        assert type(call.get('lastError')) is int and 0<=call['lastError']<=0xffffffff
+        at=_finite(call.get('observedAt'));assert previous<=at<=finished;previous=at
+
+
+def _member_samples_receipt(rows):
+    """Keep every raw result while storing each retained identity only once."""
+    identities=[];samples=[]
+    for row in rows:
+        identity={key:row[key] for key in ('pid','creationTime','image','handleValue','jobHandleValue')}
+        if identity not in identities:identities.append(identity)
+        calls=[]
+        member=row.get('membershipCall')
+        if member:calls.append([member['api'],member['observedAt'],member['result'],member['inOwnedJob'],member['lastError']])
+        for call in row['stateCalls']:
+            values=[call['api'],call['observedAt'],call['result']]
+            if call['api']=='GetExitCodeProcess':values.append(call['exitCode'])
+            calls.append(values+[call['lastError']])
+        samples.append(dict(index=row['sampleIndex'],member=identities.index(identity),phase=row['phase'],
+            times=[row['sampleStartedAt'],row['sampleFinishedAt']],calls=calls))
+    return dict(memberStateIdentities=identities,memberStateSamples=samples)
+
+
+def _expand_member_sample(sample,identities):
+    assert isinstance(sample,dict) and type(sample.get('member')) is int and 0<=sample['member']<len(identities)
+    assert isinstance(sample.get('times'),list) and len(sample['times'])==2
+    row=dict(identities[sample['member']],sampleIndex=sample.get('index'),phase=sample.get('phase'),
+        sampleStartedAt=sample['times'][0],sampleFinishedAt=sample['times'][1])
+    calls=sample.get('calls');assert isinstance(calls,list) and [len(c) if isinstance(c,list) else 0 for c in calls]==[5,4,5]
+    membership,wait,exit_=calls
+    row.update(inOwnedJob=membership[3],isInJobApiSucceeded=membership[2],waitResult=wait[2],exitCode=exit_[3],
+        membershipCall=dict(api=membership[0],observedAt=membership[1],result=membership[2],inOwnedJob=membership[3],lastError=membership[4],handleValue=row['handleValue'],jobHandleValue=row['jobHandleValue']),
+        stateCalls=[dict(api=wait[0],observedAt=wait[1],result=wait[2],lastError=wait[3],handleValue=row['handleValue'],timeoutMilliseconds=0),
+            dict(api=exit_[0],observedAt=exit_[1],result=exit_[2],exitCode=exit_[3],lastError=exit_[4],handleValue=row['handleValue'])])
+    return row
 
 
 def _require_launch(receipt,job=None):
@@ -280,6 +337,31 @@ def _require_physical_cleanup(cleanup,binding,deadline):
     assert isinstance(cleanup.get('systemConsoleHostRecheck'),dict)
     roles=[_job_member(member,binding,root,False,console) for member in members]
     assert roles.count('owned-console-host')<=1,'Multiple ancillary console hosts are not accepted'
+    for member in members:_require_member_state_sample(member)
+    samples=cleanup.get('memberStateSamples')
+    assert isinstance(samples,list) and 1<=len(samples)<=MAX_MEMBER_STATE_SAMPLES, 'Missing bounded raw member state samples'
+    identities=cleanup.get('memberStateIdentities')
+    assert isinstance(identities,list) and 1<=len(identities)<=128
+    assert len({r.get('pid') for r in identities})==len(identities)
+    assert {r['pid'] for r in identities}=={r['pid'] for r in members}, 'Unobserved retained member identity'
+    final={row['pid']:row for row in members};latest={};terminal=set();previous=0
+    for index,sample in enumerate(samples):
+        row=_expand_member_sample(sample,identities)
+        _require_member_state_sample(row)
+        assert row['sampleIndex']==index and row['pid'] in final
+        assert previous<=row['sampleStartedAt']<=row['sampleFinishedAt']<=cleanup['finishedAt'];previous=row['sampleFinishedAt']
+        if row['phase']=='release':assert row['sampleStartedAt']>=cleanup['startedAt'], 'Release sample predates cleanup'
+        else:assert row['sampleFinishedAt']<=cleanup['startedAt'], 'Read sample follows cleanup start'
+        for key in ('pid','creationTime','handleValue','jobHandleValue','image'):
+            assert row[key]==final[row['pid']][key], 'Retained member generation/HANDLE changed'
+        exiting=row['phase']=='release' and (row['waitResult'],row['exitCode'])==(258,0)
+        _job_member(row,binding,root,row['waitResult']==258,console,exiting=exiting)
+        key=(row['pid'],row['handleValue'])
+        assert key not in terminal or row['waitResult']==0, 'Terminated retained process became unsignaled'
+        if row['waitResult']==0:terminal.add(key)
+        latest[row['pid']]=row
+    assert latest==final, 'Final members are not the last actual same-HANDLE samples'
+    assert all(row['phase']=='release' and row['sampleStartedAt']>=cleanup['startedAt'] for row in members)
     ack=cleanup.get('releaseAcknowledgement',{})
     assert ack.get('action')=='release' and ack.get('proxiesReleased') is True
     helper_profile=ack.get('profileDirectory',{})
@@ -562,15 +644,16 @@ class _SystemConsoleHost:
         return dict(kind='system-console-file',handleValue=int(handle),result=result,lastError=error)
 
 
-def _job_member(row,binding,suite_root,alive,console):
+def _job_member(row,binding,suite_root,alive,console,*,exiting=False):
     if _path(row.get('image'))==_path(console['path']):
         assert row.get('inOwnedJob') is True and row.get('isInJobApiSucceeded') is True
         for key in ('pid','creationTime','handleValue','jobHandleValue'):_positive(row.get(key))
         assert row['pid'] not in (binding['shellPid'],binding['officePid'])
         assert type(row.get('waitResult')) is int and row['waitResult']==(258 if alive else 0)
-        assert type(row.get('exitCode')) is int and row['exitCode']==(259 if alive else 0)
+        assert type(row.get('exitCode')) is int and row['exitCode']==(0 if exiting else 259 if alive else 0)
+        assert not exiting or alive
         return 'owned-console-host'
-    _reader_member(row,binding,suite_root,alive);return 'packaged-python'
+    _reader_member(row,binding,suite_root,alive,exiting=exiting);return 'packaged-python'
 
 
 
@@ -768,6 +851,7 @@ class OwnedWriterReader:
             child_hwnd=child_hwnd,office_pid=office_pid,expected_url=expected_url)
         self.suite=Path(suite);self.output=Path(output);self.clock=clock;self.binding=None
         self.deadline=None;self.anchor=None;self.process=None;self.diagnostics=None;self.members={}
+        self.member_state_samples=[]
         self.sequence=0;self.closed=False;self.failed=False;self.last_observation=None;self.first_error=None;self.forced=False;self.auxiliary_errors=[];self.attempted_observation=None;self.helper_launch=None;self.console=None
 
     def _remaining(self,deadline):
@@ -778,7 +862,7 @@ class OwnedWriterReader:
         if remaining<=0:raise TimeoutError('Original Writer reader absolute deadline expired')
         return remaining
 
-    def _member_snapshots(self):
+    def _member_snapshots(self,*,releasing=False):
         for pid in self.diagnostics.job_pids(self.process.job):
             assert pid not in (self.config['shell_pid'],self.config['office_pid']), 'Editor unexpectedly belongs to observation job'
             if pid not in self.members:
@@ -792,15 +876,31 @@ class OwnedWriterReader:
                     raise
         rows=[]
         for pid,(handle,identity) in self.members.items():
-            member=W.BOOL()
-            succeeded=bool(self.diagnostics.is_in_job(handle,self.process.job,ctypes.byref(member)))
-            if not succeeded:raise ctypes.WinError(ctypes.get_last_error())
-            assert member.value,'Retained helper left its private job'
-            state=self.diagnostics.state(handle)
-            rows.append(dict(identity,pid=pid,handleValue=int(handle),waitResult=258 if state['alive'] else 0,
-                exitCode=state['exitCode'],inOwnedJob=bool(member.value),isInJobApiSucceeded=succeeded,jobHandleValue=int(self.process.job)))
+            assert len(self.member_state_samples)<MAX_MEMBER_STATE_SAMPLES, 'Reader member sample bound exceeded'
+            row=dict(identity,pid=pid,handleValue=int(handle),jobHandleValue=int(self.process.job),
+                sampleIndex=len(self.member_state_samples),phase='release' if releasing else 'read',sampleStartedAt=self.clock(),stateCalls=[])
+            self.member_state_samples.append(row)  # Retain partial API failures before any assertion.
+            try:
+                member=W.BOOL();_clear_last_error()
+                succeeded=bool(self.diagnostics.is_in_job(handle,self.process.job,ctypes.byref(member)));error=_last_error()
+                row.update(inOwnedJob=bool(member.value),isInJobApiSucceeded=succeeded)
+                row['membershipCall']=dict(api='IsProcessInJob',handleValue=int(handle),jobHandleValue=int(self.process.job),result=succeeded,inOwnedJob=bool(member.value),lastError=error,observedAt=self.clock())
+                if not succeeded:raise ctypes.WinError(error)
+                assert member.value,'Retained helper left its private job'
+                _clear_last_error();waited=int(self.diagnostics.wait_for(handle,0));error=_last_error()
+                row['stateCalls'].append(dict(api='WaitForSingleObject',handleValue=int(handle),timeoutMilliseconds=0,result=waited,lastError=error,observedAt=self.clock()))
+                row['waitResult']=waited
+                if waited not in (0,258):raise ctypes.WinError(error)
+                code=W.DWORD();_clear_last_error()
+                succeeded=bool(self.diagnostics.get_exit(handle,ctypes.byref(code)));error=_last_error()
+                row['stateCalls'].append(dict(api='GetExitCodeProcess',handleValue=int(handle),result=succeeded,exitCode=int(code.value) if succeeded else None,lastError=error,observedAt=self.clock()))
+                row['exitCode']=int(code.value) if succeeded else None
+                if not succeeded:raise ctypes.WinError(error)
+            finally:row['sampleFinishedAt']=self.clock()
+            rows.append(row)
         if self.console:
-            roles=[_job_member(row,self.anchor.base,str(self.suite),row['waitResult']==258,self.console.witness) for row in rows]
+            roles=[_job_member(row,self.anchor.base,str(self.suite),row['waitResult']==258,self.console.witness,
+                exiting=releasing and (row['waitResult'],row['exitCode'])==(258,0)) for row in rows]
             assert roles.count('owned-console-host')<=1,'Multiple ancillary console hosts are not accepted'
         return rows
 
@@ -812,9 +912,11 @@ class OwnedWriterReader:
         path=self.output/f'reply-{sequence:03d}.json'
         while True:
             remaining=self._remaining(deadline)
-            self._member_snapshots()
+            self._member_snapshots(releasing=action=='release')
             if path.exists():return _require_reply(_read_json(path),sequence,action)
-            if self.process.poll() is not None:raise AssertionError('Owned reader exited before its reply')
+            if self.process.poll() is not None:
+                if action=='release' and path.exists():return _require_reply(_read_json(path),sequence,action)
+                raise AssertionError('Owned reader exited before its reply')
             time.sleep(min(.01,remaining))
 
     def start(self,deadline):
@@ -842,6 +944,7 @@ class OwnedWriterReader:
         if self.first_error is None:
             self.first_error=dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None),traceback=traceback.format_exc(),
                 attemptedObservation=self.attempted_observation,nativeSnapshot=getattr(self.anchor,'last_snapshot',getattr(exc,'native_snapshot',None)),
+                **_member_samples_receipt(self.member_state_samples),
                 nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None),systemConsoleDiagnostic=getattr(exc,'system_console_diagnostic',None),
                 systemConsoleClosure=getattr(exc,'system_console_closure',None),helperLaunch=self.helper_launch or getattr(exc,'helper_launch',None))
             try:
@@ -896,7 +999,7 @@ class OwnedWriterReader:
                 ack=self._rpc('release',deadline);cleanup['releaseAcknowledgement']=dict(action='release',readerPid=ack['readerPid'],proxiesReleased=ack['proxiesReleased'],profileDirectory=ack.get('profileDirectory'),observerHandleClosures=ack.get('observerHandleClosures'))
                 while True:
                     remaining=self._remaining(deadline)
-                    rows=self._member_snapshots();pids=self.diagnostics.job_pids(self.process.job)
+                    rows=self._member_snapshots(releasing=True);pids=self.diagnostics.job_pids(self.process.job)
                     if rows and not pids and all(r['waitResult']==0 for r in rows):
                         cleanup.update(readerMembers=rows,finalJobPids=pids);break
                     time.sleep(min(.01,remaining))
@@ -909,7 +1012,7 @@ class OwnedWriterReader:
                     # Only this private helper job is terminated. Never the engine.
                     if not self.forced:self.process.terminate();self.forced=True
                     cleanup['terminated']=self.forced
-                    cleanup['readerMembers']=self._member_snapshots();cleanup['finalJobPids']=self.diagnostics.job_pids(self.process.job)
+                    cleanup['readerMembers']=self._member_snapshots(releasing=True);cleanup['finalJobPids']=self.diagnostics.job_pids(self.process.job)
                 except BaseException as later:error(later)
         finally:
             for pid,(handle,identity) in self.members.items():
@@ -930,7 +1033,9 @@ class OwnedWriterReader:
             if self.console:
                 try:cleanup['handleClosures'].append(self.console.close())
                 except BaseException as exc:error(exc)
-            self.closed=True;cleanup['finishedAt']=self.clock()
+            self.closed=True
+            cleanup.update(_member_samples_receipt(self.member_state_samples))
+            cleanup['finishedAt']=self.clock()
             cleanup['cleanupSucceeded']=not cleanup['errors'] and not cleanup['terminated'] and cleanup['finishedAt']<=deadline
             if cleanup['cleanupSucceeded']:
                 try:_require_physical_cleanup(cleanup,self.anchor.base,deadline)

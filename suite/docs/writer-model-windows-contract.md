@@ -66,6 +66,78 @@ may be terminated on expiry. No extra input, input retry or timing extension is
 introduced. A subsequent Windows run must establish corrected runtime behavior;
 source and portable fake tests are not Windows execution evidence.
 
+## Sequential process-state observations
+
+Run `38985711992` reached exact first-marker full-body equality in all six Writer
+cases, then failed reader cleanup. Five errors say `Reader is not alive`; one has
+no message. All six release acknowledgements and their three native observer
+HANDLE closures succeeded. The failing member rows were not retained, so their
+PIDs and actual exit codes cannot be recovered from that run. These failures do
+not establish the cause of the earlier physical input losses.
+
+`WaitForSingleObject(handle, 0)` samples whether the retained process object is
+signaled at that call. A subsequent `GetExitCodeProcess` samples its later exit
+status. The process may terminate between them: `WAIT_TIMEOUT` (258), followed
+by an exit code of zero, is a valid pair of sequential observations. It does not
+prove that the first wait was signaled. The E2E reader now calls these existing
+typed APIs directly, leaving the product worker implementation unchanged.
+
+Only during the release RPC and subsequent cleanup may the pair `(258, 0)` remain
+pending. Actual model reads still require the core interpreter's strict
+`(258, 259)` live pair. Every retained launcher/core/console process must later
+produce a fresh independent `(0, 0)` pair on its same original HANDLE, and the
+private JOB must be empty. Once a process object is signaled on termination it
+remains signaled; its following successful exit-code query supplies the terminal
+code. A third wait does not turn an earlier timeout into a signaled observation.
+Any other nonzero terminal code, failed API, foreign generation or failed closure
+keeps cleanup failed. The existing `.01` polling and original absolute deadline
+are unchanged. There is no extra input, delay, input retry or deadline reset.
+
+Every individual sample is retained before validation, including partial API
+failures and the first failure before forced helper-job cleanup. The receipt has
+a `memberStateIdentities` table of actual PID, creation time, image, retained
+process HANDLE and private JOB HANDLE. `memberStateSamples` references that table
+by its zero-based `member` index, with an individual `index`, `phase`, start/end
+`times`, and ordered raw `calls`. Call arrays contain:
+
+- `['IsProcessInJob', timestamp, BOOL, inOwnedJob, LastError]`
+- `['WaitForSingleObject', timestamp, DWORD, LastError]` (timeout is always zero)
+- `['GetExitCodeProcess', timestamp, BOOL, exitCode, LastError]`
+
+An unsuccessful exit query records `null` for its unavailable exit code. Partial
+failure receipts omit calls that were never made. This is a compact encoding of
+actual observations, not a synthesized success flag. At most 4,096 individual
+samples are permitted; exceeding that count fails before the next native call.
+The original two-MiB JSON transport bound remains enforced. A maximum-size
+portable fixture fits that bound without dropping any samples. Final
+`readerMembers` retain the detailed raw pair; portable replay resolves every
+identity reference, validates call order/results/times, and joins each final row
+to the last actual same-HANDLE sample. A retained process observed signaled may
+never become unsignaled in a later sample. Unobserved or substituted identities
+and impossible terminal-state reversals fail.
+
+The release RPC also rechecks its exact expected reply file once if the launcher
+exits after an earlier file-existence check. The helper can atomically publish
+its acknowledgement between those two observations. The same bounded reader
+and sequence/action/error checks apply; missing or invalid replies still fail.
+This adds no request, wait or deadline. It is a separately reproduced source
+race, not an inferred cause of the six historical cleanup failures.
+
+Official Microsoft contracts used for this correction:
+
+- [WaitForSingleObject](https://learn.microsoft.com/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject),
+  pinned documentation commit `19f6baf0a22c2eace5b6b9b62f979c20aab84dac`,
+  SHA-256 `29474b87ad9e518fbb7e7bc1d2169646f8f3b00c7e6d332f64309c16a8b038dd`.
+- [GetExitCodeProcess](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess),
+  commit `d43984d7c322f7d7d35704d6d1ad36dc3539703b`,
+  SHA-256 `f5a7b618ecd47b63e3a8c785ab525e9724183abbea62ace2aac80cce2a38c7c0`.
+- [Terminating a process](https://learn.microsoft.com/windows/win32/procthread/terminating-a-process),
+  commit `3aee48ac3f48e187d17bdfd56951741737331749`,
+  SHA-256 `4aec64a3904899803567b16004d171040ca7daefe9ef1bbb3c0097bdb6ba4d58`.
+
+This source correction needs a new Windows run to establish actual behavior.
+The failed run remains failed; no previous exit code is normalized to zero.
+
 ## Pinned source provenance
 
 The Suite runtime lock selects LibreOffice `26.8.1.1`. Official annotated tag

@@ -29,6 +29,16 @@ style = load('model_barrier_original_style', E2E / 'writer_style_smoke.py')
 reader_fixtures = load('model_barrier_native_fixtures', E2E.parent / 'tests/test_writer_model_reader.py')
 
 
+def retime_native_cleanup_fixture(cleanup):
+    """Keep synthetic native call times consistent with the test controller clock."""
+    at=cleanup['startedAt']
+    for row in cleanup['readerMembers']:
+        row['sampleStartedAt']=row['sampleFinishedAt']=at
+        row['membershipCall']['observedAt']=at
+        for call in row['stateCalls']:call['observedAt']=at
+    cleanup.update(reader_fixtures.state_receipt_fixture(cleanup['readerMembers']))
+
+
 def synthetic_frame(suite, baseline):
     paths = {'launcher': 'Office/program/python.exe',
         'executable': 'Office/program/python-core-3.13.15/bin/python.exe',
@@ -143,6 +153,7 @@ def case_fixture(frame,case_name='dirty-writer-cancel-save'):
         api.await_completion(plan,reader,clock=clock,pause=clock.pause,record=receipt)
         cleanup=reader_fixtures.cleanup_fixture(binding,str(frame.suite))
         cleanup.update(startedAt=clock(),finishedAt=clock()+.01,deadline=plan.deadline)
+        retime_native_cleanup_fixture(cleanup)
         clock.pause(.01);api.finalize_completion(plan,receipt,cleanup,clock())
         record['writerModelCompletions'].append(receipt);completed.append(marker);clock.pause(.1)
     return api,record
@@ -172,6 +183,7 @@ class RealBarrierContextAdapter:
             pause=self.harness.clock.pause,record=self.record,max_reads=120)
         cleanup = reader_fixtures.cleanup_fixture(plan.binding,str(self.frame.suite))
         cleanup.update(startedAt=self.harness.clock(),finishedAt=self.harness.clock()+0.01,deadline=plan.deadline)
+        retime_native_cleanup_fixture(cleanup)
         self.harness.clock.pause(0.01)
         self.api.finalize_completion(plan,self.record,cleanup,self.harness.clock())
         self.completed_markers.append(self.marker)  # Only actual validator success advances the ledger.
@@ -252,6 +264,7 @@ class ExistingStalePredicateRedTests(unittest.TestCase):
                 harness.events.append(('reader-close',))
                 cleanup=reader_fixtures.cleanup_fixture(self.binding,str(harness.frame.suite))
                 cleanup.update(startedAt=harness.clock(),finishedAt=harness.clock()+.01,deadline=deadline)
+                retime_native_cleanup_fixture(cleanup)
                 harness.clock.pause(.01);return cleanup
         def original(process,suite,evidence):
             evidence.update(original_shell_fixture(harness.frame.binding,suite));return 111
@@ -578,6 +591,7 @@ class ProposedCompletionContracts(unittest.TestCase):
         _,_,record=self.run_read(api,plan,[self.baseline+self.first])
         cleanup=reader_fixtures.cleanup_fixture(plan.binding,str(self.suite))
         cleanup.update(startedAt=self.clock.now,finishedAt=self.clock.now+.01,deadline=plan.deadline)
+        retime_native_cleanup_fixture(cleanup)
         self.clock.pause(.01)
         return api,plan,record,cleanup
 
