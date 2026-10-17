@@ -48,11 +48,8 @@ def synthetic_frame(suite, baseline):
         pythonDll=str(suite / paths['pythonDll']),
         moduleFiles={k: str(suite / paths[k]) for k in ('uno','pyuno','encodings','os')},
         moduleOrigins={k: str(suite / paths[k]) for k in ('uno','pyuno','encodings')})
-    binding = dict(shellPid=77, shellCreationTime=111, officePid=88, officeCreationTime=222,
-        expectedImage=str(suite / 'Office/program/soffice.bin'), suiteHwnd=11, parentHwnd=12,
-        childHwnd=22, rootHwnd=11, privatePipe='OpenGeul_'+'a'*32,
-        frameIdentity='pyuno object (XFrame)0x1234', controllerIdentity='pyuno object (XController)0x2345',
-        modelIdentity='pyuno object (XModel)0x3456', documentUrl=(suite / 'owned.docx').as_uri())
+    binding = dict(reader_fixtures.binding_fixture(),
+        expectedImage=str(suite / 'Office/program/soffice.bin'), documentUrl=(suite / 'owned.docx').as_uri())
     (suite / 'owned.docx').write_bytes(b'unchanged synthetic owned document bytes')
     return SimpleNamespace(suite=suite, baseline=baseline, binding=binding,
                            identity=style.require_packaged_python(suite, observed), inventory=inventory,
@@ -68,6 +65,49 @@ def model_observation(frame, body, started=0.0, finished=0.0):
         operations=['resolve-existing-owned-frame','Text.getString','isModified','verify-retained-generation'])
     observation.update(reader_fixtures.native_fixture(frame.binding,str(frame.suite)))
     return observation
+
+
+def replace_console_host_identity(raw, field):
+    """Substitute an internally consistent witness for a different OS file."""
+    witness=raw['systemConsoleHost']
+    infos=[witness['fileInfoBefore'],witness['fileInfoAfterHash'],raw['systemConsoleHostRecheck']]
+    if field=='osPath':
+        directory='D:/Windows/System32';path=directory+'/conhost.exe'
+        witness['systemDirectoryQuery'].update(path=directory,returnedLength=len(directory.encode('utf-16-le'))//2)
+        witness['path']=path
+        for info in infos:info['finalPath']=path
+    elif field=='fileId':
+        for info in infos:info['fileIndexLow']+=1
+    elif field=='sha256':witness['sha256']='f'*64
+    elif field=='retainedFileHandle':
+        original=witness['handleValue'];witness['handleValue']+=1
+        for row in raw.get('handleClosures',[]):
+            if row['kind']=='system-console-file' and row['handleValue']==original:row['handleValue']=witness['handleValue']
+    elif field=='fileGeneration':
+        for info in infos:info['creationTime']+=1
+    else:raise AssertionError('Unknown witness substitution')
+
+
+def replace_profile_directory_identity(raw, field, origin=None):
+    """Keep a replacement DIRECTORY proof locally consistent, including closure."""
+    if 'nativeSnapshots' in raw:
+        profiles=[(name,raw['nativeSnapshots'][name+edge]['profileDirectory'],[])
+            for name in ('controller','helper') for edge in ('Before','After')]
+    else:
+        profiles=[('controller',raw[edge]['profileDirectory'],raw['handleClosures']) for edge in ('nativeBefore','nativeAfter')]
+        ack=raw['releaseAcknowledgement']
+        profiles.append(('helper',ack['profileDirectory'],ack['observerHandleClosures']))
+    for name,profile,closures in profiles:
+        witness=profile['witness'];infos=[witness['openedInfo'],profile['recheck']]
+        if field=='canonicalPath':
+            witness['canonicalPath']='C:\\other-owned-profile'
+            for info in infos:info['finalPath']='\\\\?\\'+witness['canonicalPath']
+        elif field=='fileId':
+            for info in infos:info['fileIndexLow']+=1
+        elif field=='handle' and name==origin:
+            original=witness['handleValue'];witness['handleValue']+=1000
+            for closure in closures:
+                if closure['kind']=='profile-directory' and closure['handleValue']==original:closure['handleValue']=witness['handleValue']
 
 
 def original_shell_fixture(binding,suite_root):
@@ -363,11 +403,8 @@ class ProposedCompletionContracts(unittest.TestCase):
             moduleFiles={k: str(self.suite / paths[k]) for k in ('uno','pyuno','encodings','os')},
             moduleOrigins={k: str(self.suite / paths[k]) for k in ('uno','pyuno','encodings')})
         self.identity = style.require_packaged_python(self.suite, observed)
-        self.binding = dict(shellPid=77, shellCreationTime=111, officePid=88, officeCreationTime=222,
-            expectedImage=str(self.suite / 'Office/program/soffice.bin'), suiteHwnd=11, parentHwnd=12,
-            childHwnd=22, rootHwnd=11, privatePipe='OpenGeul_'+'a'*32,
-            frameIdentity='pyuno object (XFrame)0x1234', controllerIdentity='pyuno object (XController)0x2345',
-            modelIdentity='pyuno object (XModel)0x3456', documentUrl=(self.suite / 'owned.docx').as_uri())
+        self.binding = dict(reader_fixtures.binding_fixture(),
+            expectedImage=str(self.suite / 'Office/program/soffice.bin'), documentUrl=(self.suite / 'owned.docx').as_uri())
         self.baseline = 'Engine-OpenGeul-writer 한글\n'
         (self.suite / 'owned.docx').write_bytes(b'unchanged synthetic owned document bytes')
         self.first, self.second = lifecycle.ASCII_EDITOR_MARKERS['dirty-writer-cancel-save']
@@ -460,8 +497,9 @@ class ProposedCompletionContracts(unittest.TestCase):
         api,plan=self.plan()
         for key,value in [('officePid',89),('officeCreationTime',223),('shellCreationTime',112),
             ('expectedImage','C:/foreign/soffice.bin'),('childHwnd',23),('rootHwnd',99),
-            ('privatePipe','OpenGeul_'+'b'*32),('frameIdentity','other'),('controllerIdentity','other'),
-            ('modelIdentity','other'),('documentUrl','file:///C:/foreign.docx')]:
+            ('privatePipe','OpenGeul_'+'b'*32),('frameIdentity',self.binding['frameIdentity']+'0'),
+            ('controllerIdentity',self.binding['controllerIdentity']+'0'),
+            ('modelIdentity',self.binding['modelIdentity']+'0'),('documentUrl','file:///C:/foreign.docx')]:
             changed=copy.deepcopy(self.binding);changed[key]=value
             with self.subTest(key=key),self.assertRaises(AssertionError):api.validate_observation(plan,self.observation(self.baseline+self.first,binding=changed),self.baseline)
 
@@ -491,14 +529,14 @@ class ProposedCompletionContracts(unittest.TestCase):
 
     def test_other_owned_document_cannot_satisfy_this_frames_completion(self):
         api,plan=self.plan();other=copy.deepcopy(self.binding)
-        other.update(childHwnd=24,frameIdentity='retained-frame-2',controllerIdentity='retained-controller-2',modelIdentity='retained-model-2')
+        other.update(childHwnd=24,**{key:other[key]+'0' for key in ('frameIdentity','controllerIdentity','modelIdentity')})
         with self.assertRaises(AssertionError):api.validate_observation(plan,self.observation(self.baseline+self.first,binding=other),self.baseline)
 
     def test_unsaved_empty_model_still_requires_exact_owned_frame(self):
         api=self.api();binding=copy.deepcopy(self.binding);binding['documentUrl']=''
         plan=api.freeze_expectation(binding,'',(),self.first,self.observation('',binding=binding),suite_root=self.suite,original_shell=original_shell_fixture(binding,self.suite),inventory=self.inventory,inventory_sha256=self.inventory_sha256,started_at=0.0,timeout_seconds=12.0)
         self.assertEqual(api.validate_observation(plan,self.observation(self.first,binding=binding),''),'complete')
-        foreign=copy.deepcopy(binding);foreign['frameIdentity']='other-empty-frame'
+        foreign=copy.deepcopy(binding);foreign['frameIdentity']+='0'
         with self.assertRaises(AssertionError):api.validate_observation(plan,self.observation(self.first,binding=foreign),'')
 
     def test_before_input_body_and_identity_must_match_frozen_expected_prior_state(self):
@@ -663,6 +701,129 @@ class ProposedCompletionContracts(unittest.TestCase):
         api,plan,record,cleanup=self.completed_model()
         cleanup['helperLaunch']['steps'][1]['command']+=' changed-command'
         with self.subTest(stage='cleanup'),self.assertRaises(AssertionError):api.finalize_completion(plan,record,cleanup,self.clock.now)
+
+    def test_valid_but_replaced_console_host_witness_fails_on_every_read(self):
+        import writer_model_reader
+        for field in ('osPath','fileId','sha256','retainedFileHandle','fileGeneration'):
+            for read_index in (0,1):
+                with self.subTest(field=field,read_index=read_index):
+                    self.clock=FakeClock();api,plan=self.plan();record={}
+                    observations=[self.observation(self.baseline+'-LIFE'),self.observation(self.baseline+self.first)]
+                    replacement=observations[read_index];replace_console_host_identity(replacement,field)
+                    # Each replacement is valid by itself. Only its continuity
+                    # with the frozen pre-input OS witness must reject it.
+                    writer_model_reader.require_owned_observation(replacement,self.binding,str(self.suite))
+                    with self.assertRaisesRegex(AssertionError,'Frozen system console host witness changed'):
+                        self.run_read(api,plan,observations,record=record)
+                    self.assertFalse(record['success']);self.assertEqual(record['state'],'failed')
+                    self.assertEqual(len(record['observations']),read_index+1)
+                    self.assertEqual(record['deadline'],12.0)
+
+    def test_valid_but_replaced_console_host_witness_cannot_certify_cleanup(self):
+        import writer_model_reader
+        for field in ('osPath','fileId','sha256','retainedFileHandle','fileGeneration'):
+            with self.subTest(field=field):
+                self.clock=FakeClock();api,plan,record,cleanup=self.completed_model()
+                replace_console_host_identity(cleanup,field)
+                writer_model_reader.require_reader_cleanup(cleanup,self.binding,plan.deadline)
+                with self.assertRaisesRegex(AssertionError,'Cleanup changed the frozen system console host witness'):
+                    api.finalize_completion(plan,record,cleanup,self.clock.now)
+                self.assertFalse(record['success']);self.assertEqual(record['state'],'failed')
+
+    def test_retained_proxy_context_and_type_cannot_change_between_reads(self):
+        import writer_model_reader
+        for field in ('localContextId','proxyTypeId'):
+            with self.subTest(field=field):
+                api,plan=self.plan();observation=self.observation(self.baseline+self.first)
+                for suffix in ('before','after'):observation['unoSnapshots'][suffix]['proxyIdentity'][field]+=1
+                writer_model_reader.require_owned_observation(observation,self.binding,str(self.suite))
+                with self.assertRaisesRegex(AssertionError,'Frozen retained PyUNO proxy context or type changed'):
+                    api.validate_observation(plan,observation,self.baseline)
+
+    def test_valid_profile_directory_replacements_fail_on_every_read(self):
+        import writer_model_reader
+        for field,origin in (('canonicalPath',None),('fileId',None),('handle','controller'),('handle','helper')):
+            for read_index in (0,1):
+                with self.subTest(field=field,origin=origin,read_index=read_index):
+                    self.clock=FakeClock();api,plan=self.plan();record={}
+                    observations=[self.observation(self.baseline+'-LIFE'),self.observation(self.baseline+self.first)]
+                    changed=observations[read_index];replace_profile_directory_identity(changed,field,origin)
+                    writer_model_reader.require_owned_observation(changed,self.binding,str(self.suite))
+                    with self.assertRaisesRegex(AssertionError,'Frozen native profile directory witness changed'):
+                        self.run_read(api,plan,observations,record=record)
+                    self.assertFalse(record['success']);self.assertEqual(len(record['observations']),read_index+1)
+                    self.assertEqual(record['deadline'],12.0)
+
+    def test_valid_profile_directory_replacements_cannot_certify_cleanup(self):
+        import writer_model_reader
+        for field,origin in (('canonicalPath',None),('fileId',None),('handle','controller'),('handle','helper')):
+            with self.subTest(field=field,origin=origin):
+                self.clock=FakeClock();api,plan,record,cleanup=self.completed_model()
+                replace_profile_directory_identity(cleanup,field,origin)
+                writer_model_reader.require_reader_cleanup(cleanup,self.binding,plan.deadline)
+                with self.assertRaisesRegex(AssertionError,'Cleanup changed the frozen .* profile directory witness'):
+                    api.finalize_completion(plan,record,cleanup,self.clock.now)
+                self.assertFalse(record['success']);self.assertEqual(record['state'],'failed')
+
+    def test_cleanup_rejects_otherwise_valid_helper_process_handle_closures(self):
+        import writer_model_reader
+        for kind in ('shell','office'):
+            with self.subTest(kind=kind):
+                self.clock=FakeClock();api,plan,record,cleanup=self.completed_model()
+                frozen=json.loads(plan.before_input_json)
+                closure=next(row for row in cleanup['releaseAcknowledgement']['observerHandleClosures'] if row['kind']==kind)
+                # The controller holds a valid HANDLE for the same process, but
+                # it cannot certify closure of the helper's retained HANDLE.
+                closure['handleValue']=frozen['nativeSnapshots']['controllerBefore'][kind]['handleValue']
+                writer_model_reader.require_reader_cleanup(cleanup,self.binding,plan.deadline)
+                with self.assertRaisesRegex(AssertionError,'Cleanup closed different retained helper handles'):
+                    api.finalize_completion(plan,record,cleanup,self.clock.now)
+                self.assertFalse(record['success']);self.assertEqual(record['state'],'failed')
+
+    def test_whole_case_exports_native_canonical_profile_without_changing_original_short_uri(self):
+        api,frame,record,urls=self.case_data(windows=True)
+        short='file:///C:/Users/RUNNER~1/Temp/OpenGeul-office-owned'
+        canonical='C:/Users/runneradmin/Temp/OpenGeul-office-owned'
+        def native_alias(value):
+            if isinstance(value,dict):
+                if 'profileDirectory' in value:
+                    handle=value['profileDirectory']['witness']['handleValue']
+                    value['profileDirectory']=reader_fixtures.profile_directory_fixture(short,handle,canonical)
+                if 'officeCommandLine' in value:
+                    value['officeCommandLine']=[('-env:UserInstallation='+short if part.startswith('-env:UserInstallation=') else part) for part in value['officeCommandLine']]
+                    value['profileUrl']=short
+                for item in value.values():native_alias(item)
+            elif isinstance(value,list):
+                for item in value:native_alias(item)
+        native_alias(record);before=copy.deepcopy(record)
+        with patch.object(Path,'resolve',side_effect=AssertionError('Profile replay may not resolve paths')), \
+             patch.object(Path,'read_bytes',side_effect=AssertionError('Profile replay may not read files')):
+            replayed=self.replay_case(api,frame,record,urls)
+        generation=replayed['frameGenerations'][0]
+        self.assertEqual(generation.get('canonicalProfile'),dict(profileUrl=short,
+            canonicalPath=str(PureWindowsPath(canonical)).casefold(),volumeSerialNumber=104,fileIndexHigh=0,fileIndexLow=105))
+        self.assertEqual(generation['profileUrl'],short);self.assertEqual(record,before)
+
+    def test_whole_case_rejects_an_individually_valid_changed_profile_directory_between_edits(self):
+        for field in ('canonicalPath','fileId'):
+            with self.subTest(field=field):
+                api,frame,record,urls=self.case_data(windows=True);receipt=record['writerModelCompletions'][-1]
+                replace_profile_directory_identity(receipt['expectation']['beforeInput'],field)
+                for row in receipt['observations']:replace_profile_directory_identity(row['observation'],field)
+                replace_profile_directory_identity(receipt['cleanup'],field)
+                api.replay_completion(receipt,suite_root=frame.suite,inventory=frame.inventory,
+                    inventory_sha256=frame.inventory_sha256,binding=frame.binding,baseline_body=frame.baseline,
+                    completed_markers=(self.first,),next_marker=self.second)
+                with self.assertRaisesRegex(AssertionError,'Canonical profile directory changed between edits'):
+                    self.replay_case(api,frame,record,urls)
+
+    def test_whole_case_allows_fresh_directory_handles_for_the_same_native_profile(self):
+        api,frame,record,urls=self.case_data(windows=True);receipt=record['writerModelCompletions'][-1]
+        for origin in ('controller','helper'):
+            replace_profile_directory_identity(receipt['expectation']['beforeInput'],'handle',origin)
+            for row in receipt['observations']:replace_profile_directory_identity(row['observation'],'handle',origin)
+            replace_profile_directory_identity(receipt['cleanup'],'handle',origin)
+        self.assertEqual(self.replay_case(api,frame,record,urls)['editCount'],2)
 
 
 if __name__=='__main__':unittest.main()

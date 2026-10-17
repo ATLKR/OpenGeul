@@ -12,6 +12,7 @@ from ctypes import wintypes
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -517,6 +518,360 @@ def base_new_closed(api, process, hwnd, record):
     return not api.user.IsWindow(hwnd)
 
 
+BASE_SAVE_DIALOG_SECONDS = 20
+BASE_SAVE_MAX_OBSERVATIONS = 201
+BASE_SAVE_UIA_TYPES = (50004, 50000)  # UIA Edit and Button control types.
+
+
+def _base_int(value, *, positive=False):
+    assert type(value) is int and value >= (1 if positive else 0), 'Invalid native Base integer'
+    return value
+
+
+def _base_time(value):
+    assert type(value) in (int, float) and math.isfinite(value) and value >= 0, 'Invalid Base observation time'
+    return value
+
+
+def _base_native_identity(snapshot, shell_pid, document, dialog, caption):
+    owner = snapshot['document']
+    assert (owner['hwnd'] == document and owner['pid'] == shell_pid and owner['isWindow'] is True
+            and owner['rootHwnd'] == document and _base_int(owner['threadId'], positive=True)), 'Foreign or dead Base document'
+    if not dialog: return
+    native = snapshot['dialog']
+    assert (native['hwnd'] == dialog and native['isWindow'] is True and native['pid'] == shell_pid
+            and native['rootHwnd'] == dialog and _base_int(native['threadId'], positive=True)), 'Foreign or dead Base save dialog'
+    require_dialog_identity(native['pid'], shell_pid, snapshot['ownerHwnd'], document,
+                            snapshot['title'], caption, native['className'])
+    assert snapshot['visible'] is True, 'Owned Base save dialog disappeared'
+    foreground = snapshot['foreground']
+    assert (foreground['isWindow'] is True and foreground['pid'] == shell_pid
+            and foreground['rootHwnd'] == dialog), 'Foreign Base save foreground'
+
+
+def _base_native_key(window):
+    for key in ('hwnd', 'pid', 'threadId', 'rootHwnd'): _base_int(window[key], positive=True)
+    assert type(window['className']) is str and window['className']
+    assert window['isWindow'] is True
+    return tuple(window[key] for key in ('hwnd','pid','threadId','rootHwnd','className'))
+
+
+def _base_native_continuity(anchor, observation):
+    for edge in ('before','after'):
+        assert _base_native_key(observation[edge]['document']) == _base_native_key(anchor['document']), 'Base document native generation changed'
+        if observation['dialogMatches']:
+            assert _base_native_key(observation[edge]['dialog']) == _base_native_key(anchor['dialog']), 'Base save dialog native thread or window identity changed'
+
+
+def _base_uia_hwnd(row):
+    raw = row['nativeHwndRaw']
+    assert raw is None or type(raw) is int, 'Invalid raw UIA pointer value'
+    expected = 0 if raw is None else _base_int(raw)
+    assert _base_int(row['nativeHwnd']) == expected, 'Raw UIA null/handle normalization changed'
+    return expected
+
+
+def _base_runtime_id(value):
+    assert isinstance(value, list) and 1 <= len(value) <= 64 and all(type(n) is int for n in value), 'Missing actual UIA runtime identity'
+    return tuple(value)
+
+
+def _base_save_observation_state(observation, shell_pid, document, caption, frozen_dialog, frozen_root):
+    if observation['apiError'] is not None:
+        error = observation['apiError']
+        raise AssertionError('Base native/UIA API failed: ' + str(error))
+    matches = observation['dialogMatches']
+    assert isinstance(matches, list) and len(matches) <= 1, 'Owned Base save dialog is ambiguous'
+    for edge in ('before', 'after'):
+        _base_native_identity(observation[edge], shell_pid, document, frozen_dialog if matches else 0, caption)
+    if not matches:
+        assert not frozen_dialog, 'Bound Base save dialog disappeared'
+        assert observation['queryAttempted'] is False and observation['controls'] == [], 'Unexpected query without an owned dialog'
+        return 'pending'
+    assert matches == [frozen_dialog] and _base_int(frozen_dialog, positive=True), 'Owned Base save dialog was replaced'
+    assert observation['queryAttempted'] is True and observation['querySucceeded'] is True, 'Missing raw Base UIA query'
+    assert observation['queryApi'] == 'IUIAutomationElement.FindAll' and observation['treeScope'] == 4, 'Wrong Base UIA query scope'
+    root = observation['uiaRoot']
+    assert (_base_runtime_id(root['runtimeId']) == tuple(frozen_root) and root['nativeHwnd'] == frozen_dialog
+            and root['pid'] == shell_pid and root['controlType'] == 50032), 'Foreign or replaced Base UIA root'
+    _base_int(root['pid'],positive=True); _base_int(_base_uia_hwnd(root),positive=True); _base_int(root['controlType'],positive=True)
+    assert type(root['enabled']) is bool and type(root['offscreen']) is bool
+    controls = observation['controls']
+    assert isinstance(controls, list) and _base_int(observation['rawCount']) == len(controls) <= 512, 'Incomplete bounded raw UIA enumeration'
+    candidates = {('1001', 50004): [], ('1', 50000): []}
+    seen = set()
+    for index, row in enumerate(controls):
+        assert _base_int(row['index']) == index and type(row['controlType']) is int and row['controlType'] in BASE_SAVE_UIA_TYPES, 'Unexpected Base UIA control type or index'
+        _base_int(row['pid'], positive=True); _base_uia_hwnd(row)
+        identity = _base_runtime_id(row['runtimeId'])
+        assert type(row['automationId']) is str and type(row['offscreen']) is bool and type(row['enabled']) is bool, 'Invalid raw Base UIA properties'
+        key = (row['automationId'], row['controlType'])
+        if key not in candidates: continue
+        assert identity not in seen, 'Base controls have duplicate live UIA identities'
+        seen.add(identity)
+        candidates[key].append(row)
+        assert row['pid'] == shell_pid, 'Foreign Base save control process'
+        chain = row['ancestry']
+        assert isinstance(chain, list) and 2 <= len(chain) <= 32, 'Missing bounded live UIA ancestry'
+        chain_ids = []
+        for position, node in enumerate(chain):
+            chain_ids.append(_base_runtime_id(node['runtimeId']))
+            assert node['pid'] == shell_pid and _base_int(node['controlType'], positive=True), 'Foreign UIA control ancestry'
+            _base_uia_hwnd(node)
+            assert node['equalsDialogRoot'] is (position == len(chain)-1), 'UIA ancestry did not terminate at the owned root'
+            if node['controlType'] == 50032:
+                assert position == len(chain)-1, 'Foreign nested UIA Window before the owned Base dialog'
+            if node['nativeHwnd']:
+                native = node['native']
+                assert (native['hwnd'] == node['nativeHwnd'] and native['isWindow'] is True
+                        and native['pid'] == shell_pid and native['rootHwnd'] == frozen_dialog
+                        and node['nativeWithinDialog'] is True), 'Foreign native UIA ancestor'
+            else:
+                assert node['native'] is None and node['nativeWithinDialog'] is False, 'Invented UIA ancestor HWND'
+        assert len(set(chain_ids)) == len(chain_ids) and chain_ids[0] == identity and chain_ids[-1] == tuple(frozen_root), 'Replaced or cyclic UIA ancestry'
+        assert chain[-1]['nativeHwnd'] == frozen_dialog and chain[-1]['controlType'] == 50032, 'UIA ancestry ends at a foreign native window'
+        if row['nativeHwnd']:
+            native = row['native']
+            assert (native['hwnd'] == row['nativeHwnd'] and native['isWindow'] is True
+                    and native['pid'] == shell_pid and native['rootHwnd'] == frozen_dialog
+                    and row['nativeWithinDialog'] is True), 'Foreign native Base control'
+        else:
+            assert row['native'] is None and row['nativeWithinDialog'] is False, 'Invented HWND for a DirectUI control'
+    actual_counts = {'filename':len(candidates[('1001',50004)]),'save':len(candidates[('1',50000)])}
+    assert observation['candidateCounts'] == actual_counts and all(type(n) is int for n in observation['candidateCounts'].values()) and observation['countsComplete'] is True, 'Invalid raw Base candidate counts'
+    assert all(len(rows) <= 1 for rows in candidates.values()), 'Exact Base filename or Save control is ambiguous'
+    ready = root['enabled'] and not root['offscreen'] and all(len(rows) == 1 and rows[0]['enabled'] and not rows[0]['offscreen'] for rows in candidates.values())
+    return 'ready' if ready else 'pending'
+
+
+def require_base_save_dialog_readiness(evidence, shell_pid, document_hwnd, caption, *, before_input=False):
+    """Replay actual native/UIA receipts without loading Windows libraries."""
+    _base_int(shell_pid, positive=True); _base_int(document_hwnd, positive=True)
+    assert type(before_input) is bool
+    assert type(evidence['schemaVersion']) is int and evidence['schemaVersion'] == 1
+    assert evidence['kind'] == 'owned-base-save-dialog-readiness'
+    assert (evidence['shellPid'], evidence['documentHwnd'], evidence['caption']) == (shell_pid, document_hwnd, caption)
+    assert _base_int(evidence['budgetSeconds']) == BASE_SAVE_DIALOG_SECONDS and _base_int(evidence['maxObservations']) == BASE_SAVE_MAX_OBSERVATIONS
+    start, deadline, finished = (_base_time(evidence[key]) for key in ('startedAt', 'deadline', 'finishedAt'))
+    assert deadline == start + BASE_SAVE_DIALOG_SECONDS and start <= finished <= deadline, 'Base readiness exceeded its original deadline'
+    assert _base_int(evidence['fileMenuClicks']) == 1 and _base_int(evidence['saveShortcuts']) == 1 and evidence['ready'] is True, 'Original Base inputs or readiness changed'
+    focus = evidence['focusAction']
+    dialog = _base_int(evidence['dialogHwnd'], positive=True)
+    root = _base_runtime_id(evidence['uiaRootRuntimeId'])
+    assert focus['dialogHwnd'] == dialog and _base_int(focus['count']) == 1 and start <= _base_time(focus['at']) <= finished, 'Base dialog focus was retried or reordered'
+    observations = evidence['observations']
+    assert isinstance(observations, list) and 1 <= len(observations) <= BASE_SAVE_MAX_OBSERVATIONS
+    previous, bound = start, False
+    for index, observation in enumerate(observations):
+        began, ended = (_base_time(observation[key]) for key in ('startedAt', 'finishedAt'))
+        assert previous <= began <= ended <= finished and _base_int(observation['sequence']) == index, 'Invalid Base observation order'
+        previous = ended
+        assert observation['shellProcessPoll'] == {'pid':shell_pid,'exitCode':None}, 'Original retained Suite process exited'
+        _base_native_continuity(evidence['nativeAnchor'],observation)
+        matches = observation['dialogMatches']
+        if matches:
+            bound = True
+            assert focus['at'] <= began, 'Base controls queried before the single native focus action'
+        state = _base_save_observation_state(observation, shell_pid, document_hwnd, caption, dialog if bound else 0, root)
+        assert observation['state'] == state and (state == 'ready') is (index == len(observations)-1), 'Base readiness did not stop at the first strict ready snapshot'
+    rows = observations[-1]['controls']
+    bindings = evidence['wrapperBindings']
+    assert len(bindings) == 2
+    for binding, key in zip(bindings, (('1001', 50004), ('1', 50000))):
+        row = rows[_base_int(binding['sourceIndex'])]
+        assert (row['automationId'], row['controlType']) == key and binding['rawElementEquals'] is True, 'Wrapper did not retain the actual queried Base control'
+        assert binding['properties'] == {name: row[name] for name in binding['properties']} and set(binding['properties']) == {'runtimeId','automationId','controlType','pid','nativeHwnd','nativeHwndRaw','enabled','offscreen'}, 'Wrapper identity changed before input'
+    assert evidence['bindingError'] is None, 'Raw Base wrapper binding failed'
+    if not before_input or 'filenameInputStartedAt' in evidence:
+        assert _base_time(evidence['filenameInputStartedAt']) >= finished, 'Filename input preceded exact Base readiness'
+    return evidence
+
+
+def _base_native_snapshot(api, document, dialog):
+    return {'document': api._focus_window(document), 'dialog': api._focus_window(dialog) if dialog else None,
+            'ownerHwnd': int(api.user.GetWindow(dialog, 4) or 0) if dialog else 0,
+            'title': api.title(dialog) if dialog else '', 'visible': bool(api.user.IsWindowVisible(dialog)) if dialog else False,
+            'foreground': api._focus_window(api.user.GetForegroundWindow())}
+
+
+def _base_api_error(operation, exc):
+    raw = getattr(exc, 'hresult', None)
+    arguments = list(exc.args)
+    try: json.dumps(arguments,allow_nan=False)
+    except (TypeError,ValueError): arguments = [repr(argument) for argument in exc.args]
+    return {'operation': operation, 'type': type(exc).__name__, 'message': str(exc),
+            'hresult': int(raw) if raw is not None else None, 'arguments':arguments}
+
+
+def _base_raw_properties(element, call, result=None):
+    if result is None: result = {}
+    for target, source, convert in (('automationId','CurrentAutomationId',str), ('controlType','CurrentControlType',int),
+            ('pid','CurrentProcessId',int), ('nativeHwnd','CurrentNativeWindowHandle',int),
+            ('enabled','CurrentIsEnabled',bool), ('offscreen','CurrentIsOffscreen',bool)):
+        value = call(source, lambda source=source: getattr(element, source))
+        if target == 'nativeHwnd':
+            # UIA_HWND is void*: successful ctypes NULL out parameters are None.
+            result['nativeHwndRaw'] = value
+            if value is not None and type(value) is not int:
+                raise TypeError('UIA_HWND must be an actual integer or successful null pointer')
+            result[target] = 0 if value is None else _base_int(value)
+        else:
+            result[target] = convert(value)
+    result['runtimeId'] = list(call('GetRuntimeId', element.GetRuntimeId))
+    return result
+
+
+def _base_raw_controls(api, accessible, uia, dialog, observation):
+    """Do not use descendants/elements_from_uia_array: both swallow COM errors."""
+    last = 'UIA root'
+    def call(operation, function):
+        nonlocal last
+        last = operation
+        return function()
+    elements = []
+    try:
+        root = accessible.element_info._element
+        observation['uiaRoot'] = {}
+        _base_raw_properties(root, call, observation['uiaRoot'])
+        condition = call('CreateOrCondition', lambda: uia.iuia.CreateOrCondition(
+            uia.build_condition(control_type='Edit'), uia.build_condition(control_type='Button')))
+        observation.update(queryAttempted=True, queryApi='IUIAutomationElement.FindAll', treeScope=4)
+        found = call('IUIAutomationElement.FindAll', lambda: root.FindAll(uia.tree_scope['descendants'], condition))
+        count = int(call('IUIAutomationElementArray.Length', lambda: found.Length))
+        observation['rawCount'] = count
+        assert 0 <= count <= 512, 'Base UIA enumeration exceeded its finite element limit'
+        for index in range(count):
+            element = call('IUIAutomationElementArray.GetElement', lambda: found.GetElement(index))
+            row = {'index': index}
+            observation['controls'].append(row)
+            _base_raw_properties(element, call, row)
+            elements.append(element)
+            if (row['automationId'], row['controlType']) in (('1001',50004),('1',50000)):
+                row['ancestry'], cursor = [], element
+                for _ in range(32):
+                    node = _base_raw_properties(cursor, call)
+                    node = {name: node[name] for name in ('runtimeId','pid','nativeHwnd','nativeHwndRaw','controlType')}
+                    node['equalsDialogRoot'] = bool(call('IUIAutomation.CompareElements', lambda: uia.iuia.CompareElements(cursor,root)))
+                    node['native'] = api._focus_window(node['nativeHwnd']) if node['nativeHwnd'] else None
+                    node['nativeWithinDialog'] = bool(node['nativeHwnd'] and
+                        (node['nativeHwnd'] == dialog or api.user.IsChild(dialog,node['nativeHwnd'])))
+                    row['ancestry'].append(node)
+                    if node['equalsDialogRoot']: break
+                    cursor = call('ControlViewWalker.GetParentElement', lambda: uia.iuia.ControlViewWalker.GetParentElement(cursor))
+                    assert cursor, 'Base UIA ancestry ended before the owned dialog'
+                else: raise AssertionError('Base UIA ancestry exceeded its finite depth')
+                row['native'] = api._focus_window(row['nativeHwnd']) if row['nativeHwnd'] else None
+                row['nativeWithinDialog'] = bool(row['nativeHwnd'] and api.user.IsChild(dialog, row['nativeHwnd']))
+        observation['querySucceeded'] = True
+    except Exception as exc:
+        observation['apiError'] = _base_api_error(last, exc)
+    finally:
+        if 'rawCount' in observation:
+            observation['candidateCounts'] = {name:sum((row.get('automationId'),row.get('controlType')) == key for row in observation['controls'])
+                for name,key in (('filename',('1001',50004)),('save',('1',50000)))}
+            observation['countsComplete'] = observation['querySucceeded']
+    return elements
+
+
+def _wait_base_save_controls(api, process, document, caption, record):
+    start = time.monotonic()
+    from pywinauto import Desktop
+    from pywinauto.uia_defines import IUIA
+    from pywinauto.uia_element_info import UIAElementInfo
+    from pywinauto.controls.uiawrapper import UIAWrapper
+    proof = {'schemaVersion':1, 'kind':'owned-base-save-dialog-readiness', 'shellPid':process.pid,
+             'documentHwnd':document, 'caption':caption, 'budgetSeconds':BASE_SAVE_DIALOG_SECONDS,
+             'maxObservations':BASE_SAVE_MAX_OBSERVATIONS, 'startedAt':start, 'deadline':start+BASE_SAVE_DIALOG_SECONDS,
+             'finishedAt':start, 'fileMenuClicks':1, 'saveShortcuts':1, 'focusAction':None,
+             'dialogHwnd':0, 'uiaRootRuntimeId':[], 'nativeAnchor':{}, 'observations':[], 'wrapperBindings':[], 'bindingError':None, 'ready':False}
+    record['baseSaveDialogReadiness'] = proof
+    dialog, native, accessible, uia = 0, None, None, None
+    try:
+        for sequence in range(BASE_SAVE_MAX_OBSERVATIONS):
+            assert time.monotonic() < proof['deadline'], 'Base save dialog readiness deadline expired'
+            observation = {'sequence':sequence, 'startedAt':time.monotonic(), 'dialogMatches':[],
+                           'queryAttempted':False, 'querySucceeded':False, 'controls':[], 'apiError':None, 'state':'observing'}
+            proof['observations'].append(observation)
+            operation = 'EnumWindows/owned Base dialog identity'
+            try:
+                observation['shellProcessPoll'] = {'pid':process.pid,'exitCode':process.poll()}
+                assert observation['shellProcessPoll']['exitCode'] is None, 'Original retained Suite process exited'
+                matches = [handle for handle in api.windows(process.pid) if api.title(handle) == caption]
+                observation['dialogMatches'] = matches
+                assert len(matches) <= 1, 'Owned Base save dialog is ambiguous'
+                observed = matches[0] if matches else 0
+                if dialog: assert observed == dialog, 'Bound Base save dialog disappeared or was replaced'
+                if observed and not dialog:
+                    dialog = observed
+                    # Verify native owner/class BEFORE the one existing focus action.
+                    require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog,4), document,
+                                            api.title(dialog), caption, api.class_name(dialog))
+                    operation = 'native dialog wrapper/focus'
+                    native = Desktop(backend='win32').window(handle=dialog).wrapper_object()
+                    native.set_focus()
+                    api.require_foreground(dialog)
+                    proof['dialogHwnd'] = dialog
+                    proof['focusAction'] = {'dialogHwnd':dialog, 'count':1, 'at':time.monotonic()}
+                    # Observation timing starts after that single setup action.
+                    observation['startedAt'] = time.monotonic()
+                    operation = 'UIA ElementFromHandle/wrapper'
+                    accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
+                    uia = IUIA()
+                observation['before'] = _base_native_snapshot(api, document, observed)
+                _base_native_identity(observation['before'], process.pid, document, observed, caption)
+                if 'document' not in proof['nativeAnchor']: proof['nativeAnchor']['document'] = observation['before']['document']
+                if observed and 'dialog' not in proof['nativeAnchor']: proof['nativeAnchor']['dialog'] = observation['before']['dialog']
+                if observed:
+                    elements = _base_raw_controls(api, accessible, uia, dialog, observation)
+                    if not proof['uiaRootRuntimeId'] and observation.get('uiaRoot'):
+                        proof['uiaRootRuntimeId'] = observation['uiaRoot']['runtimeId']
+            except Exception as exc:
+                if observation['apiError'] is None: observation['apiError'] = _base_api_error(operation, exc)
+            finally:
+                try: observation['after'] = _base_native_snapshot(api, document, dialog)
+                except Exception as exc:
+                    observation.setdefault('secondaryErrors',[]).append(_base_api_error('native after snapshot',exc))
+                    if observation['apiError'] is None: observation['apiError'] = _base_api_error('native after snapshot',exc)
+                observation['finishedAt'] = time.monotonic()
+            if observation['apiError'] is None: _base_native_continuity(proof['nativeAnchor'],observation)
+            state = _base_save_observation_state(observation, process.pid, document, caption, dialog, proof['uiaRootRuntimeId'])
+            observation['state'] = state
+            assert observation['finishedAt'] <= proof['deadline'], 'Base save dialog readiness deadline expired during observation'
+            if state == 'ready':
+                wrappers=[]
+                binding_operation = 'UIA wrapper construction'
+                def binding_call(operation, function):
+                    nonlocal binding_operation
+                    binding_operation = operation
+                    return function()
+                try:
+                    for key in (('1001',50004), ('1',50000)):
+                        row = next(row for row in observation['controls'] if (row['automationId'],row['controlType']) == key)
+                        element = elements[row['index']]
+                        wrapper = binding_call('UIAWrapper(UIAElementInfo)', lambda:UIAWrapper(UIAElementInfo(element)))
+                        binding = {'sourceIndex':row['index'], 'properties':{}}
+                        proof['wrapperBindings'].append(binding)
+                        _base_raw_properties(wrapper.element_info._element, binding_call, binding['properties'])
+                        binding['rawElementEquals'] = bool(binding_call('IUIAutomation.CompareElements wrapper',
+                            lambda:uia.iuia.CompareElements(wrapper.element_info._element,element)))
+                        wrappers.append(wrapper)
+                except Exception as exc:
+                    proof['bindingError'] = _base_api_error(binding_operation,exc)
+                    raise
+                proof.update(ready=True, finishedAt=time.monotonic())
+                require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True)
+                return dialog, native, wrappers[0], wrappers[1]
+            time.sleep(min(0.1, max(0,proof['deadline']-time.monotonic())))
+        raise AssertionError('Base save readiness deadline or finite observation limit expired')
+    except Exception as exc:
+        if proof['observations'] and proof['observations'][-1]['state'] == 'observing':
+            proof['observations'][-1]['state'] = 'failed'
+        proof.update(ready=False, failure=type(exc).__name__+': '+str(exc))
+        raise
+    finally:
+        if not proof['ready']: proof['finishedAt'] = time.monotonic()
+
+
 def save_new_base(api, process, hwnd, fixtures, output, record):
     from pywinauto import Desktop
     from pywinauto.keyboard import send_keys
@@ -534,42 +889,25 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     api.require_foreground(hwnd)
     send_keys('^s', pause=0.1)
 
-    def own_save_dialog():
-        matches = [dialog for dialog in api.windows(process.pid)
-                   if api.title(dialog) == caption and api.user.GetWindow(dialog, 4) == hwnd]
-        assert len(matches) <= 1, 'Save As dialog is ambiguous'
-        if not matches: return None
-        dialog = matches[0]
-        native = Desktop(backend='win32').window(handle=dialog).wrapper_object()
-        require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
-                                api.title(dialog), caption, native.class_name())
-        return dialog, native
-
     record['stage'] = 'wait-save-dialog'
-    dialog, native = wait_for(own_save_dialog, seconds=20)
-    accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
-    edits = [item for item in accessible.descendants(control_type='Edit')
-             if item.element_info.automation_id == '1001' and item.is_visible() and item.is_enabled()]
-    buttons = [item for item in accessible.descendants(control_type='Button')
-               if item.element_info.automation_id == '1' and item.is_visible() and item.is_enabled()]
-    assert len(edits) == 1 and len(buttons) == 1, 'Exact standard filename Edit 1001 and Save Button 1 are required'
-    native.set_focus()
+    dialog, native, filename, save_button = _wait_base_save_controls(api, process, hwnd, caption, record)
     api.require_foreground(dialog)
     require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
                             api.title(dialog), caption, native.class_name())
     record['stage'] = 'type-save-path'
-    edits[0].click_input()
+    record['baseSaveDialogReadiness']['filenameInputStartedAt'] = time.monotonic()
+    filename.click_input()
     api.require_foreground(dialog)
     send_keys('^a', pause=0.1)
     send_keys(literal_keys(str(target)), with_spaces=True, pause=0.01)
-    assert edits[0].iface_value.CurrentValue == str(target), 'Save As filename differs from the fresh owned target'
+    assert filename.iface_value.CurrentValue == str(target), 'Save As filename differs from the fresh owned target'
     native.capture_as_image().save(output / 'new-base-save-as.png')
     require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
                             api.title(dialog), caption, native.class_name())
     api.require_foreground(dialog)
     assert not target.exists(), 'Save As target appeared before the verified Save click'
     record['stage'] = 'click-save'
-    buttons[0].click_input()
+    save_button.click_input()
     record['stage'] = 'wait-save-dialog-close'
     wait_for(lambda: not api.user.IsWindow(dialog), seconds=20)
     record['stage'] = 'validate-saved-base'

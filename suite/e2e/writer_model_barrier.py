@@ -160,12 +160,16 @@ def validate_observation(plan, observation, previous_body):
     require_owned_observation(observation,binding,plan.suite_root)
     frozen = json.loads(plan.before_input_json)
     assert observation['helperLaunch']==frozen['helperLaunch'], 'Actual owned observer launch receipt changed between reads'
+    assert observation['systemConsoleHost']==frozen['systemConsoleHost'], 'Frozen system console host witness changed'
+    for suffix in ('before','after'):
+        assert observation['unoSnapshots'][suffix]['proxyIdentity']==frozen['unoSnapshots']['before']['proxyIdentity'], 'Frozen retained PyUNO proxy context or type changed'
     for origin in ('controller','helper'):
         anchor = frozen['nativeSnapshots'][origin+'Before']
         for suffix in ('Before','After'):
             current = observation['nativeSnapshots'][origin+suffix]
             assert all(current[name]['handleValue']==anchor[name]['handleValue'] for name in ('shell','office')), 'Original retained process HANDLE was replaced between reads'
             assert current['officeCommandLine']==anchor['officeCommandLine'] and current['profileUrl']==anchor['profileUrl'], 'Original Office transport/profile changed between reads'
+            assert current['profileDirectory']['witness']==anchor['profileDirectory']['witness'], 'Frozen native profile directory witness changed'
     for key in ('pid','creationTime','handleValue','jobHandleValue'):
         assert observation['readerProcess'][key]==frozen['readerProcess'][key], 'Original observer process generation, HANDLE or job changed'
     assert _path(observation['readerProcess']['image'])==_path(frozen['readerProcess']['image'])
@@ -226,6 +230,7 @@ def finalize_completion(plan, record, cleanup, finished_at):
         assert _time(record['modelEqualityAt']) <= _time(cleanup['startedAt']) <= _time(cleanup['finishedAt']) <= finished <= plan.deadline, 'Reader cleanup is not after equality and within the original absolute budget'
         frozen=json.loads(plan.before_input_json)
         assert cleanup['helperLaunch']==frozen['helperLaunch'], 'Cleanup describes another actual observer launch'
+        assert cleanup['systemConsoleHost']==frozen['systemConsoleHost'], 'Cleanup changed the frozen system console host witness'
         reader=frozen['readerProcess']
         members=[row for row in cleanup['readerMembers'] if row['pid']==reader['pid']]
         assert len(members)==1 and cleanup['releaseAcknowledgement']['readerPid']==reader['pid'], 'Cleanup released another observer process'
@@ -237,6 +242,11 @@ def finalize_completion(plan, record, cleanup, finished_at):
             raw=cleanup[key]
             assert all(raw[name]['handleValue']==anchor[name]['handleValue'] for name in ('shell','office')), 'Cleanup closed different retained controller handles'
             assert raw['officeCommandLine']==anchor['officeCommandLine'] and raw['profileUrl']==anchor['profileUrl'], 'Cleanup belongs to another Office transport/profile'
+            assert raw['profileDirectory']['witness']==anchor['profileDirectory']['witness'], 'Cleanup changed the frozen controller profile directory witness'
+        assert cleanup['releaseAcknowledgement']['profileDirectory']['witness']==frozen['nativeSnapshots']['helperBefore']['profileDirectory']['witness'], 'Cleanup changed the frozen helper profile directory witness'
+        helper=frozen['nativeSnapshots']['helperBefore']
+        expected={('shell',helper['shell']['handleValue']),('office',helper['office']['handleValue']),('profile-directory',helper['profileDirectory']['witness']['handleValue'])}
+        assert {(row['kind'],row['handleValue']) for row in cleanup['releaseAcknowledgement']['observerHandleClosures']}==expected, 'Cleanup closed different retained helper handles'
         record.update(cleanup=copy.deepcopy(cleanup),finishedAt=finished,state='complete',success=True)
         return record
     except BaseException as exc:
@@ -281,6 +291,7 @@ def replay_case_completions(record, *, suite_root, inventory, inventory_sha256,
     Callers separately join returned generations to verified native archives.
     """
     import lifecycle_smoke as lifecycle
+    from writer_model_reader import canonical_profile_projection
     assert isinstance(record,dict) and isinstance(expected_urls,dict)
     markers=lifecycle.ASCII_EDITOR_MARKERS.get(record['case'],())
     completions=record.get('writerModelCompletions',[])
@@ -303,17 +314,18 @@ def replay_case_completions(record, *, suite_root, inventory, inventory_sha256,
         lifecycle.native.require_editor_focus_readiness(focus,key[0],key[1],record['shellPid'],attachment['officePid'])
         lifecycle.native.ascii_input.require_ascii_receipt(inputs,marker,*key)
         assert inputs['pauseSeconds']==0.025, 'Original lifecycle character pacing changed'
+        native=receipt['expectation']['beforeInput']['nativeSnapshots']['controllerBefore']
+        canonical=canonical_profile_projection(native['profileDirectory']['witness'],native['profileUrl'])
         if key in frames:
             # Reader/proxy representations may differ across new observation
             # helpers, but the original native frame/generation/URL cannot.
             native_keys=BINDING_KEYS-{'frameIdentity','controllerIdentity','modelIdentity'}
             assert all(binding[k]==frames[key][k] for k in native_keys), 'Owned frame generation changed between edits'
-            native=receipt['expectation']['beforeInput']['nativeSnapshots']['controllerBefore']
             assert native['officeCommandLine']==frames[key]['officeCommandLine'] and native['profileUrl']==frames[key]['profileUrl'], 'Owned frame transport/profile changed between edits'
+            assert canonical==frames[key]['canonicalProfile'], 'Canonical profile directory changed between edits'
         else:
             frames[key]=copy.deepcopy(binding)
-            native=receipt['expectation']['beforeInput']['nativeSnapshots']['controllerBefore']
-            frames[key].update(officeCommandLine=copy.deepcopy(native['officeCommandLine']),profileUrl=native['profileUrl'])
+            frames[key].update(officeCommandLine=copy.deepcopy(native['officeCommandLine']),profileUrl=native['profileUrl'],canonicalProfile=canonical)
         before=ledgers.setdefault(key,[])
         replayed=replay_completion(receipt,suite_root=suite_root,inventory=inventory,
             inventory_sha256=inventory_sha256,binding=binding,baseline_body=baseline_body,
