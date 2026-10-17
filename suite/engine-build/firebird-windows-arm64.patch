@@ -91,3 +91,18 @@
  };
  
  #include "../remote/remote_def.h"
+--- builds/posix/Makefile.in
++++ builds/posix/Makefile.in
+@@ -282,7 +282,12 @@
+ 
+ $(COMMON_LIB):	$(Common_Objects)
+ 	-$(RM) $@
++ifeq ($(PLATFORM)_$(CpuType),win32_aarch64)
++	$(if $(strip $(OPENGEUL_FIREBIRD_LIB)),,$(error Explicit selected native OPENGEUL_FIREBIRD_LIB is required))
++	"$(OPENGEUL_FIREBIRD_LIB)" /NOLOGO "/OUT:$@" $^
++else
+ 	$(STATICLIB_LINK) $@ $^
++endif
+ 
+ 
+ #___________________________________________________________________________

@@ -46,6 +46,7 @@ class NativeSourceTarPathTests(unittest.TestCase):
     def generate(self):
         raw=self.ps(f"""
 $script={quote(self.script)};$unixSource={quote(self.core)};$Jobs=1;$target='ExternalProject_firebird';$evidence={quote(self.evidence)}
+$receipt=@{{nativeLibrarian=@{{path={quote(self.root/'selected-native-lib.exe')}}}}}
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile({quote(DRIVER)},[ref]$tokens,[ref]$errors)
 if($errors.Count) {{throw 'Production driver has parse errors'}}

@@ -10,10 +10,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
 import tempfile
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -309,6 +311,68 @@ class AuthenticatedSource(unittest.TestCase):
                 self.assertEqual(item['beforeSha256'],hashlib.sha256(original[path]).hexdigest())
                 self.assertEqual(item['afterBytes'],len(effective))
                 self.assertEqual(item['afterSha256'],hashlib.sha256(effective).hexdigest())
+
+    def test_real_common_archive_recipe_selects_explicit_native_librarian_and_keeps_other_platforms(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.source_tree(folder)
+            target=root/'builds/posix/Makefile.in';original=target.read_bytes()
+            self.apply(root,PORT/'firebird-windows-arm64.patch')
+            text=target.read_text();start=text.index('$(COMMON_LIB):')
+            recipe=text[start:text.index('#________________________________________________________________',start)]
+            tools=Path(folder)/"selected VS's native tools";tools.mkdir()
+            librarian=tools/'lib.exe';capture=Path(folder)/'native-arguments.json'
+            librarian.write_text('#!'+sys.executable+'\nimport json,os,pathlib,sys\n'+
+                'pathlib.Path(os.environ["ARCHIVE_CAPTURE"]).write_text(json.dumps(sys.argv[1:]))\n'+
+                'code=int(os.environ.get("ARCHIVE_EXIT","0"))\n'+
+                'if code: sys.exit(code)\n'+
+                'out=next(arg[5:] for arg in sys.argv[1:] if arg.startswith("/OUT:"))\n'+
+                'pathlib.Path(out).write_bytes(b"native command fixture only")\n')
+            librarian.chmod(0o700)
+            objects=[]
+            for name in ('first','second'):
+                obj=Path(folder)/(name+'.o')
+                result=subprocess.run([self.compiler,'-x','c','-c','-o',str(obj),'-'],
+                    input='int '+name+'(void) {return 1;}\n',text=True,capture_output=True)
+                self.assertEqual(0,result.returncode,result.stderr);objects.append(obj)
+            makefile=Path(folder)/'archive.mk';output=Path(folder)/'common.lib'
+            env=dict(os.environ,ARCHIVE_CAPTURE=str(capture))
+            def run(platform,cpu,tool=str(librarian),exit_code='0'):
+                output.unlink(missing_ok=True);capture.unlink(missing_ok=True)
+                makefile.write_text('COMMON_LIB := '+str(output).replace(' ','\\ ')+'\n'+
+                    'Common_Objects := '+' '.join(map(str,objects))+'\nRM := rm -f\nSTATICLIB_LINK := ar crus\n'+
+                    'PLATFORM := '+platform+'\nCpuType := '+cpu+'\nOPENGEUL_FIREBIRD_LIB := '+tool+'\n'+recipe)
+                return subprocess.run(['make','--no-print-directory','-f',str(makefile)],
+                    capture_output=True,text=True,env=dict(env,ARCHIVE_EXIT=exit_code))
+            result=run('win32','aarch64')
+            self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+            self.assertTrue(capture.is_file(),'ARM64 recipe used GNU ar instead of the selected native librarian')
+            self.assertEqual(['/NOLOGO','/OUT:'+str(output),*map(str,objects)],json.loads(capture.read_text()))
+            self.assertEqual(b'native command fixture only',output.read_bytes())
+            output=Path(folder)/'archive output/common.lib';output.parent.mkdir()
+            result=run('win32','aarch64')
+            self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+            self.assertEqual(['/NOLOGO','/OUT:'+str(output),*map(str,objects)],json.loads(capture.read_text()))
+            result=run('win32','aarch64',exit_code='7')
+            self.assertNotEqual(0,result.returncode,'Native librarian failure was hidden')
+            self.assertIn('Error 7',result.stderr);self.assertFalse(output.exists())
+            result=run('win32','aarch64',tool='')
+            self.assertNotEqual(0,result.returncode,'Missing selected librarian fell back to PATH')
+            self.assertFalse(capture.exists());self.assertFalse(output.exists())
+            # The original GNU recipe is intentionally unchanged for all other
+            # CPU/platform selections; use unspaced output as that recipe expects.
+            output=Path(folder)/'other-common.lib'
+            for platform,cpu in (('win32','x86_64'),('win32','i686'),('LINUX','aarch64')):
+                result=run(platform,cpu)
+                self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+                self.assertFalse(capture.exists(),'Other platform used the ARM64-only librarian')
+                symbols=subprocess.run(['nm',str(output)],capture_output=True,text=True)
+                self.assertEqual(0,symbols.returncode,symbols.stderr)
+                self.assertIn('first',symbols.stdout);self.assertIn('second',symbols.stdout)
+            lock=json.loads((PORT/'source-build.json').read_text())['commonArchiveRecipe']
+            self.assertEqual('builds/posix/Makefile.in',lock['path'])
+            self.assertEqual(lock['beforeSha256'],hashlib.sha256(original).hexdigest())
+            self.assertEqual(lock['afterSha256'],hashlib.sha256(target.read_bytes()).hexdigest())
+            self.assertIn(b'\t$(STATICLIB_LINK) $@ $^\n',target.read_bytes())
 
     def test_explicit_enable_flag_is_not_overwritten_by_arm64_defaults(self):
         autoconf = shutil.which('autoconf')

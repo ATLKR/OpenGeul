@@ -21,7 +21,7 @@
   },
   "portPatch": {
     "filename": "firebird-windows-arm64.patch",
-    "sha256": "9217750cc5261d2aae28d42c0b644f6f8cddcb4a706d0e14060f62a584b5ef06",
+    "sha256": "dccca2b44bbb12ce06b75c227fa9a8fb530e5d6607904484d9f75732ae4cd58e",
     "strip": 0,
     "appliesAfter": "All pinned LibreOffice Windows Firebird patches"
   },
@@ -248,5 +248,13 @@
         "upstreamSha256": "47566aa027acb25dcad56d2d2d4618cb401883b906acef9dfca6cc740557bc64"
       }
     ]
+  },
+  "commonArchiveRecipe": {
+    "path": "builds/posix/Makefile.in",
+    "beforeStage": "After all 25 locked upstream Windows patches",
+    "beforeSha256": "d6262fca2a4fa052a8f3627fa54a03ce87774d222a1003c3d2ea996fa72b0a36",
+    "afterSha256": "4a6d7da15a8461df25cf494082e83222cadb7d9b0dbffd71cbf5e5aa4bd49180",
+    "condition": "PLATFORM=win32 and CpuType=aarch64",
+    "librarian": "Explicit OPENGEUL_FIREBIRD_LIB from selected COMPATH/bin/Hostarm64/arm64/lib.exe"
   }
 }

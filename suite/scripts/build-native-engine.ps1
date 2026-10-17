@@ -786,6 +786,19 @@ function Assert-CrtFile([string]$Path,[string]$MinimumVersion) {
     return [ordered]@{name=$name;sourcePath=[IO.Path]::GetFullPath($Path);machine=$pe.machine;size=$pe.size;sha256=$pe.sha256;signature=$identity}
 }
 
+function Get-NativeLibrarianPlan([string]$CompilerRoot) {
+    # COMPATH is the actual configured VS tools version directory, already
+    # checked by CRT preflight. Never resolve this ARM64 librarian via PATH.
+    Assert-UnlinkedPath $CompilerRoot
+    $path=Join-Path ([IO.Path]::GetFullPath($CompilerRoot)) 'bin/Hostarm64/arm64/lib.exe'
+    Assert-UnlinkedPath $path
+    $identity=Get-ProductPeIdentity $path
+    if($identity.role -cne 'nativeArm64') {throw 'Selected VS librarian must be native ARM64.'}
+    $identity.compilerRoot=[IO.Path]::GetFullPath($CompilerRoot)
+    $identity.selection='configured COMPATH/bin/Hostarm64/arm64/lib.exe; no PATH fallback'
+    return $identity
+}
+
 function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset) {
     if($Toolset -cne 'v145') {throw 'App-local runtime discovery requires the configured VS2026 v145 toolset.'}
     Assert-UnlinkedPath $CompilerRoot
@@ -1042,6 +1055,8 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $nativeCompilerRoot=(Get-Content -LiteralPath $compilerPath.stdout -Raw).Trim()
         $receipt.crtPreflight=Get-AppLocalCrtPlan $nativeCompilerRoot $receipt.configuration.VCTOOLSET
         Write-BuildJson (Join-Path $evidence 'app-local-crt-preflight.json') $receipt.crtPreflight
+        $receipt.nativeLibrarian=Get-NativeLibrarianPlan $nativeCompilerRoot
+        Write-BuildJson (Join-Path $evidence 'native-librarian.json') $receipt.nativeLibrarian
         $crtTerms=Join-Path $evidence 'Microsoft-VC145-redistribution.html'
         $receipt.crtRedistributionTerms=Save-VcRedistributionTerms $crtTerms
         # Resolve the exact source download.lst variables with GNU make rather
@@ -1061,7 +1076,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         foreach($target in Get-BuildTargets $Phase) {
             $receipt.stage='make-'+$target;Assert-NativeBuildTimeRemaining
             $script=Join-Path $commands ($target+'.sh')
-            Write-BashScript $script @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH','export TAR_OPTIONS=--force-local',"cd $(Quote-Bash $unixSource)","make -j$Jobs $target")
+            Write-BashScript $script @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH','export TAR_OPTIONS=--force-local',"export OPENGEUL_FIREBIRD_LIB=$(Quote-Bash $receipt.nativeLibrarian.path.Replace('\','/'))","cd $(Quote-Bash $unixSource)","make -j$Jobs $target")
             Copy-Item -LiteralPath $script -Destination (Join-Path $evidence ('make-'+$target+'.sh'))
             Invoke-CygwinScript $bash $cygpath $script $work (Join-Path $evidence ('make-'+$target)) -NativeLinks|Out-Null
             if($target -eq 'firebird') {

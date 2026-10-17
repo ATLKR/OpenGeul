@@ -65,6 +65,25 @@ common branch, remote header and protocol enum, then compiles ARM64, x64 and
 x86 selections. It proves source selection and preserves negotiation bytes;
 actual native transport interoperability and Base persistence remain required.
 
+Native source run `39029745766` passed the fixed-header ODS check, then the
+linker ignored `temp/Release/common.lib` with LNK4003 before reporting 69
+unresolved symbols in `gpre_boot.exe`. The frozen common archive recipe used
+GNU `ar crus`; the actual failed archive bytes were not retained. The ARM64
+candidate changes only that recipe for the generated `PLATFORM=win32` and
+`CpuType=aarch64` selection to use the selected MSVC native librarian with
+`/NOLOGO /OUT:<archive>`. Other CPU/platform selections retain the original
+GNU recipe. The driver derives `bin/Hostarm64/arm64/lib.exe` from configure's
+selected compiler root, rejects linked paths or a foreign PE, retains its
+identity, and exports its quoted literal path only to owned make children.
+There is no `PATH` fallback. Editline remains disabled by the existing external
+recipe, and the native build uses LibreOffice's separately built LibTomMath;
+their unused Firebird archive recipes are unchanged. Portable checks execute
+the exact common archive rule, including a tool/output path containing spaces,
+missing-tool rejection, native-tool failure propagation and unchanged x64/x86
+selection. These command-boundary checks do not establish a valid native
+archive or engine; the separate native archive/link diagnostic and full build
+remain required.
+
 Run the build on actual Windows ARM64 and verify the native host before using
 these options in `autogen.input`:
 
