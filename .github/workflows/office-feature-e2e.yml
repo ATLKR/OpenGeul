@@ -1,0 +1,82 @@
+name: OpenGeul Office format, feature and PDF semantic E2E
+'on':
+  push:
+    branches: [work/opengeul-office-feature-e2e]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  office-features-x64:
+    runs-on: windows-2025
+    timeout-minutes: 50
+    steps:
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install independently pinned PDF verifier
+        shell: pwsh
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r suite/config/pdf-e2e-requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF verification tooling installation failed.' }
+      - name: Verify semantic fixture, cleanup and PDF regressions
+        shell: pwsh
+        run: |
+          python -m unittest suite.tests.test_office_feature_smoke suite.tests.test_office_feature_fixtures suite.tests.test_engine_smoke suite.tests.test_pdf_export_smoke -v
+          if ($LASTEXITCODE -ne 0) { throw 'Office feature and PDF boundary tests failed.' }
+      - name: Build the pinned Suite package
+        id: build
+        shell: pwsh
+        run: |
+          $lock = Get-Content suite/config/runtime.lock.json -Raw | ConvertFrom-Json
+          if ($lock.architecture -cne 'x64' -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite identity.' }
+          "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-x64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          ./suite/scripts/build-suite.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Suite package build failed.' }
+      - name: Create, edit, save and independently reopen all 21 semantic cases
+        if: '!cancelled() && steps.build.outcome == ''success'''
+        shell: pwsh
+        run: |
+          $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+          & "$package/Office/program/python.exe" suite/e2e/office_feature_smoke.py --suite $package --output .work/suite-office-features
+          if ($LASTEXITCODE -ne 0) { throw 'Office format and feature semantic E2E failed.' }
+      - name: Export real PDFs and independently verify every page
+        if: '!cancelled() && steps.build.outcome == ''success'''
+        shell: pwsh
+        run: |
+          $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+          $output = Join-Path $env:GITHUB_WORKSPACE '.work/suite-pdf-export'
+          & "$package/Office/program/python.exe" suite/e2e/pdf_export_smoke.py --produce --suite $package --output $output
+          $producerExit = $LASTEXITCODE
+          python suite/e2e/pdf_export_smoke.py --verify --suite $package --output $output
+          $verifierExit = $LASTEXITCODE
+          python suite/scripts/verify-suite.py $package
+          $integrityExit = $LASTEXITCODE
+          if ($producerExit -ne 0 -or $verifierExit -ne 0 -or $integrityExit -ne 0) { throw "PDF E2E failed: producer=$producerExit verifier=$verifierExit integrity=$integrityExit" }
+      - name: Preserve original Office fixtures, PDFs and verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-office-feature-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/suite-office-features/
+            .work/suite-pdf-export/
+            dist/**/suite-inventory.json
+            dist/**/suite-provenance.json
+            dist/**/runtime-branding.json
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error

@@ -110,7 +110,7 @@ def expected(case):
         if not rich: return dict(text=baseline.marker(module), inputs=[17, 25], formula='=SUM(B1:C1)', value=42)
         return dict(sheetNames=['Inputs', 'Summary'], text=marker(module), inputs=[30, 25],
                     namedRange=[0, 1, 1, 2, 1], formula='=SUM(InputValues)', value=55,
-                    dependentFormula='=Inputs.B2*2', dependentValue=60)
+                    dependentFormula='=$Inputs.B2*2', dependentValue=60)
     if module in ('impress', 'draw'):
         if not rich:
             if case['extension'] == 'ppt':
@@ -131,6 +131,22 @@ def validate_observation(case, observed):
     wanted = expected(case)
     assert observed == wanted, 'Persisted semantics differ for ' + case['id'] + ': expected ' + repr(wanted) + '; observed ' + repr(observed)
     return observed
+
+
+def _fix_impress_geometry(engine, shape, wanted):
+    # Attaching text to a new Impress TextShape can auto-shrink its height.
+    # Disable content-driven sizing before setting the final exact geometry.
+    shape.setPropertyValue('TextAutoGrowHeight', False)
+    shape.setPropertyValue('TextAutoGrowWidth', False)
+    shape.setPropertyValue('TextFitToSize', engine.uno.Enum('com.sun.star.drawing.TextFitToSizeType', 'NONE'))
+    for name in ('CharHeight', 'CharHeightAsian', 'CharHeightComplex'):
+        shape.setPropertyValue(name, 12.0)
+    point = engine.uno.createUnoStruct('com.sun.star.awt.Point')
+    point.X, point.Y = wanted['position']
+    size = engine.uno.createUnoStruct('com.sun.star.awt.Size')
+    size.Width, size.Height = wanted['size']
+    shape.setPosition(point)
+    shape.setSize(size)
 
 
 def _normal_text(value):
@@ -182,24 +198,24 @@ def populate(engine, case, document):
     module = case['module']
     if case['kind'] == 'format':
         baseline.populate(engine, module, document)
-        if case['extension'] == 'ppt':
+        if module == 'impress':
             shape = document.getDrawPages().getByIndex(0).getByIndex(0)
-            wanted = expected(case)['pages'][0][0]
-            point = engine.uno.createUnoStruct('com.sun.star.awt.Point')
-            point.X, point.Y = wanted['position']
-            size = engine.uno.createUnoStruct('com.sun.star.awt.Size')
-            size.Width, size.Height = wanted['size']
-            shape.setPosition(point)
-            shape.setSize(size)
+            _fix_impress_geometry(engine, shape, expected(case)['pages'][0][0])
         return {}
     if module == 'writer':
         first = marker(module) + ' bold'
         text = document.getText()
-        text.setString(first + '\nPlain paragraph')
+        # XTextRange.setString treats CR as a paragraph boundary; LF is an
+        # in-paragraph line break and cannot satisfy the two-paragraph fixture.
+        text.setString(first + '\rPlain paragraph')
         cursor = text.createTextCursor()
+        cursor.gotoStart(False); cursor.gotoEnd(True)
+        for name in ('CharWeight', 'CharWeightAsian', 'CharWeightComplex'):
+            cursor.setPropertyValue(name, 100.0)
         cursor.gotoStart(False); cursor.goRight(len(first), True)
         for name in ('CharWeight', 'CharWeightAsian', 'CharWeightComplex'):
             cursor.setPropertyValue(name, 150.0)
+        assert _writer_paragraphs(text) == expected(case)['paragraphs'], 'Writer fixture must contain separate uniformly bold and normal paragraphs'
         cursor.gotoEnd(False)
         text.insertControlCharacter(cursor, 0, False)  # PARAGRAPH_BREAK
         table = document.createInstance('com.sun.star.text.TextTable')
@@ -218,7 +234,8 @@ def populate(engine, case, document):
         summary = sheets.getByName('Summary')
         summary.getCellRangeByName('A1').setString(marker(module))
         summary.getCellRangeByName('B1').setFormula('=SUM(InputValues)')
-        summary.getCellRangeByName('B2').setFormula('=Inputs.B2*2')
+        # XLSX preserves this deliberately absolute sheet reference verbatim.
+        summary.getCellRangeByName('B2').setFormula('=$Inputs.B2*2')
         document.calculateAll()
         assert summary.getCellRangeByName('B1').getValue() == 42, 'Initial named-range SUM is wrong'
         inputs.getCellRangeByName('B2').setValue(30)
@@ -235,6 +252,7 @@ def populate(engine, case, document):
             shape = baseline._shape(engine, document, page,
                 'com.sun.star.drawing.TextShape' if module == 'impress' else 'com.sun.star.drawing.RectangleShape',
                 wanted[0]['text'], wanted[0]['position'], wanted[0]['size'])
+            if module == 'impress': _fix_impress_geometry(engine, shape, wanted[0])
             if module == 'draw': shape.setPropertyValue('FillColor', wanted[0]['color'])
     elif module == 'math': document.setPropertyValue('Formula', RICH_FORMULA)
     elif module == 'base': return _base_crud(document)
@@ -254,16 +272,21 @@ def writer_paragraph(paragraph):
     return dict(text=paragraph.getString(), bold=uniform == [150, 150, 150], weights=uniform)
 
 
+def _writer_paragraphs(text):
+    paragraphs = []
+    items = text.createEnumeration()
+    while items.hasMoreElements():
+        item = items.nextElement()
+        if item.supportsService('com.sun.star.text.Paragraph') and item.getString():
+            paragraphs.append(writer_paragraph(item))
+    return paragraphs
+
+
 def observe(case, document):
     module, rich = case['module'], case['kind'] == 'rich'
     if module == 'writer':
         if not rich: return dict(text=_normal_text(document.getText().getString()))
-        paragraphs = []
-        items = document.getText().createEnumeration()
-        while items.hasMoreElements():
-            item = items.nextElement()
-            if item.supportsService('com.sun.star.text.Paragraph') and item.getString():
-                paragraphs.append(writer_paragraph(item))
+        paragraphs = _writer_paragraphs(document.getText())
         tables = document.getTextTables()
         result = []
         for index in range(tables.getCount()):
