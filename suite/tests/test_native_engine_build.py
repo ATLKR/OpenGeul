@@ -213,6 +213,75 @@ class NativeEngineBuildTests(unittest.TestCase):
         self.assertEqual('exact spaced argument',(self.root/'success.stdout.log').read_text().strip())
         self.assertTrue(json.loads((self.root/'success.command.json').read_text())['passed'])
 
+    def test_completed_fast_command_without_start_time_retains_success_and_truthful_receipt(self):
+        # Wait for the real child, then expose the same null metadata observed
+        # from fast git. Keep its original Process object and redirected pipes.
+        prefix=self.root/'fast-exit'
+        self.ps("$original=${function:Get-CommandCreationIdentity}; "
+            "function Get-CommandCreationIdentity($Process) { "
+            "if(-not $Process.WaitForExit(5000)){throw 'Fixture child did not exit'}; "
+            "$Process|Add-Member -MemberType ScriptProperty -Name StartTime -Value {$null} -Force; "
+            "& $original $Process }; "
+            f"Invoke-LoggedCommand {quote(os.sys.executable)} @('-c','print(\"fast completed output\")') {quote(self.root)} {quote(prefix)}|Out-Null")
+        receipt=json.loads((self.root/'fast-exit.command.json').read_text())
+        self.assertTrue(receipt['passed']);self.assertEqual(0,receipt['exitCode'])
+        self.assertTrue(receipt['directProcessDeathVerified']);self.assertTrue(receipt['pipeDrainComplete'])
+        self.assertIsNone(receipt['creationUtcTicks'])
+        self.assertEqual('unavailable-after-exit',receipt['creationIdentityStatus'])
+        self.assertGreater(receipt['pid'],0)
+        self.assertEqual('fast completed output',(self.root/'fast-exit.stdout.log').read_text().strip())
+
+    def pipe_descendant(self,delay):
+        child=self.root/'pipe-child.py'
+        child.write_text("import os, pathlib, sys, time\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            f"time.sleep({delay!r})\nprint('descendant final stdout',flush=True)\n"
+            "print('descendant final stderr',file=sys.stderr,flush=True)\n",encoding='utf-8')
+        parent=self.root/'pipe-parent.py'
+        parent.write_text("import pathlib, subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable,sys.argv[1],sys.argv[2]],stdout=sys.stdout,stderr=sys.stderr)\n"
+            "deadline=time.monotonic()+2\n"
+            "while not pathlib.Path(sys.argv[2]).exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+            "print('direct parent exited',flush=True)\n",encoding='utf-8')
+        return parent,child,self.root/'descendant.pid'
+
+    def test_exited_parent_cannot_restart_deadline_for_inherited_output_pipes(self):
+        parent,child,pidfile=self.pipe_descendant(4)
+        prefix=self.root/'inherited'
+        self.ps(f"try {{ Invoke-LoggedCommand {quote(os.sys.executable)} @({quote(parent)},{quote(child)},{quote(pidfile)}) {quote(self.root)} {quote(prefix)} -TimeoutMinutes (1.0/60) | Out-Null }} catch {{ }}")
+        receipt=json.loads((self.root/'inherited.command.json').read_text())
+        self.assertFalse(receipt['passed'],'Direct exit 0 cannot qualify a command whose output EOF missed its deadline')
+        self.assertEqual(0,receipt['exitCode'])
+        self.assertLess(receipt['elapsedSeconds'],3)
+        self.assertFalse(receipt['pipeDrainComplete'])
+        self.assertFalse(receipt['forcedTermination'])
+        self.assertTrue(receipt['directProcessDeathVerified'])
+        self.assertEqual('unproved-after-direct-process-exit',receipt['processTreeCleanup'])
+        self.assertIn('direct parent exited',(self.root/'inherited.stdout.log').read_text())
+
+    def test_pipe_eof_inside_original_deadline_preserves_final_descendant_output(self):
+        parent,child,pidfile=self.pipe_descendant(.15)
+        prefix=self.root/'drained'
+        self.ps(f"Invoke-LoggedCommand {quote(os.sys.executable)} @({quote(parent)},{quote(child)},{quote(pidfile)}) {quote(self.root)} {quote(prefix)} -TimeoutMinutes (2.0/60) | Out-Null")
+        receipt=json.loads((self.root/'drained.command.json').read_text())
+        self.assertTrue(receipt['passed'])
+        self.assertTrue(receipt['pipeDrainComplete'])
+        self.assertFalse(receipt['forcedTermination'])
+        self.assertTrue(receipt['directProcessDeathVerified'])
+        self.assertIn('descendant final stdout',(self.root/'drained.stdout.log').read_text())
+        self.assertIn('descendant final stderr',(self.root/'drained.stderr.log').read_text())
+
+    def test_running_command_timeout_forces_only_owned_tree_and_preserves_failure(self):
+        prefix=self.root/'running'
+        self.ps(f"try {{ Invoke-LoggedCommand {quote(os.sys.executable)} @('-c','import time;print(\"before timeout\",flush=True);time.sleep(20)') {quote(self.root)} {quote(prefix)} -TimeoutMinutes (1.0/60) | Out-Null }} catch {{ }}")
+        receipt=json.loads((self.root/'running.command.json').read_text())
+        self.assertFalse(receipt['passed'])
+        self.assertTrue(receipt['forcedTermination'])
+        self.assertTrue(receipt['directProcessDeathVerified'])
+        self.assertFalse(receipt['pipeDrainComplete'])
+        self.assertLess(receipt['elapsedSeconds'],7)
+        self.assertIn('before timeout',(self.root/'running.stdout.log').read_text())
+
     def test_pe_machine_rejects_emulated_products_and_truncated_headers(self):
         path=self.root/'native.exe'
         data=bytearray(512);data[:2]=b'MZ';struct.pack_into('<I',data,60,128);data[128:132]=b'PE\0\0';struct.pack_into('<H',data,132,0xAA64);struct.pack_into('<H',data,148,240);struct.pack_into('<H',data,152,0x20B)

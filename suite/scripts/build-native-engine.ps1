@@ -211,11 +211,28 @@ function Write-CommandFailureTail([string]$Path,[string]$Label) {
     } finally {$stream.Dispose()}
 }
 
-function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[int]$TimeoutMinutes=350) {
-    $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null}
+function Get-CommandCreationIdentity($Process) {
+    # A fast command may exit before Process.StartTime can be queried. This is
+    # optional command metadata; ownership stays with the original Process.
+    $reason='Process.StartTime returned no timestamp.'
+    try {
+        $started=$Process.StartTime
+        if($started -is [DateTime] -and $started.Ticks -gt 0) {
+            return [ordered]@{creationUtcTicks=$started.ToUniversalTime().Ticks;creationIdentityStatus='recorded'}
+        }
+    } catch {$reason=$_.Exception.Message}
+    return [ordered]@{creationUtcTicks=$null;
+        creationIdentityStatus=$(if($Process.HasExited){'unavailable-after-exit'}else{'unavailable'});
+        creationIdentityUnavailableReason=$reason}
+}
+
+function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350) {
+    $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null;
+        timeoutMinutes=$TimeoutMinutes;pipeDrainComplete=$false;forcedTermination=$false;directProcessDeathVerified=$false;processTreeCleanup='not-requested';cleanupErrors=@()}
     $stdout=$LogPrefix+'.stdout.log';$stderr=$LogPrefix+'.stderr.log'
     foreach($path in @($stdout,$stderr,$LogPrefix+'.command.json')) {if(Test-Path -LiteralPath $path){throw 'Command evidence already exists.'}}
-    $outStream=$null;$errStream=$null;$process=$null;$watch=[Diagnostics.Stopwatch]::StartNew()
+    $outStream=$null;$errStream=$null;$process=$null;$started=$false;$failure=$null
+    $cancel=[Threading.CancellationTokenSource]::new();$watch=[Diagnostics.Stopwatch]::StartNew()
     Write-Host ('Starting: '+[IO.Path]::GetFileName($FilePath)+' '+($Arguments -join ' '))
     try {
         $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$FilePath;$info.WorkingDirectory=$WorkingDirectory
@@ -225,15 +242,26 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         $outStream=[IO.File]::Open($stdout,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
         $errStream=[IO.File]::Open($stderr,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
         if(-not $process.Start()) {throw 'Command process did not start.'}
-        $receipt.pid=$process.Id
-        $outTask=$process.StandardOutput.BaseStream.CopyToAsync($outStream)
-        $errTask=$process.StandardError.BaseStream.CopyToAsync($errStream)
-        while(-not $process.WaitForExit(15000)) {
+        $started=$true;$receipt.pid=$process.Id
+        $creation=Get-CommandCreationIdentity $process
+        foreach($key in $creation.Keys) {$receipt[$key]=$creation[$key]}
+        $outTask=$process.StandardOutput.BaseStream.CopyToAsync($outStream,81920,$cancel.Token)
+        $errTask=$process.StandardError.BaseStream.CopyToAsync($errStream,81920,$cancel.Token)
+        while($true) {
+            $remaining=[int][Math]::Floor($TimeoutMinutes*60000-$watch.Elapsed.TotalMilliseconds)
+            if($remaining -le 0) {throw 'Owned command exceeded its original time budget.'}
+            if($process.WaitForExit([Math]::Min(15000,$remaining))) {break}
             Write-Host ("Still running {0}: {1}s; stdout={2} bytes stderr={3} bytes" -f [IO.Path]::GetFileName($FilePath),[int]$watch.Elapsed.TotalSeconds,$outStream.Length,$errStream.Length)
-            if($watch.Elapsed.TotalMinutes -gt $TimeoutMinutes) {$process.Kill($true);$process.WaitForExit();throw 'Owned command exceeded its bounded time budget.'}
+        }
+        $receipt.exitCode=$process.ExitCode;$receipt.directProcessDeathVerified=$true
+        # Descendants can retain inherited output handles after the direct
+        # command exits. EOF must fit this same deadline, not a fresh budget.
+        $remaining=[int][Math]::Floor($TimeoutMinutes*60000-$watch.Elapsed.TotalMilliseconds)
+        if($remaining -le 0 -or -not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($outTask,$errTask),$remaining)) {
+            throw 'Owned command output pipes exceeded the original time budget.'
         }
         $outTask.GetAwaiter().GetResult()|Out-Null;$errTask.GetAwaiter().GetResult()|Out-Null
-        $receipt.exitCode=$process.ExitCode
+        $receipt.pipeDrainComplete=$true
         if($process.ExitCode -ne 0) {
             $outStream.Flush();$errStream.Flush()
             try {Write-CommandFailureTail $stdout 'stdout';Write-CommandFailureTail $stderr 'stderr'}
@@ -241,12 +269,38 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
             throw "Command failed with exit $($process.ExitCode); inspect $stdout and $stderr"
         }
         $receipt.passed=$true
-    } catch {$receipt.error=$_.Exception.Message;throw}
+    } catch {$failure=$_;$receipt.error=$_.Exception.Message}
     finally {
-        if($outStream){$outStream.Dispose()};if($errStream){$errStream.Dispose()};if($process){$process.Dispose()}
+        if($started) {
+            try {
+                if(-not $process.HasExited) {
+                    $receipt.forcedTermination=$true;$receipt.processTreeCleanup='entire-process-tree-kill-requested'
+                    $process.Kill($true)
+                    if(-not $process.WaitForExit(5000)) {throw 'Owned direct command death remains unproved after termination.'}
+                }
+                $receipt.directProcessDeathVerified=$process.HasExited
+                if($process.HasExited) {$receipt.exitCode=$process.ExitCode}
+            } catch {$receipt.cleanupErrors+=('process: '+$_.Exception.Message)}
+            if(-not $receipt.pipeDrainComplete) {
+                # Kill(true) cannot establish descendant ownership once the
+                # root exited. Record the limitation and cancel our own reads.
+                if($receipt.directProcessDeathVerified -and -not $receipt.forcedTermination) {$receipt.processTreeCleanup='unproved-after-direct-process-exit'}
+                $cancel.Cancel()
+                foreach($reader in @($process.StandardOutput,$process.StandardError)) {
+                    try {$reader.Dispose()} catch {$receipt.cleanupErrors+=('pipe: '+$_.Exception.Message)}
+                }
+            }
+        }
+        foreach($resource in @($outStream,$errStream,$process,$cancel)) {
+            if($resource) {try {$resource.Dispose()} catch {$receipt.cleanupErrors+=('dispose: '+$_.Exception.Message)}}
+        }
+        if($receipt.cleanupErrors.Count -gt 0) {$receipt.passed=$false;if(-not $receipt.error){$receipt.error='Owned command resource cleanup failed.'}}
         $receipt.elapsedSeconds=[Math]::Round($watch.Elapsed.TotalSeconds,3)
+        $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
         Write-BuildJson ($LogPrefix+'.command.json') $receipt
     }
+    if($failure) {throw $failure}
+    if(-not $receipt.passed) {throw $receipt.error}
     return [pscustomobject]@{stdout=$stdout;stderr=$stderr;receipt=$LogPrefix+'.command.json';exitCode=$receipt.exitCode}
 }
 
@@ -923,11 +977,14 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.crtRedistributionTerms=Save-VcRedistributionTerms $crtTerms
         # Resolve the exact source download.lst variables with GNU make rather
         # than guessing version substitutions in Python/pip/bootstrap filenames.
+        $receipt.stage='external-source-pins'
         $makePins=Join-Path $commands 'source-inputs.mk'
         Write-BashScript $makePins @('include download.lst','$(foreach name,$(filter %_TARBALL,$(.VARIABLES)),$(info PIN|$(name)|$($(name))|$($(patsubst %_TARBALL,%_SHA256SUM,$(name)))))','pins:',"`t@true")
         $unixMakePins=&$convert $makePins 'source-input-makefile'
         $pinScript=Join-Path $commands 'source-input-pins.sh'
-        Write-BashScript $pinScript @('set -euo pipefail',"cd $(Quote-Bash $unixSource)","make --no-print-directory -f $(Quote-Bash $unixMakePins) pins")
+        Write-BashScript $pinScript @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)","test -f $(Quote-Bash $unixMakePins)",'/usr/bin/make --version',"/usr/bin/make --no-print-directory -f $(Quote-Bash $unixMakePins) pins")
+        Copy-Item -LiteralPath $makePins -Destination (Join-Path $evidence 'source-inputs.mk')
+        Copy-Item -LiteralPath $pinScript -Destination (Join-Path $evidence 'source-input-pins.sh')
         $pinOutput=Invoke-CygwinScript $bash $cygpath $pinScript $work (Join-Path $evidence 'external-source-pins')
         $knownPins=@{([IO.Path]::GetFileName($archive))=$pin.sha256;([IO.Path]::GetFileName($fb))=$manifest.firebird.sha256}
         foreach($extra in Get-ExtraSourcePins) {$knownPins[$extra.filename]=$extra.sha256}
