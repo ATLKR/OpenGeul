@@ -50,7 +50,7 @@ class NativeEngineBuildTests(unittest.TestCase):
 
     def test_config_requires_native_firebird_not_just_successful_configure(self):
         config=self.root/'config_host.mk'
-        good={'OS':'WNT','COM':'MSC','CPUNAME':'AARCH64','HOST_PLATFORM':'aarch64-pc-cygwin','BUILD_PLATFORM':'aarch64-pc-cygwin','WIN_HOST_ARCH':'arm64','WIN_BUILD_ARCH':'arm64','ENABLE_FIREBIRD_SDBC':'TRUE','SYSTEM_FIREBIRD':'','CROSS_COMPILING':'','BUILD_TYPE':'FIREBIRD ICU LIBATOMIC_OPS LIBTOMMATH','PKGFORMAT':'archive'}
+        good={'OS':'WNT','COM':'MSC','CPUNAME':'AARCH64','HOST_PLATFORM':'aarch64-pc-cygwin','BUILD_PLATFORM':'aarch64-pc-cygwin','WIN_HOST_ARCH':'arm64','WIN_BUILD_ARCH':'arm64','ENABLE_FIREBIRD_SDBC':'TRUE','SYSTEM_FIREBIRD':'','CROSS_COMPILING':'','BUILD_TYPE':'FIREBIRD ICU LIBATOMIC_OPS LIBTOMMATH','PKGFORMAT':'archive','ENABLE_ONLINE_UPDATE':'','ENABLE_ONLINE_UPDATE_MAR':'','ENABLE_BREAKPAD':''}
         def write(values): config.write_text(''.join(f'export {key}={value}\n' for key,value in values.items()))
         write({key:value for key,value in good.items() if key not in ('WIN_HOST_ARCH','WIN_BUILD_ARCH')})
         self.ps(f"$config=Assert-GeneratedConfiguration {quote(config)}; if($config.CPUNAME -ne 'AARCH64'){{throw 'Wrong parsed config'}}")

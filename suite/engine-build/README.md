@@ -34,6 +34,9 @@ these options in `autogen.input`:
 --with-distro=LibreOfficeWinArm64
 --with-visual-studio=2026
 --with-package-format=archive
+--disable-online-update
+--disable-online-update-mar
+--disable-breakpad
 --enable-firebird-sdbc
 --without-system-firebird
 ```
@@ -62,6 +65,19 @@ the normal Windows compiler/SDK checks still apply. Required native CRT files
 come from the driver's separate authenticated app-local CRT stage rather than
 MSI merge modules. `make check` and the complete Suite qualification remain
 separate checks; `make build` alone does not establish either.
+
+The fork does not publish through TDF's updater or crash-reporting services.
+The explicit online-update, MAR-update and Breakpad disable options override
+those optional upstream service choices without inventing a privacy-policy
+URL. The generated configuration must contain empty `ENABLE_ONLINE_UPDATE`,
+`ENABLE_ONLINE_UPDATE_MAR` and `ENABLE_BREAKPAD` values, and `BUILD_TYPE` must
+exclude `ONLINEUPDATE` and `BREAKPAD`. Java, ODK, help, Korean, database and
+Firebird settings remain required as before. Suite local `NativeDiagnostics`,
+owned-process identity, clean shutdown, zero-exit and crash-archive checks
+remain required. An absent private `profile/crash` directory can be archived
+completely without a dump; owned-process shutdown records supply shutdown
+evidence. A build without Breakpad does not claim dump capture.
+
 The authoritative Windows build prerequisites
 and supported setup are documented at
 <https://wiki.documentfoundation.org/Development/BuildingOnWindows>.

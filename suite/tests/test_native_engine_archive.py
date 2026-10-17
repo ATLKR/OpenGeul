@@ -39,7 +39,8 @@ class NativeEngineArchiveTests(unittest.TestCase):
         config = self.root/'config_host.mk'
         good = dict(OS='WNT',COM='MSC',CPUNAME='AARCH64',HOST_PLATFORM='aarch64-pc-cygwin',
                     BUILD_PLATFORM='aarch64-pc-cygwin',ENABLE_FIREBIRD_SDBC='TRUE',SYSTEM_FIREBIRD='',
-                    CROSS_COMPILING='',BUILD_TYPE='FIREBIRD ICU LIBATOMIC_OPS LIBTOMMATH',PKGFORMAT='archive')
+                    CROSS_COMPILING='',BUILD_TYPE='FIREBIRD ICU LIBATOMIC_OPS LIBTOMMATH',PKGFORMAT='archive',
+                    ENABLE_ONLINE_UPDATE='',ENABLE_ONLINE_UPDATE_MAR='',ENABLE_BREAKPAD='')
         def write(values): config.write_text(''.join('export '+key+'='+value+'\n' for key,value in values.items()))
         write(good)
         parsed = json.loads(self.ps(f"Assert-GeneratedConfiguration {quote(config)}|ConvertTo-Json -Compress"))
