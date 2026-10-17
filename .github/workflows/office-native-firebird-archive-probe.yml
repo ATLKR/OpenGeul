@@ -1,0 +1,60 @@
+name: OpenGeul native ARM64 Firebird archive diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-native-firebird-archive-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-archive-diagnostic:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Reserve diagnostic and upload time before checkout
+        shell: pwsh
+        run: |
+          $started = [DateTime]::UtcNow
+          $deadline = $started.AddMinutes(20).ToString('o')
+          $owned = Join-Path $env:RUNNER_TEMP ('opengeul-fb-archive-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $owned) { throw 'Preserve prior archive diagnostic evidence.' }
+          New-Item -ItemType Directory -Path $owned | Out-Null
+          $receipt = Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;diagnosticMinutes=20;jobTimeoutMinutes=30;nominalReserveMinutes=10;runnerSetupIncluded=$false} |
+            ConvertTo-Json | Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
+          "OPENGEUL_FB_ARCHIVE_ROOT=$owned" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_FB_ARCHIVE_DEADLINE=$deadline" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_FB_ARCHIVE_BUDGET_RECEIPT=$receipt" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Validate portable diagnostic boundaries
+        shell: pwsh
+        run: |
+          python -m unittest suite.tests.test_native_firebird_archive_probe.NativeFirebirdArchiveProbeTests.test_archive_inspection_preserves_missing_index_and_rejects_truncated_members suite.tests.test_native_firebird_archive_probe.NativeFirebirdArchiveProbeTests.test_foreign_or_unjoined_runtime_never_qualifies_the_native_control suite.tests.test_native_firebird_archive_probe.NativeFirebirdArchiveProbeTests.test_native_batch_uses_explicit_tool_and_host_target_with_no_environment_injection -v
+          if (-not $?) { throw 'Archive diagnostic boundary checks failed.' }
+      - name: Compare native object and archive link paths
+        shell: pwsh
+        run: |
+          ./suite/scripts/probe-native-firebird-archive.ps1 -Output "$env:OPENGEUL_FB_ARCHIVE_ROOT/evidence" -WorkRoot "$env:OPENGEUL_FB_ARCHIVE_ROOT/work" -Deadline $env:OPENGEUL_FB_ARCHIVE_DEADLINE
+          if (-not $?) { throw 'Native archive diagnostic failed; preserve original evidence.' }
+      - name: Retain original bounded archive diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-firebird-archive-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/opengeul-fb-archive-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+            ${{ runner.temp }}/opengeul-fb-archive-${{ github.run_id }}-${{ github.run_attempt }}/job-budget.json
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
