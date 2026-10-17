@@ -17,8 +17,9 @@ class CalcSaveTests(unittest.TestCase):
     def reset_boundary(self):
         self.api = importlib.import_module('calc_save')
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name) / 'Original space 한글.xlsx'
-        self.target = Path(self.temp.name) / 'Selected.xlsx'
+        self.folder = Path(self.temp.name).resolve()
+        self.path = self.folder / 'Original space 한글.xlsx'
+        self.target = self.folder / 'Selected.xlsx'
         self.calls = []
         self.url = self.path.as_uri()
         self.filter = 'Calc MS Excel 2007 XML'
@@ -79,6 +80,13 @@ class CalcSaveTests(unittest.TestCase):
 
     def executed(self): return [c for c in self.calls if c[0]=='execute']
 
+    def test_fixture_paths_follow_validated_canonical_directory_contract(self):
+        canonical=Path(self.temp.name)/'canonical-directory'
+        with patch.object(Path,'resolve',return_value=canonical):
+            self.reset_boundary()
+        self.assertEqual(canonical,self.path.parent)
+        self.assertEqual(canonical,self.target.parent)
+
     def test_fake_uno_decoder_uses_native_windows_drive_url_conversion(self):
         import nturl2path
         from urllib import request
@@ -87,7 +95,7 @@ class CalcSaveTests(unittest.TestCase):
             self.assertEqual('D:\\OpenGeul case\\한글.xlsx',self.uno.fileUrlToSystemPath(url))
 
     def test_backend_calc_save_routes_to_transaction_without_store(self):
-        native=importlib.import_module('native'); backend=native.UnoBackend(Path(self.temp.name))
+        native=importlib.import_module('native'); backend=native.UnoBackend(self.folder)
         backend.module_factory='private:factory/scalc'
         backend.document=self.document
         backend.calc_save=NS(save=lambda p,f:self.calls.append(('calc-save',p,f)))
@@ -105,7 +113,7 @@ class CalcSaveTests(unittest.TestCase):
             'com.sun.star.awt.Toolkit':NS(createSystemChild=lambda *a:peer)}
         context=NS(ServiceManager=NS(createInstanceWithContext=lambda n,c:services[n]))
         windows=NS(validate_parent=lambda h:None,validate_child=lambda c,p:calls.append('validated'))
-        backend=native.UnoBackend(Path(self.temp.name),window_api=windows,uno_loader=lambda:NS(
+        backend=native.UnoBackend(self.folder,window_api=windows,uno_loader=lambda:NS(
             Any=lambda *a:None,createUnoStruct=lambda n:NS()),connector=lambda *a:context)
         backend._start_runtime=lambda:None
         backend._isolate_legacy_style_controls=lambda *a:None;backend._bootstrap_ui=lambda *a:None
@@ -121,7 +129,7 @@ class CalcSaveTests(unittest.TestCase):
         self.assertEqual(['validated','capture','visible','activate'],calls)
 
     def test_confirmed_backend_cleanup_releases_retained_calc_controller(self):
-        native=importlib.import_module('native');backend=native.UnoBackend(Path(self.temp.name))
+        native=importlib.import_module('native');backend=native.UnoBackend(self.folder)
         backend.calc_save=object();backend.cleanup()
         self.assertIsNone(backend.calc_save)
 
@@ -233,7 +241,7 @@ class CalcSaveTests(unittest.TestCase):
     def test_session_failed_native_save_as_preserves_attached_original_path(self):
         from session import DocumentSession
         save=self.transaction();self.backend.save=save.save;self.result=NS(State=0,Result=False)
-        session=DocumentSession(Path(self.temp.name),{'calc':{'filters':{'xlsx':self.filter}}})
+        session=DocumentSession(self.folder,{'calc':{'filters':{'xlsx':self.filter}}})
         session.state='attached';session.module='calc';session.path=self.path;session.backend=self.backend
         with self.assertRaises(self.api.WorkerError) as caught:
             session.dispatch('save',{'path':str(self.target),'filter':self.filter})
