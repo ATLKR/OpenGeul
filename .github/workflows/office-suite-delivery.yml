@@ -26,7 +26,7 @@ jobs:
           PYTHON_TESTS: '582'
           PYTHON_SKIPS: '3'
           CORE_TESTS: '49'
-          CREATE_DRAFT: 'false'
+          CREATE_DRAFT: 'true'
         shell: python
         run: |
           """Prepare an exact successful Suite run; optionally create an unpublished draft.
