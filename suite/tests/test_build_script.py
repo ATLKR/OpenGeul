@@ -68,9 +68,11 @@ class BuildScriptTests(unittest.TestCase):
         self.assertEqual(prepare[0], 'suite/prepare.py')
         self.assertIn('--architecture', prepare)
         self.assertEqual(prepare[prepare.index('--architecture') + 1], architecture)
-        self.assertEqual(Path(prepare[prepare.index('--output') + 1]), output)
-        self.assertEqual(Path(events[2]['arguments'][-2]), output)
-        self.assertEqual(Path(events[2]['arguments'][-1]), Path(str(output) + '.zip'))
+        # PowerShell's resolved working directory expands Windows 8.3 aliases;
+        # tempfile can legitimately return the same directory by its short name.
+        self.assertEqual(Path(prepare[prepare.index('--output') + 1]).resolve(), output.resolve())
+        self.assertEqual(Path(events[2]['arguments'][-2]).resolve(), output.resolve())
+        self.assertEqual(Path(events[2]['arguments'][-1]).resolve(), Path(str(output) + '.zip').resolve())
         self.assertTrue(output.is_dir())
         self.assertEqual(Path(str(output) + '.zip').read_text(), 'test archive')
 

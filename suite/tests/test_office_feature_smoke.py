@@ -282,8 +282,13 @@ class ExecutionBoundaryTests(unittest.TestCase):
         self.assertEqual([1,2],[row['id'] for row in states['initialRows']])
         self.assertEqual(smoke.base_rows(True),states['committedRows'])
         self.assertEqual(states['committedRows'],states['rolledBackRows'])
-        with sqlite3.connect(db) as connection:
+        connection=sqlite3.connect(db)
+        try:
             actual=connection.execute('SELECT ID,TEXT_VALUE,AMOUNT FROM OPENGEUL_SMOKE ORDER BY ID').fetchall()
+        finally:
+            # A sqlite connection context commits/rolls back but does not close.
+            # Windows forbids deleting the owned fixture until this handle closes.
+            connection.close()
         self.assertEqual([(row['id'],row['text'],row['amount']) for row in smoke.base_rows(True)],actual)
 
     def test_partial_results_preserved_and_next_case_runs_after_exception(self):
