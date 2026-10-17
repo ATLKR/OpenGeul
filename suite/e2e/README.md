@@ -185,3 +185,16 @@ to remain unchanged; no document content is edited. That peer's `XAccessible` su
 parents, child indices and rendered tab names. These are native UNO roles, not
 MSAA role numbers; passing this UI gate does not certify that the upstream OS
 accessibility bridge exposes the notebookbar.
+
+
+## Office format and rich-feature engine cases
+
+Run `office_feature_smoke.py --suite <payload> --output <fresh evidence>` with
+that payload's `Office/program/python.exe`. Its 21 fixed cases bind all 15
+advertised Office format mappings and six rich module workflows. The catalogue
+is `suite/config/feature-catalog.json`. Each case uses owned generated documents
+and separate creation/reopen engines. TXT/CSV have explicit limited semantic
+expectations. `office-features.json` is preserved after each case and fails on
+missing, duplicate, failed or incomplete cases. `guiVerified=false` remains
+explicit: these are engine observations alongside the existing native GUI,
+Korean input, lifecycle and startup suites.

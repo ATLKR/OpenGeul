@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Native Windows ARM64 embedded Firebird source-build candidate; not a release qualification",
+  "libreoffice": {
+    "version": "26.8.1.1",
+    "tag": "libreoffice-26.8.1.1",
+    "url": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
+    "sha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+    "checksumUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz.sha256"
+  },
+  "firebird": {
+    "version": "3.0.13.33818-0",
+    "url": "https://github.com/FirebirdSQL/firebird/releases/download/v3.0.13/Firebird-3.0.13.33818-0.tar.bz2",
+    "size": 13343760,
+    "sha256": "bd263c4f685fb8fc3f1dcb8be8a411033cc31c5404d1dfce5d3849aa3f63a64d",
+    "checksumSourceUrl": "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/download.lst"
+  },
+  "sourceHook": {
+    "path": "external/firebird/UnpackedTarball_firebird.mk",
+    "sha256": "6f0563296f3e00241e1339cce5fcc92f3eba427ed27bd0f72cf1808f2800a7a5"
+  },
+  "portPatch": {
+    "filename": "firebird-windows-arm64.patch",
+    "sha256": "448a17e7bc4b5646dd3369596ed177e6f76b99427424defa790904b6f31aa793",
+    "strip": 0,
+    "appliesAfter": "All pinned LibreOffice Windows Firebird patches"
+  },
+  "upstreamWindowsPatches": [
+    {
+      "filename": "firebird-nbak-difference-file-access.patch.1",
+      "sha256": "bb9f73acbfefcd0f60c29317faa01154414c4b0d203a3bc13d82687690000d4f",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird-nbak-difference-file-access.patch.1"
+    },
+    {
+      "filename": "firebird.disable-ib-util-not-found.patch.1",
+      "sha256": "4128b2633f30e58551b50fc3fffb0962275bc593336ac15cd486b78edd049d11",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird.disable-ib-util-not-found.patch.1"
+    },
+    {
+      "filename": "firebird-Engine12.patch",
+      "sha256": "cc8d8f5f5e08032f549ee793239378771ffa385b694bb07ea58b917008cfefc7",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird-Engine12.patch"
+    },
+    {
+      "filename": "firebird-rpath.patch.0",
+      "sha256": "a22eb256dff3827cd6fd2a891624b3a2d86e6026c2d6d63964159827682a67e6",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird-rpath.patch.0"
+    },
+    {
+      "filename": "wnt-dbgutil.patch",
+      "sha256": "9842aff3949461d79f5bb4066989626629d65fc4a787c7a17728214cdb5365fd",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/wnt-dbgutil.patch"
+    },
+    {
+      "filename": "c++17.patch",
+      "sha256": "a19f105de72fe38bd9b9f98523c4f9382fd86ffa0e03f6e894bd933bc1d4e391",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/c++17.patch"
+    },
+    {
+      "filename": "ubsan.patch",
+      "sha256": "5d2ba079ae1546a3b90d785b24af92333793796431d380dbd4cbac77acba3662",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/ubsan.patch"
+    },
+    {
+      "filename": "asan.patch",
+      "sha256": "470a0f8095c69d23e967d1252bacf78fdcab762a5d201e114b6c59b872f33e60",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/asan.patch"
+    },
+    {
+      "filename": "firebird-tdf125284.patch.1",
+      "sha256": "55961f10507b6c9481bcda177267e0de39e8bad2c1c88768e96f999cc02af9f0",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird-tdf125284.patch.1"
+    },
+    {
+      "filename": "0001-Make-comparison-operator-member-functions-const.patch.1",
+      "sha256": "a91b2fb08e7245b7c6b77177868f6fb844eb53f52501656832bb829f161c5b42",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/0001-Make-comparison-operator-member-functions-const.patch.1"
+    },
+    {
+      "filename": "macos-arm64.patch.0",
+      "sha256": "3a72375919a1ea1892224623c6a20a626e820f3ebab5573732d43a383640e4ec",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/macos-arm64.patch.0"
+    },
+    {
+      "filename": "firebird-btyacc-add-explicit-rule.patch",
+      "sha256": "828f16458990c70e961c3647a17d5d3fbb14d1a4bafcdaec4c6698859e88b23f",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird-btyacc-add-explicit-rule.patch"
+    },
+    {
+      "filename": "firebird-307.patch.1",
+      "sha256": "8c1ec40878a776b92401fe050f237f4132b92209a3be5e2a9a03cec92e7d0187",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird-307.patch.1"
+    },
+    {
+      "filename": "0001-extern-cloop-Missing-dependency-of-BIN_DIR-cloop-on-.patch.1",
+      "sha256": "13b6f3d4583705e8a6fb886062bec6cc47e539a603c0d80742d4f7a5f31b2033",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/0001-extern-cloop-Missing-dependency-of-BIN_DIR-cloop-on-.patch.1"
+    },
+    {
+      "filename": "msvc.patch",
+      "sha256": "45e676ce24e7272a476935d7b56df5876cc1585907ca1aa8da9f08e964273f28",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/msvc.patch"
+    },
+    {
+      "filename": "wnt-per-process-trace-storage.patch.1",
+      "sha256": "a9a7fcfbfdb8e8b1dd8c40bed7ab2c7038c87f91ad53e4218bb1d37fca4e84ec",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/wnt-per-process-trace-storage.patch.1"
+    },
+    {
+      "filename": "configure-c99.patch",
+      "sha256": "51ca7ba2ede21c245cc9d64d4c1c6eaa20a1b61bc7a068bf0d042a1d523e6cb3",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/configure-c99.patch"
+    },
+    {
+      "filename": "Wincompatible-function-pointer-types.patch",
+      "sha256": "c65e5789404a71a911800beed42a477dbb60354ee643879db93db1fa18a38069",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/Wincompatible-function-pointer-types.patch"
+    },
+    {
+      "filename": "0001-Revert-Backported-fix-for-7122-Invalid-state-of-mapp.patch.1",
+      "sha256": "ca25cdd33f1da8e7d491c369b0209f210a571c6d7438f8dd0bdb3976c365e00a",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/0001-Revert-Backported-fix-for-7122-Invalid-state-of-mapp.patch.1"
+    },
+    {
+      "filename": "0001-Revert-Fix-for-most-cases-of-7522-7828.patch.1",
+      "sha256": "0aab74070278e410daccaa8c00ae22a03a39c68d1573b1d15e58cb4c45332e5b",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/0001-Revert-Fix-for-most-cases-of-7522-7828.patch.1"
+    },
+    {
+      "filename": "mold.patch",
+      "sha256": "c34d532a17b7adb50b4851418b02142ef2df7812e02de1cb660242a26a6ba0c6",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/mold.patch"
+    },
+    {
+      "filename": "c++26.patch",
+      "sha256": "f5909f7e86c56d5b76b17803c8c64f08d9f522520567475fc7619e34fb6e131a",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/c++26.patch"
+    },
+    {
+      "filename": "c++20.patch",
+      "sha256": "a40b1e01e4e4962d1c31afa369efc494c741050e1eb4eda359b7b256cec0b205",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/c++20.patch"
+    },
+    {
+      "filename": "firebird-cygwin-msvc.patch",
+      "sha256": "0e989cc10d07124e9de2454915386f04030e31f44ebfdaf87db215a9f9d79865",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird-cygwin-msvc.patch"
+    },
+    {
+      "filename": "firebird-cygwin-msvc-warnings.patch",
+      "sha256": "cef159ffb8f05a0727c4d9d8245e48662054926c66d93e617ca711335bd0d6fd",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/libreoffice-26.8.1.1/external/firebird/firebird-cygwin-msvc-warnings.patch"
+    }
+  ],
+  "configureOptions": [
+    "--build=aarch64-pc-cygwin",
+    "--host=aarch64-pc-cygwin",
+    "--with-distro=LibreOfficeWinArm64",
+    "--enable-firebird-sdbc",
+    "--without-system-firebird"
+  ],
+  "nativeBuildVerified": false,
+  "basePersistenceVerified": false,
+  "qualificationRequired": [
+    "Native ARM64 PE and process architecture of Office hosts, Firebird driver, ifbclient.dll, Engine12.dll and intl/fbintl.dll",
+    "Actual ARM64 embedded database create/insert/commit/save/close/reopen; verify persisted rows",
+    "Cross-architecture ODB round-trip with existing x64 runtime and isolated profiles",
+    "Full native module, GUI, Korean IME and lifecycle E2E after source-built runtime assembly"
+  ],
+  "configureSource": {
+    "path": "configure.ac",
+    "sha256": "412040c7a2e84ab8305613b902dc5f0485f11d745e51a77969332aa058d6f31c",
+    "afterSha256": "315a82e341c15eb115d41d4041ae6c7ca1eaea26d3950c5ec2efffaeb3b507de"
+  },
+  "configurePatch": {
+    "filename": "libreoffice-enable-arm64-firebird.patch",
+    "sha256": "b279f950f2279372f2efe2b07cc4c7a77d5266f3032897142f1fc1b698db781f",
+    "strip": 0
+  }
+}

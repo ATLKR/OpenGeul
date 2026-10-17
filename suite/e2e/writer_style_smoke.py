@@ -23,6 +23,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lifecycle_smoke as lifecycle
 import native_accessibility as accessible
+import native_suite_architecture as native_arch
 import startup_smoke as startup
 import windows_smoke as native
 
@@ -128,6 +129,16 @@ def run_gui(suite, fixtures, output):
     process = engine = original = None
     started = time.monotonic()
     try:
+        record['stage'] = 'native-controller-architecture'
+        inventory_file, inventory_data = _packaged_identity_file(suite, 'suite-inventory.json')
+        inventory = json.loads(inventory_data)
+        assert (isinstance(inventory, dict) and type(inventory.get('schemaVersion')) is int
+                and inventory['schemaVersion'] == 1), 'Invalid Suite native GUI inventory'
+        architecture = native_arch.require_architecture(inventory.get('architecture'))
+        record.update(architecture=architecture, inventorySha256=inventory_file['sha256'],
+            nativeArchitecture=native_arch.validate_native_architecture(
+                native_arch.observe_native_architecture(), architecture))
+        record['stage'] = 'verify-generated-fixture'
         original = native.require_engine_fixture(fixtures, 'writer', 'docx')
         original_sha = lifecycle.digest(original)
         source = lifecycle.owned_target(output / 'fixtures', 'writer-heading1.docx')
@@ -138,10 +149,14 @@ def run_gui(suite, fixtures, output):
         record.update(originalFixture=str(original), originalSha256=original_sha, baseline=baseline)
         record['stage'] = 'launch'
         process = native.launch_suite([str(suite / 'OpenGeul.Office.exe'), '--module', 'writer', '--file', str(source)], suite, output, CASE)
+        record['stage'] = 'native-shell-architecture'
+        record['shellArchitecture'] = native_arch.observe_owned_process(process.pid, architecture)
         api = native.Windows()
         record['shellPid'] = process.pid
         record['stage'] = 'attach'
         hwnd, parent, child, pid = native.verified_attachment(api, process, 'writer')
+        record['stage'] = 'native-office-architecture'
+        record['targetArchitecture'] = native_arch.observe_owned_process(pid, architecture)
         initial = startup.EngineProcessWitness(pid)
         try:
             api, engine = accessible._owned_process(child, pid, initial.creation_time, suite / 'Office/program/soffice.bin')
@@ -224,7 +239,7 @@ def validate_python_observation(suite_root, observed, inventory):
     if not root.is_absolute(): root = PurePosixPath(suite_root)
     assert root.is_absolute(), 'Packaged Python suite root must be absolute'
     assert (isinstance(inventory, dict) and type(inventory.get('schemaVersion')) is int
-            and inventory['schemaVersion'] == 1 and inventory.get('architecture') == 'x64'), 'Invalid packaged Python inventory'
+            and inventory['schemaVersion'] == 1 and inventory.get('architecture') in ('x64', 'arm64')), 'Invalid packaged Python inventory'
     files = inventory.get('files')
     assert isinstance(files, dict), 'Missing packaged Python inventory files'
     cores = [(name, re.fullmatch(r'Office/program/python-core-(\d+)\.(\d+)\.(\d+)/bin/python\.exe', name)) for name in files]
@@ -245,6 +260,10 @@ def validate_python_observation(suite_root, observed, inventory):
         path = type(root)(actual)
         assert path.is_absolute() and path == root / relative, description + ' path differs from packaged identity'
     exact(observed.get('processImage'), executable, 'Native Python process image')
+    # Frozen x64 receipts predate native-machine observation. ARM64 acceptance
+    # requires fresh native evidence; every new producer emits it for both.
+    if inventory['architecture'] == 'arm64' or 'nativeArchitecture' in observed:
+        native_arch.validate_native_architecture(observed.get('nativeArchitecture'), inventory['architecture'])
     # LO's launcher deliberately supplies pythonhome as argv[0]. CPython's
     # getpath.py may expose that directory as sys.executable, so retain it as
     # metadata while the native process image above proves executable identity.
@@ -318,6 +337,7 @@ def observe_packaged_python():
     return {'implementation': sys.implementation.name, 'version': list(sys.version_info[:3]),
             'executable': sys.executable, 'prefix': sys.prefix, 'basePrefix': sys.base_prefix,
             **_windows_python_images(),
+            'nativeArchitecture': native_arch.observe_native_architecture(),
             'moduleFiles': {name: module.__file__ for name, module in modules.items()},
             'moduleOrigins': {name: modules[name].__spec__.origin for name in ('uno', 'pyuno', 'encodings')}}
 

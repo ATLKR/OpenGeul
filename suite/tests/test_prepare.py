@@ -1,10 +1,13 @@
 """Fresh-path packaging must reject bad inputs before touching a runtime."""
 import hashlib
+import io
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 import zipfile
@@ -90,7 +93,8 @@ class PrepareTests(unittest.TestCase):
                 (x86/'concrt140.dll').write_bytes(pe(0x14c, dll=True))
                 (root/'extracted/input.msi').write_bytes(archive.read_bytes())
                 return SimpleNamespace(returncode=0)
-            def recover(msi, destination):
+            def recover(msi, destination, *, architecture='x64'):
+                self.assertEqual(architecture, 'x64')
                 self.assertEqual(msi, archive)
                 destination.mkdir()
                 result = {}
@@ -100,7 +104,7 @@ class PrepareTests(unittest.TestCase):
                 return result
             with patch.object(module, 'os', SimpleNamespace(name='nt')), \
                  patch.object(module.subprocess, 'run', side_effect=admin), \
-                 patch('suite.msi_cab.recover_x64_crt', side_effect=recover) as recovered:
+                 patch('suite.msi_cab.recover_crt', side_effect=recover) as recovered:
                 runtime = module.extract_msi(archive, root/'extracted')
             self.assertEqual(recovered.call_count, 1)
             self.assertEqual(runtime, root/'extracted-runtime')
@@ -138,6 +142,41 @@ class PrepareTests(unittest.TestCase):
                 self.assertEqual(receipt['program/'+name], {
                     'source': 'System64/'+name, 'size': len(data),
                     'sha256': hashlib.sha256(data).hexdigest()})
+
+    def test_arm64_dependencies_are_staged_without_changing_original_bytes(self):
+        module = implementation()
+        self.assertIn('architecture', inspect.signature(module.stage_msi_dependencies).parameters)
+        with tempfile.TemporaryDirectory() as folder:
+            root, runtime = self.msi_fixture(folder)
+            for name in VC_DLLS:
+                (root/'System64'/name).write_bytes(pe(0xAA64, dll=True))
+            receipt = module.stage_msi_dependencies(root, runtime, architecture='arm64')
+            for name in VC_DLLS:
+                self.assertEqual((runtime/'program'/name).read_bytes(), pe(0xAA64, dll=True))
+                self.assertEqual((root/'System64'/name).read_bytes(), pe(0xAA64, dll=True))
+                self.assertEqual(receipt['program/'+name]['sha256'], hashlib.sha256(pe(0xAA64, dll=True)).hexdigest())
+
+    def test_arm64_dependency_rejects_x64_x86_and_arm64ec_before_any_copy(self):
+        module = implementation()
+        self.assertIn('architecture', inspect.signature(module.stage_msi_dependencies).parameters)
+        for machine in (0x8664, 0x14C, 0xA641):
+            with self.subTest(machine=machine), tempfile.TemporaryDirectory() as folder:
+                root, runtime = self.msi_fixture(folder)
+                for name in VC_DLLS:
+                    (root/'System64'/name).write_bytes(pe(0xAA64, dll=True))
+                (root/'System64/vcruntime140_threads.dll').write_bytes(pe(machine, dll=True))
+                with self.assertRaisesRegex(ValueError, 'arm64|architecture'):
+                    module.stage_msi_dependencies(root, runtime, architecture='arm64')
+                self.assertEqual([], list((runtime/'program').iterdir()))
+
+    def test_unsupported_dependency_architecture_is_rejected_before_writing(self):
+        module = implementation()
+        self.assertIn('architecture', inspect.signature(module.stage_msi_dependencies).parameters)
+        with tempfile.TemporaryDirectory() as folder:
+            root, runtime = self.msi_fixture(folder)
+            with self.assertRaisesRegex(ValueError, 'architecture'):
+                module.stage_msi_dependencies(root, runtime, architecture='x86')
+            self.assertEqual([], list((runtime/'program').iterdir()))
 
     def test_missing_x64_dependency_never_falls_back_to_system_x86_or_writes(self):
         module = implementation()
@@ -207,14 +246,15 @@ class PrepareTests(unittest.TestCase):
                 for name in VC_DLLS: (output/'System64'/name).write_bytes(pe(dll=True))
                 for name in ('soffice.exe', 'python.exe'): (runtime/'program'/name).write_bytes(pe())
                 return type('Result', (), {'returncode': 0})()
-            def recover(msi, destination):
+            def recover(msi, destination, *, architecture='x64'):
+                self.assertEqual(architecture, 'x64')
                 destination.mkdir()
                 for name in VC_DLLS: (destination/name).write_bytes(pe(dll=True))
                 return {name: {'path': destination/name, 'fileId': name+'_amd64.GUID',
                                'cabinet': '#official.cab'} for name in VC_DLLS}
             with patch.object(module, 'os', SimpleNamespace(name='nt')), \
                  patch.object(module.subprocess, 'run', side_effect=administrative_extract), \
-                 patch('suite.msi_cab.recover_x64_crt', side_effect=recover):
+                 patch('suite.msi_cab.recover_crt', side_effect=recover):
                 runtime = module.extract_msi(archive, output)
             receipt = json.loads((runtime/'opengeul-msi-dependencies.json').read_text())
             self.assertEqual(receipt['schemaVersion'], 1)
@@ -222,6 +262,35 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual(set(receipt['files']), {'program/'+name for name in VC_DLLS})
             self.assertTrue(all((runtime/path).is_file() for path in receipt['files']))
             self.assertEqual(archive.read_bytes(), b'authenticated input unchanged')
+
+    def test_arm64_extraction_recovers_native_members_and_records_architecture(self):
+        module = implementation()
+        self.assertIn('architecture', inspect.signature(module.extract_msi).parameters)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); archive = root/'input.msi'; archive.write_bytes(b'authenticated arm64 input')
+            output = root/'extract'
+            def admin(*args, **kwargs):
+                self.app_root_fixture(output)
+                (output/'System64').mkdir()
+                for name in VC_DLLS: (output/'System64'/name).write_bytes(pe(dll=True))
+                return SimpleNamespace(returncode=0)
+            def recover(msi, destination, *, architecture):
+                self.assertEqual(architecture, 'arm64')
+                destination.mkdir()
+                for name in VC_DLLS: (destination/name).write_bytes(pe(0xAA64, dll=True))
+                return {name: {'path': destination/name, 'fileId': name+'_arm64.GUID',
+                               'cabinet': '#official.cab'} for name in VC_DLLS}
+            with patch.object(module, 'os', SimpleNamespace(name='nt')), \
+                 patch.object(module.subprocess, 'run', side_effect=admin), \
+                 patch('suite.msi_cab.recover_crt', side_effect=recover):
+                runtime = module.extract_msi(archive, output, architecture='arm64')
+            receipt = json.loads((runtime/'opengeul-msi-dependencies.json').read_text())
+            self.assertEqual(receipt['architecture'], 'arm64')
+            self.assertEqual(receipt['recovery'], 'embedded-arm64-file-ids')
+            self.assertEqual(receipt['inputMsiSha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
+            for name in VC_DLLS:
+                self.assertEqual((runtime/'program'/name).read_bytes(), pe(0xAA64, dll=True))
+                self.assertEqual(receipt['files']['program/'+name]['fileId'], name+'_arm64.GUID')
 
     def test_matching_cached_download_is_reused_without_network(self):
         module = implementation()
@@ -310,6 +379,65 @@ class PrepareTests(unittest.TestCase):
             (destination/'mine').write_text('keep')
             with self.assertRaises(ValueError): module.extract_hwp_zip(path,destination)
             self.assertEqual((destination/'mine').read_text(),'keep')
+
+
+class PrepareCommandTests(unittest.TestCase):
+    def command_fixture(self, folder):
+        root = Path(folder)
+        config = root/'suite/config'; config.mkdir(parents=True)
+        inputs = root/'work/inputs'; inputs.mkdir(parents=True)
+        assets = {}
+        for label, filename in (('runtime', 'office.msi'), ('hwp', 'hwp.zip')):
+            data = (label+' authenticated input').encode()
+            (inputs/filename).write_bytes(data)
+            assets[label] = {'url': 'https://example.org/'+filename, 'size': len(data),
+                             'sha256': hashlib.sha256(data).hexdigest()}
+        for architecture, filename in (('x64', 'runtime.lock.json'), ('arm64', 'runtime.arm64.lock.json')):
+            (config/filename).write_text(json.dumps(dict(assets, architecture=architecture)))
+        return root
+
+    def run_command(self, module, root, arguments):
+        def extract(archive, destination, *, architecture=None):
+            return destination.with_name('native-'+str(architecture))
+        def assemble(**kwargs):
+            kwargs['output'].write_text(json.dumps({'architecture': kwargs['lock']['architecture'],
+                                                   'runtime': kwargs['runtime'].name}))
+        argv = ['prepare', '--work', str(root/'work'), '--shell', str(root/'shell'),
+                '--output', str(root/'output.json'), *arguments]
+        with patch.object(module, 'ROOT', root), patch.object(module.sys, 'argv', argv), \
+             patch.object(module, 'extract_msi', side_effect=extract), \
+             patch.dict('sys.modules', {'package': SimpleNamespace(assemble=assemble)}), redirect_stdout(io.StringIO()):
+            try:
+                module.main()
+            except SystemExit as error:
+                self.fail('Preparation command must accept supported architecture: '+str(error))
+
+    def test_arm64_command_selects_fixed_arm64_lock_and_native_extraction(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root = self.command_fixture(folder)
+            self.run_command(module, root, ['--architecture', 'arm64'])
+            self.assertEqual({'architecture': 'arm64', 'runtime': 'native-arm64'},
+                             json.loads((root/'output.json').read_text()))
+
+    def test_default_command_preserves_x64_lock_and_native_extraction(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root = self.command_fixture(folder)
+            self.run_command(module, root, [])
+            self.assertEqual({'architecture': 'x64', 'runtime': 'native-x64'},
+                             json.loads((root/'output.json').read_text()))
+
+    def test_lock_architecture_mismatch_is_rejected_before_any_extraction(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root = self.command_fixture(folder)
+            lockfile = root/'suite/config/runtime.arm64.lock.json'
+            lock = json.loads(lockfile.read_text()); lock['architecture'] = 'x64'
+            lockfile.write_text(json.dumps(lock))
+            with self.assertRaisesRegex(ValueError, 'architecture'):
+                self.run_command(module, root, ['--architecture', 'arm64'])
+            self.assertFalse((root/'output.json').exists())
 
 
 if __name__ == '__main__': unittest.main()

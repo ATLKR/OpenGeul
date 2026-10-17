@@ -1,0 +1,24 @@
+--- builds/make.new/config/config.h.in
++++ builds/make.new/config/config.h.in
+@@ -729,6 +729,8 @@
+ /* target architecture */
+ #if defined(_M_AMD64)
+ #define AMD64
++#elif defined(_M_ARM64)
++#define ARM64
+ #endif
+ 
+ #define HAVE_IO_H
+--- src/common/common.h
++++ src/common/common.h
+@@ -533,7 +533,9 @@
+    which is too large to fit in a long int. */
+ #define QUADCONST(n) (n##LL)
+ 
+-#ifdef AMD64
++#if defined(ARM64)
++#define FB_CPU CpuArm64
++#elif defined(AMD64)
+ #define FB_CPU CpuAmd
+ #else
+ #ifndef I386

@@ -2,7 +2,7 @@
 
 Unlike Unicode keyboard injection, physical Dubeolsik scan codes must produce
 in-process WM_IME_COMPOSITION receipts, survive Backspace, save and UNO reopen.
-The observer is a temporary x64 DLL hooked only into the owned editor thread.
+The observer is a temporary native DLL hooked only into the owned editor thread.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from windows_smoke import (Windows, INPUT_CASES, capture_failure, close_document
     close_home, collect_cases, launch_suite, package_text, require_engine_fixture,
     stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input)
 from engine_smoke import verify_content
+import native_suite_architecture as native_arch
 
 EXPECTED_KEYS = list('gksrmf') + ['BACKSPACE', 'f', 'RIGHT']
 SCANS = dict(zip('qwertyuiopasdfghjklzxcvbnm',
@@ -47,7 +48,8 @@ def scan_events(tokens):
     return result
 
 
-def require_readiness(record):
+def require_readiness(record, *, architecture='x64'):
+    native_arch.require_architecture(architecture)
     assert isinstance(record, dict) and record.get('suiteOnly') is True, 'Suite-only readiness is required'
     assert record.get('capabilityAfter') == 'Installed' and record.get('restartNeeded') is False, 'Korean Basic must be Installed without pending restart'
     assert record.get('userLanguageConfigured') is True, 'Current CI user has no configured Korean input profile'
@@ -55,8 +57,15 @@ def require_readiness(record):
     guid = r'\{[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}'
     assert profile.get('registered') is True and re.fullmatch('0412:' + guid + guid, profile.get('inputTip', '')), 'A registered native Korean TSF profile is required'
     assert profile.get('inputTip') == '0412:' + profile.get('providerClsid', '') + profile.get('profileGuid', ''), 'Registered TSF identity differs from its configured input tip'
+    machine = native_arch.NATIVE_MACHINES[architecture]
+    assert type(record.get('nativeMachine')) is int and record['nativeMachine'] == machine, 'Korean readiness native OS architecture differs from Suite'
+    if architecture == 'arm64' or 'controllerMachine' in record:
+        assert type(record.get('controllerMachine')) is int and record['controllerMachine'] == 0, 'Korean readiness controller must be native'
+    if architecture == 'arm64' or 'architecture' in record.get('source', {}):
+        assert record.get('source', {}).get('architecture') == architecture, 'Korean readiness source architecture differs from Suite'
     component = profile.get('component', {})
-    assert component.get('signatureStatus') == 'Valid' and component.get('machine') == 0x8664, 'Native x64 Microsoft IME identity is unverified'
+    assert (component.get('signatureStatus') == 'Valid' and type(component.get('machine')) is int
+            and component['machine'] == machine), 'Native ' + architecture + ' Microsoft IME identity is unverified'
     assert re.fullmatch('[0-9a-f]{64}', component.get('sha256', '')), 'IME component digest is missing'
     assert re.search(r'(?:^|,\s*)O=Microsoft Corporation(?:,|$)', component.get('signerSubject', '')), 'IME component is not signed by Microsoft'
     return record
@@ -117,8 +126,12 @@ def validate_restoration(receipt):
 
 
 def validate_ime_evidence(record):
+    architecture = native_arch.require_architecture(record.get('architecture', 'x64'))
+    for field in ('nativeArchitecture', 'targetArchitecture'):
+        if architecture == 'arm64' or field in record:
+            native_arch.validate_native_architecture(record.get(field), architecture)
     require_ascii_prefix(record)
-    profile = require_readiness(record.get('readiness', {}))['profile']
+    profile = require_readiness(record.get('readiness', {}), architecture=record.get('architecture', 'x64'))['profile']
     active = record.get('activeProfile', {})
     assert active.get('activeLanguage') == 0x0412 and active.get('activeClsid', '').lower() == profile['providerClsid'].lower() and active.get('activeProfile', '').lower() == profile['profileGuid'].lower(), 'Captured active TSF profile differs from the signed Microsoft readiness profile'
     assert record.get('inputMethod') == 'SendInput-scancode' and record.get('unicodeInputUsed') is False, 'Unicode input is not an IME test'
@@ -151,7 +164,7 @@ def validate_ime_evidence(record):
             'savedKoreanVerified': True, 'reopenedKoreanVerified': True}
 
 
-# Fixed-width layout shared by x64 Python and x64 observer DLL. WCHAR is uint16,
+# Fixed-width layout shared by native x64/ARM64 Python and observer DLL. WCHAR is uint16,
 # even when these policy helpers are imported on a non-Windows test host.
 class NativeEvent(ctypes.Structure):
     _fields_ = [('sequence', ctypes.c_uint32), ('message', ctypes.c_uint32),
@@ -338,9 +351,12 @@ def utf16(array):
     return bytes(array).decode('utf-16-le').split('\0', 1)[0]
 
 
-def discover_msvc(folder, vswhere):
+def discover_msvc(folder, vswhere, *, architecture='x64'):
+    native_arch.require_architecture(architecture)
+    component = ('Microsoft.VisualStudio.Component.VC.Tools.ARM64' if architecture == 'arm64'
+                 else 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64')
     command = [str(vswhere), '-latest', '-products', '*', '-requires',
-        'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath']
+        component, '-property', 'installationPath']
     started = time.monotonic()
 
     def preserve(result, outcome):
@@ -367,31 +383,35 @@ def discover_msvc(folder, vswhere):
     return result.stdout.strip()
 
 
-def compile_observer(folder, mapping, profile):
+def compile_observer(folder, mapping, profile, *, architecture='x64'):
+    native_arch.require_architecture(architecture)
     source, library = folder / 'ime-observer.cpp', folder / 'ime-observer.dll'
     source.write_text(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
         .replace('__CLSID__', profile['providerClsid']).replace('__PROFILE__', profile['profileGuid']), encoding='utf-8')
     compiler = shutil.which('cl.exe')
     command = ['cl.exe', '/nologo', '/LD', '/O2', '/MT', '/EHsc', '/utf-8', str(source),
-               '/link', '/OUT:' + str(library), 'user32.lib', 'imm32.lib', 'ole32.lib']
-    if compiler:
+               '/link', '/MACHINE:' + ('ARM64' if architecture == 'arm64' else 'X64'), '/OUT:' + str(library), 'user32.lib', 'imm32.lib', 'ole32.lib']
+    if compiler and architecture == 'x64':
         result = subprocess.run(command, cwd=folder, capture_output=True, timeout=60)
     else:
         vswhere = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Microsoft Visual Studio/Installer/vswhere.exe'
-        found = discover_msvc(folder, vswhere)
-        vcvars = Path(found) / 'VC/Auxiliary/Build/vcvars64.bat'
-        assert vcvars.is_file(), 'Microsoft x64 C++ build tools are required for the in-process observer'
+        found = discover_msvc(folder, vswhere, architecture=architecture)
+        vcvars = Path(found) / ('VC/Auxiliary/Build/vcvarsall.bat' if architecture == 'arm64'
+                                else 'VC/Auxiliary/Build/vcvars64.bat')
+        assert vcvars.is_file(), 'Microsoft native ' + architecture + ' C++ build tools are required for the in-process observer'
         script = folder / 'compile-observer.cmd'
-        script.write_text('@echo off\ncall "' + str(vcvars) + '"\nif errorlevel 1 exit /b 1\n' + subprocess.list2cmdline(command) + '\n', encoding='utf-8')
+        script.write_text('@echo off\ncall "' + str(vcvars) + '"' + (' arm64' if architecture == 'arm64' else '') + '\nif errorlevel 1 exit /b 1\n' + subprocess.list2cmdline(command) + '\n', encoding='utf-8')
         result = subprocess.run(['cmd.exe', '/d', '/c', str(script)], cwd=folder, capture_output=True, timeout=60)
     (folder / 'compiler.log').write_bytes(result.stdout + result.stderr)
     assert result.returncode == 0 and library.is_file(), 'The native IME observer did not compile; inspect compiler.log'
-    return library
+    return native_arch.require_native_pe(library, architecture)
 
 
 class CompositionObserver:
-    def __init__(self, api, root, child, focus, pid, folder, profile):
-        assert ctypes.sizeof(ctypes.c_void_p) == 8, 'The observer controller must be native x64'
+    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64'):
+        self.native_architecture = native_arch.validate_native_architecture(
+            native_arch.observe_native_architecture(), architecture)
+        self.target_architecture = native_arch.observe_owned_process(pid, architecture)
         self.api, self.root, self.child, self.focus, self.pid = api, root, child, focus, pid
         self.tid = int(api.user.GetWindowThreadProcessId(focus, None))
         assert self.tid and api.pid(focus) == pid, 'Observer target is not the owned editor input thread'
@@ -400,7 +420,8 @@ class CompositionObserver:
         state = NativeState()
         state.magic, state.version, state.pid, state.tid = 0x4f47494d, 1, pid, self.tid
         self.mapping[:] = bytes(state)
-        library = compile_observer(folder, self.mapping_name, profile)
+        library = compile_observer(folder, self.mapping_name, profile, architecture=architecture)
+        native_arch.require_native_pe(library, architecture)
         self.dll = ctypes.WinDLL(str(library), use_last_error=True)
         self.dll.StateSize.restype = ctypes.c_uint32
         assert self.dll.StateSize() == ctypes.sizeof(NativeState), 'Native observer memory layout differs from controller'
@@ -550,7 +571,7 @@ def case(suite, fixtures, output, readiness, module, extension):
     record = {'module': module, 'kind': 'native-korean-ime', 'shellPid': process.pid,
               'file': str(source), 'success': False, 'imeVerified': False, 'stage': 'attach',
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
-              'readiness': readiness}
+              'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}
     observer = None
     api = Windows()
     try:
@@ -569,7 +590,9 @@ def case(suite, fixtures, output, readiness, module, extension):
         else: send_keys('{TAB}{F2}^{END}', pause=0.1)
         focus = api.require_editor_focus(hwnd, child)
         record['stage'] = 'install-owned-thread-observer'
-        observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'])
+        observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'],
+            architecture=record['architecture'])
+        record.update(nativeArchitecture=observer.native_architecture, targetArchitecture=observer.target_architecture)
         record.update(editorTid=observer.tid, keyboardFocusHwnd=focus)
         active = activate_after_ascii_prefix(observer, module, record,
             lambda prefix: ascii_input.type_ascii(api, hwnd, child, prefix, record, pause=0.04))
@@ -651,8 +674,12 @@ def main(argv=None):
     parser.add_argument('--file', type=Path)
     parser.add_argument('--reopen-output', type=Path)
     args = parser.parse_args(argv)
-    if os.name != 'nt' or not __debug__: raise RuntimeError('Actual Windows x64 execution with assertions enabled is required')
+    if os.name != 'nt' or not __debug__: raise RuntimeError('Actual native Windows execution with assertions enabled is required')
     suite = args.suite.resolve()
+    inventory = json.loads((suite / 'suite-inventory.json').read_text(encoding='utf-8-sig'))
+    assert isinstance(inventory, dict) and inventory.get('schemaVersion') == 1, 'Suite inventory identity is missing'
+    architecture = native_arch.require_architecture(inventory.get('architecture'))
+    controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
     if args.verify_one:
         assert args.file and args.reopen_output, 'The owned reopen fixture and receipt are required'
         observed = reopen_one(suite, args.file.resolve(), args.verify_one)
@@ -665,12 +692,13 @@ def main(argv=None):
     assert suite != output and suite not in output.parents and fixtures != output and fixtures not in output.parents, 'Evidence must be outside the payload and baseline fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
     output.mkdir(parents=True, exist_ok=False)
-    readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')))
+    readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
     results = collect_cases([('ime-' + module, lambda module=module, extension=extension:
         case(suite, fixtures, output, readiness, module, extension)) for module, extension in INPUT_CASES], output)
     success = len(results) == 3 and all(row.get('success') is True and row.get('imeVerified') is True for row in results)
     report = {'schemaVersion': 1, 'kind': 'native-korean-ime', 'success': success,
               'imeVerified': success, 'suiteOnly': True, 'tests': results,
+              'architecture': architecture, 'nativeArchitecture': controller,
               'expectedCaseCount': 3, 'passedCaseCount': sum(row.get('success') is True for row in results)}
     (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     return 0 if success else 1

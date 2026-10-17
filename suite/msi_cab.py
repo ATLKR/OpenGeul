@@ -1,4 +1,4 @@
-"""Recover exact AMD64 CRT members from a read-only Windows MSI database.
+"""Recover exact native CRT members from a read-only Windows MSI database.
 
 Administrative extraction can flatten AMD64 and ARM64 rows onto the same name.
 This module selects original File IDs and extracts those cabinet members only.
@@ -16,8 +16,14 @@ import tempfile
 EXPECTED_X64_CRT = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
                     'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
                     'vcruntime140_1.dll', 'vcruntime140_threads.dll')
-_AMD64 = re.compile(r'_amd64(?:[._]|$)', re.IGNORECASE)
-_OTHER_ARCH = re.compile(r'_(?:arm64|x86|ia64)(?:[._]|$)', re.IGNORECASE)
+_ARCHITECTURES = {'x64': ('amd64', 'AMD64', 0x8664), 'arm64': ('arm64', 'ARM64', 0xAA64)}
+
+
+def _architecture(architecture):
+    try:
+        return _ARCHITECTURES[architecture]
+    except (KeyError, TypeError):
+        raise ValueError('Unsupported native CRT architecture: ' + str(architecture)) from None
 
 
 def _safe_member(value):
@@ -35,8 +41,12 @@ def _positive(value, label):
     raise ValueError('Invalid MSI ' + label)
 
 
-def select_x64_crt(file_rows, media_rows):
-    """Map the nine friendly DLL names to exact AMD64 File IDs and Media rows."""
+def select_crt(file_rows, media_rows, *, architecture='x64'):
+    """Map the nine friendly DLL names to exact native File IDs and Media rows."""
+    marker, label, _ = _architecture(architecture)
+    native = re.compile(r'_' + marker + r'(?:[._]|$)', re.IGNORECASE)
+    others = '|'.join(value for value in ('amd64', 'arm64', 'x86', 'ia64') if value != marker)
+    other_arch = re.compile(r'_(?:' + others + r')(?:[._]|$)', re.IGNORECASE)
     disks = []
     for row in media_rows:
         disks.append((_positive(row.get('DiskId'), 'DiskId'),
@@ -56,14 +66,14 @@ def select_x64_crt(file_rows, media_rows):
         file_id, component = row.get('File'), row.get('Component_')
         if not isinstance(file_id, str) or not isinstance(component, str):
             raise ValueError('Missing MSI File ID or Component')
-        if not (_AMD64.search(file_id) or _AMD64.search(component)):
+        if not (native.search(file_id) or native.search(component)):
             continue
-        if _OTHER_ARCH.search(file_id) or _OTHER_ARCH.search(component):
+        if other_arch.search(file_id) or other_arch.search(component):
             raise ValueError('Conflicting architecture in MSI File row')
         _safe_member(file_id)
         sequence = _positive(row.get('Sequence'), 'File Sequence')
         if name in result or file_id.casefold() in file_ids or sequence in sequences:
-            raise ValueError('Duplicate AMD64 CRT row in MSI: ' + name)
+            raise ValueError('Duplicate ' + label + ' CRT row in MSI: ' + name)
         disk = next((disk for disk in disks if sequence <= disk[1]), None)
         if disk is None:
             raise ValueError('Missing cabinet for MSI File sequence')
@@ -76,22 +86,28 @@ def select_x64_crt(file_rows, media_rows):
         sequences.add(sequence)
     missing = set(EXPECTED_X64_CRT) - set(result)
     if missing:
-        raise ValueError('MSI is missing AMD64 CRT files: ' + ', '.join(sorted(missing)))
+        raise ValueError('MSI is missing ' + label + ' CRT files: ' + ', '.join(sorted(missing)))
     return {name: result[name] for name in EXPECTED_X64_CRT}
 
 
-def _verify_amd64(path):
+def select_x64_crt(file_rows, media_rows):
+    """Compatibility entry point for exact AMD64 CRT selection."""
+    return select_crt(file_rows, media_rows, architecture='x64')
+
+
+def _verify_native(path, *, architecture):
+    _, label, machine = _architecture(architecture)
     with path.open('rb') as source:
         header = source.read(64)
         if len(header) != 64 or header[:2] != b'MZ':
-            raise ValueError('Recovered CRT is not an AMD64 PE: ' + path.name)
+            raise ValueError('Recovered CRT is not a ' + label + ' PE: ' + path.name)
         offset = struct.unpack_from('<I', header, 60)[0]
         if offset < 64 or offset > path.stat().st_size - 6:
-            raise ValueError('Recovered CRT has an invalid AMD64 PE header: ' + path.name)
+            raise ValueError('Recovered CRT has an invalid ' + label + ' PE header: ' + path.name)
         source.seek(offset)
         signature = source.read(6)
-        if signature[:4] != b'PE\0\0' or struct.unpack_from('<H', signature, 4)[0] != 0x8664:
-            raise ValueError('Recovered CRT must be AMD64: ' + path.name)
+        if signature[:4] != b'PE\0\0' or struct.unpack_from('<H', signature, 4)[0] != machine:
+            raise ValueError('Recovered CRT must be ' + label + ': ' + path.name)
 
 
 def windows_expand_path():
@@ -113,12 +129,13 @@ def expand_file(cabinet, file_id, destination):
                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
 
-def recover_x64_crt(msi: Path, output: Path) -> dict:
+def recover_crt(msi: Path, output: Path, *, architecture='x64') -> dict:
     """Return friendly DLL -> {path, fileId, cabinet}, publishing a fresh directory.
 
     The caller pins and verifies the MSI digest. Original MSI and existing output
     directories are never modified. Failure leaves no partially published output.
     """
+    _architecture(architecture)
     msi, output = Path(msi).resolve(strict=True), Path(output).absolute()
     if not msi.is_file():
         raise ValueError('MSI source must be a file')
@@ -131,7 +148,7 @@ def recover_x64_crt(msi: Path, output: Path) -> dict:
         staged = scratch / 'recovered'
         staged.mkdir()
         with WindowsMsiDatabase(msi) as database:
-            selected = select_x64_crt(database.file_rows(), database.media_rows())
+            selected = select_crt(database.file_rows(), database.media_rows(), architecture=architecture)
             cabinets = {}
             for row in selected.values():
                 stream = row['cabinet'][1:]
@@ -150,7 +167,7 @@ def recover_x64_crt(msi: Path, output: Path) -> dict:
             if (member.is_symlink() or not member.is_file()
                     or any(path.name.casefold() != row['fileId'].casefold() for path in extracted.iterdir())):
                 raise ValueError('Exact MSI cabinet member is missing or ambiguous: ' + row['fileId'])
-            _verify_amd64(member)
+            _verify_native(member, architecture=architecture)
             shutil.copyfile(member, staged / name)
         if output.exists() or output.is_symlink():
             raise ValueError('CRT recovery output was created during extraction')
@@ -158,6 +175,11 @@ def recover_x64_crt(msi: Path, output: Path) -> dict:
         # directory created by another producer while extraction was in progress.
         staged.rename(output)
     return {name: dict(row, path=output / name) for name, row in selected.items()}
+
+
+def recover_x64_crt(msi: Path, output: Path) -> dict:
+    """Compatibility entry point for exact native AMD64 CRT recovery."""
+    return recover_crt(msi, output, architecture='x64')
 
 
 class WindowsMsiDatabase:

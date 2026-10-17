@@ -1,0 +1,226 @@
+{
+  "schemaVersion": 1,
+  "kind": "finite-office-engine-feature-catalog",
+  "guiVerified": false,
+  "officeReplacementCertified": false,
+  "expectedCaseCount": 21,
+  "cases": [
+    {
+      "id": "format-writer-odt",
+      "module": "writer",
+      "extension": "odt",
+      "filter": "writer8",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-writer-docx",
+      "module": "writer",
+      "extension": "docx",
+      "filter": "Office Open XML Text",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-writer-doc",
+      "module": "writer",
+      "extension": "doc",
+      "filter": "MS Word 97",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-writer-rtf",
+      "module": "writer",
+      "extension": "rtf",
+      "filter": "Rich Text Format",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-writer-txt",
+      "module": "writer",
+      "extension": "txt",
+      "filter": "Text",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [
+        "formatting",
+        "structure"
+      ],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-calc-ods",
+      "module": "calc",
+      "extension": "ods",
+      "filter": "calc8",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-calc-xlsx",
+      "module": "calc",
+      "extension": "xlsx",
+      "filter": "Calc MS Excel 2007 XML",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-calc-xls",
+      "module": "calc",
+      "extension": "xls",
+      "filter": "MS Excel 97",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-calc-csv",
+      "module": "calc",
+      "extension": "csv",
+      "filter": "Text - txt - csv (StarCalc)",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [
+        "formula-expression",
+        "formatting",
+        "extra-sheets"
+      ],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-impress-odp",
+      "module": "impress",
+      "extension": "odp",
+      "filter": "impress8",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-impress-pptx",
+      "module": "impress",
+      "extension": "pptx",
+      "filter": "Impress MS PowerPoint 2007 XML",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-impress-ppt",
+      "module": "impress",
+      "extension": "ppt",
+      "filter": "MS PowerPoint 97",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-draw-odg",
+      "module": "draw",
+      "extension": "odg",
+      "filter": "draw8",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-math-odf",
+      "module": "math",
+      "extension": "odf",
+      "filter": "math8",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "format-base-odb",
+      "module": "base",
+      "extension": "odb",
+      "filter": "StarOffice XML (Base)",
+      "kind": "format",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+    },
+    {
+      "id": "rich-writer",
+      "module": "writer",
+      "extension": "docx",
+      "filter": "Office Open XML Text",
+      "kind": "rich",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Bold/plain paragraphs and exact 2x2 table cells."
+    },
+    {
+      "id": "rich-calc",
+      "module": "calc",
+      "extension": "xlsx",
+      "filter": "Calc MS Excel 2007 XML",
+      "kind": "rich",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Two named sheets; named range; formula and dependent recalculation17 to30 gives55 and60."
+    },
+    {
+      "id": "rich-impress",
+      "module": "impress",
+      "extension": "pptx",
+      "filter": "Impress MS PowerPoint 2007 XML",
+      "kind": "rich",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Two ordered slides with exact text and shape geometry."
+    },
+    {
+      "id": "rich-draw",
+      "module": "draw",
+      "extension": "odg",
+      "filter": "draw8",
+      "kind": "rich",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Two pages with exact rectangle text, geometry and fill colors."
+    },
+    {
+      "id": "rich-math",
+      "module": "math",
+      "extension": "odf",
+      "filter": "math8",
+      "kind": "rich",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "New square-root expression, whitespace-normalized formula."
+    },
+    {
+      "id": "rich-base",
+      "module": "base",
+      "extension": "odb",
+      "filter": "StarOffice XML (Base)",
+      "kind": "rich",
+      "guiVerified": false,
+      "lossBudget": [],
+      "semantics": "Real Firebird insert/update/delete commit and rollback, exact final rows1/3."
+    }
+  ]
+}

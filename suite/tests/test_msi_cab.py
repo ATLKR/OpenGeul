@@ -46,6 +46,41 @@ def pe(machine=0x8664):
 
 
 class SelectorTests(unittest.TestCase):
+    def test_arm64_selection_recovers_only_exact_native_file_ids(self):
+        implementation = module()
+        self.assertTrue(callable(getattr(implementation, 'select_crt', None)),
+                        'Architecture-aware CRT selection is required')
+        selected = implementation.select_crt(files(), media(), architecture='arm64')
+        self.assertEqual(set(NAMES), set(selected))
+        for name, metadata in selected.items():
+            self.assertEqual(name + '_arm64.DFEFC2FE', metadata['fileId'])
+        self.assertEqual('#first.cab', selected['msvcp140_2.dll']['cabinet'])
+        self.assertEqual('#second.cab', selected['msvcp140_atomic_wait.dll']['cabinet'])
+
+    def test_generic_x64_selection_preserves_compatibility_contract(self):
+        implementation = module()
+        self.assertTrue(callable(getattr(implementation, 'select_crt', None)))
+        self.assertEqual(implementation.select_x64_crt(files(), media()),
+                         implementation.select_crt(files(), media()))
+
+    def test_arm64_selection_rejects_missing_duplicate_and_conflicting_rows(self):
+        implementation = module()
+        self.assertTrue(callable(getattr(implementation, 'select_crt', None)))
+        missing = [row for row in files() if '_arm64.' not in row['File']]
+        duplicate = files() + [copy.deepcopy(files()[1])]
+        mixed = files()
+        mixed[1]['Component_'] = 'component_amd64'
+        for table in (missing, duplicate, mixed):
+            with self.subTest(table=table[:2]), self.assertRaises(ValueError):
+                implementation.select_crt(table, media(), architecture='arm64')
+
+    def test_unsupported_architecture_cannot_select_crt(self):
+        implementation = module()
+        self.assertTrue(callable(getattr(implementation, 'select_crt', None)))
+        for architecture in ('x86', 'ARM64', '', None):
+            with self.subTest(architecture=architecture), self.assertRaises(ValueError):
+                implementation.select_crt(files(), media(), architecture=architecture)
+
     def test_only_amd64_rows_survive_same_friendly_name_collisions(self):
         selected = module().select_x64_crt(files(), media())
         self.assertEqual(set(NAMES), set(selected))
@@ -147,6 +182,33 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue(metadata['cabinet'].startswith('#'))
         self.assertEqual(9, len(self.expansions))
         self.assertEqual(b'original signed MSI', self.msi.read_bytes())
+
+    def test_arm64_recovery_publishes_native_arm64_members(self):
+        self.assertTrue(callable(getattr(self.implementation, 'recover_crt', None)),
+                        'Architecture-aware CRT recovery is required')
+        def arm64(cabinet, file_id, destination):
+            self.expansions.append((cabinet.name, file_id))
+            (destination / file_id).write_bytes(pe(0xAA64) + file_id.encode())
+        with patch.object(self.implementation, 'WindowsMsiDatabase', self.database), patch.object(
+                self.implementation, 'expand_file', arm64):
+            recovered = self.implementation.recover_crt(self.msi, self.output, architecture='arm64')
+        for name, metadata in recovered.items():
+            self.assertIn('_arm64.', metadata['fileId'])
+            self.assertEqual(pe(0xAA64) + metadata['fileId'].encode(), (self.output/name).read_bytes())
+        self.assertEqual(9, len(self.expansions))
+        self.assertEqual(b'original signed MSI', self.msi.read_bytes())
+
+    def test_x64_bytes_under_arm64_ids_fail_without_publishing_output(self):
+        self.assertTrue(callable(getattr(self.implementation, 'recover_crt', None)))
+        for machine in (0x8664, 0xA641, 0x14C):
+            def wrong_arch(cabinet, file_id, destination):
+                (destination / file_id).write_bytes(pe(machine))
+            with self.subTest(machine=machine), patch.object(
+                    self.implementation, 'WindowsMsiDatabase', self.database), patch.object(
+                    self.implementation, 'expand_file', wrong_arch):
+                with self.assertRaisesRegex(ValueError, 'ARM64'):
+                    self.implementation.recover_crt(self.msi, self.output, architecture='arm64')
+            self.assertFalse(self.output.exists())
 
     def test_existing_output_and_source_are_never_overwritten(self):
         self.output.mkdir()

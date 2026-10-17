@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$Output,
+    [ValidateSet('x64','arm64')][string]$Architecture='x64',
     [switch]$Worker
 )
 # Ephemeral Suite CI prerequisite only. Target input and Store qualification
@@ -19,7 +20,7 @@ if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0] -cne $env:GITHUB_SHA)
     throw 'Hosted Windows Suite SHA differs from the actual checkout HEAD.'
 }
 $binding=[ordered]@{sourceCommit=$head[0];job=$env:GITHUB_JOB;repository=$env:GITHUB_REPOSITORY;
-    sourceRun=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT}
+    sourceRun=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;architecture=$Architecture}
 $out=[IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($Output)) { $Output } else { Join-Path $repo $Output }))
 if (-not $out.StartsWith($repo+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or
     $out.IndexOfAny([char[]]@('"',"`r","`n")) -ge 0) {
@@ -42,14 +43,53 @@ function Save-SuiteObservation([string]$Name,$Value) {
     if ([Text.Encoding]::UTF8.GetByteCount($json) -gt 32768) { throw 'Suite prerequisite observation exceeds its bound.' }
     [IO.File]::WriteAllText((Join-Path $out $Name),$json,[Text.UTF8Encoding]::new($false))
 }
+function Assert-SuiteNativeArchitecture([string]$Architecture,[UInt16]$ProcessMachine,[UInt16]$NativeMachine) {
+    $expectedMachine=switch -CaseSensitive ($Architecture) { 'x64' { 0x8664 } 'arm64' { 0xAA64 } default { throw 'Unsupported Suite native architecture.' } }
+    if ($ProcessMachine -ne 0 -or $NativeMachine -ne $expectedMachine) {
+        throw 'Suite Korean setup requires its requested native controller and OS architecture.'
+    }
+}
+function Assert-SuiteKoreanOfflineSource([UInt16]$NativeMachine,[string]$Build,[string]$InstallationType) {
+    if ($NativeMachine -ne 0x8664 -or $Build -cne '26100' -or $InstallationType -cnotin @('Server','Server Core')) {
+        throw 'Pinned offline language FOD media requires actual Server 2025 amd64 build 26100; ARM64 uses its own native Windows Update capability source.'
+    }
+}
+function Install-SuiteArm64KoreanCapability([UInt16]$ProcessMachine,[UInt16]$NativeMachine,[string]$CapabilityName,[string]$LogPath) {
+    Assert-SuiteNativeArchitecture -Architecture 'arm64' -ProcessMachine $ProcessMachine -NativeMachine $NativeMachine
+    if ($CapabilityName -cne 'Language.Basic~~~ko-KR~0.0.1.0') { throw 'Only the named Korean Basic capability is authorized.' }
+    # The already verified hosted Suite worker owns this single Windows Update
+    # attempt. Its controller retains the ten-minute process/log bound. Do not
+    # change Windows Update policy, retry, or borrow the x64 offline media.
+    Dism\Add-WindowsCapability -Online -Name $CapabilityName -LogPath $LogPath -ErrorAction Stop
+}
+function Get-SuiteNativeHost([string]$Architecture) {
+    if (-not ('SuiteKoreanSetupHost' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SuiteKoreanSetupHost {
+    [DllImport("kernel32")] public static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWow64Process2(IntPtr process,out ushort processMachine,out ushort nativeMachine);
+}
+'@
+    }
+    [UInt16]$processMachine=0;[UInt16]$nativeMachine=0
+    if (-not [SuiteKoreanSetupHost]::IsWow64Process2([SuiteKoreanSetupHost]::GetCurrentProcess(),[ref]$processMachine,[ref]$nativeMachine)) {
+        throw 'Actual Suite Korean setup process architecture is unavailable.'
+    }
+    Assert-SuiteNativeArchitecture -Architecture $Architecture -ProcessMachine $processMachine -NativeMachine $nativeMachine
+    return [ordered]@{processMachine=[int]$processMachine;nativeMachine=[int]$nativeMachine}
+}
 if (-not $Worker) {
     foreach ($name in @('readiness.json','failure.json','setup.log','setup-error.log','dism.log')) {
         if (Test-Path -LiteralPath (Join-Path $out $name)) { throw 'Preserve existing Suite prerequisite evidence; use a new output directory.' }
     }
+    $controllerHost=Get-SuiteNativeHost -Architecture $Architecture
     $windowsPowerShell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell/v1.0/powershell.exe'
     Assert-SuitePlainPath $windowsPowerShell
     $arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),
-        '-Output',('"'+$out+'"'),'-Worker')
+        '-Output',('"'+$out+'"'),'-Architecture',$Architecture,'-Worker')
     $child=Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments -PassThru -NoNewWindow `
         -RedirectStandardOutput (Join-Path $out 'setup.log') -RedirectStandardError (Join-Path $out 'setup-error.log')
     $started=$child.StartTime
@@ -75,6 +115,8 @@ if (-not $Worker) {
         if ($child.ExitCode -ne 0) { throw 'Suite Korean prerequisite worker failed; inspect the original setup logs and failure.json.' }
         $record=Get-Content -LiteralPath (Join-Path $out 'readiness.json') -Raw | ConvertFrom-Json
         if ($record.source.sourceCommit -cne $head[0] -or $record.source.job -cne 'windows-suite' -or
+            $record.source.architecture -cne $Architecture -or $record.nativeMachine -ne $controllerHost.nativeMachine -or
+            $record.controllerMachine -ne 0 -or $record.profile.component.machine -ne $controllerHost.nativeMachine -or
             $record.suiteOnly -ne $true -or $record.productInputVerified -ne $false -or
             $record.storeQualified -ne $false -or $record.capabilityAfter -cne 'Installed' -or
             $record.restartNeeded -ne $false -or $record.userLanguageConfigured -ne $true -or
@@ -117,20 +159,9 @@ try {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'Online Windows capability servicing requires the hosted elevated user.'
     }
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class SuiteKoreanSetupHost {
-    [DllImport("kernel32")] public static extern IntPtr GetCurrentProcess();
-    [DllImport("kernel32",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)]
-    public static extern bool IsWow64Process2(IntPtr process,out ushort processMachine,out ushort nativeMachine);
-}
-'@
-    [UInt16]$processMachine=0;[UInt16]$nativeMachine=0
-    if (-not [SuiteKoreanSetupHost]::IsWow64Process2([SuiteKoreanSetupHost]::GetCurrentProcess(),[ref]$processMachine,[ref]$nativeMachine) -or
-        $processMachine -ne 0 -or @(0x8664,0xAA64) -notcontains [int]$nativeMachine) {
-        throw 'Suite Korean setup requires native 64-bit Windows PowerShell.'
-    }
+    $nativeHost=Get-SuiteNativeHost -Architecture $Architecture
+    [UInt16]$processMachine=$nativeHost.processMachine
+    [UInt16]$nativeMachine=$nativeHost.nativeMachine
     $systemPath=[IO.Path]::GetFullPath([Environment]::SystemDirectory)
     $modules=Join-Path $systemPath 'WindowsPowerShell/v1.0/Modules'
     foreach ($name in @('Dism','International','Microsoft.PowerShell.Security')) {
@@ -151,40 +182,46 @@ public static class SuiteKoreanSetupHost {
     $before=[string]$capability[0].State
     $languages=International\Get-WinUserLanguageList -ErrorAction Stop
     Save-SuiteObservation 'before.json' ([ordered]@{source=$binding;capabilityName=$capabilityName;capabilityBefore=$before;
-        userSid=$identity.User.Value;nativeMachine=[int]$nativeMachine;
+        userSid=$identity.User.Value;nativeMachine=[int]$nativeMachine;controllerMachine=[int]$processMachine;
         languages=@($languages | ForEach-Object { [ordered]@{tag=[string]$_.LanguageTag;inputMethodTips=@($_.InputMethodTips)} });
         suiteOnly=$true;productInputVerified=$false;storeQualified=$false})
     $stage='capability-install'
     $restartNeeded=$false
     $acquisition='already-installed'
     if ($before -eq 'NotPresent') {
-        $stage='matching-official-server-media'
-        $version=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-        if ($nativeMachine -ne 0x8664 -or $version.CurrentBuildNumber -cne '26100' -or
-            $version.InstallationType -notin @('Server','Server Core')) {
-            throw 'Pinned offline language FOD media requires actual Server 2025 amd64 build 26100.'
+        if ($nativeMachine -eq 0xAA64) {
+            $stage='native-arm64-online-capability-install'
+            $acquisition='native-arm64-WindowsUpdate-Korean-Basic'
+            $servicingStartedUtc=[DateTime]::UtcNow
+            $servicingFailed=$true
+            $installed=@(Install-SuiteArm64KoreanCapability -ProcessMachine $processMachine -NativeMachine $nativeMachine -CapabilityName $capabilityName -LogPath $dismLog)
+            $servicingFailed=$false
+        } else {
+            $stage='matching-official-server-media'
+            $version=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+            Assert-SuiteKoreanOfflineSource -NativeMachine $nativeMachine -Build $version.CurrentBuildNumber -InstallationType $version.InstallationType
+            $sourceRoot=Join-Path $out 'fod-source'
+            $sourceHelper=Join-Path $PSScriptRoot 'korean_fod_source.py'
+            & python $sourceHelper --output $sourceRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Pinned official Server language FOD source acquisition failed.' }
+            $sourceReceipt=Get-Content -LiteralPath (Join-Path $sourceRoot 'source-acquisition.json') -Raw | ConvertFrom-Json
+            $sourceDirectory=Join-Path $sourceRoot 'LanguagesAndOptionalFeatures'
+            Assert-SuitePlainPath $sourceDirectory
+            if ($sourceReceipt.success -ne $true -or $sourceReceipt.productInputVerified -ne $false -or
+                $sourceReceipt.storeQualified -ne $false -or $sourceReceipt.packages.Count -ne 9 -or
+                [IO.Path]::GetFullPath($sourceReceipt.sourceDirectory) -cne [IO.Path]::GetFullPath($sourceDirectory)) {
+                throw 'Official offline FOD acquisition receipt does not identify the owned source.'
+            }
+            $acquisition='pinned-official-Server2025-amd64-26100-language-FOD-source'
+            $stage='offline-capability-install'
+            # Language FODs are complete monolithic CABs. Preserve selected original
+            # Server metadata too; DISM validates package catalogs and must prove
+            # this x64 source is sufficient without changing host update policy.
+            $servicingStartedUtc=[DateTime]::UtcNow
+            $servicingFailed=$true
+            $installed=@(Dism\Add-WindowsCapability -Online -Name $capabilityName -Source $sourceDirectory -LimitAccess -LogPath $dismLog -ErrorAction Stop)
+            $servicingFailed=$false
         }
-        $sourceRoot=Join-Path $out 'fod-source'
-        $sourceHelper=Join-Path $PSScriptRoot 'korean_fod_source.py'
-        & python $sourceHelper --output $sourceRoot
-        if ($LASTEXITCODE -ne 0) { throw 'Pinned official Server language FOD source acquisition failed.' }
-        $sourceReceipt=Get-Content -LiteralPath (Join-Path $sourceRoot 'source-acquisition.json') -Raw | ConvertFrom-Json
-        $sourceDirectory=Join-Path $sourceRoot 'LanguagesAndOptionalFeatures'
-        Assert-SuitePlainPath $sourceDirectory
-        if ($sourceReceipt.success -ne $true -or $sourceReceipt.productInputVerified -ne $false -or
-            $sourceReceipt.storeQualified -ne $false -or $sourceReceipt.packages.Count -ne 9 -or
-            [IO.Path]::GetFullPath($sourceReceipt.sourceDirectory) -cne [IO.Path]::GetFullPath($sourceDirectory)) {
-            throw 'Official offline FOD acquisition receipt does not identify the owned source.'
-        }
-        $acquisition='pinned-official-Server2025-amd64-26100-language-FOD-source'
-        $stage='offline-capability-install'
-        # Language FODs are complete monolithic CABs. Preserve selected original
-        # Server metadata too; DISM validates package catalogs and must prove
-        # this source is sufficient. Never query WU or alter its host policy.
-        $servicingStartedUtc=[DateTime]::UtcNow
-        $servicingFailed=$true
-        $installed=@(Dism\Add-WindowsCapability -Online -Name $capabilityName -Source $sourceDirectory -LimitAccess -LogPath $dismLog -ErrorAction Stop)
-        $servicingFailed=$false
         if ($installed.Count -ne 1 -or $installed[0].RestartNeeded -isnot [bool]) { throw 'Windows servicing restart status is unavailable.' }
         $restartNeeded=$installed[0].RestartNeeded
     } elseif ($before -ne 'Installed') { throw 'Korean Basic capability is pending or unknown.' }
@@ -258,7 +295,7 @@ public static class SuiteKoreanSetupHost {
         throw 'Read-back did not confirm the selected current-user Microsoft Korean TSF profile.'
     }
     Save-SuiteObservation 'readiness.json' ([ordered]@{formatVersion=1;source=$binding;
-        nativeMachine=[int]$nativeMachine;systemDirectory=$systemPath;capabilityName=$capabilityName;
+        nativeMachine=[int]$nativeMachine;controllerMachine=[int]$processMachine;systemDirectory=$systemPath;capabilityName=$capabilityName;
         capabilityBefore=$before;capabilityAfter=[string]$after[0].State;restartNeeded=$restartNeeded;acquisition=$acquisition;
         userLanguageConfigured=$true;configuredInputTips=@($observedKorean[0].InputMethodTips);profile=$profile;
         profileScope='current-user configured; target HWND/thread unverified';

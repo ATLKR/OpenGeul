@@ -17,11 +17,19 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+NATIVE_MACHINES = {'x64': 0x8664, 'arm64': 0xAA64}
 MSI_VC_DEPENDENCIES = frozenset({
     'concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
     'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
     'vcruntime140_1.dll', 'vcruntime140_threads.dll',
 })
+
+
+def native_machine(architecture: str) -> int:
+    try:
+        return NATIVE_MACHINES[architecture]
+    except (KeyError, TypeError):
+        raise ValueError('Unsupported native Suite architecture: '+str(architecture)) from None
 
 
 def sha256(path: Path) -> str:
@@ -158,7 +166,8 @@ def normalize_admin_runtime(source: Path, destination: Path, *, admin_metadata: 
     return destination
 
 
-def extract_msi(archive: Path, destination: Path) -> Path:
+def extract_msi(archive: Path, destination: Path, *, architecture: str = 'x64') -> Path:
+    native_machine(architecture)
     if os.name != 'nt': raise ValueError('GUI MSI extraction requires Windows')
     if destination.exists(): raise ValueError('MSI extraction output already exists')
     destination.mkdir(parents=True)
@@ -174,33 +183,35 @@ def extract_msi(archive: Path, destination: Path) -> Path:
     runtime = normalize_admin_runtime(runtime, destination.with_name(destination.name+'-runtime'),
                                       admin_metadata=runtime == destination, msi_name=archive.name)
     # Administrative images may flatten ARM64 and AMD64 merge-module rows onto
-    # the same System64 filenames. Recover the exact native AMD64 File IDs from
+    # the same System64 filenames. Recover the exact native File IDs from
     # the authenticated original cabinet instead of trusting those paths.
     try:
-        from suite.msi_cab import recover_x64_crt
+        from suite.msi_cab import recover_crt
     except ModuleNotFoundError:
-        from msi_cab import recover_x64_crt
+        from msi_cab import recover_crt
     crt = destination.with_name(destination.name + '-native-crt')
     crt.mkdir(exist_ok=False)
-    recovered = recover_x64_crt(archive, crt/'System64')
-    files = stage_msi_dependencies(crt, runtime)
+    recovered = recover_crt(archive, crt/'System64', architecture=architecture)
+    files = stage_msi_dependencies(crt, runtime, architecture=architecture)
     for name, record in recovered.items():
         files['program/'+name].update(fileId=record['fileId'], cabinet=record['cabinet'])
     receipt = runtime/'opengeul-msi-dependencies.json'
     with receipt.open('x', encoding='utf-8') as stream:
-        json.dump({'schemaVersion': 1, 'architecture': 'x64', 'inputMsiSha256': sha256(archive),
-                   'recovery': 'embedded-amd64-file-ids', 'files': files}, stream, indent=2)
+        marker = 'amd64' if architecture == 'x64' else 'arm64'
+        json.dump({'schemaVersion': 1, 'architecture': architecture, 'inputMsiSha256': sha256(archive),
+                   'recovery': 'embedded-'+marker+'-file-ids', 'files': files}, stream, indent=2)
         stream.write('\n')
     return runtime
 
 
-def stage_msi_dependencies(extraction_root: Path, runtime_root: Path) -> dict:
-    """Copy the pinned MSI's native x64 VC++ DLLs into its scratch runtime.
+def stage_msi_dependencies(extraction_root: Path, runtime_root: Path, *, architecture: str = 'x64') -> dict:
+    """Copy the pinned MSI's native VC++ DLLs into its scratch runtime.
 
     Administrative extraction puts these files in System64 rather than program.
     Validate every source and existing destination before copying any dependency;
     never use the sibling System directory containing x86 binaries.
     """
+    machine = native_machine(architecture)
     try:
         from suite.payload import _pe
     except ModuleNotFoundError:
@@ -239,13 +250,13 @@ def stage_msi_dependencies(extraction_root: Path, runtime_root: Path) -> dict:
     result = {}
     for name, path in sorted(candidates.items()):
         info = regular(path)
-        _pe(path)
+        _pe(path, architecture=architecture)
         with path.open('rb') as stream:
             stream.seek(60)
             pe_offset = struct.unpack('<I', stream.read(4))[0]
             stream.seek(pe_offset+4)
-            if struct.unpack('<H', stream.read(2))[0] != 0x8664:
-                raise ValueError('MSI dependency must use native x64 architecture: '+name)
+            if struct.unpack('<H', stream.read(2))[0] != machine:
+                raise ValueError('MSI dependency must use native '+architecture+' architecture: '+name)
         digest = sha256(path)
         if name in existing:
             other = existing[name]
@@ -270,11 +281,15 @@ def main() -> None:
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--shell', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--architecture', choices=tuple(NATIVE_MACHINES), default='x64')
     args = parser.parse_args()
-    lock = json.loads((ROOT/'suite/config/runtime.lock.json').read_text(encoding='utf-8'))
+    lock_name = 'runtime.lock.json' if args.architecture == 'x64' else 'runtime.arm64.lock.json'
+    lock = json.loads((ROOT/'suite/config'/lock_name).read_text(encoding='utf-8'))
+    if lock.get('architecture') != args.architecture:
+        raise ValueError('Runtime lock architecture does not match requested native architecture')
     msi = download_locked(lock['runtime'], args.work/'inputs/office.msi')
     hwp = download_locked(lock['hwp'], args.work/'inputs/hwp.zip')
-    runtime = extract_msi(msi, args.work/'msi')
+    runtime = extract_msi(msi, args.work/'msi', architecture=args.architecture)
     from package import assemble
     assemble(runtime=runtime, hwp=hwp, shell=args.shell, output=args.output, lock=lock)
     print('OpenGeul Office package prepared and verified:', args.output)

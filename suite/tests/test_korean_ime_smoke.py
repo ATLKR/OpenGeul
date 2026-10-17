@@ -63,7 +63,8 @@ class KoreanImePolicyTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 1, 'Discovery must not silently retry or skip failure')
 
     def readiness(self):
-        return {'suiteOnly': True, 'capabilityAfter': 'Installed', 'restartNeeded': False,
+        return {'suiteOnly': True, 'nativeMachine': 0x8664, 'controllerMachine': 0,
+                  'capabilityAfter': 'Installed', 'restartNeeded': False,
                   'userLanguageConfigured': True,
                   'profile': {'inputTip': '0412:{A1A1A1A1-1111-2222-3333-444444444444}{B2B2B2B2-1111-2222-3333-444444444444}',
                               'providerClsid': '{A1A1A1A1-1111-2222-3333-444444444444}',
@@ -214,6 +215,10 @@ class KoreanImePolicyTests(unittest.TestCase):
                     calls.append(('activation', value))
                     raise ProbeDone()
                 observer = SimpleNamespace(api=api, tid=41, activation_attempted=False, focus=51,
+                    native_architecture={'processMachine': 0, 'nativeMachine': 0x8664,
+                        'processArchitecture': 'x64', 'nativeArchitecture': 'x64'},
+                    target_architecture={'processMachine': 0, 'nativeMachine': 0x8664,
+                        'processArchitecture': 'x64', 'nativeArchitecture': 'x64'},
                     require_target=lambda: None, command=command, events=lambda: [], commands=[], close=lambda: None)
                 real_type_ascii = ascii_input.type_ascii
                 def physical(*args, **kw):
@@ -333,5 +338,133 @@ with patch.object(ctypes,'WinDLL',create=True,side_effect=AssertionError('native
         self.assertEqual([row['scan'] for row in events[::2]], [0x22, 0x25, 0x1f, 0x13, 0x32, 0x21, 0x0e, 0x21, 0x4d])
         with self.assertRaises(ValueError): ime.scan_events(['한글'])
 
+
+
+class NativeArmImeTests(unittest.TestCase):
+    readiness = KoreanImePolicyTests.readiness
+    record = KoreanImePolicyTests.record
+    ascii_receipt = KoreanImePolicyTests.ascii_receipt
+    restoration = KoreanImePolicyTests.restoration
+    # Reuse producer-shaped fixture helpers, without duplicating inherited cases.
+    def arm_readiness(self):
+        record = self.readiness()
+        record.update(nativeMachine=0xaa64, controllerMachine=0, source={'architecture': 'arm64'})
+        record['profile']['component']['machine'] = 0xaa64
+        return record
+
+    def call_architecture(self, function, *args, architecture='arm64'):
+        try:
+            return function(*args, architecture=architecture)
+        except TypeError as error:
+            self.fail('Explicit native observer architecture is required: ' + str(error))
+
+    def test_arm_readiness_requires_matching_native_os_and_component(self):
+        record = self.arm_readiness()
+        self.assertEqual(self.call_architecture(ime.require_readiness, record), record)
+        for machine in (0x8664, 0xa641, 0x14c, 0, True):
+            changed = copy.deepcopy(record)
+            changed['profile']['component']['machine'] = machine
+            with self.subTest(component=machine), self.assertRaises(AssertionError):
+                self.call_architecture(ime.require_readiness, changed)
+        for field, value in (('nativeMachine', 0x8664), ('nativeMachine', True),
+                             ('controllerMachine', 0x8664), ('controllerMachine', 0xaa64)):
+            with self.subTest(field=field, value=value), self.assertRaises(AssertionError):
+                self.call_architecture(ime.require_readiness, {**record, field: value})
+
+    def test_readiness_cannot_transpose_requested_architecture(self):
+        for architecture in ('x64', 'x86', 'ARM64', None, [], {}):
+            with self.subTest(architecture=architecture), self.assertRaises(AssertionError):
+                self.call_architecture(ime.require_readiness, self.arm_readiness(), architecture=architecture)
+
+    def test_arm_composition_preserves_the_existing_message_content_and_cleanup_gates(self):
+        record = self.record()
+        record.update(architecture='arm64', readiness=self.arm_readiness(),
+            nativeArchitecture={'processMachine': 0, 'nativeMachine': 0xaa64,
+                'processArchitecture': 'arm64', 'nativeArchitecture': 'arm64'},
+            targetArchitecture={'processMachine': 0, 'nativeMachine': 0xaa64,
+                'processArchitecture': 'arm64', 'nativeArchitecture': 'arm64'})
+        self.assertTrue(ime.validate_ime_evidence(record)['imeVerified'])
+        record['events'][0]['pid'] += 1
+        with self.assertRaisesRegex(AssertionError, 'another process'):
+            ime.validate_ime_evidence(record)
+
+    def test_arm_composition_requires_native_controller_and_target_receipts(self):
+        for field in ('nativeArchitecture', 'targetArchitecture'):
+            for value in (None, {'processMachine': 0x8664, 'nativeMachine': 0xaa64,
+                    'processArchitecture': 'x64', 'nativeArchitecture': 'arm64'}):
+                record = self.record()
+                proof = {'processMachine': 0, 'nativeMachine': 0xaa64,
+                         'processArchitecture': 'arm64', 'nativeArchitecture': 'arm64'}
+                record.update(architecture='arm64', readiness=self.arm_readiness(),
+                    nativeArchitecture=proof, targetArchitecture=proof)
+                record[field] = value
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(AssertionError, 'architecture|native|Native'):
+                    ime.validate_ime_evidence(record)
+
+    def test_compiler_targets_arm64_and_verifies_emitted_dll_before_returning(self):
+        import struct
+        for emitted in (0xaa64, 0x8664, 0xa641):
+            with self.subTest(emitted=emitted), tempfile.TemporaryDirectory() as directory:
+                folder = Path(directory)
+                vs = folder/'vs'
+                vcvars = vs/'VC/Auxiliary/Build/vcvarsall.bat'
+                vcvars.parent.mkdir(parents=True)
+                vcvars.write_text('@echo off')
+                commands = []
+                def compile(command, **kwargs):
+                    commands.append(command)
+                    data = bytearray(1024)
+                    data[:2] = b'MZ'
+                    struct.pack_into('<I', data, 60, 128)
+                    data[128:132] = b'PE\0\0'
+                    struct.pack_into('<HHIIIHH', data, 132, emitted, 1, 0, 0, 0, 240, 0x2002)
+                    struct.pack_into('<H', data, 152, 0x20b)
+                    (folder/'ime-observer.dll').write_bytes(data)
+                    return subprocess.CompletedProcess(command, 0, b'original compiler stdout', b'')
+                with patch.object(ime.shutil, 'which', return_value='cl.exe'), \
+                        patch.object(ime, 'discover_msvc', return_value=str(vs)), \
+                        patch.object(ime.subprocess, 'run', side_effect=compile):
+                    if emitted == 0xaa64:
+                        self.call_architecture(ime.compile_observer, folder, 'Local\\owned', self.arm_readiness()['profile'])
+                    else:
+                        with self.assertRaisesRegex(AssertionError, 'architecture|ARM64|arm64'):
+                            self.call_architecture(ime.compile_observer, folder, 'Local\\owned', self.arm_readiness()['profile'])
+                self.assertTrue((folder/'compile-observer.cmd').is_file(), 'ARM64 compiler environment must be selected')
+                script = (folder/'compile-observer.cmd').read_text()
+                self.assertIn('vcvarsall.bat" arm64', script)
+                self.assertIn('/MACHINE:ARM64', script)
+                self.assertEqual(commands[0][0], 'cmd.exe')
+
+    def test_architecture_helper_proves_native_controller_and_closes_owned_target_handle(self):
+        helper = getattr(ime, 'native_arch', None)
+        self.assertIsNotNone(helper, 'Actual IsWow64Process2 observation helper is required')
+        class Function:
+            def __init__(self, callback): self.callback = callback
+            def __call__(self, *args): return self.callback(*args)
+        for process_machine, native_machine, expected, accepted in (
+                (0, 0xaa64, 'arm64', True), (0, 0x8664, 'x64', True),
+                (0x8664, 0xaa64, 'arm64', False), (0, 0x8664, 'arm64', False),
+                (0, 0xa641, 'arm64', False)):
+            handles, closed = [], []
+            def observe(handle, process, native):
+                handles.append(handle)
+                process._obj.value, native._obj.value = process_machine, native_machine
+                return True
+            kernel = SimpleNamespace(GetCurrentProcess=Function(lambda: 0x123456789abc),
+                IsWow64Process2=Function(observe), OpenProcess=Function(lambda *args: 0x123456789def),
+                CloseHandle=Function(lambda handle: closed.append(handle) or True))
+            with self.subTest(process=process_machine, native=native_machine), \
+                    patch.object(helper.ctypes, 'WinDLL', return_value=kernel, create=True):
+                receipt = helper.observe_native_architecture()
+                self.assertEqual(handles, [0x123456789abc])
+                self.assertEqual(receipt['processMachine'], process_machine)
+                self.assertEqual(receipt['nativeMachine'], native_machine)
+                if accepted:
+                    self.assertEqual(helper.validate_native_architecture(receipt, expected), receipt)
+                    helper.observe_owned_process(123, expected)
+                else:
+                    with self.assertRaises(AssertionError): helper.validate_native_architecture(receipt, expected)
+                    with self.assertRaises(AssertionError): helper.observe_owned_process(123, expected)
+                self.assertEqual(closed, [0x123456789def])
 
 if __name__ == '__main__': unittest.main()

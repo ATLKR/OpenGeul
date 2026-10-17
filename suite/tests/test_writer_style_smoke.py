@@ -167,16 +167,20 @@ class PackagedPythonIdentityTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.suite = Path(self.temp.name).resolve()
-        self.core = self.suite / 'Office/program/python-core-3.13.15'
+        self.configure_runtime()
+
+    def configure_runtime(self, version=(3, 13, 15), architecture='x64'):
+        core = 'Office/program/python-core-' + '.'.join(str(part) for part in version)
+        self.core = self.suite / core
         self.paths = {
             'launcher': 'Office/program/python.exe',
-            'executable': 'Office/program/python-core-3.13.15/bin/python.exe',
-            'pythonDll': 'Office/program/python313.dll',
+            'executable': core + '/bin/python.exe',
+            'pythonDll': 'Office/program/python' + str(version[0]) + str(version[1]) + '.dll',
             'uno': 'Office/program/uno.py', 'pyuno': 'Office/program/pyuno.pyd',
-            'encodings': 'Office/program/python-core-3.13.15/lib/encodings/__init__.py',
-            'os': 'Office/program/python-core-3.13.15/lib/os.py',
+            'encodings': core + '/lib/encodings/__init__.py',
+            'os': core + '/lib/os.py',
         }
-        self.inventory = {'schemaVersion': 1, 'architecture': 'x64', 'files': {}}
+        self.inventory = {'schemaVersion': 1, 'architecture': architecture, 'files': {}}
         for role, relative in self.paths.items():
             path = self.suite / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -185,14 +189,20 @@ class PackagedPythonIdentityTests(unittest.TestCase):
             self.inventory['files'][relative] = {'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
         self.store_inventory()
         self.observed = {
-            'implementation': 'cpython', 'version': [3, 13, 15],
+            'implementation': 'cpython', 'version': list(version),
             'executable': str(self.suite / self.paths['executable']),
             'processImage': str(self.suite / self.paths['executable']),
+            'nativeArchitecture': self.native_architecture(architecture),
             'prefix': str(self.core), 'basePrefix': str(self.core),
             'pythonDll': str(self.suite / self.paths['pythonDll']),
             'moduleFiles': {name: str(self.suite / self.paths[name]) for name in ('uno', 'pyuno', 'encodings', 'os')},
             'moduleOrigins': {name: str(self.suite / self.paths[name]) for name in ('uno', 'pyuno', 'encodings')},
         }
+
+    @staticmethod
+    def native_architecture(architecture):
+        return {'processMachine': 0, 'nativeMachine': {'x64': 0x8664, 'arm64': 0xAA64}[architecture],
+                'processArchitecture': architecture, 'nativeArchitecture': architecture}
 
     def store_inventory(self):
         (self.suite / 'suite-inventory.json').write_text(json.dumps(self.inventory), encoding='utf-8')
@@ -209,6 +219,93 @@ class PackagedPythonIdentityTests(unittest.TestCase):
         for name, relative in self.paths.items():
             self.assertEqual(receipt['files'][name]['relativePath'], relative)
             self.assertEqual(receipt['files'][name]['sha256'], self.inventory['files'][relative]['sha256'])
+
+    def test_native_arm64_interpreter_preserves_all_seven_packaged_identity_roles(self):
+        self.configure_runtime(architecture='arm64')
+        receipt = self.verify()
+        self.assertTrue(receipt['verified'])
+        self.assertEqual(receipt['observed']['nativeArchitecture'], self.native_architecture('arm64'))
+        self.assertEqual(set(receipt['files']), set(self.paths))
+        for role, relative in self.paths.items():
+            with self.subTest(role=role):
+                self.assertEqual(receipt['files'][role]['relativePath'], relative)
+                self.assertEqual(receipt['files'][role]['sha256'], self.inventory['files'][relative]['sha256'])
+
+    def test_frozen_x64_observation_without_native_architecture_remains_replayable(self):
+        observed = copy.deepcopy(self.observed)
+        del observed['nativeArchitecture']
+        receipt = self.verify(observed)
+        self.assertTrue(receipt['verified'])
+        self.assertEqual(receipt['observed'], observed)
+
+    def test_arm64_observation_requires_new_native_architecture_evidence(self):
+        self.configure_runtime(architecture='arm64')
+        for evidence in (None, 'arm64', {}):
+            observed = copy.deepcopy(self.observed)
+            observed['nativeArchitecture'] = evidence
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(AssertionError, 'architecture'):
+                self.verify(observed)
+        del observed['nativeArchitecture']
+        with self.assertRaisesRegex(AssertionError, 'architecture'):
+            self.verify(observed)
+
+    def test_runtime_core_version_is_derived_for_both_supported_architectures(self):
+        for architecture in ('x64', 'arm64'):
+            self.configure_runtime(version=(3, 12, 9), architecture=architecture)
+            with self.subTest(architecture=architecture):
+                receipt = self.verify()
+                self.assertEqual(receipt['files']['executable']['relativePath'], 'Office/program/python-core-3.12.9/bin/python.exe')
+                self.assertEqual(receipt['files']['pythonDll']['relativePath'], 'Office/program/python312.dll')
+
+    def test_inventory_rejects_unknown_or_missing_architecture(self):
+        for architecture in (None, '', 'ARM64', 'amd64', 'arm', 'x86', 0xAA64, True):
+            self.inventory['architecture'] = architecture
+            self.store_inventory()
+            with self.subTest(architecture=architecture), self.assertRaisesRegex(AssertionError, 'inventory'):
+                self.verify()
+        del self.inventory['architecture']
+        self.store_inventory()
+        with self.assertRaisesRegex(AssertionError, 'inventory'):
+            self.verify()
+
+    def test_inventory_architecture_must_match_native_interpreter_and_os(self):
+        for architecture, other in (('x64', 'arm64'), ('arm64', 'x64')):
+            self.configure_runtime(architecture=architecture)
+            observed = copy.deepcopy(self.observed)
+            observed['nativeArchitecture'] = self.native_architecture(other)
+            with self.subTest(architecture=architecture), self.assertRaisesRegex(AssertionError, 'architecture'):
+                self.verify(observed)
+
+    def test_missing_emulated_or_inconsistent_native_architecture_cannot_qualify(self):
+        bad = [None, 'x64', {},
+               dict(self.native_architecture('x64'), processMachine=0x8664),
+               dict(self.native_architecture('x64'), nativeMachine=0xAA64),
+               dict(self.native_architecture('x64'), nativeMachine=0),
+               dict(self.native_architecture('x64'), nativeMachine=True),
+               dict(self.native_architecture('x64'), processArchitecture='arm64'),
+               dict(self.native_architecture('x64'), nativeArchitecture='arm64')]
+        for evidence in bad:
+            observed = copy.deepcopy(self.observed)
+            # A present invalid field is never a legacy receipt, even on x64.
+            observed['nativeArchitecture'] = evidence
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(AssertionError, 'architecture'):
+                self.verify(observed)
+
+    def test_packaged_observation_captures_native_architecture_with_module_identity(self):
+        modules = {name: SimpleNamespace(__file__=self.observed['moduleFiles'][name],
+                    __spec__=SimpleNamespace(origin=self.observed['moduleOrigins'][name]))
+                   for name in ('uno', 'pyuno', 'encodings')}
+        self.assertTrue(hasattr(smoke, 'native_arch'), 'Shared native architecture observation is missing')
+        for architecture in ('x64', 'arm64'):
+            evidence = self.native_architecture(architecture)
+            with self.subTest(architecture=architecture), mock.patch.dict('sys.modules', modules), \
+                    mock.patch.object(smoke, '_windows_python_images', return_value={
+                        name: self.observed[name] for name in ('processImage', 'pythonDll')}), \
+                    mock.patch.object(smoke.native_arch, 'observe_native_architecture', return_value=evidence) as capture:
+                observed = smoke.observe_packaged_python()
+                self.assertEqual(observed['nativeArchitecture'], evidence)
+                self.assertEqual(observed['moduleFiles']['uno'], self.observed['moduleFiles']['uno'])
+                capture.assert_called_once_with()
 
     def test_windows_observation_is_replayed_portably_without_running_interpreter(self):
         root = PureWindowsPath('D:/a/OpenGeul/dist/OpenGeul-Office')
@@ -301,18 +398,22 @@ class PackagedPythonIdentityTests(unittest.TestCase):
                 self.verify(observed)
 
     def test_foreign_uno_python_or_native_modules_cannot_qualify(self):
-        for field in self.observed['moduleFiles']:
-            observed = copy.deepcopy(self.observed)
-            observed['moduleFiles'][field] = str(self.suite / ('foreign/' + field + '.py'))
-            with self.subTest(module=field), self.assertRaisesRegex(AssertionError, 'module'):
-                self.verify(observed)
+        for architecture in ('x64', 'arm64'):
+            self.configure_runtime(architecture=architecture)
+            for field in self.observed['moduleFiles']:
+                observed = copy.deepcopy(self.observed)
+                observed['moduleFiles'][field] = str(self.suite / ('foreign/' + field + '.py'))
+                with self.subTest(architecture=architecture, module=field), self.assertRaisesRegex(AssertionError, 'module'):
+                    self.verify(observed)
 
     def test_forged_module_file_with_foreign_import_origin_is_rejected(self):
-        for field in self.observed['moduleOrigins']:
-            observed = copy.deepcopy(self.observed)
-            observed['moduleOrigins'][field] = str(self.suite / ('foreign/' + field + '.py'))
-            with self.subTest(module=field), self.assertRaisesRegex(AssertionError, 'origin'):
-                self.verify(observed)
+        for architecture in ('x64', 'arm64'):
+            self.configure_runtime(architecture=architecture)
+            for field in self.observed['moduleOrigins']:
+                observed = copy.deepcopy(self.observed)
+                observed['moduleOrigins'][field] = str(self.suite / ('foreign/' + field + '.py'))
+                with self.subTest(architecture=architecture, module=field), self.assertRaisesRegex(AssertionError, 'origin'):
+                    self.verify(observed)
 
     def test_foreign_loaded_python_dll_is_rejected(self):
         observed = copy.deepcopy(self.observed)
@@ -334,13 +435,15 @@ class PackagedPythonIdentityTests(unittest.TestCase):
             self.verify()
 
     def test_modified_interpreter_launcher_dll_or_module_bytes_fail(self):
-        for name, relative in self.paths.items():
-            path = self.suite / relative
-            original = path.read_bytes()
-            path.write_bytes(original[:-1] + b'!')
-            with self.subTest(file=name), self.assertRaisesRegex(AssertionError, 'inventory'):
-                self.verify()
-            path.write_bytes(original)
+        for architecture in ('x64', 'arm64'):
+            self.configure_runtime(architecture=architecture)
+            for name, relative in self.paths.items():
+                path = self.suite / relative
+                original = path.read_bytes()
+                path.write_bytes(original[:-1] + b'!')
+                with self.subTest(architecture=architecture, file=name), self.assertRaisesRegex(AssertionError, 'inventory'):
+                    self.verify()
+                path.write_bytes(original)
 
     def test_required_identity_file_must_be_in_inventory(self):
         del self.inventory['files'][self.paths['uno']]
@@ -358,6 +461,66 @@ class PackagedPythonIdentityTests(unittest.TestCase):
                 return value
             with self.subTest(path=linked), mock.patch.object(Path, 'lstat', lstat), self.assertRaisesRegex(AssertionError, 'linked'):
                 self.verify()
+
+
+
+
+class WriterNativeGuiTests(unittest.TestCase):
+    def test_gui_rejects_emulated_controller_shell_or_office_before_editor_input(self):
+        import sys
+        class Function:
+            def __init__(self, callback): self.callback = callback
+            def __call__(self, *args): return self.callback(*args)
+        for bad_role in ('controller', 'shell', 'office', None):
+            with self.subTest(bad_role=bad_role), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                suite, output = root/'suite', root/'evidence'
+                suite.mkdir(); (output/'fixtures').mkdir(parents=True)
+                (suite/'suite-inventory.json').write_text(json.dumps({
+                    'schemaVersion': 1, 'architecture': 'arm64', 'files': {}}))
+                original = root/'fixture.docx'; original.write_bytes(b'original generated fixture')
+                roles = {100: 'controller', 200: 'shell', 300: 'office'}
+                opened, closed = [], []
+                def observe(handle, process, native):
+                    process._obj.value = 0x8664 if roles[handle] == bad_role else 0
+                    native._obj.value = 0xaa64
+                    return True
+                def open_process(access, inherit, pid):
+                    handle = {77: 200, 31: 300}[pid]
+                    opened.append(handle)
+                    return handle
+                kernel = SimpleNamespace(GetCurrentProcess=Function(lambda: 100),
+                    IsWow64Process2=Function(observe), OpenProcess=Function(open_process),
+                    CloseHandle=Function(lambda handle: closed.append(handle) or True))
+                desktop, keys = mock.Mock(), mock.Mock()
+                process = SimpleNamespace(pid=77, poll=lambda: 0)
+                def failure(out, name, record, exc): record['error'] = str(exc)
+                with mock.patch.dict(sys.modules, {'pywinauto': SimpleNamespace(Desktop=desktop),
+                        'pywinauto.keyboard': SimpleNamespace(send_keys=keys)}), \
+                        mock.patch.object(smoke.native_arch.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                        mock.patch.object(smoke.native, 'require_engine_fixture', return_value=original), \
+                        mock.patch.object(smoke, 'docx_style_evidence', return_value={
+                            'firstParagraphStyleId': 'Normal', 'sha256': hashlib.sha256(original.read_bytes()).hexdigest()}), \
+                        mock.patch.object(smoke.native, 'launch_suite', return_value=process) as launched, \
+                        mock.patch.object(smoke.native, 'Windows', return_value=SimpleNamespace()), \
+                        mock.patch.object(smoke.native, 'verified_attachment', return_value=(11, 12, 22, 31)), \
+                        mock.patch.object(smoke.startup, 'EngineProcessWitness', side_effect=RuntimeError('native-probes-complete')), \
+                        mock.patch.object(smoke.native, 'capture_failure', side_effect=failure), \
+                        mock.patch.object(smoke.native, 'stop_owned_test_process') as cleanup, \
+                        mock.patch.object(smoke.native, 'write_result'):
+                    record = smoke.run_gui(suite, root, output)
+                self.assertFalse(record['guiVerified'])
+                if bad_role is None:
+                    self.assertEqual(record['error'], 'native-probes-complete')
+                    self.assertIn('targetArchitecture', record, 'Actual owned Office native identity receipt is required')
+                    self.assertEqual(record['targetArchitecture']['nativeMachine'], 0xaa64)
+                else:
+                    self.assertIn('architecture', record['error'])
+                self.assertEqual(opened, closed, 'Every owned target query handle must close on success/failure')
+                self.assertEqual(launched.call_count, 0 if bad_role == 'controller' else 1)
+                self.assertEqual(cleanup.call_count, launched.call_count)
+                desktop.assert_not_called(); keys.assert_not_called()
+                self.assertEqual(original.read_bytes(), b'original generated fixture')
 
 
 if __name__ == '__main__': unittest.main()

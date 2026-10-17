@@ -1,7 +1,7 @@
 # OpenGeul Office 개발판
 
 OpenGeul Office는 한 제품군 안에서 서로 다른 문서 엔진을 사용하는 Windows Suite입니다.
-이 디렉터리는 **0.1.1-dev 개발 소스**이며 기존 OpenGeul HWP Store 상품이나 정규
+이 디렉터리는 **0.2.0-dev 개발 소스**이며 기존 OpenGeul HWP Store 상품이나 정규
 릴리스를 교체하지 않습니다. 실제 Windows 검증 결과는 Suite workflow의 동일 소스
 실행과 원본 evidence를 확인해야 합니다.
 
@@ -29,7 +29,8 @@ Writer/Calc/Impress/Draw는 Tabbed UI를 기본 설정합니다. Math/Base에는
 ## 개발 패키지 사용
 
 검증된 ZIP 전체를 새 폴더에 풀고 `OpenGeul.Office.exe`를 실행합니다. 시작 화면에서
-모듈을 선택하거나 파일 열기를 사용합니다. Windows x64용이며 .NET 런타임을 포함합니다.
+모듈을 선택하거나 파일 열기를 사용합니다. 아키텍처별 패키지에 .NET 런타임을 포함합니다.
+직전 0.1.1-dev x64 검증과 현재 소스의 실제 Windows 검증 결과는 구분해서 확인하세요.
 HWP 편집기는 Windows WebView2 런타임이 필요합니다. 사용자 LibreOffice 설치나 프로필,
 파일 연결, Store 업데이트 설정은 변경하지 않습니다. 설치·등록·업데이트를 수행하는
 정식 installer가 아닌 portable 개발 패키지입니다.
@@ -52,17 +53,17 @@ Base는 데이터베이스 URL·현재 연결·등록된 드라이버와 Java �
 
 PowerShell 7, Python 3.12 이상, .NET 8 SDK, Git과 인터넷 연결이 필요합니다.
 Suite는 .NET Windows Desktop 8.0.32와 고정한 Office 26.8.1.1 x64 입력을 사용합니다.
-공식 배포의 SHA256과 HWP 원본 개발 패키지의 SHA256은 `config/runtime.lock.json`에
-고정되어 있습니다. 새 작업 폴더와 새 출력 경로를 사용해야 합니다.
+공식 배포의 SHA256과 HWP 원본 개발 패키지의 SHA256은 아키텍처별
+`config/runtime.lock.json`과 `config/runtime.arm64.lock.json`에 고정되어 있습니다. 새 작업 폴더와 새 출력 경로를 사용해야 합니다.
 
 ```powershell
 python -m unittest discover -s suite/tests -v
 dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
-./suite/scripts/build-suite.ps1
+./suite/scripts/build-suite.ps1 -Architecture x64
 ```
 
 빌드 스크립트는 MSI를 관리자 설치 이미지로 **추출**하며 사용자 PC에 LibreOffice를
-설치하지 않습니다. MSI의 원래 cabinet에서 정확한 AMD64 File ID를 찾아 VC++ 구성 요소를 app-local로
+설치하지 않습니다. MSI의 원래 cabinet에서 선택한 아키텍처의 정확한 File ID를 찾아 VC++ 구성 요소를 app-local로
 준비합니다. 서로 다른 아키텍처나 기존 출력과 충돌하면 거부합니다. Office 런타임은
 공유하므로 모듈마다 전체 엔진을 중복 배포하지 않습니다.
 
@@ -113,7 +114,10 @@ Windows UIA/MSAA 기록은 별도 진단이며 OS 화면 읽기 프로그램 지
 파일 해시를 확인하고, 네이티브 크래시 덤프가 있으면 전달을 막습니다.
 워크플로는 새 문서 집합으로 전체 13개 GUI 검사와 6개 문서의 의미 재검증을 두 번 실행합니다.
 실패 기록은 보존하며 하나라도 실패하면 배포 ZIP 업로드를 수행하지 않습니다.
-ARM64, 전체 WACK/Store, 실제 프린터와 모든 문서의 호환성도 별도 검증 대상입니다.
+ARM64 엔진의 완전한 제품 검증, 전체 WACK/Store, 실제 프린터와 모든 문서의 호환성은
+각각 실제 실행 증거로 판단합니다. 공식 ARM64 Office 입력에는 내장 Firebird가 빠져 있어
+그 입력만으로 전체 Base 지원이나 ARM64 Suite 배포 준비 완료를 주장하지 않습니다.
+완전 네이티브 Base를 위한 소스 빌드와 별도 엔진 검증 경로를 사용합니다.
 
 Suite CI의 한국어 입력 환경은 `scripts/ensure-korean-ime.ps1`로 준비합니다.
 실제 Windows Server 2025 x64 호스트에서만 Microsoft 공식 미디어의 고정한 CAB와
@@ -138,3 +142,15 @@ SharePoint 구성 요소에는 별도 등록과 의존성이 필요합니다. �
 OpenGeul 추가 코드는 MIT이고 Office 엔진·.NET·HWP 구성 요소에는 각각의 라이선스가
 적용됩니다. 패키지 `Notices/CORRESPONDING_SOURCE.md`와 원래 LICENSE/NOTICE를 참고하세요.
 The Document Foundation·한컴과 제휴하거나 승인을 받은 제품은 아닙니다.
+
+## 기능별 엔진 E2E
+
+`e2e/office_feature_smoke.py`는 제품 설정의 Office 형식 15개를 각각 생성·저장하고
+별도의 소유 프로세스·프로필에서 다시 열어 비교합니다. Writer 표와 문자 서식,
+Calc 시트·수식 재계산, Impress 슬라이드, Draw 도형, Math 수식, Base 트랜잭션의
+심화 사례 6개를 더해 고정한 21개 사례를 실행합니다. TXT/CSV는 텍스트·값 중심의
+명시한 보존 범위로 판정합니다. 실패·누락·중복 사례와 비정상 종료는 통과할 수 없습니다.
+
+이는 실제 엔진 기능 검사이며 물리적 GUI 입력 검사를 대신하지 않습니다.
+`config/feature-catalog.json`은 시험별 판정 범위를 기록합니다. 해당 실행의
+`office-features.json`과 원본 문서를 확인해야 실제 통과로 볼 수 있습니다.

@@ -98,6 +98,6 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
         '32비트 TWAIN 스캐너·SharePoint COM 연동은 이 portable 개발판에서 지원하지 않습니다.\n'
         '이 개발판은 Store 배포판이 아닙니다. 원본을 보관하고 저장 결과를 확인하세요.\n'
         '라이선스·대응 소스: Notices/CORRESPONDING_SOURCE.md\n', encoding='utf-8')
-    inventory = create_inventory(output)
+    inventory = create_inventory(output, architecture=lock['architecture'])
     write_json(output/'suite-inventory.json', inventory)
     verify_payload(output, inventory)
