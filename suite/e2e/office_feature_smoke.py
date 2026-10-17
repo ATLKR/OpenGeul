@@ -447,7 +447,10 @@ def run_case(suite, output, case):
                 except Exception as exc: engine.cleanup_errors.append('generated document: ' + str(exc))
                 try: engine.cleanup()
                 except Exception as exc: engine.cleanup_errors.append('owned cleanup: ' + str(exc))
+                cleanup = getattr(engine, 'cleanup_evidence', None)
+                record.setdefault('engineCleanups', []).append(dict(phase=phase, evidence=cleanup))
                 if engine.cleanup_errors: raise RuntimeError('Owned engine cleanup failed: ' + '; '.join(engine.cleanup_errors))
+                baseline.validate_cleanup_evidence(cleanup)
             # Firebird finalizes its embedded backup during close; hash only after
             # each model and owned process have fully disposed.
             validate_container(case, path)

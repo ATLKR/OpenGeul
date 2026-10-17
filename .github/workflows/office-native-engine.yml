@@ -65,17 +65,9 @@ jobs:
           name: opengeul-native-arm64-engine-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             .work/native-engine-host-evidence/
-            .work/native-engine-evidence/**/*.json
-            .work/native-engine-evidence/**/*.log
-            .work/native-engine-evidence/**/*.txt
-            .work/native-engine-evidence/**/*.sql
-            .work/native-engine-evidence/**/*.fdb
-            .work/native-engine-evidence/**/*.odb
-            .work/native-engine-evidence/**/fixtures/*
-            .work/native-engine-evidence/**/*.dmp
-            .work/native-engine/**/*.log
-            .work/native-engine/**/config_host.mk
-            .work/native-engine/**/config.log
+            .work/native-engine-evidence/
+            !.work/native-engine-evidence/*.zip
+          include-hidden-files: true
           retention-days: 7
           if-no-files-found: error
       - name: Retain the qualified native engine input

@@ -3,7 +3,9 @@ param(
     [string]$WorkDirectory='.work/native-engine',
     [string]$OutputDirectory='.work/native-engine-evidence',
     [string]$SourceLockPath='',
-    [ValidateRange(1,64)][int]$Jobs=4
+    [ValidateRange(1,64)][int]$Jobs=4,
+    [string]$JdkHome='',
+    [string]$AntHome=''
 )
 $ErrorActionPreference='Stop'
 
@@ -140,6 +142,19 @@ function Get-AuthenticatedDownload([string]$Url,[string]$Destination,[long]$Size
     return $receipt.identity
 }
 
+function Write-CommandFailureTail([string]$Path,[string]$Label) {
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    try {
+        [int]$length=[Math]::Min(8192,$stream.Length)
+        $null=$stream.Seek(-$length,[IO.SeekOrigin]::End)
+        $buffer=[byte[]]::new($length);$count=$stream.Read($buffer,0,$length)
+        $text=[Text.Encoding]::UTF8.GetString($buffer,0,$count)
+        $tail=($text -split "`r?`n"|Select-Object -Last 40)-join "`n"
+        Write-Host "Owned command failure $Label tail (at most 8192 bytes/40 lines): $Path"
+        Write-Host $tail
+    } finally {$stream.Dispose()}
+}
+
 function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[int]$TimeoutMinutes=350) {
     $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null}
     $stdout=$LogPrefix+'.stdout.log';$stderr=$LogPrefix+'.stderr.log'
@@ -161,9 +176,14 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
             Write-Host ("Still running {0}: {1}s; stdout={2} bytes stderr={3} bytes" -f [IO.Path]::GetFileName($FilePath),[int]$watch.Elapsed.TotalSeconds,$outStream.Length,$errStream.Length)
             if($watch.Elapsed.TotalMinutes -gt $TimeoutMinutes) {$process.Kill($true);$process.WaitForExit();throw 'Owned command exceeded its bounded time budget.'}
         }
-        $outTask.GetAwaiter().GetResult();$errTask.GetAwaiter().GetResult()
+        $outTask.GetAwaiter().GetResult()|Out-Null;$errTask.GetAwaiter().GetResult()|Out-Null
         $receipt.exitCode=$process.ExitCode
-        if($process.ExitCode -ne 0) {throw "Command failed with exit $($process.ExitCode); inspect $stdout and $stderr"}
+        if($process.ExitCode -ne 0) {
+            $outStream.Flush();$errStream.Flush()
+            try {Write-CommandFailureTail $stdout 'stdout';Write-CommandFailureTail $stderr 'stderr'}
+            catch {Write-Host ('Owned failure tail unavailable: '+$_.Exception.Message)}
+            throw "Command failed with exit $($process.ExitCode); inspect $stdout and $stderr"
+        }
         $receipt.passed=$true
     } catch {$receipt.error=$_.Exception.Message;throw}
     finally {
@@ -185,11 +205,115 @@ function Get-ExtraSourcePins {
     )) { [ordered]@{filename=$pin[0];url=$base+$pin[0];size=$pin[1];sha256=$pin[2];checksumUrl=$base+$pin[0]+'.sha256'} }
 }
 
-function Get-ConfigureArguments([string]$ExternalTar='') {
+function Get-Arm64ImportLibrary([string]$Path) {
+    Assert-UnlinkedPath $Path
+    $data=[IO.File]::ReadAllBytes($Path)
+    if($data.Length -lt 8 -or [Text.Encoding]::ASCII.GetString($data,0,8) -cne "!<arch>`n") {throw 'JNI import library is not a COFF archive.'}
+    [long]$offset=8;$machines=@()
+    while($offset -lt $data.Length) {
+        if($offset+60 -gt $data.Length -or $data[[int]$offset+58] -ne 96 -or $data[[int]$offset+59] -ne 10) {throw 'Truncated JNI COFF archive member.'}
+        $name=[Text.Encoding]::ASCII.GetString($data,[int]$offset,16).Trim()
+        [long]$size=0
+        if(-not [long]::TryParse([Text.Encoding]::ASCII.GetString($data,[int]$offset+48,10).Trim(),[ref]$size) -or $size -lt 0 -or $offset+60+$size -gt $data.Length) {throw 'Invalid JNI COFF archive member size.'}
+        $member=[int]$offset+60
+        if($name -notin @('/','//','/SYM64/')) {
+            if($size -lt 20) {throw 'JNI COFF object is truncated.'}
+            $machine=if([BitConverter]::ToUInt16($data,$member) -eq 0 -and [BitConverter]::ToUInt16($data,$member+2) -eq 0xffff) {[BitConverter]::ToUInt16($data,$member+6)} else {[BitConverter]::ToUInt16($data,$member)}
+            if($machine -ne 0xaa64) {throw 'JNI import library contains a non-ARM64 object.'}
+            $machines+=[int]$machine
+        }
+        $offset+=60+$size+($size%2)
+    }
+    if($machines.Count -eq 0 -or $offset -ne $data.Length) {throw 'JNI import library has no complete ARM64 objects.'}
+    return [ordered]@{path=[IO.Path]::GetFullPath($Path);size=$data.Length;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant();machines=@($machines|Sort-Object -Unique)}
+}
+
+function Get-NativeJdkPlan([string]$JdkHome) {
+    Assert-UnlinkedPath $JdkHome
+    $jdk=[IO.Path]::GetFullPath($JdkHome)
+    $native=@();$libraries=@()
+    foreach($relative in @('bin/java.exe','bin/javac.exe','bin/server/jvm.dll','bin/jawt.dll')) {
+        $path=Join-Path $jdk $relative;Assert-UnlinkedPath $path
+        $identity=Get-ProductPeIdentity $path
+        if($identity.role -ne 'nativeArm64') {throw "Installed JDK executable/library must be native ARM64: $path"}
+        $native+=$identity
+    }
+    foreach($relative in @('lib/jvm.lib','lib/jawt.lib')) {$libraries+=Get-Arm64ImportLibrary (Join-Path $jdk $relative)}
+    foreach($relative in @('include/jni.h','include/win32/jni_md.h','release')) {
+        $path=Join-Path $jdk $relative;Assert-UnlinkedPath $path
+        if(-not(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) {throw "Installed JDK is missing required JNI/release input: $relative"}
+    }
+    $release=Join-Path $jdk 'release';$text=Get-Content -LiteralPath $release -Raw
+    $version=[regex]::Match($text,'(?m)^JAVA_VERSION="([0-9]+(?:\.[^"\r\n]+)?)"\s*$')
+    if(-not $version.Success -or [int]$version.Groups[1].Value.Split('.')[0] -lt 8 -or $text -notmatch '(?m)^OS_ARCH="(?:aarch64|arm64)"\s*$') {throw 'Installed JDK release metadata does not identify a supported ARM64 JDK.'}
+    return [ordered]@{home=$jdk;javaVersion=$version.Groups[1].Value;nativeFiles=@($native);importLibraries=@($libraries);releaseSha256=(Get-FileHash -LiteralPath $release -Algorithm SHA256).Hash.ToLowerInvariant();origin='preinstalled build-host tool; no download performed'}
+}
+
+function Resolve-NativeJdk([string]$ExplicitHome='') {
+    if($ExplicitHome) {$plan=Get-NativeJdkPlan $ExplicitHome;$plan.selection='explicit';return $plan}
+    $errors=@()
+    foreach($name in @('JAVA_HOME_21_AARCH64','JAVA_HOME_17_AARCH64','JAVA_HOME_21_ARM64','JAVA_HOME_17_ARM64','JAVA_HOME_23_AARCH64','JAVA_HOME_25_AARCH64','JAVA_HOME')) {
+        $candidate=[Environment]::GetEnvironmentVariable($name)
+        if(-not $candidate) {continue}
+        try {$plan=Get-NativeJdkPlan $candidate;$plan.selection=$name;return $plan}
+        catch {$errors+=($name+': '+$_.Exception.Message)}
+    }
+    throw ('No usable installed native Windows ARM64 JDK was found. Set -JdkHome or JAVA_HOME_21_AARCH64; keep Java enabled. '+($errors -join '; '))
+}
+
+function Get-AntPlan([string]$AntHome) {
+    Assert-UnlinkedPath $AntHome
+    $ant=[IO.Path]::GetFullPath($AntHome);$launcher=Join-Path $ant 'bin/ant'
+    Assert-UnlinkedPath $launcher
+    if(-not(Test-Path -LiteralPath $launcher -PathType Leaf)) {throw 'Installed Ant must include its Cygwin-compatible bin/ant launcher.'}
+    $jars=@();$version=''
+    foreach($pair in @(@('ant.jar','org/apache/tools/ant/Main.class'),@('ant-launcher.jar','org/apache/tools/ant/launch/Launcher.class'))) {
+        $path=Join-Path $ant ('lib/'+$pair[0]);Assert-UnlinkedPath $path
+        $jar=[IO.Compression.ZipFile]::OpenRead($path)
+        try {
+            if(-not $jar.GetEntry($pair[1])) {throw 'Installed Ant JAR lacks its required Java entry point.'}
+            if($pair[0] -eq 'ant.jar') {
+                $manifest=$jar.GetEntry('META-INF/MANIFEST.MF')
+                if(-not $manifest) {throw 'Installed Ant version manifest is missing.'}
+                $reader=[IO.StreamReader]::new($manifest.Open())
+                try {$text=$reader.ReadToEnd()} finally {$reader.Dispose()}
+                $match=[regex]::Match($text,'(?m)^Implementation-Version:\s*([0-9]+(?:\.[0-9]+){1,3})(?:\s|$)')
+                if(-not $match.Success -or [Version]$match.Groups[1].Value -lt [Version]'1.6') {throw 'Installed Ant version is not supported.'}
+                $version=$match.Groups[1].Value
+            }
+        } finally {$jar.Dispose()}
+        $jars+=@{path=$path;size=(Get-Item -LiteralPath $path).Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
+    }
+    return [ordered]@{home=$ant;version=$version;launcher=$launcher;launcherSha256=(Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant();jars=@($jars);origin='preinstalled build-host tool; no download performed'}
+}
+
+function Resolve-Ant([string]$ExplicitHome='') {
+    if($ExplicitHome) {$plan=Get-AntPlan $ExplicitHome;$plan.selection='explicit';return $plan}
+    $candidates=@()
+    if($env:ANT_HOME) {$candidates+=@{home=$env:ANT_HOME;selection='ANT_HOME'}}
+    foreach($name in @('ant','ant.bat','ant.cmd')) {
+        $command=Get-Command $name -ErrorAction SilentlyContinue
+        if($command -and $command.Source) {$candidates+=@{home=(Split-Path (Split-Path $command.Source -Parent) -Parent);selection='PATH/'+$name}}
+    }
+    $errors=@()
+    foreach($candidate in $candidates) {
+        try {$plan=Get-AntPlan $candidate.home;$plan.selection=$candidate.selection;return $plan}
+        catch {$errors+=$_.Exception.Message}
+    }
+    throw ('No complete installed Apache Ant was found. Set -AntHome or ANT_HOME; Java features remain enabled. '+($errors -join '; '))
+}
+
+function Get-CygwinBuildPackages {
+    'autoconf,automake,make,perl,python3,patch,bison,flex,gperf,unzip,zip,libtool,curl,git,diffutils,which,pkg-config,gcc-g++,gettext-devel,doxygen,graphviz'
+}
+
+function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='') {
     '--with-distro=LibreOfficeWinArm64','--build=aarch64-pc-cygwin','--host=aarch64-pc-cygwin',
     '--with-visual-studio=2026','--enable-firebird-sdbc','--enable-database-connectivity',
     '--without-system-firebird','--without-system-libatomic_ops','--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'
     if($ExternalTar) {'--with-external-tar='+$ExternalTar}
+    if($JdkHome) {'--with-jdk-home='+$JdkHome}
+    if($AntHome) {'--with-ant-home='+$AntHome}
 }
 
 function Get-BuildTargets([ValidateSet('Firebird','Full')][string]$Phase) {
@@ -290,6 +414,24 @@ function Invoke-CygwinScript($Bash,$Cygpath,[string]$Script,[string]$WorkingDire
     $converted=Invoke-LoggedCommand $Cygpath @('-u',$Script) $WorkingDirectory ($LogPrefix+'-path')
     $unix=(Get-Content -LiteralPath $converted.stdout -Raw).Trim()
     return Invoke-LoggedCommand $Bash @('--noprofile','--norc',$unix) $WorkingDirectory $LogPrefix
+}
+
+function Get-CygwinIdentity($Bash,$Cygpath,[string]$CommandDirectory,[string]$WorkingDirectory,[string]$EvidenceDirectory) {
+    $script=Join-Path $CommandDirectory 'cygwin-identity.sh'
+    Write-BashScript $script @('set -euo pipefail',
+        "printf 'userId='; /usr/bin/id -u","printf 'groupId='; /usr/bin/id -g",
+        "printf 'machine='; /usr/bin/uname -m","printf 'operatingSystem='; /usr/bin/uname -o",
+        "printf 'kernelRelease='; /usr/bin/uname -r","printf 'kernelVersion='; /usr/bin/uname -v")
+    $result=Invoke-CygwinScript $Bash $Cygpath $script $WorkingDirectory (Join-Path $EvidenceDirectory 'cygwin-identity')
+    $identity=[ordered]@{}
+    foreach($line in Get-Content -LiteralPath $result.stdout) {
+        if($line -notmatch '^(userId|groupId|machine|operatingSystem|kernelRelease|kernelVersion)=(.+)$' -or $identity.Contains($Matches[1])) {throw 'Cygwin identity command returned an unexpected field.'}
+        $identity[$Matches[1]]=$Matches[2]
+    }
+    if($identity.Count -ne 6 -or $identity.userId -notmatch '^\d+$' -or $identity.groupId -notmatch '^\d+$') {throw 'Cygwin identity receipt is incomplete.'}
+    $identity.commandReceipt=$result.receipt
+    Write-BuildJson (Join-Path $EvidenceDirectory 'cygwin-identity.json') $identity
+    return $identity
 }
 
 function Get-IsqlSql([string]$DatabasePath) {
@@ -555,7 +697,7 @@ sys.exit(0 if record['passed'] else 1)
 '@|Set-Content -LiteralPath $Path -Encoding utf8NoBOM
 }
 
-function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs) {
+function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='') {
     $paths=New-BuildDirectories $WorkDirectory $OutputDirectory
     $work=$paths.work;$evidence=$paths.output
     $source=''
@@ -569,6 +711,11 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         if(-not $SourceLockPath) {$SourceLockPath=Join-Path $repo 'suite/config/runtime.lock.json'}
         $pin=Get-SourcePin $SourceLockPath;$receipt.sourcePin=$pin
         Copy-Item -LiteralPath $SourceLockPath -Destination (Join-Path $evidence 'input-runtime.lock.json')
+        # Windows configure otherwise searches only the JavaSoft registry. Bind
+        # actual native hosted tools before any large source downloads instead.
+        $receipt.stage='installed-java-build-prerequisites'
+        $receipt.javaTools=[ordered]@{jdk=(Resolve-NativeJdk $JdkHome);ant=(Resolve-Ant $AntHome)}
+        Write-BuildJson (Join-Path $evidence 'java-build-tools.json') $receipt.javaTools
         $downloads=Join-Path $work 'downloads';New-Item -ItemType Directory $downloads|Out-Null
         $receipt.stage='authenticated-downloads'
         $archive=Join-Path $downloads 'libreoffice-26.8.1.1.tar.xz'
@@ -588,14 +735,17 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         if($manifest.firebird.url -ne 'https://github.com/FirebirdSQL/firebird/releases/download/v3.0.13/Firebird-3.0.13.33818-0.tar.bz2' -or $manifest.firebird.sha256 -ne 'bd263c4f685fb8fc3f1dcb8be8a411033cc31c5404d1dfce5d3849aa3f63a64d') {throw 'Pinned Firebird source manifest changed.'}
         $receipt.firebirdArchive=Get-AuthenticatedDownload $manifest.firebird.url $fb 13343760 SHA256 $manifest.firebird.sha256 (Join-Path $evidence 'firebird-download.json')
         $cygwin=Join-Path $work 'cygwin';$cache=Join-Path $work 'cygwin-cache'
-        $packages='autoconf,automake,make,perl,python3,patch,bison,flex,gperf,unzip,zip,libtool,curl,git,diffutils,which,pkg-config,gcc-g++,gettext-devel'
+        $packages=Get-CygwinBuildPackages
         $receipt.stage='cygwin-build-tools'
         Invoke-LoggedCommand $setup @('--quiet-mode','--no-admin','--no-shortcuts','--no-startmenu','--no-desktop','--root',$cygwin,'--local-package-dir',$cache,'--site','https://mirrors.kernel.org/sourceware/cygwin/','--packages',$packages) $work (Join-Path $evidence 'cygwin-setup')|Out-Null
         $bash=Join-Path $cygwin 'bin/bash.exe';$cygpath=Join-Path $cygwin 'bin/cygpath.exe'
         if(-not(Test-Path -LiteralPath $bash) -or -not(Test-Path -LiteralPath $cygpath)) {throw 'Authenticated setup did not produce the required Cygwin build tools.'}
         $commands=Join-Path $work 'commands';New-Item -ItemType Directory $commands|Out-Null
+        $receipt.stage='cygwin-host-identity'
+        $receipt.cygwinIdentity=Get-CygwinIdentity $bash $cygpath $commands $work $evidence
         $convert={param($path,$name) $r=Invoke-LoggedCommand $cygpath @('-u',$path) $work (Join-Path $evidence ('cygpath-'+$name));(Get-Content -LiteralPath $r.stdout -Raw).Trim()}
         $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixDownloads=&$convert $downloads 'downloads'
+        $unixJdk=&$convert $receipt.javaTools.jdk.home 'jdk';$unixAnt=&$convert $receipt.javaTools.ant.home 'ant'
         $source=Join-Path $work 'libreoffice-26.8.1.1';$unixSource=$unixWork+'/libreoffice-26.8.1.1'
         $extract=Join-Path $commands 'extract.sh'
         Write-BashScript $extract @('set -euo pipefail',"cd $(Quote-Bash $unixWork)","/usr/bin/tar -xf $(Quote-Bash $unixArchive)")
@@ -611,7 +761,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.stage='install-authenticated-source-hooks'
         $python=(Get-Command python -ErrorAction Stop).Source
         Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source) $repo (Join-Path $evidence 'source-hooks')|Out-Null
-        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads)
+        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt)
         Copy-Item (Join-Path $source 'autogen.input') (Join-Path $evidence 'autogen.input')
         $configure=Join-Path $commands 'configure.sh'
         Write-BashScript $configure @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)",'./autogen.sh')
@@ -724,5 +874,5 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
 }
 
 if($MyInvocation.InvocationName -ne '.') {
-    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs
+    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome
 }
