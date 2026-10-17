@@ -201,5 +201,11 @@
     "filename": "libreoffice-enable-arm64-firebird.patch",
     "sha256": "b279f950f2279372f2efe2b07cc4c7a77d5266f3032897142f1fc1b698db781f",
     "strip": 0
+  },
+  "moduleBootstrap": {
+    "path": "bin/unpack-sources",
+    "sha256": "912e88972e7fc7f61eb0b373187d80d2f2ab6e7462378dce979254fa31792715",
+    "afterSha256": "5fbba07a0945cff9a3ce5ae56208c9e5ad7c713701d6ae32cf08950fef0ee6d4",
+    "change": "Exclude git-hooks while linking extracted source modules into the core root"
   }
 }

@@ -22,7 +22,40 @@ def _regular(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def install(source: Path) -> dict:
+def install_module_bootstrap(source: Path, evidence: Path | None = None) -> dict:
+    """Correct the pinned unpack helper's inverted git-hooks selection only."""
+    lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))['moduleBootstrap']
+    source = Path(source).resolve(strict=True)
+    target = source / lock['path']
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise ValueError('Source bootstrap requires a regular bin directory')
+    original = _regular(target)
+    if hashlib.sha256(original).hexdigest() != lock['sha256']:
+        raise ValueError('LibreOffice unpack helper SHA256 differs from the pinned source')
+    changed = original.replace(b'-type d -path ', b'-type d ! -path ')
+    if hashlib.sha256(changed).hexdigest() != lock['afterSha256']:
+        raise ValueError('LibreOffice module bootstrap result SHA256 differs from its lock')
+    retained = {}
+    if evidence is not None:
+        evidence = Path(evidence)
+        if any(path.is_symlink() for path in (evidence, *evidence.parents)) or not evidence.is_dir():
+            raise ValueError('Source bootstrap evidence requires regular owned directories')
+        retained = {'original': evidence / 'original-unpack-sources',
+                    'effective': evidence / 'effective-unpack-sources'}
+        if any(path.exists() or path.is_symlink() for path in retained.values()):
+            raise ValueError('Source bootstrap evidence already exists')
+        for name, raw in (('original', original), ('effective', changed)):
+            with retained[name].open('xb') as stream:
+                stream.write(raw)
+    target.write_bytes(changed)
+    if _regular(target) != changed:
+        raise ValueError('Effective source bootstrap bytes changed after write')
+    return {'path': lock['path'], 'beforeSha256': lock['sha256'],
+            'afterSha256': lock['afterSha256'],
+            'evidence': {name: str(path) for name, path in retained.items()}}
+
+
+def install(source: Path, evidence: Path | None = None) -> dict:
     lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))
     source = Path(source).resolve(strict=True)
     target = source / lock['sourceHook']['path']
@@ -60,8 +93,9 @@ def install(source: Path) -> dict:
             '\texternal/firebird/' + patch_name + ' \\\n'
             '))\nendif\n').encode('utf-8')
     changed = original + hook
-    # All source and patch checks precede either write. The fresh build tree is
+    # All source and patch checks precede source writes. The fresh build tree is
     # owned by this invocation; a repeated or changed hook is rejected above.
+    bootstrap = install_module_bootstrap(source, evidence)
     with output.open('xb') as stream:
         stream.write(patch)
     try:
@@ -81,14 +115,16 @@ def install(source: Path) -> dict:
             'configurePatchSha256': lock['configurePatch']['sha256'],
             'configureBeforeSha256': lock['configureSource']['sha256'],
             'configureAfterSha256': lock['configureSource']['afterSha256'],
+            'moduleBootstrap': bootstrap,
             'nativeBuildVerified': False, 'basePersistenceVerified': False}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--libreoffice-source', type=Path, required=True)
+    parser.add_argument('--evidence-directory', type=Path)
     args = parser.parse_args()
-    print(json.dumps(install(args.libreoffice_source), indent=2))
+    print(json.dumps(install(args.libreoffice_source, args.evidence_directory), indent=2))
 
 
 if __name__ == '__main__':

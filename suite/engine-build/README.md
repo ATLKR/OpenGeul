@@ -9,10 +9,10 @@ runtime or release qualification.
 the original LibreOffice Windows Firebird patches, and our two patches. Keep
 those source inputs and the patch receipts with the build evidence. The caller
 must authenticate the complete LibreOffice archive before extracting a fresh,
-owned tree. The installer also checks the exact two source files it changes.
+owned tree. The installer also authenticates each source file it changes.
 
 ```
-python suite/engine-build/enable_firebird_arm64.py --libreoffice-source C:/build/lo
+python suite/engine-build/enable_firebird_arm64.py --libreoffice-source C:/build/lo --evidence-directory C:/build/evidence
 ```
 
 The installer removes only the Windows ARM64 assignment that forcibly disables
@@ -158,3 +158,17 @@ resources. Actual target scripts are retained with the build evidence.
 Source URLs, sizes and SHA checks, the three help/dictionary/translation inputs,
 and their language configuration remain required. This path correction does
 not establish Firebird product compilation or Office qualification.
+
+The pinned `bin/unpack-sources` helper also uses a positive `-path git-hooks`
+predicate while its comment says to ignore that directory. Consequently it
+extracts all three archives but links only `git-hooks`, leaving the root
+`dictionaries/Module_dictionaries.mk` absent, as observed in native run
+`39024071446`. The guarded source installer corrects only that predicate to
+`! -path`, with pinned pristine and effective SHA checks. The native driver
+passes its owned evidence directory to retain both exact helper versions and
+records the source-hook receipt. The existing relative module-link behavior,
+source archive authentication, Korean/help/dictionary inputs and build targets
+remain required. Use a fresh owned source tree: the helper skips extraction
+and linking once an archive's destination exists. Portable GNU-tool tests
+prove all three root links and module lookups; actual Cygwin links and the
+native build remain Windows qualifications.

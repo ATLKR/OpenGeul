@@ -241,7 +241,36 @@ class AuthenticatedSource(unittest.TestCase):
             target.write_bytes(original)
             configure = root / 'configure.ac'
             configure.write_bytes(self.lo_configure.read_bytes())
-            receipt = module().install(root)
+            bootstrap = root / 'bin/unpack-sources'
+            bootstrap.parent.mkdir()
+            pristine = (ROOT / 'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes()
+            bootstrap.write_bytes(pristine)
+            evidence = root / 'evidence'
+            evidence.mkdir()
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision'):
+                with self.subTest(invalid=invalid):
+                    if invalid == 'changed-helper':
+                        bootstrap.write_bytes(pristine + b'\nchanged\n')
+                    elif invalid == 'linked-helper':
+                        saved = root / 'original-helper'
+                        saved.write_bytes(pristine)
+                        bootstrap.unlink()
+                        bootstrap.symlink_to(saved)
+                    else:
+                        (evidence / 'effective-unpack-sources').write_bytes(b'prior evidence')
+                    expected_bootstrap = bootstrap.read_bytes()
+                    with self.assertRaisesRegex(ValueError, 'SHA256|regular file|exists'):
+                        module().install(root, evidence)
+                    self.assertEqual(original, target.read_bytes())
+                    self.assertEqual(self.lo_configure.read_bytes(), configure.read_bytes())
+                    self.assertEqual(expected_bootstrap, bootstrap.read_bytes())
+                    self.assertFalse((target.parent / 'firebird-windows-arm64.patch').exists())
+                    self.assertFalse((evidence / 'original-unpack-sources').exists())
+                    if bootstrap.is_symlink():
+                        bootstrap.unlink()
+                    bootstrap.write_bytes(pristine)
+                    (evidence / 'effective-unpack-sources').unlink(missing_ok=True)
+            receipt = module().install(root, evidence)
             changed = target.read_text()
             self.assertTrue(changed.startswith(original.decode()))
             self.assertIn('ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)', changed)
@@ -251,6 +280,10 @@ class AuthenticatedSource(unittest.TestCase):
                              hashlib.sha256((PORT/'firebird-windows-arm64.patch').read_bytes()).hexdigest())
             self.assertFalse('        enable_coinmp=no\n        enable_firebird_sdbc=no\n' in configure.read_text(), 'ARM64 Firebird is still forcibly disabled')
             self.assertEqual(receipt['status'], 'source-hook-installed-native-build-pending')
+            self.assertEqual(pristine, (evidence / 'original-unpack-sources').read_bytes())
+            self.assertEqual(bootstrap.read_bytes(), (evidence / 'effective-unpack-sources').read_bytes())
+            self.assertEqual(hashlib.sha256(bootstrap.read_bytes()).hexdigest(),
+                             receipt['moduleBootstrap']['afterSha256'])
             self.assertEqual((target.parent / 'firebird-windows-arm64.patch').read_bytes(),
                              (PORT / 'firebird-windows-arm64.patch').read_bytes())
             with self.assertRaisesRegex(ValueError, 'SHA256|already exists'):

@@ -38,5 +38,27 @@
     "phase": "make-ExternalProject_firebird",
     "error": "tar: Cannot connect to C: resolve failed"
   },
-  "fixtureScope": "Exact authenticated upstream fragment/helper; surrounding core files and three source archives are deliberately synthetic portable fixtures, not a replay of the full Windows source tree."
+  "fixtureScope": "Exact authenticated upstream fragment/helper; surrounding core files and three source archives are deliberately synthetic portable fixtures, not a replay of the full Windows source tree.",
+  "moduleLookup": {
+    "file": "module-lookup.mk",
+    "sha256": "ec857b7e2a584e6f6379bf3a3b6291a265ab7a5808e02f3bb1448de464f0a1bb",
+    "source": "solenv/gbuild/Module.mk",
+    "sourceBytes": 24899,
+    "sourceSha256": "3ddf03b7324b91c001d86d3802d20340701016766e01bdeaee54885b11bd09aa",
+    "sourceLines": [
+      [
+        403,
+        405
+      ],
+      [
+        408,
+        409
+      ]
+    ],
+    "licenseHeaderLines": [
+      1,
+      18
+    ],
+    "syntheticWrapper": "fixture_require_module wraps exact source check/include without unrelated gbuild target-stack behavior"
+  }
 }
