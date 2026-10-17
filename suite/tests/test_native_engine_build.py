@@ -34,6 +34,53 @@ class NativeEngineBuildTests(unittest.TestCase):
     def rejected(self,body):
         self.ps("$rejected=$false; try { "+body+" } catch { $rejected=$true }; if(-not $rejected){ throw 'Unsafe condition was accepted' }")
 
+    def test_native_source_gate_requires_explicit_mdds_archive_and_existing_actual_source_module(self):
+        script = self.root/'source-gate.sh'
+        self.ps(f"Write-NativeSourceGate {quote(script)} '/owned/repo' '/owned/lo source' '/owned/firebird.tar.bz2' '/owned/mdds.tar.xz'")
+        raw = script.read_text()
+        self.assertIn('export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1', raw)
+        self.assertIn("export OPENGEUL_MDDS_SOURCE_ARCHIVE='/owned/mdds.tar.xz'", raw)
+        self.assertIn("export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE='/owned/firebird.tar.bz2'", raw)
+        self.assertIn("export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES='/owned/lo source/external/firebird'", raw)
+        self.assertIn('/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port -v', raw)
+        result = subprocess.run(['bash','-n',str(script)],capture_output=True,text=True)
+        self.assertEqual(0,result.returncode,result.stderr)
+
+    def test_actual_mdds_header_retention_copies_owned_bytes_and_rejects_drift_or_links(self):
+        import hashlib
+        names = ['flat_segment_tree.hpp', 'flat_segment_tree_def.inl', 'node.hpp']
+        source = self.root / 'source'; include = source / 'workdir/UnpackedTarball/mdds/include/mdds'
+        include.mkdir(parents=True)
+        lock = {'headers': [], 'nodeHeader': None}
+        for name in names:
+            raw = ('retention boundary '+name+'\n').encode(); (include/name).write_bytes(raw)
+            item = {'path':'include/mdds/'+name, 'afterBytes':len(raw), 'afterSha256':hashlib.sha256(raw).hexdigest()}
+            if name == 'node.hpp': lock['nodeHeader'] = item
+            else: lock['headers'].append(item)
+        pin = self.root/'mdds.json'; pin.write_text(json.dumps(lock))
+        def retain(label):
+            evidence = self.root/label; evidence.mkdir()
+            result = json.loads(self.ps(f"Save-ActualMddsHeaders {quote(source)} {quote(evidence)} (Get-Content {quote(pin)} -Raw|ConvertFrom-Json)|ConvertTo-Json -Depth 8 -Compress"))
+            return evidence,result
+        evidence,result = retain('good')
+        self.assertTrue(result['matchesExpected'])
+        self.assertEqual(3,len(result['files']))
+        for item in result['files']:
+            self.assertEqual('retained',item['status'])
+            self.assertEqual(Path(item['sourcePath']).read_bytes(),Path(item['evidencePath']).read_bytes())
+            self.assertEqual(item['expectedSha256'],item['sha256'])
+        (include/names[0]).write_bytes(b'drift')
+        _,result = retain('drift');self.assertFalse(result['matchesExpected'])
+        self.assertEqual('retained',result['files'][0]['status'])
+        self.assertFalse(result['files'][0]['matchesExpected'])
+        (include/names[0]).unlink()
+        _,result = retain('missing');self.assertFalse(result['matchesExpected'])
+        self.assertEqual('missing',result['files'][0]['status'])
+        (include/names[0]).symlink_to(include/names[1])
+        _,result = retain('linked');self.assertFalse(result['matchesExpected'])
+        self.assertEqual('rejected',result['files'][0]['status'])
+        self.assertFalse((self.root/'linked'/('actual-mdds-'+names[0])).exists())
+
     def test_native_host_requires_real_windows_arm64_and_unemulated_controller(self):
         self.ps("Assert-NativeBuildHost ([pscustomobject]@{isWindows=$true;processMachine=0;nativeMachine=43620})")
         for props in ("isWindows=$false;processMachine=0;nativeMachine=43620", "isWindows=$true;processMachine=34404;nativeMachine=43620", "isWindows=$true;processMachine=0;nativeMachine=34404"):

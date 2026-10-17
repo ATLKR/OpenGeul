@@ -1015,10 +1015,43 @@ sys.exit(0 if record['passed'] else 1)
 '@|Set-Content -LiteralPath $Path -Encoding utf8NoBOM
 }
 
+function Write-NativeSourceGate([string]$Path,[string]$RepoRoot,[string]$SourceRoot,[string]$FirebirdArchive,[string]$MddsArchive) {
+    Write-BashScript $Path @("set -euo pipefail","export PATH=/usr/local/bin:/usr/bin:/bin:`$PATH","cd $(Quote-Bash $RepoRoot)","export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1","export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE=$(Quote-Bash $FirebirdArchive)","export OPENGEUL_MDDS_SOURCE_ARCHIVE=$(Quote-Bash $MddsArchive)","export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES=$(Quote-Bash ($SourceRoot+'/external/firebird'))",'/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port -v')
+}
+
+function Save-ActualMddsHeaders([string]$SourceRoot,[string]$EvidenceDirectory,$Lock) {
+    # Best-effort evidence on failure; Full admission separately requires every
+    # actual file to match. Never replace a build exception with retention errors.
+    $record=[ordered]@{schemaVersion=1;matchesExpected=$true;files=@()}
+    foreach($pin in @($Lock.headers)+@($Lock.nodeHeader)) {
+        $path=Join-Path $SourceRoot ('workdir/UnpackedTarball/mdds/'+$pin.path)
+        $destination=Join-Path $EvidenceDirectory ('actual-mdds-'+[IO.Path]::GetFileName($pin.path))
+        $item=[ordered]@{sourcePath=$path;evidencePath=$destination;expectedBytes=$pin.afterBytes;expectedSha256=$pin.afterSha256;expectedState=$(if($pin.stage){$pin.stage}else{'post-patch native equality candidate'});status='missing';matchesExpected=$false}
+        try {
+            Assert-UnlinkedPath $path;Assert-UnlinkedPath $destination
+            if(Test-Path -LiteralPath $path) {
+                $file=Get-Item -LiteralPath $path -Force
+                if($file.PSIsContainer -or $file.Length -gt 65536) {throw 'Actual MDDS evidence requires a small regular header.'}
+                if(Test-Path -LiteralPath $destination) {throw 'Actual MDDS evidence output already exists.'}
+                $bytes=[IO.File]::ReadAllBytes($path)
+                $stream=[IO.File]::Open($destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                try {$stream.Write($bytes,0,$bytes.Length)} finally {$stream.Dispose()}
+                $item.bytes=$bytes.Length
+                $item.sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+                $item.matchesExpected=($item.bytes -eq $pin.afterBytes -and $item.sha256 -ceq $pin.afterSha256)
+                $item.status='retained'
+            }
+        } catch {$item.status='rejected';$item.error=$_.Exception.Message}
+        if(-not $item.matchesExpected) {$record.matchesExpected=$false}
+        $record.files+=,$item
+    }
+    return $record
+}
+
 function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='') {
     $paths=New-BuildDirectories $WorkDirectory $OutputDirectory
     $work=$paths.work;$evidence=$paths.output
-    $source=''
+    $source='';$manifest=$null
     $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     $receipt=[ordered]@{schemaVersion=1;kind='native-office-engine-source-build';phase=$Phase;architecture='arm64';status='failed';passed=$false;fullEngineQualified=$false;guiVerified=$false;startedUtc=[DateTime]::UtcNow.ToString('o');stage='native-host';firebirdSourcePortChecksExecuted=$false;libreOfficeCheckTargetExecuted=$false}
     $previousBudget=$script:NativeEngineBuildBudget
@@ -1058,6 +1091,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $fb=Join-Path $downloads 'Firebird-3.0.13.33818-0.tar.bz2'
         if($manifest.firebird.url -ne 'https://github.com/FirebirdSQL/firebird/releases/download/v3.0.13/Firebird-3.0.13.33818-0.tar.bz2' -or $manifest.firebird.sha256 -ne 'bd263c4f685fb8fc3f1dcb8be8a411033cc31c5404d1dfce5d3849aa3f63a64d') {throw 'Pinned Firebird source manifest changed.'}
         $receipt.firebirdArchive=Get-AuthenticatedDownload $manifest.firebird.url $fb 13343760 SHA256 $manifest.firebird.sha256 (Join-Path $evidence 'firebird-download.json')
+        $mddsPin=$manifest.mddsEquality.archive
+        if($mddsPin.filename -cne 'mdds-3.2.1.tar.xz' -or $mddsPin.size -ne 648256 -or $mddsPin.sha256 -cne '673f5bb94612dbba581fc92b99b5e5dd1a53e29496a5dbc936432f6b0687c112') {throw 'Pinned MDDS source manifest changed.'}
+        $mdds=Join-Path $downloads $mddsPin.filename
+        $receipt.mddsArchive=Get-AuthenticatedDownload $mddsPin.url $mdds $mddsPin.size SHA256 $mddsPin.sha256 (Join-Path $evidence 'mdds-download.json')
         $cygwin=Join-Path $work 'cygwin';$cache=Join-Path $work 'cygwin-cache'
         $packages=Get-CygwinBuildPackages
         $receipt.stage='cygwin-build-tools';Assert-NativeBuildTimeRemaining
@@ -1068,7 +1105,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.stage='cygwin-host-identity';Assert-NativeBuildTimeRemaining
         $receipt.cygwinIdentity=Get-CygwinIdentity $bash $cygpath $commands $work $evidence
         $convert={param($path,$name) $r=Invoke-LoggedCommand $cygpath @('-u',$path) $work (Join-Path $evidence ('cygpath-'+$name));(Get-Content -LiteralPath $r.stdout -Raw).Trim()}
-        $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixDownloads=&$convert $downloads 'downloads'
+        $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixMdds=&$convert $mdds 'mdds';$unixDownloads=&$convert $downloads 'downloads'
         $unixJdk=&$convert $receipt.javaTools.jdk.home 'jdk';$unixAnt=&$convert $receipt.javaTools.ant.home 'ant'
         $unixPkgconf=&$convert $receipt.pkgconfTool.identity.path 'pkgconf'
         $source=Join-Path $work 'libreoffice-26.8.1.1';$unixSource=$unixWork+'/libreoffice-26.8.1.1'
@@ -1079,7 +1116,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         if(-not(Test-Path -LiteralPath (Join-Path $source 'configure.ac'))) {throw 'Pinned source root was not extracted.'}
         Copy-Item (Join-Path $source 'configure.ac') (Join-Path $evidence 'configure-pristine.ac')
         $sourceGate=Join-Path $commands 'source-gate.sh'
-        Write-BashScript $sourceGate @("set -euo pipefail","export PATH=/usr/local/bin:/usr/bin:/bin:`$PATH","cd $(Quote-Bash $unixRepo)","export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1","export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE=$(Quote-Bash $unixFb)","export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES=$(Quote-Bash ($unixSource+'/external/firebird'))",'/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port -v')
+        Write-NativeSourceGate $sourceGate $unixRepo $unixSource $unixFb $unixMdds
         $receipt.stage='real-source-port-tests';Assert-NativeBuildTimeRemaining
         Invoke-CygwinScript $bash $cygpath $sourceGate $work (Join-Path $evidence 'source-port-tests')|Out-Null
         $receipt.firebirdSourcePortChecksExecuted=$true
@@ -1119,7 +1156,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         Copy-Item -LiteralPath $makePins -Destination (Join-Path $evidence 'source-inputs.mk')
         Copy-Item -LiteralPath $pinScript -Destination (Join-Path $evidence 'source-input-pins.sh')
         $pinOutput=Invoke-CygwinScript $bash $cygpath $pinScript $work (Join-Path $evidence 'external-source-pins')
-        $knownPins=@{([IO.Path]::GetFileName($archive))=$pin.sha256;([IO.Path]::GetFileName($fb))=$manifest.firebird.sha256}
+        $knownPins=@{([IO.Path]::GetFileName($archive))=$pin.sha256;([IO.Path]::GetFileName($fb))=$manifest.firebird.sha256;([IO.Path]::GetFileName($mdds))=$mddsPin.sha256}
         foreach($extra in Get-ExtraSourcePins) {$knownPins[$extra.filename]=$extra.sha256}
         $receipt.makeTargetLinkPolicy=[ordered]@{environment='CYGWIN=winsymlinks:nativestrict';scope='make-target children';launcher='selected Cygwin bin/env.exe';fallback=$false}
         foreach($target in Get-BuildTargets $Phase) {
@@ -1156,6 +1193,9 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             }
         }
         if($Phase -eq 'Full') {
+            $receipt.stage='admit-actual-mdds-headers';Assert-NativeBuildTimeRemaining
+            $receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality
+            if(-not $receipt.mddsHeaders.matchesExpected) {throw 'Actual effective MDDS headers differ from the proven native candidate.'}
             $receipt.stage='authenticate-all-downloaded-source-archives';Assert-NativeBuildTimeRemaining
             $receipt.externalSources=Write-ExternalSourceInventory $downloads $pinOutput.stdout (Join-Path $evidence 'external-source-inventory.json') $knownPins (Join-Path $source 'workdir/UnpackedTarball/python3') -RequirePython
             Copy-Item (Join-Path $source 'download.lst') (Join-Path $evidence 'authenticated-download.lst')
@@ -1207,6 +1247,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
     } catch {$receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString();throw}
     finally {
         if($source -and (Test-Path -LiteralPath $source)) {
+            if($manifest -and -not $receipt.mddsHeaders) {
+                try {$receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality}
+                catch {$receipt.mddsHeaderRetentionError=$_.Exception.ToString()}
+            }
             foreach($name in @('config_host.mk','config.log','autogen.input')) {
                 $candidate=Join-Path $source $name
                 if(Test-Path -LiteralPath $candidate) {Copy-Item -LiteralPath $candidate -Destination (Join-Path $evidence $name) -Force}

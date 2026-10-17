@@ -273,5 +273,54 @@
     "sha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
     "afterSha256": "c92eabab77eb0693ed93dcbd459608717c61935994bfe6c814c341237e86c742",
     "change": "Use one Windows ARM64 loader-path helper call for ICU/source/lib and the actual Firebird Windows client DLL directory bin; other platforms retain the original expression"
+  },
+  "mddsEquality": {
+    "scope": "WNT_AARCH64 only; exact equality body relocated into class with const noexcept(nothrow_eq_comparable_v) unchanged",
+    "archive": {
+      "filename": "mdds-3.2.1.tar.xz",
+      "url": "https://dev-www.libreoffice.org/src/mdds-3.2.1.tar.xz",
+      "size": 648256,
+      "sha256": "673f5bb94612dbba581fc92b99b5e5dd1a53e29496a5dbc936432f6b0687c112"
+    },
+    "recipe": {
+      "path": "external/mdds/UnpackedTarball_mdds.mk",
+      "size": 645,
+      "sha256": "f315da733c95aeeae29656318289fae9a90bff2eab46478972a9d8472a10208a",
+      "afterSha256": "8b2c09e41163c700a87f18681df2d5f2543716448657f8e7850c8d63b50a936a"
+    },
+    "upstreamPatch": {
+      "filename": "gcc-12-silence-use-after-free.patch.1",
+      "sha256": "3411f0814815e06914ea1fbf50c5428af86cbed68c82c0481e09dd62bc8a22c6",
+      "strip": 1
+    },
+    "patch": {
+      "filename": "opengeul-arm64-equality.patch.1",
+      "size": 2362,
+      "sha256": "8bddef54230e818dadee067de53f0ab4971bf5c47764fdd2a05951144c92e8e3",
+      "strip": 1,
+      "appliesAfter": "gcc-12-silence-use-after-free.patch.1"
+    },
+    "headers": [
+      {
+        "path": "include/mdds/flat_segment_tree.hpp",
+        "beforeBytes": 29117,
+        "beforeSha256": "ad0e52219db6c8194cadee54b30cec34f55350c4b587a1bc1764d37701276fa8",
+        "afterBytes": 29794,
+        "afterSha256": "a3bac3e97208286097aa457cf884e0d14cda4e4e572450cb8ca3e09711423ef2"
+      },
+      {
+        "path": "include/mdds/flat_segment_tree_def.inl",
+        "beforeBytes": 27738,
+        "beforeSha256": "5afeba9fed6c8e821bb02c4dc654d29c18dcc23d51bffbc3f48986fc2b67b7b7",
+        "afterBytes": 26993,
+        "afterSha256": "49823be2452093155e6fd0cb3f3baf5f93e85ee0b3ae5746cc10ac299fdf095d"
+      }
+    ],
+    "nodeHeader": {
+      "path": "include/mdds/node.hpp",
+      "afterBytes": 13942,
+      "afterSha256": "6ea1f9515d843c298c4754a235957fae860c66f75411b2541d8929431970f9d8",
+      "stage": "Existing GCC12 patch; equality correction must leave unchanged"
+    }
   }
 }

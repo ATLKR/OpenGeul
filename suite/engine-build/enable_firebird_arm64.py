@@ -58,6 +58,40 @@ def _zstd_source_links(source: Path, lock: dict) -> tuple[Path, bytes, bytes]:
     return target, original, changed
 
 
+def _mdds_equality(source: Path, lock: dict):
+    """Authenticate and plan the exact two-header native-control correction."""
+    target = source / lock['recipe']['path']
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise ValueError('MDDS source hook requires a regular recipe directory')
+    original = _regular(target)
+    if hashlib.sha256(original).hexdigest() != lock['recipe']['sha256']:
+        raise ValueError('MDDS unpack recipe SHA256 differs from the pinned source')
+    upstream = _regular(target.parent / lock['upstreamPatch']['filename'])
+    if hashlib.sha256(upstream).hexdigest() != lock['upstreamPatch']['sha256']:
+        raise ValueError('MDDS existing GCC12 patch SHA256 differs from its lock')
+    patch_name = lock['patch']['filename']
+    if Path(patch_name).name != patch_name:
+        raise ValueError('Invalid MDDS patch filename')
+    patch = _regular(HERE / patch_name)
+    if hashlib.sha256(patch).hexdigest() != lock['patch']['sha256']:
+        raise ValueError('MDDS equality patch SHA256 differs from its lock')
+    output = target.parent / patch_name
+    if output.exists() or output.is_symlink():
+        raise ValueError('MDDS patch output already exists')
+    changed = original + (
+        b'\n'
+        b'# OpenGeul native Windows ARM64 MDDS equality definition correction.\n'
+        b'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
+        b'$(eval $(call gb_UnpackedTarball_add_patches,mdds,\\\n'
+        b'\texternal/mdds/opengeul-arm64-equality.patch.1 \\\n'
+        b'))\n'
+        b'endif\n'
+    )
+    if hashlib.sha256(changed).hexdigest() != lock['recipe']['afterSha256']:
+        raise ValueError('MDDS unpack result SHA256 differs from its lock')
+    return target, original, changed, output, patch
+
+
 def install_module_bootstrap(source: Path, evidence: Path | None = None) -> dict:
     """Correct the pinned unpack helper's inverted git-hooks selection only."""
     lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))['moduleBootstrap']
@@ -125,6 +159,8 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         raise ValueError('Port patch output already exists')
     project, project_original, project_changed = _icu_build_path(source, lock['icuBuildPath'])
     zstd, zstd_original, zstd_changed = _zstd_source_links(source, lock['zstdSourceLinks'])
+    mdds, mdds_original, mdds_changed, mdds_output, mdds_patch = _mdds_equality(source, lock['mddsEquality'])
+    mdds_evidence = {}
     project_evidence = {}
     zstd_evidence = {}
     if evidence is not None:
@@ -139,6 +175,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                          'effective': evidence / 'effective-UnpackedTarball_zstd.mk'}
         if any(path.exists() or path.is_symlink() for path in zstd_evidence.values()):
             raise ValueError('Zstd unpack evidence already exists')
+        mdds_evidence = {'original': evidence / 'original-UnpackedTarball_mdds.mk',
+                         'effective': evidence / 'effective-UnpackedTarball_mdds.mk'}
+        if any(path.exists() or path.is_symlink() for path in mdds_evidence.values()):
+            raise ValueError('MDDS unpack evidence already exists')
     hook = ('\n# OpenGeul native Windows ARM64 Firebird CPU identity port.\n'
             'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
             '$(eval $(call gb_UnpackedTarball_add_patches,firebird,\\\n'
@@ -156,6 +196,12 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         if zstd_evidence:
             with zstd_evidence[name].open('xb') as stream:
                 stream.write(raw)
+    for name, raw in (('original', mdds_original), ('effective', mdds_changed)):
+        if mdds_evidence:
+            with mdds_evidence[name].open('xb') as stream:
+                stream.write(raw)
+    with mdds_output.open('xb') as stream:
+        stream.write(mdds_patch)
     with output.open('xb') as stream:
         stream.write(patch)
     try:
@@ -165,11 +211,15 @@ def install(source: Path, evidence: Path | None = None) -> dict:
             stream.write(configure_changed)
         project.write_bytes(project_changed)
         zstd.write_bytes(zstd_changed)
+        mdds.write_bytes(mdds_changed)
+        if _regular(mdds) != mdds_changed or _regular(mdds_output) != mdds_patch:
+            raise ValueError('Effective MDDS source hook bytes changed after write')
         if _regular(project) != project_changed:
             raise ValueError('Effective Firebird build recipe bytes changed after write')
         if _regular(zstd) != zstd_changed:
             raise ValueError('Effective zstd unpack recipe bytes changed after write')
     except BaseException:
+        mdds_output.unlink(missing_ok=True)
         output.unlink(missing_ok=True)
         raise
     return {'schemaVersion': 1, 'status': 'source-hook-installed-native-build-pending',
@@ -192,6 +242,13 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                                 'archive': lock['zstdSourceLinks']['archive'],
                                 'scope': lock['zstdSourceLinks']['scope'],
                                 'evidence': {name: str(path) for name, path in zstd_evidence.items()}},
+            'mddsEquality': {'path': lock['mddsEquality']['recipe']['path'],
+                             'beforeSha256': lock['mddsEquality']['recipe']['sha256'],
+                             'afterSha256': lock['mddsEquality']['recipe']['afterSha256'],
+                             'patchSha256': lock['mddsEquality']['patch']['sha256'],
+                             'upstreamPatchSha256': lock['mddsEquality']['upstreamPatch']['sha256'],
+                             'scope': lock['mddsEquality']['scope'],
+                             'evidence': {name: str(path) for name, path in mdds_evidence.items()}},
             'nativeBuildVerified': False, 'basePersistenceVerified': False}
 
 

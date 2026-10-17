@@ -314,3 +314,34 @@ Both recipe versions are retained in build evidence, with additive
 make tests verify target, sibling and architecture scope; actual Cygwin
 extraction and native alias access require the separate Windows control before
 another full build. This correction does not qualify that build or its runtime.
+
+The MDDS 3.2.1 equality correction addresses the C2382 declaration/definition
+failure observed in Native20. The bounded native ARM64 control `39068742893`
+reproduced that error with MSVC 19.51.36260 and passed compilation and unchanged
+normal/throwing equality and inequality checks after relocating only the exact
+`operator==` body into its class. Its `const noexcept(nothrow_eq_comparable_v)`
+contract is unchanged. This control proves the tested headers and probe; the
+original gnumeric translation units and their PCH were unavailable, and full
+engine and Base qualification still require the native build.
+
+The installer authenticates the original MDDS recipe, existing GCC12 patch and
+new two-header patch before writing source. It appends the correction after the
+GCC12 patch only for `WNT_AARCH64`. The `.patch.1` suffix deliberately selects
+strip level 1 despite the upstream recipe's default level 0. Other platform
+patch selection stays unchanged. The additive `mddsEquality` manifest pins the
+complete archive, recipe, patch, original/candidate headers and unchanged
+GCC12-patched `node.hpp`; `sourceHooks.mddsEquality` records recipe and patch
+hashes and retains both recipe versions.
+
+The native driver authenticates the complete MDDS archive before mandatory
+source tests and exports `OPENGEUL_MDDS_SOURCE_ARCHIVE`. Local source runners
+must pass that archive together with the existing Firebird inputs; the optional
+`OPENGEUL_LIBREOFFICE_MDDS_PATCHES` points to an authenticated `external/mdds`
+directory when it is not beside the Firebird patch folder. No tests download
+inputs. The source case uses GNU make for platform selection and real GNU patch
+to reproduce the exact candidate header hashes. On native builds, three small
+actual unpacked MDDS headers are retained as `actual-mdds-*` with source paths,
+actual and expected identities in `source-build-receipt.json.mddsHeaders`, even
+on a later build failure. Linked paths and output collisions are rejected;
+retention errors preserve the original build failure. Full admission requires
+all three actual headers to match the locked post-patch identities.

@@ -2,6 +2,8 @@
 
 Set OPENGEUL_FIREBIRD_SOURCE_ARCHIVE to the pinned Firebird source tar.bz2 and
 OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES to the pinned LO external/firebird folder
+and OPENGEUL_MDDS_SOURCE_ARCHIVE to the pinned MDDS archive. Optional
+OPENGEUL_LIBREOFFICE_MDDS_PATCHES overrides the sibling external/mdds directory
 for the actual patch-application/compiler checks. No test downloads inputs.
 """
 import hashlib
@@ -74,12 +76,85 @@ class AuthenticatedSource(unittest.TestCase):
         actual = hashlib.sha256(cls.archive.read_bytes()).hexdigest()
         if actual != SOURCE_SHA:
             raise AssertionError('Firebird source archive differs from the pinned SHA256')
+        cls.mdds_archive = None
+        mdds_value = os.environ.get('OPENGEUL_MDDS_SOURCE_ARCHIVE')
+        cls.mdds_patches = Path(os.environ.get('OPENGEUL_LIBREOFFICE_MDDS_PATCHES', str(cls.lo_patches.parent / 'mdds')))
+        if mdds_value:
+            cls.mdds_archive = Path(mdds_value)
+            if cls.mdds_archive.stat().st_size != 648256 or hashlib.sha256(cls.mdds_archive.read_bytes()).hexdigest() != '673f5bb94612dbba581fc92b99b5e5dd1a53e29496a5dbc936432f6b0687c112':
+                raise AssertionError('MDDS source archive differs from the pinned size/SHA256')
+        elif cls.required:
+            raise AssertionError('Mandatory pinned MDDS source archive is missing')
         cls.compiler = shutil.which('cc') or shutil.which('gcc')
         cls.cxx = shutil.which('c++') or shutil.which('g++')
         if not cls.compiler or not shutil.which('patch'):
             if cls.required:
                 raise AssertionError('Mandatory C compiler/preprocessor or GNU patch is missing')
             raise unittest.SkipTest('A C preprocessor/compiler and GNU patch are required')
+
+    def mdds_recipe(self, root):
+        target = root / 'external/mdds/UnpackedTarball_mdds.mk'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / 'suite/tests/fixtures/native-mdds-equality' / target.name).read_bytes())
+        upstream = 'gcc-12-silence-use-after-free.patch.1'
+        (target.parent / upstream).write_bytes((self.mdds_patches / upstream).read_bytes())
+        return target
+
+    def test_real_mdds_patch_selection_replays_exact_native_candidate(self):
+        if self.mdds_archive is None:
+            self.skipTest('Pinned local MDDS archive is required')
+        archive, patches = self.mdds_archive, self.mdds_patches
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            hook = root / 'external/firebird/UnpackedTarball_firebird.mk'; hook.parent.mkdir(parents=True)
+            hook.write_bytes((self.lo_patches / hook.name).read_bytes())
+            (hook.parent / 'ExternalProject_firebird.mk').write_bytes((ROOT / 'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes())
+            (root / 'configure.ac').write_bytes(self.lo_configure.read_bytes())
+            bootstrap = root / 'bin/unpack-sources'; bootstrap.parent.mkdir()
+            bootstrap.write_bytes((ROOT / 'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
+            zstd = root / 'external/zstd/UnpackedTarball_zstd.mk'; zstd.parent.mkdir()
+            zstd.write_bytes((ROOT / 'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes())
+            recipe = self.mdds_recipe(root); original = recipe.read_bytes()
+            def selection(raw, platform):
+                makefile = root / 'selection.mk'
+                makefile.write_text('OS := '+platform[0]+'\nCPUNAME := '+platform[1]+'\n'
+                    'gb_UnpackedTarball_add_patches = $(eval selected += $(2))\n'+raw.decode()+
+                    '\nall:\n\t@echo $(selected)\n')
+                result = subprocess.run(['make', '--no-print-directory', '-f', str(makefile)], capture_output=True, text=True, check=True)
+                return result.stdout.split()
+            gcc = 'external/mdds/gcc-12-silence-use-after-free.patch.1'
+            own = 'external/mdds/opengeul-arm64-equality.patch.1'
+            for platform in [('WNT','AARCH64'), ('WNT','X86_64'), ('LINUX','AARCH64')]:
+                self.assertEqual([gcc], selection(original, platform))
+            evidence = root / 'evidence'; evidence.mkdir()
+            receipt = module().install(root, evidence)
+            self.assertEqual([gcc, own], selection(recipe.read_bytes(), ('WNT','AARCH64')))
+            for platform in [('WNT','X86_64'), ('LINUX','AARCH64')]:
+                self.assertEqual([gcc], selection(recipe.read_bytes(), platform))
+            lock = json.loads((PORT / 'source-build.json').read_text())['mddsEquality']
+            unpack = root / 'unpack'; unpack.mkdir()
+            with tarfile.open(archive, 'r:xz') as source:
+                for member in source:
+                    name = Path(member.name)
+                    self.assertFalse(name.is_absolute() or '..' in name.parts)
+                    if member.isfile():
+                        target = unpack.joinpath(*name.parts[1:]); target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(source.extractfile(member).read())
+            upstream = patches / Path(gcc).name
+            self.assertEqual(lock['upstreamPatch']['sha256'], hashlib.sha256(upstream.read_bytes()).hexdigest())
+            for item in lock['headers']:
+                raw = (unpack / item['path']).read_bytes()
+                self.assertEqual(item['beforeSha256'], hashlib.sha256(raw).hexdigest())
+            self.apply(unpack, upstream, 1)
+            self.apply(unpack, root / own, 1)
+            for item in lock['headers'] + [lock['nodeHeader']]:
+                raw = (unpack / item['path']).read_bytes()
+                self.assertEqual(item['afterBytes'], len(raw))
+                self.assertEqual(item['afterSha256'], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(original, (evidence / 'original-UnpackedTarball_mdds.mk').read_bytes())
+            self.assertEqual(recipe.read_bytes(), (evidence / 'effective-UnpackedTarball_mdds.mk').read_bytes())
+            self.assertEqual(lock['recipe']['afterSha256'], receipt['mddsEquality']['afterSha256'])
+            self.assertEqual(lock['patch']['sha256'], receipt['mddsEquality']['patchSha256'])
 
     def source_tree(self, folder):
         root = Path(folder) / 'firebird'
@@ -403,6 +478,7 @@ class AuthenticatedSource(unittest.TestCase):
             bootstrap.write_bytes((ROOT/'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
             zstd=root/'external/zstd/UnpackedTarball_zstd.mk';zstd.parent.mkdir()
             zstd.write_bytes((ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes())
+            self.mdds_recipe(root)
             evidence=root/'evidence';evidence.mkdir()
             bash=shutil.which('bash')
             self.assertTrue(bash,'Actual Bash is required for the nested make source replay')
@@ -472,6 +548,7 @@ class AuthenticatedSource(unittest.TestCase):
             bootstrap.write_bytes((ROOT/'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
             recipe=root/'external/zstd/UnpackedTarball_zstd.mk';recipe.parent.mkdir()
             original=(ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes();recipe.write_bytes(original)
+            self.mdds_recipe(root)
             self.assertEqual('3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909',hashlib.sha256(original).hexdigest())
             observer=root/'observe.py';observer.write_text('import json,os,sys;print(json.dumps([sys.argv[1],os.environ["CYGWIN"]]))\n')
             def replay(raw,cpu,os_name='WNT'):
@@ -563,9 +640,13 @@ class AuthenticatedSource(unittest.TestCase):
             bootstrap.write_bytes(pristine)
             zstd=root/'external/zstd/UnpackedTarball_zstd.mk';zstd.parent.mkdir()
             zstd_original=(ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes();zstd.write_bytes(zstd_original)
+            mdds = self.mdds_recipe(root)
+            mdds_original = mdds.read_bytes()
+            upstream = mdds.parent / 'gcc-12-silence-use-after-free.patch.1'
+            upstream_original = upstream.read_bytes()
             evidence = root / 'evidence'
             evidence.mkdir()
-            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision'):
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch'):
                 with self.subTest(invalid=invalid):
                     if invalid == 'changed-helper':
                         bootstrap.write_bytes(pristine + b'\nchanged\n')
@@ -588,18 +669,40 @@ class AuthenticatedSource(unittest.TestCase):
                     elif invalid == 'linked-zstd-recipe':
                         saved_zstd=root/'original-zstd-recipe';saved_zstd.write_bytes(zstd_original)
                         zstd.unlink();zstd.symlink_to(saved_zstd)
-                    else:
+                    elif invalid == 'zstd-evidence-collision':
                         (evidence/'effective-UnpackedTarball_zstd.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'changed-mdds-recipe':
+                        mdds.write_bytes(mdds_original+b'changed')
+                    elif invalid == 'linked-mdds-recipe':
+                        saved_mdds=root/'original-mdds';saved_mdds.write_bytes(mdds_original)
+                        mdds.unlink();mdds.symlink_to(saved_mdds)
+                    elif invalid == 'mdds-evidence-collision':
+                        (evidence/'effective-UnpackedTarball_mdds.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'mdds-patch-collision':
+                        (mdds.parent/'opengeul-arm64-equality.patch.1').write_bytes(b'prior patch')
+                    elif invalid == 'changed-mdds-upstream-patch':
+                        upstream.write_bytes(upstream_original+b'changed')
                     expected_bootstrap = bootstrap.read_bytes()
                     expected_project=project.read_bytes()
                     expected_zstd=zstd.read_bytes()
+                    expected_mdds=mdds.read_bytes()
+                    installer = module()
+                    if invalid == 'changed-mdds-patch':
+                        bundle = root/'changed-port'; bundle.mkdir(exist_ok=True)
+                        for name in ('source-build.json', 'firebird-windows-arm64.patch', 'libreoffice-enable-arm64-firebird.patch', 'opengeul-arm64-equality.patch.1'):
+                            shutil.copyfile(PORT/name,bundle/name)
+                        bad_patch = bundle/'opengeul-arm64-equality.patch.1'
+                        bad_patch.write_bytes(bad_patch.read_bytes()+b'changed')
+                        installer.HERE = bundle
                     with self.assertRaisesRegex(ValueError, 'SHA256|regular file|exists'):
-                        module().install(root, evidence)
+                        installer.install(root, evidence)
                     self.assertEqual(original, target.read_bytes())
                     self.assertEqual(self.lo_configure.read_bytes(), configure.read_bytes())
                     self.assertEqual(expected_bootstrap, bootstrap.read_bytes())
                     self.assertEqual(expected_project,project.read_bytes())
                     self.assertEqual(expected_zstd,zstd.read_bytes())
+                    self.assertEqual(expected_mdds,mdds.read_bytes())
+                    self.assertFalse((evidence/'original-UnpackedTarball_mdds.mk').exists())
                     self.assertFalse((target.parent / 'firebird-windows-arm64.patch').exists())
                     self.assertFalse((evidence / 'original-unpack-sources').exists())
                     self.assertFalse((evidence/'original-ExternalProject_firebird.mk').exists())
@@ -614,6 +717,11 @@ class AuthenticatedSource(unittest.TestCase):
                     if zstd.is_symlink():zstd.unlink()
                     zstd.write_bytes(zstd_original)
                     (evidence/'effective-UnpackedTarball_zstd.mk').unlink(missing_ok=True)
+                    if mdds.is_symlink():mdds.unlink()
+                    mdds.write_bytes(mdds_original)
+                    upstream.write_bytes(upstream_original)
+                    (mdds.parent/'opengeul-arm64-equality.patch.1').unlink(missing_ok=True)
+                    (evidence/'effective-UnpackedTarball_mdds.mk').unlink(missing_ok=True)
             receipt = module().install(root, evidence)
             changed = target.read_text()
             self.assertTrue(changed.startswith(original.decode()))
