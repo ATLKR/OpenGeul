@@ -1,0 +1,2006 @@
+# Prepared only. Fill final successful source/run/counts before pushing this file.
+# Keep CREATE_DRAFT false for a complete read-only verification pass.
+name: OpenGeul Office 0.1.1 unpublished draft delivery
+on:
+  push:
+    branches: [work/suite-delivery-0.1.1]
+    paths: [.github/workflows/office-suite-delivery.yml]
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: office-suite-unpublished-delivery
+  cancel-in-progress: false
+jobs:
+  deliver:
+    if: github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Verify every exact source-bound gate before unpublished draft creation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_RUN: '39000146117'
+          SOURCE_HEAD: '80c722c00377189495c3731c3b507d402bbbb6c2'
+          SOURCE_ATTEMPT: '1'
+          PYTHON_TESTS: '582'
+          PYTHON_SKIPS: '3'
+          CORE_TESTS: '49'
+          CREATE_DRAFT: 'false'
+        shell: python
+        run: |
+          """Prepare an exact successful Suite run; optionally create an unpublished draft.
+          
+          No source/run is pinned by default. No GitHub mutation is permitted without
+          --create-draft, and verification must finish before any release API POST.
+          """
+          from __future__ import annotations
+          import argparse
+          import ast
+          from datetime import datetime, timezone
+          import hashlib
+          import importlib
+          import json
+          import math
+          import os
+          from pathlib import Path, PurePosixPath, PureWindowsPath
+          import re
+          import stat
+          import subprocess
+          import sys
+          import tempfile
+          from types import SimpleNamespace
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import zipfile
+          
+          sys.dont_write_bytecode = True
+          REPOSITORY = 'ATLKR/OpenGeul'
+          VERSION = '0.1.1-dev'
+          TAG = 'opengeul-office-' + VERSION
+          PACKAGE = 'OpenGeul-Office-' + VERSION + '-windows-x64.zip'
+          API = 'https://api.github.com/repos/' + REPOSITORY
+          MODULES = {'writer', 'calc', 'impress', 'draw', 'math', 'base'}
+          INPUT_MODULES = {'writer', 'calc', 'impress'}
+          SHA = re.compile(r'[0-9a-f]{64}')
+          WINDOWS_UNIT_SKIPS = {
+              'test_branding.RealRuntimeBrandingTests.test_branded_runtime_converts_without_changing_source': {
+                  'reason': 'set OPENGEUL_TEST_RUNTIME for actual runtime proof', 'owner': 'class',
+                  'decorator': "unittest.skipUnless(os.environ.get('OPENGEUL_TEST_RUNTIME'), 'set OPENGEUL_TEST_RUNTIME for actual runtime proof')"},
+              'test_payload.PayloadTests.test_case_aliases_and_invalid_windows_names_in_actual_tree_rejected': {
+                  'reason': 'Windows prevents creating these invalid/aliased fixture paths', 'owner': 'method',
+                  'decorator': "unittest.skipIf(os.name == 'nt', 'Windows prevents creating these invalid/aliased fixture paths')"},
+              'test_payload.PayloadTests.test_directory_case_aliases_rejected_even_when_file_names_differ': {
+                  'reason': 'Windows prevents creating aliased fixture directories', 'owner': 'method',
+                  'decorator': "unittest.skipIf(os.name == 'nt', 'Windows prevents creating aliased fixture directories')"},
+          }
+          
+          
+          def require(condition, message):
+              if not condition:
+                  raise RuntimeError(message)
+          
+          
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open('rb') as stream:
+                  while block := stream.read(1024 * 1024):
+                      digest.update(block)
+              return digest.hexdigest()
+          
+          
+          def write_json(path, value):
+              with path.open('x', encoding='utf-8') as stream:
+                  json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
+                  stream.write('\n')
+          
+          
+          def load_json(path):
+              return json.loads(path.read_text(encoding='utf-8-sig'))
+          
+          
+          def retain_verified_inventory(payload, output):
+              """Copy small metadata only, after the full same-source payload verifier."""
+              require(payload.is_dir() and not payload.is_symlink()
+                      and output.is_dir() and not output.is_symlink(), 'Inventory receipt directories must be unlinked')
+              original = evidence_file(payload, 'suite-inventory.json')
+              raw = original.read_bytes()
+              inventory = json.loads(raw.decode('utf-8-sig'))
+              require(isinstance(inventory, dict) and type(inventory.get('schemaVersion')) is int
+                      and inventory['schemaVersion'] == 1 and inventory.get('architecture') == 'x64'
+                      and isinstance(inventory.get('files'), dict) and inventory['files'],
+                      'Verified inventory metadata schema differs')
+              for name, record in inventory['files'].items():
+                  require(isinstance(name, str) and name and isinstance(record, dict)
+                          and type(record.get('size')) is int and record['size'] >= 0
+                          and isinstance(record.get('sha256'), str) and SHA.fullmatch(record['sha256']),
+                          'Verified inventory file metadata differs')
+              target = output / 'suite-inventory.json'
+              require(not target.exists() and not target.is_symlink(), 'Preserve the existing inventory receipt')
+              with target.open('xb') as stream:
+                  require(stream.write(raw) == len(raw), 'Inventory receipt copy was incomplete')
+              digest = hashlib.sha256(raw).hexdigest()
+              require(target.stat().st_size == original.stat().st_size == len(raw)
+                      and sha256(target) == sha256(original) == digest,
+                      'Retained inventory bytes differ from the verified full payload')
+              return {'path': target.name, 'bytes': len(raw), 'sha256': digest,
+                      'source': 'verified-full-payload', 'releaseAsset': False}
+          
+          
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, message, headers, new_url):
+                  return None
+          
+          
+          class GitHub:
+              def __init__(self, token, mutate=False):
+                  self.token, self.mutate = token, mutate
+                  self.opener = urllib.request.build_opener(NoRedirect())
+                  self.created_release_id = None
+          
+              def request(self, url, *, data=None, content_type='application/vnd.github+json', size=None):
+                  headers = {'Authorization': 'Bearer ' + self.token,
+                             'Accept': 'application/vnd.github+json',
+                             'X-GitHub-Api-Version': '2022-11-28',
+                             'User-Agent': 'OpenGeul-draft-delivery', 'Content-Type': content_type}
+                  if size is not None:
+                      headers['Content-Length'] = str(size)
+                  return urllib.request.Request(url, data=data, headers=headers,
+                                                method='GET' if data is None else 'POST')
+          
+              def json(self, path, payload=None):
+                  require(path.startswith('/') and not path.startswith('//'), 'Invalid API path')
+                  if payload is not None:
+                      require(self.mutate and path == '/releases' and payload.get('draft') is True
+                              and payload.get('prerelease') is True and payload.get('tag_name') == TAG,
+                              'Only unpublished draft creation is permitted')
+                  data = None if payload is None else json.dumps(payload).encode('utf-8')
+                  try:
+                      with self.opener.open(self.request(API + path, data=data), timeout=120) as response:
+                          raw = response.read(8 * 1024 * 1024 + 1)
+                          require(len(raw) <= 8 * 1024 * 1024, 'API response exceeds its bound')
+                          return json.loads(raw)
+                  except urllib.error.HTTPError as error:
+                      code = error.code
+                      error.close()
+                      raise RuntimeError('GitHub API returned HTTP ' + str(code)) from None
+          
+              def pages(self, path, key=None):
+                  result = []
+                  for page in range(1, 11):
+                      value = self.json(path + ('&' if '?' in path else '?') + 'per_page=100&page=' + str(page))
+                      batch = value[key] if key else value
+                      require(isinstance(batch, list), 'Invalid paginated API response')
+                      result.extend(batch)
+                      if len(batch) < 100:
+                          return result
+                  raise RuntimeError('API pagination exceeded ten pages')
+          
+              def redirected_download(self, path, target, maximum, *, size=None, digest=None):
+                  try:
+                      response = self.opener.open(self.request(API + path), timeout=120)
+                  except urllib.error.HTTPError as error:
+                      require(error.code == 302, 'Expected a single storage redirect')
+                      location = error.headers.get('Location', '')
+                      error.close()
+                  else:
+                      response.close()
+                      raise RuntimeError('Expected a storage redirect')
+                  parsed = urllib.parse.urlsplit(location)
+                  require(parsed.scheme == 'https' and parsed.hostname and not parsed.username
+                          and not parsed.password and parsed.port in (None, 443)
+                          and parsed.hostname.endswith(('.blob.core.windows.net', '.githubusercontent.com')),
+                          'Unexpected anonymous storage destination')
+                  count = 0
+                  try:
+                      # Storage may redirect again. Its anonymous redirect chain never
+                      # receives the GitHub Authorization header; API/upload stay NoRedirect.
+                      request = urllib.request.Request(location, headers={'User-Agent': 'OpenGeul-draft-delivery'})
+                      with urllib.request.urlopen(request, timeout=180) as response, target.open('xb') as output:
+                          while block := response.read(1024 * 1024):
+                              count += len(block)
+                              require(count <= maximum, 'Download exceeds its bound')
+                              output.write(block)
+                  except Exception as error:
+                      # Never emit signed storage URLs, including exception strings.
+                      raise RuntimeError('Anonymous download failed: ' + type(error).__name__) from None
+                  require(size is None or count == size, 'Downloaded size differs from server metadata')
+                  require(digest is None or sha256(target) == digest, 'Downloaded SHA256 differs from server metadata')
+                  return target
+          
+              def upload(self, release, path):
+                  require(self.mutate, 'Uploads require explicit draft mode')
+                  require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', path.name), 'Asset filename must be ASCII')
+                  base = release['upload_url'].split('{', 1)[0]
+                  require(base == 'https://uploads.github.com/repos/' + REPOSITORY + '/releases/'
+                          + str(release['id']) + '/assets', 'Unexpected upload destination')
+                  content_type = 'application/zip' if path.suffix == '.zip' else 'application/json' if path.suffix == '.json' else 'text/plain; charset=utf-8'
+                  try:
+                      with path.open('rb') as stream:
+                          request = self.request(base + '?' + urllib.parse.urlencode({'name': path.name}),
+                              data=stream, content_type=content_type, size=path.stat().st_size)
+                          with self.opener.open(request, timeout=600) as response:
+                              return json.load(response)
+                  except urllib.error.HTTPError as error:
+                      code = error.code
+                      error.close()
+                      raise RuntimeError('Draft upload returned HTTP ' + str(code)) from None
+          
+          
+          def safe_extract(archive, destination, *, maximum, members=100000):
+              destination.mkdir(parents=True, exist_ok=False)
+              with zipfile.ZipFile(archive) as source:
+                  entries = source.infolist()
+                  require(0 < len(entries) <= members, 'ZIP member count exceeds its bound')
+                  require(sum(row.file_size for row in entries) <= maximum, 'ZIP expanded bytes exceed their bound')
+                  seen = set()
+                  for row in entries:
+                      name = row.filename
+                      parts = PurePosixPath(name).parts
+                      require(name and '\\' not in name and ':' not in name and not name.startswith('/')
+                              and '..' not in parts and '.' not in parts and '\0' not in name
+                              and not stat.S_ISLNK(row.external_attr >> 16), 'Unsafe ZIP member')
+                      key = name.rstrip('/').casefold()
+                      require(key not in seen, 'Duplicate case-insensitive ZIP member')
+                      seen.add(key)
+                  for row in entries:
+                      target = destination.joinpath(*PurePosixPath(row.filename).parts)
+                      if row.is_dir():
+                          target.mkdir(parents=True, exist_ok=True)
+                      else:
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          with source.open(row) as stream, target.open('xb') as output:
+                              while block := stream.read(1024 * 1024):
+                                  output.write(block)
+                  # Reading every entry above also checks every ZIP member CRC.
+          
+          
+          def exact_rows(rows, key, expected):
+              require(isinstance(rows, list) and len(rows) == len(expected), 'Wrong evidence case count')
+              require({row[key] for row in rows} == set(expected), 'Missing, duplicated or unexpected evidence case')
+              return {row[key]: row for row in rows}
+          
+          
+          def evidence_file(root, name):
+              require(isinstance(name, str) and name and Path(name).name == name, 'Evidence reference escaped its directory')
+              path = root / name
+              require(path.is_file() and not path.is_symlink(), 'Referenced evidence file is missing')
+              return path
+          
+          
+          def unit_receipt(log, expected_python, expected_skips, expected_core):
+              # Strip only GitHub's timestamp prefix, then match complete runner summaries.
+              lines = [re.sub(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z ', '', line).rstrip()
+                       for line in log.read_text(encoding='utf-8-sig').splitlines()]
+              python = [(index, re.fullmatch(r'Ran (\d+) tests? in [0-9.]+s', line)) for index, line in enumerate(lines)]
+              python = [(index, match) for index, match in python if match]
+              core = [re.fullmatch(r'(\d+)/(\d+) passed', line) for line in lines]
+              core = [match for match in core if match]
+              ok = 'OK' if expected_skips == 0 else 'OK (skipped=' + str(expected_skips) + ')'
+              require(expected_skips == len(WINDOWS_UNIT_SKIPS), 'Exactly the three named existing Windows skips are permitted')
+              require(len(python) == 1 and int(python[0][1][1]) == expected_python, 'Exact Python unit count is unverified')
+              following = [line for line in lines[python[0][0] + 1:] if line]
+              require(following and following[0] == ok and lines.count(ok) == 1
+                      and not any(re.fullmatch(r'FAILED(?: \(.*\))?', line) for line in lines), 'Python unit summary did not pass')
+              require(len(core) == 1 and int(core[0][1]) == int(core[0][2]) == expected_core, 'Exact Core unit result is unverified')
+              require(sum(line.startswith('PASS ') for line in lines) == expected_core
+                      and not any(line.startswith('FAIL ') for line in lines), 'Core individual case results differ')
+              skipped = []
+              for line in lines:
+                  match = re.fullmatch(r'(\S+) \(([^()]+)\) \.\.\. skipped (.+)', line)
+                  if match:
+                      require(match[1] == match[2].rsplit('.', 1)[-1], 'Skipped unit test identity is inconsistent')
+                      reason = ast.literal_eval(match[3])
+                      require(isinstance(reason, str), 'Skipped unit reason is invalid')
+                      skipped.append({'test': match[2], 'reason': reason})
+              actual = exact_rows(skipped, 'test', WINDOWS_UNIT_SKIPS)
+              require(all(actual[name]['reason'] == spec['reason'] for name, spec in WINDOWS_UNIT_SKIPS.items()),
+                      'A skipped Windows unit test has an unreviewed reason')
+              return {'pythonTests': expected_python, 'pythonPassed': expected_python - expected_skips,
+                      'pythonSkipped': expected_skips, 'coreTests': expected_core, 'corePassed': expected_core,
+                      'skippedTests': skipped, 'originalJobLogSha256': sha256(log)}
+          
+          
+          def verify_unit_skip_sources(source):
+              receipts = []
+              for identity, expected in WINDOWS_UNIT_SKIPS.items():
+                  module, class_name, method_name = identity.split('.')
+                  path = source / 'suite/tests' / (module + '.py')
+                  tree = ast.parse(path.read_text(encoding='utf-8'))
+                  classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+                  require(len(classes) == 1, 'Named Windows skip class is absent from the exact source')
+                  methods = [node for node in classes[0].body if isinstance(node, ast.FunctionDef) and node.name == method_name]
+                  require(len(methods) == 1, 'Named Windows skip test is absent from the exact source')
+                  owner = classes[0] if expected['owner'] == 'class' else methods[0]
+                  wanted = ast.dump(ast.parse(expected['decorator'], mode='eval').body, include_attributes=False)
+                  require(any(ast.dump(node, include_attributes=False) == wanted for node in owner.decorator_list),
+                          'Named Windows skip predicate/reason differs from the exact source')
+                  receipts.append({'test': identity, 'reason': expected['reason'],
+                                   'sourceFile': path.relative_to(source).as_posix(), 'sourceSha256': sha256(path)})
+              return receipts
+          
+          
+          def verify_korean_snapshot(directory, row, korean):
+              snapshot = load_json(evidence_file(directory, row['accessibilitySnapshot']))
+              require(snapshot.get('module') == row['module'], 'Native Korean snapshot module differs from its case')
+              creation = row.get('officeCreationTime')
+              require(type(creation) is int and creation > 0 and type(snapshot.get('officeCreationTime')) is int
+                      and snapshot['officeCreationTime'] == creation,
+                      'Native Korean snapshot engine generation differs from its case')
+              require(row['osAccessibilitySnapshot'] != row['accessibilitySnapshot'], 'OS diagnostic must remain separate from native proof')
+              evidence_file(directory, row['osAccessibilitySnapshot'])  # Diagnostic presence, not OS certification.
+              proof = korean.require_korean_tabs(snapshot, row['officePid'], row['childHwnd'])
+              require(all(row.get(key) == value for key, value in proof.items()), 'Native Korean proof differs from its case receipt')
+              require(row.get('osScreenReaderExposureCertified') is False and snapshot.get('osScreenReaderExposureCertified') is False,
+                      'Native VCL evidence cannot certify OS screen-reader exposure')
+              return proof
+          
+          
+          def verify_hwp_census(row, lifecycle, suite):
+              launches, witnesses = row.get('hwpLaunches'), row.get('hwpShellWitnesses')
+              require(isinstance(launches, list) and isinstance(witnesses, list)
+                      and len(launches) == len(witnesses) == 2,
+                      'HWP native census requires both retained shell and child generations')
+              image = PureWindowsPath(suite) / 'HWP/OpenGeul.exe'
+              require(image.is_absolute(), 'HWP native census expected image must be absolute')
+              parents, selected = {}, {}
+              for index, (launch, witness) in enumerate(zip(launches, witnesses)):
+                  require(isinstance(launch, dict) and isinstance(witness, dict)
+                          and type(witness.get('pid')) is int and 0 < witness['pid'] <= 0xffffffff
+                          and type(witness.get('creationFileTime')) is int and 0 < witness['creationFileTime'] <= 0xffffffffffffffff,
+                          'HWP native census retained shell generation is invalid')
+                  parent = (witness['pid'], witness['creationFileTime'])
+                  require(parent not in parents and type(launch.get('parentPid')) is int
+                          and type(launch.get('parentCreationFileTime')) is int
+                          and (launch['parentPid'], launch['parentCreationFileTime']) == parent
+                          and type(launch.get('pid')) is int and 0 < launch['pid'] <= 0xffffffff
+                          and type(launch.get('creationFileTime')) is int and 0 < launch['creationFileTime'] <= 0xffffffffffffffff
+                          and PureWindowsPath(witness.get('executable', '')) == PureWindowsPath(suite) / 'OpenGeul.Office.exe'
+                          and PureWindowsPath(launch.get('executable', '')) == image,
+                          'HWP native census launch differs from its exact retained parent/image generation')
+                  observation = launch.get('censusObservation')
+                  require(type(observation) is int and observation > 0 and observation not in selected,
+                          'HWP native census selected observation is missing or duplicated')
+                  parents[parent], selected[observation] = index, launch
+              require(witnesses[0]['pid'] == row.get('shellPid'), 'First HWP native census shell differs from the case shell')
+              receipts = row.get('hwpNativeCensus')
+              require(isinstance(receipts, list) and len(receipts) >= 2,
+                      'HWP raw precise-clock census observations are missing')
+              matched, groups = set(), []
+              for observation, receipt in enumerate(receipts, 1):
+                  require(isinstance(receipt, dict) and type(receipt.get('observation')) is int
+                          and receipt['observation'] == observation and type(receipt.get('schemaVersion')) is int
+                          and type(receipt.get('shellPid')) is int and type(receipt.get('shellCreationFileTime')) is int
+                          and isinstance(receipt.get('expectedExecutable'), str) and '\0' not in receipt['expectedExecutable'],
+                          'HWP native census observation/schema/parent identity is malformed')
+                  parent = (receipt['shellPid'], receipt['shellCreationFileTime'])
+                  require(parent in parents, 'HWP native census belongs to another retained shell generation')
+                  groups.append(parents[parent])
+                  raw = receipt.get('snapshotClock')
+                  require(isinstance(raw, dict) and set(raw) == {'low', 'high', 'fileTime'},
+                          'HWP native census raw clock schema differs')
+                  candidates = receipt.get('candidates')
+                  require(isinstance(candidates, list), 'HWP native census raw candidates are missing')
+                  for candidate in candidates:
+                      require(isinstance(candidate, dict) and 'error' not in candidate
+                              and type(candidate.get('pid')) is int and 0 < candidate['pid'] <= 0xffffffff
+                              and type(candidate.get('parentPid')) is int and 0 <= candidate['parentPid'] <= 0xffffffff
+                              and isinstance(candidate.get('snapshotExeName'), str) and candidate['snapshotExeName']
+                              and '\0' not in candidate['snapshotExeName']
+                              and all(type(candidate.get(key)) is bool for key in ('parentMatches', 'nameMatches',
+                                  'queryAttempted', 'handleOpened', 'handleClosed', 'matched')),
+                              'HWP native census candidate identity or native query flags are malformed')
+                      if candidate['queryAttempted']:
+                          require(isinstance(candidate.get('nativeImage'), str) and candidate['nativeImage']
+                                  and '\0' not in candidate['nativeImage'] and isinstance(candidate.get('image'), str)
+                                  and '\0' not in candidate['image'] and type(candidate.get('nativeImageLength')) is int
+                                  and isinstance(candidate.get('nativeCreation'), dict)
+                                  and set(candidate['nativeCreation']) == {'low', 'high', 'fileTime'}
+                                  and type(candidate.get('creationFileTime')) is int
+                                  and all(type(candidate.get(key)) is bool for key in ('imageMatches', 'generationWithinSnapshot')),
+                                  'HWP native census queried image/generation metadata is malformed')
+                  selected_match = receipt.get('match')
+                  require(selected_match is None or (isinstance(selected_match, dict)
+                          and set(selected_match) == {'pid', 'parentPid', 'executable', 'creationFileTime'}
+                          and all(type(selected_match.get(key)) is int for key in ('pid', 'parentPid', 'creationFileTime'))
+                          and isinstance(selected_match.get('executable'), str)),
+                          'HWP native census selected match schema is malformed')
+                  match = lifecycle.require_hwp_census_receipt(receipt, *parent, image)
+                  if match is not None:
+                      require(observation in selected, 'HWP native census has an unselected successful child match')
+                      launch = selected[observation]
+                      require(match['pid'] == launch['pid'] and match['parentPid'] == launch['parentPid']
+                              and match['creationFileTime'] == launch['creationFileTime']
+                              and PureWindowsPath(match['executable']) == PureWindowsPath(launch['executable']) == image
+                              and parent == (launch['parentPid'], launch['parentCreationFileTime']),
+                              'HWP selected native census child differs from its launch/retained shell generation')
+                      matched.add(observation)
+              require(matched == set(selected) and len(matched) == 2,
+                      'Both HWP launches require their exact selected native census match')
+              require(groups == sorted(groups)
+                      and all(max(index + 1 for index, group in enumerate(groups) if group == parents[parent])
+                              in selected for parent in parents),
+                      'HWP native censuses do not follow the two source launch/poll sequences')
+              return {'clockApi': 'GetSystemTimePreciseAsFileTime', 'observations': len(receipts),
+                      'selectedMatches': 2, 'shellGenerations': 2}
+          
+          
+          def verify_hwp_receipts(directory, row, lifecycle, suite):
+              folder = directory / 'fixtures' / row['case']
+              fixtures = list(folder.iterdir())
+              require(len(fixtures) == 1 and fixtures[0].is_file() and fixtures[0].suffix == '.hwpx',
+                      'HWP route must retain exactly one generated HWPX fixture')
+              fixture = fixtures[0]
+              require(sha256(fixture) == row['generatedHwpxSha256'], 'Generated HWPX route fixture differs')
+              # Replay the exact source's owned template transformation. Compare every
+              # uncompressed member; Windows/Ubuntu zlib may encode valid streams differently.
+              # The retained archive's exact bytes remain bound to its producer SHA above.
+              with tempfile.TemporaryDirectory(prefix='hwpx-generation-replay-', dir=directory.parent.parent) as temporary:
+                  recreated = lifecycle.generate_hwpx(Path(temporary) / fixture.name)
+                  with zipfile.ZipFile(fixture) as actual, zipfile.ZipFile(recreated) as generated:
+                      require(actual.comment == generated.comment and actual.namelist() == generated.namelist(),
+                              'HWPX members differ from same-source generation')
+                      for member in generated.infolist():
+                          require(actual.getinfo(member.filename).compress_type == member.compress_type
+                                  and actual.read(member.filename) == generated.read(member.filename),
+                                  'HWPX member content differs from same-source generation')
+              launches, witnesses = row.get('hwpLaunches', []), row.get('hwpShellWitnesses', [])
+              require(len(launches) == len(witnesses) == 2, 'HWP tile/route generation receipts are incomplete')
+              shell_generations, child_generations = set(), set()
+              suite = PureWindowsPath(suite)
+              for index, (launch, witness) in enumerate(zip(launches, witnesses)):
+                  for key in ('pid', 'parentPid'):
+                      require(type(launch.get(key)) is int and 0 < launch[key] <= 0xffffffff, 'HWP launch PID is invalid')
+                  for key in ('creationFileTime', 'parentCreationFileTime'):
+                      require(type(launch.get(key)) is int and 0 < launch[key] <= 0xffffffffffffffff, 'HWP launch generation is invalid')
+                  require(type(witness.get('pid')) is int and type(witness.get('creationFileTime')) is int
+                          and launch['parentPid'] == witness['pid'] and launch['parentCreationFileTime'] == witness['creationFileTime']
+                          and launch['parentCreationFileTime'] <= launch['creationFileTime'], 'HWP launch is not bound to its retained shell generation')
+                  require(PureWindowsPath(witness['executable']) == suite / 'OpenGeul.Office.exe'
+                          and PureWindowsPath(launch['executable']) == suite / 'HWP/OpenGeul.exe', 'HWP generation names another executable')
+                  require(type(launch.get('hwnd')) is int and launch['hwnd'] > 0 and launch.get('webviewHwnds')
+                          and all(type(hwnd) is int and hwnd > 0 for hwnd in launch['webviewHwnds'])
+                          and launch.get('filenameObserved') is True, 'HWP WebView/window evidence is incomplete')
+                  require(launch.get('routedFile') == (None if index == 0 else fixture.name), 'HWP tile/extension route filename differs')
+                  shell_generations.add((witness['pid'], witness['creationFileTime']))
+                  child_generations.add((launch['pid'], launch['creationFileTime']))
+              require(witnesses[0]['pid'] == row['shellPid'] and len(shell_generations) == len(child_generations) == 2,
+                      'HWP tile/route did not retain two distinct shell and child generations')
+              census = verify_hwp_census(row, lifecycle, suite)
+              postload = verify_hwp_postload(directory, row, lifecycle)
+              return {'generatedHwpxSha256': row['generatedHwpxSha256'], 'hwpShellGenerations': 2,
+                      'hwpChildGenerations': 2, 'nativeCensus': census, 'postLoadTrace': postload}
+          
+          
+          def verify_hwp_postload(directory, row, lifecycle):
+              require(row.get('postLoadEditorVerified') is True and row.get('toolbarEnabled') is True,
+                      'HWP routed editor did not establish post-load readiness')
+              require(len(row.get('hwpLaunches', [])) == 2, 'HWP route identity is incomplete')
+              route = row['hwpLaunches'][1]
+              trace = evidence_file(directory, row['hwpReadinessEvidence'])
+              observations = matching = 0
+              with trace.open(encoding='utf-8') as stream:
+                  for line in stream:
+                      observation = json.loads(line)
+                      observations += 1
+                      require(type(observation.get('hwnd')) is int and type(observation.get('pid')) is int
+                              and observation['hwnd'] == route['hwnd'] and observation['pid'] == route['pid'],
+                              'HWP raw readiness targets another routed HWND/process')
+                      rows = observation.get('rows')
+                      require(isinstance(rows, list), 'HWP raw readiness rows are missing')
+                      canonical = json.dumps(rows, ensure_ascii=False, sort_keys=True, allow_nan=False).encode('utf-8')
+                      require(observation.get('rowsSha256') == hashlib.sha256(canonical).hexdigest(),
+                              'HWP raw readiness row digest differs')
+                      try:
+                          proof = lifecycle.hwp_postload_observation(rows)
+                      except AssertionError:
+                          # An early startup observation may be ambiguous/incomplete;
+                          # it stays raw evidence and cannot certify readiness.
+                          continue
+                      if proof is None:
+                          continue
+                      controls = [value for value in proof.values() if isinstance(value, dict)]
+                      if not controls or any('metadataError' in control for control in controls):
+                          continue  # Unavailable COM metadata cannot certify an editor.
+                      if (proof == row.get('hwpEditorControls') and proof.get('postLoadEditorVerified') is True
+                              and proof.get('toolbarEnabled') is True):
+                          matching += 1
+              require(observations > 0 and matching > 0, 'HWP post-load controls have no matching available raw observation')
+              return {'file': trace.name, 'sha256': sha256(trace), 'rawObservations': observations,
+                      'matchingPostLoadObservations': matching, 'postLoadEditorVerified': True, 'toolbarEnabled': True}
+          
+          
+          def verify_python_identity(identity, style, payload, suite):
+              require(isinstance(identity, dict) and type(identity.get('schemaVersion')) is int
+                      and identity['schemaVersion'] == 1 and identity.get('verified') is True,
+                      'Writer packaged Python identity receipt is missing or unverified')
+              root = identity.get('suiteRoot')
+              require(isinstance(root, str) and PureWindowsPath(root).is_absolute()
+                      and PureWindowsPath(root) == PureWindowsPath(suite), 'Writer packaged Python identity names another Suite')
+              inventory_path = payload / 'suite-inventory.json'
+              require(inventory_path.is_file() and not inventory_path.is_symlink(), 'Verified payload inventory is missing')
+              inventory = load_json(inventory_path)
+              require(type(inventory.get('schemaVersion')) is int and inventory['schemaVersion'] == 1
+                      and inventory.get('architecture') == 'x64' and isinstance(inventory.get('files'), dict)
+                      and identity.get('inventorySha256') == sha256(inventory_path), 'Writer packaged Python inventory digest differs')
+              observed = identity.get('observed')
+              require(isinstance(observed, dict), 'Writer raw Python observation is missing')
+              # The exact source derives one core interpreter/version from the complete
+              # verified inventory and replays the actual Windows CPython/DLL/import paths.
+              paths = style.validate_python_observation(root, observed, inventory)
+              roles = {'launcher', 'executable', 'pythonDll', 'uno', 'pyuno', 'encodings', 'os'}
+              files = identity.get('files')
+              require(isinstance(paths, dict) and set(paths) == roles and isinstance(files, dict) and set(files) == roles,
+                      'Writer packaged Python identity file roles differ')
+              # LibreOffice's launcher can leave its core directory in sys.executable.
+              # The separately observed native process image must identify the actual EXE.
+              require(isinstance(observed.get('processImage'), str) and PureWindowsPath(observed['processImage']).is_absolute()
+                      and PureWindowsPath(observed['processImage']) == PureWindowsPath(root) / paths['executable'],
+                      'Writer native Python process image differs from the packaged interpreter')
+              for role, relative in paths.items():
+                  require(isinstance(relative, str) and relative and '\\' not in relative and ':' not in relative
+                          and not relative.startswith('/') and all(part not in ('', '.', '..') for part in relative.split('/')),
+                          'Writer packaged Python identity path escaped its payload')
+                  record, expected = files[role], inventory['files'].get(relative)
+                  require(isinstance(record, dict) and set(record) == {'path', 'relativePath', 'size', 'sha256'}
+                          and record['relativePath'] == relative and isinstance(record['path'], str)
+                          and PureWindowsPath(record['path']).is_absolute()
+                          and PureWindowsPath(record['path']) == PureWindowsPath(root) / relative,
+                          'Writer packaged Python identity file path differs')
+                  require(isinstance(expected, dict) and set(expected) == {'size', 'sha256'}
+                          and type(expected['size']) is int and expected['size'] > 0
+                          and isinstance(expected['sha256'], str) and SHA.fullmatch(expected['sha256'])
+                          and type(record['size']) is int and record['size'] == expected['size']
+                          and record['sha256'] == expected['sha256'], 'Writer packaged Python identity receipt differs from inventory')
+                  parts = relative.split('/')
+                  for index in range(len(parts) + 1):
+                      path = payload.joinpath(*parts[:index])
+                      require(not path.is_symlink() and not getattr(path, 'is_junction', lambda: False)(),
+                              'Writer packaged Python identity payload is linked')
+                  path = payload.joinpath(*parts)
+                  require(path.is_file() and path.stat().st_size == expected['size'] and sha256(path) == expected['sha256'],
+                          'Writer packaged Python identity payload bytes differ from inventory')
+              return {'verified': True, 'suiteRoot': root, 'inventorySha256': sha256(inventory_path),
+                      'implementation': observed['implementation'], 'version': observed['version'],
+                      'executable': observed['executable'], 'processImage': observed['processImage'],
+                      'pythonDll': observed['pythonDll'], 'files': files}
+          
+          
+          def verify_writer_style(directory, style, initial_writer, korean_directory, korean_writer, payload, suite):
+              report = load_json(directory / 'results.json')
+              require(type(report.get('schemaVersion')) is int and report['schemaVersion'] == 1
+                      and report.get('kind') == 'native-writer-style-regression'
+                      and report.get('success') is True, 'Physical Writer style gate did not pass')
+              row = exact_rows(report['tests'], 'case', {'writer-heading1'})['writer-heading1']
+              flags = ('success', 'guiVerified', 'retainedProcessVerified', 'engineImageVerified', 'nativeParentVerified',
+                       'physicalStyleShortcutSent', 'savedViaOwnedSuiteMenu', 'docxHeading1Verified', 'textUnchanged',
+                       'screenshotCaptured', 'noExternalOfficeWindow', 'officeExited', 'officeExitedAfterCleanup',
+                       'originalFixtureUnchanged', 'cleanClose', 'packagedUnoVerified')
+              require(row.get('module') == 'writer' and row.get('kind') == 'native-writer-style'
+                      and row.get('stage') == 'complete' and all(row.get(key) is True for key in flags)
+                      and row.get('inputMethod') == 'physical-keyboard' and row.get('unicodeInputUsed') is False
+                      and row.get('keyboardKeys') == ['CTRL+HOME', 'CTRL+1'], 'Writer physical shortcut or native ownership is unverified')
+              require(type(row.get('shellExitCode')) is int and row['shellExitCode'] == 0
+                      and row.get('forcedCleanupRequired') is False
+                      and type(row.get('packagedUnoExitCode')) is int and row['packagedUnoExitCode'] == 0
+                      and not any(row.get(key) for key in ('error', 'cleanupError', 'engineCleanupErrors')),
+                      'Writer style did not exit normally')
+              style.require_office_exit(row.get('officeExitCode'))
+              for key in ('shellPid', 'windowHwnd', 'parentHwnd', 'childHwnd', 'officePid', 'officeCreationTime', 'keyboardFocusHwnd'):
+                  require(type(row.get(key)) is int and row[key] > 0, 'Writer owned process/window identity is missing')
+              require(row['shellPid'] != row['officePid'], 'Writer shell and embedded engine identities are not distinct')
+              readiness = verify_editor_focus_readiness(row, style.native,
+                  [(row['windowHwnd'], row['childHwnd'], row['shellPid'], row['officePid'])])
+              require(isinstance(row.get('saveMenuRuntimeId'), list) and row['saveMenuRuntimeId']
+                      and all(type(value) is int for value in row['saveMenuRuntimeId']), 'Writer owned Save menu identity is missing')
+              require(row.get('copiedFixture') == style.COPY == 'fixtures/writer-heading1.docx', 'Writer saved style path differs')
+              require(row.get('screenshot') == 'writer-heading1-saved.png'
+                      and row.get('stderrLog') == 'writer-heading1-stderr.log'
+                      and row.get('packagedUnoEvidence') == 'packaged-uno-result.json', 'Writer style evidence reference differs')
+              for name in (row['screenshot'], row['stderrLog'], 'packaged-uno.log'):
+                  evidence_file(directory, name)
+              require(load_json(evidence_file(directory, 'writer-heading1-result.json')) == row,
+                      'Writer raw GUI receipt differs from its report')
+              # GUI edits the engine's live Writer file later. Recover the original bytes
+              # from Korean UI's retained unchanged copy, independently of style.baseline.
+              require(korean_writer.get('module') == 'writer' and korean_writer.get('fixtureUnchanged') is True
+                      and korean_writer.get('originalFixtureUnchanged') is True, 'Unchanged Korean UI Writer baseline is missing')
+              original = evidence_file(korean_directory, korean_writer['copiedFixture'])
+              baseline = style.docx_style_evidence(original)
+              require(SHA.fullmatch(initial_writer.get('sha256', ''))
+                      and baseline['sha256'] == initial_writer['sha256'] == row.get('originalSha256') == korean_writer.get('beforeSha256')
+                      and baseline['bytes'] == initial_writer.get('bytes')
+                      and baseline == row.get('baseline'), 'Writer initial baseline differs from original engine/Korean UI bytes')
+              require(PureWindowsPath(row['originalFixture']) == PureWindowsPath(initial_writer['fixture'])
+                      == PureWindowsPath(korean_writer['originalFixture']), 'Writer baseline names another generated fixture')
+              actual = style.docx_style_evidence(style.owned_saved_path(directory, row))
+              require(actual == row.get('savedDocument'), 'Writer saved style bytes differ from its receipt')
+              style.require_saved_style(baseline, actual)
+              uno = load_json(evidence_file(directory, row['packagedUnoEvidence']))
+              require(uno.get('kind') == 'packaged-uno-writer-style-reopen' and uno.get('success') is True
+                      and uno.get('readOnlyModelVerified') is True and not uno.get('closeError') and not uno.get('cleanupErrors'),
+                      'Writer independent UNO style reopen did not pass')
+              identity = verify_python_identity(uno.get('pythonIdentity'), style, payload, suite)
+              replay = style.require_uno_style(actual, uno['observed'], uno['beforeSha256'], uno['afterSha256'])
+              require(all(uno.get(key) == value for key, value in replay.items()), 'Writer raw UNO style observation differs from its receipt')
+              return {'cases': 1, 'physicalShortcut': ['CTRL+HOME', 'CTRL+1'], 'unicodeInputUsed': False,
+                      'originalSha256': baseline['sha256'], 'savedSha256': actual['sha256'],
+                      'packagedUnoSha256': sha256(directory / row['packagedUnoEvidence']), 'pythonIdentity': identity,
+                      'editorFocusReadiness': readiness}
+          
+          
+          def verify_toolbar_receipt(receipt):
+              services = {'Writer': 'com.sun.star.text.TextDocument', 'Calc': 'com.sun.star.sheet.SpreadsheetDocument',
+                          'Impress': 'com.sun.star.presentation.PresentationDocument', 'Draw': 'com.sun.star.drawing.DrawingDocument'}
+              expected = {'Writer': {'textobjectbar': 1, 'textstylebar': 3, 'singlemode-text': 1, 'singlemode-table': 1},
+                          'Calc': {'formatobjectbar': 1, 'singlemode': 1}, 'Impress': {}, 'Draw': {}}
+              module = receipt.get('moduleName')
+              require(type(receipt.get('schemaVersion')) is int and receipt['schemaVersion'] == 1 and receipt.get('stored') is False
+                      and module in services and receipt.get('moduleService') == services[module], 'Native StyleApply receipt schema/module differs')
+              require(receipt.get('mode') == {'active': 'notebookbar.ui', 'globalActive': 'notebookbar.ui',
+                      'tabbedCommandArg': 'notebookbar.ui', 'hasNotebookbar': True}, 'Native StyleApply mode differs from standard Tabbed UI')
+              require(receipt['mode']['hasNotebookbar'] is True, 'Native StyleApply Notebookbar flag is not boolean true')
+              removed = receipt.get('removed')
+              require(isinstance(removed, list) and len(removed) == len(expected[module]), 'Native StyleApply resource set differs')
+              resources = {}
+              for row in removed:
+                  resource = row.get('resourceURL')
+                  require(isinstance(resource, str) and resource.startswith('private:resource/toolbar/'), 'Native StyleApply resource path differs')
+                  resource = resource.removeprefix('private:resource/toolbar/')
+                  require(resource in expected[module] and resource not in resources, 'Native StyleApply resource set differs')
+                  indices = row.get('indices')
+                  require(isinstance(indices, list) and all(type(index) is int and index >= 0 for index in indices)
+                          and indices == sorted(set(indices)) and len(indices) == expected[module][resource]
+                          and row.get('commands') == ['.uno:StyleApply'] * len(indices), 'Native StyleApply command/index counts differ')
+                  resources[resource] = len(indices)
+              require(resources == expected[module], 'Native StyleApply resource set differs')
+              return receipt
+          
+          
+          def native_diagnostic_members(root):
+              """Separate owned profile archives from bounded source-defined worker trace files."""
+              require(root.is_dir() and not root.is_symlink(), 'Native diagnostic root is missing or linked')
+              profiles, traces = [], []
+              for path in sorted(root.iterdir()):
+                  require(not path.is_symlink(), 'Linked native diagnostic member is not accepted')
+                  if path.is_dir():
+                      profiles.append(path)
+                      continue
+                  match = re.fullmatch(r'worker-save-([1-9][0-9]*)-([a-f0-9]{32})\.jsonl', path.name)
+                  require(path.is_file() and match and path.stat().st_size <= 256 * 4096,
+                          'Unexpected native diagnostic root member')
+                  rows = []
+                  for line in path.read_text(encoding='utf-8').splitlines():
+                      require(line and len((line + '\n').encode('utf-8')) <= 4096,
+                              'Worker save trace record exceeds its source bound')
+                      row = json.loads(line)
+                      require(isinstance(row, dict) and set(row) == {'event', 'component', 'stage', 'sequence',
+                              'utc', 'workerPid', 'threadId', 'traceId', 'details'}
+                              and row['component'] == 'worker' and type(row['workerPid']) is int
+                              and row['workerPid'] == int(match[1]) and 0 < row['workerPid'] <= 0xffffffff
+                              and type(row['threadId']) is int and row['threadId'] > 0
+                              and type(row['sequence']) is int and 1 <= row['sequence'] <= 256
+                              and (not rows or rows[-1]['sequence'] < row['sequence'])
+                              and (row['traceId'] is None or (isinstance(row['traceId'], str)
+                                   and re.fullmatch('[a-f0-9]{32}', row['traceId'])))
+                              and (not rows or row['traceId'] == rows[0]['traceId']),
+                              'Worker save trace native identity/sequence/token schema differs')
+                      require(isinstance(row['utc'], str) and datetime.fromisoformat(row['utc']).utcoffset() == timezone.utc.utcoffset(None),
+                              'Worker save trace lacks its original UTC timestamp')
+                      details = row['details']
+                      require(isinstance(details, dict), 'Worker save trace details are missing')
+                      if row['event'] == 'suite.nativeDispatch':
+                          require(row['stage'] == 'received' and set(details) == {'receiptSequence', 'command', 'nativeCommand'}
+                                  and type(details['receiptSequence']) is int and details['receiptSequence'] > 0
+                                  and (details['command'], details['nativeCommand']) in (('save', '.uno:Save'), ('saveAs', '.uno:SaveAs')),
+                                  'Worker native save arrival schema differs')
+                      else:
+                          require(row['event'] == 'suite.workerSave' and row['stage'] in ('request.begin', 'request.end', 'request.error')
+                                  and set(details) <= {'requestId', 'ok', 'errorCode', 'exceptionType'}
+                                  and type(details.get('requestId')) is int and details['requestId'] > 0,
+                                  'Worker save request identity/stage schema differs')
+                          if row['stage'] == 'request.begin':
+                              require(set(details) == {'requestId'}, 'Worker save begin contains unsupported fields')
+                          elif row['stage'] == 'request.end':
+                              require(set(details) == {'requestId', 'ok'} and details['ok'] is True,
+                                      'Worker save end is not successful')
+                          else:
+                              require(details.get('ok') is False and all(isinstance(details[k], str) and details[k]
+                                      for k in ('errorCode', 'exceptionType') if k in details),
+                                      'Worker save error metadata is malformed')
+                      rows.append(row)
+                  require(0 < len(rows) <= 256, 'Worker save trace is empty or exceeds its source record bound')
+                  traces.append({'file': path.name, 'bytes': path.stat().st_size, 'sha256': sha256(path),
+                                 'workerPid': int(match[1]), 'traceId': rows[0]['traceId'], 'rows': rows})
+              require(profiles, 'Native diagnostic profiles are missing')
+              return profiles, traces
+          
+          
+          def verify_calc_save_routes(evidence, cohorts):
+              """Retain diagnostic milestones; equality and persistence remain separate gates."""
+              require(set(cohorts) == {'suite-1', 'suite-2'}, 'Both original Calc save routes are mandatory')
+              _, traces = native_diagnostic_members(evidence / 'suite-worker-diagnostics')
+              verified, selected = {}, set()
+              for name in ('suite-1', 'suite-2'):
+                  cohort = cohorts[name];case = cohort['rows']['calc']
+                  path = evidence_file(cohort['directory'], case['stderrLog'])
+                  host, form, sequences = [], [], {}
+                  for position, line in enumerate(path.read_text(encoding='utf-8').splitlines()):
+                      row = json.loads(line)
+                      if row.get('event') not in ('suite.workerSave', 'suite.documentSave'):
+                          continue
+                      require(set(row) == {'event', 'component', 'stage', 'sequence', 'utc', 'processId',
+                              'managedThreadId', 'workerProcessId', 'traceId', 'details'}
+                              and row.get('component') == 'host' and type(row.get('processId')) is int
+                              and row['processId'] == case['shellPid'] and type(row.get('workerProcessId')) is int
+                              and row['workerProcessId'] > 0 and isinstance(row.get('traceId'), str)
+                              and re.fullmatch('[a-f0-9]{32}', row['traceId'])
+                              and type(row.get('sequence')) is int and 1 <= row['sequence'] <= 128
+                              and type(row.get('managedThreadId')) is int and row['managedThreadId'] > 0
+                              and isinstance(row.get('details'), dict), 'Calc host save trace identity/schema differs')
+                      require(isinstance(row['utc'], str) and datetime.fromisoformat(row['utc']).utcoffset() == timezone.utc.utcoffset(None),
+                              'Calc host trace lacks its original UTC timestamp')
+                      group = (row['event'], row['traceId'])
+                      require(row['sequence'] > sequences.get(group, 0), 'Calc host logger sequence is reordered or duplicated')
+                      sequences[group] = row['sequence']
+                      row = dict(row, position=position)
+                      (host if row['event'] == 'suite.workerSave' else form).append(row)
+                  commands = [r for r in host if r['stage'] == 'command.received']
+                  require(len(commands) == 1 and commands[0]['details'].get('command') == 'save',
+                          'Calc needs exactly its original native Save command arrival')
+                  command = commands[0];token = command['traceId'];client = command['workerProcessId']
+                  sequence = command['details'].get('commandSequence')
+                  require(type(sequence) is int and sequence > 0 and token not in selected,
+                          'Calc source command sequence/token is missing or reused')
+                  selected.add(token)
+                  require(all(r['traceId'] == token and r['workerProcessId'] == client for r in (*host, *form)),
+                          'Calc save trace changed its owned worker client token/launcher identity')
+                  require([r['sequence'] for r in host] == list(range(1, len(host) + 1))
+                          and [r['sequence'] for r in form] == list(range(1, len(form) + 1)),
+                          'Calc original host logger trace is incomplete')
+                  requests = [r for r in host if r['stage'].startswith('request.')
+                              and r['details'].get('commandSequence') == sequence]
+                  require([r['stage'] for r in requests] == ['request.begin', 'request.written', 'request.reply']
+                          and requests[-1]['details'].get('ok') is True
+                          and len(requests) == sum(r['stage'].startswith('request.') for r in host)
+                          and sorted(r['stage'] for r in host if r['stage'].startswith('command.'))
+                              == sorted(['command.received', 'command.handler.enter', 'command.handler.return']),
+                          'Calc host save request did not reach one successful reply')
+                  request_id = requests[0]['details'].get('requestId')
+                  require(type(request_id) is int and request_id > 0
+                          and all(r['details'].get('requestId') == request_id for r in requests),
+                          'Calc host save request ID changed')
+                  current = [r for r in form if r['details'].get('details', {}).get('commandSequence') == sequence]
+                  stages = [r['stage'] for r in current]
+                  required = ['command.received', 'command.enqueue', 'command.execute', 'save.begin', 'save.workerRequest', 'save.end']
+                  require(stages == required and len(current) == len(form),
+                          'Calc UI save was guarded, cancelled, repeated, errored or incomplete')
+                  for r in current:
+                      details = r['details']
+                      require(details.get('module') == 'calc' and type(details.get('isUiThread')) is bool
+                              and type(details.get('hwnd')) is int
+                              and all(type(details.get(k)) is bool for k in ('loading', 'busy', 'closing', 'attached',
+                                  'statusBusy', 'resizeBusy', 'disposed', 'disposing', 'workerPresent')),
+                              'Calc form save snapshot schema differs')
+                      if r['stage'] in ('command.execute', 'save.begin', 'save.workerRequest', 'save.end'):
+                          require(details['isUiThread'] is True and details['hwnd'] == case['windowHwnd']
+                                  and details['attached'] is True and details['workerPresent'] is True,
+                                  'Calc save did not execute on the original owned UI frame')
+                  require(current[3]['details']['details'].get('saveAs') is False
+                          and current[-1]['details']['details'].get('ok') is True
+                          and command['position'] < current[0]['position']
+                          and current[-2]['position'] < requests[0]['position'] < requests[1]['position']
+                          < requests[2]['position'] < current[-1]['position'],
+                          'Calc source Save milestones are incomplete or causally reordered')
+                  matching = [t for t in traces if t['traceId'] == token]
+                  require(len(matching) == 1, 'Calc token does not bind one original worker trace file')
+                  trace = matching[0]
+                  require([r['sequence'] for r in trace['rows']] == list(range(1, len(trace['rows']) + 1)),
+                          'Calc original worker trace is incomplete')
+                  arrivals = [r for r in trace['rows'] if r['event'] == 'suite.nativeDispatch'
+                              and r['details'].get('command') == 'save']
+                  worker = [r for r in trace['rows'] if r['event'] == 'suite.workerSave'
+                            and r['details'].get('requestId') == request_id]
+                  require(len(arrivals) == 1 and [r['stage'] for r in worker] == ['request.begin', 'request.end']
+                          and worker[-1]['details'].get('ok') is True
+                          and len(worker) == sum(r['event'] == 'suite.workerSave' for r in trace['rows'])
+                          and len(arrivals) == sum(r['event'] == 'suite.nativeDispatch' for r in trace['rows'])
+                          and arrivals[0]['sequence'] < worker[0]['sequence'] < worker[-1]['sequence'],
+                          'Calc original worker lacks native Save arrival and successful matching request milestones')
+                  verified[name] = {'traceId': token, 'hostPid': case['shellPid'], 'workerProcessId': client,
+                      'actualWorkerPid': trace['workerPid'], 'requestId': request_id, 'commandSequence': sequence,
+                      'nativeReceiptSequence': arrivals[0]['details']['receiptSequence'],
+                      'hostTrace': {'file': path.name, 'bytes': path.stat().st_size, 'sha256': sha256(path)},
+                      'workerTrace': {k: trace[k] for k in ('file', 'bytes', 'sha256')}, 'successfulSaveMilestones': True}
+              return {'cases': 2, 'cohorts': verified, 'workerLauncherPidEqualityClaimed': False,
+                      'nativeReceiptSequenceUsedAsCrossProcessId': False, 'productFixEstablished': False}
+          
+          
+          def verify_native_diagnostics(evidence, source, payload, attempts, suite):
+              source_worker, packaged_worker = source / 'suite/worker/native.py', payload / 'worker/native.py'
+              require(source_worker.is_file() and packaged_worker.is_file() and sha256(source_worker) == sha256(packaged_worker),
+                      'Native StyleApply source worker differs from the verified payload')
+              # A normal-looking process exit does not disprove a crash. Inspect all raw
+              # evidence, including files omitted from a manifest or renamed minidumps.
+              for path in evidence.rglob('*'):
+                  require(not path.is_symlink(), 'Linked native evidence is not accepted')
+                  if path.is_file():
+                      with path.open('rb') as stream:
+                          header = stream.read(4)
+                      require(path.suffix.lower() not in ('.dmp', '.mdmp') and header != b'MDMP',
+                              'A native crash dump remains in the original evidence')
+              root = evidence / 'suite-worker-diagnostics'
+              require(root.is_dir() and not root.is_symlink(), 'Native diagnostic archive directory is missing')
+              profiles, save_traces = native_diagnostic_members(root)
+              archives, receipts = [], []
+              image = PureWindowsPath(suite) / 'Office/program/soffice.bin'
+              for folder in sorted(profiles):
+                  manifest = load_json(evidence_file(folder, 'manifest.json'))
+                  require(type(manifest.get('schemaVersion')) is int and manifest['schemaVersion'] == 1
+                          and manifest.get('archiveComplete') is True
+                          and isinstance(manifest.get('files'), list), 'Native diagnostic archive is incomplete')
+                  listed = set()
+                  for row in manifest['files']:
+                      name = row.get('path')
+                      require(isinstance(name, str) and name and '\\' not in name and ':' not in name
+                              and not name.startswith('/') and all(part not in ('', '.', '..') for part in name.split('/')),
+                              'Native diagnostic archive path escaped its profile')
+                      path = folder.joinpath(*name.split('/'))
+                      require(name not in listed and path.is_file() and not path.is_symlink()
+                              and type(row.get('bytes')) is int and row['bytes'] >= 0 and path.stat().st_size == row['bytes']
+                              and isinstance(row.get('sha256'), str) and SHA.fullmatch(row['sha256']) and sha256(path) == row['sha256'],
+                              'Native diagnostic archive file hash/size differs')
+                      listed.add(name)
+                  actual = {path.relative_to(folder).as_posix() for path in folder.rglob('*') if path.is_file()}
+                  require(actual == listed | {'manifest.json', 'events.jsonl'}, 'Native diagnostic archive contains unlisted files')
+                  events = [json.loads(line) for line in evidence_file(folder, 'events.jsonl').read_text(encoding='utf-8').splitlines()]
+                  require(events and all(isinstance(event.get('phase'), str) and isinstance(event.get('utc'), str) for event in events),
+                          'Native diagnostic events are missing')
+                  for event in events:
+                      for process in event.get('processes', []):
+                          if PureWindowsPath(process.get('image', '')).name.lower() != 'soffice.bin':
+                              continue
+                          require(PureWindowsPath(process['image']) == image, 'Native diagnostic process names another Office engine')
+                          if process.get('alive') is False:
+                              require(type(process.get('exitCode')) is int and process['exitCode'] in (0, 1),
+                                      'Native diagnostic engine has a native failure exit status')
+                      if event.get('phase') == 'after-ui-bootstrap' and 'toolbarStyleIsolation' in event.get('metadata', {}):
+                          receipt = verify_toolbar_receipt(event['metadata']['toolbarStyleIsolation'])
+                          receipts.append({'archive': folder.name, 'event': event, 'receipt': receipt})
+                  archives.append({'name': folder.name, 'events': events})
+              matched = set()
+              for attempt in attempts:
+                  require(type(attempt.get('officePid')) is int and attempt['officePid'] > 0
+                          and type(attempt.get('officeCreationTime')) is int and attempt['officeCreationTime'] > 0,
+                          'Startup native generation is missing')
+                  matches = [row for row in receipts if any(process.get('pid') == attempt['officePid']
+                             and process.get('creationTime') == attempt['officeCreationTime']
+                             and PureWindowsPath(process.get('image', '')) == image for process in row['event'].get('processes', []))]
+                  require(len(matches) == 1 and matches[0]['archive'] not in matched
+                          and matches[0]['receipt']['moduleName'].lower() == attempt['module'],
+                          'Startup does not have one distinct source-bound native StyleApply receipt')
+                  matched.add(matches[0]['archive'])
+              require(attempts and len(matched) == len(attempts), 'Startup native StyleApply receipts are incomplete')
+              return {'nativeWorkerSha256': sha256(source_worker), 'completeArchives': len(archives),
+                      'validatedToolbarReceipts': len(receipts), 'startupGenerationReceipts': len(matched), 'nativeCrashDumps': 0,
+                      'workerSaveTraces': [{k: trace[k] for k in ('file', 'bytes', 'sha256', 'workerPid', 'traceId')}
+                                          for trace in save_traces]}
+          
+          
+          def verify_editor_focus_readiness(row, native, targets):
+              require(isinstance(targets, (list, tuple)) and targets
+                      and all(isinstance(target, (list, tuple)) and len(target) == 4
+                              and all(type(value) is int and value > 0 for value in target)
+                              and target[0] != target[1] and target[2] != target[3] for target in targets),
+                      'Source editor readiness targets are invalid')
+              records = row.get('editorFocusReadinessRecords')
+              require(isinstance(records, list) and len(records) == len(targets)
+                      and row.get('editorFocusReadiness') == records[-1],
+                      'Editor readiness receipt coverage or latest alias differs from exact source')
+              def number(value):
+                  return type(value) in (int, float) and math.isfinite(value) and value >= 0
+              def window(value):
+                  require(isinstance(value, dict)
+                          and set(value) == {'hwnd', 'isWindow', 'pid', 'threadId', 'rootHwnd', 'className'}
+                          and all(type(value[key]) is int and 0 <= value[key] <= 0xffffffffffffffff
+                                  for key in ('hwnd', 'rootHwnd'))
+                          and all(type(value[key]) is int and 0 <= value[key] <= 0xffffffff for key in ('pid', 'threadId'))
+                          and type(value['isWindow']) is bool and isinstance(value['className'], str),
+                          'Editor readiness native window metadata is malformed')
+              for receipt, target in zip(records, targets):
+                  require(isinstance(receipt, dict) and not receipt.get('error')
+                          and type(receipt.get('schemaVersion')) is int
+                          and all(type(receipt.get(key)) is int and receipt[key] > 0
+                                  for key in ('suiteHwnd', 'childHwnd', 'shellPid', 'officePid', 'editorThreadId', 'focusHwnd'))
+                          and all(number(receipt.get(key)) for key in ('deadlineSeconds', 'pollStartedSeconds', 'elapsedSeconds')),
+                          'Editor readiness identity, timing or successful observation is malformed')
+                  snapshots = receipt.get('snapshots')
+                  require(isinstance(snapshots, list) and len(snapshots) >= 3, 'Editor readiness native snapshots are missing')
+                  for snapshot in snapshots:
+                      require(isinstance(snapshot, dict) and isinstance(snapshot.get('phase'), str)
+                              and number(snapshot.get('elapsedSeconds'))
+                              and all(type(snapshot.get(key)) is bool for key in ('queryAttempted', 'querySucceeded', 'focusWithinEditor'))
+                              and all(type(snapshot.get(key)) is int and 0 <= snapshot[key] <= 0xffffffff
+                                      for key in ('queriedThreadId', 'cbSize', 'lastError', 'flags')),
+                              'Editor readiness raw Win64 query metadata is malformed')
+                      require(isinstance(snapshot.get('caretRect'), list) and len(snapshot['caretRect']) == 4
+                              and all(type(value) is int and -(2**31) <= value < 2**31 for value in snapshot['caretRect']),
+                              'Editor readiness native caret rectangle is malformed')
+                      for edge in ('before', 'after'):
+                          binding = snapshot.get(edge)
+                          require(isinstance(binding, dict) and set(binding) == {'suite', 'editor', 'foreground', 'editorWithinSuite'}
+                                  and type(binding['editorWithinSuite']) is bool,
+                                  'Editor readiness surrounding native ownership observations are missing')
+                          for key in ('suite', 'editor', 'foreground'):
+                              window(binding[key])
+                      for key in ('active', 'focus', 'capture', 'menuOwner', 'moveSize', 'caret'):
+                          window(snapshot.get(key))
+                  require(receipt['elapsedSeconds'] >= snapshots[-1]['elapsedSeconds'],
+                          'Editor readiness total elapsed time precedes its final observation')
+                  native.require_editor_focus_readiness(receipt, *target)
+              return {'count': len(records), 'focusHwnds': [receipt['focusHwnd'] for receipt in records],
+                      'editorThreadIds': [receipt['editorThreadId'] for receipt in records]}
+          
+          
+          def verify_ascii_editor_inputs(row, expected_texts, document_hwnd, child_hwnd, ascii_input, pause):
+              require(type(document_hwnd) is int and document_hwnd > 0 and type(child_hwnd) is int and child_hwnd > 0
+                      and document_hwnd != child_hwnd, 'ASCII editor native window identity is missing')
+              require(isinstance(expected_texts, (list, tuple)) and expected_texts
+                      and all(isinstance(text, str) and text for text in expected_texts), 'Source ASCII editor markers are missing')
+              receipts = row.get('asciiEditorInputs')
+              require(isinstance(receipts, list) and len(receipts) == len(expected_texts), 'ASCII editor receipt coverage differs from exact source')
+              for receipt, text in zip(receipts, expected_texts):
+                  require(isinstance(receipt, dict) and type(receipt.get('schemaVersion')) is int and receipt['schemaVersion'] == 1,
+                          'ASCII editor receipt schema differs')
+                  require(type(receipt.get('pauseSeconds')) in (int, float) and receipt['pauseSeconds'] == pause,
+                          'ASCII editor character pacing differs from its source case')
+                  require(not receipt.get('error'), 'A failed ASCII editor input cannot certify acceptance')
+                  ascii_input.require_ascii_receipt(receipt, text, document_hwnd, child_hwnd)
+              return {'receipts': len(receipts), 'characters': sum(map(len, expected_texts)),
+                      'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False}
+          
+          
+          def verify_lifecycle_ascii_inputs(row, lifecycle, ascii_input):
+              cases = {name for name, flags in lifecycle.CASE_REQUIREMENTS.items() if 'packagedUnoVerified' in flags}
+              require(isinstance(lifecycle.ASCII_EDITOR_MARKERS, dict) and set(lifecycle.ASCII_EDITOR_MARKERS) == cases
+                      and row.get('case') in cases, 'Lifecycle ASCII marker cases differ from exact source')
+              # This case deliberately closes its clean first document and edits the
+              # still-owned second document. Its receipts must retain that exact target.
+              index = 1 if row['case'] == 'home-two-documents-cancel' else 0
+              attachments = row.get('attachments')
+              require(isinstance(attachments, list) and len(attachments) == index + 1
+                      and type(row.get('shellPid')) is int and row['shellPid'] > 0, 'Lifecycle ASCII document attachments are incomplete')
+              for attachment in attachments:
+                  require(all(type(attachment.get(key)) is int and attachment[key] > 0 for key in ('hwnd', 'parent', 'child', 'officePid'))
+                          and attachment['officePid'] != row['shellPid'], 'Lifecycle ASCII attachment ownership is unverified')
+              require(all(len({attachment[key] for attachment in attachments}) == len(attachments)
+                          for key in ('hwnd', 'parent', 'child', 'officePid')),
+                      'Lifecycle ASCII document attachments are not distinct')
+              target = attachments[index]
+              readiness = verify_editor_focus_readiness(row, lifecycle.native,
+                  [(target['hwnd'], target['child'], row['shellPid'], target['officePid'])]
+                  * len(lifecycle.ASCII_EDITOR_MARKERS[row['case']]))
+              result = verify_ascii_editor_inputs(row, lifecycle.ASCII_EDITOR_MARKERS[row['case']],
+                  target['hwnd'], target['child'], ascii_input, 0.025)
+              return {**result, 'editedAttachmentIndex': index, 'editorFocusReadiness': readiness}
+          
+          
+          def completion_path(value):
+              require(isinstance(value, str) and value and '\0' not in value,
+                      'Completion anchor needs an absolute owned path')
+              path = PureWindowsPath(value)
+              if not path.is_absolute():
+                  path = PurePosixPath(value)
+              require(path.is_absolute() and '..' not in path.parts,
+                      'Completion anchor path is relative or escaped')
+              return path
+          
+          
+          def lifecycle_completion_baseline(directory, korean_writer, initial_writer, lifecycle):
+              # The later GUI edits the live engine fixture. Its earlier Korean UI copy
+              # retains the actual original bytes; no completion producer supplies this body.
+              require(korean_writer.get('module') == 'writer'
+                      and korean_writer.get('fixtureUnchanged') is True
+                      and korean_writer.get('originalFixtureUnchanged') is True,
+                      'Completion baseline needs the unchanged original Korean UI Writer copy')
+              original = evidence_file(directory, korean_writer['copiedFixture'])
+              actual = lifecycle.writer_evidence(original)
+              require(SHA.fullmatch(initial_writer.get('sha256', ''))
+                      and actual['sha256'] == initial_writer['sha256'] == korean_writer.get('beforeSha256')
+                      and actual['bytes'] == initial_writer.get('bytes')
+                      and completion_path(korean_writer['originalFixture']) == completion_path(initial_writer['fixture']),
+                      'Completion baseline differs from the independently generated original Writer fixture')
+              return {'bodyText': actual['bodyText'], 'sha256': actual['sha256'], 'bytes': actual['bytes']}
+          
+          
+          def lifecycle_completion_url(lifecycle, name, initial_engine):
+              # Bind the target basename and factory exception to the actual Case source,
+              # rather than accepting a producer-supplied model URL or post-SaveAs path.
+              tree = ast.parse(Path(lifecycle.__file__).read_text(encoding='utf-8'))
+              cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Case')
+              init = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == '__init__')
+              assigns = [node.value for node in init.body if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                                 and target.value.id == 'self' and target.attr == 'source' for target in node.targets)]
+              expected = ast.parse("None if blank or home else copy_writer_fixture(fixtures, self.folder, '원본 문서 & ' + name + '.docx')", mode='eval').body
+              require(len(assigns) == 1 and ast.dump(assigns[0], include_attributes=False)
+                      == ast.dump(expected, include_attributes=False), 'Lifecycle original fixture constructor differs from exact source')
+              main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+              definitions = [node.value for node in main.body if isinstance(node, ast.Assign)
+                             and any(isinstance(target, ast.Name) and target.id == 'definitions' for target in node.targets)]
+              require(len(definitions) == 1 and isinstance(definitions[0], ast.Tuple)
+                      and len(definitions[0].elts) == len(lifecycle.CASE_REQUIREMENTS),
+                      'Lifecycle factory definitions differ from exact source')
+              options = {}
+              for case, entry in zip(lifecycle.CASE_REQUIREMENTS, definitions[0].elts):
+                  require(isinstance(entry, ast.Tuple) and len(entry.elts) == 2
+                          and isinstance(entry.elts[0], ast.Name), 'Lifecycle factory action is not source-defined')
+                  values = ast.literal_eval(entry.elts[1])
+                  require(isinstance(values, dict) and set(values) <= {'blank', 'home'}
+                          and all(value is True for value in values.values()), 'Lifecycle factory options differ')
+                  options[case] = values
+              require(name in options, 'Lifecycle factory case is missing')
+              if options[name].get('blank') or options[name].get('home'):
+                  return ''
+              original = completion_path(initial_engine['writer']['fixture'])
+              return (original.parent.parent.parent / 'suite-lifecycle' / 'fixtures' / name
+                      / ('원본 문서 & ' + name + '.docx')).as_uri()
+          
+          
+          def verify_lifecycle_model_completions(row, lifecycle, model, *, suite_root,
+                                                 inventory, inventory_sha256, baseline_body, initial_engine):
+              markers = lifecycle.ASCII_EDITOR_MARKERS
+              name = row.get('case')
+              require(isinstance(markers, dict) and name in markers and markers[name],
+                      'Completion case has no exact source physical markers')
+              require(Path(importlib.import_module('lifecycle_smoke').__file__).absolute()
+                      == Path(lifecycle.__file__).absolute()
+                      and Path(model.__file__).parent.absolute() == Path(lifecycle.__file__).parent.absolute(),
+                      'Completion replay modules do not belong to the same tested source')
+              index = 1 if name == 'home-two-documents-cancel' else 0
+              attachments = row.get('attachments')
+              require(isinstance(attachments, list) and len(attachments) == index + 1,
+                      'Completion edited attachment coverage differs from source')
+              target = attachments[index]
+              require(all(type(target.get(key)) is int and target[key] > 0
+                          for key in ('hwnd', 'child', 'parent', 'officePid')),
+                      'Completion original attachment identity is missing')
+              url = lifecycle_completion_url(lifecycle, name, initial_engine)
+              body = '' if url == '' else baseline_body
+              replay = model.replay_case_completions(row, suite_root=suite_root, inventory=inventory,
+                  inventory_sha256=inventory_sha256, baseline_body=body,
+                  expected_urls={(target['hwnd'], target['child']): url})
+              require(isinstance(replay, dict) and replay.get('kind') == 'writer-model-case-replay'
+                      and replay.get('success') is True and replay.get('editCount') == len(markers[name])
+                      and replay.get('originalPhysicalAsciiLossCauseEstablished') is False
+                      and replay.get('productFixEstablished') is False,
+                      'Source replay did not establish exact bounded original-edit completion')
+              reader = importlib.import_module('writer_model_reader')
+              require(Path(reader.__file__).parent.absolute() == Path(lifecycle.__file__).parent.absolute(),
+                      'Canonical directory replay does not belong to the same tested source')
+              frames = replay.get('frameGenerations')
+              require(isinstance(frames, list) and len(frames) == 1,
+                      'Canonical profile summary differs from the source-edited frame set')
+              for frame in frames:
+                  require((frame.get('suiteHwnd'), frame.get('childHwnd')) == (target['hwnd'], target['child']),
+                          'Canonical directory summary names another original editor frame')
+                  canonical, _ = completion_canonical_profile(frame)
+                  receipts = [receipt for receipt in row['writerModelCompletions']
+                              if all(receipt['expectation']['binding'].get(key) == frame.get(key)
+                                     for key in ('suiteHwnd', 'childHwnd', 'parentHwnd', 'rootHwnd',
+                                                 'shellPid', 'shellCreationTime', 'officePid', 'officeCreationTime', 'expectedImage'))]
+                  require(receipts, 'Canonical directory summary lacks its original retained native generation')
+                  for receipt in receipts:
+                      native = receipt['expectation']['beforeInput']['nativeSnapshots']['controllerBefore']
+                      require(native['officeCommandLine'] == frame.get('officeCommandLine')
+                              and native['profileUrl'] == frame.get('profileUrl'),
+                              'Canonical directory summary changed the original Office argv/profile URI')
+                      directory = native['profileDirectory']
+                      reader.require_profile_directory_witness(directory['witness'], native['profileUrl'], directory['recheck'])
+                      projected = reader.canonical_profile_projection(directory['witness'], native['profileUrl'])
+                      require(projected == canonical,
+                              'Canonical directory summary differs from the source-replayed native DIRECTORYHANDLE witness')
+              return replay
+          
+          
+          def completion_profile(argv, observed_url):
+              require(isinstance(argv, list) and 1 <= len(argv) <= 64
+                      and all(isinstance(value, str) and '\0' not in value for value in argv),
+                      'Completion needs the retained original Office argv')
+              urls = [value[len('-env:UserInstallation='):] for value in argv
+                      if value.startswith('-env:UserInstallation=')]
+              require(len(urls) == 1 and urls[0] == observed_url,
+                      'Completion needs one unchanged original Office profile URL')
+              uri = urllib.parse.urlsplit(urls[0])
+              require(uri.scheme == 'file' and not uri.netloc and not uri.query and not uri.fragment,
+                      'Completion profile is not a local file URI')
+              raw = urllib.parse.unquote(uri.path, errors='strict')
+              require(raw.startswith('/') and not raw.startswith('//')
+                      and not re.match(r'^/[A-Za-z]:(?:[^/]|$)', raw)
+                      and '\\' not in raw and '\0' not in raw
+                      and '..' not in PurePosixPath(raw).parts, 'Completion profile URI escaped its owned directory')
+              path = raw[1:] if re.match(r'^/[A-Za-z]:/', raw) else raw
+              return completion_path(path)
+          
+          
+          def completion_canonical_profile(frame):
+              # This descriptor is returned by full raw source replay, and independently
+              # reprojected from that raw DIRECTORYHANDLE witness by the case wrapper.
+              # Its FileID is not claimed to be a field of the older native archives.
+              raw = completion_profile(frame.get('officeCommandLine'), frame.get('profileUrl'))
+              require(isinstance(raw, PureWindowsPath) and re.fullmatch(r'[A-Za-z]:', raw.drive),
+                      'Native profile URI must identify a local Windows drive directory')
+              canonical = frame.get('canonicalProfile')
+              require(isinstance(canonical, dict) and set(canonical) == {
+                          'profileUrl', 'canonicalPath', 'volumeSerialNumber', 'fileIndexHigh', 'fileIndexLow'}
+                      and canonical.get('profileUrl') == frame.get('profileUrl'),
+                      'Native canonical profile descriptor is missing or changed its original URI')
+              path = completion_path(canonical.get('canonicalPath'))
+              require(isinstance(path, PureWindowsPath) and re.fullmatch(r'[A-Za-z]:', path.drive),
+                      'Native canonical profile must be a local Windows drive directory')
+              require(all(type(canonical.get(key)) is int and 0 <= canonical[key] <= 0xffffffff
+                          for key in ('volumeSerialNumber', 'fileIndexHigh', 'fileIndexLow'))
+                      and (canonical['fileIndexHigh'] or canonical['fileIndexLow']),
+                      'Native canonical profile volume/FileID is missing or invalid')
+              return canonical, path
+          
+          
+          def verify_model_completion_archives(evidence, cases, suite_root, *, module_name='Writer'):
+              # Called only after verify_native_diagnostics checks every file/hash/exit and
+              # all startup receipts. Archives record PID/FILETIME/image/profile, not argv
+              # or pipe. The pipe is separately replayed from the retained raw argv.
+              image = completion_path(suite_root) / 'Office/program/soffice.bin'
+              require(module_name in ('Writer', 'Calc'), 'Unknown model-completion native module')
+              root = evidence / 'suite-worker-diagnostics'
+              require(root.is_dir() and not root.is_symlink(), 'Completion native archives are missing')
+              archives = []
+              profiles, _ = native_diagnostic_members(root)
+              for folder in sorted(profiles):
+                  require(folder.is_dir() and not folder.is_symlink(), 'Completion native archive is not an owned directory')
+                  manifest = load_json(evidence_file(folder, 'manifest.json'))
+                  require(type(manifest.get('schemaVersion')) is int and manifest['schemaVersion'] == 1
+                          and manifest.get('archiveComplete') is True,
+                          'Completion native archive is incomplete')
+                  profile = completion_path(manifest.get('ownedProfile'))
+                  events = [json.loads(line) for line in evidence_file(folder, 'events.jsonl').read_text(encoding='utf-8').splitlines()]
+                  generations = set()
+                  for event in events:
+                      if event.get('phase') != 'after-ui-bootstrap':
+                          continue
+                      toolbar = event.get('metadata', {}).get('toolbarStyleIsolation')
+                      if toolbar is None:
+                          continue
+                      replay = verify_toolbar_receipt(toolbar)
+                      if replay['moduleName'] != module_name:
+                          continue
+                      for process in event.get('processes', []):
+                          if not process.get('image') or completion_path(process['image']) != image:
+                              continue
+                          require(type(process.get('pid')) is int and process['pid'] > 0
+                                  and type(process.get('creationTime')) is int and process['creationTime'] > 0,
+                                  'Completion archive native generation is missing')
+                          generations.add((process['pid'], process['creationTime'], image))
+                  archives.append((folder.name, profile, generations))
+              frames, selected = {}, set()
+              require(isinstance(cases, dict) and cases, 'Completion case replay summaries are missing')
+              for name, replay in cases.items():
+                  require(replay.get('success') is True and isinstance(replay.get('frameGenerations'), list)
+                          and replay['frameGenerations'], 'Completion frame generation summary is missing')
+                  for frame in replay['frameGenerations']:
+                      require(type(frame.get('officePid')) is int and frame['officePid'] > 0
+                              and type(frame.get('officeCreationTime')) is int and frame['officeCreationTime'] > 0
+                              and completion_path(frame.get('expectedImage')) == image,
+                              'Completion describes another Office native generation/image')
+                      canonical, profile = completion_canonical_profile(frame)
+                      generation = (frame['officePid'], frame['officeCreationTime'], image)
+                      matches = [(archive, owned) for archive, owned, generations in archives if generation in generations]
+                      require(len(matches) == 1 and matches[0][1] == profile,
+                              'Completion lacks one exact native archive generation/profile join')
+                      archive = matches[0][0]
+                      if generation in frames:
+                          require(frames[generation]['archive'] == archive and frames[generation]['profile'] == str(profile)
+                                  and frames[generation]['officeCommandLine'] == frame['officeCommandLine']
+                                  and frames[generation]['canonicalProfile'] == canonical,
+                                  'Completion native generation transport/profile changed across cases')
+                      else:
+                          frames[generation] = {'archive': archive, 'profile': str(profile),
+                              'officePid': frame['officePid'], 'officeCreationTime': frame['officeCreationTime'],
+                              'image': str(image), 'officeCommandLine': frame['officeCommandLine'],
+                              'canonicalProfile': canonical}
+                      selected.add(archive)
+              return {'frameGenerations': len(frames), 'distinctArchives': len(selected),
+                      'anchors': list(frames.values()), 'archivePipeFieldClaimed': False}
+          
+          
+          def verify_base_save_cohorts(cohorts, native):
+              require(isinstance(cohorts, dict) and set(cohorts) == {'suite-1', 'suite-2'},
+                      'Both native GUI cohorts need their original new-Base readiness proof')
+              tree = ast.parse(Path(native.__file__).read_text(encoding='utf-8'))
+              save = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'save_new_base')
+              captions = [node.value for node in save.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'caption' for target in node.targets)]
+              require(len(captions) == 1 and isinstance(captions[0], ast.Constant)
+                      and isinstance(captions[0].value, str) and captions[0].value,
+                      'Base Save dialog caption is not one exact source literal')
+              caption, verified = captions[0].value, {}
+              for name in ('suite-1', 'suite-2'):
+                  rows = cohorts[name]
+                  require(isinstance(rows, dict) and isinstance(rows.get('new-base'), dict),
+                          'Native GUI cohort has no new-Base source row')
+                  row = rows['new-base']
+                  require(all(type(row.get(key)) is int and row[key] > 0 for key in ('shellPid', 'windowHwnd')),
+                          'Base readiness needs its actual source-bound Suite PID/document HWND')
+                  proof = row.get('baseSaveDialogReadiness')
+                  require(isinstance(proof, dict), 'New Base is missing its raw owned Save dialog readiness proof')
+                  # Default four-argument replay requires filenameInputStartedAt, unlike
+                  # the producer's internal pre-input validation seam.
+                  native.require_base_save_dialog_readiness(proof, row['shellPid'], row['windowHwnd'], caption)
+                  verified[name] = {'shellPid': row['shellPid'], 'documentHwnd': row['windowHwnd'],
+                      'caption': caption, 'dialogHwnd': proof['dialogHwnd'], 'observations': len(proof['observations']),
+                      'deadline': proof['deadline'], 'finishedAt': proof['finishedAt'],
+                      'filenameInputStartedAt': proof['filenameInputStartedAt'],
+                      'rawProofSha256': hashlib.sha256(json.dumps(proof, ensure_ascii=False, sort_keys=True,
+                          separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()}
+              return {'cases': 2, 'cohorts': verified}
+          
+          
+          def verify_calc_model_cohorts(cohorts, native, model, *, inventory, inventory_sha256):
+              """Replay one original existing-Calc completion in each unchanged 13-case GUI cohort."""
+              require(isinstance(cohorts, dict) and set(cohorts) == {'suite-1', 'suite-2'},
+                      'Both original GUI cohorts require their Calc model completion')
+              source = Path(native.__file__).absolute().parent
+              require(Path(model.__file__).absolute().parent == source,
+                      'Calc completion replay does not belong to the exact native case source')
+              reader = importlib.import_module('writer_model_reader')
+              require(Path(reader.__file__).absolute().parent == source,
+                      'Calc native reader replay does not belong to the same tested source')
+              require(isinstance(native.EDITOR_MARKERS, dict)
+                      and native.EDITOR_MARKERS.get('calc') == 'UI-OpenGeul-calc',
+                      'Calc completion marker differs from the original physical case')
+              marker, verified, baselines, generations, suite = native.EDITOR_MARKERS['calc'], {}, {}, set(), None
+              for name, suffix in (('suite-1', ''), ('suite-2', '-2')):
+                  cohort = cohorts[name]
+                  require(isinstance(cohort, dict) and isinstance(cohort.get('rows'), dict)
+                          and isinstance(cohort['rows'].get('calc'), dict)
+                          and isinstance(cohort.get('initialCalc'), dict),
+                          'Original existing-Calc row or independent engine baseline is missing')
+                  row, initial = cohort['rows']['calc'], cohort['initialCalc']
+                  root = completion_path(cohort.get('suiteRoot'))
+                  require(suite is None or root == suite, 'Calc GUI cohorts name different Suite payloads')
+                  suite = root
+                  require(row.get('case') == row.get('module') == 'calc'
+                          and row.get('keyboardMarker') == marker,
+                          'Calc completion is not the original existing physical-input case')
+                  original = completion_path(initial.get('fixture'))
+                  require(isinstance(original, PureWindowsPath) and original.name == 'OpenGeul-calc.xlsx'
+                          and original.parent.name == 'fixtures'
+                          and original.parent.parent.name == 'suite-engine' + suffix,
+                          'Calc expected URL must come from the exact independent cohort fixture')
+                  snapshot = evidence_file(cohort['directory'], 'calc-model-baseline.xlsx')
+                  raw = snapshot.read_bytes()
+                  require(SHA.fullmatch(initial.get('sha256', '')) and type(initial.get('bytes')) is int
+                          and initial['bytes'] > 0 and hashlib.sha256(raw).hexdigest()
+                          == initial['sha256'] == row.get('beforeSha256') and len(raw) == initial['bytes'],
+                          'Calc prelaunch snapshot differs from its independent engine SHA/size')
+                  baseline = model.baseline_from_ooxml(raw)
+                  require(isinstance(baseline, dict) and baseline.get('sourceSha256') == initial['sha256']
+                          and baseline.get('sourceBytes') == initial['bytes'] and row.get('calcModelBaseline') == baseline,
+                          'Calc producer baseline differs from independently parsed original OOXML')
+                  observed = initial.get('observed', {})
+                  require(initial.get('module') == 'calc' and initial.get('status') == 'passed'
+                          and observed.get('text') == baseline['a1Text']
+                          and observed.get('formula') == baseline['d1Formula']
+                          and type(observed.get('value')) in (int, float) and observed['value'] == baseline['d1Value'],
+                          'Calc prelaunch OOXML differs from independent engine semantics')
+                  receipt = row.get('calcModelCompletion')
+                  require(isinstance(receipt, dict), 'Calc requires exactly one full completion receipt')
+                  binding = receipt.get('expectation', {}).get('binding')
+                  require(isinstance(binding, dict), 'Calc retained frame binding is missing')
+                  external = {'shellPid': 'shellPid', 'officePid': 'officePid', 'suiteHwnd': 'windowHwnd',
+                              'parentHwnd': 'parentHwnd', 'childHwnd': 'childHwnd', 'rootHwnd': 'windowHwnd'}
+                  require(all(type(row.get(field)) is int and row[field] > 0
+                              and type(binding.get(key)) is int and binding[key] == row[field]
+                              for key, field in external.items())
+                          and completion_path(binding.get('expectedImage')) == root / 'Office/program/soffice.bin'
+                          and binding.get('documentUrl') == original.as_uri(),
+                          'Calc completion differs from independent case PID/HWND/image/fixture URL')
+                  replay = model.replay_completion(receipt, suite_root=str(root), inventory=inventory,
+                      inventory_sha256=inventory_sha256, binding=dict(binding), baseline=baseline,
+                      expected_url=original.as_uri(), marker=marker)
+                  require(isinstance(replay, dict) and replay.get('kind') == 'calc-model-case-replay'
+                          and replay.get('success') is True and replay.get('editCount') == 1
+                          and replay.get('expectedA1') == baseline['a1Text'] + marker
+                          and replay.get('productFixEstablished') is False
+                          and replay.get('originalPhysicalAsciiLossCauseEstablished') is False,
+                          'Source replay did not establish exact Calc model equality and normal cleanup')
+                  frames = replay.get('frameGenerations')
+                  require(isinstance(frames, list) and len(frames) == 1,
+                          'Calc replay must retain exactly its original frame generation')
+                  frame = frames[0]
+                  require(all(frame.get(key) == value for key, value in binding.items()),
+                          'Calc replay changed its original retained frame binding')
+                  canonical, _ = completion_canonical_profile(frame)
+                  raw_native = receipt['expectation']['beforeInput']['nativeSnapshots']['controllerBefore']
+                  directory = raw_native['profileDirectory']
+                  reader.require_profile_directory_witness(directory['witness'], raw_native['profileUrl'], directory['recheck'])
+                  require(frame.get('officeCommandLine') == raw_native['officeCommandLine']
+                          and frame.get('profileUrl') == raw_native['profileUrl']
+                          and canonical == reader.canonical_profile_projection(directory['witness'], raw_native['profileUrl']),
+                          'Calc canonical profile summary differs from the retained native DIRECTORY HANDLE')
+                  generation = (frame['officePid'], frame['officeCreationTime'])
+                  require(generation not in generations, 'Two original Calc cohorts reused an owned engine generation')
+                  generations.add(generation)
+                  verified[name], baselines[name] = replay, {'file': snapshot.name,
+                      'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw), 'baseline': baseline,
+                      'expectedUrl': original.as_uri()}
+              return {'cases': 2, 'cohorts': verified, 'baselines': baselines,
+                      'inventorySha256': inventory_sha256, 'acceptanceCompletionStrengthened': True,
+                      'productFixEstablished': False, 'originalPhysicalAsciiLossCauseEstablished': False}
+          
+          
+          def picker_filename_source(lifecycle, name):
+              functions = {'new-writer-saveas-cancel': 'new_saveas_cancel',
+                           'failed-saveas-retains-editor': 'failed_saveas',
+                           'home-two-documents-cancel': 'home_two_documents'}
+              tree = ast.parse(Path(lifecycle.__file__).read_text(encoding='utf-8'))
+              action = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == functions[name])
+              calls = [node for node in ast.walk(action) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == 'owned_target']
+              require(len(calls) == 1 and len(calls[0].args) == 2 and not calls[0].keywords,
+                      'Source picker target is not one fixed owned fixture')
+              folder, filename = calls[0].args
+              require(isinstance(folder, ast.Attribute) and folder.attr == 'folder'
+                      and isinstance(folder.value, ast.Name) and folder.value.id == 'case', 'Source picker target names another directory')
+              filename = ast.literal_eval(filename)
+              require(isinstance(filename, str) and filename and PureWindowsPath(filename).name == filename
+                      and not any(char in filename for char in ('/', '\\', ':')) and filename.endswith('.docx'),
+                      'Source picker target is not a fixed DOCX basename')
+              cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Case')
+              picker = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == 'picker')
+              captions = [ast.literal_eval(node.value) for node in picker.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'caption' for target in node.targets)]
+              require(len(captions) == 1 and isinstance(captions[0], str) and captions[0], 'Source picker caption is not fixed')
+              return filename, captions[0]
+          
+          
+          def verify_picker_filename_focus_receipt(receipt, lifecycle, shell, dialog, field):
+              require(receipt.get('success') is True and not receipt.get('error') and receipt.get('readOnly') is False
+                      and type(receipt.get('focusClickAttempts')) is int and receipt['focusClickAttempts'] == 1
+                      and type(receipt.get('assignmentAttempts')) is int and receipt['assignmentAttempts'] == 1,
+                      'Picker filename focus requires one successful owned click and one assignment')
+              fields = {'threadId', 'fieldLive', 'fieldPid', 'fieldRoot', 'fieldClass', 'activeHwnd', 'focusHwnd', 'captureHwnd',
+                        'menuOwnerHwnd', 'flags', 'foregroundHwnd', 'foregroundRoot', 'nativeText',
+                        'nativeTextLength', 'nativeTextTimeoutMs'}
+              states = []
+              for name in ('focusBefore', 'focusAfterClick', 'focusAfterAssignment'):
+                  state = receipt.get(name)
+                  require(isinstance(state, dict) and set(state) == fields, 'Picker filename native focus/text snapshot schema differs')
+                  require(state['fieldLive'] is True and state['fieldClass'] == 'Edit'
+                          and type(state['fieldPid']) is int and state['fieldPid'] == shell
+                          and type(state['threadId']) is int and 0 < state['threadId'] <= 0xffffffff,
+                          'Picker filename native focus field/process/thread is invalid')
+                  require(all(type(state[key]) is int and 0 <= state[key] <= 0xffffffffffffffff
+                              for key in ('fieldRoot', 'activeHwnd', 'focusHwnd', 'captureHwnd', 'menuOwnerHwnd', 'foregroundHwnd', 'foregroundRoot'))
+                          and state['foregroundHwnd'] > 0 and type(state['flags']) is int and 0 <= state['flags'] <= 0xffffffff,
+                          'Picker filename native focus window metadata is malformed')
+                  require(isinstance(state['nativeText'], str) and '\0' not in state['nativeText']
+                          and type(state['nativeTextLength']) is int and 0 <= state['nativeTextLength'] < 4095
+                          and type(state['nativeTextTimeoutMs']) is int and state['nativeTextTimeoutMs'] == 1000,
+                          'Picker filename native text is missing, unbounded or has a different timeout')
+                  try:
+                      units = len(state['nativeText'].encode('utf-16-le')) // 2
+                  except UnicodeEncodeError:
+                      raise RuntimeError('Picker filename native text is not valid UTF-16') from None
+                  require(state['nativeTextLength'] == units, 'Picker filename native UTF-16 text length differs')
+                  lifecycle.require_picker_filename_context(state, shell, dialog)
+                  states.append(state)
+              before, clicked, assigned = states
+              require(before['nativeText'] == receipt.get('before'), 'Picker filename pre-click native/UIA text differs')
+              lifecycle.require_picker_filename_focus(clicked, shell, dialog, field, before['threadId'])
+              lifecycle.require_picker_filename_focus(assigned, shell, dialog, field, before['threadId'])
+              require(assigned['nativeText'] == receipt.get('after') == receipt.get('expected'),
+                      'Picker filename assigned native text differs from exact UIA readback/target')
+              return {'focusClickAttempts': 1, 'assignmentAttempts': 1, 'nativeSnapshots': 3,
+                      'threadId': before['threadId'], 'nativeTextTimeoutMs': 1000}
+          
+          
+          def verify_picker_native_edit_receipt(receipt, lifecycle, shell, dialog, field):
+              focus = verify_picker_filename_focus_receipt(receipt, lifecycle, shell, dialog, field)
+              require(receipt.get('method') == 'Win32-Edit-EM_REPLACESEL'
+                      and type(receipt.get('selectionSetAttempts')) is int and receipt['selectionSetAttempts'] == 1,
+                      'Picker filename native selection must execute exactly once')
+              edit = receipt.get('nativeEdit')
+              require(isinstance(edit, dict)
+                      and all(type(edit.get(key)) is int for key in ('styleRaw', 'timeoutFlags', 'timeoutMs', 'replacementUtf16Units'))
+                      and isinstance(edit.get('replacementUtf16LeHex'), str)
+                      and type(edit.get('multiline')) is bool,
+                      'Picker filename native Edit metadata is malformed')
+              context_fields = {'threadId', 'fieldLive', 'fieldPid', 'fieldRoot', 'fieldClass', 'activeHwnd', 'focusHwnd',
+                                'captureHwnd', 'menuOwnerHwnd', 'flags', 'foregroundHwnd', 'foregroundRoot'}
+              for name in ('selectionBefore', 'selectResult', 'selectionAfterSelect', 'replaceResult'):
+                  message = edit.get(name)
+                  require(isinstance(message, dict)
+                          and all(type(message.get(key)) is int for key in ('message', 'wParam', 'lParam', 'timeoutFlags',
+                                                                         'timeoutMs', 'sendReturn', 'messageReturn'))
+                          and all(0 <= message[key] <= 0xffffffff for key in ('message', 'timeoutFlags', 'timeoutMs'))
+                          and 0 <= message['wParam'] <= 0xffffffffffffffff
+                          and -(2**63) <= message['lParam'] < 2**63
+                          and -(2**63) <= message['sendReturn'] < 2**63
+                          and 0 <= message['messageReturn'] <= 0xffffffffffffffff,
+                          'Picker filename native Edit message arguments or result are malformed')
+                  context = message.get('context')
+                  require(isinstance(context, dict) and set(context) == context_fields
+                          and context['fieldLive'] is True and context['fieldClass'] == 'Edit'
+                          and all(type(context[key]) is int and 0 <= context[key] <= 0xffffffffffffffff
+                                  for key in context_fields - {'fieldLive', 'fieldClass'})
+                          and 0 < context['threadId'] <= 0xffffffff and context['fieldPid'] == shell
+                          and context['flags'] <= 0xffffffff,
+                          'Picker filename per-message native Edit ownership context is malformed')
+                  if name in ('selectionBefore', 'selectionAfterSelect'):
+                      require(all(type(message.get(key)) is int for key in ('packedResult', 'start', 'end')),
+                              'Picker filename native Edit selection result is malformed')
+              lifecycle.require_picker_native_edit_receipt(receipt, shell, dialog, field)
+              return {**focus, 'selectionSetAttempts': 1, 'nativeEditMessages': 4,
+                      'replacementUtf16Units': edit['replacementUtf16Units']}
+          
+          
+          def verify_picker_filename_inputs(row, lifecycle, expected_output):
+              name = row.get('case')
+              require(name in lifecycle.CASE_REQUIREMENTS, 'Picker filename case differs from exact source')
+              receipts = row.get('pickerFilenameInputs', [])
+              require(isinstance(receipts, list), 'Picker filename receipt list is malformed')
+              counts = {'new-writer-saveas-cancel': (2,), 'failed-saveas-retains-editor': (1, 2),
+                        'home-two-documents-cancel': (1,)}
+              require(len(receipts) in counts.get(name, (0,)), 'Picker filename receipt count differs from its actual case flow')
+              if not receipts:
+                  return {'receipts': 0}
+              filename, caption = picker_filename_source(lifecycle, name)
+              saved = row.get('savedDocuments')
+              require(isinstance(saved, list) and len(saved) == 1 and isinstance(saved[0].get('path'), str),
+                      'Picker filename has no unique saved-document path')
+              path = PureWindowsPath(saved[0]['path'])
+              output = PureWindowsPath(expected_output)
+              require(output.is_absolute() and output.name == 'suite-lifecycle' and output.parent.name == '.work',
+                      'Picker filename output differs from the source-bound engine workspace')
+              require(path.is_absolute() and path.parent.name == name and path.parent.parent.name == 'fixtures'
+                      and path.parent.parent.parent == output, 'Picker filename target escaped its source-bound case fixture directory')
+              target = str(path.parent / filename)
+              require((path.name != filename) if name == 'failed-saveas-retains-editor' else (path.name == filename),
+                      'Picker target differs from its source case saved document')
+              attachments = row.get('attachments')
+              index = 1 if name == 'home-two-documents-cancel' else 0
+              require(isinstance(attachments, list) and len(attachments) == index + 1, 'Picker filename document attachment is missing')
+              attachment, shell = attachments[index], row.get('shellPid')
+              require(type(shell) is int and shell > 0 and isinstance(attachment, dict)
+                      and all(type(attachment.get(key)) is int and attachment[key] > 0 for key in ('hwnd', 'parent', 'child', 'officePid'))
+                      and attachment['officePid'] != shell, 'Picker filename document identity is invalid')
+              document = attachment['hwnd']
+              editor_windows = {attachment[key] for key in ('hwnd', 'parent', 'child')}
+              def runtime_id(value):
+                  return isinstance(value, list) and bool(value) and all(type(item) is int for item in value)
+              for receipt in receipts:
+                  require(isinstance(receipt, dict) and receipt.get('method') == 'Win32-Edit-EM_REPLACESEL'
+                          and receipt.get('success') is True and not receipt.get('error') and receipt.get('readOnly') is False
+                          and type(receipt.get('assignmentAttempts')) is int and receipt['assignmentAttempts'] == 1
+                          and receipt.get('expected') == receipt.get('after') == target and isinstance(receipt.get('before'), str),
+                          'Picker filename assignment/readback is incomplete or differs from its source target')
+                  doc, dialog, uia, field = (receipt.get(key) for key in ('document', 'dialog', 'dialogUia', 'field'))
+                  require(all(isinstance(value, dict) for value in (doc, dialog, uia, field)), 'Picker filename native/UIA identities are missing')
+                  require(type(doc.get('hwnd')) is int and doc['hwnd'] == document and type(doc.get('pid')) is int
+                          and doc['pid'] == shell and doc.get('live') is True, 'Picker filename document is not the live owned attachment')
+                  require(type(dialog.get('hwnd')) is int and dialog['hwnd'] > 0 and dialog['hwnd'] not in editor_windows
+                          and type(dialog.get('pid')) is int and type(dialog.get('owner')) is int and dialog.get('live') is True,
+                          'Picker filename dialog is not a distinct live native window')
+                  lifecycle.native.require_dialog_identity(dialog['pid'], shell, dialog['owner'], document,
+                      dialog.get('title'), caption, dialog.get('class'))
+                  require(type(uia.get('nativeHandle')) is int and uia['nativeHandle'] == dialog['hwnd']
+                          and type(uia.get('processId')) is int and uia['processId'] == shell and runtime_id(uia.get('runtimeId'))
+                          and uia.get('name') == dialog['title'] and uia.get('controlType') == 'Window',
+                          'Picker filename UIA root differs from its owned native dialog')
+                  require(type(field.get('nativeHandle')) is int and field['nativeHandle'] > 0
+                          and field['nativeHandle'] not in editor_windows | {dialog['hwnd']}
+                          and type(field.get('processId')) is int and type(field.get('nativePid')) is int
+                          and field['processId'] == field['nativePid'] == shell and runtime_id(field.get('runtimeId'))
+                          and field.get('automationId') == '1001' and field.get('controlType') == 'Edit'
+                          and isinstance(field.get('name'), str) and field.get('nativeClass') == 'Edit'
+                          and all(field.get(key) is True for key in ('visible', 'enabled', 'nativeLive', 'nativeChildOfDialog'))
+                          and type(field.get('nativeRoot')) is int and field['nativeRoot'] == dialog['hwnd'],
+                          'Picker filename Edit 1001 is not the live owned native/UIA field')
+                  verify_picker_native_edit_receipt(receipt, lifecycle, shell, dialog['hwnd'], field['nativeHandle'])
+              if name == 'failed-saveas-retains-editor':
+                  require(all(row.get(key) is True for key in ('actualSaveAsFailureVerified', 'originalShaPreservedOnFailure', 'subsequentEditSavePersisted'))
+                          and row.get('failureSurface') in ('suite-worker', 'native-picker'), 'Picker filename failure path has no actual save error')
+                  error, texts = row.get('saveErrorUia'), row.get('saveErrorText')
+                  require(isinstance(error, dict) and type(error.get('nativeHandle')) is int and error['nativeHandle'] > 0
+                          and error['nativeHandle'] not in (document, receipts[0]['dialog']['hwnd'])
+                          and type(error.get('processId')) is int and error['processId'] == shell and runtime_id(error.get('runtimeId'))
+                          and error.get('name') == row.get('saveErrorCaption') and error.get('controlType') == 'Window'
+                          and isinstance(texts, list) and texts and all(isinstance(text, str) for text in texts),
+                          'Picker filename save error lacks its distinct owned UIA surface')
+                  # Replay the exact source's classifier over the retained error text/UIA.
+                  # failureSurface records its observed native owner category; picker liveness
+                  # is independent and only a retained second receipt proves that branch.
+                  handle, picker = error['nativeHandle'], receipts[0]['dialog']['hwnd']
+                  owner = document if row['failureSurface'] == 'suite-worker' else picker
+                  info = SimpleNamespace(handle=handle, process_id=shell, runtime_id=error['runtimeId'],
+                                         name=error['name'], control_type=error['controlType'])
+                  accessible = SimpleNamespace(element_info=info,
+                      descendants=lambda: [SimpleNamespace(element_info=SimpleNamespace(name=text)) for text in texts])
+                  api = SimpleNamespace(windows=lambda pid: [handle], pid=lambda hwnd: shell, class_name=lambda hwnd: '#32770',
+                      title=lambda hwnd: row['saveErrorCaption'], user=SimpleNamespace(IsWindow=lambda hwnd: hwnd == handle,
+                                                                                   GetWindow=lambda hwnd, relation: owner))
+                  desktop = SimpleNamespace(window=lambda **kwargs: SimpleNamespace(wrapper_object=lambda: accessible))
+                  observed = lifecycle.saveas_error_surface(api, shell, document, picker, filename, desktop)
+                  require(observed is not None and observed[0] == 'failure', 'Picker filename error text is not a recognized actual write denial')
+                  if len(receipts) == 2:
+                      first, second = receipts
+                      fields = ('nativeHandle', 'processId', 'runtimeId', 'automationId', 'controlType', 'nativePid', 'nativeClass', 'nativeRoot')
+                      require(first['document'] == second['document'] and first['dialog'] == second['dialog']
+                              and first['dialogUia'] == second['dialogUia']
+                              and all(first['field'][key] == second['field'][key] for key in fields)
+                              and second['before'] == first['after'] == target,
+                              'Picker filename cancellation does not retain the original live picker/field and value')
+              return {'receipts': len(receipts), 'method': 'Win32-Edit-EM_REPLACESEL', 'expected': target,
+                      'documentHwnd': document, 'focusClickAttemptsPerReceipt': 1, 'assignmentAttemptsPerReceipt': 1,
+                      'selectionSetAttemptsPerReceipt': 1, 'nativeEditMessagesPerReceipt': 4,
+                      'nativeFilenameSnapshotsPerReceipt': 3}
+          
+          
+          def verify_evidence(evidence, source, args, payload):
+              sys.path.insert(0, str(source / 'suite/e2e'))
+              native = importlib.import_module('windows_smoke')
+              engine = importlib.import_module('engine_smoke')
+              ime = importlib.import_module('korean_ime_smoke')
+              korean = importlib.import_module('korean_ui_smoke')
+              lifecycle = importlib.import_module('lifecycle_smoke')
+              startup = importlib.import_module('startup_smoke')
+              style = importlib.import_module('writer_style_smoke')
+              ascii_input = importlib.import_module('ascii_editor_input')
+              model = importlib.import_module('writer_model_barrier')
+              reader = importlib.import_module('writer_model_reader')
+              calc_model = importlib.import_module('calc_model_barrier')
+              for module in (model, reader, calc_model, native):
+                  require(Path(module.__file__).absolute().parent == (source / 'suite/e2e').absolute(),
+                          'Completion replay was not loaded from the exact tested source')
+              require(isinstance(native.EDITOR_MARKERS, dict) and set(native.EDITOR_MARKERS) == INPUT_MODULES,
+                      'GUI ASCII editor markers differ from exact source')
+              checks, initial_engine, initial_suite, base_cohorts, calc_cohorts = {}, None, None, {}, {}
+              inventory_path = evidence_file(payload, 'suite-inventory.json')
+              completion_inventory = load_json(inventory_path)
+              completion_inventory_sha = sha256(inventory_path)
+              require(type(completion_inventory.get('schemaVersion')) is int and completion_inventory['schemaVersion'] == 1
+                      and completion_inventory.get('architecture') == 'x64'
+                      and isinstance(completion_inventory.get('files'), dict), 'Completion payload inventory is missing')
+              for suffix in ('', '-2'):
+                  ed, nd = evidence / ('suite-engine' + suffix), evidence / ('suite-native' + suffix)
+                  baseline, ui, reopened = (load_json(ed / 'engine-smoke.json'), load_json(nd / 'results.json'),
+                                            load_json(ed / 'ui-engine-verification.json'))
+                  indexed = []
+                  for report, kind, after_gui in ((baseline, 'engine', False), (reopened, 'ui-verification', True)):
+                      require(report.get('schemaVersion') == 1 and report.get('kind') == kind and report.get('passed') is True,
+                              'Engine gate did not pass')
+                      require(report.get('suite') == baseline.get('suite')
+                              and PureWindowsPath(report['suite']).name == PACKAGE.removesuffix('.zip'),
+                              'Engine report names another Suite payload')
+                      rows = exact_rows(report['cases'], 'module', MODULES)
+                      for module, row in rows.items():
+                          require(row.get('status') == 'passed' and SHA.fullmatch(row.get('sha256', ''))
+                                  and type(row.get('bytes')) is int and row['bytes'] > 0, 'Invalid engine case')
+                          engine.verify_content(module, row['observed'], verify_ui=after_gui)
+                          fixture = PureWindowsPath(row['fixture'])
+                          require(fixture.is_absolute() and fixture.name == engine.FILES[module]
+                                  and fixture.parent.name == 'fixtures' and fixture.parent.parent.name == 'suite-engine' + suffix,
+                                  'Engine receipt names another fixture directory')
+                          if after_gui:
+                              require(row['fixture'] == indexed[0][module]['fixture'], 'Post-GUI fixture source differs')
+                              file = ed / 'fixtures' / engine.FILES[module]
+                              require(file.is_file() and sha256(file) == row['sha256'] and file.stat().st_size == row['bytes'],
+                                      'Final GUI fixture differs from post-GUI engine receipt')
+                      indexed.append(rows)
+                  if not suffix:
+                      initial_engine = indexed[0]
+                      initial_suite = baseline['suite']
+                  recalculated = native.suite_report(ui['tests'])
+                  require(ui.get('success') is True and recalculated['success'] is True
+                          and ui.get('homeVerified') is True
+                          and ui.get('expectedCaseCount') == ui.get('completedCaseCount') == ui.get('passedCaseCount') == 13,
+                          'Complete native GUI gate did not pass')
+                  for field, expected in (('nativeAttachmentModules', MODULES), ('newDocumentModules', MODULES),
+                          ('physicalInputModules', INPUT_MODULES), ('attachOnlyModules', MODULES - INPUT_MODULES)):
+                      require(set(ui.get(field, [])) == set(expected) and recalculated[field] == ui[field], 'Native coverage differs')
+                  rows = exact_rows(ui['tests'], 'case', ('home', *engine.FILES, *('new-' + x for x in engine.FILES)))
+                  gui_ascii, gui_readiness = {}, {}
+                  for name, row in rows.items():
+                      require(row.get('success') is True and row.get('cleanClose') is True and row.get('stage') == 'complete',
+                              'Native case did not close cleanly')
+                      evidence_file(nd, row['screenshot'])
+                      evidence_file(nd, row['stderrLog'])
+                      if name != 'home':
+                          require(row.get('nativeParentVerified') is True and row.get('noExternalOfficeWindow') is True,
+                                  'Native existing/new document ownership is unverified')
+                      if name in MODULES:
+                          require(row['beforeSha256'] == indexed[0][name]['sha256'], 'GUI initial fixture differs from engine baseline')
+                          if name != 'base':
+                              require(row['afterSha256'] == indexed[1][name]['sha256'], 'Saved GUI fixture differs from semantic reopen')
+                          require(row.get('nativeParentVerified') is True and row.get('noExternalOfficeWindow') is True,
+                                  'Native attachment ownership is unverified')
+                      if name in INPUT_MODULES:
+                          gui_readiness[name] = verify_editor_focus_readiness(row, native,
+                              [(row['windowHwnd'], row['childHwnd'], row['shellPid'], row['officePid'])])
+                          gui_ascii[name] = verify_ascii_editor_inputs(row, (native.EDITOR_MARKERS[name],),
+                              row['windowHwnd'], row['childHwnd'], ascii_input, 0.04)
+                  base = rows['new-base']
+                  base_cohorts['suite' + (suffix or '-1')] = rows
+                  calc_cohorts['suite' + (suffix or '-1')] = {'rows': rows, 'directory': nd,
+                      'initialCalc': indexed[0]['calc'], 'suiteRoot': baseline['suite']}
+                  require(base.get('newBaseSaveAsVerified') is True and base.get('savedFileSurvivedCleanup') is True
+                          and base.get('savedDatabaseUrl') == 'sdbc:embedded:firebird', 'New Base durable save is unverified')
+                  saved_base = ed / 'fixtures' / base['savedFile']
+                  require(native.saved_base_evidence(saved_base)['sha256'] == base['savedFileSha256'], 'Saved Base bytes differ')
+                  fixture_names = {path.name for path in (ed / 'fixtures').iterdir() if path.is_file()}
+                  require(fixture_names == set(engine.FILES.values()) | {base['savedFile']}, 'Complete Suite fixture set differs')
+                  evidence_file(nd, 'new-base-save-as.png')
+                  evidence_file(nd, 'new-base-saved.png')
+                  for module in INPUT_MODULES:
+                      evidence_file(nd, module + '-edited.png')
+                  require(set(rows['home']['moduleLabels']) == set(native.MODULE_LABELS), 'Home module labels differ')
+                  checks['suite' + (suffix or '-1')] = {'engineModules': 6, 'nativeCases': 13, 'postGuiModules': 6,
+                                                      'generatedFixtureFiles': len(fixture_names), 'asciiEditorInputs': gui_ascii,
+                                                      'editorFocusReadiness': gui_readiness}
+          
+              checks['newBaseSaveDialogReadiness'] = verify_base_save_cohorts(base_cohorts, native)
+              checks['calcModelCompletions'] = verify_calc_model_cohorts(calc_cohorts, native, calc_model,
+                  inventory=completion_inventory, inventory_sha256=completion_inventory_sha)
+          
+              readiness = load_json(evidence / 'suite-korean-readiness/readiness.json')
+              ime.require_readiness(readiness)
+              binding = readiness.get('source', {})
+              require(binding.get('sourceCommit') == args.source_head and binding.get('job') == 'windows-suite'
+                      and binding.get('repository') == REPOSITORY and str(binding.get('sourceRun')) == str(args.source_run)
+                      and str(binding.get('runAttempt')) == str(args.run_attempt), 'IME readiness source binding differs')
+              imedir = evidence / 'suite-korean-ime'
+              imer = load_json(imedir / 'results.json')
+              require(imer.get('schemaVersion') == 1 and imer.get('kind') == 'native-korean-ime'
+                      and imer.get('success') is True and imer.get('imeVerified') is True and imer.get('suiteOnly') is True
+                      and imer.get('expectedCaseCount') == imer.get('passedCaseCount') == 3, 'Real Korean IME gate did not pass')
+              for name, row in exact_rows(imer['tests'], 'case', {'ime-' + x for x in INPUT_MODULES}).items():
+                  require(row.get('module') in INPUT_MODULES and name == 'ime-' + row['module'], 'IME case/module identity differs')
+                  require(row.get('success') is True and row.get('imeVerified') is True and row.get('cleanClose') is True
+                          and row.get('originalFixtureUnchanged') is True and row.get('stage') == 'complete'
+                          and row.get('readiness') == readiness and not row.get('imeCleanupError') and not row.get('hookCleanupError'),
+                          'IME case or cleanup did not pass')
+                  ime.validate_ime_evidence(row)
+                  require(row['beforeSha256'] == initial_engine[row['module']]['sha256'], 'IME fixture differs from the initial engine baseline')
+                  saved = imedir / name / engine.FILES[row['module']]
+                  require(sha256(saved) == row['afterSha256'] and ime.marker(row['module']) in native.package_text(saved), 'IME saved bytes differ')
+                  evidence_file(imedir, name + '-composing.png')
+                  evidence_file(imedir, name + '-saved.png')
+                  evidence_file(imedir, name + '-stderr.log')
+                  require(load_json(imedir / name / 'reopened.json') == row['reopened'], 'IME independent reopen receipt differs')
+              checks['koreanImeCases'] = 3
+          
+              kd = evidence / 'suite-korean-ui'
+              kr = load_json(kd / 'results.json')
+              require(kr.get('schemaVersion') == 1 and kr.get('kind') == 'native-korean-tabbed-ui'
+                      and kr.get('success') is True and kr.get('koreanUiVerified') is True and kr.get('probeOnly') is False
+                      and set(kr.get('expectedModules', [])) == set(kr.get('verifiedModules', [])) == set(korean.MODULES),
+                      'Actual Korean Tabbed UI gate did not pass')
+              korean_rows = exact_rows(kr['tests'], 'module', korean.MODULES)
+              for module, row in korean_rows.items():
+                  flags = ('success', 'nativeParentVerified', 'noExternalOfficeWindow', 'koreanUiVerified', 'tabbedUiVerified',
+                           'screenshotCaptured', 'cleanClose', 'fixtureUnchanged', 'originalFixtureUnchanged', 'officeExited')
+                  require(all(row.get(x) is True for x in flags) and row.get('forcedCleanupRequired') is False
+                          and row.get('shellExitCode') == 0 and row.get('probeOnly') is False, 'Korean UI ownership or lifecycle is unverified')
+                  verify_korean_snapshot(kd, row, korean)
+                  require(row['beforeSha256'] == initial_engine[module]['sha256'], 'Korean UI fixture differs from the initial engine baseline')
+                  evidence_file(kd, row['screenshot'])
+                  evidence_file(kd, row['stderrLog'])
+                  require(sha256(evidence_file(kd, row['copiedFixture'])) == row['beforeSha256'], 'Korean UI fixture bytes differ')
+              checks['koreanUiModules'] = 4
+              checks['osScreenReaderExposureCertified'] = False
+              checks['physicalWriterStyle'] = verify_writer_style(evidence / 'suite-writer-style', style,
+                  initial_engine['writer'], kd, korean_rows['writer'], payload, initial_suite)
+              completion_baseline = lifecycle_completion_baseline(kd, korean_rows['writer'], initial_engine['writer'], lifecycle)
+          
+              ld = evidence / 'suite-lifecycle'
+              lr = load_json(ld / 'results.json')
+              require(lr.get('schemaVersion') == 1 and lr.get('kind') == 'native-lifecycle' and lr.get('success') is True
+                      and lifecycle.lifecycle_report(lr['tests'])['success'] is True and lr.get('baselineFixturesUnchanged') is True
+                      and lr.get('packagedUnoExitCode') == 0 and lr.get('packagedUnoEvidence') == 'packaged-uno-result.json',
+                      'Native lifecycle gate did not pass')
+              uno = load_json(evidence_file(ld, lr['packagedUnoEvidence']))
+              expected = {name for name, flags in lifecycle.CASE_REQUIREMENTS.items() if 'packagedUnoVerified' in flags}
+              require(uno.get('kind') == 'packaged-uno-lifecycle-reopen' and uno.get('success') is True, 'Lifecycle UNO reopen did not pass')
+              ur = exact_rows(uno['cases'], 'case', expected)
+              lifecycle_ascii, picker_inputs, lifecycle_completions = {}, {}, {}
+              for name, row in exact_rows(lr['tests'], 'case', lifecycle.CASE_REQUIREMENTS).items():
+                  evidence_file(ld, row['stderrLog'])
+                  require(row.get('screenshots'), 'Lifecycle screenshots are missing')
+                  for screenshot in row.get('screenshots', []):
+                      evidence_file(ld, screenshot)
+                  if name in expected:
+                      lifecycle_ascii[name] = verify_lifecycle_ascii_inputs(row, lifecycle, ascii_input)
+                      lifecycle_completions[name] = verify_lifecycle_model_completions(row, lifecycle, model,
+                          suite_root=initial_suite, inventory=completion_inventory, inventory_sha256=completion_inventory_sha,
+                          baseline_body=completion_baseline['bodyText'], initial_engine=initial_engine)
+                      require(ur[name].get('success') is True and len(ur[name]['documents']) == len(row['savedDocuments']) == 1,
+                              'Lifecycle case has incomplete UNO receipts')
+                      for saved, proof in zip(row['savedDocuments'], ur[name]['documents']):
+                          require(proof.get('path') == saved['path'], 'Lifecycle UNO observation names another saved document')
+                          path = ld / 'fixtures' / name / Path(saved['path'].replace('\\', '/')).name
+                          actual = lifecycle.writer_evidence(path, saved['requiredMarkers'], saved['forbiddenMarkers'])
+                          require(actual['sha256'] == saved['sha256'] and actual['bodyText'] == saved['bodyText'],
+                                  'Lifecycle saved document bytes/body differ')
+                          replay = lifecycle.require_uno_observation(saved, proof['observedBodyText'], proof['beforeSha256'], proof['afterSha256'])
+                          require(replay['bodyText'] == proof['bodyText'] and proof['expectedBodyText'] == saved['bodyText'],
+                                  'Lifecycle raw UNO text differs from its declared receipt')
+                  else:
+                      evidence_file(ld, name + '-route-stderr.log')
+                      checks['hwpGenerationReceipts'] = verify_hwp_receipts(ld, row, lifecycle, initial_suite)
+                  picker_inputs[name] = verify_picker_filename_inputs(row, lifecycle,
+                      PureWindowsPath(initial_engine['writer']['fixture']).parent.parent.parent / 'suite-lifecycle')
+              checks['lifecycleCases'] = 7
+              checks['lifecycleAsciiEditorInputs'] = lifecycle_ascii
+              checks['lifecyclePickerFilenameInputs'] = picker_inputs
+          
+              sd = evidence / 'suite-startup'
+              sr = load_json(sd / 'results.json')
+              require(sr.get('schemaVersion') == 1 and sr.get('kind') == 'native-startup-stress' and sr.get('success') is True
+                      and startup.stress_report(sr['attempts'], 40)['success'] is True
+                      and sr.get('expectedAttemptCount') == sr.get('completedAttemptCount') == sr.get('passedAttemptCount') == 40,
+                      'Forty independent startup cases did not all pass')
+              for row in sr['attempts']:
+                  evidence_file(sd, row['stderrLog'])
+                  evidence_file(sd, row['screenshot'])
+                  if row['mode'] == 'existing':
+                      require(row['beforeSha256'] == row['afterSha256'] == initial_engine[row['module']]['sha256'],
+                              'Startup fixture differs from its initial engine baseline')
+              checks['independentStartups'] = 40
+              checks['nativeDiagnostics'] = verify_native_diagnostics(evidence, source, payload, sr['attempts'], initial_suite)
+              checks['calcModelCompletions']['nativeArchives'] = verify_model_completion_archives(
+                  evidence, checks['calcModelCompletions']['cohorts'], initial_suite, module_name='Calc')
+              checks['calcSaveRoutes'] = verify_calc_save_routes(evidence, calc_cohorts)
+              require(set(lifecycle_completions) == expected
+                      and sum(replay['editCount'] for replay in lifecycle_completions.values())
+                      == sum(len(markers) for markers in lifecycle.ASCII_EDITOR_MARKERS.values()),
+                      'Original lifecycle edit completion coverage is incomplete')
+              checks['lifecycleModelCompletions'] = {
+                  'cases': lifecycle_completions, 'baseline': completion_baseline,
+                  'inventorySha256': completion_inventory_sha,
+                  'nativeArchives': verify_model_completion_archives(evidence, lifecycle_completions, initial_suite),
+                  'acceptanceCompletionStrengthened': True,
+                  'originalPhysicalAsciiLossCauseEstablished': False, 'productFixEstablished': False,
+                  'historicalPhysicalInputDiagnostic': {
+                      'run': 38975228858, 'passed': 18, 'total': 20,
+                      'failedControls': [10, 12], 'savedXmlEqualsReadOnlyUno': True,
+                      'qualifiedDeliveryEvidence': False}}
+              checks['acceptanceCompletionStrengthened'] = True
+              checks['originalPhysicalAsciiLossCauseEstablished'] = False
+              checks['productFixEstablished'] = False
+              gui_ascii = [proof for name in ('suite-1', 'suite-2') for proof in checks[name]['asciiEditorInputs'].values()]
+              checks['asciiEditorInputCompatibility'] = {'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False,
+                  'guiCases': len(gui_ascii), 'lifecycleCases': len(lifecycle_ascii),
+                  'receipts': sum(proof['receipts'] for proof in (*gui_ascii, *lifecycle_ascii.values())),
+                  'originalUnicodeInputPathFixed': False}
+              checks['editorFocusReadiness'] = {
+                  'guiReceipts': sum(proof['count'] for name in ('suite-1', 'suite-2')
+                                     for proof in checks[name]['editorFocusReadiness'].values()),
+                  'writerStyleReceipts': checks['physicalWriterStyle']['editorFocusReadiness']['count'],
+                  'lifecycleReceipts': sum(proof['editorFocusReadiness']['count'] for proof in lifecycle_ascii.values()),
+                  'setupClickAttemptsPerReceipt': 1, 'setupControlF6AttemptsPerReceipt': 1, 'inputRetried': False}
+              return checks
+          
+          
+          def check_draft(release, head):
+              require(release.get('draft') is True and release.get('published_at') is None
+                      and release.get('prerelease') is True and release.get('tag_name') == TAG
+                      and release.get('target_commitish') == head, 'Refusing an unrelated or published release')
+          
+          
+          def preflight_draft_assets(existing, assets):
+              """Validate every present asset before any missing asset may be uploaded."""
+              local = {path.name: path for path in assets}
+              require(local and len(local) == len(assets) and isinstance(existing, list),
+                      'Draft asset preflight needs unique local assets and a complete server list')
+              present = {}
+              for row in existing:
+                  require(isinstance(row, dict) and isinstance(row.get('name'), str)
+                          and row['name'] in local and row['name'] not in present,
+                          'Existing draft contains unexpected or duplicated assets')
+                  path = local[row['name']]
+                  require(row.get('state') == 'uploaded' and type(row.get('size')) is int
+                          and row['size'] == path.stat().st_size
+                          and row.get('digest') == 'sha256:' + sha256(path),
+                          'Existing draft asset state/digest/size differs from verified local bytes')
+                  present[row['name']] = row
+              return present
+          
+          
+          def main(argv=None):
+              require(__debug__, 'Delivery verification requires Python assertions; do not use -O')
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument('--source-run', type=int, required=True)
+              parser.add_argument('--source-head', required=True)
+              parser.add_argument('--run-attempt', type=int, default=1)
+              parser.add_argument('--python-tests', type=int, default=261)
+              parser.add_argument('--python-skips', type=int, default=3)
+              parser.add_argument('--core-tests', type=int, default=41)
+              parser.add_argument('--output', type=Path, required=True)
+              parser.add_argument('--create-draft', action='store_true')
+              args = parser.parse_args(argv)
+              require(args.source_run > 0 and re.fullmatch(r'[0-9a-f]{40}', args.source_head) and args.run_attempt > 0,
+                      'Fill the exact final successful source/run/attempt first')
+              require(args.python_tests >= 211 and args.python_skips == len(WINDOWS_UNIT_SKIPS) and args.core_tests >= 41,
+                      'Expected unit counts may increase but may not weaken the acceptance baseline')
+              require(not args.output.exists() and not args.output.is_symlink(), 'Preserve existing delivery evidence')
+              args.output.mkdir(parents=True)
+              gh = GitHub(os.environ['GITHUB_TOKEN'], mutate=False)
+              run = gh.json('/actions/runs/' + str(args.source_run))
+              require(run.get('id') == args.source_run and run.get('head_sha') == args.source_head
+                      and run.get('run_attempt') == args.run_attempt and run.get('status') == 'completed'
+                      and run.get('conclusion') == 'success' and run.get('repository', {}).get('full_name') == REPOSITORY
+                      and run.get('head_repository', {}).get('full_name') == REPOSITORY
+                      and run.get('head_branch') == 'work/opengeul-office-suite'
+                      and run.get('path') == '.github/workflows/office-suite.yml', 'Exact complete successful Suite run is required')
+              jobs = gh.pages('/actions/runs/' + str(args.source_run) + '/attempts/' + str(args.run_attempt) + '/jobs', 'jobs')
+              require(len(jobs) == 1 and jobs[0].get('name') == 'windows-suite' and jobs[0].get('status') == 'completed'
+                      and jobs[0].get('conclusion') == 'success', 'Expected Windows job did not pass')
+              require(all(step.get('conclusion') == 'success' for step in jobs[0]['steps'] if not step['name'].startswith('Post ')),
+                      'A required Windows job step was skipped or failed')
+              log = gh.redirected_download('/actions/jobs/' + str(jobs[0]['id']) + '/logs', args.output / 'OpenGeul-Office-Windows-job.log', 32 * 1024 * 1024)
+              units = unit_receipt(log, args.python_tests, args.python_skips, args.core_tests)
+              artifacts = gh.pages('/actions/runs/' + str(args.source_run) + '/artifacts', 'artifacts')
+              wanted = {'package': 'opengeul-office-suite-x64-' + str(args.source_run),
+                        'evidence': 'opengeul-suite-evidence-' + str(args.source_run) + '-' + str(args.run_attempt)}
+              downloaded, metadata = {}, {}
+              for kind, name in wanted.items():
+                  selected = [item for item in artifacts if item['name'] == name]
+                  require(len(selected) == 1, 'Required successful artifact is missing or ambiguous')
+                  item = gh.json('/actions/artifacts/' + str(selected[0]['id']))
+                  digest = item.get('digest', '')
+                  maximum = 1024 * 1024 * 1024 if kind == 'package' else 128 * 1024 * 1024
+                  require(not item.get('expired') and item.get('name') == name and item['workflow_run']['id'] == args.source_run
+                          and item['workflow_run']['head_sha'] == args.source_head and digest.startswith('sha256:')
+                          and SHA.fullmatch(digest[7:]) and 0 < item['size_in_bytes'] <= maximum,
+                          'Artifact identity, size or server digest is unverified')
+                  target = args.output / ('package-artifact.zip' if kind == 'package' else 'OpenGeul-Office-validation-evidence.zip')
+                  downloaded[kind] = gh.redirected_download('/actions/artifacts/' + str(item['id']) + '/zip', target,
+                      maximum, size=item['size_in_bytes'], digest=digest[7:])
+                  metadata[kind] = {'id': item['id'], 'name': name, 'bytes': item['size_in_bytes'], 'sha256': digest[7:]}
+              outer = args.output / 'artifact-members'
+              safe_extract(downloaded['package'], outer, maximum=1024 * 1024 * 1024, members=2)
+              require([path.name for path in outer.iterdir()] == [PACKAGE], 'Package artifact has unexpected members')
+              package = outer / PACKAGE
+              payload, source, evidence = args.output / 'verified-payload', args.output / 'exact-source', args.output / 'evidence'
+              safe_extract(package, payload, maximum=5 * 1024 * 1024 * 1024)
+              provenance, product = load_json(payload / 'suite-provenance.json'), load_json(payload / 'suite-product.json')
+              require(provenance.get('sourceCommit') == args.source_head and provenance.get('version') == VERSION
+                      and product.get('version') == VERSION and provenance.get('architecture') == 'x64', 'Package source/version differs')
+              source_zip = payload / 'Sources/OpenGeul-Office-source.zip'
+              with zipfile.ZipFile(source_zip) as archive:
+                  require(archive.comment == args.source_head.encode('ascii'), 'Source archive commit differs')
+              safe_extract(source_zip, source, maximum=512 * 1024 * 1024)
+              units['skipSourceReceipts'] = verify_unit_skip_sources(source)
+              env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+              env.pop('GITHUB_TOKEN', None)
+              with (args.output / 'full-payload-verifier.log').open('xb') as output:
+                  verified = subprocess.run([sys.executable, str(source / 'suite/scripts/verify-suite.py'), str(payload)],
+                      env=env, stdout=output, stderr=subprocess.STDOUT, timeout=300)
+              require(verified.returncode == 0, 'Full same-source verify-suite.py rejected the package')
+              retained_inventory = retain_verified_inventory(payload, args.output)
+              safe_extract(downloaded['evidence'], evidence, maximum=512 * 1024 * 1024)
+              checks = verify_evidence(evidence, source, args, payload)
+              require(checks['lifecycleModelCompletions']['inventorySha256'] == retained_inventory['sha256'],
+                      'Completion replay inventory differs from the verified retained metadata')
+              require(checks['calcModelCompletions']['inventorySha256'] == retained_inventory['sha256'],
+                      'Calc replay inventory differs from the verified retained metadata')
+              checks.update(units=units, completePayloadVerified=True, sourceArchiveCommitVerified=True)
+              checks['verifiedSuiteInventory'] = retained_inventory
+              checks['receiptMetadataContractVersion'] = 2
+              guide = args.output / 'OpenGeul-Office-Guide-ko.txt'
+              guide.write_text('OpenGeul Office 0.1.1-dev — 미공개 Windows x64 portable 개발 초안\n\n'
+                  + f"Windows Python 단위 검사: {units['pythonTests']}개 중 {units['pythonPassed']}개 통과, 기존 환경·파일시스템 사유 {units['pythonSkipped']}개 제외.\n"
+                  + f"C# Core 검사: {units['corePassed']}/{units['coreTests']} 통과. 제외된 검사 이름·사유는 attestation에 기록합니다.\n\n"
+                  +
+                  'ZIP 전체를 새 폴더에 풀고 OpenGeul.Office.exe를 실행하세요. HWP에는 WebView2가 필요합니다.\n'
+                  'Writer/Calc/Impress/Draw/Math/Base는 OpenGeul 문서 창 내부의 Office 엔진에서 편집합니다.\n'
+                  'HWP/HWPX는 별도의 OpenGeul HWP 창에서 열립니다.\n'
+                  '일반 저장은 원래 형식을 유지하며 다른 형식은 다른 이름으로 저장에서 선택합니다.\n'
+                  'Calc 셀 입력은 Enter로 확정한 뒤 저장하세요. 저장은 문서 모델의 내용을 기록하며 아직 확정하지 않은 셀 편집 버퍼의 반영을 보장하지 않습니다.\n'
+                  '실제 확인 범위: Writer/Calc/Impress의 한국어 IME 조합·Backspace·저장·재열기,\n'
+                  'Writer/Calc/Impress/Draw의 한국어 홈·삽입 탭, 7개 수명 검사와 독립 초기화 40회.\n'
+                  'Writer에서 실제 Ctrl+Home·Ctrl+1 입력 후 제목 1 스타일 저장·독립 재열기 1회를 확인했습니다.\n'
+                  '영문 편집 검사는 US 키 스캔 코드로 대소문자·입력 개수·포커스를 확인합니다.\n'
+                  '수명 검사에서는 원래 저장·취소 동작 전에 같은 엔진·문서의 전체 본문과 순서대로 입력한 문자열의 완료를 추가 확인합니다.\n'
+                  'Calc 기존 문서 2개 사례는 원래 Enter 확정 후 셀 전체 내용·계산 값과 관찰자 정상 종료를 확인한 뒤 원래 저장 동작을 검사합니다.\n'
+                  '이전 물리 키 입력 진단에서 저장 전 문자 누락이 확인됐고 원인은 확정되지 않았습니다. 이 확인 절차의 강화는 제품 수정이나 과거 입력 경로 문제의 해결을 뜻하지 않습니다.\n'
+                  '별도 VK_PACKET 문자열 주입 진단에는 저장 전 문자 누락이 재현됐으며, 그 외부 자동화 경로의 문제 해결을 보장하지 않습니다.\n'
+                  '직접 생성한 시험 문서로 6개 엔진 검사·13개 GUI 사례·편집 후 6개 내용 검사를 각각 2회 통과했습니다.\n'
+                  '세부 내용과 정확한 소스·실행·해시는 원본 증거와 attestation을 보세요.\n'
+                  '전체 upstream UI 번역이나 모든 문서·형식의 완전한 왕복 보존을 보장하지 않습니다.\n'
+                  'ARM64, 실제 프린터와 Store 배포는 별도 검증 대상입니다.\n'
+                  '라이선스·대응 소스는 패키지 Notices/CORRESPONDING_SOURCE.md에 있습니다.\n', encoding='utf-8')
+              assets = [package, downloaded['evidence'], log, guide]
+              attestation = args.output / 'OpenGeul-Office-delivery-attestation.json'
+              write_json(attestation, {'repository': REPOSITORY, 'version': VERSION, 'sourceRun': args.source_run,
+                  'sourceRunAttempt': args.run_attempt, 'sourceCommit': args.source_head,
+                  'windowsJobId': jobs[0]['id'], 'artifacts': metadata, 'checks': checks,
+                  'assets': [{'name': path.name, 'bytes': path.stat().st_size, 'sha256': sha256(path)} for path in assets],
+                  'draftOnly': True, 'published': False})
+              assets.append(attestation)
+              body = ('Windows x64 portable development package. Tested source: `' + args.source_head
+                  + '`. Exact successful run: https://github.com/' + REPOSITORY + '/actions/runs/' + str(args.source_run)
+                  + '.\n\nAll finite 0.1.1 development acceptance gates passed; see the original evidence ZIP '
+                    'and delivery attestation for counts, scope and SHA256 values. This remains an unpublished '
+                    'development draft. Store publication, ARM64 and complete document compatibility are separate.')
+              write_json(args.output / 'draft-plan.json', {'tag': TAG, 'targetCommit': args.source_head,
+                  'draft': True, 'prerelease': True, 'assetNames': [path.name for path in assets], 'body': body,
+                  'verifiedSuiteInventory': retained_inventory, 'receiptMetadataContractVersion': 2})
+              if not args.create_draft:
+                  print('Verified delivery plan prepared locally; no GitHub mutation performed.')
+                  return 0
+              # All byte, unit, GUI and source gates finished before mutation is enabled.
+              gh.mutate = True
+              matches = [release for release in gh.pages('/releases') if release.get('tag_name') == TAG]
+              require(len(matches) <= 1, 'The development tag has ambiguous releases')
+              refs = gh.json('/git/matching-refs/tags/' + TAG)
+              require(not any(row.get('ref') == 'refs/tags/' + TAG for row in refs),
+                      'The delivery tag already exists; refusing an ambiguous existing tag target')
+              if matches:
+                  release = matches[0]
+                  check_draft(release, args.source_head)
+                  require(release.get('name') == 'OpenGeul Office ' + VERSION and release.get('body') == body,
+                          'Existing draft text differs; refusing any update')
+              else:
+                  release = gh.json('/releases', {'tag_name': TAG, 'target_commitish': args.source_head,
+                      'name': 'OpenGeul Office ' + VERSION, 'body': body, 'draft': True, 'prerelease': True})
+              check_draft(release, args.source_head)
+              existing = gh.pages('/releases/' + str(release['id']) + '/assets')
+              present = preflight_draft_assets(existing, assets)
+              server_assets = []
+              for asset in assets:
+                  check_draft(gh.json('/releases/' + str(release['id'])), args.source_head)
+                  same = present.get(asset.name)
+                  uploaded = same if same is not None else gh.upload(release, asset)
+                  require(uploaded.get('name') == asset.name and uploaded.get('state') == 'uploaded'
+                          and uploaded.get('size') == asset.stat().st_size and uploaded.get('digest') == 'sha256:' + sha256(asset),
+                          'Server asset digest/size differs from verified local bytes')
+                  server_assets.append({'id': uploaded['id'], 'name': uploaded['name'], 'size': uploaded['size'], 'digest': uploaded['digest']})
+              check_draft(gh.json('/releases/' + str(release['id'])), args.source_head)
+              uploaded = gh.pages('/releases/' + str(release['id']) + '/assets')
+              require({row['name'] for row in uploaded} == {path.name for path in assets} and len(uploaded) == len(assets),
+                      'Final draft asset set differs')
+              local = {path.name: path for path in assets}
+              require(all(row.get('state') == 'uploaded' and row.get('size') == local[row['name']].stat().st_size
+                          and row.get('digest') == 'sha256:' + sha256(local[row['name']]) for row in uploaded),
+                      'Final server asset hashes differ from verified local bytes')
+              write_json(args.output / 'server-delivery-receipt.json', {'releaseId': release['id'], 'url': release['html_url'],
+                  'draft': True, 'published': False, 'assets': server_assets})
+              print('Verified unpublished draft: ' + release['html_url'])
+              return 0
+          
+          
+          if __name__ == '__main__':
+              arguments = ['--source-run', os.environ['SOURCE_RUN'], '--source-head', os.environ['SOURCE_HEAD'],
+                  '--run-attempt', os.environ['SOURCE_ATTEMPT'], '--python-tests', os.environ['PYTHON_TESTS'],
+                  '--python-skips', os.environ['PYTHON_SKIPS'], '--core-tests', os.environ['CORE_TESTS'],
+                  '--output', 'draft-delivery']
+              require(os.environ['CREATE_DRAFT'] in ('true', 'false'), 'Invalid draft mode')
+              if os.environ['CREATE_DRAFT'] == 'true': arguments.append('--create-draft')
+              raise SystemExit(main(arguments))
+      - name: Retain verification plan and draft delivery receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-office-delivery-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            draft-delivery/draft-plan.json
+            draft-delivery/OpenGeul-Office-delivery-attestation.json
+            draft-delivery/OpenGeul-Office-Guide-ko.txt
+            draft-delivery/full-payload-verifier.log
+            draft-delivery/server-delivery-receipt.json
+            draft-delivery/OpenGeul-Office-Windows-job.log
+            draft-delivery/suite-inventory.json
+          retention-days: 7
+          if-no-files-found: warn
