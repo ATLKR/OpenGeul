@@ -41,7 +41,7 @@ class HomeCalcCloseContracts(unittest.TestCase):
         import test_writer_model_barrier as writer
         import test_writer_model_reader as fixtures
         with tempfile.TemporaryDirectory() as directory:
-            frame=calc.synthetic_frame(Path(directory)/'Suite','unused');url='file:///C:/owned/format-calc-csv.csv';frame.binding['documentUrl']=url
+            frame=calc.synthetic_frame(Path(directory).resolve()/'Suite','unused');url='file:///C:/owned/format-calc-csv.csv';frame.binding['documentUrl']=url
             observation=calc.observation(frame,'Engine-OpenGeul-calc 한글',0,.1)
             observation['d1Formula']='42'
             cleanup=fixtures.cleanup_fixture(frame.binding,str(frame.suite));cleanup['kind']='owned-calc-reader-cleanup'
@@ -68,7 +68,7 @@ class HomeCalcCloseContracts(unittest.TestCase):
         import lifecycle_smoke
         for fails in (False,True):
             with self.subTest(fails=fails),tempfile.TemporaryDirectory() as directory:
-                root=Path(directory);frame=calc.synthetic_frame(root/'Suite','unused');source=root/'format-calc-csv.csv';source.write_bytes(b'owned')
+                root=Path(directory).resolve();frame=calc.synthetic_frame(root/'Suite','unused');source=root/'format-calc-csv.csv';source.write_bytes(b'owned')
                 frame.binding['documentUrl']=source.as_uri();observed=calc.observation(frame,'Engine-OpenGeul-calc 한글',0,.1);observed['d1Formula']='42'
                 cleanup=fixtures.cleanup_fixture(frame.binding,str(frame.suite));cleanup['kind']='owned-calc-reader-cleanup';cleanup.update(startedAt=1.,finishedAt=1.1,deadline=12.);writer.retime_native_cleanup_fixture(cleanup)
                 clock=[0.];calls=[];shell=writer.original_shell_fixture(frame.binding,frame.suite)
@@ -96,7 +96,7 @@ class HomeCalcCloseContracts(unittest.TestCase):
         import test_writer_model_reader as fixtures
         import lifecycle_smoke
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);frame=calc.synthetic_frame(root/'Suite','unused');frame.binding['documentUrl']=''
+            root=Path(directory).resolve();frame=calc.synthetic_frame(root/'Suite','unused');frame.binding['documentUrl']=''
             observation=calc.observation(frame,'',0,.1);observation.update(b1Value=0,c1Value=0,d1Formula='',d1Value=0)
             cleanup=fixtures.cleanup_fixture(frame.binding,str(frame.suite));cleanup['kind']='owned-calc-reader-cleanup'
             context=dict(success=True,startedAt=0.,deadline=12.,finishedAt=1.1,observation=observation,cleanup=cleanup,originalShell=writer.original_shell_fixture(frame.binding,frame.suite),inventory=frame.inventory,inventorySha256=frame.inventory_sha256)
@@ -124,7 +124,7 @@ class HomeCalcCloseContracts(unittest.TestCase):
         import home_routing_smoke
         for extension in ('ods','xlsx','xls','csv'):
             with self.subTest(extension=extension),tempfile.TemporaryDirectory() as directory:
-                root=Path(directory);suite=root/'Suite';suite.mkdir();owned=root/'owned';owned.mkdir()
+                root=Path(directory).resolve();suite=root/'Suite';suite.mkdir();owned=root/'owned';owned.mkdir()
                 feature=root/'features';originals=feature/'fixtures';originals.mkdir(parents=True)
                 name=f'format-calc-{extension}.{extension}';data=('owned-'+extension).encode();original=originals/name;original.write_bytes(data)
                 source=owned/name;source.write_bytes(data);report=feature/'office-features.json';report.write_bytes(b'source-bound passed21 report')
