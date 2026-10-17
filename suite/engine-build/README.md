@@ -32,6 +32,8 @@ these options in `autogen.input`:
 --build=aarch64-pc-cygwin
 --host=aarch64-pc-cygwin
 --with-distro=LibreOfficeWinArm64
+--with-visual-studio=2026
+--with-package-format=archive
 --enable-firebird-sdbc
 --without-system-firebird
 ```
@@ -41,15 +43,26 @@ produced executables must run on the ARM64 host. A cross build inferred from an
 x64 Cygwin shell is insufficient: the exact LibreOffice configuration skips its
 bundled Firebird build when `cross_compiling=yes`. Leave that cross-build guard
 unchanged. After running `autogen.sh`, require `OS=WNT`, `CPUNAME=AARCH64`,
-`ENABLE_FIREBIRD_SDBC=TRUE`, `BUILD_TYPE` containing `FIREBIRD`, and
-`CROSS_COMPILING` unequal to `TRUE` in `config_host.mk`. Preserve `config.log`,
+`ENABLE_FIREBIRD_SDBC=TRUE`, `PKGFORMAT=archive`, `BUILD_TYPE` containing `FIREBIRD`,
+and an empty `CROSS_COMPILING` in `config_host.mk`. Preserve `config.log`,
 `config_host.mk`, compiler versions and the source-hook receipt.
 
-Use Visual Studio 2022 ARM64 C++ tools and Windows SDK 10.0.22000 or later;
+The automated driver selects Visual Studio 2026 ARM64 C++ tools (MSVC18/v145)
+and Windows SDK 10.0.22000 or later;
 Skia/PDFium need that SDK floor. Native compiler discovery uses
-`Hostarm64/arm64`. Start with `make ExternalProject_firebird` (or `make firebird`)
-before spending time on the full `make build`, `make check`, and
-`make instsetoo_native` stages. The authoritative Windows build prerequisites
+`Hostarm64/arm64`. The driver runs `make ExternalProject_firebird`, `make firebird`,
+then `make build` for the Full phase. It audits `instdir`, stages authenticated
+native app-local CRT files, proves Base persistence, and ZIPs that installation
+tree. It does not run `make instsetoo_native` or publish an upstream MSI.
+
+The explicit archive option overrides the distro's MSI packaging default while
+retaining its Java, ODK, help, extensions and Korean-language configuration.
+It avoids MSI-only Font::TTF and translated-installer WiLangId requirements;
+the normal Windows compiler/SDK checks still apply. Required native CRT files
+come from the driver's separate authenticated app-local CRT stage rather than
+MSI merge modules. `make check` and the complete Suite qualification remain
+separate checks; `make build` alone does not establish either.
+The authoritative Windows build prerequisites
 and supported setup are documented at
 <https://wiki.documentfoundation.org/Development/BuildingOnWindows>.
 

@@ -50,6 +50,11 @@ async Task ThrowsAsync<T>(Func<Task> action) where T : Exception
     try { await action(); } catch (T) { return; }
     throw new Exception($"Expected {typeof(T).Name}");
 }
+CloseResult ParseWorkerClose(string json)
+{
+    using var document = JsonDocument.Parse(json);
+    return DocumentClose.FromWorkerResult(document.RootElement);
+}
 
 var manifestJson = """
 {"schemaVersion":1,"productName":"OpenGeul Office","vendor":"ATLKR","runtime":{"directory":"Office","executable":"program/soffice.exe","python":"program/python.exe"},"modules":{
@@ -187,7 +192,7 @@ AsyncTest("cancel dirty close preserves the document", async () =>
 {
     var session = new TestSession { Modified = true };
     var result = await DocumentClose.TryAsync(session, () => Task.FromResult(CloseChoice.Cancel), () => Task.FromResult(true));
-    Equal(false, result.Closed); Equal(0, session.CloseCalls);
+    Equal(false, result.Closed); Equal(0, session.CloseCalls); Equal(null, result.Warning);
 });
 AsyncTest("failed save preserves dirty document and worker", async () =>
 {
@@ -216,21 +221,124 @@ AsyncTest("clean close does not prompt or save", async () =>
 });
 AsyncTest("status failure preserves window and does not close", async () =>
 {
-    var session = new TestSession { FailStatus = true };
+    var session = new TestSession { FailStatus = true, CloseOutcome = new(true, Warning: "engine cleanup failed") };
     var result = await DocumentClose.TryAsync(session, () => Task.FromResult(CloseChoice.Discard), () => Task.FromResult(true));
-    Equal(false, result.Closed); Equal(0, session.CloseCalls); Equal(true, result.Error is not null);
+    Equal(false, result.Closed); Equal(0, session.CloseCalls); Equal(true, result.Error is not null); Equal(null, result.Warning);
 });
 AsyncTest("worker close cancellation preserves window", async () =>
 {
     var session = new TestSession { CancelClose = true };
     var result = await DocumentClose.TryAsync(session, () => Task.FromResult(CloseChoice.Discard), () => Task.FromResult(true));
-    Equal(false, result.Closed);
+    Equal(false, result.Closed); Equal(null, result.Warning);
 });
 AsyncTest("worker close failure preserves window", async () =>
 {
     var session = new TestSession { FailClose = true };
     var result = await DocumentClose.TryAsync(session, () => Task.FromResult(CloseChoice.Discard), () => Task.FromResult(true));
-    Equal(false, result.Closed); Equal(true, result.Error is not null);
+    Equal(false, result.Closed); Equal(true, result.Error is not null); Equal(null, result.Warning);
+});
+Test("confirmed document close carries cleanup failure without claiming document stayed open", () =>
+{
+    var result = ParseWorkerClose("""
+    {"closed":true,"closeCancelled":false,"cleanupVerified":false,"cleanupError":"owned Office process exit was not verified"}
+    """);
+    Equal(true, result.Closed);
+    Equal(null, result.Error);
+    var warning = result.Warning;
+    Equal(true, warning?.Contains("owned Office process exit was not verified") == true);
+    Equal(true, warning?.Contains("문서는 닫혔") == true);
+    Equal(false, warning?.Contains("창을 유지") == true);
+});
+Test("confirmed close with missing or malformed cleanup proof remains closed with a warning", () =>
+{
+    foreach (var json in new[]
+    {
+        """{"closed":true,"closeCancelled":false}""",
+        """{"closed":true,"closeCancelled":false,"cleanupVerified":null,"cleanupError":42}""",
+        """{"closed":true,"closeCancelled":false,"cleanupVerified":"true"}"""
+    })
+    {
+        var result = ParseWorkerClose(json);
+        Equal(true, result.Closed);
+        Equal(null, result.Error);
+        Equal(true, !string.IsNullOrWhiteSpace(result.Warning));
+    }
+});
+Test("verified cleanup after confirmed document close has no warning", () =>
+{
+    var result = ParseWorkerClose("""{"closed":true,"closeCancelled":false,"cleanupVerified":true}""");
+    Equal(true, result.Closed); Equal(null, result.Error); Equal(null, result.Warning);
+});
+Test("worker cancellation never becomes a confirmed closed cleanup warning", () =>
+{
+    foreach (var json in new[]
+    {
+        """{"closed":false,"closeCancelled":true,"cleanupVerified":false}""",
+        """{"closed":true,"closeCancelled":true,"cleanupVerified":false}""",
+        """{"closed":false,"closeCancelled":false,"cleanupVerified":true}"""
+    })
+    {
+        var result = ParseWorkerClose(json);
+        Equal(false, result.Closed); Equal(null, result.Warning);
+    }
+});
+AsyncTest("document close preserves a confirmed close warning from its owned session", async () =>
+{
+    var outcome = ParseWorkerClose("""{"closed":true,"closeCancelled":false,"cleanupVerified":false,"cleanupError":"owned process was forced"}""");
+    var session = new TestSession { CloseOutcome = outcome };
+    var result = await DocumentClose.TryAsync(session, () => throw new Exception("unexpected prompt"), () => throw new Exception("unexpected save"));
+    Equal(true, result.Closed); Equal(null, result.Error); Equal(outcome.Warning, result.Warning);
+    Equal(1, session.CloseCalls); Equal(false, session.Discard);
+});
+Test("malformed cancellation proof cannot confirm document close", () =>
+{
+    foreach (var value in new[] { "\"true\"", "null", "0", "{}" })
+        Throws<SuiteException>(() => ParseWorkerClose("{\"closed\":true,\"closeCancelled\":" + value + ",\"cleanupVerified\":true}"));
+});
+AsyncTest("close preparation can require a choice even when ordinary status is clean", async () =>
+{
+    var session = new TestSession { PreparedModified = true };
+    var result = await DocumentClose.TryAsync(session, () =>
+    {
+        session.Events.Add("choice");
+        return Task.FromResult(CloseChoice.Cancel);
+    }, () => throw new Exception("unexpected save"));
+    Equal(false, result.Closed); Equal(0, session.CloseCalls);
+    Equal("prepare,choice", string.Join(',', session.Events));
+});
+AsyncTest("close preparation precedes choice save and document close", async () =>
+{
+    var session = new TestSession { PreparedModified = true };
+    var result = await DocumentClose.TryAsync(session, () =>
+    {
+        session.Events.Add("choice");
+        return Task.FromResult(CloseChoice.Save);
+    }, () =>
+    {
+        session.Events.Add("save");
+        return Task.FromResult(true);
+    });
+    Equal(true, result.Closed); Equal(false, session.Discard);
+    Equal("prepare,choice,save,close", string.Join(',', session.Events));
+});
+AsyncTest("close preparation precedes explicit discard without saving", async () =>
+{
+    var session = new TestSession { PreparedModified = true };
+    var result = await DocumentClose.TryAsync(session, () =>
+    {
+        session.Events.Add("choice");
+        return Task.FromResult(CloseChoice.Discard);
+    }, () => throw new Exception("unexpected save"));
+    Equal(true, result.Closed); Equal(true, session.Discard);
+    Equal("prepare,choice,close", string.Join(',', session.Events));
+});
+AsyncTest("close preparation failure keeps the document without prompting saving or closing", async () =>
+{
+    var session = new TestSession { FailPreparation = true };
+    var result = await DocumentClose.TryAsync(session, () => throw new Exception("unexpected prompt"), () => throw new Exception("unexpected save"));
+    Equal(false, result.Closed); Equal(true, result.Error?.Contains("닫기 준비 실패") == true);
+    Equal(null, result.Warning); Equal(0, session.CloseCalls);
+    Equal("prepare", string.Join(',', session.Events));
 });
 
 WorkerClient StartWorker(TimeSpan? timeout = null) => WorkerClient.Start(new ProcessStartInfo
@@ -496,14 +604,29 @@ sealed class TestSession : IDocumentSession
     public bool FailStatus { get; init; }
     public bool FailClose { get; init; }
     public bool CancelClose { get; init; }
+    public bool? PreparedModified { get; init; }
+    public bool FailPreparation { get; init; }
+    public CloseResult? CloseOutcome { get; init; }
+    public List<string> Events { get; } = new();
     public int CloseCalls { get; private set; }
     public bool Discard { get; private set; }
-    public Task<DocumentStatus> StatusAsync() => FailStatus ? throw new SuiteException("상태 확인 실패") : Task.FromResult(new DocumentStatus(Modified, "문서"));
-    public Task<bool> CloseAsync(bool discard)
+    public Task<DocumentStatus> StatusAsync()
+    {
+        Events.Add("status");
+        return FailStatus ? throw new SuiteException("상태 확인 실패") : Task.FromResult(new DocumentStatus(Modified, "문서"));
+    }
+    public Task<DocumentStatus> PrepareCloseAsync()
+    {
+        Events.Add("prepare");
+        if (FailPreparation) throw new SuiteException("닫기 준비 실패");
+        return FailStatus ? throw new SuiteException("상태 확인 실패") : Task.FromResult(new DocumentStatus(PreparedModified ?? Modified, "문서"));
+    }
+    public Task<CloseResult> CloseAsync(bool discard)
     {
         CloseCalls++; Discard = discard;
+        Events.Add("close");
         if (FailClose) throw new SuiteException("닫기 실패");
-        return Task.FromResult(!CancelClose);
+        return Task.FromResult(CloseOutcome ?? new CloseResult(!CancelClose));
     }
 }
 

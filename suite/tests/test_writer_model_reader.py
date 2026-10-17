@@ -1388,4 +1388,100 @@ class ExplicitOwnedModelContracts(unittest.TestCase):
             with self.assertRaises(AssertionError):reader.read(13.0)
 
 
+class CalcPendingGetterContracts(unittest.TestCase):
+    GETTERS='calc-a1-b1-c1-d1-pending-input-v1'
+
+    @classmethod
+    def setUpClass(cls):
+        spec=importlib.util.spec_from_file_location('calc_pending_reader_contract',SOURCE)
+        cls.api=importlib.util.module_from_spec(spec);spec.loader.exec_module(cls.api)
+
+    def require_api(self):return self.api
+
+    def test_pending_getter_contract_is_explicit_and_distinct_from_model_only(self):
+        api=self.api
+        contract=api._model_contract(api.CALC_MODEL_SERVICE,self.GETTERS)
+        self.assertNotEqual(contract.getters,api.CALC_GETTER_CONTRACT)
+        self.assertEqual(contract.kind,'existing-owned-calc-pending-input')
+        self.assertIn('XSelectionSupplier.getSelection.rangeAddress',contract.operations)
+        self.assertIn('owned-test-accessible.A1-editor.XAccessibleText.getText',contract.operations)
+        self.assertEqual(contract.operations[-1],'verify-retained-generation')
+
+    def test_pending_getter_reads_ui_before_model_and_releases_only_client_proxies(self):
+        from types import SimpleNamespace as NS
+        api=self.api;uno,events,objects=ExplicitOwnedModelContracts().make_calc_uno()
+        sheet=objects['model'].getSheets().getByIndex(0)
+        area=NS(Sheet=0,StartColumn=0,StartRow=0,EndColumn=0,EndRow=0)
+        objects['controller'].getSelection=lambda: NS(getRangeAddress=lambda:area,getSpreadsheet=lambda:sheet)
+        class Pending:
+            def __init__(self,frame,child):
+                self.assert_frame=frame;self.assert_child=child
+            def read(self):events.append('pending-text');return {'actual':'getter-receipt'}
+            def release(self):events.append('pending-proxies-release')
+        contract=api._model_contract(api.CALC_MODEL_SERVICE,self.GETTERS)
+        module=NS(AccessiblePendingReader=Pending,require_pending_receipt=lambda raw,child_hwnd:raw)
+        with patch.dict('sys.modules',{'uno':uno,'calc_pending_input':module}):
+            reader=api._UnoReader(dict(child_hwnd=22,expected_url='file:///C:/owned.xlsx'),
+                NS(base={'privatePipe':'OpenGeul_'+'a'*32}),contract=contract)
+            events.clear();value=reader.read();reader.release()
+        self.assertEqual(value['pendingInput'],{'actual':'getter-receipt'})
+        self.assertEqual(value['calcSelection']['range'],dict(sheet=0,startColumn=0,startRow=0,endColumn=0,endRow=0))
+        self.assertLess(events.index('pending-text'),events.index('A1.getString'))
+        self.assertEqual(events.count('pending-proxies-release'),1)
+
+    def test_pending_receipt_replay_requires_explicit_contract_and_owned_accessible_binding(self):
+        from suite.tests.test_calc_pending_input import PendingInputTests
+        fixture=PendingInputTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        fixture.peer.getWindowHandle=lambda *args:22
+        fixture.document.set_children([fixture.table,fixture.editor])
+        raw=fixture.api.AccessiblePendingReader(fixture.frame,22).read()
+        binding,value=ExplicitOwnedModelContracts().calc_observation()
+        value.update(kind='existing-owned-calc-pending-input',operations=list(self.api.CALC_PENDING_OPERATIONS),
+            calcSelection=dict(readOnly=True,source='retained-controller.getSelection',range=dict(sheet=0,startColumn=0,startRow=0,endColumn=0,endRow=0)),
+            pendingInput=raw)
+        kwargs=dict(expected_service=self.api.CALC_MODEL_SERVICE,getter_contract=self.GETTERS)
+        self.assertIs(self.api.require_owned_model_observation(value,binding,'C:/Suite',**kwargs),value)
+        with self.assertRaises(AssertionError):
+            self.api.require_owned_model_observation(value,binding,'C:/Suite',expected_service=self.api.CALC_MODEL_SERVICE,
+                getter_contract=self.api.CALC_GETTER_CONTRACT)
+        for mutate in (lambda row:row.update(pendingInput=None),
+                       lambda row:row['pendingInput'].update(childHwnd=999),
+                       lambda row:row['pendingInput']['witness'].update(sameRoot=False),
+                       lambda row:row['calcSelection'].update(source='foreign-controller.getSelection'),
+                       lambda row:row.update(operations=list(self.api.CALC_OPERATIONS))):
+            changed=copy.deepcopy(value);mutate(changed)
+            with self.subTest(mutate=mutate),self.assertRaises(AssertionError):
+                self.api.require_owned_model_observation(changed,binding,'C:/Suite',**kwargs)
+
+    def test_pending_contract_selection_is_exact_readonly_range_and_owned_sheet(self):
+        from types import SimpleNamespace as NS
+        api=self.require_api()
+        self.assertTrue(callable(getattr(api,'read_calc_selection',None)),
+                        'Missing fixed readonly Calc selection getter')
+        sheet=object();calls=[]
+        address=NS(Sheet=0,StartColumn=0,StartRow=0,EndColumn=0,EndRow=0)
+        selection=NS(getRangeAddress=lambda:calls.append('range') or address,
+                     getSpreadsheet=lambda:calls.append('sheet') or sheet)
+        controller=NS(getSelection=lambda:calls.append('selection') or selection)
+        value=api.read_calc_selection(controller)
+        self.assertEqual(calls,['selection','range'])
+        self.assertIs(api.require_calc_a1_selection(value),value)
+        for field in ('sheet','startColumn','startRow','endColumn','endRow'):
+            changed=copy.deepcopy(value);changed['range'][field]=1
+            with self.subTest(field=field),self.assertRaises(AssertionError):api.require_calc_a1_selection(changed)
+        for field,replacement in [('source','foreign-controller.getSelection'),('readOnly',False),('range',None)]:
+            with self.subTest(field=field),self.assertRaises(AssertionError):
+                api.require_calc_a1_selection(dict(value,**{field:replacement}))
+
+    def test_selection_does_not_compare_separately_allocated_sheet_uno_proxies(self):
+        from types import SimpleNamespace as NS
+        # Pinned ScCellRangeObj::getSpreadsheet allocates a NEW ScTableSheetObj.
+        # A range from the retained controller is bound by its source DocShell,
+        # not by equality with another independently allocated sheet wrapper.
+        address=NS(Sheet=0,StartColumn=0,StartRow=0,EndColumn=0,EndRow=0)
+        selected=NS(getRangeAddress=lambda:address,getSpreadsheet=lambda:object())
+        value=self.api.read_calc_selection(NS(getSelection=lambda:selected))
+        self.api.require_calc_a1_selection(value)
+
+
 if __name__=='__main__':unittest.main()

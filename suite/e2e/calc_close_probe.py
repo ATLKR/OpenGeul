@@ -40,6 +40,7 @@ def require_original_close(record):
     assert type(record.get('closeShortcutCount')) is int and record['closeShortcutCount']==1
     assert record.get('beforeCloseActions')==['observe-uncommitted','observer-closed','ctrl-w'],'Focus/commit/retry between pending observation and CtrlW'
     assert record.get('uncommittedBeforeCloseVerified') is True
+    assert record.get('pendingInputTextVerified') is True, 'Actual owned A1 edit-buffer text was not proved'
 
 
 def require_disk_outcome(choice,before,after,baseline):
@@ -105,14 +106,14 @@ class CalcCloseCase(lifecycle.Case):
         try:cleanup=self.reader.close(self.deadline)
         finally:self.reader=None
         require_model_reader_cleanup(cleanup,binding,self.deadline,expected_service=calc_model_barrier.SERVICE,
-            getter_contract=calc_model_barrier.GETTERS)
+            getter_contract=calc_save.PENDING_GETTERS)
         return cleanup
 
     def start_reader(self,folder):
         from writer_model_reader import OwnedModelReader
         self.deadline=time.monotonic()+calc_model_barrier.MAX_SECONDS
         self.reader=OwnedModelReader(self.suite,self.output/folder,expected_service=calc_model_barrier.SERVICE,
-            getter_contract=calc_model_barrier.GETTERS,shell_pid=self.process.pid,
+            getter_contract=calc_save.PENDING_GETTERS,shell_pid=self.process.pid,
             expected_shell_creation=self.creation,suite_hwnd=self.hwnd,parent_hwnd=self.parent,
             child_hwnd=self.child,office_pid=self.office_pid,expected_url=self.source.as_uri())
         return self.reader.start(self.deadline)
@@ -202,12 +203,11 @@ class CalcCloseCase(lifecycle.Case):
             before=self.start_reader('before-close-reader');self.record['beforeInput']=before
             calc_save.require_uncommitted_cells(before,self.baseline)
             self.record['stage']='type-without-enter'
-            send_keys('^{HOME}{F2}^{END}',pause=.1);self.record['navigationKeys']=['^{HOME}','{F2}','^{END}']
-            self.api.require_editor_focus(self.hwnd,self.child)
-            native.ascii_input.type_ascii(self.api,self.hwnd,self.child,marker(self.choice),self.record,pause=.04)
-            self.api.require_editor_focus(self.hwnd,self.child)
-            pending=self.reader.read(self.deadline);self.record['beforeClose']=pending
-            calc_save.require_pending_observation(before,pending,self.baseline,suite=self.suite,inventory=inventory,
+            selected,editing,pending=calc_save.type_pending_a1(self.reader,self.baseline,marker(self.choice),self.record,self.deadline,
+                navigate=lambda keys:send_keys(keys,pause=.1),require_focus=lambda:self.api.require_editor_focus(self.hwnd,self.child),
+                type_marker=lambda:native.ascii_input.type_ascii(self.api,self.hwnd,self.child,marker(self.choice),self.record,pause=.04))
+            self.record['beforeClose']=pending
+            calc_save.require_pending_input_observations(before,selected,editing,pending,self.baseline,marker(self.choice),suite=self.suite,inventory=inventory,
                 inventory_sha256=identity['sha256'],original_shell=self.record['originalShell'],
                 expected_url=self.source.as_uri(),deadline=self.deadline)
             self.record['uncommittedBeforeCloseVerified']=True
@@ -233,7 +233,7 @@ class CalcCloseCase(lifecycle.Case):
                 after=self.start_reader('after-cancel-reader');self.record['afterCancel']=after
                 from writer_model_reader import require_owned_model_observation
                 require_owned_model_observation(after,after['bindingBefore'],self.suite,
-                    expected_service=calc_model_barrier.SERVICE,getter_contract=calc_model_barrier.GETTERS)
+                    expected_service=calc_model_barrier.SERVICE,getter_contract=calc_save.PENDING_GETTERS)
                 require_same_native_binding(before['bindingBefore'],after['bindingBefore'])
                 from writer_model_reader import canonical_profile_projection
                 old=before['nativeSnapshots']['controllerBefore'];new=after['nativeSnapshots']['controllerBefore']

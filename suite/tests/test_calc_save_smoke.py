@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 # Existing shared test fixtures use top-level imports under discovery; include
@@ -110,12 +111,99 @@ class CalcSaveSmokeTests(unittest.TestCase):
 
     def test_action_contract_forbids_enter_accept_formula_or_multiple_save(self):
         row=dict(navigationKeys=['^{HOME}','{F2}','^{END}'],commitKeys=[],saveShortcutCount=1,
-                 physicalAsciiMarker=self.api.MARKER,uncommittedBeforeSaveVerified=True,observerClosedBeforeSave=True)
+                 physicalAsciiMarker=self.api.MARKER,uncommittedBeforeSaveVerified=True,observerClosedBeforeSave=True,
+                 pendingInputTextVerified=True)
         self.api.require_actions(row)
         for key,value in [('commitKeys',['{ENTER}']),('navigationKeys',['.uno:AcceptFormula']),
-                          ('saveShortcutCount',2),('observerClosedBeforeSave',False)]:
+                          ('saveShortcutCount',2),('observerClosedBeforeSave',False),('pendingInputTextVerified',False)]:
             changed=dict(row);changed[key]=value
             with self.subTest(key=key),self.assertRaises(AssertionError):self.api.require_actions(changed)
+
+    def pending_rows(self):
+        from test_calc_pending_input import PendingInputTests
+        fixture=PendingInputTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        reader=fixture.reader();absent=reader.read()
+        fixture.paragraph.text=self.base['a1Text'];edit=fixture.present(reader)
+        fixture.paragraph.text=self.expected;pending=reader.read()
+        selection=dict(readOnly=True,source='retained-controller.getSelection',range=dict(sheet=0,startColumn=0,startRow=0,endColumn=0,endRow=0))
+        def row(ui):return dict(self.base,isModified=False,pendingInput=ui,calcSelection=copy.deepcopy(selection),bindingBefore={'childHwnd':456})
+        return [row(absent),row(edit),row(pending)]
+
+    def type_pending(self,rows):
+        from types import SimpleNamespace as NS
+        self.assertTrue(callable(getattr(self.api,'type_pending_a1',None)),
+                        'Physical Calc edit lacks exact owned selection/buffer receipt')
+        events=[];iterator=iter(rows);record={}
+        def read(deadline):events.append(('read',deadline));return next(iterator)
+        value=self.api.type_pending_a1(NS(read=read),self.base,self.api.MARKER,record,12.,
+            navigate=lambda keys:events.append(('keys',keys)),require_focus=lambda:events.append(('focus-getter',)),
+            type_marker=lambda:events.append(('ascii-once',)))
+        return value,events,record
+
+    def test_physical_edit_observes_a1_then_baseline_buffer_before_ascii_without_committing(self):
+        self.assertTrue(callable(getattr(self.api,'type_pending_a1',None)),
+                        'Physical Calc edit lacks exact owned selection/buffer receipt')
+        rows=self.pending_rows();value,events,record=self.type_pending(rows)
+        self.assertEqual(value,tuple(rows))
+        self.assertEqual([event for event in events if event[0] in ('keys','read','ascii-once')],
+            [('keys','^{HOME}'),('read',12.),('keys','{F2}^{END}'),('read',12.),('ascii-once',),('read',12.)])
+        self.assertEqual(record['navigationKeys'],['^{HOME}','{F2}','^{END}'])
+        self.assertTrue(record['pendingInputTextVerified'])
+
+    def test_wrong_a1_selection_stops_before_f2_and_missing_or_wrong_buffer_stops_before_ascii(self):
+        self.assertTrue(callable(getattr(self.api,'type_pending_a1',None)),
+                        'Physical Calc edit lacks exact owned selection/buffer receipt')
+        from types import SimpleNamespace as NS
+        for stage in ('selection','missing-editor','baseline-text','suffix','model-accepted'):
+            rows=self.pending_rows();events=[];record={};iterator=iter(rows)
+            if stage=='selection':rows[0]['calcSelection']['range']['startRow']=rows[0]['calcSelection']['range']['endRow']=7
+            elif stage=='missing-editor':rows[1]['pendingInput']=copy.deepcopy(rows[0]['pendingInput'])
+            elif stage=='baseline-text':rows[1]['pendingInput']['editor']['text']='wrong'
+            elif stage=='suffix':rows[2]['pendingInput']['editor']['text']+='x'
+            else:rows[2]['isModified']=True
+            with self.subTest(stage=stage),self.assertRaises(AssertionError):
+                self.api.type_pending_a1(NS(read=lambda deadline:next(iterator)),self.base,self.api.MARKER,record,12.,
+                    navigate=lambda keys:events.append(keys),require_focus=lambda:None,type_marker=lambda:events.append('ascii'))
+            if stage=='selection':self.assertEqual(events,['^{HOME}'])
+            elif stage in ('missing-editor','baseline-text'):self.assertNotIn('ascii',events)
+            else:self.assertEqual(events.count('ascii'),1)
+
+    def test_pending_input_replay_joins_exact_ui_text_to_ordered_owned_model_receipts(self):
+        from test_calc_model_barrier import observation
+        from test_writer_model_barrier import synthetic_frame,original_shell_fixture
+        import writer_model_reader as reader
+        self.assertTrue(callable(getattr(self.api,'require_pending_input_observations',None)))
+        basic=self.pending_rows()
+        with tempfile.TemporaryDirectory() as directory:
+            frame=synthetic_frame(Path(directory)/'Suite','unused')
+            frame.binding['documentUrl']='file:///C:/owned.xlsx'
+            rows=[]
+            for index,part in enumerate([basic[0],*basic]):
+                row=observation(frame,self.base['a1Text'],1+index*.2,1.1+index*.2,False)
+                ui=copy.deepcopy(part['pendingInput']);ui['childHwnd']=frame.binding['childHwnd']
+                row.update(kind='existing-owned-calc-pending-input',operations=list(reader.CALC_PENDING_OPERATIONS),
+                    calcSelection=copy.deepcopy(part['calcSelection']),pendingInput=ui)
+                rows.append(row)
+            context=dict(suite=frame.suite,inventory=frame.inventory,inventory_sha256=frame.inventory_sha256,
+                original_shell=original_shell_fixture(frame.binding,frame.suite),expected_url=frame.binding['documentUrl'],deadline=12.)
+            self.api.require_pending_input_observations(*rows,self.base,self.api.MARKER,**context)
+            for mutate in (lambda r:r[1]['calcSelection']['range'].update(startRow=7,endRow=7),
+                           lambda r:r[3]['pendingInput']['editor'].update(text=self.expected+'suffix'),
+                           lambda r:r[3]['bindingAfter'].update(officeCreationTime=999),
+                           lambda r:r[3].update(readStartedAt=.5)):
+                changed=copy.deepcopy(rows);mutate(changed)
+                with self.subTest(mutate=mutate),self.assertRaises(AssertionError):
+                    self.api.require_pending_input_observations(*changed,self.base,self.api.MARKER,**context)
+
+    def test_lost_focus_or_capture_after_reader_start_prevents_navigation_input(self):
+        from types import SimpleNamespace as NS
+        events=[]
+        def refuse():raise AssertionError('Owned input focus/capture changed')
+        with self.assertRaisesRegex(AssertionError,'focus/capture'):
+            self.api.type_pending_a1(NS(read=lambda deadline:self.fail('No getter after rejected input guard')),
+                self.base,self.api.MARKER,{},12.,navigate=lambda keys:events.append(keys),
+                require_focus=refuse,type_marker=lambda:events.append('ascii'))
+        self.assertEqual(events,[])
 
 
 if __name__=='__main__':unittest.main()

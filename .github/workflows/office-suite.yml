@@ -106,6 +106,50 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
       if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기
+      id: calc-save
+      shell: pwsh
+      run: |
+        python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+S verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+S 성공·실패 뒤 패키지 불변 확인
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+S verification.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+S 입력·저장·로컬 네이티브 진단 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-calc-save-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-calc-save/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
+    - name: Enter 없이 실제 Calc Ctrl+W 저장·버림·취소 관측
+      id: calc-close
+      shell: pwsh
+      run: |
+        python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+W choice probe failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+W 성공·실패 뒤 패키지 불변 확인
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+W choice probe.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+W 세 선택과 로컬 네이티브 진단 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-calc-close-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-calc-close/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
     - name: 문서 형식 15개와 모듈 심화 기능 6개 의미 검증
       shell: pwsh
       run: |
@@ -254,8 +298,10 @@ jobs:
       shell: python
       run: |
         from pathlib import Path, PurePosixPath
-        import hashlib, json, os, re
-        def check_native_archives(root):
+        import hashlib, json, os, re, sys
+        sys.path.insert(0, str(Path.cwd()))
+        from suite.e2e.native_cleanup_receipt import MAX_RECEIPT_BYTES, load_cleanup_receipt, validate_cleanup_receipt
+        def check_native_archives(root, expected_engine_image):
             assert root.is_dir() and not root.is_symlink(), 'Owned native diagnostics are missing'
             manifests = sorted(root.glob('*/manifest.json'))
             assert manifests, 'No owned native diagnostic manifests were archived'
@@ -265,7 +311,7 @@ jobs:
                     with path.open('rb') as stream:
                         signature = stream.read(4)
                     assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
-            files = 0
+            files = shutdowns = 0
             for manifest in manifests:
                 record = json.loads(manifest.read_text(encoding='utf-8'))
                 assert record.get('schemaVersion') == 1 and record.get('archiveComplete') is True, 'Incomplete native archive: ' + str(manifest)
@@ -281,11 +327,59 @@ jobs:
                     assert type(item['bytes']) is int and path.stat().st_size == item['bytes'], 'Native archive file size differs'
                     assert re.fullmatch('[a-f0-9]{64}', item['sha256']) and hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256'], 'Native archive file hash differs'
                     files += 1
-            return dict(schemaVersion=1, kind='native-archive-integrity', success=True, completeArchives=len(manifests), verifiedFiles=files, crashDumps=0)
-        result = check_native_archives(Path('.work/suite-worker-diagnostics'))
+                # These five diagnostics roots are product UnoBackend archives.
+                # Observer evidence is outside them; a missing proof is never an exemption.
+                assert 'shutdown.json' in seen, 'Manifest-hashed product shutdown receipt is missing'
+                shutdown = manifest.parent / 'shutdown.json'
+                assert 0 < shutdown.stat().st_size <= MAX_RECEIPT_BYTES, 'Product shutdown receipt exceeds its finite limit'
+                validate_cleanup_receipt(load_cleanup_receipt(shutdown.read_bytes()),
+                                         expected_engine_image=str(expected_engine_image), launcher_pid=record.get('launcherPid'))
+                shutdowns += 1
+            return dict(schemaVersion=1, kind='native-archive-integrity', success=True, completeArchives=len(manifests), verifiedFiles=files, qualifiedShutdowns=shutdowns, crashDumps=0)
+        def check_evidence_crash_dumps(root):
+            assert root.is_dir() and not root.is_symlink(), 'Owned Calc evidence is missing'
+            for path in root.rglob('*'):
+                assert not path.is_symlink(), 'Linked Calc evidence paths are not accepted'
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        signature = stream.read(4)
+                    assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
+            return dict(success=True, crashDumps=0)
+        def check_all_native_archives(roots, evidence_roots, expected_engine_image):
+            records = []
+            for root in roots:
+                try:
+                    record = check_native_archives(Path(root), expected_engine_image)
+                except Exception as exc:
+                    record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+                record['root'] = str(root)
+                records.append(record)
+            evidence = []
+            for root in evidence_roots:
+                try:
+                    record = check_evidence_crash_dumps(Path(root))
+                except Exception as exc:
+                    record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+                record['root'] = str(root)
+                evidence.append(record)
+            success = bool(records) and bool(evidence) and all(record['success'] for record in records + evidence)
+            result = dict(schemaVersion=1, kind='native-archive-integrity', success=success, roots=records, evidenceRoots=evidence,
+                          completeArchives=sum(record.get('completeArchives', 0) for record in records),
+                          verifiedFiles=sum(record.get('verifiedFiles', 0) for record in records),
+                          qualifiedShutdowns=sum(record.get('qualifiedShutdowns', 0) for record in records))
+            if success:
+                result['crashDumps'] = 0
+            return result
+        roots = ('.work/suite-worker-diagnostics', '.work/suite-calc-save/diagnostics',
+                 '.work/suite-calc-close/calc-close-save/diagnostics',
+                 '.work/suite-calc-close/calc-close-discard/diagnostics',
+                 '.work/suite-calc-close/calc-close-cancel/diagnostics')
+        evidence_roots = ('.work/suite-calc-save', '.work/suite-calc-close')
+        result = check_all_native_archives(roots, evidence_roots, Path(os.environ['SUITE_PACKAGE']).resolve() / 'Office/program/soffice.bin')
         result.update(sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'])
         Path('.work/suite-native-integrity.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
         print(json.dumps(result))
+        assert result['success'], 'At least one owned native diagnostics root failed integrity or graceful shutdown qualification'
     - name: 원본 GUI·엔진·IME·반복 검증 기록 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -297,6 +391,8 @@ jobs:
           .work/suite-engine-2/
           .work/suite-native/
           .work/suite-native-2/
+          .work/suite-calc-save/
+          .work/suite-calc-close/
           .work/suite-korean-readiness/
           !.work/suite-korean-readiness/fod-source/**/*.cab
           .work/suite-korean-ime/

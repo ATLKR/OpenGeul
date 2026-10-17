@@ -50,7 +50,7 @@ class NativeEngineBuildTests(unittest.TestCase):
 
     def test_config_requires_native_firebird_not_just_successful_configure(self):
         config=self.root/'config_host.mk'
-        good={'OS':'WNT','COM':'MSC','CPUNAME':'AARCH64','HOST_PLATFORM':'aarch64-pc-cygwin','BUILD_PLATFORM':'aarch64-pc-cygwin','WIN_HOST_ARCH':'arm64','WIN_BUILD_ARCH':'arm64','ENABLE_FIREBIRD_SDBC':'TRUE','SYSTEM_FIREBIRD':'','CROSS_COMPILING':'','BUILD_TYPE':'FIREBIRD ICU LIBATOMIC_OPS LIBTOMMATH'}
+        good={'OS':'WNT','COM':'MSC','CPUNAME':'AARCH64','HOST_PLATFORM':'aarch64-pc-cygwin','BUILD_PLATFORM':'aarch64-pc-cygwin','WIN_HOST_ARCH':'arm64','WIN_BUILD_ARCH':'arm64','ENABLE_FIREBIRD_SDBC':'TRUE','SYSTEM_FIREBIRD':'','CROSS_COMPILING':'','BUILD_TYPE':'FIREBIRD ICU LIBATOMIC_OPS LIBTOMMATH','PKGFORMAT':'archive'}
         def write(values): config.write_text(''.join(f'export {key}={value}\n' for key,value in values.items()))
         write({key:value for key,value in good.items() if key not in ('WIN_HOST_ARCH','WIN_BUILD_ARCH')})
         self.ps(f"$config=Assert-GeneratedConfiguration {quote(config)}; if($config.CPUNAME -ne 'AARCH64'){{throw 'Wrong parsed config'}}")
@@ -110,9 +110,83 @@ class NativeEngineBuildTests(unittest.TestCase):
         self.assertEqual(302435508,data['size'])
         self.assertEqual('296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785',data['sha256'])
         self.assertEqual(json.loads(lock.read_text())['runtime']['sourceUrl'],data['url'])
+        self.assertEqual('bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1',data.get('coreCommit'))
         bad=json.loads(lock.read_text()); bad['runtime']['sourceUrl']='https://example.org/renamed.tar.xz'
         path=self.root/'bad.json';path.write_text(json.dumps(bad))
         self.rejected(f"Get-SourcePin {quote(path)}")
+
+    def build_identity_fixture(self, original='a'*40):
+        import hashlib
+        runtime=self.root/'runtime';program=runtime/'program';program.mkdir(parents=True)
+        for name,section in (('version.ini','Version'),('setup.ini','Bootstrap')):
+            (program/name).write_bytes(f'[{section}]\r\nbuildid={original}\r\nVendor=LibreOffice\r\n'.encode())
+        archive=self.root/'source.tar.xz';archive.write_bytes(b'authenticated source archive fixture')
+        pin={'url':'https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz',
+             'version':'26.8.1.1','size':archive.stat().st_size,'sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),
+             'coreCommit':'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'}
+        pin_path=self.root/'source-pin.json';pin_path.write_text(json.dumps(pin))
+        evidence=self.root/'evidence';evidence.mkdir()
+        call=f"Set-RuntimeBuildIdentity {quote(runtime)} {quote(archive)} (Get-Content {quote(pin_path)} -Raw|ConvertFrom-Json) {quote('a'*40)} {quote(evidence)}"
+        return runtime,archive,pin_path,evidence,pin,call
+
+    def test_runtime_identity_corrects_known_parent_git_or_empty_id_using_authenticated_source_pin(self):
+        for original in ('a'*40,'','bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'):
+            with self.subTest(original=original),tempfile.TemporaryDirectory() as folder:
+                old_root=self.root;self.root=Path(folder)
+                try:
+                    runtime,_,_,evidence,pin,call=self.build_identity_fixture(original)
+                    before={name:(runtime/'program'/name).read_bytes() for name in ('version.ini','setup.ini')}
+                    data=json.loads(self.ps(call+'|ConvertTo-Json -Depth 8 -Compress'))
+                    self.assertEqual(pin['coreCommit'],data['expectedBuildId'])
+                    self.assertEqual(pin['sha256'],data['sourceArchiveSha256'])
+                    for name in before:
+                        self.assertEqual(before[name],(evidence/('original-runtime-'+name)).read_bytes())
+                        self.assertEqual(before[name].replace(('buildid='+original).encode(),('buildid='+pin['coreCommit']).encode()),
+                                         (runtime/'program'/name).read_bytes())
+                        self.assertEqual(original,data['files']['program/'+name]['originalBuildId'])
+                        self.assertEqual(original!=pin['coreCommit'],data['files']['program/'+name]['corrected'])
+                finally:self.root=old_root
+
+    def test_runtime_identity_rejects_unrelated_parent_id_missing_duplicate_or_wrong_section_before_writes(self):
+        for mutation in ('unrelated','missing','duplicate','spaced-key','leading-space','section','hidden-section','missing-file','archive-hash','archive-size'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as folder:
+                old_root=self.root;self.root=Path(folder)
+                try:
+                    runtime,archive,_,evidence,_,call=self.build_identity_fixture()
+                    path=runtime/'program/version.ini'
+                    if mutation=='unrelated':path.write_bytes(path.read_bytes().replace(b'a'*40,b'f'*40))
+                    elif mutation=='missing':path.write_bytes(b'[Version]\r\nVendor=LibreOffice\r\n')
+                    elif mutation=='duplicate':path.write_bytes(path.read_bytes()+b'buildid='+b'a'*40+b'\r\n')
+                    elif mutation=='spaced-key':path.write_bytes(path.read_bytes()+b'buildid ='+b'f'*40+b'\r\n')
+                    elif mutation=='leading-space':path.write_bytes(path.read_bytes()+b' buildid='+b'f'*40+b'\r\n')
+                    elif mutation=='section':path.write_bytes(path.read_bytes().replace(b'[Version]',b'[Other]'))
+                    elif mutation=='hidden-section':path.write_bytes(b'[Version]\r\nVendor=LibreOffice\r\n [Other]\r\nbuildid='+b'a'*40+b'\r\n')
+                    elif mutation=='missing-file':path.unlink()
+                    elif mutation=='archive-hash':archive.write_bytes(b'x'*archive.stat().st_size)
+                    else:archive.write_bytes(archive.read_bytes()+b'x')
+                    before={p.name:p.read_bytes() for p in (runtime/'program').iterdir()}
+                    self.rejected(call)
+                    self.assertEqual(before,{p.name:p.read_bytes() for p in (runtime/'program').iterdir()})
+                    self.assertEqual([],list(evidence.iterdir()))
+                finally:self.root=old_root
+
+    def test_final_runtime_identity_verification_rejects_wrong_missing_or_changed_effective_metadata(self):
+        for mutation in ('unchanged','wrong-id','empty-id','missing-file','other-metadata'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as folder:
+                old_root=self.root;self.root=Path(folder)
+                try:
+                    runtime,_,pin_path,_,pin,call=self.build_identity_fixture()
+                    proof=self.root/'identity.json'
+                    self.ps(call+f'|ConvertTo-Json -Depth 8|Set-Content {quote(proof)}')
+                    path=runtime/'program/version.ini'
+                    if mutation=='wrong-id':path.write_bytes(path.read_bytes().replace(pin['coreCommit'].encode(),b'f'*40))
+                    elif mutation=='empty-id':path.write_bytes(path.read_bytes().replace(pin['coreCommit'].encode(),b''))
+                    elif mutation=='missing-file':path.unlink()
+                    elif mutation=='other-metadata':path.write_bytes(path.read_bytes()+b'other=changed\r\n')
+                    check=f"Assert-RuntimeBuildIdentity {quote(runtime)} (Get-Content {quote(pin_path)} -Raw|ConvertFrom-Json) (Get-Content {quote(proof)} -Raw|ConvertFrom-Json)"
+                    if mutation=='unchanged':self.ps(check+'|Out-Null')
+                    else:self.rejected(check)
+                finally:self.root=old_root
 
     def test_authentication_rejects_wrong_size_or_hash_before_execution(self):
         fixture=self.root/'owned';fixture.write_bytes(b'authenticated')

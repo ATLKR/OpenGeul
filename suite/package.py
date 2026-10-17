@@ -86,6 +86,8 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
             f"GitHub build artifact SHA256: {build['artifactSha256']}\n"
             'Authenticated native build receipt: ../Office/opengeul-source-build.json\n'
             f"Native build receipt SHA256: {build['receiptSha256']}\n\n"
+            'Native engine source patches are enumerated in the pinned patch manifest.\n'
+            'The exact patch files are included in the OpenGeul source archive.\n\n'
         )
     source_notice = (
         '# OpenGeul Office corresponding source\n\n'
@@ -96,7 +98,7 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
         + engine_source_notice +
         f"HWP component source: {lock['hwp']['sourceUrl']}\n"
         f"HWP original build provenance: {lock['hwp']['provenanceUrl']}\n\n"
-        'Runtime modifications are enumerated in ../runtime-branding.json. The changed\n'
+        'Suite branding changes are enumerated in ../runtime-branding.json. The changed\n'
         'registry/configuration and branding files are included in ../Office and the\n'
         'OpenGeul source archive. Original runtime LICENSE/NOTICE/CREDITS remain in Office.\n'
         'OpenGeul Suite additions are MIT; upstream files retain their original licenses.\n'

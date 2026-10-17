@@ -1,0 +1,472 @@
+{
+  "graceful": {
+    "schemaVersion": 1,
+    "kind": "owned-office-job-cleanup",
+    "success": true,
+    "gracefulQualified": true,
+    "forcedTermination": false,
+    "jobEmptyVerified": true,
+    "initialMembers": [
+      {
+        "image": "C:/Office/program/soffice.exe",
+        "creationTime": 134366967797539297,
+        "pid": 10,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 110
+      },
+      {
+        "image": "C:/Office/program/soffice.bin",
+        "creationTime": 134366967797539307,
+        "pid": 20,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 120
+      }
+    ],
+    "finalMembers": [
+      {
+        "image": "C:/Office/program/soffice.exe",
+        "creationTime": 134366967797539297,
+        "pid": 10,
+        "alive": false,
+        "waitResult": 0,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 110
+      },
+      {
+        "image": "C:/Office/program/soffice.bin",
+        "creationTime": 134366967797539307,
+        "pid": 20,
+        "alive": false,
+        "waitResult": 0,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 120
+      }
+    ],
+    "expectedEngineImage": "C:/Office/program/soffice.bin",
+    "finalJobPids": [],
+    "launcherExitCode": 0,
+    "gracefulBudgetSeconds": 5,
+    "recoveryBudgetSeconds": 5,
+    "terminateRequested": true,
+    "terminateResult": true,
+    "errors": [],
+    "jobHandleValue": 99,
+    "launcherPid": 10,
+    "launcherHandleValue": 1001,
+    "terminateStartedAt": 0.0,
+    "terminateFinishedAt": 0.0,
+    "gracefulWaitStartedAt": 0.0,
+    "launcherWaitResult": 0,
+    "lastJobCensus": {
+      "schemaVersion": 1,
+      "kind": "private-job-process-census",
+      "api": "QueryInformationJobObject",
+      "informationClass": 3,
+      "jobHandleValue": 99,
+      "capacity": 128,
+      "maxAttempts": 3,
+      "bufferBytes": 1032,
+      "headerBytes": 8,
+      "processIdBytes": 8,
+      "startedAt": 1.41,
+      "finishedAt": 1.41,
+      "classification": "complete",
+      "calls": [
+        {
+          "attempt": 1,
+          "startedAt": 1.41,
+          "finishedAt": 1.41,
+          "result": true,
+          "lastError": 0,
+          "assigned": 0,
+          "count": 0,
+          "returnLength": 8,
+          "pids": [],
+          "classification": "complete"
+        }
+      ]
+    },
+    "gracefulWaitFinishedAt": 1.41,
+    "profileRetained": false,
+    "elapsedSeconds": 1.41,
+    "deathProved": true,
+    "resourcesReleased": true
+  },
+  "forced": {
+    "schemaVersion": 1,
+    "kind": "owned-office-job-cleanup",
+    "success": false,
+    "gracefulQualified": false,
+    "forcedTermination": true,
+    "jobEmptyVerified": true,
+    "initialMembers": [
+      {
+        "image": "C:/Office/program/soffice.exe",
+        "creationTime": 134366967797539297,
+        "pid": 10,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 110
+      },
+      {
+        "image": "C:/Office/program/soffice.bin",
+        "creationTime": 134366967797539307,
+        "pid": 20,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 120
+      }
+    ],
+    "finalMembers": [
+      {
+        "image": "C:/Office/program/soffice.exe",
+        "creationTime": 134366967797539297,
+        "pid": 10,
+        "alive": false,
+        "waitResult": 0,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 110
+      },
+      {
+        "image": "C:/Office/program/soffice.bin",
+        "creationTime": 134366967797539307,
+        "pid": 20,
+        "alive": false,
+        "waitResult": 0,
+        "exitCode": 1,
+        "exitCodeHex": "0x00000001",
+        "getExitCodeProcessResult": true,
+        "handleValue": 120
+      }
+    ],
+    "expectedEngineImage": "C:/Office/program/soffice.bin",
+    "finalJobPids": [],
+    "launcherExitCode": 0,
+    "gracefulBudgetSeconds": 5,
+    "recoveryBudgetSeconds": 5,
+    "terminateRequested": true,
+    "terminateResult": true,
+    "errors": [
+      {
+        "stage": "graceful exit",
+        "type": "RuntimeError",
+        "message": "Private Office job required forced recovery",
+        "winerror": null,
+        "jobCensus": null
+      },
+      {
+        "stage": "process exit",
+        "type": "RuntimeError",
+        "message": "An owned Office process exited with a nonzero code",
+        "winerror": null,
+        "jobCensus": null
+      }
+    ],
+    "jobHandleValue": 99,
+    "launcherPid": 10,
+    "launcherHandleValue": 1001,
+    "terminateStartedAt": 0.0,
+    "terminateFinishedAt": 0.0,
+    "gracefulWaitStartedAt": 0.0,
+    "launcherWaitResult": 0,
+    "lastJobCensus": {
+      "schemaVersion": 1,
+      "kind": "private-job-process-census",
+      "api": "QueryInformationJobObject",
+      "informationClass": 3,
+      "jobHandleValue": 99,
+      "capacity": 128,
+      "maxAttempts": 3,
+      "bufferBytes": 1032,
+      "headerBytes": 8,
+      "processIdBytes": 8,
+      "startedAt": 5.109999999999999,
+      "finishedAt": 5.109999999999999,
+      "classification": "complete",
+      "calls": [
+        {
+          "attempt": 1,
+          "startedAt": 5.109999999999999,
+          "finishedAt": 5.109999999999999,
+          "result": true,
+          "lastError": 0,
+          "assigned": 0,
+          "count": 0,
+          "returnLength": 8,
+          "pids": [],
+          "classification": "complete"
+        }
+      ]
+    },
+    "gracefulWaitFinishedAt": 5.0,
+    "forcedTerminationStartedAt": 5.0,
+    "forcedTerminationFinishedAt": 5.0,
+    "recoveryWaitStartedAt": 5.0,
+    "recoveryWaitFinishedAt": 5.109999999999999,
+    "profileRetained": false,
+    "elapsedSeconds": 5.109999999999999,
+    "deathProved": true,
+    "resourcesReleased": true
+  },
+  "nonzero": {
+    "schemaVersion": 1,
+    "kind": "owned-office-job-cleanup",
+    "success": false,
+    "gracefulQualified": false,
+    "forcedTermination": false,
+    "jobEmptyVerified": true,
+    "initialMembers": [
+      {
+        "image": "C:/Office/program/soffice.exe",
+        "creationTime": 134366967797539297,
+        "pid": 10,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 110
+      },
+      {
+        "image": "C:/Office/program/soffice.bin",
+        "creationTime": 134366967797539307,
+        "pid": 20,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 3221225477,
+        "exitCodeHex": "0xc0000005",
+        "getExitCodeProcessResult": true,
+        "handleValue": 120
+      }
+    ],
+    "finalMembers": [
+      {
+        "image": "C:/Office/program/soffice.exe",
+        "creationTime": 134366967797539297,
+        "pid": 10,
+        "alive": false,
+        "waitResult": 0,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 110
+      },
+      {
+        "image": "C:/Office/program/soffice.bin",
+        "creationTime": 134366967797539307,
+        "pid": 20,
+        "alive": false,
+        "waitResult": 0,
+        "exitCode": 3221225477,
+        "exitCodeHex": "0xc0000005",
+        "getExitCodeProcessResult": true,
+        "handleValue": 120
+      }
+    ],
+    "expectedEngineImage": "C:/Office/program/soffice.bin",
+    "finalJobPids": [],
+    "launcherExitCode": 0,
+    "gracefulBudgetSeconds": 5,
+    "recoveryBudgetSeconds": 5,
+    "terminateRequested": true,
+    "terminateResult": true,
+    "errors": [
+      {
+        "stage": "process exit",
+        "type": "RuntimeError",
+        "message": "An owned Office process exited with a nonzero code",
+        "winerror": null,
+        "jobCensus": null
+      }
+    ],
+    "jobHandleValue": 99,
+    "launcherPid": 10,
+    "launcherHandleValue": 1001,
+    "terminateStartedAt": 0.0,
+    "terminateFinishedAt": 0.0,
+    "gracefulWaitStartedAt": 0.0,
+    "launcherWaitResult": 0,
+    "lastJobCensus": {
+      "schemaVersion": 1,
+      "kind": "private-job-process-census",
+      "api": "QueryInformationJobObject",
+      "informationClass": 3,
+      "jobHandleValue": 99,
+      "capacity": 128,
+      "maxAttempts": 3,
+      "bufferBytes": 1032,
+      "headerBytes": 8,
+      "processIdBytes": 8,
+      "startedAt": 1.41,
+      "finishedAt": 1.41,
+      "classification": "complete",
+      "calls": [
+        {
+          "attempt": 1,
+          "startedAt": 1.41,
+          "finishedAt": 1.41,
+          "result": true,
+          "lastError": 0,
+          "assigned": 0,
+          "count": 0,
+          "returnLength": 8,
+          "pids": [],
+          "classification": "complete"
+        }
+      ]
+    },
+    "gracefulWaitFinishedAt": 1.41,
+    "profileRetained": false,
+    "elapsedSeconds": 1.41,
+    "deathProved": true,
+    "resourcesReleased": true
+  },
+  "unproved": {
+    "schemaVersion": 1,
+    "kind": "owned-office-job-cleanup",
+    "success": false,
+    "gracefulQualified": false,
+    "forcedTermination": true,
+    "jobEmptyVerified": false,
+    "initialMembers": [
+      {
+        "image": "C:/Office/program/soffice.exe",
+        "creationTime": 134366967797539297,
+        "pid": 10,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 110
+      },
+      {
+        "image": "C:/Office/program/soffice.bin",
+        "creationTime": 134366967797539307,
+        "pid": 20,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 120
+      }
+    ],
+    "finalMembers": [
+      {
+        "image": "C:/Office/program/soffice.exe",
+        "creationTime": 134366967797539297,
+        "pid": 10,
+        "alive": false,
+        "waitResult": 0,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 110
+      },
+      {
+        "image": "C:/Office/program/soffice.bin",
+        "creationTime": 134366967797539307,
+        "pid": 20,
+        "alive": true,
+        "waitResult": 258,
+        "exitCode": 0,
+        "exitCodeHex": "0x00000000",
+        "getExitCodeProcessResult": true,
+        "handleValue": 120
+      }
+    ],
+    "expectedEngineImage": "C:/Office/program/soffice.bin",
+    "finalJobPids": [
+      20
+    ],
+    "launcherExitCode": null,
+    "gracefulBudgetSeconds": 5,
+    "recoveryBudgetSeconds": 5,
+    "terminateRequested": true,
+    "terminateResult": true,
+    "errors": [
+      {
+        "stage": "graceful exit",
+        "type": "RuntimeError",
+        "message": "Private Office job required forced recovery",
+        "winerror": null,
+        "jobCensus": null
+      },
+      {
+        "stage": "owned job retained",
+        "type": "RuntimeError",
+        "message": "Private Office job death could not be proved",
+        "winerror": null,
+        "jobCensus": null
+      }
+    ],
+    "jobHandleValue": 99,
+    "launcherPid": 10,
+    "launcherHandleValue": 1001,
+    "terminateStartedAt": 0.0,
+    "terminateFinishedAt": 0.0,
+    "gracefulWaitStartedAt": 0.0,
+    "launcherWaitResult": null,
+    "lastJobCensus": {
+      "schemaVersion": 1,
+      "kind": "private-job-process-census",
+      "api": "QueryInformationJobObject",
+      "informationClass": 3,
+      "jobHandleValue": 99,
+      "capacity": 128,
+      "maxAttempts": 3,
+      "bufferBytes": 1032,
+      "headerBytes": 8,
+      "processIdBytes": 8,
+      "startedAt": 10.0,
+      "finishedAt": 10.0,
+      "classification": "complete",
+      "calls": [
+        {
+          "attempt": 1,
+          "startedAt": 10.0,
+          "finishedAt": 10.0,
+          "result": true,
+          "lastError": 0,
+          "assigned": 1,
+          "count": 1,
+          "returnLength": 16,
+          "pids": [
+            20
+          ],
+          "classification": "complete"
+        }
+      ]
+    },
+    "gracefulWaitFinishedAt": 5.0,
+    "forcedTerminationStartedAt": 5.0,
+    "forcedTerminationFinishedAt": 5.0,
+    "recoveryWaitStartedAt": 5.0,
+    "recoveryWaitFinishedAt": 10.0,
+    "profileRetained": true,
+    "elapsedSeconds": 10.0,
+    "deathProved": false,
+    "resourcesReleased": false
+  }
+}

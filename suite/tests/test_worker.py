@@ -129,6 +129,8 @@ class FakeBackend:
 
     def cleanup(self):
         self.calls.append(('cleanup',))
+        return dict(success=True, gracefulQualified=True, forcedTermination=False,
+                    jobEmptyVerified=True, resourcesReleased=True)
 
 
 class WorkerTests(unittest.TestCase):
@@ -275,6 +277,41 @@ class WorkerTests(unittest.TestCase):
         self.backend.modified = False
         self.assertTrue(self.session.dispatch('shutdown', {})['shutdown'])
         self.assert_code('invalid_state', 'attach', {})
+
+    def test_calc_eof_never_closes_clean_model_with_unobserved_pending_input(self):
+        self.attach(module='calc')
+        self.backend.modified = False
+        retained_profile, retained_process = object(), object()
+        self.backend.profile, self.backend.process = retained_profile, retained_process
+        calls = list(self.backend.calls)
+        self.backend.status = lambda: self.fail('EOF must not infer pending-cell safety from model status')
+        self.backend.prepare_close = lambda: self.fail('EOF must not prepare or prompt interactively')
+        self.worker_module.serve(self.session, io.StringIO(''), io.StringIO())
+        self.assertEqual(self.session.state, 'attached')
+        self.assertIs(self.session.backend, self.backend)
+        self.assertIs(self.backend.profile, retained_profile)
+        self.assertIs(self.backend.process, retained_process)
+        self.assertEqual(self.backend.calls, calls)
+
+    def test_calc_shutdown_without_explicit_discard_cancels_even_when_model_is_clean(self):
+        self.attach(module='calc')
+        self.backend.modified = False
+        self.assertEqual(self.session.dispatch('shutdown', {}), dict(closed=False, closeCancelled=True))
+        self.assertEqual(self.session.state, 'attached')
+        self.assertFalse(any(call[0] in ('close','cleanup') for call in self.backend.calls))
+
+    def test_calc_explicit_discard_shutdown_remains_authorized(self):
+        self.attach(module='calc')
+        self.backend.modified = True
+        self.assertTrue(self.session.dispatch('shutdown', dict(discard=True))['shutdown'])
+        self.assertEqual(self.backend.calls[-2:], [('close',True),('cleanup',)])
+
+    def test_calc_postconfirmed_close_shutdown_remains_authorized(self):
+        self.attach(module='calc')
+        self.assertTrue(self.session.dispatch('close', {})['closed'])
+        cleanup_calls = self.backend.calls.count(('cleanup',))
+        self.assertTrue(self.session.dispatch('shutdown', {})['shutdown'])
+        self.assertEqual(self.backend.calls.count(('cleanup',)), cleanup_calls)
 
     def test_resize_is_checked_then_forwarded(self):
         self.attach()
@@ -490,6 +527,8 @@ class NativeBoundaryTests(unittest.TestCase):
 
     def test_explicit_connect_deadline_preserves_last_resolver_cause_and_owned_cleanup(self):
         from types import SimpleNamespace
+        from suite.tests.test_native_cleanup import Job
+        job = Job(ends=(100.,100.))
         calls = []
         failures = [RuntimeError('first connection refusal'), OSError('last pipe refusal')]
         last_failure = failures[-1]
@@ -501,8 +540,7 @@ class NativeBoundaryTests(unittest.TestCase):
         resolver = SimpleNamespace(resolve=resolve)
         local = SimpleNamespace(ServiceManager=SimpleNamespace(createInstanceWithContext=lambda *args: resolver))
         uno = SimpleNamespace(getComponentContext=lambda: local)
-        process = SimpleNamespace(poll=lambda: None, terminate=lambda: calls.append('terminate'),
-                                  wait=lambda timeout: calls.append('wait'), close=lambda: calls.append('handles'))
+        process = job.process()
         backend = self.native.UnoBackend(self.root, uno_loader=lambda: uno,
             window_api=SimpleNamespace(validate_parent=lambda hwnd: None),
             connector=lambda uno, pipe, owned: self.native.connect_uno(
@@ -515,12 +553,17 @@ class NativeBoundaryTests(unittest.TestCase):
         backend._start_runtime = start
         session = importlib.import_module('session').DocumentSession(
             self.root, MODULES, backend_factory=lambda runtime: backend)
-        with self.assertRaises(self.native.WorkerError) as caught:
+        with patch.object(self.native.time, 'monotonic', lambda: job.now), \
+                patch.object(self.native.time, 'sleep', job.sleep), redirect_stderr(io.StringIO()), \
+                self.assertRaises(self.native.WorkerError) as caught:
             session.dispatch('attach', {'parentHwnd': 1, 'module': 'writer', 'width': 1, 'height': 1})
         self.assertEqual('connect_timeout', caught.exception.code)
         self.assertEqual('Office 런타임 연결 시간이 초과되었습니다.', str(caught.exception))
         self.assertIs(last_failure, caught.exception.__cause__)
-        self.assertEqual(['terminate', 'wait', 'handles', 'profile'], calls)
+        self.assertEqual(['profile'], calls)
+        self.assertTrue(job.closed)
+        self.assertEqual(len([row for row in job.calls if row[0] == 'force']), 1)
+        self.assertTrue(backend.cleanup_evidence['forcedTermination'])
         self.assertIsNone(backend.process)
         self.assertIsNone(backend.profile)
 
@@ -606,17 +649,14 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertIsNone(backend.document)
 
     def test_cleanup_terminates_only_owned_process_before_removing_owned_profile(self):
-        from types import SimpleNamespace
-        calls = []
-        process = SimpleNamespace(poll=lambda: None, wait=lambda timeout: calls.append(('wait', timeout)),
-                                  terminate=lambda: calls.append(('terminate',)), close=lambda: calls.append(('close_handles',)))
-        backend = self.native.UnoBackend(self.root)
-        backend.process = process
-        backend.profile = SimpleNamespace(cleanup=lambda: calls.append(('profile',)))
-        backend.cleanup()
-        self.assertEqual(('profile',), calls[-1])
-        self.assertIn(('terminate',), calls)
-        self.assertNotIn(('taskkill',), calls)
+        from suite.tests.test_native_cleanup import Job
+        job = Job(ends=(100.,100.))
+        backend = job.backend()
+        proof = job.run_cleanup(backend)
+        self.assertFalse(proof['success'])
+        self.assertTrue(proof['forcedTermination'] and proof['jobEmptyVerified'])
+        self.assertTrue(job.closed and job.profile_removed)
+        self.assertEqual([row[1] for row in job.calls if row[0] == 'force'], [99])
 
     def test_interceptor_routes_document_commands_and_delegates_formatting(self):
         from types import SimpleNamespace

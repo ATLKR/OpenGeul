@@ -74,7 +74,63 @@ function Get-SourcePin([string]$LockPath) {
     $url='https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz'
     $sha='296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785'
     if($lock.schemaVersion -ne 1 -or $lock.runtime.version -ne '26.8.1.1' -or $lock.runtime.sourceUrl -ne $url -or $lock.runtime.sourceSha256 -ne $sha) {throw 'The authenticated official LibreOffice26.8.1.1 source lock is required.'}
-    return [ordered]@{url=$lock.runtime.sourceUrl;size=302435508;sha256=$sha;version='26.8.1.1'}
+    # Official 26.8.1.1 core identity, paired with the authenticated source tar.
+    # Never derive this identity from a parent OpenGeul Git checkout.
+    return [ordered]@{url=$lock.runtime.sourceUrl;size=302435508;sha256=$sha;version='26.8.1.1';coreCommit='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'}
+}
+
+function Read-RuntimeBuildIdentity([string]$Path,[string]$Section) {
+    Assert-UnlinkedPath $Path
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)) {throw 'Generated runtime build identity file is missing.'}
+    $encoding=[Text.UTF8Encoding]::new($false,$true)
+    $text=$encoding.GetString([IO.File]::ReadAllBytes($Path))
+    $sections=[regex]::Matches($text,'(?m)^(?:\uFEFF)?[ \t]*\[([^\]\r\n]+)\]')
+    $ids=[regex]::Matches($text,'(?im)^[ \t]*buildid[ \t]*=([^\r\n]*)')
+    if($sections.Count -ne 1 -or $sections[0].Groups[1].Value -cne $Section -or $ids.Count -ne 1 -or $ids[0].Index -le $sections[0].Index) {throw 'Generated runtime build identity section/key is missing or ambiguous.'}
+    return [ordered]@{text=$text;match=$ids[0];buildid=$ids[0].Groups[1].Value;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}
+}
+
+function Set-RuntimeBuildIdentity([string]$RuntimeRoot,[string]$Archive,$Pin,[string]$ParentCommit,[string]$EvidenceDirectory) {
+    if($Pin.coreCommit -cnotmatch '^[0-9a-f]{40}$' -or $ParentCommit -cnotmatch '^[0-9a-f]{40}$') {throw 'Externally pinned upstream and actual parent source identities are required.'}
+    Assert-UnlinkedPath $Archive;Assert-UnlinkedPath $EvidenceDirectory
+    Confirm-FileIdentity $Archive $Pin.size SHA256 $Pin.sha256|Out-Null
+    if(-not(Test-Path -LiteralPath $EvidenceDirectory -PathType Container)) {throw 'Owned identity evidence directory is missing.'}
+    $candidates=@()
+    foreach($item in @(@('version.ini','Version'),@('setup.ini','Bootstrap'))) {
+        $path=Join-Path $RuntimeRoot ('program/'+$item[0])
+        $original=Read-RuntimeBuildIdentity $path $item[1]
+        if($original.buildid -cnotin @('', $ParentCommit, $Pin.coreCommit)) {throw 'Generated runtime buildid is unrelated to the authenticated source or actual parent checkout.'}
+        $evidence=Join-Path $EvidenceDirectory ('original-runtime-'+$item[0])
+        if(Test-Path -LiteralPath $evidence) {throw 'Original runtime identity evidence already exists.'}
+        $candidates+=@{name=$item[0];path=$path;original=$original;evidence=$evidence}
+    }
+    # Only generated configuration changes. Preserve original bytes before the
+    # explicit correction; no source Git repository or synthetic commit is made.
+    $files=[ordered]@{}
+    foreach($item in $candidates) {
+        Copy-Item -LiteralPath $item.path -Destination $item.evidence -ErrorAction Stop
+        $original=$item.original;$value=$original.match.Groups[1]
+        $changed=$original.text.Remove($value.Index,$value.Length).Insert($value.Index,$Pin.coreCommit)
+        [IO.File]::WriteAllBytes($item.path,([Text.UTF8Encoding]::new($false,$true)).GetBytes($changed))
+        $files['program/'+$item.name]=[ordered]@{originalBuildId=$original.buildid;buildid=$Pin.coreCommit;
+            corrected=($original.buildid -cne $Pin.coreCommit);beforeSha256=$original.sha256;
+            sha256=(Get-FileHash -LiteralPath $item.path -Algorithm SHA256).Hash.ToLowerInvariant()}
+    }
+    return [ordered]@{schemaVersion=1;mechanism='explicit-generated-config-correction-from-authenticated-source-pin';
+        expectedBuildId=$Pin.coreCommit;sourceArchiveUrl=$Pin.url;sourceArchiveSha256=$Pin.sha256;sourceArchiveSize=$Pin.size;files=$files}
+}
+
+function Assert-RuntimeBuildIdentity([string]$RuntimeRoot,$Pin,$Proof) {
+    if($Pin.coreCommit -cnotmatch '^[0-9a-f]{40}$' -or $Proof.expectedBuildId -cne $Pin.coreCommit -or
+        $Proof.sourceArchiveSha256 -cne $Pin.sha256 -or $Proof.sourceArchiveSize -ne $Pin.size -or $Proof.sourceArchiveUrl -cne $Pin.url) {throw 'Runtime identity proof differs from authenticated upstream source pin.'}
+    $files=[ordered]@{}
+    foreach($item in @(@('version.ini','Version'),@('setup.ini','Bootstrap'))) {
+        $name='program/'+$item[0];$actual=Read-RuntimeBuildIdentity (Join-Path $RuntimeRoot $name) $item[1]
+        $expected=$Proof.files.$name
+        if($actual.buildid -cne $Pin.coreCommit -or $expected.buildid -cne $Pin.coreCommit -or $actual.sha256 -cne $expected.sha256) {throw 'Effective runtime buildid/metadata differs from authenticated upstream identity.'}
+        $files[$name]=[ordered]@{buildid=$actual.buildid;sha256=$actual.sha256}
+    }
+    return [ordered]@{passed=$true;expectedBuildId=$Pin.coreCommit;files=$files}
 }
 
 function Get-SourceRunBinding([string]$RepoRoot,[string]$DriverPath,[string]$ManifestPath,[string]$LogDirectory) {
@@ -307,13 +363,72 @@ function Get-CygwinBuildPackages {
     'autoconf,automake,make,perl,python3,patch,bison,flex,gperf,unzip,zip,libtool,curl,git,diffutils,which,pkg-config,gcc-g++,gettext-devel,doxygen,graphviz'
 }
 
-function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='') {
+function Get-WindowsPkgconfPin {
+    # Official LODE bin/utils_Cygwin.sh downloads this Windows-path-aware tool.
+    # This x64 build helper is never admitted to the native ARM64 product.
+    return [ordered]@{filename='pkgconf-2.4.3.exe';version='2.4.3';url='https://dev-www.libreoffice.org/extern/pkgconf-2.4.3.exe';size=90624;sha256='791cd6dbc56f7268fbf9c4652d6634b0f5c59687ab4e504565e58245952edd41';machine=0x8664}
+}
+
+function Get-WindowsBuildToolPeIdentity([string]$Path) {
+    Assert-UnlinkedPath $Path
+    $data=[IO.File]::ReadAllBytes($Path)
+    if($data.Length -lt 64 -or $data[0] -ne 77 -or $data[1] -ne 90) {throw 'Windows build tool is not a PE.'}
+    [long]$offset=[BitConverter]::ToUInt32($data,60)
+    if($offset -lt 64 -or $offset+24 -gt $data.Length -or [BitConverter]::ToUInt32($data,[int]$offset) -ne 17744) {throw 'Invalid Windows build tool PE headers.'}
+    [int]$machine=[BitConverter]::ToUInt16($data,[int]$offset+4)
+    [int]$sections=[BitConverter]::ToUInt16($data,[int]$offset+6)
+    [int]$optionalSize=[BitConverter]::ToUInt16($data,[int]$offset+20)
+    [int]$flags=[BitConverter]::ToUInt16($data,[int]$offset+22)
+    [int]$optional=[int]$offset+24;[int]$sectionTable=$optional+$optionalSize
+    if($machine -ne 0x8664 -or $optionalSize -lt 240 -or $sectionTable -gt $data.Length -or [BitConverter]::ToUInt16($data,$optional) -ne 0x20b -or -not($flags -band 2) -or ($flags -band 0x2000) -or $sections -lt 1 -or $sections -gt 96 -or $sectionTable+$sections*40 -gt $data.Length -or [BitConverter]::ToUInt32($data,$optional+108) -lt 14) {throw 'Pinned Windows build tool requires an x64 PE32+ executable.'}
+    $mapRva={param([uint32]$Rva,[uint32]$Length)
+        for($i=0;$i -lt $sections;$i++) {
+            $entry=$sectionTable+$i*40;[long]$start=[BitConverter]::ToUInt32($data,$entry+12);[long]$size=[BitConverter]::ToUInt32($data,$entry+16);[long]$raw=[BitConverter]::ToUInt32($data,$entry+20)
+            if($Rva -ge $start -and [long]$Rva+$Length -le $start+$size -and $raw+$size -le $data.Length) {return [int]($raw+$Rva-$start)}
+        }
+        throw 'Windows build tool import RVA is outside actual section bytes.'
+    }
+    if([BitConverter]::ToUInt32($data,$optional+216) -ne 0 -or [BitConverter]::ToUInt32($data,$optional+220) -ne 0) {throw 'Unexpected Windows build tool delayed imports.'}
+    [uint32]$importRva=[BitConverter]::ToUInt32($data,$optional+120);[uint32]$importSize=[BitConverter]::ToUInt32($data,$optional+124)
+    if($importRva -eq 0 -or $importSize -lt 40 -or $importSize -gt 65536) {throw 'Windows build tool imports are missing or unbounded.'}
+    [int]$first=&$mapRva $importRva $importSize;$imports=@();$terminated=$false
+    for($entry=$first;$entry+20 -le $first+$importSize;$entry+=20) {
+        if(@($data[$entry..($entry+19)]|Where-Object {$_ -ne 0}).Count -eq 0) {$terminated=$true;break}
+        [int]$nameOffset=&$mapRva ([BitConverter]::ToUInt32($data,$entry+12)) 1
+        $end=$nameOffset
+        while($end -lt $data.Length -and $end-$nameOffset -lt 256 -and $data[$end] -ne 0) {$end++}
+        if($end -ge $data.Length -or $end-$nameOffset -ge 256) {throw 'Invalid Windows build tool import name.'}
+        $name=[Text.Encoding]::ASCII.GetString($data,$nameOffset,$end-$nameOffset)
+        if($name -notmatch '^[A-Za-z0-9_.-]+\.dll$' -or $name -match '^(?:cygwin|msys-)') {throw 'Windows build tool imports a non-Windows runtime.'}
+        $imports+=$name
+        if($imports.Count -gt 64) {throw 'Windows build tool import count exceeds its bound.'}
+    }
+    if(-not $terminated -or $imports.Count -eq 0) {throw 'Windows build tool import table is incomplete.'}
+    return [ordered]@{path=[IO.Path]::GetFullPath($Path);size=$data.Length;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant();machine=$machine;optionalMagic=0x20b;imports=@($imports|Sort-Object -Unique);role='buildHostTool';productPayload=$false;executionArchitecture='x64 build helper; Windows ARM64 emulation permitted'}
+}
+
+function Get-AuthenticatedWindowsPkgconf([string]$DownloadDirectory,[string]$EvidenceDirectory,[string]$WorkingDirectory) {
+    $pin=Get-WindowsPkgconfPin;$path=Join-Path $DownloadDirectory $pin.filename
+    Get-AuthenticatedDownload $pin.url $path $pin.size SHA256 $pin.sha256 (Join-Path $EvidenceDirectory 'pkgconf-download.json')|Out-Null
+    Confirm-FileIdentity $path $pin.size SHA256 $pin.sha256|Out-Null
+    $identity=Get-WindowsBuildToolPeIdentity $path
+    if($identity.machine -ne $pin.machine) {throw 'Authenticated pkgconf machine differs from its pinned build-tool identity.'}
+    $probe=Invoke-LoggedCommand $path @('--version') $WorkingDirectory (Join-Path $EvidenceDirectory 'pkgconf-version')
+    $version=(Get-Content -LiteralPath $probe.stdout -Raw).Trim()
+    if($version -cne $pin.version) {throw 'Authenticated Windows pkgconf version probe differs from its pin.'}
+    $result=[ordered]@{pin=$pin;identity=$identity;version=$version;versionCommandReceipt=$probe.receipt;productPayload=$false}
+    Write-BuildJson (Join-Path $EvidenceDirectory 'pkgconf-build-tool.json') $result
+    return $result
+}
+
+function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='',[string]$PkgConfig='') {
     '--with-distro=LibreOfficeWinArm64','--build=aarch64-pc-cygwin','--host=aarch64-pc-cygwin',
-    '--with-visual-studio=2026','--enable-firebird-sdbc','--enable-database-connectivity',
+    '--with-visual-studio=2026','--with-package-format=archive','--enable-firebird-sdbc','--enable-database-connectivity',
     '--without-system-firebird','--without-system-libatomic_ops','--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'
     if($ExternalTar) {'--with-external-tar='+$ExternalTar}
     if($JdkHome) {'--with-jdk-home='+$JdkHome}
     if($AntHome) {'--with-ant-home='+$AntHome}
+    if($PkgConfig) {'PKG_CONFIG='+$PkgConfig}
 }
 
 function Get-BuildTargets([ValidateSet('Firebird','Full')][string]$Phase) {
@@ -326,7 +441,7 @@ function Assert-GeneratedConfiguration([string]$Path) {
     foreach($line in Get-Content -LiteralPath $Path) {
         if($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::|\?)?=\s*(.*?)\s*$') {$values[$Matches[1]]=$Matches[2]}
     }
-    $required=@{OS='WNT';COM='MSC';CPUNAME='AARCH64';HOST_PLATFORM='aarch64-pc-cygwin';BUILD_PLATFORM='aarch64-pc-cygwin';ENABLE_FIREBIRD_SDBC='TRUE'}
+    $required=@{OS='WNT';COM='MSC';CPUNAME='AARCH64';HOST_PLATFORM='aarch64-pc-cygwin';BUILD_PLATFORM='aarch64-pc-cygwin';ENABLE_FIREBIRD_SDBC='TRUE';PKGFORMAT='archive'}
     foreach($key in $required.Keys) {if($values[$key] -cne $required[$key]){throw "Generated configuration rejects native Firebird: $key=$($values[$key])"}}
     if(-not $values.ContainsKey('CROSS_COMPILING') -or $values.CROSS_COMPILING -ne '' -or $values.SYSTEM_FIREBIRD -ne '') {throw 'Cross-compiling or system Firebird is forbidden.'}
     foreach($token in @('FIREBIRD','LIBATOMIC_OPS','LIBTOMMATH')) {if($values.BUILD_TYPE -notmatch ('(^|\s)'+$token+'(\s|$)')) {throw "Required internal build dependency is absent: $token"}}
@@ -718,6 +833,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         Write-BuildJson (Join-Path $evidence 'java-build-tools.json') $receipt.javaTools
         $downloads=Join-Path $work 'downloads';New-Item -ItemType Directory $downloads|Out-Null
         $receipt.stage='authenticated-downloads'
+        $receipt.pkgconfTool=Get-AuthenticatedWindowsPkgconf $downloads $evidence $work
         $archive=Join-Path $downloads 'libreoffice-26.8.1.1.tar.xz'
         $receipt.sourceArchive=Get-AuthenticatedDownload $pin.url $archive $pin.size SHA256 $pin.sha256 (Join-Path $evidence 'libreoffice-download.json')
         $receipt.extraSourceArchives=@()
@@ -746,6 +862,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $convert={param($path,$name) $r=Invoke-LoggedCommand $cygpath @('-u',$path) $work (Join-Path $evidence ('cygpath-'+$name));(Get-Content -LiteralPath $r.stdout -Raw).Trim()}
         $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixDownloads=&$convert $downloads 'downloads'
         $unixJdk=&$convert $receipt.javaTools.jdk.home 'jdk';$unixAnt=&$convert $receipt.javaTools.ant.home 'ant'
+        $unixPkgconf=&$convert $receipt.pkgconfTool.identity.path 'pkgconf'
         $source=Join-Path $work 'libreoffice-26.8.1.1';$unixSource=$unixWork+'/libreoffice-26.8.1.1'
         $extract=Join-Path $commands 'extract.sh'
         Write-BashScript $extract @('set -euo pipefail',"cd $(Quote-Bash $unixWork)","/usr/bin/tar -xf $(Quote-Bash $unixArchive)")
@@ -761,7 +878,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.stage='install-authenticated-source-hooks'
         $python=(Get-Command python -ErrorAction Stop).Source
         Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source) $repo (Join-Path $evidence 'source-hooks')|Out-Null
-        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt)
+        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt $unixPkgconf)
         Copy-Item (Join-Path $source 'autogen.input') (Join-Path $evidence 'autogen.input')
         $configure=Join-Path $commands 'configure.sh'
         Write-BashScript $configure @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)",'./autogen.sh')
@@ -824,8 +941,11 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.stage='authenticate-all-downloaded-source-archives'
             $receipt.externalSources=Write-ExternalSourceInventory $downloads $pinOutput.stdout (Join-Path $evidence 'external-source-inventory.json') $knownPins (Join-Path $source 'workdir/UnpackedTarball/python3') -RequirePython
             Copy-Item (Join-Path $source 'download.lst') (Join-Path $evidence 'authenticated-download.lst')
-            $receipt.stage='stage-authenticated-native-app-local-crt'
             $instdir=Join-Path $source 'instdir'
+            $receipt.stage='bind-authenticated-runtime-build-identity'
+            $receipt.runtimeBuildIdentity=Set-RuntimeBuildIdentity $instdir $archive $pin $receipt.sourceCommit $evidence
+            Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
+            $receipt.stage='stage-authenticated-native-app-local-crt'
             $receipt.appLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $instdir 'program') $crtTerms
             Write-BuildJson (Join-Path $evidence 'app-local-crt-installed.json') $receipt.appLocalCrt
             $receipt.stage='native-product-pe-audit'
@@ -849,6 +969,9 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $proof=Join-Path $evidence 'native-base-proof.json'
             Invoke-LoggedCommand (Join-Path $instdir 'program/python.exe') @($probe,$repo,$instdir,$proof,(Join-Path $work 'base-proof')) $instdir (Join-Path $evidence 'native-base-proof')|Out-Null
             $receipt.baseProof=Assert-BaseProof $proof
+            $receipt.stage='verify-effective-runtime-build-identity'
+            $receipt.runtimeBuildIdentity.finalVerification=Assert-RuntimeBuildIdentity $instdir $pin $receipt.runtimeBuildIdentity
+            Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
             $receipt.stage='package-qualified-source-build'
             $zip=Join-Path $evidence 'OpenGeul-Office-engine-arm64.zip'
             if(Test-Path $zip) {throw 'Engine artifact already exists.'}

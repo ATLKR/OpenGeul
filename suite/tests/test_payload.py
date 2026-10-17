@@ -65,7 +65,8 @@ class PayloadFixture(unittest.TestCase):
             self.write(name, pe())
         self.write('OpenGeul.Office.dll', pe(0x14c, managed=True, dll=True))
         for name in ('worker/office_worker.py', 'worker/session.py', 'worker/native.py',
-                     'worker/native_windows.py', 'worker/dispatch.py'):
+                     'worker/native_windows.py', 'worker/dispatch.py', 'worker/calc_save.py',
+                     'worker/calc_close.py', 'worker/save_diagnostics.py', 'worker/native_diagnostics.py'):
             self.write(name, b'# worker source\n')
         for name in ('Notices/OpenGeul-Office-LICENSE.txt', 'Notices/LibreOffice-LICENSE.txt',
                      'Notices/CORRESPONDING_SOURCE.md', 'Office/LICENSE', 'Office/NOTICE'):
@@ -238,7 +239,8 @@ class PayloadTests(PayloadFixture):
         names = ('OpenGeul.Office.exe', 'OpenGeul.Office.dll', 'suite-product.json', 'suite-provenance.json',
                  'runtime-branding.json', 'Office/program/soffice.exe', 'Office/program/soffice.bin',
                  'Office/program/python.exe', 'Office/opengeul-branding.json',
-                 'worker/office_worker.py', 'worker/session.py', 'Notices/OpenGeul-Office-LICENSE.txt',
+                 'worker/office_worker.py', 'worker/session.py', 'worker/calc_save.py', 'worker/calc_close.py',
+                 'worker/save_diagnostics.py', 'worker/native_diagnostics.py', 'Notices/OpenGeul-Office-LICENSE.txt',
                  'Notices/LibreOffice-LICENSE.txt', 'Notices/CORRESPONDING_SOURCE.md',
                  'Sources/OpenGeul-Office-source.zip')
         for name in names:

@@ -108,6 +108,27 @@ This strengthens the harness acceptance boundary; the earlier Calc save-timeout
 remains a failed run with an unproved cause. Opt-in bounded save-route traces
 record command/request milestones without document contents or input retries.
 
+The full matrix also runs `calc_save_smoke.py` and
+[`calc_close_probe.py`](calc_close_probe.README.md) immediately after the fresh
+engine fixtures, before the existing GUI cases can edit those originals. Both
+type ordinary text into A1 without Enter and use separate owned fixture copies.
+The save case requires the single physical Ctrl+S to persist the pending text;
+the close probe independently measures the existing Save/Discard/Cancel choices
+after a single physical Ctrl+W. Neither case qualifies asynchronous validation or
+changes product close behavior.
+
+Each probe and its following package-immutability check run independently of
+prior GUI failures. Immediate seven-day evidence uploads retain the complete
+`.work/suite-calc-save/` and `.work/suite-calc-close/` trees, including their local
+native diagnostics, screenshots, traces and failed results. The final archive
+integrity gate checks the existing shared diagnostics root plus the save root
+and all three close-choice roots. Missing/incomplete archives, changed file
+sizes/hashes, unsafe members and any DMP/MDMP suffix or `MDMP` signature fail the
+job. Both complete Calc output trees are also scanned for crash dumps, including
+reader evidence outside those native archives. Every root is checked and
+recorded even if another root fails. Portable
+workflow tests exercise these checks; they establish no Windows GUI success.
+
 After existing-document checks, all six Office modules also launch with
 `--module MODULE` and no file argument. Each blank document must attach under the
 Suite panel, retain its OpenGeul title, avoid external Office windows, produce

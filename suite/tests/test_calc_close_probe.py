@@ -26,11 +26,12 @@ class CalcCloseProbeTests(unittest.TestCase):
     def test_no_enter_original_close_contract_is_exact_and_has_no_focus_action(self):
         row=dict(choice='save',navigationKeys=['^{HOME}','{F2}','^{END}'],commitKeys=[],
             marker=self.api.marker('save'),closeShortcutCount=1,
-            beforeCloseActions=['observe-uncommitted','observer-closed','ctrl-w'],uncommittedBeforeCloseVerified=True)
+            beforeCloseActions=['observe-uncommitted','observer-closed','ctrl-w'],uncommittedBeforeCloseVerified=True,
+            pendingInputTextVerified=True)
         self.api.require_original_close(row)
         for key,value in [('commitKeys',['{ENTER}']),('closeShortcutCount',2),
                           ('beforeCloseActions',['observe-uncommitted','observer-closed','set-focus','ctrl-w']),
-                          ('uncommittedBeforeCloseVerified',False)]:
+                          ('uncommittedBeforeCloseVerified',False),('pendingInputTextVerified',False)]:
             changed=dict(row);changed[key]=value
             with self.subTest(key=key),self.assertRaises(AssertionError):self.api.require_original_close(changed)
 

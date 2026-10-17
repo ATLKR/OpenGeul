@@ -1,5 +1,7 @@
 """Actual GUI UNO embedding. No headless or external-window fallback exists."""
 import importlib
+import json
+import ntpath
 import os
 from pathlib import Path
 import shutil
@@ -150,6 +152,8 @@ class UnoBackend:
         self.diagnostics = None
         self.ui_style_isolation = None
         self.calc_save = None
+        self.cleanup_evidence = None
+        self._shutdown_witness = None
 
     def _diagnose(self, phase):
         if self.diagnostics is None and not os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS'):
@@ -403,6 +407,14 @@ class UnoBackend:
             result['readiness'] = base_readiness(self.document, self.context)
         return result
 
+    def prepare_close(self):
+        if self.module_factory == 'private:factory/scalc':
+            if self.calc_save is None:
+                raise WorkerError('close_failed', 'Calc 닫기 준비 경로를 확인하지 못했습니다.')
+            from calc_close import prepare_calc_close
+            return prepare_calc_close(self.calc_save)
+        return self.status()
+
     def resize(self, width, height):
         self.peer.setPosSize(0, 0, width, height, 15)
 
@@ -439,31 +451,121 @@ class UnoBackend:
         self.document = None
 
     def cleanup(self):
-        self._diagnose('before-owned-shutdown')
-        if self.desktop is not None:
-            try:
-                self.desktop.terminate()
-            except Exception:
-                pass
+        if self.cleanup_evidence is None:
+            self.cleanup_evidence = dict(schemaVersion=1, kind='owned-office-job-cleanup',
+                success=False, gracefulQualified=False, forcedTermination=False,
+                jobEmptyVerified=self.process is None, initialMembers=[], finalMembers=[],
+                expectedEngineImage=str(self.runtime / 'program/soffice.bin'),
+                finalJobPids=[] if self.process is None else None, launcherExitCode=None,
+                gracefulBudgetSeconds=5, recoveryBudgetSeconds=5,
+                terminateRequested=False, terminateResult=None, errors=[])
+        proof = self.cleanup_evidence
+        started = time.monotonic()
+        def error(stage, exc):
+            # Keep the first failure and every later cleanup failure sticky.
+            if len(proof['errors']) < 32:
+                proof['errors'].append(dict(stage=stage, type=type(exc).__name__,
+                    message=str(exc)[:2048], winerror=getattr(exc, 'winerror', None),
+                    jobCensus=getattr(exc, 'job_census', None)))
+        dead = self.process is None or proof['jobEmptyVerified']
         if self.process is not None:
+            self._diagnose('before-owned-shutdown')
+        if self.process is not None and not dead and self._shutdown_witness is None:
             try:
-                if self.process.poll() is None:
+                self._shutdown_witness = self.process.open_diagnostic_witnesses()
+                proof['jobHandleValue'] = int(self.process.job)
+                proof['launcherPid'] = self.process.pid
+                proof['launcherHandleValue'] = int(self.process.handle)
+                proof['initialMembers'] = self._shutdown_witness.retained_snapshot()
+                expected = ntpath.normcase(ntpath.normpath(proof['expectedEngineImage']))
+                if not any(ntpath.normcase(ntpath.normpath(row['image'])) == expected for row in proof['initialMembers']):
+                    raise RuntimeError('No original owned Office engine handle was retained before shutdown')
+            except Exception as exc:
+                error('retain owned members', exc)
+        if self.desktop is not None and not dead and not proof['terminateRequested']:
+            proof['terminateRequested'] = True
+            proof['terminateStartedAt'] = time.monotonic()
+            try:
+                proof['terminateResult'] = self.desktop.terminate()
+                if proof['terminateResult'] is False:
+                    raise RuntimeError('Private Office desktop vetoed termination')
+            except Exception as exc:
+                error('desktop termination', exc)
+            proof['terminateFinishedAt'] = time.monotonic()
+        if self.process is not None and not dead:
+            grace_started = time.monotonic()
+            proof['gracefulWaitStartedAt'] = grace_started
+            try:
+                if self._shutdown_witness is None:
+                    raise RuntimeError('No retained private-job shutdown witness')
+                proof.update(self.process.wait_for_job_exit(self._shutdown_witness,
+                    proof['gracefulBudgetSeconds']))
+                dead = proof['jobEmptyVerified']
+            except Exception as exc:
+                error('owned job exit', exc)
+            proof['gracefulWaitFinishedAt'] = time.monotonic()
+            if not dead and not proof['forcedTermination']:
+                # Even failed native queries cannot shorten the grace budget.
+                remaining = grace_started + proof['gracefulBudgetSeconds'] - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+                proof['forcedTermination'] = True
+                proof['forcedTerminationStartedAt'] = time.monotonic()
+                error('graceful exit', RuntimeError('Private Office job required forced recovery'))
+                try:
                     self.process.terminate()
-                self.process.wait(timeout=5)
-            except Exception:
-                # Keep the live profile when process death was not confirmed.
+                except Exception as exc:
+                    error('owned job termination', exc)
+                proof['forcedTerminationFinishedAt'] = time.monotonic()
+                proof['recoveryWaitStartedAt'] = time.monotonic()
+                try:
+                    if self._shutdown_witness is None:
+                        raise RuntimeError('No retained private-job recovery witness')
+                    proof.update(self.process.wait_for_job_exit(self._shutdown_witness,
+                        proof['recoveryBudgetSeconds']))
+                    dead = proof['jobEmptyVerified']
+                except Exception as exc:
+                    error('owned job recovery', exc)
+                proof['recoveryWaitFinishedAt'] = time.monotonic()
+            if dead:
+                self._diagnose('after-owned-shutdown')
+                if proof['launcherExitCode'] != 0 or any(row['exitCode'] != 0 for row in proof['finalMembers']):
+                    error('process exit', RuntimeError('An owned Office process exited with a nonzero code'))
+            else:
                 self._diagnose('shutdown-unconfirmed')
-                self._finish_diagnostics(archive=False)
-                return
-            self._diagnose('after-owned-shutdown')
-            self.process.close()
-            self.process = None
-        self.context = self.document = self.desktop = self.frame = self.peer = self.interceptor = None
-        self.calc_save = None
-        if self.profile is not None:
-            self._finish_diagnostics()
+                error('owned job retained', RuntimeError('Private Office job death could not be proved'))
+        # Archive while the owned profile still exists. Incomplete recovery
+        # never authorizes profile removal or closing the retained job handles.
+        self._finish_diagnostics(archive=dead and self.profile is not None)
+        if dead:
+            if self._shutdown_witness is not None:
+                try:
+                    self._shutdown_witness.close()
+                    self._shutdown_witness = None
+                except Exception as exc:
+                    error('member handle close', exc)
+            if self.process is not None:
+                try:
+                    self.process.close()
+                    self.process = None
+                except Exception as exc:
+                    error('private job handle close', exc)
+            self.context = self.document = self.desktop = self.frame = self.peer = self.interceptor = None
+            self.calc_save = None
+        if dead and self.profile is not None:
             try:
                 self.profile.cleanup()
                 self.profile = None
-            except OSError:
-                pass
+            except Exception as exc:
+                error('private profile removal', exc)
+        proof.update(profileRetained=self.profile is not None, elapsedSeconds=time.monotonic()-started,
+            deathProved=proof['jobEmptyVerified'],
+            resourcesReleased=self.process is None and self.profile is None and self._shutdown_witness is None)
+        proof['success'] = proof['gracefulQualified'] = bool(dead and not proof['errors'] and not proof['forcedTermination'])
+        if self.diagnostics is not None:
+            try:
+                self.diagnostics.record_shutdown(proof)
+            except Exception as exc:
+                print('OpenGeul shutdown receipt archive: ' + str(exc), file=sys.stderr, flush=True)
+        print(json.dumps(dict(event='suite.nativeCleanup', cleanup=proof), ensure_ascii=False), file=sys.stderr, flush=True)
+        return proof

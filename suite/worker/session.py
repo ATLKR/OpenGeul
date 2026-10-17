@@ -1,6 +1,7 @@
 """Validated document-session state, independent of the UNO transport."""
 from pathlib import Path
 import os
+import sys
 
 FACTORIES = {'writer': 'private:factory/swriter', 'calc': 'private:factory/scalc',
              'impress': 'private:factory/simpress', 'draw': 'private:factory/sdraw',
@@ -62,11 +63,14 @@ class DocumentSession:
         self.path = None
         self.handles = {}
         self.event_sink = lambda event: None
+        self._cleanup_result = None
+        self._cleanup_resources_released = False
 
     def dispatch(self, command, args):
         if not isinstance(args, dict):
             raise WorkerError('invalid_request', 'args는 JSON 객체여야 합니다.')
         handlers = {'attach': self._attach, 'resize': self._resize, 'status': self._status,
+                    'prepare-close': self._prepare_close,
                     'save': self._save, 'close': self._close, 'shutdown': self._shutdown}
         if command not in handlers:
             raise WorkerError('unknown_command', '지원하지 않는 작업자 명령입니다.')
@@ -81,6 +85,8 @@ class DocumentSession:
     def _attach(self, args):
         if self.state not in ('idle', 'closed'):
             raise WorkerError('invalid_state', '문서가 이미 열려 있습니다.')
+        if self.backend is not None:
+            raise WorkerError('cleanup_pending', '이전 Office 작업자의 종료를 확인하지 못했습니다.')
         module_id = args.get('module')
         if not isinstance(module_id, str) or module_id not in FACTORIES or module_id not in self.modules:
             raise WorkerError('unsupported_module', '지원하지 않는 Office 모듈입니다.')
@@ -111,11 +117,24 @@ class DocumentSession:
             if not handles.get('childHwnd'):
                 raise WorkerError('attach_failed', '내장 편집기 창을 확인할 수 없습니다.')
         except Exception as exc:
-            backend.cleanup()
+            released = False
+            try:
+                proof = backend.cleanup()
+                released = isinstance(proof, dict) and proof.get('resourcesReleased') is True
+            except Exception as later:
+                print('OpenGeul attach cleanup: ' + str(later), file=sys.stderr, flush=True)
+            if not released:
+                # Keep the exact failed owner reachable; another attach must
+                # not orphan an unproved job/profile after startup failure.
+                self.backend, self.state = backend, 'closed'
+                self._cleanup_resources_released = False
+                self._cleanup_result = dict(cleanupVerified=False,
+                    cleanupError='Office 시작 실패 뒤 작업자의 종료를 확인하지 못했습니다.')
             if isinstance(exc, WorkerError):
                 raise
             raise WorkerError('attach_failed', 'Office 내장 편집기를 시작하지 못했습니다.') from exc
         self.backend, self.module, self.path = backend, module_id, path
+        self._cleanup_result = None
         self.handles, self.state = handles, 'attached'
         return self._status({})
 
@@ -129,6 +148,12 @@ class DocumentSession:
     def _status(self, args):
         self._require_attached()
         state = self._document_status()
+        return dict(state, module=self.module, path=str(self.path) if self.path else None, **self.handles)
+
+    def _prepare_close(self, args):
+        self._require_attached()
+        state = dict(self.backend.prepare_close())
+        state['modified'] = bool(state['modified'] or (self.module == 'base' and self.path is None))
         return dict(state, module=self.module, path=str(self.path) if self.path else None, **self.handles)
 
     def _resize(self, args):
@@ -169,17 +194,48 @@ class DocumentSession:
             self.backend.close(discard)
         except Exception as exc:
             raise WorkerError('close_failed', '문서 닫기가 취소되었습니다. 문서를 열어 둡니다.') from exc
-        self.backend.cleanup()
-        self.backend, self.state = None, 'closed'
-        return {'closed': True, 'closeCancelled': False}
+        # The model is irrevocably closed. Cleanup cannot turn it back into an
+        # attached document or truthfully promise that its window remains open.
+        self.state = 'closed'
+        cleanup = self._cleanup_closed_backend()
+        return dict(closed=True, closeCancelled=False, **cleanup)
+
+    def _cleanup_closed_backend(self):
+        try:
+            proof = self.backend.cleanup()
+            verified = (isinstance(proof, dict) and proof.get('success') is True
+                and proof.get('gracefulQualified') is True and proof.get('forcedTermination') is False
+                and proof.get('jobEmptyVerified') is True and proof.get('resourcesReleased') is True)
+            self._cleanup_resources_released = isinstance(proof, dict) and proof.get('resourcesReleased') is True
+            message = 'Office 작업자의 정상 종료를 확인하지 못했습니다.'
+            if isinstance(proof, dict) and proof.get('errors'):
+                message += ' ' + '; '.join(str(row.get('message', '')) for row in proof['errors'])[:2048]
+        except Exception as exc:
+            verified = self._cleanup_resources_released = False
+            message = 'Office 작업자의 종료 확인에 실패했습니다. ' + str(exc)[:2048]
+        result = dict(cleanupVerified=verified)
+        if verified:
+            self.backend = None
+        else:
+            result['cleanupError'] = message
+        self._cleanup_result = result
+        return result
 
     def _shutdown(self, args):
         discard = args.get('discard', False)
         if type(discard) is not bool:
             raise WorkerError('invalid_request', 'discard는 true 또는 false여야 합니다.')
         if self.state == 'attached':
+            # EOF is not a Suite close choice. Calc's pending input may leave
+            # XModifiable clean, so never infer discard authorization here.
+            if self.module == 'calc' and not discard:
+                return {'closed': False, 'closeCancelled': True}
             result = self._close(args)
             if result['closeCancelled']:
                 return result
-        self.state = 'stopped'
-        return {'closed': True, 'closeCancelled': False, 'shutdown': True}
+        elif self.backend is not None:
+            self._cleanup_closed_backend()
+        if self.backend is None or self._cleanup_resources_released:
+            self.backend, self.state = None, 'stopped'
+        return dict(closed=True, closeCancelled=False, shutdown=self.state == 'stopped',
+                    **(self._cleanup_result or {}))

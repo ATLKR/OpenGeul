@@ -474,9 +474,14 @@ def run_case(suite, output, case):
             # FormulaText otherwise prints the source as well as the formula.
             options.extend([('TitleRow', False), ('FormulaText', False), ('Border', False)])
         record['pdfRenderOptions'] = dict(options)
+        # A tuple in PropertyValue.Value otherwise becomes []any, which the
+        # PDF filter cannot extract as its required []PropertyValue sequence.
+        filter_data = engine.uno.Any('[]com.sun.star.beans.PropertyValue',
+                                     tuple(engine.prop(name, value) for name, value in options))
+        record['pdfFilterDataType'] = filter_data.type.typeName
         document.storeToURL(path.as_uri(), (
             engine.prop('FilterName', case['filter']), engine.prop('Overwrite', False),
-            engine.prop('FilterData', tuple(engine.prop(name, value) for name, value in options)),
+            engine.prop('FilterData', filter_data),
             engine.prop('InteractionHandler', _interaction_handler())))
         _require(document.getURL() == original_url, 'PDF export replaced ownership of the private native source')
         record['status'] = 'passed'

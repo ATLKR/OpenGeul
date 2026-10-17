@@ -246,7 +246,15 @@ class PdfProducerBoundaryTests(unittest.TestCase):
             url = ''
 
             def storeToURL(self, url, props):
-                events.append(('pdf-export', dict(props)))
+                properties = dict(props)
+                events.append(('pdf-export', properties))
+                # Pinned PyUNO infers []any for a plain tuple in an Any field;
+                # PDFFilter extracts only the exact []PropertyValue type and
+                # silently uses defaults if that extraction fails.
+                data = properties.get('FilterData')
+                uno_type = getattr(getattr(data, 'type', None), 'typeName', '[]any')
+                options = dict(data.value) if uno_type == '[]com.sun.star.beans.PropertyValue' else {}
+                events.append(('native-filter-data', dict(type=uno_type, options=options)))
                 path.write_bytes(b'%PDF-1.7\nbefore engine cleanup')
                 if change_url:
                     self.url = url
@@ -258,6 +266,8 @@ class PdfProducerBoundaryTests(unittest.TestCase):
             def __init__(self, suite):
                 self.cleanup_errors = []
                 self.document = Document()
+                self.uno = SimpleNamespace(Any=lambda name, values:
+                    SimpleNamespace(type=SimpleNamespace(typeName=name), value=values))
                 member = dict(pid=99, creationTime=789, image=str(suite / 'Office/program/soffice.bin'), alive=True, exitCode=259)
                 self.owned_job_evidence = dict(jobHandleValue=42, initial=[member],
                     final=[dict(member, alive=False, exitCode=exit_code)], finalJobPids=[], jobEmptyVerified=True,
@@ -336,10 +346,20 @@ class PdfProducerBoundaryTests(unittest.TestCase):
         self.assertEqual(record['status'], 'passed', record)
         export = next(event[1] for event in events if isinstance(event, tuple) and event[0] == 'pdf-export')
         self.assertEqual(export['FilterName'], 'math_pdf_Export')
-        options = dict(export['FilterData'])
+        options = dict(getattr(export['FilterData'], 'value', export['FilterData']))
         self.assertIn('FormulaText', options, 'Formula source must not duplicate rendered markers')
         for name in ('FormulaText', 'TitleRow', 'Border'):
             self.assertIs(options.get(name), False, name)
+
+    def test_math_filter_data_survives_the_native_typed_sequence_extraction(self):
+        record, events, path = self.run_generated_case(module='math')
+        self.assertEqual(record['status'], 'passed', record)
+        received = next(event[1] for event in events if isinstance(event, tuple) and event[0] == 'native-filter-data')
+        self.assertEqual(received['type'], '[]com.sun.star.beans.PropertyValue',
+                         'An untyped tuple becomes []any and silently selects PDF defaults')
+        self.assertEqual(record['pdfFilterDataType'], received['type'])
+        for name in ('FormulaText', 'TitleRow', 'Border'):
+            self.assertIs(received['options'].get(name), False, name)
 
     def test_cleanup_failure_or_source_replacement_never_publishes_success_hash(self):
         for cleanup_error, change_url in ((True, False), (False, True)):

@@ -20,7 +20,7 @@ import zipfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import calc_model_barrier
-from windows_smoke import (Windows, ascii_input, capture_failure, close_document, close_home,
+from windows_smoke import (Windows, ascii_input, capture_failure, close_home,
     launch_suite, prepare_editor_focus, require_engine_fixture, stop_owned_test_process,
     verified_attachment, wait_for, write_result)
 
@@ -28,6 +28,7 @@ MARKER='UI-OpenGeul-calc-CtrlS'
 CASE='calc-active-cell-save'
 NS=calc_model_barrier.NS
 MAX_BYTES=16*1024*1024
+PENDING_GETTERS='calc-a1-b1-c1-d1-pending-input-v1'
 
 
 def read_cells(data):
@@ -89,6 +90,7 @@ def require_actions(record):
     assert type(record.get('saveShortcutCount')) is int and record['saveShortcutCount']==1,'Ctrl+S must occur once'
     assert record.get('physicalAsciiMarker')==MARKER
     assert record.get('uncommittedBeforeSaveVerified') is True
+    assert record.get('pendingInputTextVerified') is True, 'Actual owned A1 edit-buffer text was not proved'
     assert record.get('observerClosedBeforeSave') is True
 
 
@@ -136,14 +138,15 @@ def require_host_trace(rows,shell_pid):
     return dict(traceId=token,requestId=request,commandSequence=command)
 
 
-def require_pending_observation(before,now,baseline,*,suite,inventory,inventory_sha256,original_shell,expected_url,deadline):
+def require_pending_observation(before,now,baseline,*,suite,inventory,inventory_sha256,original_shell,expected_url,deadline,
+                                getter_contract=calc_model_barrier.GETTERS):
     from writer_model_barrier import require_original_shell,require_python_identity
     from writer_model_reader import require_owned_model_observation
     binding=before['bindingBefore'];assert binding['documentUrl']==expected_url
     require_original_shell(original_shell,binding,suite)
     for row in (before,now):
         require_owned_model_observation(row,binding,suite,expected_service=calc_model_barrier.SERVICE,
-            getter_contract=calc_model_barrier.GETTERS)
+            getter_contract=getter_contract)
         require_python_identity(row['pythonIdentity'],suite,inventory,inventory_sha256)
         assert row['readStartedAt']<=row['readFinishedAt']<=deadline
         require_uncommitted_cells(row,baseline)
@@ -161,6 +164,56 @@ def require_pending_observation(before,now,baseline,*,suite,inventory,inventory_
                 assert row[process]['handleValue']==anchor[process]['handleValue'],'Retained process HANDLE changed'
             assert row['officeCommandLine']==anchor['officeCommandLine'] and row['profileUrl']==anchor['profileUrl']
             assert row['profileDirectory']['witness']==anchor['profileDirectory']['witness']
+
+
+def type_pending_a1(reader,baseline,marker,record,deadline,*,navigate,require_focus,type_marker):
+    """One physical input sequence with read-only A1 and live-buffer receipts.
+
+    The accessibility root is an explicitly pinned upstream TEST property.
+    Paragraph getters may allocate accessibility bookkeeping/notifications; they
+    never request focus, accept input or call the unsafe formula UI-test getter.
+    Every observation uses the original reader deadline; no input is retried.
+    """
+    from writer_model_reader import require_calc_a1_selection
+    from calc_pending_input import require_pending_receipt
+    assert isinstance(marker,str) and marker
+    record['navigationKeys']=[]
+    require_focus()
+    navigate('^{HOME}');record['navigationKeys'].append('^{HOME}')
+    selected=reader.read(deadline);record['afterCtrlHome']=selected
+    require_uncommitted_cells(selected,baseline)
+    require_calc_a1_selection(selected['calcSelection'])
+    require_focus()
+    navigate('{F2}^{END}');record['navigationKeys'].extend(('{F2}','^{END}'))
+    require_focus()
+    editing=reader.read(deadline);record['beforePhysicalMarker']=editing
+    require_uncommitted_cells(editing,baseline)
+    require_calc_a1_selection(editing['calcSelection'])
+    child=editing['bindingBefore']['childHwnd']
+    require_pending_receipt(editing['pendingInput'],child,baseline['a1Text'],True,selected['pendingInput'])
+    type_marker();record['physicalAsciiMarker']=marker
+    require_focus()
+    pending=reader.read(deadline);record['pendingInputObservation']=pending
+    require_uncommitted_cells(pending,baseline)
+    require_calc_a1_selection(pending['calcSelection'])
+    require_pending_receipt(pending['pendingInput'],child,baseline['a1Text']+marker,True,editing['pendingInput'])
+    record['pendingInputTextVerified']=True
+    return selected,editing,pending
+
+
+def require_pending_input_observations(before,selected,editing,pending,baseline,marker,**context):
+    """Pure strict replay joins the input receipt to the original native reader."""
+    from writer_model_reader import require_calc_a1_selection
+    from calc_pending_input import require_pending_receipt
+    child=before['bindingBefore']['childHwnd']
+    earlier=before
+    for row in (selected,editing,pending):
+        require_pending_observation(before,row,baseline,getter_contract=PENDING_GETTERS,**context)
+        assert earlier['readFinishedAt']<=row['readStartedAt'], 'Pending-input receipt order does not match physical input boundaries'
+        require_calc_a1_selection(row['calcSelection'])
+        earlier=row
+    require_pending_receipt(editing['pendingInput'],child,baseline['a1Text'],True,selected['pendingInput'])
+    require_pending_receipt(pending['pendingInput'],child,baseline['a1Text']+marker,True,editing['pendingInput'])
 
 
 def verify_reopen(suite,source,baseline,expected,output):
@@ -274,20 +327,17 @@ def physical_case(suite,fixtures,output):
         inventory=json.loads(data)
         deadline=time.monotonic()+calc_model_barrier.MAX_SECONDS
         reader=OwnedModelReader(suite,output/'active-cell-reader',expected_service=calc_model_barrier.SERVICE,
-            getter_contract=calc_model_barrier.GETTERS,shell_pid=process.pid,expected_shell_creation=creation,
+            getter_contract=PENDING_GETTERS,shell_pid=process.pid,expected_shell_creation=creation,
             suite_hwnd=hwnd,parent_hwnd=parent,child_hwnd=child,office_pid=office_pid,expected_url=source.as_uri())
         record['stage']='observe-clean-before-input'
         before=reader.start(deadline);record['beforeInput']=before
         require_uncommitted_cells(before,baseline)
         record['stage']='physical-edit-without-enter'
-        send_keys('^{HOME}{F2}^{END}',pause=.1);record['navigationKeys']=['^{HOME}','{F2}','^{END}']
-        api.require_editor_focus(hwnd,child)
-        ascii_input.type_ascii(api,hwnd,child,MARKER,record,pause=.04)
-        record['physicalAsciiMarker']=MARKER
-        api.require_editor_focus(hwnd,child)
-        record['stage']='observe-original-model-still-uncommitted'
-        pending=reader.read(deadline);record['beforeSave']=pending
-        require_pending_observation(before,pending,baseline,suite=suite,inventory=inventory,
+        selected,editing,pending=type_pending_a1(reader,baseline,MARKER,record,deadline,
+            navigate=lambda keys:send_keys(keys,pause=.1),require_focus=lambda:api.require_editor_focus(hwnd,child),
+            type_marker=lambda:ascii_input.type_ascii(api,hwnd,child,MARKER,record,pause=.04))
+        record['beforeSave']=pending
+        require_pending_input_observations(before,selected,editing,pending,baseline,MARKER,suite=suite,inventory=inventory,
             inventory_sha256=identity['sha256'],original_shell=record['originalShell'],
             expected_url=source.as_uri(),deadline=deadline)
         record['uncommittedBeforeSaveVerified']=True
@@ -295,7 +345,7 @@ def physical_case(suite,fixtures,output):
         finally:reader=None
         record['readerCleanup']=cleanup
         require_model_reader_cleanup(cleanup,before['bindingBefore'],deadline,
-            expected_service=calc_model_barrier.SERVICE,getter_contract=calc_model_barrier.GETTERS)
+            expected_service=calc_model_barrier.SERVICE,getter_contract=PENDING_GETTERS)
         record['observerClosedBeforeSave']=True
         # No focus action, input acceptance or model setter may occur here.
         api.require_editor_focus(hwnd,child)
@@ -313,7 +363,9 @@ def physical_case(suite,fixtures,output):
         assert not api.windows(office_pid),'Office created an unowned visible top-level window'
         window.capture_as_image().save(output/(CASE+'-saved.png'))
         record['stage']='close-original-editor'
-        close_document(api,process,hwnd,child,record);close_home(api,process,record)
+        from generated_calc_close import freeze_saved_calc_copy,close_saved_calc_copy
+        saved_copy=freeze_saved_calc_copy(suite,source.parent,source,record['persisted']['sha256'],record['persisted']['cells'])
+        close_saved_calc_copy(api,process,hwnd,child,record,saved_copy);close_home(api,process,record)
         process.wait(timeout=15)
         rows=[]
         for path in sorted(diagnostics.glob('worker-save-*.jsonl')):

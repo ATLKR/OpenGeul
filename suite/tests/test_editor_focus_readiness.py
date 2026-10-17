@@ -14,9 +14,11 @@ spec.loader.exec_module(native)
 
 class NativeFocusFrames:
     """An external Win32 boundary with real GUIThreadInfo pointer writes."""
-    def __init__(self, focuses):
+    def __init__(self, focuses, captures=(0,)):
         self.focuses = iter(focuses)
+        self.captures = iter(captures)
         self.focus = 0
+        self.capture = 0
         self.foreground = 11
         # hwnd: (PID, TID, GA_ROOT, native class)
         self.windows = {11: (100, 10, 11, 'Suite'), 22: (100, 10, 11, 'Panel'),
@@ -37,9 +39,11 @@ class NativeFocusFrames:
     def GetGUIThreadInfo(self, tid, pointer):
         self.queries.append(tid)
         self.focus = next(self.focuses, self.focus)
+        self.capture = next(self.captures, self.capture)
         if not self.query_ok: return False
         info = pointer._obj
         info.flags, info.hwndActive, info.hwndFocus = 1, 33, self.focus
+        info.hwndCapture = self.capture
         info.hwndCaret, info.hwndMenuOwner = 34, 35
         info.rcCaret.left, info.rcCaret.top, info.rcCaret.right, info.rcCaret.bottom = 1, 2, 3, 4
         return True
@@ -52,8 +56,8 @@ class EditorFocusReadinessTests(unittest.TestCase):
         self.clock = 0
         self.record, self.inputs = {}, []
 
-    def api(self, focuses):
-        user = NativeFocusFrames(focuses)
+    def api(self, focuses, captures=(0,)):
+        user = NativeFocusFrames(focuses, captures)
         api = object.__new__(native.Windows)
         api.user = user
         api.class_name = lambda hwnd: user.windows.get(hwnd, (0, 0, 0, ''))[3]
@@ -93,6 +97,39 @@ class EditorFocusReadinessTests(unittest.TestCase):
         api = self.api([11, 35, 35, 33, 33])
         self.assertEqual(self.prepare(api), 33)
         self.assertEqual(self.inputs, ['click', 'CTRL+F6'])
+
+    def test_editor_focus_with_mouse_capture_waits_without_repeating_input(self):
+        api = self.api([0, 34, 34, 34, 34, 34], captures=[0, 33, 33, 33, 0, 0])
+        self.assertEqual(self.prepare(api), 34)
+        self.assertEqual(self.inputs, ['click', 'CTRL+F6'])
+        evidence = self.record['editorFocusReadiness']
+        self.assertEqual([row['capture']['hwnd'] for row in evidence['snapshots']], [0, 33, 33, 33, 0])
+        self.assertEqual([row['phase'] for row in evidence['snapshots'][3:]], ['wait', 'wait'])
+        self.assertEqual(evidence['deadlineSeconds'], .2)
+        self.assertGreater(self.clock, 0)
+        self.assertLessEqual(self.clock, .2)
+        self.assertIs(native.require_editor_focus_readiness(evidence, 11, 33, 100, 200), evidence)
+
+    def test_persistent_mouse_capture_times_out_with_editor_focus_and_original_input_count(self):
+        api = self.api([34], captures=[33])
+        with self.assertRaisesRegex(AssertionError, 'ready'):
+            self.prepare(api)
+        self.assertGreaterEqual(self.clock, .2)
+        self.assertLessEqual(self.clock, .25)
+        self.assertEqual(self.inputs, ['click', 'CTRL+F6'])
+        evidence = self.record['editorFocusReadiness']
+        self.assertFalse(evidence['ready'])
+        self.assertTrue(all(row['focus']['hwnd'] == 34 and row['capture']['hwnd'] == 33
+                            for row in evidence['snapshots']))
+
+    def test_strict_before_input_guard_rejects_capture_reappearing_after_ready_snapshot(self):
+        api = self.api([34], captures=[0, 0, 0, 33])
+        with self.assertRaisesRegex(AssertionError, 'capture'):
+            self.prepare(api)
+        self.assertEqual(self.clock, 0)
+        self.assertEqual(self.inputs, ['click', 'CTRL+F6'])
+        self.assertFalse(self.record['editorFocusReadiness']['ready'])
+        self.assertEqual(self.record['editorFocusReadiness']['snapshots'][-1]['capture']['hwnd'], 0)
 
     def test_foreign_focus_fails_immediately_without_more_input(self):
         api = self.api([0, 44, 34])
@@ -169,6 +206,8 @@ class EditorFocusReadinessTests(unittest.TestCase):
                      lambda e: e['snapshots'][-1].update(queriedThreadId=99),
                      lambda e: e['snapshots'][-1].update(querySucceeded=False),
                      lambda e: e['snapshots'][-1].update(lastError=5),
+                     lambda e: e['snapshots'][-1]['capture'].update(hwnd=33),
+                     lambda e: e['snapshots'][-1]['capture'].update(hwnd=False),
                      lambda e: e['snapshots'][-1]['focus'].update(threadId=99),
                      lambda e: e['snapshots'][-1]['focus'].update(pid=999),
                      lambda e: e['snapshots'][-1]['after']['foreground'].update(rootHwnd=44)]

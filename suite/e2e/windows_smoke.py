@@ -264,6 +264,7 @@ class Windows:
         info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
         if not self.user.GetGUIThreadInfo(thread, ctypes.byref(info)): raise ctypes.WinError(ctypes.get_last_error())
         assert info.hwndFocus and (info.hwndFocus == child or self.user.IsChild(child, info.hwndFocus)), 'Keyboard focus is outside the embedded Office editor'
+        assert not info.hwndCapture, 'Owned editor mouse capture is still active before physical input'
         return int(info.hwndFocus)
 
     def _focus_window(self, hwnd):
@@ -338,7 +339,10 @@ def _editor_focus_snapshot_ready(snapshot, hwnd, child, shell_pid, office_pid, t
     if snapshot['focusWithinEditor']:
         assert ready, 'Observed foreign keyboard focus inside the editor hierarchy'
         assert focus['threadId'] == thread, 'Observed keyboard focus belongs to another editor thread'
-    return focus['hwnd'] if ready else None
+    capture = snapshot['capture']['hwnd']
+    assert type(capture) is int and capture >= 0, 'Invalid native mouse capture observation'
+    # Zero capture excludes current Win32 capture; it is not input completion.
+    return focus['hwnd'] if ready and capture == 0 else None
 
 
 def require_editor_focus_readiness(evidence, hwnd, child, shell_pid, office_pid):
@@ -371,9 +375,10 @@ def prepare_editor_focus(api, hwnd, child, shell_pid, office_pid, record,
                          click_editor, enter_document, seconds=5):
     """Send the original single click/Ctrl+F6, then only observe readiness.
 
-    A missing focus or a live setup control within this Suite may be pending.
+    A missing focus, live Suite setup control, or mouse capture may be pending.
     Foreign foreground/focus, changed ownership, and native query errors fail
-    immediately. This does not establish the cause of a previous focus failure.
+    immediately. Zero capture does not establish edit mode or input completion,
+    nor does this establish the cause of a previous focus failure.
     """
     assert 0 < seconds <= 10, 'Editor focus readiness must have a bounded deadline'
     started = time.monotonic()
@@ -474,7 +479,20 @@ def close_home(api, process, record):
     assert process.returncode == 0, 'Suite did not close cleanly'
 
 
-def close_document(api, process, hwnd, child, record):
+def _verified_saved_calc_close_proof(suite, owned_root, source, baseline, **options):
+    from generated_calc_close import freeze_saved_calc_from_baseline
+    return freeze_saved_calc_from_baseline(suite, owned_root, source, baseline, **options)
+
+
+def close_document(api, process, hwnd, child, record, *, calc_close_proof=None):
+    if record.get('module') == 'calc':
+        from generated_calc_close import (GeneratedBlankCalc, SavedCalcCopy,
+                                          close_generated_blank_calc, close_saved_calc_copy)
+        assert isinstance(calc_close_proof, (SavedCalcCopy, GeneratedBlankCalc)), 'Calc cleanup requires an explicit verified generated-copy or fresh-blank token'
+        closer = close_generated_blank_calc if isinstance(calc_close_proof, GeneratedBlankCalc) else close_saved_calc_copy
+        closer(api, process, hwnd, child, record, calc_close_proof)
+        return
+    assert calc_close_proof is None, 'Calc discard authorization cannot close another module'
     # HwndWrapper.close() adds a 2s deadline before our async teardown waits.
     # Post the same owned WM_CLOSE once, then use the explicit lifecycle bounds.
     record['stage'] = 'close-document'
@@ -951,7 +969,13 @@ def new_module(suite, output, module, *, fixtures=None):
             record['stage'] = 'capture-saved-base'
             window.capture_as_image().save(output / 'new-base-saved.png')
         # A Save As failure never falls back to discarding the unsaved Base document.
-        close_document(api, process, hwnd, child, record)
+        calc_proof = None
+        if module == 'calc':
+            from generated_calc_close import freeze_generated_blank_calc
+            calc_proof = freeze_generated_blank_calc(suite, api, process, hwnd, child, record)
+            close_document(api, process, hwnd, child, record, calc_close_proof=calc_proof)
+        else:
+            close_document(api, process, hwnd, child, record)
         close_home(api, process, record)
         if saved_base is not None:
             record['stage'] = 'verify-base-after-cleanup'
@@ -1149,7 +1173,13 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
                           keyboardInputVerified=True, contentMutationVerified=True)
         assert not api.windows(office_pid), api.external_window_message(office_pid, 'Office created an unowned visible top-level window during the test')
         record.update(nativeParentVerified=True, noExternalOfficeWindow=True, screenshot=screenshot)
-        close_document(api, process, hwnd, child, record)
+        calc_proof = None
+        if module == 'calc':
+            calc_proof = _verified_saved_calc_close_proof(suite, fixtures, source, calc_baseline,
+                                                         suffix=EDITOR_MARKERS[module])
+            close_document(api, process, hwnd, child, record, calc_close_proof=calc_proof)
+        else:
+            close_document(api, process, hwnd, child, record)
         close_home(api, process, record)
         record['stage'] = 'verify-final-content'
         after = hashlib.sha256(source.read_bytes()).hexdigest()

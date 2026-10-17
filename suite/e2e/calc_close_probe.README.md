@@ -62,3 +62,12 @@ Relevant pinned source:
 
 Portable unit checks validate these probe oracles. They provide no Windows GUI
 result, no IME coverage and no universal asynchronous formula/validation proof.
+
+The pending-input setup now requires a read-only A1 selection receipt after
+Ctrl+Home, then the exact original text and full typed marker from the same
+temporary in-cell accessibility editor. The model must still contain the
+original A1 value with `isModified == false`. The observer uses LibreOffice
+26.8.1.1's explicitly removable `XVclWindowPeer.XAccessible` test property;
+this is an E2E-only receipt, not a production pending-input API. Missing or
+ambiguous editors, foreign paths, changed identities, and text mismatches fail
+before Ctrl+W. The unsafe formula-bar UI-test text getter is never called.

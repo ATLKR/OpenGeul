@@ -51,7 +51,8 @@ class FakeWindows:
                    'foreground': window(hwnd), 'editorWithinSuite': True}
         return {'before': binding, 'after': binding, 'querySucceeded': True,
                 'queryAttempted': True, 'queriedThreadId': 44, 'cbSize': 72, 'lastError': 0,
-                'focus': window(self.focus), 'focusWithinEditor': True}
+                'focus': window(self.focus), 'focusWithinEditor': True,
+                'capture': {'hwnd': 0, 'isWindow': False, 'pid': 0, 'threadId': 0, 'rootHwnd': 0, 'className': ''}}
 
     def send(self, count, payload, size):
         self.sent.append((count, bytes(payload), size))
@@ -352,6 +353,7 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                         patch.object(native, 'Windows', return_value=api), \
                         patch.object(native, 'verified_attachment', return_value=(11, 12, 22, 88)), \
                         patch.object(native.ascii_input, 'type_ascii', type_ascii), \
+                        patch.object(native, '_verified_saved_calc_close_proof', return_value=object()), \
                         patch.object(native, 'close_document'), patch.object(native, 'close_home'), \
                         patch.object(native, 'stop_owned_test_process'):
                     result = native.document_case(root, root, root, module, extension, True)

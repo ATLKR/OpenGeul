@@ -22,7 +22,9 @@ REQUIRED = frozenset({
     'suite-provenance.json', 'runtime-branding.json', 'Office/opengeul-branding.json',
     'Office/program/soffice.exe', 'Office/program/soffice.bin', 'Office/program/python.exe',
     'worker/office_worker.py', 'worker/session.py', 'worker/native.py',
-    'worker/native_windows.py', 'worker/dispatch.py', 'Notices/OpenGeul-Office-LICENSE.txt',
+    'worker/native_windows.py', 'worker/dispatch.py', 'worker/calc_save.py',
+    'worker/calc_close.py', 'worker/save_diagnostics.py', 'worker/native_diagnostics.py',
+    'Notices/OpenGeul-Office-LICENSE.txt',
     'Notices/LibreOffice-LICENSE.txt', 'Notices/CORRESPONDING_SOURCE.md',
     'Sources/OpenGeul-Office-source.zip',
 })

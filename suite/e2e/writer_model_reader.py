@@ -35,6 +35,7 @@ WRITER_MODEL_SERVICE = 'com.sun.star.text.TextDocument'
 WRITER_GETTER_CONTRACT = 'writer-body-v1'
 CALC_MODEL_SERVICE = 'com.sun.star.sheet.SpreadsheetDocument'
 CALC_GETTER_CONTRACT = 'calc-a1-b1-c1-d1-v1'
+CALC_PENDING_GETTER_CONTRACT = 'calc-a1-b1-c1-d1-pending-input-v1'
 CALC_OPERATIONS = ['resolve-existing-owned-frame','Sheet0.A1.getString','Sheet0.B1.getValue',
     'Sheet0.C1.getValue','Sheet0.D1.getFormula','Sheet0.D1.getValue','isModified','verify-retained-generation']
 _ModelContract = namedtuple('_ModelContract','service getters kind cleanup_kind operations')
@@ -42,6 +43,11 @@ _WRITER_CONTRACT = _ModelContract(WRITER_MODEL_SERVICE,WRITER_GETTER_CONTRACT,
     'existing-owned-writer-body','owned-writer-reader-cleanup',tuple(OPERATIONS))
 _CALC_CONTRACT = _ModelContract(CALC_MODEL_SERVICE,CALC_GETTER_CONTRACT,
     'existing-owned-calc-cells','owned-calc-reader-cleanup',tuple(CALC_OPERATIONS))
+CALC_PENDING_OPERATIONS = [CALC_OPERATIONS[0],
+    'XSelectionSupplier.getSelection.rangeAddress',
+    'owned-test-accessible.A1-editor.XAccessibleText.getText']+CALC_OPERATIONS[1:]
+_CALC_PENDING_CONTRACT = _ModelContract(CALC_MODEL_SERVICE,CALC_PENDING_GETTER_CONTRACT,
+    'existing-owned-calc-pending-input','owned-calc-pending-reader-cleanup',tuple(CALC_PENDING_OPERATIONS))
 PROCESS_KEYS = ('pid','creationTime','image','handleValue','waitResult','exitCode')
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -51,7 +57,7 @@ from native_accessibility import private_pipe as _parse_private_pipe
 def _model_contract(expected_service,getter_contract):
     """Only the caller selects a fixed contract; receipt fields never select it."""
     assert type(expected_service) is str and type(getter_contract) is str, 'Explicit model service/getter contract is required'
-    for contract in (_WRITER_CONTRACT,_CALC_CONTRACT):
+    for contract in (_WRITER_CONTRACT,_CALC_CONTRACT,_CALC_PENDING_CONTRACT):
         if (expected_service,getter_contract)==(contract.service,contract.getters):return contract
     raise AssertionError('Unsupported explicit model service/getter pair')
 
@@ -63,6 +69,38 @@ def _require_calc_values(value):
     for key in ('b1Value','c1Value','d1Value'):
         assert type(value.get(key)) in (int,float) and math.isfinite(value[key]), 'Invalid finite Calc numeric getter: '+key
     assert type(value.get('isModified')) is bool, 'Invalid Calc modified state'
+
+
+def read_calc_selection(controller):
+    """Fixed XSelectionSupplier/range getters; never accepts input or sets selection."""
+    selected=controller.getSelection()
+    assert selected is not None, 'Calc has no single cell/range selection'
+    address=selected.getRangeAddress()
+    # ScCellRangeObj::getSpreadsheet creates a fresh wrapper; proxy equality
+    # with separately fetched Sheet0 is not sheet identity. getSelection is
+    # bound to this already verified retained controller's own DocShell.
+    value=dict(readOnly=True,source='retained-controller.getSelection',range={
+        key:getattr(address,source) for key,source in (
+            ('sheet','Sheet'),('startColumn','StartColumn'),('startRow','StartRow'),
+            ('endColumn','EndColumn'),('endRow','EndRow'))})
+    _require_calc_selection(value)
+    return value
+
+
+def _require_calc_selection(value):
+    assert isinstance(value,dict) and value.get('readOnly') is True
+    assert value.get('source')=='retained-controller.getSelection', 'Calc selection getter source differs'
+    area=value.get('range')
+    assert isinstance(area,dict) and set(area)=={'sheet','startColumn','startRow','endColumn','endRow'}
+    assert all(type(n) is int and n>=0 for n in area.values()), 'Invalid Calc range address'
+    assert area['startColumn']<=area['endColumn'] and area['startRow']<=area['endRow']
+    return value
+
+
+def require_calc_a1_selection(value):
+    _require_calc_selection(value)
+    assert all(n==0 for n in value['range'].values()), 'Physical CtrlHome did not select exactly A1 on sheet zero'
+    return value
 
 
 def _path(value):
@@ -348,7 +386,11 @@ def _require_owned_observation(observation,binding,suite_root,contract):
     assert _path(observation['helperLaunch']['steps'][1]['application'])==_path(_join(suite_root,'Office/program/python.exe'))
     observed=observation.get('pythonIdentity',{}).get('observed',{})
     assert _path(observation['readerProcess']['image'])==_path(observed.get('processImage')), 'Actual reader process does not match the packaged Python observation'
-    if contract==_CALC_CONTRACT:_require_calc_values(observation)
+    if contract in (_CALC_CONTRACT,_CALC_PENDING_CONTRACT):_require_calc_values(observation)
+    if contract==_CALC_PENDING_CONTRACT:
+        from calc_pending_input import require_pending_receipt
+        _require_calc_selection(observation.get('calcSelection'))
+        require_pending_receipt(observation.get('pendingInput'),binding['childHwnd'])
     return observation
 
 
@@ -878,7 +920,7 @@ class _UnoReader:
     def __init__(self,config,anchor,*,contract=_WRITER_CONTRACT):
         self.config=config;self.contract=contract;self.diagnostic={'proxyTypes':{},'frameEnumeration':[]}
         self.model=self.controller=self.frame=self.desktop=self.context=self.local_context=None
-        self.retained={}
+        self.retained={};self.pending_input=None
         try:
             import uno
             self.local_context=uno.getComponentContext();self.proxy_type=type(self.local_context)
@@ -942,12 +984,18 @@ class _UnoReader:
 
     def read(self):
         before=self.snapshot()
-        if self.contract==_CALC_CONTRACT:
+        if self.contract in (_CALC_CONTRACT,_CALC_PENDING_CONTRACT):
             sheet=self.model.getSheets().getByIndex(0)
+            pending={}
+            if self.contract==_CALC_PENDING_CONTRACT:
+                from calc_pending_input import AccessiblePendingReader
+                if self.pending_input is None:
+                    self.pending_input=AccessiblePendingReader(self.frame,self.config['child_hwnd'])
+                pending=dict(calcSelection=read_calc_selection(self.controller),pendingInput=self.pending_input.read())
             value=dict(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
                 b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
                 d1Formula=sheet.getCellRangeByName('D1').getFormula(),d1Value=sheet.getCellRangeByName('D1').getValue(),
-                isModified=self.model.isModified())
+                isModified=self.model.isModified(),**pending)
             after=self.snapshot()
             _require_calc_values(value)
         else:
@@ -960,6 +1008,7 @@ class _UnoReader:
 
     def release(self):
         # Client references only. The live document is never closed/disposed.
+        if self.pending_input is not None:self.pending_input.release();self.pending_input=None
         self.model=self.controller=self.frame=self.desktop=self.context=self.local_context=None
 
 

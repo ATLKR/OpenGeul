@@ -119,8 +119,30 @@
       "filter": "Impress MS PowerPoint 2007 XML",
       "kind": "format",
       "guiVerified": false,
-      "lossBudget": [],
-      "semantics": "Exact generated model content and actual format container; fresh independent engine reopen."
+      "lossBudget": [
+        "native-reopen-bounds-minus-one-mm100"
+      ],
+      "semantics": "Exact authored text/order/position and saved OOXML EMU extents; independent native reopen requires exact documented closed/open bounds conversion. Repeated native edit/save geometry preservation is not certified.",
+      "qualificationScope": {
+        "authoredAndSavedGeometry": "exact authored mm100 and OOXML EMU extents",
+        "nativeReopenGeometry": "exact native bounds conversion, no tolerance",
+        "losslessRepeatedNativeEditSave": false,
+        "universalGeometryPreservation": false
+      },
+      "knownNativeGeometryDifference": {
+        "kind": "native-closed-open-rectangle-bounds",
+        "unit": "mm100",
+        "reopenSizeDeltaMm100": -1,
+        "authoredShapeType": "com.sun.star.drawing.TextShape",
+        "reopenedShapeType": "com.sun.star.drawing.CustomShape",
+        "sources": [
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/oox/source/ppt/pptshapegroupcontext.cxx#L108",
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/oox/source/drawingml/shape.cxx#L1118",
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/svx/source/svdraw/svdoashp.cxx#L3032",
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/include/tools/gen.hxx#L593",
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/svx/source/unodraw/unoshape.cxx#L1069"
+        ]
+      }
     },
     {
       "id": "format-impress-ppt",
@@ -189,8 +211,30 @@
       "filter": "Impress MS PowerPoint 2007 XML",
       "kind": "rich",
       "guiVerified": false,
-      "lossBudget": [],
-      "semantics": "Two ordered slides with exact text and shape geometry."
+      "lossBudget": [
+        "native-reopen-bounds-minus-one-mm100"
+      ],
+      "semantics": "Exact authored text/order/position and saved OOXML EMU extents; independent native reopen requires exact documented closed/open bounds conversion. Repeated native edit/save geometry preservation is not certified.",
+      "qualificationScope": {
+        "authoredAndSavedGeometry": "exact authored mm100 and OOXML EMU extents",
+        "nativeReopenGeometry": "exact native bounds conversion, no tolerance",
+        "losslessRepeatedNativeEditSave": false,
+        "universalGeometryPreservation": false
+      },
+      "knownNativeGeometryDifference": {
+        "kind": "native-closed-open-rectangle-bounds",
+        "unit": "mm100",
+        "reopenSizeDeltaMm100": -1,
+        "authoredShapeType": "com.sun.star.drawing.TextShape",
+        "reopenedShapeType": "com.sun.star.drawing.CustomShape",
+        "sources": [
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/oox/source/ppt/pptshapegroupcontext.cxx#L108",
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/oox/source/drawingml/shape.cxx#L1118",
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/svx/source/svdraw/svdoashp.cxx#L3032",
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/include/tools/gen.hxx#L593",
+          "https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/svx/source/unodraw/unoshape.cxx#L1069"
+        ]
+      }
     },
     {
       "id": "rich-draw",
