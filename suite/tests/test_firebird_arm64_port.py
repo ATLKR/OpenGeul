@@ -187,6 +187,72 @@ class AuthenticatedSource(unittest.TestCase):
                 after=self.compile_fpe(root,architecture)
                 self.assertEqual(after.returncode,0,architecture+': '+after.stderr)
 
+    def compile_msvc_platform(self, root, architecture):
+        if not self.cxx:
+            if self.required:self.fail('Mandatory C++ compiler for the MSVC platform-header check is missing')
+            self.skipTest('A C++ compiler is required for the MSVC platform-header check')
+        macros={'arm64':'#define _M_ARM64 1\n','x64':'#define _M_AMD64 1\n#define _M_X64 1\n',
+                'x86':'#define _M_IX86 1\n','unknown':'','arm64ec':'#define _M_ARM64 1\n#define _M_ARM64EC 1\n'}
+        text=('#define _MSC_VER 1940\n'+macros[architecture]+
+              '#include "'+str(root/'src/include/gen/autoconfig_msvc.h')+'"\n')
+        if architecture in ('arm64','x64','x86'):
+            common=(root/'src/common/common.h').read_text()
+            start=common.index('#ifdef WIN_NT');end=common.index('#endif /* WIN_NT */',start)+len('#endif /* WIN_NT */')
+            cpu={'arm64':'CpuArm64','x64':'CpuAmd','x86':'CpuIntel'}[architecture]
+            size=4 if architecture=='x86' else 8
+            text+=('enum { CpuIntel=0, CpuAmd=1, CpuArm64=15 };\n'+common[start:end]+'\n'+
+                   'static_assert(FB_CPU=='+cpu+',"wrong CPU identity from fixed MSVC header");\n'+
+                   'static_assert(SIZEOF_VOID_P=='+str(size)+',"wrong pointer-size definition");\n'+
+                   'static_assert(SIZEOF_SIZE_T=='+str(size)+',"wrong size_t definition");\n'+
+                   'static_assert(FB_ALIGNMENT=='+str(size)+',"wrong Firebird alignment definition");\n'+
+                   'static_assert(SIZEOF_LONG==4,"Windows long must remain 32-bit");\n'+
+                   'static_assert(FB_DOUBLE_ALIGN==8,"double alignment must remain eight");\n'+
+                   '#ifndef WIN_NT\n#error Windows platform missing\n#endif\n'+
+                   '#ifdef WORDS_BIGENDIAN\n#error Windows ARM64 must remain little endian\n#endif\n')
+            expected={'arm64':'ARM64','x64':'AMD64','x86':'I386'}[architecture]
+            for name in ('ARM64','AMD64','I386'):
+                text+=('#ifndef ' if name==expected else '#ifdef ')+name+'\n#error incorrect architecture alias '+name+'\n#endif\n'
+        # This uses actual source headers and macro/type-definition assertions.
+        # The host compiler does not establish a Windows ABI or execute ODS.
+        return subprocess.run([self.cxx,'-std=c++11','-Wno-unknown-pragmas','-x','c++','-fsyntax-only','-'],
+                              input=text,text=True,capture_output=True)
+
+    def test_real_msvc_header_rejects_arm64_then_port_preserves_windows_platform_definitions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.source_tree(folder);header=root/'src/include/gen/autoconfig_msvc.h';original=header.read_bytes()
+            lock=json.loads((PORT/'source-build.json').read_text())['msvcPlatformHeader']
+            self.assertEqual('src/include/gen/autoconfig_msvc.h',lock['path'])
+            with tarfile.open(self.archive,'r:bz2') as archive:
+                members=[item for item in archive if item.isfile() and item.name.endswith('/'+lock['path'])]
+                self.assertEqual(1,len(members))
+                archived=archive.extractfile(members[0]).read()
+            self.assertEqual(lock['archiveBytes'],len(archived))
+            self.assertEqual(lock['archiveSha256'],hashlib.sha256(archived).hexdigest())
+            self.assertEqual(lock['beforeBytes'],len(original))
+            self.assertEqual(lock['beforeSha256'],hashlib.sha256(original).hexdigest())
+            failed=self.compile_msvc_platform(root,'arm64')
+            self.assertNotEqual(0,failed.returncode,'Original fixed MSVC header no longer reproduces C1189')
+            self.assertIn('unknown target platform',failed.stderr)
+            for architecture in ('x64','x86'):
+                before=self.compile_msvc_platform(root,architecture)
+                self.assertEqual(0,before.returncode,architecture+': '+before.stderr)
+            self.apply(root,PORT/'firebird-windows-arm64.patch')
+            branch=(b'#elif defined(_M_ARM64) && !defined(_M_ARM64EC)\n#define ARM64\n'
+                    b'/* sizeof(void *) */\n#define SIZEOF_VOID_P 8\n'
+                    b'/* sizeof(size_t) */\n#define SIZEOF_SIZE_T 8\n'
+                    b'/* Firebird alignment, matching the 64-bit Windows layout */\n#define FB_ALIGNMENT 8\n')
+            self.assertEqual(original.replace(b'#else\n#error unknown target platform\n',branch+b'#else\n#error unknown target platform\n'),
+                             header.read_bytes(),'Only the pure ARM64 fixed-header branch may change')
+            self.assertEqual(lock['afterBytes'],header.stat().st_size)
+            self.assertEqual(lock['afterSha256'],hashlib.sha256(header.read_bytes()).hexdigest())
+            for architecture in ('arm64','x64','x86'):
+                result=self.compile_msvc_platform(root,architecture)
+                self.assertEqual(0,result.returncode,architecture+': '+result.stderr)
+            for architecture in ('unknown','arm64ec'):
+                result=self.compile_msvc_platform(root,architecture)
+                self.assertNotEqual(0,result.returncode,'Unsupported target was accepted as pure ARM64')
+                self.assertIn('unknown target platform',result.stderr)
+
     def test_explicit_enable_flag_is_not_overwritten_by_arm64_defaults(self):
         autoconf = shutil.which('autoconf')
         if not autoconf:

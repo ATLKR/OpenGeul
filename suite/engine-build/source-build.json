@@ -21,7 +21,7 @@
   },
   "portPatch": {
     "filename": "firebird-windows-arm64.patch",
-    "sha256": "2d4c5bf4a44e571fd4a67e16272756719b3f0d482e9eb33104e063ca37d90880",
+    "sha256": "0e3eaf847a82269c0c2e1b5935327e7e628e2c1df9e488c9f642768f307854f2",
     "strip": 0,
     "appliesAfter": "All pinned LibreOffice Windows Firebird patches"
   },
@@ -207,5 +207,18 @@
     "sha256": "912e88972e7fc7f61eb0b373187d80d2f2ab6e7462378dce979254fa31792715",
     "afterSha256": "5fbba07a0945cff9a3ce5ae56208c9e5ad7c713701d6ae32cf08950fef0ee6d4",
     "change": "Exclude git-hooks while linking extracted source modules into the core root"
+  },
+  "msvcPlatformHeader": {
+    "path": "src/include/gen/autoconfig_msvc.h",
+    "archiveBytes": 9408,
+    "archiveSha256": "e9a17ae0ccace8a8153ca6d4e07246fb7273abcfa0945a478eb655bd7de06537",
+    "beforeBytes": 9443,
+    "beforeSha256": "18e03d9c4a7ceabd02bf0ee54cafc9418e63cbe68f99e7a47eade81dea05b0b9",
+    "afterBytes": 9679,
+    "afterSha256": "518774a3f491e134cfd811f97580aae8962eaa82ae6fc1f08bb35e91e104bd8a",
+    "upstreamHeaderPatches": [
+      "firebird-cygwin-msvc-warnings.patch"
+    ],
+    "beforeStage": "After all25 locked upstream Windows patches"
   }
 }

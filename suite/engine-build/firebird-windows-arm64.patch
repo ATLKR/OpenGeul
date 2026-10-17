@@ -51,3 +51,20 @@
  		_controlfp(savedMask, _MCW_EM); // restore saved
  #else
  		Mask cw;
+--- src/include/gen/autoconfig_msvc.h
++++ src/include/gen/autoconfig_msvc.h
+@@ -240,6 +240,14 @@
+ #define SIZEOF_SIZE_T 8
+ /* alignment of long */
+ #define FB_ALIGNMENT 8
++#elif defined(_M_ARM64) && !defined(_M_ARM64EC)
++#define ARM64
++/* sizeof(void *) */
++#define SIZEOF_VOID_P 8
++/* sizeof(size_t) */
++#define SIZEOF_SIZE_T 8
++/* Firebird alignment, matching the 64-bit Windows layout */
++#define FB_ALIGNMENT 8
+ #else
+ #error unknown target platform
+ #endif

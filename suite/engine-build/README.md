@@ -35,6 +35,21 @@ declaration-only Microsoft API visibility fixtures. It proves source selection
 and syntax; actual Windows compiler, floating-point runtime behavior and Base
 persistence still require the native build and qualification gates.
 
+Native source run `39026193296` reached Firebird's generated ODS test and
+stopped at the fixed `src/include/gen/autoconfig_msvc.h` platform guard.
+`ods.awk` includes that header directly for MSVC, independently of the generated
+configure header. The ARM64 port adds a pure `_M_ARM64` branch defining the
+existing ARM64 CPU identity, eight-byte pointer and `size_t` definitions, and
+eight-byte Firebird alignment. The existing Windows `long` definition remains
+four bytes and double alignment remains eight. The x64 and x86 branches are
+unchanged; the unsupported-platform guard remains. The manifest separately pins
+the archived header, its state after all 25 upstream patches, and the ported
+header: the upstream warning patch changes this file before our branch is added.
+Mandatory source checks compile the real fixed header and CPU branch for all
+three target macro sets. They establish source selection and definitions;
+actual Windows ABI, ODS comparison and complete native Base qualification remain
+required.
+
 Run the build on actual Windows ARM64 and verify the native host before using
 these options in `autogen.input`:
 
