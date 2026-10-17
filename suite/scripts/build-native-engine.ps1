@@ -307,13 +307,72 @@ function Get-CygwinBuildPackages {
     'autoconf,automake,make,perl,python3,patch,bison,flex,gperf,unzip,zip,libtool,curl,git,diffutils,which,pkg-config,gcc-g++,gettext-devel,doxygen,graphviz'
 }
 
-function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='') {
+function Get-WindowsPkgconfPin {
+    # Official LODE bin/utils_Cygwin.sh downloads this Windows-path-aware tool.
+    # This x64 build helper is never admitted to the native ARM64 product.
+    return [ordered]@{filename='pkgconf-2.4.3.exe';version='2.4.3';url='https://dev-www.libreoffice.org/extern/pkgconf-2.4.3.exe';size=90624;sha256='791cd6dbc56f7268fbf9c4652d6634b0f5c59687ab4e504565e58245952edd41';machine=0x8664}
+}
+
+function Get-WindowsBuildToolPeIdentity([string]$Path) {
+    Assert-UnlinkedPath $Path
+    $data=[IO.File]::ReadAllBytes($Path)
+    if($data.Length -lt 64 -or $data[0] -ne 77 -or $data[1] -ne 90) {throw 'Windows build tool is not a PE.'}
+    [long]$offset=[BitConverter]::ToUInt32($data,60)
+    if($offset -lt 64 -or $offset+24 -gt $data.Length -or [BitConverter]::ToUInt32($data,[int]$offset) -ne 17744) {throw 'Invalid Windows build tool PE headers.'}
+    [int]$machine=[BitConverter]::ToUInt16($data,[int]$offset+4)
+    [int]$sections=[BitConverter]::ToUInt16($data,[int]$offset+6)
+    [int]$optionalSize=[BitConverter]::ToUInt16($data,[int]$offset+20)
+    [int]$flags=[BitConverter]::ToUInt16($data,[int]$offset+22)
+    [int]$optional=[int]$offset+24;[int]$sectionTable=$optional+$optionalSize
+    if($machine -ne 0x8664 -or $optionalSize -lt 240 -or $sectionTable -gt $data.Length -or [BitConverter]::ToUInt16($data,$optional) -ne 0x20b -or -not($flags -band 2) -or ($flags -band 0x2000) -or $sections -lt 1 -or $sections -gt 96 -or $sectionTable+$sections*40 -gt $data.Length -or [BitConverter]::ToUInt32($data,$optional+108) -lt 14) {throw 'Pinned Windows build tool requires an x64 PE32+ executable.'}
+    $mapRva={param([uint32]$Rva,[uint32]$Length)
+        for($i=0;$i -lt $sections;$i++) {
+            $entry=$sectionTable+$i*40;[long]$start=[BitConverter]::ToUInt32($data,$entry+12);[long]$size=[BitConverter]::ToUInt32($data,$entry+16);[long]$raw=[BitConverter]::ToUInt32($data,$entry+20)
+            if($Rva -ge $start -and [long]$Rva+$Length -le $start+$size -and $raw+$size -le $data.Length) {return [int]($raw+$Rva-$start)}
+        }
+        throw 'Windows build tool import RVA is outside actual section bytes.'
+    }
+    if([BitConverter]::ToUInt32($data,$optional+216) -ne 0 -or [BitConverter]::ToUInt32($data,$optional+220) -ne 0) {throw 'Unexpected Windows build tool delayed imports.'}
+    [uint32]$importRva=[BitConverter]::ToUInt32($data,$optional+120);[uint32]$importSize=[BitConverter]::ToUInt32($data,$optional+124)
+    if($importRva -eq 0 -or $importSize -lt 40 -or $importSize -gt 65536) {throw 'Windows build tool imports are missing or unbounded.'}
+    [int]$first=&$mapRva $importRva $importSize;$imports=@();$terminated=$false
+    for($entry=$first;$entry+20 -le $first+$importSize;$entry+=20) {
+        if(@($data[$entry..($entry+19)]|Where-Object {$_ -ne 0}).Count -eq 0) {$terminated=$true;break}
+        [int]$nameOffset=&$mapRva ([BitConverter]::ToUInt32($data,$entry+12)) 1
+        $end=$nameOffset
+        while($end -lt $data.Length -and $end-$nameOffset -lt 256 -and $data[$end] -ne 0) {$end++}
+        if($end -ge $data.Length -or $end-$nameOffset -ge 256) {throw 'Invalid Windows build tool import name.'}
+        $name=[Text.Encoding]::ASCII.GetString($data,$nameOffset,$end-$nameOffset)
+        if($name -notmatch '^[A-Za-z0-9_.-]+\.dll$' -or $name -match '^(?:cygwin|msys-)') {throw 'Windows build tool imports a non-Windows runtime.'}
+        $imports+=$name
+        if($imports.Count -gt 64) {throw 'Windows build tool import count exceeds its bound.'}
+    }
+    if(-not $terminated -or $imports.Count -eq 0) {throw 'Windows build tool import table is incomplete.'}
+    return [ordered]@{path=[IO.Path]::GetFullPath($Path);size=$data.Length;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant();machine=$machine;optionalMagic=0x20b;imports=@($imports|Sort-Object -Unique);role='buildHostTool';productPayload=$false;executionArchitecture='x64 build helper; Windows ARM64 emulation permitted'}
+}
+
+function Get-AuthenticatedWindowsPkgconf([string]$DownloadDirectory,[string]$EvidenceDirectory,[string]$WorkingDirectory) {
+    $pin=Get-WindowsPkgconfPin;$path=Join-Path $DownloadDirectory $pin.filename
+    Get-AuthenticatedDownload $pin.url $path $pin.size SHA256 $pin.sha256 (Join-Path $EvidenceDirectory 'pkgconf-download.json')|Out-Null
+    Confirm-FileIdentity $path $pin.size SHA256 $pin.sha256|Out-Null
+    $identity=Get-WindowsBuildToolPeIdentity $path
+    if($identity.machine -ne $pin.machine) {throw 'Authenticated pkgconf machine differs from its pinned build-tool identity.'}
+    $probe=Invoke-LoggedCommand $path @('--version') $WorkingDirectory (Join-Path $EvidenceDirectory 'pkgconf-version')
+    $version=(Get-Content -LiteralPath $probe.stdout -Raw).Trim()
+    if($version -cne $pin.version) {throw 'Authenticated Windows pkgconf version probe differs from its pin.'}
+    $result=[ordered]@{pin=$pin;identity=$identity;version=$version;versionCommandReceipt=$probe.receipt;productPayload=$false}
+    Write-BuildJson (Join-Path $EvidenceDirectory 'pkgconf-build-tool.json') $result
+    return $result
+}
+
+function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='',[string]$PkgConfig='') {
     '--with-distro=LibreOfficeWinArm64','--build=aarch64-pc-cygwin','--host=aarch64-pc-cygwin',
     '--with-visual-studio=2026','--enable-firebird-sdbc','--enable-database-connectivity',
     '--without-system-firebird','--without-system-libatomic_ops','--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'
     if($ExternalTar) {'--with-external-tar='+$ExternalTar}
     if($JdkHome) {'--with-jdk-home='+$JdkHome}
     if($AntHome) {'--with-ant-home='+$AntHome}
+    if($PkgConfig) {'PKG_CONFIG='+$PkgConfig}
 }
 
 function Get-BuildTargets([ValidateSet('Firebird','Full')][string]$Phase) {
@@ -718,6 +777,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         Write-BuildJson (Join-Path $evidence 'java-build-tools.json') $receipt.javaTools
         $downloads=Join-Path $work 'downloads';New-Item -ItemType Directory $downloads|Out-Null
         $receipt.stage='authenticated-downloads'
+        $receipt.pkgconfTool=Get-AuthenticatedWindowsPkgconf $downloads $evidence $work
         $archive=Join-Path $downloads 'libreoffice-26.8.1.1.tar.xz'
         $receipt.sourceArchive=Get-AuthenticatedDownload $pin.url $archive $pin.size SHA256 $pin.sha256 (Join-Path $evidence 'libreoffice-download.json')
         $receipt.extraSourceArchives=@()
@@ -746,6 +806,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $convert={param($path,$name) $r=Invoke-LoggedCommand $cygpath @('-u',$path) $work (Join-Path $evidence ('cygpath-'+$name));(Get-Content -LiteralPath $r.stdout -Raw).Trim()}
         $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixDownloads=&$convert $downloads 'downloads'
         $unixJdk=&$convert $receipt.javaTools.jdk.home 'jdk';$unixAnt=&$convert $receipt.javaTools.ant.home 'ant'
+        $unixPkgconf=&$convert $receipt.pkgconfTool.identity.path 'pkgconf'
         $source=Join-Path $work 'libreoffice-26.8.1.1';$unixSource=$unixWork+'/libreoffice-26.8.1.1'
         $extract=Join-Path $commands 'extract.sh'
         Write-BashScript $extract @('set -euo pipefail',"cd $(Quote-Bash $unixWork)","/usr/bin/tar -xf $(Quote-Bash $unixArchive)")
@@ -761,7 +822,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.stage='install-authenticated-source-hooks'
         $python=(Get-Command python -ErrorAction Stop).Source
         Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source) $repo (Join-Path $evidence 'source-hooks')|Out-Null
-        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt)
+        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt $unixPkgconf)
         Copy-Item (Join-Path $source 'autogen.input') (Join-Path $evidence 'autogen.input')
         $configure=Join-Path $commands 'configure.sh'
         Write-BashScript $configure @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)",'./autogen.sh')
