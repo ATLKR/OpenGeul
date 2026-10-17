@@ -638,9 +638,15 @@ function Write-BashScript([string]$Path,[string[]]$Lines) {
     [IO.File]::WriteAllText($Path,$text,[Text.UTF8Encoding]::new($false))
 }
 
-function Invoke-CygwinScript($Bash,$Cygpath,[string]$Script,[string]$WorkingDirectory,[string]$LogPrefix) {
+function Invoke-CygwinScript($Bash,$Cygpath,[string]$Script,[string]$WorkingDirectory,[string]$LogPrefix,[switch]$NativeLinks) {
     $converted=Invoke-LoggedCommand $Cygpath @('-u',$Script) $WorkingDirectory ($LogPrefix+'-path')
     $unix=(Get-Content -LiteralPath $converted.stdout -Raw).Trim()
+    if($NativeLinks) {
+        $envExe=Join-Path (Split-Path $Bash -Parent) 'env.exe';Assert-UnlinkedPath $envExe
+        # Set the mode before Bash starts, exactly as the native access probe.
+        # env.exe changes only its child; strict creation has no link fallback.
+        return Invoke-LoggedCommand $envExe @('CYGWIN=winsymlinks:nativestrict',$Bash,'--noprofile','--norc',$unix) $WorkingDirectory $LogPrefix
+    }
     return Invoke-LoggedCommand $Bash @('--noprofile','--norc',$unix) $WorkingDirectory $LogPrefix
 }
 
@@ -1051,12 +1057,13 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $pinOutput=Invoke-CygwinScript $bash $cygpath $pinScript $work (Join-Path $evidence 'external-source-pins')
         $knownPins=@{([IO.Path]::GetFileName($archive))=$pin.sha256;([IO.Path]::GetFileName($fb))=$manifest.firebird.sha256}
         foreach($extra in Get-ExtraSourcePins) {$knownPins[$extra.filename]=$extra.sha256}
+        $receipt.makeTargetLinkPolicy=[ordered]@{environment='CYGWIN=winsymlinks:nativestrict';scope='make-target children';launcher='selected Cygwin bin/env.exe';fallback=$false}
         foreach($target in Get-BuildTargets $Phase) {
             $receipt.stage='make-'+$target;Assert-NativeBuildTimeRemaining
             $script=Join-Path $commands ($target+'.sh')
             Write-BashScript $script @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH','export TAR_OPTIONS=--force-local',"cd $(Quote-Bash $unixSource)","make -j$Jobs $target")
             Copy-Item -LiteralPath $script -Destination (Join-Path $evidence ('make-'+$target+'.sh'))
-            Invoke-CygwinScript $bash $cygpath $script $work (Join-Path $evidence ('make-'+$target))|Out-Null
+            Invoke-CygwinScript $bash $cygpath $script $work (Join-Path $evidence ('make-'+$target)) -NativeLinks|Out-Null
             if($target -eq 'firebird') {
                 $fbOutput=Join-Path $source 'workdir/UnpackedTarball/firebird/gen/Release/firebird'
                 $receipt.firebirdPe=@('bin/ifbclient.dll','plugins/Engine12.dll','intl/fbintl.dll')|ForEach-Object {

@@ -71,7 +71,7 @@ jobs:
         shell: pwsh
         run: |
           ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC
-          if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 Office source build or functional verification failed.' }
+          if (-not $?) { throw 'Native ARM64 Office source build or functional verification failed.' }
       - name: Retain original source build diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

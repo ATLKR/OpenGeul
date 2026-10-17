@@ -172,3 +172,16 @@ remain required. Use a fresh owned source tree: the helper skips extraction
 and linking once an archive's destination exists. Portable GNU-tool tests
 prove all three root links and module lookups; actual Cygwin links and the
 native build remain Windows qualifications.
+
+Native module-link diagnostic `39027528344` then observed a separate Windows
+access boundary: all three direct unpacked marker files were readable by
+native ARM64 Python and PowerShell, while their root links were unreadable in
+the inherited Cygwin mode. With the child-only
+`CYGWIN=winsymlinks:nativestrict` wrapper, both readers matched all three root
+and direct files. The producer uses that tested Cygwin `env.exe` wrapper before
+starting Bash for each make target. The controller environment and other
+Cygwin stages keep their inherited settings. Native link creation fails rather
+than falling back; no registry or Developer Mode changes are made. Command
+receipts retain the actual launcher and mode arguments alongside the unchanged
+`TAR_OPTIONS=--force-local` make scripts. This controlled resource-read proof
+does not qualify the full Office or Firebird build.
