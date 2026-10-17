@@ -17,6 +17,19 @@ jobs:
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
+      - name: Reserve finalization and evidence time before checkout
+        shell: pwsh
+        run: |
+          $started = [DateTime]::UtcNow
+          $deadline = $started.AddMinutes(330).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+          $owned = Join-Path $env:RUNNER_TEMP ('opengeul-engine-budget-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $owned) { throw 'Preserve the original job-budget receipt.' }
+          New-Item -ItemType Directory -Path $owned | Out-Null
+          $receipt = Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;buildMinutes=330;jobTimeoutMinutes=360;nominalReserveMinutes=30;runnerSetupIncluded=$false} |
+            ConvertTo-Json | Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
+          "OPENGEUL_ENGINE_BUILD_DEADLINE_UTC=$deadline" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_ENGINE_BUDGET_RECEIPT=$receipt" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
       - name: Preserve exact source bytes
         shell: pwsh
         run: |
@@ -33,6 +46,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force .work/native-engine-host-evidence | Out-Null
+          Copy-Item -LiteralPath $env:OPENGEUL_ENGINE_BUDGET_RECEIPT -Destination .work/native-engine-host-evidence/job-budget.json -ErrorAction Stop
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $instances = @(& $vswhere -all -format json | ConvertFrom-Json)
           $instances | ConvertTo-Json -Depth 8 | Out-File .work/native-engine-host-evidence/visual-studio.json -Encoding utf8
@@ -56,7 +70,7 @@ jobs:
       - name: Build and verify native Firebird before the full Office engine
         shell: pwsh
         run: |
-          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json
+          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC
           if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 Office source build or functional verification failed.' }
       - name: Retain original source build diagnostics
         if: always()

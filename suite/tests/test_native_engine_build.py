@@ -282,6 +282,112 @@ class NativeEngineBuildTests(unittest.TestCase):
         self.assertLess(receipt['elapsedSeconds'],7)
         self.assertIn('before timeout',(self.root/'running.stdout.log').read_text())
 
+    def test_shared_build_budget_is_not_restarted_for_later_commands(self):
+        body=f"$script:NativeEngineBuildBudget=New-NativeBuildBudget -MaximumMinutes (1.0/60); "
+        for name,delay in (('first',.25),('second',3),('third',0)):
+            body+=f"try {{ Invoke-LoggedCommand {quote(os.sys.executable)} @('-c','import time;time.sleep({delay})') {quote(self.root)} {quote(self.root/name)}|Out-Null }} catch {{ }}; "
+        self.ps(body)
+        receipts=[json.loads((self.root/(name+'.command.json')).read_text()) for name in ('first','second','third')]
+        self.assertTrue(receipts[0]['passed'])
+        self.assertFalse(receipts[1]['passed'])
+        self.assertTrue(receipts[1]['forcedTermination'])
+        self.assertLess(receipts[1]['effectiveTimeoutMilliseconds'],800)
+        self.assertFalse(receipts[2]['passed'])
+        self.assertNotIn('pid',receipts[2],'Expired build budget must reject before launch')
+        self.assertIn('shared build deadline',receipts[2]['error'])
+
+    def test_build_deadline_requires_utc_roundtrip_and_cannot_extend_local_maximum(self):
+        self.ps("$budget=New-NativeBuildBudget -DeadlineUtc ([DateTime]::UtcNow.AddHours(10).ToString('o')); if($budget.record.timeoutMilliseconds -gt 330*60000){throw 'Extended local maximum'}")
+        for deadline in ('2020-01-01T00:00:00.0000000Z','2026-10-17T01:00:00.0000000+01:00','not a timestamp'):
+            self.rejected(f"New-NativeBuildBudget -DeadlineUtc {quote(deadline)}")
+
+    def test_expired_build_deadline_retains_failure_before_native_host_or_commands(self):
+        output=self.root/'expired-evidence'
+        self.ps(f"function Get-NativeBuildHost {{ throw 'Native host must not run after deadline' }}; try {{ Invoke-NativeEngineBuild Full {quote(self.root/'expired-work')} {quote(output)} '' 4 -DeadlineUtc '2020-01-01T00:00:00.0000000Z' }} catch {{ }}")
+        receipt=json.loads((output/'source-build-receipt.json').read_text())
+        self.assertFalse(receipt['passed']);self.assertFalse(receipt['fullEngineQualified'])
+        self.assertEqual('build-time-budget',receipt['stage'])
+        self.assertIn('deadline',receipt['error'])
+        self.assertNotIn('host',receipt)
+        self.assertFalse((output/'OpenGeul-Office-engine-arm64.zip').exists())
+
+    def test_final_deadline_cannot_leave_a_qualified_declaration_in_failure_receipt(self):
+        target=self.root/'late-admission.json'
+        body="$tokens=$null;$errors=$null;$text=Get-Content -LiteralPath "+quote(SOURCE)+" -Raw; "
+        body+="$ast=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors); "
+        body+="$build=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-NativeEngineBuild'},$true); "
+        body+="$outer=$build.Body.Find({param($n) $n -is [Management.Automation.Language.TryStatementAst]},$true); "
+        body+="$artifact=$outer.Body.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$receipt.artifact'},$true); "
+        body+="$tail='if($Phase -eq ''Full'') {'+$text.Substring($artifact.Extent.EndOffset,$outer.Body.Extent.EndOffset-1-$artifact.Extent.EndOffset); "
+        body+="$caught=$outer.CatchClauses[0].Body.Extent.Text;$caught=$caught.Substring(1,$caught.Length-2); "
+        body+="$receipt=[ordered]@{passed=$false;fullEngineQualified=$false;status='failed'};$Phase='Full';$script:checks=0; "
+        body+="function Assert-NativeBuildTimeRemaining {$script:checks++;if($script:checks -eq 2){throw 'Observed final shared build deadline'}}; "
+        body+="try {& ([scriptblock]::Create('try {'+$tail+'} catch {'+$caught+'}'))} catch {}; "
+        body+="if($script:checks -ne 2){throw 'Final deadline boundary was not exercised'}; Write-BuildJson "+quote(target)+" $receipt"
+        self.ps(body)
+        receipt=json.loads(target.read_text())
+        self.assertFalse(receipt['passed']);self.assertFalse(receipt['fullEngineQualified'])
+        self.assertEqual('failed',receipt['status'])
+        self.assertIn('Observed final shared build deadline',receipt['error'])
+
+    def test_shared_deadline_cancels_stalled_authenticated_download_body(self):
+        import hashlib
+        import http.server
+        import threading
+        import time
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(handler):
+                handler.send_response(200);handler.send_header('Content-Length','2');handler.end_headers()
+                handler.wfile.write(b'a');handler.wfile.flush();time.sleep(3)
+                try:handler.wfile.write(b'z')
+                except (BrokenPipeError,ConnectionResetError):pass
+            def log_message(self,*args):pass
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        prefix=self.root/'download';receipt=self.root/'download.json'
+        self.ps(f"$script:NativeEngineBuildBudget=New-NativeBuildBudget -MaximumMinutes (1.0/60); try {{ Get-AuthenticatedDownload 'http://127.0.0.1:{server.server_port}/fixture' {quote(prefix)} 2 SHA256 {quote(hashlib.sha256(b'az').hexdigest())} {quote(receipt)}|Out-Null }} catch {{ }}")
+        data=json.loads(receipt.read_text())
+        self.assertEqual('failed',data['status'],'Headers alone must not remove the deadline from the streamed body')
+        self.assertLess(data['elapsedSeconds'],2)
+        self.assertEqual(b'a',prefix.read_bytes(),'Partial original bytes remain available after cancellation')
+
+    def test_workflow_establishes_deadline_before_checkout_outside_workspace(self):
+        import textwrap
+        import datetime
+        workflow=SOURCE.parents[2]/'.github/workflows/office-native-engine.yml'
+        text=workflow.read_text()
+        first=text.split('        run: |\n',1)[1].split('      - name: Preserve exact source bytes',1)[0]
+        runner=self.root/'runner-temp';runner.mkdir();github_env=self.root/'github-env'
+        self.ps(f"$env:RUNNER_TEMP={quote(runner)};$env:GITHUB_ENV={quote(github_env)};$env:GITHUB_RUN_ID='123';$env:GITHUB_RUN_ATTEMPT='1';\n"+textwrap.dedent(first))
+        values=dict(line.split('=',1) for line in github_env.read_text().splitlines())
+        path=Path(values['OPENGEUL_ENGINE_BUDGET_RECEIPT'])
+        self.assertEqual(runner,path.parent.parent)
+        receipt=json.loads(path.read_text());self.assertEqual('first-user-step',receipt['origin'])
+        self.assertFalse(receipt['runnerSetupIncluded']);self.assertEqual(30,receipt['nominalReserveMinutes'])
+        start=datetime.datetime.fromisoformat(receipt['startedUtc'].replace('Z','+00:00'))
+        end=datetime.datetime.fromisoformat(receipt['deadlineUtc'].replace('Z','+00:00'))
+        self.assertEqual(330*60,(end-start).total_seconds())
+        self.assertEqual(receipt['deadlineUtc'],values['OPENGEUL_ENGINE_BUILD_DEADLINE_UTC'])
+        self.assertIn('-DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC',text)
+        self.assertIn('Copy-Item -LiteralPath $env:OPENGEUL_ENGINE_BUDGET_RECEIPT',text)
+
+    def test_engine_archive_uses_bounded_command_and_preserves_exact_runtime_bytes(self):
+        import zipfile
+        runtime=self.root/'runtime';runtime.mkdir();(runtime/'nested').mkdir()
+        (runtime/'nested/한글.txt').write_bytes(b'exact native runtime fixture')
+        evidence=self.root/'zip-evidence';evidence.mkdir();archive=evidence/'engine.zip'
+        self.ps(f"$script:NativeEngineBuildBudget=New-NativeBuildBudget -MaximumMinutes (5.0/60); Write-NativeEngineArchive {quote(runtime)} {quote(archive)} {quote(evidence)}")
+        with zipfile.ZipFile(archive) as package:
+            self.assertEqual(['nested/한글.txt'],package.namelist())
+            self.assertEqual(b'exact native runtime fixture',package.read('nested/한글.txt'))
+        receipt=json.loads((evidence/'package-native-engine.command.json').read_text())
+        self.assertTrue(receipt['passed']);self.assertTrue(receipt['pipeDrainComplete'])
+        self.assertLessEqual(receipt['effectiveTimeoutMilliseconds'],5000)
+        self.assertEqual(str(runtime),receipt['arguments'][-2])
+        self.assertEqual(str(archive),receipt['arguments'][-1])
+
     def test_pe_machine_rejects_emulated_products_and_truncated_headers(self):
         path=self.root/'native.exe'
         data=bytearray(512);data[:2]=b'MZ';struct.pack_into('<I',data,60,128);data[128:132]=b'PE\0\0';struct.pack_into('<H',data,132,0xAA64);struct.pack_into('<H',data,148,240);struct.pack_into('<H',data,152,0x20B)

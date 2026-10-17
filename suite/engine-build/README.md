@@ -146,3 +146,15 @@ reader supports PE32/PE32+ file-backed import metadata with explicit bounds and
 rejects legacy VA-based delay descriptors. Exact CRT copying and all native
 Office, Java, ODK, help, Korean resources and Base gates remain required. The
 public x64 family and default remain the original nine files.
+
+Each owned make-target shell script exports the fixed
+`TAR_OPTIONS=--force-local`. The authenticated source Makefile's
+`get-submodules` target invokes `bin/unpack-sources`, which calls bare GNU tar
+with configure's native `C:/...` archive paths. GNU tar otherwise interprets
+that colon as remote-host syntax, as observed in native source run
+`39021455577`. The option is confined to the build child environment and
+replaces inherited tar options so exclusions cannot silently drop Korean
+resources. Actual target scripts are retained with the build evidence.
+Source URLs, sizes and SHA checks, the three help/dictionary/translation inputs,
+and their language configuration remain required. This path correction does
+not establish Firebird product compilation or Office qualification.
