@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -613,6 +614,22 @@ class NativeEngineBuildTests(unittest.TestCase):
         self.assertIn('ROLLBACK;',sql['create'])
         self.assertIn('DELETE FROM OPENGEUL_ARM64_PROBE',sql['create'])
         self.assertIn('ROW_THREE',sql['verify'])
+
+    def test_isql_verify_quotes_reserved_result_alias_without_changing_columns(self):
+        sql=json.loads(self.ps("Get-IsqlSql -DatabasePath 'C:\\owned\\proof.fdb'|ConvertTo-Json -Compress"))
+        aliases=re.findall(r'\bAS\s+("[^"]+"|[A-Z_]+)',sql['verify'])
+        self.assertEqual(['ROW_COUNT','TOTAL','ROW_ONE','ROW_THREE'],[name.strip('"') for name in aliases])
+        # Firebird 3.0.13 keywords.cpp marks ROW_COUNT reserved; parse.y's
+        # symbol_item_alias_name accepts SYMBOL, not that context-variable token.
+        # A double-quoted identifier becomes SYMBOL and keeps SET LIST's label.
+        for alias in aliases:
+            if alias.strip('"') in {'ROW_COUNT'}:
+                self.assertEqual('"'+alias.strip('"')+'"',alias,'Reserved Firebird result alias must be delimited')
+        self.assertIn('COUNT(*) AS ',sql['verify'])
+        self.assertIn('SUM(AMOUNT) AS TOTAL',sql['verify'])
+        self.assertIn('WHEN ID=1 AND AMOUNT=55 THEN 1 ELSE 0 END) AS ROW_ONE',sql['verify'])
+        self.assertIn('WHEN ID=3 AND AMOUNT=13 THEN 1 ELSE 0 END) AS ROW_THREE',sql['verify'])
+        self.assertIn('FROM OPENGEUL_ARM64_PROBE;',sql['verify'])
 
     def test_full_qualification_rejects_missing_base_native_or_crud_semantics(self):
         report=self.root/'base.json'
