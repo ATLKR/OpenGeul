@@ -59,13 +59,16 @@ class PackageSourceTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(),b'keep')
 
     def test_assembly_inventory_uses_the_authenticated_lock_architecture(self):
-        from suite import prepare
+        from suite import payload, prepare
         for architecture, source_built in (('x64', False), ('arm64', False), ('arm64', True)):
             with self.subTest(architecture=architecture, source_built=source_built), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)/'repo'; self.repository(root)
                 config = root/'suite/config'; config.mkdir(parents=True)
                 (config/'product.json').write_text(json.dumps({'version': 'test-version'}))
-                (root/'suite/worker').mkdir(); (root/'suite/worker/office_worker.py').write_text('# worker')
+                # Exercise the actual checked-in worker files: a one-file fake
+                # missed source documentation leaking into the runtime payload.
+                shutil.copytree(ROOT/'suite/worker', root/'suite/worker',
+                                ignore=shutil.ignore_patterns('__pycache__'))
                 (root/'suite/notices').mkdir(); (root/'suite/notices/upstream.txt').write_text('upstream notices')
                 subprocess.run(['git', '-C', str(root), 'add', 'suite'], check=True)
                 subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'package fixture'], check=True)
@@ -90,6 +93,8 @@ class PackageSourceTests(unittest.TestCase):
                 # The inventory validator is an independently tested boundary;
                 # preserve its x64 default so missing ARM64 forwarding is observable.
                 def inventory(path, *, architecture='x64'):
+                    for member in (path/'worker').rglob('*'):
+                        payload._layout(member.relative_to(path).as_posix(), directory=member.is_dir())
                     return {'schemaVersion': 1, 'architecture': architecture, 'files': {}}
                 output = Path(folder)/'output'
                 module = implementation()
@@ -99,6 +104,18 @@ class PackageSourceTests(unittest.TestCase):
                     module.assemble(runtime=runtime, hwp=hwp, shell=shell, output=output, lock=lock)
                 self.assertEqual(architecture, json.loads((output/'suite-provenance.json').read_text())['architecture'])
                 self.assertEqual(architecture, json.loads((output/'suite-inventory.json').read_text())['architecture'])
+                self.assertEqual({path.name for path in (output/'worker').iterdir()},
+                                 {path.name for path in (ROOT/'suite/worker').glob('*.py')})
+                self.assertEqual((output/'worker/calc_close.py').read_bytes(),
+                                 (ROOT/'suite/worker/calc_close.py').read_bytes())
+                self.assertFalse((output/'worker/calc_close.README.md').exists())
+                with zipfile.ZipFile(output/'Sources/OpenGeul-Office-source.zip') as archive:
+                    self.assertEqual(archive.read('suite/worker/calc_close.README.md'),
+                                     (ROOT/'suite/worker/calc_close.README.md').read_bytes())
+                    self.assertEqual(archive.read('suite/worker/calc_close.py'),
+                                     (ROOT/'suite/worker/calc_close.py').read_bytes())
+                with self.assertRaisesRegex(ValueError, 'Unexpected Suite payload path'):
+                    payload._layout('worker/calc_close.README.md')
                 if source_built:
                     notice = (output/'Notices/CORRESPONDING_SOURCE.md').read_text()
                     commit = lock['runtime']['sourceBuild']['sourceCommit']

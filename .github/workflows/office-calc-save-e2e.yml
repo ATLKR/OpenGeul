@@ -34,7 +34,7 @@ jobs:
       - name: Verify Calc Save ownership and persistence regressions
         shell: pwsh
         run: |
-          python -m unittest suite.tests.test_calc_save suite.tests.test_calc_save_smoke suite.tests.test_worker suite.tests.test_save_diagnostics suite.tests.test_calc_close_probe suite.tests.test_calc_pending_input suite.tests.test_native_cleanup suite.tests.test_native_cleanup_receipt suite.tests.test_generated_calc_close suite.tests.test_calc_close_prepare suite.tests.test_editor_focus_readiness -v
+          python -m unittest suite.tests.test_package suite.tests.test_payload suite.tests.test_calc_save suite.tests.test_calc_save_smoke suite.tests.test_worker suite.tests.test_save_diagnostics suite.tests.test_calc_close_probe suite.tests.test_calc_pending_input suite.tests.test_native_cleanup suite.tests.test_native_cleanup_receipt suite.tests.test_generated_calc_close suite.tests.test_calc_close_prepare suite.tests.test_editor_focus_readiness -v
           if ($LASTEXITCODE -ne 0) { throw 'Calc Save boundary tests failed.' }
           dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'Suite close flow tests failed.' }

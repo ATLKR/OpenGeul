@@ -61,6 +61,8 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
     copy_regular_tree(ROOT/'suite/worker', output/'worker')
     # Python cache files are development intermediates, never packaged sources.
     for path in sorted((output/'worker').rglob('__pycache__'), reverse=True): shutil.rmtree(path)
+    # Worker documentation remains in the corresponding-source archive.
+    for path in (output/'worker').glob('*.md'): path.unlink()
     shutil.copy2(product_path, output/'suite-product.json')
     notices = output/'Notices'; notices.mkdir()
     shutil.copy2(ROOT/'LICENSE', notices/'OpenGeul-Office-LICENSE.txt')
