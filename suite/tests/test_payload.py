@@ -37,6 +37,8 @@ def pe(machine=0x8664, *, managed=False, flags=1, dll=False):
     struct.pack_into('<H', data, optional, 0x10b if machine == 0x14c else 0x20b)
     count_offset = 92 if machine == 0x14c else 108
     struct.pack_into('<I', data, optional + count_offset, 16)
+    struct.pack_into('<II', data, optional+32, 0x1000, 0x200)
+    struct.pack_into('<II', data, optional+56, 0x2000, 0x200)
     section = optional + size
     data[section:section+8] = b'.text\0\0\0'
     struct.pack_into('<IIII', data, section+8, 512, 0x1000, 512, 512)
@@ -608,6 +610,8 @@ class Arm64PayloadTests(PayloadFixture):
         self.provenance['runtime'] = runtime
         self.write('Office/opengeul-source-build.json', receipt_path.read_bytes())
         with zipfile.ZipFile(archive) as source:
+            for name in ('program/pyuno.pyd','program/ifbclient.dll','program/Engine12.dll','program/intl/fbintl.dll'):
+                self.write('Office/'+name,source.read(name))
             for name in ('program/version.ini', 'program/setup.ini'):
                 original = source.read(name)
                 branded = original.replace(b'Vendor=The Document Foundation', b'Vendor=ATLKR')
@@ -618,7 +622,7 @@ class Arm64PayloadTests(PayloadFixture):
             sourceUrl='https://github.com/LibreOffice/core/tree/'+runtime['sourceCoreCommit'])
         for name in ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
                      'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
-                     'vcruntime140_1.dll', 'vcruntime140_threads.dll'):
+                     'vcruntime140_threads.dll'):
             self.write('Office/program/'+name, pe(0xaa64, dll=True))
         self.write('Office/share/readme/Microsoft-VC145-redistribution.html', b'Official VS2026 redistribution terms')
         self.source_archive(); self.save_metadata()

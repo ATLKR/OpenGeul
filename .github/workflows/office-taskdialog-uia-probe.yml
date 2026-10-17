@@ -1,0 +1,47 @@
+name: OpenGeul controlled TaskDialog UIA shape diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-taskdialog-uia-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  taskdialog-uia-diagnostic:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Preserve source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install exact automation versions
+        shell: pwsh
+        run: |
+          python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned UIA diagnostic dependencies failed.' }
+      - name: Observe owned stub without selecting any dialog button
+        shell: pwsh
+        run: |
+          python suite/e2e/taskdialog_uia_probe.py --output .work/taskdialog-uia-probe
+          if ($LASTEXITCODE -ne 0) { throw 'Controlled TaskDialog diagnostic failed; preserve original evidence.' }
+      - name: Preserve raw dialog observations and screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-taskdialog-uia-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/taskdialog-uia-probe/*.json
+            .work/taskdialog-uia-probe/*.log
+            .work/taskdialog-uia-probe/*.png
+            .work/taskdialog-uia-probe/project/*.cs
+            .work/taskdialog-uia-probe/project/*.csproj
+            .work/taskdialog-uia-probe/program/TaskDialogProbe.*
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error

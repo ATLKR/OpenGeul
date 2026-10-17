@@ -13,9 +13,12 @@ import struct
 import subprocess
 import tempfile
 
-EXPECTED_X64_CRT = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
-                    'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
-                    'vcruntime140_1.dll', 'vcruntime140_threads.dll')
+try:
+    from suite.crt import crt_names
+except ModuleNotFoundError:
+    from crt import crt_names
+
+EXPECTED_X64_CRT = crt_names()
 _ARCHITECTURES = {'x64': ('amd64', 'AMD64', 0x8664), 'arm64': ('arm64', 'ARM64', 0xAA64)}
 
 
@@ -42,8 +45,9 @@ def _positive(value, label):
 
 
 def select_crt(file_rows, media_rows, *, architecture='x64'):
-    """Map the nine friendly DLL names to exact native File IDs and Media rows."""
+    """Map the exact architecture-specific DLL names to exact native File IDs and Media rows."""
     marker, label, _ = _architecture(architecture)
+    expected = crt_names(architecture)
     native = re.compile(r'_' + marker + r'(?:[._]|$)', re.IGNORECASE)
     others = '|'.join(value for value in ('amd64', 'arm64', 'x86', 'ia64') if value != marker)
     other_arch = re.compile(r'_(?:' + others + r')(?:[._]|$)', re.IGNORECASE)
@@ -61,7 +65,7 @@ def select_crt(file_rows, media_rows, *, architecture='x64'):
         if not isinstance(filename, str):
             continue
         name = filename.rsplit('|', 1)[-1].casefold()
-        if name not in EXPECTED_X64_CRT:
+        if name not in expected:
             continue
         file_id, component = row.get('File'), row.get('Component_')
         if not isinstance(file_id, str) or not isinstance(component, str):
@@ -84,10 +88,10 @@ def select_crt(file_rows, media_rows, *, architecture='x64'):
         result[name] = {'fileId': file_id, 'cabinet': cabinet}
         file_ids.add(file_id.casefold())
         sequences.add(sequence)
-    missing = set(EXPECTED_X64_CRT) - set(result)
+    missing = set(expected) - set(result)
     if missing:
         raise ValueError('MSI is missing ' + label + ' CRT files: ' + ', '.join(sorted(missing)))
-    return {name: result[name] for name in EXPECTED_X64_CRT}
+    return {name: result[name] for name in expected}
 
 
 def select_x64_crt(file_rows, media_rows):

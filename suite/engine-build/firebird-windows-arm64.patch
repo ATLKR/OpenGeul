@@ -51,3 +51,58 @@
  		_controlfp(savedMask, _MCW_EM); // restore saved
  #else
  		Mask cw;
+--- src/include/gen/autoconfig_msvc.h
++++ src/include/gen/autoconfig_msvc.h
+@@ -240,6 +240,14 @@
+ #define SIZEOF_SIZE_T 8
+ /* alignment of long */
+ #define FB_ALIGNMENT 8
++#elif defined(_M_ARM64) && !defined(_M_ARM64EC)
++#define ARM64
++/* sizeof(void *) */
++#define SIZEOF_VOID_P 8
++/* sizeof(size_t) */
++#define SIZEOF_SIZE_T 8
++/* Firebird alignment, matching the 64-bit Windows layout */
++#define FB_ALIGNMENT 8
+ #else
+ #error unknown target platform
+ #endif
+--- src/remote/remote_def.h
++++ src/remote/remote_def.h
+@@ -64,6 +64,8 @@
+ const P_ARCH ARCHITECTURE	= arch_darwin_ppc;
+ #elif defined(WIN_NT) && defined(AMD64)
+ const P_ARCH ARCHITECTURE	= arch_winnt_64;
++#elif defined(WIN_NT) && defined(ARM64)
++const P_ARCH ARCHITECTURE	= arch_winnt_arm64;
+ #elif defined(I386)
+ const P_ARCH ARCHITECTURE	= arch_intel_32;
+ #elif defined(DARWIN64)
+--- src/remote/protocol.h
++++ src/remote/protocol.h
+@@ -106,7 +106,8 @@
+ 	arch_darwin_x64		= 41,
+ 	arch_darwin_ppc64	= 42,
+ 	arch_arm            = 43,
+-	arch_max			= 44	// Keep this at the end
++	arch_winnt_arm64	= 44,
++	arch_max			= 45	// Keep this at the end
+ };
+ 
+ #include "../remote/remote_def.h"
+--- builds/posix/Makefile.in
++++ builds/posix/Makefile.in
+@@ -282,7 +282,12 @@
+ 
+ $(COMMON_LIB):	$(Common_Objects)
+ 	-$(RM) $@
++ifeq ($(PLATFORM)_$(CpuType),win32_aarch64)
++	$(if $(strip $(OPENGEUL_FIREBIRD_LIB)),,$(error Explicit selected native OPENGEUL_FIREBIRD_LIB is required))
++	"$(OPENGEUL_FIREBIRD_LIB)" /NOLOGO "/OUT:$@" $^
++else
+ 	$(STATICLIB_LINK) $@ $^
++endif
+ 
+ 
+ #___________________________________________________________________________

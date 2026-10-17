@@ -446,8 +446,10 @@ class HomeRoutingContracts(unittest.TestCase):
     def test_actual_close_frame_dispatches_home_calc_token_and_menu_close_without_second_message(self):
         from types import SimpleNamespace
         import home_calc_close
-        for module,menu in (('calc',False),('impress',True),('writer',False)):
+        for module,menu,extension in (('calc',False,None),('calc',False,'csv'),('impress',True,None),('writer',False,None)):
             calls=[];case=object.__new__(self.api.HomeCase);case.record=dict(case='tile-'+module,module=module);case.suite=Path('/Suite');case.output=Path('/output')
+            if extension:case.record.update(case='home-open-calc-csv',extension=extension)
+            case.csv_post_getter_screenshot=lambda *args:calls.append('post-getter-png')
             case.process=SimpleNamespace(pid=7);live={20,22};bound=SimpleNamespace(live=lambda:False)
             frame=dict(hwnd=20,parent=21,child=22,officePid=8,module=module,source=None,bound=bound,receipt={})
             # A live pre-close check and an exited post-close check are distinct.
@@ -460,8 +462,92 @@ class HomeRoutingContracts(unittest.TestCase):
                 patch.object(home_calc_close,'freeze_home_calc_close',side_effect=lambda *args,**kwargs:calls.append('token') or object()),patch.object(home_calc_close,'close_home_calc',side_effect=close):
                 case.close_frame(frame,menu=menu)
             self.assertEqual(calls.count('close-action'),1);self.assertTrue(frame['closed'])
-            if module=='calc':self.assertEqual(calls,['getter','token','close-action','normal-exit'])
+            if module=='calc':self.assertEqual(calls,['getter','token',*(['post-getter-png'] if extension else []),'close-action','normal-exit'])
             elif menu:self.assertEqual(calls,['physical-menu-close','close-action','normal-exit']);self.assertEqual(case.record['frameCloses'][0]['closeMessageCount'],0)
+
+    def csv_checkpoint_fixture(self,root):
+        from types import SimpleNamespace as NS
+        binding=dict(shellPid=77,shellCreationTime=111,officePid=88,officeCreationTime=222,suiteHwnd=11,parentHwnd=12,childHwnd=22)
+        context=dict(success=True,finishedAt=4.,deadline=12.,observation=dict(bindingBefore=binding))
+        case=object.__new__(self.api.HomeCase);case.output=root
+        case.record=dict(case='home-open-calc-csv',module='calc',extension='csv',shellPid=77,officePid=88,
+            windowHwnd=11,parentHwnd=12,childHwnd=22,originalShell=dict(handleValue=555),calcReader=context,
+            screenshots=['home-open-calc-csv-calc-attached.png'],attachments=[dict(hwnd=11,officePid=88,
+                officeCreationTime=222,liveProcessBinding=dict(handleValue=888))])
+        case.api=NS(require_foreground=lambda hwnd:None)
+        proof=NS(process=NS(pid=77),process_handle=555,bound=NS(pid=88,creation=222),bound_handle=888,hwnd=11,child=22)
+        return case,dict(hwnd=11,parent=12,child=22,officePid=88),proof
+
+    def test_csv_post_getter_png_is_bound_readonly_and_never_claims_grid_readiness(self):
+        import home_calc_close
+        from types import SimpleNamespace as NS
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();case,frame,proof=self.csv_checkpoint_fixture(root);calls=[]
+            def capture(hwnd,pid,path,timeout):
+                calls.append(('capture',hwnd,pid,timeout));Image.new('RGB',(2,2),'white').save(path)
+                return NS(returncode=0,stdout='',stderr='')
+            with patch.object(home_calc_close,'verify_home_calc_close',side_effect=lambda *args:calls.append(('guard',))), \
+                 patch.object(self.api,'_capture_checkpoint_png',side_effect=capture),patch.object(self.api.time,'monotonic',return_value=5.):
+                case.csv_post_getter_screenshot(frame,proof)
+            self.assertEqual([r[0] for r in calls],['guard','capture','guard'])
+            row=case.record['csvPostGetterScreenshot'];self.assertEqual(row['readerDeadline'],12.)
+            self.assertFalse(row['gridVisibleVerified']);self.assertFalse(row['paintCompleteVerified']);self.assertTrue(row['visualReviewRequired'])
+            self.assertEqual(case.record['screenshots'],['home-open-calc-csv-calc-attached.png',row['image']])
+            self.api.require_csv_post_getter_screenshot(case.record)
+            for field,bad in [('startedAt',3.),('readerDeadline',13.),('gridVisibleVerified',True),('captureCount',2),('image','foreign.png')]:
+                changed=copy.deepcopy(case.record);changed['csvPostGetterScreenshot'][field]=bad
+                with self.subTest(field=field),self.assertRaises(AssertionError):self.api.require_csv_post_getter_screenshot(changed)
+            for field,bad in [('officeCreationTime',223),('officeHandleValue',999),('childHwnd',23)]:
+                changed=copy.deepcopy(case.record);changed['csvPostGetterScreenshot']['nativeAfter'][field]=bad
+                with self.subTest(field=field),self.assertRaises(AssertionError):self.api.require_csv_post_getter_screenshot(changed)
+
+    def test_csv_post_getter_capture_never_masks_original_guard_or_collector_failure(self):
+        import home_calc_close
+        from types import SimpleNamespace as NS
+        from PIL import Image
+        for failure in ('before','after','collector','timeout','late'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory:
+                case,frame,proof=self.csv_checkpoint_fixture(Path(directory).resolve());guards=[];captures=[];clock=[5.]
+                def guard(*args):
+                    guards.append(True)
+                    if failure=='before' or failure=='after' and len(guards)==2:raise OSError('original retained identity failure')
+                def capture(hwnd,pid,path,timeout):
+                    captures.append(True)
+                    if failure=='timeout':raise self.api.subprocess.TimeoutExpired(['owned-screenshot'],timeout)
+                    if failure=='late':clock[0]=16.
+                    Image.new('RGB',(2,2),'white').save(path)
+                    return NS(returncode=7 if failure=='collector' else 0,stdout='',stderr='original capture failure')
+                with patch.object(home_calc_close,'verify_home_calc_close',side_effect=guard),patch.object(self.api,'_capture_checkpoint_png',side_effect=capture), \
+                     patch.object(self.api.time,'monotonic',side_effect=lambda:clock[0]):
+                    with self.assertRaises((OSError,AssertionError,self.api.subprocess.TimeoutExpired)):
+                        case.csv_post_getter_screenshot(frame,proof)
+                self.assertEqual(len(captures),0 if failure=='before' else 1)
+                self.assertIsNot(case.record.get('csvPostGetterScreenshot',{}).get('passed'),True)
+                self.assertEqual(len(case.record['screenshots']),1)
+
+    def test_actual_screenshot_collector_only_reads_owned_window_without_focus_or_input(self):
+        from types import SimpleNamespace as NS
+        from PIL import Image
+        import importlib.metadata
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory).resolve()/'owned.png';calls=[]
+            wrapper=NS(handle=11,process_id=lambda:77,is_visible=lambda:True,
+                capture_as_image=lambda:calls.append('capture') or Image.new('RGB',(2,2),'white'))
+            desktop=NS(window=lambda handle:NS(wrapper_object=lambda:wrapper))
+            with patch.dict(sys.modules,{'pywinauto':NS(Desktop=lambda backend:desktop)}), \
+                 patch.object(sys,'argv',['collector','11','77',str(target)]),patch.object(importlib.metadata,'version',return_value='0.6.9'):
+                exec(self.api.CSV_CHECKPOINT_CAPTURE,{'__name__':'__main__'})
+            self.assertEqual(calls,['capture']);self.assertTrue(target.is_file())
+            self.assertFalse(hasattr(wrapper,'set_focus'));self.assertFalse(hasattr(wrapper,'click_input'))
+
+    def test_screenshot_helper_has_one_bounded_hidden_child_and_no_retry(self):
+        from types import SimpleNamespace as NS
+        with patch.object(self.api.subprocess,'run',return_value=NS(returncode=0,stdout='',stderr='')) as run:
+            self.api._capture_checkpoint_png(11,77,Path('/owned/checkpoint.png'),3.25)
+        self.assertEqual(run.call_count,1);args,kwargs=run.call_args
+        self.assertEqual(args[0][1:3],['-c',self.api.CSV_CHECKPOINT_CAPTURE]);self.assertEqual(kwargs['timeout'],3.25)
+        self.assertFalse(kwargs.get('shell',False));self.assertIn('creationflags',kwargs)
 
     def test_main_keeps_case_failures_and_strict_archive_failure_nonzero(self):
         from types import SimpleNamespace

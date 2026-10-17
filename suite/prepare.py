@@ -19,11 +19,13 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_MACHINES = {'x64': 0x8664, 'arm64': 0xAA64}
-MSI_VC_DEPENDENCIES = frozenset({
-    'concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
-    'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
-    'vcruntime140_1.dll', 'vcruntime140_threads.dll',
-})
+try:
+    from suite.crt import crt_names, is_vc_crt_file
+except ModuleNotFoundError:
+    from crt import crt_names, is_vc_crt_file
+
+# Compatibility name retains the existing public x64 family.
+MSI_VC_DEPENDENCIES = frozenset(crt_names())
 
 
 def native_machine(architecture: str) -> int:
@@ -245,6 +247,7 @@ def _source_build_identity(proof: dict, core: str) -> dict:
 def _source_build_crt(proof: dict) -> tuple[dict, dict]:
     """Join the driver's preflight, signed sources, copied bytes and legal snapshot."""
     plan = proof.get('crtPreflight'); copied = proof.get('appLocalCrt'); terms = proof.get('crtRedistributionTerms')
+    expected = frozenset(crt_names('arm64'))
     def version(value):
         if not isinstance(value, str) or not re.fullmatch(r'14\.[0-9]+\.[0-9]+(?:\.[0-9]+)?', value):
             raise ValueError('Source-build CRT compiler/runtime version is invalid')
@@ -252,9 +255,10 @@ def _source_build_crt(proof: dict) -> tuple[dict, dict]:
     if (not isinstance(plan, dict) or not isinstance(copied, dict)
             or plan.get('schemaVersion') != 1 or copied.get('schemaVersion') != 1
             or plan.get('toolset') != 'v145' or copied.get('toolset') != 'v145'
-            or not isinstance(plan.get('files'), list) or len(plan['files']) != 9
-            or not isinstance(copied.get('files'), list) or len(copied['files']) != 9):
-        raise ValueError('Source-build CRT requires the complete native VS2026 nine-file family')
+            or plan.get('architecture') != 'arm64' or copied.get('architecture') != 'arm64'
+            or not isinstance(plan.get('files'), list) or len(plan['files']) != len(expected)
+            or not isinstance(copied.get('files'), list) or len(copied['files']) != len(expected)):
+        raise ValueError('Source-build CRT requires the complete native VS2026 ARM64 eight-file family')
     minimum = version(plan.get('minimumRuntimeVersion'))
     if minimum != version(plan.get('compilerToolsVersion')):
         raise ValueError('Source-build CRT version floor differs from selected compiler')
@@ -269,7 +273,7 @@ def _source_build_crt(proof: dict) -> tuple[dict, dict]:
         raise ValueError('Source-build CRT source/runtime directories differ from qualified engine')
     records = {}
     for record in plan['files']:
-        if not isinstance(record, dict) or record.get('name') not in MSI_VC_DEPENDENCIES:
+        if not isinstance(record, dict) or record.get('name') not in expected:
             raise ValueError('Unexpected source-build CRT file')
         name = record['name']; signature = record.get('signature')
         if (name in records or type(record.get('machine')) is not int or record['machine'] != 0xaa64
@@ -293,8 +297,8 @@ def _source_build_crt(proof: dict) -> tuple[dict, dict]:
                     or parts[0] != 14 or tuple(parts) < minimum):
                 raise ValueError('Source-build CRT signed runtime is older than selected compiler')
         records[name] = record
-    if set(records) != MSI_VC_DEPENDENCIES:
-        raise ValueError('Source-build CRT exact nine-file family is incomplete')
+    if set(records) != expected:
+        raise ValueError('Source-build CRT exact ARM64 eight-file family is incomplete')
     seen = set()
     for item in copied['files']:
         source = item.get('source') if isinstance(item, dict) else None
@@ -315,7 +319,38 @@ def _source_build_crt(proof: dict) -> tuple[dict, dict]:
             or '\x00' in app_terms['path'] or PureWindowsPath(app_terms['path']) !=
                 PureWindowsPath(program_dir).parent/'share/readme/Microsoft-VC145-redistribution.html'):
         raise ValueError('Source-build CRT redistribution terms snapshot differs from packaged legal source')
+    _source_build_import_closure(proof)
     return records, terms
+
+
+def _source_build_import_closure(proof: dict) -> dict:
+    closure = proof.get('crtImportClosure')
+    expected = list(crt_names('arm64'))
+    if (not isinstance(closure, dict)
+            or set(closure) != {'schemaVersion', 'architecture', 'passed', 'requiredCrtFiles', 'checkedPeCount', 'imports'}
+            or type(closure.get('schemaVersion')) is not int or closure['schemaVersion'] != 1
+            or closure.get('architecture') != 'arm64' or closure.get('passed') is not True
+            or closure.get('requiredCrtFiles') != expected
+            or type(closure.get('checkedPeCount')) is not int or not 0 < closure['checkedPeCount'] <= 100_000
+            or not isinstance(closure.get('imports'), list) or len(closure['imports']) > closure['checkedPeCount']):
+        raise ValueError('Source-build CRT requires an exact successful ARM64 normal/delay import closure')
+    paths = set()
+    for item in closure['imports']:
+        if (not isinstance(item, dict) or set(item) != {'path', 'normal', 'delay'}
+                or not isinstance(item['path'], str)):
+            raise ValueError('Invalid source-build CRT import record')
+        name = archive_path(item['path'])
+        if name.casefold() in paths:
+            raise ValueError('Duplicate source-build CRT import image')
+        paths.add(name.casefold())
+        for kind in ('normal', 'delay'):
+            names = item[kind]
+            if (not isinstance(names, list) or any(not isinstance(name, str) or name not in expected for name in names)
+                    or names != sorted(set(names))):
+                raise ValueError('Unexpected source-build CRT normal/delay import')
+        if not item['normal'] and not item['delay']:
+            raise ValueError('Empty source-build CRT import record')
+    return closure
 
 
 def validate_source_build_runtime(runtime_root: Path, proof: dict, *, branding: dict | None = None) -> None:
@@ -375,6 +410,12 @@ def validate_source_build_runtime(runtime_root: Path, proof: dict, *, branding: 
         check_asset(terms, runtime_root/'share/readme/Microsoft-VC145-redistribution.html')
     except (OSError, ValueError) as error:
         raise ValueError('Source-build CRT redistribution terms bytes differ from authenticated receipt') from error
+    try:
+        from suite.crt import validate_crt_imports
+    except ModuleNotFoundError:
+        from crt import validate_crt_imports
+    if validate_crt_imports(runtime_root, architecture='arm64') != _source_build_import_closure(proof):
+        raise ValueError('Source-build CRT normal/delay import closure differs from authenticated receipt')
 
 
 def extract_source_engine_zip(archive: Path, destination: Path, *, runtime: dict, receipt: Path,
@@ -585,12 +626,17 @@ def stage_msi_dependencies(extraction_root: Path, runtime_root: Path, *, archite
         if name in candidates:
             raise ValueError('MSI dependency source case collision: '+name)
         candidates[name] = path
-    missing = MSI_VC_DEPENDENCIES - candidates.keys()
+    expected = frozenset(crt_names(architecture))
+    if architecture == 'arm64' and candidates.keys() - expected:
+        raise ValueError('Unexpected ARM64 CRT family members: '+', '.join(sorted(candidates.keys() - expected)))
+    missing = expected - candidates.keys()
     if missing:
         raise ValueError('Missing pinned MSI System64 dependencies: '+', '.join(sorted(missing)))
     existing = {}
     for path in target.iterdir():
         name = path.name.lower()
+        if architecture == 'arm64' and is_vc_crt_file(name) and name not in expected:
+            raise ValueError('Unexpected ARM64 CRT destination family member: '+name)
         if name in candidates:
             if name in existing:
                 raise ValueError('MSI dependency destination case collision: '+name)

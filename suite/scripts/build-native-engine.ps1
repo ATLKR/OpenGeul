@@ -5,12 +5,53 @@ param(
     [string]$SourceLockPath='',
     [ValidateRange(1,64)][int]$Jobs=4,
     [string]$JdkHome='',
-    [string]$AntHome=''
+    [string]$AntHome='',
+    [string]$DeadlineUtc=''
 )
 $ErrorActionPreference='Stop'
 
 function Write-BuildJson($Path,$Value) {
     $Value|ConvertTo-Json -Depth 30|Set-Content -LiteralPath $Path -Encoding utf8NoBOM
+}
+
+function New-NativeBuildBudget([string]$DeadlineUtc='',[ValidateRange(0.000001,330)][double]$MaximumMinutes=330) {
+    $now=[DateTime]::UtcNow;$milliseconds=$MaximumMinutes*60000
+    if($DeadlineUtc) {
+        [DateTime]$deadline=[DateTime]::MinValue
+        if($DeadlineUtc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$' -or
+           -not [DateTime]::TryParseExact($DeadlineUtc,'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$deadline) -or
+           $deadline.Kind -ne [DateTimeKind]::Utc) {throw 'Build deadline requires an invariant UTC roundtrip timestamp.'}
+        $milliseconds=[Math]::Min($milliseconds,($deadline-$now).TotalMilliseconds)
+    }
+    if($milliseconds -lt 1) {throw 'The shared build deadline already expired.'}
+    $milliseconds=[int][Math]::Floor($milliseconds)
+    return [pscustomobject]@{clock=[Diagnostics.Stopwatch]::StartNew();record=[ordered]@{
+        startedUtc=$now.ToString('o');deadlineUtc=$now.AddMilliseconds($milliseconds).ToString('o');
+        workflowDeadlineUtc=$DeadlineUtc;maximumMinutes=$MaximumMinutes;timeoutMilliseconds=$milliseconds}}
+}
+
+function Get-NativeBuildRemaining([int]$MaximumMilliseconds=21000000) {
+    $remaining=$MaximumMilliseconds
+    if($script:NativeEngineBuildBudget) {
+        $remaining=[Math]::Min($remaining,$script:NativeEngineBuildBudget.record.timeoutMilliseconds-$script:NativeEngineBuildBudget.clock.Elapsed.TotalMilliseconds)
+    }
+    if($remaining -lt 1) {throw 'The shared build deadline expired; preserve final diagnostics and upload evidence.'}
+    return [int][Math]::Floor($remaining)
+}
+
+function Assert-NativeBuildTimeRemaining {Get-NativeBuildRemaining|Out-Null}
+
+function Write-NativeEngineArchive([string]$RuntimeRoot,[string]$Archive,[string]$EvidenceDirectory) {
+    $scriptPath=Join-Path $EvidenceDirectory 'package-native-engine.ps1'
+    if((Test-Path -LiteralPath $Archive) -or (Test-Path -LiteralPath $scriptPath)) {throw 'Engine archive or packaging command already exists.'}
+    @'
+param([string]$RuntimeRoot,[string]$Archive)
+$ErrorActionPreference='Stop'
+[IO.Compression.ZipFile]::CreateFromDirectory($RuntimeRoot,$Archive,[IO.Compression.CompressionLevel]::Fastest,$false)
+'@|Set-Content -LiteralPath $scriptPath -Encoding utf8NoBOM
+    $controller=(Get-Process -Id $PID).Path
+    Invoke-LoggedCommand $controller @('-NoLogo','-NoProfile','-NonInteractive','-File',$scriptPath,$RuntimeRoot,$Archive) $RuntimeRoot (Join-Path $EvidenceDirectory 'package-native-engine')|Out-Null
+    Assert-NativeBuildTimeRemaining
 }
 
 function Assert-NativeBuildHost($Identity) {
@@ -176,25 +217,32 @@ function Get-AuthenticatedDownload([string]$Url,[string]$Destination,[long]$Size
     Write-BuildJson $ReceiptPath $receipt
     Write-Host "Downloading authenticated input: $Url"
     $client=[Net.Http.HttpClient]::new();$client.Timeout=[TimeSpan]::FromMinutes(30)
-    $stream=$null;$file=$null
+    $stream=$null;$file=$null;$response=$null;$cancel=[Threading.CancellationTokenSource]::new();$watch=[Diagnostics.Stopwatch]::StartNew()
     try {
-        $response=$client.GetAsync($Url,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $cancel.CancelAfter((Get-NativeBuildRemaining 1800000))
+        $response=$client.GetAsync($Url,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cancel.Token).GetAwaiter().GetResult()
         $response.EnsureSuccessStatusCode()|Out-Null
         $receipt.finalUrl=$response.RequestMessage.RequestUri.AbsoluteUri
         $stream=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
         $file=[IO.File]::Open($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
         $buffer=[byte[]]::new(1048576);[long]$count=0;[long]$reported=0
-        while(($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0) {
+        while(($read=$stream.ReadAsync($buffer,0,$buffer.Length,$cancel.Token).GetAwaiter().GetResult()) -gt 0) {
+            Assert-NativeBuildTimeRemaining
             $file.Write($buffer,0,$read);$count+=$read
             if($Size -gt 0 -and $count -gt $Size) {throw 'Download exceeded its authenticated size.'}
             if($count-$reported -ge 16777216) {Write-Host "Downloaded $count bytes: $([IO.Path]::GetFileName($Destination))";$reported=$count}
         }
         $file.Dispose();$file=$null
         $receipt.identity=Confirm-FileIdentity $Destination $Size $Algorithm $Hash
+        Assert-NativeBuildTimeRemaining
         $receipt.status='authenticated'
         Write-Host "Authenticated $count bytes: $([IO.Path]::GetFileName($Destination))"
     } catch {$receipt.status='failed';$receipt.error=$_.Exception.Message;throw}
-    finally {if($file){$file.Dispose()};if($stream){$stream.Dispose()};$client.Dispose();Write-BuildJson $ReceiptPath $receipt}
+    finally {
+        if($file){$file.Dispose()};if($stream){$stream.Dispose()};if($response){$response.Dispose()};$client.Dispose();$cancel.Dispose()
+        $receipt.elapsedSeconds=$watch.Elapsed.TotalSeconds
+        Write-BuildJson $ReceiptPath $receipt
+    }
     return $receipt.identity
 }
 
@@ -211,29 +259,70 @@ function Write-CommandFailureTail([string]$Path,[string]$Label) {
     } finally {$stream.Dispose()}
 }
 
-function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[int]$TimeoutMinutes=350) {
-    $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null}
+function Get-CommandCreationIdentity($Process) {
+    # A fast command may exit before Process.StartTime can be queried. This is
+    # optional command metadata; ownership stays with the original Process.
+    $reason='Process.StartTime returned no timestamp.'
+    try {
+        $started=$Process.StartTime
+        if($started -is [DateTime] -and $started.Ticks -gt 0) {
+            return [ordered]@{creationUtcTicks=$started.ToUniversalTime().Ticks;creationIdentityStatus='recorded'}
+        }
+    } catch {$reason=$_.Exception.Message}
+    return [ordered]@{creationUtcTicks=$null;
+        creationIdentityStatus=$(if($Process.HasExited){'unavailable-after-exit'}else{'unavailable'});
+        creationIdentityUnavailableReason=$reason}
+}
+
+function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350,[hashtable]$EnvironmentOverrides=@{}) {
+    $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null;
+        timeoutMinutes=$TimeoutMinutes;pipeDrainComplete=$false;forcedTermination=$false;directProcessDeathVerified=$false;processTreeCleanup='not-requested';cleanupErrors=@()}
     $stdout=$LogPrefix+'.stdout.log';$stderr=$LogPrefix+'.stderr.log'
     foreach($path in @($stdout,$stderr,$LogPrefix+'.command.json')) {if(Test-Path -LiteralPath $path){throw 'Command evidence already exists.'}}
-    $outStream=$null;$errStream=$null;$process=$null;$watch=[Diagnostics.Stopwatch]::StartNew()
+    $outStream=$null;$errStream=$null;$process=$null;$started=$false;$failure=$null
+    $cancel=[Threading.CancellationTokenSource]::new();$watch=[Diagnostics.Stopwatch]::StartNew()
     Write-Host ('Starting: '+[IO.Path]::GetFileName($FilePath)+' '+($Arguments -join ' '))
     try {
+        $timeoutMilliseconds=Get-NativeBuildRemaining ([int][Math]::Floor($TimeoutMinutes*60000))
+        $receipt.effectiveTimeoutMilliseconds=$timeoutMilliseconds
         $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$FilePath;$info.WorkingDirectory=$WorkingDirectory
         $info.UseShellExecute=$false;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
         foreach($argument in $Arguments) {$info.ArgumentList.Add($argument)}
+        if($EnvironmentOverrides.Count) {
+            # Only these two explicitly selected loader values may differ.
+            # Retain their digests without dumping the inherited host PATH.
+            $receipt.environmentOverrideSha256=[ordered]@{}
+            foreach($name in $EnvironmentOverrides.Keys) {
+                if($name -cnotin @('PATH','FIREBIRD') -or $EnvironmentOverrides[$name] -isnot [string] -or $EnvironmentOverrides[$name].Contains([char]0)) {throw 'Unsupported child environment override.'}
+                $value=$EnvironmentOverrides[$name]
+                $info.Environment[$name]=$value
+                $receipt.environmentOverrideSha256[$name]=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($value))).ToLowerInvariant()
+            }
+        }
         $process=[Diagnostics.Process]::new();$process.StartInfo=$info
         $outStream=[IO.File]::Open($stdout,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
         $errStream=[IO.File]::Open($stderr,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
         if(-not $process.Start()) {throw 'Command process did not start.'}
-        $receipt.pid=$process.Id
-        $outTask=$process.StandardOutput.BaseStream.CopyToAsync($outStream)
-        $errTask=$process.StandardError.BaseStream.CopyToAsync($errStream)
-        while(-not $process.WaitForExit(15000)) {
+        $started=$true;$receipt.pid=$process.Id
+        $creation=Get-CommandCreationIdentity $process
+        foreach($key in $creation.Keys) {$receipt[$key]=$creation[$key]}
+        $outTask=$process.StandardOutput.BaseStream.CopyToAsync($outStream,81920,$cancel.Token)
+        $errTask=$process.StandardError.BaseStream.CopyToAsync($errStream,81920,$cancel.Token)
+        while($true) {
+            $remaining=[int][Math]::Floor($timeoutMilliseconds-$watch.Elapsed.TotalMilliseconds)
+            if($remaining -le 0) {throw 'Owned command exceeded its original time budget.'}
+            if($process.WaitForExit([Math]::Min(15000,$remaining))) {break}
             Write-Host ("Still running {0}: {1}s; stdout={2} bytes stderr={3} bytes" -f [IO.Path]::GetFileName($FilePath),[int]$watch.Elapsed.TotalSeconds,$outStream.Length,$errStream.Length)
-            if($watch.Elapsed.TotalMinutes -gt $TimeoutMinutes) {$process.Kill($true);$process.WaitForExit();throw 'Owned command exceeded its bounded time budget.'}
+        }
+        $receipt.exitCode=$process.ExitCode;$receipt.directProcessDeathVerified=$true
+        # Descendants can retain inherited output handles after the direct
+        # command exits. EOF must fit this same deadline, not a fresh budget.
+        $remaining=[int][Math]::Floor($timeoutMilliseconds-$watch.Elapsed.TotalMilliseconds)
+        if($remaining -le 0 -or -not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($outTask,$errTask),$remaining)) {
+            throw 'Owned command output pipes exceeded the original time budget.'
         }
         $outTask.GetAwaiter().GetResult()|Out-Null;$errTask.GetAwaiter().GetResult()|Out-Null
-        $receipt.exitCode=$process.ExitCode
+        $receipt.pipeDrainComplete=$true
         if($process.ExitCode -ne 0) {
             $outStream.Flush();$errStream.Flush()
             try {Write-CommandFailureTail $stdout 'stdout';Write-CommandFailureTail $stderr 'stderr'}
@@ -241,12 +330,38 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
             throw "Command failed with exit $($process.ExitCode); inspect $stdout and $stderr"
         }
         $receipt.passed=$true
-    } catch {$receipt.error=$_.Exception.Message;throw}
+    } catch {$failure=$_;$receipt.error=$_.Exception.Message}
     finally {
-        if($outStream){$outStream.Dispose()};if($errStream){$errStream.Dispose()};if($process){$process.Dispose()}
+        if($started) {
+            try {
+                if(-not $process.HasExited) {
+                    $receipt.forcedTermination=$true;$receipt.processTreeCleanup='entire-process-tree-kill-requested'
+                    $process.Kill($true)
+                    if(-not $process.WaitForExit(5000)) {throw 'Owned direct command death remains unproved after termination.'}
+                }
+                $receipt.directProcessDeathVerified=$process.HasExited
+                if($process.HasExited) {$receipt.exitCode=$process.ExitCode}
+            } catch {$receipt.cleanupErrors+=('process: '+$_.Exception.Message)}
+            if(-not $receipt.pipeDrainComplete) {
+                # Kill(true) cannot establish descendant ownership once the
+                # root exited. Record the limitation and cancel our own reads.
+                if($receipt.directProcessDeathVerified -and -not $receipt.forcedTermination) {$receipt.processTreeCleanup='unproved-after-direct-process-exit'}
+                $cancel.Cancel()
+                foreach($reader in @($process.StandardOutput,$process.StandardError)) {
+                    try {$reader.Dispose()} catch {$receipt.cleanupErrors+=('pipe: '+$_.Exception.Message)}
+                }
+            }
+        }
+        foreach($resource in @($outStream,$errStream,$process,$cancel)) {
+            if($resource) {try {$resource.Dispose()} catch {$receipt.cleanupErrors+=('dispose: '+$_.Exception.Message)}}
+        }
+        if($receipt.cleanupErrors.Count -gt 0) {$receipt.passed=$false;if(-not $receipt.error){$receipt.error='Owned command resource cleanup failed.'}}
         $receipt.elapsedSeconds=[Math]::Round($watch.Elapsed.TotalSeconds,3)
+        $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
         Write-BuildJson ($LogPrefix+'.command.json') $receipt
     }
+    if($failure) {throw $failure}
+    if(-not $receipt.passed) {throw $receipt.error}
     return [pscustomobject]@{stdout=$stdout;stderr=$stderr;receipt=$LogPrefix+'.command.json';exitCode=$receipt.exitCode}
 }
 
@@ -289,6 +404,7 @@ function Get-NativeJdkPlan([string]$JdkHome) {
     $jdk=[IO.Path]::GetFullPath($JdkHome)
     $native=@();$libraries=@()
     foreach($relative in @('bin/java.exe','bin/javac.exe','bin/server/jvm.dll','bin/jawt.dll')) {
+        Assert-NativeBuildTimeRemaining
         $path=Join-Path $jdk $relative;Assert-UnlinkedPath $path
         $identity=Get-ProductPeIdentity $path
         if($identity.role -ne 'nativeArm64') {throw "Installed JDK executable/library must be native ARM64: $path"}
@@ -309,6 +425,7 @@ function Resolve-NativeJdk([string]$ExplicitHome='') {
     if($ExplicitHome) {$plan=Get-NativeJdkPlan $ExplicitHome;$plan.selection='explicit';return $plan}
     $errors=@()
     foreach($name in @('JAVA_HOME_21_AARCH64','JAVA_HOME_17_AARCH64','JAVA_HOME_21_ARM64','JAVA_HOME_17_ARM64','JAVA_HOME_23_AARCH64','JAVA_HOME_25_AARCH64','JAVA_HOME')) {
+        Assert-NativeBuildTimeRemaining
         $candidate=[Environment]::GetEnvironmentVariable($name)
         if(-not $candidate) {continue}
         try {$plan=Get-NativeJdkPlan $candidate;$plan.selection=$name;return $plan}
@@ -532,9 +649,15 @@ function Write-BashScript([string]$Path,[string[]]$Lines) {
     [IO.File]::WriteAllText($Path,$text,[Text.UTF8Encoding]::new($false))
 }
 
-function Invoke-CygwinScript($Bash,$Cygpath,[string]$Script,[string]$WorkingDirectory,[string]$LogPrefix) {
+function Invoke-CygwinScript($Bash,$Cygpath,[string]$Script,[string]$WorkingDirectory,[string]$LogPrefix,[switch]$NativeLinks) {
     $converted=Invoke-LoggedCommand $Cygpath @('-u',$Script) $WorkingDirectory ($LogPrefix+'-path')
     $unix=(Get-Content -LiteralPath $converted.stdout -Raw).Trim()
+    if($NativeLinks) {
+        $envExe=Join-Path (Split-Path $Bash -Parent) 'env.exe';Assert-UnlinkedPath $envExe
+        # Set the mode before Bash starts, exactly as the native access probe.
+        # env.exe changes only its child; strict creation has no link fallback.
+        return Invoke-LoggedCommand $envExe @('CYGWIN=winsymlinks:nativestrict',$Bash,'--noprofile','--norc',$unix) $WorkingDirectory $LogPrefix
+    }
     return Invoke-LoggedCommand $Bash @('--noprofile','--norc',$unix) $WorkingDirectory $LogPrefix
 }
 
@@ -576,13 +699,51 @@ QUIT;
 "@
     $verify=@'
 SET LIST ON;
-SELECT COUNT(*) AS ROW_COUNT, SUM(AMOUNT) AS TOTAL,
+SELECT COUNT(*) AS "ROW_COUNT", SUM(AMOUNT) AS TOTAL,
 SUM(CASE WHEN ID=1 AND AMOUNT=55 THEN 1 ELSE 0 END) AS ROW_ONE,
 SUM(CASE WHEN ID=3 AND AMOUNT=13 THEN 1 ELSE 0 END) AS ROW_THREE
 FROM OPENGEUL_ARM64_PROBE;
 QUIT;
 '@
     return [ordered]@{create=$create;verify=$verify}
+}
+
+function Get-IsqlIcuPlan([string]$SourceDirectory,[Collections.IDictionary]$Configuration) {
+    # This source pin builds ICU 78.3 in release mode. Do not silently use an
+    # ambient/system or debug ICU, or substitute foreign product DLLs.
+    foreach($entry in @(@('ICU_MAJOR','78'),@('ICU_MINOR','3'),@('SYSTEM_ICU',''),@('MSVC_USE_DEBUG_RUNTIME',''))) {
+        if(-not $Configuration.Contains($entry[0]) -or $Configuration[$entry[0]] -cne $entry[1]) {throw 'Standalone isql requires the pinned internal release ICU 78.3 configuration.'}
+    }
+    $directory=[IO.Path]::GetFullPath((Join-Path $SourceDirectory 'workdir/UnpackedTarball/icu/source/lib'))
+    if($directory -match '[;\r\n]') {throw 'Compiled ICU directory cannot be a loader-path list.'}
+    Assert-UnlinkedPath $directory
+    if(-not(Test-Path -LiteralPath $directory -PathType Container)) {throw 'Compiled ICU directory is missing.'}
+    $files=@()
+    foreach($name in @('icudt78.dll','icuuc78.dll','icuin78.dll')) {
+        $path=Join-Path $directory $name;Assert-UnlinkedPath $path
+        if(-not(Test-Path -LiteralPath $path -PathType Leaf)) {throw "Compiled ICU DLL is missing: $name"}
+        $identity=Get-ProductPeIdentity $path
+        $bytes=[IO.File]::ReadAllBytes($path);$offset=[BitConverter]::ToUInt32($bytes,60)
+        if($identity.role -cne 'nativeArm64' -or $identity.machine -ne 0xaa64 -or -not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw "Compiled ICU must be a native ARM64 DLL: $name"}
+        $identity.name=$name;$files+=$identity
+    }
+    return [ordered]@{directory=$directory;version='78.3';architecture='arm64';origin='compiled internal ICU from authenticated pinned source';files=$files}
+}
+
+function Get-IsqlPluginPlan([string]$FirebirdDirectory) {
+    # The locked LO Engine12 patch returns a bare plugin name outside boot
+    # mode; the standalone proof must find the actual compiled plugin normally.
+    $directory=[IO.Path]::GetFullPath((Join-Path $FirebirdDirectory 'plugins'))
+    if($directory -match '[;\r\n]') {throw 'Compiled plugin directory cannot be a loader-path list.'}
+    Assert-UnlinkedPath $directory
+    if(-not(Test-Path -LiteralPath $directory -PathType Container)) {throw 'Compiled Firebird plugin directory is missing.'}
+    $path=Join-Path $directory 'Engine12.dll';Assert-UnlinkedPath $path
+    if(-not(Test-Path -LiteralPath $path -PathType Leaf)) {throw 'Compiled embedded Engine12.dll is missing.'}
+    $identity=Get-ProductPeIdentity $path
+    $bytes=[IO.File]::ReadAllBytes($path);$offset=[BitConverter]::ToUInt32($bytes,60)
+    if($identity.role -cne 'nativeArm64' -or $identity.machine -ne 0xaa64 -or -not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw 'Compiled embedded engine must be a native ARM64 DLL.'}
+    $identity.name='Engine12.dll'
+    return [ordered]@{directory=$directory;architecture='arm64';origin='compiled internal Firebird from authenticated pinned source';files=@($identity)}
 }
 
 function Assert-IsqlOutput([string]$Path) {
@@ -619,6 +780,7 @@ function Write-ExternalSourceInventory([string]$CacheDirectory,[string]$PinLog,[
     foreach($name in $KnownPins.Keys) {$pins[$name]=@{variable='independently-authenticated-source';sha256=$KnownPins[$name]}}
     $archives=@();$pythonVerified=$false
     foreach($file in Get-ChildItem -LiteralPath $CacheDirectory -File) {
+        Assert-NativeBuildTimeRemaining
         if($pins.ContainsKey($file.Name)) {
             $actual=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             if($actual -cne $pins[$file.Name].sha256) {throw "External source archive fails authenticated download.lst hash: $($file.Name)"}
@@ -640,9 +802,10 @@ function Write-ExternalSourceInventory([string]$CacheDirectory,[string]$PinLog,[
     return $result
 }
 
-function Get-CrtNames {
-    'concrt140.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','msvcp140_atomic_wait.dll',
-    'msvcp140_codecvt_ids.dll','vcruntime140.dll','vcruntime140_1.dll','vcruntime140_threads.dll'
+function Get-CrtNames([ValidateSet('x64','arm64')][string]$Architecture='x64') {
+    $names=@('concrt140.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','msvcp140_atomic_wait.dll',
+        'msvcp140_codecvt_ids.dll','vcruntime140.dll','vcruntime140_1.dll','vcruntime140_threads.dll')
+    if($Architecture -eq 'arm64') {$names|Where-Object {$_ -cne 'vcruntime140_1.dll'}} else {$names}
 }
 
 function Get-CrtSigningIdentity([string]$Path) {
@@ -659,7 +822,7 @@ function Get-CrtSigningIdentity([string]$Path) {
 function Assert-CrtFile([string]$Path,[string]$MinimumVersion) {
     Assert-UnlinkedPath $Path
     $name=[IO.Path]::GetFileName($Path)
-    if($name -cnotin @(Get-CrtNames)) {throw "Unexpected app-local CRT filename: $name"}
+    if($name -cnotin @(Get-CrtNames 'arm64')) {throw "Unexpected app-local CRT filename: $name"}
     $pe=Get-ProductPeIdentity $Path
     if($pe.role -ne 'nativeArm64') {throw "App-local CRT must be native ARM64: $Path"}
     $identity=Get-CrtSigningIdentity $Path
@@ -670,6 +833,19 @@ function Assert-CrtFile([string]$Path,[string]$MinimumVersion) {
         if($version.Major -ne 14 -or $version -lt [Version]$MinimumVersion) {throw "CRT runtime is older than selected MSVC build tools: $Path ($version < $MinimumVersion)"}
     }
     return [ordered]@{name=$name;sourcePath=[IO.Path]::GetFullPath($Path);machine=$pe.machine;size=$pe.size;sha256=$pe.sha256;signature=$identity}
+}
+
+function Get-NativeLibrarianPlan([string]$CompilerRoot) {
+    # COMPATH is the actual configured VS tools version directory, already
+    # checked by CRT preflight. Never resolve this ARM64 librarian via PATH.
+    Assert-UnlinkedPath $CompilerRoot
+    $path=Join-Path ([IO.Path]::GetFullPath($CompilerRoot)) 'bin/Hostarm64/arm64/lib.exe'
+    Assert-UnlinkedPath $path
+    $identity=Get-ProductPeIdentity $path
+    if($identity.role -cne 'nativeArm64') {throw 'Selected VS librarian must be native ARM64.'}
+    $identity.compilerRoot=[IO.Path]::GetFullPath($CompilerRoot)
+    $identity.selection='configured COMPATH/bin/Hostarm64/arm64/lib.exe; no PATH fallback'
+    return $identity
 }
 
 function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset) {
@@ -685,6 +861,7 @@ function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset) {
     $redistRoot=Join-Path $vc 'Redist/MSVC';Assert-UnlinkedPath $redistRoot
     $candidates=@()
     foreach($directory in Get-ChildItem -LiteralPath $redistRoot -Directory) {
+        Assert-NativeBuildTimeRemaining
         if($directory.Name -match '^v?(14\.\d+\.\d+(?:\.\d+)?)$') {$candidateVersion=[Version]$Matches[1]}
         elseif($directory.Name -ceq 'v145') {$candidateVersion=$minimum}
         else {continue}
@@ -698,8 +875,8 @@ function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset) {
     if($candidates.Count -eq 0) {throw "No ARM64 VC redist from the selected VS installation is at least MSVC $minimum under $redistRoot"}
     $selected=@($candidates|Sort-Object -Property @{Expression={$_.version};Descending=$true},@{Expression={$_.family};Descending=$true})[0]
     Assert-UnlinkedPath $selected.path
-    $files=@(foreach($name in Get-CrtNames) {Assert-CrtFile (Join-Path $selected.path $name) ([string]$minimum)})
-    return [ordered]@{schemaVersion=1;toolset=$Toolset;compilerRoot=$compiler;compilerToolsVersion=$versionText;minimumRuntimeVersion=[string]$minimum;
+    $files=@(foreach($name in Get-CrtNames 'arm64') {Assert-CrtFile (Join-Path $selected.path $name) ([string]$minimum)})
+    return [ordered]@{schemaVersion=1;architecture='arm64';toolset=$Toolset;compilerRoot=$compiler;compilerToolsVersion=$versionText;minimumRuntimeVersion=[string]$minimum;
         redistRoot=$redistRoot;sourceDirectory=$selected.path;redistVersionDirectory=$selected.directory;redistFamily=$selected.family;
         selection='selected VS installation; highest installed v14 ARM64 CRT not older than configured build tools; each DLL signature/version verified';files=$files}
 }
@@ -708,22 +885,30 @@ function Save-VcRedistributionTerms([string]$OutputPath) {
     if(Test-Path -LiteralPath $OutputPath) {throw 'CRT redistribution terms snapshot already exists.'}
     $url='https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution'
     $client=[Net.Http.HttpClient]::new();$client.Timeout=[TimeSpan]::FromMinutes(2)
+    $cancel=[Threading.CancellationTokenSource]::new();$response=$null
     try {
-        $response=$client.GetAsync($url).GetAwaiter().GetResult();$response.EnsureSuccessStatusCode()|Out-Null
+        $cancel.CancelAfter((Get-NativeBuildRemaining 120000))
+        $response=$client.GetAsync($url,$cancel.Token).GetAwaiter().GetResult();$response.EnsureSuccessStatusCode()|Out-Null
         if($response.RequestMessage.RequestUri.Scheme -ne 'https' -or $response.RequestMessage.RequestUri.Host -ne 'learn.microsoft.com') {throw 'Microsoft redistribution terms left their official HTTPS origin.'}
-        $bytes=$response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        $bytes=$response.Content.ReadAsByteArrayAsync($cancel.Token).GetAwaiter().GetResult()
         $text=[Text.Encoding]::UTF8.GetString($bytes)
         if($bytes.Length -gt 2097152 -or $text -notmatch 'Visual Studio 2026' -or $text -notmatch 'REDIST.TXT' -or $text -notmatch 'VC\\redist') {throw 'Official VS2026 redistribution terms did not contain the expected redist grant.'}
         [IO.File]::WriteAllBytes($OutputPath,$bytes)
+        Assert-NativeBuildTimeRemaining
         return [ordered]@{url=$url;path=$OutputPath;size=$bytes.Length;sha256=(Get-FileHash $OutputPath -Algorithm SHA256).Hash.ToLowerInvariant()}
-    } finally {$client.Dispose()}
+    } finally {if($response){$response.Dispose()};$client.Dispose();$cancel.Dispose()}
 }
 
 function Install-AppLocalCrt($Plan,[string]$ProgramDirectory,[string]$TermsPath) {
     Assert-UnlinkedPath $ProgramDirectory;Assert-UnlinkedPath $TermsPath
-    if(-not(Test-Path -LiteralPath $ProgramDirectory -PathType Container) -or -not(Test-Path -LiteralPath $TermsPath -PathType Leaf) -or @($Plan.files).Count -ne 9) {throw 'App-local CRT requires the complete preflight plan, program directory and preserved terms.'}
+    if(-not(Test-Path -LiteralPath $ProgramDirectory -PathType Container) -or -not(Test-Path -LiteralPath $TermsPath -PathType Leaf) -or $Plan.architecture -cne 'arm64' -or @($Plan.files).Count -ne @(Get-CrtNames 'arm64').Count) {throw 'App-local CRT requires the complete preflight plan, program directory and preserved terms.'}
     $names=@($Plan.files|ForEach-Object {$_.name})
-    if((Compare-Object -CaseSensitive $names @(Get-CrtNames))) {throw 'CRT preflight plan changed its exact nine-file family.'}
+    if((Compare-Object -CaseSensitive $names @(Get-CrtNames 'arm64'))) {throw 'CRT preflight plan changed its exact ARM64 eight-file family.'}
+    foreach($existing in Get-ChildItem -LiteralPath $ProgramDirectory -File) {
+        if($existing.Name -match '^(?:concrt|msvcp|vcruntime|vccorlib|msvcr|msvcm)[0-9][a-z0-9_]*\.dll$' -and $existing.Name.ToLowerInvariant() -cnotin $names) {
+            throw "Unexpected existing ARM64 CRT family member: $($existing.Name)"
+        }
+    }
     $readme=Join-Path (Split-Path $ProgramDirectory -Parent) 'share/readme'
     $termsTarget=Join-Path $readme 'Microsoft-VC145-redistribution.html'
     Assert-UnlinkedPath $readme;Assert-UnlinkedPath $termsTarget
@@ -748,7 +933,18 @@ function Install-AppLocalCrt($Plan,[string]$ProgramDirectory,[string]$TermsPath)
     }
     New-Item -ItemType Directory -Path $readme -Force|Out-Null
     if(-not(Test-Path $termsTarget)) {Copy-Item -LiteralPath $TermsPath -Destination $termsTarget}
-    return [ordered]@{schemaVersion=1;toolset=$Plan.toolset;sourceDirectory=$Plan.sourceDirectory;programDirectory=$ProgramDirectory;files=$checked;redistributionTerms=@{path=$termsTarget;sha256=$termsHash}}
+    return [ordered]@{schemaVersion=1;architecture='arm64';toolset=$Plan.toolset;sourceDirectory=$Plan.sourceDirectory;programDirectory=$ProgramDirectory;files=$checked;redistributionTerms=@{path=$termsTarget;sha256=$termsHash}}
+}
+
+function Invoke-CrtImportAudit([string]$Python,[string]$Repo,[string]$Runtime,[string]$EvidenceDirectory) {
+    $helper=Join-Path $Repo 'suite/crt.py';$proofPath=Join-Path $EvidenceDirectory 'crt-import-closure.json'
+    Assert-UnlinkedPath $helper;Assert-UnlinkedPath $proofPath
+    Invoke-LoggedCommand $Python @($helper,'--root',$Runtime,'--architecture','arm64','--output',$proofPath) $Repo (Join-Path $EvidenceDirectory 'crt-import-closure')|Out-Null
+    $proof=Get-Content -LiteralPath $proofPath -Raw|ConvertFrom-Json
+    if($proof.schemaVersion -ne 1 -or $proof.architecture -cne 'arm64' -or $proof.passed -ne $true -or
+       $proof.checkedPeCount -lt 1 -or @($proof.requiredCrtFiles).Count -ne 8 -or
+       (Compare-Object -CaseSensitive @($proof.requiredCrtFiles) @(Get-CrtNames 'arm64'))) {throw 'Native CRT normal/delay import closure was not proved.'}
+    return $proof
 }
 
 function Write-BaseProofScript([string]$Path) {
@@ -819,15 +1015,53 @@ sys.exit(0 if record['passed'] else 1)
 '@|Set-Content -LiteralPath $Path -Encoding utf8NoBOM
 }
 
-function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='') {
+function Write-NativeSourceGate([string]$Path,[string]$RepoRoot,[string]$SourceRoot,[string]$FirebirdArchive,[string]$MddsArchive) {
+    Write-BashScript $Path @("set -euo pipefail","export PATH=/usr/local/bin:/usr/bin:/bin:`$PATH","cd $(Quote-Bash $RepoRoot)","export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1","export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE=$(Quote-Bash $FirebirdArchive)","export OPENGEUL_MDDS_SOURCE_ARCHIVE=$(Quote-Bash $MddsArchive)","export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES=$(Quote-Bash ($SourceRoot+'/external/firebird'))",'/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port -v')
+}
+
+function Save-ActualMddsHeaders([string]$SourceRoot,[string]$EvidenceDirectory,$Lock) {
+    # Best-effort evidence on failure; Full admission separately requires every
+    # actual file to match. Never replace a build exception with retention errors.
+    $record=[ordered]@{schemaVersion=1;matchesExpected=$true;files=@()}
+    foreach($pin in @($Lock.headers)+@($Lock.nodeHeader)) {
+        $path=Join-Path $SourceRoot ('workdir/UnpackedTarball/mdds/'+$pin.path)
+        $destination=Join-Path $EvidenceDirectory ('actual-mdds-'+[IO.Path]::GetFileName($pin.path))
+        $item=[ordered]@{sourcePath=$path;evidencePath=$destination;expectedBytes=$pin.afterBytes;expectedSha256=$pin.afterSha256;expectedState=$(if($pin.stage){$pin.stage}else{'post-patch native equality candidate'});status='missing';matchesExpected=$false}
+        try {
+            Assert-UnlinkedPath $path;Assert-UnlinkedPath $destination
+            if(Test-Path -LiteralPath $path) {
+                $file=Get-Item -LiteralPath $path -Force
+                if($file.PSIsContainer -or $file.Length -gt 65536) {throw 'Actual MDDS evidence requires a small regular header.'}
+                if(Test-Path -LiteralPath $destination) {throw 'Actual MDDS evidence output already exists.'}
+                $bytes=[IO.File]::ReadAllBytes($path)
+                $stream=[IO.File]::Open($destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                try {$stream.Write($bytes,0,$bytes.Length)} finally {$stream.Dispose()}
+                $item.bytes=$bytes.Length
+                $item.sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+                $item.matchesExpected=($item.bytes -eq $pin.afterBytes -and $item.sha256 -ceq $pin.afterSha256)
+                $item.status='retained'
+            }
+        } catch {$item.status='rejected';$item.error=$_.Exception.Message}
+        if(-not $item.matchesExpected) {$record.matchesExpected=$false}
+        $record.files+=,$item
+    }
+    return $record
+}
+
+function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='') {
     $paths=New-BuildDirectories $WorkDirectory $OutputDirectory
     $work=$paths.work;$evidence=$paths.output
-    $source=''
+    $source='';$manifest=$null
     $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     $receipt=[ordered]@{schemaVersion=1;kind='native-office-engine-source-build';phase=$Phase;architecture='arm64';status='failed';passed=$false;fullEngineQualified=$false;guiVerified=$false;startedUtc=[DateTime]::UtcNow.ToString('o');stage='native-host';firebirdSourcePortChecksExecuted=$false;libreOfficeCheckTargetExecuted=$false}
+    $previousBudget=$script:NativeEngineBuildBudget
     try {
+        $receipt.stage='build-time-budget'
+        $script:NativeEngineBuildBudget=New-NativeBuildBudget $DeadlineUtc
+        $receipt.buildBudget=$script:NativeEngineBuildBudget.record
+        $receipt.stage='native-host';Assert-NativeBuildTimeRemaining
         $receipt.host=Get-NativeBuildHost
-        $receipt.stage='bind-actual-source-run'
+        $receipt.stage='bind-actual-source-run';Assert-NativeBuildTimeRemaining
         $binding=Get-SourceRunBinding $repo (Join-Path $PSScriptRoot 'build-native-engine.ps1') (Join-Path $repo 'suite/engine-build/source-build.json') $evidence
         foreach($key in $binding.Keys) {$receipt[$key]=$binding[$key]}
         if(-not $SourceLockPath) {$SourceLockPath=Join-Path $repo 'suite/config/runtime.lock.json'}
@@ -835,11 +1069,11 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         Copy-Item -LiteralPath $SourceLockPath -Destination (Join-Path $evidence 'input-runtime.lock.json')
         # Windows configure otherwise searches only the JavaSoft registry. Bind
         # actual native hosted tools before any large source downloads instead.
-        $receipt.stage='installed-java-build-prerequisites'
+        $receipt.stage='installed-java-build-prerequisites';Assert-NativeBuildTimeRemaining
         $receipt.javaTools=[ordered]@{jdk=(Resolve-NativeJdk $JdkHome);ant=(Resolve-Ant $AntHome)}
         Write-BuildJson (Join-Path $evidence 'java-build-tools.json') $receipt.javaTools
         $downloads=Join-Path $work 'downloads';New-Item -ItemType Directory $downloads|Out-Null
-        $receipt.stage='authenticated-downloads'
+        $receipt.stage='authenticated-downloads';Assert-NativeBuildTimeRemaining
         $receipt.pkgconfTool=Get-AuthenticatedWindowsPkgconf $downloads $evidence $work
         $archive=Join-Path $downloads 'libreoffice-26.8.1.1.tar.xz'
         $receipt.sourceArchive=Get-AuthenticatedDownload $pin.url $archive $pin.size SHA256 $pin.sha256 (Join-Path $evidence 'libreoffice-download.json')
@@ -857,39 +1091,44 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $fb=Join-Path $downloads 'Firebird-3.0.13.33818-0.tar.bz2'
         if($manifest.firebird.url -ne 'https://github.com/FirebirdSQL/firebird/releases/download/v3.0.13/Firebird-3.0.13.33818-0.tar.bz2' -or $manifest.firebird.sha256 -ne 'bd263c4f685fb8fc3f1dcb8be8a411033cc31c5404d1dfce5d3849aa3f63a64d') {throw 'Pinned Firebird source manifest changed.'}
         $receipt.firebirdArchive=Get-AuthenticatedDownload $manifest.firebird.url $fb 13343760 SHA256 $manifest.firebird.sha256 (Join-Path $evidence 'firebird-download.json')
+        $mddsPin=$manifest.mddsEquality.archive
+        if($mddsPin.filename -cne 'mdds-3.2.1.tar.xz' -or $mddsPin.size -ne 648256 -or $mddsPin.sha256 -cne '673f5bb94612dbba581fc92b99b5e5dd1a53e29496a5dbc936432f6b0687c112') {throw 'Pinned MDDS source manifest changed.'}
+        $mdds=Join-Path $downloads $mddsPin.filename
+        $receipt.mddsArchive=Get-AuthenticatedDownload $mddsPin.url $mdds $mddsPin.size SHA256 $mddsPin.sha256 (Join-Path $evidence 'mdds-download.json')
         $cygwin=Join-Path $work 'cygwin';$cache=Join-Path $work 'cygwin-cache'
         $packages=Get-CygwinBuildPackages
-        $receipt.stage='cygwin-build-tools'
+        $receipt.stage='cygwin-build-tools';Assert-NativeBuildTimeRemaining
         Invoke-LoggedCommand $setup @('--quiet-mode','--no-admin','--no-shortcuts','--no-startmenu','--no-desktop','--root',$cygwin,'--local-package-dir',$cache,'--site','https://mirrors.kernel.org/sourceware/cygwin/','--packages',$packages) $work (Join-Path $evidence 'cygwin-setup')|Out-Null
         $bash=Join-Path $cygwin 'bin/bash.exe';$cygpath=Join-Path $cygwin 'bin/cygpath.exe'
         if(-not(Test-Path -LiteralPath $bash) -or -not(Test-Path -LiteralPath $cygpath)) {throw 'Authenticated setup did not produce the required Cygwin build tools.'}
         $commands=Join-Path $work 'commands';New-Item -ItemType Directory $commands|Out-Null
-        $receipt.stage='cygwin-host-identity'
+        $receipt.stage='cygwin-host-identity';Assert-NativeBuildTimeRemaining
         $receipt.cygwinIdentity=Get-CygwinIdentity $bash $cygpath $commands $work $evidence
         $convert={param($path,$name) $r=Invoke-LoggedCommand $cygpath @('-u',$path) $work (Join-Path $evidence ('cygpath-'+$name));(Get-Content -LiteralPath $r.stdout -Raw).Trim()}
-        $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixDownloads=&$convert $downloads 'downloads'
+        $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixMdds=&$convert $mdds 'mdds';$unixDownloads=&$convert $downloads 'downloads'
         $unixJdk=&$convert $receipt.javaTools.jdk.home 'jdk';$unixAnt=&$convert $receipt.javaTools.ant.home 'ant'
         $unixPkgconf=&$convert $receipt.pkgconfTool.identity.path 'pkgconf'
         $source=Join-Path $work 'libreoffice-26.8.1.1';$unixSource=$unixWork+'/libreoffice-26.8.1.1'
         $extract=Join-Path $commands 'extract.sh'
         Write-BashScript $extract @('set -euo pipefail',"cd $(Quote-Bash $unixWork)","/usr/bin/tar -xf $(Quote-Bash $unixArchive)")
-        $receipt.stage='extract-authenticated-source'
+        $receipt.stage='extract-authenticated-source';Assert-NativeBuildTimeRemaining
         Invoke-CygwinScript $bash $cygpath $extract $work (Join-Path $evidence 'extract-source')|Out-Null
         if(-not(Test-Path -LiteralPath (Join-Path $source 'configure.ac'))) {throw 'Pinned source root was not extracted.'}
         Copy-Item (Join-Path $source 'configure.ac') (Join-Path $evidence 'configure-pristine.ac')
         $sourceGate=Join-Path $commands 'source-gate.sh'
-        Write-BashScript $sourceGate @("set -euo pipefail","export PATH=/usr/local/bin:/usr/bin:/bin:`$PATH","cd $(Quote-Bash $unixRepo)","export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1","export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE=$(Quote-Bash $unixFb)","export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES=$(Quote-Bash ($unixSource+'/external/firebird'))",'/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port -v')
-        $receipt.stage='real-source-port-tests'
+        Write-NativeSourceGate $sourceGate $unixRepo $unixSource $unixFb $unixMdds
+        $receipt.stage='real-source-port-tests';Assert-NativeBuildTimeRemaining
         Invoke-CygwinScript $bash $cygpath $sourceGate $work (Join-Path $evidence 'source-port-tests')|Out-Null
         $receipt.firebirdSourcePortChecksExecuted=$true
-        $receipt.stage='install-authenticated-source-hooks'
+        $receipt.stage='install-authenticated-source-hooks';Assert-NativeBuildTimeRemaining
         $python=(Get-Command python -ErrorAction Stop).Source
-        Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source) $repo (Join-Path $evidence 'source-hooks')|Out-Null
+        $hookResult=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source,'--evidence-directory',$evidence) $repo (Join-Path $evidence 'source-hooks')
+        $receipt.sourceHooks=Get-Content -LiteralPath $hookResult.stdout -Raw|ConvertFrom-Json
         Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt $unixPkgconf)
         Copy-Item (Join-Path $source 'autogen.input') (Join-Path $evidence 'autogen.input')
         $configure=Join-Path $commands 'configure.sh'
         Write-BashScript $configure @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)",'./autogen.sh')
-        $receipt.stage='native-configure'
+        $receipt.stage='native-configure';Assert-NativeBuildTimeRemaining
         Invoke-CygwinScript $bash $cygpath $configure $work (Join-Path $evidence 'configure')|Out-Null
         $config=Join-Path $source 'config_host.mk'
         Copy-Item $config (Join-Path $evidence 'config_host.mk')
@@ -897,28 +1136,35 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         if(Test-Path (Join-Path $source 'config.log')) {Copy-Item (Join-Path $source 'config.log') (Join-Path $evidence 'config.log')}
         # Fail before any expensive compilation if this configured VS install
         # cannot supply a signed native runtime at least as new as its tools.
-        $receipt.stage='selected-toolchain-app-local-crt-preflight'
+        $receipt.stage='selected-toolchain-app-local-crt-preflight';Assert-NativeBuildTimeRemaining
         $compilerPath=Invoke-LoggedCommand $cygpath @('-w',$receipt.configuration.COMPATH) $work (Join-Path $evidence 'configured-msvc-root')
         $nativeCompilerRoot=(Get-Content -LiteralPath $compilerPath.stdout -Raw).Trim()
         $receipt.crtPreflight=Get-AppLocalCrtPlan $nativeCompilerRoot $receipt.configuration.VCTOOLSET
         Write-BuildJson (Join-Path $evidence 'app-local-crt-preflight.json') $receipt.crtPreflight
+        $receipt.nativeLibrarian=Get-NativeLibrarianPlan $nativeCompilerRoot
+        Write-BuildJson (Join-Path $evidence 'native-librarian.json') $receipt.nativeLibrarian
         $crtTerms=Join-Path $evidence 'Microsoft-VC145-redistribution.html'
         $receipt.crtRedistributionTerms=Save-VcRedistributionTerms $crtTerms
         # Resolve the exact source download.lst variables with GNU make rather
         # than guessing version substitutions in Python/pip/bootstrap filenames.
+        $receipt.stage='external-source-pins'
         $makePins=Join-Path $commands 'source-inputs.mk'
         Write-BashScript $makePins @('include download.lst','$(foreach name,$(filter %_TARBALL,$(.VARIABLES)),$(info PIN|$(name)|$($(name))|$($(patsubst %_TARBALL,%_SHA256SUM,$(name)))))','pins:',"`t@true")
         $unixMakePins=&$convert $makePins 'source-input-makefile'
         $pinScript=Join-Path $commands 'source-input-pins.sh'
-        Write-BashScript $pinScript @('set -euo pipefail',"cd $(Quote-Bash $unixSource)","make --no-print-directory -f $(Quote-Bash $unixMakePins) pins")
+        Write-BashScript $pinScript @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)","test -f $(Quote-Bash $unixMakePins)",'/usr/bin/make --version',"/usr/bin/make --no-print-directory -f $(Quote-Bash $unixMakePins) pins")
+        Copy-Item -LiteralPath $makePins -Destination (Join-Path $evidence 'source-inputs.mk')
+        Copy-Item -LiteralPath $pinScript -Destination (Join-Path $evidence 'source-input-pins.sh')
         $pinOutput=Invoke-CygwinScript $bash $cygpath $pinScript $work (Join-Path $evidence 'external-source-pins')
-        $knownPins=@{([IO.Path]::GetFileName($archive))=$pin.sha256;([IO.Path]::GetFileName($fb))=$manifest.firebird.sha256}
+        $knownPins=@{([IO.Path]::GetFileName($archive))=$pin.sha256;([IO.Path]::GetFileName($fb))=$manifest.firebird.sha256;([IO.Path]::GetFileName($mdds))=$mddsPin.sha256}
         foreach($extra in Get-ExtraSourcePins) {$knownPins[$extra.filename]=$extra.sha256}
+        $receipt.makeTargetLinkPolicy=[ordered]@{environment='CYGWIN=winsymlinks:nativestrict';scope='make-target children';launcher='selected Cygwin bin/env.exe';fallback=$false}
         foreach($target in Get-BuildTargets $Phase) {
-            $receipt.stage='make-'+$target
+            $receipt.stage='make-'+$target;Assert-NativeBuildTimeRemaining
             $script=Join-Path $commands ($target+'.sh')
-            Write-BashScript $script @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)","make -j$Jobs $target")
-            Invoke-CygwinScript $bash $cygpath $script $work (Join-Path $evidence ('make-'+$target))|Out-Null
+            Write-BashScript $script @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH','export TAR_OPTIONS=--force-local',"export OPENGEUL_FIREBIRD_LIB=$(Quote-Bash $receipt.nativeLibrarian.path.Replace('\','/'))","cd $(Quote-Bash $unixSource)","make -j$Jobs $target")
+            Copy-Item -LiteralPath $script -Destination (Join-Path $evidence ('make-'+$target+'.sh'))
+            Invoke-CygwinScript $bash $cygpath $script $work (Join-Path $evidence ('make-'+$target)) -NativeLinks|Out-Null
             if($target -eq 'firebird') {
                 $fbOutput=Join-Path $source 'workdir/UnpackedTarball/firebird/gen/Release/firebird'
                 $receipt.firebirdPe=@('bin/ifbclient.dll','plugins/Engine12.dll','intl/fbintl.dll')|ForEach-Object {
@@ -934,34 +1180,40 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                     $sql=Get-IsqlSql (Join-Path $work 'isql-proof.fdb')
                     $createSql=Join-Path $work 'isql-create.sql';$verifySql=Join-Path $work 'isql-verify.sql'
                     $sql.create|Set-Content $createSql -Encoding ascii;$sql.verify|Set-Content $verifySql -Encoding ascii
-                    $oldFirebird=$env:FIREBIRD
-                    try {
-                        $env:FIREBIRD=$fbOutput
-                        Invoke-LoggedCommand $isql @('-b','-q','-i',$createSql) $fbOutput (Join-Path $evidence 'isql-create')|Out-Null
-                        $query=Invoke-LoggedCommand $isql @('-b','-q','-user','SYSDBA','-password','masterkey','-i',$verifySql,(Join-Path $work 'isql-proof.fdb')) $fbOutput (Join-Path $evidence 'isql-reopen')
-                        Assert-IsqlOutput $query.stdout;$receipt.isql.verified=$true
-                    } finally {$env:FIREBIRD=$oldFirebird}
+                    $receipt.isql.icu=Get-IsqlIcuPlan $source $receipt.configuration
+                    Write-BuildJson (Join-Path $evidence 'isql-icu.json') $receipt.isql.icu
+                    $receipt.isql.plugins=Get-IsqlPluginPlan $fbOutput
+                    Write-BuildJson (Join-Path $evidence 'isql-plugins.json') $receipt.isql.plugins
+                    $isqlEnvironment=@{PATH=$receipt.isql.icu.directory+[IO.Path]::PathSeparator+$receipt.isql.plugins.directory+[IO.Path]::PathSeparator+$env:PATH;FIREBIRD=$fbOutput}
+                    $receipt.isql.environment=[ordered]@{PATH=@{prepend=@($receipt.isql.icu.directory,$receipt.isql.plugins.directory);separator=[string][IO.Path]::PathSeparator;inheritParent=$true};FIREBIRD=$fbOutput;scope='isql-create and isql-reopen children only'}
+                    Invoke-LoggedCommand $isql @('-b','-q','-i',$createSql) $fbOutput (Join-Path $evidence 'isql-create') -EnvironmentOverrides $isqlEnvironment|Out-Null
+                    $query=Invoke-LoggedCommand $isql @('-b','-q','-user','SYSDBA','-password','masterkey','-i',$verifySql,(Join-Path $work 'isql-proof.fdb')) $fbOutput (Join-Path $evidence 'isql-reopen') -EnvironmentOverrides $isqlEnvironment
+                    Assert-IsqlOutput $query.stdout;$receipt.isql.verified=$true
                 }
             }
         }
         if($Phase -eq 'Full') {
-            $receipt.stage='authenticate-all-downloaded-source-archives'
+            $receipt.stage='admit-actual-mdds-headers';Assert-NativeBuildTimeRemaining
+            $receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality
+            if(-not $receipt.mddsHeaders.matchesExpected) {throw 'Actual effective MDDS headers differ from the proven native candidate.'}
+            $receipt.stage='authenticate-all-downloaded-source-archives';Assert-NativeBuildTimeRemaining
             $receipt.externalSources=Write-ExternalSourceInventory $downloads $pinOutput.stdout (Join-Path $evidence 'external-source-inventory.json') $knownPins (Join-Path $source 'workdir/UnpackedTarball/python3') -RequirePython
             Copy-Item (Join-Path $source 'download.lst') (Join-Path $evidence 'authenticated-download.lst')
             $instdir=Join-Path $source 'instdir'
-            $receipt.stage='bind-authenticated-runtime-build-identity'
+            $receipt.stage='bind-authenticated-runtime-build-identity';Assert-NativeBuildTimeRemaining
             $receipt.runtimeBuildIdentity=Set-RuntimeBuildIdentity $instdir $archive $pin $receipt.sourceCommit $evidence
             Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
-            $receipt.stage='stage-authenticated-native-app-local-crt'
+            $receipt.stage='stage-authenticated-native-app-local-crt';Assert-NativeBuildTimeRemaining
             $receipt.appLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $instdir 'program') $crtTerms
             Write-BuildJson (Join-Path $evidence 'app-local-crt-installed.json') $receipt.appLocalCrt
-            $receipt.stage='native-product-pe-audit'
+            $receipt.stage='native-product-pe-audit';Assert-NativeBuildTimeRemaining
             foreach($relative in @('program/soffice.bin','program/python.exe','program/pyuno.pyd','program/ifbclient.dll','program/Engine12.dll','program/intl/fbintl.dll')) {
                 $critical=Get-ProductPeIdentity (Join-Path $instdir $relative)
                 if($critical.role -ne 'nativeArm64') {throw "Required native runtime output has wrong architecture: $relative"}
             }
             $inventory=@()
             foreach($file in Get-ChildItem -LiteralPath $instdir -File -Recurse) {
+                Assert-NativeBuildTimeRemaining
                 $stream=$file.OpenRead();try {$first=$stream.ReadByte();$second=$stream.ReadByte()} finally {$stream.Dispose()}
                 if(($first -eq 77 -and $second -eq 90) -or $file.Extension -in @('.exe','.dll','.pyd') -or $file.Name -eq 'soffice.bin') {$inventory+=Get-ProductPeIdentity $file.FullName $instdir}
             }
@@ -971,26 +1223,34 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.nativePeCount=@($inventory|Where-Object {$_.role -eq 'nativeArm64'}).Count
             $receipt.managedAnyCpuCount=@($inventory|Where-Object {$_.role -eq 'managedAnyCpu'}).Count
             $receipt.pinnedTemplateCount=@($inventory|Where-Object {$_.role -eq 'pythonLauncherTemplate'}).Count
-            $receipt.stage='actual-native-uno-base-persistence'
+            $receipt.stage='native-normal-delay-crt-import-closure';Assert-NativeBuildTimeRemaining
+            $receipt.crtImportClosure=Invoke-CrtImportAudit (Join-Path $instdir 'program/python.exe') $repo $instdir $evidence
+            $receipt.stage='actual-native-uno-base-persistence';Assert-NativeBuildTimeRemaining
             $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe
             $proof=Join-Path $evidence 'native-base-proof.json'
             Invoke-LoggedCommand (Join-Path $instdir 'program/python.exe') @($probe,$repo,$instdir,$proof,(Join-Path $work 'base-proof')) $instdir (Join-Path $evidence 'native-base-proof')|Out-Null
             $receipt.baseProof=Assert-BaseProof $proof
-            $receipt.stage='verify-effective-runtime-build-identity'
+            $receipt.stage='verify-effective-runtime-build-identity';Assert-NativeBuildTimeRemaining
             $receipt.runtimeBuildIdentity.finalVerification=Assert-RuntimeBuildIdentity $instdir $pin $receipt.runtimeBuildIdentity
             Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
-            $receipt.stage='package-qualified-source-build'
+            $receipt.stage='package-qualified-source-build';Assert-NativeBuildTimeRemaining
             $zip=Join-Path $evidence 'OpenGeul-Office-engine-arm64.zip'
             if(Test-Path $zip) {throw 'Engine artifact already exists.'}
-            [IO.Compression.ZipFile]::CreateFromDirectory($instdir,$zip,[IO.Compression.CompressionLevel]::Fastest,$false)
+            Write-NativeEngineArchive $instdir $zip $evidence
             $receipt.artifact=[ordered]@{path=$zip;size=(Get-Item $zip).Length;sha256=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()}
-            $receipt.fullEngineQualified=$true
+            Assert-NativeBuildTimeRemaining
         }
+        Assert-NativeBuildTimeRemaining
         $receipt.status=if($Phase -eq 'Full'){'native-engine-source-build-qualified'}else{'native-firebird-pe-built-full-engine-unqualified'}
+        $receipt.fullEngineQualified=($Phase -eq 'Full')
         $receipt.passed=$true;$receipt.stage='complete'
-    } catch {$receipt.error=$_.Exception.ToString();throw}
+    } catch {$receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString();throw}
     finally {
         if($source -and (Test-Path -LiteralPath $source)) {
+            if($manifest -and -not $receipt.mddsHeaders) {
+                try {$receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality}
+                catch {$receipt.mddsHeaderRetentionError=$_.Exception.ToString()}
+            }
             foreach($name in @('config_host.mk','config.log','autogen.input')) {
                 $candidate=Join-Path $source $name
                 if(Test-Path -LiteralPath $candidate) {Copy-Item -LiteralPath $candidate -Destination (Join-Path $evidence $name) -Force}
@@ -999,10 +1259,12 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             if(Test-Path -LiteralPath $fbLog) {Copy-Item -LiteralPath $fbLog -Destination (Join-Path $evidence 'firebird-build.log')}
         }
         $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
+        if($receipt.buildBudget) {$receipt.buildBudget.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}
+        $script:NativeEngineBuildBudget=$previousBudget
         Write-BuildJson (Join-Path $evidence 'source-build-receipt.json') $receipt
     }
 }
 
 if($MyInvocation.InvocationName -ne '.') {
-    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome
+    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc
 }

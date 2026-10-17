@@ -1,6 +1,7 @@
 param(
     [string]$SourceLockPath = 'suite/config/runtime.arm64.lock.json',
-    [string]$Output = '.work/source-engine-input'
+    [string]$Output = '.work/source-engine-input',
+    [ValidateRange(1,1200)][int]$TimeoutSeconds = 1200
 )
 $ErrorActionPreference = 'Stop'
 
@@ -30,7 +31,8 @@ function New-EngineFetchClient {
     $handler.AllowAutoRedirect = $false
     $handler.UseCookies = $false
     $client = [Net.Http.HttpClient]::new($handler)
-    $client.Timeout = [TimeSpan]::FromMinutes(20)
+    # One operation-owned cancellation deadline covers every request and body.
+    $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
     return $client
 }
 
@@ -43,61 +45,74 @@ function New-EngineApiRequest([string]$Url, [string]$Token) {
     return $request
 }
 
-function Read-EngineApiJson($Client, [string]$Url, [string]$Token) {
+function Read-EngineApiJson($Client, [string]$Url, [string]$Token,
+                            [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None) {
     $request = New-EngineApiRequest $Url $Token
     $response = $null; $stream = $null; $body = [IO.MemoryStream]::new()
     try {
-        $response = $Client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $response = $Client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $CancellationToken).WaitAsync($CancellationToken).GetAwaiter().GetResult()
         if ([int]$response.StatusCode -ne 200 -or $response.Content.Headers.ContentLength -gt 1048576) { throw 'GitHub metadata status/size rejected.' }
-        $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $stream = $response.Content.ReadAsStreamAsync($CancellationToken).WaitAsync($CancellationToken).GetAwaiter().GetResult()
         $buffer = [byte[]]::new(65536)
-        while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        while (($count = $stream.ReadAsync($buffer, 0, $buffer.Length, $CancellationToken).WaitAsync($CancellationToken).GetAwaiter().GetResult()) -gt 0) {
             if ($body.Length + $count -gt 1048576) { throw 'GitHub metadata exceeds bound.' }
             $body.Write($buffer, 0, $count)
         }
+        $CancellationToken.ThrowIfCancellationRequested()
         return ([Text.Encoding]::UTF8.GetString($body.ToArray()) | ConvertFrom-Json -AsHashtable)
     } finally {
         $body.Dispose(); if ($stream) { $stream.Dispose() }; if ($response) { $response.Dispose() }; $request.Dispose()
     }
 }
 
-function Copy-EngineBoundedStream($Stream, [string]$Destination, [long]$Size, [string]$Sha256) {
-    $file = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+function Copy-EngineBoundedStream($Stream, [string]$Destination, [long]$Size, [string]$Sha256,
+                                  [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None) {
+    $file = $null; $hash = $null
     try {
+        $CancellationToken.ThrowIfCancellationRequested()
+        $file = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+                                   [IO.FileShare]::None, 65536, [IO.FileOptions]::Asynchronous)
+        $hash = [Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA256)
         $buffer = [byte[]]::new(1048576); [long]$total = 0
-        while (($count = $Stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        while (($count = $Stream.ReadAsync($buffer, 0, $buffer.Length, $CancellationToken).WaitAsync($CancellationToken).GetAwaiter().GetResult()) -gt 0) {
             $total += $count
             if ($total -gt $Size) { throw 'Source engine download/extraction exceeds authenticated size.' }
-            $file.Write($buffer, 0, $count)
+            $file.WriteAsync($buffer, 0, $count, $CancellationToken).WaitAsync($CancellationToken).GetAwaiter().GetResult() | Out-Null
+            $hash.AppendData($buffer, 0, $count)
         }
+        $CancellationToken.ThrowIfCancellationRequested()
         if ($total -ne $Size) { throw 'Source engine download/extraction size mismatch.' }
-    } finally { $file.Dispose() }
-    if ((Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Sha256) { throw 'Source engine byte hash mismatch.' }
+        $actual = [Convert]::ToHexString($hash.GetHashAndReset()).ToLowerInvariant()
+        if ($actual -cne $Sha256) { throw 'Source engine byte hash mismatch.' }
+    } finally { if ($hash) { $hash.Dispose() }; if ($file) { $file.Dispose() } }
 }
 
 function Save-EngineArtifact($ApiClient, $DownloadClient, [string]$Url, [string]$Token,
-                             [string]$Destination, [long]$Size, [string]$Sha256) {
+                             [string]$Destination, [long]$Size, [string]$Sha256,
+                             [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None) {
     $request = New-EngineApiRequest $Url $Token
     $redirect = $null; $response = $null; $stream = $null; $download = $null
     try {
-        $redirect = $ApiClient.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $redirect = $ApiClient.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $CancellationToken).WaitAsync($CancellationToken).GetAwaiter().GetResult()
         $location = $redirect.Headers.Location
         if ([int]$redirect.StatusCode -ne 302 -or -not $location -or -not $location.IsAbsoluteUri -or
             $location.Scheme -cne 'https' -or $location.UserInfo -or $location.Fragment -or $location.Port -ne 443) { throw 'GitHub signed download redirect rejected.' }
         # A separate no-auth client receives the signed URL. Never record that URL.
         $download = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $location)
-        $response = $DownloadClient.SendAsync($download, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $response = $DownloadClient.SendAsync($download, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $CancellationToken).WaitAsync($CancellationToken).GetAwaiter().GetResult()
         if ([int]$response.StatusCode -ne 200 -or
             ($null -ne $response.Content.Headers.ContentLength -and $response.Content.Headers.ContentLength -ne $Size)) { throw 'Artifact download status/size rejected.' }
-        $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-        Copy-EngineBoundedStream $stream $Destination $Size $Sha256
+        $stream = $response.Content.ReadAsStreamAsync($CancellationToken).WaitAsync($CancellationToken).GetAwaiter().GetResult()
+        Copy-EngineBoundedStream $stream $Destination $Size $Sha256 $CancellationToken
     } finally {
         if ($stream) { $stream.Dispose() }; if ($response) { $response.Dispose() }; if ($download) { $download.Dispose() }
         if ($redirect) { $redirect.Dispose() }; $request.Dispose()
     }
 }
 
-function Expand-EngineArtifact([string]$Archive, [string]$Output, $Runtime) {
+function Expand-EngineArtifact([string]$Archive, [string]$Output, $Runtime,
+                               [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None) {
+    $CancellationToken.ThrowIfCancellationRequested()
     $engineName = 'OpenGeul-Office-engine-arm64.zip'; $receiptName = 'source-build-receipt.json'
     $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
     try {
@@ -117,13 +132,14 @@ function Expand-EngineArtifact([string]$Archive, [string]$Output, $Runtime) {
         foreach ($name in @($engineName, $receiptName)) {
             $expectedHash = if ($name -ceq $engineName) { $Runtime.sha256 } else { $Runtime.sourceBuild.receiptSha256 }
             $entry = $members[$name]; $stream = $entry.Open()
-            try { Copy-EngineBoundedStream $stream (Join-Path $Output $name) $entry.Length $expectedHash }
+            try { Copy-EngineBoundedStream $stream (Join-Path $Output $name) $entry.Length $expectedHash $CancellationToken }
             finally { $stream.Dispose() }
         }
     } finally { $zip.Dispose() }
 }
 
-function Invoke-SourceEngineFetch([string]$SourceLockPath, [string]$Output, $ApiClient = $null, $DownloadClient = $null) {
+function Invoke-SourceEngineFetch([string]$SourceLockPath, [string]$Output, $ApiClient = $null, $DownloadClient = $null,
+                                  [ValidateRange(1,1200)][int]$TimeoutSeconds = 1200) {
     Assert-EngineUnlinkedPath $SourceLockPath
     $lock = Get-Content -LiteralPath $SourceLockPath -Raw | ConvertFrom-Json -AsHashtable
     $runtime = $lock.runtime; $build = $runtime.sourceBuild
@@ -140,15 +156,18 @@ function Invoke-SourceEngineFetch([string]$SourceLockPath, [string]$Output, $Api
     $outputPath = [IO.Path]::GetFullPath($Output)
     New-Item -ItemType Directory -Path $outputPath -ErrorAction Stop | Out-Null
     $ownApi = -not $ApiClient; $ownDownload = -not $DownloadClient
+    $started = [DateTime]::UtcNow; $clock = [Diagnostics.Stopwatch]::StartNew()
+    $cancellation = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))
     $audit = [ordered]@{schemaVersion=1;kind='authenticated-source-engine-download';passed=$false;stage='github-metadata';
         repository='ATLKR/OpenGeul';artifactId=$build.artifactId;runId=$build.runId;sourceCommit=$build.sourceCommit;
-        artifactSha256=$build.artifactSha256;startedUtc=[DateTime]::UtcNow.ToString('o')}
+        artifactSha256=$build.artifactSha256;startedUtc=$started.ToString('o');
+        timeoutSeconds=$TimeoutSeconds;deadlineUtc=$started.AddSeconds($TimeoutSeconds).ToString('o');deadlineExceeded=$false}
     try {
         if ($ownApi) { $ApiClient = New-EngineFetchClient }
         if ($ownDownload) { $DownloadClient = New-EngineFetchClient }
         $api = 'https://api.github.com/repos/ATLKR/OpenGeul/actions'
-        $artifact = Read-EngineApiJson $ApiClient ($api+'/artifacts/'+$build.artifactId) $token
-        $run = Read-EngineApiJson $ApiClient ($api+'/runs/'+$build.runId) $token
+        $artifact = Read-EngineApiJson $ApiClient ($api+'/artifacts/'+$build.artifactId) $token $cancellation.Token
+        $run = Read-EngineApiJson $ApiClient ($api+'/runs/'+$build.runId) $token $cancellation.Token
         if (-not (Test-EnginePositiveInteger $artifact.id) -or $artifact.id -ne $build.artifactId -or
             $artifact.digest -cne ('sha256:'+$build.artifactSha256) -or $artifact.expired -isnot [bool] -or $artifact.expired -or
             -not (Test-EnginePositiveInteger $artifact.size_in_bytes) -or $artifact.size_in_bytes -gt $runtime.size + 9437184 -or
@@ -171,24 +190,27 @@ function Invoke-SourceEngineFetch([string]$SourceLockPath, [string]$Output, $Api
         Write-EngineFetchJson (Join-Path $outputPath 'artifact-server-metadata.json') $metadata
         $audit.stage = 'authenticated-outer-zip'
         $archive = Join-Path $outputPath 'github-artifact.zip'
-        Save-EngineArtifact $ApiClient $DownloadClient ($api+'/artifacts/'+$build.artifactId+'/zip') $token $archive $artifact.size_in_bytes $build.artifactSha256
+        Save-EngineArtifact $ApiClient $DownloadClient ($api+'/artifacts/'+$build.artifactId+'/zip') $token $archive $artifact.size_in_bytes $build.artifactSha256 $cancellation.Token
         $audit.artifactSize = $artifact.size_in_bytes
         $audit.stage = 'extract-exact-inputs'
-        Expand-EngineArtifact $archive $outputPath $runtime
+        Expand-EngineArtifact $archive $outputPath $runtime $cancellation.Token
         $audit.engineSize = $runtime.size; $audit.engineSha256 = $runtime.sha256; $audit.receiptSha256 = $build.receiptSha256
+        $cancellation.Token.ThrowIfCancellationRequested()
         $audit.passed = $true; $audit.stage = 'complete'
     } catch {
+        $audit.deadlineExceeded = $cancellation.IsCancellationRequested
         # HTTP exceptions can contain credentials or signed URLs. Never echo or serialize them.
         throw ('Source engine fetch failed at '+$audit.stage+'; inspect the sanitized download receipt.')
     } finally {
         $audit.finishedUtc = [DateTime]::UtcNow.ToString('o')
+        $audit.elapsedSeconds = $clock.Elapsed.TotalSeconds
         Write-EngineFetchJson (Join-Path $outputPath 'source-engine-download.json') $audit
         if ($ownApi -and $ApiClient) { $ApiClient.Dispose() }; if ($ownDownload -and $DownloadClient) { $DownloadClient.Dispose() }
-        $token = $null
+        $cancellation.Dispose(); $token = $null
     }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-SourceEngineFetch -SourceLockPath $SourceLockPath -Output $Output
+    Invoke-SourceEngineFetch -SourceLockPath $SourceLockPath -Output $Output -TimeoutSeconds $TimeoutSeconds
     Write-Host 'Source engine inputs authenticated and extracted.'
 }

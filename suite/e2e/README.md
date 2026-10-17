@@ -219,3 +219,13 @@ expectations. `office-features.json` is preserved after each case and fails on
 missing, duplicate, failed or incomplete cases. `guiVerified=false` remains
 explicit: these are engine observations alongside the existing native GUI,
 Korean input, lifecycle and startup suites.
+
+The physical Home CSV route keeps its early attachment image and also captures
+`home-open-calc-csv-calc-post-getter.png` after the owned model reader has
+finished and released, before the original close. Original retained process
+handles and HWND ownership bracket one hidden screenshot collector with a
+separate ten-second budget. The original twelve-second reader deadline is not
+changed. No focus, input, forced repaint or retry is added. This is a raw PNG
+checkpoint for final visual review: `gridVisibleVerified=false` and
+`paintCompleteVerified=false` remain explicit. Image existence does not prove
+that the CSV grid or ribbon rendered; the XLSX Korean UI gate is separate.

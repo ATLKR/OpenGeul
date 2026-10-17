@@ -18,6 +18,7 @@ from suite.tests.test_payload import pe
 VC_DLLS = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
            'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
            'vcruntime140_1.dll', 'vcruntime140_threads.dll')
+ARM_VC_DLLS = tuple(name for name in VC_DLLS if name != 'vcruntime140_1.dll')
 SOURCE_CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +35,7 @@ def source_build_fixture(root):
             source.writestr('program/'+name, pe(0xaa64))
         source.writestr('LICENSE.html', b'Original upstream license')
         for name, raw in metadata.items(): source.writestr(name, raw)
-        for name in VC_DLLS: source.writestr('program/'+name, pe(0xaa64, dll=True))
+        for name in ARM_VC_DLLS: source.writestr('program/'+name, pe(0xaa64, dll=True))
         source.writestr('share/readme/Microsoft-VC145-redistribution.html', b'Official VS2026 redistribution terms')
     runtime = {'format': 'source-built-zip', 'version': '26.8.1.1',
                'url': 'https://example.org/engine.zip', 'size': archive.stat().st_size,
@@ -86,11 +87,11 @@ def source_build_fixture(root):
                   'signerThumbprint': 'a'*40, 'signerIssuer': 'Microsoft CA',
                   'fileVersion': '14.50.35717.0', 'productVersion': '14.50.35717.0',
                   'fileVersionParts': [14, 50, 35717, 0], 'productVersionParts': [14, 50, 35717, 0],
-                  'companyName': 'Microsoft Corporation', 'originalFilename': name}} for name in VC_DLLS]
-    receipt['crtPreflight'] = {'schemaVersion': 1, 'toolset': 'v145',
+                  'companyName': 'Microsoft Corporation', 'originalFilename': name}} for name in ARM_VC_DLLS]
+    receipt['crtPreflight'] = {'schemaVersion': 1, 'architecture': 'arm64', 'toolset': 'v145',
         'compilerToolsVersion': '14.50.35717', 'minimumRuntimeVersion': '14.50.35717.0',
         'sourceDirectory': source_directory, 'files': files}
-    receipt['appLocalCrt'] = {'schemaVersion': 1, 'toolset': 'v145', 'sourceDirectory': source_directory,
+    receipt['appLocalCrt'] = {'schemaVersion': 1, 'architecture': 'arm64', 'toolset': 'v145', 'sourceDirectory': source_directory,
         'programDirectory': 'C:\\build\\instdir\\program',
         'files': [{'source': copy.deepcopy(file), 'destination': 'C:\\build\\instdir\\program\\'+file['name'],
                    'alreadyIdentical': False, 'copiedSha256': file['sha256']} for file in files],
@@ -99,6 +100,8 @@ def source_build_fixture(root):
     receipt['crtRedistributionTerms'] = {'url': 'https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution',
         'path': 'C:\\evidence\\terms.html', 'size': len(b'Official VS2026 redistribution terms'),
         'sha256': hashlib.sha256(b'Official VS2026 redistribution terms').hexdigest()}
+    receipt['crtImportClosure'] = dict(schemaVersion=1, architecture='arm64', passed=True,
+        requiredCrtFiles=list(ARM_VC_DLLS), checkedPeCount=15, imports=[])
     receipt_path = root/'source-build-receipt.json'
     pin_source_receipt(runtime, receipt_path, receipt)
     return archive, runtime, receipt_path, receipt
@@ -236,10 +239,11 @@ class PrepareTests(unittest.TestCase):
         self.assertIn('architecture', inspect.signature(module.stage_msi_dependencies).parameters)
         with tempfile.TemporaryDirectory() as folder:
             root, runtime = self.msi_fixture(folder)
-            for name in VC_DLLS:
+            (root/'System64/vcruntime140_1.dll').unlink()
+            for name in ARM_VC_DLLS:
                 (root/'System64'/name).write_bytes(pe(0xAA64, dll=True))
             receipt = module.stage_msi_dependencies(root, runtime, architecture='arm64')
-            for name in VC_DLLS:
+            for name in ARM_VC_DLLS:
                 self.assertEqual((runtime/'program'/name).read_bytes(), pe(0xAA64, dll=True))
                 self.assertEqual((root/'System64'/name).read_bytes(), pe(0xAA64, dll=True))
                 self.assertEqual(receipt['program/'+name]['sha256'], hashlib.sha256(pe(0xAA64, dll=True)).hexdigest())
@@ -250,12 +254,35 @@ class PrepareTests(unittest.TestCase):
         for machine in (0x8664, 0x14C, 0xA641):
             with self.subTest(machine=machine), tempfile.TemporaryDirectory() as folder:
                 root, runtime = self.msi_fixture(folder)
-                for name in VC_DLLS:
+                (root/'System64/vcruntime140_1.dll').unlink()
+                for name in ARM_VC_DLLS:
                     (root/'System64'/name).write_bytes(pe(0xAA64, dll=True))
                 (root/'System64/vcruntime140_threads.dll').write_bytes(pe(machine, dll=True))
                 with self.assertRaisesRegex(ValueError, 'arm64|architecture'):
                     module.stage_msi_dependencies(root, runtime, architecture='arm64')
                 self.assertEqual([], list((runtime/'program').iterdir()))
+
+    def test_arm64_staging_rejects_extra_one_even_if_marked_native_before_copy(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root,runtime=self.msi_fixture(folder)
+            for name in VC_DLLS:(root/'System64'/name).write_bytes(pe(0xaa64,dll=True))
+            with self.assertRaisesRegex(ValueError,'family|Unexpected|unexpected'):
+                module.stage_msi_dependencies(root,runtime,architecture='arm64')
+            self.assertEqual([],list((runtime/'program').iterdir()))
+
+    def test_arm64_staging_rejects_existing_extra_one_before_any_copy(self):
+        module=implementation()
+        for machine in (0xaa64,0x8664):
+            with self.subTest(machine=machine),tempfile.TemporaryDirectory() as folder:
+                root,runtime=self.msi_fixture(folder)
+                (root/'System64/vcruntime140_1.dll').unlink()
+                for name in ARM_VC_DLLS:(root/'System64'/name).write_bytes(pe(0xaa64,dll=True))
+                extra=runtime/'program/vcruntime140_1.dll';raw=pe(machine,dll=True);extra.write_bytes(raw)
+                with self.assertRaisesRegex(ValueError,'family|Unexpected|unexpected'):
+                    module.stage_msi_dependencies(root,runtime,architecture='arm64')
+                self.assertEqual([extra],list((runtime/'program').iterdir()))
+                self.assertEqual(raw,extra.read_bytes())
 
     def test_unsupported_dependency_architecture_is_rejected_before_writing(self):
         module = implementation()
@@ -360,14 +387,14 @@ class PrepareTests(unittest.TestCase):
             def admin(*args, **kwargs):
                 self.app_root_fixture(output)
                 (output/'System64').mkdir()
-                for name in VC_DLLS: (output/'System64'/name).write_bytes(pe(dll=True))
+                for name in ARM_VC_DLLS: (output/'System64'/name).write_bytes(pe(dll=True))
                 return SimpleNamespace(returncode=0)
             def recover(msi, destination, *, architecture):
                 self.assertEqual(architecture, 'arm64')
                 destination.mkdir()
-                for name in VC_DLLS: (destination/name).write_bytes(pe(0xAA64, dll=True))
+                for name in ARM_VC_DLLS: (destination/name).write_bytes(pe(0xAA64, dll=True))
                 return {name: {'path': destination/name, 'fileId': name+'_arm64.GUID',
-                               'cabinet': '#official.cab'} for name in VC_DLLS}
+                               'cabinet': '#official.cab'} for name in ARM_VC_DLLS}
             with patch.object(module, 'os', SimpleNamespace(name='nt')), \
                  patch.object(module.subprocess, 'run', side_effect=admin), \
                  patch('suite.msi_cab.recover_crt', side_effect=recover):
@@ -376,7 +403,7 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual(receipt['architecture'], 'arm64')
             self.assertEqual(receipt['recovery'], 'embedded-arm64-file-ids')
             self.assertEqual(receipt['inputMsiSha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
-            for name in VC_DLLS:
+            for name in ARM_VC_DLLS:
                 self.assertEqual((runtime/'program'/name).read_bytes(), pe(0xAA64, dll=True))
                 self.assertEqual(receipt['files']['program/'+name]['fileId'], name+'_arm64.GUID')
 
@@ -553,7 +580,7 @@ class SourceEngineTests(unittest.TestCase):
                 module.extract_source_engine_zip(archive, Path(folder)/'runtime', runtime=lock,
                                                  receipt=path, architecture='arm64')
 
-    def test_source_receipt_requires_matching_signed_native_nine_crt_metadata_and_terms(self):
+    def test_source_receipt_requires_matching_signed_native_eight_crt_metadata_and_terms(self):
         module = implementation()
         for mutation in ('missing', 'count', 'copied', 'source', 'machine', 'signature', 'version', 'terms'):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as folder:
@@ -571,6 +598,31 @@ class SourceEngineTests(unittest.TestCase):
                     module.extract_source_engine_zip(archive, root/'runtime', runtime=lock,
                                                      receipt=path, architecture='arm64')
                 self.assertFalse((root/'runtime').exists())
+
+    def test_source_receipt_requires_exact_successful_arm64_import_closure(self):
+        module=implementation()
+        for mutation in ('missing','passed','architecture','count','names','imports'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);archive,lock,path,proof=source_build_fixture(root)
+                if mutation=='missing':del proof['crtImportClosure']
+                elif mutation=='passed':proof['crtImportClosure']['passed']=False
+                elif mutation=='architecture':proof['crtImportClosure']['architecture']='x64'
+                elif mutation=='count':proof['crtImportClosure']['checkedPeCount']=0
+                elif mutation=='names':proof['crtImportClosure']['requiredCrtFiles'].append('vcruntime140_1.dll')
+                else:proof['crtImportClosure']['imports']=[dict(path='program/soffice.bin',normal=['vcruntime140_1.dll'],delay=[])]
+                pin_source_receipt(lock,path,proof)
+                with self.assertRaisesRegex(ValueError,'CRT|import'):
+                    module.extract_source_engine_zip(archive,root/'runtime',runtime=lock,receipt=path,architecture='arm64')
+                self.assertFalse((root/'runtime').exists())
+
+    def test_extracted_runtime_replays_import_closure_count_after_authenticated_receipt(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);archive,lock,path,proof=source_build_fixture(root)
+            destination=module.extract_source_engine_zip(archive,root/'runtime',runtime=lock,receipt=path,architecture='arm64')
+            (destination/'program/extra-native.dll').write_bytes(pe(0xaa64,dll=True))
+            with self.assertRaisesRegex(ValueError,'CRT|import'):
+                module.validate_source_build_runtime(destination,proof)
 
     def test_locked_qualified_engine_extracts_original_bytes_and_exact_receipt_without_msi_metadata(self):
         module = implementation()

@@ -7,6 +7,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import unittest
 import warnings
 import zipfile
@@ -19,7 +23,7 @@ ENGINE = 'OpenGeul-Office-engine-arm64.zip'
 RECEIPT = 'source-build-receipt.json'
 
 HARNESS = r'''
-param([string]$Root,[string]$Script)
+param([string]$Root,[string]$Script,[int]$FetchTimeoutSeconds=1200)
 $ErrorActionPreference='Stop'
 Add-Type @'
 using System;
@@ -33,8 +37,9 @@ using System.Collections.Generic;
 public sealed class EngineFakeHttp : HttpMessageHandler {
  public static List<object> Events = new List<object>();
  string root; bool api;
+ HttpClient local = new HttpClient(new HttpClientHandler { AllowAutoRedirect=false });
  public EngineFakeHttp(string root, bool api) { this.root=root;this.api=api; }
- protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) {
+ protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) {
   string path=request.RequestUri.AbsolutePath;
   string endpoint=api?(path.EndsWith("/zip")?"redirect":path.Contains("/artifacts/")?"artifact":"run"):"blob";
   Events.Add(new { endpoint=endpoint, authenticated=request.Headers.Authorization!=null });
@@ -42,6 +47,10 @@ public sealed class EngineFakeHttp : HttpMessageHandler {
   if(!api && request.Headers.Authorization!=null) throw new Exception("Signed download leaked Authorization");
   using var scenario=JsonDocument.Parse(File.ReadAllText(Path.Combine(root,"scenario.json")));
   var options=scenario.RootElement;
+  if(options.TryGetProperty("loopbackOrigin",out var loopback)) {
+   using var forwarded=new HttpRequestMessage(HttpMethod.Get,loopback.GetString()+"/"+endpoint);
+   return await local.SendAsync(forwarded,HttpCompletionOption.ResponseHeadersRead,token);
+  }
   if(endpoint=="blob" && options.GetProperty("throwDownload").GetBoolean()) throw new HttpRequestException("https://blob.example.test/file?sig=signed-test-secret-do-not-record");
   var response=new HttpResponseMessage(HttpStatusCode.OK);
   if(endpoint=="redirect") {
@@ -52,8 +61,9 @@ public sealed class EngineFakeHttp : HttpMessageHandler {
    var bytes=File.ReadAllBytes(Path.Combine(root,"outer.zip"));
    response.Content=options.GetProperty("unknownLength").GetBoolean()?(HttpContent)new EngineUnknownLength(bytes):new ByteArrayContent(bytes);
   } else response.Content=new StringContent(File.ReadAllText(Path.Combine(root,endpoint+".json")));
-  return Task.FromResult(response);
+  return response;
  }
+ protected override void Dispose(bool disposing) { if(disposing)local.Dispose();base.Dispose(disposing); }
 }
 public sealed class EngineUnknownLength : HttpContent {
  byte[] bytes;
@@ -68,9 +78,11 @@ public sealed class EngineUnknownLength : HttpContent {
 $api=[Net.Http.HttpClient]::new([EngineFakeHttp]::new($Root,$true))
 $download=[Net.Http.HttpClient]::new([EngineFakeHttp]::new($Root,$false))
 try {
- Invoke-SourceEngineFetch -SourceLockPath (Join-Path $Root 'lock.json') -Output (Join-Path $Root 'output') -ApiClient $api -DownloadClient $download
+ $parameters=@{SourceLockPath=(Join-Path $Root 'lock.json');Output=(Join-Path $Root 'output');ApiClient=$api;DownloadClient=$download}
+ if((Get-Command Invoke-SourceEngineFetch).Parameters.ContainsKey('TimeoutSeconds')) {$parameters.TimeoutSeconds=$FetchTimeoutSeconds}
+ Invoke-SourceEngineFetch @parameters
 } finally {
- [EngineFakeHttp]::Events|ConvertTo-Json -Depth 5|Set-Content (Join-Path $Root 'events.json')
+ ConvertTo-Json -InputObject @([EngineFakeHttp]::Events) -Depth 5|Set-Content (Join-Path $Root 'events.json')
  $api.Dispose();$download.Dispose()
 }
 '''
@@ -92,10 +104,40 @@ def zip_bytes(entries):
     return buffer.getvalue()
 
 
+@contextmanager
+def loopback_responses(root, *, stalled=None, header_delay=0):
+    """Actual local HTTP headers/body; original authenticated URLs stay in the fake handler."""
+    release=threading.Event()
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):
+            endpoint=self.path.lstrip('/')
+            try:
+                if header_delay:release.wait(header_delay)
+                if endpoint=='redirect':
+                    self.send_response(302);self.send_header('Location','https://blob.example.test/file?sig='+SIGNED_SECRET)
+                    data=b''
+                else:
+                    self.send_response(200)
+                    data=(root/('outer.zip' if endpoint=='blob' else endpoint+'.json')).read_bytes()
+                self.send_header('Content-Length',str(len(data)));self.end_headers()
+                if endpoint==stalled and data:
+                    self.wfile.write(data[:1]);self.wfile.flush()
+                    release.wait(4)
+                    self.wfile.write(data[1:])
+                elif data:self.wfile.write(data)
+            except (BrokenPipeError,ConnectionResetError):pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
+    worker=threading.Thread(target=lambda:server.serve_forever(poll_interval=.05),daemon=True);worker.start()
+    try:yield 'http://127.0.0.1:'+str(server.server_port)
+    finally:
+        release.set();server.shutdown();server.server_close();worker.join(timeout=2)
+
+
 @unittest.skipUnless(PWSH, 'PowerShell runtime unavailable')
 class FetchSourceEngineTests(unittest.TestCase):
-    def fixture(self, root, entries=None):
-        engine = zip_bytes([('program/soffice.bin', b'actual engine fixture', 0)])
+    def fixture(self, root, entries=None, *, engine_payload=b'actual engine fixture'):
+        engine = zip_bytes([('program/soffice.bin', engine_payload, 0)])
         receipt = b'{"schemaVersion":1,"boundedFixture":true}\n'
         outer = zip_bytes(entries if entries is not None else [(ENGINE, engine, 0), (RECEIPT, receipt, 0)])
         (root/'outer.zip').write_bytes(outer)
@@ -120,7 +162,7 @@ class FetchSourceEngineTests(unittest.TestCase):
     def save(self, root, name, value):
         (root/(name+'.json')).write_text(json.dumps(value), encoding='utf-8')
 
-    def run_fetch(self, root, token=True, token_name='GH_TOKEN'):
+    def run_fetch(self, root, token=True, token_name='GH_TOKEN', timeout_seconds=1200):
         script = ROOT/'suite/scripts/fetch-source-engine.ps1'
         self.assertTrue(script.is_file(), 'Authenticated source-engine fetch script is required')
         harness = root/'harness.ps1'; harness.write_text(HARNESS, encoding='utf-8')
@@ -128,7 +170,7 @@ class FetchSourceEngineTests(unittest.TestCase):
         env.pop('GH_TOKEN', None); env.pop('GITHUB_TOKEN', None)
         if token: env[token_name] = SECRET
         result = subprocess.run([PWSH, '-NoProfile', '-File', str(harness), '-Root', str(root),
-                                 '-Script', str(script)], capture_output=True, text=True, timeout=30, env=env)
+                                 '-Script', str(script), '-FetchTimeoutSeconds', str(timeout_seconds)], capture_output=True, text=True, timeout=30, env=env)
         output = result.stdout+result.stderr
         self.assertTrue((root/'harness-ready').is_file(), output)
         self.assertNotIn(SECRET, output); self.assertNotIn(SIGNED_SECRET, output)
@@ -148,11 +190,65 @@ class FetchSourceEngineTests(unittest.TestCase):
             self.assertEqual([event['authenticated'] for event in events], [True, True, True, False])
             audit = json.loads((root/'output/source-engine-download.json').read_text())
             self.assertTrue(audit['passed'])
+            self.assertEqual(1200,audit['timeoutSeconds']);self.assertFalse(audit['deadlineExceeded'])
             self.assertEqual(audit['artifactSha256'], lock['runtime']['sourceBuild']['artifactSha256'])
             self.assertEqual(audit['engineSha256'], lock['runtime']['sha256'])
             metadata = json.loads((root/'output/artifact-server-metadata.json').read_text())
             self.assertEqual(metadata['artifact']['id'], 456)
             self.assertEqual(metadata['run']['head_sha'], 'a'*40)
+
+    def test_actual_stalled_metadata_and_artifact_bodies_cancel_with_sanitized_audit(self):
+        for endpoint in ('artifact','blob'):
+            with self.subTest(endpoint=endpoint),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);_,_,_,scenario,_,_=self.fixture(root)
+                with loopback_responses(root,stalled=endpoint) as origin:
+                    scenario['loopbackOrigin']=origin;self.save(root,'scenario',scenario)
+                    result,_=self.run_fetch(root,timeout_seconds=1)
+                self.assertNotEqual(0,result.returncode,'A body stall must not outlive the original fetch budget')
+                audit=json.loads((root/'output/source-engine-download.json').read_text())
+                self.assertFalse(audit['passed']);self.assertTrue(audit['deadlineExceeded'])
+                self.assertEqual(1,audit['timeoutSeconds']);self.assertLess(audit['elapsedSeconds'],3)
+                self.assertEqual('github-metadata' if endpoint=='artifact' else 'authenticated-outer-zip',audit['stage'])
+                self.assertFalse((root/'output'/ENGINE).exists())
+                partial=root/'output/github-artifact.zip'
+                if endpoint=='blob':
+                    self.assertTrue(partial.is_file());self.assertGreater(partial.stat().st_size,0)
+                    self.assertLess(partial.stat().st_size,(root/'outer.zip').stat().st_size)
+                else:self.assertFalse(partial.exists())
+
+    def test_original_deadline_is_shared_across_metadata_and_download_headers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);_,_,_,scenario,_,_=self.fixture(root)
+            with loopback_responses(root,header_delay=.6) as origin:
+                scenario['loopbackOrigin']=origin;self.save(root,'scenario',scenario)
+                result,events=self.run_fetch(root,timeout_seconds=2)
+            self.assertNotEqual(0,result.returncode,'Four fresh per-request budgets must not replace the original total deadline')
+            self.assertGreaterEqual(len(events),3)
+            audit=json.loads((root/'output/source-engine-download.json').read_text())
+            self.assertFalse(audit['passed']);self.assertTrue(audit['deadlineExceeded'])
+            self.assertEqual(2,audit['timeoutSeconds']);self.assertLess(audit['elapsedSeconds'],4)
+            self.assertEqual('authenticated-outer-zip',audit['stage'])
+            self.assertFalse((root/'output'/ENGINE).exists())
+
+    def test_timeout_override_is_positive_and_never_exceeds_production_cap(self):
+        for seconds in (0,-1,1201):
+            with self.subTest(seconds=seconds),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);self.fixture(root)
+                result,events=self.run_fetch(root,timeout_seconds=seconds)
+                self.assertNotEqual(0,result.returncode)
+                self.assertEqual([],events)
+                self.assertFalse((root/'output').exists())
+
+    def test_multichunk_outer_and_inner_bytes_keep_exact_incremental_hashes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            _,_,_,_,engine,receipt=self.fixture(root,engine_payload=bytes(range(256))*10000)
+            self.assertGreater(len(engine),2*1024*1024)
+            result,_=self.run_fetch(root)
+            self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+            self.assertEqual(engine,(root/'output'/ENGINE).read_bytes())
+            self.assertEqual(receipt,(root/'output'/RECEIPT).read_bytes())
+            self.assertTrue(json.loads((root/'output/source-engine-download.json').read_text())['passed'])
 
     def test_fixed_cli_options_reach_token_gate_without_creating_output_or_using_http(self):
         with tempfile.TemporaryDirectory() as folder:

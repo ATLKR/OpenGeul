@@ -44,6 +44,19 @@ def run_code(step):
 
 
 class CalcMatrixWorkflowTests(unittest.TestCase):
+    def test_pinned_image_tooling_is_installed_before_unit_discovery(self):
+        steps = workflow_steps()
+        unit_index = next(i for i, step in enumerate(steps)
+                          if 'python -m unittest discover -s suite/tests -v' in step)
+        image_steps = [(i, run_code(step)) for i, step in enumerate(steps)
+                       if 'python -m pip install Pillow==12.3.0' in step]
+        self.assertEqual(len(image_steps), 1)
+        image_index, code = image_steps[0]
+        self.assertLess(image_index, unit_index,
+                        'PNG checkpoint unit checks need Pillow before discovery')
+        command = 'python -m pip install Pillow==12.3.0'
+        self.assertIn('if ($LASTEXITCODE -ne 0)', code[code.index(command) + len(command):])
+
     def test_independent_probes_precede_existing_fixture_mutations(self):
         steps = workflow_steps()
         fixture = next(i for i, step in enumerate(steps) if field(step, 'id') == 'fixtures')

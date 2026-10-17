@@ -12,6 +12,7 @@ NAMES = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
          'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
          'vcruntime140_1.dll', 'vcruntime140_threads.dll')
 
+ARM_NAMES = tuple(name for name in NAMES if name != 'vcruntime140_1.dll')
 
 def module():
     assert IMPLEMENTATION.is_file(), 'MSI cabinet recovery implementation is missing'
@@ -51,7 +52,7 @@ class SelectorTests(unittest.TestCase):
         self.assertTrue(callable(getattr(implementation, 'select_crt', None)),
                         'Architecture-aware CRT selection is required')
         selected = implementation.select_crt(files(), media(), architecture='arm64')
-        self.assertEqual(set(NAMES), set(selected))
+        self.assertEqual(set(ARM_NAMES), set(selected))
         for name, metadata in selected.items():
             self.assertEqual(name + '_arm64.DFEFC2FE', metadata['fileId'])
         self.assertEqual('#first.cab', selected['msvcp140_2.dll']['cabinet'])
@@ -195,7 +196,7 @@ class RecoveryTests(unittest.TestCase):
         for name, metadata in recovered.items():
             self.assertIn('_arm64.', metadata['fileId'])
             self.assertEqual(pe(0xAA64) + metadata['fileId'].encode(), (self.output/name).read_bytes())
-        self.assertEqual(9, len(self.expansions))
+        self.assertEqual(8, len(self.expansions))
         self.assertEqual(b'original signed MSI', self.msi.read_bytes())
 
     def test_x64_bytes_under_arm64_ids_fail_without_publishing_output(self):

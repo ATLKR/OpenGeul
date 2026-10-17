@@ -11,10 +11,12 @@ import ctypes
 from ctypes import wintypes as W
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -28,6 +30,62 @@ OPEN_CAPTION='OpenGeul Office에서 문서 열기'
 OPEN_FILENAME_ID='1148'  # Actual Home native Open, distinct from Save Edit1001.
 OFFICE_MODULES=('writer','calc','impress','draw','math','base')
 OPEN_ROUTES=tuple((module,extension) for module,extension,_ in features.FORMATS)+(('hwp','hwp'),('hwp','hwpx'))
+
+# The pinned pywinauto capture reads the screen rectangle without focusing or
+# painting the window. Run it in one hidden, bounded child, separate from UNO.
+CSV_CHECKPOINT_CAPTURE='''import sys
+from pathlib import Path
+from importlib.metadata import version
+from pywinauto import Desktop
+assert version('pywinauto') == '0.6.9'
+hwnd, pid = map(int, sys.argv[1:3])
+window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
+assert int(window.handle) == hwnd and int(window.process_id()) == pid
+assert window.is_visible()
+image = window.capture_as_image()
+assert image is not None
+with Path(sys.argv[3]).open('xb') as stream:
+    image.save(stream, format='PNG')
+'''
+
+
+def _capture_checkpoint_png(hwnd,pid,path,timeout):
+    assert 0<timeout<=10
+    return subprocess.run([sys.executable,'-c',CSV_CHECKPOINT_CAPTURE,str(hwnd),str(pid),str(path)],
+        capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=timeout,shell=False,
+        creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+
+
+def _checkpoint_reader_sha(context):
+    return hashlib.sha256(json.dumps(context,ensure_ascii=False,sort_keys=True,allow_nan=False).encode('utf-8')).hexdigest()
+
+
+def require_csv_post_getter_screenshot(record):
+    """Replay a raw image checkpoint, never a visible-grid or paint oracle."""
+    assert record['case']=='home-open-calc-csv' and record['module']=='calc' and record['extension']=='csv'
+    context=record['calcReader'];binding=context['observation']['bindingBefore'];frame,=record['attachments']
+    expected=dict(shellPid=record['shellPid'],shellCreationTime=binding['shellCreationTime'],
+        shellHandleValue=record['originalShell']['handleValue'],officePid=frame['officePid'],
+        officeCreationTime=frame['officeCreationTime'],officeHandleValue=frame['liveProcessBinding']['handleValue'],
+        windowHwnd=frame['hwnd'],parentHwnd=record['parentHwnd'],childHwnd=record['childHwnd'])
+    value=record['csvPostGetterScreenshot']
+    assert type(value['schemaVersion']) is int and value['schemaVersion']==1 and value['kind']=='owned-csv-post-getter-png'
+    assert value['passed'] is True and type(value['captureCount']) is int and value['captureCount']==1
+    assert type(value['collectorExitCode']) is int and value['collectorExitCode']==0
+    assert value['readerFinishedAt']==context['finishedAt'] and value['readerDeadline']==context['deadline']
+    assert value['readerContextSha256']==_checkpoint_reader_sha(context)
+    for edge in ('nativeBefore','nativeAfter'):
+        assert value[edge]==expected and all(type(v) is int and v>0 for v in value[edge].values())
+    times=[value[k] for k in ('startedAt','deadline','finishedAt')]
+    assert all(type(t) in (int,float) and math.isfinite(t) for t in times)
+    assert context['finishedAt']<=value['startedAt']<=value['finishedAt']<=value['deadline']==value['startedAt']+10
+    assert value['inputActions']==value['focusActions']==value['paintActions']==[]
+    assert value['gridVisibleVerified'] is value['paintCompleteVerified'] is False and value['visualReviewRequired'] is True
+    assert value['foregroundVerifiedBefore'] is value['foregroundVerifiedAfter'] is True
+    assert value['image']==record['case']+'-calc-post-getter.png' and record['screenshots'].count(value['image'])==1
+    assert type(value['bytes']) is int and 0<value['bytes']<=32*1024*1024 and re.fullmatch('[a-f0-9]{64}',value['sha256'])
+    assert all(type(v) is int and 0<v<=20000 for v in (value['width'],value['height'])) and value['width']*value['height']<=16_000_000
+    return value
 
 
 def build_plan():
@@ -440,6 +498,45 @@ class HomeCase:
         name=self.record['case']+'-'+label+'.png';window.capture_as_image().save(self.output/name)
         self.record.setdefault('screenshots',[]).append(name)
 
+    def csv_post_getter_screenshot(self,frame,proof):
+        """One raw post-reader PNG with the original handles, no extra focus."""
+        from home_calc_close import verify_home_calc_close
+        from PIL import Image
+        assert self.record['case']=='home-open-calc-csv' and self.record['extension']=='csv'
+        context=self.record['calcReader'];binding=context['observation']['bindingBefore']
+        started=time.monotonic();name=self.record['case']+'-calc-post-getter.png';path=self.output/name
+        _unlinked(self.output);assert self.output.is_dir() and not path.exists() and not path.is_symlink()
+        value=dict(schemaVersion=1,kind='owned-csv-post-getter-png',passed=False,startedAt=started,deadline=started+10,
+            readerFinishedAt=context['finishedAt'],readerDeadline=context['deadline'],readerContextSha256=_checkpoint_reader_sha(context),
+            captureCount=0,inputActions=[],focusActions=[],paintActions=[],gridVisibleVerified=False,
+            paintCompleteVerified=False,visualReviewRequired=True,image=name)
+        self.record['csvPostGetterScreenshot']=value
+        assert context['finishedAt']<=started
+        def snapshot():
+            return dict(shellPid=proof.process.pid,shellCreationTime=binding['shellCreationTime'],shellHandleValue=proof.process_handle,
+                officePid=proof.bound.pid,officeCreationTime=proof.bound.creation,officeHandleValue=proof.bound_handle,
+                windowHwnd=proof.hwnd,parentHwnd=frame['parent'],childHwnd=proof.child)
+        verify_home_calc_close(self.api,proof,self.record);self.api.require_foreground(proof.hwnd)
+        value.update(nativeBefore=snapshot(),foregroundVerifiedBefore=True)
+        remaining=value['deadline']-time.monotonic();assert remaining>0
+        value['captureCount']=1
+        result=_capture_checkpoint_png(proof.hwnd,proof.process.pid,path,remaining)
+        value.update(collectorExitCode=result.returncode,collectorStdout=result.stdout[:4096],collectorStderr=result.stderr[:4096])
+        assert result.returncode==0, 'Owned post-getter screenshot failed: '+result.stderr[:4096]
+        verify_home_calc_close(self.api,proof,self.record);self.api.require_foreground(proof.hwnd)
+        value.update(nativeAfter=snapshot(),foregroundVerifiedAfter=True)
+        _unlinked(path);assert path.is_file() and 0<path.stat().st_size<=32*1024*1024
+        with Image.open(path) as image:
+            assert image.format=='PNG';width,height=image.size
+            assert 0<width<=20000 and 0<height<=20000 and width*height<=16_000_000
+            image.verify()
+        value.update(bytes=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),width=width,height=height,
+                     finishedAt=time.monotonic())
+        assert value['finishedAt']<=value['deadline']
+        candidate=dict(self.record,screenshots=[*self.record['screenshots'],name],csvPostGetterScreenshot=dict(value,passed=True))
+        require_csv_post_getter_screenshot(candidate)
+        self.record['screenshots'].append(name);value['passed']=True
+
     def attach(self,module,source):
         self.record['stage']='await-new-'+module+'-attachment'
         previous={frame['hwnd'] for frame in self.frames if not frame.get('closed')}
@@ -469,6 +566,9 @@ class HomeCase:
             self.record['stage']='observe-owned-home-calc'
             observe_home_calc(self.suite,self.output/(self.record['case']+'-calc-reader'),self.process,attachment,frame['source'],self.record.get('extension'),self.record)
             proof=freeze_home_calc_close(self.suite,self.process,frame['bound'],self.record,source=frame['source'],extension=self.record.get('extension'))
+            if self.record.get('extension')=='csv':
+                self.record['stage']='capture-csv-post-getter'
+                self.csv_post_getter_screenshot(frame,proof)
             self.record['stage']='close-owned-home-calc'
             close_home_calc(self.api,proof,self.record);row['closeMessageCount']=1
         else:
@@ -691,6 +791,7 @@ def require_case_result(record,suite):
         _home_origin(suite,SimpleNamespace(pid=pid,args=record['shellCommand']),record,source,spec.get('extension'))
         close=record['homeCalcClose'];assert close['closeMessageCount']==1 and close['frameClosed'] is True
         assert (close['branch'],close['discardClickCount']) in (('closed',0),('prompt',1))
+        if spec.get('extension')=='csv':require_csv_post_getter_screenshot(record)
     if spec['kind']=='tile' and spec['module']=='base':
         frame,=frames
         native.require_base_save_dialog_readiness(record['baseSaveDialogReadiness'],pid,frame['hwnd'],'OpenGeul Base — 다른 이름으로 저장')

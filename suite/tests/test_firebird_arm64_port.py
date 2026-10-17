@@ -2,6 +2,8 @@
 
 Set OPENGEUL_FIREBIRD_SOURCE_ARCHIVE to the pinned Firebird source tar.bz2 and
 OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES to the pinned LO external/firebird folder
+and OPENGEUL_MDDS_SOURCE_ARCHIVE to the pinned MDDS archive. Optional
+OPENGEUL_LIBREOFFICE_MDDS_PATCHES overrides the sibling external/mdds directory
 for the actual patch-application/compiler checks. No test downloads inputs.
 """
 import hashlib
@@ -10,10 +12,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
 import tempfile
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -72,12 +76,85 @@ class AuthenticatedSource(unittest.TestCase):
         actual = hashlib.sha256(cls.archive.read_bytes()).hexdigest()
         if actual != SOURCE_SHA:
             raise AssertionError('Firebird source archive differs from the pinned SHA256')
+        cls.mdds_archive = None
+        mdds_value = os.environ.get('OPENGEUL_MDDS_SOURCE_ARCHIVE')
+        cls.mdds_patches = Path(os.environ.get('OPENGEUL_LIBREOFFICE_MDDS_PATCHES', str(cls.lo_patches.parent / 'mdds')))
+        if mdds_value:
+            cls.mdds_archive = Path(mdds_value)
+            if cls.mdds_archive.stat().st_size != 648256 or hashlib.sha256(cls.mdds_archive.read_bytes()).hexdigest() != '673f5bb94612dbba581fc92b99b5e5dd1a53e29496a5dbc936432f6b0687c112':
+                raise AssertionError('MDDS source archive differs from the pinned size/SHA256')
+        elif cls.required:
+            raise AssertionError('Mandatory pinned MDDS source archive is missing')
         cls.compiler = shutil.which('cc') or shutil.which('gcc')
         cls.cxx = shutil.which('c++') or shutil.which('g++')
         if not cls.compiler or not shutil.which('patch'):
             if cls.required:
                 raise AssertionError('Mandatory C compiler/preprocessor or GNU patch is missing')
             raise unittest.SkipTest('A C preprocessor/compiler and GNU patch are required')
+
+    def mdds_recipe(self, root):
+        target = root / 'external/mdds/UnpackedTarball_mdds.mk'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / 'suite/tests/fixtures/native-mdds-equality' / target.name).read_bytes())
+        upstream = 'gcc-12-silence-use-after-free.patch.1'
+        (target.parent / upstream).write_bytes((self.mdds_patches / upstream).read_bytes())
+        return target
+
+    def test_real_mdds_patch_selection_replays_exact_native_candidate(self):
+        if self.mdds_archive is None:
+            self.skipTest('Pinned local MDDS archive is required')
+        archive, patches = self.mdds_archive, self.mdds_patches
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            hook = root / 'external/firebird/UnpackedTarball_firebird.mk'; hook.parent.mkdir(parents=True)
+            hook.write_bytes((self.lo_patches / hook.name).read_bytes())
+            (hook.parent / 'ExternalProject_firebird.mk').write_bytes((ROOT / 'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes())
+            (root / 'configure.ac').write_bytes(self.lo_configure.read_bytes())
+            bootstrap = root / 'bin/unpack-sources'; bootstrap.parent.mkdir()
+            bootstrap.write_bytes((ROOT / 'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
+            zstd = root / 'external/zstd/UnpackedTarball_zstd.mk'; zstd.parent.mkdir()
+            zstd.write_bytes((ROOT / 'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes())
+            recipe = self.mdds_recipe(root); original = recipe.read_bytes()
+            def selection(raw, platform):
+                makefile = root / 'selection.mk'
+                makefile.write_text('OS := '+platform[0]+'\nCPUNAME := '+platform[1]+'\n'
+                    'gb_UnpackedTarball_add_patches = $(eval selected += $(2))\n'+raw.decode()+
+                    '\nall:\n\t@echo $(selected)\n')
+                result = subprocess.run(['make', '--no-print-directory', '-f', str(makefile)], capture_output=True, text=True, check=True)
+                return result.stdout.split()
+            gcc = 'external/mdds/gcc-12-silence-use-after-free.patch.1'
+            own = 'external/mdds/opengeul-arm64-equality.patch.1'
+            for platform in [('WNT','AARCH64'), ('WNT','X86_64'), ('LINUX','AARCH64')]:
+                self.assertEqual([gcc], selection(original, platform))
+            evidence = root / 'evidence'; evidence.mkdir()
+            receipt = module().install(root, evidence)
+            self.assertEqual([gcc, own], selection(recipe.read_bytes(), ('WNT','AARCH64')))
+            for platform in [('WNT','X86_64'), ('LINUX','AARCH64')]:
+                self.assertEqual([gcc], selection(recipe.read_bytes(), platform))
+            lock = json.loads((PORT / 'source-build.json').read_text())['mddsEquality']
+            unpack = root / 'unpack'; unpack.mkdir()
+            with tarfile.open(archive, 'r:xz') as source:
+                for member in source:
+                    name = Path(member.name)
+                    self.assertFalse(name.is_absolute() or '..' in name.parts)
+                    if member.isfile():
+                        target = unpack.joinpath(*name.parts[1:]); target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(source.extractfile(member).read())
+            upstream = patches / Path(gcc).name
+            self.assertEqual(lock['upstreamPatch']['sha256'], hashlib.sha256(upstream.read_bytes()).hexdigest())
+            for item in lock['headers']:
+                raw = (unpack / item['path']).read_bytes()
+                self.assertEqual(item['beforeSha256'], hashlib.sha256(raw).hexdigest())
+            self.apply(unpack, upstream, 1)
+            self.apply(unpack, root / own, 1)
+            for item in lock['headers'] + [lock['nodeHeader']]:
+                raw = (unpack / item['path']).read_bytes()
+                self.assertEqual(item['afterBytes'], len(raw))
+                self.assertEqual(item['afterSha256'], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(original, (evidence / 'original-UnpackedTarball_mdds.mk').read_bytes())
+            self.assertEqual(recipe.read_bytes(), (evidence / 'effective-UnpackedTarball_mdds.mk').read_bytes())
+            self.assertEqual(lock['recipe']['afterSha256'], receipt['mddsEquality']['afterSha256'])
+            self.assertEqual(lock['patch']['sha256'], receipt['mddsEquality']['patchSha256'])
 
     def source_tree(self, folder):
         root = Path(folder) / 'firebird'
@@ -187,6 +264,319 @@ class AuthenticatedSource(unittest.TestCase):
                 after=self.compile_fpe(root,architecture)
                 self.assertEqual(after.returncode,0,architecture+': '+after.stderr)
 
+    def compile_msvc_platform(self, root, architecture):
+        if not self.cxx:
+            if self.required:self.fail('Mandatory C++ compiler for the MSVC platform-header check is missing')
+            self.skipTest('A C++ compiler is required for the MSVC platform-header check')
+        macros={'arm64':'#define _M_ARM64 1\n','x64':'#define _M_AMD64 1\n#define _M_X64 1\n',
+                'x86':'#define _M_IX86 1\n','unknown':'','arm64ec':'#define _M_ARM64 1\n#define _M_ARM64EC 1\n'}
+        text=('#define _MSC_VER 1940\n'+macros[architecture]+
+              '#include "'+str(root/'src/include/gen/autoconfig_msvc.h')+'"\n')
+        if architecture in ('arm64','x64','x86'):
+            common=(root/'src/common/common.h').read_text()
+            start=common.index('#ifdef WIN_NT');end=common.index('#endif /* WIN_NT */',start)+len('#endif /* WIN_NT */')
+            cpu={'arm64':'CpuArm64','x64':'CpuAmd','x86':'CpuIntel'}[architecture]
+            size=4 if architecture=='x86' else 8
+            text+=('enum { CpuIntel=0, CpuAmd=1, CpuArm64=15 };\n'+common[start:end]+'\n'+
+                   'static_assert(FB_CPU=='+cpu+',"wrong CPU identity from fixed MSVC header");\n'+
+                   'static_assert(SIZEOF_VOID_P=='+str(size)+',"wrong pointer-size definition");\n'+
+                   'static_assert(SIZEOF_SIZE_T=='+str(size)+',"wrong size_t definition");\n'+
+                   'static_assert(FB_ALIGNMENT=='+str(size)+',"wrong Firebird alignment definition");\n'+
+                   'static_assert(SIZEOF_LONG==4,"Windows long must remain 32-bit");\n'+
+                   'static_assert(FB_DOUBLE_ALIGN==8,"double alignment must remain eight");\n'+
+                   '#ifndef WIN_NT\n#error Windows platform missing\n#endif\n'+
+                   '#ifdef WORDS_BIGENDIAN\n#error Windows ARM64 must remain little endian\n#endif\n')
+            expected={'arm64':'ARM64','x64':'AMD64','x86':'I386'}[architecture]
+            for name in ('ARM64','AMD64','I386'):
+                text+=('#ifndef ' if name==expected else '#ifdef ')+name+'\n#error incorrect architecture alias '+name+'\n#endif\n'
+        # This uses actual source headers and macro/type-definition assertions.
+        # The host compiler does not establish a Windows ABI or execute ODS.
+        return subprocess.run([self.cxx,'-std=c++11','-Wno-unknown-pragmas','-x','c++','-fsyntax-only','-'],
+                              input=text,text=True,capture_output=True)
+
+    def test_real_msvc_header_rejects_arm64_then_port_preserves_windows_platform_definitions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.source_tree(folder);header=root/'src/include/gen/autoconfig_msvc.h';original=header.read_bytes()
+            lock=json.loads((PORT/'source-build.json').read_text())['msvcPlatformHeader']
+            self.assertEqual('src/include/gen/autoconfig_msvc.h',lock['path'])
+            with tarfile.open(self.archive,'r:bz2') as archive:
+                members=[item for item in archive if item.isfile() and item.name.endswith('/'+lock['path'])]
+                self.assertEqual(1,len(members))
+                archived=archive.extractfile(members[0]).read()
+            self.assertEqual(lock['archiveBytes'],len(archived))
+            self.assertEqual(lock['archiveSha256'],hashlib.sha256(archived).hexdigest())
+            self.assertEqual(lock['beforeBytes'],len(original))
+            self.assertEqual(lock['beforeSha256'],hashlib.sha256(original).hexdigest())
+            failed=self.compile_msvc_platform(root,'arm64')
+            self.assertNotEqual(0,failed.returncode,'Original fixed MSVC header no longer reproduces C1189')
+            self.assertIn('unknown target platform',failed.stderr)
+            for architecture in ('x64','x86'):
+                before=self.compile_msvc_platform(root,architecture)
+                self.assertEqual(0,before.returncode,architecture+': '+before.stderr)
+            self.apply(root,PORT/'firebird-windows-arm64.patch')
+            branch=(b'#elif defined(_M_ARM64) && !defined(_M_ARM64EC)\n#define ARM64\n'
+                    b'/* sizeof(void *) */\n#define SIZEOF_VOID_P 8\n'
+                    b'/* sizeof(size_t) */\n#define SIZEOF_SIZE_T 8\n'
+                    b'/* Firebird alignment, matching the 64-bit Windows layout */\n#define FB_ALIGNMENT 8\n')
+            self.assertEqual(original.replace(b'#else\n#error unknown target platform\n',branch+b'#else\n#error unknown target platform\n'),
+                             header.read_bytes(),'Only the pure ARM64 fixed-header branch may change')
+            self.assertEqual(lock['afterBytes'],header.stat().st_size)
+            self.assertEqual(lock['afterSha256'],hashlib.sha256(header.read_bytes()).hexdigest())
+            for architecture in ('arm64','x64','x86'):
+                result=self.compile_msvc_platform(root,architecture)
+                self.assertEqual(0,result.returncode,architecture+': '+result.stderr)
+            for architecture in ('unknown','arm64ec'):
+                result=self.compile_msvc_platform(root,architecture)
+                self.assertNotEqual(0,result.returncode,'Unsupported target was accepted as pure ARM64')
+                self.assertIn('unknown target platform',result.stderr)
+
+    def compile_remote_architecture(self, root, architecture, protocol, remote):
+        if not self.cxx:
+            if self.required:self.fail('Mandatory C++ compiler for the remote architecture source check is missing')
+            self.skipTest('A C++ compiler is required for the remote architecture source check')
+        macros={'arm64':'#define _M_ARM64 1\n','x64':'#define _M_AMD64 1\n#define _M_X64 1\n',
+                'x86':'#define _M_IX86 1\n'}
+        start=protocol.index('enum P_ARCH\n')
+        enum=protocol[start:protocol.index('};',start)+2]
+        common=(root/'src/common/common.h').read_text()
+        start=common.index('#ifdef WIN_NT')
+        windows=common[start:common.index('#endif /* WIN_NT */',start)+len('#endif /* WIN_NT */')]
+        # Compile the complete real remote header and its exact protocol enum.
+        # The already-tested fixed MSVC header supplies the Windows/CPU macros.
+        # Skip unrelated common declarations; this check claims no Windows ABI.
+        text=('#define _MSC_VER 1940\n'+macros[architecture]+
+              '#include "'+str(root/'src/include/gen/autoconfig_msvc.h')+'"\n'+
+              windows+'\n#define COMMON_COMMON_H\ntypedef unsigned short USHORT;\n'+enum+'\n'+remote+'\n'+
+              'static_assert(ARCHITECTURE=='+str({'arm64':44,'x64':40,'x86':29}[architecture])+',"wrong remote architecture");\n')
+        return subprocess.run([self.cxx,'-std=c++11','-Wno-unknown-pragmas','-x','c++','-fsyntax-only',
+                               '-I'+str(root/'src/remote'),'-'],input=text,text=True,capture_output=True)
+
+    def test_real_remote_architecture_backports_upstream_arm64_identity_without_reusing_old_ids(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.source_tree(folder)
+            paths=('src/remote/remote_def.h','src/remote/protocol.h')
+            original={path:(root/path).read_bytes() for path in paths}
+            self.apply(root,PORT/'firebird-windows-arm64.patch')
+            before=self.compile_remote_architecture(root,'arm64',original[paths[1]].decode(),original[paths[0]].decode())
+            self.assertNotEqual(0,before.returncode,'Original remote header no longer reproduces the ARM64 identity gap')
+            self.assertIn('ARCHITECTURE',before.stderr)
+            for architecture in ('x64','x86'):
+                result=self.compile_remote_architecture(root,architecture,original[paths[1]].decode(),original[paths[0]].decode())
+                self.assertEqual(0,result.returncode,architecture+': '+result.stderr)
+            for architecture in ('arm64','x64','x86'):
+                result=self.compile_remote_architecture(root,architecture,(root/paths[1]).read_text(),(root/paths[0]).read_text())
+                self.assertEqual(0,result.returncode,architecture+': '+result.stderr)
+            lock=json.loads((PORT/'source-build.json').read_text())['remoteArchitecture']
+            self.assertEqual('c02ba31824f5cee34cc8966fc44b38e6b395152a',lock['upstreamCommit'])
+            self.assertEqual({'name':'arch_winnt_arm64','value':44},lock['identity'])
+            branch=(b'#elif defined(WIN_NT) && defined(ARM64)\n'
+                    b'const P_ARCH ARCHITECTURE\t= arch_winnt_arm64;\n')
+            self.assertEqual(original[paths[0]].replace(b'#elif defined(I386)\n',branch+b'#elif defined(I386)\n'),
+                             (root/paths[0]).read_bytes(),'Only the native Windows ARM64 identity branch may change')
+            self.assertEqual(original[paths[1]].replace(b'\tarch_max\t\t\t= 44\t',
+                             b'\tarch_winnt_arm64\t= 44,\n\tarch_max\t\t\t= 45\t'),
+                             (root/paths[1]).read_bytes(),'Existing protocol identities and negotiation must remain unchanged')
+            with tarfile.open(self.archive,'r:bz2') as archive:
+                archived={path:archive.extractfile(next(item for item in archive.getmembers()
+                          if item.isfile() and item.name.endswith('/'+path))).read() for path in paths}
+            for item in lock['headers']:
+                path=item['path'];effective=(root/path).read_bytes()
+                self.assertEqual(archived[path],original[path],'Upstream patches unexpectedly changed the pinned remote header')
+                self.assertEqual(item['beforeBytes'],len(original[path]))
+                self.assertEqual(item['beforeSha256'],hashlib.sha256(original[path]).hexdigest())
+                self.assertEqual(item['afterBytes'],len(effective))
+                self.assertEqual(item['afterSha256'],hashlib.sha256(effective).hexdigest())
+
+    def test_real_common_archive_recipe_selects_explicit_native_librarian_and_keeps_other_platforms(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.source_tree(folder)
+            target=root/'builds/posix/Makefile.in';original=target.read_bytes()
+            self.apply(root,PORT/'firebird-windows-arm64.patch')
+            text=target.read_text();start=text.index('$(COMMON_LIB):')
+            recipe=text[start:text.index('#________________________________________________________________',start)]
+            tools=Path(folder)/"selected VS's native tools";tools.mkdir()
+            librarian=tools/'lib.exe';capture=Path(folder)/'native-arguments.json'
+            librarian.write_text('#!'+sys.executable+'\nimport json,os,pathlib,sys\n'+
+                'pathlib.Path(os.environ["ARCHIVE_CAPTURE"]).write_text(json.dumps(sys.argv[1:]))\n'+
+                'code=int(os.environ.get("ARCHIVE_EXIT","0"))\n'+
+                'if code: sys.exit(code)\n'+
+                'out=next(arg[5:] for arg in sys.argv[1:] if arg.startswith("/OUT:"))\n'+
+                'pathlib.Path(out).write_bytes(b"native command fixture only")\n')
+            librarian.chmod(0o700)
+            objects=[]
+            for name in ('first','second'):
+                obj=Path(folder)/(name+'.o')
+                result=subprocess.run([self.compiler,'-x','c','-c','-o',str(obj),'-'],
+                    input='int '+name+'(void) {return 1;}\n',text=True,capture_output=True)
+                self.assertEqual(0,result.returncode,result.stderr);objects.append(obj)
+            makefile=Path(folder)/'archive.mk';output=Path(folder)/'common.lib'
+            env=dict(os.environ,ARCHIVE_CAPTURE=str(capture))
+            def run(platform,cpu,tool=str(librarian),exit_code='0'):
+                output.unlink(missing_ok=True);capture.unlink(missing_ok=True)
+                makefile.write_text('COMMON_LIB := '+str(output).replace(' ','\\ ')+'\n'+
+                    'Common_Objects := '+' '.join(map(str,objects))+'\nRM := rm -f\nSTATICLIB_LINK := ar crus\n'+
+                    'PLATFORM := '+platform+'\nCpuType := '+cpu+'\nOPENGEUL_FIREBIRD_LIB := '+tool+'\n'+recipe)
+                return subprocess.run(['make','--no-print-directory','-f',str(makefile)],
+                    capture_output=True,text=True,env=dict(env,ARCHIVE_EXIT=exit_code))
+            result=run('win32','aarch64')
+            self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+            self.assertTrue(capture.is_file(),'ARM64 recipe used GNU ar instead of the selected native librarian')
+            self.assertEqual(['/NOLOGO','/OUT:'+str(output),*map(str,objects)],json.loads(capture.read_text()))
+            self.assertEqual(b'native command fixture only',output.read_bytes())
+            output=Path(folder)/'archive output/common.lib';output.parent.mkdir()
+            result=run('win32','aarch64')
+            self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+            self.assertEqual(['/NOLOGO','/OUT:'+str(output),*map(str,objects)],json.loads(capture.read_text()))
+            result=run('win32','aarch64',exit_code='7')
+            self.assertNotEqual(0,result.returncode,'Native librarian failure was hidden')
+            self.assertIn('Error 7',result.stderr);self.assertFalse(output.exists())
+            result=run('win32','aarch64',tool='')
+            self.assertNotEqual(0,result.returncode,'Missing selected librarian fell back to PATH')
+            self.assertFalse(capture.exists());self.assertFalse(output.exists())
+            # The original GNU recipe is intentionally unchanged for all other
+            # CPU/platform selections; use unspaced output as that recipe expects.
+            output=Path(folder)/'other-common.lib'
+            for platform,cpu in (('win32','x86_64'),('win32','i686'),('LINUX','aarch64')):
+                result=run(platform,cpu)
+                self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+                self.assertFalse(capture.exists(),'Other platform used the ARM64-only librarian')
+                symbols=subprocess.run(['nm',str(output)],capture_output=True,text=True)
+                self.assertEqual(0,symbols.returncode,symbols.stderr)
+                self.assertIn('first',symbols.stdout);self.assertIn('second',symbols.stdout)
+            lock=json.loads((PORT/'source-build.json').read_text())['commonArchiveRecipe']
+            self.assertEqual('builds/posix/Makefile.in',lock['path'])
+            self.assertEqual(lock['beforeSha256'],hashlib.sha256(original).hexdigest())
+            self.assertEqual(lock['afterSha256'],hashlib.sha256(target.read_bytes()).hexdigest())
+            self.assertIn(b'\t$(STATICLIB_LINK) $@ $^\n',target.read_bytes())
+
+    def test_real_windows_icu_path_survives_both_make_levels_with_both_directories_and_old_x64_behavior(self):
+        fixture=ROOT/'suite/tests/fixtures/native-icu-path'
+        provenance=json.loads((fixture/'source.json').read_text())
+        self.assertEqual('296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785',provenance['archiveSha256'])
+        for item in provenance['members']:
+            self.assertEqual(item['fixtureSha256'],hashlib.sha256((fixture/item['fixture']).read_bytes()).hexdigest())
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);project=root/'external/firebird/ExternalProject_firebird.mk';project.parent.mkdir(parents=True)
+            firebird_source=self.source_tree(root)
+            examples=(firebird_source/'builds/posix/Makefile.in.examples').read_text()
+            defaults=(firebird_source/'builds/posix/make.defaults').read_text()
+            platform=(firebird_source/'builds/posix/prefix.mingw').read_text()
+            # The authenticated Windows recipe puts the actual client DLL in
+            # bin. Its examples copy of isql runs outside that application dir.
+            self.assertIn('LIB=$(BIN)\n',platform)
+            self.assertIn('$(EXAMPLES_DEST)/isql$(EXEC_EXT)',examples)
+            self.assertIn('$(LN) $(ISQL) $(EXAMPLES_DEST)/isql$(EXEC_EXT)',examples)
+            self.assertIn('ROOT:=$(shell cygpath -m -a ../..)\n',examples)
+            example_path='\n'.join(line for line in examples.splitlines()
+                                   if line.startswith('PATH :=') or line=='export PATH')
+            locations='\n'.join(next(line for line in defaults.splitlines() if line.startswith(key+'='))
+                                for key in ('GEN_ROOT','FB_BUILD','BIN'))
+            original=(fixture/project.name).read_bytes();project.write_bytes(original)
+            hook=project.with_name('UnpackedTarball_firebird.mk');hook.write_bytes((self.lo_patches/hook.name).read_bytes())
+            (root/'configure.ac').write_bytes(self.lo_configure.read_bytes())
+            bootstrap=root/'bin/unpack-sources';bootstrap.parent.mkdir()
+            bootstrap.write_bytes((ROOT/'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
+            zstd=root/'external/zstd/UnpackedTarball_zstd.mk';zstd.parent.mkdir()
+            zstd.write_bytes((ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes())
+            self.mdds_recipe(root)
+            evidence=root/'evidence';evidence.mkdir()
+            bash=shutil.which('bash')
+            self.assertTrue(bash,'Actual Bash is required for the nested make source replay')
+            observer=root/'observe.py';observer.write_text('import json,os;print(json.dumps(os.environ["PATH"].split(":")))\n')
+            inner=root/'inner.mk';inner.write_text('SHELL := '+bash+'\n'+
+                'ROOT := C:/source/workdir/UnpackedTarball/firebird\nTARGET := Release\n'+locations+'\n'+
+                example_path+'\nall:\n\t$(LIBO_TUNNEL_LIBRARY_PATH) '+shlex.quote(sys.executable)+' '+shlex.quote(str(observer))+'\n')
+            def replay(raw,cpu):
+                assignment=next(line.strip().removesuffix(' \\') for line in raw.decode().splitlines()
+                                if line.strip().startswith('LIBO_TUNNEL_LIBRARY_PATH='))
+                variables=('SHELL := '+bash+'\nOS := WNT\nCPUNAME := '+cpu+'\n'+
+                    'SRCDIR := C:/source\nSRCDIR_CYG := /cygdrive/c/source\n'+
+                    'BUILDDIR := C:/source\nBUILDDIR_CYG := /cygdrive/c/source\n'+
+                    'INSTDIR := C:/source/instdir\nINSTDIR_CYG := /cygdrive/c/source/instdir\n'+
+                    'WORKDIR := C:/source/workdir\nWORKDIR_CYG := /cygdrive/c/source/workdir\n'+
+                    'TARFILE_LOCATION := C:/downloads\nTARFILE_LOCATION_CYG := /cygdrive/c/downloads\n'+
+                    'INSTDIR_FOR_BUILD := $(INSTDIR)\nLIBO_URE_LIB_FOLDER := program\nLIBO_BIN_FOLDER := program\n'+
+                    'gb_UnpackedTarball_workdir := $(WORKDIR)/UnpackedTarball\n'+
+                    'firebird_BUILDDIR := $(gb_UnpackedTarball_workdir)/firebird/gen/Release/firebird\n')
+                outer=root/'outer.mk';outer.write_text(variables+(fixture/'cyg-path.mk').read_text()+'\n'+
+                    (fixture/'windows-loader-path.mk').read_text()+'\nall:\n\t$(MAKE) --no-print-directory -f '+
+                    shlex.quote(str(inner))+' '+assignment+'\n')
+                result=subprocess.run(['make','--no-print-directory','-f',str(outer),'SHELL='+bash],
+                    capture_output=True,text=True,env=dict(os.environ,PATH='/usr/bin:/bin'),timeout=10)
+                self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+                return json.loads(result.stdout.splitlines()[-1])
+            icu='/cygdrive/c/source/workdir/UnpackedTarball/icu/source/lib'
+            firebird='/cygdrive/c/source/workdir/UnpackedTarball/firebird/gen/Release/firebird/bin'
+            before=replay(original,'AARCH64')
+            self.assertNotIn(icu,before,'Pinned original no longer reproduces concatenated PATH assignments')
+            self.assertTrue(any('icu/source/libPATH=' in entry for entry in before))
+            # Reproduce the intermediate ICU fix used in Native15: the mixed
+            # C:/ examples PATH does not supply a canonical Cygwin bin entry,
+            # and appending Firebird/lib misses prefix.mingw's LIB=$(BIN).
+            old=(b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib)'
+                 b'$(call gb_Helper_extend_ld_path,$(firebird_BUILDDIR)/lib)')
+            prior=original.replace(old,b'$(if $(filter WNT_AARCH64,$(OS)_$(CPUNAME)),'+
+                b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib:$(firebird_BUILDDIR)/lib),'+old+b')')
+            self.assertEqual('94d52186250e98ced4237146faca6d0448c9562d74ce1c3cb3254bd9d351c5b2',hashlib.sha256(prior).hexdigest())
+            prior_entries=replay(prior,'AARCH64')
+            self.assertIn(icu,prior_entries)
+            self.assertNotIn(firebird,prior_entries)
+            mixed='/source/workdir/UnpackedTarball/firebird/gen/Release/firebird/bin'
+            self.assertIn('C',prior_entries);self.assertIn(mixed,prior_entries)
+            receipt=module().install(root,evidence)
+            effective=project.read_bytes();after=replay(effective,'AARCH64')
+            self.assertIn(icu,after,'Owned ARM64 child lost the complete authenticated ICU library directory')
+            self.assertIn(firebird,after,'ARM64 helper misses the actual Windows client DLL directory')
+            self.assertEqual(['/cygdrive/c/source/instdir/program','/cygdrive/c/source/instdir/program',
+                              './','C',mixed,'/usr/bin','/bin',icu,firebird],after,'Existing helper base paths and directory order changed')
+            self.assertFalse(any('libPATH=' in entry for entry in after))
+            self.assertEqual(replay(original,'X86_64'),replay(effective,'X86_64'),'x64 helper behavior changed')
+            lock=json.loads((PORT/'source-build.json').read_text())['icuBuildPath']
+            self.assertEqual(lock['sha256'],hashlib.sha256(original).hexdigest())
+            self.assertEqual(lock['afterSha256'],hashlib.sha256(effective).hexdigest())
+            self.assertEqual(original,(evidence/'original-ExternalProject_firebird.mk').read_bytes())
+            self.assertEqual(effective,(evidence/'effective-ExternalProject_firebird.mk').read_bytes())
+            self.assertEqual(lock['afterSha256'],receipt['icuBuildPath']['afterSha256'])
+
+    def test_real_zstd_unpack_environment_changes_only_its_arm64_archive_target(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);hook=root/'external/firebird/UnpackedTarball_firebird.mk';hook.parent.mkdir(parents=True)
+            hook.write_bytes((self.lo_patches/hook.name).read_bytes())
+            hook.with_name('ExternalProject_firebird.mk').write_bytes((ROOT/'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes())
+            (root/'configure.ac').write_bytes(self.lo_configure.read_bytes())
+            bootstrap=root/'bin/unpack-sources';bootstrap.parent.mkdir()
+            bootstrap.write_bytes((ROOT/'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
+            recipe=root/'external/zstd/UnpackedTarball_zstd.mk';recipe.parent.mkdir()
+            original=(ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes();recipe.write_bytes(original)
+            self.mdds_recipe(root)
+            self.assertEqual('3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909',hashlib.sha256(original).hexdigest())
+            observer=root/'observe.py';observer.write_text('import json,os,sys;print(json.dumps([sys.argv[1],os.environ["CYGWIN"]]))\n')
+            def replay(raw,cpu,os_name='WNT'):
+                recipe.write_bytes(raw)
+                makefile=root/'scope.mk';makefile.write_text(
+                    'all: unpacked/zstd-1.5.7.tar.gz unpacked/other.tar.gz outer\n'+
+                    'OS := '+os_name+'\nCPUNAME := '+cpu+'\nZSTD_TARBALL := zstd-1.5.7.tar.gz\n'+
+                    'gb_UnpackedTarget_get_target = unpacked/$(1)\ninclude '+str(recipe)+'\n'+
+                    'unpacked/zstd-1.5.7.tar.gz unpacked/other.tar.gz outer:\n\t@'+
+                    shlex.quote(sys.executable)+' '+shlex.quote(str(observer))+' $@\n')
+                result=subprocess.run(['make','--no-print-directory','-f',str(makefile)],cwd=root,
+                    env=dict(os.environ,CYGWIN='winsymlinks:nativestrict'),capture_output=True,text=True,timeout=10)
+                self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+                return dict(json.loads(line) for line in result.stdout.splitlines())
+            strict={name:'winsymlinks:nativestrict' for name in ('unpacked/zstd-1.5.7.tar.gz','unpacked/other.tar.gz','outer')}
+            self.assertEqual(strict,replay(original,'AARCH64'))
+            evidence=root/'evidence';evidence.mkdir();receipt=module().install(root,evidence)
+            effective=recipe.read_bytes()
+            self.assertEqual(dict(strict,**{'unpacked/zstd-1.5.7.tar.gz':'winsymlinks:sys'}),replay(effective,'AARCH64'))
+            self.assertEqual(strict,replay(effective,'X86_64'))
+            self.assertEqual(strict,replay(effective,'AARCH64','LINUX'))
+            self.assertTrue(effective.startswith(original),'Pristine upstream zstd workaround bytes changed')
+            lock=json.loads((PORT/'source-build.json').read_text())['zstdSourceLinks']
+            self.assertEqual(lock['afterSha256'],hashlib.sha256(effective).hexdigest())
+            self.assertEqual(original,(evidence/'original-UnpackedTarball_zstd.mk').read_bytes())
+            self.assertEqual(effective,(evidence/'effective-UnpackedTarball_zstd.mk').read_bytes())
+            self.assertEqual(lock['afterSha256'],receipt['zstdSourceLinks']['afterSha256'])
+
     def test_explicit_enable_flag_is_not_overwritten_by_arm64_defaults(self):
         autoconf = shutil.which('autoconf')
         if not autoconf:
@@ -239,9 +629,100 @@ class AuthenticatedSource(unittest.TestCase):
             target.parent.mkdir(parents=True)
             original = (self.lo_patches / target.name).read_bytes()
             target.write_bytes(original)
+            project=target.with_name('ExternalProject_firebird.mk')
+            project_original=(ROOT/'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes()
+            project.write_bytes(project_original)
             configure = root / 'configure.ac'
             configure.write_bytes(self.lo_configure.read_bytes())
-            receipt = module().install(root)
+            bootstrap = root / 'bin/unpack-sources'
+            bootstrap.parent.mkdir()
+            pristine = (ROOT / 'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes()
+            bootstrap.write_bytes(pristine)
+            zstd=root/'external/zstd/UnpackedTarball_zstd.mk';zstd.parent.mkdir()
+            zstd_original=(ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes();zstd.write_bytes(zstd_original)
+            mdds = self.mdds_recipe(root)
+            mdds_original = mdds.read_bytes()
+            upstream = mdds.parent / 'gcc-12-silence-use-after-free.patch.1'
+            upstream_original = upstream.read_bytes()
+            evidence = root / 'evidence'
+            evidence.mkdir()
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch'):
+                with self.subTest(invalid=invalid):
+                    if invalid == 'changed-helper':
+                        bootstrap.write_bytes(pristine + b'\nchanged\n')
+                    elif invalid == 'linked-helper':
+                        saved = root / 'original-helper'
+                        saved.write_bytes(pristine)
+                        bootstrap.unlink()
+                        bootstrap.symlink_to(saved)
+                    elif invalid == 'evidence-collision':
+                        (evidence / 'effective-unpack-sources').write_bytes(b'prior evidence')
+                    elif invalid == 'changed-build-recipe':
+                        project.write_bytes(project_original+b'\nchanged\n')
+                    elif invalid == 'linked-build-recipe':
+                        saved_project=root/'original-build-recipe';saved_project.write_bytes(project_original)
+                        project.unlink();project.symlink_to(saved_project)
+                    elif invalid == 'build-evidence-collision':
+                        (evidence/'effective-ExternalProject_firebird.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'changed-zstd-recipe':
+                        zstd.write_bytes(zstd_original+b'\nchanged\n')
+                    elif invalid == 'linked-zstd-recipe':
+                        saved_zstd=root/'original-zstd-recipe';saved_zstd.write_bytes(zstd_original)
+                        zstd.unlink();zstd.symlink_to(saved_zstd)
+                    elif invalid == 'zstd-evidence-collision':
+                        (evidence/'effective-UnpackedTarball_zstd.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'changed-mdds-recipe':
+                        mdds.write_bytes(mdds_original+b'changed')
+                    elif invalid == 'linked-mdds-recipe':
+                        saved_mdds=root/'original-mdds';saved_mdds.write_bytes(mdds_original)
+                        mdds.unlink();mdds.symlink_to(saved_mdds)
+                    elif invalid == 'mdds-evidence-collision':
+                        (evidence/'effective-UnpackedTarball_mdds.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'mdds-patch-collision':
+                        (mdds.parent/'opengeul-arm64-equality.patch.1').write_bytes(b'prior patch')
+                    elif invalid == 'changed-mdds-upstream-patch':
+                        upstream.write_bytes(upstream_original+b'changed')
+                    expected_bootstrap = bootstrap.read_bytes()
+                    expected_project=project.read_bytes()
+                    expected_zstd=zstd.read_bytes()
+                    expected_mdds=mdds.read_bytes()
+                    installer = module()
+                    if invalid == 'changed-mdds-patch':
+                        bundle = root/'changed-port'; bundle.mkdir(exist_ok=True)
+                        for name in ('source-build.json', 'firebird-windows-arm64.patch', 'libreoffice-enable-arm64-firebird.patch', 'opengeul-arm64-equality.patch.1'):
+                            shutil.copyfile(PORT/name,bundle/name)
+                        bad_patch = bundle/'opengeul-arm64-equality.patch.1'
+                        bad_patch.write_bytes(bad_patch.read_bytes()+b'changed')
+                        installer.HERE = bundle
+                    with self.assertRaisesRegex(ValueError, 'SHA256|regular file|exists'):
+                        installer.install(root, evidence)
+                    self.assertEqual(original, target.read_bytes())
+                    self.assertEqual(self.lo_configure.read_bytes(), configure.read_bytes())
+                    self.assertEqual(expected_bootstrap, bootstrap.read_bytes())
+                    self.assertEqual(expected_project,project.read_bytes())
+                    self.assertEqual(expected_zstd,zstd.read_bytes())
+                    self.assertEqual(expected_mdds,mdds.read_bytes())
+                    self.assertFalse((evidence/'original-UnpackedTarball_mdds.mk').exists())
+                    self.assertFalse((target.parent / 'firebird-windows-arm64.patch').exists())
+                    self.assertFalse((evidence / 'original-unpack-sources').exists())
+                    self.assertFalse((evidence/'original-ExternalProject_firebird.mk').exists())
+                    self.assertFalse((evidence/'original-UnpackedTarball_zstd.mk').exists())
+                    if bootstrap.is_symlink():
+                        bootstrap.unlink()
+                    bootstrap.write_bytes(pristine)
+                    (evidence / 'effective-unpack-sources').unlink(missing_ok=True)
+                    if project.is_symlink():project.unlink()
+                    project.write_bytes(project_original)
+                    (evidence/'effective-ExternalProject_firebird.mk').unlink(missing_ok=True)
+                    if zstd.is_symlink():zstd.unlink()
+                    zstd.write_bytes(zstd_original)
+                    (evidence/'effective-UnpackedTarball_zstd.mk').unlink(missing_ok=True)
+                    if mdds.is_symlink():mdds.unlink()
+                    mdds.write_bytes(mdds_original)
+                    upstream.write_bytes(upstream_original)
+                    (mdds.parent/'opengeul-arm64-equality.patch.1').unlink(missing_ok=True)
+                    (evidence/'effective-UnpackedTarball_mdds.mk').unlink(missing_ok=True)
+            receipt = module().install(root, evidence)
             changed = target.read_text()
             self.assertTrue(changed.startswith(original.decode()))
             self.assertIn('ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)', changed)
@@ -251,6 +732,10 @@ class AuthenticatedSource(unittest.TestCase):
                              hashlib.sha256((PORT/'firebird-windows-arm64.patch').read_bytes()).hexdigest())
             self.assertFalse('        enable_coinmp=no\n        enable_firebird_sdbc=no\n' in configure.read_text(), 'ARM64 Firebird is still forcibly disabled')
             self.assertEqual(receipt['status'], 'source-hook-installed-native-build-pending')
+            self.assertEqual(pristine, (evidence / 'original-unpack-sources').read_bytes())
+            self.assertEqual(bootstrap.read_bytes(), (evidence / 'effective-unpack-sources').read_bytes())
+            self.assertEqual(hashlib.sha256(bootstrap.read_bytes()).hexdigest(),
+                             receipt['moduleBootstrap']['afterSha256'])
             self.assertEqual((target.parent / 'firebird-windows-arm64.patch').read_bytes(),
                              (PORT / 'firebird-windows-arm64.patch').read_bytes())
             with self.assertRaisesRegex(ValueError, 'SHA256|already exists'):

@@ -22,7 +22,110 @@ def _regular(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def install(source: Path) -> dict:
+def _icu_build_path(source: Path, lock: dict) -> tuple[Path, bytes, bytes]:
+    """Plan the ARM64-only correction before any owned source writes."""
+    target = source / lock['path']
+    original = _regular(target)
+    if hashlib.sha256(original).hexdigest() != lock['sha256']:
+        raise ValueError('LibreOffice Firebird build recipe SHA256 differs from the pinned source')
+    old = (b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib)'
+           b'$(call gb_Helper_extend_ld_path,$(firebird_BUILDDIR)/lib)')
+    new = (b'$(if $(filter WNT_AARCH64,$(OS)_$(CPUNAME)),'
+           b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib:$(firebird_BUILDDIR)/bin),'
+           + old + b')')
+    changed = original.replace(old, new)
+    if hashlib.sha256(changed).hexdigest() != lock['afterSha256']:
+        raise ValueError('LibreOffice Firebird build path result SHA256 differs from its lock')
+    return target, original, changed
+
+
+def _zstd_source_links(source: Path, lock: dict) -> tuple[Path, bytes, bytes]:
+    """Keep portable source-test links confined to the exact ARM64 untar target."""
+    target = source / lock['path']
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise ValueError('Zstd source unpack requires a regular recipe directory')
+    original = _regular(target)
+    if hashlib.sha256(original).hexdigest() != lock['sha256']:
+        raise ValueError('LibreOffice zstd unpack recipe SHA256 differs from the pinned source')
+    changed = original + (
+        b'\n# Preserve source-only CLI test symlinks whose targets occur later in the archive.\n'
+        b'# Keep native module and DLL links strict outside this exact unpack target.\n'
+        b'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
+        b'$(call gb_UnpackedTarget_get_target,$(ZSTD_TARBALL)): export CYGWIN := winsymlinks:sys\n'
+        b'endif\n')
+    if hashlib.sha256(changed).hexdigest() != lock['afterSha256']:
+        raise ValueError('LibreOffice zstd unpack result SHA256 differs from its lock')
+    return target, original, changed
+
+
+def _mdds_equality(source: Path, lock: dict):
+    """Authenticate and plan the exact two-header native-control correction."""
+    target = source / lock['recipe']['path']
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise ValueError('MDDS source hook requires a regular recipe directory')
+    original = _regular(target)
+    if hashlib.sha256(original).hexdigest() != lock['recipe']['sha256']:
+        raise ValueError('MDDS unpack recipe SHA256 differs from the pinned source')
+    upstream = _regular(target.parent / lock['upstreamPatch']['filename'])
+    if hashlib.sha256(upstream).hexdigest() != lock['upstreamPatch']['sha256']:
+        raise ValueError('MDDS existing GCC12 patch SHA256 differs from its lock')
+    patch_name = lock['patch']['filename']
+    if Path(patch_name).name != patch_name:
+        raise ValueError('Invalid MDDS patch filename')
+    patch = _regular(HERE / patch_name)
+    if hashlib.sha256(patch).hexdigest() != lock['patch']['sha256']:
+        raise ValueError('MDDS equality patch SHA256 differs from its lock')
+    output = target.parent / patch_name
+    if output.exists() or output.is_symlink():
+        raise ValueError('MDDS patch output already exists')
+    changed = original + (
+        b'\n'
+        b'# OpenGeul native Windows ARM64 MDDS equality definition correction.\n'
+        b'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
+        b'$(eval $(call gb_UnpackedTarball_add_patches,mdds,\\\n'
+        b'\texternal/mdds/opengeul-arm64-equality.patch.1 \\\n'
+        b'))\n'
+        b'endif\n'
+    )
+    if hashlib.sha256(changed).hexdigest() != lock['recipe']['afterSha256']:
+        raise ValueError('MDDS unpack result SHA256 differs from its lock')
+    return target, original, changed, output, patch
+
+
+def install_module_bootstrap(source: Path, evidence: Path | None = None) -> dict:
+    """Correct the pinned unpack helper's inverted git-hooks selection only."""
+    lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))['moduleBootstrap']
+    source = Path(source).resolve(strict=True)
+    target = source / lock['path']
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise ValueError('Source bootstrap requires a regular bin directory')
+    original = _regular(target)
+    if hashlib.sha256(original).hexdigest() != lock['sha256']:
+        raise ValueError('LibreOffice unpack helper SHA256 differs from the pinned source')
+    changed = original.replace(b'-type d -path ', b'-type d ! -path ')
+    if hashlib.sha256(changed).hexdigest() != lock['afterSha256']:
+        raise ValueError('LibreOffice module bootstrap result SHA256 differs from its lock')
+    retained = {}
+    if evidence is not None:
+        evidence = Path(evidence)
+        if any(path.is_symlink() for path in (evidence, *evidence.parents)) or not evidence.is_dir():
+            raise ValueError('Source bootstrap evidence requires regular owned directories')
+        retained = {'original': evidence / 'original-unpack-sources',
+                    'effective': evidence / 'effective-unpack-sources'}
+        if any(path.exists() or path.is_symlink() for path in retained.values()):
+            raise ValueError('Source bootstrap evidence already exists')
+        for name, raw in (('original', original), ('effective', changed)):
+            with retained[name].open('xb') as stream:
+                stream.write(raw)
+    target.write_bytes(changed)
+    if _regular(target) != changed:
+        raise ValueError('Effective source bootstrap bytes changed after write')
+    return {'path': lock['path'], 'beforeSha256': lock['sha256'],
+            'afterSha256': lock['afterSha256'],
+            'evidence': {name: str(path) for name, path in retained.items()}}
+
+
+def install(source: Path, evidence: Path | None = None) -> dict:
     lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))
     source = Path(source).resolve(strict=True)
     target = source / lock['sourceHook']['path']
@@ -54,14 +157,51 @@ def install(source: Path) -> dict:
     output = target.parent / patch_name
     if output.exists() or output.is_symlink():
         raise ValueError('Port patch output already exists')
+    project, project_original, project_changed = _icu_build_path(source, lock['icuBuildPath'])
+    zstd, zstd_original, zstd_changed = _zstd_source_links(source, lock['zstdSourceLinks'])
+    mdds, mdds_original, mdds_changed, mdds_output, mdds_patch = _mdds_equality(source, lock['mddsEquality'])
+    mdds_evidence = {}
+    project_evidence = {}
+    zstd_evidence = {}
+    if evidence is not None:
+        evidence = Path(evidence)
+        if any(path.is_symlink() for path in (evidence, *evidence.parents)) or not evidence.is_dir():
+            raise ValueError('Firebird build path evidence requires regular owned directories')
+        project_evidence = {'original': evidence / 'original-ExternalProject_firebird.mk',
+                            'effective': evidence / 'effective-ExternalProject_firebird.mk'}
+        if any(path.exists() or path.is_symlink() for path in project_evidence.values()):
+            raise ValueError('Firebird build path evidence already exists')
+        zstd_evidence = {'original': evidence / 'original-UnpackedTarball_zstd.mk',
+                         'effective': evidence / 'effective-UnpackedTarball_zstd.mk'}
+        if any(path.exists() or path.is_symlink() for path in zstd_evidence.values()):
+            raise ValueError('Zstd unpack evidence already exists')
+        mdds_evidence = {'original': evidence / 'original-UnpackedTarball_mdds.mk',
+                         'effective': evidence / 'effective-UnpackedTarball_mdds.mk'}
+        if any(path.exists() or path.is_symlink() for path in mdds_evidence.values()):
+            raise ValueError('MDDS unpack evidence already exists')
     hook = ('\n# OpenGeul native Windows ARM64 Firebird CPU identity port.\n'
             'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
             '$(eval $(call gb_UnpackedTarball_add_patches,firebird,\\\n'
             '\texternal/firebird/' + patch_name + ' \\\n'
             '))\nendif\n').encode('utf-8')
     changed = original + hook
-    # All source and patch checks precede either write. The fresh build tree is
+    # All source and patch checks precede source writes. The fresh build tree is
     # owned by this invocation; a repeated or changed hook is rejected above.
+    bootstrap = install_module_bootstrap(source, evidence)
+    for name, raw in (('original', project_original), ('effective', project_changed)):
+        if project_evidence:
+            with project_evidence[name].open('xb') as stream:
+                stream.write(raw)
+    for name, raw in (('original', zstd_original), ('effective', zstd_changed)):
+        if zstd_evidence:
+            with zstd_evidence[name].open('xb') as stream:
+                stream.write(raw)
+    for name, raw in (('original', mdds_original), ('effective', mdds_changed)):
+        if mdds_evidence:
+            with mdds_evidence[name].open('xb') as stream:
+                stream.write(raw)
+    with mdds_output.open('xb') as stream:
+        stream.write(mdds_patch)
     with output.open('xb') as stream:
         stream.write(patch)
     try:
@@ -69,7 +209,17 @@ def install(source: Path) -> dict:
             stream.write(changed)
         with configure.open('wb') as stream:
             stream.write(configure_changed)
+        project.write_bytes(project_changed)
+        zstd.write_bytes(zstd_changed)
+        mdds.write_bytes(mdds_changed)
+        if _regular(mdds) != mdds_changed or _regular(mdds_output) != mdds_patch:
+            raise ValueError('Effective MDDS source hook bytes changed after write')
+        if _regular(project) != project_changed:
+            raise ValueError('Effective Firebird build recipe bytes changed after write')
+        if _regular(zstd) != zstd_changed:
+            raise ValueError('Effective zstd unpack recipe bytes changed after write')
     except BaseException:
+        mdds_output.unlink(missing_ok=True)
         output.unlink(missing_ok=True)
         raise
     return {'schemaVersion': 1, 'status': 'source-hook-installed-native-build-pending',
@@ -81,14 +231,33 @@ def install(source: Path) -> dict:
             'configurePatchSha256': lock['configurePatch']['sha256'],
             'configureBeforeSha256': lock['configureSource']['sha256'],
             'configureAfterSha256': lock['configureSource']['afterSha256'],
+            'moduleBootstrap': bootstrap,
+            'icuBuildPath': {'path': lock['icuBuildPath']['path'],
+                             'beforeSha256': lock['icuBuildPath']['sha256'],
+                             'afterSha256': lock['icuBuildPath']['afterSha256'],
+                             'evidence': {name: str(path) for name, path in project_evidence.items()}},
+            'zstdSourceLinks': {'path': lock['zstdSourceLinks']['path'],
+                                'beforeSha256': lock['zstdSourceLinks']['sha256'],
+                                'afterSha256': lock['zstdSourceLinks']['afterSha256'],
+                                'archive': lock['zstdSourceLinks']['archive'],
+                                'scope': lock['zstdSourceLinks']['scope'],
+                                'evidence': {name: str(path) for name, path in zstd_evidence.items()}},
+            'mddsEquality': {'path': lock['mddsEquality']['recipe']['path'],
+                             'beforeSha256': lock['mddsEquality']['recipe']['sha256'],
+                             'afterSha256': lock['mddsEquality']['recipe']['afterSha256'],
+                             'patchSha256': lock['mddsEquality']['patch']['sha256'],
+                             'upstreamPatchSha256': lock['mddsEquality']['upstreamPatch']['sha256'],
+                             'scope': lock['mddsEquality']['scope'],
+                             'evidence': {name: str(path) for name, path in mdds_evidence.items()}},
             'nativeBuildVerified': False, 'basePersistenceVerified': False}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--libreoffice-source', type=Path, required=True)
+    parser.add_argument('--evidence-directory', type=Path)
     args = parser.parse_args()
-    print(json.dumps(install(args.libreoffice_source), indent=2))
+    print(json.dumps(install(args.libreoffice_source, args.evidence_directory), indent=2))
 
 
 if __name__ == '__main__':
