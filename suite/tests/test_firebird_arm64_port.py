@@ -382,6 +382,20 @@ class AuthenticatedSource(unittest.TestCase):
             self.assertEqual(item['fixtureSha256'],hashlib.sha256((fixture/item['fixture']).read_bytes()).hexdigest())
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);project=root/'external/firebird/ExternalProject_firebird.mk';project.parent.mkdir(parents=True)
+            firebird_source=self.source_tree(root)
+            examples=(firebird_source/'builds/posix/Makefile.in.examples').read_text()
+            defaults=(firebird_source/'builds/posix/make.defaults').read_text()
+            platform=(firebird_source/'builds/posix/prefix.mingw').read_text()
+            # The authenticated Windows recipe puts the actual client DLL in
+            # bin. Its examples copy of isql runs outside that application dir.
+            self.assertIn('LIB=$(BIN)\n',platform)
+            self.assertIn('$(EXAMPLES_DEST)/isql$(EXEC_EXT)',examples)
+            self.assertIn('$(LN) $(ISQL) $(EXAMPLES_DEST)/isql$(EXEC_EXT)',examples)
+            self.assertIn('ROOT:=$(shell cygpath -m -a ../..)\n',examples)
+            example_path='\n'.join(line for line in examples.splitlines()
+                                   if line.startswith('PATH :=') or line=='export PATH')
+            locations='\n'.join(next(line for line in defaults.splitlines() if line.startswith(key+'='))
+                                for key in ('GEN_ROOT','FB_BUILD','BIN'))
             original=(fixture/project.name).read_bytes();project.write_bytes(original)
             hook=project.with_name('UnpackedTarball_firebird.mk');hook.write_bytes((self.lo_patches/hook.name).read_bytes())
             (root/'configure.ac').write_bytes(self.lo_configure.read_bytes())
@@ -391,7 +405,9 @@ class AuthenticatedSource(unittest.TestCase):
             bash=shutil.which('bash')
             self.assertTrue(bash,'Actual Bash is required for the nested make source replay')
             observer=root/'observe.py';observer.write_text('import json,os;print(json.dumps(os.environ["PATH"].split(":")))\n')
-            inner=root/'inner.mk';inner.write_text('SHELL := '+bash+'\nall:\n\t$(LIBO_TUNNEL_LIBRARY_PATH) '+shlex.quote(sys.executable)+' '+shlex.quote(str(observer))+'\n')
+            inner=root/'inner.mk';inner.write_text('SHELL := '+bash+'\n'+
+                'ROOT := C:/source/workdir/UnpackedTarball/firebird\nTARGET := Release\n'+locations+'\n'+
+                example_path+'\nall:\n\t$(LIBO_TUNNEL_LIBRARY_PATH) '+shlex.quote(sys.executable)+' '+shlex.quote(str(observer))+'\n')
             def replay(raw,cpu):
                 assignment=next(line.strip().removesuffix(' \\') for line in raw.decode().splitlines()
                                 if line.strip().startswith('LIBO_TUNNEL_LIBRARY_PATH='))
@@ -412,15 +428,29 @@ class AuthenticatedSource(unittest.TestCase):
                 self.assertEqual(0,result.returncode,result.stdout+result.stderr)
                 return json.loads(result.stdout.splitlines()[-1])
             icu='/cygdrive/c/source/workdir/UnpackedTarball/icu/source/lib'
-            firebird='/cygdrive/c/source/workdir/UnpackedTarball/firebird/gen/Release/firebird/lib'
+            firebird='/cygdrive/c/source/workdir/UnpackedTarball/firebird/gen/Release/firebird/bin'
             before=replay(original,'AARCH64')
             self.assertNotIn(icu,before,'Pinned original no longer reproduces concatenated PATH assignments')
             self.assertTrue(any('icu/source/libPATH=' in entry for entry in before))
+            # Reproduce the intermediate ICU fix used in Native15: the mixed
+            # C:/ examples PATH does not supply a canonical Cygwin bin entry,
+            # and appending Firebird/lib misses prefix.mingw's LIB=$(BIN).
+            old=(b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib)'
+                 b'$(call gb_Helper_extend_ld_path,$(firebird_BUILDDIR)/lib)')
+            prior=original.replace(old,b'$(if $(filter WNT_AARCH64,$(OS)_$(CPUNAME)),'+
+                b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib:$(firebird_BUILDDIR)/lib),'+old+b')')
+            self.assertEqual('94d52186250e98ced4237146faca6d0448c9562d74ce1c3cb3254bd9d351c5b2',hashlib.sha256(prior).hexdigest())
+            prior_entries=replay(prior,'AARCH64')
+            self.assertIn(icu,prior_entries)
+            self.assertNotIn(firebird,prior_entries)
+            mixed='/source/workdir/UnpackedTarball/firebird/gen/Release/firebird/bin'
+            self.assertIn('C',prior_entries);self.assertIn(mixed,prior_entries)
             receipt=module().install(root,evidence)
             effective=project.read_bytes();after=replay(effective,'AARCH64')
             self.assertIn(icu,after,'Owned ARM64 child lost the complete authenticated ICU library directory')
+            self.assertIn(firebird,after,'ARM64 helper misses the actual Windows client DLL directory')
             self.assertEqual(['/cygdrive/c/source/instdir/program','/cygdrive/c/source/instdir/program',
-                              '/usr/bin','/bin',icu,firebird],after,'Existing helper base paths and directory order changed')
+                              './','C',mixed,'/usr/bin','/bin',icu,firebird],after,'Existing helper base paths and directory order changed')
             self.assertFalse(any('libPATH=' in entry for entry in after))
             self.assertEqual(replay(original,'X86_64'),replay(effective,'X86_64'),'x64 helper behavior changed')
             lock=json.loads((PORT/'source-build.json').read_text())['icuBuildPath']

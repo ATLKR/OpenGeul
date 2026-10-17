@@ -31,7 +31,7 @@ def _icu_build_path(source: Path, lock: dict) -> tuple[Path, bytes, bytes]:
     old = (b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib)'
            b'$(call gb_Helper_extend_ld_path,$(firebird_BUILDDIR)/lib)')
     new = (b'$(if $(filter WNT_AARCH64,$(OS)_$(CPUNAME)),'
-           b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib:$(firebird_BUILDDIR)/lib),'
+           b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib:$(firebird_BUILDDIR)/bin),'
            + old + b')')
     changed = original.replace(old, new)
     if hashlib.sha256(changed).hexdigest() != lock['afterSha256']:

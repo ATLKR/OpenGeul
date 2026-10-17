@@ -30,9 +30,13 @@ Windows ARM64. The pinned Windows helper produces a complete `PATH=...`
 assignment per call; concatenating two calls joins the ICU directory to the
 next literal `PATH=`. This upstream expression is independent of the CPU.
 Our conditional correction targets `WNT_AARCH64` and leaves the original
-expression for x64 and other platforms unchanged. It passes both ICU and
-Firebird library directories to one existing helper call, preserving its base
+expression for x64 and other platforms unchanged. It passes ICU's `source/lib`
+and Firebird's `bin` directory to one existing helper call, preserving its base
 paths, inherited `PATH`, directory order and quoting through both make levels.
+The pinned Windows `prefix.mingw` sets `LIB=$(BIN)` and builds the client DLL
+there. The examples recipe launches its local `isql` copy outside that directory;
+its own `PATH` inserts a mixed `C:/.../bin` pathname. The helper supplies the
+converted Cygwin directory explicitly instead of the unused Firebird `lib` path.
 The manifest authenticates the original and effective external build recipe,
 and the source-hook receipt retains both complete files as evidence.
 
@@ -45,6 +49,13 @@ loading, resolve every possible dependency failure or qualify Base. Missing
 `firebird.msg` formatting accompanies the database failures; the build creates
 that message file after its message database, so copying a message file does
 not repair the demonstrated loader path.
+
+Native source run `39039743949` progressed to the examples `empbuild.fdb`
+recipe, where `gen/examples/isql.exe` reported a loader error; make recorded
+status 127.
+The retained log does not identify the missing DLL or preserve executable import
+bytes. The source replay proves the directory mismatch and Bash path expansion;
+it does not prove this correction resolves that Windows loader failure.
 
 The standalone `isql` proof runs outside that make child. It validates the
 compiled internal ICU 78.3 release triplet as owned native ARM64 DLLs and
