@@ -58,7 +58,7 @@ function Install-SuiteArm64KoreanCapability([UInt16]$ProcessMachine,[UInt16]$Nat
     Assert-SuiteNativeArchitecture -Architecture 'arm64' -ProcessMachine $ProcessMachine -NativeMachine $NativeMachine
     if ($CapabilityName -cne 'Language.Basic~~~ko-KR~0.0.1.0') { throw 'Only the named Korean Basic capability is authorized.' }
     # The already verified hosted Suite worker owns this single Windows Update
-    # attempt. Its controller retains the ten-minute process/log bound. Do not
+    # attempt. Its controller retains the architecture-specific process/log bound. Do not
     # change Windows Update policy, retry, or borrow the x64 offline media.
     Dism\Add-WindowsCapability -Online -Name $CapabilityName -LogPath $LogPath -ErrorAction Stop
 }
@@ -81,11 +81,63 @@ public static class SuiteKoreanSetupHost {
     Assert-SuiteNativeArchitecture -Architecture $Architecture -ProcessMachine $processMachine -NativeMachine $nativeMachine
     return [ordered]@{processMachine=[int]$processMachine;nativeMachine=[int]$nativeMachine}
 }
+function Get-SuiteKoreanPreparationDeadline([string]$Architecture,[UInt16]$ProcessMachine,[UInt16]$NativeMachine,[DateTime]$StartedUtc) {
+    Assert-SuiteNativeArchitecture $Architecture $ProcessMachine $NativeMachine
+    if ($StartedUtc.Kind -ne [DateTimeKind]::Utc) { throw 'Preparation deadline requires an actual UTC start.' }
+    # Native ARM64 WU probe 39011753462 needed 951.62 seconds without restart.
+    # Retain the established x64 limit; extend only the verified native ARM lane.
+    $seconds=if ($Architecture -ceq 'arm64') { 1800 } else { 600 }
+    return [ordered]@{budgetSeconds=$seconds;startedUtc=$StartedUtc.ToString('o');expiresUtc=$StartedUtc.AddSeconds($seconds).ToString('o')}
+}
+function Test-SuiteKoreanLegacyCollectorWindow([string]$Architecture,[double]$ElapsedSeconds) {
+    return -not ($Architecture -ceq 'arm64' -and $ElapsedSeconds -gt 900)
+}
+function Copy-SuiteKoreanServicingTail([string]$Source,[string]$Destination) {
+    Assert-SuitePlainPath $Source
+    Assert-SuitePlainPath $Destination
+    $inputStream=$null;$outputStream=$null
+    try {
+        $inputStream=[IO.File]::Open($Source,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        [long]$size=$inputStream.Length
+        [long]$start=[Math]::Max(0,$size-1MB)
+        [void]$inputStream.Seek($start,[IO.SeekOrigin]::Begin)
+        $buffer=[byte[]]::new([int][Math]::Min(1MB,$size));$used=0
+        while ($used -lt $buffer.Length) {
+            $read=$inputStream.Read($buffer,$used,$buffer.Length-$used)
+            if ($read -eq 0) { break }
+            $used+=$read
+        }
+        $outputStream=[IO.File]::Open($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        $outputStream.Write($buffer,0,$used)
+        return [ordered]@{sourcePath=$Source;sourceBytes=$size;tailStart=$start;tailBytes=$used;truncated=($start -gt 0)}
+    } finally {
+        if ($null -ne $outputStream) { $outputStream.Dispose() }
+        if ($null -ne $inputStream) { $inputStream.Dispose() }
+    }
+}
+function Save-SuiteArm64FailureDiagnostics($HostRecord,$Deadline) {
+    Assert-SuiteNativeArchitecture 'arm64' $HostRecord.processMachine $HostRecord.nativeMachine
+    $record=[ordered]@{source=$binding;preparationDeadline=$Deadline;capturedUtc=[DateTime]::UtcNow.ToString('o');logs=@();errors=@();
+        suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false}
+    $windows=[Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+    foreach ($pair in @(@((Join-Path $windows 'Logs/CBS/CBS.log'),'arm64-cbs-tail.log'),@((Join-Path $out 'dism.log'),'arm64-dism-tail.log'))) {
+        try { $record.logs+=@(Copy-SuiteKoreanServicingTail -Source $pair[0] -Destination (Join-Path $out $pair[1])) }
+        catch { $record.errors+=@($pair[1]+': '+$_.Exception.GetType().FullName) }
+    }
+    Save-SuiteObservation 'arm64-servicing-diagnostics.json' $record
+}
 if (-not $Worker) {
-    foreach ($name in @('readiness.json','failure.json','setup.log','setup-error.log','dism.log')) {
+    foreach ($name in @('readiness.json','failure.json','setup.log','setup-error.log','dism.log','controller-deadline.json')) {
         if (Test-Path -LiteralPath (Join-Path $out $name)) { throw 'Preserve existing Suite prerequisite evidence; use a new output directory.' }
     }
     $controllerHost=Get-SuiteNativeHost -Architecture $Architecture
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $deadline=Get-SuiteKoreanPreparationDeadline $Architecture $controllerHost.processMachine $controllerHost.nativeMachine ([DateTime]::UtcNow)
+    Save-SuiteObservation 'controller-deadline.json' ([ordered]@{source=$binding;preparationDeadline=$deadline;
+        nativeMachine=$controllerHost.nativeMachine;controllerMachine=$controllerHost.processMachine;
+        suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false})
+    $deadlineError=if ($Architecture -ceq 'arm64') { 'Owned Suite Korean prerequisite worker exceeded its native ARM64 1800-second preparation deadline.' } else { 'Owned Suite Korean prerequisite worker exceeded ten minutes.' }
+    $timedOut=$false
     $windowsPowerShell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell/v1.0/powershell.exe'
     Assert-SuitePlainPath $windowsPowerShell
     $arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),
@@ -93,11 +145,10 @@ if (-not $Worker) {
     $child=Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments -PassThru -NoNewWindow `
         -RedirectStandardOutput (Join-Path $out 'setup.log') -RedirectStandardError (Join-Path $out 'setup-error.log')
     $started=$child.StartTime
-    $clock=[Diagnostics.Stopwatch]::StartNew()
     try {
         while ($true) {
-            $remaining=[int][Math]::Floor(600000-$clock.Elapsed.TotalMilliseconds)
-            if ($remaining -le 0) { throw 'Owned Suite Korean prerequisite worker exceeded ten minutes.' }
+            $remaining=[int][Math]::Floor(($deadline.budgetSeconds*1000)-$clock.Elapsed.TotalMilliseconds)
+            if ($remaining -le 0) { $timedOut=$true;throw $deadlineError }
             $finished=$child.WaitForExit([Math]::Min(15000,$remaining))
             [long]$consoleBytes=0
             foreach ($name in @('setup.log','setup-error.log')) {
@@ -108,14 +159,17 @@ if (-not $Worker) {
             if ($consoleBytes -gt 1MB -or ((Test-Path -LiteralPath $dismPath) -and (Get-Item -LiteralPath $dismPath).Length -gt 8MB)) {
                 throw 'Owned Suite Korean prerequisite logs exceeded their bounds; original logs are retained.'
             }
-            if ($clock.Elapsed.TotalSeconds -ge 600) { throw 'Owned Suite Korean prerequisite worker exceeded ten minutes.' }
+            if ($clock.Elapsed.TotalSeconds -ge $deadline.budgetSeconds) { $timedOut=$true;throw $deadlineError }
             if ($finished) { break }
             Write-Host ('Suite Korean prerequisite setup: '+[int]$clock.Elapsed.TotalSeconds+' seconds; original logs retained.')
         }
         if ($child.ExitCode -ne 0) { throw 'Suite Korean prerequisite worker failed; inspect the original setup logs and failure.json.' }
         $record=Get-Content -LiteralPath (Join-Path $out 'readiness.json') -Raw | ConvertFrom-Json
         if ($record.source.sourceCommit -cne $head[0] -or $record.source.job -cne 'windows-suite' -or
-            $record.source.architecture -cne $Architecture -or $record.nativeMachine -ne $controllerHost.nativeMachine -or
+            $record.source.architecture -cne $Architecture -or
+            $record.preparationDeadline.budgetSeconds -ne $deadline.budgetSeconds -or
+            $record.preparationDeadline.startedUtc -cne $deadline.startedUtc -or $record.preparationDeadline.expiresUtc -cne $deadline.expiresUtc -or
+            $record.nativeMachine -ne $controllerHost.nativeMachine -or
             $record.controllerMachine -ne 0 -or $record.profile.component.machine -ne $controllerHost.nativeMachine -or
             $record.suiteOnly -ne $true -or $record.productInputVerified -ne $false -or
             $record.storeQualified -ne $false -or $record.capabilityAfter -cne 'Installed' -or
@@ -124,14 +178,26 @@ if (-not $Worker) {
             throw 'Suite prerequisite worker did not produce a ready, Suite-only observation.'
         }
     } catch {
-        if (-not $child.HasExited -and $child.StartTime -eq $started) {
-            $child.Kill()
-            [void]$child.WaitForExit(10000)
+        $originalControllerFailure=$_
+        $cleanupErrorType=$null
+        try {
+            if (-not $child.HasExited -and $child.StartTime -eq $started) {
+                $child.Kill()
+                [void]$child.WaitForExit(10000)
+            }
+        } catch { $cleanupErrorType=$_.Exception.GetType().FullName }
+        if ($Architecture -ceq 'arm64') {
+            try { Save-SuiteArm64FailureDiagnostics $controllerHost $deadline }
+            catch { Write-Warning ('Bounded ARM64 diagnostics unavailable: '+$_.Exception.GetType().FullName) }
         }
-        Save-SuiteObservation 'controller-failure.json' ([ordered]@{source=$binding;message=$_.Exception.Message;
-            elapsedSeconds=[int]$clock.Elapsed.TotalSeconds;suiteOnly=$true;productInputVerified=$false;storeQualified=$false})
-        throw
-    } finally { $child.Dispose() }
+        try { Save-SuiteObservation 'controller-failure.json' ([ordered]@{source=$binding;message=$originalControllerFailure.Exception.Message;
+            preparationDeadline=$deadline;timedOut=$timedOut;elapsedSeconds=$clock.Elapsed.TotalSeconds;cleanupErrorType=$cleanupErrorType;
+            suiteOnly=$true;productInputVerified=$false;storeQualified=$false}) }
+        catch { Write-Warning ('Controller failure receipt unavailable: '+$_.Exception.GetType().FullName) }
+        throw $originalControllerFailure
+    } finally {
+        try { $child.Dispose() } catch { Write-Warning ('Owned worker handle disposal failed: '+$_.Exception.GetType().FullName) }
+    }
     return
 }
 
@@ -153,6 +219,7 @@ function Test-SuiteKoreanLanguageTag([AllowNull()][object]$Tag) {
 $stage='native-host'
 $servicingFailed=$false
 $servicingStartedUtc=$null
+$deadline=$null;$workerClock=[Diagnostics.Stopwatch]::StartNew()
 try {
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     $principal=[Security.Principal.WindowsPrincipal]::new($identity)
@@ -162,6 +229,17 @@ try {
     $nativeHost=Get-SuiteNativeHost -Architecture $Architecture
     [UInt16]$processMachine=$nativeHost.processMachine
     [UInt16]$nativeMachine=$nativeHost.nativeMachine
+    $savedDeadline=Get-Content -LiteralPath (Join-Path $out 'controller-deadline.json') -Raw | ConvertFrom-Json
+    $deadlineStart=if ($savedDeadline.preparationDeadline.startedUtc -is [DateTime]) { $savedDeadline.preparationDeadline.startedUtc }
+        else { [DateTime]::Parse($savedDeadline.preparationDeadline.startedUtc,$null,[Globalization.DateTimeStyles]::RoundtripKind) }
+    $deadline=Get-SuiteKoreanPreparationDeadline $Architecture $processMachine $nativeMachine $deadlineStart
+    if ($savedDeadline.source.sourceCommit -cne $binding.sourceCommit -or $savedDeadline.source.sourceRun -cne $binding.sourceRun -or
+        $savedDeadline.source.runAttempt -cne $binding.runAttempt -or $savedDeadline.source.job -cne $binding.job -or
+        $savedDeadline.source.repository -cne $binding.repository -or $savedDeadline.source.architecture -cne $Architecture -or
+        $savedDeadline.nativeMachine -ne $nativeMachine -or $savedDeadline.controllerMachine -ne $processMachine -or
+        $savedDeadline.preparationDeadline.budgetSeconds -ne $deadline.budgetSeconds -or
+        $savedDeadline.preparationDeadline.expiresUtc -cne $deadline.expiresUtc -or $deadlineStart -gt [DateTime]::UtcNow -or
+        [DateTime]::UtcNow -ge $deadlineStart.AddSeconds($deadline.budgetSeconds)) { throw 'Owned preparation deadline/source/native identity differs from its controller.' }
     $systemPath=[IO.Path]::GetFullPath([Environment]::SystemDirectory)
     $modules=Join-Path $systemPath 'WindowsPowerShell/v1.0/Modules'
     foreach ($name in @('Dism','International','Microsoft.PowerShell.Security')) {
@@ -181,7 +259,7 @@ try {
     if ($capability.Count -ne 1) { throw 'Named Korean Basic capability is missing or ambiguous.' }
     $before=[string]$capability[0].State
     $languages=International\Get-WinUserLanguageList -ErrorAction Stop
-    Save-SuiteObservation 'before.json' ([ordered]@{source=$binding;capabilityName=$capabilityName;capabilityBefore=$before;
+    Save-SuiteObservation 'before.json' ([ordered]@{source=$binding;preparationDeadline=$deadline;elapsedSeconds=$workerClock.Elapsed.TotalSeconds;capabilityName=$capabilityName;capabilityBefore=$before;
         userSid=$identity.User.Value;nativeMachine=[int]$nativeMachine;controllerMachine=[int]$processMachine;
         languages=@($languages | ForEach-Object { [ordered]@{tag=[string]$_.LanguageTag;inputMethodTips=@($_.InputMethodTips)} });
         suiteOnly=$true;productInputVerified=$false;storeQualified=$false})
@@ -228,7 +306,7 @@ try {
     $stage='capability-after'
     $after=@(Dism\Get-WindowsCapability -Online -Name $capabilityName -LogPath $dismLog -ErrorAction Stop |
         Where-Object Name -eq $capabilityName)
-    Save-SuiteObservation 'capability.json' ([ordered]@{source=$binding;capabilityBefore=$before;
+    Save-SuiteObservation 'capability.json' ([ordered]@{source=$binding;preparationDeadline=$deadline;elapsedSeconds=$workerClock.Elapsed.TotalSeconds;capabilityBefore=$before;
         capabilityAfter=if ($after.Count -eq 1) { [string]$after[0].State } else { $null };
         restartNeeded=$restartNeeded;suiteOnly=$true;productInputVerified=$false;storeQualified=$false})
     if ($after.Count -ne 1 -or [string]$after[0].State -ne 'Installed' -or $restartNeeded) {
@@ -294,7 +372,7 @@ try {
     if ($observedKorean.Count -ne 1 -or @($observedKorean[0].InputMethodTips) -notcontains $profile.inputTip) {
         throw 'Read-back did not confirm the selected current-user Microsoft Korean TSF profile.'
     }
-    Save-SuiteObservation 'readiness.json' ([ordered]@{formatVersion=1;source=$binding;
+    Save-SuiteObservation 'readiness.json' ([ordered]@{formatVersion=1;source=$binding;preparationDeadline=$deadline;elapsedSeconds=$workerClock.Elapsed.TotalSeconds;
         nativeMachine=[int]$nativeMachine;controllerMachine=[int]$processMachine;systemDirectory=$systemPath;capabilityName=$capabilityName;
         capabilityBefore=$before;capabilityAfter=[string]$after[0].State;restartNeeded=$restartNeeded;acquisition=$acquisition;
         userLanguageConfigured=$true;configuredInputTips=@($observedKorean[0].InputMethodTips);profile=$profile;
@@ -302,10 +380,12 @@ try {
         suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false})
 } catch {
     $originalFailure=$_
-    Save-SuiteObservation 'failure.json' ([ordered]@{source=$binding;stage=$stage;message=$originalFailure.Exception.Message;
+    try { Save-SuiteObservation 'failure.json' ([ordered]@{source=$binding;preparationDeadline=$deadline;elapsedSeconds=$workerClock.Elapsed.TotalSeconds;stage=$stage;message=$originalFailure.Exception.Message;
         failureType=$originalFailure.Exception.GetType().FullName;scriptLine=[int]$originalFailure.InvocationInfo.ScriptLineNumber;
-        suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false})
-    if ($servicingFailed -and $null -ne $servicingStartedUtc) {
+        suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false}) }
+    catch { Write-Warning ('Worker failure receipt unavailable: '+$_.Exception.GetType().FullName) }
+    if ($servicingFailed -and $null -ne $servicingStartedUtc -and
+        (Test-SuiteKoreanLegacyCollectorWindow $Architecture ([DateTime]::UtcNow-$servicingStartedUtc).TotalSeconds)) {
         # One owned, read-only collector runs only after the actual DISM call
         # throws. It cannot replace the original error or extend setup retries.
         $diagnosticProcess=$null
@@ -339,6 +419,10 @@ try {
             }
             try { Save-SuiteObservation 'diagnostic-collection.json' $collection } catch { }
         }
+    }
+    elseif ($servicingFailed -and $null -ne $servicingStartedUtc -and $Architecture -ceq 'arm64') {
+        try { Save-SuiteObservation 'diagnostic-collection.json' ([ordered]@{source=$binding;status='extended-arm64-parent-bounded-tails';
+            preparationDeadline=$deadline;suiteOnly=$true;productInputVerified=$false;sourceQualified=$false;storeQualified=$false}) } catch { }
     }
     throw $originalFailure
 }
