@@ -1,6 +1,6 @@
 """Platform-neutral checks for the actual-Windows smoke harness helpers."""
 import importlib.util
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import hashlib
 import io
 import json
@@ -391,6 +391,302 @@ class NativeSmokeTests(unittest.TestCase):
             for marker in ('Engine-OpenGeul-writer', 'UI-OpenGeul-calc', 'UI-OpenGeul-impress'):
                 self.assertIn(marker, text)
             self.assertNotIn('should not count', text)
+
+
+class CalcDocumentOrchestrationTests(unittest.TestCase):
+    """Exercise document_case while replacing only its external GUI boundaries.
+
+    Removing or moving the Calc begin/complete calls must fail these tests even
+    when the fake keyboard produces a saved file containing the marker.
+    """
+
+    @staticmethod
+    def _write_document(path, module, suffix=''):
+        marker = 'Engine-OpenGeul-' + module + suffix
+        with zipfile.ZipFile(path, 'w') as archive:
+            if module == 'calc':
+                archive.writestr('xl/workbook.xml',
+                    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                    '<sheets><sheet name="Sheet0" sheetId="1" r:id="rId1"/></sheets></workbook>')
+                archive.writestr('xl/_rels/workbook.xml.rels',
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+                    'Target="worksheets/sheet1.xml"/></Relationships>')
+                archive.writestr('xl/worksheets/sheet1.xml',
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>' + marker + '</t></is></c>'
+                    '<c r="B1"><v>17</v></c><c r="C1"><v>25</v></c>'
+                    '<c r="D1"><f>SUM(B1:C1)</f><v>42</v></c></row></sheetData></worksheet>')
+            else:
+                member = 'word/document.xml' if module == 'writer' else 'ppt/slides/slide1.xml'
+                archive.writestr(member, '<document><text>' + marker + '</text></document>')
+
+    def _run_document(self, module='calc', *, failure=None, abort_raises=False,
+                      replace_source_on_launch=False, physical_input=True):
+        events, state = [], {}
+        first_error = RuntimeError({
+            'begin': 'before-input model rejected',
+            'complete': 'model completion rejected',
+            'cleanup': 'observer cleanup rejected',
+            'input': 'physical input failed',
+            'save': 'saved marker verification failed',
+        }.get(failure, 'unused failure'))
+        plan = object()
+        extension = dict(smoke.INPUT_CASES + smoke.ATTACH_CASES)[module]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite, fixtures, output = (root / name for name in ('suite', 'fixtures', 'output'))
+            for path in (suite, fixtures, output): path.mkdir()
+            source = fixtures / ('OpenGeul-' + module + '.' + extension)
+            self._write_document(source, module)
+            original = source.read_bytes()
+            (root / 'engine-smoke.json').write_text(json.dumps({
+                'schemaVersion': 1, 'kind': 'engine', 'passed': True, 'cases': [{
+                    'module': module, 'status': 'passed', 'fixture': str(source.resolve()),
+                    'sha256': hashlib.sha256(original).hexdigest()}]}), encoding='utf-8')
+            process = SimpleNamespace(pid=100, poll=lambda: None)
+
+            class FakeWindow:
+                def __init__(self, handle): self.handle = handle
+                def maximize(self): events.append('maximize')
+                def set_focus(self): events.append('window-focus')
+                def click_input(self): events.append('editor-click')
+                def capture_as_image(self): return self
+                def save(self, path): events.append(('screenshot', path.name))
+
+            class FakeDesktop:
+                def __init__(self, **kwargs): pass
+                def window(self, *, handle):
+                    return SimpleNamespace(wrapper_object=lambda: FakeWindow(handle))
+
+            def editor_focus(hwnd, child):
+                events.append('editor-focus-verified')
+                return child
+
+            api = SimpleNamespace(
+                user=SimpleNamespace(GetForegroundWindow=lambda: 11, GetAncestor=lambda hwnd, flag: 11),
+                title=lambda hwnd: 'OpenGeul ' + module.title(),
+                require_foreground=lambda hwnd: None,
+                require_editor_focus=editor_focus,
+                windows=lambda pid: [], external_window_message=lambda *args: 'foreign window')
+
+            def launch(*args):
+                events.append('launch')
+                baseline = output / 'calc-model-baseline.xlsx'
+                state['baselineAtLaunch'] = baseline.read_bytes() if baseline.exists() else None
+                if replace_source_on_launch:
+                    self._write_document(source, module, '-changed-after-launch')
+                return process
+
+            def send_keys(keys, *, pause):
+                events.append(('keys', keys, pause))
+                if keys == '^s' and failure != 'save':
+                    self._write_document(source, module, smoke.EDITOR_MARKERS[module])
+
+            real_wait_for = smoke.wait_for
+            def wait_for(check, seconds=10):
+                if failure == 'save' and seconds == 30:
+                    self.assertFalse(check(), 'The original save XML gate must really observe a missing marker')
+                    events.append('saved-xml-check-failed')
+                    raise first_error
+                return real_wait_for(check, seconds)
+
+            def prepare_focus(api, hwnd, child, shell_pid, office_pid, record, click, enter):
+                click()
+                enter()
+                events.append('focus-ready')
+
+            def type_ascii(api, hwnd, child, marker, record, *, pause):
+                events.append(('type', marker, pause))
+                if failure == 'input': raise first_error
+
+            class FakeCalcContext:
+                def __init__(self, actual_suite, actual_source, actual_output, actual_process,
+                             attachment, record, baseline):
+                    events.append('model-context')
+                    state['contextArguments'] = (actual_suite, actual_source, actual_output,
+                                                  actual_process, attachment, record)
+                    state['contextBaseline'] = baseline
+                    self.record = record
+
+                def begin(self, marker):
+                    events.append(('model-begin', marker))
+                    self.record['calcModelCompletion'] = dict(state='pending', success=False)
+                    if failure == 'begin': raise first_error
+                    return plan
+
+                def complete(self, actual_plan):
+                    if actual_plan is not plan:
+                        raise AssertionError('The original Calc plan was not retained')
+                    events.append('model-completion-observed')
+                    if failure == 'complete': raise first_error
+                    events.append('reader-normal-close')
+                    if failure == 'cleanup': raise first_error
+                    events.append('reader-cleanup-validated')
+                    self.record['calcModelCompletion'].update(state='complete', success=True,
+                        cleanup={'normalExit': True, 'emptyJob': True, 'handlesClosed': True})
+                    self.record['calcModelCompletionVerified'] = True
+                    state['sealedCompletion'] = json.loads(json.dumps(self.record['calcModelCompletion']))
+
+                def abort(self, exc):
+                    events.append('model-abort')
+                    state['abortError'] = exc
+                    self.record['calcModelCompletion'].update(state='failed', success=False)
+                    if abort_raises: raise RuntimeError('secondary abort cleanup failure')
+
+            def capture_failure(output, name, record, exc):
+                events.append('failure-recorded')
+                record.update(success=False, error=type(exc).__name__ + ': ' + str(exc))
+
+            modules = {
+                'pywinauto': SimpleNamespace(Desktop=FakeDesktop),
+                'pywinauto.keyboard': SimpleNamespace(send_keys=send_keys),
+            }
+            error = None
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(sys.modules, modules))
+                for name, replacement in (
+                        ('launch_suite', launch), ('Windows', lambda: api),
+                        ('verified_attachment', lambda *args: (11, 22, 33, 200)),
+                        ('prepare_editor_focus', prepare_focus),
+                        ('wait_for', wait_for),
+                        ('CalcModelContext', FakeCalcContext), ('capture_failure', capture_failure),
+                        ('close_document', lambda *args: events.append('document-close')),
+                        ('close_home', lambda *args: events.append('home-close')),
+                        ('stop_owned_test_process', lambda *args: events.append('process-cleanup'))):
+                    stack.enter_context(patch.object(smoke, name, replacement, create=True))
+                stack.enter_context(patch.object(smoke.ascii_input, 'type_ascii', type_ascii))
+                try:
+                    smoke.document_case(suite, fixtures, output, module, extension, physical_input)
+                except Exception as exc:
+                    error = exc
+            state.update(events=events, error=error, firstError=first_error, original=original,
+                         record=json.loads((output / (module + '-result.json')).read_text(encoding='utf-8')),
+                         snapshot=(output / 'calc-model-baseline.xlsx').read_bytes()
+                         if (output / 'calc-model-baseline.xlsx').exists() else None)
+            return state
+
+    def test_calc_requires_model_completion_and_normal_cleanup_before_single_original_save(self):
+        run = self._run_document()
+        self.assertIsNone(run['error'])
+        events = run['events']
+        marker = smoke.EDITOR_MARKERS['calc']
+        self.assertIn(('model-begin', marker), events,
+                      'Calc physical input bypassed the owned before-input model gate')
+        ordered = ['focus-ready', 'model-context', ('model-begin', marker),
+                   ('keys', '^{HOME}{F2}^{END}', 0.1), ('type', marker, 0.04),
+                   ('keys', '{ENTER}', 0.1), 'model-completion-observed',
+                   'reader-normal-close', 'reader-cleanup-validated', ('keys', '^s', 0.1),
+                   'document-close', 'home-close']
+        self.assertEqual(sorted(events.index(event) for event in ordered),
+                         [events.index(event) for event in ordered])
+        self.assertEqual([event for event in events if isinstance(event, tuple) and event[0] == 'keys'],
+                         [('keys', '^{F6}', 0.1), ('keys', '^{HOME}{F2}^{END}', 0.1),
+                          ('keys', '{ENTER}', 0.1), ('keys', '^s', 0.1)])
+        self.assertEqual([event for event in events if isinstance(event, tuple) and event[0] == 'type'],
+                         [('type', marker, 0.04)])
+        self.assertNotIn('model-abort', events)
+        self.assertTrue(run['record']['success'])
+
+    def test_calc_freezes_exact_ooxml_bytes_before_launch_and_passes_that_independent_baseline(self):
+        run = self._run_document(replace_source_on_launch=True)
+        self.assertIsNone(run['error'])
+        self.assertEqual(run['original'], run['baselineAtLaunch'],
+                         'The independent Calc snapshot must exist before Suite launch')
+        self.assertEqual(run['original'], run['snapshot'])
+        self.assertEqual(smoke.calc_model_barrier.baseline_from_ooxml(run['original']),
+                         run['contextBaseline'])
+        arguments = run['contextArguments']
+        self.assertEqual({'hwnd': 11, 'parent': 22, 'child': 33, 'officePid': 200}, arguments[4])
+        self.assertEqual('calc', arguments[5]['module'])
+
+    def test_calc_completion_failure_aborts_once_without_save_and_preserves_the_first_error(self):
+        run = self._run_document(failure='complete', abort_raises=True)
+        self.assertIs(run['error'], run['firstError'])
+        self.assertIs(run.get('abortError'), run['firstError'])
+        self.assertEqual(1, run['events'].count('model-abort'))
+        self.assertNotIn(('keys', '^s', 0.1), run['events'])
+        self.assertNotIn('document-close', run['events'])
+        self.assertEqual('RuntimeError: model completion rejected', run['record']['error'])
+        self.assertFalse(run['record']['success'])
+
+    def test_calc_normal_reader_cleanup_failure_blocks_save(self):
+        run = self._run_document(failure='cleanup')
+        self.assertIs(run['error'], run['firstError'])
+        self.assertIn('model-completion-observed', run['events'])
+        self.assertIn('reader-normal-close', run['events'])
+        self.assertNotIn('reader-cleanup-validated', run['events'])
+        self.assertNotIn(('keys', '^s', 0.1), run['events'])
+        self.assertEqual(1, run['events'].count('model-abort'))
+        self.assertEqual('RuntimeError: observer cleanup rejected', run['record']['error'])
+
+    def test_calc_before_input_failure_blocks_navigation_typing_enter_and_save(self):
+        run = self._run_document(failure='begin')
+        self.assertIs(run['error'], run['firstError'])
+        self.assertEqual([('keys', '^{F6}', 0.1)],
+                         [event for event in run['events'] if isinstance(event, tuple) and event[0] == 'keys'])
+        self.assertFalse(any(isinstance(event, tuple) and event[0] == 'type' for event in run['events']))
+        self.assertIs(run.get('abortError'), run['firstError'])
+
+    def test_calc_input_failure_aborts_without_replacing_original_failure(self):
+        run = self._run_document(failure='input', abort_raises=True)
+        self.assertIs(run['error'], run['firstError'])
+        self.assertIs(run.get('abortError'), run['firstError'])
+        self.assertNotIn('model-completion-observed', run['events'])
+        self.assertNotIn(('keys', '{ENTER}', 0.1), run['events'])
+        self.assertNotIn(('keys', '^s', 0.1), run['events'])
+        self.assertEqual('RuntimeError: physical input failed', run['record']['error'])
+
+    def test_original_save_xml_failure_preserves_sealed_model_completion_without_second_cleanup(self):
+        run = self._run_document(failure='save')
+        self.assertIs(run['error'], run['firstError'])
+        self.assertIn('reader-cleanup-validated', run['events'])
+        self.assertIn('saved-xml-check-failed', run['events'])
+        self.assertEqual(1, run['events'].count(('keys', '^s', 0.1)))
+        self.assertNotIn('model-abort', run['events'],
+                         'The completed and normally closed observer must not be aborted by a later save failure')
+        self.assertEqual(run['sealedCompletion'], run['record']['calcModelCompletion'])
+        self.assertTrue(run['record']['calcModelCompletionVerified'])
+        self.assertFalse(run['record']['success'])
+        self.assertEqual('RuntimeError: saved marker verification failed', run['record']['error'])
+        self.assertNotIn('document-close', run['events'])
+
+    def test_completed_real_calc_context_abort_preserves_sealed_proof_and_does_not_persist_again(self):
+        context = object.__new__(smoke.CalcModelContext)
+        context.reader = None
+        context.failed = False
+        context.receipt = dict(state='complete', success=True,
+            cleanup={'normalExit': True, 'emptyJob': True, 'handlesClosed': True})
+        sealed = json.loads(json.dumps(context.receipt))
+        with patch.object(context, 'persist') as persist:
+            context.abort(RuntimeError('later original save gate failed'))
+        self.assertEqual(sealed, context.receipt,
+                         'A later save failure must not falsify the completed model and cleanup proof')
+        self.assertFalse(context.failed)
+        persist.assert_not_called()
+
+    def test_other_physical_modules_keep_original_navigation_and_do_not_start_calc_observer(self):
+        for module, navigation in (('writer', '^{END}'), ('impress', '{TAB}{F2}^{END}')):
+            with self.subTest(module=module):
+                run = self._run_document(module)
+                self.assertIsNone(run['error'])
+                self.assertNotIn('model-context', run['events'])
+                self.assertIsNone(run['snapshot'])
+                self.assertEqual([('keys', '^{F6}', 0.1), ('keys', navigation, 0.1), ('keys', '^s', 0.1)],
+                    [event for event in run['events'] if isinstance(event, tuple) and event[0] == 'keys'])
+                self.assertTrue(run['record']['success'])
+
+    def test_attach_only_modules_do_not_capture_calc_baseline_or_send_editor_input(self):
+        for module in ('draw', 'math', 'base'):
+            with self.subTest(module=module):
+                run = self._run_document(module, physical_input=False)
+                self.assertIsNone(run['error'])
+                self.assertNotIn('model-context', run['events'])
+                self.assertIsNone(run['snapshot'])
+                self.assertFalse(any(isinstance(event, tuple) and event[0] in ('keys', 'type')
+                                     for event in run['events']))
+                self.assertTrue(run['record']['success'])
 
 
 if __name__ == '__main__':

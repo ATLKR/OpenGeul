@@ -250,6 +250,7 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                 root = Path(directory)
                 source = root / ('OpenGeul-' + module + '.' + extension)
                 source.write_text('Engine-OpenGeul-' + module)
+                original_bytes = source.read_bytes()
                 marker = 'UI-OpenGeul-' + module
                 api = FakeWindows()
                 api.title, api.windows = lambda hwnd: 'OpenGeul ' + module, lambda pid: []
@@ -258,11 +259,25 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                 window = SimpleNamespace(maximize=Mock(), set_focus=Mock(), click_input=Mock(),
                                          capture_as_image=lambda: SimpleNamespace(save=lambda _: None))
                 desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: window))
+                events = []
                 def send(keys, **kw):
+                    events.append(('keys', keys))
                     if keys == '^s': source.write_text('Engine-OpenGeul-' + module + marker)
-                send_keys, type_ascii = Mock(side_effect=send), Mock()
+                send_keys = Mock(side_effect=send)
+                type_ascii = Mock(side_effect=lambda *args, **kw: events.append(('type', args[3])))
+                # This existing test isolates navigation/input/save routing with
+                # synthetic files. Real Calc XML and completion policy are covered
+                # by test_calc_model_barrier and test_native_smoke.
+                baseline, plan = {'fixture': 'isolated Calc baseline'}, object()
+                def begin(actual_marker):
+                    events.append(('begin', actual_marker))
+                    return plan
+                completion = SimpleNamespace(begin=Mock(side_effect=begin),
+                    complete=Mock(side_effect=lambda actual_plan: events.append(('complete', actual_plan))), abort=Mock())
                 with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
                                                'pywinauto.keyboard': SimpleNamespace(send_keys=send_keys)}), \
+                        patch.object(native.calc_model_barrier, 'baseline_from_ooxml', return_value=baseline) as parse_baseline, \
+                        patch.object(native, 'CalcModelContext', return_value=completion) as model_context, \
                         patch.object(native, 'require_engine_fixture', return_value=source), \
                         patch.object(native, 'package_text', side_effect=lambda path: path.read_text()), \
                         patch.object(native, 'launch_suite', return_value=process), \
@@ -279,6 +294,20 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                 window.click_input.assert_called_once_with()
                 self.assertTrue(result['editorFocusReadiness']['ready'])
                 self.assertIn('^s', sent)
+                if module == 'calc':
+                    parse_baseline.assert_called_once_with(original_bytes)
+                    self.assertEqual((root / 'calc-model-baseline.xlsx').read_bytes(), original_bytes)
+                    model_context.assert_called_once_with(root, source, root, process,
+                        {'hwnd': 11, 'parent': 12, 'child': 22, 'officePid': 88}, result, baseline)
+                    completion.begin.assert_called_once_with(marker)
+                    completion.complete.assert_called_once_with(plan)
+                    completion.abort.assert_not_called()
+                    self.assertEqual(events, [('keys', '^{F6}'), ('begin', marker),
+                        ('keys', '^{HOME}{F2}^{END}'), ('type', marker), ('keys', '{ENTER}'),
+                        ('complete', plan), ('keys', '^s')])
+                else:
+                    parse_baseline.assert_not_called()
+                    model_context.assert_not_called()
                 self.assertIs(result['keyboardInputVerified'], True)
                 self.assertIs(result['contentMutationVerified'], True)
                 self.assertNotEqual(result['beforeSha256'], result['afterSha256'])

@@ -1,5 +1,6 @@
 """Route native document-management actions back to the owning Suite form."""
 from session import FACTORIES
+from save_diagnostics import trace_native_dispatch
 
 FACTORY_MODULES = {factory: module for module, factory in FACTORIES.items()}
 
@@ -16,6 +17,7 @@ class DispatchRouter:
         self.on_command = on_command
         self.slave = None
         self.master = None
+        self.save_receipt_sequence = 0
 
     def queryDispatch(self, url, target, flags):
         name = url.Complete.split('?', 1)[0]
@@ -38,6 +40,9 @@ class DispatchRouter:
             return
         command = 'open' if name.startswith('file:') else COMMANDS.get(name)
         if command:
+            if command in ('save', 'saveAs'):
+                self.save_receipt_sequence += 1
+                trace_native_dispatch(self.save_receipt_sequence, command, name)
             self.on_command(command)
 
     def addStatusListener(self, listener, url):

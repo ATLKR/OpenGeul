@@ -95,6 +95,19 @@ The earlier fixed20 physical-input diagnostic retained two control failures
 (trials10/12, interior L/C loss); their cause remains unproved. A passing new
 harness does not establish a historical physical-input or product fix.
 
+Calc keyboard edits additionally use `calc_model_barrier.py` and an explicitly
+selected Calc getter contract in the same owned reader. The independently frozen
+pre-launch XLSX supplies the first-sheet A1 baseline, literal B1/C1 values and
+D1 formula/cached result. After the original single Enter, exact A1 equality with
+the original marker and unchanged 17/25/`=SUM(B1:C1)`/42 semantics must be observed.
+The reader uses only fixed-sheet getters, never selection, calculation or edit
+commit commands. Its original twelve-second budget includes startup, navigation,
+physical input, observation and normal job cleanup before the original single
+Ctrl+S. Saved XML, file hashes, close and independent reopen checks still apply.
+This strengthens the harness acceptance boundary; the earlier Calc save-timeout
+remains a failed run with an unproved cause. Opt-in bounded save-route traces
+record command/request milestones without document contents or input retries.
+
 After existing-document checks, all six Office modules also launch with
 `--module MODULE` and no file argument. Each blank document must attach under the
 Suite panel, retain its OpenGeul title, avoid external Office windows, produce

@@ -7,6 +7,7 @@ Portable raw-receipt validators below do not query Windows or the filesystem.
 """
 from __future__ import annotations
 
+from collections import namedtuple
 import ctypes
 from ctypes import wintypes as W
 import importlib.util
@@ -28,10 +29,38 @@ PROFILE_DIRECTORY_ACCESS = 0x80  # FILE_READ_ATTRIBUTES
 PROFILE_DIRECTORY_SHARE = 1 | 2 | 4  # FILE_SHARE_READ | WRITE | DELETE
 PROFILE_DIRECTORY_FLAGS = 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
 OPERATIONS = ['resolve-existing-owned-frame','Text.getString','isModified','verify-retained-generation']
+WRITER_MODEL_SERVICE = 'com.sun.star.text.TextDocument'
+WRITER_GETTER_CONTRACT = 'writer-body-v1'
+CALC_MODEL_SERVICE = 'com.sun.star.sheet.SpreadsheetDocument'
+CALC_GETTER_CONTRACT = 'calc-a1-b1-c1-d1-v1'
+CALC_OPERATIONS = ['resolve-existing-owned-frame','Sheet0.A1.getString','Sheet0.B1.getValue',
+    'Sheet0.C1.getValue','Sheet0.D1.getFormula','Sheet0.D1.getValue','isModified','verify-retained-generation']
+_ModelContract = namedtuple('_ModelContract','service getters kind cleanup_kind operations')
+_WRITER_CONTRACT = _ModelContract(WRITER_MODEL_SERVICE,WRITER_GETTER_CONTRACT,
+    'existing-owned-writer-body','owned-writer-reader-cleanup',tuple(OPERATIONS))
+_CALC_CONTRACT = _ModelContract(CALC_MODEL_SERVICE,CALC_GETTER_CONTRACT,
+    'existing-owned-calc-cells','owned-calc-reader-cleanup',tuple(CALC_OPERATIONS))
 PROCESS_KEYS = ('pid','creationTime','image','handleValue','waitResult','exitCode')
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from native_accessibility import private_pipe as _parse_private_pipe
+
+
+def _model_contract(expected_service,getter_contract):
+    """Only the caller selects a fixed contract; receipt fields never select it."""
+    assert type(expected_service) is str and type(getter_contract) is str, 'Explicit model service/getter contract is required'
+    for contract in (_WRITER_CONTRACT,_CALC_CONTRACT):
+        if (expected_service,getter_contract)==(contract.service,contract.getters):return contract
+    raise AssertionError('Unsupported explicit model service/getter pair')
+
+
+def _require_calc_values(value):
+    assert type(value.get('sheetIndex')) is int and value['sheetIndex']==0, 'Calc getter must read fixed sheet zero'
+    assert isinstance(value.get('a1Text'),str) and len(value['a1Text'].encode('utf-8'))<=MAX_BODY_BYTES, 'Invalid bounded Calc A1 string'
+    assert isinstance(value.get('d1Formula'),str) and len(value['d1Formula'].encode('utf-8'))<=MAX_BODY_BYTES, 'Invalid bounded Calc D1 formula'
+    for key in ('b1Value','c1Value','d1Value'):
+        assert type(value.get(key)) in (int,float) and math.isfinite(value[key]), 'Invalid finite Calc numeric getter: '+key
+    assert type(value.get('isModified')) is bool, 'Invalid Calc modified state'
 
 
 def _path(value):
@@ -180,7 +209,7 @@ def _require_pair(before,after,binding,suite_root):
     assert before['profileDirectory']['witness']==after['profileDirectory']['witness'], 'Retained original profile DIRECTORY HANDLE was replaced'
 
 
-def _require_uno(raw,binding):
+def _require_uno(raw,binding,*,contract=_WRITER_CONTRACT):
     assert isinstance(raw,dict) and type(raw.get('frameCount')) is int and 1<=raw['frameCount']<=8
     frames=raw.get('frames')
     assert isinstance(frames,list) and len(frames)==raw['frameCount']
@@ -202,7 +231,7 @@ def _require_uno(raw,binding):
         _positive(value);assert retained[name]=='pyuno-proxy:0x'+format(value,'x')
     eq=raw.get('equalities',{})
     assert set(eq)=={'frame','controller','model','controllerFrame','modelController'} and all(v is True for v in eq.values()), 'Original live UNO links changed'
-    assert raw.get('modelService')=='com.sun.star.text.TextDocument' and raw.get('documentUrl')==binding['documentUrl'], 'Foreign Writer model or URL'
+    assert raw.get('modelService')==contract.service and raw.get('documentUrl')==binding['documentUrl'], 'Foreign Writer model or URL' if contract==_WRITER_CONTRACT else 'Foreign Calc model or URL'
 
 
 def _reader_member(row,binding,suite_root,alive,*,exiting=False):
@@ -295,13 +324,12 @@ def _require_launch(receipt,job=None):
     return pid,process_handle,job_handle
 
 
-def require_owned_observation(observation,binding,suite_root):
-    """Replay raw original-generation/frame evidence, with no native calls or I/O."""
-    assert isinstance(observation,dict) and observation.get('kind')=='existing-owned-writer-body'
+def _require_owned_observation(observation,binding,suite_root,contract):
+    assert isinstance(observation,dict) and observation.get('kind')==contract.kind
     assert observation.get('bindingBefore')==binding==observation.get('bindingAfter')
     for key in ('retainedProcessHandle','readOnlyObservation','sameFrameControllerModelVerified','readCallCleanupSucceeded','readerStillRetained'):
         assert observation.get(key) is True, 'Incomplete read-only observation: '+key
-    assert observation.get('handleSignaled') is False and observation.get('operations')==OPERATIONS
+    assert observation.get('handleSignaled') is False and observation.get('operations')==list(contract.operations)
     require_console_host_witness(observation.get('systemConsoleHost'),observation.get('systemConsoleHostRecheck'))
     assert isinstance(observation.get('systemConsoleHostRecheck'),dict)
     native=observation.get('nativeSnapshots',{})
@@ -310,7 +338,7 @@ def require_owned_observation(observation,binding,suite_root):
     assert native['controllerBefore']['officeCommandLine']==native['helperBefore']['officeCommandLine'], 'Helper resolved another private transport/profile'
     assert canonical_profile_projection(native['controllerBefore']['profileDirectory']['witness'],native['controllerBefore']['profileUrl'])==canonical_profile_projection(native['helperBefore']['profileDirectory']['witness'],native['helperBefore']['profileUrl']), 'Helper opened a different canonical profile directory'
     uno=observation.get('unoSnapshots',{})
-    _require_uno(uno.get('before'),binding);_require_uno(uno.get('after'),binding)
+    _require_uno(uno.get('before'),binding,contract=contract);_require_uno(uno.get('after'),binding,contract=contract)
     assert uno['before']['proxyIdentity']==uno['after']['proxyIdentity']
     assert uno['before']['proxyIdentity']['helperPid']==observation.get('readerProcess',{}).get('pid')
     _reader_member(observation.get('readerProcess'),binding,suite_root,True)
@@ -318,12 +346,23 @@ def require_owned_observation(observation,binding,suite_root):
     assert _path(observation['helperLaunch']['steps'][1]['application'])==_path(_join(suite_root,'Office/program/python.exe'))
     observed=observation.get('pythonIdentity',{}).get('observed',{})
     assert _path(observation['readerProcess']['image'])==_path(observed.get('processImage')), 'Actual reader process does not match the packaged Python observation'
+    if contract==_CALC_CONTRACT:_require_calc_values(observation)
     return observation
 
 
-def _require_physical_cleanup(cleanup,binding,deadline):
+def require_owned_observation(observation,binding,suite_root):
+    """Replay the unchanged fixed Writer contract, with no native calls or I/O."""
+    return _require_owned_observation(observation,binding,suite_root,_WRITER_CONTRACT)
+
+
+def require_owned_model_observation(observation,binding,suite_root,*,expected_service,getter_contract):
+    """Pure replay against an explicit caller-selected service/getter pair."""
+    return _require_owned_observation(observation,binding,suite_root,_model_contract(expected_service,getter_contract))
+
+
+def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRACT):
     """Replay final helper quiescence separately from every still-retained read."""
-    assert isinstance(cleanup,dict) and cleanup.get('kind')=='owned-writer-reader-cleanup'
+    assert isinstance(cleanup,dict) and cleanup.get('kind')==contract.cleanup_kind
     assert cleanup.get('deadline')==deadline and _finite(cleanup.get('startedAt'))<=_finite(cleanup.get('finishedAt'))<=_finite(deadline)
     assert cleanup.get('terminated') is False and cleanup.get('errors')==[] and cleanup.get('finalJobPids')==[]
     # Infer only a lexical root, never resolve a recorded Windows path on Linux.
@@ -398,6 +437,15 @@ def require_reader_cleanup(cleanup,binding,deadline):
     assert cleanup.get('binding')==binding and cleanup.get('cleanupSucceeded') is True
     assert cleanup.get('physicalCleanupSucceeded') is True and cleanup.get('contextQualified') is True
     return _require_physical_cleanup(cleanup,binding,deadline)
+
+
+def require_model_reader_cleanup(cleanup,binding,deadline,*,expected_service,getter_contract):
+    """Use the same raw cleanup proof, with an explicit expected model kind."""
+    contract=_model_contract(expected_service,getter_contract)
+    assert isinstance(binding,dict), 'No explicit model binding was established'
+    assert cleanup.get('binding')==binding and cleanup.get('cleanupSucceeded') is True
+    assert cleanup.get('physicalCleanupSucceeded') is True and cleanup.get('contextQualified') is True
+    return _require_physical_cleanup(cleanup,binding,deadline,contract=contract)
 
 
 class ReaderBackendError(AssertionError):
@@ -769,8 +817,8 @@ class _UnoReader:
     wrapped UNO Any. Python id() identifies only our held local wrapper, scoped
     by the actual reader generation. Native UNO equality remains authoritative.
     """
-    def __init__(self,config,anchor):
-        self.config=config;self.diagnostic={'proxyTypes':{},'frameEnumeration':[]}
+    def __init__(self,config,anchor,*,contract=_WRITER_CONTRACT):
+        self.config=config;self.contract=contract;self.diagnostic={'proxyTypes':{},'frameEnumeration':[]}
         self.model=self.controller=self.frame=self.desktop=self.context=self.local_context=None
         self.retained={}
         try:
@@ -828,17 +876,29 @@ class _UnoReader:
                 typeMatches={k:type(getattr(self,k)) is self.proxy_type for k in ('frame','controller','model')}),
             equalities=dict(frame=frame==self.frame,controller=controller==self.controller,model=model==self.model,
                 controllerFrame=self.controller.getFrame()==self.frame,modelController=self.model.getCurrentController()==self.controller),
-            documentUrl=self.model.getURL(),modelService='com.sun.star.text.TextDocument' if self.model.supportsService('com.sun.star.text.TextDocument') else '')
+            documentUrl=self.model.getURL(),modelService=self.contract.service if self.model.supportsService(self.contract.service) else '')
         self.last_snapshot=raw
         expected=dict(childHwnd=self.config['child_hwnd'],documentUrl=self.config['expected_url'],**{k+'Identity':v for k,v in self.retained.items()})
-        _require_uno(raw,expected)
+        _require_uno(raw,expected,contract=self.contract)
         return raw
 
     def read(self):
-        before=self.snapshot();body=self.model.getText().getString();modified=self.model.isModified();after=self.snapshot()
-        assert isinstance(body,str) and len(body.encode('utf-8'))<=MAX_BODY_BYTES,'Writer body exceeded getter bound'
-        assert type(modified) is bool
-        return dict(bodyText=body,isModified=modified,unoSnapshots=dict(before=before,after=after))
+        before=self.snapshot()
+        if self.contract==_CALC_CONTRACT:
+            sheet=self.model.getSheets().getByIndex(0)
+            value=dict(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
+                b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
+                d1Formula=sheet.getCellRangeByName('D1').getFormula(),d1Value=sheet.getCellRangeByName('D1').getValue(),
+                isModified=self.model.isModified())
+            after=self.snapshot()
+            _require_calc_values(value)
+        else:
+            body=self.model.getText().getString();modified=self.model.isModified();after=self.snapshot()
+            assert isinstance(body,str) and len(body.encode('utf-8'))<=MAX_BODY_BYTES,'Writer body exceeded getter bound'
+            assert type(modified) is bool
+            value=dict(bodyText=body,isModified=modified)
+        value['unoSnapshots']=dict(before=before,after=after)
+        return value
 
     def release(self):
         # Client references only. The live document is never closed/disposed.
@@ -846,6 +906,9 @@ class _UnoReader:
 
 
 class OwnedWriterReader:
+    _contract=_WRITER_CONTRACT
+    _helper_flag='--helper'
+
     def __init__(self,suite,output,*,shell_pid,expected_shell_creation,suite_hwnd,parent_hwnd,child_hwnd,office_pid,expected_url,clock=time.monotonic):
         self.config=dict(suite=str(suite),shell_pid=shell_pid,expected_shell_creation=expected_shell_creation,suite_hwnd=suite_hwnd,parent_hwnd=parent_hwnd,
             child_hwnd=child_hwnd,office_pid=office_pid,expected_url=expected_url)
@@ -931,7 +994,7 @@ class OwnedWriterReader:
             _atomic_json(self.output/'configuration.json',helper_config)
             self.console=_SystemConsoleHost(deadline,self.clock)
             native=_worker_native();self.diagnostics=native.ProcessDiagnosticsApi()
-            argv=[str(self.suite/'Office/program/python.exe'),str(Path(__file__).resolve()),'--helper',str(self.output)]
+            argv=[str(self.suite/'Office/program/python.exe'),str(Path(__file__).resolve()),self._helper_flag,str(self.output)]
             self.process,self.helper_launch=_launch_owned(native,argv,self.suite/'Office/program')
             _require_launch(self.helper_launch,int(self.process.job))
             self._remaining(deadline)
@@ -971,7 +1034,7 @@ class OwnedWriterReader:
         if self.binding is None:self.binding=derived
         assert derived==self.binding,'Original Writer binding changed'
         result.update(bindingBefore=dict(self.binding),bindingAfter=dict(self.binding))
-        require_owned_observation(result,self.binding,str(self.suite));self._remaining(deadline)
+        _require_owned_observation(result,self.binding,str(self.suite),self._contract);self._remaining(deadline)
         _atomic_json(self.output/f'observation-{self.sequence-1:03d}.json',result)
         self._remaining(deadline)
         self.last_observation=result
@@ -987,7 +1050,7 @@ class OwnedWriterReader:
 
     def close(self,deadline):
         assert deadline==self.deadline and not self.closed,'Reader cleanup must use original deadline once'
-        cleanup=dict(kind='owned-writer-reader-cleanup',binding=self.binding,cleanupSucceeded=False,startedAt=self.clock(),deadline=deadline,
+        cleanup=dict(kind=self._contract.cleanup_kind,binding=self.binding,cleanupSucceeded=False,startedAt=self.clock(),deadline=deadline,
             terminated=self.forced,helperLaunch=self.helper_launch,releaseAcknowledgement=None,readerMembers=[],finalJobPids=None,jobHandleValue=int(self.process.job) if self.process else 0,
             nativeBefore=None,nativeAfter=None,systemConsoleHost=self.console.witness if self.console else None,systemConsoleHostRecheck=None,handleClosures=[],errors=list(self.auxiliary_errors))
         def error(exc):cleanup['errors'].append(dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None)))
@@ -1038,7 +1101,7 @@ class OwnedWriterReader:
             cleanup['finishedAt']=self.clock()
             cleanup['cleanupSucceeded']=not cleanup['errors'] and not cleanup['terminated'] and cleanup['finishedAt']<=deadline
             if cleanup['cleanupSucceeded']:
-                try:_require_physical_cleanup(cleanup,self.anchor.base,deadline)
+                try:_require_physical_cleanup(cleanup,self.anchor.base,deadline,contract=self._contract)
                 except BaseException as exc:error(exc);cleanup['cleanupSucceeded']=False
             cleanup['physicalCleanupSucceeded']=cleanup['cleanupSucceeded']
             cleanup['contextQualified']=self.binding is not None and not self.failed and self.first_error is None
@@ -1047,6 +1110,23 @@ class OwnedWriterReader:
                 try:_atomic_json(self.output/'cleanup.json',cleanup)
                 except BaseException as exc:error(exc);cleanup['cleanupSucceeded']=False
         return cleanup
+
+
+class OwnedModelReader(OwnedWriterReader):
+    """Additive explicit API; no auto-detection, dynamic getters, or writer fallback."""
+    _helper_flag='--model-helper'
+
+    def __init__(self,suite,output,*,expected_service,getter_contract,shell_pid,expected_shell_creation,
+                 suite_hwnd,parent_hwnd,child_hwnd,office_pid,expected_url,clock=time.monotonic):
+        self._contract=_model_contract(expected_service,getter_contract)
+        super().__init__(suite,output,shell_pid=shell_pid,expected_shell_creation=expected_shell_creation,
+            suite_hwnd=suite_hwnd,parent_hwnd=parent_hwnd,child_hwnd=child_hwnd,office_pid=office_pid,
+            expected_url=expected_url,clock=clock)
+        self.config.update(expected_service=expected_service,getter_contract=getter_contract)
+
+    def start(self,deadline):
+        assert _model_contract(self.config['expected_service'],self.config['getter_contract'])==self._contract, 'Explicit model contract changed before startup'
+        return super().start(deadline)
 
 
 def _qpc():
@@ -1059,8 +1139,9 @@ def _qpc():
     return int(counter.value),int(frequency.value)
 
 
-def _helper(directory):
+def _helper(directory,*,explicit_model=False):
     directory=Path(directory);config=_read_json(directory/'configuration.json')
+    contract=_model_contract(config['expected_service'],config['getter_contract']) if explicit_model else _WRITER_CONTRACT
     anchor=reader=None;sequence=0;failed=False;identity=None
     try:
         while sequence<123:
@@ -1083,7 +1164,8 @@ def _helper(directory):
                         assert reader is None and sequence==0
                         from writer_style_smoke import observe_packaged_python,require_packaged_python
                         identity=require_packaged_python(Path(config['suite']),observe_packaged_python())
-                        anchor=_native_anchor(config);reader=_UnoReader(config,anchor)
+                        anchor=_native_anchor(config)
+                        reader=_UnoReader(config,anchor,contract=contract) if explicit_model else _UnoReader(config,anchor)
                     else:assert reader is not None
                     from writer_style_smoke import observe_packaged_python,require_packaged_python
                     identity=require_packaged_python(Path(config['suite']),observe_packaged_python())
@@ -1091,9 +1173,9 @@ def _helper(directory):
                     before=anchor.snapshot();observation=reader.read();after=anchor.snapshot()
                     finished_ticks,finished_frequency=_qpc();assert finished_frequency==frequency
                     observation['helperQpc']=dict(startedTicks=ticks,finishedTicks=finished_ticks,frequency=frequency)
-                    observation.update(kind='existing-owned-writer-body',pythonIdentity=identity,nativeSnapshots=dict(helperBefore=before,helperAfter=after),
+                    observation.update(kind=contract.kind,pythonIdentity=identity,nativeSnapshots=dict(helperBefore=before,helperAfter=after),
                         retainedProcessHandle=True,handleSignaled=False,readOnlyObservation=True,sameFrameControllerModelVerified=True,
-                        readCallCleanupSucceeded=True,readerStillRetained=True,operations=list(OPERATIONS))
+                        readCallCleanupSucceeded=True,readerStillRetained=True,operations=list(contract.operations))
                     reply.update(ok=True,observation=observation)
             except BaseException as exc:
                 failed=True;reply['error']=dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None),traceback=traceback.format_exc(),
@@ -1109,5 +1191,5 @@ def _helper(directory):
 
 
 if __name__=='__main__':
-    assert len(sys.argv)==3 and sys.argv[1]=='--helper'
-    raise SystemExit(_helper(sys.argv[2]))
+    assert len(sys.argv)==3 and sys.argv[1] in ('--helper','--model-helper')
+    raise SystemExit(_helper(sys.argv[2],explicit_model=sys.argv[1]=='--model-helper'))

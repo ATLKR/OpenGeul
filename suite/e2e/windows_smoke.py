@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 import traceback
 import xml.etree.ElementTree as ET
@@ -30,6 +31,8 @@ _ascii_spec = importlib.util.spec_from_file_location(
     'suite_ascii_editor_input', Path(__file__).with_name('ascii_editor_input.py'))
 ascii_input = importlib.util.module_from_spec(_ascii_spec)
 _ascii_spec.loader.exec_module(ascii_input)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import calc_model_barrier
 
 INPUT_CASES = (('writer', 'docx'), ('calc', 'xlsx'), ('impress', 'pptx'))
 EDITOR_MARKERS = {module: 'UI-OpenGeul-' + module for module, _ in INPUT_CASES}
@@ -998,6 +1001,80 @@ def capture_home(suite, output):
         write_result(output, 'home', record)
 
 
+class CalcModelContext:
+    """One original Calc edit; no observer survives into the original Ctrl+S."""
+    def __init__(self, suite, source, output, process, attachment, record, baseline):
+        self.suite,self.source,self.output,self.process=suite,source,output,process
+        self.attachment,self.record,self.baseline=dict(attachment),record,dict(baseline)
+        self.expected_url=source.resolve().as_uri()
+        self.reader=self.plan=self.receipt=None
+        self.failed=False
+
+    def begin(self, marker):
+        from lifecycle_smoke import retained_writer_shell
+        from writer_model_reader import OwnedModelReader
+        from writer_style_smoke import _packaged_identity_file
+        assert self.reader is None and self.receipt is None and not self.failed,'Calc edit cannot restart'
+        started=time.monotonic();self.deadline=started+calc_model_barrier.MAX_SECONDS
+        self.receipt=dict(schemaVersion=1,kind='calc-model-completion',success=False,startedAt=started,
+            deadline=self.deadline,originalPhysicalAsciiLossCauseEstablished=False,productFixEstablished=False)
+        self.record['calcModelCompletion']=self.receipt
+        try:
+            self.receipt['originalShell']={}
+            creation=retained_writer_shell(self.process,self.suite,self.receipt['originalShell'])
+            identity_file,data=_packaged_identity_file(self.suite,'suite-inventory.json')
+            self.inventory,self.inventory_sha256=json.loads(data),identity_file['sha256']
+            self.destination=self.output/'calc-model-reader'
+            self.receipt['readerOutput']=str(self.destination)
+            a=self.attachment
+            self.reader=OwnedModelReader(self.suite,self.destination,expected_service=calc_model_barrier.SERVICE,
+                getter_contract=calc_model_barrier.GETTERS,shell_pid=self.process.pid,expected_shell_creation=creation,
+                suite_hwnd=a['hwnd'],parent_hwnd=a['parent'],child_hwnd=a['child'],office_pid=a['officePid'],expected_url=self.expected_url)
+            before=self.reader.start(self.deadline);self.receipt['beforeInput']=before
+            self.plan=calc_model_barrier.freeze_expectation(before['bindingBefore'],self.baseline,marker,before,
+                suite_root=self.suite,original_shell=self.receipt['originalShell'],inventory=self.inventory,
+                inventory_sha256=self.inventory_sha256,expected_url=self.expected_url,started_at=started)
+            self.receipt['expectation']=self.plan.receipt()
+            return self.plan
+        except BaseException as exc:
+            self.abort(exc);raise
+
+    def complete(self, plan):
+        assert plan is self.plan and not self.failed and self.reader is not None
+        try:
+            calc_model_barrier.await_completion(plan,self.reader.read,clock=time.monotonic,pause=time.sleep,record=self.receipt)
+            try:cleanup=self.reader.close(self.deadline)
+            finally:self.reader=None
+            calc_model_barrier.finalize_completion(plan,self.receipt,cleanup,time.monotonic())
+            self.record['calcModelCompletionReplay']=calc_model_barrier.replay_completion(self.receipt,
+                suite_root=self.suite,inventory=self.inventory,inventory_sha256=self.inventory_sha256,
+                binding=plan.binding,baseline=self.baseline,expected_url=self.expected_url,marker=plan.marker)
+            self.record['calcModelCompletionVerified']=True
+            self.persist()
+        except BaseException as exc:
+            self.abort(exc);raise
+
+    def persist(self):
+        if self.receipt is not None and getattr(self,'destination',None) is not None and self.destination.is_dir():
+            (self.destination/'completion.json').write_text(json.dumps(self.receipt,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
+
+    def abort(self, exc):
+        if self.reader is None and self.receipt is not None and self.receipt.get('state')=='complete':
+            return  # A later original save/close failure cannot erase sealed model evidence.
+        self.failed=True
+        if self.receipt is not None:
+            self.receipt.update(success=False,state='failed')
+            self.receipt.setdefault('error',type(exc).__name__+': '+str(exc))
+            self.receipt.setdefault('traceback',traceback.format_exc())
+        if self.reader is not None:
+            try:self.receipt['cleanup']=self.reader.close(self.deadline)
+            except BaseException as later:self.receipt.setdefault('cleanupErrors',[]).append(type(later).__name__+': '+str(later))
+            finally:self.reader=None
+        try:self.persist()
+        except BaseException as later:
+            if self.receipt is not None:self.receipt.setdefault('evidenceWriteErrors',[]).append(type(later).__name__+': '+str(later))
+
+
 def document_case(suite, fixtures, output, module, extension, physical_input):
     from pywinauto import Desktop
     from pywinauto.keyboard import send_keys
@@ -1006,14 +1083,22 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
     if physical_input:
         assert 'Engine-OpenGeul-' + module in package_text(source), 'Generated source marker is missing'
         assert 'UI-OpenGeul-' + module not in package_text(source), 'UI marker must be absent before actual input'
-    before = hashlib.sha256(source.read_bytes()).hexdigest()
+    source_bytes=source.read_bytes()
+    before = hashlib.sha256(source_bytes).hexdigest()
+    calc_baseline=None
+    if physical_input and module=='calc':
+        calc_baseline=calc_model_barrier.baseline_from_ooxml(source_bytes)
+        with (output/'calc-model-baseline.xlsx').open('xb') as captured:captured.write(source_bytes)
     process = launch_suite([str(suite/'OpenGeul.Office.exe'), '--module', module, '--file', str(source)],
                            suite, output, module)
     api = Windows()
     record = {'module': module, 'kind': 'keyboard-edit' if physical_input else 'native-attach',
               'shellPid': process.pid, 'file': source.name, 'success': False,
               'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False,
-              'stage': 'attach', 'stderrLog': module + '-stderr.log'}
+              'stage': 'attach', 'stderrLog': module + '-stderr.log', 'beforeSha256':before}
+    if calc_baseline is not None:record['calcModelBaseline']=dict(calc_baseline)
+    calc_context=None
+    calc_context_completed=False
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid, title=api.title(hwnd))
@@ -1032,6 +1117,12 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
             prepare_editor_focus(api, hwnd, child, process.pid, office_pid, record,
                 lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
                 lambda: send_keys('^{F6}', pause=0.1))
+            calc_plan=None
+            if module=='calc':
+                record['stage']='begin-calc-model-observation'
+                calc_context=CalcModelContext(suite,source,output,process,
+                    dict(hwnd=hwnd,parent=parent,child=child,officePid=office_pid),record,calc_baseline)
+                calc_plan=calc_context.begin(EDITOR_MARKERS[module])
             record['stage'] = 'navigate-editor'
             if module == 'writer': send_keys('^{END}', pause=0.1)
             elif module == 'calc': send_keys('^{HOME}{F2}^{END}', pause=0.1)
@@ -1042,6 +1133,10 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
             ascii_input.type_ascii(api, hwnd, child, marker, record, pause=0.04)
             if module == 'calc': send_keys('{ENTER}', pause=0.1)
             api.require_editor_focus(hwnd, child)
+            if module=='calc':
+                record['stage']='complete-calc-model-observation'
+                calc_context.complete(calc_plan)
+                calc_context_completed=True
             record['stage'] = 'save-keyboard'
             send_keys('^s', pause=0.1)
             record['stage'] = 'wait-saved-marker'
@@ -1067,6 +1162,9 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
                       **content_status)
         return record
     except Exception as exc:
+        if calc_context is not None and not calc_context_completed:
+            try:calc_context.abort(exc)
+            except BaseException as later:record.setdefault('calcModelAbortErrors',[]).append(type(later).__name__+': '+str(later))
         capture_failure(output, module, record, exc)
         raise
     finally:

@@ -980,4 +980,226 @@ class NativeProfileDirectoryContracts(unittest.TestCase):
         self.assertEqual(sum(event[0]=='directory-open' for event in events),1)
 
 
+class ExplicitOwnedModelContracts(unittest.TestCase):
+    """Calc uses an explicit getter contract; synthetic peers are not Windows proof."""
+    SERVICE='com.sun.star.sheet.SpreadsheetDocument'
+    GETTERS='calc-a1-b1-c1-d1-v1'
+    OPS=['resolve-existing-owned-frame','Sheet0.A1.getString','Sheet0.B1.getValue',
+         'Sheet0.C1.getValue','Sheet0.D1.getFormula','Sheet0.D1.getValue','isModified','verify-retained-generation']
+
+    @classmethod
+    def setUpClass(cls):
+        spec=importlib.util.spec_from_file_location('explicit_owned_model_contract',SOURCE)
+        cls.api=importlib.util.module_from_spec(spec);spec.loader.exec_module(cls.api)
+
+    def require_api(self):
+        for name in ('OwnedModelReader','require_owned_model_observation','require_model_reader_cleanup'):
+            self.assertTrue(callable(getattr(self.api,name,None)), 'Missing explicit owned model API: '+name)
+        return self.api
+
+    def kwargs(self):
+        return dict(expected_service=self.SERVICE,getter_contract=self.GETTERS)
+
+    def calc_observation(self):
+        binding=binding_fixture();binding['documentUrl']='file:///C:/owned.xlsx'
+        value=observation_fixture(binding);value.pop('bodyText')
+        value.update(kind='existing-owned-calc-cells',operations=list(self.OPS),sheetIndex=0,
+            a1Text='Engine-OpenGeul-calc 한글UI-OpenGeul-calc',b1Value=17.0,c1Value=25.0,
+            d1Formula='=SUM(B1:C1)',d1Value=42.0,isModified=True)
+        for row in value['unoSnapshots'].values():row['modelService']=self.SERVICE
+        return binding,value
+
+    def make_calc_uno(self):
+        from types import SimpleNamespace
+        uno,events,objects=WindowsReaderFailureFixContracts().make_uno()
+        values={'A1':'Engine-OpenGeul-calc 한글UI-OpenGeul-calc','B1':17.0,'C1':25.0,'D1':42.0}
+        def cell(name):
+            self.assertIn(name,values)
+            return SimpleNamespace(getString=lambda:events.append(name+'.getString') or values[name],
+                getValue=lambda:events.append(name+'.getValue') or values[name],
+                getFormula=lambda:events.append(name+'.getFormula') or '=SUM(B1:C1)')
+        sheet=SimpleNamespace(getCellRangeByName=cell)
+        def sheet_at(index):
+            self.assertEqual(index,0);events.append('sheet-0');return sheet
+        objects['model'].getSheets=lambda:SimpleNamespace(getByIndex=sheet_at)
+        objects['model'].supportsService=lambda name:name==self.SERVICE
+        objects['model'].isModified=lambda:events.append('isModified') or True
+        objects['model'].getURL=lambda:'file:///C:/owned.xlsx'
+        return uno,events,objects
+
+    def test_explicit_contract_rejects_missing_unknown_or_mixed_pair_before_native_access(self):
+        api=self.require_api()
+        native=dict(shell_pid=77,expected_shell_creation=111,suite_hwnd=11,parent_hwnd=12,
+            child_hwnd=22,office_pid=88,expected_url='file:///C:/owned.xlsx')
+        with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',side_effect=AssertionError('must not open native state')):
+            output=Path(directory)/'uncreated'
+            for pair in ({},dict(expected_service=self.SERVICE),dict(getter_contract=self.GETTERS),
+                         dict(expected_service=self.SERVICE,getter_contract='writer-body-v1'),
+                         dict(expected_service='com.sun.star.text.TextDocument',getter_contract=self.GETTERS),
+                         dict(expected_service=self.SERVICE,getter_contract='arbitrary-getter'),
+                         dict(expected_service=None,getter_contract=None)):
+                with self.subTest(pair=pair),self.assertRaises((AssertionError,TypeError)):
+                    api.OwnedModelReader(Path('C:/Suite'),output,**native,**pair)
+            reader=api.OwnedModelReader(Path('C:/Suite'),output,**native,**self.kwargs())
+            self.assertIsNone(reader.process);self.assertFalse(output.exists())
+            writer=api.OwnedWriterReader(Path('C:/Suite'),output,**native)
+            self.assertNotIn('expected_service',writer.config);self.assertNotIn('getter_contract',writer.config)
+
+    def test_calc_raw_validator_never_selects_contract_from_producer_fields(self):
+        api=self.require_api();binding,value=self.calc_observation();original=copy.deepcopy(value)
+        self.assertIs(api.require_owned_model_observation(value,binding,'C:/Suite',**self.kwargs()),value)
+        self.assertEqual(value,original)
+        with self.assertRaises(AssertionError):api.require_owned_observation(value,binding,'C:/Suite')
+        with self.assertRaises(AssertionError):
+            api.require_owned_model_observation(value,binding,'C:/Suite',expected_service='com.sun.star.text.TextDocument',getter_contract='writer-body-v1')
+        for mutate in (
+            lambda v:v.update(kind='existing-owned-writer-body'),
+            lambda v:v.update(operations=list(api.OPERATIONS)),
+            lambda v:v['unoSnapshots']['after'].update(modelService='com.sun.star.text.TextDocument'),
+            lambda v:v['unoSnapshots']['before'].update(documentUrl='file:///C:/foreign.xlsx'),
+            lambda v:v['nativeSnapshots']['helperAfter']['office'].update(creationTime=999),
+            lambda v:v['nativeSnapshots']['helperAfter']['profileDirectory']['recheck'].update(fileIndexLow=999),
+            lambda v:v['unoSnapshots']['after']['equalities'].update(modelController=False)):
+            altered=copy.deepcopy(value);mutate(altered)
+            with self.subTest(value=altered),self.assertRaises(AssertionError):
+                api.require_owned_model_observation(altered,binding,'C:/Suite',**self.kwargs())
+        writer_binding=binding_fixture();writer=observation_fixture(writer_binding);saved=copy.deepcopy(writer)
+        api.require_owned_model_observation(writer,writer_binding,'C:/Suite',
+            expected_service='com.sun.star.text.TextDocument',getter_contract='writer-body-v1')
+        self.assertEqual(writer,saved)
+
+    def test_explicit_contract_drift_before_start_opens_no_native_handles_or_output(self):
+        api=self.require_api()
+        with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',side_effect=AssertionError('native handle opened')) as native:
+            output=Path(directory)/'uncreated'
+            reader=api.OwnedModelReader(Path('C:/Suite'),output,shell_pid=77,expected_shell_creation=111,
+                suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url='file:///C:/owned.xlsx',clock=lambda:1.0,**self.kwargs())
+            reader.config['getter_contract']='writer-body-v1'
+            with self.assertRaises(AssertionError):reader.start(12.0)
+            native.assert_not_called();self.assertFalse(output.exists());self.assertIsNone(reader.process)
+
+    def test_calc_getter_schema_rejects_unbounded_nonfinite_boolean_or_wrong_sheet_values(self):
+        api=self.require_api();binding,value=self.calc_observation()
+        for key,replacement in (('a1Text',None),('a1Text','x'*(api.MAX_BODY_BYTES+1)),
+                ('sheetIndex',True),('sheetIndex',1),('b1Value',True),('c1Value',float('nan')),
+                ('d1Value',float('inf')),('d1Formula',None),('isModified',1)):
+            altered=copy.deepcopy(value);altered[key]=replacement
+            with self.subTest(key=key,replacement=type(replacement).__name__),self.assertRaises(AssertionError):
+                api.require_owned_model_observation(altered,binding,'C:/Suite',**self.kwargs())
+
+    def test_actual_calc_helper_reads_only_fixed_model_cells_and_keeps_retained_proxy_identity(self):
+        from types import SimpleNamespace
+        api=self.require_api();uno,events,objects=self.make_calc_uno()
+        anchor=SimpleNamespace(base={'privatePipe':'OpenGeul_'+'a'*32},
+            snapshot=lambda:{'native':'retained'},profile=SimpleNamespace(snapshot=lambda:profile_directory_fixture(handle=602)),
+            close=lambda:[dict(kind=k,handleValue=h,result=True) for k,h in [('shell',201),('office',202),('profile-directory',602)]])
+        identity={'observed':{'boundary':'synthetic-seven-role-identity'}}
+        style=SimpleNamespace(observe_packaged_python=lambda:identity['observed'],require_packaged_python=lambda suite,observed:identity)
+        with tempfile.TemporaryDirectory() as directory,patch.dict('sys.modules',{'uno':uno,'writer_style_smoke':style}), \
+             patch.object(api,'_native_anchor',lambda config:anchor),patch.object(api,'_qpc',lambda:(100,1000)):
+            output=Path(directory)
+            api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,expected_url='file:///C:/owned.xlsx',**self.kwargs()))
+            for sequence,action in enumerate(('start','read','release')):
+                api._atomic_json(output/f'request-{sequence:03d}.json',dict(sequence=sequence,action=action))
+            self.assertEqual(api._helper(output,explicit_model=True),0)
+            first=api._read_json(output/'reply-000.json')['observation'];second=api._read_json(output/'reply-001.json')['observation']
+            self.assertEqual(first['kind'],'existing-owned-calc-cells');self.assertEqual(first['operations'],self.OPS)
+            self.assertNotIn('bodyText',first);self.assertEqual(first['sheetIndex'],0)
+            self.assertEqual([first[k] for k in ('a1Text','b1Value','c1Value','d1Formula','d1Value','isModified')],
+                ['Engine-OpenGeul-calc 한글UI-OpenGeul-calc',17.0,25.0,'=SUM(B1:C1)',42.0,True])
+            self.assertEqual(first['unoSnapshots']['before']['proxyIdentity'],second['unoSnapshots']['after']['proxyIdentity'])
+            self.assertEqual(set(first['unoSnapshots']['before']['proxyIdentity']['retainedIds']),{'frame','controller','model'})
+            self.assertTrue(api._read_json(output/'reply-002.json')['proxiesReleased'])
+        self.assertEqual(events,2*['sheet-0','A1.getString','B1.getValue','C1.getValue','D1.getFormula','D1.getValue','isModified'])
+
+    def test_explicit_helper_rejects_bad_contract_or_service_before_cell_getter(self):
+        from types import SimpleNamespace
+        api=self.require_api();uno,events,objects=self.make_calc_uno()
+        anchor=SimpleNamespace(base={'privatePipe':'OpenGeul_'+'a'*32},last_snapshot={},close=lambda:[],profile=None)
+        identity={'observed':{}}
+        style=SimpleNamespace(observe_packaged_python=lambda:{},require_packaged_python=lambda *args:identity)
+        for config in (dict(expected_service=self.SERVICE),dict(expected_service=self.SERVICE,getter_contract='writer-body-v1')):
+            with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',side_effect=AssertionError('native access before contract rejection')):
+                output=Path(directory);api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',**config))
+                with self.assertRaises((AssertionError,KeyError)):api._helper(output,explicit_model=True)
+        objects['model'].supportsService=lambda name:False
+        with tempfile.TemporaryDirectory() as directory,patch.dict('sys.modules',{'uno':uno,'writer_style_smoke':style}),patch.object(api,'_native_anchor',lambda config:anchor):
+            output=Path(directory);api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,expected_url='file:///C:/owned.xlsx',**self.kwargs()))
+            for sequence,action in enumerate(('start','release')):api._atomic_json(output/f'request-{sequence:03d}.json',dict(sequence=sequence,action=action))
+            self.assertEqual(api._helper(output,explicit_model=True),0)
+            self.assertFalse(api._read_json(output/'reply-000.json')['ok'])
+        self.assertEqual(events,[])
+
+    def test_calc_cleanup_reuses_exact_physical_quiescence_without_writer_fallback(self):
+        api=self.require_api();binding,_=self.calc_observation();value=cleanup_fixture(binding,'C:/Suite')
+        value['kind']='owned-calc-reader-cleanup'
+        self.assertIs(api.require_model_reader_cleanup(value,binding,12.0,**self.kwargs()),value)
+        with self.assertRaises(AssertionError):api.require_reader_cleanup(value,binding,12.0)
+        for mutate in (lambda c:c.update(finalJobPids=[99]),lambda c:c.update(terminated=True),
+                       lambda c:c['releaseAcknowledgement']['observerHandleClosures'].pop(),
+                       lambda c:c['memberStateIdentities'][0].update(handleValue=999),
+                       lambda c:c['memberStateSamples'][0]['calls'][2].__setitem__(3,1)):
+            altered=copy.deepcopy(value);mutate(altered)
+            with self.subTest(value=altered),self.assertRaises(AssertionError):
+                api.require_model_reader_cleanup(altered,binding,12.0,**self.kwargs())
+
+    def test_explicit_calc_controller_retains_one_job_and_releases_before_return(self):
+        from types import SimpleNamespace
+        api=self.require_api();binding,raw=self.calc_observation();events=[];active=True
+        clean=cleanup_fixture(binding,'C:/Suite')
+        class Anchor:
+            base={k:v for k,v in binding.items() if k not in ('frameIdentity','controllerIdentity','modelIdentity','documentUrl')}
+            def snapshot(self):return copy.deepcopy(raw['nativeSnapshots']['controllerBefore'])
+            def close(self):events.append('native-release');return [dict(kind=k,handleValue=v,result=True) for k,v in [('shell',101),('office',102),('profile-directory',601)]]
+        class Console:
+            def __init__(self,*args):self.witness=copy.deepcopy(raw['systemConsoleHost'])
+            def recheck(self):return copy.deepcopy(raw['systemConsoleHostRecheck'])
+            def close(self):return dict(kind='system-console-file',handleValue=501,result=True)
+        class Job:
+            def __init__(self):self.job=401;self.handle=302;self.pid=98;self.close_handle=lambda handle:True
+            def poll(self):return None
+            def terminate(self):raise AssertionError('Normal Calc observer must never be terminated')
+            def close(self):self.close_handle(self.handle);self.close_handle(self.job);self.handle=self.job=None
+        class Diagnostics:
+            def job_pids(self,job):return [98,99] if active else []
+            def open_owned(self,pid,job):return pid+300
+            def identity(self,handle):return dict(image='C:/Suite/Office/program/'+('python.exe' if handle==398 else 'python-core-3.13.15/bin/python.exe'),creationTime=handle)
+            def is_in_job(self,handle,job,result):result._obj.value=True;return True
+            def wait_for(self,handle,milliseconds):return 258 if active else 0
+            def get_exit(self,handle,output):output._obj.value=259 if active else 0;return True
+            def close_handle(self,handle):return True
+        original=api._atomic_json
+        def atomic(path,value):
+            nonlocal active
+            original(path,value)
+            if path.name.startswith('request-'):
+                action=value['action'];reply=dict(sequence=value['sequence'],action=action,ok=True,readerPid=99)
+                if action=='release':
+                    active=False;reply.update(clean['releaseAcknowledgement']);events.append('proxies-released')
+                else:
+                    obs=copy.deepcopy(raw);obs['nativeSnapshots']={k:v for k,v in obs['nativeSnapshots'].items() if k.startswith('helper')}
+                    obs['pythonIdentity']={'observed':{'processImage':raw['readerProcess']['image']}}
+                    reply['observation']=obs
+                original(path.parent/f"reply-{value['sequence']:03d}.json",reply)
+        def launch(native,argv,cwd):
+            self.assertEqual(argv[2],'--model-helper');events.append('launch-private-job')
+            config=api._read_json(Path(argv[3])/'configuration.json')
+            self.assertEqual((config['expected_service'],config['getter_contract']),(self.SERVICE,self.GETTERS))
+            return Job(),raw['helperLaunch']
+        native=SimpleNamespace(ProcessDiagnosticsApi=Diagnostics)
+        style=SimpleNamespace(require_packaged_python=lambda suite,observed:dict(observed=observed))
+        with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',lambda config:Anchor()), \
+             patch.object(api,'_worker_native',lambda:native),patch.object(api,'_SystemConsoleHost',Console), \
+             patch.object(api,'_launch_owned',launch),patch.object(api,'_atomic_json',atomic),patch.dict('sys.modules',{'writer_style_smoke':style}):
+            reader=api.OwnedModelReader(Path('C:/Suite'),Path(directory)/'fresh',shell_pid=77,expected_shell_creation=111,
+                suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url=binding['documentUrl'],clock=lambda:1.0,**self.kwargs())
+            first=reader.start(12.0);second=reader.read(12.0);cleanup=reader.close(12.0)
+            api.require_model_reader_cleanup(cleanup,reader.binding,12.0,**self.kwargs())
+            self.assertEqual(first['bindingBefore'],second['bindingAfter'])
+            self.assertEqual(cleanup['kind'],'owned-calc-reader-cleanup');self.assertTrue(cleanup['cleanupSucceeded'])
+            self.assertEqual(sum(event=='launch-private-job' for event in events),1)
+            self.assertLess(events.index('proxies-released'),events.index('native-release'))
+            with self.assertRaises(AssertionError):reader.read(13.0)
+
+
 if __name__=='__main__':unittest.main()

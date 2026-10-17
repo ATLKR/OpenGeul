@@ -7,6 +7,7 @@ import threading
 import traceback
 
 from session import DocumentSession, FACTORIES, WorkerError
+from save_diagnostics import trace_request
 
 MAX_REQUEST_BYTES = 1024 * 1024
 REQUEST_ERROR_CODES = frozenset({
@@ -56,17 +57,29 @@ def handle_request(session, request):
     request_id = request.get('id') if isinstance(request, dict) else None
     if type(request_id) not in (int, str):
         request_id = None
+    save_request = False
     try:
         if (not isinstance(request, dict) or set(request) != {'id', 'command', 'args'}
                 or type(request_id) not in (int, str) or not isinstance(request['command'], str)
                 or not isinstance(request['args'], dict)):
             raise WorkerError('invalid_request', 'id, command, args 객체를 포함한 요청이 필요합니다.')
+        save_request = request['command'] == 'save'
+        if save_request:
+            trace_request('request.begin', request_id)
         result = session.dispatch(request['command'], request['args'])
+        if save_request:
+            trace_request('request.end', request_id, ok=True)
         return {'id': request_id, 'ok': True, 'result': result}
     except WorkerError as exc:
+        if save_request:
+            trace_request('request.error', request_id, ok=False, error_code=exc.code,
+                          exception_type=type(exc).__name__)
         _log_failure(exc)
         return {'id': request_id, 'ok': False, 'error': {'code': exc.code, 'message': exc.message}}
     except Exception as exc:
+        if save_request:
+            trace_request('request.error', request_id, ok=False, error_code='engine_error',
+                          exception_type=type(exc).__name__)
         _log_failure(exc)
         return {'id': request_id, 'ok': False,
                 'error': {'code': 'engine_error', 'message': 'Office 작업에 실패했습니다. 문서 상태를 확인해 주세요.'}}

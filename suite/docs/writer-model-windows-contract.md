@@ -138,6 +138,64 @@ Official Microsoft contracts used for this correction:
 This source correction needs a new Windows run to establish actual behavior.
 The failed run remains failed; no previous exit code is normalized to zero.
 
+## Explicit Calc getter contract
+
+`OwnedWriterReader`, `require_owned_observation`, `require_reader_cleanup`, the
+Writer `OPERATIONS`, `TextDocument` service, Writer receipt kinds and the LC
+portable replay keep their fixed Writer defaults. Legacy `--helper` accepts the
+existing configuration without service/getter fields.
+
+The additive `OwnedModelReader` API requires both `expected_service` and
+`getter_contract`; it accepts only these exact pairs:
+
+| Service | Getter contract |
+|---|---|
+| `com.sun.star.text.TextDocument` | `writer-body-v1` |
+| `com.sun.star.sheet.SpreadsheetDocument` | `calc-a1-b1-c1-d1-v1` |
+
+`require_owned_model_observation(observation, binding, suite_root, *,
+expected_service, getter_contract)` and `require_model_reader_cleanup(cleanup,
+binding, deadline, *, expected_service, getter_contract)` require that same
+explicit caller contract. They validate raw records directly; they never infer
+the contract from an observed kind/service or rewrite a Calc record as Writer.
+Unsupported or mixed pairs fail before native/UNO startup. The explicit
+`--model-helper` entry point also requires and checks both configuration fields
+before opening any native observer handles or resolving UNO. A changed pair in
+the controller configuration fails before creating its output or native state.
+
+The Calc reader resolves the same original private pipe and retained native
+frame/controller/model, then reads sheet zero through `getSheets().getByIndex(0)`.
+It calls, in order, A1 `getString`, B1/C1 `getValue`, D1 `getFormula`/`getValue`,
+and model `isModified`. It never reads the current selection, calls
+`calculateAll`, commits input, dispatches, sets cell values, saves, or focuses a
+window. Before/after UNO snapshots still use the same three retained PyUNO
+proxy identities and native equality checks. Sheet/cell getter proxies are
+temporary local references, with no additional retained proxy identity scheme.
+
+Calc observations use kind `existing-owned-calc-cells` and the public
+`CALC_OPERATIONS` list. Their semantic fields are `sheetIndex` (integer zero),
+`a1Text`, `b1Value`, `c1Value`, `d1Formula`, `d1Value`, and `isModified`. Strings
+are bounded by the existing one-MiB limit; numbers must be finite integers or
+floats, excluding booleans, and modified state must be boolean. The reader does
+not normalize A1 or derive an expected value from an observation. Independent
+baseline, original marker, exact full A1 equality, numeric/formula invariants,
+and permission to perform the original save belong to the separate Calc
+completion policy.
+
+Calc cleanup uses `owned-calc-reader-cleanup`. Native generation, retained
+HANDLE, canonical profile directory/FileID, actual seven-role packaged Python
+identity checks, suspended/private-job/resume launch, compact raw member API
+samples, release acknowledgement, exact HANDLE closures, empty final job and
+normal zero exit reuse the same implementation. All calls, pending observations
+and normal cleanup use the one immutable caller deadline. Neither model
+equality nor a successful physical cleanup can qualify a failed model context.
+
+These getter-only receipts can establish that expected A1 content reached the
+owned model. They do not establish that edit mode ended, diagnose the earlier
+Calc save failure, repair input loss, or establish a product fix. Portable mocked
+tests establish code contracts; a new Windows execution is required for actual
+behavior evidence.
+
 ## Pinned source provenance
 
 The Suite runtime lock selects LibreOffice `26.8.1.1`. Official annotated tag

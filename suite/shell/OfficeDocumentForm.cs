@@ -17,6 +17,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly System.Windows.Forms.Timer resizeTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1500 };
     private readonly bool closeDiagnostics = CloseDiagnosticsEnabled();
+    private readonly SaveDiagnosticsTrace saveDiagnostics = new("suite.documentSave");
     private readonly int uiThreadId = Environment.CurrentManagedThreadId;
     private int closeDiagnosticCount;
     private WorkerClient? worker;
@@ -127,23 +128,41 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     private void OnWorkerCommand(WorkerCommand command)
     {
-        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        var traceSave = command.Command is "save" or "saveAs";
+        if (traceSave) TraceSave("command.received", new { commandSequence = command.DiagnosticSequence, command = command.Command });
+        if (IsDisposed || Disposing || !IsHandleCreated)
+        {
+            if (traceSave) TraceSave("command.guarded", new { commandSequence = command.DiagnosticSequence,
+                guard = IsDisposed ? "disposed" : Disposing ? "disposing" : "handleMissing" });
+            return;
+        }
         try
         {
+            if (traceSave) TraceSave("command.enqueue", new { commandSequence = command.DiagnosticSequence });
             BeginInvoke(async () =>
             {
-                if (!attached || busy || closing || IsDisposed) return;
+                if (traceSave) TraceSave("command.execute", new { commandSequence = command.DiagnosticSequence });
+                if (!attached || busy || closing || IsDisposed)
+                {
+                    if (traceSave) TraceSave("command.guarded", new { commandSequence = command.DiagnosticSequence,
+                        guard = !attached ? "notAttached" : busy ? "busy" : closing ? "closing" : "disposed" });
+                    return;
+                }
                 switch (command.Command)
                 {
                     case "open": open(); break;
                     case "new": create(command.Module ?? module.Id); break;
-                    case "save": await SaveDocumentAsync(false); break;
-                    case "saveAs": await SaveDocumentAsync(true); break;
+                    case "save": await SaveDocumentAsync(false, command.DiagnosticSequence); break;
+                    case "saveAs": await SaveDocumentAsync(true, command.DiagnosticSequence); break;
                     case "close": Close(); break;
                 }
             });
         }
-        catch (InvalidOperationException) { /* Form closed between event and BeginInvoke. */ }
+        catch (InvalidOperationException e)
+        {
+            if (traceSave) TraceSave("command.enqueueError", new { commandSequence = command.DiagnosticSequence, exceptionType = e.GetType().FullName });
+            /* Form closed between event and BeginInvoke. */
+        }
     }
 
     private Size EditorSize() => new(Math.Max(1, editorPanel.ClientSize.Width), Math.Max(1, editorPanel.ClientSize.Height));
@@ -195,9 +214,15 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         SetStatus(DocumentStatusText.Format(module.Id, modified, path is not null, readinessMessage));
     }
 
-    private async Task<bool> SaveDocumentAsync(bool saveAs)
+    private async Task<bool> SaveDocumentAsync(bool saveAs, long? commandSequence = null)
     {
-        if (!attached || worker is null || loading || busy) return false;
+        TraceSave("save.begin", new { commandSequence, saveAs });
+        if (!attached || worker is null || loading || busy)
+        {
+            TraceSave("save.guarded", new { commandSequence,
+                guard = !attached ? "notAttached" : worker is null ? "workerMissing" : loading ? "loading" : "busy" });
+            return false;
+        }
         busy = true;
         EnableSave(false);
         try
@@ -213,20 +238,27 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                     FileName = path is null ? "새 문서." + module.DefaultExtension : Path.GetFileName(path)
                 };
                 if (path is not null) dialog.InitialDirectory = Path.GetDirectoryName(path);
-                if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    TraceSave("save.dialogCancelled", new { commandSequence });
+                    return false;
+                }
                 target = LocalDocumentPath.Validate(dialog.FileName);
                 filter = module.SaveFilter(target);
             }
             SetStatus("저장하고 있습니다…");
             var request = new Dictionary<string, object>();
             if (target is not null) { request["path"] = target; request["filter"] = filter!; }
-            var result = await worker.SendAsync("save", request);
+            TraceSave("save.workerRequest", new { commandSequence });
+            var result = await worker.SendAsync("save", request, diagnosticCommandSequence: commandSequence);
             if (target is not null) path = target;
             ApplyStatus(result);
+            TraceSave("save.end", new { commandSequence, ok = true });
             return true;
         }
         catch (Exception e)
         {
+            TraceSave("save.error", new { commandSequence, exceptionType = e.GetType().FullName });
             SetStatus("저장하지 못했습니다. 문서 창을 유지합니다.");
             Program.ShowError("문서를 저장하지 못했습니다. 문서 창을 유지합니다.\n" + e.Message, this);
             return false;
@@ -376,6 +408,25 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             Console.Error.Flush();
         }
         catch (Exception) { /* Diagnostic failures must not change document close behavior. */ }
+    }
+
+    private void TraceSave(string stage, object? details = null)
+    {
+        if (!saveDiagnostics.Enabled) return;
+        try
+        {
+            var managedThreadId = Environment.CurrentManagedThreadId;
+            var isUiThread = managedThreadId == uiThreadId;
+            saveDiagnostics.Write(stage, new
+            {
+                module = module.Id, uiThreadId, isUiThread,
+                hwnd = isUiThread && IsHandleCreated ? Handle.ToInt64() : 0,
+                loading, busy, closing, attached, statusBusy, resizeBusy,
+                disposed = IsDisposed, disposing = Disposing, workerPresent = worker is not null,
+                details
+            }, worker?.ProcessId, worker?.DiagnosticTraceId);
+        }
+        catch (Exception) { /* Diagnostic snapshots must not change save behavior. */ }
     }
 
     private async Task ReleaseWorkerAsync()
