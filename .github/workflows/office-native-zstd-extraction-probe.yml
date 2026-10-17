@@ -1,0 +1,58 @@
+name: OpenGeul native ARM64 zstd source extraction diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-native-zstd-extraction-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  zstd-source-extraction:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Reserve extraction and evidence time before checkout
+        shell: pwsh
+        run: |
+          $started = [DateTime]::UtcNow
+          $deadline = $started.AddMinutes(20).ToString('o')
+          $owned = Join-Path $env:RUNNER_TEMP ('opengeul-zstd-extraction-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $owned) { throw 'Preserve prior extraction evidence.' }
+          New-Item -ItemType Directory -Path $owned | Out-Null
+          $receipt = Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;diagnosticMinutes=20;jobTimeoutMinutes=30;nominalReserveMinutes=10;runnerSetupIncluded=$false} |
+            ConvertTo-Json | Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
+          "OPENGEUL_ZSTD_ROOT=$owned" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_ZSTD_DEADLINE=$deadline" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_ZSTD_BUDGET_RECEIPT=$receipt" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Verify portable extraction diagnostic contracts
+        shell: pwsh
+        run: python -m unittest suite.tests.test_native_zstd_extraction_probe -v
+      - name: Compare exact original and corrected source extraction
+        shell: pwsh
+        run: |
+          ./suite/scripts/probe-native-zstd-extraction.ps1 -Output "$env:OPENGEUL_ZSTD_ROOT/evidence" -WorkRoot "$env:OPENGEUL_ZSTD_ROOT/work" -Deadline $env:OPENGEUL_ZSTD_DEADLINE
+          if (-not $?) { throw 'Source extraction diagnostic failed; preserve originals.' }
+      - name: Retain complete extraction and native-link diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-zstd-extraction-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/opengeul-zstd-extraction-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+            ${{ runner.temp }}/opengeul-zstd-extraction-${{ github.run_id }}-${{ github.run_attempt }}/job-budget.json
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error

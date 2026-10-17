@@ -202,6 +202,17 @@
     "sha256": "b279f950f2279372f2efe2b07cc4c7a77d5266f3032897142f1fc1b698db781f",
     "strip": 0
   },
+  "zstdSourceLinks": {
+    "path": "external/zstd/UnpackedTarball_zstd.mk",
+    "sha256": "3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909",
+    "afterSha256": "6e2dc4deb222a3bc5385153d51778701fce4eb9f45d7e5cf4c0b3ceea75766d8",
+    "archive": {
+      "filename": "zstd-1.5.7.tar.gz",
+      "size": 2434947,
+      "sha256": "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
+    },
+    "scope": "WNT_AARCH64 exact zstd UnpackedTarget only; all other make children retain strict native links"
+  },
   "moduleBootstrap": {
     "path": "bin/unpack-sources",
     "sha256": "912e88972e7fc7f61eb0b373187d80d2f2ab6e7462378dce979254fa31792715",

@@ -39,6 +39,25 @@ def _icu_build_path(source: Path, lock: dict) -> tuple[Path, bytes, bytes]:
     return target, original, changed
 
 
+def _zstd_source_links(source: Path, lock: dict) -> tuple[Path, bytes, bytes]:
+    """Keep portable source-test links confined to the exact ARM64 untar target."""
+    target = source / lock['path']
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise ValueError('Zstd source unpack requires a regular recipe directory')
+    original = _regular(target)
+    if hashlib.sha256(original).hexdigest() != lock['sha256']:
+        raise ValueError('LibreOffice zstd unpack recipe SHA256 differs from the pinned source')
+    changed = original + (
+        b'\n# Preserve source-only CLI test symlinks whose targets occur later in the archive.\n'
+        b'# Keep native module and DLL links strict outside this exact unpack target.\n'
+        b'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
+        b'$(call gb_UnpackedTarget_get_target,$(ZSTD_TARBALL)): export CYGWIN := winsymlinks:sys\n'
+        b'endif\n')
+    if hashlib.sha256(changed).hexdigest() != lock['afterSha256']:
+        raise ValueError('LibreOffice zstd unpack result SHA256 differs from its lock')
+    return target, original, changed
+
+
 def install_module_bootstrap(source: Path, evidence: Path | None = None) -> dict:
     """Correct the pinned unpack helper's inverted git-hooks selection only."""
     lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))['moduleBootstrap']
@@ -105,7 +124,9 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     if output.exists() or output.is_symlink():
         raise ValueError('Port patch output already exists')
     project, project_original, project_changed = _icu_build_path(source, lock['icuBuildPath'])
+    zstd, zstd_original, zstd_changed = _zstd_source_links(source, lock['zstdSourceLinks'])
     project_evidence = {}
+    zstd_evidence = {}
     if evidence is not None:
         evidence = Path(evidence)
         if any(path.is_symlink() for path in (evidence, *evidence.parents)) or not evidence.is_dir():
@@ -114,6 +135,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                             'effective': evidence / 'effective-ExternalProject_firebird.mk'}
         if any(path.exists() or path.is_symlink() for path in project_evidence.values()):
             raise ValueError('Firebird build path evidence already exists')
+        zstd_evidence = {'original': evidence / 'original-UnpackedTarball_zstd.mk',
+                         'effective': evidence / 'effective-UnpackedTarball_zstd.mk'}
+        if any(path.exists() or path.is_symlink() for path in zstd_evidence.values()):
+            raise ValueError('Zstd unpack evidence already exists')
     hook = ('\n# OpenGeul native Windows ARM64 Firebird CPU identity port.\n'
             'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
             '$(eval $(call gb_UnpackedTarball_add_patches,firebird,\\\n'
@@ -127,6 +152,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         if project_evidence:
             with project_evidence[name].open('xb') as stream:
                 stream.write(raw)
+    for name, raw in (('original', zstd_original), ('effective', zstd_changed)):
+        if zstd_evidence:
+            with zstd_evidence[name].open('xb') as stream:
+                stream.write(raw)
     with output.open('xb') as stream:
         stream.write(patch)
     try:
@@ -135,8 +164,11 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         with configure.open('wb') as stream:
             stream.write(configure_changed)
         project.write_bytes(project_changed)
+        zstd.write_bytes(zstd_changed)
         if _regular(project) != project_changed:
             raise ValueError('Effective Firebird build recipe bytes changed after write')
+        if _regular(zstd) != zstd_changed:
+            raise ValueError('Effective zstd unpack recipe bytes changed after write')
     except BaseException:
         output.unlink(missing_ok=True)
         raise
@@ -154,6 +186,12 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                              'beforeSha256': lock['icuBuildPath']['sha256'],
                              'afterSha256': lock['icuBuildPath']['afterSha256'],
                              'evidence': {name: str(path) for name, path in project_evidence.items()}},
+            'zstdSourceLinks': {'path': lock['zstdSourceLinks']['path'],
+                                'beforeSha256': lock['zstdSourceLinks']['sha256'],
+                                'afterSha256': lock['zstdSourceLinks']['afterSha256'],
+                                'archive': lock['zstdSourceLinks']['archive'],
+                                'scope': lock['zstdSourceLinks']['scope'],
+                                'evidence': {name: str(path) for name, path in zstd_evidence.items()}},
             'nativeBuildVerified': False, 'basePersistenceVerified': False}
 
 
