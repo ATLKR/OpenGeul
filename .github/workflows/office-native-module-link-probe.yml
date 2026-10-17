@@ -1,0 +1,42 @@
+name: OpenGeul native ARM64 module link diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-native-module-link-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-module-link-diagnostic:
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Observe module links without qualifying the product
+        shell: pwsh
+        run: |
+          ./suite/scripts/probe-native-module-links.ps1 -Output .work/native-module-link-probe -WorkDirectory .work/native-module-link-work
+          if (-not $?) { throw 'Native module link diagnostic failed; preserve its original evidence.' }
+      - name: Retain only the module link diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-module-link-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .work/native-module-link-probe/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
