@@ -89,6 +89,13 @@ function Get-SuiteKoreanPreparationDeadline([string]$Architecture,[UInt16]$Proce
     $seconds=if ($Architecture -ceq 'arm64') { 1800 } else { 600 }
     return [ordered]@{budgetSeconds=$seconds;startedUtc=$StartedUtc.ToString('o');expiresUtc=$StartedUtc.AddSeconds($seconds).ToString('o')}
 }
+function Get-SuiteKoreanUtcTicks([AllowNull()][object]$Value) {
+    $instant=if ($Value -is [DateTime]) { $Value }
+        elseif ($Value -is [string]) { [DateTime]::ParseExact($Value,'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind) }
+        else { throw 'Preparation deadline requires a UTC round-trip timestamp.' }
+    if ($instant.Kind -ne [DateTimeKind]::Utc) { throw 'Preparation deadline timestamp is not UTC.' }
+    return $instant.Ticks
+}
 function Test-SuiteKoreanLegacyCollectorWindow([string]$Architecture,[double]$ElapsedSeconds) {
     return -not ($Architecture -ceq 'arm64' -and $ElapsedSeconds -gt 900)
 }
@@ -168,7 +175,8 @@ if (-not $Worker) {
         if ($record.source.sourceCommit -cne $head[0] -or $record.source.job -cne 'windows-suite' -or
             $record.source.architecture -cne $Architecture -or
             $record.preparationDeadline.budgetSeconds -ne $deadline.budgetSeconds -or
-            $record.preparationDeadline.startedUtc -cne $deadline.startedUtc -or $record.preparationDeadline.expiresUtc -cne $deadline.expiresUtc -or
+            (Get-SuiteKoreanUtcTicks $record.preparationDeadline.startedUtc) -ne (Get-SuiteKoreanUtcTicks $deadline.startedUtc) -or
+            (Get-SuiteKoreanUtcTicks $record.preparationDeadline.expiresUtc) -ne (Get-SuiteKoreanUtcTicks $deadline.expiresUtc) -or
             $record.nativeMachine -ne $controllerHost.nativeMachine -or
             $record.controllerMachine -ne 0 -or $record.profile.component.machine -ne $controllerHost.nativeMachine -or
             $record.suiteOnly -ne $true -or $record.productInputVerified -ne $false -or

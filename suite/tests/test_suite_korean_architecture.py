@@ -1,5 +1,6 @@
 """Execute Suite Korean setup architecture and offline source gates in PowerShell."""
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import tempfile
@@ -11,7 +12,7 @@ PWSH = shutil.which('pwsh')
 
 @unittest.skipUnless(PWSH, 'PowerShell is required to execute prerequisite gates')
 class SuiteKoreanArchitectureTests(unittest.TestCase):
-    def run_gate(self, body):
+    def run_gate(self, body, timezone=None):
         script = '''param([string]$Source)
 $ErrorActionPreference='Stop'
 $tokens=$null;$errors=$null
@@ -27,7 +28,8 @@ foreach($name in @('Assert-SuiteNativeArchitecture','Assert-SuitePlainPath','Ass
             path = Path(directory)/'gate.ps1'
             path.write_text(script)
             result = subprocess.run([PWSH, '-NoProfile', '-NonInteractive', '-File', str(path), '-Source', str(SOURCE)],
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=30,
+                                    env=dict(os.environ, TZ=timezone) if timezone else None)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_native_requested_machine_must_equal_real_os_and_unemulated_controller(self):
@@ -152,6 +154,46 @@ foreach($savedDeadline in @($original,($original|ConvertTo-Json|ConvertFrom-Json
     if($deadlineStart.Kind -ne [DateTimeKind]::Utc -or $deadline.startedUtc -cne $started.ToString('o')){throw 'UTC deadline lost its kind or precision during JSON replay'}
 }
 ''')
+
+    def test_controller_deadline_accepts_exact_utc_instants_and_rejects_changed_or_missing_ticks_in_each_timezone(self):
+        for timezone in ('UTC', 'America/Chicago'):
+            with self.subTest(timezone=timezone):
+                self.run_gate('''
+$helpers=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-SuiteKoreanUtcTicks'},$true))
+foreach($helper in $helpers){Invoke-Expression $helper.Extent.Text}
+$guards=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.Contains('$record.source.sourceCommit') -and $node.Clauses[0].Item1.Extent.Text.Contains('$record.profile.registered')},$true))
+if($guards.Count -ne 1){throw 'Actual controller readiness comparison missing or ambiguous'}
+$started=[DateTime]::Parse('2026-10-17T07:39:17.8129419Z',$null,[Globalization.DateTimeStyles]::RoundtripKind)
+$Architecture='arm64';$controllerHost=@{processMachine=0;nativeMachine=0xAA64};$head=@('a'*40)
+$deadline=Get-SuiteKoreanPreparationDeadline $Architecture 0 0xAA64 $started
+$original=[pscustomobject]@{source=[pscustomobject]@{sourceCommit=$head[0];job='windows-suite';architecture='arm64'};
+    preparationDeadline=[pscustomobject]@{budgetSeconds=1800;startedUtc=$deadline.startedUtc;expiresUtc=$deadline.expiresUtc};
+    nativeMachine=0xAA64;controllerMachine=0;profile=[pscustomobject]@{component=[pscustomobject]@{machine=0xAA64};registered=$true};
+    suiteOnly=$true;productInputVerified=$false;storeQualified=$false;capabilityAfter='Installed';restartNeeded=$false;userLanguageConfigured=$true}
+$json=$original|ConvertTo-Json -Depth 6
+foreach($record in @($original,($json|ConvertFrom-Json))) {
+    try{Invoke-Expression $guards[0].Extent.Text}catch{throw ('Actual controller rejected identical UTC deadline after JSON replay: '+$_.Exception.Message)}
+}
+foreach($field in @('startedUtc','expiresUtc')) {
+    foreach($mutation in @('plus-tick','minus-tick','null','missing','unspecified','local')) {
+        $record=$json|ConvertFrom-Json
+        $value=[DateTime]::Parse($original.preparationDeadline.$field,$null,[Globalization.DateTimeStyles]::RoundtripKind)
+        switch($mutation) {
+            'plus-tick'{$record.preparationDeadline.$field=$value.AddTicks(1)}
+            'minus-tick'{$record.preparationDeadline.$field=$value.AddTicks(-1)}
+            'null'{$record.preparationDeadline.$field=$null}
+            'missing'{$record.preparationDeadline.PSObject.Properties.Remove($field)}
+            'unspecified'{$record.preparationDeadline.$field=[DateTime]::SpecifyKind($value,[DateTimeKind]::Unspecified)}
+            'local'{$record.preparationDeadline.$field=$value.ToLocalTime()}
+        }
+        $rejected=$false;try{Invoke-Expression $guards[0].Extent.Text}catch{$rejected=$true}
+        if(-not $rejected){throw ('Actual controller accepted changed/missing UTC ticks: '+$field+' '+$mutation)}
+    }
+}
+$record=$json|ConvertFrom-Json;$record.preparationDeadline.budgetSeconds=1801
+$rejected=$false;try{Invoke-Expression $guards[0].Extent.Text}catch{$rejected=$true}
+if(-not $rejected){throw 'Controller accepted a weaker preparation budget'}
+''', timezone=timezone)
 
     def test_arm_timeout_preserves_original_error_and_tails_when_cleanup_or_receipt_fails(self):
         self.run_gate('''
