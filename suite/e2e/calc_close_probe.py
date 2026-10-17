@@ -95,8 +95,8 @@ class CalcCloseCase(lifecycle.Case):
         self.suite,self.fixtures,self.root=suite,fixtures,output
         self.choice,self.name=choice,'calc-close-'+choice
         self.output=output/self.name;self.output.mkdir(exist_ok=False)
-        self.api=None;self.process=None;self.reader=None;self.deadline=None
-        self.record=dict(case=self.name,choice=choice,kind='physical-calc-uncommitted-close',success=False,
+        self.api=None;self.process=None;self.reader=None;self.deadline=None;self.cleanup_proof=None
+        self.record=dict(case=self.name,choice=choice,kind='physical-calc-uncommitted-close',success=False,module='calc',
             stage='setup',productCloseChanged=False,historicalDataLossEstablished=False,
             marker=marker(choice),navigationKeys=[],commitKeys=[],closeShortcutCount=0,beforeCloseActions=[],
             stderrLog=self.name+'/'+self.name+'-stderr.log')
@@ -168,6 +168,8 @@ class CalcCloseCase(lifecycle.Case):
         self.record.update(packagedUnoVerified=True,reopen=result)
 
     def run(self):
+        from calc_failure_cleanup import bind_pre_input_cleanup,finish_pre_input_cleanup
+        from generated_calc_close import freeze_saved_calc_copy
         from pywinauto import Desktop
         from pywinauto.keyboard import send_keys
         from writer_style_smoke import _packaged_identity_file
@@ -178,6 +180,7 @@ class CalcCloseCase(lifecycle.Case):
             self.source=folder/'OpenGeul-calc.xlsx'
             with self.source.open('xb') as stream:stream.write(raw)
             self.record.update(baseline=self.baseline,beforeSha256=hashlib.sha256(raw).hexdigest())
+            baseline_copy=freeze_saved_calc_copy(self.suite,folder,self.source,self.record['beforeSha256'],calc_save.read_cells(raw))
             diagnostics=self.output/'diagnostics';diagnostics.mkdir()
             previous=os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS')
             os.environ['OPENGEUL_SUITE_DIAGNOSTICS']=str(diagnostics)
@@ -189,6 +192,7 @@ class CalcCloseCase(lifecycle.Case):
             self.record['stage']='attach'
             self.hwnd,self.parent,self.child,self.office_pid=native.verified_attachment(self.api,self.process,'calc')
             self.record.update(windowHwnd=self.hwnd,parentHwnd=self.parent,childHwnd=self.child,officePid=self.office_pid)
+            self.cleanup_proof=bind_pre_input_cleanup(self.api,self.process,self.hwnd,self.parent,self.child,self.record,baseline_copy)
             window=Desktop(backend='win32').window(handle=self.hwnd).wrapper_object()
             window.maximize();window.set_focus()
             native.wait_for(lambda:self.api.user.GetAncestor(self.api.user.GetForegroundWindow(),2)==self.hwnd,10)
@@ -279,6 +283,7 @@ class CalcCloseCase(lifecycle.Case):
                 try:self.record['failedReaderCleanup']=self.reader.close(self.deadline)
                 except BaseException as later:self.record['failedReaderCleanupError']=str(later)
                 self.reader=None
+            finish_pre_input_cleanup(self.api,self.process,self.record,self.cleanup_proof,self.record.get('failedReaderCleanup'))
             if self.process is not None:
                 # Authorized cleanup only for this launched generated-copy case;
                 # never dismiss an unexpected or foreign dialog to make it pass.

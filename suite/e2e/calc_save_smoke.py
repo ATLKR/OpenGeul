@@ -285,6 +285,8 @@ def await_reopen_job(helper,probe,record,*,clock=time.monotonic,pause=time.sleep
 
 
 def physical_case(suite,fixtures,output):
+    from calc_failure_cleanup import bind_pre_input_cleanup,finish_pre_input_cleanup
+    from generated_calc_close import freeze_saved_calc_copy
     from pywinauto import Desktop
     from pywinauto.keyboard import send_keys
     from lifecycle_smoke import retained_writer_shell
@@ -297,10 +299,11 @@ def physical_case(suite,fixtures,output):
     source=owned/'OpenGeul-calc.xlsx'
     with source.open('xb') as f:f.write(source_bytes)
     expected=baseline['a1Text']+MARKER
-    process=reader=None
+    process=reader=cleanup_proof=None
     record=dict(schemaVersion=1,case=CASE,kind='physical-uncommitted-calc-save',success=False,stage='launch',
         module='calc',sourceSha256=hashlib.sha256(source_bytes).hexdigest(),baseline=baseline,
         navigationKeys=[],commitKeys=[],saveShortcutCount=0,asyncValidationQualified=False)
+    baseline_copy=freeze_saved_calc_copy(suite,owned,source,record['sourceSha256'],read_cells(source_bytes))
     diagnostics=output/'diagnostics';diagnostics.mkdir()
     prior={key:os.environ.get(key) for key in ('OPENGEUL_SUITE_DIAGNOSTICS',)}
     api=Windows()
@@ -314,6 +317,7 @@ def physical_case(suite,fixtures,output):
         record['shellPid']=process.pid
         hwnd,parent,child,office_pid=verified_attachment(api,process,'calc')
         record.update(windowHwnd=hwnd,parentHwnd=parent,childHwnd=child,officePid=office_pid)
+        cleanup_proof=bind_pre_input_cleanup(api,process,hwnd,parent,child,record,baseline_copy)
         window=Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize();window.set_focus()
         wait_for(lambda:api.user.GetAncestor(api.user.GetForegroundWindow(),2)==hwnd,10)
@@ -410,9 +414,11 @@ def physical_case(suite,fixtures,output):
         if reader is not None:
             try:record['readerCleanup']=reader.close(deadline)
             except BaseException as later:record['readerCleanupError']=str(later)
+            finally:reader=None
         capture_failure(output,CASE,record,exc)
         raise
     finally:
+        finish_pre_input_cleanup(api,process,record,cleanup_proof,record.get('readerCleanup'))
         if process is not None:stop_owned_test_process(process,record)
         write_result(output,CASE,record)
 

@@ -990,7 +990,8 @@ class _UnoReader:
             if self.contract==_CALC_PENDING_CONTRACT:
                 from calc_pending_input import AccessiblePendingReader
                 if self.pending_input is None:
-                    self.pending_input=AccessiblePendingReader(self.frame,self.config['child_hwnd'])
+                    self.pending_input=AccessiblePendingReader(self.frame,self.config['child_hwnd'],
+                        deadline=self.config['readerDeadline'])
                 pending=dict(calcSelection=read_calc_selection(self.controller),pendingInput=self.pending_input.read())
             value=dict(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
                 b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
@@ -1305,7 +1306,10 @@ def _helper(directory,*,explicit_model=False):
                 failed=True;reply['error']=dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None),traceback=traceback.format_exc(),
                     attemptedObservation=observation,nativeSnapshot=getattr(anchor,'last_snapshot',getattr(exc,'native_snapshot',None)),
                     unoSnapshot=getattr(reader,'last_snapshot',getattr(exc,'uno_snapshot',None)),frameEnumeration=getattr(reader,'last_frames',getattr(exc,'frame_enumeration',None)),
-                    unoDiagnostic=getattr(reader,'diagnostic',getattr(exc,'uno_diagnostic',None)),observerProxiesReleased=getattr(exc,'observer_proxies_released',None),pythonIdentity=identity,nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None))
+                    unoDiagnostic=getattr(reader,'diagnostic',getattr(exc,'uno_diagnostic',None)),
+                    pendingInputDiagnostic=getattr(exc,'pending_input_diagnostic',
+                        getattr(getattr(reader,'pending_input',None),'last_diagnostic',None)),
+                    observerProxiesReleased=getattr(exc,'observer_proxies_released',None),pythonIdentity=identity,nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None))
             _atomic_json(directory/f'reply-{sequence:03d}.json',reply);sequence+=1
             if action=='release':return 0 if reply['ok'] else 1
     finally:

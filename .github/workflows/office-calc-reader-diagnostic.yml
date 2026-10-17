@@ -1,0 +1,105 @@
+name: OpenGeul Calc reader failure diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-calc-reader-diagnostic]
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  calc-save-x64:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Prepare native UI tools
+        shell: pwsh
+        run: |
+          python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+          if ($LASTEXITCODE -ne 0) { throw 'Native UI prerequisites failed.' }
+      - name: Verify Calc Save ownership and persistence regressions
+        shell: pwsh
+        run: |
+          python -m unittest suite.tests.test_package suite.tests.test_payload suite.tests.test_calc_save suite.tests.test_calc_save_smoke suite.tests.test_worker suite.tests.test_save_diagnostics suite.tests.test_calc_close_probe suite.tests.test_calc_pending_input suite.tests.test_calc_pending_input_diagnostics suite.tests.test_calc_failure_cleanup suite.tests.test_writer_model_reader suite.tests.test_native_cleanup suite.tests.test_native_cleanup_receipt suite.tests.test_generated_calc_close suite.tests.test_calc_close_prepare suite.tests.test_editor_focus_readiness -v
+          if ($LASTEXITCODE -ne 0) { throw 'Calc Save boundary tests failed.' }
+          dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Suite close flow tests failed.' }
+      - name: Build the pinned Suite package
+        id: build
+        shell: pwsh
+        run: |
+          $lock = Get-Content suite/config/runtime.lock.json -Raw | ConvertFrom-Json
+          if ($lock.architecture -cne 'x64' -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite identity.' }
+          "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-x64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          ./suite/scripts/build-suite.ps1 -Architecture x64
+          if ($LASTEXITCODE -ne 0) { throw 'Suite package build failed.' }
+      - name: Create a fresh authenticated engine fixture set
+        id: fixtures
+        shell: pwsh
+        run: |
+          $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+          & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-calc-engine
+          if ($LASTEXITCODE -ne 0) { throw 'Fresh engine fixtures failed.' }
+      - name: Single native Calc input scenario with bounded reader failure evidence
+        if: '!cancelled() && steps.fixtures.outcome == ''success'''
+        shell: pwsh
+        run: |
+          $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+          python suite/e2e/calc_save_smoke.py --suite $package --fixtures .work/suite-calc-engine/fixtures --output .work/suite-calc-active-cell
+          $e2eExit = $LASTEXITCODE
+          python suite/scripts/verify-suite.py $package
+          $integrityExit = $LASTEXITCODE
+          if ($e2eExit -ne 0 -or $integrityExit -ne 0) { throw "Calc active-cell Save failed: physical=$e2eExit integrity=$integrityExit" }
+      - name: Require graceful product shutdown for every owned Calc editor
+        if: '!cancelled() && steps.fixtures.outcome == ''success'''
+        shell: python
+        run: |
+          import ast, hashlib, json, os, sys, textwrap
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          # Execute the reviewed matrix verifier functions from this same source
+          # commit. This single-case diagnostic does not qualify the Suite.
+          source = Path('.github/workflows/office-suite.yml').read_text(encoding='utf-8')
+          begin = source.index('        from pathlib import Path, PurePosixPath\n')
+          end = source.index('        roots = (', begin)
+          module = ast.parse(textwrap.dedent(source[begin:end]))
+          definitions = ast.Module(body=[node for node in module.body if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef))], type_ignores=[])
+          namespace = {}
+          exec(compile(definitions, '.github/workflows/office-suite.yml', 'exec'), namespace)
+          roots = ('.work/suite-calc-active-cell/diagnostics',)
+          outputs = ('.work/suite-calc-active-cell',)
+          engine = Path(os.environ['SUITE_PACKAGE']).resolve() / 'Office/program/soffice.bin'
+          result = namespace['check_all_native_archives'](roots, outputs, engine)
+          result.update(qualification=False, diagnosticPurpose='first accessible parent/index failure', sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'], verifierWorkflowSha256=hashlib.sha256(source.encode('utf-8')).hexdigest())
+          Path('.work/suite-calc-native-integrity.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(result))
+          assert result['success'], 'At least one Calc product job did not exit gracefully or preserve its archive'
+      - name: Preserve original generated fixtures, native diagnostics and save evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-calc-reader-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/suite-calc-engine/
+            .work/suite-calc-active-cell/
+            .work/suite-calc-native-integrity.json
+            dist/**/suite-inventory.json
+            dist/**/suite-provenance.json
+            dist/**/runtime-branding.json
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error

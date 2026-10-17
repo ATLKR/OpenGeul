@@ -17,6 +17,7 @@ the actual temporary editor is explicit; model-cell text is never substituted.
 from __future__ import annotations
 
 import re
+import time
 import uuid
 
 ROLE_NAMESPACE = 'com.sun.star.accessibility.AccessibleRole'
@@ -29,6 +30,7 @@ STATE_CONSTANTS = dict(DEFUNC=16, SHOWING=16777216, VISIBLE=536870912)
 A1_EDITOR_NAMES = ('Cell A1', '셀 A1')
 MAX_DEPTH, MAX_CHILDREN, MAX_NODES, MAX_PARAGRAPHS = 24, 256, 2048, 32
 MAX_TEXT = 65536
+MAX_DIAGNOSTIC_NODES, MAX_DIAGNOSTIC_NAME, MAX_DIAGNOSTIC_ERROR = 64, 256, 512
 KIND = 'owned-calc-a1-accessible-pending-input'
 WITNESSES = ('sameFramePeer', 'sameRoot', 'liveParentIndexReciprocity',
              'sameRetainedDocument', 'sameRetainedEditor')
@@ -118,13 +120,14 @@ def require_pending_receipt(raw, child_hwnd, expected_text=None, require_editor=
 class AccessiblePendingReader:
     """Retain only objects reachable from the verified frame's own native peer."""
 
-    def __init__(self, frame, child_hwnd):
+    def __init__(self, frame, child_hwnd, *, deadline=None, clock=time.monotonic):
         import uno
         assert type(child_hwnd) is int and child_hwnd > 0, 'Owned native editor HWND is invalid'
         for namespace, constants in ((ROLE_NAMESPACE, ROLE_CONSTANTS), (STATE_NAMESPACE, STATE_CONSTANTS)):
             for name, expected in constants.items():
                 assert int(uno.getConstantByName(namespace + '.' + name)) == expected, 'Accessible API differs from pinned source'
         self.frame, self.child_hwnd = frame, child_hwnd
+        self.deadline, self.clock = deadline, clock
         self.peer = frame.getContainerWindow()
         assert self.peer is not None and int(self.peer.getWindowHandle((), 1)) == child_hwnd, 'Frame peer does not own the verified native editor'
         self.root = self.peer.getProperty('XAccessible')
@@ -132,6 +135,7 @@ class AccessiblePendingReader:
         self.document = self.editor = None
         self.identities = dict(root=uuid.uuid4().hex, document=uuid.uuid4().hex, editor=uuid.uuid4().hex)
         self.previous = None
+        self.last_diagnostic = None
 
     def release(self):
         """Drop local references only; never close/dispose any native object."""
@@ -144,28 +148,154 @@ class AccessiblePendingReader:
         assert self.peer.getProperty('XAccessible') == self.root, 'Retained native accessible root changed'
 
     def read(self):
+        # Error evidence is separate from a qualified observation. Retain only
+        # bounded JSON data; drop every temporary native proxy in the finally.
+        self._trace, self._trace_count, self._current = [], 0, None
+        self._contexts, self._phase = [], 'verify-peer'
+        self.last_diagnostic = None
+        try:
+            return self._read()
+        except BaseException as exc:
+            try:
+                diagnostic = self._failure_diagnostic(exc)
+            except BaseException as diagnostic_error:
+                diagnostic = dict(schemaVersion=1, kind=KIND + '-failure', qualified=False,
+                    childHwnd=self.child_hwnd, phase=self._phase,
+                    primaryError=dict(type=type(exc).__name__, message=str(exc)[:MAX_DIAGNOSTIC_ERROR]),
+                    diagnosticError=dict(type=type(diagnostic_error).__name__,
+                                         message=str(diagnostic_error)[:MAX_DIAGNOSTIC_ERROR]))
+            self.last_diagnostic = diagnostic
+            try:
+                exc.pending_input_diagnostic = diagnostic
+            except BaseException:
+                pass  # The original exception, even if immutable, stays primary.
+            raise
+        finally:
+            self._trace = self._contexts = self._current = None
+
+    def _describe_failure_object(self, accessible, known_role=None, context=None, *, read_index=False):
+        """At most one node and its two parents; no second tree traversal."""
+        if accessible is None:
+            return None
+        known = [node for node in self._contexts if node[0] == accessible]
+        record = dict(knownIndexPaths=[node[2] for node in known])
+        errors = record['errors'] = []
+
+        def get(operation, owner):
+            # These optional getters cannot reset/extend the reader's budget.
+            # An absent deadline gives no authorization for extra remote calls.
+            if self.deadline is None or self.clock() >= self.deadline:
+                record['deadlineExpired'] = True
+                return None
+            try:
+                return getattr(owner, operation)()
+            except BaseException as exc:
+                errors.append(dict(operation=operation, type=type(exc).__name__,
+                                   message=str(exc)[:MAX_DIAGNOSTIC_ERROR]))
+                return None
+
+        if context is None:
+            context = known[0][1] if known else get('getAccessibleContext', accessible)
+        if known_role is not None:
+            record['role'] = known_role
+        if context is None:
+            return record
+        if read_index:
+            index = get('getAccessibleIndexInParent', context)
+            if type(index) is int:
+                record['indexInParent'] = index
+        if known_role is None:
+            role = get('getAccessibleRole', context)
+            if type(role) is int:
+                record['role'] = role
+        name = get('getAccessibleName', context)
+        if isinstance(name, str):
+            record.update(name=name[:MAX_DIAGNOSTIC_NAME], nameTruncated=len(name) > MAX_DIAGNOSTIC_NAME)
+        point = get('getLocationOnScreen', context)
+        size = get('getSize', context)
+        if point is not None and size is not None:
+            values = point.X, point.Y, size.Width, size.Height
+            if all(type(value) is int for value in values):
+                record['rectangle'] = [point.X, point.Y, point.X + size.Width, point.Y + size.Height]
+        return record
+
+    def _failure_diagnostic(self, exc):
+        diagnostic = dict(schemaVersion=1, kind=KIND + '-failure', sourceTag='libreoffice-26.8.1.1',
+            qualified=False, childHwnd=self.child_hwnd, phase=self._phase,
+            primaryError=dict(type=type(exc).__name__, message=str(exc)[:MAX_DIAGNOSTIC_ERROR]),
+            observedNodeCount=self._trace_count, partialTreeTruncated=self._trace_count > len(self._trace),
+            nodes=[dict(row) for row in self._trace])
+        if self._current is not None:
+            current = self._current
+            row = dict(current['record'])
+            row['description'] = self._describe_failure_object(current['accessible'], row.get('role'),
+                current.get('context'), read_index='observedIndexInParent' not in row and bool(row['indexPath']))
+            if row['description'] is not None and 'indexInParent' in row['description']:
+                row['observedIndexInParent'] = row['description']['indexInParent']
+            diagnostic['failedNode'] = row
+            diagnostic['expectedParent'] = self._describe_failure_object(current['parent'])
+            if current['actualParent'] is current['parent']:
+                diagnostic['actualParent'] = diagnostic['expectedParent']
+            else:
+                diagnostic['actualParent'] = self._describe_failure_object(current['actualParent'])
+        return diagnostic
+
+    def _read(self):
         self._verify_peer()
         nodes, skipped = [], [0]
+        self._contexts = nodes
+
+        def reciprocity(context, parent, path, record, phase, *, final=False):
+            self._phase = phase
+            actual_parent = context.getAccessibleParent()
+            self._current['actualParent'] = actual_parent
+            parent_matches = actual_parent == parent
+            record.update(observedParentMatchesExpected=parent_matches, expectedIndexInParent=path[-1])
+            # Preserve the original short-circuit: if the parent is foreign,
+            # its index is optional error evidence, never a new primary error.
+            actual_index = int(context.getAccessibleIndexInParent()) if parent_matches else None
+            if parent_matches:
+                record['observedIndexInParent'] = actual_index
+            assert parent_matches and actual_index == path[-1], ('Accessible identity/path changed during pending-input read'
+                if final else 'Pending-input actual parent/index reciprocity failed')
+            self._phase = phase + '-readback'
+            readback_matches = parent.getAccessibleContext().getAccessibleChild(path[-1]) == self._current['accessible']
+            record['parentChildReadbackMatches'] = readback_matches
+            assert readback_matches, ('Accessible identity/path changed during pending-input read'
+                if final else 'Pending-input parent child-index readback changed')
 
         def visit(accessible, path, parent=None):
+            self._phase = 'visit-bound'
+            row = dict(indexPath=path[:MAX_DEPTH + 1], parentIndexPath=path[:-1][:MAX_DEPTH + 1])
+            self._trace_count += 1
+            if len(self._trace) < MAX_DIAGNOSTIC_NODES:
+                self._trace.append(row)
+            self._current = dict(record=row, accessible=accessible, parent=parent, actualParent=None)
             assert accessible is not None and len(path) <= MAX_DEPTH and len(nodes) < MAX_NODES, 'Pending-input accessible traversal exceeded its finite bound or returned null'
             assert not any(accessible == earlier[0] for earlier in nodes), 'Pending-input accessible tree contains a cycle or duplicate live object'
+            self._phase = 'get-context'
             context = accessible.getAccessibleContext()
+            self._current['context'] = context
             assert context is not None, 'Pending-input accessible context is null'
             if parent is not None:
-                assert context.getAccessibleParent() == parent and int(context.getAccessibleIndexInParent()) == path[-1], 'Pending-input actual parent/index reciprocity failed'
-                assert parent.getAccessibleContext().getAccessibleChild(path[-1]) == accessible, 'Pending-input parent child-index readback changed'
+                reciprocity(context, parent, path, row, 'parent-index-reciprocity')
+            self._phase = 'get-role'
             role = int(context.getAccessibleRole())
+            row['role'] = role
             nodes.append((accessible, context, path, parent, role))
             if role in (ROLE_CONSTANTS['TABLE'], ROLE_CONSTANTS['TABLE_CELL']):
                 skipped[0] += 1
+                row['tableDescendantsSkipped'] = True
                 return  # Never ask a spreadsheet table/cell for its descendants.
+            self._phase = 'get-child-count'
             count = int(context.getAccessibleChildCount())
+            row['childCount'] = count
             assert 0 <= count <= MAX_CHILDREN, 'Pending-input container has an excessive child count'
             for index in range(count):
                 visit(context.getAccessibleChild(index), path + [index], accessible)
 
         visit(self.root, [])
+        self._phase = 'select-document-editor'
         documents = [node for node in nodes if node[4] == ROLE_CONSTANTS['DOCUMENT_SPREADSHEET']]
         assert len(documents) == 1, 'Exactly one reachable Calc document is required; split/ambiguous panes are unsupported'
         document, document_context, document_path, _, _ = documents[0]
@@ -206,8 +336,12 @@ class AccessiblePendingReader:
         # Hold every captured proxy until the complete tree/text read is checked.
         for accessible, context, path, parent, role in nodes:
             if parent is not None:
-                assert context.getAccessibleParent() == parent and int(context.getAccessibleIndexInParent()) == path[-1] and parent.getAccessibleContext().getAccessibleChild(path[-1]) == accessible, 'Accessible identity/path changed during pending-input read'
+                row = dict(indexPath=path, parentIndexPath=path[:-1], role=role)
+                self._current = dict(record=row, accessible=accessible, context=context, parent=parent, actualParent=None)
+                reciprocity(context, parent, path, row, 'final-parent-index-reciprocity', final=True)
+        self._phase = 'verify-peer-after-read'
         self._verify_peer()
+        self._phase = 'validate-pending-receipt'
         raw = dict(schemaVersion=1, kind=KIND, sourceTag='libreoffice-26.8.1.1',
                    testOnlyProperty='XVclWindowPeer.XAccessible', childHwnd=self.child_hwnd,
                    roleConstants=dict(ROLE_CONSTANTS), stateConstants=dict(STATE_CONSTANTS),
