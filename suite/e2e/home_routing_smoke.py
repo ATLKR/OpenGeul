@@ -25,6 +25,7 @@ import lifecycle_smoke as lifecycle
 import office_feature_smoke as features
 
 OPEN_CAPTION='OpenGeul Office에서 문서 열기'
+OPEN_FILENAME_ID='1148'  # Actual Home native Open, distinct from Save Edit1001.
 OFFICE_MODULES=('writer','calc','impress','draw','math','base')
 OPEN_ROUTES=tuple((module,extension) for module,extension,_ in features.FORMATS)+(('hwp','hwp'),('hwp','hwpx'))
 
@@ -147,6 +148,7 @@ def require_open_dialog_readiness(proof,shell_pid,home,*,before_input=False):
     """Raw native/UIA replay; Home remains the owner for document-menu callbacks."""
     assert type(before_input) is bool and type(proof['schemaVersion']) is int and proof['schemaVersion']==1
     assert proof['kind']=='owned-open-dialog-readiness' and proof['caption']==OPEN_CAPTION
+    assert proof['filenameAutomationId']==OPEN_FILENAME_ID
     assert (proof['shellPid'],proof['documentHwnd'])==(shell_pid,home)
     assert proof['trigger']['kind'] in ('home-button','document-menu') and proof['trigger']['clicks']==1
     assert 'saveShortcuts' not in proof and 'fileMenuClicks' not in proof
@@ -163,10 +165,10 @@ def require_open_dialog_readiness(proof,shell_pid,home,*,before_input=False):
         assert row['shellProcessPoll']==dict(pid=shell_pid,exitCode=None)
         native._base_native_continuity(proof['nativeAnchor'],row)
         if row['dialogMatches']:bound=True;assert focus['at']<=began
-        state=native._base_save_observation_state(row,shell_pid,home,OPEN_CAPTION,dialog if bound else 0,root)
+        state=native._base_save_observation_state(row,shell_pid,home,OPEN_CAPTION,dialog if bound else 0,root,filename_id=OPEN_FILENAME_ID)
         assert row['state']==state and (state=='ready') is (index==len(observations)-1)
     bindings=proof['wrapperBindings'];assert len(bindings)==2 and proof['bindingError'] is None
-    for binding,key in zip(bindings,(('1001',50004),('1',50000))):
+    for binding,key in zip(bindings,((OPEN_FILENAME_ID,50004),('1',50000))):
         row=observations[-1]['controls'][native._base_int(binding['sourceIndex'])]
         assert (row['automationId'],row['controlType'])==key and binding['rawElementEquals'] is True
         properties=binding['properties'];assert set(properties)=={'runtimeId','automationId','controlType','pid','nativeHwnd','nativeHwndRaw','enabled','offscreen'}
@@ -178,6 +180,17 @@ def require_open_dialog_readiness(proof,shell_pid,home,*,before_input=False):
 
 def wait_open_dialog(api,process,home,record):
     return native._wait_base_save_controls(api,process,home,OPEN_CAPTION,record,open_dialog=True)
+
+
+def require_open_filename_receipt(operation,shell_pid,home,expected):
+    proof=operation['openDialogReadiness'];require_open_dialog_readiness(proof,shell_pid,home)
+    receipt,=operation['pickerFilenameInputs'];field=receipt['field'];binding=proof['wrapperBindings'][0]['properties']
+    assert receipt['expected']==receipt['after']==str(expected)
+    assert receipt['dialog']['owner']==home and receipt['dialog']['title']==OPEN_CAPTION
+    assert field['automationId']==binding['automationId']==OPEN_FILENAME_ID and field['controlType']=='Edit'
+    assert field['nativeHandle']==binding['nativeHwnd']>0 and field['runtimeId']==binding['runtimeId']
+    lifecycle.require_picker_native_edit_receipt(receipt,shell_pid,proof['dialogHwnd'],field['nativeHandle'])
+    return receipt
 
 
 def new_attachment(api,process,module,previous,source):
@@ -311,17 +324,70 @@ def verify_native_archives(suite,root,records):
         qualifiedShutdowns=len(proofs),verifiedFiles=verified_files,crashDumps=0,archives=proofs)
 
 
+def _filetime(raw):
+    assert all(type(raw[key]) is int and 0<=raw[key]<=0xffffffff for key in ('low','high'))
+    value=(raw['high']<<32)|raw['low'];assert type(raw['fileTime']) is int and raw['fileTime']==value
+    return value
+
+
+def _require_live_binding(binding):
+    assert binding['kind']=='home-retained-live-process'
+    for key in ('pid','creationTime','handleValue'):assert type(binding[key]) is int and binding[key]>0
+    assert binding['pid']<=0xffffffff and max(binding['creationTime'],binding['handleValue'])<=0xffffffffffffffff
+    assert type(binding['getProcessIdResult']) is int and binding['getProcessIdResult']==binding['pid']
+    assert type(binding['waitResult']) is int and binding['waitResult']==258
+    assert PureWindowsPath(binding['nativeImage'])==PureWindowsPath(binding['expectedImage'])
+    assert type(binding['nativeImageLength']) is int and binding['nativeImageLength']==len(binding['nativeImage'].encode('utf-16-le'))//2
+    assert 0<binding['nativeImageLength']<32768
+    assert _filetime(binding['nativeCreation'])==binding['creationTime']
+    return binding
+
+
+def freeze_live_process(bound,executable,evidence=None):
+    """Freeze this original HANDLE's live image once, before its close action."""
+    assert not hasattr(bound,'home_binding_json'), 'An original Home process binding cannot be replaced'
+    raw={} if evidence is None else evidence
+    raw.update(kind='home-retained-live-process',expectedImage=str(Path(executable).resolve()),
+        handleValue=int(bound.handle),pid=bound.pid,creationTime=bound.creation)
+    function=bound.kernel.GetProcessId;function.argtypes=(W.HANDLE,);function.restype=W.DWORD
+    raw['getProcessIdResult']=int(function(bound.handle))
+    raw['waitResult']=int(bound.kernel.WaitForSingleObject(bound.handle,0))
+    image,created=lifecycle.process_identity(bound.kernel,bound.handle,raw)
+    assert image==Path(executable).resolve() and created==bound.creation
+    _require_live_binding(raw)
+    bound.home_binding_json=json.dumps(raw,sort_keys=True,allow_nan=False)
+    return raw
+
+
 def retained_exit(bound,evidence):
-    """GetExit follows a signaled retained HANDLE; no timeout/exit atomicity claim."""
-    evidence.update(pid=bound.pid,creationTime=bound.creation,handleValue=int(bound.handle),waitResult=int(bound.kernel.WaitForSingleObject(bound.handle,0)))
+    """Same retained object: wait0, native creation and actual normal exit code.
+
+    QueryFullProcessImageNameW is deliberately used only while live. The cached
+    image is labelled as such; no PID reopen or post-exit image query is needed.
+    """
+    binding=_require_live_binding(json.loads(bound.home_binding_json))
+    evidence.update(liveBinding=binding,pid=bound.pid,creationTime=bound.creation,handleValue=int(bound.handle),
+        image=binding['nativeImage'],imageSource='retained-live-binding')
+    assert (bound.pid,bound.creation,int(bound.handle))==(binding['pid'],binding['creationTime'],binding['handleValue']), 'Original retained process object changed'
+    evidence['waitResult']=int(bound.kernel.WaitForSingleObject(bound.handle,0))
+    evidence['waitLastError']=getattr(ctypes,'get_last_error',lambda:0)()
     assert evidence['waitResult']==0, 'Owned process is not yet signaled'
-    image,created=lifecycle.process_identity(bound.kernel,bound.handle,evidence)
-    assert created==bound.creation
+    function=bound.kernel.GetProcessId;function.argtypes=(W.HANDLE,);function.restype=W.DWORD
+    evidence['getProcessIdResult']=int(function(bound.handle));evidence['getProcessIdLastError']=getattr(ctypes,'get_last_error',lambda:0)()
+    assert evidence['getProcessIdResult']==binding['pid'], 'Retained HANDLE identifies a different PID'
+    times=[W.FILETIME() for _ in range(4)]
+    function=bound.kernel.GetProcessTimes;function.argtypes=(W.HANDLE,)+(ctypes.POINTER(W.FILETIME),)*4;function.restype=W.BOOL
+    evidence['getProcessTimesResult']=bool(function(bound.handle,*(ctypes.byref(value) for value in times)))
+    evidence['getProcessTimesLastError']=getattr(ctypes,'get_last_error',lambda:0)()
+    evidence['processTimes']={name:dict(low=int(value.dwLowDateTime),high=int(value.dwHighDateTime),
+        fileTime=(int(value.dwHighDateTime)<<32)|int(value.dwLowDateTime)) for name,value in zip(('creation','exit','kernel','user'),times)}
+    assert evidence['getProcessTimesResult'] is True, 'GetProcessTimes failed on the original retained process'
+    assert _filetime(evidence['processTimes']['creation'])==binding['creationTime'], 'Retained process creation changed'
     function=bound.kernel.GetExitCodeProcess;function.argtypes=(W.HANDLE,ctypes.POINTER(W.DWORD));function.restype=W.BOOL
     code=W.DWORD();getattr(ctypes,'set_last_error',lambda n:None)(0)
     evidence['getExitCodeProcessResult']=bool(function(bound.handle,ctypes.byref(code)))
     evidence['getExitCodeProcessLastError']=getattr(ctypes,'get_last_error',lambda:0)()
-    evidence.update(exitCode=int(code.value),image=str(image))
+    evidence.update(exitCode=int(code.value))
     assert evidence['getExitCodeProcessResult'] is True and evidence['exitCode']==0, 'Owned process did not exit normally'
     return evidence
 
@@ -383,6 +449,7 @@ class HomeCase:
         self.frames.append(frame)
         row=dict(attachment,module=module,file=str(source) if source else None,officeCreationTime=bound.creation,officeImage=str(self.suite/'Office/program/soffice.bin'))
         self.record['attachments'].append(row);frame['receipt']=row
+        freeze_live_process(bound,self.suite/'Office/program/soffice.bin',row.setdefault('liveProcessBinding',{}))
         self.record.update(windowHwnd=attachment['hwnd'],parentHwnd=attachment['parent'],childHwnd=attachment['child'],officePid=attachment['officePid'])
         self.screenshot(attachment['hwnd'],module+'-attached')
         if module=='base' and source is None:
@@ -402,6 +469,7 @@ class HomeCase:
             self.record['stage']='observe-owned-home-calc'
             observe_home_calc(self.suite,self.output/(self.record['case']+'-calc-reader'),self.process,attachment,frame['source'],self.record.get('extension'),self.record)
             proof=freeze_home_calc_close(self.suite,self.process,frame['bound'],self.record,source=frame['source'],extension=self.record.get('extension'))
+            self.record['stage']='close-owned-home-calc'
             close_home_calc(self.api,proof,self.record);row['closeMessageCount']=1
         else:
             assert self.api.user.IsWindow(frame['hwnd']) and frame['bound'].live()
@@ -412,6 +480,7 @@ class HomeCase:
                 row['closeMessageCount']=1;self.api.request_close(frame['hwnd'],self.process.pid)
             native.wait_for(lambda:not self.api.user.IsWindow(frame['hwnd']),20)
             native.wait_for(lambda:not self.api.user.IsWindow(frame['child']),10)
+        self.record['stage']='verify-retained-'+frame['module']+'-exit'
         native.wait_for(lambda:not frame['bound'].live(),20)
         retained_exit(frame['bound'],row.setdefault('exit',{}))
         frame['closed']=True;row['success']=True;frame['receipt']['closed']=True
@@ -455,6 +524,7 @@ class HomeCase:
             return lifecycle._hwp_child_process(self.process.pid,executable,shell_creation=self.shell_creation,evidence=evidence)
         matched=native.wait_for(child,45)
         bound=lifecycle.BoundHwpProcess(matched['pid'],executable,expected_creation=matched['creationFileTime']);self.hwp_bounds.append(bound)
+        freeze_live_process(bound,executable,self.record.setdefault('hwpLiveBinding',{}))
         trace=self.output/(self.record['case']+'-hwp-readiness.jsonl');signatures=set()
         def ready():
             assert bound.live()
@@ -590,9 +660,7 @@ def require_case_result(record,suite):
             assert not operation.get('pickerFilenameInputs') and record['cancelPreservedHomeOnly'] is True
         else:
             assert proof['action']=='open' and operation['openButtonClicks']==1 and operation['cancelEscapeCount']==0
-            filename,=operation['pickerFilenameInputs'];assert filename['expected']==filename['after']==copies[index]['path']
-            assert filename['dialog']['owner']==home and filename['dialog']['title']==OPEN_CAPTION
-            lifecycle.require_picker_native_edit_receipt(filename,pid,proof['dialogHwnd'],filename['field']['nativeHandle'])
+            require_open_filename_receipt(operation,pid,home,copies[index]['path'])
             assert operation['openButtonAncestry'][-1]['nativeHandle']==proof['dialogHwnd']
     modules=[] if spec['kind']=='cancel' or spec.get('module')=='hwp' else ['writer','impress'] if spec['kind']=='shared-open' else [spec['module']]
     frames=record['attachments'];assert [row['module'] for row in frames]==modules
@@ -608,7 +676,7 @@ def require_case_result(record,suite):
         assert (close['menuCloseClicks'],close['closeMessageCount'])==((1,0) if physical else (0,1))
         exit=close['exit'];assert (exit['pid'],exit['creationTime'])==(frame['officePid'],frame['officeCreationTime'])
         assert PureWindowsPath(exit['image'])==PureWindowsPath(str(expected_image))
-        _require_exit_and_closure(exit,closures)
+        _require_exit_and_closure(exit,closures,frame['liveProcessBinding'])
     menus=record.get('shellMenuActions',[])
     assert [row['label'] for row in menus]==(['열기…','닫기'] if spec['kind']=='shared-open' else [])
     assert all(row['fileClicks']==row['actionClicks']==1 and row['success'] is True for row in menus)
@@ -634,7 +702,7 @@ def require_case_result(record,suite):
         assert PureWindowsPath(exit['image'])==PureWindowsPath(str(Path(suite)/'HWP/OpenGeul.exe'))
         matches=[lifecycle.require_hwp_census_receipt(row,pid,record['originalShell']['nativeCreation']['fileTime'],Path(suite)/'HWP/OpenGeul.exe') for row in record['hwpNativeCensus']]
         assert matches[-1]['pid']==exit['pid'] and matches[-1]['creationFileTime']==exit['creationTime']
-        assert record['hwpCloseMessageCount']==1;_require_exit_and_closure(exit,closures)
+        assert record['hwpCloseMessageCount']==1;_require_exit_and_closure(exit,closures,record['hwpLiveBinding'])
     if spec['kind']=='shared-open':
         from home_calc_close import require_reader_context
         from writer_model_reader import WRITER_MODEL_SERVICE,WRITER_GETTER_CONTRACT
@@ -650,8 +718,17 @@ def require_case_result(record,suite):
     return record
 
 
-def _require_exit_and_closure(exit,closures):
-    assert exit['waitResult']==0 and exit['getExitCodeProcessResult'] is True and type(exit['exitCode']) is int and exit['exitCode']==0
+def _require_exit_and_closure(exit,closures,binding):
+    _require_live_binding(binding);assert exit['liveBinding']==binding
+    assert exit['imageSource']=='retained-live-binding' and exit['image']==binding['nativeImage']
+    assert (exit['pid'],exit['creationTime'],exit['handleValue'])==(binding['pid'],binding['creationTime'],binding['handleValue'])
+    assert type(exit['getProcessIdResult']) is int and exit['getProcessIdResult']==binding['pid']
+    assert exit['getProcessTimesResult'] is True
+    assert set(exit['processTimes'])=={'creation','exit','kernel','user'}
+    for value in exit['processTimes'].values():_filetime(value)
+    assert _filetime(exit['processTimes']['creation'])==binding['creationTime']
+    assert _filetime(exit['processTimes']['exit'])>=binding['creationTime']
+    assert type(exit['waitResult']) is int and exit['waitResult']==0 and exit['getExitCodeProcessResult'] is True and type(exit['exitCode']) is int and exit['exitCode']==0
     closure,=[row for row in closures if row['handleValue']==exit['handleValue']]
     assert (closure['pid'],closure['creationTime'])==(exit['pid'],exit['creationTime']) and closure['closeHandleResult'] is True
 

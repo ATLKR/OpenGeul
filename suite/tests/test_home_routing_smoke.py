@@ -72,6 +72,7 @@ class HomeRoutingContracts(unittest.TestCase):
         spec=importlib.util.spec_from_file_location('home_open_boundary',Path(__file__).with_name('test_base_save_readiness.py'))
         fixtures=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixtures)
         boundary=fixtures.NativeBoundary([lambda b:[],lambda b:[b.edit,b.save]])
+        boundary.edit.CurrentAutomationId='1148'  # Actual Home2 native Open filename Edit.
         boundary.api.title=lambda hwnd:self.api.OPEN_CAPTION if hwnd==44 else 'OpenGeul Office'
         record={'openTrigger':dict(kind='home-button',clicks=1)}
         with patch.dict(sys.modules,boundary.modules()),patch.object(self.api.native.time,'monotonic',boundary.clock.monotonic),patch.object(self.api.native.time,'sleep',boundary.clock.sleep):
@@ -98,6 +99,7 @@ class HomeRoutingContracts(unittest.TestCase):
         fixtures=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixtures)
         api,root,field,calls=fixtures.LifecycleSmokeTests().picker_fixture()
         api.title=lambda hwnd:self.api.OPEN_CAPTION;root.element_info.name=self.api.OPEN_CAPTION
+        field.element_info.automation_id='1148'
         record={};target='D:\\owned\\입력 경로 & fixture.docx'
         self.api.lifecycle.set_owned_picker_filename(api,31,100,500,root,field,target,record,expected_title=self.api.OPEN_CAPTION)
         receipt,=record['pickerFilenameInputs']
@@ -105,6 +107,27 @@ class HomeRoutingContracts(unittest.TestCase):
         self.assertEqual(receipt['dialog']['owner'],100)
         self.assertEqual([name for name,*_ in calls].count('assign'),1)
         with self.assertRaises(AssertionError):self.api.lifecycle.set_owned_picker_filename(api,31,100,500,root,field,target,{},expected_title='foreign dialog')
+
+    def test_home_open_never_substitutes_base_save_filename_edit_1001(self):
+        spec=importlib.util.spec_from_file_location('home_wrong_filename_field',Path(__file__).with_name('test_base_save_readiness.py'))
+        fixtures=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixtures)
+        boundary=fixtures.NativeBoundary([lambda b:[b.edit,b.save]])
+        boundary.api.title=lambda hwnd:self.api.OPEN_CAPTION if hwnd==44 else 'OpenGeul Office'
+        record={'openTrigger':dict(kind='home-button',clicks=1)}
+        with patch.dict(sys.modules,boundary.modules()),patch.object(self.api.native.time,'monotonic',boundary.clock.monotonic),patch.object(self.api.native.time,'sleep',boundary.clock.sleep):
+            with self.assertRaises(AssertionError):self.api.wait_open_dialog(boundary.api,boundary.process,11,record)
+        self.assertFalse(record['openDialogReadiness']['ready'])
+        self.assertTrue(all(row.get('candidateCounts',{}).get('filename',0)==0 for row in record['openDialogReadiness']['observations']))
+
+    def test_open_filename_replay_binds_exact1148_native_handle_runtime_and_target(self):
+        value=dict(openDialogReadiness=dict(dialogHwnd=44,wrapperBindings=[dict(properties=dict(automationId='1148',nativeHwnd=101,runtimeId=[42,101]))]),
+            pickerFilenameInputs=[dict(expected='C:/owned/format-writer-docx.docx',after='C:/owned/format-writer-docx.docx',
+                dialog=dict(owner=11,title=self.api.OPEN_CAPTION),field=dict(automationId='1148',controlType='Edit',nativeHandle=101,runtimeId=[42,101]))])
+        with patch.object(self.api,'require_open_dialog_readiness'),patch.object(self.api.lifecycle,'require_picker_native_edit_receipt'):
+            self.api.require_open_filename_receipt(value,77,11,'C:/owned/format-writer-docx.docx')
+            for key,bad in (('automationId','1001'),('nativeHandle',102),('runtimeId',[42,102]),('controlType','ComboBox')):
+                changed=copy.deepcopy(value);changed['pickerFilenameInputs'][0]['field'][key]=bad
+                with self.subTest(key=key),self.assertRaises(AssertionError):self.api.require_open_filename_receipt(changed,77,11,'C:/owned/format-writer-docx.docx')
 
     def test_actual_home_tile_click_has_one_exact_raw_button_and_never_inputs_after_bad_query(self):
         spec=importlib.util.spec_from_file_location('home_tile_boundary',Path(__file__).with_name('test_base_save_readiness.py'))
@@ -297,39 +320,84 @@ class HomeRoutingContracts(unittest.TestCase):
             self.assertEqual(len(rows),25);self.assertFalse(rows[0]['success']);self.assertIn('first evidence write failed',rows[0]['recordWriteError'])
             self.assertTrue(rows[-1]['success'])
 
-    def test_retained_exit_requires_signaled_same_generation_and_actual_exit_zero(self):
+    def retained_process_boundary(self,mode='normal',expected=None):
         from types import SimpleNamespace
+        expected=Path(expected or '/Suite/Office/program/soffice.bin').resolve();calls=[];state={'live':True}
         class Function:
-            def __init__(self,call):self.call=call
-            def __call__(self,*args):return self.call(*args)
-        for mode in ('normal','timeout','crash','api','recycled'):
-            calls=[]
-            def exit_code(handle,code):calls.append(('GetExitCodeProcess',handle));code._obj.value=0xc0000005 if mode=='crash' else 0;return mode!='api'
-            kernel=SimpleNamespace(WaitForSingleObject=Function(lambda handle,timeout:calls.append(('Wait',handle)) or (258 if mode=='timeout' else 0)),GetExitCodeProcess=Function(exit_code))
-            bound=SimpleNamespace(pid=8,creation=222,handle=888,kernel=kernel);evidence={}
-            def identity(kernel,handle,raw):raw.update(nativeImage='C:/Suite/Office/program/soffice.bin');return Path('C:/Suite/Office/program/soffice.bin'),223 if mode=='recycled' else 222
-            with patch.object(self.api.lifecycle,'process_identity',side_effect=identity):
+            def __init__(self,name,call):self.name,self.call=name,call
+            def __call__(self,*args):
+                calls.append((self.name,int(args[0])));assert int(args[0])==888
+                return self.call(*args)
+        def image(handle,flags,buffer,size):
+            if not state['live']:raise OSError(31,'post-exit image query unavailable')
+            buffer.value=str(expected);size._obj.value=len(str(expected).encode('utf-16-le'))//2;return True
+        def times(handle,*outputs):
+            if mode=='times-api' and not state['live']:return False
+            values=(223 if mode=='recycled' and not state['live'] else 222,0 if state['live'] else 1000,7,9)
+            for output,value in zip(outputs,values):output._obj.dwLowDateTime=value&0xffffffff;output._obj.dwHighDateTime=value>>32
+            return True
+        def exit_code(handle,code):code._obj.value=259 if state['live'] else 0xc0000005 if mode=='crash' else 0;return mode!='api' or state['live']
+        kernel=SimpleNamespace(QueryFullProcessImageNameW=Function('QueryFullProcessImageNameW',image),GetProcessTimes=Function('GetProcessTimes',times),
+            WaitForSingleObject=Function('WaitForSingleObject',lambda handle,timeout:258 if state['live'] or mode=='timeout' else 0),
+            GetProcessId=Function('GetProcessId',lambda handle:9 if mode=='pid' and not state['live'] else 8),GetExitCodeProcess=Function('GetExitCodeProcess',exit_code))
+        bound=SimpleNamespace(pid=8,creation=222,handle=888,kernel=kernel)
+        # Producer-shaped original live proof, with actual existing identity API
+        # supplying the native image/FILETIME before the signaled-state transition.
+        binding=dict(kind='home-retained-live-process',expectedImage=str(expected),handleValue=888,pid=8,creationTime=222,
+            getProcessIdResult=int(kernel.GetProcessId(888)),waitResult=int(kernel.WaitForSingleObject(888,0)))
+        self.api.lifecycle.process_identity(kernel,888,binding)
+        bound.home_binding_json=json.dumps(binding,sort_keys=True)
+        return bound,binding,calls,state
+
+    def test_retained_exit_requires_signaled_same_generation_and_actual_exit_zero(self):
+        for mode in ('normal','timeout','crash','api','times-api','recycled','pid','handle','bound-pid'):
+            with self.subTest(mode=mode):
+                bound,binding,calls,state=self.retained_process_boundary(mode);state['live']=False;calls.clear();evidence={}
+                if mode=='handle':bound.handle=999
+                elif mode=='bound-pid':bound.pid=9
                 if mode=='normal':self.api.retained_exit(bound,evidence)
                 else:
-                    with self.assertRaises(AssertionError):self.api.retained_exit(bound,evidence)
-            self.assertEqual(calls[0],('Wait',888))
-            if mode in ('crash','api'):self.assertIn('exitCode',evidence)
+                    with self.assertRaises((AssertionError,OSError)):self.api.retained_exit(bound,evidence)
+                self.assertNotIn('QueryFullProcessImageNameW',[name for name,handle in calls],'No post-exit image lookup is required')
+                if mode in ('crash','api'):self.assertIn('exitCode',evidence)
+                if mode=='normal':
+                    self.assertEqual(evidence['liveBinding'],binding);self.assertEqual(evidence['creationTime'],222)
+                    self.assertEqual(evidence['getProcessTimesResult'],True);self.assertEqual(evidence['getProcessIdResult'],8)
+                    self.assertEqual(evidence['imageSource'],'retained-live-binding')
+
+    def test_actual_live_binding_freezes_original_handle_native_image_pid_and_creation(self):
+        bound,expected,calls,state=self.retained_process_boundary();del bound.home_binding_json;calls.clear()
+        actual=self.api.freeze_live_process(bound,Path(expected['expectedImage']))
+        self.assertEqual(actual,expected);self.assertEqual(json.loads(bound.home_binding_json),expected)
+        self.assertIn(('QueryFullProcessImageNameW',888),calls);self.assertIn(('GetProcessTimes',888),calls)
+        actual['pid']=99;self.assertEqual(json.loads(bound.home_binding_json)['pid'],8,'Returned mutable data cannot replace frozen identity')
+        for mode in ('pid','creation','image','dead'):
+            with self.subTest(mode=mode):
+                bound,expected,calls,state=self.retained_process_boundary();del bound.home_binding_json
+                executable=Path(expected['expectedImage'])
+                if mode=='pid':bound.pid=9
+                elif mode=='creation':bound.creation=223
+                elif mode=='image':executable=executable.with_name('foreign.bin')
+                else:state['live']=False
+                with self.assertRaises((AssertionError,OSError)):self.api.freeze_live_process(bound,executable)
+                self.assertFalse(hasattr(bound,'home_binding_json'))
 
     def test_final_case_replay_rejects_forged_flags_missing_close_and_wrong_generations(self):
         from test_writer_model_barrier import original_shell_fixture
         with tempfile.TemporaryDirectory() as directory:
             suite=Path(directory).resolve()/'Suite'
+            bound,live,calls,state=self.retained_process_boundary(expected=suite/'Office/program/soffice.bin');state['live']=False;exit={};self.api.retained_exit(bound,exit)
             action=dict(homeHwnd=10,shellPid=7,home=dict(hwnd=10,pid=7,isWindow=True,rootHwnd=10,threadId=9),foreground=dict(hwnd=10,pid=7,isWindow=True,rootHwnd=10),
                 candidates=[dict(name='OpenGeul Writer',pid=7,runtimeId=[1],nativeHwnd=11,nativeRoot=10,nativeLive=True,enabled=True,visible=True)],clicks=1,success=True,rawElementEquals=True)
             record=dict(self.api.build_plan()[0],success=True,cleanClose=True,forcedCleanup=False,shellExitCode=0,keyboardInputVerified=False,
                 shellCommand=[str(suite/'OpenGeul.Office.exe')],shellPid=7,homeHwnd=10,homeOnlyBeforeAction=[10],homeActions=[action],sourceCopies=[],
                 originalShell=original_shell_fixture(dict(shellPid=7,shellCreationTime=111),suite),
-                attachments=[dict(module='writer',hwnd=20,officePid=8,officeCreationTime=222,officeImage=str(suite/'Office/program/soffice.bin'),closed=True)],
+                attachments=[dict(module='writer',hwnd=20,officePid=8,officeCreationTime=222,officeImage=str(suite/'Office/program/soffice.bin'),closed=True,liveProcessBinding=live)],
                 frameCloses=[dict(hwnd=20,module='writer',success=True,menuCloseClicks=0,closeMessageCount=1,
-                    exit=dict(pid=8,creationTime=222,image=str(suite/'Office/program/soffice.bin'),waitResult=0,getExitCodeProcessResult=True,exitCode=0,handleValue=888))],
+                    exit=exit)],
                 retainedHandleClosures=[dict(pid=8,creationTime=222,handleValue=888,closeHandleResult=True)])
             self.api.require_case_result(record,suite)
-            for reason in ('generation','exit','closure','double-close','missing','menu','original-shell'):
+            for reason in ('generation','exit','closure','double-close','missing','menu','original-shell','live-binding','raw-pid','native-creation','times-bool','wait-bool'):
                 value=copy.deepcopy(record)
                 if reason=='generation':value['attachments'][0]['officeCreationTime']+=1
                 elif reason=='exit':value['frameCloses'][0]['exit']['exitCode']=0xc0000005
@@ -337,6 +405,11 @@ class HomeRoutingContracts(unittest.TestCase):
                 elif reason=='double-close':value['frameCloses'][0]['closeMessageCount']=2
                 elif reason=='missing':value['frameCloses']=[]
                 elif reason=='menu':value['shellMenuActions']=[dict(label='닫기',fileClicks=1,actionClicks=1,success=True)]
+                elif reason=='live-binding':value['frameCloses'][0]['exit']['liveBinding']['handleValue']+=1
+                elif reason=='raw-pid':value['frameCloses'][0]['exit']['getProcessIdResult']+=1
+                elif reason=='native-creation':value['frameCloses'][0]['exit']['processTimes']['creation']['fileTime']+=1
+                elif reason=='times-bool':value['frameCloses'][0]['exit']['getProcessTimesResult']=False
+                elif reason=='wait-bool':value['frameCloses'][0]['exit']['waitResult']=False
                 else:value['originalShell']['nativeCreation']['fileTime']+=1
                 with self.subTest(reason=reason),self.assertRaises((AssertionError,ValueError)):self.api.require_case_result(value,suite)
 

@@ -43,8 +43,10 @@ including when its callback came from a document's menu.
 
 Open readiness reuses the strict Base collector with an explicit opt-in mode.
 It keeps the original twenty-second absolute budget, raw FindAll/HRESULT evidence,
-native continuity and exact filename Edit1001/Open Button1 bindings. The original
-Base mode is unchanged. Only a ready owned picker receives the existing single
+native continuity and exact Home filename Edit1148/Open Button1 bindings. Actual
+Home2 raw controls exposed Edit1148 throughout all nineteen Open attempts; Base
+Save uses its separate exact Edit1001 contract. Neither accepts the other field
+as a fallback. Only a ready owned picker receives the existing single
 native filename Edit transaction; exact UIA/native readback is mandatory before
 the one physical Open click. Cancel uses one physical Escape after the same
 ownership/readiness gate. These filename messages do not edit document content.
@@ -73,9 +75,15 @@ and one physical Discard. Foreign, duplicate, stale, late or uncertain surfaces
 fail without another input. The shared Writer getters use the existing fixed
 read-only Writer contract and the same owned-reader lifetime checks.
 
-All Office and HWP processes are observed through retained native HANDLEs until
-signaled. A separate actual GetExitCodeProcess call must return zero; actual
-CloseHandle results are retained. HWP routing also requires the precise-clock
+All Office and HWP processes freeze their actual live image, PID, creation
+FILETIME and original native HANDLE before the close action. The same HANDLE is
+retained until signaled; then actual GetProcessId, GetProcessTimes creation and
+GetExitCodeProcess results must match the frozen generation and a normal zero
+exit. Every raw return, FILETIME and final handle closure is retained and replayed.
+The exit image is explicitly labelled as the original live binding; there is no
+post-exit QueryFullProcessImageNameW requirement or PID reopen. That query failed
+with actual WinError31 after wait0 in all six Home2 tile cases. Actual
+CloseHandle results remain mandatory. HWP routing also requires the precise-clock
 owned child census, expected filename, WebView and post-load editor/toolbar.
 Forced cleanup is recorded as failure and cannot qualify a case.
 
@@ -98,5 +106,6 @@ owned cleanup check, not certification of arbitrary Office features, HWP/Word
 conversion fidelity or every rendered pixel. Native attachment screenshots may
 precede a complete repaint; structural and readonly observations provide the
 stated gates. Local synthetic tests exercise source contracts and do not establish
-successful Windows execution. Original keyboard-loss causes remain unresolved by
-this addition.
+successful Windows execution. Home2 remains an actual 0/25 failed run; its two
+harness contract corrections require a fresh Windows result before qualification.
+Original keyboard-loss causes remain unresolved by this addition.

@@ -597,7 +597,9 @@ def _base_runtime_id(value):
     return tuple(value)
 
 
-def _base_save_observation_state(observation, shell_pid, document, caption, frozen_dialog, frozen_root):
+def _base_save_observation_state(observation, shell_pid, document, caption, frozen_dialog, frozen_root, *, filename_id='1001'):
+    assert filename_id in ('1001','1148')
+    if filename_id=='1148':assert caption=='OpenGeul Office에서 문서 열기'
     if observation['apiError'] is not None:
         error = observation['apiError']
         raise AssertionError('Base native/UIA API failed: ' + str(error))
@@ -619,7 +621,7 @@ def _base_save_observation_state(observation, shell_pid, document, caption, froz
     assert type(root['enabled']) is bool and type(root['offscreen']) is bool
     controls = observation['controls']
     assert isinstance(controls, list) and _base_int(observation['rawCount']) == len(controls) <= 512, 'Incomplete bounded raw UIA enumeration'
-    candidates = {('1001', 50004): [], ('1', 50000): []}
+    candidates = {(filename_id, 50004): [], ('1', 50000): []}
     seen = set()
     for index, row in enumerate(controls):
         assert _base_int(row['index']) == index and type(row['controlType']) is int and row['controlType'] in BASE_SAVE_UIA_TYPES, 'Unexpected Base UIA control type or index'
@@ -658,7 +660,7 @@ def _base_save_observation_state(observation, shell_pid, document, caption, froz
                     and row['nativeWithinDialog'] is True), 'Foreign native Base control'
         else:
             assert row['native'] is None and row['nativeWithinDialog'] is False, 'Invented HWND for a DirectUI control'
-    actual_counts = {'filename':len(candidates[('1001',50004)]),'save':len(candidates[('1',50000)])}
+    actual_counts = {'filename':len(candidates[(filename_id,50004)]),'save':len(candidates[('1',50000)])}
     assert observation['candidateCounts'] == actual_counts and all(type(n) is int for n in observation['candidateCounts'].values()) and observation['countsComplete'] is True, 'Invalid raw Base candidate counts'
     assert all(len(rows) <= 1 for rows in candidates.values()), 'Exact Base filename or Save control is ambiguous'
     ready = root['enabled'] and not root['offscreen'] and all(len(rows) == 1 and rows[0]['enabled'] and not rows[0]['offscreen'] for rows in candidates.values())
@@ -742,8 +744,9 @@ def _base_raw_properties(element, call, result=None):
     return result
 
 
-def _base_raw_controls(api, accessible, uia, dialog, observation):
+def _base_raw_controls(api, accessible, uia, dialog, observation, *, filename_id='1001'):
     """Do not use descendants/elements_from_uia_array: both swallow COM errors."""
+    assert filename_id in ('1001','1148')
     last = 'UIA root'
     def call(operation, function):
         nonlocal last
@@ -767,7 +770,7 @@ def _base_raw_controls(api, accessible, uia, dialog, observation):
             observation['controls'].append(row)
             _base_raw_properties(element, call, row)
             elements.append(element)
-            if (row['automationId'], row['controlType']) in (('1001',50004),('1',50000)):
+            if (row['automationId'], row['controlType']) in ((filename_id,50004),('1',50000)):
                 row['ancestry'], cursor = [], element
                 for _ in range(32):
                     node = _base_raw_properties(cursor, call)
@@ -789,13 +792,14 @@ def _base_raw_controls(api, accessible, uia, dialog, observation):
     finally:
         if 'rawCount' in observation:
             observation['candidateCounts'] = {name:sum((row.get('automationId'),row.get('controlType')) == key for row in observation['controls'])
-                for name,key in (('filename',('1001',50004)),('save',('1',50000)))}
+                for name,key in (('filename',(filename_id,50004)),('save',('1',50000)))}
             observation['countsComplete'] = observation['querySucceeded']
     return elements
 
 
 def _wait_base_save_controls(api, process, document, caption, record, *, open_dialog=False):
     start = time.monotonic()
+    filename_id='1148' if open_dialog else '1001'
     from pywinauto import Desktop
     from pywinauto.uia_defines import IUIA
     from pywinauto.uia_element_info import UIAElementInfo
@@ -808,7 +812,7 @@ def _wait_base_save_controls(api, process, document, caption, record, *, open_di
     if open_dialog:
         assert caption == 'OpenGeul Office에서 문서 열기'
         proof.pop('fileMenuClicks');proof.pop('saveShortcuts')
-        proof.update(kind='owned-open-dialog-readiness',trigger=dict(record['openTrigger']))
+        proof.update(kind='owned-open-dialog-readiness',trigger=dict(record['openTrigger']),filenameAutomationId=filename_id)
         record['openDialogReadiness'] = proof
     else: record['baseSaveDialogReadiness'] = proof
     dialog, native, accessible, uia = 0, None, None, None
@@ -848,7 +852,7 @@ def _wait_base_save_controls(api, process, document, caption, record, *, open_di
                 if 'document' not in proof['nativeAnchor']: proof['nativeAnchor']['document'] = observation['before']['document']
                 if observed and 'dialog' not in proof['nativeAnchor']: proof['nativeAnchor']['dialog'] = observation['before']['dialog']
                 if observed:
-                    elements = _base_raw_controls(api, accessible, uia, dialog, observation)
+                    elements = _base_raw_controls(api, accessible, uia, dialog, observation, filename_id=filename_id)
                     if not proof['uiaRootRuntimeId'] and observation.get('uiaRoot'):
                         proof['uiaRootRuntimeId'] = observation['uiaRoot']['runtimeId']
             except Exception as exc:
@@ -860,7 +864,7 @@ def _wait_base_save_controls(api, process, document, caption, record, *, open_di
                     if observation['apiError'] is None: observation['apiError'] = _base_api_error('native after snapshot',exc)
                 observation['finishedAt'] = time.monotonic()
             if observation['apiError'] is None: _base_native_continuity(proof['nativeAnchor'],observation)
-            state = _base_save_observation_state(observation, process.pid, document, caption, dialog, proof['uiaRootRuntimeId'])
+            state = _base_save_observation_state(observation, process.pid, document, caption, dialog, proof['uiaRootRuntimeId'], filename_id=filename_id)
             observation['state'] = state
             assert observation['finishedAt'] <= proof['deadline'], 'Base save dialog readiness deadline expired during observation'
             if state == 'ready':
@@ -871,7 +875,7 @@ def _wait_base_save_controls(api, process, document, caption, record, *, open_di
                     binding_operation = operation
                     return function()
                 try:
-                    for key in (('1001',50004), ('1',50000)):
+                    for key in ((filename_id,50004), ('1',50000)):
                         row = next(row for row in observation['controls'] if (row['automationId'],row['controlType']) == key)
                         element = elements[row['index']]
                         wrapper = binding_call('UIAWrapper(UIAElementInfo)', lambda:UIAWrapper(UIAElementInfo(element)))

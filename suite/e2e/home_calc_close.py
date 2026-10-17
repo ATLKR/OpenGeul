@@ -41,7 +41,7 @@ def require_calc_source(suite,owned_root,source,descriptor):
 
 
 def _home_origin(suite,process,record,source,extension):
-    from home_routing_smoke import require_home_action,require_open_dialog_readiness,OPEN_CAPTION
+    from home_routing_smoke import require_home_action,require_open_dialog_readiness,require_open_filename_receipt
     import lifecycle_smoke
     assert tuple(map(str,process.args))==(str(Path(suite)/'OpenGeul.Office.exe'),), 'Home authorization cannot substitute a CLI module/file launch'
     assert record['module']=='calc' and record['shellPid']==process.pid and record['keyboardInputVerified'] is False
@@ -61,10 +61,7 @@ def _home_origin(suite,process,record,source,extension):
         operation=operations[0];proof=operation['openDialogReadiness']
         require_open_dialog_readiness(proof,process.pid,home)
         assert proof['action']=='open' and operation['openButtonClicks']==1
-        receipt,=operation['pickerFilenameInputs']
-        assert receipt['expected']==receipt['after']==str(source)
-        assert receipt['dialog']['owner']==home and receipt['dialog']['title']==OPEN_CAPTION
-        lifecycle_smoke.require_picker_native_edit_receipt(receipt,process.pid,proof['dialogHwnd'],receipt['field']['nativeHandle'])
+        require_open_filename_receipt(operation,process.pid,home,source)
     keys=('case','kind','module','shellPid','homeHwnd','homeOnlyBeforeAction','homeActions','openDialogs',
           'windowHwnd','parentHwnd','childHwnd','officePid','keyboardInputVerified')
     return {key:record[key] for key in keys if key in record}
