@@ -291,3 +291,26 @@ than falling back; no registry or Developer Mode changes are made. Command
 receipts retain the actual launcher and mode arguments alongside the unchanged
 `TAR_OPTIONS=--force-local` make scripts. This controlled resource-read proof
 does not qualify the full Office or Firebird build.
+
+The same strict mode cannot create a source-archive symlink before its target
+exists. Native run `39052527005` reached the full `build` target after Firebird
+and both standalone SQL processes passed, then GNU tar failed on zstd's
+`tests/cli-tests/bin/unzstd` link to `zstd`. The authenticated zstd 1.5.7 archive
+contains 743 members: 637 regular files, 104 directories and two CLI-test links.
+The link target is a regular shell wrapper stored immediately after `unzstd`;
+the native zstd library's headers and compiled inputs are regular files. The
+pinned upstream zstd recipe already documents this extraction-order problem
+for MSYS.
+
+The guarded installer appends a Windows ARM64 target-specific
+`CYGWIN=winsymlinks:sys` export to that exact zstd archive's `UnpackedTarget`.
+This preserves both source-test links as Cygwin links, including the temporarily
+dangling link, without changing other archive targets or the outer strict
+module/DLL link policy. GNU tar errors still fail the target before its success
+stamp; no source members are excluded or removed. The source manifest binds
+the original and effective recipe hashes and the original zstd archive hash.
+Both recipe versions are retained in build evidence, with additive
+`sourceHooks.zstdSourceLinks` provenance. Use a fresh source tree. Portable GNU
+make tests verify target, sibling and architecture scope; actual Cygwin
+extraction and native alias access require the separate Windows control before
+another full build. This correction does not qualify that build or its runtime.

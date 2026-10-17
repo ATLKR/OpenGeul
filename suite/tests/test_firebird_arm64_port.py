@@ -401,6 +401,8 @@ class AuthenticatedSource(unittest.TestCase):
             (root/'configure.ac').write_bytes(self.lo_configure.read_bytes())
             bootstrap=root/'bin/unpack-sources';bootstrap.parent.mkdir()
             bootstrap.write_bytes((ROOT/'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
+            zstd=root/'external/zstd/UnpackedTarball_zstd.mk';zstd.parent.mkdir()
+            zstd.write_bytes((ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes())
             evidence=root/'evidence';evidence.mkdir()
             bash=shutil.which('bash')
             self.assertTrue(bash,'Actual Bash is required for the nested make source replay')
@@ -459,6 +461,44 @@ class AuthenticatedSource(unittest.TestCase):
             self.assertEqual(original,(evidence/'original-ExternalProject_firebird.mk').read_bytes())
             self.assertEqual(effective,(evidence/'effective-ExternalProject_firebird.mk').read_bytes())
             self.assertEqual(lock['afterSha256'],receipt['icuBuildPath']['afterSha256'])
+
+    def test_real_zstd_unpack_environment_changes_only_its_arm64_archive_target(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);hook=root/'external/firebird/UnpackedTarball_firebird.mk';hook.parent.mkdir(parents=True)
+            hook.write_bytes((self.lo_patches/hook.name).read_bytes())
+            hook.with_name('ExternalProject_firebird.mk').write_bytes((ROOT/'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes())
+            (root/'configure.ac').write_bytes(self.lo_configure.read_bytes())
+            bootstrap=root/'bin/unpack-sources';bootstrap.parent.mkdir()
+            bootstrap.write_bytes((ROOT/'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
+            recipe=root/'external/zstd/UnpackedTarball_zstd.mk';recipe.parent.mkdir()
+            original=(ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes();recipe.write_bytes(original)
+            self.assertEqual('3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909',hashlib.sha256(original).hexdigest())
+            observer=root/'observe.py';observer.write_text('import json,os,sys;print(json.dumps([sys.argv[1],os.environ["CYGWIN"]]))\n')
+            def replay(raw,cpu,os_name='WNT'):
+                recipe.write_bytes(raw)
+                makefile=root/'scope.mk';makefile.write_text(
+                    'all: unpacked/zstd-1.5.7.tar.gz unpacked/other.tar.gz outer\n'+
+                    'OS := '+os_name+'\nCPUNAME := '+cpu+'\nZSTD_TARBALL := zstd-1.5.7.tar.gz\n'+
+                    'gb_UnpackedTarget_get_target = unpacked/$(1)\ninclude '+str(recipe)+'\n'+
+                    'unpacked/zstd-1.5.7.tar.gz unpacked/other.tar.gz outer:\n\t@'+
+                    shlex.quote(sys.executable)+' '+shlex.quote(str(observer))+' $@\n')
+                result=subprocess.run(['make','--no-print-directory','-f',str(makefile)],cwd=root,
+                    env=dict(os.environ,CYGWIN='winsymlinks:nativestrict'),capture_output=True,text=True,timeout=10)
+                self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+                return dict(json.loads(line) for line in result.stdout.splitlines())
+            strict={name:'winsymlinks:nativestrict' for name in ('unpacked/zstd-1.5.7.tar.gz','unpacked/other.tar.gz','outer')}
+            self.assertEqual(strict,replay(original,'AARCH64'))
+            evidence=root/'evidence';evidence.mkdir();receipt=module().install(root,evidence)
+            effective=recipe.read_bytes()
+            self.assertEqual(dict(strict,**{'unpacked/zstd-1.5.7.tar.gz':'winsymlinks:sys'}),replay(effective,'AARCH64'))
+            self.assertEqual(strict,replay(effective,'X86_64'))
+            self.assertEqual(strict,replay(effective,'AARCH64','LINUX'))
+            self.assertTrue(effective.startswith(original),'Pristine upstream zstd workaround bytes changed')
+            lock=json.loads((PORT/'source-build.json').read_text())['zstdSourceLinks']
+            self.assertEqual(lock['afterSha256'],hashlib.sha256(effective).hexdigest())
+            self.assertEqual(original,(evidence/'original-UnpackedTarball_zstd.mk').read_bytes())
+            self.assertEqual(effective,(evidence/'effective-UnpackedTarball_zstd.mk').read_bytes())
+            self.assertEqual(lock['afterSha256'],receipt['zstdSourceLinks']['afterSha256'])
 
     def test_explicit_enable_flag_is_not_overwritten_by_arm64_defaults(self):
         autoconf = shutil.which('autoconf')
@@ -521,9 +561,11 @@ class AuthenticatedSource(unittest.TestCase):
             bootstrap.parent.mkdir()
             pristine = (ROOT / 'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes()
             bootstrap.write_bytes(pristine)
+            zstd=root/'external/zstd/UnpackedTarball_zstd.mk';zstd.parent.mkdir()
+            zstd_original=(ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes();zstd.write_bytes(zstd_original)
             evidence = root / 'evidence'
             evidence.mkdir()
-            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision'):
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision'):
                 with self.subTest(invalid=invalid):
                     if invalid == 'changed-helper':
                         bootstrap.write_bytes(pristine + b'\nchanged\n')
@@ -539,19 +581,29 @@ class AuthenticatedSource(unittest.TestCase):
                     elif invalid == 'linked-build-recipe':
                         saved_project=root/'original-build-recipe';saved_project.write_bytes(project_original)
                         project.unlink();project.symlink_to(saved_project)
-                    else:
+                    elif invalid == 'build-evidence-collision':
                         (evidence/'effective-ExternalProject_firebird.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'changed-zstd-recipe':
+                        zstd.write_bytes(zstd_original+b'\nchanged\n')
+                    elif invalid == 'linked-zstd-recipe':
+                        saved_zstd=root/'original-zstd-recipe';saved_zstd.write_bytes(zstd_original)
+                        zstd.unlink();zstd.symlink_to(saved_zstd)
+                    else:
+                        (evidence/'effective-UnpackedTarball_zstd.mk').write_bytes(b'prior evidence')
                     expected_bootstrap = bootstrap.read_bytes()
                     expected_project=project.read_bytes()
+                    expected_zstd=zstd.read_bytes()
                     with self.assertRaisesRegex(ValueError, 'SHA256|regular file|exists'):
                         module().install(root, evidence)
                     self.assertEqual(original, target.read_bytes())
                     self.assertEqual(self.lo_configure.read_bytes(), configure.read_bytes())
                     self.assertEqual(expected_bootstrap, bootstrap.read_bytes())
                     self.assertEqual(expected_project,project.read_bytes())
+                    self.assertEqual(expected_zstd,zstd.read_bytes())
                     self.assertFalse((target.parent / 'firebird-windows-arm64.patch').exists())
                     self.assertFalse((evidence / 'original-unpack-sources').exists())
                     self.assertFalse((evidence/'original-ExternalProject_firebird.mk').exists())
+                    self.assertFalse((evidence/'original-UnpackedTarball_zstd.mk').exists())
                     if bootstrap.is_symlink():
                         bootstrap.unlink()
                     bootstrap.write_bytes(pristine)
@@ -559,6 +611,9 @@ class AuthenticatedSource(unittest.TestCase):
                     if project.is_symlink():project.unlink()
                     project.write_bytes(project_original)
                     (evidence/'effective-ExternalProject_firebird.mk').unlink(missing_ok=True)
+                    if zstd.is_symlink():zstd.unlink()
+                    zstd.write_bytes(zstd_original)
+                    (evidence/'effective-UnpackedTarball_zstd.mk').unlink(missing_ok=True)
             receipt = module().install(root, evidence)
             changed = target.read_text()
             self.assertTrue(changed.startswith(original.decode()))
