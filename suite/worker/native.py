@@ -378,12 +378,13 @@ class UnoBackend:
             ('MacroExecutionMode', 0), ('UpdateDocMode', 0), ('ReadOnly', False),
             ('Hidden', True), ('PickListEntry', False), ('InteractionHandler', interaction)))
         if path is not None and module['factory'] == 'private:factory/scalc' and path.suffix.lower() == '.csv':
-            # Let the native CSV filter detect separators/encoding without an
-            # options interaction (which our abort-only handler must reject).
-            # Keep double-quote escaping and the normal import defaults.
+            # Standard CSV uses one comma separator: native delimiter detection
+            # can also split ordinary unquoted spaces. Keep native charset
+            # detection, double quotes and the normal import defaults, without
+            # an options interaction (which our abort-only handler must reject).
             props += tuple(self._property(name, value) for name, value in (
                 ('FilterName', module['filters']['csv']),
-                ('FilterOptions', 'DETECT,34,DETECT,1,,0,false,false')))
+                ('FilterOptions', '44,34,DETECT,1,,0,false,false')))
         url = path.as_uri() if path is not None else module['factory']
         if path is None and module['factory'] == 'private:factory/sdatabase':
             url = self._new_base_url(service, module, interaction)

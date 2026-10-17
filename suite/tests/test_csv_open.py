@@ -1,6 +1,8 @@
 """Exercise the real attach/load boundary with fake UNO, not a GUI/CSV parser."""
 from contextlib import ExitStack
+import csv
 import importlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -81,12 +83,12 @@ class CsvOpenTests(unittest.TestCase):
                 transaction.assert_not_called()
         return result
 
-    def test_csv_load_uses_native_detection_without_changing_source_or_ownership(self):
+    def test_csv_load_uses_native_charset_detection_without_changing_source_or_ownership(self):
         samples = (
             ('ordinary.csv', b'Name,Amount\nAlice,17\n'),
-            ('quoted.CSV', b'Name;Amount\n"A;B";25\n'),
-            ('korean.CsV', '\uc774\ub984\t\uac12\n\ud55c\uae00\t42\n'.encode('cp949')),
-            ('unicode.csv', 'Name|Amount\n\ud55c\uae00|42\n'.encode('utf-16')),
+            ('quoted.CSV', b'Name,Amount\n"A;B, C",25\n'),
+            ('korean.CsV', '\uc774\ub984,\uac12\n\ud55c\uae00,42\n'.encode('cp949')),
+            ('unicode.csv', 'Name,Amount\n\ud55c\uae00,42\n'.encode('utf-16')),
         )
         for name, data in samples:
             with self.subTest(name=name):
@@ -99,10 +101,10 @@ class CsvOpenTests(unittest.TestCase):
                 self.assertTrue(target.startswith('OpenGeul_'))
                 self.assertEqual(4, flags)
                 self.assertEqual(CSV_FILTER, props['FilterName'])
-                # Detection is delegated to LO; these bytes are deliberately
-                # not parsed here and do not claim real-engine charset coverage.
+                # Only charset detection is delegated to LO. The byte samples
+                # do not claim real-engine charset coverage at this fake boundary.
                 tokens = props['FilterOptions'].split(',')
-                self.assertEqual(['DETECT', '34', 'DETECT', '1', '', '0', 'false', 'false'], tokens)
+                self.assertEqual(['44', '34', 'DETECT', '1', '', '0', 'false', 'false'], tokens)
                 self.assertEqual(data, path.read_bytes())
                 self.assertEqual([], self.aborted + self.approved)
                 self.assertEqual(0, props['MacroExecutionMode'])
@@ -114,6 +116,31 @@ class CsvOpenTests(unittest.TestCase):
                 self.assertLess(self.calls.index(('load',)), self.calls.index(('child', 456, 123)))
                 self.assertLess(self.calls.index(('child', 456, 123)), self.calls.index(('visible', True)))
                 self.assertLess(self.calls.index(('visible', True)), self.calls.index(('activate',)))
+
+    def test_csv_options_preserve_standard_csv_spaces_quotes_and_rows(self):
+        samples = (
+            ('Engine-OpenGeul-calc \ud55c\uae00,17,25,42\r\n',
+             [['Engine-OpenGeul-calc \ud55c\uae00', '17', '25', '42']]),
+            ('"text with spaces, comma; tab\tand|pipe",17\r\n',
+             [['text with spaces, comma; tab\tand|pipe', '17']]),
+            ('"say ""hello, world""",25\r\n', [['say "hello, world"', '25']]),
+            ('First name,Amount\r\nAlice Kim,17\r\nBob Lee,25\r\n',
+             [['First name', 'Amount'], ['Alice Kim', '17'], ['Bob Lee', '25']]),
+            ('Alpha beta;17;25;42\r\n', [['Alpha beta;17;25;42']]),
+        )
+        for index, (text, expected) in enumerate(samples):
+            with self.subTest(index=index):
+                path = self.root / ('standard-' + str(index) + '.csv')
+                path.write_bytes(text.encode('utf-8'))
+                self.attach(self.modules['calc'], path, 'csv-options')
+                tokens = self.loads[0][3]['FilterOptions'].split(',')
+                self.assertEqual('44', tokens[0], 'CSV must select one comma, not infer spaces as separators')
+                # Replay the exact production delimiter/quote with the standard
+                # parser. Actual native import is checked separately, not faked.
+                rows = list(csv.reader(io.StringIO(text, newline=''),
+                                       delimiter=chr(int(tokens[0])), quotechar=chr(int(tokens[1]))))
+                self.assertEqual(expected, rows)
+                self.assertEqual(text.encode('utf-8'), path.read_bytes())
 
     def test_other_formats_factories_and_new_calc_keep_the_original_load_properties(self):
         cases = [('calc', suffix) for suffix in ('ods', 'xlsx', 'xls')]
