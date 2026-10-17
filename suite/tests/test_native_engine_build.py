@@ -276,7 +276,7 @@ class NativeEngineBuildTests(unittest.TestCase):
         tools.mkdir(parents=True)
         source=self.root/('VS/VC/Redist/MSVC/'+redist_version+'/arm64/'+family)
         source.mkdir(parents=True)
-        names=('concrt140.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','msvcp140_atomic_wait.dll','msvcp140_codecvt_ids.dll','vcruntime140.dll','vcruntime140_1.dll','vcruntime140_threads.dll')
+        names=('concrt140.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','msvcp140_atomic_wait.dll','msvcp140_codecvt_ids.dll','vcruntime140.dll','vcruntime140_threads.dll')
         data=bytearray(512);data[:2]=b'MZ';struct.pack_into('<I',data,60,128);data[128:132]=b'PE\0\0';struct.pack_into('<H',data,132,0xAA64);struct.pack_into('<H',data,148,240);struct.pack_into('<H',data,152,0x20B)
         for name in names:(source/name).write_bytes(data)
         return tools,source,names
@@ -314,12 +314,29 @@ class NativeEngineBuildTests(unittest.TestCase):
         tools,source,names=self.crt_fixture(family='Microsoft.VC143.CRT')
         raw=self.ps(self.crt_mock()+f"Get-AppLocalCrtPlan {quote(tools)} 'v145'|ConvertTo-Json -Depth 12 -Compress")
         plan=json.loads(raw)
-        self.assertEqual(9,len(plan['files']))
+        self.assertEqual('arm64',plan['architecture'])
+        self.assertEqual(8,len(plan['files']))
         self.assertEqual(str(source),plan['sourceDirectory'])
         self.assertEqual('Microsoft.VC143.CRT',plan['redistFamily'])
         self.assertEqual('14.50.12345',plan['compilerToolsVersion'])
         self.assertEqual(set(names),{row['name'] for row in plan['files']})
         self.rejected(self.crt_mock()+f"Get-AppLocalCrtPlan {quote(tools)} 'v143'")
+
+    def test_architecture_family_preserves_x64_default_and_native_arm64_exact_eight(self):
+        raw=self.ps("@{default=@(Get-CrtNames);x64=@(Get-CrtNames 'x64');arm64=@(Get-CrtNames 'arm64')}|ConvertTo-Json -Compress")
+        families=json.loads(raw)
+        self.assertEqual(families['default'],families['x64'])
+        self.assertEqual(9,len(families['x64']));self.assertEqual(8,len(families['arm64']))
+        self.assertIn('vcruntime140_1.dll',families['x64'])
+        self.assertNotIn('vcruntime140_1.dll',families['arm64'])
+        self.rejected("Get-CrtNames 'x86'")
+
+    def test_native_crt_preflight_does_not_require_or_stage_x64_one(self):
+        tools,source,names=self.crt_fixture()
+        (source/'vcruntime140_1.dll').write_bytes(b'foreign x64 evidence, never native')
+        raw=self.ps(self.crt_mock()+f"Get-AppLocalCrtPlan {quote(tools)} 'v145'|ConvertTo-Json -Depth 12 -Compress")
+        self.assertEqual(set(names),{row['name'] for row in json.loads(raw)['files']})
+        self.rejected(self.crt_mock()+f"Assert-CrtFile {quote(source/'vcruntime140_1.dll')} '14.50.12345.0'")
 
     def test_native_crt_same_tool_version_directory_is_accepted(self):
         tools,source,names=self.crt_fixture(redist_version='14.50.12345')
@@ -341,17 +358,35 @@ class NativeEngineBuildTests(unittest.TestCase):
         for changed in (base.replace("status='Valid'","status='NotTrusted'"),base.replace('O=Microsoft Corporation','O=Other Corporation'),base.replace('@(14,50,12350,0)','@(14,44,99999,0)')):
             self.rejected(changed+f"Get-AppLocalCrtPlan {quote(tools)} 'v145'")
 
-    def test_native_crt_stage_copies_only_nine_authentic_bytes_and_redistribution_terms(self):
+    def test_native_crt_stage_copies_only_eight_authentic_bytes_and_redistribution_terms(self):
         tools,source,names=self.crt_fixture()
         (source/'arbitrary.dll').write_bytes(b'never copy')
         program=self.root/'instdir/program';program.mkdir(parents=True)
         terms=self.root/'terms.html';terms.write_text('Preserved Microsoft Visual Studio2026 redistribution terms')
         raw=self.ps(self.crt_mock()+f"$plan=Get-AppLocalCrtPlan {quote(tools)} 'v145'; Install-AppLocalCrt $plan {quote(program)} {quote(terms)}|ConvertTo-Json -Depth 12 -Compress")
         receipt=json.loads(raw)
-        self.assertEqual(9,len(receipt['files']))
+        self.assertEqual('arm64',receipt['architecture'])
+        self.assertEqual(8,len(receipt['files']))
         self.assertEqual(set(names),{p.name for p in program.iterdir()})
         for name in names:self.assertEqual((source/name).read_bytes(),(program/name).read_bytes())
         self.assertTrue((program.parent/'share/readme/Microsoft-VC145-redistribution.html').is_file())
+
+    def test_native_crt_stage_rejects_extra_one_before_copying_native_family(self):
+        tools,source,names=self.crt_fixture()
+        program=self.root/'instdir/program';program.mkdir(parents=True)
+        foreign=program/'vcruntime140_1.dll';foreign.write_bytes(b'preserve foreign bytes')
+        terms=self.root/'terms.html';terms.write_text('Owned terms snapshot')
+        self.rejected(self.crt_mock()+f"$plan=Get-AppLocalCrtPlan {quote(tools)} 'v145';Install-AppLocalCrt $plan {quote(program)} {quote(terms)}")
+        self.assertEqual([foreign],list(program.iterdir()))
+        self.assertEqual(b'preserve foreign bytes',foreign.read_bytes())
+
+    def test_native_crt_stage_rejects_legacy_versioned_runtime_before_copy(self):
+        tools,source,names=self.crt_fixture()
+        program=self.root/'instdir/program';program.mkdir(parents=True)
+        legacy=program/'msvcr120.dll';legacy.write_bytes(b'preserve legacy runtime')
+        terms=self.root/'terms.html';terms.write_text('Owned terms snapshot')
+        self.rejected(self.crt_mock()+f"$plan=Get-AppLocalCrtPlan {quote(tools)} 'v145';Install-AppLocalCrt $plan {quote(program)} {quote(terms)}")
+        self.assertEqual([legacy],list(program.iterdir()))
 
     def test_native_crt_stage_rejects_linked_notice_directory_before_any_copy(self):
         tools,source,names=self.crt_fixture()
@@ -376,6 +411,21 @@ class NativeEngineBuildTests(unittest.TestCase):
         target.unlink()
         self.rejected(self.crt_mock()+f"$plan=Get-AppLocalCrtPlan {quote(tools)} 'v145';[IO.File]::WriteAllText({quote(source/names[0])},'changed');Install-AppLocalCrt $plan {quote(program)} {quote(terms)}")
         self.assertEqual([],list(program.iterdir()))
+
+    def test_native_import_closure_function_runs_source_bound_helper_with_exact_architecture(self):
+        from suite.tests.test_crt import CrtImportClosureTests
+        from suite.tests.test_payload import pe
+        runtime=self.root/'runtime';runtime.mkdir()
+        CrtImportClosureTests().fixture(runtime)
+        (runtime/'program/soffice.bin').write_bytes(pe(0xaa64))
+        evidence=self.root/'evidence';evidence.mkdir()
+        repo=SOURCE.parents[2]
+        raw=self.ps(f"Invoke-CrtImportAudit {quote(os.sys.executable)} {quote(repo)} {quote(runtime)} {quote(evidence)}|ConvertTo-Json -Depth 12 -Compress")
+        proof=json.loads(raw.splitlines()[-1])
+        self.assertTrue(proof['passed']);self.assertEqual('arm64',proof['architecture'])
+        self.assertEqual(9,proof['checkedPeCount'])
+        self.assertTrue((evidence/'crt-import-closure.json').is_file())
+        self.assertTrue((evidence/'crt-import-closure.command.json').is_file())
 
     def test_isql_oracle_requires_exact_committed_rows_and_rollback(self):
         output=self.root/'isql.log'

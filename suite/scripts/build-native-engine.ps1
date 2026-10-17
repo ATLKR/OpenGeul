@@ -640,9 +640,10 @@ function Write-ExternalSourceInventory([string]$CacheDirectory,[string]$PinLog,[
     return $result
 }
 
-function Get-CrtNames {
-    'concrt140.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','msvcp140_atomic_wait.dll',
-    'msvcp140_codecvt_ids.dll','vcruntime140.dll','vcruntime140_1.dll','vcruntime140_threads.dll'
+function Get-CrtNames([ValidateSet('x64','arm64')][string]$Architecture='x64') {
+    $names=@('concrt140.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','msvcp140_atomic_wait.dll',
+        'msvcp140_codecvt_ids.dll','vcruntime140.dll','vcruntime140_1.dll','vcruntime140_threads.dll')
+    if($Architecture -eq 'arm64') {$names|Where-Object {$_ -cne 'vcruntime140_1.dll'}} else {$names}
 }
 
 function Get-CrtSigningIdentity([string]$Path) {
@@ -659,7 +660,7 @@ function Get-CrtSigningIdentity([string]$Path) {
 function Assert-CrtFile([string]$Path,[string]$MinimumVersion) {
     Assert-UnlinkedPath $Path
     $name=[IO.Path]::GetFileName($Path)
-    if($name -cnotin @(Get-CrtNames)) {throw "Unexpected app-local CRT filename: $name"}
+    if($name -cnotin @(Get-CrtNames 'arm64')) {throw "Unexpected app-local CRT filename: $name"}
     $pe=Get-ProductPeIdentity $Path
     if($pe.role -ne 'nativeArm64') {throw "App-local CRT must be native ARM64: $Path"}
     $identity=Get-CrtSigningIdentity $Path
@@ -698,8 +699,8 @@ function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset) {
     if($candidates.Count -eq 0) {throw "No ARM64 VC redist from the selected VS installation is at least MSVC $minimum under $redistRoot"}
     $selected=@($candidates|Sort-Object -Property @{Expression={$_.version};Descending=$true},@{Expression={$_.family};Descending=$true})[0]
     Assert-UnlinkedPath $selected.path
-    $files=@(foreach($name in Get-CrtNames) {Assert-CrtFile (Join-Path $selected.path $name) ([string]$minimum)})
-    return [ordered]@{schemaVersion=1;toolset=$Toolset;compilerRoot=$compiler;compilerToolsVersion=$versionText;minimumRuntimeVersion=[string]$minimum;
+    $files=@(foreach($name in Get-CrtNames 'arm64') {Assert-CrtFile (Join-Path $selected.path $name) ([string]$minimum)})
+    return [ordered]@{schemaVersion=1;architecture='arm64';toolset=$Toolset;compilerRoot=$compiler;compilerToolsVersion=$versionText;minimumRuntimeVersion=[string]$minimum;
         redistRoot=$redistRoot;sourceDirectory=$selected.path;redistVersionDirectory=$selected.directory;redistFamily=$selected.family;
         selection='selected VS installation; highest installed v14 ARM64 CRT not older than configured build tools; each DLL signature/version verified';files=$files}
 }
@@ -721,9 +722,14 @@ function Save-VcRedistributionTerms([string]$OutputPath) {
 
 function Install-AppLocalCrt($Plan,[string]$ProgramDirectory,[string]$TermsPath) {
     Assert-UnlinkedPath $ProgramDirectory;Assert-UnlinkedPath $TermsPath
-    if(-not(Test-Path -LiteralPath $ProgramDirectory -PathType Container) -or -not(Test-Path -LiteralPath $TermsPath -PathType Leaf) -or @($Plan.files).Count -ne 9) {throw 'App-local CRT requires the complete preflight plan, program directory and preserved terms.'}
+    if(-not(Test-Path -LiteralPath $ProgramDirectory -PathType Container) -or -not(Test-Path -LiteralPath $TermsPath -PathType Leaf) -or $Plan.architecture -cne 'arm64' -or @($Plan.files).Count -ne @(Get-CrtNames 'arm64').Count) {throw 'App-local CRT requires the complete preflight plan, program directory and preserved terms.'}
     $names=@($Plan.files|ForEach-Object {$_.name})
-    if((Compare-Object -CaseSensitive $names @(Get-CrtNames))) {throw 'CRT preflight plan changed its exact nine-file family.'}
+    if((Compare-Object -CaseSensitive $names @(Get-CrtNames 'arm64'))) {throw 'CRT preflight plan changed its exact ARM64 eight-file family.'}
+    foreach($existing in Get-ChildItem -LiteralPath $ProgramDirectory -File) {
+        if($existing.Name -match '^(?:concrt|msvcp|vcruntime|vccorlib|msvcr|msvcm)[0-9][a-z0-9_]*\.dll$' -and $existing.Name.ToLowerInvariant() -cnotin $names) {
+            throw "Unexpected existing ARM64 CRT family member: $($existing.Name)"
+        }
+    }
     $readme=Join-Path (Split-Path $ProgramDirectory -Parent) 'share/readme'
     $termsTarget=Join-Path $readme 'Microsoft-VC145-redistribution.html'
     Assert-UnlinkedPath $readme;Assert-UnlinkedPath $termsTarget
@@ -748,7 +754,18 @@ function Install-AppLocalCrt($Plan,[string]$ProgramDirectory,[string]$TermsPath)
     }
     New-Item -ItemType Directory -Path $readme -Force|Out-Null
     if(-not(Test-Path $termsTarget)) {Copy-Item -LiteralPath $TermsPath -Destination $termsTarget}
-    return [ordered]@{schemaVersion=1;toolset=$Plan.toolset;sourceDirectory=$Plan.sourceDirectory;programDirectory=$ProgramDirectory;files=$checked;redistributionTerms=@{path=$termsTarget;sha256=$termsHash}}
+    return [ordered]@{schemaVersion=1;architecture='arm64';toolset=$Plan.toolset;sourceDirectory=$Plan.sourceDirectory;programDirectory=$ProgramDirectory;files=$checked;redistributionTerms=@{path=$termsTarget;sha256=$termsHash}}
+}
+
+function Invoke-CrtImportAudit([string]$Python,[string]$Repo,[string]$Runtime,[string]$EvidenceDirectory) {
+    $helper=Join-Path $Repo 'suite/crt.py';$proofPath=Join-Path $EvidenceDirectory 'crt-import-closure.json'
+    Assert-UnlinkedPath $helper;Assert-UnlinkedPath $proofPath
+    Invoke-LoggedCommand $Python @($helper,'--root',$Runtime,'--architecture','arm64','--output',$proofPath) $Repo (Join-Path $EvidenceDirectory 'crt-import-closure')|Out-Null
+    $proof=Get-Content -LiteralPath $proofPath -Raw|ConvertFrom-Json
+    if($proof.schemaVersion -ne 1 -or $proof.architecture -cne 'arm64' -or $proof.passed -ne $true -or
+       $proof.checkedPeCount -lt 1 -or @($proof.requiredCrtFiles).Count -ne 8 -or
+       (Compare-Object -CaseSensitive @($proof.requiredCrtFiles) @(Get-CrtNames 'arm64'))) {throw 'Native CRT normal/delay import closure was not proved.'}
+    return $proof
 }
 
 function Write-BaseProofScript([string]$Path) {
@@ -971,6 +988,8 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.nativePeCount=@($inventory|Where-Object {$_.role -eq 'nativeArm64'}).Count
             $receipt.managedAnyCpuCount=@($inventory|Where-Object {$_.role -eq 'managedAnyCpu'}).Count
             $receipt.pinnedTemplateCount=@($inventory|Where-Object {$_.role -eq 'pythonLauncherTemplate'}).Count
+            $receipt.stage='native-normal-delay-crt-import-closure'
+            $receipt.crtImportClosure=Invoke-CrtImportAudit (Join-Path $instdir 'program/python.exe') $repo $instdir $evidence
             $receipt.stage='actual-native-uno-base-persistence'
             $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe
             $proof=Join-Path $evidence 'native-base-proof.json'

@@ -124,3 +124,25 @@ required for all source checks. Without explicit local inputs, ordinary Suite
 unit runs skip these source checks with a reason. The native engine build must
 run them with authenticated inputs and tools available, setting
 `OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1` so missing inputs/tools fail the gate.
+
+
+The ARM64 app-local VC runtime stage uses the exact eight-file native ABI
+family. It excludes `vcruntime140_1.dll`, whose installed compatibility image
+has an x64 default PE header and ARM64X hybrid metadata; its presence in an
+ARM64 redist folder does not make it an exact AA64 image. The eight admitted
+files may themselves contain ARM64X metadata and must retain their AA64 default
+header, valid Microsoft signature, version-resource identity and selected
+compiler version floor. The actual native ARM64 C++ exception/vector diagnostic
+proved this eight-file ABI on the selected VS2026 toolchain; that diagnostic
+does not qualify the Office engine or Firebird.
+
+After the complete runtime PE audit, the source-built native Python runs
+`suite/crt.py` against every native image in `instdir`, reading both normal and
+delay import tables without loading the images. Any VC dependency outside the
+exact ARM64 family, including a dependency on the omitted compatibility DLL,
+fails the build. The engine receipt records this closure, and extraction and
+payload verification recompute it from the authenticated runtime bytes. The
+reader supports PE32/PE32+ file-backed import metadata with explicit bounds and
+rejects legacy VA-based delay descriptors. Exact CRT copying and all native
+Office, Java, ODK, help, Korean resources and Base gates remain required. The
+public x64 family and default remain the original nine files.

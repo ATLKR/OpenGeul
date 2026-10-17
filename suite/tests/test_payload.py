@@ -37,6 +37,8 @@ def pe(machine=0x8664, *, managed=False, flags=1, dll=False):
     struct.pack_into('<H', data, optional, 0x10b if machine == 0x14c else 0x20b)
     count_offset = 92 if machine == 0x14c else 108
     struct.pack_into('<I', data, optional + count_offset, 16)
+    struct.pack_into('<II', data, optional+32, 0x1000, 0x200)
+    struct.pack_into('<II', data, optional+56, 0x2000, 0x200)
     section = optional + size
     data[section:section+8] = b'.text\0\0\0'
     struct.pack_into('<IIII', data, section+8, 512, 0x1000, 512, 512)
