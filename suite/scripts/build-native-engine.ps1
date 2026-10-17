@@ -730,6 +730,22 @@ function Get-IsqlIcuPlan([string]$SourceDirectory,[Collections.IDictionary]$Conf
     return [ordered]@{directory=$directory;version='78.3';architecture='arm64';origin='compiled internal ICU from authenticated pinned source';files=$files}
 }
 
+function Get-IsqlPluginPlan([string]$FirebirdDirectory) {
+    # The locked LO Engine12 patch returns a bare plugin name outside boot
+    # mode; the standalone proof must find the actual compiled plugin normally.
+    $directory=[IO.Path]::GetFullPath((Join-Path $FirebirdDirectory 'plugins'))
+    if($directory -match '[;\r\n]') {throw 'Compiled plugin directory cannot be a loader-path list.'}
+    Assert-UnlinkedPath $directory
+    if(-not(Test-Path -LiteralPath $directory -PathType Container)) {throw 'Compiled Firebird plugin directory is missing.'}
+    $path=Join-Path $directory 'Engine12.dll';Assert-UnlinkedPath $path
+    if(-not(Test-Path -LiteralPath $path -PathType Leaf)) {throw 'Compiled embedded Engine12.dll is missing.'}
+    $identity=Get-ProductPeIdentity $path
+    $bytes=[IO.File]::ReadAllBytes($path);$offset=[BitConverter]::ToUInt32($bytes,60)
+    if($identity.role -cne 'nativeArm64' -or $identity.machine -ne 0xaa64 -or -not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw 'Compiled embedded engine must be a native ARM64 DLL.'}
+    $identity.name='Engine12.dll'
+    return [ordered]@{directory=$directory;architecture='arm64';origin='compiled internal Firebird from authenticated pinned source';files=@($identity)}
+}
+
 function Assert-IsqlOutput([string]$Path) {
     $text=Get-Content -LiteralPath $Path -Raw
     foreach($pair in @(@('ROW_COUNT',2),@('TOTAL',68),@('ROW_ONE',1),@('ROW_THREE',1))) {
@@ -1129,8 +1145,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                     $sql.create|Set-Content $createSql -Encoding ascii;$sql.verify|Set-Content $verifySql -Encoding ascii
                     $receipt.isql.icu=Get-IsqlIcuPlan $source $receipt.configuration
                     Write-BuildJson (Join-Path $evidence 'isql-icu.json') $receipt.isql.icu
-                    $isqlEnvironment=@{PATH=$receipt.isql.icu.directory+[IO.Path]::PathSeparator+$env:PATH;FIREBIRD=$fbOutput}
-                    $receipt.isql.environment=[ordered]@{PATH=@{prepend=$receipt.isql.icu.directory;separator=[string][IO.Path]::PathSeparator;inheritParent=$true};FIREBIRD=$fbOutput;scope='isql-create and isql-reopen children only'}
+                    $receipt.isql.plugins=Get-IsqlPluginPlan $fbOutput
+                    Write-BuildJson (Join-Path $evidence 'isql-plugins.json') $receipt.isql.plugins
+                    $isqlEnvironment=@{PATH=$receipt.isql.icu.directory+[IO.Path]::PathSeparator+$receipt.isql.plugins.directory+[IO.Path]::PathSeparator+$env:PATH;FIREBIRD=$fbOutput}
+                    $receipt.isql.environment=[ordered]@{PATH=@{prepend=@($receipt.isql.icu.directory,$receipt.isql.plugins.directory);separator=[string][IO.Path]::PathSeparator;inheritParent=$true};FIREBIRD=$fbOutput;scope='isql-create and isql-reopen children only'}
                     Invoke-LoggedCommand $isql @('-b','-q','-i',$createSql) $fbOutput (Join-Path $evidence 'isql-create') -EnvironmentOverrides $isqlEnvironment|Out-Null
                     $query=Invoke-LoggedCommand $isql @('-b','-q','-user','SYSDBA','-password','masterkey','-i',$verifySql,(Join-Path $work 'isql-proof.fdb')) $fbOutput (Join-Path $evidence 'isql-reopen') -EnvironmentOverrides $isqlEnvironment
                     Assert-IsqlOutput $query.stdout;$receipt.isql.verified=$true

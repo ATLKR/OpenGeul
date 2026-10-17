@@ -101,6 +101,54 @@ class NativeIsqlIcuTests(unittest.TestCase):
                          ("MSVC_USE_DEBUG_RUNTIME=''", "MSVC_USE_DEBUG_RUNTIME='TRUE'")):
             self.rejected('Get-IsqlIcuPlan ' + quote(self.source) + ' ' + self.config.replace(old, new))
 
+    def test_plugin_plan_binds_native_engine_without_changing_config_or_files(self):
+        firebird = self.root / 'firebird'
+        plugins = firebird / 'plugins'
+        plugins.mkdir(parents=True)
+        engine = plugins / 'Engine12.dll'
+        self.pe(engine)
+        config = firebird / 'firebird.conf'
+        config.write_bytes(b'Providers = Remote, Engine12, Loopback\n')
+        before = {str(p.relative_to(firebird)): p.read_bytes() for p in firebird.rglob('*') if p.is_file()}
+        plan = json.loads(self.ps('Get-IsqlPluginPlan ' + quote(firebird) + '|ConvertTo-Json -Depth 8 -Compress'))
+        self.assertEqual(str(plugins), plan['directory'])
+        self.assertEqual('arm64', plan['architecture'])
+        self.assertEqual(1, len(plan['files']))
+        row = plan['files'][0]
+        self.assertEqual('Engine12.dll', row['name'])
+        self.assertEqual(str(engine), row['path'])
+        self.assertEqual(0xaa64, row['machine'])
+        self.assertEqual('nativeArm64', row['role'])
+        self.assertEqual(engine.stat().st_size, row['size'])
+        self.assertEqual(hashlib.sha256(engine.read_bytes()).hexdigest(), row['sha256'])
+        self.assertEqual(before, {str(p.relative_to(firebird)): p.read_bytes() for p in firebird.rglob('*') if p.is_file()})
+
+    def test_plugin_plan_rejects_missing_foreign_executable_and_linked_engine(self):
+        firebird = self.root / 'firebird'
+        plugins = firebird / 'plugins'
+        plugins.mkdir(parents=True)
+        engine = plugins / 'Engine12.dll'
+        self.pe(engine)
+        command = 'Get-IsqlPluginPlan ' + quote(firebird)
+        self.ps(command + '|Out-Null')
+        original = engine.read_bytes()
+        for machine in (0x8664, 0x14c):
+            self.pe(engine, machine)
+            self.rejected(command)
+        self.pe(engine, dll=False)
+        self.rejected(command)
+        engine.unlink()
+        self.rejected(command)
+        actual = self.root / 'actual-engine.dll'
+        actual.write_bytes(original)
+        engine.symlink_to(actual)
+        self.rejected(command)
+        engine.unlink()
+        engine.write_bytes(original)
+        linked = self.root / 'linked-firebird'
+        linked.symlink_to(firebird, target_is_directory=True)
+        self.rejected('Get-IsqlPluginPlan ' + quote(linked))
+
     def test_real_children_receive_scoped_overrides_and_parent_default_and_failure_stay_intact(self):
         child = self.root / 'observe.py'
         child.write_text('import json,os,sys\nprint(json.dumps({"PATH":os.environ.get("PATH"),'
@@ -140,19 +188,24 @@ Write-BuildJson {quote(state)} @{{PATH=$env:PATH;FIREBIRD=$env:FIREBIRD}}
     @unittest.skipIf(os.name == 'nt', 'Portable executable observer requires a POSIX shebang')
     def test_actual_isql_create_and_reopen_calls_use_same_child_only_environment(self):
         (self.root / 'firebird').mkdir()
+        plugins = self.root / 'firebird/plugins'
+        plugins.mkdir()
+        self.pe(plugins / 'Engine12.dll')
         isql = self.root / 'observe-isql'
         isql.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
                         'print(json.dumps({"PATH":os.environ.get("PATH"),'
-                        '"FIREBIRD":os.environ.get("FIREBIRD"),"args":sys.argv[1:]}))\n')
+                        '"FIREBIRD":os.environ.get("FIREBIRD"),"BOOT":os.environ.get("FIREBIRD_BOOT_BUILD"),"args":sys.argv[1:]}))\n')
         isql.chmod(0o700)
         self.ps(f"""
 $source={quote(self.source)};$fbOutput={quote(self.root/'firebird')};$isql={quote(isql)}
 $work={quote(self.root)};$evidence={quote(self.root)};$createSql='create.sql';$verifySql='verify.sql'
 $receipt=@{{configuration={self.config};isql=@{{}}}};$env:PATH='parent-path';$env:FIREBIRD='parent-firebird'
+$env:FIREBIRD_BOOT_BUILD=$null
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile({quote(DRIVER)},[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw 'Driver syntax errors'}}
-foreach($left in @('$receipt.isql.icu','$isqlEnvironment','$receipt.isql.environment')){{
+foreach($left in @('$receipt.isql.icu','$receipt.isql.plugins','$isqlEnvironment','$receipt.isql.environment')){{
  $rows=@($ast.FindAll({{param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq $left}},$true))
+ if($rows.Count -eq 0 -and $left -ceq '$receipt.isql.plugins'){{continue}}
  if($rows.Count -ne 1){{throw ('Missing unique isql binding '+$left)}}
  Invoke-Expression $rows[0].Extent.Text
 }}
@@ -160,17 +213,21 @@ $calls=@($ast.FindAll({{param($n) $n -is [Management.Automation.Language.Command
 if($calls.Count -ne 2){{throw 'Expected original create/reopen commands'}}
 foreach($call in $calls){{Invoke-Expression $call.Extent.Text|Out-Null}}
 if($env:PATH -cne 'parent-path' -or $env:FIREBIRD -cne 'parent-firebird'){{throw 'isql changed controller environment'}}
+if($env:FIREBIRD_BOOT_BUILD){{throw 'isql enabled bootstrap mode'}}
 Write-BuildJson {quote(self.root/'binding.json')} $receipt.isql
 """)
         binding = json.loads((self.root / 'binding.json').read_text())
-        self.assertEqual(str(self.icu), binding['environment']['PATH']['prepend'])
-        self.assertTrue(binding['environment']['PATH']['inheritParent'])
-        self.assertEqual(str(self.root / 'firebird'), binding['environment']['FIREBIRD'])
         for prefix in ('isql-create', 'isql-reopen'):
             child = json.loads((self.root / (prefix + '.stdout.log')).read_text())
-            self.assertEqual(str(self.icu) + os.pathsep + 'parent-path', child['PATH'])
+            self.assertEqual(os.pathsep.join((str(self.icu), str(plugins), 'parent-path')), child['PATH'],
+                             'Non-boot bare Engine12 cannot find the owned plugins directory')
             self.assertEqual(str(self.root / 'firebird'), child['FIREBIRD'])
+            self.assertIsNone(child['BOOT'], 'Standalone proof must retain normal embedded mode')
             self.assertEqual(['-b', '-q'], child['args'][:2])
+        self.assertEqual([str(self.icu), str(plugins)], binding['environment']['PATH']['prepend'])
+        self.assertTrue(binding['environment']['PATH']['inheritParent'])
+        self.assertEqual(str(self.root / 'firebird'), binding['environment']['FIREBIRD'])
+        self.assertEqual(str(plugins), binding['plugins']['directory'])
 
 
 if __name__ == '__main__':

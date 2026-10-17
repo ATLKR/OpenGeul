@@ -60,7 +60,8 @@ it does not prove this correction resolves that Windows loader failure.
 The standalone `isql` proof runs outside that make child. It validates the
 compiled internal ICU 78.3 release triplet as owned native ARM64 DLLs and
 retains each file's size and SHA256. Only the create/reopen child processes
-receive the compiled ICU directory before the inherited Windows `PATH`, plus
+receive the compiled ICU directory and owned Firebird `plugins` directory before
+the inherited Windows `PATH`, plus
 their explicit `FIREBIRD` root. The controller environment stays unchanged.
 Command receipts retain hashes of those effective values and the proof records
 the selected prefix/root, without dumping the inherited host environment.
@@ -68,6 +69,18 @@ Even ASCII database creation prepares Unicode system metadata and loads ICU;
 this provisioning is required independently of the integer SQL fixture. The
 source and portable command checks do not establish an actual Windows ICU
 load or native Base qualification.
+
+The locked LibreOffice `firebird-Engine12.patch` returns a bare plugin name in
+normal mode. Make's `FIREBIRD_BOOT_BUILD` path instead uses the full plugin
+directory; that successful bootstrap does not provision a later standalone
+process. Run `39043828006` completed both Firebird make targets, then its native
+standalone `isql` reported an XNET network error. The source trace shows that
+missing optional embedded plugins can be skipped before this fallback. The
+standalone proof now validates the owned `plugins/Engine12.dll` as a native ARM64
+DLL, records its path/size/SHA256 in `isql-plugins.json`, and provides that directory
+after ICU only to both proof children. It does not set boot mode, change provider
+order or configuration, copy plugins, or relax SQL/Base checks. Actual native
+plugin loading and database persistence remain subject to the next build.
 
 The same ARM64-only patch selects Firebird's existing `_controlfp` path for
 the three Windows floating-point save/mask/restore guards, as newer upstream
