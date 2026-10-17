@@ -25,6 +25,16 @@ It leaves atomics, assembly, database formats and protocol numbers unchanged.
 The only inline x86 assembly found in the pinned source is legacy Win9x code,
 guarded by `WIN9X_SUPPORT`; no speculative assembly replacement is included.
 
+The same ARM64-only patch selects Firebird's existing `_controlfp` path for
+the three Windows floating-point save/mask/restore guards, as newer upstream
+Firebird does for ARM64. Microsoft restricts `__control87_2` to x86; its UCRT
+header declares that function only under `_M_IX86`. The x64 and i386 branches,
+control masks, calls and ordering remain unchanged. The source test compiles
+the real header after all 25 authenticated LibreOffice Windows patches against
+declaration-only Microsoft API visibility fixtures. It proves source selection
+and syntax; actual Windows compiler, floating-point runtime behavior and Base
+persistence still require the native build and qualification gates.
+
 Run the build on actual Windows ARM64 and verify the native host before using
 these options in `autogen.input`:
 
@@ -34,6 +44,9 @@ these options in `autogen.input`:
 --with-distro=LibreOfficeWinArm64
 --with-visual-studio=2026
 --with-package-format=archive
+--disable-online-update
+--disable-online-update-mar
+--disable-breakpad
 --enable-firebird-sdbc
 --without-system-firebird
 ```
@@ -62,6 +75,19 @@ the normal Windows compiler/SDK checks still apply. Required native CRT files
 come from the driver's separate authenticated app-local CRT stage rather than
 MSI merge modules. `make check` and the complete Suite qualification remain
 separate checks; `make build` alone does not establish either.
+
+The fork does not publish through TDF's updater or crash-reporting services.
+The explicit online-update, MAR-update and Breakpad disable options override
+those optional upstream service choices without inventing a privacy-policy
+URL. The generated configuration must contain empty `ENABLE_ONLINE_UPDATE`,
+`ENABLE_ONLINE_UPDATE_MAR` and `ENABLE_BREAKPAD` values, and `BUILD_TYPE` must
+exclude `ONLINEUPDATE` and `BREAKPAD`. Java, ODK, help, Korean, database and
+Firebird settings remain required as before. Suite local `NativeDiagnostics`,
+owned-process identity, clean shutdown, zero-exit and crash-archive checks
+remain required. An absent private `profile/crash` directory can be archived
+completely without a dump; owned-process shutdown records supply shutdown
+evidence. A build without Breakpad does not claim dump capture.
+
 The authoritative Windows build prerequisites
 and supported setup are documented at
 <https://wiki.documentfoundation.org/Development/BuildingOnWindows>.

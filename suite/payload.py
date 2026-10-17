@@ -319,7 +319,7 @@ def _metadata(root: Path, files: dict, *, architecture: str):
         if 'Office/opengeul-source-build.json' not in files:
             raise ValueError('Source-built runtime is missing its externally locked source-build receipt')
         proof = validate_source_build_receipt(runtime, receipt_path, architecture=architecture)
-        validate_source_build_runtime(root/'Office', proof)
+        validate_source_build_runtime(root/'Office', proof, branding=_json(root/'runtime-branding.json'))
         if 'Office/opengeul-msi-dependencies.json' in files:
             raise ValueError('Source-built runtime cannot claim an MSI extraction receipt')
     elif runtime_format != 'msi':

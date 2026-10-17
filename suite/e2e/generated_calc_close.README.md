@@ -28,6 +28,36 @@ once. The copy's hash and five exact cells are checked before close, again
 before that choice, and after the document/editor windows close. Any mismatch
 raises; there is no alternate prompt, second close or generic discard path.
 
+The original twenty-second prompt deadline covers discovery and read-only
+readiness checks before the physical choice. Missing or disabled expected
+choices may finish appearing within that same deadline. Unexpected or duplicate
+client buttons still refuse Discard. A slow UIA read cannot authorize a click
+after the deadline; synchronous Windows/UIA calls themselves may exceed it.
+The receipt retains up to 24 bounded prompt observations plus the last one,
+including labels, native dialog ownership and each button's name, visibility,
+enabled state and available UIA identifiers. This records mismatches without
+assuming that a fourth button is safe to ignore.
+
+Controlled Windows2025/.NET8.0.32 evidence from run39020205748 establishes a
+fourth visible enabled UIA Button: the native nonclient titlebar Close control.
+It has no native HWND, empty automation ID/class, the native nonclient runtime
+identity, and direct TitleBar ancestry ending at the exact owned dialog root.
+The three document choices have native HWNDs and a separate client Pane route.
+`require_calc_prompt_buttons` is the shared read-only selector for generated-copy
+cleanup and the measured Calc close probe. It validates every active control,
+requires the three unique client choices, and separately records at most one
+exact native titlebar Close. It never clicks that control. A client button named
+Close, fake TitleBar, wrong runtime identity, foreign root or any extra client
+action remains a refusal.
+
+The existing ControlView/native-root ancestry checks remain mandatory. If
+ControlView skips the titlebar node, a separate bounded live RawView walk must
+prove Button→TitleBar→the exact dialog by UIA CompareElements; no missing
+ancestor is inferred. The observed native runtime-ID structure is checked again
+before the choice. A future provider shape fails closed. This controlled probe
+selected no button and qualified no product close; the exact read-only selector
+and then real Calc behavior still require their respective Windows runs.
+
 The already-saved Calc branches of `windows_smoke`, `startup_smoke`,
 `korean_ui_smoke` and `korean_ime_smoke` use this authorization. The separately
 maintained `calc_save_smoke` adapter must pass its exact `persisted` hash/cells.

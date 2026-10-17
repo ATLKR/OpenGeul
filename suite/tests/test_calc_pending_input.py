@@ -10,7 +10,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'e2e'))
 
 ROLES = dict(PARAGRAPH=41, TABLE=58, TABLE_CELL=59, TEXT_FRAME=61,
-             DOCUMENT_SPREADSHEET=84)
+             DOCUMENT_SPREADSHEET=84, FRAME=21, PANEL=40, ROOT_PANE=49,
+             SCROLL_PANE=51, SPLIT_PANE=56, VIEW_PORT=66, WINDOW=67)
 STATES = dict(DEFUNC=16, SHOWING=16777216, VISIBLE=536870912)
 
 

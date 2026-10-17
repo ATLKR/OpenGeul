@@ -18,6 +18,7 @@ from suite.tests.test_payload import pe
 VC_DLLS = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
            'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
            'vcruntime140_1.dll', 'vcruntime140_threads.dll')
+SOURCE_CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,17 +26,22 @@ ROOT = Path(__file__).resolve().parents[2]
 def source_build_fixture(root):
     """A pinned receipt uses the source driver's actual JSON field names."""
     archive = root/'engine.zip'
+    metadata = {'program/version.ini': ('[Version]\nbuildid='+SOURCE_CORE+'\nVendor=The Document Foundation\n').encode(),
+                'program/setup.ini': ('[Bootstrap]\nbuildid='+SOURCE_CORE+'\n').encode()}
     with zipfile.ZipFile(archive, 'w') as source:
         for name in ('soffice.exe', 'soffice.bin', 'python.exe', 'pyuno.pyd',
                      'ifbclient.dll', 'Engine12.dll', 'intl/fbintl.dll'):
             source.writestr('program/'+name, pe(0xaa64))
         source.writestr('LICENSE.html', b'Original upstream license')
+        for name, raw in metadata.items(): source.writestr(name, raw)
         for name in VC_DLLS: source.writestr('program/'+name, pe(0xaa64, dll=True))
         source.writestr('share/readme/Microsoft-VC145-redistribution.html', b'Official VS2026 redistribution terms')
     runtime = {'format': 'source-built-zip', 'version': '26.8.1.1',
                'url': 'https://example.org/engine.zip', 'size': archive.stat().st_size,
                'sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
-               'sourceUrl': 'https://example.org/libreoffice.tar.xz', 'sourceSha256': '1'*64,
+               'sourceUrl': 'https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz',
+               'sourceSha256': '296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785',
+               'sourceCoreCommit': SOURCE_CORE,
                'sourceBuild': {'receiptSha256': '0'*64, 'sourceCommit': 'a'*40,
                                'runId': 123, 'artifactId': 456, 'artifactSha256': '2'*64,
                                'patchManifestSha256': '3'*64}}
@@ -47,10 +53,12 @@ def source_build_fixture(root):
                'sourcePortManifestSha256': '3'*64, 'driverSha256': '4'*64,
                'host': dict(native, isWindows=True, controllerPid=1),
                'sourcePin': {'url': runtime['sourceUrl'], 'sha256': runtime['sourceSha256'],
-                             'version': runtime['version'], 'size': 302435508},
+                             'version': runtime['version'], 'size': 302435508, 'coreCommit': SOURCE_CORE},
                'configuration': {'OS': 'WNT', 'COM': 'MSC', 'CPUNAME': 'AARCH64',
                                  'HOST_PLATFORM': 'aarch64-pc-cygwin', 'BUILD_PLATFORM': 'aarch64-pc-cygwin',
                                  'ENABLE_FIREBIRD_SDBC': 'TRUE', 'CROSS_COMPILING': '', 'SYSTEM_FIREBIRD': '',
+                                 'PKGFORMAT': 'archive', 'ENABLE_ONLINE_UPDATE': '',
+                                 'ENABLE_ONLINE_UPDATE_MAR': '', 'ENABLE_BREAKPAD': '',
                                  'BUILD_TYPE': 'FIREBIRD LIBATOMIC_OPS LIBTOMMATH'},
                'baseProof': {'schemaVersion': 1, 'passed': True, 'guiVerified': False,
                              'independentReopenVerified': True,
@@ -62,6 +70,15 @@ def source_build_fixture(root):
                              'rows': [{'id': 1, 'text': 'Engine-OpenGeul-base 한글', 'amount': 42}],
                              'odb': 'C:\\build\\proof.odb', 'odbSha256': '5'*64},
                'artifact': {'path': str(archive), 'size': runtime['size'], 'sha256': runtime['sha256']}}
+    files = {name: dict(originalBuildId='a'*40, buildid=SOURCE_CORE, corrected=True,
+                       beforeSha256=hashlib.sha256(raw.replace(SOURCE_CORE.encode(), b'a'*40)).hexdigest(),
+                       sha256=hashlib.sha256(raw).hexdigest()) for name, raw in metadata.items()}
+    receipt['runtimeBuildIdentity'] = dict(schemaVersion=1,
+        mechanism='explicit-generated-config-correction-from-authenticated-source-pin',
+        expectedBuildId=SOURCE_CORE, sourceArchiveUrl=runtime['sourceUrl'],
+        sourceArchiveSha256=runtime['sourceSha256'], sourceArchiveSize=302435508, files=files,
+        finalVerification=dict(passed=True, expectedBuildId=SOURCE_CORE,
+            files={name:dict(buildid=SOURCE_CORE, sha256=item['sha256']) for name,item in files.items()}))
     source_directory = 'C:\\VS\\VC\\Redist\\MSVC\\14.50.35717\\arm64\\Microsoft.VC145.CRT'
     files = [{'name': name, 'sourcePath': source_directory+'\\'+name, 'machine': 0xaa64,
               'size': len(pe(0xaa64, dll=True)), 'sha256': hashlib.sha256(pe(0xaa64, dll=True)).hexdigest(),
@@ -453,6 +470,89 @@ class PrepareTests(unittest.TestCase):
 
 
 class SourceEngineTests(unittest.TestCase):
+    def test_source_receipt_requires_effective_archive_format_and_oem_services_disabled(self):
+        module = implementation()
+        for field in ('PKGFORMAT', 'ENABLE_ONLINE_UPDATE', 'ENABLE_ONLINE_UPDATE_MAR', 'ENABLE_BREAKPAD'):
+            for value in (None, 'TRUE'):
+                with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as folder:
+                    _, lock, path, proof = source_build_fixture(Path(folder))
+                    if value is None: del proof['configuration'][field]
+                    else: proof['configuration'][field] = value
+                    pin_source_receipt(lock, path, proof)
+                    with self.assertRaisesRegex(ValueError, 'configuration|OEM'):
+                        module.validate_source_build_receipt(lock, path, architecture='arm64')
+        for token in ('BREAKPAD', 'ONLINEUPDATE', 'breakpad', 'OnlineUpdate'):
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as folder:
+                _, lock, path, proof = source_build_fixture(Path(folder))
+                proof['configuration']['BUILD_TYPE'] += ' '+token
+                pin_source_receipt(lock, path, proof)
+                with self.assertRaisesRegex(ValueError, 'configuration|OEM'):
+                    module.validate_source_build_receipt(lock, path, architecture='arm64')
+
+    def test_external_core_pin_and_final_emitted_build_identity_are_required(self):
+        module = implementation()
+        mutations = (
+            lambda lock,p:lock.pop('sourceCoreCommit'),
+            lambda lock,p:lock.update(sourceCoreCommit='f'*40),
+            lambda lock,p:p['sourcePin'].pop('coreCommit'),
+            lambda lock,p:p['sourcePin'].update(coreCommit='f'*40),
+            lambda lock,p:p.pop('runtimeBuildIdentity'),
+            lambda lock,p:p['runtimeBuildIdentity'].update(expectedBuildId='f'*40),
+            lambda lock,p:p['runtimeBuildIdentity'].update(sourceArchiveSha256='f'*64),
+            lambda lock,p:p['runtimeBuildIdentity'].update(sourceArchiveSize=123),
+            lambda lock,p:p['runtimeBuildIdentity']['files']['program/version.ini'].update(buildid='f'*40),
+            lambda lock,p:p['runtimeBuildIdentity']['files']['program/version.ini'].update(corrected=False),
+            lambda lock,p:p['runtimeBuildIdentity']['files']['program/setup.ini'].update(originalBuildId='f'*40),
+            lambda lock,p:p['runtimeBuildIdentity'].pop('finalVerification'),
+            lambda lock,p:p['runtimeBuildIdentity']['finalVerification'].update(passed=False),
+            lambda lock,p:p['runtimeBuildIdentity']['finalVerification'].update(expectedBuildId='f'*40),
+            lambda lock,p:p['runtimeBuildIdentity']['finalVerification']['files']['program/version.ini'].update(sha256='f'*64),
+            lambda lock,p:p['runtimeBuildIdentity']['finalVerification']['files'].pop('program/setup.ini'),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as folder:
+                _, lock, path, proof = source_build_fixture(Path(folder)); mutate(lock,proof)
+                pin_source_receipt(lock, path, proof)
+                with self.assertRaisesRegex(ValueError, 'core|identity|source.build|Source.build'):
+                    module.validate_source_build_receipt(lock, path, architecture='arm64')
+
+    def test_extracted_metadata_bytes_and_effective_buildid_match_final_proof(self):
+        module = implementation()
+        for name in ('program/version.ini', 'program/setup.ini'):
+            for damage in ('missing', 'hash', 'wrong-id', 'duplicate-key'):
+                with self.subTest(name=name, damage=damage), tempfile.TemporaryDirectory() as folder:
+                    root=Path(folder); archive, lock, path, proof=source_build_fixture(root)
+                    destination=module.extract_source_engine_zip(archive, root/'runtime', runtime=lock,
+                                                                 receipt=path, architecture='arm64')
+                    target=destination/name
+                    if damage=='missing':target.unlink()
+                    else:
+                        raw=target.read_bytes()
+                        if damage=='hash':raw+=b'; changed bytes\n'
+                        elif damage=='wrong-id':raw=raw.replace(SOURCE_CORE.encode(),b'f'*40)
+                        else:raw+=b' buildid ='+SOURCE_CORE.encode()+b'\n'
+                        target.write_bytes(raw)
+                        # Even a separately re-pinned receipt cannot turn wrong/ambiguous IDs into the external core.
+                        if damage!='hash':
+                            proof['runtimeBuildIdentity']['files'][name]['sha256']=hashlib.sha256(raw).hexdigest()
+                            proof['runtimeBuildIdentity']['finalVerification']['files'][name]['sha256']=hashlib.sha256(raw).hexdigest()
+                    with self.assertRaisesRegex(ValueError, 'identity|buildid'):
+                        module.validate_source_build_runtime(destination, proof)
+
+    def test_actual_emitter_accepts_empty_and_already_official_original_build_ids(self):
+        module = implementation()
+        for original in ('', SOURCE_CORE):
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as folder:
+                archive, lock, path, proof = source_build_fixture(Path(folder))
+                with zipfile.ZipFile(archive) as source:
+                    for name, record in proof['runtimeBuildIdentity']['files'].items():
+                        before = source.read(name).replace(SOURCE_CORE.encode(), original.encode())
+                        record.update(originalBuildId=original, corrected=original != SOURCE_CORE,
+                                      beforeSha256=hashlib.sha256(before).hexdigest())
+                pin_source_receipt(lock, path, proof)
+                module.extract_source_engine_zip(archive, Path(folder)/'runtime', runtime=lock,
+                                                 receipt=path, architecture='arm64')
+
     def test_source_receipt_requires_matching_signed_native_nine_crt_metadata_and_terms(self):
         module = implementation()
         for mutation in ('missing', 'count', 'copied', 'source', 'machine', 'signature', 'version', 'terms'):

@@ -424,6 +424,7 @@ function Get-AuthenticatedWindowsPkgconf([string]$DownloadDirectory,[string]$Evi
 function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='',[string]$PkgConfig='') {
     '--with-distro=LibreOfficeWinArm64','--build=aarch64-pc-cygwin','--host=aarch64-pc-cygwin',
     '--with-visual-studio=2026','--with-package-format=archive','--enable-firebird-sdbc','--enable-database-connectivity',
+    '--disable-online-update','--disable-online-update-mar','--disable-breakpad',
     '--without-system-firebird','--without-system-libatomic_ops','--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'
     if($ExternalTar) {'--with-external-tar='+$ExternalTar}
     if($JdkHome) {'--with-jdk-home='+$JdkHome}
@@ -443,6 +444,12 @@ function Assert-GeneratedConfiguration([string]$Path) {
     }
     $required=@{OS='WNT';COM='MSC';CPUNAME='AARCH64';HOST_PLATFORM='aarch64-pc-cygwin';BUILD_PLATFORM='aarch64-pc-cygwin';ENABLE_FIREBIRD_SDBC='TRUE';PKGFORMAT='archive'}
     foreach($key in $required.Keys) {if($values[$key] -cne $required[$key]){throw "Generated configuration rejects native Firebird: $key=$($values[$key])"}}
+    foreach($key in @('ENABLE_ONLINE_UPDATE','ENABLE_ONLINE_UPDATE_MAR','ENABLE_BREAKPAD')) {
+        if(-not $values.ContainsKey($key) -or $values[$key] -cne '') {throw "Generated configuration enables or omits an unsupported OEM network service: $key=$($values[$key])"}
+    }
+    foreach($token in @('BREAKPAD','ONLINEUPDATE')) {
+        if($values.BUILD_TYPE -match ('(^|\s)'+$token+'(\s|$)')) {throw "Unsupported OEM network service remains in BUILD_TYPE: $token"}
+    }
     if(-not $values.ContainsKey('CROSS_COMPILING') -or $values.CROSS_COMPILING -ne '' -or $values.SYSTEM_FIREBIRD -ne '') {throw 'Cross-compiling or system Firebird is forbidden.'}
     foreach($token in @('FIREBIRD','LIBATOMIC_OPS','LIBTOMMATH')) {if($values.BUILD_TYPE -notmatch ('(^|\s)'+$token+'(\s|$)')) {throw "Required internal build dependency is absent: $token"}}
     return $values

@@ -21,7 +21,7 @@
   },
   "portPatch": {
     "filename": "firebird-windows-arm64.patch",
-    "sha256": "448a17e7bc4b5646dd3369596ed177e6f76b99427424defa790904b6f31aa793",
+    "sha256": "2d4c5bf4a44e571fd4a67e16272756719b3f0d482e9eb33104e063ca37d90880",
     "strip": 0,
     "appliesAfter": "All pinned LibreOffice Windows Firebird patches"
   },

@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from types import SimpleNamespace as NS
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
@@ -22,6 +24,22 @@ class CalcCloseProbeTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(self.api,'RED: separate current-behavior CtrlW probe is required')
         self.raw=workbook();self.baseline=self.api.calc_save.read_cells(self.raw)
+
+    def test_measured_choice_refuses_an_extra_client_action_without_clicking(self):
+        import test_generated_calc_close as fixtures
+        f=fixtures.GeneratedCalcCloseTests();f.setUp();self.addCleanup(f.doCleanups)
+        Desktop,accessible,buttons,_,_,pane,_=f.titlebar_boundary()
+        buttons.append(NS(element_info=NS(handle=40,process_id=7,runtime_id=[42,40],name='Unexpected client action',
+            control_type='Button',parent=pane,automation_id='CommandButton_103',class_name='CCPushButton'),
+            is_visible=lambda:True,is_enabled=lambda:True))
+        case=object.__new__(self.api.CalcCloseCase)
+        case.api=f.windows;case.process=f.process;case.hwnd=10;case.choice='discard';case.record={}
+        case.dialog=lambda owner,title:(30,accessible);case.screenshot=lambda *a:None
+        with patch.dict(sys.modules,{'pywinauto':NS(Desktop=Desktop)}), \
+             patch('windows_smoke.wait_for',side_effect=lambda check,seconds=60:check() or (_ for _ in ()).throw(AssertionError('not ready'))), \
+             self.assertRaises(AssertionError):
+            case.choose_existing_prompt()
+        self.assertEqual([],f.clicks);self.assertEqual([],f.closes)
 
     def test_no_enter_original_close_contract_is_exact_and_has_no_focus_action(self):
         row=dict(choice='save',navigationKeys=['^{HOME}','{F2}','^{END}'],commitKeys=[],

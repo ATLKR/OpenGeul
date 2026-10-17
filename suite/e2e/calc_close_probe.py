@@ -95,8 +95,8 @@ class CalcCloseCase(lifecycle.Case):
         self.suite,self.fixtures,self.root=suite,fixtures,output
         self.choice,self.name=choice,'calc-close-'+choice
         self.output=output/self.name;self.output.mkdir(exist_ok=False)
-        self.api=None;self.process=None;self.reader=None;self.deadline=None
-        self.record=dict(case=self.name,choice=choice,kind='physical-calc-uncommitted-close',success=False,
+        self.api=None;self.process=None;self.reader=None;self.deadline=None;self.cleanup_proof=None
+        self.record=dict(case=self.name,choice=choice,kind='physical-calc-uncommitted-close',success=False,module='calc',
             stage='setup',productCloseChanged=False,historicalDataLossEstablished=False,
             marker=marker(choice),navigationKeys=[],commitKeys=[],closeShortcutCount=0,beforeCloseActions=[],
             stderrLog=self.name+'/'+self.name+'-stderr.log')
@@ -120,6 +120,12 @@ class CalcCloseCase(lifecycle.Case):
 
     def choose_existing_prompt(self):
         from pywinauto import Desktop
+        from generated_calc_close import require_calc_prompt_buttons
+        deadline=time.monotonic()+20
+        def remaining():
+            seconds=deadline-time.monotonic()
+            assert seconds>0, 'Original Calc choice deadline expired'
+            return seconds
         dialog,accessible=self.dialog(self.hwnd,'OpenGeul Calc')
         expected=BUTTONS[self.choice]
         def observe():
@@ -128,8 +134,12 @@ class CalcCloseCase(lifecycle.Case):
                 owner=self.api.user.GetWindow(dialog,4),document=self.hwnd,title=self.api.title(dialog),
                 expected_title='OpenGeul Calc',class_name=self.api.class_name(dialog),text=labels,
                 expected_text='변경 내용을 저장하시겠습니까?',button=expected,allowed=tuple(BUTTONS.values()))
-            buttons=[item for item in accessible.descendants(control_type='Button')
-                if item.is_visible() and item.is_enabled()]
+            controls={}
+            observations=self.record.setdefault('choicePromptControlObservations',[])
+            if len(observations)<24:observations.append(controls)
+            self.record['lastChoicePromptControls']=controls
+            buttons=require_calc_prompt_buttons(self.api,accessible,self.process.pid,dialog,controls)
+            if buttons is None:return None
             require_three_choices([item.element_info.name for item in buttons])
             selected=[item for item in buttons if item.element_info.name==expected]
             assert len(selected)==1
@@ -137,14 +147,16 @@ class CalcCloseCase(lifecycle.Case):
             lifecycle.require_dialog_button_ancestry(self.api,accessible,selected[0],self.process.pid,dialog,ancestry)
             return selected[0],dict(hwnd=dialog,owner=self.hwnd,pid=self.process.pid,title=self.api.title(dialog),
                 text=labels,buttonNames=[item.element_info.name for item in buttons],choice=expected,
-                uia=lifecycle.dialog_uia_identity(accessible,dialog,self.process.pid),buttonAncestry=ancestry)
-        selected,evidence=observe();self.record['choicePrompt']=evidence
+                uia=lifecycle.dialog_uia_identity(accessible,dialog,self.process.pid),buttonAncestry=ancestry,
+                promptControls=controls)
+        selected,evidence=native.wait_for(observe,remaining());self.record['choicePrompt']=evidence
         self.record['promptVerified']=True
         # Focus changes occur only after the original close has shown its prompt.
         Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
         self.api.require_foreground(dialog)
-        selected,self.record['choicePromptBeforeClick']=observe()
+        selected,self.record['choicePromptBeforeClick']=native.wait_for(observe,remaining())
         self.screenshot(dialog,'choice-'+self.choice)
+        remaining()
         selected.click_input()
         self.record['choiceClickCount']=1
         native.wait_for(lambda:not self.api.user.IsWindow(dialog),20)
@@ -168,6 +180,8 @@ class CalcCloseCase(lifecycle.Case):
         self.record.update(packagedUnoVerified=True,reopen=result)
 
     def run(self):
+        from calc_failure_cleanup import bind_pre_input_cleanup,finish_pre_input_cleanup
+        from generated_calc_close import freeze_saved_calc_copy
         from pywinauto import Desktop
         from pywinauto.keyboard import send_keys
         from writer_style_smoke import _packaged_identity_file
@@ -178,6 +192,7 @@ class CalcCloseCase(lifecycle.Case):
             self.source=folder/'OpenGeul-calc.xlsx'
             with self.source.open('xb') as stream:stream.write(raw)
             self.record.update(baseline=self.baseline,beforeSha256=hashlib.sha256(raw).hexdigest())
+            baseline_copy=freeze_saved_calc_copy(self.suite,folder,self.source,self.record['beforeSha256'],calc_save.read_cells(raw))
             diagnostics=self.output/'diagnostics';diagnostics.mkdir()
             previous=os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS')
             os.environ['OPENGEUL_SUITE_DIAGNOSTICS']=str(diagnostics)
@@ -189,6 +204,7 @@ class CalcCloseCase(lifecycle.Case):
             self.record['stage']='attach'
             self.hwnd,self.parent,self.child,self.office_pid=native.verified_attachment(self.api,self.process,'calc')
             self.record.update(windowHwnd=self.hwnd,parentHwnd=self.parent,childHwnd=self.child,officePid=self.office_pid)
+            self.cleanup_proof=bind_pre_input_cleanup(self.api,self.process,self.hwnd,self.parent,self.child,self.record,baseline_copy)
             window=Desktop(backend='win32').window(handle=self.hwnd).wrapper_object()
             window.maximize();window.set_focus()
             native.wait_for(lambda:self.api.user.GetAncestor(self.api.user.GetForegroundWindow(),2)==self.hwnd,10)
@@ -279,6 +295,7 @@ class CalcCloseCase(lifecycle.Case):
                 try:self.record['failedReaderCleanup']=self.reader.close(self.deadline)
                 except BaseException as later:self.record['failedReaderCleanupError']=str(later)
                 self.reader=None
+            finish_pre_input_cleanup(self.api,self.process,self.record,self.cleanup_proof,self.record.get('failedReaderCleanup'))
             if self.process is not None:
                 # Authorized cleanup only for this launched generated-copy case;
                 # never dismiss an unexpected or foreign dialog to make it pass.

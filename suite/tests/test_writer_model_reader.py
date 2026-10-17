@@ -1414,16 +1414,18 @@ class CalcPendingGetterContracts(unittest.TestCase):
         area=NS(Sheet=0,StartColumn=0,StartRow=0,EndColumn=0,EndRow=0)
         objects['controller'].getSelection=lambda: NS(getRangeAddress=lambda:area,getSpreadsheet=lambda:sheet)
         class Pending:
-            def __init__(self,frame,child):
-                self.assert_frame=frame;self.assert_child=child
+            def __init__(self,frame,child,*,deadline):
+                self.assert_frame=frame;self.assert_child=child;self.assert_deadline=deadline
             def read(self):events.append('pending-text');return {'actual':'getter-receipt'}
             def release(self):events.append('pending-proxies-release')
         contract=api._model_contract(api.CALC_MODEL_SERVICE,self.GETTERS)
         module=NS(AccessiblePendingReader=Pending,require_pending_receipt=lambda raw,child_hwnd:raw)
         with patch.dict('sys.modules',{'uno':uno,'calc_pending_input':module}):
-            reader=api._UnoReader(dict(child_hwnd=22,expected_url='file:///C:/owned.xlsx'),
+            reader=api._UnoReader(dict(child_hwnd=22,expected_url='file:///C:/owned.xlsx',readerDeadline=100.0),
                 NS(base={'privatePipe':'OpenGeul_'+'a'*32}),contract=contract)
-            events.clear();value=reader.read();reader.release()
+            events.clear();value=reader.read()
+            self.assertEqual(reader.pending_input.assert_deadline,100.0)
+            reader.release()
         self.assertEqual(value['pendingInput'],{'actual':'getter-receipt'})
         self.assertEqual(value['calcSelection']['range'],dict(sheet=0,startColumn=0,startRow=0,endColumn=0,endRow=0))
         self.assertLess(events.index('pending-text'),events.index('A1.getString'))

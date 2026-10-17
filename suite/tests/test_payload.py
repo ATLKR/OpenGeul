@@ -604,9 +604,18 @@ class Arm64PayloadTests(PayloadFixture):
 
     def source_engine(self):
         from suite.tests.test_prepare import source_build_fixture
-        _, runtime, receipt_path, receipt = source_build_fixture(Path(self.temp.name))
+        archive, runtime, receipt_path, receipt = source_build_fixture(Path(self.temp.name))
         self.provenance['runtime'] = runtime
         self.write('Office/opengeul-source-build.json', receipt_path.read_bytes())
+        with zipfile.ZipFile(archive) as source:
+            for name in ('program/version.ini', 'program/setup.ini'):
+                original = source.read(name)
+                branded = original.replace(b'Vendor=The Document Foundation', b'Vendor=ATLKR')
+                self.write('Office/'+name, branded)
+                if branded != original:
+                    self.branding['modifiedFiles'][name] = dict(beforeSha256=digest(original), sha256=digest(branded))
+        self.branding['source'].update(buildId=runtime['sourceCoreCommit'],
+            sourceUrl='https://github.com/LibreOffice/core/tree/'+runtime['sourceCoreCommit'])
         for name in ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
                      'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
                      'vcruntime140_1.dll', 'vcruntime140_threads.dll'):
@@ -630,6 +639,25 @@ class Arm64PayloadTests(PayloadFixture):
         self.assertIn('Office/opengeul-source-build.json', receipt['files'])
         verify_payload(self.root, receipt)
 
+    def test_source_engine_final_metadata_requires_qualified_input_and_actual_branding_hash_join(self):
+        for mutation in ('before-hash', 'after-hash', 'effective-id', 'missing-version', 'setup-change', 'branding-core'):
+            with self.subTest(mutation=mutation):
+                self.source_engine()
+                if mutation == 'before-hash':
+                    self.branding['modifiedFiles']['program/version.ini']['beforeSha256'] = 'f'*64
+                elif mutation == 'after-hash':
+                    self.branding['modifiedFiles']['program/version.ini']['sha256'] = 'f'*64
+                elif mutation == 'branding-core':self.branding['source']['buildId'] = 'f'*40
+                elif mutation == 'missing-version':(self.root/'Office/program/version.ini').unlink()
+                elif mutation == 'setup-change':self.write('Office/program/setup.ini',self.read('Office/program/setup.ini')+b'; changed\n')
+                else:
+                    self.write('Office/program/version.ini',self.read('Office/program/version.ini').replace(
+                        self.provenance['runtime']['sourceCoreCommit'].encode(),b'f'*40))
+                    self.branding['modifiedFiles']['program/version.ini']['sha256'] = digest(self.read('Office/program/version.ini'))
+                self.save_metadata()
+                with self.assertRaisesRegex(ValueError, 'identity|buildid'):
+                    self.inventory()
+
     def test_source_engine_payload_requires_the_locked_receipt_even_if_inventory_is_rebuilt(self):
         self.source_engine()
         (self.root/'Office/opengeul-source-build.json').unlink()
@@ -642,7 +670,7 @@ class Arm64PayloadTests(PayloadFixture):
     def test_source_engine_packaged_lock_binds_all_runtime_source_build_and_format_fields(self):
         self.source_engine()
         original = copy.deepcopy(self.provenance)
-        for key, value in (('format', 'msi'), ('size', 123),
+        for key, value in (('format', 'msi'), ('size', 123), ('sourceCoreCommit', 'f'*40),
                            ('sourceBuild', dict(original['runtime']['sourceBuild'], artifactId=999)),
                            ('sourceBuild', dict(original['runtime']['sourceBuild'], artifactSha256='f'*64)),
                            ('sourceBuild', dict(original['runtime']['sourceBuild'], receiptSha256='f'*64))):

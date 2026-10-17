@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -101,6 +102,8 @@ def validate_source_build_lock(runtime: dict, *, architecture: str) -> dict:
     if (architecture != 'arm64' or runtime.get('format') != 'source-built-zip'
             or not isinstance(build, dict) or not positive(runtime.get('size'))
             or not digest(runtime.get('sha256'))
+            or not isinstance(runtime.get('sourceCoreCommit'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', runtime['sourceCoreCommit'])
             or not isinstance(build.get('sourceCommit'), str)
             or not re.fullmatch(r'[0-9a-f]{40}', build['sourceCommit'])
             or any(not digest(build.get(key)) for key in
@@ -164,11 +167,15 @@ def validate_source_build_receipt(runtime: dict, receipt: Path, *, architecture:
         raise ValueError('Source-build receipt artifact/source identity differs from locked input')
     required = {'OS': 'WNT', 'COM': 'MSC', 'CPUNAME': 'AARCH64',
                 'HOST_PLATFORM': 'aarch64-pc-cygwin', 'BUILD_PLATFORM': 'aarch64-pc-cygwin',
-                'ENABLE_FIREBIRD_SDBC': 'TRUE', 'CROSS_COMPILING': '', 'SYSTEM_FIREBIRD': ''}
+                'ENABLE_FIREBIRD_SDBC': 'TRUE', 'CROSS_COMPILING': '', 'SYSTEM_FIREBIRD': '',
+                'PKGFORMAT': 'archive', 'ENABLE_ONLINE_UPDATE': '',
+                'ENABLE_ONLINE_UPDATE_MAR': '', 'ENABLE_BREAKPAD': ''}
     if (not isinstance(config, dict) or any(config.get(key) != value for key, value in required.items())
             or not isinstance(config.get('BUILD_TYPE'), str)
-            or not {'FIREBIRD', 'LIBATOMIC_OPS', 'LIBTOMMATH'} <= set(config['BUILD_TYPE'].split())):
-        raise ValueError('Source-build receipt configuration does not prove native internal Firebird')
+            or not {'FIREBIRD', 'LIBATOMIC_OPS', 'LIBTOMMATH'} <= set(config['BUILD_TYPE'].split())
+            or {'BREAKPAD', 'ONLINEUPDATE'} & {token.upper() for token in config['BUILD_TYPE'].split()}):
+        raise ValueError('Source-build receipt configuration does not prove native internal Firebird and disabled OEM services')
+    _source_build_identity(proof, runtime['sourceCoreCommit'])
     base = proof.get('baseProof')
     if (not isinstance(base, dict) or type(base.get('schemaVersion')) is not int or base['schemaVersion'] != 1
             or base.get('passed') is not True or base.get('guiVerified') is not False
@@ -199,6 +206,40 @@ def validate_source_build_receipt(runtime: dict, receipt: Path, *, architecture:
         raise ValueError('Source-build Base proof must independently reopen with the same engine')
     _source_build_crt(proof)
     return proof
+
+
+def _source_build_identity(proof: dict, core: str) -> dict:
+    """Replay the emitted correction/final proof against the external source core pin."""
+    source = proof.get('sourcePin'); identity = proof.get('runtimeBuildIdentity')
+    def digest(value):
+        return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+    if (not isinstance(core, str) or not re.fullmatch(r'[0-9a-f]{40}', core)
+            or not isinstance(source, dict) or source.get('coreCommit') != core
+            or not isinstance(identity, dict) or type(identity.get('schemaVersion')) is not int
+            or identity['schemaVersion'] != 1
+            or identity.get('mechanism') != 'explicit-generated-config-correction-from-authenticated-source-pin'
+            or identity.get('expectedBuildId') != core
+            or identity.get('sourceArchiveUrl') != source.get('url')
+            or identity.get('sourceArchiveSha256') != source.get('sha256')
+            or type(identity.get('sourceArchiveSize')) is not int
+            or identity['sourceArchiveSize'] != source.get('size')):
+        raise ValueError('Source-build runtime identity differs from externally pinned upstream core/source')
+    files = identity.get('files'); final = identity.get('finalVerification')
+    names = {'program/version.ini', 'program/setup.ini'}
+    if (not isinstance(files, dict) or set(files) != names or not isinstance(final, dict)
+            or final.get('passed') is not True or final.get('expectedBuildId') != core
+            or not isinstance(final.get('files'), dict) or set(final['files']) != names):
+        raise ValueError('Source-build runtime identity final verification is missing or incomplete')
+    for name, record in files.items():
+        original = record.get('originalBuildId') if isinstance(record, dict) else None
+        if (not isinstance(record, dict) or not isinstance(original, str)
+                or original not in ('', proof.get('sourceCommit'), core)
+                or record.get('buildid') != core or record.get('corrected') is not (original != core)
+                or not digest(record.get('beforeSha256')) or not digest(record.get('sha256'))
+                or original == core and record['beforeSha256'] != record['sha256']
+                or final['files'][name] != {'buildid': core, 'sha256': record['sha256']}):
+            raise ValueError('Source-build runtime identity original/corrected/final metadata differs: '+name)
+    return identity
 
 
 def _source_build_crt(proof: dict) -> tuple[dict, dict]:
@@ -277,9 +318,43 @@ def _source_build_crt(proof: dict) -> tuple[dict, dict]:
     return records, terms
 
 
-def validate_source_build_runtime(runtime_root: Path, proof: dict) -> None:
-    """Check the actual app-local DLL/terms bytes against authenticated driver evidence."""
+def validate_source_build_runtime(runtime_root: Path, proof: dict, *, branding: dict | None = None) -> None:
+    """Replay metadata and CRT bytes after authenticating the receipt against its lock.
+
+    Only the final Suite payload supplies branding; preparation checks the exact
+    original metadata hash, and packaging joins that hash to the branded bytes.
+    """
     records, terms = _source_build_crt(proof)
+    core = proof.get('sourcePin', {}).get('coreCommit')
+    identity = _source_build_identity(proof, core)
+    for name, section in (('program/version.ini', 'Version'), ('program/setup.ini', 'Bootstrap')):
+        path = runtime_root/name
+        expected_hash = identity['files'][name]['sha256']
+        if branding is not None and name == 'program/version.ini':
+            changes = branding.get('modifiedFiles') if isinstance(branding, dict) else None
+            branded_source = branding.get('source') if isinstance(branding, dict) else None
+            change = changes.get(name) if isinstance(changes, dict) else None
+            if (not isinstance(change, dict) or change.get('beforeSha256') != expected_hash
+                    or not isinstance(change.get('sha256'), str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', change['sha256'])
+                    or not isinstance(branded_source, dict) or branded_source.get('buildId') != core):
+                raise ValueError('Source-build runtime identity is not joined to actual branding input/output')
+            expected_hash = change['sha256']
+        try:
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400
+                    or not 0 < info.st_size <= 1024*1024 or sha256(path) != expected_hash):
+                raise ValueError('Runtime metadata bytes differ')
+            metadata = configparser.RawConfigParser()
+            text = path.read_text(encoding='utf-8-sig')
+            assignments = re.findall(r'(?im)^[ \t]*buildid[ \t]*=([^\r\n]*)', text)
+            metadata.read_string(text)
+            if (metadata.sections() != [section] or metadata.defaults()
+                    or assignments != [core]
+                    or metadata.get(section, 'buildid', fallback=None) != core):
+                raise ValueError('Effective runtime buildid differs')
+        except (OSError, UnicodeError, configparser.Error, ValueError) as error:
+            raise ValueError('Source-build runtime identity/buildid bytes are missing, changed or ambiguous: '+name) from error
     try:
         from suite.payload import _pe
     except ModuleNotFoundError:

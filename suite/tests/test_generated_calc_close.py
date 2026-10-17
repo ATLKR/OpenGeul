@@ -66,12 +66,13 @@ class GeneratedCalcCloseTests(unittest.TestCase):
         self.record=dict(module='calc',shellPid=7,windowHwnd=10,childHwnd=20)
         return Desktop,accessible,buttons
 
-    def invoke(self,proof,Desktop,*,blank=False):
+    def invoke(self,proof,Desktop,*,blank=False,waiter=None,real_ancestry=False):
+        from contextlib import nullcontext
         import lifecycle_smoke as lifecycle
         with patch.dict(sys.modules,{'pywinauto':NS(Desktop=Desktop)}), \
-             patch.object(lifecycle,'require_dialog_button_ancestry',return_value=None), \
-             patch.object(lifecycle,'dialog_uia_identity',return_value={'pid':7}), \
-             patch('windows_smoke.wait_for',side_effect=lambda check,seconds=60:check() or (_ for _ in ()).throw(AssertionError('not ready'))):
+             (nullcontext() if real_ancestry else patch.object(lifecycle,'require_dialog_button_ancestry',return_value=[{'controlType':'Button','nativeHandle':1},{'controlType':'Window'}])), \
+             (nullcontext() if real_ancestry else patch.object(lifecycle,'dialog_uia_identity',return_value={'pid':7})), \
+             patch('windows_smoke.wait_for',side_effect=waiter or (lambda check,seconds=60:check() or (_ for _ in ()).throw(AssertionError('not ready')))):
             function=self.api.close_generated_blank_calc if blank else self.api.close_saved_calc_copy
             function(self.windows,self.process,10,20,self.record,proof)
 
@@ -144,6 +145,163 @@ class GeneratedCalcCloseTests(unittest.TestCase):
             proof=self.proof();Desktop,_,_=self.boundary();self.record[key]=value
             with self.subTest(key=key),self.assertRaises(AssertionError):self.invoke(proof,Desktop)
             self.assertEqual([],self.closes);self.assertEqual([],self.clicks)
+
+    def test_unexpected_fourth_button_is_recorded_and_never_dismissed(self):
+        proof=self.proof();Desktop,_,buttons=self.boundary()
+        buttons.append(NS(element_info=NS(name='Close',control_type='Button',automation_id='Close',
+            control_id=0,process_id=7,runtime_id=[42,30,99]),is_visible=lambda:True,is_enabled=lambda:True))
+        with self.assertRaisesRegex(AssertionError,'Expected exact three-choice Calc prompt'):
+            self.invoke(proof,Desktop)
+        self.assertEqual([(10,7)],self.closes);self.assertEqual([],self.clicks)
+        evidence=self.record['verifiedSavedCalcDiscard']
+        self.assertIn('promptObservations',evidence,'Rejected buttons must remain inspectable')
+        row=evidence['promptObservations'][-1]
+        self.assertEqual(['저장','저장하지 않음','취소','Close'],[b['name'] for b in row['buttons']])
+        self.assertEqual([42,30,99],row['buttons'][-1]['runtimeId'])
+        self.assertFalse(row['ready']);self.assertEqual('unexpected-or-duplicate-button',row['readiness'])
+
+    def test_readonly_wait_allows_three_owned_choices_to_finish_appearing_once(self):
+        import itertools
+        self.assertTrue(hasattr(self.api,'time'),'Readiness must keep the original prompt deadline')
+        proof=self.proof();Desktop,accessible,buttons=self.boundary();scans=[0];budgets=[]
+        buttons[0].is_enabled=lambda:scans[0]>=2
+        def descendants(**kw):
+            if kw:scans[0]+=1;return buttons
+            return [NS(element_info=NS(name='변경 내용을 저장하시겠습니까?'))]+buttons
+        accessible.descendants=descendants
+        def wait(check,seconds=60):
+            budgets.append(seconds)
+            for _ in range(3):
+                result=check()
+                if result:return result
+            raise AssertionError('not ready')
+        with patch.object(self.api.time,'monotonic',side_effect=itertools.count(100,2)):
+            self.invoke(proof,Desktop,waiter=wait)
+        self.assertEqual([(10,7)],self.closes);self.assertEqual(['discard'],self.clicks)
+        evidence=self.record['verifiedSavedCalcDiscard']
+        self.assertEqual(['choices-not-ready','ready','ready'],[o['readiness'] for o in evidence['promptObservations']])
+        self.assertEqual([18,16,14],budgets[:3],'The same original prompt deadline must bound every read-only wait')
+
+    def test_never_ready_prompt_keeps_bounded_raw_observations_without_discard(self):
+        proof=self.proof();Desktop,_,buttons=self.boundary();buttons[0].is_enabled=lambda:False
+        def wait(check,seconds=60):
+            for _ in range(35):
+                result=check()
+                if result:return result
+            raise AssertionError('prompt readiness timeout')
+        with self.assertRaisesRegex(AssertionError,'prompt readiness timeout'):
+            self.invoke(proof,Desktop,waiter=wait)
+        evidence=self.record['verifiedSavedCalcDiscard']
+        self.assertEqual([(10,7)],self.closes);self.assertEqual([],self.clicks)
+        self.assertEqual(35,evidence['promptObservationCount'])
+        self.assertEqual(24,len(evidence['promptObservations']))
+        self.assertFalse(evidence['lastPromptObservation']['buttons'][0]['enabled'])
+
+    def test_prompt_verification_finishing_after_original_deadline_never_clicks(self):
+        proof=self.proof();Desktop,_,_=self.boundary();clock=[100.];calls=[0]
+        def wait(check,seconds=60):
+            calls[0]+=1;result=check()
+            if calls[0]==3:clock[0]=121.
+            return result or (_ for _ in ()).throw(AssertionError('not ready'))
+        with patch.object(self.api.time,'monotonic',side_effect=lambda:clock[0]), \
+             self.assertRaisesRegex(AssertionError,'Original Calc close-prompt deadline expired'):
+            self.invoke(proof,Desktop,waiter=wait)
+        self.assertEqual([(10,7)],self.closes);self.assertEqual([],self.clicks)
+
+    def titlebar_boundary(self):
+        Desktop,accessible,buttons=self.boundary()
+        root=NS(handle=30,process_id=7,runtime_id=[42,30],name='OpenGeul Calc',control_type='Window',parent=None)
+        pane=NS(handle=50,process_id=7,runtime_id=[42,50],name='OpenGeul Calc',control_type='Pane',parent=root)
+        titlebar=NS(handle=0,process_id=7,runtime_id=[42,30,3,-2147483647,30,-2,0],
+            name='None',control_type='TitleBar',parent=root)
+        for i,button in enumerate(buttons):
+            button.element_info=NS(handle=40+i,process_id=7,runtime_id=[42,40+i],
+                name=button.element_info.name,control_type='Button',parent=pane)
+        close=NS(element_info=NS(handle=0,process_id=7,runtime_id=[42,30,3,-2147483647,30,-2,5],
+            name='Close',control_type='Button',automation_id='',class_name='',parent=titlebar),
+            is_visible=lambda:True,is_enabled=lambda:True,
+            click_input=lambda:self.fail('Nonclient Close must never be clicked'))
+        buttons.append(close);accessible.element_info=root
+        self.live.update((40,41,42,50))
+        self.pid=lambda h:7 if h in (10,30,40,41,42,50) else 8
+        self.windows.user.GetAncestor=lambda h,k:30 if h in (30,40,41,42,50) else h
+        return Desktop,accessible,buttons,close,titlebar,pane,root
+
+    def test_actual_native_titlebar_close_is_separate_from_three_client_choices(self):
+        proof=self.proof();Desktop,_,_,_,_,_,_=self.titlebar_boundary()
+        self.invoke(proof,Desktop,real_ancestry=True)
+        self.assertEqual([(10,7)],self.closes);self.assertEqual(['discard'],self.clicks)
+        evidence=self.record['verifiedSavedCalcDiscard']
+        self.assertEqual(1,evidence['nonclientCloseCount'])
+        row=evidence['promptObservations'][0]['buttons'][-1]
+        self.assertEqual('native-titlebar-close',row['role'])
+        self.assertEqual(['Button','TitleBar','Window'],[x['controlType'] for x in row['ancestry']])
+        self.assertTrue(evidence['diskBytesUnchanged'])
+
+    def test_close_label_or_fake_titlebar_never_exempts_an_unexpected_client_action(self):
+        for reason in ('client','foreign','wrong-root','wrong-runtime','native-hwnd','automation-id','extra-pane','renamed','duplicate'):
+            proof=self.proof();Desktop,_,buttons,close,titlebar,pane,root=self.titlebar_boundary()
+            info=close.element_info
+            if reason=='client':info.parent=pane
+            elif reason=='foreign':titlebar.process_id=999
+            elif reason=='wrong-root':titlebar.parent=NS(**dict(vars(root),handle=99,runtime_id=[42,99]))
+            elif reason=='wrong-runtime':info.runtime_id=[42,30,123]
+            elif reason=='native-hwnd':info.handle=40
+            elif reason=='automation-id':info.automation_id='CommandButton_103'
+            elif reason=='extra-pane':titlebar.parent=pane
+            elif reason=='renamed':info.name='Other action'
+            else:buttons.append(close)
+            with self.subTest(reason=reason),self.assertRaises(AssertionError):
+                self.invoke(proof,Desktop,real_ancestry=True)
+            self.assertEqual([(10,7)],self.closes);self.assertEqual([],self.clicks)
+
+    def test_choice_labels_in_nonclient_titlebar_do_not_become_document_actions(self):
+        proof=self.proof();Desktop,_,buttons,close,titlebar,_,_=self.titlebar_boundary()
+        buttons.remove(close);buttons[0].element_info.parent=titlebar
+        with self.assertRaises(AssertionError):self.invoke(proof,Desktop,real_ancestry=True)
+        self.assertEqual([(10,7)],self.closes);self.assertEqual([],self.clicks)
+
+    def test_shared_selector_is_readonly_and_retains_exact_client_roles(self):
+        self.assertTrue(hasattr(self.api,'require_calc_prompt_buttons'),'The measured close and cleanup must use one read-only selector')
+        _,accessible,_,_,_,_,_=self.titlebar_boundary();evidence={}
+        buttons=self.api.require_calc_prompt_buttons(self.windows,accessible,7,30,evidence)
+        self.assertEqual(['저장','저장하지 않음','취소'],[b.element_info.name for b in buttons])
+        self.assertEqual([],self.closes);self.assertEqual([],self.clicks)
+        self.assertEqual(1,evidence['nonclientCloseCount']);self.assertTrue(evidence['ready'])
+
+    def raw_titlebar(self,accessible,close,titlebar,root):
+        def raw(info,parent,type_):
+            return NS(CurrentName=info.name,CurrentProcessId=info.process_id,
+                CurrentNativeWindowHandle=info.handle,CurrentControlType=type_,parent=parent,
+                GetRuntimeId=lambda:list(info.runtime_id))
+        raw_root=raw(root,None,50032);raw_titlebar=raw(titlebar,raw_root,50037)
+        raw_close=raw(close.element_info,raw_titlebar,50000)
+        accessible.element_info.element=raw_root;close.element_info.element=raw_close
+        automation=NS(RawViewWalker=NS(GetParentElement=lambda node:node.parent),CompareElements=lambda a,b:a is b)
+        return raw_root,raw_titlebar,raw_close,automation
+
+    def test_skipped_controlview_titlebar_needs_independent_live_rawview_root_proof(self):
+        proof=self.proof();Desktop,accessible,_,close,titlebar,_,root=self.titlebar_boundary()
+        _,_,_,automation=self.raw_titlebar(accessible,close,titlebar,root)
+        close.element_info.parent=root
+        with patch.dict(sys.modules,{'pywinauto.uia_defines':NS(IUIA=lambda:NS(iuia=automation))}):
+            self.invoke(proof,Desktop,real_ancestry=True)
+        self.assertEqual(['discard'],self.clicks)
+        row=self.record['verifiedSavedCalcDiscard']['promptObservations'][0]['buttons'][-1]
+        self.assertEqual(['Button','Window'],[p['controlType'] for p in row['ancestry']])
+        self.assertEqual(['Button','TitleBar','Window'],[p['controlType'] for p in row['rawAncestry']])
+
+    def test_rawview_fallback_never_infers_titlebar_or_accepts_a_lookalike_root(self):
+        for reason in ('missing-titlebar','foreign-root','foreign-pid'):
+            proof=self.proof();Desktop,accessible,_,close,titlebar,_,root=self.titlebar_boundary()
+            raw_root,raw_titlebar,raw_close,automation=self.raw_titlebar(accessible,close,titlebar,root)
+            close.element_info.parent=root
+            if reason=='missing-titlebar':raw_close.parent=raw_root
+            elif reason=='foreign-root':raw_titlebar.parent=NS(**vars(raw_root))
+            else:raw_titlebar.CurrentProcessId=999
+            with self.subTest(reason=reason),patch.dict(sys.modules,{'pywinauto.uia_defines':NS(IUIA=lambda:NS(iuia=automation))}),self.assertRaises(AssertionError):
+                self.invoke(proof,Desktop,real_ancestry=True)
+            self.assertEqual([],self.clicks)
 
 
 if __name__=='__main__':unittest.main()
