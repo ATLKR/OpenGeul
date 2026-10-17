@@ -111,6 +111,42 @@ class NativeFirebirdArchiveProbeTests(unittest.TestCase):
         self.assertIn('Expected exact original archive recipe', result.stderr)
         self.assertFalse((self.out / 'changed.json').exists())
 
+    def test_real_space_timestamp_patch_replays_to_exact_full_post25_files(self):
+        recipe = self.prepare()
+        patch = next(x for x in recipe['upstreamPatches'] if x['filename'] == 'firebird-307.patch.1')
+        self.assertTrue(patch['recipeIncluded'], 'The real space-timestamp Makefile patch was omitted')
+        original = (self.out / 'upstream-patches/firebird-307.patch.1').read_bytes()
+        self.assertIn(b'+++ firebird/builds/posix/Makefile.in   2020-11-08 ', original)
+        selected = (self.out / 'recipe-patches/firebird-307.patch.1').read_bytes()
+        self.assertIn(selected, original)
+        replay = (self.out / 'git-replay-patches/firebird-307.patch.1').read_bytes()
+        context = b'\n\tawk -f $(ODS_AWK) <$(ODS_H) >$(ODS_TEST_CPP)\n'
+        self.assertEqual(selected.replace(context, b'\n ' + context[1:], 1), replay)
+        self.assertEqual(len(selected) + 1, len(replay))
+        self.assertEqual(hashlib.sha256(replay).hexdigest(), patch['gitReplaySha256'])
+        self.assertEqual('missing-unified-context-marker', patch['normalization']['kind'])
+        # Independently retained full source tree after all25 authenticated
+        # upstream patches; these pins cover the entire two selected files.
+        expected = {
+            'Makefile.in': (24301, 'd6262fca2a4fa052a8f3627fa54a03ce87774d222a1003c3d2ea996fa72b0a36'),
+            'make.defaults': (12445, '7fb6f45c055210e3110084f736cef00bbdfe6c3b07426aad7ae5d3bac026b0bc'),
+        }
+        for name, (size, digest) in expected.items():
+            raw = (self.out / ('effective-' + name)).read_bytes()
+            self.assertEqual((size, digest), (len(raw), hashlib.sha256(raw).hexdigest()), name)
+        self.assertIn(b'\tdiff -u --strip-trailing-cr $^', (self.out / 'effective-Makefile.in').read_bytes())
+
+    def test_incomplete_unrelated_hunk_is_rejected_with_archive_recipe_intact(self):
+        self.prepare()
+        makefile = self.root / 'source/builds/posix/Makefile.in'
+        makefile.write_bytes(makefile.read_bytes().replace(b'diff -u --strip-trailing-cr $^', b'diff -u $^'))
+        destination = self.out / 'incomplete.json'
+        result = subprocess.run([sys.executable, str(self.out / 'archive-helper.py'), 'recipe', str(self.root / 'source'),
+            str(destination), str(self.out)], capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(0, result.returncode, 'An incomplete selected source file was accepted')
+        self.assertIn('Full post25 selected file differs', result.stderr)
+        self.assertFalse(destination.exists())
+
     def test_archive_inspection_preserves_missing_index_and_rejects_truncated_members(self):
         helper = self.helper(); path = self.out / 'common.lib'
         def member(name, raw):

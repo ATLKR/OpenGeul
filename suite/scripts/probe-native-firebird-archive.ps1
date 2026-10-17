@@ -7,6 +7,10 @@ function Write-ArchiveProbeHelper([string]$Path) {
 import hashlib,json,pathlib,re,struct,sys,tarfile
 P=pathlib.Path
 TARGETS=('builds/posix/make.defaults','builds/posix/Makefile.in')
+POST25={
+    TARGETS[0]:(12445,'7fb6f45c055210e3110084f736cef00bbdfe6c3b07426aad7ae5d3bac026b0bc'),
+    TARGETS[1]:(24301,'d6262fca2a4fa052a8f3627fa54a03ce87774d222a1003c3d2ea996fa72b0a36'),
+}
 def digest(data):return hashlib.sha256(data).hexdigest()
 def selected(path,wanted):
     found={};count=0
@@ -22,7 +26,7 @@ def selected(path,wanted):
     if set(found)!=set(wanted):raise ValueError('Selected source members missing')
     return found,count
 def paths(raw,strip):
-    return ['/'.join(m[1].split('/')[strip:]) for m in re.finditer(r'(?m)^\+\+\+ ([^\t\r\n]+)',raw.decode())]
+    return ['/'.join(m[1].split('/')[strip:]) for m in re.finditer(r'(?m)^\+\+\+ ([^ \t\r\n]+)',raw.decode())]
 def extract(manifest,fb,lo,source,out):
     pin=json.loads(P(manifest).read_bytes());source,out=P(source),P(out)
     if source.exists() or any((p/'.git').exists() for p in (source,*source.parents)):raise ValueError('Recipe source must be fresh outside Git')
@@ -34,7 +38,7 @@ def extract(manifest,fb,lo,source,out):
         wanted[loprefix+patch['filename']]=patch['sha256']
     if len(wanted)!=25:raise ValueError('Expected 25 unique upstream patch pins')
     patches,locount=selected(lo,wanted);records=[]
-    (out/'upstream-patches').mkdir();(out/'recipe-patches').mkdir()
+    (out/'upstream-patches').mkdir();(out/'recipe-patches').mkdir();(out/'git-replay-patches').mkdir()
     for target in TARGETS:
         raw=original[prefix+target];path=source/target;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
         (out/('original-'+path.name)).write_bytes(raw)
@@ -43,7 +47,7 @@ def extract(manifest,fb,lo,source,out):
         # Keep complete input bytes and exact selected diff sections. One
         # upstream patch has malformed context in an unrelated source file;
         # parsing that section is unnecessary for these two authenticated files.
-        starts=list(re.finditer(rb'(?m)^--- ([^\t\r\n]+)[^\r\n]*\r?\n\+\+\+ ([^\t\r\n]+)[^\r\n]*\r?\n',raw));parts=[]
+        starts=list(re.finditer(rb'(?m)^--- ([^ \t\r\n]+)[^\r\n]*\r?\n\+\+\+ ([^ \t\r\n]+)[^\r\n]*\r?\n',raw));parts=[]
         for i,start in enumerate(starts):
             target='/'.join(start[2].decode().split('/')[patch['strip']:])
             if target not in TARGETS:continue
@@ -54,8 +58,20 @@ def extract(manifest,fb,lo,source,out):
             parts.append(section)
         filtered=b''.join(parts)
         if bool(filtered)!=any(x in TARGETS for x in paths(raw,patch['strip'])):raise ValueError('Selected patch section mismatch')
-        if filtered:(out/'recipe-patches'/patch['filename']).write_bytes(filtered)
-        records.append(dict(filename=patch['filename'],sha256=digest(raw),size=len(raw),strip=patch['strip'],recipeIncluded=bool(filtered),selectedDiffSha256=digest(filtered),selectedDiffBytes=len(filtered)))
+        replay=filtered;normalization=None
+        if patch['filename']=='firebird-307.patch.1':
+            # GNU patch accepts this pinned legacy context line without its
+            # leading space. Retain the unchanged section separately and make
+            # the single missing marker explicit for Git's stricter parser.
+            legacy=b'\n\tawk -f $(ODS_AWK) <$(ODS_H) >$(ODS_TEST_CPP)\n'
+            if digest(raw)!='8c1ec40878a776b92401fe050f237f4132b92209a3be5e2a9a03cec92e7d0187' or filtered.count(legacy)!=1:
+                raise ValueError('Pinned legacy context line differs')
+            replay=filtered.replace(legacy,b'\n '+legacy[1:],1)
+            normalization=dict(kind='missing-unified-context-marker',insertedByteHex='20',contextLine='\tawk -f $(ODS_AWK) <$(ODS_H) >$(ODS_TEST_CPP)',hunkCountsChanged=False)
+        if filtered:
+            (out/'recipe-patches'/patch['filename']).write_bytes(filtered)
+            (out/'git-replay-patches'/patch['filename']).write_bytes(replay)
+        records.append(dict(filename=patch['filename'],sha256=digest(raw),size=len(raw),strip=patch['strip'],recipeIncluded=bool(filtered),selectedDiffSha256=digest(filtered),selectedDiffBytes=len(filtered),gitReplaySha256=digest(replay),gitReplayBytes=len(replay),normalization=normalization))
     result=dict(schemaVersion=1,targets=TARGETS,upstreamPatches=records,archiveMemberCounts=dict(firebird=fbcount,libreoffice=locount),selectedRegularMembersOnly=True)
     (out/'recipe-extraction.json').write_text(json.dumps(result,indent=2)+'\n')
 def recipe(source,destination,out):
@@ -66,9 +82,13 @@ def recipe(source,destination,out):
     if len(ars)!=1 or len(links)!=1 or len(blocks)!=1:raise ValueError('Expected exact original archive recipe')
     result=json.loads((out/'recipe-extraction.json').read_bytes())
     result.update(archiveTool='ar',archiveToolDefinition=ars[0],arOptions='',arOptionsScope='controlled Windows ARM64 recipe comparison; no full configure replay',staticLibraryLink=links[0],archiveCommand=blocks[0],generatedObjects=['archive-probe.obj'],syntheticPayload=True)
+    effective={target:(source/target).read_bytes() for target in TARGETS}
+    for target,raw in effective.items():
+        if (len(raw),digest(raw))!=POST25[target]:raise ValueError('Full post25 selected file differs: '+target)
+    result['fullPost25FilesVerified']=True
     result['effectiveFiles']=[]
-    for target in TARGETS:
-        raw=(source/target).read_bytes();(out/('effective-'+P(target).name)).write_bytes(raw)
+    for target,raw in effective.items():
+        (out/('effective-'+P(target).name)).write_bytes(raw)
         result['effectiveFiles'].append(dict(path=target,size=len(raw),sha256=digest(raw)))
     P(destination).write_text(json.dumps(result,indent=2)+'\n')
 def inspect(path):
@@ -109,7 +129,7 @@ function Invoke-ArchiveRecipePreparation([string]$Python,[string]$Git,[string]$R
     $plan=Get-Content (Join-Path $Output 'recipe-extraction.json') -Raw|ConvertFrom-Json
     foreach($patch in $plan.upstreamPatches) {
         if(-not $patch.recipeIncluded){continue}
-        Invoke-LoggedCommand $Git @('apply',('-p'+$patch.strip),'--include=builds/posix/make.defaults','--include=builds/posix/Makefile.in',(Join-Path (Join-Path $Output 'recipe-patches') $patch.filename)) $SourceRoot (Join-Path $Output ('apply-'+$patch.filename)) -TimeoutMinutes 1|Out-Null
+        Invoke-LoggedCommand $Git @('apply',('-p'+$patch.strip),'--include=builds/posix/make.defaults','--include=builds/posix/Makefile.in',(Join-Path (Join-Path $Output 'git-replay-patches') $patch.filename)) $SourceRoot (Join-Path $Output ('apply-'+$patch.filename)) -TimeoutMinutes 1|Out-Null
     }
     $port=Join-Path (Join-Path $Repo 'suite/engine-build') $manifest.portPatch.filename
     Confirm-FileIdentity $port 0 SHA256 $manifest.portPatch.sha256|Out-Null
