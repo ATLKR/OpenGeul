@@ -1,0 +1,52 @@
+name: OpenGeul ARM64 native prerequisites
+on:
+  push:
+    branches: [work/opengeul-office-arm64]
+    paths:
+      - .github/workflows/office-arm64-probe.yml
+      - suite/scripts/arm64-native-probe.py
+      - suite/config/runtime.arm64.lock.json
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-arm64-probe:
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Native host and upstream baseline inspection
+        shell: pwsh
+        run: |
+          python suite/scripts/arm64-native-probe.py --output .work/arm64-probe
+          if ($LASTEXITCODE -ne 0) { throw 'Actual ARM64 native probe failed.' }
+      - name: Actual compiler, SDK and Korean capability inventory
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .work/arm64-probe | Out-Null
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          & $vswhere -all -format json | Out-File .work/arm64-probe/visual-studio.json -Encoding utf8
+          dotnet --info | Out-File .work/arm64-probe/dotnet-info.txt -Encoding utf8
+          Get-WindowsCapability -Online -Name 'Language.Basic~~~ko-KR~0.0.1.0' | Select-Object Name,State | ConvertTo-Json | Out-File .work/arm64-probe/korean-capability.json -Encoding utf8
+          Get-Volume | Select-Object DriveLetter,Size,SizeRemaining | ConvertTo-Json | Out-File .work/arm64-probe/storage.json -Encoding utf8
+      - name: Retain bounded raw probe evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-arm64-native-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/arm64-probe/*.json
+            .work/arm64-probe/*.txt
+            .work/arm64-probe/*.log
+          if-no-files-found: error
+          retention-days: 7

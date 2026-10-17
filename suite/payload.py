@@ -1,4 +1,4 @@
-"""Inventory the independent x64 Suite without changing HWP release contracts.
+"""Inventory independent native Windows Suites without changing HWP release contracts.
 
 The receipt proves byte consistency against its trusted input, not authorship or
 GUI correctness. The package builder verifies the locked upstream downloads.
@@ -40,6 +40,9 @@ RESERVED = re.compile(r'(?i)(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:
 CULTURE = re.compile(r'[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*\Z')
 MAX_FILES = 100_000
 MAX_METADATA = 8 * 1024 * 1024
+NATIVE_MACHINES = {'x64': 0x8664, 'arm64': 0xaa64}
+SOURCE_LOCKS = {'x64': 'suite/config/runtime.lock.json',
+                'arm64': 'suite/config/runtime.arm64.lock.json'}
 # Exact companion bytes from the authenticated LibreOffice 26.8.1.1 x64 MSI:
 # c6298b10cfa1748bcbedad94c62ce771e240e5021bfd6d7a967cd571b04b5312.
 # These optional compatibility components and Python cross-platform launcher
@@ -86,6 +89,18 @@ COMPANION_PE_ADMISSIONS = {
         'machine': 0x14c, 'role': 'pythonLauncherTemplate',
         'sha256': '6b4195e640a85ac32eb6f9628822a622057df1e459df7c17a12f97aeabc9415b'},
 }
+
+
+# ARM64 exceptions require their own exact path/machine/hash review. Do not
+# inherit x64 compatibility helpers or assume that similarly named ARM64 MSI
+# companions have identical bytes. Unknown non-native assets fail closed.
+ARM64_COMPANION_PE_ADMISSIONS = {}
+
+
+def _architecture(architecture: str) -> str:
+    if not isinstance(architecture, str) or architecture not in NATIVE_MACHINES:
+        raise ValueError(f'Unsupported Suite architecture: {architecture!r}')
+    return architecture
 
 
 def _name(name: str) -> str:
@@ -221,7 +236,7 @@ def _https(value) -> bool:
         return False
 
 
-def _source_archive(root: Path, provenance: dict):
+def _source_archive(root: Path, provenance: dict, *, architecture: str):
     path = root/'Sources/OpenGeul-Office-source.zip'
     try:
         with zipfile.ZipFile(path) as archive:
@@ -241,13 +256,13 @@ def _source_archive(root: Path, provenance: dict):
                 has_code |= name.startswith('suite/') and name.endswith(('.py', '.cs')) and entry.file_size > 0
             if not has_code:
                 raise ValueError('Suite source archive contains no Suite implementation source')
-            name = 'suite/config/runtime.lock.json'
+            name = SOURCE_LOCKS[architecture]
             if archive.getinfo(name).file_size > MAX_METADATA:
                 raise ValueError('Packaged Suite runtime lock exceeds metadata limit')
             lock = _json_bytes(archive.read(name), name)
     except (zipfile.BadZipFile, KeyError, OSError) as error:
         raise ValueError('Invalid Suite corresponding-source archive') from error
-    if (lock.get('schemaVersion') != 1 or lock.get('architecture') != 'x64'
+    if (lock.get('schemaVersion') != 1 or lock.get('architecture') != architecture
             or lock.get('version') != provenance['version'] or not isinstance(lock.get('runtime'), dict)
             or any(lock['runtime'].get(key) != provenance['runtime'].get(key)
                    for key in ('sha256', 'url', 'sourceUrl', 'sourceSha256'))):
@@ -257,8 +272,10 @@ def _source_archive(root: Path, provenance: dict):
         raise ValueError('Suite HWP provenance differs from its packaged source lock')
 
 
-def _metadata(root: Path, files: dict):
+def _metadata(root: Path, files: dict, *, architecture: str):
     product, provenance = (_json(root/name) for name in ('suite-product.json', 'suite-provenance.json'))
+    if provenance.get('architecture') != architecture:
+        raise ValueError('Suite provenance architecture differs from payload architecture')
     if (type(product.get('schemaVersion')) is not int or product['schemaVersion'] != 1
             or product.get('productName') != 'OpenGeul Office'
             or product.get('version') != provenance.get('version')):
@@ -285,7 +302,7 @@ def _metadata(root: Path, files: dict):
             raise ValueError('Incomplete original HWP runtime/license/input provenance')
     elif provenance.get('hwp') is not None:
         raise ValueError('HWP provenance supplied without its payload')
-    _source_archive(root, provenance)
+    _source_archive(root, provenance, architecture=architecture)
     branding = _json(root/'runtime-branding.json')
     if branding != _json(root/'Office/opengeul-branding.json'):
         raise ValueError('Root/runtime branding receipts differ')
@@ -319,8 +336,9 @@ def _metadata(root: Path, files: dict):
         aliases.add(name.casefold())
 
 
-def _pe(path: Path, *, companion: dict | None = None):
-    """Keep x64 hosts strict; admit only explicitly pinned optional companions."""
+def _pe(path: Path, *, companion: dict | None = None, architecture: str = 'x64'):
+    """Require native hosts; admit only explicitly pinned optional companions."""
+    architecture = _architecture(architecture)
     size = path.stat().st_size
     with path.open('rb') as stream:
         def read(offset, length):
@@ -362,10 +380,10 @@ def _pe(path: Path, *, companion: dict | None = None):
                 raise ValueError(f'Pinned Office companion bytes/architecture mismatch: {path.name}')
             if role in ('x86CompatibilityHelper', 'pythonLauncherTemplate'):
                 return
-        if machine == 0x8664 and magic == 0x20b:
+        if machine == NATIVE_MACHINES[architecture] and magic == 0x20b:
             return
         if machine != 0x14c or magic != 0x10b or path.suffix.lower() != '.dll' or not characteristics & 0x2000:
-            raise ValueError(f'Payload code must use x64 architecture: {path.name}')
+            raise ValueError(f'Payload code must use {architecture} architecture: {path.name}')
 
         def at_rva(rva, length):
             for start, raw_size, raw_offset in section_ranges:
@@ -374,10 +392,10 @@ def _pe(path: Path, *, companion: dict | None = None):
             raise ValueError(f'Invalid managed PE RVA: {path.name}')
 
         if optional_size < 96+15*8 or struct.unpack_from('<I', optional, 92)[0] < 15:
-            raise ValueError(f'Non-x64 code is not an AnyCPU managed DLL: {path.name}')
+            raise ValueError(f'Non-{architecture} code is not an AnyCPU managed DLL: {path.name}')
         clr_rva, clr_size = struct.unpack_from('<II', optional, 96+14*8)
         if not clr_rva or clr_size < 72:
-            raise ValueError(f'Non-x64 code lacks managed CLR metadata: {path.name}')
+            raise ValueError(f'Non-{architecture} code lacks managed CLR metadata: {path.name}')
         clr = at_rva(clr_rva, 72)
         cb = struct.unpack_from('<I', clr)[0]
         metadata_rva, metadata_size, flags = struct.unpack_from('<III', clr, 8)
@@ -386,39 +404,43 @@ def _pe(path: Path, *, companion: dict | None = None):
         invalid_flags = flags != 0xb if role == 'managedPublisherPolicy' else not flags & 1 or flags & (2 | 16 | 0x20000)
         if (cb < 72 or cb > clr_size or invalid_flags
                 or metadata_size < 16 or at_rva(metadata_rva, metadata_size)[:4] != b'BSJB'):
-            raise ValueError(f'Non-x64 DLL must be IL-only AnyCPU: {path.name}')
+            raise ValueError(f'Non-{architecture} DLL must be IL-only AnyCPU: {path.name}')
 
 
-def _validate(root: Path, files: dict):
-    _metadata(root, files)
+def _validate(root: Path, files: dict, *, architecture: str):
+    _metadata(root, files, architecture=architecture)
+    companions = (COMPANION_PE_ADMISSIONS if architecture == 'x64'
+                  else ARM64_COMPANION_PE_ADMISSIONS)
     for name in files:
         path = root/name
         with path.open('rb') as stream:
             magic = stream.read(2)
         if magic == b'MZ' or path.suffix.lower() in ('.exe', '.dll', '.pyd') or name == 'Office/program/soffice.bin':
             try:
-                _pe(path, companion=COMPANION_PE_ADMISSIONS.get(name))
+                _pe(path, companion=companions.get(name), architecture=architecture)
             except ValueError as error:
                 raise ValueError(f'{name}: {error}') from error
 
 
-def create_inventory(root: Path) -> dict:
-    """Validate staged x64 content and return its complete deterministic inventory.
+def create_inventory(root: Path, *, architecture: str = 'x64') -> dict:
+    """Validate staged native content and return its complete deterministic inventory.
 
     Only ``suite-inventory.json`` is excluded, so callers can write this receipt
     after creating it without introducing a circular hash.
     """
+    architecture = _architecture(architecture)
     root = Path(root)
     files = _scan(root)
-    _validate(root, files)
-    return {'schemaVersion': 1, 'architecture': 'x64', 'files': files}
+    _validate(root, files, architecture=architecture)
+    return {'schemaVersion': 1, 'architecture': architecture, 'files': files}
 
 
 def verify_payload(root: Path, receipt: dict) -> None:
     """Reject malformed receipts, file changes, missing/extra files and mixed code."""
     if (not isinstance(receipt, dict) or set(receipt) != {'schemaVersion', 'architecture', 'files'}
             or type(receipt['schemaVersion']) is not int or receipt['schemaVersion'] != 1
-            or receipt['architecture'] != 'x64' or not isinstance(receipt['files'], dict)
+            or not isinstance(receipt['architecture'], str) or receipt['architecture'] not in NATIVE_MACHINES
+            or not isinstance(receipt['files'], dict)
             or not receipt['files'] or len(receipt['files']) > MAX_FILES):
         raise ValueError('Invalid Suite inventory receipt')
     aliases = set()
@@ -430,7 +452,7 @@ def verify_payload(root: Path, receipt: dict) -> None:
             raise ValueError(f'Invalid Suite inventory file record: {name}')
         aliases.add(name.casefold())
     root = Path(root)
-    actual = create_inventory(root)
+    actual = create_inventory(root, architecture=receipt['architecture'])
     if actual != receipt:
         raise ValueError('Suite payload does not match its complete inventory')
     inventory = root/INVENTORY

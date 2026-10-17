@@ -47,7 +47,7 @@ def pe(machine=0x8664, *, managed=False, flags=1, dll=False):
     return bytes(data)
 
 
-class PayloadTests(unittest.TestCase):
+class PayloadFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -56,7 +56,7 @@ class PayloadTests(unittest.TestCase):
         self.product = {'schemaVersion': 1, 'productName': 'OpenGeul Office', 'version': '0.1.0'}
         self.provenance = {
             'schemaVersion': 1, 'productName': 'OpenGeul Office', 'version': '0.1.0',
-            'sourceCommit': 'a'*40,
+            'architecture': 'x64', 'sourceCommit': 'a'*40,
             'runtime': {'sha256': 'b'*64, 'url': 'https://example.org/office.msi',
                         'sourceUrl': 'https://example.org/source.tar.xz', 'sourceSha256': '1'*64},
         }
@@ -83,15 +83,19 @@ class PayloadTests(unittest.TestCase):
         self.source_archive()
         self.save_metadata()
 
-    def source_archive(self, *, commit=None, entries=None):
+    def source_archive(self, *, commit=None, entries=None, lock_architecture=None, lock_name=None):
         data = io.BytesIO()
         with zipfile.ZipFile(data, 'w') as archive:
             archive.comment = (commit or self.provenance['sourceCommit']).encode()
-            lock = {'schemaVersion': 1, 'architecture': 'x64', 'version': self.provenance['version'],
+            architecture = self.provenance['architecture']
+            lock = {'schemaVersion': 1, 'architecture': lock_architecture or architecture,
+                    'version': self.provenance['version'],
                     'runtime': copy.deepcopy(self.provenance['runtime'])}
             if self.provenance.get('hwp'):
                 lock['hwp'] = copy.deepcopy(self.provenance['hwp'])
-            archive.writestr('suite/config/runtime.lock.json', canonical(lock))
+            lock_name = lock_name or ('suite/config/runtime.arm64.lock.json' if architecture == 'arm64'
+                                      else 'suite/config/runtime.lock.json')
+            archive.writestr(lock_name, canonical(lock))
             for name, content in (entries or {'suite/worker/office_worker.py': b'# exact source\n'}).items():
                 archive.writestr(name, content)
         self.write('Sources/OpenGeul-Office-source.zip', data.getvalue())
@@ -115,6 +119,8 @@ class PayloadTests(unittest.TestCase):
         self.provenance['brandingReceiptSha256'] = digest(self.read('runtime-branding.json'))
         self.write_json('suite-provenance.json', self.provenance)
 
+
+class PayloadTests(PayloadFixture):
     def test_complete_inventory_covers_native_managed_worker_and_legal_files(self):
         receipt = create_inventory(self.root)
         self.assertEqual(set(receipt), {'schemaVersion', 'architecture', 'files'})
@@ -125,6 +131,19 @@ class PayloadTests(unittest.TestCase):
         for name, record in receipt['files'].items():
             self.assertEqual(record, {'size': len(self.read(name)), 'sha256': digest(self.read(name))})
         verify_payload(self.root, receipt)
+
+    def test_x64_provenance_must_explicitly_name_its_matching_architecture(self):
+        for architecture in ('arm64', 'x86', None):
+            changed = copy.deepcopy(self.provenance)
+            changed['architecture'] = architecture
+            self.write_json('suite-provenance.json', changed)
+            with self.subTest(architecture=architecture), self.assertRaisesRegex(ValueError, 'architecture'):
+                create_inventory(self.root)
+        changed = copy.deepcopy(self.provenance)
+        del changed['architecture']
+        self.write_json('suite-provenance.json', changed)
+        with self.assertRaisesRegex(ValueError, 'architecture'):
+            create_inventory(self.root)
 
     def test_inventory_deterministic_independent_of_creation_order(self):
         before = create_inventory(self.root)
@@ -465,6 +484,135 @@ class PayloadTests(unittest.TestCase):
         self.source_archive()
         self.save_metadata()
         verify_payload(self.root, create_inventory(self.root))
+
+
+class Arm64PayloadTests(PayloadFixture):
+    def setUp(self):
+        super().setUp()
+        self.provenance['architecture'] = 'arm64'
+        for name in ('OpenGeul.Office.exe', 'Office/program/soffice.exe',
+                     'Office/program/soffice.bin', 'Office/program/python.exe', 'hostfxr.dll'):
+            self.write(name, pe(0xaa64))
+        self.source_archive()
+        self.save_metadata()
+
+    def architecture_call(self, function, *args, architecture='arm64'):
+        try:
+            return function(*args, architecture=architecture)
+        except TypeError as error:
+            self.fail(f'Explicit Suite architecture contract is required: {error}')
+
+    def inventory(self):
+        return self.architecture_call(create_inventory, self.root)
+
+    def test_arm64_inventory_and_receipt_verify_native_hosts_and_anycpu_dll(self):
+        receipt = self.inventory()
+        self.assertEqual(receipt['architecture'], 'arm64')
+        self.assertEqual(receipt['files']['hostfxr.dll']['sha256'], digest(pe(0xaa64)))
+        self.assertEqual(receipt['files']['OpenGeul.Office.dll']['sha256'],
+                         digest(pe(0x14c, managed=True, dll=True)))
+        self.write_json('suite-inventory.json', receipt)
+        verify_payload(self.root, receipt)
+
+    def test_pe_accepts_only_the_requested_native_machine(self):
+        path = self.root/'hostfxr.dll'
+        self.architecture_call(payload._pe, path)
+        for machine in (0x8664, 0xa641, 0x14c, 0x1c4):
+            self.write('hostfxr.dll', pe(machine, dll=True))
+            with self.subTest(machine=machine), self.assertRaisesRegex(ValueError, 'arm64|architecture'):
+                self.architecture_call(payload._pe, path)
+        self.write('hostfxr.dll', pe(0xaa64))
+        with self.assertRaisesRegex(ValueError, 'x64|architecture'):
+            payload._pe(path)
+
+    def test_wrong_architecture_hosts_dependencies_and_disguised_pe_are_rejected(self):
+        for name in ('OpenGeul.Office.exe', 'Office/program/soffice.exe',
+                     'Office/program/soffice.bin', 'Office/program/python.exe',
+                     'hostfxr.dll', 'Office/program/extra.pyd', 'Office/program/disguised.dat'):
+            existed = (self.root/name).exists()
+            original = self.read(name) if existed else None
+            for machine in (0x8664, 0xa641, 0x14c):
+                self.write(name, pe(machine))
+                with self.subTest(name=name, machine=machine), self.assertRaisesRegex(ValueError, 'arm64|architecture'):
+                    self.inventory()
+            if existed:
+                self.write(name, original)
+            else:
+                (self.root/name).unlink()
+
+    def test_arm64_anycpu_still_rejects_native_x86_and_architecture_required_clr(self):
+        for data in (pe(0x14c, dll=True), pe(0x14c, managed=True, flags=0, dll=True),
+                     pe(0x14c, managed=True, flags=3, dll=True),
+                     pe(0x14c, managed=True, flags=17, dll=True),
+                     pe(0x14c, managed=True, flags=0x20001, dll=True)):
+            self.write('OpenGeul.Office.dll', data)
+            with self.subTest(sha256=digest(data)), self.assertRaises(ValueError):
+                self.inventory()
+
+    def test_unknown_architecture_is_rejected_before_scanning_or_parsing(self):
+        for architecture in ('x86', 'ARM64', '', None, False, 64, [], {}):
+            with self.subTest(architecture=architecture):
+                with self.assertRaisesRegex(ValueError, 'architecture'):
+                    self.architecture_call(create_inventory, self.root/'missing', architecture=architecture)
+                with self.assertRaisesRegex(ValueError, 'architecture'):
+                    self.architecture_call(payload._pe, self.root/'missing.exe', architecture=architecture)
+
+    def test_provenance_architecture_must_match_requested_payload_and_receipt(self):
+        for architecture in ('x64', 'x86', 'ARM64', None, [], {}):
+            changed = copy.deepcopy(self.provenance)
+            changed['architecture'] = architecture
+            self.write_json('suite-provenance.json', changed)
+            with self.subTest(architecture=architecture), self.assertRaisesRegex(ValueError, 'provenance.*architecture|architecture.*provenance'):
+                self.inventory()
+
+    def test_missing_provenance_architecture_fails_closed(self):
+        changed = copy.deepcopy(self.provenance)
+        del changed['architecture']
+        self.write_json('suite-provenance.json', changed)
+        with self.assertRaisesRegex(ValueError, 'provenance.*architecture|architecture.*provenance'):
+            self.inventory()
+
+    def test_receipt_architecture_cannot_transpose_payload_provenance(self):
+        receipt = self.inventory()
+        for architecture in ('x64', 'x86', None, [], {}):
+            changed = copy.deepcopy(receipt)
+            changed['architecture'] = architecture
+            with self.subTest(architecture=architecture), self.assertRaises(ValueError):
+                verify_payload(self.root, changed)
+
+    def test_arm64_source_archive_requires_its_named_architecture_lock(self):
+        for lock_architecture, lock_name in (
+                ('arm64', 'suite/config/runtime.lock.json'),
+                ('x64', 'suite/config/runtime.arm64.lock.json'),
+                ('x86', 'suite/config/runtime.arm64.lock.json')):
+            self.source_archive(lock_architecture=lock_architecture, lock_name=lock_name)
+            self.save_metadata()
+            with self.subTest(lock_architecture=lock_architecture, lock_name=lock_name), self.assertRaisesRegex(ValueError, 'source|lock'):
+                self.inventory()
+
+    def test_arm64_source_lock_binds_input_and_corresponding_source(self):
+        for key, value in (('sha256', '2'*64), ('sourceSha256', '3'*64),
+                           ('url', 'https://example.org/another.msi'),
+                           ('sourceUrl', 'https://example.org/another.tar.xz')):
+            changed = copy.deepcopy(self.provenance)
+            changed['runtime'][key] = value
+            self.write_json('suite-provenance.json', changed)
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'source lock'):
+                self.inventory()
+
+    def test_x64_companion_admission_does_not_grant_arm64_an_exception(self):
+        name = 'Office/program/twain32shim.exe'
+        data = pe(0x14c)
+        self.write(name, data)
+        with patch.dict(payload.COMPANION_PE_ADMISSIONS, {name: {
+                'machine': 0x14c, 'sha256': digest(data), 'role': 'x86CompatibilityHelper'}}):
+            with self.assertRaisesRegex(ValueError, 'arm64|architecture'):
+                self.inventory()
+
+    def test_unknown_arm64_compatibility_bytes_remain_rejected_at_known_path(self):
+        self.write('Office/program/python-core-3.13.15/lib/setuptools/gui-32.exe', pe(0x14c))
+        with self.assertRaises(ValueError):
+            self.inventory()
 
 
 if __name__ == '__main__':
