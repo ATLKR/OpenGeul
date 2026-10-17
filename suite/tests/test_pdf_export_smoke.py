@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -53,6 +54,73 @@ def write_pdf(path, pages, metadata=None):
         writer.add_metadata(metadata)
     with path.open('wb') as output:
         writer.write(output)
+
+
+def writer_document():
+    """Model the pinned Writer API's CR paragraphs and LF in-paragraph breaks."""
+    class Paragraph:
+        def __init__(self, text):
+            self.text, self.break_type = text, 'NONE'
+
+        def getString(self):
+            return self.text
+
+        def supportsService(self, service):
+            return service == 'com.sun.star.text.Paragraph'
+
+        def getPropertyValue(self, name):
+            return SimpleNamespace(value=self.break_type)
+
+    class Cursor:
+        index = 0
+
+        def gotoEnd(self, expand):
+            self.index = len(text.paragraphs) - 1
+
+        def gotoStart(self, expand):
+            self.index = 0
+
+        def gotoNextParagraph(self, expand):
+            if self.index + 1 >= len(text.paragraphs):
+                return False
+            self.index += 1
+            return True
+
+        def setPropertyValue(self, name, value):
+            if name == 'BreakType':
+                text.paragraphs[self.index].break_type = value.value
+
+    class Text:
+        def setString(self, value):
+            self.paragraphs = [Paragraph(part) for part in value.split('\r')]
+
+        def getString(self):
+            return '\n'.join(paragraph.text for paragraph in self.paragraphs)
+
+        def createTextCursor(self):
+            return Cursor()
+
+        def createEnumeration(self):
+            remaining = iter(self.paragraphs)
+            values = list(remaining)
+            return SimpleNamespace(hasMoreElements=lambda: bool(values), nextElement=lambda: values.pop(0))
+
+    text = Text()
+
+    class Document:
+        def getText(self):
+            return text
+
+        def getStyleFamilies(self):
+            return self
+
+        def getByName(self, name):
+            return self
+
+        def setPropertyValue(self, name, value):
+            pass
+
+    return Document()
 
 
 class PdfExportOracleTests(unittest.TestCase):
@@ -170,9 +238,9 @@ class PdfProducerBoundaryTests(unittest.TestCase):
         (self.output / 'sources').mkdir()
         (self.output / 'exports').mkdir()
 
-    def run_generated_case(self, cleanup_error=False, change_url=False):
+    def run_generated_case(self, cleanup_error=False, change_url=False, forced=False, exit_code=0, module='writer'):
         events = []
-        path = self.output / 'exports' / 'writer.pdf'
+        path = self.output / 'exports' / (module + '.pdf')
 
         class Document:
             url = ''
@@ -192,7 +260,8 @@ class PdfProducerBoundaryTests(unittest.TestCase):
                 self.document = Document()
                 member = dict(pid=99, creationTime=789, image=str(suite / 'Office/program/soffice.bin'), alive=True, exitCode=259)
                 self.owned_job_evidence = dict(jobHandleValue=42, initial=[member],
-                    final=[dict(member, alive=False, exitCode=0)], finalJobPids=[], jobEmptyVerified=True)
+                    final=[dict(member, alive=False, exitCode=exit_code)], finalJobPids=[], jobEmptyVerified=True,
+                    shutdown='forced-private-job-termination' if forced else 'graceful', forcedTermination=forced)
 
             def start(self):
                 events.append('start-owned-engine')
@@ -226,7 +295,8 @@ class PdfProducerBoundaryTests(unittest.TestCase):
                 patch.object(smoke, '_validate_model', create=True), \
                 patch.object(smoke, '_require_font', create=True), \
                 patch.object(smoke, '_interaction_handler', return_value=object(), create=True):
-            record = smoke.run_case(self.suite, self.output, smoke.case_specs()[0])
+            case = next(case for case in smoke.case_specs() if case['module'] == module)
+            record = smoke.run_case(self.suite, self.output, case)
         return record, events, path
 
     def test_producer_uses_pdf_filter_without_replacing_source_and_hashes_after_owned_cleanup(self):
@@ -241,6 +311,36 @@ class PdfProducerBoundaryTests(unittest.TestCase):
         self.assertEqual(sum(isinstance(event, tuple) and event[0] == 'load' for event in events), 2)
         self.assertEqual(events[-1], 'cleanup-owned-engine')
 
+    def test_writer_creates_real_paragraphs_and_breaks_before_the_second_marker(self):
+        case = smoke.case_specs()[0]
+        document = writer_document()
+        engine = SimpleNamespace(uno=SimpleNamespace(Enum=lambda name, value: SimpleNamespace(value=value)))
+        smoke._populate(engine, case, document)
+        paragraphs = document.getText().paragraphs
+        self.assertEqual([paragraph.text for paragraph in paragraphs], [' '.join(markers) for markers in case['pageMarkers']])
+        self.assertEqual(paragraphs[1].break_type, 'PAGE_BEFORE')
+        smoke._validate_model(case, document)
+
+    def test_writer_validation_rejects_the_original_one_paragraph_line_break_fixture(self):
+        # Run39011717816 writer.odt SHA256 bde30cc02e28768444ac3f0393eec549b
+        # ae8b2606623508581062c656f6918a8 had this one-paragraph structure.
+        case = smoke.case_specs()[0]
+        document = writer_document()
+        document.getText().setString('\n'.join(' '.join(markers) for markers in case['pageMarkers']))
+        document.getText().paragraphs[0].break_type = 'PAGE_BEFORE'
+        with self.assertRaisesRegex(ValueError, 'paragraph'):
+            smoke._validate_model(case, document)
+
+    def test_math_pdf_export_disables_source_title_and_border_in_the_actual_filter_data(self):
+        record, events, path = self.run_generated_case(module='math')
+        self.assertEqual(record['status'], 'passed', record)
+        export = next(event[1] for event in events if isinstance(event, tuple) and event[0] == 'pdf-export')
+        self.assertEqual(export['FilterName'], 'math_pdf_Export')
+        options = dict(export['FilterData'])
+        self.assertIn('FormulaText', options, 'Formula source must not duplicate rendered markers')
+        for name in ('FormulaText', 'TitleRow', 'Border'):
+            self.assertIs(options.get(name), False, name)
+
     def test_cleanup_failure_or_source_replacement_never_publishes_success_hash(self):
         for cleanup_error, change_url in ((True, False), (False, True)):
             with self.subTest(cleanup_error=cleanup_error, change_url=change_url):
@@ -250,6 +350,41 @@ class PdfProducerBoundaryTests(unittest.TestCase):
                 self.assertTrue(path.is_file(), 'Failed exports must remain for diagnosis')
                 path.unlink()
                 (self.output / 'sources' / 'writer.odt').unlink()
+
+    def test_forced_or_abnormal_engine_exit_never_publishes_producer_success_hash(self):
+        base_output = self.output
+        for index, (forced, exit_code) in enumerate(((True, 0), (False, 0xC0000005))):
+            with self.subTest(forced=forced, exit_code=exit_code):
+                self.output = base_output / str(index)
+                (self.output / 'sources').mkdir(parents=True)
+                (self.output / 'exports').mkdir()
+                record, events, path = self.run_generated_case(forced=forced, exit_code=exit_code)
+                self.assertEqual(record['status'], 'failed', record)
+                self.assertNotIn('sha256', record)
+                self.assertTrue(path.is_file(), 'Rejected exports must remain for diagnosis')
+                path.unlink()
+                (self.output / 'sources' / 'writer.odt').unlink()
+
+    def test_independent_identity_replay_rejects_forced_missing_or_abnormal_exit_proof(self):
+        product = b'{"schemaVersion": 1}'
+        (self.suite / 'suite-product.json').write_bytes(product)
+        python_identity = dict(observed={})
+        member = dict(pid=99, creationTime=789, image=str(self.suite / 'Office/program/soffice.bin'), alive=True, exitCode=259)
+        production = dict(suite=str(self.suite), pythonIdentity=python_identity, engineIdentity={},
+                          productSha256=hashlib.sha256(product).hexdigest())
+        for defect in ('forced-shutdown', 'forced-flag', 'missing-flag', 'abnormal-exit'):
+            evidence = dict(jobHandleValue=42, initial=[member], final=[dict(member, alive=False, exitCode=0)],
+                            finalJobPids=[], jobEmptyVerified=True, shutdown='graceful', forcedTermination=False)
+            if defect == 'forced-shutdown': evidence['shutdown'] = 'forced-private-job-termination'
+            elif defect == 'forced-flag': evidence['forcedTermination'] = True
+            elif defect == 'missing-flag': evidence.pop('forcedTermination')
+            else: evidence['final'][0]['exitCode'] = 0xC0000005
+            production['cases'] = [dict(ownedJobEvidence=evidence)]
+            with self.subTest(defect=defect), \
+                    patch('writer_style_smoke.require_packaged_python', return_value=python_identity), \
+                    patch.object(smoke, '_engine_identity', return_value={}), \
+                    self.assertRaises(ValueError):
+                smoke._verify_identity(self.suite, production)
 
     def test_production_refuses_existing_output_and_paths_inside_payload(self):
         sentinel = self.output / 'user-document.txt'
@@ -371,6 +506,8 @@ class PdfProducerBoundaryTests(unittest.TestCase):
                     self.assertLess(events.index('close-job'), events.index('remove-profile'))
                     self.assertEqual(engine.owned_job_evidence['finalJobPids'], [])
                     self.assertTrue(engine.owned_job_evidence['jobEmptyVerified'])
+                    self.assertTrue(engine.cleanup_errors, 'Safe forced recovery must still fail graceful qualification')
+                    self.assertTrue(engine.owned_job_evidence['forcedTermination'])
 
     def test_engine_identity_rejects_changed_binary_or_another_uno_server_image(self):
         self.assertTrue(hasattr(smoke, '_engine_identity'), 'Engine inventory identity is not implemented')
@@ -388,7 +525,7 @@ class PdfProducerBoundaryTests(unittest.TestCase):
             smoke._engine_identity(self.suite)
         initial = dict(pid=99, creationTime=789, image=str(self.suite / 'Office/program/soffice.bin'), alive=True, exitCode=259)
         evidence = dict(jobHandleValue=42, initial=[initial], final=[dict(initial, alive=False, exitCode=0)],
-                        finalJobPids=[], jobEmptyVerified=True)
+                        finalJobPids=[], jobEmptyVerified=True, shutdown='graceful', forcedTermination=False)
         smoke._validate_job_evidence(self.suite, evidence)
         evidence['initial'][0]['image'] = str(self.root / 'another-suite/Office/program/soffice.bin')
         with self.assertRaisesRegex(ValueError, 'engine image'):

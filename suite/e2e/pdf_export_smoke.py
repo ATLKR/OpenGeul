@@ -121,6 +121,8 @@ def _validate_job_evidence(suite, evidence):
     _require(isinstance(evidence, dict) and type(evidence.get('jobHandleValue')) is int
              and evidence['jobHandleValue'] > 0 and evidence.get('jobEmptyVerified') is True
              and evidence.get('finalJobPids') == [], 'Private engine job exit is unverified')
+    _require(evidence.get('shutdown') == 'graceful' and evidence.get('forcedTermination') is False,
+             'Graceful engine exit is unverified; forced termination cannot qualify')
     initial, final = evidence.get('initial', []), evidence.get('final', [])
     expected = _image(suite / 'Office/program/soffice.bin')
     _require(any(isinstance(row.get('image'), str) and _image(row['image']) == expected
@@ -135,8 +137,9 @@ def _validate_job_evidence(suite, evidence):
             result.add((row['pid'], row['creationTime'], _image(row['image'])))
         _require(len(result) == len(rows), 'Duplicate retained owned process identity')
         return result
-    _require(identities(initial) <= identities(final) and all(row['alive'] is False for row in final),
-             'Owned engine member generation changed or remained alive')
+    _require(identities(initial) <= identities(final)
+             and all(row['alive'] is False and row['exitCode'] == 0 for row in final),
+             'Owned engine member generation changed, remained alive, or exited abnormally')
 
 
 class Engine(baseline.Engine):
@@ -144,7 +147,7 @@ class Engine(baseline.Engine):
     def __init__(self, suite):
         super().__init__(suite)
         self.witness = None
-        self.owned_job_evidence = dict(jobEmptyVerified=False)
+        self.owned_job_evidence = dict(jobEmptyVerified=False, forcedTermination=False)
 
     def _capture(self):
         if self.witness is None:
@@ -199,12 +202,16 @@ class Engine(baseline.Engine):
                 dead = self._empty(5)
                 self.owned_job_evidence['shutdown'] = 'graceful' if dead else 'forced-private-job-termination'
                 if not dead:
+                    self.owned_job_evidence['forcedTermination'] = True
+                    self.cleanup_errors.append('Forced private job termination cannot qualify as graceful engine exit')
                     self.process.terminate()  # Only the job created by Engine.start.
                     dead = self._empty(5)
                 _require(dead, 'Private Office job or retained child remained alive')
             except Exception as exc:
                 self.cleanup_errors.append('owned job cleanup: ' + str(exc))
                 try:
+                    self.owned_job_evidence.update(shutdown='forced-private-job-termination', forcedTermination=True)
+                    self.cleanup_errors.append('Forced private job termination cannot qualify as graceful engine exit')
                     self.process.terminate()
                     dead = self._empty(5)
                 except Exception as later:
@@ -227,6 +234,11 @@ class Engine(baseline.Engine):
                 self.witness.close()
             except Exception as exc:
                 self.cleanup_errors.append('retained member handle close: ' + str(exc))
+        if self.process is not None and not self.cleanup_errors:
+            try:
+                _validate_job_evidence(self.suite, self.owned_job_evidence)
+            except Exception as exc:
+                self.cleanup_errors.append('graceful engine exit: ' + str(exc))
 
 
 def _write(path, value, replace=False):
@@ -341,12 +353,13 @@ def _populate(engine, case, document):
     module = case['module']
     if module == 'writer':
         text = document.getText()
-        text.setString('\n'.join(' '.join(markers) for markers in case['pageMarkers']))
+        # Writer's XText.setString splits paragraphs on CR; LF is a line break.
+        text.setString('\r'.join(' '.join(markers) for markers in case['pageMarkers']))
         cursor = text.createTextCursor()
         cursor.gotoEnd(True)
         _font(cursor)
         cursor.gotoStart(False)
-        cursor.gotoNextParagraph(False)
+        _require(cursor.gotoNextParagraph(False), 'Generated Writer fixture lacks the second paragraph')
         cursor.setPropertyValue('BreakType', engine.uno.Enum('com.sun.star.style.BreakType', 'PAGE_BEFORE'))
         style = document.getStyleFamilies().getByName('PageStyles').getByName('Standard')
         for name, value in [('Width', 21000), ('Height', 29700), ('LeftMargin', 2000), ('RightMargin', 2000),
@@ -397,6 +410,18 @@ def _validate_model(case, document):
     module = case['module']
     if module == 'writer':
         text = document.getText().getString()
+        elements = document.getText().createEnumeration()
+        paragraphs = []
+        while elements.hasMoreElements():
+            paragraph = elements.nextElement()
+            _require(paragraph.supportsService('com.sun.star.text.Paragraph'), 'Unexpected generated Writer body object')
+            paragraphs.append(paragraph)
+        _require(len(paragraphs) == case['pageCount'], 'Generated Writer paragraph count differs from deliberate pagination')
+        for index, (paragraph, markers) in enumerate(zip(paragraphs, case['pageMarkers'])):
+            _require(_normal(paragraph.getString()) == _normal(' '.join(markers)), 'Generated Writer paragraph marker order changed')
+            if index:
+                _require(getattr(paragraph.getPropertyValue('BreakType'), 'value', None) == 'PAGE_BEFORE',
+                         'Generated Writer second paragraph lost its page break')
     elif module == 'calc':
         document.calculateAll()
         sheet = document.getSheets().getByIndex(0)
@@ -444,6 +469,11 @@ def run_case(suite, output, case):
         _require(original_url == source.as_uri(), 'Reopened source URL differs from the private fixture')
         options = [('ExportNotesPages', False), ('ExportOnlyNotesPages', False),
                    ('ExportHiddenSlides', False), ('SinglePageSheets', False)]
+        if case['module'] == 'math':
+            # These are Math render options forwarded by the PDF exporter.
+            # FormulaText otherwise prints the source as well as the formula.
+            options.extend([('TitleRow', False), ('FormulaText', False), ('Border', False)])
+        record['pdfRenderOptions'] = dict(options)
         document.storeToURL(path.as_uri(), (
             engine.prop('FilterName', case['filter']), engine.prop('Overwrite', False),
             engine.prop('FilterData', tuple(engine.prop(name, value) for name, value in options)),

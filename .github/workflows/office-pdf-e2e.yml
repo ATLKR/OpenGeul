@@ -68,8 +68,7 @@ jobs:
             .work/suite-pdf-export/
             dist/**/suite-inventory.json
             dist/**/suite-provenance.json
-            dist/**/suite-branding.json
-            dist/**/suite-source-lock.json
+            dist/**/runtime-branding.json
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: error
