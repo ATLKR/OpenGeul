@@ -196,6 +196,24 @@ Calc save failure, repair input loss, or establish a product fix. Portable mocke
 tests establish code contracts; a new Windows execution is required for actual
 behavior evidence.
 
+## Bounded private-job census
+
+The reader accepts only a complete class-3 process list for its own helper job.
+A successful coherent list with fewer returned IDs than assigned IDs, while both
+counts fit the fixed 128-ID buffer, permits at most three immediate read-only
+queries within the original deadline. It never returns partial IDs, grows the
+buffer, sleeps, repeats editor input, or retries an API failure, including
+`ERROR_MORE_DATA`. Every anomalous query group retains its raw return, last error,
+counts, returned byte length, bounded IDs, job handle and times; at most 32 such
+groups are retained before failing closed. Cleanup replay additionally requires
+the final successful complete empty census and the existing native identity,
+normal exit, release acknowledgement, directory witness and handle closures.
+Microsoft's [list structure contract](https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-jobobject_basic_process_id_list)
+defines an incomplete list, but does not identify the cause of the earlier
+failure: that run retained neither header counts nor returned byte length.
+This is a conservative census and diagnostic correction, not evidence of a
+specific process-exit race or a product fix.
+
 ## Pinned source provenance
 
 The Suite runtime lock selects LibreOffice `26.8.1.1`. Official annotated tag

@@ -74,6 +74,7 @@ def cleanup_fixture(binding,suite_root):
     member=copy.deepcopy(raw['readerProcess']);member.update(waitResult=0,exitCode=0)
     value=dict(kind='owned-writer-reader-cleanup',binding=copy.deepcopy(binding),cleanupSucceeded=True,physicalCleanupSucceeded=True,contextQualified=True,
         startedAt=1.0,finishedAt=1.1,deadline=12.0,terminated=False,
+        jobCensusAnomalies=[],lastJobCensus=census_fixture([],at=1.02,sequence=1,phase='release-final'),
         releaseAcknowledgement=dict(action='release',readerPid=99,proxiesReleased=True,
             profileDirectory=copy.deepcopy(raw['nativeSnapshots']['helperBefore']['profileDirectory']),
             observerHandleClosures=[dict(kind=kind,handleValue=value,result=True) for kind,value in [('shell',201),('office',202),('profile-directory',602)]]),
@@ -86,6 +87,26 @@ def cleanup_fixture(binding,suite_root):
     for index,row in enumerate(value['readerMembers']):state_sample_fixture(row,index)
     value.update(state_receipt_fixture(value['readerMembers']))
     return value
+
+
+def census_fixture(pids,*,at=1.0,sequence=None,phase=None):
+    row=dict(attempt=1,startedAt=at,finishedAt=at,result=True,lastError=0,
+        assigned=len(pids),count=len(pids),returnLength=8+8*len(pids),pids=list(pids),classification='complete')
+    value=dict(schemaVersion=1,kind='private-job-process-census',jobHandleValue=401,
+        api='QueryInformationJobObject',informationClass=3,
+        capacity=128,maxAttempts=3,bufferBytes=1032,headerBytes=8,processIdBytes=8,
+        startedAt=at,finishedAt=at,classification='complete',calls=[row])
+    if sequence is not None:value['sequence']=sequence
+    if phase is not None:value['phase']=phase
+    return value
+
+
+def query_census_fixture(job,pids,*,record=None,check=None,at=1.0):
+    if check:check()
+    value=census_fixture(pids,at=at);value['jobHandleValue']=job
+    if record:record(value)
+    if check:check()
+    return list(pids)
 
 
 def state_sample_fixture(row,index):
@@ -137,7 +158,138 @@ class ReaderContracts(unittest.TestCase):
     def setUp(self):
         self.binding=binding_fixture();self.value=observation_fixture(self.binding)
 
-    def _exit_script(self,pairs,*,release=True,job_stays=False,close_ok=True):
+    def test_cleanup_census_replay_rejects_missing_partial_foreign_or_unbounded_final_evidence(self):
+        for change in ('missing','partial','nonempty','job','capacity','used','bool','attempt','time','phase','sequence','anomaly-missing-call','anomaly-count'):
+            with self.subTest(change=change):
+                value=cleanup_fixture(self.binding,'C:/Suite');group=value['lastJobCensus'];row=group['calls'][0]
+                if change=='missing':value.pop('lastJobCensus')
+                elif change=='partial':row.update(assigned=1,classification='incomplete')
+                elif change=='nonempty':row.update(assigned=1,count=1,returnLength=16,pids=[98])
+                elif change=='job':group['jobHandleValue']=999
+                elif change=='capacity':group['capacity']=129
+                elif change=='used':row['returnLength']=7
+                elif change=='bool':row['result']=1
+                elif change=='attempt':row['attempt']=2
+                elif change=='time':row['finishedAt']=13.0
+                elif change=='phase':group['phase']='read-members'
+                elif change=='sequence':group['sequence']=True
+                elif change=='anomaly-missing-call':value['jobCensusAnomalies']=[dict(copy.deepcopy(group),calls=[])]
+                elif change=='anomaly-count':value['jobCensusAnomalies']=[copy.deepcopy(group)]*33
+                with self.assertRaises(AssertionError):self.api.require_reader_cleanup(value,self.binding,12.0)
+
+    def test_reader_census_recorder_retains_recovery_and_original_deadline_without_actions(self):
+        from types import SimpleNamespace
+        api=self.api;checks=[];calls=[]
+        with tempfile.TemporaryDirectory() as directory:
+            reader=api.OwnedWriterReader(Path('C:/Suite'),Path(directory),shell_pid=77,expected_shell_creation=111,
+                suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url=self.binding['documentUrl'],clock=lambda:1.0)
+            reader.deadline=12.0;reader.process=SimpleNamespace(job=401)
+            complete=census_fixture([98,99]);partial=dict(copy.deepcopy(complete['calls'][0]),assigned=3,classification='incomplete')
+            complete['calls']=[partial,dict(complete['calls'][0],attempt=2)]
+            def query(job,*,record,check):
+                calls.append(job);check();record(copy.deepcopy(complete));check();return [98,99]
+            reader.diagnostics=SimpleNamespace(job_pids=query)
+            with patch.object(reader,'_remaining',side_effect=lambda deadline:checks.append(deadline) or 11.0):
+                self.assertEqual(reader._job_pids(phase='read-members'),[98,99])
+            self.assertEqual(checks,[12.0,12.0]);self.assertEqual(calls,[401])
+            self.assertEqual(len(reader.job_census_anomalies),1)
+            self.assertEqual(reader.last_job_census,reader.job_census_anomalies[0])
+            self.assertEqual(reader.last_job_census['sequence'],0)
+            self.assertEqual(reader.last_job_census['phase'],'read-members')
+            self.assertEqual(reader.deadline,12.0)
+
+    def test_anomalous_census_replay_requires_complete_original_calls_and_known_member_pids(self):
+        value=cleanup_fixture(self.binding,'C:/Suite')
+        group=census_fixture([98,99],at=.9,sequence=0,phase='read-members')
+        group['calls']=[dict(copy.deepcopy(group['calls'][0]),assigned=3,classification='incomplete'),
+            dict(group['calls'][0],attempt=2)]
+        value['jobCensusAnomalies']=[group]
+        self.api.require_reader_cleanup(value,self.binding,12.0)
+        for change in ('lost','extra','order','time','foreign','partial-last','api-failed','last-error','schema-bool','duplicate-pid'):
+            with self.subTest(change=change):
+                changed=copy.deepcopy(value);g=changed['jobCensusAnomalies'][0]
+                if change=='lost':g['calls'].pop(0)
+                elif change=='extra':g['calls']*=2
+                elif change=='order':g['calls'].reverse()
+                elif change=='time':g['startedAt']=2.0
+                elif change=='foreign':g['calls'][0]['pids'][0]=777
+                elif change=='partial-last':g['calls'][-1].update(assigned=3,classification='incomplete')
+                elif change=='api-failed':g['calls'][0]['result']=False
+                elif change=='last-error':g['calls'][0]['lastError']=True
+                elif change=='schema-bool':g['schemaVersion']=True
+                elif change=='duplicate-pid':g['calls'][0]['pids']=[98,98]
+                with self.assertRaises(AssertionError):self.api.require_reader_cleanup(changed,self.binding,12.0)
+
+    def test_successful_cleanup_cannot_include_forced_final_census(self):
+        value=cleanup_fixture(self.binding,'C:/Suite')
+        group=census_fixture([98,99],at=1.012,sequence=0,phase='release-members')
+        group['calls']=[dict(copy.deepcopy(group['calls'][0]),assigned=3,classification='incomplete'),
+            dict(group['calls'][0],attempt=2)]
+        value['jobCensusAnomalies']=[group]
+        self.api.require_reader_cleanup(value,self.binding,12.0)
+        group['phase']='forced-final'
+        # Failed cleanup still retains this raw phase; only successful cleanup
+        # acceptance must reject its contradiction with terminated=False.
+        self.api._require_job_census(group,401,12.0)
+        with self.assertRaises(AssertionError):self.api.require_reader_cleanup(value,self.binding,12.0)
+
+    def test_census_anomaly_history_is_bounded_without_overwriting_first_evidence(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            reader=self.api.OwnedWriterReader(Path('C:/Suite'),Path(directory),shell_pid=77,expected_shell_creation=111,
+                suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url=self.binding['documentUrl'],clock=lambda:1.0)
+            reader.deadline=12.0;reader.process=SimpleNamespace(job=401)
+            complete=census_fixture([98,99]);complete['calls']=[dict(copy.deepcopy(complete['calls'][0]),assigned=3,classification='incomplete'),dict(complete['calls'][0],attempt=2)]
+            def query(job,*,record,check):check();record(copy.deepcopy(complete));check();return [98,99]
+            reader.diagnostics=SimpleNamespace(job_pids=query)
+            for _ in range(32):reader._job_pids(phase='read-members')
+            original=copy.deepcopy(reader.job_census_anomalies)
+            with self.assertRaisesRegex(AssertionError,'anomaly bound'):reader._job_pids(phase='read-members')
+            self.assertEqual(reader.job_census_anomalies,original)
+            self.assertEqual(len(reader.job_census_anomalies),32)
+
+    def test_census_anomaly_bound_preserves_failed_33rd_native_call_and_first_failure(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            reader=self.api.OwnedWriterReader(Path('C:/Suite'),Path(directory),shell_pid=77,expected_shell_creation=111,
+                suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url=self.binding['documentUrl'],clock=lambda:1.0)
+            reader.deadline=12.0;reader.process=SimpleNamespace(job=401)
+            complete=census_fixture([98,99]);complete['calls']=[dict(copy.deepcopy(complete['calls'][0]),assigned=3,classification='incomplete'),dict(complete['calls'][0],attempt=2)]
+            def recovered(job,*,record,check):check();record(copy.deepcopy(complete));check();return [98,99]
+            reader.diagnostics=SimpleNamespace(job_pids=recovered)
+            for _ in range(32):reader._job_pids(phase='read-members')
+            original=copy.deepcopy(reader.job_census_anomalies)
+            native=self.api._worker_native();diagnostics=object.__new__(native.ProcessDiagnosticsApi)
+            def denied(job,info,output,size,used):
+                output._obj.assigned=3;output._obj.count=2
+                output._obj.pids[0]=98;output._obj.pids[1]=99;used._obj.value=24
+                return False
+            diagnostics.query_job=denied;reader.diagnostics=diagnostics
+            with patch.object(native.time,'monotonic',lambda:1.0),patch.object(native.ctypes,'get_last_error',lambda:5,create=True):
+                with self.assertRaises(RuntimeError) as raised:reader._job_pids(phase='read-members')
+            self.assertEqual(raised.exception.winerror,5)
+            latest=raised.exception.job_census
+            self.assertEqual(latest['calls'][0]['lastError'],5)
+            self.assertEqual(latest['calls'][0]['classification'],'api-error')
+            self.assertEqual(latest['recordingError']['type'],'AssertionError')
+            self.assertIn('anomaly bound',latest['recordingError']['message'])
+            self.assertEqual(reader.job_census_anomalies,original)
+            reader._record_failure(raised.exception)
+            self.assertEqual(reader.first_error['jobCensusError'],latest)
+            self.assertEqual(reader.first_error['winerror'],5)
+            self.assertEqual(len(reader.first_error['jobCensusAnomalies']),32)
+
+    def test_primary_census_failure_retains_structured_calls_before_any_forced_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reader=self.api.OwnedWriterReader(Path('C:/Suite'),Path(directory),shell_pid=77,expected_shell_creation=111,
+                suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url=self.binding['documentUrl'])
+            error=RuntimeError('finite census failure');error.job_census=dict(census_fixture([98]),classification='failed')
+            reader._record_failure(error)
+            self.assertEqual(reader.first_error['jobCensusError'],error.job_census)
+            self.assertTrue(reader.failed);self.assertFalse(reader.forced)
+            self.assertEqual(json.loads((Path(directory)/'failure.json').read_text())['jobCensusError'],error.job_census)
+
+    def _exit_script(self,pairs,*,release=True,job_stays=False,close_ok=True,census_partial=0):
         """Actual controller/RPC/typed diagnostics, with only Windows DLL/file peers faked."""
         from types import SimpleNamespace
         api=self.api;binding=binding_fixture();fixture=cleanup_fixture(binding,'C:/Suite')
@@ -160,7 +312,20 @@ class ReaderContracts(unittest.TestCase):
             IsProcessInJob=Function(membership),WaitForSingleObject=Function(wait),GetExitCodeProcess=Function(get_exit))
         native=api._worker_native()
         with patch.object(native,'windows_dll',lambda name:dll):diagnostics=native.ProcessDiagnosticsApi()
-        diagnostics.job_pids=lambda job: [r['pid'] for r in members] if job_stays or any(current.get(r['handleValue'],(258,259))[0]==258 for r in members) else []
+        if census_partial:
+            census_calls=[0]
+            def query(job,info,output,size,used):
+                census_calls[0]+=1;events.append(('native-census',census_calls[0]))
+                pids=[r['pid'] for r in members] if job_stays or any(current.get(r['handleValue'],(258,259))[0]==258 for r in members) else []
+                output._obj.assigned=len(pids)
+                if census_calls[0]<=census_partial:pids=pids[:2]
+                output._obj.count=len(pids)
+                for index,pid in enumerate(pids):output._obj.pids[index]=pid
+                used._obj.value=8+8*len(pids);last[0]=0;return True
+            diagnostics.query_job=query
+        else:
+            diagnostics.job_pids=lambda job,**kwargs:query_census_fixture(job,
+                [r['pid'] for r in members] if job_stays or any(current.get(r['handleValue'],(258,259))[0]==258 for r in members) else [],at=clock[0],**kwargs)
         self.assertEqual(diagnostics.wait_for.argtypes,[native.wt.HANDLE,native.wt.DWORD])
         self.assertEqual(diagnostics.get_exit.restype,native.wt.BOOL)
         class Job:
@@ -183,12 +348,32 @@ class ReaderContracts(unittest.TestCase):
                 ack=dict(fixture['releaseAcknowledgement'],ok=True,sequence=value['sequence'])
                 original(path.parent/f"reply-{value['sequence']:03d}.json",ack)
         def sleep(seconds):clock[0]+=seconds
-        with patch.object(api,'_atomic_json',atomic),patch.object(api.time,'sleep',sleep),patch.object(api,'_clear_last_error',lambda:last.__setitem__(0,0)),patch.object(api,'_last_error',lambda:last[0]),patch.object(api.ctypes,'WinError',lambda code:OSError(code,'fake native API failure'),create=True):
+        with patch.object(api,'_atomic_json',atomic),patch.object(api.time,'sleep',sleep),patch.object(native.time,'monotonic',lambda:clock[0]),patch.object(api,'_clear_last_error',lambda:last.__setitem__(0,0)),patch.object(api,'_last_error',lambda:last[0]),patch.object(api.ctypes,'get_last_error',lambda:last[0],create=True),patch.object(api.ctypes,'WinError',lambda code:OSError(code,'fake native API failure'),create=True):
             if release:result=reader.close(12.0)
             else:
                 try:reader._member_snapshots();result=None
                 except BaseException as exc:result=exc
         return result,reader,events
+
+    def test_actual_native_census_recovery_preserves_normal_owned_reader_cleanup(self):
+        cleanup,reader,events=self._exit_script([(0,0)],census_partial=1)
+        self.assertTrue(cleanup['cleanupSucceeded'],cleanup['errors'])
+        self.assertNotIn('terminate-owned-job',events)
+        self.assertEqual(len(cleanup['jobCensusAnomalies']),1)
+        self.assertEqual([row['classification'] for row in cleanup['jobCensusAnomalies'][0]['calls']],['incomplete','complete'])
+        self.assertEqual(cleanup['lastJobCensus']['calls'][-1]['pids'],[])
+        self.api.require_reader_cleanup(cleanup,self.binding,12.0)
+
+    def test_actual_native_census_exhaustion_keeps_raw_first_failure_and_owned_only_forced_cleanup(self):
+        cleanup,reader,events=self._exit_script([(0,0)],census_partial=3)
+        self.assertFalse(cleanup['cleanupSucceeded']);self.assertTrue(cleanup['terminated'])
+        self.assertIn('terminate-owned-job',events)
+        first=cleanup['errors'][0]['jobCensus']
+        self.assertEqual(first['jobHandleValue'],401)
+        self.assertEqual(len(first['calls']),3)
+        self.assertEqual([row['classification'] for row in first['calls']],['incomplete']*3)
+        self.assertIsNone(cleanup['nativeAfter']);self.assertIsNone(cleanup['systemConsoleHostRecheck'])
+        with self.assertRaises(AssertionError):self.api.require_reader_cleanup(cleanup,self.binding,12.0)
 
     def test_release_transition_needs_fresh_signaled_zero_for_all_same_handles(self):
         cleanup,reader,events=self._exit_script([(258,0),(0,0)])
@@ -261,6 +446,7 @@ class ReaderContracts(unittest.TestCase):
             row=copy.deepcopy(value['readerMembers'][index%2]);state_sample_fixture(row,index)
             rows.append(row)
         value['readerMembers']=rows[-2:];value.update(self.api._member_samples_receipt(rows));value['finishedAt']=6.0
+        value['lastJobCensus']=census_fixture([],at=5.2,sequence=4096,phase='release-final')
         self.api.require_reader_cleanup(value,self.binding,12.0)
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'bounded.json';self.api._atomic_json(path,value)
@@ -470,7 +656,7 @@ class RuntimeBoundaryContracts(unittest.TestCase):
             def close(self):
                 self.close_handle(self.handle);self.close_handle(self.job);self.handle=self.job=None
         class Diagnostics:
-            def job_pids(self,job):return [98,99] if active else []
+            def job_pids(self,job,**kwargs):return query_census_fixture(job,[98,99] if active else [],**kwargs)
             def open_owned(self,pid,job):events.append(('open-private-member',pid,job));return pid+300
             def identity(self,handle):return dict(image='C:/Suite/Office/program/'+('python.exe' if handle==398 else 'python-core-3.13.15/bin/python.exe'),creationTime=handle)
             def is_in_job(self,handle,job,result):result._obj.value=True;return True
@@ -770,7 +956,7 @@ class ConstructorAndAncillaryEvidenceContracts(unittest.TestCase):
             base={k:v for k,v in binding.items() if k not in ('frameIdentity','controllerIdentity','modelIdentity','documentUrl')}
             reader.anchor=SimpleNamespace(base=base,snapshot=lambda:copy.deepcopy(cleanup['nativeBefore']),close=lambda:[r for r in cleanup['handleClosures'] if r['kind'] in ('shell','office','profile-directory')])
             reader.console=SimpleNamespace(witness=cleanup['systemConsoleHost'],recheck=lambda:copy.deepcopy(cleanup['systemConsoleHostRecheck']),close=lambda:dict(kind='system-console-file',handleValue=501,result=True))
-            reader.diagnostics=SimpleNamespace(job_pids=lambda job:[],close_handle=lambda handle:True)
+            reader.diagnostics=SimpleNamespace(job_pids=lambda job,**kwargs:query_census_fixture(job,[],**kwargs),close_handle=lambda handle:True)
             reader.members={r['pid']:(r['handleValue'],dict(image=r['image'],creationTime=r['creationTime'])) for r in members}
             for row in members:
                 row['sampleStartedAt']=row['sampleFinishedAt']=1.0
@@ -1161,7 +1347,7 @@ class ExplicitOwnedModelContracts(unittest.TestCase):
             def terminate(self):raise AssertionError('Normal Calc observer must never be terminated')
             def close(self):self.close_handle(self.handle);self.close_handle(self.job);self.handle=self.job=None
         class Diagnostics:
-            def job_pids(self,job):return [98,99] if active else []
+            def job_pids(self,job,**kwargs):return query_census_fixture(job,[98,99] if active else [],**kwargs)
             def open_owned(self,pid,job):return pid+300
             def identity(self,handle):return dict(image='C:/Suite/Office/program/'+('python.exe' if handle==398 else 'python-core-3.13.15/bin/python.exe'),creationTime=handle)
             def is_in_job(self,handle,job,result):result._obj.value=True;return True

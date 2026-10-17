@@ -25,6 +25,8 @@ from urllib.parse import unquote, urlsplit
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_BODY_BYTES = 1024 * 1024
 MAX_MEMBER_STATE_SAMPLES = 4096
+MAX_JOB_CENSUS_ANOMALIES = 32
+MAX_JOB_CENSUS_GROUPS = 8192
 PROFILE_DIRECTORY_ACCESS = 0x80  # FILE_READ_ATTRIBUTES
 PROFILE_DIRECTORY_SHARE = 1 | 2 | 4  # FILE_SHARE_READ | WRITE | DELETE
 PROFILE_DIRECTORY_FLAGS = 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
@@ -360,6 +362,61 @@ def require_owned_model_observation(observation,binding,suite_root,*,expected_se
     return _require_owned_observation(observation,binding,suite_root,_model_contract(expected_service,getter_contract))
 
 
+def _require_job_census(group,job,deadline):
+    """Pure replay of complete, bounded raw class-3 calls; never accept partial IDs."""
+    assert isinstance(group,dict) and type(group.get('schemaVersion')) is int and group['schemaVersion']==1
+    assert group.get('kind')=='private-job-process-census'
+    assert group.get('api')=='QueryInformationJobObject' and type(group.get('informationClass')) is int and group['informationClass']==3
+    for key,expected in (('jobHandleValue',job),('capacity',128),('maxAttempts',3),
+                         ('bufferBytes',1032),('headerBytes',8),('processIdBytes',8)):
+        assert type(group.get(key)) is int and group[key]==expected
+    assert type(group.get('sequence')) is int and 0<=group['sequence']<MAX_JOB_CENSUS_GROUPS
+    assert group.get('phase') in ('read-members','release-members','release-final','forced-final')
+    assert group.get('classification')=='complete' and 'error' not in group
+    started=_finite(group.get('startedAt'));finished=_finite(group.get('finishedAt'))
+    assert started<=finished<=deadline
+    calls=group.get('calls');assert isinstance(calls,list) and 1<=len(calls)<=3
+    previous=started
+    for index,row in enumerate(calls,1):
+        assert isinstance(row,dict) and type(row.get('attempt')) is int and row['attempt']==index
+        assert row.get('result') is True
+        assert type(row.get('lastError')) is int and 0<=row['lastError']<=0xffffffff
+        for key in ('assigned','count','returnLength'):assert type(row.get(key)) is int
+        assert 0<=row['count']<=row['assigned']<=128
+        assert 8+8*row['count']<=row['returnLength']<=1032
+        pids=row.get('pids');assert isinstance(pids,list) and len(pids)==row['count']
+        assert all(type(pid) is int and 0<pid<=0xffffffff for pid in pids) and len(set(pids))==len(pids)
+        assert previous<=_finite(row.get('startedAt'))<=_finite(row.get('finishedAt'))<=finished
+        previous=row['finishedAt']
+        if index<len(calls):
+            assert row['count']<row['assigned'] and row.get('classification')=='incomplete'
+        else:assert row['count']==row['assigned'] and row.get('classification')=='complete'
+    return group
+
+
+def _require_cleanup_censuses(cleanup,job,members,deadline):
+    final=_require_job_census(cleanup.get('lastJobCensus'),job,deadline)
+    assert final['phase']=='release-final' and final['calls'][-1]['pids']==[]
+    assert final['startedAt']>=max(row['sampleFinishedAt'] for row in members)
+    assert cleanup['startedAt']<=final['startedAt']<=final['finishedAt']<=cleanup['finishedAt']
+    anomalies=cleanup.get('jobCensusAnomalies')
+    assert isinstance(anomalies,list) and len(anomalies)<=MAX_JOB_CENSUS_ANOMALIES
+    previous_sequence=-1;previous_finish=0;known={row['pid'] for row in members}
+    for group in anomalies:
+        _require_job_census(group,job,deadline)
+        assert group['phase']!='forced-final', 'Successful cleanup contains a forced helper-job census'
+        assert len(group['calls'])>=2, 'Anomalous census lost its original incomplete call'
+        assert previous_sequence<group['sequence']<=final['sequence']
+        assert previous_finish<=group['startedAt']
+        previous_sequence=group['sequence'];previous_finish=group['finishedAt']
+        if group['phase']=='read-members':assert group['finishedAt']<=cleanup['startedAt']
+        else:assert group['startedAt']>=cleanup['startedAt']
+        assert all(set(row['pids'])<=known for row in group['calls']), 'Census contains an unobserved helper member'
+        if group['sequence']==final['sequence']:assert group==final
+        else:assert group['finishedAt']<=final['startedAt']
+    if len(final['calls'])>=2:assert final in anomalies, 'Resolved final census lost incomplete-call history'
+
+
 def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRACT):
     """Replay final helper quiescence separately from every still-retained read."""
     assert isinstance(cleanup,dict) and cleanup.get('kind')==contract.cleanup_kind
@@ -421,6 +478,7 @@ def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRA
     assert _path(cleanup['helperLaunch']['steps'][1]['application'])==_path(_join(root,'Office/program/python.exe'))
     assert launch_pid in {r['pid'] for r in members}
     assert all(r['jobHandleValue']==job for r in members)
+    _require_cleanup_censuses(cleanup,job,members,deadline)
     closures=cleanup.get('handleClosures')
     assert isinstance(closures,list) and all(r.get('result') is True for r in closures)
     expected={('profile-directory',cleanup['nativeAfter']['profileDirectory']['witness']['handleValue']),('system-console-file',console['handleValue']),('job',job),('shell',cleanup['nativeAfter']['shell']['handleValue']),('office',cleanup['nativeAfter']['office']['handleValue'])}
@@ -915,6 +973,7 @@ class OwnedWriterReader:
         self.suite=Path(suite);self.output=Path(output);self.clock=clock;self.binding=None
         self.deadline=None;self.anchor=None;self.process=None;self.diagnostics=None;self.members={}
         self.member_state_samples=[]
+        self.job_census_anomalies=[];self.last_job_census=None;self.job_census_sequence=0
         self.sequence=0;self.closed=False;self.failed=False;self.last_observation=None;self.first_error=None;self.forced=False;self.auxiliary_errors=[];self.attempted_observation=None;self.helper_launch=None;self.console=None
 
     def _remaining(self,deadline):
@@ -925,8 +984,22 @@ class OwnedWriterReader:
         if remaining<=0:raise TimeoutError('Original Writer reader absolute deadline expired')
         return remaining
 
+    def _census_receipt(self):
+        return dict(jobCensusAnomalies=list(self.job_census_anomalies),lastJobCensus=self.last_job_census)
+
+    def _job_pids(self,*,phase):
+        assert self.job_census_sequence<MAX_JOB_CENSUS_GROUPS, 'Reader job census group bound exceeded'
+        sequence=self.job_census_sequence;self.job_census_sequence+=1
+        def record(group):
+            value=dict(group,sequence=sequence,phase=phase)
+            if group['classification']=='complete':self.last_job_census=value
+            if len(group['calls'])>1 or group['classification']!='complete':
+                assert len(self.job_census_anomalies)<MAX_JOB_CENSUS_ANOMALIES, 'Reader job census anomaly bound exceeded'
+                self.job_census_anomalies.append(value)
+        return self.diagnostics.job_pids(self.process.job,record=record,check=lambda:self._remaining(self.deadline))
+
     def _member_snapshots(self,*,releasing=False):
-        for pid in self.diagnostics.job_pids(self.process.job):
+        for pid in self._job_pids(phase='release-members' if releasing else 'read-members'):
             assert pid not in (self.config['shell_pid'],self.config['office_pid']), 'Editor unexpectedly belongs to observation job'
             if pid not in self.members:
                 handle=self.diagnostics.open_owned(pid,self.process.job)
@@ -1008,6 +1081,7 @@ class OwnedWriterReader:
             self.first_error=dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None),traceback=traceback.format_exc(),
                 attemptedObservation=self.attempted_observation,nativeSnapshot=getattr(self.anchor,'last_snapshot',getattr(exc,'native_snapshot',None)),
                 **_member_samples_receipt(self.member_state_samples),
+                **self._census_receipt(),jobCensusError=getattr(exc,'job_census',None),
                 nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None),systemConsoleDiagnostic=getattr(exc,'system_console_diagnostic',None),
                 systemConsoleClosure=getattr(exc,'system_console_closure',None),helperLaunch=self.helper_launch or getattr(exc,'helper_launch',None))
             try:
@@ -1053,7 +1127,7 @@ class OwnedWriterReader:
         cleanup=dict(kind=self._contract.cleanup_kind,binding=self.binding,cleanupSucceeded=False,startedAt=self.clock(),deadline=deadline,
             terminated=self.forced,helperLaunch=self.helper_launch,releaseAcknowledgement=None,readerMembers=[],finalJobPids=None,jobHandleValue=int(self.process.job) if self.process else 0,
             nativeBefore=None,nativeAfter=None,systemConsoleHost=self.console.witness if self.console else None,systemConsoleHostRecheck=None,handleClosures=[],errors=list(self.auxiliary_errors))
-        def error(exc):cleanup['errors'].append(dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None)))
+        def error(exc):cleanup['errors'].append(dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None),jobCensus=getattr(exc,'job_census',None)))
         try:
             self._remaining(deadline)
             assert not self.forced, 'Reader job required forced cleanup'
@@ -1062,7 +1136,7 @@ class OwnedWriterReader:
                 ack=self._rpc('release',deadline);cleanup['releaseAcknowledgement']=dict(action='release',readerPid=ack['readerPid'],proxiesReleased=ack['proxiesReleased'],profileDirectory=ack.get('profileDirectory'),observerHandleClosures=ack.get('observerHandleClosures'))
                 while True:
                     remaining=self._remaining(deadline)
-                    rows=self._member_snapshots(releasing=True);pids=self.diagnostics.job_pids(self.process.job)
+                    rows=self._member_snapshots(releasing=True);pids=self._job_pids(phase='release-final')
                     if rows and not pids and all(r['waitResult']==0 for r in rows):
                         cleanup.update(readerMembers=rows,finalJobPids=pids);break
                     time.sleep(min(.01,remaining))
@@ -1075,7 +1149,7 @@ class OwnedWriterReader:
                     # Only this private helper job is terminated. Never the engine.
                     if not self.forced:self.process.terminate();self.forced=True
                     cleanup['terminated']=self.forced
-                    cleanup['readerMembers']=self._member_snapshots(releasing=True);cleanup['finalJobPids']=self.diagnostics.job_pids(self.process.job)
+                    cleanup['readerMembers']=self._member_snapshots(releasing=True);cleanup['finalJobPids']=self._job_pids(phase='forced-final')
                 except BaseException as later:error(later)
         finally:
             for pid,(handle,identity) in self.members.items():
@@ -1098,6 +1172,7 @@ class OwnedWriterReader:
                 except BaseException as exc:error(exc)
             self.closed=True
             cleanup.update(_member_samples_receipt(self.member_state_samples))
+            cleanup.update(self._census_receipt())
             cleanup['finishedAt']=self.clock()
             cleanup['cleanupSucceeded']=not cleanup['errors'] and not cleanup['terminated'] and cleanup['finishedAt']<=deadline
             if cleanup['cleanupSucceeded']:

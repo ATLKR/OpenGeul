@@ -23,6 +23,7 @@ SCANS = dict(zip('qwertyuiopasdfghjklzxcvbnm',
      0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
      0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32)))
 SCANS.update(zip('1234567890- ', (*range(2, 12), 0x0c, 0x39)))
+SCANS.update({':': 0x27})  # Literal IME scaffold punctuation: Shift + US semicolon.
 MODIFIERS = (0x10, 0x11, 0x12, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x14)
 
 
@@ -52,7 +53,7 @@ def ascii_actions(text):
     for index, char in enumerate(text):
         if char.lower() not in SCANS or not char.isascii():
             raise ValueError('Unsupported ASCII editor character: ' + repr(char))
-        scans = ([0x2a] if char.isupper() else []) + [SCANS[char.lower()]]
+        scans = ([0x2a] if char.isupper() or char == ':' else []) + [SCANS[char.lower()]]
         events = [{'vk': 0, 'scan': scan, 'flags': 8} for scan in scans]
         events += [{'vk': 0, 'scan': scan, 'flags': 10} for scan in reversed(scans)]
         result.append({'index': index, 'character': char, 'events': events})

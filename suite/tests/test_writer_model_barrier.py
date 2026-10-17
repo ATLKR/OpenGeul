@@ -37,6 +37,7 @@ def retime_native_cleanup_fixture(cleanup):
         row['membershipCall']['observedAt']=at
         for call in row['stateCalls']:call['observedAt']=at
     cleanup.update(reader_fixtures.state_receipt_fixture(cleanup['readerMembers']))
+    cleanup['lastJobCensus']=reader_fixtures.census_fixture([],at=at,sequence=1,phase='release-final')
 
 
 def synthetic_frame(suite, baseline):

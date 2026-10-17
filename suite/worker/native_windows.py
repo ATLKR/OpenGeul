@@ -9,6 +9,7 @@ from ctypes import wintypes as wt
 import os
 from pathlib import Path
 import subprocess
+import time
 
 from session import WorkerError
 
@@ -68,6 +69,12 @@ class ProcessInfo(ctypes.Structure):
                 ('dwProcessId', wt.DWORD), ('dwThreadId', wt.DWORD)]
 
 
+class JobCensusError(RuntimeError):
+    def __init__(self, message, *, winerror=None):
+        super().__init__(message)
+        self.winerror = winerror
+
+
 class ProcessDiagnosticsApi:
     """Queries only the supplied private job, with read-only process handles."""
     def __init__(self):
@@ -83,16 +90,68 @@ class ProcessDiagnosticsApi:
         self.wait_for = bind(kernel, 'WaitForSingleObject', [wt.HANDLE, wt.DWORD], wt.DWORD)
         self.close_handle = bind(kernel, 'CloseHandle', [wt.HANDLE], wt.BOOL)
 
-    def job_pids(self, job):
-        # The explicit finite capacity avoids unbounded enumeration/allocation.
+    def job_pids(self, job, *, record=None, check=None):
+        # A partial list is never ownership evidence. Only coherent in-capacity
+        # successful reads can be queried again, at most three times. This is a
+        # conservative census policy, not an assertion about a past race.
         class Pids(ctypes.Structure):
-            _fields_ = [('assigned', wt.DWORD), ('count', wt.DWORD), ('pids', ctypes.c_size_t * 128)]
-        result, used = Pids(), wt.DWORD()
-        if not self.query_job(job, 3, ctypes.byref(result), ctypes.sizeof(result), ctypes.byref(used)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        if result.count > 128 or result.assigned > result.count:
-            raise RuntimeError('Private job process list exceeded diagnostic capacity')
-        return [int(result.pids[i]) for i in range(result.count)]
+            # Windows DWORD is explicitly 32 bits, also in portable DLL seams.
+            _fields_ = [('assigned', ctypes.c_uint32), ('count', ctypes.c_uint32),
+                        ('pids', ctypes.c_size_t * 128)]
+        group = dict(schemaVersion=1, kind='private-job-process-census',
+            api='QueryInformationJobObject', informationClass=3,
+            jobHandleValue=int(job), capacity=128, maxAttempts=3,
+            bufferBytes=ctypes.sizeof(Pids), headerBytes=Pids.pids.offset,
+            processIdBytes=ctypes.sizeof(ctypes.c_size_t), startedAt=time.monotonic(),
+            finishedAt=None, classification='failed', calls=[])
+        emitted = False
+        try:
+            for attempt in range(1, 4):
+                if check:check()
+                result, used = Pids(), wt.DWORD()
+                started = time.monotonic()
+                succeeded = bool(self.query_job(job, 3, ctypes.byref(result),
+                    ctypes.sizeof(result), ctypes.byref(used)))
+                error = int(ctypes.get_last_error())  # Capture before any other native call.
+                row = dict(attempt=attempt, startedAt=started, finishedAt=time.monotonic(),
+                    result=succeeded, lastError=error, assigned=int(result.assigned),
+                    count=int(result.count), returnLength=int(used.value),
+                    pids=[int(result.pids[i]) for i in range(min(int(result.count), 128))],
+                    classification='api-error')
+                group['calls'].append(row)
+                if succeeded:
+                    if result.count > 128 or result.assigned > 128:
+                        row['classification']='capacity-exceeded'
+                    elif result.count > result.assigned or not (
+                            Pids.pids.offset + result.count * ctypes.sizeof(ctypes.c_size_t)
+                            <= used.value <= ctypes.sizeof(result)):
+                        row['classification']='invalid-header'
+                    else:
+                        row['classification']='complete' if result.assigned == result.count else 'incomplete'
+                if check:check()
+                if not succeeded:
+                    # Failure output is retained diagnostically, never trusted,
+                    # including ERROR_MORE_DATA (234).
+                    raise JobCensusError('Private job census API failed', winerror=error)
+                if row['classification'] in ('capacity-exceeded', 'invalid-header'):
+                    raise JobCensusError('Private job census '+row['classification'])
+                if row['classification']=='complete':
+                    group.update(classification='complete', finishedAt=time.monotonic())
+                    if record:
+                        emitted=True;record(group)
+                    return list(row['pids'])
+            raise JobCensusError('Private job census remained incomplete after three bounded reads')
+        except BaseException as exc:
+            group.update(classification='failed', finishedAt=time.monotonic(),
+                error=dict(type=type(exc).__name__, message=str(exc), winerror=getattr(exc,'winerror',None)))
+            exc.job_census=group
+            if record and not emitted:
+                try:record(group)
+                except BaseException as later:
+                    # Preserve the original failure and its current raw calls
+                    # even when the bounded history cannot accept another group.
+                    group['recordingError']=dict(type=type(later).__name__[:128],message=str(later)[:1024])
+            raise
 
     def open_owned(self, pid, job):
         handle = self.open_process(0x00100000 | 0x1000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION

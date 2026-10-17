@@ -23,7 +23,7 @@ import uuid
 
 from windows_smoke import (Windows, INPUT_CASES, capture_failure, close_document,
     close_home, collect_cases, launch_suite, package_text, require_engine_fixture,
-    stop_owned_test_process, verified_attachment, wait_for, write_result)
+    stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input)
 from engine_smoke import verify_content
 
 EXPECTED_KEYS = list('gksrmf') + ['BACKSPACE', 'f', 'RIGHT']
@@ -76,11 +76,30 @@ def activate_after_ascii_prefix(observer, module, record, send_ascii):
     observer.require_target()
     layout = int(observer.api.user.GetKeyboardLayout(observer.tid) or 0)
     assert layout & 0xffff == 0x0409, 'ASCII setup requires the verified original English input layout'
+    assert not record.get('asciiEditorInputs'), 'IME ASCII setup requires one fresh counted input receipt'
     prefix = ' ' + marker(module).split('한글')[0]
     send_ascii(prefix)
     record.update(asciiPrefix=prefix, prefixInputLayout=layout,
                   stage='activate-microsoft-korean-profile')
+    require_ascii_prefix(record)
     return observer.command(1)
+
+
+def require_ascii_prefix(record):
+    """Replay the one physical setup receipt before allowing Korean activation."""
+    expected = ' ' + marker(record['module']).split('한글')[0]
+    assert record.get('asciiPrefix') == expected and record.get('prefixInputLayout') == ascii_input.US_LAYOUT, 'IME ASCII setup requires its exact prefix on the original US layout'
+    receipts = record.get('asciiEditorInputs')
+    assert isinstance(receipts, list) and len(receipts) == 1, 'IME ASCII setup requires exactly one counted physical receipt'
+    for key in ('windowHwnd', 'childHwnd', 'keyboardFocusHwnd', 'editorTid'):
+        assert type(record.get(key)) is int and record[key] > 0, 'IME ASCII setup has no owned editor identity'
+    receipt = ascii_input.require_ascii_receipt(receipts[0], expected, record['windowHwnd'], record['childHwnd'])
+    assert receipt.get('pauseSeconds') == 0.04, 'IME ASCII setup must retain its original character pacing'
+    for action in receipt['actions']:
+        for side in ('before', 'after'):
+            snapshot = action[side]
+            assert snapshot['focusHwnd'] == record['keyboardFocusHwnd'] and snapshot['editorThreadId'] == record['editorTid'], 'IME ASCII setup differs from the observed editor focus/thread'
+    return receipt
 
 
 def validate_restoration(receipt):
@@ -98,6 +117,7 @@ def validate_restoration(receipt):
 
 
 def validate_ime_evidence(record):
+    require_ascii_prefix(record)
     profile = require_readiness(record.get('readiness', {}))['profile']
     active = record.get('activeProfile', {})
     assert active.get('activeLanguage') == 0x0412 and active.get('activeClsid', '').lower() == profile['providerClsid'].lower() and active.get('activeProfile', '').lower() == profile['profileGuid'].lower(), 'Captured active TSF profile differs from the signed Microsoft readiness profile'
@@ -552,7 +572,7 @@ def case(suite, fixtures, output, readiness, module, extension):
         observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'])
         record.update(editorTid=observer.tid, keyboardFocusHwnd=focus)
         active = activate_after_ascii_prefix(observer, module, record,
-            lambda prefix: send_keys(prefix, with_spaces=True, pause=0.04, vk_packet=False))
+            lambda prefix: ascii_input.type_ascii(api, hwnd, child, prefix, record, pause=0.04))
         wait_for(lambda: int(api.user.GetKeyboardLayout(observer.tid) or 0) & 0xffff == 0x0412, 10)
         profile = readiness['profile']
         assert active['activeLanguage'] == 0x0412 and active['activeClsid'].lower() == profile['providerClsid'].lower() and active['activeProfile'].lower() == profile['profileGuid'].lower(), 'Focused editor TSF profile differs from the attested Microsoft IME'

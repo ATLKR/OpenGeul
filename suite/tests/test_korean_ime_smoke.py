@@ -1,21 +1,49 @@
 """Evidence policy tests for genuine native Korean composition, independent of Windows."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 SOURCE = Path(__file__).resolve().parents[1] / 'e2e' / 'korean_ime_smoke.py'
 sys.path.insert(0, str(SOURCE.parent))
 SPEC = importlib.util.spec_from_file_location('suite_korean_ime_smoke', SOURCE)
 ime = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ime)
+from windows_smoke import ascii_input
 
 
 class KoreanImePolicyTests(unittest.TestCase):
+    def ascii_receipt(self, module='writer'):
+        # Independent producer-shaped fixture: exact physical US key events,
+        # including the literal colon's explicit Shift+semicolon pair.
+        scans = {' ': 0x39, 'i': 0x17, 'm': 0x32, 'e': 0x12, '-': 0x0c,
+                 'o': 0x18, 'p': 0x19, 'n': 0x31, 'g': 0x22, 'u': 0x16,
+                 'l': 0x26, 'w': 0x11, 'r': 0x13, 't': 0x14, 'c': 0x2e,
+                 'a': 0x1e, 's': 0x1f, ':': 0x27}
+        prefix = ' ime-opengeul-' + module + ':'
+        snapshot = {'foregroundVerified': True, 'editorFocusVerified': True,
+                    'focusHwnd': 51, 'editorThreadId': 41, 'targetLayout': 0x04090409,
+                    'currentThreadLayout': 0x04090409, 'keysDown': [], 'capsLockOn': False}
+        actions = []
+        for index, char in enumerate(prefix):
+            physical = ([0x2a] if char == ':' else []) + [scans[char]]
+            events = ([{'vk': 0, 'scan': scan, 'flags': 8} for scan in physical]
+                      + [{'vk': 0, 'scan': scan, 'flags': 10} for scan in reversed(physical)])
+            actions.append({'index': index, 'character': char, 'events': events,
+                'bufferHex': bytes(ascii_input.input_buffer(events)).hex(),
+                'requested': len(events), 'inserted': len(events),
+                'before': copy.deepcopy(snapshot), 'after': copy.deepcopy(snapshot)})
+        return {'schemaVersion': 1, 'success': True, 'text': prefix,
+                'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False,
+                'documentHwnd': 11, 'childHwnd': 22, 'inputSize': 40,
+                'pauseSeconds': 0.04, 'actions': actions}
+
     def test_cpp_discovery_failure_preserves_original_output_and_bounded_failure_receipt(self):
         failures = [subprocess.TimeoutExpired('vswhere.exe', 60, output=b'original stdout\n', stderr=b'original stderr\n'),
                     subprocess.CompletedProcess(['vswhere.exe'], 2, 'original stdout\n', 'original stderr\n')]
@@ -62,7 +90,8 @@ class KoreanImePolicyTests(unittest.TestCase):
                                     ('그', ''), ('글', ''), ('그', ''), ('글', ''), ('', '글')]:
             events.append({'message': 0x10f, 'pid': 31, 'tid': 41, 'hwnd': 51,
                            'layout': 0x0412, 'composition': composition, 'result': result})
-        return {'module': 'writer', 'officePid': 31, 'editorTid': 41, 'keyboardFocusHwnd': 51,
+        return {'module': 'writer', 'windowHwnd': 11, 'childHwnd': 22,
+                'officePid': 31, 'editorTid': 41, 'keyboardFocusHwnd': 51,
                 'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False,
                 'keyTokens': list('gksrmf') + ['BACKSPACE', 'f', 'RIGHT'],
                 'activeLayout': 0x0412, 'events': events,
@@ -73,6 +102,7 @@ class KoreanImePolicyTests(unittest.TestCase):
                 'savedText': 'Engine-OpenGeul-writer 한글\nime-opengeul-writer:한글',
                 'reopened': {'text': 'Engine-OpenGeul-writer 한글\nime-opengeul-writer:한글'},
                 'asciiPrefix': ' ime-opengeul-writer:', 'prefixInputLayout': 0x04090409,
+                'asciiEditorInputs': [self.ascii_receipt()],
                 'layoutRestored': True, 'restoration': self.restoration()}
 
     def test_real_dubeolsik_commit_backspace_save_and_reopen_satisfy_policy(self):
@@ -81,22 +111,152 @@ class KoreanImePolicyTests(unittest.TestCase):
         self.assertTrue(result['backspaceCompositionVerified'])
 
     def test_ascii_scaffold_precedes_korean_activation_on_verified_original_english_layout(self):
-        from types import SimpleNamespace
         for layout in (0x04090409, 0x04120412):
-            calls, record = [], {}
+            calls = []
+            record = {key: value for key, value in self.record().items()
+                      if key in ('module', 'windowHwnd', 'childHwnd', 'editorTid', 'keyboardFocusHwnd')}
             observer = SimpleNamespace(tid=41,
                 api=SimpleNamespace(user=SimpleNamespace(GetKeyboardLayout=lambda tid: layout)),
                 require_target=lambda: calls.append('owned-focus'),
                 command=lambda value: calls.append(('command', value)) or {'command': value})
+            def counted_ascii(text):
+                calls.append(('ascii', text))
+                record['asciiEditorInputs'] = [self.ascii_receipt()]
             if layout & 0xffff == 0x0409:
-                result = ime.activate_after_ascii_prefix(observer, 'writer', record, lambda text: calls.append(('ascii', text)))
+                result = ime.activate_after_ascii_prefix(observer, 'writer', record, counted_ascii)
                 self.assertEqual(calls, ['owned-focus', ('ascii', ' ime-opengeul-writer:'), ('command', 1)])
                 self.assertEqual(result, {'command': 1})
                 self.assertEqual(record['prefixInputLayout'], layout)
+                self.assertEqual(len(record['asciiEditorInputs']), 1)
             else:
                 with self.assertRaises(AssertionError):
-                    ime.activate_after_ascii_prefix(observer, 'writer', record, lambda text: calls.append(('ascii', text)))
+                    ime.activate_after_ascii_prefix(observer, 'writer', record, counted_ascii)
                 self.assertEqual(calls, ['owned-focus'])
+
+    def test_missing_counted_prefix_cannot_activate_korean_even_when_callback_returns(self):
+        calls, record = [], {key: value for key, value in self.record().items()
+            if key in ('module', 'windowHwnd', 'childHwnd', 'editorTid', 'keyboardFocusHwnd')}
+        observer = SimpleNamespace(tid=41,
+            api=SimpleNamespace(user=SimpleNamespace(GetKeyboardLayout=lambda tid: 0x04090409)),
+            require_target=lambda: calls.append('owned-focus'),
+            command=lambda value: calls.append(('command', value)))
+        with self.assertRaises(AssertionError):
+            ime.activate_after_ascii_prefix(observer, 'writer', record,
+                lambda text: calls.append(('ascii', text)))
+        self.assertEqual(calls, ['owned-focus', ('ascii', ' ime-opengeul-writer:')])
+
+    def test_one_mandatory_physical_prefix_receipt_rejects_missing_duplicate_counts_and_buffers(self):
+        changes = [lambda r: r.pop('asciiEditorInputs'),
+                   lambda r: r.update(asciiEditorInputs=[]),
+                   lambda r: r['asciiEditorInputs'].append(copy.deepcopy(r['asciiEditorInputs'][0])),
+                   lambda r: r['asciiEditorInputs'][0].update(text=' me-opengeul-writer:'),
+                   lambda r: r['asciiEditorInputs'][0].update(pauseSeconds=0.025),
+                   lambda r: r['asciiEditorInputs'][0].update(documentHwnd=99),
+                   lambda r: r['asciiEditorInputs'][0].update(childHwnd=99),
+                   lambda r: r['asciiEditorInputs'][0]['actions'][0].update(inserted=0),
+                   lambda r: r['asciiEditorInputs'][0]['actions'][0].update(bufferHex='00'),
+                   lambda r: r['asciiEditorInputs'][0]['actions'][-1]['events'].pop(0)]
+        for change in changes:
+            record = self.record()
+            change(record)
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                ime.validate_ime_evidence(record)
+
+    def test_prefix_receipt_must_match_observed_editor_focus_thread_and_neutral_us_state(self):
+        changes = [lambda r: r['asciiEditorInputs'][0]['actions'][0]['before'].update(focusHwnd=99),
+                   lambda r: r['asciiEditorInputs'][0]['actions'][0]['before'].update(editorFocusVerified=False),
+                   lambda r: [a[side].update(editorThreadId=99) for a in r['asciiEditorInputs'][0]['actions'] for side in ('before', 'after')],
+                   lambda r: r['asciiEditorInputs'][0]['actions'][0]['before'].update(keysDown=[0x10]),
+                   lambda r: r['asciiEditorInputs'][0]['actions'][0]['after'].update(capsLockOn=True),
+                   lambda r: r['asciiEditorInputs'][0]['actions'][0]['before'].update(targetLayout=0x04120412),
+                   lambda r: r['asciiEditorInputs'][0]['actions'][0]['before'].update(currentThreadLayout=0x04120412)]
+        for change in changes:
+            record = self.record()
+            change(record)
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                ime.validate_ime_evidence(record)
+
+    def test_preexisting_or_malformed_receipt_cannot_authorize_korean_activation(self):
+        for preexisting in (True, False):
+            record, commands = self.record(), []
+            if not preexisting:
+                record.pop('asciiEditorInputs')
+            observer = SimpleNamespace(tid=41,
+                api=SimpleNamespace(user=SimpleNamespace(GetKeyboardLayout=lambda tid: 0x04090409)),
+                require_target=lambda: None, command=lambda value: commands.append(value))
+            def callback(text):
+                record['asciiEditorInputs'] = [self.ascii_receipt()]
+                record['asciiEditorInputs'][0]['actions'][0]['inserted'] = 0
+            with self.subTest(preexisting=preexisting), self.assertRaises(AssertionError):
+                ime.activate_after_ascii_prefix(observer, 'writer', record, callback)
+            self.assertEqual(commands, [])
+
+    def test_case_routes_only_original_prefix_once_through_physical_producer_before_activation(self):
+        class ProbeDone(Exception):
+            pass
+        for module, extension in ime.INPUT_CASES:
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                original = root / ('OpenGeul-' + module + '.' + extension)
+                original.write_bytes(b'unchanged original fixture')
+                calls, sent = [], []
+                user = SimpleNamespace(GetKeyboardLayout=lambda tid: 0x04090409,
+                    GetAsyncKeyState=lambda key: 0, GetKeyState=lambda key: 0,
+                    GetWindowThreadProcessId=lambda hwnd, pointer: 41,
+                    GetForegroundWindow=lambda: 11, GetAncestor=lambda hwnd, kind: 11,
+                    SendInput=lambda count, payload, size: sent.append((count, bytes(payload), size)) or count)
+                api = SimpleNamespace(user=user, require_foreground=lambda hwnd: None,
+                    require_editor_focus=lambda hwnd, child: 51, pid=lambda hwnd: 31)
+                window = SimpleNamespace(maximize=lambda: None, set_focus=lambda: None, click_input=lambda: None)
+                desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: window))
+                process = SimpleNamespace(pid=77)
+                def command(value):
+                    calls.append(('activation', value))
+                    raise ProbeDone()
+                observer = SimpleNamespace(api=api, tid=41, activation_attempted=False, focus=51,
+                    require_target=lambda: None, command=command, events=lambda: [], commands=[], close=lambda: None)
+                real_type_ascii = ascii_input.type_ascii
+                def physical(*args, **kw):
+                    calls.append(('physical', args[3], kw['pause']))
+                    return real_type_ascii(*args, **kw)
+                send_keys = unittest.mock.Mock()
+                with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
+                        'pywinauto.keyboard': SimpleNamespace(send_keys=send_keys)}), \
+                        patch.object(ime, 'require_engine_fixture', return_value=original), \
+                        patch.object(ime, 'launch_suite', return_value=process), \
+                        patch.object(ime, 'Windows', return_value=api), \
+                        patch.object(ime, 'verified_attachment', return_value=(11, 12, 22, 31)), \
+                        patch.object(ime, 'CompositionObserver', return_value=observer), \
+                        patch.object(ascii_input, 'type_ascii', side_effect=physical) as typed, \
+                        patch.object(ascii_input.time, 'sleep'), patch.object(ime, 'capture_failure'), \
+                        patch.object(ime, 'stop_owned_test_process'), patch.object(ime, 'write_result') as written:
+                    with self.assertRaises(ProbeDone):
+                        ime.case(root, root, root, self.readiness(), module, extension)
+                self.assertEqual(calls, [('physical', ' ime-opengeul-' + module + ':', 0.04), ('activation', 1)])
+                self.assertEqual(typed.call_count, 1)
+                self.assertGreater(len(sent), 0)
+                self.assertNotIn(' ime-opengeul-' + module + ':', [call.args[0] for call in send_keys.call_args_list])
+                record = written.call_args.args[2]
+                self.assertEqual(len(record['asciiEditorInputs']), 1)
+                ascii_input.require_ascii_receipt(record['asciiEditorInputs'][0], record['asciiPrefix'], 11, 22)
+
+    def test_ime_fresh_import_loads_exact_ascii_helper_without_uno_or_native_calls(self):
+        script = '''import ctypes,json,pathlib,sys
+from unittest.mock import patch
+sys.path.insert(0,sys.argv[1])
+with patch.object(ctypes,'WinDLL',create=True,side_effect=AssertionError('native call during import')):
+    import korean_ime_smoke as ime
+    import windows_smoke as native
+    assert 'uno' not in sys.modules and 'pyuno' not in sys.modules
+    assert ime.ascii_input is native.ascii_input
+    print(json.dumps({'ime':ime.__file__,'ascii':ime.ascii_input.__file__}))
+'''
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', script, str(SOURCE.parent)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(Path(receipt['ime']).resolve(), SOURCE.resolve())
+        self.assertEqual(Path(receipt['ascii']).resolve(), SOURCE.with_name('ascii_editor_input.py').resolve())
 
     def test_missing_or_non_english_ascii_setup_receipt_cannot_pass(self):
         for patch in ({'asciiPrefix': ''}, {'prefixInputLayout': 0x04120412}, {'prefixInputLayout': 0}):
@@ -150,6 +310,7 @@ class KoreanImePolicyTests(unittest.TestCase):
     def test_calc_reopen_must_preserve_formula_and_original_marker(self):
         record = self.record()
         record.update(module='calc', asciiPrefix=' ime-opengeul-calc:', savedText=record['savedText'].replace('writer', 'calc'))
+        record['asciiEditorInputs'] = [self.ascii_receipt('calc')]
         record['reopened'] = {'text': record['savedText'], 'formula': '=SUM(B1:C1)', 'value': 42}
         self.assertTrue(ime.validate_ime_evidence(record)['imeVerified'])
         record['reopened']['value'] = 0

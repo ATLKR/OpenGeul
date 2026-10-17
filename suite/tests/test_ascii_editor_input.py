@@ -1,6 +1,7 @@
 """Physical ASCII input: exact case, Win64 ABI, preconditions and fail-closed delivery."""
 import copy
 import ctypes
+import hashlib
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -85,6 +86,47 @@ class AsciiEditorInputTests(unittest.TestCase):
         actions = keyboard.ascii_actions('1234567890- ')
         self.assertEqual([row['events'][0]['scan'] for row in actions], list(range(2, 12)) + [12, 57])
         self.assertTrue(all(len(row['events']) == 2 for row in actions))
+
+    def test_colon_brackets_the_us_semicolon_scan_with_explicit_shift(self):
+        try:
+            actions = keyboard.ascii_actions(':')
+        except ValueError as exc:
+            self.fail('The literal IME scaffold colon needs a counted physical plan: ' + str(exc))
+        self.assertEqual(actions, [{'index': 0, 'character': ':', 'events': [
+            {'vk': 0, 'scan': 0x2a, 'flags': 8},
+            {'vk': 0, 'scan': 0x27, 'flags': 8},
+            {'vk': 0, 'scan': 0x27, 'flags': 10},
+            {'vk': 0, 'scan': 0x2a, 'flags': 10}]}])
+        api, receipt, sleep = self.inject(':', pause=0.04)
+        self.assertEqual([sent[0] for sent in api.sent], [4])
+        self.assertEqual(receipt['actions'][0]['bufferHex'], bytes(keyboard.input_buffer(actions[0]['events'])).hex())
+        self.assertEqual(sleep.call_args_list, [((0.04,),)])
+        keyboard.require_ascii_receipt(receipt, ':', 11, 22)
+
+    def test_three_exact_ime_scaffolds_keep_spaces_colon_and_original_pacing(self):
+        for module in ('writer', 'calc', 'impress'):
+            prefix = ' ime-opengeul-' + module + ':'
+            with self.subTest(module=module):
+                try:
+                    api, receipt, sleep = self.inject(prefix, pause=0.04)
+                except ValueError as exc:
+                    self.fail('The full literal IME scaffold must have counted physical input: ' + str(exc))
+                self.assertEqual(''.join(action['character'] for action in receipt['actions']), prefix)
+                self.assertEqual([sent[0] for sent in api.sent], [2] * (len(prefix) - 1) + [4])
+                self.assertEqual(sleep.call_args_list, [((0.04,),)] * len(prefix))
+                keyboard.require_ascii_receipt(receipt, prefix, 11, 22)
+
+    def test_partial_colon_only_releases_inserted_shift_and_never_retypes(self):
+        api, record = FakeWindows(counts=(1, 1)), {}
+        try:
+            with patch.object(keyboard.time, 'sleep'), self.assertRaisesRegex(AssertionError, 'inserted 1 of 4'):
+                keyboard.type_ascii(api, 11, 22, ':', record, pause=0.04)
+        except ValueError as exc:
+            self.fail('Colon needs a physical plan before partial insertion can be bounded: ' + str(exc))
+        self.assertEqual([sent[0] for sent in api.sent], [4, 1])
+        self.assertEqual(record['asciiEditorInputs'][0]['success'], False)
+        self.assertEqual(record['asciiEditorInputs'][0]['actions'][0]['cleanup']['events'],
+                         [{'vk': 0, 'scan': 0x2a, 'flags': 10}])
 
     def test_rejects_unicode_key_syntax_newlines_empty_and_unbounded_input_before_any_event(self):
         for text in ('한글', 'x\n', '{F6}', '+', '', 'a' * 257):
@@ -219,6 +261,32 @@ def load_sibling(name):
 
 
 class AsciiEditorIntegrationTests(unittest.TestCase):
+    def test_all_thirteen_existing_marker_input_buffers_match_frozen_bb926_bytes(self):
+        # Native Win64 INPUT bytes captured from the parent bb926 source before
+        # adding colon. These hashes include every original character buffer.
+        expected = {
+            'UI-OpenGeul-writer': '3111fad0223e4161e27c60b1329a732a21b44cda3e512fd6cdb443f898923713',
+            'UI-OpenGeul-calc': '75fc5e031c5c94c7668af31f450aacab40420dc6f570a44fcc21bd1daffba8e9',
+            'UI-OpenGeul-impress': 'd7a1657742d4ea0258026e96522220cb9ca08c30b44f09dcfeeacc24eba59e55',
+            '-LIFECYCLE-CANCEL-SAVE-': '9f83db4733f7564a0dc640fb72e0626cf228fc494b760a598b51e51cd520f252',
+            '-AFTER-CANCEL-': '1c544a62877ccea93d35758f687a9772932d76b94b33b071a6d594115eb419eb',
+            '-LIFECYCLE-DISCARD-': 'fc45bcef836b7a230fa2b6d9b4b12bf1da0910ef2608c497e0150c19f5b0f02d',
+            '-LIFECYCLE-NEW-': '6c0f89c2df497f58e3d561d1c00fe97f76063856455a957f215a386e33be3cb6',
+            '-AFTER-PICKER-CANCEL-': '784893741d052cfad898d9479e6456cf127687908d1e64bd2cd6f462c82827e9',
+            '-FAILED-SAVEAS-DIRTY-': '0edf0cef14f1c209405262e07a6dcc0fd7d4de357dc5359bf6d84bee74d0322f',
+            '-AFTER-SAVEAS-ERROR-': 'dab73e281689f486bda6013b1036d8fb4df0093f108f6f07b94d1f7bbcd8b86d',
+            '-HOME-CANCEL-DIRTY-': '31cb8f3878be617e2a4818621f35789c8218c853d7b8b7ab115c0686aaaee982',
+            '-REMAINDER-EDIT-': '91c4a03d1871d4fd391837d102b8c890ef0ef5c05faefc0a44d418fe03a51185',
+            '-AFTER-RESIZE-MINIMIZE-RESTORE-': '8c087d270c4efb7cf07a47e314946e4bdd5ff1726fa91edba0bb47ef1db6e04a'}
+        lifecycle, native = load_sibling('lifecycle_smoke'), load_sibling('windows_smoke')
+        markers = list(native.EDITOR_MARKERS.values()) + [
+            marker for group in lifecycle.ASCII_EDITOR_MARKERS.values() for marker in group]
+        self.assertEqual(set(markers), set(expected))
+        for marker in markers:
+            with self.subTest(marker=marker):
+                raw = b''.join(bytes(keyboard.input_buffer(row['events'])) for row in keyboard.ascii_actions(marker))
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), expected[marker])
+
     def test_lifecycle_keeps_navigation_and_dirty_check_but_routes_only_marker_to_physical_ascii(self):
         lifecycle = load_sibling('lifecycle_smoke')
         self.assertTrue(hasattr(lifecycle.native, 'ascii_input'), 'Lifecycle lacks physical ASCII sibling helper')
