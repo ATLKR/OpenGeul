@@ -13,9 +13,6 @@ from pathlib import PurePosixPath, PureWindowsPath
 import re
 import traceback
 
-from writer_style_smoke import validate_python_observation
-
-
 OPERATIONS = ['resolve-existing-owned-frame', 'Text.getString', 'isModified', 'verify-retained-generation']
 MAX_READS = 120
 MAX_SECONDS = 12.0
@@ -49,6 +46,7 @@ def _text(value):
 
 def require_python_identity(identity, suite_root, inventory, inventory_sha256):
     """Recompute all seven roles from explicit trusted inventory, without I/O."""
+    from writer_style_smoke import validate_python_observation
     root = _path(str(suite_root))
     assert isinstance(inventory_sha256, str) and re.fullmatch('[a-f0-9]{64}', inventory_sha256)
     assert isinstance(identity, dict) and type(identity.get('schemaVersion')) is int and identity['schemaVersion'] == 1 and identity.get('verified') is True
