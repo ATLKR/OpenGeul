@@ -25,6 +25,16 @@ It leaves atomics, assembly, database formats and protocol numbers unchanged.
 The only inline x86 assembly found in the pinned source is legacy Win9x code,
 guarded by `WIN9X_SUPPORT`; no speculative assembly replacement is included.
 
+The same ARM64-only patch selects Firebird's existing `_controlfp` path for
+the three Windows floating-point save/mask/restore guards, as newer upstream
+Firebird does for ARM64. Microsoft restricts `__control87_2` to x86; its UCRT
+header declares that function only under `_M_IX86`. The x64 and i386 branches,
+control masks, calls and ordering remain unchanged. The source test compiles
+the real header after all 25 authenticated LibreOffice Windows patches against
+declaration-only Microsoft API visibility fixtures. It proves source selection
+and syntax; actual Windows compiler, floating-point runtime behavior and Base
+persistence still require the native build and qualification gates.
+
 Run the build on actual Windows ARM64 and verify the native host before using
 these options in `autogen.input`:
 

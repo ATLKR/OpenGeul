@@ -22,3 +22,32 @@
  #define FB_CPU CpuAmd
  #else
  #ifndef I386
+--- src/common/classes/FpeControl.h
++++ src/common/classes/FpeControl.h
+@@ -86,7 +86,7 @@
+ 	{
+ 		_clearfp(); // always call _clearfp() before setting control word
+ 
+-#ifdef AMD64
++#if defined(AMD64) || defined(ARM64)
+ 		_controlfp(_CW_DEFAULT, _MCW_EM);
+ #else
+ 		Mask cw;
+@@ -105,7 +105,7 @@
+ 
+ 	static void getCurrentMask(Mask& m) throw()
+ 	{
+-#ifdef AMD64
++#if defined(AMD64) || defined(ARM64)
+ 		m = _controlfp(0, 0);
+ #else
+ 		__control87_2(0, 0, &m, NULL);
+@@ -116,7 +116,7 @@
+ 	{
+ 		_clearfp(); // always call _clearfp() before setting control word
+ 
+-#ifdef AMD64
++#if defined(AMD64) || defined(ARM64)
+ 		_controlfp(savedMask, _MCW_EM); // restore saved
+ #else
+ 		Mask cw;

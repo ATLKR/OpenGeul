@@ -73,6 +73,7 @@ class AuthenticatedSource(unittest.TestCase):
         if actual != SOURCE_SHA:
             raise AssertionError('Firebird source archive differs from the pinned SHA256')
         cls.compiler = shutil.which('cc') or shutil.which('gcc')
+        cls.cxx = shutil.which('c++') or shutil.which('g++')
         if not cls.compiler or not shutil.which('patch'):
             if cls.required:
                 raise AssertionError('Mandatory C compiler/preprocessor or GNU patch is missing')
@@ -133,6 +134,59 @@ class AuthenticatedSource(unittest.TestCase):
                 result = self.compile_cpu(root, architecture)
                 self.assertEqual(result.returncode, 0, architecture + ': ' + result.stderr)
 
+    def compile_fpe(self, root, architecture):
+        if not self.cxx:
+            if self.required:self.fail('Mandatory C++ compiler for actual FpeControl source check is missing')
+            self.skipTest('A C++ compiler is required for the FpeControl source check')
+        include=root/'test-api';include.mkdir(exist_ok=True)
+        # Declaration-only surface from Microsoft's official UCRT float.h:
+        # microsoft/win32metadata/generation/WinSDK/RecompiledIdlHeaders/ucrt/float.h
+        # SHA256 54277b70e18bf90ab6573b12ee37334ec3d7a43afca360529e37337f1ac5c6ba.
+        # The authoritative header guards __control87_2 with _M_IX86; this
+        # fixture supplies no implementation and claims no Windows ABI/runtime.
+        (include/'float.h').write_text(
+            '#define _MCW_EM 0x0008001f\n'
+            '#if defined(_M_IX86)\n#define _CW_DEFAULT 0x0009001f\n'
+            '#else\n#define _CW_DEFAULT 0x0008001f\n#endif\n'
+            'extern "C" unsigned int _clearfp(void);\n'
+            'extern "C" unsigned int _controlfp(unsigned int, unsigned int);\n'
+            'extern "C" int _fpclass(double);\nextern "C" int _finite(double);\n'
+            'extern "C" int _isnan(double);\n#define _FPCLASS_NINF 0x0004\n'
+            '#ifdef _M_IX86\n'
+            'extern "C" int __control87_2(unsigned int, unsigned int, unsigned int*, unsigned int*);\n'
+            '#endif\n')
+        # Avoid importing the host Linux math declarations into the Windows
+        # source check. The required Microsoft math names above are declarations.
+        (include/'math.h').write_text('#pragma once\n')
+        macros={'arm64':'#define _M_ARM64 1\n','x64':'#define _M_AMD64 1\n#define _M_X64 1\n',
+                'x86':'#define _M_IX86 1\n'}
+        text=('#include <cstddef>\n#define _MSC_VER 1940\n'+macros[architecture]+
+              '#include "'+str(root/'builds/make.new/config/config.h.in')+'"\n'+
+              '#include "'+str(root/'src/common/classes/FpeControl.h')+'"\n'+
+              'void exercise_source() { Firebird::FpeControl state; Firebird::FpeControl::maskAll(); }\n')
+        return subprocess.run([self.cxx,'-std=c++11','-x','c++','-fsyntax-only','-I'+str(include),'-'],
+                              input=text,text=True,capture_output=True)
+
+    def test_real_fpe_source_rejects_x86_only_api_on_arm64_then_preserves_x64_i386(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.source_tree(folder)
+            original=(root/'src/common/classes/FpeControl.h').read_bytes()
+            self.assertEqual(hashlib.sha256(original).hexdigest(),
+                             'ebc4c409cf9f69d04375310c83e72f1e13792f16c79b33360a5ae916d9acaa80')
+            failed=self.compile_fpe(root,'arm64')
+            self.assertNotEqual(failed.returncode,0,'Original ARM64 FPE defect no longer reproduces')
+            self.assertIn('__control87_2',failed.stderr)
+            for architecture in ('x64','x86'):
+                before=self.compile_fpe(root,architecture)
+                self.assertEqual(before.returncode,0,architecture+': '+before.stderr)
+            self.apply(root,PORT/'firebird-windows-arm64.patch')
+            self.assertEqual((root/'src/common/classes/FpeControl.h').read_bytes(),
+                             original.replace(b'#ifdef AMD64\n',b'#if defined(AMD64) || defined(ARM64)\n'),
+                             'Floating-point masks, calls, order or non-ARM branches changed')
+            for architecture in ('arm64','x64','x86'):
+                after=self.compile_fpe(root,architecture)
+                self.assertEqual(after.returncode,0,architecture+': '+after.stderr)
+
     def test_explicit_enable_flag_is_not_overwritten_by_arm64_defaults(self):
         autoconf = shutil.which('autoconf')
         if not autoconf:
@@ -191,6 +245,10 @@ class AuthenticatedSource(unittest.TestCase):
             changed = target.read_text()
             self.assertTrue(changed.startswith(original.decode()))
             self.assertIn('ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)', changed)
+            self.assertGreater(changed.index('external/firebird/firebird-windows-arm64.patch'),
+                               changed.index('external/firebird/firebird-cygwin-msvc-warnings.patch'))
+            self.assertEqual(receipt['portPatchSha256'],
+                             hashlib.sha256((PORT/'firebird-windows-arm64.patch').read_bytes()).hexdigest())
             self.assertFalse('        enable_coinmp=no\n        enable_firebird_sdbc=no\n' in configure.read_text(), 'ARM64 Firebird is still forcibly disabled')
             self.assertEqual(receipt['status'], 'source-hook-installed-native-build-pending')
             self.assertEqual((target.parent / 'firebird-windows-arm64.patch').read_bytes(),
