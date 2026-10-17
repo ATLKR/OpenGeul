@@ -30,7 +30,7 @@ function Assert-SuitePlainPath([string]$Path) {
     $check=[IO.Path]::GetFullPath($Path)
     while ($check) {
         if ((Test-Path -LiteralPath $check) -and
-            ((Get-Item -LiteralPath $check).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            ((Get-Item -LiteralPath $check -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw 'Suite prerequisite path contains a reparse point.'
         }
         $check=[IO.Path]::GetDirectoryName($check)

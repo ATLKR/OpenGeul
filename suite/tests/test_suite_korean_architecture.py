@@ -174,4 +174,32 @@ foreach($failureMode in @('cleanup','receipt','none')) {
 }
 ''')
 
+    def test_hidden_windows_ancestor_is_inspected_with_force_and_reparse_still_rejected(self):
+        self.run_gate('''
+$root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+$script:hiddenAncestor=Join-Path $root 'AppData';$nested=Join-Path $script:hiddenAncestor 'nested'
+[void][IO.Directory]::CreateDirectory($nested)
+$source=Join-Path $nested 'source.log';[IO.File]::WriteAllText($source,'original')
+$attributes=[IO.File]::GetAttributes($script:hiddenAncestor)
+if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){[IO.File]::SetAttributes($script:hiddenAncestor,($attributes -bor [IO.FileAttributes]::Hidden))}
+$script:observedHiddenForce=$false;$script:simulateReparse=$false
+function Get-Item {
+    param([string]$LiteralPath,[switch]$Force)
+    if($LiteralPath -ceq $script:hiddenAncestor) {
+        if(-not $Force){throw 'Could not find ordinary hidden AppData ancestor without Force'}
+        $script:observedHiddenForce=$true
+        if($script:simulateReparse){return [pscustomobject]@{Attributes=([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::ReparsePoint)}}
+    }
+    Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath -Force:$Force
+}
+try {
+    Assert-SuitePlainPath $source
+    if(-not $script:observedHiddenForce){throw 'Hidden ancestor was not inspected with Force'}
+    $script:simulateReparse=$true;$rejected=$false
+    try{Assert-SuitePlainPath $source}catch{if($_.Exception.Message -notlike '*reparse point*'){throw};$rejected=$true}
+    if(-not $rejected){throw 'Hidden reparse ancestor accepted'}
+    if([IO.File]::ReadAllText($source) -cne 'original'){throw 'Path inspection changed original bytes'}
+}finally{[IO.File]::SetAttributes($script:hiddenAncestor,$attributes);Remove-Item -LiteralPath $root -Recurse -Force}
+''')
+
 if __name__ == '__main__': unittest.main()
