@@ -6,6 +6,9 @@ from pathlib import Path
 import sys
 import unittest
 
+# Existing shared test fixtures use top-level imports under discovery; include
+# their exact directory for explicit suite.tests.* invocation as well.
+sys.path.insert(0,str(Path(__file__).resolve().parent))
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
 from test_calc_model_barrier import workbook
 

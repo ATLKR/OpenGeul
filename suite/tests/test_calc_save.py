@@ -60,9 +60,10 @@ class CalcSaveTests(unittest.TestCase):
             if name.endswith('FilterFactory'): return NS(getByName=lambda name:(NS(Name='Flags',Value=3),))
             self.fail('Unexpected service ' + name)
         self.context = NS(ServiceManager=NS(createInstanceWithContext=create))
-        from urllib.parse import unquote, urlsplit
+        from urllib.parse import urlsplit
+        from urllib import request
         self.uno = NS(createUnoStruct=lambda n:NS(),
-            fileUrlToSystemPath=lambda url: unquote(urlsplit(url).path))
+            fileUrlToSystemPath=lambda url: request.url2pathname(urlsplit(url).path))
         self.desktop=NS(getFrames=lambda:NS(getCount=lambda:1,getByIndex=lambda i:self.frame))
         self.frame.getCreator=lambda:self.desktop
         self.backend = NS(desktop=self.desktop,document=self.document, frame=self.frame, peer=self.peer, context=self.context,
@@ -77,6 +78,13 @@ class CalcSaveTests(unittest.TestCase):
         return self.api.CalcSaveTransaction(self.backend, {'xlsx':self.filter,'ods':'calc8'}, self.path, 123, 456)
 
     def executed(self): return [c for c in self.calls if c[0]=='execute']
+
+    def test_fake_uno_decoder_uses_native_windows_drive_url_conversion(self):
+        import nturl2path
+        from urllib import request
+        url='file:///D:/OpenGeul%20case/%ED%95%9C%EA%B8%80.xlsx'
+        with patch.object(request,'url2pathname',nturl2path.url2pathname):
+            self.assertEqual('D:\\OpenGeul case\\한글.xlsx',self.uno.fileUrlToSystemPath(url))
 
     def test_backend_calc_save_routes_to_transaction_without_store(self):
         native=importlib.import_module('native'); backend=native.UnoBackend(Path(self.temp.name))
