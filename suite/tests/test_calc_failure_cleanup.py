@@ -45,7 +45,7 @@ class CalcFailureCleanupTests(unittest.TestCase):
         for p in (patch.object(lifecycle_smoke,'BoundHwpProcess',Bound),
                   patch.object(lifecycle_smoke,'process_identity',side_effect=identity),
                   patch.dict(sys.modules,{'pywinauto':NS(Desktop=self.Desktop)}),
-                  patch.object(lifecycle_smoke,'require_dialog_button_ancestry',return_value=None),
+                  patch.object(lifecycle_smoke,'require_dialog_button_ancestry',return_value=[{'controlType':'Button','nativeHandle':1},{'controlType':'Window'}]),
                   patch.object(lifecycle_smoke,'dialog_uia_identity',return_value={'pid':7}),
                   patch('windows_smoke.wait_for',side_effect=lambda check,seconds=60:check() or (_ for _ in ()).throw(AssertionError('not ready')))):
             p.start();self.addCleanup(p.stop)

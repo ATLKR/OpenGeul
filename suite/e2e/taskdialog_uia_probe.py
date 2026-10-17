@@ -85,6 +85,25 @@ def stable_pair(rows,*,deadline):
     return None
 
 
+def observe_calc_client_selector(api,accessible,pid,dialog,evidence,*,selector=None):
+    """Exercise the product E2E selector without invoking any returned button."""
+    evidence['selectorVerified']=False
+    try:
+        if not __debug__:raise RuntimeError('Shared selector observation requires Python assertions enabled')
+        if selector is None:
+            from generated_calc_close import require_calc_prompt_buttons
+            selector=require_calc_prompt_buttons
+        buttons=selector(api,accessible,pid,dialog,evidence)
+        if buttons is None:return False
+        names=[button.element_info.name for button in buttons]
+        assert sorted(names)==sorted(('저장','저장하지 않음','취소')), 'Shared selector returned incomplete or unexpected client choices'
+        evidence.update(selectorVerified=True,clientButtonNames=names)
+        return True
+    except Exception as exc:
+        evidence['observerError']=type(exc).__name__+': '+str(exc)
+        raise
+
+
 class Native:
     def __init__(self):
         self.user=ctypes.WinDLL('user32',use_last_error=True)
@@ -151,13 +170,16 @@ class Native:
 
 def observe(binding_path):
     binding=json.loads(binding_path.read_bytes());out=binding_path.parent;api=Native();handle=None
-    report=dict(schemaVersion=1,kind='owned-stub-taskdialog-uia-shape',source=binding['source'],observed=False,
+    report=dict(schemaVersion=1,kind='owned-stub-taskdialog-uia-shape',source=binding['source'],observed=False,clientSelectorVerified=False,
         productCloseQualified=False,selectionPerformed=False,startedAt=binding['startedAt'],deadline=binding['deadline'],samples=[])
     ready=[]
     try:
+        from pywinauto import Desktop
         from pywinauto.uia_defines import IUIA
         from PIL import ImageGrab
+        from windows_smoke import Windows
         uia=IUIA().iuia
+        selector_api=Windows()
         handle=api.open(0x1000|0x100000,False,binding['pid'])
         if not handle:raise ctypes.WinError(ctypes.get_last_error())
         expected=binding['identity']
@@ -216,18 +238,32 @@ def observe(binding_path):
                 if not 0<=count<=256:raise RuntimeError('Owned UIA tree exceeds finite control bound')
                 for index in range(count):sample['controls'].append(element(found.GetElement(index)))
             except Exception as exc:errors.append(dict(operation='raw-UIA-census',type=type(exc).__name__,message=str(exc)[:1024]))
+            check_binding=dict(pid=binding['pid'],creationTime=expected['creationTime'],ownerHwnd=owner_hwnd)
+            selector_verified=False
+            raw_at=time.monotonic()
+            if raw_at<=binding['deadline'] and sample_ready(sample,check_binding):
+                if 'firstReadyAt' not in report:
+                    report['firstReadyAt']=raw_at
+                    write_json(out/'first-ready.json',dict(at=raw_at,sample=sample))
+                    ImageGrab.grab(bbox=tuple(dialog['rect'])).save(out/'first-ready.png')
+                sample['clientSelector']={}
+                try:
+                    owned()
+                    accessible=Desktop(backend='uia').window(handle=hwnd).wrapper_object()
+                    selector_verified=observe_calc_client_selector(selector_api,accessible,binding['pid'],hwnd,sample['clientSelector'])
+                    owned()
+                except Exception:
+                    report['samples'].append(dict(at=time.monotonic(),sample=sample))
+                    write_json(out/'observations.json',report)
+                    raise
             owned();stamp=time.monotonic();entry=dict(at=stamp,sample=sample)
             report['samples'].append(entry);write_json(out/'observations.json',report)
-            check_binding=dict(pid=binding['pid'],creationTime=expected['creationTime'],ownerHwnd=owner_hwnd)
-            if stamp<=binding['deadline'] and sample_ready(sample,check_binding):
-                if 'firstReadyAt' not in report:
-                    report['firstReadyAt']=stamp
-                    write_json(out/'first-ready.json',entry)
-                    ImageGrab.grab(bbox=tuple(dialog['rect'])).save(out/'first-ready.png')
+            if stamp<=binding['deadline'] and sample_ready(sample,check_binding) and selector_verified:
+                report.setdefault('firstSelectorReadyAt',stamp)
                 ready.append(entry)
                 if stable_pair(ready,deadline=binding['deadline']):
                     write_json(out/'stable.json',entry);ImageGrab.grab(bbox=tuple(dialog['rect'])).save(out/'stable.png')
-                    report['observed']=True;break
+                    report.update(observed=True,clientSelectorVerified=True);break
             else:ready=[]
             time.sleep(min(.2,max(0,binding['deadline']-time.monotonic())))
         if not report['observed']:raise RuntimeError('No two complete stable owned TaskDialog observations within original20s')
@@ -244,7 +280,7 @@ def controller(output):
     for path in (out,*out.parents):
         if path.is_symlink():raise ValueError('Diagnostic output cannot traverse links')
     out.mkdir(parents=True)
-    record=dict(schemaVersion=1,kind='controlled-winforms-taskdialog-shape-diagnostic',observed=False,
+    record=dict(schemaVersion=1,kind='controlled-winforms-taskdialog-shape-diagnostic',observed=False,clientSelectorVerified=False,
         productCloseQualified=False,selectionPerformed=False,purpose='Observe owned stub UIA shape only',cleanup={})
     stub=worker=None;api=None
     try:
@@ -279,8 +315,9 @@ def controller(output):
             except subprocess.TimeoutExpired:raise RuntimeError('Owned UIA observer exceeded original20s deadline')
         if code!=0:raise RuntimeError('Owned UIA observer failed; inspect original observations and stderr')
         evidence=json.loads((out/'observations.json').read_bytes())
-        if evidence.get('observed') is not True or evidence['finishedAt']>deadline:raise RuntimeError('Stable observation missed original deadline')
-        record['observed']=True
+        if evidence.get('observed') is not True or evidence.get('clientSelectorVerified') is not True or evidence['finishedAt']>deadline:
+            raise RuntimeError('Stable shared-selector observation missed original deadline')
+        record.update(observed=True,clientSelectorVerified=True)
     except Exception as exc:
         record.update(error=type(exc).__name__+': '+str(exc),traceback=traceback.format_exc());raise
     finally:

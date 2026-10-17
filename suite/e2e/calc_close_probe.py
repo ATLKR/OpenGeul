@@ -120,6 +120,12 @@ class CalcCloseCase(lifecycle.Case):
 
     def choose_existing_prompt(self):
         from pywinauto import Desktop
+        from generated_calc_close import require_calc_prompt_buttons
+        deadline=time.monotonic()+20
+        def remaining():
+            seconds=deadline-time.monotonic()
+            assert seconds>0, 'Original Calc choice deadline expired'
+            return seconds
         dialog,accessible=self.dialog(self.hwnd,'OpenGeul Calc')
         expected=BUTTONS[self.choice]
         def observe():
@@ -128,8 +134,12 @@ class CalcCloseCase(lifecycle.Case):
                 owner=self.api.user.GetWindow(dialog,4),document=self.hwnd,title=self.api.title(dialog),
                 expected_title='OpenGeul Calc',class_name=self.api.class_name(dialog),text=labels,
                 expected_text='변경 내용을 저장하시겠습니까?',button=expected,allowed=tuple(BUTTONS.values()))
-            buttons=[item for item in accessible.descendants(control_type='Button')
-                if item.is_visible() and item.is_enabled()]
+            controls={}
+            observations=self.record.setdefault('choicePromptControlObservations',[])
+            if len(observations)<24:observations.append(controls)
+            self.record['lastChoicePromptControls']=controls
+            buttons=require_calc_prompt_buttons(self.api,accessible,self.process.pid,dialog,controls)
+            if buttons is None:return None
             require_three_choices([item.element_info.name for item in buttons])
             selected=[item for item in buttons if item.element_info.name==expected]
             assert len(selected)==1
@@ -137,14 +147,16 @@ class CalcCloseCase(lifecycle.Case):
             lifecycle.require_dialog_button_ancestry(self.api,accessible,selected[0],self.process.pid,dialog,ancestry)
             return selected[0],dict(hwnd=dialog,owner=self.hwnd,pid=self.process.pid,title=self.api.title(dialog),
                 text=labels,buttonNames=[item.element_info.name for item in buttons],choice=expected,
-                uia=lifecycle.dialog_uia_identity(accessible,dialog,self.process.pid),buttonAncestry=ancestry)
-        selected,evidence=observe();self.record['choicePrompt']=evidence
+                uia=lifecycle.dialog_uia_identity(accessible,dialog,self.process.pid),buttonAncestry=ancestry,
+                promptControls=controls)
+        selected,evidence=native.wait_for(observe,remaining());self.record['choicePrompt']=evidence
         self.record['promptVerified']=True
         # Focus changes occur only after the original close has shown its prompt.
         Desktop(backend='win32').window(handle=dialog).wrapper_object().set_focus()
         self.api.require_foreground(dialog)
-        selected,self.record['choicePromptBeforeClick']=observe()
+        selected,self.record['choicePromptBeforeClick']=native.wait_for(observe,remaining())
         self.screenshot(dialog,'choice-'+self.choice)
+        remaining()
         selected.click_input()
         self.record['choiceClickCount']=1
         native.wait_for(lambda:not self.api.user.IsWindow(dialog),20)

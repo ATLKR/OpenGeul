@@ -3,6 +3,7 @@ import copy
 import importlib.util
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
 
 ROOT=Path(__file__).resolve().parents[2]
 SOURCE=ROOT/'suite/e2e/taskdialog_uia_probe.py'
@@ -63,5 +64,40 @@ class TaskDialogProbeTests(unittest.TestCase):
         text=path.read_text();self.assertIn('windows-2025',text);self.assertIn('if: always()',text)
         self.assertIn('pywinauto==0.6.9 Pillow==12.3.0',text)
         self.assertNotIn('build-suite.ps1',text);self.assertNotIn('LibreOffice',text)
+
+    def test_observer_calls_shared_selector_read_only_with_exact_live_binding(self):
+        m=module();api=object();accessible=object();evidence={};calls=[]
+        class Button:
+            def __init__(self,name):self.element_info=SimpleNamespace(name=name)
+            def click_input(self):raise AssertionError('Diagnostic must never choose a button')
+        def selector(*args):
+            calls.append(args)
+            args[-1].update(nonclientCloseCount=1,ready=True,buttons=[dict(name='Close',role='verified-nonclient-close')])
+            return [Button(name) for name in ('저장','저장하지 않음','취소')]
+        self.assertTrue(m.observe_calc_client_selector(api,accessible,123,20,evidence,selector=selector))
+        self.assertEqual([(api,accessible,123,20,evidence)],calls)
+        self.assertEqual(['저장','저장하지 않음','취소'],evidence['clientButtonNames'])
+        self.assertEqual('Close',evidence['buttons'][0]['name'])
+        self.assertEqual(1,evidence['nonclientCloseCount'])
+
+    def test_missing_choice_and_rejected_unknown_control_never_qualify_selector(self):
+        m=module();evidence={}
+        self.assertFalse(m.observe_calc_client_selector(None,None,123,20,evidence,selector=lambda *args:None))
+        self.assertIs(False,evidence['selectorVerified'])
+        def unknown(*args):
+            args[-1]['buttons']=[dict(name='Unexpected',role='client')]
+            raise AssertionError('Unknown active client button')
+        with self.assertRaisesRegex(AssertionError,'Unknown active client'):
+            m.observe_calc_client_selector(None,None,123,20,evidence,selector=unknown)
+        self.assertIs(False,evidence['selectorVerified'])
+        self.assertEqual('Unexpected',evidence['buttons'][0]['name'])
+        self.assertIn('Unknown active client',evidence['observerError'])
+
+    def test_selector_contract_cannot_accept_wrong_or_incomplete_returned_choices(self):
+        m=module()
+        for names in (('저장','취소'),('저장','취소','Unexpected'),('저장','저장','취소')):
+            buttons=[SimpleNamespace(element_info=SimpleNamespace(name=name)) for name in names]
+            with self.subTest(names=names),self.assertRaises(AssertionError):
+                m.observe_calc_client_selector(None,None,123,20,{},selector=lambda *args:buttons)
 
 if __name__=='__main__':unittest.main()
