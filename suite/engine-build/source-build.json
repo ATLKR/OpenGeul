@@ -256,5 +256,11 @@
     "afterSha256": "4a6d7da15a8461df25cf494082e83222cadb7d9b0dbffd71cbf5e5aa4bd49180",
     "condition": "PLATFORM=win32 and CpuType=aarch64",
     "librarian": "Explicit OPENGEUL_FIREBIRD_LIB from selected COMPATH/bin/Hostarm64/arm64/lib.exe"
+  },
+  "icuBuildPath": {
+    "path": "external/firebird/ExternalProject_firebird.mk",
+    "sha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
+    "afterSha256": "94d52186250e98ced4237146faca6d0448c9562d74ce1c3cb3254bd9d351c5b2",
+    "change": "Use one Windows ARM64 loader-path helper call for the ICU and Firebird library directories; other platforms retain the original expression"
   }
 }

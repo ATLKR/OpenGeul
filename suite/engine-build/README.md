@@ -25,6 +25,27 @@ It leaves atomics, assembly and database formats unchanged.
 The only inline x86 assembly found in the pinned source is legacy Win9x code,
 guarded by `WIN9X_SUPPORT`; no speculative assembly replacement is included.
 
+The installer also corrects the Firebird build's temporary loader path for
+Windows ARM64. The pinned Windows helper produces a complete `PATH=...`
+assignment per call; concatenating two calls joins the ICU directory to the
+next literal `PATH=`. This upstream expression is independent of the CPU.
+Our conditional correction targets `WNT_AARCH64` and leaves the original
+expression for x64 and other platforms unchanged. It passes both ICU and
+Firebird library directories to one existing helper call, preserving its base
+paths, inherited `PATH`, directory order and quoting through both make levels.
+The manifest authenticates the original and effective external build recipe,
+and the source-hook receipt retains both complete files as evidence.
+
+Native source run `39034993907` reached database bootstrap and reported
+`Could not find acceptable ICU library`. The compiled ICU 78.3 and release DLL
+names are within Firebird's supported search. The source replay establishes
+the malformed path; the original run did not retain ICU DLL bytes or a Windows
+loader error code. The correction does not establish successful native ICU
+loading, resolve every possible dependency failure or qualify Base. Missing
+`firebird.msg` formatting accompanies the database failures; the build creates
+that message file after its message database, so copying a message file does
+not repair the demonstrated loader path.
+
 The same ARM64-only patch selects Firebird's existing `_controlfp` path for
 the three Windows floating-point save/mask/restore guards, as newer upstream
 Firebird does for ARM64. Microsoft restricts `__control87_2` to x86; its UCRT

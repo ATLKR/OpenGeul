@@ -374,6 +374,62 @@ class AuthenticatedSource(unittest.TestCase):
             self.assertEqual(lock['afterSha256'],hashlib.sha256(target.read_bytes()).hexdigest())
             self.assertIn(b'\t$(STATICLIB_LINK) $@ $^\n',target.read_bytes())
 
+    def test_real_windows_icu_path_survives_both_make_levels_with_both_directories_and_old_x64_behavior(self):
+        fixture=ROOT/'suite/tests/fixtures/native-icu-path'
+        provenance=json.loads((fixture/'source.json').read_text())
+        self.assertEqual('296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785',provenance['archiveSha256'])
+        for item in provenance['members']:
+            self.assertEqual(item['fixtureSha256'],hashlib.sha256((fixture/item['fixture']).read_bytes()).hexdigest())
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);project=root/'external/firebird/ExternalProject_firebird.mk';project.parent.mkdir(parents=True)
+            original=(fixture/project.name).read_bytes();project.write_bytes(original)
+            hook=project.with_name('UnpackedTarball_firebird.mk');hook.write_bytes((self.lo_patches/hook.name).read_bytes())
+            (root/'configure.ac').write_bytes(self.lo_configure.read_bytes())
+            bootstrap=root/'bin/unpack-sources';bootstrap.parent.mkdir()
+            bootstrap.write_bytes((ROOT/'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes())
+            evidence=root/'evidence';evidence.mkdir()
+            bash=shutil.which('bash')
+            self.assertTrue(bash,'Actual Bash is required for the nested make source replay')
+            observer=root/'observe.py';observer.write_text('import json,os;print(json.dumps(os.environ["PATH"].split(":")))\n')
+            inner=root/'inner.mk';inner.write_text('SHELL := '+bash+'\nall:\n\t$(LIBO_TUNNEL_LIBRARY_PATH) '+shlex.quote(sys.executable)+' '+shlex.quote(str(observer))+'\n')
+            def replay(raw,cpu):
+                assignment=next(line.strip().removesuffix(' \\') for line in raw.decode().splitlines()
+                                if line.strip().startswith('LIBO_TUNNEL_LIBRARY_PATH='))
+                variables=('SHELL := '+bash+'\nOS := WNT\nCPUNAME := '+cpu+'\n'+
+                    'SRCDIR := C:/source\nSRCDIR_CYG := /cygdrive/c/source\n'+
+                    'BUILDDIR := C:/source\nBUILDDIR_CYG := /cygdrive/c/source\n'+
+                    'INSTDIR := C:/source/instdir\nINSTDIR_CYG := /cygdrive/c/source/instdir\n'+
+                    'WORKDIR := C:/source/workdir\nWORKDIR_CYG := /cygdrive/c/source/workdir\n'+
+                    'TARFILE_LOCATION := C:/downloads\nTARFILE_LOCATION_CYG := /cygdrive/c/downloads\n'+
+                    'INSTDIR_FOR_BUILD := $(INSTDIR)\nLIBO_URE_LIB_FOLDER := program\nLIBO_BIN_FOLDER := program\n'+
+                    'gb_UnpackedTarball_workdir := $(WORKDIR)/UnpackedTarball\n'+
+                    'firebird_BUILDDIR := $(gb_UnpackedTarball_workdir)/firebird/gen/Release/firebird\n')
+                outer=root/'outer.mk';outer.write_text(variables+(fixture/'cyg-path.mk').read_text()+'\n'+
+                    (fixture/'windows-loader-path.mk').read_text()+'\nall:\n\t$(MAKE) --no-print-directory -f '+
+                    shlex.quote(str(inner))+' '+assignment+'\n')
+                result=subprocess.run(['make','--no-print-directory','-f',str(outer),'SHELL='+bash],
+                    capture_output=True,text=True,env=dict(os.environ,PATH='/usr/bin:/bin'),timeout=10)
+                self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+                return json.loads(result.stdout.splitlines()[-1])
+            icu='/cygdrive/c/source/workdir/UnpackedTarball/icu/source/lib'
+            firebird='/cygdrive/c/source/workdir/UnpackedTarball/firebird/gen/Release/firebird/lib'
+            before=replay(original,'AARCH64')
+            self.assertNotIn(icu,before,'Pinned original no longer reproduces concatenated PATH assignments')
+            self.assertTrue(any('icu/source/libPATH=' in entry for entry in before))
+            receipt=module().install(root,evidence)
+            effective=project.read_bytes();after=replay(effective,'AARCH64')
+            self.assertIn(icu,after,'Owned ARM64 child lost the complete authenticated ICU library directory')
+            self.assertEqual(['/cygdrive/c/source/instdir/program','/cygdrive/c/source/instdir/program',
+                              '/usr/bin','/bin',icu,firebird],after,'Existing helper base paths and directory order changed')
+            self.assertFalse(any('libPATH=' in entry for entry in after))
+            self.assertEqual(replay(original,'X86_64'),replay(effective,'X86_64'),'x64 helper behavior changed')
+            lock=json.loads((PORT/'source-build.json').read_text())['icuBuildPath']
+            self.assertEqual(lock['sha256'],hashlib.sha256(original).hexdigest())
+            self.assertEqual(lock['afterSha256'],hashlib.sha256(effective).hexdigest())
+            self.assertEqual(original,(evidence/'original-ExternalProject_firebird.mk').read_bytes())
+            self.assertEqual(effective,(evidence/'effective-ExternalProject_firebird.mk').read_bytes())
+            self.assertEqual(lock['afterSha256'],receipt['icuBuildPath']['afterSha256'])
+
     def test_explicit_enable_flag_is_not_overwritten_by_arm64_defaults(self):
         autoconf = shutil.which('autoconf')
         if not autoconf:
@@ -426,6 +482,9 @@ class AuthenticatedSource(unittest.TestCase):
             target.parent.mkdir(parents=True)
             original = (self.lo_patches / target.name).read_bytes()
             target.write_bytes(original)
+            project=target.with_name('ExternalProject_firebird.mk')
+            project_original=(ROOT/'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes()
+            project.write_bytes(project_original)
             configure = root / 'configure.ac'
             configure.write_bytes(self.lo_configure.read_bytes())
             bootstrap = root / 'bin/unpack-sources'
@@ -434,7 +493,7 @@ class AuthenticatedSource(unittest.TestCase):
             bootstrap.write_bytes(pristine)
             evidence = root / 'evidence'
             evidence.mkdir()
-            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision'):
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision'):
                 with self.subTest(invalid=invalid):
                     if invalid == 'changed-helper':
                         bootstrap.write_bytes(pristine + b'\nchanged\n')
@@ -443,20 +502,33 @@ class AuthenticatedSource(unittest.TestCase):
                         saved.write_bytes(pristine)
                         bootstrap.unlink()
                         bootstrap.symlink_to(saved)
-                    else:
+                    elif invalid == 'evidence-collision':
                         (evidence / 'effective-unpack-sources').write_bytes(b'prior evidence')
+                    elif invalid == 'changed-build-recipe':
+                        project.write_bytes(project_original+b'\nchanged\n')
+                    elif invalid == 'linked-build-recipe':
+                        saved_project=root/'original-build-recipe';saved_project.write_bytes(project_original)
+                        project.unlink();project.symlink_to(saved_project)
+                    else:
+                        (evidence/'effective-ExternalProject_firebird.mk').write_bytes(b'prior evidence')
                     expected_bootstrap = bootstrap.read_bytes()
+                    expected_project=project.read_bytes()
                     with self.assertRaisesRegex(ValueError, 'SHA256|regular file|exists'):
                         module().install(root, evidence)
                     self.assertEqual(original, target.read_bytes())
                     self.assertEqual(self.lo_configure.read_bytes(), configure.read_bytes())
                     self.assertEqual(expected_bootstrap, bootstrap.read_bytes())
+                    self.assertEqual(expected_project,project.read_bytes())
                     self.assertFalse((target.parent / 'firebird-windows-arm64.patch').exists())
                     self.assertFalse((evidence / 'original-unpack-sources').exists())
+                    self.assertFalse((evidence/'original-ExternalProject_firebird.mk').exists())
                     if bootstrap.is_symlink():
                         bootstrap.unlink()
                     bootstrap.write_bytes(pristine)
                     (evidence / 'effective-unpack-sources').unlink(missing_ok=True)
+                    if project.is_symlink():project.unlink()
+                    project.write_bytes(project_original)
+                    (evidence/'effective-ExternalProject_firebird.mk').unlink(missing_ok=True)
             receipt = module().install(root, evidence)
             changed = target.read_text()
             self.assertTrue(changed.startswith(original.decode()))

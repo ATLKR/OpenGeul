@@ -22,6 +22,23 @@ def _regular(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _icu_build_path(source: Path, lock: dict) -> tuple[Path, bytes, bytes]:
+    """Plan the ARM64-only correction before any owned source writes."""
+    target = source / lock['path']
+    original = _regular(target)
+    if hashlib.sha256(original).hexdigest() != lock['sha256']:
+        raise ValueError('LibreOffice Firebird build recipe SHA256 differs from the pinned source')
+    old = (b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib)'
+           b'$(call gb_Helper_extend_ld_path,$(firebird_BUILDDIR)/lib)')
+    new = (b'$(if $(filter WNT_AARCH64,$(OS)_$(CPUNAME)),'
+           b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib:$(firebird_BUILDDIR)/lib),'
+           + old + b')')
+    changed = original.replace(old, new)
+    if hashlib.sha256(changed).hexdigest() != lock['afterSha256']:
+        raise ValueError('LibreOffice Firebird build path result SHA256 differs from its lock')
+    return target, original, changed
+
+
 def install_module_bootstrap(source: Path, evidence: Path | None = None) -> dict:
     """Correct the pinned unpack helper's inverted git-hooks selection only."""
     lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))['moduleBootstrap']
@@ -87,6 +104,16 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     output = target.parent / patch_name
     if output.exists() or output.is_symlink():
         raise ValueError('Port patch output already exists')
+    project, project_original, project_changed = _icu_build_path(source, lock['icuBuildPath'])
+    project_evidence = {}
+    if evidence is not None:
+        evidence = Path(evidence)
+        if any(path.is_symlink() for path in (evidence, *evidence.parents)) or not evidence.is_dir():
+            raise ValueError('Firebird build path evidence requires regular owned directories')
+        project_evidence = {'original': evidence / 'original-ExternalProject_firebird.mk',
+                            'effective': evidence / 'effective-ExternalProject_firebird.mk'}
+        if any(path.exists() or path.is_symlink() for path in project_evidence.values()):
+            raise ValueError('Firebird build path evidence already exists')
     hook = ('\n# OpenGeul native Windows ARM64 Firebird CPU identity port.\n'
             'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
             '$(eval $(call gb_UnpackedTarball_add_patches,firebird,\\\n'
@@ -96,6 +123,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     # All source and patch checks precede source writes. The fresh build tree is
     # owned by this invocation; a repeated or changed hook is rejected above.
     bootstrap = install_module_bootstrap(source, evidence)
+    for name, raw in (('original', project_original), ('effective', project_changed)):
+        if project_evidence:
+            with project_evidence[name].open('xb') as stream:
+                stream.write(raw)
     with output.open('xb') as stream:
         stream.write(patch)
     try:
@@ -103,6 +134,9 @@ def install(source: Path, evidence: Path | None = None) -> dict:
             stream.write(changed)
         with configure.open('wb') as stream:
             stream.write(configure_changed)
+        project.write_bytes(project_changed)
+        if _regular(project) != project_changed:
+            raise ValueError('Effective Firebird build recipe bytes changed after write')
     except BaseException:
         output.unlink(missing_ok=True)
         raise
@@ -116,6 +150,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
             'configureBeforeSha256': lock['configureSource']['sha256'],
             'configureAfterSha256': lock['configureSource']['afterSha256'],
             'moduleBootstrap': bootstrap,
+            'icuBuildPath': {'path': lock['icuBuildPath']['path'],
+                             'beforeSha256': lock['icuBuildPath']['sha256'],
+                             'afterSha256': lock['icuBuildPath']['afterSha256'],
+                             'evidence': {name: str(path) for name, path in project_evidence.items()}},
             'nativeBuildVerified': False, 'basePersistenceVerified': False}
 
 
