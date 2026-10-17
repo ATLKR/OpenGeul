@@ -70,7 +70,7 @@ class HomeWorkflowChecks:
         self.assertNotIn('cargo ', source)
         tests = next(step for step in steps(FOCUSED) if 'python -m unittest' in step)
         for module in ('test_home_routing_smoke', 'test_home_calc_close', 'test_home_fixture_inputs',
-                       'test_home_routes_workflow', 'test_native_cleanup_receipt'):
+                       'test_home_routes_workflow', 'test_native_cleanup_receipt', 'test_csv_open'):
             self.assertIn('suite.tests.' + module, tests)
         self.assertIn('test_home_routes_workflow.HomeRoutesFocusedWorkflowTests', tests)
         self.check_inputs_and_route(FOCUSED)

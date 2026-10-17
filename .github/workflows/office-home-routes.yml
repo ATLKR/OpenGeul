@@ -34,7 +34,7 @@ jobs:
     - name: Verify Home routing and owned shutdown regressions
       shell: pwsh
       run: |
-        python -m unittest suite.tests.test_home_routing_smoke suite.tests.test_home_calc_close suite.tests.test_home_fixture_inputs suite.tests.test_home_routes_workflow.HomeRoutesFocusedWorkflowTests suite.tests.test_base_save_readiness suite.tests.test_lifecycle_smoke suite.tests.test_native_cleanup_receipt suite.tests.test_generated_calc_close -v
+        python -m unittest suite.tests.test_home_routing_smoke suite.tests.test_home_calc_close suite.tests.test_home_fixture_inputs suite.tests.test_home_routes_workflow.HomeRoutesFocusedWorkflowTests suite.tests.test_base_save_readiness suite.tests.test_lifecycle_smoke suite.tests.test_native_cleanup_receipt suite.tests.test_generated_calc_close suite.tests.test_csv_open -v
         if ($LASTEXITCODE -ne 0) { throw 'Home routing boundary tests failed.' }
         dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
         if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
