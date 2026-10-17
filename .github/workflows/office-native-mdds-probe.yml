@@ -1,0 +1,58 @@
+name: OpenGeul native ARM64 MDDS equality A/B diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-native-mdds-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mdds-equality-ab:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Reserve diagnostic and evidence time before checkout
+        shell: pwsh
+        run: |
+          $started = [DateTime]::UtcNow
+          $deadline = $started.AddMinutes(20).ToString('o')
+          $owned = Join-Path $env:RUNNER_TEMP ('opengeul-mdds-probe-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $owned) { throw 'Preserve prior MDDS evidence.' }
+          New-Item -ItemType Directory -Path $owned | Out-Null
+          $receipt = Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;diagnosticMinutes=20;jobTimeoutMinutes=30;nominalReserveMinutes=10;runnerSetupIncluded=$false} |
+            ConvertTo-Json | Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
+          "OPENGEUL_MDDS_ROOT=$owned" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_MDDS_DEADLINE=$deadline" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_MDDS_BUDGET_RECEIPT=$receipt" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Verify portable MDDS diagnostic contracts
+        shell: pwsh
+        run: python -m unittest suite.tests.test_native_mdds_probe -v
+      - name: Compare exact original and candidate MDDS equality
+        shell: pwsh
+        run: |
+          ./suite/scripts/probe-native-mdds.ps1 -Output "$env:OPENGEUL_MDDS_ROOT/evidence" -WorkRoot "$env:OPENGEUL_MDDS_ROOT/work" -Deadline $env:OPENGEUL_MDDS_DEADLINE
+          if (-not $?) { throw 'MDDS equality diagnostic failed; preserve originals.' }
+      - name: Retain complete bounded MDDS native diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-mdds-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/opengeul-mdds-probe-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+            ${{ runner.temp }}/opengeul-mdds-probe-${{ github.run_id }}-${{ github.run_attempt }}/job-budget.json
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
