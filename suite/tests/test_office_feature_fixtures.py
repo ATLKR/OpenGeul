@@ -43,6 +43,7 @@ class TextShape:
     def setSize(self, size): self.size = [size.Width, size.Height]
     def setString(self, value): self.text = value; self._layout()
     def getString(self): return self.text
+    def getShapeType(self): return 'com.sun.star.drawing.TextShape'
     def getPosition(self): return SimpleNamespace(X=self.position[0], Y=self.position[1])
     def getSize(self): return SimpleNamespace(Width=self.size[0], Height=self.size[1])
     def setPropertyValue(self, name, value): self.properties[name] = value; self._layout()

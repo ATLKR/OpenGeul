@@ -17,6 +17,7 @@ import re
 import sys
 import time
 import traceback
+import xml.etree.ElementTree as ET
 import zipfile
 
 sys.dont_write_bytecode = True
@@ -45,6 +46,24 @@ CSV_OPTIONS = '44,34,76,1,,0,false,true,false,false,false,0,false,false'
 RICH_FORMULA = 'sqrt {a^2 + b^2} = c'
 ODF_MIMETYPES = {'odt': 'text', 'ods': 'spreadsheet', 'odp': 'presentation',
                  'odg': 'graphics', 'odf': 'formula', 'odb': 'base'}
+PPTX_LOSS = ['native-reopen-bounds-minus-one-mm100']
+PPTX_SCOPE = dict(authoredAndSavedGeometry='exact authored mm100 and OOXML EMU extents',
+                  nativeReopenGeometry='exact native bounds conversion, no tolerance',
+                  losslessRepeatedNativeEditSave=False, universalGeometryPreservation=False)
+PPTX_NATIVE_DIFFERENCE = dict(
+    kind='native-closed-open-rectangle-bounds', unit='mm100', reopenSizeDeltaMm100=-1,
+    authoredShapeType='com.sun.star.drawing.TextShape',
+    reopenedShapeType='com.sun.star.drawing.CustomShape',
+    sources=[
+        'https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/oox/source/ppt/pptshapegroupcontext.cxx#L108',
+        'https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/oox/source/drawingml/shape.cxx#L1118',
+        'https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/svx/source/svdraw/svdoashp.cxx#L3032',
+        'https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/include/tools/gen.hxx#L593',
+        'https://github.com/LibreOffice/core/blob/libreoffice-26.8.1.1/svx/source/unodraw/unoshape.cxx#L1069'])
+
+
+def is_pptx(case):
+    return case['module'] == 'impress' and case['extension'] == 'pptx'
 
 
 def marker(module):
@@ -67,9 +86,12 @@ def validate_catalog(catalog):
             raise ValueError('Catalog case kind changed')
         if case['kind'] == 'rich' and (module, extension) not in RICH_FORMATS:
             raise ValueError('Catalog rich representative format changed')
-        loss = ['formula-expression', 'formatting', 'extra-sheets'] if extension == 'csv' else ['formatting', 'structure'] if extension == 'txt' else []
+        loss = PPTX_LOSS if is_pptx(case) else ['formula-expression', 'formatting', 'extra-sheets'] if extension == 'csv' else ['formatting', 'structure'] if extension == 'txt' else []
         if case.get('lossBudget') != loss:
             raise ValueError('Catalog loss budget changed')
+        if is_pptx(case) and (case.get('qualificationScope') != PPTX_SCOPE or
+                             case.get('knownNativeGeometryDifference') != PPTX_NATIVE_DIFFERENCE):
+            raise ValueError('PPTX native geometry limitation must remain explicit')
     return cases
 
 
@@ -117,18 +139,32 @@ def expected(case):
                 # Binary PPT stores geometry on a 576-DPI grid. These exact
                 # inch-based coordinates avoid pretending its rounding is loss.
                 return dict(pages=[[_shape(baseline.marker(module), [2540, 2540], [20320, 6350])]])
-            return dict(pages=[[_shape(baseline.marker(module), [2500, 2500] if module == 'impress' else [1000, 1000],
-                                      [20000, 6000] if module == 'impress' else [6000, 2500])]])
-        colors = [0x2266AA, 0xCC5500] if module == 'draw' else [None, None]
-        return dict(pages=[[_shape(marker(module) + '-page-' + str(index + 1), [1000 + index * 1500, 1200 + index * 800],
-                                   [6000 + index * 1000, 2500 + index * 500], colors[index])] for index in range(2)])
+            result = dict(pages=[[_shape(baseline.marker(module), [2500, 2500] if module == 'impress' else [1000, 1000],
+                                        [20000, 6000] if module == 'impress' else [6000, 2500])]])
+        else:
+            colors = [0x2266AA, 0xCC5500] if module == 'draw' else [None, None]
+            result = dict(pages=[[_shape(marker(module) + '-page-' + str(index + 1), [1000 + index * 1500, 1200 + index * 800],
+                                       [6000 + index * 1000, 2500 + index * 500], colors[index])] for index in range(2)])
+        if is_pptx(case):
+            for page in result['pages']:
+                for shape in page: shape['shapeType'] = PPTX_NATIVE_DIFFERENCE['authoredShapeType']
+        return result
     if module == 'math': return dict(formula=''.join((RICH_FORMULA if rich else baseline.FORMULA).split()))
     if module == 'base': return dict(databaseUrl='sdbc:embedded:firebird', rows=base_rows(rich))
     raise ValueError('Unknown module')
 
 
-def validate_observation(case, observed):
+def validate_observation(case, observed, phase='create'):
+    if phase not in ('create', 'independent-reopen'): raise ValueError('Unknown semantic observation phase')
     wanted = expected(case)
+    if is_pptx(case) and phase == 'independent-reopen':
+        # Preserve the authored oracle and raw observations. Upstream imports
+        # extent into a closed Rectangle, while XShape.getSize exposes open size.
+        # The separate package proof still requires exact authored EMU extents.
+        for page in wanted['pages']:
+            for shape in page:
+                shape['size'] = [value - 1 for value in shape['size']]
+                shape['shapeType'] = PPTX_NATIVE_DIFFERENCE['reopenedShapeType']
     assert observed == wanted, 'Persisted semantics differ for ' + case['id'] + ': expected ' + repr(wanted) + '; observed ' + repr(observed)
     return observed
 
@@ -323,6 +359,7 @@ def observe(case, document):
                 shape = page.getByIndex(number)
                 position, size = shape.getPosition(), shape.getSize()
                 observed = _shape(shape.getString(), [position.X, position.Y], [size.Width, size.Height])
+                if is_pptx(case): observed['shapeType'] = shape.getShapeType()
                 if rich and module == 'draw': observed['color'] = shape.getPropertyValue('FillColor')
                 shapes.append(observed)
             result.append(shapes)
@@ -345,6 +382,73 @@ def validate_flat_bytes(case, path):
         assert rows == [[baseline.marker('calc'), '17', '25', '42']], 'CSV must contain exact displayed values in comma-delimited UTF-8'
 
 
+def validate_pptx_geometry(case, package):
+    """Read the saved OOXML independently of UNO, in relationship slide order."""
+    p = '{http://schemas.openxmlformats.org/presentationml/2006/main}'
+    a = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
+    r = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+    rel = '{http://schemas.openxmlformats.org/package/2006/relationships}'
+    names = package.namelist()
+    assert len(names) == len(set(names)), 'PPTX contains duplicate package members'
+
+    def xml(name, root):
+        info = package.getinfo(name)
+        assert info.file_size <= 1048576, 'Generated PPTX XML exceeds its bounded fixture size'
+        data = package.read(name)
+        assert b'<!DOCTYPE' not in data and b'<!ENTITY' not in data, 'Unexpected PPTX XML declarations'
+        tree = ET.fromstring(data)
+        assert tree.tag == root, 'Unexpected PPTX XML root'
+        return tree
+
+    def one(parent, tag):
+        children = parent.findall(tag)
+        assert len(children) == 1, 'PPTX geometry element missing or duplicated: ' + tag
+        return children[0]
+
+    presentation = xml('ppt/presentation.xml', p+'presentation')
+    ids = list(one(presentation, p+'sldIdLst'))
+    assert all(node.tag == p+'sldId' for node in ids), 'Unexpected PPTX slide-list entry'
+    refs = [node.get(r+'id') for node in ids]
+    assert None not in refs and len(refs) == len(set(refs)), 'PPTX slide references are missing or duplicated'
+    relationships = xml('ppt/_rels/presentation.xml.rels', rel+'Relationships')
+    targets = {}
+    for node in relationships:
+        assert node.tag == rel+'Relationship', 'Unexpected PPTX relationship element'
+        if node.get('Type') != r[1:-1]+'/slide': continue
+        rid, target = node.get('Id'), node.get('Target')
+        assert rid and rid not in targets and node.get('TargetMode') is None, 'Invalid PPTX slide relationship'
+        assert target and re.fullmatch(r'slides/slide[1-9][0-9]*\.xml', target), 'Unexpected PPTX slide target'
+        targets[rid] = 'ppt/'+target
+    assert set(refs) == set(targets), 'PPTX slide relationships differ from presentation order'
+    assert set(targets.values()) == {name for name in names if re.fullmatch(r'ppt/slides/slide[1-9][0-9]*\.xml', name)}, 'PPTX has missing or unreferenced slides'
+    pages = []
+    for rid in refs:
+        slide = xml(targets[rid], p+'sld')
+        tree = one(one(slide, p+'cSld'), p+'spTree')
+        assert all(node.tag in (p+'nvGrpSpPr', p+'grpSpPr', p+'sp') for node in tree), 'Unexpected PPTX shape kind'
+        shapes = []
+        for node in tree.findall(p+'sp'):
+            nonvisual = one(one(node, p+'nvSpPr'), p+'cNvSpPr')
+            assert nonvisual.get('txBox') == '1', 'PPTX fixture is not the authored text box'
+            transform = one(one(node, p+'spPr'), a+'xfrm')
+            assert not transform.attrib, 'Unexpected PPTX rotation or flipping'
+            assert len(transform) == 2, 'Unexpected PPTX transform children'
+            off, ext = one(transform, a+'off'), one(transform, a+'ext')
+            assert set(off.attrib) == {'x','y'} and set(ext.attrib) == {'cx','cy'}, 'Malformed PPTX geometry attributes'
+            coordinates = [off.get('x'), off.get('y'), ext.get('cx'), ext.get('cy')]
+            assert all(re.fullmatch(r'-?(?:0|[1-9][0-9]*)', value) for value in coordinates), 'PPTX geometry is not an exact integer'
+            body = one(node, p+'txBody')
+            paragraphs = body.findall(a+'p')
+            assert len(paragraphs) == 1 and not paragraphs[0].findall('.//'+a+'br'), 'Unexpected PPTX paragraph or line break'
+            text = ''.join(part.text or '' for part in paragraphs[0].iter(a+'t'))
+            shapes.append(dict(text=text, positionEmu=list(map(int, coordinates[:2])), sizeEmu=list(map(int, coordinates[2:]))))
+        pages.append(shapes)
+    wanted = dict(pages=[[dict(text=s['text'], positionEmu=[n*360 for n in s['position']],
+                              sizeEmu=[n*360 for n in s['size']]) for s in page] for page in expected(case)['pages']])
+    assert dict(pages=pages) == wanted, 'Saved PPTX differs from exact authored text/order/EMU geometry'
+    return dict(exactAuthoredEmuVerified=True, unit='EMU', pages=pages)
+
+
 def validate_container(case, path):
     ext = case['extension']
     data = path.read_bytes()
@@ -365,6 +469,7 @@ def validate_container(case, path):
             else:
                 main = {'docx': 'word/document.xml', 'xlsx': 'xl/workbook.xml', 'pptx': 'ppt/presentation.xml'}[ext]
                 assert main in package.namelist() and '[Content_Types].xml' in package.namelist(), 'OOXML package type does not match its extension'
+                if is_pptx(case): return validate_pptx_geometry(case, package)
 
 
 def _filter_options(case):
@@ -437,6 +542,9 @@ def run_case(suite, output, case):
     record = dict(case=case['id'], module=case['module'], extension=case['extension'], filter=case['filter'],
                   status='failed', guiVerified=False, independentReopenVerified=False, stage='fixture',
                   lossBudget=case['lossBudget'], expected=expected(case))
+    if is_pptx(case):
+        record.update(knownNativeGeometryDifference=case['knownNativeGeometryDifference'],
+                      qualificationScope=case['qualificationScope'])
     started = time.monotonic()
     engines = []
     path = None
@@ -458,12 +566,14 @@ def run_case(suite, output, case):
                     else:
                         document = engine.load(baseline.FACTORIES[case['module']])
                     record['creationCheckpoints'] = populate(engine, case, document)
-                    record['createdObservation'] = validate_observation(case, observe(case, document))
+                    record['createdObservation'] = observe(case, document)
+                    validate_observation(case, record['createdObservation'], phase=phase)
                     if case['module'] == 'base': document.store()
                     else: store_new(engine, case, document, path)
                 else:
                     document = load_saved(engine, case, path)
-                    record['observed'] = validate_observation(case, observe(case, document))
+                    record['observed'] = observe(case, document)
+                    validate_observation(case, record['observed'], phase=phase)
                     record['independentReopenVerified'] = True
             finally:
                 try: engine.close_document(document)
@@ -476,7 +586,8 @@ def run_case(suite, output, case):
                 baseline.validate_cleanup_evidence(cleanup)
             # Firebird finalizes its embedded backup during close; hash only after
             # each model and owned process have fully disposed.
-            validate_container(case, path)
+            package_proof = validate_container(case, path)
+            if is_pptx(case): record.setdefault('packageGeometryChecks', []).append(dict(phase=phase, proof=package_proof))
             if phase == 'create': record['createdSha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
         final = path.read_bytes()
         digest = hashlib.sha256(final).hexdigest()

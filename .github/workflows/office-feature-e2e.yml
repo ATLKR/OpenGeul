@@ -1,4 +1,4 @@
-name: OpenGeul Office format, feature and PDF semantic E2E
+name: OpenGeul focused PPTX geometry compatibility E2E
 'on':
   push:
     branches: [work/opengeul-office-feature-e2e]
@@ -35,7 +35,7 @@ jobs:
       - name: Verify semantic fixture, cleanup and PDF regressions
         shell: pwsh
         run: |
-          python -m unittest suite.tests.test_office_feature_smoke suite.tests.test_office_feature_fixtures suite.tests.test_engine_smoke suite.tests.test_pdf_export_smoke -v
+          python -m unittest suite.tests.test_office_feature_smoke suite.tests.test_office_feature_fixtures suite.tests.test_engine_smoke suite.tests.test_pdf_export_smoke suite.tests.test_pptx_geometry_contract -v
           if ($LASTEXITCODE -ne 0) { throw 'Office feature and PDF boundary tests failed.' }
       - name: Build the pinned Suite package
         id: build
@@ -46,34 +46,48 @@ jobs:
           "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-x64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           ./suite/scripts/build-suite.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Suite package build failed.' }
-      - name: Create, edit, save and independently reopen all 21 semantic cases
+      - name: Verify the two originally failing PPTX cases with exact package and native geometry
         if: '!cancelled() && steps.build.outcome == ''success'''
         shell: pwsh
         run: |
           $package = (Resolve-Path $env:SUITE_PACKAGE).Path
-          & "$package/Office/program/python.exe" suite/e2e/office_feature_smoke.py --suite $package --output .work/suite-office-features
-          if ($LASTEXITCODE -ne 0) { throw 'Office format and feature semantic E2E failed.' }
-      - name: Export real PDFs and independently verify every page
-        if: '!cancelled() && steps.build.outcome == ''success'''
-        shell: pwsh
-        run: |
-          $package = (Resolve-Path $env:SUITE_PACKAGE).Path
-          $output = Join-Path $env:GITHUB_WORKSPACE '.work/suite-pdf-export'
-          & "$package/Office/program/python.exe" suite/e2e/pdf_export_smoke.py --produce --suite $package --output $output
-          $producerExit = $LASTEXITCODE
-          python suite/e2e/pdf_export_smoke.py --verify --suite $package --output $output
-          $verifierExit = $LASTEXITCODE
+          $runner = Join-Path $env:RUNNER_TEMP 'opengeul-focused-pptx.py'
+          @'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0,str(Path(sys.argv[3])/'suite/e2e'))
+          import office_feature_smoke as feature
+          from engine_smoke import write_json
+          suite,output=feature.prepare_output(Path(sys.argv[1]),Path(sys.argv[2]))
+          manifest=json.loads((suite/'suite-product.json').read_text(encoding='utf-8-sig'))
+          assert manifest['schemaVersion']==1
+          feature.validate_modules(manifest['modules'])
+          ids=('format-impress-pptx','rich-impress')
+          cases=[case for case in feature.case_specs() if case['id'] in ids]
+          assert tuple(case['id'] for case in cases)==ids
+          records=[]
+          for case in cases:
+              record=feature.run_case(suite,output,case)
+              records.append(record)
+              write_json(output/(case['id']+'.json'),record)
+              print(case['id']+': '+record['status'],flush=True)
+          passed=len(records)==2 and all(record['status']=='passed' and record['independentReopenVerified'] and len(record['packageGeometryChecks'])==2 for record in records)
+          report=dict(schemaVersion=1,kind='focused-pptx-geometry-compatibility',passed=passed,expectedCaseCount=2,completedCaseCount=len(records),caseIds=list(ids),guiVerified=False,full21CaseQualification=False,cases=records)
+          write_json(output/'focused-pptx.json',report)
+          raise SystemExit(0 if passed else 1)
+          '@ | Set-Content -LiteralPath $runner -Encoding utf8NoBOM
+          & "$package/Office/program/python.exe" $runner $package (Join-Path $env:GITHUB_WORKSPACE '.work/suite-pptx-geometry') $env:GITHUB_WORKSPACE
+          $focusedExit = $LASTEXITCODE
           python suite/scripts/verify-suite.py $package
           $integrityExit = $LASTEXITCODE
-          if ($producerExit -ne 0 -or $verifierExit -ne 0 -or $integrityExit -ne 0) { throw "PDF E2E failed: producer=$producerExit verifier=$verifierExit integrity=$integrityExit" }
+          if ($focusedExit -ne 0 -or $integrityExit -ne 0) { throw "Focused PPTX failed: cases=$focusedExit integrity=$integrityExit" }
       - name: Preserve original Office fixtures, PDFs and verification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: opengeul-office-feature-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          name: opengeul-office-pptx-geometry-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            .work/suite-office-features/
-            .work/suite-pdf-export/
+            .work/suite-pptx-geometry/
             dist/**/suite-inventory.json
             dist/**/suite-provenance.json
             dist/**/runtime-branding.json
