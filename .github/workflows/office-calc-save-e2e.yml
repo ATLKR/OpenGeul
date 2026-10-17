@@ -1,4 +1,4 @@
-name: OpenGeul Calc active-cell native Save E2E
+name: OpenGeul Calc pending-cell Save and Close E2E
 'on':
   push:
     branches: [work/opengeul-office-calc-save-e2e]
@@ -34,7 +34,7 @@ jobs:
       - name: Verify Calc Save ownership and persistence regressions
         shell: pwsh
         run: |
-          python -m unittest suite.tests.test_calc_save suite.tests.test_calc_save_smoke suite.tests.test_worker suite.tests.test_save_diagnostics -v
+          python -m unittest suite.tests.test_calc_save suite.tests.test_calc_save_smoke suite.tests.test_worker suite.tests.test_save_diagnostics suite.tests.test_calc_close_probe -v
           if ($LASTEXITCODE -ne 0) { throw 'Calc Save boundary tests failed.' }
       - name: Build the pinned Suite package
         id: build
@@ -62,6 +62,16 @@ jobs:
           python suite/scripts/verify-suite.py $package
           $integrityExit = $LASTEXITCODE
           if ($e2eExit -ne 0 -or $integrityExit -ne 0) { throw "Calc active-cell Save failed: physical=$e2eExit integrity=$integrityExit" }
+      - name: Close active cell input with physical Ctrl+W and all three choices
+        if: '!cancelled() && steps.fixtures.outcome == ''success'''
+        shell: pwsh
+        run: |
+          $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+          python suite/e2e/calc_close_probe.py --suite $package --fixtures .work/suite-calc-engine/fixtures --output .work/suite-calc-close
+          $e2eExit = $LASTEXITCODE
+          python suite/scripts/verify-suite.py $package
+          $integrityExit = $LASTEXITCODE
+          if ($e2eExit -ne 0 -or $integrityExit -ne 0) { throw "Calc active-cell Close failed: physical=$e2eExit integrity=$integrityExit" }
       - name: Preserve original generated fixtures, native diagnostics and save evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -70,6 +80,7 @@ jobs:
           path: |
             .work/suite-calc-engine/
             .work/suite-calc-active-cell/
+            .work/suite-calc-close/
             dist/**/suite-inventory.json
             dist/**/suite-provenance.json
             dist/**/runtime-branding.json
