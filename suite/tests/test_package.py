@@ -60,8 +60,8 @@ class PackageSourceTests(unittest.TestCase):
 
     def test_assembly_inventory_uses_the_authenticated_lock_architecture(self):
         from suite import prepare
-        for architecture in ('x64', 'arm64'):
-            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as folder:
+        for architecture, source_built in (('x64', False), ('arm64', False), ('arm64', True)):
+            with self.subTest(architecture=architecture, source_built=source_built), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)/'repo'; self.repository(root)
                 config = root/'suite/config'; config.mkdir(parents=True)
                 (config/'product.json').write_text(json.dumps({'version': 'test-version'}))
@@ -79,6 +79,11 @@ class PackageSourceTests(unittest.TestCase):
                         'hwp': {'size': hwp.stat().st_size, 'sha256': prepare.sha256(hwp),
                                 'sourceUrl': 'https://example.org/hwp-source',
                                 'provenanceUrl': 'https://example.org/hwp-provenance'}}
+                if source_built:
+                    from suite.tests.test_prepare import source_build_fixture
+                    archive, lock['runtime'], receipt_path, _ = source_build_fixture(Path(folder))
+                    runtime = prepare.extract_source_engine_zip(archive, Path(folder)/'source-runtime',
+                        runtime=lock['runtime'], receipt=receipt_path, architecture=architecture)
                 def brand(source, destination, product):
                     shutil.copytree(source, destination)
                     return {'schemaVersion': 1}
@@ -94,6 +99,37 @@ class PackageSourceTests(unittest.TestCase):
                     module.assemble(runtime=runtime, hwp=hwp, shell=shell, output=output, lock=lock)
                 self.assertEqual(architecture, json.loads((output/'suite-provenance.json').read_text())['architecture'])
                 self.assertEqual(architecture, json.loads((output/'suite-inventory.json').read_text())['architecture'])
+                if source_built:
+                    notice = (output/'Notices/CORRESPONDING_SOURCE.md').read_text()
+                    commit = lock['runtime']['sourceBuild']['sourceCommit']
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/blob/'+commit+'/suite/engine-build/source-build.json', notice)
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/blob/'+commit+'/.github/workflows/office-native-engine.yml', notice)
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/tree/'+commit, notice)
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/actions/runs/123', notice)
+                    self.assertEqual((output/'Office/opengeul-source-build.json').read_bytes(), receipt_path.read_bytes())
+                    self.assertEqual(json.loads((output/'suite-provenance.json').read_text())['runtime'], lock['runtime'])
+
+    def test_source_engine_missing_or_unpinned_receipt_fails_before_output_creation(self):
+        from suite import prepare
+        from suite.tests.test_prepare import source_build_fixture
+        module = implementation()
+        for wrong in ('missing', 'hash'):
+            with self.subTest(wrong=wrong), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                _, runtime_lock, receipt_path, _ = source_build_fixture(root)
+                runtime = root/'runtime'; runtime.mkdir()
+                if wrong == 'hash':
+                    (runtime/'opengeul-source-build.json').write_bytes(receipt_path.read_bytes()+b' ')
+                shell = root/'shell'; shell.mkdir(); (shell/'OpenGeul.Office.exe').write_bytes(b'shell')
+                hwp = root/'hwp.zip'; hwp.write_bytes(b'input')
+                with patch.dict('sys.modules', {'prepare': prepare,
+                        'runtime_branding': SimpleNamespace(brand_runtime=None),
+                        'payload': SimpleNamespace(create_inventory=None, verify_payload=None)}), \
+                     self.assertRaisesRegex(ValueError, 'receipt|source.build'):
+                    module.assemble(runtime=runtime, hwp=hwp, shell=shell, output=root/'output',
+                        lock={'architecture': 'arm64', 'runtime': runtime_lock,
+                              'hwp': {'size': hwp.stat().st_size, 'sha256': prepare.sha256(hwp)}})
+                self.assertFalse((root/'output').exists())
 
 
 if __name__ == '__main__': unittest.main()

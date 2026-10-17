@@ -262,10 +262,14 @@ def _source_archive(root: Path, provenance: dict, *, architecture: str):
             lock = _json_bytes(archive.read(name), name)
     except (zipfile.BadZipFile, KeyError, OSError) as error:
         raise ValueError('Invalid Suite corresponding-source archive') from error
+    locked_runtime = lock.get('runtime')
+    source_built = (provenance['runtime'].get('format') == 'source-built-zip'
+                    or isinstance(locked_runtime, dict) and locked_runtime.get('format') == 'source-built-zip')
     if (lock.get('schemaVersion') != 1 or lock.get('architecture') != architecture
             or lock.get('version') != provenance['version'] or not isinstance(lock.get('runtime'), dict)
             or any(lock['runtime'].get(key) != provenance['runtime'].get(key)
-                   for key in ('sha256', 'url', 'sourceUrl', 'sourceSha256'))):
+                   for key in ('sha256', 'url', 'sourceUrl', 'sourceSha256'))
+            or source_built and locked_runtime != provenance['runtime']):
         raise ValueError('Suite runtime/source provenance differs from its packaged source lock')
     if provenance.get('hwp') is not None and (not isinstance(lock.get('hwp'), dict)
             or any(lock['hwp'].get(key) != provenance['hwp'].get(key) for key in ('sha256', 'url'))):
@@ -303,6 +307,21 @@ def _metadata(root: Path, files: dict, *, architecture: str):
     elif provenance.get('hwp') is not None:
         raise ValueError('HWP provenance supplied without its payload')
     _source_archive(root, provenance, architecture=architecture)
+    runtime_format = runtime.get('format', 'msi')
+    if runtime_format == 'source-built-zip':
+        try:
+            from suite.prepare import validate_source_build_receipt, validate_source_build_runtime
+        except ModuleNotFoundError:
+            from prepare import validate_source_build_receipt, validate_source_build_runtime
+        receipt_path = root/'Office/opengeul-source-build.json'
+        if 'Office/opengeul-source-build.json' not in files:
+            raise ValueError('Source-built runtime is missing its externally locked source-build receipt')
+        proof = validate_source_build_receipt(runtime, receipt_path, architecture=architecture)
+        validate_source_build_runtime(root/'Office', proof)
+        if 'Office/opengeul-msi-dependencies.json' in files:
+            raise ValueError('Source-built runtime cannot claim an MSI extraction receipt')
+    elif runtime_format != 'msi':
+        raise ValueError('Unsupported Suite runtime format')
     branding = _json(root/'runtime-branding.json')
     if branding != _json(root/'Office/opengeul-branding.json'):
         raise ValueError('Root/runtime branding receipts differ')

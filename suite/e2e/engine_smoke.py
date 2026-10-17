@@ -69,6 +69,43 @@ def verify_content(module, observed, verify_ui=False):
         raise ValueError('Unknown test module: ' + module)
 
 
+def validate_cleanup_evidence(evidence):
+    """New qualification requires graceful exit of this job and retained members."""
+    def require(condition, message):
+        if not condition:
+            raise ValueError(message)
+    require(isinstance(evidence, dict) and evidence.get('schemaVersion') == 1
+            and evidence.get('kind') == 'owned-engine-job-cleanup', 'Owned engine cleanup evidence is missing')
+    require(evidence.get('gracefulQualified') is True and evidence.get('forcedTermination') is False
+            and evidence.get('jobEmptyVerified') is True and evidence.get('finalJobPids') == []
+            and evidence.get('launcherExitCode') == 0 and not evidence.get('errors'),
+            'Graceful owned engine job exit is unverified')
+    require(type(evidence.get('jobHandleValue')) is int and evidence['jobHandleValue'] > 0,
+            'Original private engine job handle is missing')
+    initial, final = evidence.get('initialMembers'), evidence.get('finalMembers')
+    expected = evidence.get('expectedEngineImage')
+    require(isinstance(initial, list) and initial and isinstance(final, list) and final
+            and isinstance(expected, str) and expected, 'Actual owned engine observations are missing')
+    image = lambda path: os.path.normcase(str(Path(path).resolve()))
+    require(any(row.get('alive') is True and isinstance(row.get('image'), str)
+                and image(row['image']) == image(expected) for row in initial),
+            'Expected owned engine was not observed alive before shutdown')
+    def identities(rows):
+        result = set()
+        for row in rows:
+            require(not row.get('error') and all(type(row.get(key)) is int and row[key] > 0
+                    for key in ('pid', 'creationTime', 'handleValue')) and isinstance(row.get('image'), str)
+                    and type(row.get('alive')) is bool and type(row.get('exitCode')) is int,
+                    'Retained owned member observation is incomplete')
+            result.add((row['pid'], row['creationTime'], row['handleValue'], image(row['image'])))
+        require(len(result) == len(rows), 'Duplicate retained member identity')
+        return result
+    require(identities(initial) <= identities(final)
+            and all(row['alive'] is False and row['exitCode'] == 0 for row in final),
+            'Retained member changed generation/handle, remained alive, or exited abnormally')
+    return evidence
+
+
 class Engine:
     """One private profile, named pipe and owned Windows job per test case."""
     def __init__(self, suite):
@@ -76,6 +113,11 @@ class Engine:
         self.runtime = suite / 'Office'
         self.process = self.profile = self.desktop = self.uno = None
         self.cleanup_errors = []
+        self._job_witness = None
+        self.cleanup_evidence = dict(schemaVersion=1, kind='owned-engine-job-cleanup',
+            expectedEngineImage=str(self.runtime / 'program/soffice.bin'), gracefulQualified=False,
+            forcedTermination=False, jobEmptyVerified=False, initialMembers=[], finalMembers=[],
+            finalJobPids=None, launcherExitCode=None, snapshots=[], errors=[])
 
     def start(self):
         if os.name != 'nt':
@@ -138,32 +180,114 @@ class Engine:
             document.setModified(False)
             document.close(False)
 
+    def _cleanup_error(self, stage, exc):
+        self.cleanup_errors.append(stage + ': ' + type(exc).__name__ + ': ' + str(exc))
+        self.cleanup_evidence['errors'].append(dict(stage=stage, type=type(exc).__name__,
+            message=str(exc), winerror=getattr(exc, 'winerror', None), jobCensus=getattr(exc, 'job_census', None)))
+
+    def _capture_members(self, phase):
+        # Capture before requesting termination, including partial-start failures.
+        # No handles are opened by start(), so existing Engine subclasses that
+        # own their cleanup do not acquire extra hidden observer handles.
+        if self._job_witness is None:
+            self._job_witness = self.process.open_diagnostic_witnesses()
+            self.cleanup_evidence['jobHandleValue'] = int(self.process.job)
+        rows = self._job_witness.snapshot()
+        handles = {pid: int(handle) for pid, (handle, identity) in self._job_witness.members.items()}
+        rows = [dict(row, handleValue=handles.get(row.get('pid'))) for row in rows]
+        self.cleanup_evidence['snapshots'].append(dict(phase=phase, members=rows))
+        if any(row.get('error') or type(row.get('alive')) is not bool for row in rows):
+            raise RuntimeError('Retained private-job member observation failed')
+        if not self.cleanup_evidence['initialMembers']:
+            self.cleanup_evidence['initialMembers'] = rows
+        return rows
+
+    def _wait_empty_job(self, phase, timeout=5):
+        deadline = time.monotonic() + timeout
+        # At most three discovery passes share one five-second wait budget.
+        # Retained handles prove member exit; an independent empty census proves
+        # no unobserved child remains in the still-open private job.
+        for attempt in range(3):
+            rows = self._capture_members(phase)
+            pids = self._job_witness.api.job_pids(self.process.job)
+            self.cleanup_evidence.update(finalMembers=rows, finalJobPids=pids)
+            if not pids and all(row['alive'] is False for row in rows):
+                self.cleanup_evidence['launcherExitCode'] = self.process.wait(timeout=0)
+                self.cleanup_evidence['jobEmptyVerified'] = True
+                return True
+            for handle, identity in self._job_witness.members.values():
+                remaining = max(0, int((deadline - time.monotonic()) * 1000))
+                if self._job_witness.api.wait_for(handle, remaining) not in (0, 258):
+                    raise RuntimeError('Retained owned process wait failed')
+            if time.monotonic() >= deadline:
+                break
+        rows = self._capture_members(phase + '-final')
+        pids = self._job_witness.api.job_pids(self.process.job)
+        self.cleanup_evidence.update(finalMembers=rows, finalJobPids=pids)
+        empty = not pids and all(row['alive'] is False for row in rows)
+        if empty:
+            self.cleanup_evidence['launcherExitCode'] = self.process.wait(timeout=0)
+        self.cleanup_evidence['jobEmptyVerified'] = empty
+        return empty
+
+    def _force_owned_job(self):
+        self.cleanup_evidence['forcedTermination'] = True
+        self._cleanup_error('graceful engine exit', RuntimeError('Private Office job required forced termination; qualification failed'))
+        self.process.terminate()  # Only the job created by this Engine.start().
+        return self._wait_empty_job('forced-recovery')
+
     def cleanup(self):
-        if self.desktop is not None:
-            try:
-                self.desktop.terminate()
-            except Exception as exc:
-                self.cleanup_errors.append('desktop: ' + str(exc))
         dead = self.process is None
         if self.process is not None:
             try:
-                try:
-                    self.process.wait(timeout=5)
-                except Exception:
-                    self.process.terminate()  # Only our private Windows Job Object.
-                    self.process.wait(timeout=5)
-                dead = True
+                self._capture_members('before-desktop-termination')
             except Exception as exc:
-                self.cleanup_errors.append('owned process: ' + str(exc))
-            if dead:
-                self.process.close()
-        if self.profile is not None and dead:
+                self._cleanup_error('retain owned members', exc)
+        if self.desktop is not None:
             try:
-                self.profile.cleanup()
-            except OSError as exc:
-                self.cleanup_errors.append('private profile: ' + str(exc))
-        elif self.profile is not None:
-            self.cleanup_errors.append('Kept the live private profile: ' + self.profile.name)
+                if self.desktop.terminate() is False:
+                    raise RuntimeError('Private desktop vetoed graceful termination')
+            except Exception as exc:
+                self._cleanup_error('desktop termination', exc)
+        if self.process is not None:
+            try:
+                dead = self._wait_empty_job('graceful')
+                if not dead:
+                    dead = self._force_owned_job()
+                if not dead:
+                    raise RuntimeError('Owned job or retained child remained alive')
+            except Exception as exc:
+                self._cleanup_error('owned job exit', exc)
+                if not self.cleanup_evidence['forcedTermination']:
+                    try:
+                        dead = self._force_owned_job()
+                    except Exception as later:
+                        self._cleanup_error('owned job recovery', later)
+            if dead:
+                try:
+                    self.process.close()
+                except Exception as exc:
+                    self._cleanup_error('private job handle close', exc)
+        if self.profile is not None:
+            if dead:
+                try:
+                    self.profile.cleanup()
+                except Exception as exc:
+                    self._cleanup_error('private profile removal', exc)
+            else:
+                self._cleanup_error('private profile retained', RuntimeError('Kept unproved private profile/job: ' + self.profile.name))
+        if self._job_witness is not None:
+            try:
+                self._job_witness.close()
+            except Exception as exc:
+                self._cleanup_error('retained member handle close', exc)
+        if self.process is not None and dead and not self.cleanup_errors:
+            self.cleanup_evidence['gracefulQualified'] = True
+            try:
+                validate_cleanup_evidence(self.cleanup_evidence)
+            except Exception as exc:
+                self.cleanup_evidence['gracefulQualified'] = False
+                self._cleanup_error('graceful exit proof', exc)
 
 
 def _shape(engine, document, page, service, text, position, size):
@@ -320,11 +444,13 @@ def run_case(suite, output, module, specification, verify_ui=False):
         except Exception as exc:
             engine.cleanup_errors.append('generated document: ' + type(exc).__name__ + ': ' + str(exc))
         engine.cleanup()
+        result['engineCleanup'] = getattr(engine, 'cleanup_evidence', None)
         if engine.cleanup_errors:
             result['cleanupErrors'] = engine.cleanup_errors
             result['status'] = 'failed'
         if result['status'] == 'passed':
             try:
+                validate_cleanup_evidence(result['engineCleanup'])
                 # Embedded Firebird persists its backup during disposal. Hash
                 # only after model close and the owned process has exited.
                 final_bytes = path.read_bytes()

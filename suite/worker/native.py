@@ -149,6 +149,7 @@ class UnoBackend:
         self.module_factory = None
         self.diagnostics = None
         self.ui_style_isolation = None
+        self.calc_save = None
 
     def _diagnose(self, phase):
         if self.diagnostics is None and not os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS'):
@@ -386,6 +387,9 @@ class UnoBackend:
             raise WorkerError('open_failed', '문서를 열 수 없습니다. 파일 형식과 암호 여부를 확인해 주세요.')
         child = int(self.peer.getWindowHandle((), 1))
         self.window_api.validate_child(child, hwnd)
+        if self.module_factory == 'private:factory/scalc':
+            from calc_save import CalcSaveTransaction
+            self.calc_save = CalcSaveTransaction(self, module['filters'], path, hwnd, child)
         self.peer.setVisible(True)
         self.frame.activate()
         return {'parentHwnd': hwnd, 'childHwnd': child}
@@ -403,6 +407,10 @@ class UnoBackend:
         self.peer.setPosSize(0, 0, width, height, 15)
 
     def save(self, path, filter_name):
+        if self.module_factory == 'private:factory/scalc':
+            if self.calc_save is None:
+                raise WorkerError('save_failed', 'Calc 저장 경로를 확인하지 못했습니다. 문서를 열어 둡니다.')
+            return self.calc_save.save(path, filter_name)
         if path is None:
             self.document.store()
         else:
@@ -451,6 +459,7 @@ class UnoBackend:
             self.process.close()
             self.process = None
         self.context = self.document = self.desktop = self.frame = self.peer = self.interceptor = None
+        self.calc_save = None
         if self.profile is not None:
             self._finish_diagnostics()
             try:

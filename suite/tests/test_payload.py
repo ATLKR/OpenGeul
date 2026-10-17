@@ -600,6 +600,63 @@ class Arm64PayloadTests(PayloadFixture):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'source lock'):
                 self.inventory()
 
+    def source_engine(self):
+        from suite.tests.test_prepare import source_build_fixture
+        _, runtime, receipt_path, receipt = source_build_fixture(Path(self.temp.name))
+        self.provenance['runtime'] = runtime
+        self.write('Office/opengeul-source-build.json', receipt_path.read_bytes())
+        for name in ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+                     'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
+                     'vcruntime140_1.dll', 'vcruntime140_threads.dll'):
+            self.write('Office/program/'+name, pe(0xaa64, dll=True))
+        self.write('Office/share/readme/Microsoft-VC145-redistribution.html', b'Official VS2026 redistribution terms')
+        self.source_archive(); self.save_metadata()
+        return receipt
+
+    def test_source_engine_crt_and_terms_must_match_exact_receipted_bytes_after_inventory_rebuild(self):
+        for name in ('Office/program/vcruntime140.dll',
+                     'Office/share/readme/Microsoft-VC145-redistribution.html'):
+            with self.subTest(name=name):
+                self.source_engine()
+                self.write(name, self.read(name)+b'changed')
+                with self.assertRaisesRegex(ValueError, 'CRT|redistribution'):
+                    self.inventory()
+
+    def test_source_engine_payload_keeps_exact_authenticated_receipt_and_immutable_lock(self):
+        self.source_engine()
+        receipt = self.inventory()
+        self.assertIn('Office/opengeul-source-build.json', receipt['files'])
+        verify_payload(self.root, receipt)
+
+    def test_source_engine_payload_requires_the_locked_receipt_even_if_inventory_is_rebuilt(self):
+        self.source_engine()
+        (self.root/'Office/opengeul-source-build.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'receipt|source.build'):
+            self.inventory()
+        self.write('Office/opengeul-source-build.json', b'{"passed":true}')
+        with self.assertRaisesRegex(ValueError, 'receipt|source.build'):
+            self.inventory()
+
+    def test_source_engine_packaged_lock_binds_all_runtime_source_build_and_format_fields(self):
+        self.source_engine()
+        original = copy.deepcopy(self.provenance)
+        for key, value in (('format', 'msi'), ('size', 123),
+                           ('sourceBuild', dict(original['runtime']['sourceBuild'], artifactId=999)),
+                           ('sourceBuild', dict(original['runtime']['sourceBuild'], artifactSha256='f'*64)),
+                           ('sourceBuild', dict(original['runtime']['sourceBuild'], receiptSha256='f'*64))):
+            changed = copy.deepcopy(original); changed['runtime'][key] = value
+            self.write_json('suite-provenance.json', changed)
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'source lock'):
+                self.inventory()
+
+    def test_source_engine_pinned_receipt_cannot_replace_native_base_qualification(self):
+        from suite.tests.test_prepare import pin_source_receipt
+        receipt = self.source_engine(); receipt['baseProof']['independentReopenVerified'] = False
+        pin_source_receipt(self.provenance['runtime'], self.root/'Office/opengeul-source-build.json', receipt)
+        self.source_archive(); self.save_metadata()
+        with self.assertRaisesRegex(ValueError, 'Base|source.build'):
+            self.inventory()
+
     def test_x64_companion_admission_does_not_grant_arm64_an_exception(self):
         name = 'Office/program/twain32shim.exe'
         data = pe(0x14c)

@@ -1,5 +1,6 @@
 """Fresh-path packaging must reject bad inputs before touching a runtime."""
 import hashlib
+import copy
 import io
 import importlib.util
 import inspect
@@ -19,6 +20,76 @@ VC_DLLS = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
            'vcruntime140_1.dll', 'vcruntime140_threads.dll')
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def source_build_fixture(root):
+    """A pinned receipt uses the source driver's actual JSON field names."""
+    archive = root/'engine.zip'
+    with zipfile.ZipFile(archive, 'w') as source:
+        for name in ('soffice.exe', 'soffice.bin', 'python.exe', 'pyuno.pyd',
+                     'ifbclient.dll', 'Engine12.dll', 'intl/fbintl.dll'):
+            source.writestr('program/'+name, pe(0xaa64))
+        source.writestr('LICENSE.html', b'Original upstream license')
+        for name in VC_DLLS: source.writestr('program/'+name, pe(0xaa64, dll=True))
+        source.writestr('share/readme/Microsoft-VC145-redistribution.html', b'Official VS2026 redistribution terms')
+    runtime = {'format': 'source-built-zip', 'version': '26.8.1.1',
+               'url': 'https://example.org/engine.zip', 'size': archive.stat().st_size,
+               'sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+               'sourceUrl': 'https://example.org/libreoffice.tar.xz', 'sourceSha256': '1'*64,
+               'sourceBuild': {'receiptSha256': '0'*64, 'sourceCommit': 'a'*40,
+                               'runId': 123, 'artifactId': 456, 'artifactSha256': '2'*64,
+                               'patchManifestSha256': '3'*64}}
+    native = {'processMachine': 0, 'nativeMachine': 0xaa64}
+    receipt = {'schemaVersion': 1, 'kind': 'native-office-engine-source-build',
+               'phase': 'Full', 'architecture': 'arm64', 'status': 'native-engine-source-build-qualified',
+               'passed': True, 'fullEngineQualified': True, 'guiVerified': False, 'stage': 'complete',
+               'sourceCommit': 'a'*40, 'sourceTree': 'b'*40, 'sourceRun': 123, 'runAttempt': 1,
+               'sourcePortManifestSha256': '3'*64, 'driverSha256': '4'*64,
+               'host': dict(native, isWindows=True, controllerPid=1),
+               'sourcePin': {'url': runtime['sourceUrl'], 'sha256': runtime['sourceSha256'],
+                             'version': runtime['version'], 'size': 302435508},
+               'configuration': {'OS': 'WNT', 'COM': 'MSC', 'CPUNAME': 'AARCH64',
+                                 'HOST_PLATFORM': 'aarch64-pc-cygwin', 'BUILD_PLATFORM': 'aarch64-pc-cygwin',
+                                 'ENABLE_FIREBIRD_SDBC': 'TRUE', 'CROSS_COMPILING': '', 'SYSTEM_FIREBIRD': '',
+                                 'BUILD_TYPE': 'FIREBIRD LIBATOMIC_OPS LIBTOMMATH'},
+               'baseProof': {'schemaVersion': 1, 'passed': True, 'guiVerified': False,
+                             'independentReopenVerified': True,
+                             'nativeProcesses': [dict(native, pid=10, role='uno-python'),
+                                  dict(native, pid=11, role='uno-host', phase='create', jobOwned=True,
+                                       image='C:\\build\\instdir\\program\\soffice.bin', creationTime=100),
+                                  dict(native, pid=12, role='uno-host', phase='reopen', jobOwned=True,
+                                       image='C:\\build\\instdir\\program\\soffice.bin', creationTime=200)],
+                             'rows': [{'id': 1, 'text': 'Engine-OpenGeul-base 한글', 'amount': 42}],
+                             'odb': 'C:\\build\\proof.odb', 'odbSha256': '5'*64},
+               'artifact': {'path': str(archive), 'size': runtime['size'], 'sha256': runtime['sha256']}}
+    source_directory = 'C:\\VS\\VC\\Redist\\MSVC\\14.50.35717\\arm64\\Microsoft.VC145.CRT'
+    files = [{'name': name, 'sourcePath': source_directory+'\\'+name, 'machine': 0xaa64,
+              'size': len(pe(0xaa64, dll=True)), 'sha256': hashlib.sha256(pe(0xaa64, dll=True)).hexdigest(),
+              'signature': {'status': 'Valid', 'signerSubject': 'CN=Microsoft, O=Microsoft Corporation, C=US',
+                  'signerThumbprint': 'a'*40, 'signerIssuer': 'Microsoft CA',
+                  'fileVersion': '14.50.35717.0', 'productVersion': '14.50.35717.0',
+                  'fileVersionParts': [14, 50, 35717, 0], 'productVersionParts': [14, 50, 35717, 0],
+                  'companyName': 'Microsoft Corporation', 'originalFilename': name}} for name in VC_DLLS]
+    receipt['crtPreflight'] = {'schemaVersion': 1, 'toolset': 'v145',
+        'compilerToolsVersion': '14.50.35717', 'minimumRuntimeVersion': '14.50.35717.0',
+        'sourceDirectory': source_directory, 'files': files}
+    receipt['appLocalCrt'] = {'schemaVersion': 1, 'toolset': 'v145', 'sourceDirectory': source_directory,
+        'programDirectory': 'C:\\build\\instdir\\program',
+        'files': [{'source': copy.deepcopy(file), 'destination': 'C:\\build\\instdir\\program\\'+file['name'],
+                   'alreadyIdentical': False, 'copiedSha256': file['sha256']} for file in files],
+        'redistributionTerms': {'path': 'C:\\build\\instdir\\share\\readme\\Microsoft-VC145-redistribution.html',
+            'sha256': hashlib.sha256(b'Official VS2026 redistribution terms').hexdigest()}}
+    receipt['crtRedistributionTerms'] = {'url': 'https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution',
+        'path': 'C:\\evidence\\terms.html', 'size': len(b'Official VS2026 redistribution terms'),
+        'sha256': hashlib.sha256(b'Official VS2026 redistribution terms').hexdigest()}
+    receipt_path = root/'source-build-receipt.json'
+    pin_source_receipt(runtime, receipt_path, receipt)
+    return archive, runtime, receipt_path, receipt
+
+
+def pin_source_receipt(runtime, path, receipt):
+    path.write_text(json.dumps(receipt, ensure_ascii=False), encoding='utf-8')
+    runtime['sourceBuild']['receiptSha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def implementation():
@@ -381,6 +452,178 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual((destination/'mine').read_text(),'keep')
 
 
+class SourceEngineTests(unittest.TestCase):
+    def test_source_receipt_requires_matching_signed_native_nine_crt_metadata_and_terms(self):
+        module = implementation()
+        for mutation in ('missing', 'count', 'copied', 'source', 'machine', 'signature', 'version', 'terms'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); archive, lock, path, receipt = source_build_fixture(root)
+                if mutation == 'missing': del receipt['crtPreflight']
+                elif mutation == 'count': receipt['appLocalCrt']['files'].pop()
+                elif mutation == 'copied': receipt['appLocalCrt']['files'][0]['copiedSha256'] = 'f'*64
+                elif mutation == 'source': receipt['appLocalCrt']['files'][0]['source']['sha256'] = 'f'*64
+                elif mutation == 'machine': receipt['crtPreflight']['files'][0]['machine'] = 0x8664
+                elif mutation == 'signature': receipt['crtPreflight']['files'][0]['signature']['status'] = 'UnknownError'
+                elif mutation == 'version': receipt['crtPreflight']['files'][0]['signature']['productVersionParts'] = [14, 40, 1, 0]
+                else: receipt['crtRedistributionTerms']['sha256'] = 'f'*64
+                pin_source_receipt(lock, path, receipt)
+                with self.assertRaisesRegex(ValueError, 'CRT|redistribution'):
+                    module.extract_source_engine_zip(archive, root/'runtime', runtime=lock,
+                                                     receipt=path, architecture='arm64')
+                self.assertFalse((root/'runtime').exists())
+
+    def test_locked_qualified_engine_extracts_original_bytes_and_exact_receipt_without_msi_metadata(self):
+        module = implementation()
+        self.assertTrue(callable(getattr(module, 'extract_source_engine_zip', None)),
+                        'Source-built ZIP ingestion is required')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); archive, lock, receipt_path, receipt = source_build_fixture(root)
+            destination = root/'runtime'
+            module.extract_source_engine_zip(archive, destination, runtime=lock,
+                                             receipt=receipt_path, architecture='arm64')
+            self.assertEqual((destination/'program/soffice.bin').read_bytes(), pe(0xaa64))
+            self.assertEqual((destination/'opengeul-source-build.json').read_bytes(), receipt_path.read_bytes())
+            self.assertFalse((destination/'opengeul-msi-dependencies.json').exists())
+            self.assertEqual(json.loads(receipt_path.read_text()), receipt)
+
+    def test_input_size_hash_and_external_receipt_pin_are_required_before_extraction(self):
+        module = implementation()
+        for mutation in ('size', 'hash', 'receipt', 'no-pin', 'untrusted-outer-artifact'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); archive, lock, receipt_path, receipt = source_build_fixture(root)
+                if mutation == 'size': lock['size'] += 1
+                elif mutation == 'hash': lock['sha256'] = 'f'*64
+                elif mutation == 'receipt': receipt_path.write_bytes(receipt_path.read_bytes()+b' ')
+                elif mutation == 'no-pin': del lock['sourceBuild']['receiptSha256']
+                else: lock['sourceBuild']['artifactSha256'] = 'invalid'
+                with self.assertRaisesRegex(ValueError, 'lock|Locked|receipt|Receipt|source.build'):
+                    module.extract_source_engine_zip(archive, root/'runtime', runtime=lock,
+                                                     receipt=receipt_path, architecture='arm64')
+                self.assertFalse((root/'runtime').exists())
+
+    def test_source_zip_preserves_existing_output_and_rejects_linked_inputs_or_parent(self):
+        module = implementation()
+        for linked in ('existing', 'archive', 'receipt', 'parent'):
+            with self.subTest(linked=linked), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); archive, lock, receipt, _ = source_build_fixture(root)
+                output = root/'runtime'
+                if linked == 'existing':
+                    output.mkdir(); (output/'sentinel').write_bytes(b'keep')
+                else:
+                    target = root/'alias'
+                    original = {'archive': archive, 'receipt': receipt, 'parent': root/'outside'}[linked]
+                    if linked == 'parent': original.mkdir()
+                    try: target.symlink_to(original, target_is_directory=linked == 'parent')
+                    except OSError: self.skipTest('Symlink creation unavailable')
+                    if linked == 'archive': archive = target
+                    elif linked == 'receipt': receipt = target
+                    else: output = target/'runtime'
+                with self.assertRaises(ValueError):
+                    module.extract_source_engine_zip(archive, output, runtime=lock,
+                                                     receipt=receipt, architecture='arm64')
+                if linked == 'existing': self.assertEqual((output/'sentinel').read_bytes(), b'keep')
+                else: self.assertFalse(output.exists())
+
+    def test_pinned_receipt_still_must_prove_native_full_engine_source_and_independent_base_reopen(self):
+        module = implementation()
+        changes = [('passed', False), ('phase', 'Firebird'), ('fullEngineQualified', False),
+                   ('architecture', 'x64'), ('host.processMachine', 0x8664),
+                   ('host.nativeMachine', 0x8664), ('sourceCommit', 'f'*40), ('sourceRun', 999),
+                   ('sourcePortManifestSha256', 'f'*64), ('sourcePin.sha256', 'f'*64),
+                   ('sourcePin.url', 'https://example.org/other'), ('artifact.size', 123),
+                   ('artifact.sha256', 'f'*64), ('configuration.CPUNAME', 'X86_64'),
+                   ('configuration.ENABLE_FIREBIRD_SDBC', ''), ('configuration.CROSS_COMPILING', 'yes'),
+                   ('baseProof.independentReopenVerified', False), ('baseProof.rows', []),
+                   ('baseProof.rows', [{'id': 1, 'text': 'wrong', 'amount': 42}]),
+                   ('baseProof.nativeProcesses', [])]
+        for field, value in changes:
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); archive, lock, receipt_path, receipt = source_build_fixture(root)
+                target = receipt
+                parts = field.split('.')
+                for part in parts[:-1]: target = target[part]
+                target[parts[-1]] = value
+                pin_source_receipt(lock, receipt_path, receipt)
+                with self.assertRaises(ValueError):
+                    module.extract_source_engine_zip(archive, root/'runtime', runtime=lock,
+                                                     receipt=receipt_path, architecture='arm64')
+                self.assertFalse((root/'runtime').exists())
+
+    def test_native_base_witnesses_require_actual_owned_separate_soffice_hosts(self):
+        module = implementation()
+        for field, value in (('image', 'C:\\runtime\\program\\soffice.exe'), ('jobOwned', False),
+                             ('phase', 'create'), ('creationTime', 0), ('pid', 11),
+                             ('processMachine', 0x8664), ('role', 'launcher')):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); archive, lock, receipt_path, receipt = source_build_fixture(root)
+                receipt['baseProof']['nativeProcesses'][2][field] = value
+                if field == 'pid':
+                    receipt['baseProof']['nativeProcesses'][2]['creationTime'] = 100
+                pin_source_receipt(lock, receipt_path, receipt)
+                with self.assertRaises(ValueError):
+                    module.extract_source_engine_zip(archive, root/'runtime', runtime=lock,
+                                                     receipt=receipt_path, architecture='arm64')
+                self.assertFalse((root/'runtime').exists())
+
+    def test_native_base_reopen_uses_process_identity_when_windows_reuses_a_pid(self):
+        module = implementation()
+        for pid, creation_time in ((11, 200), (12, 100)):
+            with self.subTest(pid=pid, creationTime=creation_time), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); _, lock, receipt_path, receipt = source_build_fixture(root)
+                receipt['baseProof']['nativeProcesses'][2].update(pid=pid, creationTime=creation_time)
+                pin_source_receipt(lock, receipt_path, receipt)
+                try:
+                    observed = module.validate_source_build_receipt(lock, receipt_path, architecture='arm64')
+                except ValueError as error:
+                    self.fail('Separate native process identities must qualify: '+str(error))
+                self.assertEqual(observed, receipt)
+
+    def test_native_base_host_cannot_share_the_still_live_python_pid(self):
+        module = implementation()
+        for host in (1, 2):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); _, lock, receipt_path, receipt = source_build_fixture(root)
+                receipt['baseProof']['nativeProcesses'][host]['pid'] = 10
+                pin_source_receipt(lock, receipt_path, receipt)
+                with self.assertRaisesRegex(ValueError, 'process witnesses'):
+                    module.validate_source_build_receipt(lock, receipt_path, architecture='arm64')
+
+    def test_source_zip_rejects_unsafe_regular_member_names_kinds_aliases_and_bounds_before_output(self):
+        module = implementation()
+        cases = [('../escape', 0, b'x'), ('C:/escape', 0, b'x'), ('bad\\file', 0, b'x'),
+                 ('CON.txt', 0, b'x'), ('COM¹.txt', 0, b'x'), ('bad:stream', 0, b'x'),
+                 ('CONIN$', 0, b'x'), ('CONOUT$', 0, b'x'), ('CON .txt', 0, b'x'),
+                 ('AUX .bin', 0, b'x'), ('COM1 .dll', 0, b'x'), ('LPT1 .x', 0, b'x'),
+                 ('nul\x00hidden', 0, b'x'), ('program/SOFFICE.bin', 0, b'x'),
+                 ('Program/extra', 0, b'x'), ('program/soffice.bin/child', 0, b'x'),
+                 ('linked', (0o120777 << 16), b'outside'),
+                 ('fifo', (0o010600 << 16), b'x'), ('reparse', 0x400, b'x'),
+                 ('opengeul-source-build.json', 0, b'forged receipt'),
+                 ('opengeul-source-build.json/child', 0, b'forged receipt directory'),
+                 ('opengeul-msi-dependencies.json/child', 0, b'forged MSI receipt directory')]
+        for name, attributes, data in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); archive, lock, receipt_path, receipt = source_build_fixture(root)
+                with zipfile.ZipFile(archive, 'a') as source:
+                    info = zipfile.ZipInfo('fixture'); info.filename = info.orig_filename = name
+                    info.external_attr = attributes
+                    source.writestr(info, data)
+                lock['size'] = archive.stat().st_size; lock['sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+                receipt['artifact'].update(size=lock['size'], sha256=lock['sha256'])
+                pin_source_receipt(lock, receipt_path, receipt)
+                with self.assertRaises(ValueError):
+                    module.extract_source_engine_zip(archive, root/'runtime', runtime=lock,
+                                                     receipt=receipt_path, architecture='arm64')
+                self.assertFalse((root/'runtime').exists())
+        for bound in ('limit', 'max_files', 'max_file_size'):
+            with self.subTest(bound=bound), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); archive, lock, receipt_path, _ = source_build_fixture(root)
+                with self.assertRaises(ValueError):
+                    module.extract_source_engine_zip(archive, root/'runtime', runtime=lock,
+                        receipt=receipt_path, architecture='arm64', **{bound: 1})
+                self.assertFalse((root/'runtime').exists())
+
+
 class PrepareCommandTests(unittest.TestCase):
     def command_fixture(self, folder):
         root = Path(folder)
@@ -427,6 +670,65 @@ class PrepareCommandTests(unittest.TestCase):
             self.run_command(module, root, [])
             self.assertEqual({'architecture': 'x64', 'runtime': 'native-x64'},
                              json.loads((root/'output.json').read_text()))
+
+    def test_source_mode_uses_explicit_local_engine_and_receipt_without_downloading_a_runtime(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root = self.command_fixture(folder)
+            archive, runtime, receipt_path, _ = source_build_fixture(root)
+            lockfile = root/'suite/config/runtime.arm64.lock.json'
+            lock = json.loads(lockfile.read_text()); lock['runtime'] = runtime
+            lockfile.write_text(json.dumps(lock))
+            with patch.object(module, 'download_locked', wraps=module.download_locked) as downloaded, \
+                 patch.object(module, 'extract_msi', side_effect=AssertionError('ZIP must not use MSI')):
+                self.run_command(module, root, ['--architecture', 'arm64', '--engine-archive', str(archive),
+                                                '--engine-receipt', str(receipt_path)])
+            self.assertEqual(downloaded.call_count, 1)
+            self.assertEqual(downloaded.call_args.args[0], lock['hwp'])
+            self.assertEqual(json.loads((root/'output.json').read_text()),
+                             {'architecture': 'arm64', 'runtime': 'source-engine-runtime'})
+
+    def test_source_mode_requires_both_local_inputs_before_any_download(self):
+        module = implementation()
+        for inputs in ([], ['--engine-archive', 'engine.zip'], ['--engine-receipt', 'receipt.json']):
+            with self.subTest(inputs=inputs), tempfile.TemporaryDirectory() as folder:
+                root = self.command_fixture(folder)
+                _, runtime, _, _ = source_build_fixture(root)
+                lockfile = root/'suite/config/runtime.arm64.lock.json'
+                lock = json.loads(lockfile.read_text()); lock['runtime'] = runtime
+                lockfile.write_text(json.dumps(lock))
+                with patch.object(module, 'download_locked', side_effect=AssertionError('No downloads allowed')):
+                    with self.assertRaisesRegex(ValueError, 'source.build artifact|source-build artifact'):
+                        self.run_command(module, root, ['--architecture', 'arm64', *inputs])
+                self.assertFalse((root/'output.json').exists())
+
+    def test_source_mode_reports_missing_local_inputs_before_any_download(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root = self.command_fixture(folder)
+            _, runtime, _, _ = source_build_fixture(root)
+            lockfile = root/'suite/config/runtime.arm64.lock.json'
+            lock = json.loads(lockfile.read_text()); lock['runtime'] = runtime
+            lockfile.write_text(json.dumps(lock))
+            with patch.object(module, 'download_locked', side_effect=AssertionError('No downloads allowed')):
+                with self.assertRaisesRegex(ValueError, 'source.build artifact|source-build artifact'):
+                    self.run_command(module, root, ['--architecture', 'arm64', '--engine-archive', str(root/'absent.zip'),
+                                                    '--engine-receipt', str(root/'absent.json')])
+
+    def test_unknown_runtime_format_and_msi_source_options_fail_before_download(self):
+        module = implementation()
+        for mode in ('unknown', 'msi-inputs'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                root = self.command_fixture(folder)
+                arguments = []
+                if mode == 'unknown':
+                    lockfile = root/'suite/config/runtime.lock.json'
+                    lock = json.loads(lockfile.read_text()); lock['runtime']['format'] = 'unknown'
+                    lockfile.write_text(json.dumps(lock))
+                else: arguments = ['--engine-archive', 'engine.zip', '--engine-receipt', 'receipt.json']
+                with patch.object(module, 'download_locked', side_effect=AssertionError('No downloads allowed')):
+                    with self.assertRaisesRegex(ValueError, 'format|source.build|source-built'):
+                        self.run_command(module, root, arguments)
 
     def test_lock_architecture_mismatch_is_rejected_before_any_extraction(self):
         module = implementation()

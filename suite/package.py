@@ -42,9 +42,14 @@ def copy_regular_tree(source: Path, target: Path) -> None:
 def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict) -> None:
     if output.exists() or output.is_symlink(): raise ValueError('Suite output already exists')
     if not (shell/'OpenGeul.Office.exe').is_file(): raise ValueError('Published Windows shell is required')
-    from prepare import check_asset, extract_hwp_zip
+    from prepare import check_asset, extract_hwp_zip, validate_source_build_receipt, validate_source_build_runtime
     from runtime_branding import brand_runtime
     from payload import create_inventory, verify_payload
+    if lock['runtime'].get('format') == 'source-built-zip':
+        receipt = runtime/'opengeul-source-build.json'
+        if not receipt.is_file(): raise ValueError('Source-built runtime requires its pinned source-build receipt')
+        proof = validate_source_build_receipt(lock['runtime'], receipt, architecture=lock['architecture'])
+        validate_source_build_runtime(runtime, proof)
     check_asset(lock['hwp'], hwp)
     product_path = ROOT/'suite/config/product.json'
     product = json.loads(product_path.read_text(encoding='utf-8'))
@@ -65,12 +70,30 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
                       and path.name.casefold() in ('license', 'license.txt', 'license.html'))
     if not licenses: raise ValueError('Original Office runtime license is missing')
     shutil.copy2(licenses[0], notices/'LibreOffice-LICENSE.txt')
+    engine_source_notice = ''
+    if lock['runtime'].get('format') == 'source-built-zip':
+        build = lock['runtime']['sourceBuild']
+        code = 'https://github.com/ATLKR/OpenGeul'
+        commit_url = code+'/tree/'+build['sourceCommit']
+        blob = code+'/blob/'+build['sourceCommit']
+        engine_source_notice = (
+            f'Native engine source/build code: {commit_url}\n'
+            f'Native engine patch manifest: {blob}/suite/engine-build/source-build.json\n'
+            f"Patch manifest SHA256: {build['patchManifestSha256']}\n"
+            f'Native engine workflow: {blob}/.github/workflows/office-native-engine.yml\n'
+            f"Native engine workflow run: {code}/actions/runs/{build['runId']}\n"
+            f"GitHub build artifact ID: {build['artifactId']}\n"
+            f"GitHub build artifact SHA256: {build['artifactSha256']}\n"
+            'Authenticated native build receipt: ../Office/opengeul-source-build.json\n'
+            f"Native build receipt SHA256: {build['receiptSha256']}\n\n"
+        )
     source_notice = (
         '# OpenGeul Office corresponding source\n\n'
         f'OpenGeul Suite source commit: {source_commit}\n'
         'Source archive: ../Sources/OpenGeul-Office-source.zip\n\n'
         f"LibreOffice upstream {lock['runtime']['version']}: {lock['runtime']['sourceUrl']}\n"
         f"Upstream source SHA256: {lock['runtime']['sourceSha256']}\n\n"
+        + engine_source_notice +
         f"HWP component source: {lock['hwp']['sourceUrl']}\n"
         f"HWP original build provenance: {lock['hwp']['provenanceUrl']}\n\n"
         'Runtime modifications are enumerated in ../runtime-branding.json. The changed\n'
