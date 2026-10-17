@@ -74,7 +74,63 @@ function Get-SourcePin([string]$LockPath) {
     $url='https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz'
     $sha='296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785'
     if($lock.schemaVersion -ne 1 -or $lock.runtime.version -ne '26.8.1.1' -or $lock.runtime.sourceUrl -ne $url -or $lock.runtime.sourceSha256 -ne $sha) {throw 'The authenticated official LibreOffice26.8.1.1 source lock is required.'}
-    return [ordered]@{url=$lock.runtime.sourceUrl;size=302435508;sha256=$sha;version='26.8.1.1'}
+    # Official 26.8.1.1 core identity, paired with the authenticated source tar.
+    # Never derive this identity from a parent OpenGeul Git checkout.
+    return [ordered]@{url=$lock.runtime.sourceUrl;size=302435508;sha256=$sha;version='26.8.1.1';coreCommit='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'}
+}
+
+function Read-RuntimeBuildIdentity([string]$Path,[string]$Section) {
+    Assert-UnlinkedPath $Path
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)) {throw 'Generated runtime build identity file is missing.'}
+    $encoding=[Text.UTF8Encoding]::new($false,$true)
+    $text=$encoding.GetString([IO.File]::ReadAllBytes($Path))
+    $sections=[regex]::Matches($text,'(?m)^(?:\uFEFF)?[ \t]*\[([^\]\r\n]+)\]')
+    $ids=[regex]::Matches($text,'(?im)^[ \t]*buildid[ \t]*=([^\r\n]*)')
+    if($sections.Count -ne 1 -or $sections[0].Groups[1].Value -cne $Section -or $ids.Count -ne 1 -or $ids[0].Index -le $sections[0].Index) {throw 'Generated runtime build identity section/key is missing or ambiguous.'}
+    return [ordered]@{text=$text;match=$ids[0];buildid=$ids[0].Groups[1].Value;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}
+}
+
+function Set-RuntimeBuildIdentity([string]$RuntimeRoot,[string]$Archive,$Pin,[string]$ParentCommit,[string]$EvidenceDirectory) {
+    if($Pin.coreCommit -cnotmatch '^[0-9a-f]{40}$' -or $ParentCommit -cnotmatch '^[0-9a-f]{40}$') {throw 'Externally pinned upstream and actual parent source identities are required.'}
+    Assert-UnlinkedPath $Archive;Assert-UnlinkedPath $EvidenceDirectory
+    Confirm-FileIdentity $Archive $Pin.size SHA256 $Pin.sha256|Out-Null
+    if(-not(Test-Path -LiteralPath $EvidenceDirectory -PathType Container)) {throw 'Owned identity evidence directory is missing.'}
+    $candidates=@()
+    foreach($item in @(@('version.ini','Version'),@('setup.ini','Bootstrap'))) {
+        $path=Join-Path $RuntimeRoot ('program/'+$item[0])
+        $original=Read-RuntimeBuildIdentity $path $item[1]
+        if($original.buildid -cnotin @('', $ParentCommit, $Pin.coreCommit)) {throw 'Generated runtime buildid is unrelated to the authenticated source or actual parent checkout.'}
+        $evidence=Join-Path $EvidenceDirectory ('original-runtime-'+$item[0])
+        if(Test-Path -LiteralPath $evidence) {throw 'Original runtime identity evidence already exists.'}
+        $candidates+=@{name=$item[0];path=$path;original=$original;evidence=$evidence}
+    }
+    # Only generated configuration changes. Preserve original bytes before the
+    # explicit correction; no source Git repository or synthetic commit is made.
+    $files=[ordered]@{}
+    foreach($item in $candidates) {
+        Copy-Item -LiteralPath $item.path -Destination $item.evidence -ErrorAction Stop
+        $original=$item.original;$value=$original.match.Groups[1]
+        $changed=$original.text.Remove($value.Index,$value.Length).Insert($value.Index,$Pin.coreCommit)
+        [IO.File]::WriteAllBytes($item.path,([Text.UTF8Encoding]::new($false,$true)).GetBytes($changed))
+        $files['program/'+$item.name]=[ordered]@{originalBuildId=$original.buildid;buildid=$Pin.coreCommit;
+            corrected=($original.buildid -cne $Pin.coreCommit);beforeSha256=$original.sha256;
+            sha256=(Get-FileHash -LiteralPath $item.path -Algorithm SHA256).Hash.ToLowerInvariant()}
+    }
+    return [ordered]@{schemaVersion=1;mechanism='explicit-generated-config-correction-from-authenticated-source-pin';
+        expectedBuildId=$Pin.coreCommit;sourceArchiveUrl=$Pin.url;sourceArchiveSha256=$Pin.sha256;sourceArchiveSize=$Pin.size;files=$files}
+}
+
+function Assert-RuntimeBuildIdentity([string]$RuntimeRoot,$Pin,$Proof) {
+    if($Pin.coreCommit -cnotmatch '^[0-9a-f]{40}$' -or $Proof.expectedBuildId -cne $Pin.coreCommit -or
+        $Proof.sourceArchiveSha256 -cne $Pin.sha256 -or $Proof.sourceArchiveSize -ne $Pin.size -or $Proof.sourceArchiveUrl -cne $Pin.url) {throw 'Runtime identity proof differs from authenticated upstream source pin.'}
+    $files=[ordered]@{}
+    foreach($item in @(@('version.ini','Version'),@('setup.ini','Bootstrap'))) {
+        $name='program/'+$item[0];$actual=Read-RuntimeBuildIdentity (Join-Path $RuntimeRoot $name) $item[1]
+        $expected=$Proof.files.$name
+        if($actual.buildid -cne $Pin.coreCommit -or $expected.buildid -cne $Pin.coreCommit -or $actual.sha256 -cne $expected.sha256) {throw 'Effective runtime buildid/metadata differs from authenticated upstream identity.'}
+        $files[$name]=[ordered]@{buildid=$actual.buildid;sha256=$actual.sha256}
+    }
+    return [ordered]@{passed=$true;expectedBuildId=$Pin.coreCommit;files=$files}
 }
 
 function Get-SourceRunBinding([string]$RepoRoot,[string]$DriverPath,[string]$ManifestPath,[string]$LogDirectory) {
@@ -367,7 +423,7 @@ function Get-AuthenticatedWindowsPkgconf([string]$DownloadDirectory,[string]$Evi
 
 function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='',[string]$PkgConfig='') {
     '--with-distro=LibreOfficeWinArm64','--build=aarch64-pc-cygwin','--host=aarch64-pc-cygwin',
-    '--with-visual-studio=2026','--enable-firebird-sdbc','--enable-database-connectivity',
+    '--with-visual-studio=2026','--with-package-format=archive','--enable-firebird-sdbc','--enable-database-connectivity',
     '--without-system-firebird','--without-system-libatomic_ops','--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'
     if($ExternalTar) {'--with-external-tar='+$ExternalTar}
     if($JdkHome) {'--with-jdk-home='+$JdkHome}
@@ -385,7 +441,7 @@ function Assert-GeneratedConfiguration([string]$Path) {
     foreach($line in Get-Content -LiteralPath $Path) {
         if($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::|\?)?=\s*(.*?)\s*$') {$values[$Matches[1]]=$Matches[2]}
     }
-    $required=@{OS='WNT';COM='MSC';CPUNAME='AARCH64';HOST_PLATFORM='aarch64-pc-cygwin';BUILD_PLATFORM='aarch64-pc-cygwin';ENABLE_FIREBIRD_SDBC='TRUE'}
+    $required=@{OS='WNT';COM='MSC';CPUNAME='AARCH64';HOST_PLATFORM='aarch64-pc-cygwin';BUILD_PLATFORM='aarch64-pc-cygwin';ENABLE_FIREBIRD_SDBC='TRUE';PKGFORMAT='archive'}
     foreach($key in $required.Keys) {if($values[$key] -cne $required[$key]){throw "Generated configuration rejects native Firebird: $key=$($values[$key])"}}
     if(-not $values.ContainsKey('CROSS_COMPILING') -or $values.CROSS_COMPILING -ne '' -or $values.SYSTEM_FIREBIRD -ne '') {throw 'Cross-compiling or system Firebird is forbidden.'}
     foreach($token in @('FIREBIRD','LIBATOMIC_OPS','LIBTOMMATH')) {if($values.BUILD_TYPE -notmatch ('(^|\s)'+$token+'(\s|$)')) {throw "Required internal build dependency is absent: $token"}}
@@ -885,8 +941,11 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.stage='authenticate-all-downloaded-source-archives'
             $receipt.externalSources=Write-ExternalSourceInventory $downloads $pinOutput.stdout (Join-Path $evidence 'external-source-inventory.json') $knownPins (Join-Path $source 'workdir/UnpackedTarball/python3') -RequirePython
             Copy-Item (Join-Path $source 'download.lst') (Join-Path $evidence 'authenticated-download.lst')
-            $receipt.stage='stage-authenticated-native-app-local-crt'
             $instdir=Join-Path $source 'instdir'
+            $receipt.stage='bind-authenticated-runtime-build-identity'
+            $receipt.runtimeBuildIdentity=Set-RuntimeBuildIdentity $instdir $archive $pin $receipt.sourceCommit $evidence
+            Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
+            $receipt.stage='stage-authenticated-native-app-local-crt'
             $receipt.appLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $instdir 'program') $crtTerms
             Write-BuildJson (Join-Path $evidence 'app-local-crt-installed.json') $receipt.appLocalCrt
             $receipt.stage='native-product-pe-audit'
@@ -910,6 +969,9 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $proof=Join-Path $evidence 'native-base-proof.json'
             Invoke-LoggedCommand (Join-Path $instdir 'program/python.exe') @($probe,$repo,$instdir,$proof,(Join-Path $work 'base-proof')) $instdir (Join-Path $evidence 'native-base-proof')|Out-Null
             $receipt.baseProof=Assert-BaseProof $proof
+            $receipt.stage='verify-effective-runtime-build-identity'
+            $receipt.runtimeBuildIdentity.finalVerification=Assert-RuntimeBuildIdentity $instdir $pin $receipt.runtimeBuildIdentity
+            Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
             $receipt.stage='package-qualified-source-build'
             $zip=Join-Path $evidence 'OpenGeul-Office-engine-arm64.zip'
             if(Test-Path $zip) {throw 'Engine artifact already exists.'}
