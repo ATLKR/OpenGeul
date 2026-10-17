@@ -177,8 +177,10 @@ def dialog_uia_identity(accessible, dialog, shell_pid, evidence=None):
     return observed
 
 
-def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, field, target, record):
+def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, field, target, record, *,
+                            expected_title='OpenGeul Writer — 다른 이름으로 저장'):
     """Assign only the verified fixture filename; document text still uses physical input."""
+    assert expected_title in ('OpenGeul Writer — 다른 이름으로 저장','OpenGeul Office에서 문서 열기'), 'Unsupported owned filename dialog'
     receipt = {'method': 'Win32-Edit-EM_REPLACESEL', 'expected': str(target), 'before': None, 'after': None,
                'assignmentAttempts': 0, 'selectionSetAttempts': 0, 'focusClickAttempts': 0, 'success': False,
                'document': {}, 'dialog': {}, 'dialogUia': {}, 'field': {}, 'nativeEdit': {},
@@ -204,7 +206,7 @@ def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, fiel
         native_dialog = receipt['dialog']
         assert dialog != document and native_dialog['live'], 'Picker is not a distinct live native dialog'
         native.require_dialog_identity(native_dialog['pid'], shell_pid, native_dialog['owner'], document,
-                                       native_dialog['title'], 'OpenGeul Writer — 다른 이름으로 저장', native_dialog['class'])
+                                       native_dialog['title'], expected_title, native_dialog['class'])
         observed = receipt['field']
         assert observed['processId'] == observed['nativePid'] == shell_pid and observed['runtimeId'], 'Filename field belongs to a foreign process or lacks runtime identity'
         assert observed['automationId'] == '1001' and observed['controlType'] == 'Edit', 'Exact native filename Edit 1001 is required'

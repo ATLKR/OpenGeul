@@ -794,7 +794,7 @@ def _base_raw_controls(api, accessible, uia, dialog, observation):
     return elements
 
 
-def _wait_base_save_controls(api, process, document, caption, record):
+def _wait_base_save_controls(api, process, document, caption, record, *, open_dialog=False):
     start = time.monotonic()
     from pywinauto import Desktop
     from pywinauto.uia_defines import IUIA
@@ -805,7 +805,12 @@ def _wait_base_save_controls(api, process, document, caption, record):
              'maxObservations':BASE_SAVE_MAX_OBSERVATIONS, 'startedAt':start, 'deadline':start+BASE_SAVE_DIALOG_SECONDS,
              'finishedAt':start, 'fileMenuClicks':1, 'saveShortcuts':1, 'focusAction':None,
              'dialogHwnd':0, 'uiaRootRuntimeId':[], 'nativeAnchor':{}, 'observations':[], 'wrapperBindings':[], 'bindingError':None, 'ready':False}
-    record['baseSaveDialogReadiness'] = proof
+    if open_dialog:
+        assert caption == 'OpenGeul Office에서 문서 열기'
+        proof.pop('fileMenuClicks');proof.pop('saveShortcuts')
+        proof.update(kind='owned-open-dialog-readiness',trigger=dict(record['openTrigger']))
+        record['openDialogReadiness'] = proof
+    else: record['baseSaveDialogReadiness'] = proof
     dialog, native, accessible, uia = 0, None, None, None
     try:
         for sequence in range(BASE_SAVE_MAX_OBSERVATIONS):
@@ -880,7 +885,10 @@ def _wait_base_save_controls(api, process, document, caption, record):
                     proof['bindingError'] = _base_api_error(binding_operation,exc)
                     raise
                 proof.update(ready=True, finishedAt=time.monotonic())
-                require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True)
+                if open_dialog:
+                    from home_routing_smoke import require_open_dialog_readiness
+                    require_open_dialog_readiness(proof, process.pid, document, before_input=True)
+                else:require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True)
                 return dialog, native, wrappers[0], wrappers[1]
             time.sleep(min(0.1, max(0,proof['deadline']-time.monotonic())))
         raise AssertionError('Base save readiness deadline or finite observation limit expired')

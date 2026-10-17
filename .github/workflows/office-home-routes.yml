@@ -1,0 +1,92 @@
+name: OpenGeul Home document routing E2E
+'on':
+  push:
+    branches: [work/opengeul-office-home-routes]
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  home-routes-x64:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+    - name: Preserve exact source bytes
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: x64
+    - name: Prepare pinned native UI tools
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI prerequisites failed.' }
+    - name: Verify Home routing and owned shutdown regressions
+      shell: pwsh
+      run: |
+        python -m unittest suite.tests.test_home_routing_smoke suite.tests.test_home_calc_close suite.tests.test_home_fixture_inputs suite.tests.test_home_routes_workflow.HomeRoutesFocusedWorkflowTests suite.tests.test_base_save_readiness suite.tests.test_lifecycle_smoke suite.tests.test_native_cleanup_receipt suite.tests.test_generated_calc_close -v
+        if ($LASTEXITCODE -ne 0) { throw 'Home routing boundary tests failed.' }
+        dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+        if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
+    - name: Build the pinned x64 Suite package
+      id: build
+      shell: pwsh
+      run: |
+        $lock = Get-Content suite/config/runtime.lock.json -Raw | ConvertFrom-Json
+        if ($lock.architecture -cne 'x64' -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite identity.' }
+        "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-x64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        ./suite/scripts/build-suite.ps1 -Architecture x64
+        if ($LASTEXITCODE -ne 0) { throw 'Suite package build failed.' }
+    - name: Create all twenty-one fresh engine feature fixtures
+      id: office-features
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/office_feature_smoke.py --suite $package --output .work/suite-office-features
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh canonical Office feature fixtures failed.' }
+    - name: Create source-bound HWP fixtures with the packaged converter
+      id: home-fixtures
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/home_fixture_inputs.py --suite $package --output .work/e2e-fixtures
+        if ($LASTEXITCODE -ne 0) { throw 'Owned HWP fixture generation or provenance failed.' }
+    - name: Exercise all twenty-five physical Home routes and shared document menus
+      id: home-routes
+      if: '!cancelled() && steps.office-features.outcome == ''success'' && steps.home-fixtures.outcome == ''success'''
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/home_routing_smoke.py --suite $package --features .work/suite-office-features --hwp-fixtures .work/e2e-fixtures --output .work/suite-home-routing
+        $homeExit = $LASTEXITCODE
+        python suite/scripts/verify-suite.py $package
+        $integrityExit = $LASTEXITCODE
+        if ($homeExit -ne 0 -or $integrityExit -ne 0) { throw "Home routing failed: physical=$homeExit integrity=$integrityExit" }
+    - name: Preserve original fixtures, physical observations and owned native shutdown evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-home-routes-x64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-office-features/
+          .work/e2e-fixtures/
+          .work/suite-home-routing/
+          .work/office-suite/msi.msi.log
+          dist/**/suite-inventory.json
+          dist/**/suite-provenance.json
+          dist/**/runtime-branding.json
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
