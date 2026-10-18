@@ -106,9 +106,34 @@ class AtlSourceTests(unittest.TestCase):
                 self.assertEqual(before, target.read_bytes() if target.exists() else None)
 
     def test_producer_mandates_actual_source_and_replay(self):
-        driver = (ROOT / 'suite/scripts/build-native-engine.ps1').read_text()
-        self.assertTrue('export OPENGEUL_LIBREOFFICE_ATL_SOURCE=' in driver)
-        self.assertTrue('suite.tests.test_native_atl_path -v' in driver)
+        driver = (ROOT/'suite/scripts/build-native-engine.ps1').read_text()
+        functions = driver.split('function Write-NativeSourceGate(',1)
+        self.assertEqual(2,len(functions))
+        body, closing, _ = functions[1].partition('\n}')
+        self.assertEqual('\n}',closing)
+        # Parse the quoted source literals without running a native Windows
+        # process from the actual Cygwin source gate.
+        lexer = shlex.shlex(body,posix=False,punctuation_chars=',()')
+        lexer.whitespace_split = True
+        literals = [token for token in lexer
+                    if len(token)>1 and token[0] in "\"'" and token[-1]==token[0]]
+        self.assertEqual([['/usr/bin/python3','-m','unittest',
+            'suite.tests.test_firebird_arm64_port','suite.tests.test_native_python_host',
+            'suite.tests.test_native_atl_path','suite.tests.test_native_meson_path','-v']],
+            [shlex.split(token[1:-1]) for token in literals
+             if token.startswith("'/usr/bin/python3 ")])
+        self.assertEqual([
+            'export PATH=/usr/local/bin:/usr/bin:/bin:`$PATH',
+            'export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1',
+            'export OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY=1',
+            'export OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY=1',
+            'export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE=$(Quote-Bash $FirebirdArchive)',
+            'export OPENGEUL_MDDS_SOURCE_ARCHIVE=$(Quote-Bash $MddsArchive)',
+            "export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES=$(Quote-Bash ($SourceRoot+'/external/firebird'))",
+            'export OPENGEUL_LIBREOFFICE_ATL_SOURCE=$(Quote-Bash $SourceRoot)',
+            'export OPENGEUL_LIBREOFFICE_MESON_SOURCE=$(Quote-Bash $SourceRoot)',
+            "export OPENGEUL_LIBREOFFICE_PYTHON_PATCHES=$(Quote-Bash ($SourceRoot+'/external/python3'))"],
+            [token[1:-1] for token in literals if token.startswith('"export ')])
 
     def test_strict_gate_rejects_missing_or_forged_actual_source_without_skip(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -38,16 +39,31 @@ class NativeEngineBuildTests(unittest.TestCase):
         script = self.root/'source-gate.sh'
         self.ps(f"Write-NativeSourceGate {quote(script)} '/owned/repo' '/owned/lo source' '/owned/firebird.tar.bz2' '/owned/mdds.tar.xz'")
         raw = script.read_text()
-        self.assertIn('export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1', raw)
-        self.assertIn('export OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY=1', raw)
-        self.assertIn("export OPENGEUL_MDDS_SOURCE_ARCHIVE='/owned/mdds.tar.xz'", raw)
-        self.assertIn("export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE='/owned/firebird.tar.bz2'", raw)
-        self.assertIn("export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES='/owned/lo source/external/firebird'", raw)
-        self.assertIn("export OPENGEUL_LIBREOFFICE_PYTHON_PATCHES='/owned/lo source/external/python3'", raw)
-        self.assertIn("export OPENGEUL_LIBREOFFICE_ATL_SOURCE='/owned/lo source'", raw)
-        self.assertIn('/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port suite.tests.test_native_python_host suite.tests.test_native_atl_path -v', raw)
+        parsed = [shlex.split(line) for line in raw.splitlines()]
+        self.assertEqual([['/usr/bin/python3', '-m', 'unittest',
+            'suite.tests.test_firebird_arm64_port', 'suite.tests.test_native_python_host',
+            'suite.tests.test_native_atl_path', 'suite.tests.test_native_meson_path', '-v']],
+            [argv for argv in parsed if argv and argv[0] == '/usr/bin/python3'])
+        self.assertEqual([
+            ['export', 'PATH=/usr/local/bin:/usr/bin:/bin:$PATH'],
+            ['export', 'OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1'],
+            ['export', 'OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY=1'],
+            ['export', 'OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY=1'],
+            ['export', 'OPENGEUL_FIREBIRD_SOURCE_ARCHIVE=/owned/firebird.tar.bz2'],
+            ['export', 'OPENGEUL_MDDS_SOURCE_ARCHIVE=/owned/mdds.tar.xz'],
+            ['export', 'OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES=/owned/lo source/external/firebird'],
+            ['export', 'OPENGEUL_LIBREOFFICE_ATL_SOURCE=/owned/lo source'],
+            ['export', 'OPENGEUL_LIBREOFFICE_MESON_SOURCE=/owned/lo source'],
+            ['export', 'OPENGEUL_LIBREOFFICE_PYTHON_PATCHES=/owned/lo source/external/python3']],
+            [argv for argv in parsed if argv and argv[0] == 'export'])
         result = subprocess.run(['bash','-n',str(script)],capture_output=True,text=True)
         self.assertEqual(0,result.returncode,result.stderr)
+        atl_source = (SOURCE.parents[1]/'tests/test_native_atl_path.py').read_text()
+        methods = re.findall(r'    def test_producer_mandates_actual_source_and_replay\(self\):\n(.*?)(?=\n    def |\n\nclass |\Z)',
+                             atl_source,re.DOTALL)
+        self.assertEqual(1,len(methods))
+        self.assertNotRegex(methods[0],r'\b(?:subprocess|PWSH|test_native_engine_build)\b')
+        self.assertNotRegex(methods[0],r'(?m)^\s*(?:import|from)\s')
 
     def test_actual_mdds_header_retention_copies_owned_bytes_and_rejects_drift_or_links(self):
         import hashlib

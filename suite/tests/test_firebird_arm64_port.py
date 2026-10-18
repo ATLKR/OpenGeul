@@ -93,6 +93,9 @@ class AuthenticatedSource(unittest.TestCase):
             raise unittest.SkipTest('A C preprocessor/compiler and GNU patch are required')
 
     def mdds_recipe(self, root):
+        harfbuzz = root / 'external/harfbuzz/ExternalProject_harfbuzz.mk'
+        harfbuzz.parent.mkdir(parents=True, exist_ok=True)
+        harfbuzz.write_bytes((ROOT / 'suite/tests/fixtures/native-meson-path' / harfbuzz.name).read_bytes())
         atl = root / 'extensions/Library_so_activex.mk'
         atl.parent.mkdir(exist_ok=True)
         atl.write_bytes((ROOT / 'suite/tests/fixtures/native-atl-path' / atl.name).read_bytes())
@@ -652,14 +655,25 @@ class AuthenticatedSource(unittest.TestCase):
             python_original = python.read_bytes()
             atl = root / 'extensions/Library_so_activex.mk'
             atl_original = atl.read_bytes()
+            harfbuzz = root / 'external/harfbuzz/ExternalProject_harfbuzz.mk'
+            harfbuzz_original = harfbuzz.read_bytes()
             python_targets = python.with_name('opengeul-native-arm64-tools.targets')
             upstream = mdds.parent / 'gcc-12-silence-use-after-free.patch.1'
             upstream_original = upstream.read_bytes()
             evidence = root / 'evidence'
             evidence.mkdir()
-            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch', 'changed-python-recipe', 'linked-python-recipe', 'python-targets-collision', 'python-evidence-collision', 'python-payload-evidence-collision', 'forged-python-targets', 'missing-python-lock', 'changed-atl-recipe', 'linked-atl-recipe', 'atl-original-evidence-collision', 'atl-effective-evidence-collision', 'missing-atl-lock'):
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch', 'changed-python-recipe', 'linked-python-recipe', 'python-targets-collision', 'python-evidence-collision', 'python-payload-evidence-collision', 'forged-python-targets', 'missing-python-lock', 'changed-atl-recipe', 'linked-atl-recipe', 'atl-original-evidence-collision', 'atl-effective-evidence-collision', 'missing-atl-lock', 'changed-harfbuzz-recipe', 'linked-harfbuzz-recipe', 'harfbuzz-original-evidence-collision', 'harfbuzz-effective-evidence-collision', 'missing-harfbuzz-lock'):
                 with self.subTest(invalid=invalid):
-                    if invalid == 'changed-atl-recipe':
+                    if invalid == 'changed-harfbuzz-recipe':
+                        harfbuzz.write_bytes(harfbuzz_original+b'changed')
+                    elif invalid == 'linked-harfbuzz-recipe':
+                        saved_harfbuzz=root/'saved-harfbuzz'; saved_harfbuzz.write_bytes(harfbuzz_original)
+                        harfbuzz.unlink(); harfbuzz.symlink_to(saved_harfbuzz)
+                    elif invalid == 'harfbuzz-original-evidence-collision':
+                        (evidence/'original-ExternalProject_harfbuzz.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'harfbuzz-effective-evidence-collision':
+                        (evidence/'effective-ExternalProject_harfbuzz.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'changed-atl-recipe':
                         atl.write_bytes(atl_original+b'changed')
                     elif invalid == 'linked-atl-recipe':
                         saved_atl = root/'saved-atl'; saved_atl.write_bytes(atl_original)
@@ -719,6 +733,7 @@ class AuthenticatedSource(unittest.TestCase):
                     expected_mdds=mdds.read_bytes()
                     expected_python=python.read_bytes()
                     expected_atl=atl.read_bytes()
+                    expected_harfbuzz=harfbuzz.read_bytes()
                     installer = module()
                     if invalid == 'changed-mdds-patch':
                         bundle = root/'changed-port'; bundle.mkdir(exist_ok=True)
@@ -727,7 +742,7 @@ class AuthenticatedSource(unittest.TestCase):
                         bad_patch = bundle/'opengeul-arm64-equality.patch.1'
                         bad_patch.write_bytes(bad_patch.read_bytes()+b'changed')
                         installer.HERE = bundle
-                    elif invalid in ('forged-python-targets', 'missing-python-lock', 'missing-atl-lock'):
+                    elif invalid in ('forged-python-targets', 'missing-python-lock', 'missing-atl-lock', 'missing-harfbuzz-lock'):
                         bundle = root/invalid; bundle.mkdir()
                         for name in ('source-build.json', 'firebird-windows-arm64.patch', 'libreoffice-enable-arm64-firebird.patch', 'opengeul-arm64-equality.patch.1', 'opengeul-native-arm64-tools.targets'):
                             shutil.copyfile(PORT/name,bundle/name)
@@ -735,10 +750,11 @@ class AuthenticatedSource(unittest.TestCase):
                             (bundle/'opengeul-native-arm64-tools.targets').write_bytes(b'forged targets')
                         else:
                             manifest = json.loads((bundle/'source-build.json').read_text())
-                            del manifest['pythonNativeHost' if invalid == 'missing-python-lock' else 'atlNativePaths']
+                            del manifest[{'missing-python-lock':'pythonNativeHost', 'missing-atl-lock':'atlNativePaths',
+                                          'missing-harfbuzz-lock':'harfbuzzNativeMesonPaths'}[invalid]]
                             (bundle/'source-build.json').write_text(json.dumps(manifest))
                         installer.HERE = bundle
-                    if invalid in ('missing-python-lock', 'missing-atl-lock'):
+                    if invalid in ('missing-python-lock', 'missing-atl-lock', 'missing-harfbuzz-lock'):
                         with self.assertRaises(KeyError):
                             installer.install(root, evidence)
                     else:
@@ -752,6 +768,7 @@ class AuthenticatedSource(unittest.TestCase):
                     self.assertEqual(expected_mdds,mdds.read_bytes())
                     self.assertEqual(expected_python,python.read_bytes())
                     self.assertEqual(expected_atl,atl.read_bytes())
+                    self.assertEqual(expected_harfbuzz,harfbuzz.read_bytes())
                     self.assertFalse((evidence/'original-ExternalProject_python3.mk').exists())
                     self.assertFalse((evidence/'original-UnpackedTarball_mdds.mk').exists())
                     self.assertFalse((target.parent / 'firebird-windows-arm64.patch').exists())
@@ -777,12 +794,21 @@ class AuthenticatedSource(unittest.TestCase):
                     atl.write_bytes(atl_original)
                     (evidence/'original-Library_so_activex.mk').unlink(missing_ok=True)
                     (evidence/'effective-Library_so_activex.mk').unlink(missing_ok=True)
+                    if harfbuzz.is_symlink(): harfbuzz.unlink()
+                    harfbuzz.write_bytes(harfbuzz_original)
+                    (evidence/'original-ExternalProject_harfbuzz.mk').unlink(missing_ok=True)
+                    (evidence/'effective-ExternalProject_harfbuzz.mk').unlink(missing_ok=True)
                     if python.is_symlink(): python.unlink()
                     python.write_bytes(python_original)
                     python_targets.unlink(missing_ok=True)
                     (evidence/'effective-ExternalProject_python3.mk').unlink(missing_ok=True)
                     (evidence/'effective-opengeul-native-arm64-tools.targets').unlink(missing_ok=True)
             receipt = module().install(root, evidence)
+            self.assertEqual(harfbuzz_original,(evidence/'original-ExternalProject_harfbuzz.mk').read_bytes())
+            self.assertEqual(harfbuzz.read_bytes(),(evidence/'effective-ExternalProject_harfbuzz.mk').read_bytes())
+            self.assertEqual(hashlib.sha256(harfbuzz_original).hexdigest(),receipt['harfbuzzNativeMesonPaths']['beforeSha256'])
+            self.assertEqual(hashlib.sha256(harfbuzz.read_bytes()).hexdigest(),receipt['harfbuzzNativeMesonPaths']['afterSha256'])
+            self.assertEqual({'original','effective'},set(receipt['harfbuzzNativeMesonPaths']['evidence']))
             self.assertEqual(atl_original,(evidence/'original-Library_so_activex.mk').read_bytes())
             self.assertEqual(atl.read_bytes(),(evidence/'effective-Library_so_activex.mk').read_bytes())
             self.assertEqual(hashlib.sha256(atl_original).hexdigest(),receipt['atlNativePaths']['beforeSha256'])
