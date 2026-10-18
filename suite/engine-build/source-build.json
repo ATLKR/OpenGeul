@@ -344,5 +344,22 @@
       "causalCorrectionProven": false,
       "engineQualified": false
     }
+  },
+  "atlNativePaths": {
+    "scope": "ActiveX recipe only; WNT_AARCH64 and actual GNU make MAKE_HOST ending -cygwin; cygpath -lm quoted native include/library arguments; full atls.lib path bypasses T_LIBS word sorting via recipe-local ldflags; all other profiles and system libraries unchanged",
+    "recipe": {
+      "path": "extensions/Library_so_activex.mk",
+      "size": 1376,
+      "sha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c",
+      "afterSize": 2416,
+      "afterSha256": "454fd02b85c851f035d41731d2e889da03293e67c4e6bcdecb15aeba74caf9d8"
+    },
+    "diagnosticEvidence": {
+      "runId": 39098589144,
+      "nativePathCompileSucceeded": true,
+      "nativePathLinkSucceeded": true,
+      "allConsumedLibraryArchitectureVerified": false,
+      "engineQualified": false
+    }
   }
 }

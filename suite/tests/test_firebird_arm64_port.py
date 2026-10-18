@@ -93,6 +93,9 @@ class AuthenticatedSource(unittest.TestCase):
             raise unittest.SkipTest('A C preprocessor/compiler and GNU patch are required')
 
     def mdds_recipe(self, root):
+        atl = root / 'extensions/Library_so_activex.mk'
+        atl.parent.mkdir(exist_ok=True)
+        atl.write_bytes((ROOT / 'suite/tests/fixtures/native-atl-path' / atl.name).read_bytes())
         python = root / 'external/python3/ExternalProject_python3.mk'
         python.parent.mkdir(parents=True, exist_ok=True)
         python.write_bytes((ROOT / 'suite/tests/fixtures/native-python-host' / python.name).read_bytes())
@@ -647,14 +650,25 @@ class AuthenticatedSource(unittest.TestCase):
             mdds_original = mdds.read_bytes()
             python = root / 'external/python3/ExternalProject_python3.mk'
             python_original = python.read_bytes()
+            atl = root / 'extensions/Library_so_activex.mk'
+            atl_original = atl.read_bytes()
             python_targets = python.with_name('opengeul-native-arm64-tools.targets')
             upstream = mdds.parent / 'gcc-12-silence-use-after-free.patch.1'
             upstream_original = upstream.read_bytes()
             evidence = root / 'evidence'
             evidence.mkdir()
-            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch', 'changed-python-recipe', 'linked-python-recipe', 'python-targets-collision', 'python-evidence-collision', 'python-payload-evidence-collision', 'forged-python-targets', 'missing-python-lock'):
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch', 'changed-python-recipe', 'linked-python-recipe', 'python-targets-collision', 'python-evidence-collision', 'python-payload-evidence-collision', 'forged-python-targets', 'missing-python-lock', 'changed-atl-recipe', 'linked-atl-recipe', 'atl-original-evidence-collision', 'atl-effective-evidence-collision', 'missing-atl-lock'):
                 with self.subTest(invalid=invalid):
-                    if invalid == 'changed-helper':
+                    if invalid == 'changed-atl-recipe':
+                        atl.write_bytes(atl_original+b'changed')
+                    elif invalid == 'linked-atl-recipe':
+                        saved_atl = root/'saved-atl'; saved_atl.write_bytes(atl_original)
+                        atl.unlink(); atl.symlink_to(saved_atl)
+                    elif invalid == 'atl-original-evidence-collision':
+                        (evidence/'original-Library_so_activex.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'atl-effective-evidence-collision':
+                        (evidence/'effective-Library_so_activex.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'changed-helper':
                         bootstrap.write_bytes(pristine + b'\nchanged\n')
                     elif invalid == 'linked-helper':
                         saved = root / 'original-helper'
@@ -704,6 +718,7 @@ class AuthenticatedSource(unittest.TestCase):
                     expected_zstd=zstd.read_bytes()
                     expected_mdds=mdds.read_bytes()
                     expected_python=python.read_bytes()
+                    expected_atl=atl.read_bytes()
                     installer = module()
                     if invalid == 'changed-mdds-patch':
                         bundle = root/'changed-port'; bundle.mkdir(exist_ok=True)
@@ -712,7 +727,7 @@ class AuthenticatedSource(unittest.TestCase):
                         bad_patch = bundle/'opengeul-arm64-equality.patch.1'
                         bad_patch.write_bytes(bad_patch.read_bytes()+b'changed')
                         installer.HERE = bundle
-                    elif invalid in ('forged-python-targets', 'missing-python-lock'):
+                    elif invalid in ('forged-python-targets', 'missing-python-lock', 'missing-atl-lock'):
                         bundle = root/invalid; bundle.mkdir()
                         for name in ('source-build.json', 'firebird-windows-arm64.patch', 'libreoffice-enable-arm64-firebird.patch', 'opengeul-arm64-equality.patch.1', 'opengeul-native-arm64-tools.targets'):
                             shutil.copyfile(PORT/name,bundle/name)
@@ -720,10 +735,10 @@ class AuthenticatedSource(unittest.TestCase):
                             (bundle/'opengeul-native-arm64-tools.targets').write_bytes(b'forged targets')
                         else:
                             manifest = json.loads((bundle/'source-build.json').read_text())
-                            del manifest['pythonNativeHost']
+                            del manifest['pythonNativeHost' if invalid == 'missing-python-lock' else 'atlNativePaths']
                             (bundle/'source-build.json').write_text(json.dumps(manifest))
                         installer.HERE = bundle
-                    if invalid == 'missing-python-lock':
+                    if invalid in ('missing-python-lock', 'missing-atl-lock'):
                         with self.assertRaises(KeyError):
                             installer.install(root, evidence)
                     else:
@@ -736,6 +751,7 @@ class AuthenticatedSource(unittest.TestCase):
                     self.assertEqual(expected_zstd,zstd.read_bytes())
                     self.assertEqual(expected_mdds,mdds.read_bytes())
                     self.assertEqual(expected_python,python.read_bytes())
+                    self.assertEqual(expected_atl,atl.read_bytes())
                     self.assertFalse((evidence/'original-ExternalProject_python3.mk').exists())
                     self.assertFalse((evidence/'original-UnpackedTarball_mdds.mk').exists())
                     self.assertFalse((target.parent / 'firebird-windows-arm64.patch').exists())
@@ -757,12 +773,22 @@ class AuthenticatedSource(unittest.TestCase):
                     upstream.write_bytes(upstream_original)
                     (mdds.parent/'opengeul-arm64-equality.patch.1').unlink(missing_ok=True)
                     (evidence/'effective-UnpackedTarball_mdds.mk').unlink(missing_ok=True)
+                    if atl.is_symlink(): atl.unlink()
+                    atl.write_bytes(atl_original)
+                    (evidence/'original-Library_so_activex.mk').unlink(missing_ok=True)
+                    (evidence/'effective-Library_so_activex.mk').unlink(missing_ok=True)
                     if python.is_symlink(): python.unlink()
                     python.write_bytes(python_original)
                     python_targets.unlink(missing_ok=True)
                     (evidence/'effective-ExternalProject_python3.mk').unlink(missing_ok=True)
                     (evidence/'effective-opengeul-native-arm64-tools.targets').unlink(missing_ok=True)
             receipt = module().install(root, evidence)
+            self.assertEqual(atl_original,(evidence/'original-Library_so_activex.mk').read_bytes())
+            self.assertEqual(atl.read_bytes(),(evidence/'effective-Library_so_activex.mk').read_bytes())
+            self.assertEqual(hashlib.sha256(atl_original).hexdigest(),receipt['atlNativePaths']['beforeSha256'])
+            self.assertEqual(hashlib.sha256(atl.read_bytes()).hexdigest(),receipt['atlNativePaths']['afterSha256'])
+            self.assertEqual({'original','effective'},set(receipt['atlNativePaths']['evidence']))
+            self.assertFalse(receipt['nativeBuildVerified'])
             self.assertEqual(python_original,(evidence/'original-ExternalProject_python3.mk').read_bytes())
             self.assertEqual(python.read_bytes(),(evidence/'effective-ExternalProject_python3.mk').read_bytes())
             self.assertEqual(python_targets.read_bytes(),(evidence/'effective-opengeul-native-arm64-tools.targets').read_bytes())

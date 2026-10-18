@@ -120,6 +120,49 @@ def _python_native_host(source: Path, lock: dict):
     return target, original, changed, output, payload
 
 
+def _atl_native_paths(source: Path, lock: dict):
+    """Plan recipe-local native Windows argv for the actual Cygwin make profile."""
+    recipe = lock['recipe']
+    target = source / recipe['path']
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise ValueError('ATL source hook requires a regular recipe directory')
+    original = _regular(target)
+    if len(original) != recipe['size'] or hashlib.sha256(original).hexdigest() != recipe['sha256']:
+        raise ValueError('ATL build recipe SHA256 differs from the pinned source')
+    hook = (
+        b'# OpenGeul: native MSVC arguments require Windows paths under Cygwin GNU make.\n'
+        b'so_activex_ATL_INCLUDE := $(foreach i,$(ATL_INCLUDE), -I$(i))\n'
+        b'so_activex_ATL_LIB := $(ATL_LIB)\n'
+        b'so_activex_ATL_LIBS := $(ATL_LIB)/atls.lib\n'
+        b'so_activex_ATL_LINK_LIB :=\n'
+        b'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
+        b'ifneq ($(filter %-cygwin,$(MAKE_HOST)),)\n'
+        b'ifeq ($(strip $(ATL_INCLUDE)),)\n'
+        b'$(error ATL include path is empty)\n'
+        b'endif\n'
+        b'define so_activex_native_atl_path\n'
+        b'$(eval so_activex_atl_path := $(shell cygpath -lm "$(1)"))$(if $(filter 0,$(.SHELLSTATUS)),,$(error ATL path conversion failed))$(if $(strip $(so_activex_atl_path)),,$(error ATL path conversion returned no path))"$(so_activex_atl_path)"\n'
+        b'endef\n'
+        b'so_activex_ATL_INCLUDE := $(foreach i,$(ATL_INCLUDE), -I$(call so_activex_native_atl_path,$(i)))\n'
+        b'so_activex_ATL_LIB := $(call so_activex_native_atl_path,$(ATL_LIB))\n'
+        b'# T_LIBS is word-sorted by com_MSC_class.mk; keep this quoted path in ldflags.\n'
+        b'so_activex_ATL_LINK_LIB := $(so_activex_ATL_LIB)/atls.lib\n'
+        b'so_activex_ATL_LIBS :=\n'
+        b'endif\n'
+        b'endif\n'
+        b'\n'
+    )
+    changed = original.replace(b'$(eval $(call gb_Library_Library,so_activex))',
+                               hook + b'$(eval $(call gb_Library_Library,so_activex))')
+    changed = changed.replace(b'\t$(foreach i,$(ATL_INCLUDE), -I$(i))', b'\t$(so_activex_ATL_INCLUDE)')
+    changed = changed.replace(b'\t-LIBPATH:$(ATL_LIB)',
+                              b'\t-LIBPATH:$(so_activex_ATL_LIB) $(so_activex_ATL_LINK_LIB)')
+    changed = changed.replace(b'\t$(ATL_LIB)/atls.lib', b'\t$(so_activex_ATL_LIBS)')
+    if len(changed) != recipe['afterSize'] or hashlib.sha256(changed).hexdigest() != recipe['afterSha256']:
+        raise ValueError('ATL build recipe result SHA256 differs from its lock')
+    return target, original, changed
+
+
 def install_module_bootstrap(source: Path, evidence: Path | None = None) -> dict:
     """Correct the pinned unpack helper's inverted git-hooks selection only."""
     lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))['moduleBootstrap']
@@ -189,6 +232,8 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     zstd, zstd_original, zstd_changed = _zstd_source_links(source, lock['zstdSourceLinks'])
     mdds, mdds_original, mdds_changed, mdds_output, mdds_patch = _mdds_equality(source, lock['mddsEquality'])
     python, python_original, python_changed, python_output, python_payload = _python_native_host(source, lock['pythonNativeHost'])
+    atl, atl_original, atl_changed = _atl_native_paths(source, lock['atlNativePaths'])
+    atl_evidence = {}
     python_evidence = {}
     mdds_evidence = {}
     project_evidence = {}
@@ -197,6 +242,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         evidence = Path(evidence)
         if any(path.is_symlink() for path in (evidence, *evidence.parents)) or not evidence.is_dir():
             raise ValueError('Firebird build path evidence requires regular owned directories')
+        atl_evidence = {'original': evidence / 'original-Library_so_activex.mk',
+                        'effective': evidence / 'effective-Library_so_activex.mk'}
+        if any(path.exists() or path.is_symlink() for path in atl_evidence.values()):
+            raise ValueError('ATL recipe evidence already exists')
         project_evidence = {'original': evidence / 'original-ExternalProject_firebird.mk',
                             'effective': evidence / 'effective-ExternalProject_firebird.mk'}
         if any(path.exists() or path.is_symlink() for path in project_evidence.values()):
@@ -223,6 +272,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     # All source and patch checks precede source writes. The fresh build tree is
     # owned by this invocation; a repeated or changed hook is rejected above.
     bootstrap = install_module_bootstrap(source, evidence)
+    for name, raw in (('original', atl_original), ('effective', atl_changed)):
+        if atl_evidence:
+            with atl_evidence[name].open('xb') as stream:
+                stream.write(raw)
     for name, raw in (('original', project_original), ('effective', project_changed)):
         if project_evidence:
             with project_evidence[name].open('xb') as stream:
@@ -254,6 +307,9 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         zstd.write_bytes(zstd_changed)
         mdds.write_bytes(mdds_changed)
         python.write_bytes(python_changed)
+        atl.write_bytes(atl_changed)
+        if _regular(atl) != atl_changed:
+            raise ValueError('Effective ATL source hook bytes changed after write')
         if _regular(python) != python_changed or _regular(python_output) != python_payload:
             raise ValueError('Effective Python host source hook bytes changed after write')
         if _regular(mdds) != mdds_changed or _regular(mdds_output) != mdds_patch:
@@ -301,6 +357,11 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                                  'targetsPath': str(python_output),
                                  'scope': lock['pythonNativeHost']['scope'],
                                  'evidence': {name: str(path) for name, path in python_evidence.items()}},
+            'atlNativePaths': {'path': lock['atlNativePaths']['recipe']['path'],
+                               'beforeSha256': lock['atlNativePaths']['recipe']['sha256'],
+                               'afterSha256': lock['atlNativePaths']['recipe']['afterSha256'],
+                               'scope': lock['atlNativePaths']['scope'],
+                               'evidence': {name: str(path) for name, path in atl_evidence.items()}},
             'nativeBuildVerified': False, 'basePersistenceVerified': False}
 
 

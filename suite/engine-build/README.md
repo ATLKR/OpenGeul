@@ -345,3 +345,28 @@ actual and expected identities in `source-build-receipt.json.mddsHeaders`, even
 on a later build failure. Linked paths and output collisions are rejected;
 retention errors preserve the original build failure. Full admission requires
 all three actual headers to match the locked post-patch identities.
+
+The ATL correction addresses Native22's missing `atlbase.h` and the bounded
+control's unresolved Cygwin `atls.lib` path. It changes only the authenticated
+ActiveX recipe under `WNT_AARCH64` and an actual GNU make `MAKE_HOST` ending in
+`-cygwin`. `cygpath -lm` supplies quoted native Windows include and library
+arguments. The explicit full `atls.lib` path goes through this recipe's linker
+flags because common gbuild sorts `T_LIBS` as words; all system libraries and
+other profiles retain their original behavior. Failed or empty conversions stop
+make. Original/effective recipes and hashes are retained under
+`sourceHooks.atlNativePaths`; existing source pins and qualification gates stay
+unchanged.
+
+The native driver exports `OPENGEUL_LIBREOFFICE_ATL_SOURCE` as the pristine
+extracted LibreOffice root and sets both `OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1`
+and `OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY=1`. The shared source flag requires
+authentic recipe, architecture profile, configure source and relevant gbuild
+inputs; Linux source integration retains its explicitly labelled argv adapter
+replay. The separate Cygwin flag also requires authentic ATL source, even when
+the shared flag is unset, and additionally requires actual Cygwin GNU make, Bash
+and cygpath for native path conversion and linker argument replay. Missing
+source/tools or an unsupported profile fails that mode without a skip. Native
+Windows unit discovery skips POSIX replay only when neither strict flag requires
+it. No tests download source or execute a product binary. Control 39098589144 supports bounded
+native compile/link path feasibility; it did not prove all consumed static
+library architectures or qualify the full engine, Base, IME or E2E behavior.
