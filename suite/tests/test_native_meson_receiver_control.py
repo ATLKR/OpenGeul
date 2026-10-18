@@ -129,7 +129,9 @@ class PrepareContractTests(unittest.TestCase):
             self.assertFalse(result['fullInstallerExecuted'])
             self.assertFalse(result['fullHarfBuzzOptionsExecuted'])
             self.assertEqual(4, len(result['observations']))
+            cross_payload = None
             for observation in result['observations']:
+                self.assertEqual(Path(result['dependencies']), Path(observation['directory']).parent)
                 makefile = Path(observation['makefile']).read_text()
                 recipe = (evidence / (('original' if observation['arm'] == 'original' else 'effective') +
                           '-ExternalProject_harfbuzz.mk')).read_text()
@@ -137,12 +139,25 @@ class PrepareContractTests(unittest.TestCase):
                 self.assertNotIn('MAKE_HOST :=', makefile)
                 self.assertIn('define gb_ExternalProject_run\n', makefile)
                 self.assertIn('builtin-make-host.txt,$(MAKE_HOST)', makefile)
+                self.assertIn('EXTERNAL_WORKDIR := .\n', makefile)
+                self.assertIn('gb_UnpackedTarball_workdir := ..\n', makefile)
+                cross = Path(observation['crossFile'])
+                self.assertEqual(Path(result['dependencies']) / 'harfbuzz/cross-file.txt', cross)
+                self.assertFalse(cross.exists())
                 dry = subprocess.run([shutil.which('make'), '--no-print-directory', '-n', '-f', observation['makefile']],
-                                     cwd=work, text=True, capture_output=True, timeout=15)
+                                     cwd=observation['directory'], text=True, capture_output=True, timeout=15)
                 self.assertEqual(0, dry.returncode, dry.stdout + dry.stderr)
                 self.assertIn('-Dsubset=enabled', dry.stdout)
                 self.assertIn('-Dicu_builtin=true', dry.stdout)
                 self.assertIn('compile -C builddir libs', dry.stdout)
+                payload = cross.read_bytes()
+                self.assertTrue(payload.startswith(b'[binaries]\n'))
+                self.assertIn(b"c = ['/cygdrive/c/PROGRA~1/VS/Hostarm64/arm64/cl.exe']", payload)
+                if cross_payload is not None:
+                    self.assertEqual(cross_payload, payload)
+                cross_payload = payload
+                self.assertFalse((work / 'Dependency').exists())
+                cross.unlink()
 
     def test_changed_production_module_rejects_before_control_source_writes(self):
         module = prepare_module()
@@ -185,7 +200,7 @@ class PrepareContractTests(unittest.TestCase):
 
 
 class ShallowAncestryContractTests(unittest.TestCase):
-    def test_direct_parent_gate_requires_two_checkout_generations(self):
+    def test_two_parent_hops_require_three_checkout_generations(self):
         # Local test objects only: no clone, network, remote or source commit
         # fabrication. Git's actual shallow boundary controls the same gate.
         with tempfile.TemporaryDirectory(prefix='receiver-shallow-fixture-') as folder:
@@ -198,10 +213,13 @@ class ShallowAncestryContractTests(unittest.TestCase):
                 'commit', '-q', '--allow-empty', '-m', 'local shallow fixture parent')
             parent = git('rev-parse', 'HEAD').stdout.strip()
             git('-c', 'user.name=Receiver fixture', '-c', 'user.email=receiver@example.invalid',
+                'commit', '-q', '--allow-empty', '-m', 'local shallow fixture Control1')
+            middle = git('rev-parse', 'HEAD').stdout.strip()
+            git('-c', 'user.name=Receiver fixture', '-c', 'user.email=receiver@example.invalid',
                 'commit', '-q', '--allow-empty', '-m', 'local shallow fixture child')
             child = git('rev-parse', 'HEAD').stdout.strip()
             shallow = root / '.git/shallow'
-            shallow.write_text(child + '\n')
+            shallow.write_text(middle + '\n')
             self.assertEqual(1, git('merge-base', '--is-ancestor', parent, 'HEAD', check=False).returncode)
             shallow.write_text(parent + '\n')
             self.assertEqual(0, git('merge-base', '--is-ancestor', parent, 'HEAD', check=False).returncode)

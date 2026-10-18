@@ -90,6 +90,97 @@ function Invoke-MesonMake([string]$Makefile,[string]$Bash,[string]$Cygpath,[stri
     return Invoke-MesonObservation (Join-Path (Split-Path $Bash -Parent) 'env.exe') @('CYGWIN=winsymlinks:nativestrict',$Bash,'--noprofile','--norc',$unixScript) $Work (Join-Path $Evidence $Name) $Allowed
 }
 
+function Get-MesonPkgFixturePlan([string]$Dependencies,[string]$Work,[string]$Macro,$Flags) {
+    # GNU make's file function stops its filename at the first whitespace.
+    # Only its output operands are staged; the authentic macro and PC values
+    # retain the same physical native paths, including spaces.
+    $files=@(
+        @{staged=(Join-Path $Work 'pc-stage-graphite.pc');destination=(Join-Path $Dependencies 'graphite/graphite2-uninstalled.pc')},
+        @{staged=(Join-Path $Work 'pc-stage-icu.pc');destination=(Join-Path $Dependencies 'icu/icu-uc-uninstalled.pc')},
+        @{staged=(Join-Path $Work 'pc-stage-prefix.pc');destination=(Join-Path $Dependencies 'prefix pc/prefix-control.pc')})
+    $body=$Macro+"`n"+'$(file >pc-stage-graphite.pc,$('+'call gb_pkgconfig_file,graphite2,1.3.15,'+$Flags.graphite[0]+','+$Flags.graphite[1]+',fixture_control=graphite))'+"`n"+
+        '$(file >pc-stage-icu.pc,$('+'call gb_pkgconfig_file,icu-uc,78.3,'+$Flags.icu[0]+','+$Flags.icu[1]+',fixture_control=icu))'+"`n"+
+        '$(file >pc-stage-prefix.pc,$('+'call gb_pkgconfig_file,prefix-control,1.0,-DPREFIX_CONTROL, -L"'+$Dependencies.Replace('\','/')+'",fixture_control=prefix))'+"`nall:`n`t@true`n"
+    return [ordered]@{makeText=$body;files=$files;makeCwd=$Work}
+}
+
+function Assert-MesonFreshFile([string]$Path) {
+    Assert-UnlinkedPath $Path
+    if($null -ne (Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {throw ('Fresh fixture output required: '+$Path)}
+}
+
+function Install-MesonPcStage([string]$Stage,[string]$Destination) {
+    Assert-UnlinkedPath $Stage
+    $item=Get-Item -LiteralPath $Stage -Force
+    if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -le 0 -or $item.Length -gt 65536) {
+        throw 'A nonempty bounded unlinked staged PC file is required.'
+    }
+    $partial=$Destination+'.control-partial'
+    Assert-MesonFreshFile $Destination;Assert-MesonFreshFile $partial
+    $bytes=[IO.File]::ReadAllBytes($Stage)
+    $stream=[IO.File]::Open($partial,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try {$stream.Write($bytes,0,$bytes.Length);$stream.Flush()} finally {$stream.Dispose()}
+    # Same-directory rename without overwrite; retain a partial file on failure.
+    [IO.File]::Move($partial,$Destination,$false)
+    $placed=[IO.File]::ReadAllBytes($Destination)
+    if([Convert]::ToHexString($bytes) -cne [Convert]::ToHexString($placed)) {throw 'Atomic PC placement changed staged bytes.'}
+    return [ordered]@{path=$Destination;stagedPath=$Stage;bytes=$placed.Length;
+        stagedSha256=(Get-FileHash -LiteralPath $Stage -Algorithm SHA256).Hash.ToLowerInvariant();
+        sha256=(Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant();
+        freshDestination=$true;unlinked=$true;byteIdentical=$true;atomicPlacement=$true}
+}
+
+function Save-MesonCrossFile([string]$Expected,[string]$Unexpected,[string]$Evidence,[string]$Name) {
+    $record=[ordered]@{passed=$false;makeOutput='authentic full recipe cross-file';intended=$null;unexpected=$null}
+    foreach($entry in @(@('intended',$Expected),@('unexpected',$Unexpected))) {
+        $key=$entry[0];$path=$entry[1];$part=[ordered]@{path=$path;present=$false;valid=$false}
+        try {
+            $item=Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if($null -ne $item) {
+                $part.present=$true;Assert-UnlinkedPath $path
+                if($item.PSIsContainer -or $item.Length -gt 65536) {throw 'Unexpected cross-file output type/size.'}
+                $part.snapshot=Join-Path $Evidence ($Name+'-cross-file-'+$key+'.txt')
+                Assert-MesonFreshFile $part.snapshot
+                $bytes=[IO.File]::ReadAllBytes($path)
+                [IO.File]::WriteAllBytes($part.snapshot,$bytes)
+                $part.bytes=$bytes.Length;$part.sha256=(Get-FileHash -LiteralPath $part.snapshot -Algorithm SHA256).Hash.ToLowerInvariant()
+                $part.valid=($bytes.Length -gt 0)
+            }
+        } catch {$part.error=$_.Exception.ToString()}
+        $record[$key]=$part
+    }
+    $record.passed=($record.intended.present -and $record.intended.valid -and -not $record.unexpected.present -and -not $record.unexpected.error)
+    Write-BuildJson (Join-Path $Evidence ($Name+'-cross-file.json')) $record
+    return $record
+}
+
+function Invoke-MesonRecipeMake($Observation,[string]$Bash,[string]$Cygpath,[string]$Evidence,[string]$Name,[int[]]$Allowed,$PriorCrossFile) {
+    # All observations use the same authentic cross-file target. Retain it
+    # after each make, then verify that snapshot before removing our prior
+    # generated file so the next observation must create its own output.
+    if($null -ne (Get-Item -LiteralPath $Observation.crossFile -Force -ErrorAction SilentlyContinue)) {
+        if($null -eq $PriorCrossFile -or $PriorCrossFile.passed -ne $true) {
+            Save-MesonCrossFile $Observation.crossFile $Observation.unexpectedSibling $Evidence ($Name+'-preexisting')|Out-Null
+            throw 'An unaccounted cross-file precedes this observation.'
+        }
+        Assert-UnlinkedPath $Observation.crossFile
+        Confirm-FileIdentity $Observation.crossFile $PriorCrossFile.intended.bytes SHA256 $PriorCrossFile.intended.sha256|Out-Null
+        Remove-Item -LiteralPath $Observation.crossFile -ErrorAction Stop
+    }
+    if($null -ne (Get-Item -LiteralPath $Observation.unexpectedSibling -Force -ErrorAction SilentlyContinue)) {
+        Save-MesonCrossFile $Observation.crossFile $Observation.unexpectedSibling $Evidence ($Name+'-preexisting')|Out-Null
+        throw 'An unexpected sibling output precedes this observation.'
+    }
+    $commandError=$null;$result=$null
+    try {$result=Invoke-MesonMake $Observation.makefile $Bash $Cygpath $Observation.directory $Evidence $Name $Allowed}
+    catch {$commandError=$_}
+    $cross=Save-MesonCrossFile $Observation.crossFile $Observation.unexpectedSibling $Evidence $Name
+    if($null -ne $commandError) {throw $commandError}
+    if(-not $cross.passed) {throw 'The authentic cross-file output is missing, invalid or misplaced; observation is inconclusive.'}
+    $result.crossFile=$cross
+    return $result
+}
+
 function New-MesonDependencyFixtures([string]$Dependencies,[string]$Compiler,[string]$Librarian,[string]$VsBatch,[string]$Work,[string]$Evidence,[string]$Bash,[string]$Cygpath) {
     $libraries=@();$flags=@{}
     foreach($item in @(@('graphite',17,'receiver_graphite_fixture','graphite-fixture.h'),@('icu',19,'receiver_icu_fixture','icu-fixture.h'))) {
@@ -110,16 +201,14 @@ function New-MesonDependencyFixtures([string]$Dependencies,[string]$Compiler,[st
     }
     $macro=[IO.File]::ReadAllText((Join-Path $Evidence 'gb-pkgconfig-file.mk'))
     $make=Join-Path $Evidence 'pkg-fixtures.mk'
-    $graphite=(Join-Path $Dependencies 'graphite/graphite2-uninstalled.pc').Replace('\','/')
-    $icu=(Join-Path $Dependencies 'icu/icu-uc-uninstalled.pc').Replace('\','/')
-    $prefix=(Join-Path $Dependencies 'prefix pc/prefix-control.pc').Replace('\','/')
-    $body=$macro+"`n"+'$(file >'+$graphite+',$('+'call gb_pkgconfig_file,graphite2,1.3.15,'+$flags.graphite[0]+','+$flags.graphite[1]+',fixture_control=graphite))'+"`n"+
-        '$(file >'+$icu+',$('+'call gb_pkgconfig_file,icu-uc,78.3,'+$flags.icu[0]+','+$flags.icu[1]+',fixture_control=icu))'+"`n"+
-        '$(file >'+$prefix+',$('+'call gb_pkgconfig_file,prefix-control,1.0,-DPREFIX_CONTROL, -L"'+$Dependencies.Replace('\','/')+'",fixture_control=prefix))'+"`nall:`n`t@true`n"
-    [IO.File]::WriteAllText($make,$body,[Text.UTF8Encoding]::new($false))
+    $plan=Get-MesonPkgFixturePlan $Dependencies $Work $macro $flags
+    Write-BuildJson (Join-Path $Evidence 'pkg-fixtures-plan.json') $plan
+    foreach($file in $plan.files) {Assert-MesonFreshFile $file.staged;Assert-MesonFreshFile $file.destination;Assert-MesonFreshFile ($file.destination+'.control-partial')}
+    [IO.File]::WriteAllText($make,$plan.makeText,[Text.UTF8Encoding]::new($false))
     Invoke-MesonMake $make $Bash $Cygpath $Work $Evidence 'pkg-fixtures'|Out-Null
+    $placed=@($plan.files|ForEach-Object {Install-MesonPcStage $_.staged $_.destination})
     return [ordered]@{scope='explicit ARM64 dependency fixtures, not actual Graphite/ICU qualification';libraries=$libraries;
-        pcFiles=@($graphite,$icu,$prefix)|ForEach-Object {@{path=$_;bytes=(Get-Item -LiteralPath $_).Length;sha256=(Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()}}}
+        pcFiles=$placed;plan=(Join-Path $Evidence 'pkg-fixtures-plan.json')}
 }
 
 function Invoke-NativeMesonReceiverControl([string]$WorkDirectory,[string]$OutputDirectory,[string]$DeadlineUtc) {
@@ -187,10 +276,11 @@ function Invoke-NativeMesonReceiverControl([string]$WorkDirectory,[string]$Outpu
         $receipt.stage='explicit-dependency-fixtures'
         $receipt.dependencyFixtures=New-MesonDependencyFixtures $preparation.dependencies $compiler $librarian $vsBatch $work $evidence $bash $cygpath
         $receipt.stage='authentic-source-recipe-capture'
-        $receipt.observations=@()
+        $receipt.observations=@();$priorCrossFile=$null
         foreach($observation in @($preparation.observations|Where-Object mode -eq 'capture')) {
             Confirm-FileIdentity $observation.makefile 0 SHA256 $observation.makefileSha256|Out-Null
-            $result=Invoke-MesonMake $observation.makefile $bash $cygpath $work $evidence ($observation.arm+'-capture')
+            $result=Invoke-MesonRecipeMake $observation $bash $cygpath $evidence ($observation.arm+'-capture') @(0) $priorCrossFile
+            $priorCrossFile=$result.crossFile
             $makeHost=([IO.File]::ReadAllText((Join-Path $observation.directory 'builtin-make-host.txt'))).Trim()
             if($makeHost -notmatch '-cygwin$'){throw 'Real built-in Cygwin MAKE_HOST was not observed.'}
             $receipt.observations+=@{arm=$observation.arm;mode='capture';makeHost=$makeHost;command=$result}
@@ -215,7 +305,8 @@ function Invoke-NativeMesonReceiverControl([string]$WorkDirectory,[string]$Outpu
         foreach($observation in @($preparation.observations|Where-Object mode -eq 'recipe')) {
             Confirm-FileIdentity $observation.makefile 0 SHA256 $observation.makefileSha256|Out-Null
             $allowed=if($observation.arm -eq 'original'){@(0,2)}else{@(0)}
-            $result=Invoke-MesonMake $observation.makefile $bash $cygpath $work $evidence ($observation.arm+'-recipe') $allowed
+            $result=Invoke-MesonRecipeMake $observation $bash $cygpath $evidence ($observation.arm+'-recipe') $allowed $priorCrossFile
+            $priorCrossFile=$result.crossFile
             $record=Get-Content -LiteralPath (Join-Path $evidence ($observation.arm+'.recipe.setup.json')) -Raw|ConvertFrom-Json
             Assert-MesonNativeIdentity $record.identity|Out-Null
             $capture=Get-Content -LiteralPath (Join-Path $evidence ($observation.arm+'.capture.setup.json')) -Raw|ConvertFrom-Json
@@ -259,7 +350,7 @@ function Invoke-NativeMesonReceiverControl([string]$WorkDirectory,[string]$Outpu
     finally {
         # Retain partial preparation too. Failure before source-preparation.json
         # must not erase the exact installed recipe or partially reached build.
-        foreach($name in @('production-source','original-capture','candidate-capture','original-recipe','candidate-recipe','Dependency Fixtures')) {
+        foreach($name in @('production-source','Dependency Fixtures','Dependency','pc-stage-graphite.pc','pc-stage-icu.pc','pc-stage-prefix.pc')) {
             $path=Join-Path $work $name
             if(Test-Path -LiteralPath $path) {
                 try {Assert-UnlinkedPath $path;Copy-Item -LiteralPath $path -Destination (Join-Path $evidence $name) -Recurse -ErrorAction Stop}

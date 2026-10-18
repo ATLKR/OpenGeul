@@ -84,7 +84,7 @@ class NativeMesonReceiverWorkflowContractTests(unittest.TestCase):
             action, pin = step['uses'].split('@')
             self.assertRegex(pin, r'^[0-9a-f]{40}$')
             self.assertEqual(existing[action], step['uses'])
-        self.assertEqual({'ref': '${{ github.sha }}', 'persist-credentials': False, 'fetch-depth': 2}, actual[1]['with'])
+        self.assertEqual({'ref': '${{ github.sha }}', 'persist-credentials': False, 'fetch-depth': 3}, actual[1]['with'])
         self.assertEqual({'python-version': '3.12', 'architecture': 'arm64'}, actual[2]['with'])
         self.assertEqual('${{ inputs.source_sha }}',
                          actual[0]['env']['OPENGEUL_MESON_CONTROL_REQUESTED_SHA'])

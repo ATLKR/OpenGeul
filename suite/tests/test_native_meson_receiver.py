@@ -122,7 +122,7 @@ class ReceiverContracts(unittest.TestCase):
             script.write_text("import json,os,sys; print(json.dumps({'path':os.environ['PKG_CONFIG_PATH'], 'cc':os.environ['CC'], 'args':sys.argv[1:], 'syntax':os.environ.get('PKG_CONFIG_MSVC_SYNTAX')}))")
             env = environment(True)
             env["PKG_CONFIG"] = sys.executable
-            capture = self.module.capture_record("candidate", "capture", SETUP, env, {}, "C:/fixture")
+            capture = self.module.capture_record("candidate", "capture", SETUP, env, {}, str(root))
             current = dict(os.environ, PKG_CONFIG_PATH="wrong", PKG_CONFIG="wrong.exe", PKG_CONFIG_MSVC_SYNTAX="unexpected")
             receipt = self.module.run_pkg_query(capture, "candidate", [str(script), "argument with spaces"],
                     current, {"scope": "portable-test-only"}, root, "portable-query")
@@ -142,6 +142,7 @@ class ReceiverContracts(unittest.TestCase):
         capture["environment"]["PKG_CONFIG"] = sys.executable
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            capture["cwd"] = str(root)
             receipt = self.module.run_pkg_query(capture, "candidate", ["-c", "import sys;sys.stderr.write('missing fixture');sys.exit(1)"],
                     dict(os.environ), {"scope": "portable-test-only"}, root, "missing")
             self.assertEqual(receipt["returncode"], 1)
@@ -151,6 +152,48 @@ class ReceiverContracts(unittest.TestCase):
             capture["environment"]["UNSELECTED_VARIABLE"] = "injection"
             with self.assertRaises(ValueError):
                 self.module.run_pkg_query(capture, "candidate", [], {}, {}, root, "wrong-env")
+
+    def test_pkg_query_runs_in_captured_cwd_to_resolve_the_same_relative_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture_root = root / "Dependency Fixtures"
+            captured_cwd = fixture_root / "original observation"
+            captured_cwd.mkdir(parents=True)
+            graphite = fixture_root / "graphite"
+            graphite.mkdir()
+            (graphite / "marker.txt").write_text("same physical fixture")
+            script = root / "portable cwd query.py"
+            script.write_text("import json,os,pathlib; print(json.dumps({'cwd':os.getcwd(), 'value':pathlib.Path(os.environ['PKG_CONFIG_PATH']).read_text()}))")
+            env = environment()
+            env.update(PKG_CONFIG=sys.executable, PKG_CONFIG_PATH="../graphite/marker.txt")
+            capture = self.module.capture_record("original", "capture", SETUP, env, {}, str(captured_cwd))
+            receipt = self.module.run_pkg_query(capture, "original", [str(script)], dict(os.environ),
+                    {"scope": "portable-test-only"}, root / "evidence", "relative-fixture")
+            self.assertEqual(receipt["returncode"], 0, receipt["stderr"])
+            output = json.loads(receipt["stdout"])
+            self.assertEqual(Path(output["cwd"]), captured_cwd)
+            self.assertEqual(output["value"], "same physical fixture")
+            self.assertEqual(receipt["cwd"], str(captured_cwd))
+            saved = json.loads((root / "evidence/original.pkg.relative-fixture.json").read_text())
+            self.assertEqual(saved["cwd"], str(captured_cwd))
+            self.assertEqual(saved["receivedPath"], "../graphite/marker.txt")
+
+    def test_pkg_query_rejects_missing_relative_or_non_directory_captured_cwd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            file_path = root / "ordinary file"
+            file_path.write_text("not a directory")
+            for index, cwd in enumerate([None, "", ".", str(root / "missing"), str(file_path)]):
+                with self.subTest(cwd=cwd):
+                    capture = self.records(True)["setup"]
+                    capture["environment"]["PKG_CONFIG"] = sys.executable
+                    if cwd is None:
+                        del capture["cwd"]
+                    else:
+                        capture["cwd"] = cwd
+                    with self.assertRaisesRegex(ValueError, "cwd"):
+                        self.module.run_pkg_query(capture, "candidate", ["-c", "pass"],
+                                dict(os.environ), {"scope": "portable-test-only"}, root, f"invalid-{index}")
 
     def test_compile_forwarding_is_exact_and_rejects_unscoped_commands(self):
         self.assertEqual(self.module.fixture_command(COMPILE), (COMPILE, []))

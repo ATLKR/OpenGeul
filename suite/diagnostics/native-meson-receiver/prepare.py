@@ -133,12 +133,12 @@ def prepare(repo, work, evidence, python, meson, pkgconf, cc, python_search_path
                'LIBO_PATH_SEPARATOR := :\nSYSTEM_ICU :=\n'
                'CXXFLAGS_CXX11 := -std:c++20 -permissive- -Zc:__cplusplus,preprocessor\n'
                'WHITESPACE := $(subst ,, )\nCOMMA := ,\nverbose := TRUE\n'
-               'gb_UnpackedTarball_workdir := ' + str(dependencies).replace('\\', '/') + '\n'
+               'gb_UnpackedTarball_workdir := ..\n'
                'gb_ExternalProject_get_state_target = all\ngb_Helper_print_on_error = $(1)\n')
     observations = []
     for mode in ('capture', 'recipe'):
         for arm, recipe in (('original', before), ('candidate', installed)):
-            observation = work / (arm + '-' + mode)
+            observation = dependencies / (arm + '-' + mode)
             observation.mkdir()
             for name in ('meson.build', 'probe.c', 'probe.cpp', 'main.cpp', 'tool-observer.py'):
                 (observation / name).write_bytes(regular(HERE / name))
@@ -152,12 +152,14 @@ def prepare(repo, work, evidence, python, meson, pkgconf, cc, python_search_path
             # its HOME/PATH precommand with setup-python + a minimal native PATH.
             command = 'PATH=' + shlex.quote(python_search_path) + ' ' + command
             makefile = observation / 'receiver.mk'
-            body = (profile + 'EXTERNAL_WORKDIR := ' + str(observation).replace('\\', '/') + '\n'
+            body = (profile + 'EXTERNAL_WORKDIR := .\n'
                     'MESON = ' + command + '\n' + compiler_binding + '\n' + external_macro + '\n'
                     '$(file >$(EXTERNAL_WORKDIR)/builtin-make-host.txt,$(MAKE_HOST))\n' + recipe.decode())
             makefile.write_text(body, encoding='utf-8', newline='\n')
             observations.append({'mode': mode, 'arm': arm, 'directory': str(observation),
                                  'makefile': str(makefile), 'makefileSha256': digest(makefile.read_bytes()),
+                                 'crossFile': str(dependencies / 'harfbuzz/cross-file.txt'),
+                                 'unexpectedSibling': str(work / 'Dependency'),
                                  'installedRecipeSha256': digest(recipe)})
     binding = {'schemaVersion': 1, 'provenance': 'production planner output/control-local write, not fullinstaller execution',
                'productionBaseCommit': manifest['productionBaseCommit'], 'productionModuleSha256': digest(module_raw),
@@ -168,6 +170,7 @@ def prepare(repo, work, evidence, python, meson, pkgconf, cc, python_search_path
                'sourceInputsSha256': digest(regular(manifest_path)), 'dependencies': str(dependencies),
                'observations': observations, 'configuredCompiler': cc,
                'substitutions': {'scheduler': 'Minimal no-op scheduler/dependency/trace macros; authentic complete recipe and ExternalProject_run macro',
+                                 'workdirAliases': 'Owned make cwd is each observation under Dependency Fixtures; EXTERNAL_WORKDIR=. and gb_UnpackedTarball_workdir=.. resolve the same physical spaced fixture directories. Original list entries remain relative; candidate production hook converts them to native absolute paths.',
                                  'python': 'setup-python native ARM64 3.12; explicitly substituted HOME/PATH precommand; not Native23 bundled3.13.15 equivalence',
                                  'tinySetup': 'Full HarfBuzz options captured for parity only; receiver explicitly substitutes tiny-project setup options'},
                'fullHarfBuzzOptionsExecuted': False, 'fullInstallerExecuted': False,

@@ -169,6 +169,9 @@ def run_pkg_query(capture: dict, arm: str, query_args: list[str], environ: dict,
         raise ValueError("captured PKG_CONFIG must be a single unquoted executable pathname")
     if not isinstance(captured["PKG_CONFIG_PATH"], str):
         raise ValueError("captured dependency path-list string is absent")
+    captured_cwd = capture.get("cwd")
+    if not isinstance(captured_cwd, str) or not Path(captured_cwd).is_absolute() or not Path(captured_cwd).is_dir():
+        raise ValueError("captured recipe cwd must be an existing absolute directory")
     child_env = dict(environ)
     for key, value in captured.items():
         if value is None:
@@ -183,6 +186,7 @@ def run_pkg_query(capture: dict, arm: str, query_args: list[str], environ: dict,
     stderr_path = stem.with_suffix(stem.suffix + ".stderr.log")
     receipt = {"schemaVersion": 1, "scope": "pkgconf-fixture-query-only", "arm": arm,
                "name": name, "pkgconfArgv": command, "receivedPath": child_env["PKG_CONFIG_PATH"],
+               "cwd": captured_cwd,
                "environment": captured, "identity": dict(identity), "status": "started",
                "qualification": qualification()}
     with target.open("x", encoding="utf-8") as stream:
@@ -190,7 +194,7 @@ def run_pkg_query(capture: dict, arm: str, query_args: list[str], environ: dict,
         stream.write("\n")
     try:
         with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
-            completed = subprocess.run(command, env=child_env, stdout=stdout, stderr=stderr, check=False)
+            completed = subprocess.run(command, env=child_env, cwd=captured_cwd, stdout=stdout, stderr=stderr, check=False)
         raw_stdout, raw_stderr = stdout_path.read_bytes(), stderr_path.read_bytes()
         receipt.update(returncode=completed.returncode, status="exited",
                        stdout=raw_stdout.decode("utf-8", errors="replace"),
