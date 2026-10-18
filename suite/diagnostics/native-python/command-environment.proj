@@ -1,0 +1,36 @@
+<Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Run with the same selected Full-framework MSBuild and child allowlist as both arms. -->
+  <UsingTask TaskName="PythonControlEnvironmentProbe" TaskFactory="CodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <OutputPath ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Reference Include="$(MSBuildToolsPath)\Microsoft.Build.Utilities.Core.dll" />
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        string folder = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        if (String.IsNullOrEmpty(folder) || !Path.IsPathRooted(folder) || !Directory.Exists(folder))
+          throw new InvalidOperationException("Selected child CommonApplicationData is not an existing rooted folder.");
+        string root = Path.GetPathRoot(folder);
+        if (String.IsNullOrEmpty(root))
+          throw new InvalidOperationException("Selected child CommonApplicationData has no root.");
+        bool excluded = Microsoft.Build.Utilities.FileTracker.FileIsExcludedFromDependencies(Path.Combine(folder, "opengeul-environment-probe.c"));
+        File.WriteAllLines(OutputPath, new string[] {
+          "commonApplicationData=" + folder,
+          "commonApplicationDataRoot=" + root,
+          "runtimeVersion=" + Environment.Version.ToString(),
+          "fileTrackerInitialized=true",
+          "fileTrackerExcluded=" + excluded.ToString(),
+          "fileTrackerAssembly=" + typeof(Microsoft.Build.Utilities.FileTracker).Assembly.FullName,
+          "fileTrackerAssemblyLocation=" + typeof(Microsoft.Build.Utilities.FileTracker).Assembly.Location
+        });
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="Probe">
+    <Error Condition="'$(MSBuildRuntimeType)' != 'Full'" Text="Environment probe requires the actual Full-framework MSBuild." />
+    <PythonControlEnvironmentProbe OutputPath="$(PythonControlEnvironmentOutput)" />
+  </Target>
+</Project>

@@ -43,7 +43,11 @@ Artifacts retain MSBuild binlogs, command receipts, complete object/resource
 inputs, response/tlog files, generated headers and hash inventories. Source
 archives are official pin-verified downloads. All diagnostic MSBuild child processes receive a selected environment allowlist,
 excluding runner credentials and arbitrary variables. The parent environment is
-never changed; only allowed values are read. The owned bounded command wrapper
+never changed; only allowed values are read. ALLUSERSPROFILE and SystemDrive
+are explicit OS fields required by the documented CommonApplicationData known-folder
+contract. Before either build arm, the same Full-framework MSBuild resolves that
+folder and initializes its real FileTracker in a bounded preflight; new Windows
+results must establish whether this addresses the measured environment failure. The owned bounded command wrapper
 clears the child ProcessStartInfo environment and adds those explicit values. The raw inherited PATH travels through private work storage
 and is deleted in finally. The sanitized known tool PATH is digest-recorded;
 MSBuild may also retain these known tool paths in binlogs/evaluation evidence.
@@ -58,3 +62,9 @@ prove direct process identity/death and pipe drain only, not descendant census.
 Runtime observer records its own candidate child cleanup separately, observes
 through the retained Popen CreateProcess handle, and records creation FILETIME. Rollback is
 to stop dispatching this branch-only workflow; no production settings change.
+
+PreferredToolArchitecture requests use four indexed evidence names so ARM64 and
+arm64 remain distinct on Windows. Each measurement rejects prior output before
+launch and binds its receipt to the current exact argv. The earlier control2
+measured default/x86/uppercase ARM64 as x86; its lowercase request reused an
+uppercase path and did not establish a separate property result.

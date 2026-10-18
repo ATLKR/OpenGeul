@@ -216,3 +216,22 @@ class PreparationTransportTests(unittest.TestCase):
             self.assertEqual(receipt['exitCode'],1)
             self.assertEqual(receipt['before'][0]['sha256'],hashlib.sha256(before).hexdigest())
             self.assertTrue(receipt['after']);self.assertTrue(receipt['patch']['sha256'])
+
+class CommandEnvironmentContractTests(unittest.TestCase):
+    def test_common_appdata_os_fields_propagate_only_to_allowed_child(self):
+        import sys
+        ps=PowerShellControlTests()
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix=Path(tmp)/'child'
+            ps.ps("$env:ALLUSERSPROFILE='C:\\ProgramData';$env:SystemDrive='C:';$env:OPENGEUL_FAKE_CREDENTIAL='must-stay-parent';$child=Get-PythonControlChildEnvironment @{};if($child.ALLUSERSPROFILE -cne $env:ALLUSERSPROFILE -or $child.SystemDrive -cne $env:SystemDrive){throw 'Documented shell-folder OS fields missing'};if($child.ContainsKey('OPENGEUL_FAKE_CREDENTIAL')){throw 'arbitrary credential copied'};Invoke-PythonControlBuildCommand '"+sys.executable+"' @('-c','import os;assert os.environ[\"ALLUSERSPROFILE\"]==\"C:\\\\ProgramData\";assert os.environ[\"SystemDrive\"]==\"C:\";assert \"OPENGEUL_FAKE_CREDENTIAL\" not in os.environ;print(\"OS fields propagated\")') '"+tmp+"' '"+str(prefix)+"' -ChildEnvironment $child -TimeoutMinutes 1|Out-Null;if($env:OPENGEUL_FAKE_CREDENTIAL -cne 'must-stay-parent' -or $env:ALLUSERSPROFILE -cne 'C:\\ProgramData' -or $env:SystemDrive -cne 'C:'){throw 'parent changed'}")
+            self.assertIn('OS fields propagated',Path(str(prefix)+'.stdout.log').read_text())
+
+    def test_requested_property_aliases_have_distinct_windows_evidence_paths(self):
+        ps=PowerShellControlTests()
+        with tempfile.TemporaryDirectory() as tmp:
+            ps.ps("$cases=@(Get-PythonControlPropertyCases);if(($cases.requested -join ',') -cne 'default,x86,ARM64,arm64'){throw 'Requested values changed'};$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase);foreach($case in $cases){$paths=New-PythonControlMeasurementPaths '"+tmp+"' $case;if(-not $seen.Add($paths.prefix)){throw 'Windows path alias'};Set-Content -LiteralPath ($paths.prefix+'.command.json') -Value '{}'};if($seen.Count -ne 4){throw 'Expected four real invocations'}")
+
+    def test_preexisting_measurement_receipt_cannot_be_accepted_as_current(self):
+        ps=PowerShellControlTests()
+        with tempfile.TemporaryDirectory() as tmp:
+            ps.ps("$case=@(Get-PythonControlPropertyCases)[2];$paths=New-PythonControlMeasurementPaths '"+tmp+"' $case;Set-Content ($paths.prefix+'.command.json') 'original receipt';$rejected=$false;try{New-PythonControlMeasurementPaths '"+tmp+"' $case|Out-Null}catch{$rejected=$true};if(-not $rejected -or (Get-Content ($paths.prefix+'.command.json') -Raw).Trim() -cne 'original receipt'){throw 'Existing receipt accepted or altered'}")

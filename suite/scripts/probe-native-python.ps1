@@ -5,7 +5,7 @@ $ErrorActionPreference='Stop'
 
 function Get-PythonControlChildEnvironment([hashtable]$Selected) {
     # Read only explicit system/build fields. Never enumerate or save inherited values.
-    $allowed=@('SystemRoot','WINDIR','COMSPEC','OS','NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE','ProgramFiles','ProgramFiles(x86)','ProgramW6432','TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','ProgramData','HOMEDRIVE','HOMEPATH')
+    $allowed=@('SystemRoot','WINDIR','COMSPEC','OS','NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE','ProgramFiles','ProgramFiles(x86)','ProgramW6432','TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','ProgramData','ALLUSERSPROFILE','SystemDrive','HOMEDRIVE','HOMEPATH')
     $child=@{}
     foreach($name in $allowed) {
         $value=[Environment]::GetEnvironmentVariable($name)
@@ -16,6 +16,24 @@ function Get-PythonControlChildEnvironment([hashtable]$Selected) {
         $child[$name]=$Selected[$name]
     }
     return $child
+}
+
+function Get-PythonControlPropertyCases {
+    @(
+        [ordered]@{requested='default';evidenceName='preferred-00-default'},
+        [ordered]@{requested='x86';evidenceName='preferred-01-x86'},
+        [ordered]@{requested='ARM64';evidenceName='preferred-02-uppercase-arm64'},
+        [ordered]@{requested='arm64';evidenceName='preferred-03-lowercase-arm64'}
+    )
+}
+
+function New-PythonControlMeasurementPaths([string]$Out,$Case) {
+    $prefix=Join-Path $Out $Case.evidenceName
+    $propertyFile=$prefix+'.properties.txt'
+    foreach($path in @($propertyFile,($prefix+'.command.json'),($prefix+'.stdout.log'),($prefix+'.stderr.log'))) {
+        if(Test-Path -LiteralPath $path){throw 'Preserve prior property measurement evidence; never reuse an old invocation receipt.'}
+    }
+    return [ordered]@{prefix=$prefix;properties=$propertyFile}
 }
 
 function Complete-PythonControlResult($Receipt,$Baseline,$Candidate,$Runtime) {
@@ -110,20 +128,32 @@ function Invoke-PythonControl([string]$ControlOutput,[string]$ControlWork,[strin
         $environment=Get-PythonControlEnvironment (Join-Path $vs 'Common7/Tools/VsDevCmd.bat') (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') $work $out
         $childEnvironment=Get-PythonControlChildEnvironment $environment
         & {
+            $r.stage='selected-child-common-appdata-preflight'
+            $preflight=Join-Path $out 'command-environment.properties.txt'
+            if(Test-Path -LiteralPath $preflight){throw 'Preserve prior environment preflight evidence.'}
+            $probeProject=Join-Path $data 'command-environment.proj'
+            Invoke-PythonControlBuildCommand $msbuild @($probeProject,'/t:Probe','/nodeReuse:false',('/p:PythonControlEnvironmentOutput='+$preflight)) $work (Join-Path $out 'command-environment') -ChildEnvironment $childEnvironment -TimeoutMinutes 2|Out-Null
+            $r.commandEnvironmentPreflight=Get-Content -LiteralPath $preflight
             $observer=Join-Path $data 'observe-tools.targets'
             $common=@('/p:Configuration=Release','/p:Platform=ARM64','/maxcpucount','/p:PlatformToolset=v145','/p:VisualStudioVersion=18.0','/ToolsVersion:Current','/p:WindowsTargetPlatformVersion=10.0.26100.0',('/p:zlibDir='+$work+'/zlib'),('/p:ForceImportAfterCppTargets='+$observer),'/nodeReuse:false')
             # Measure installed property evaluation before using any assumed spelling/value.
             $r.stage='installed-property-measurement';$measurements=@()
-            foreach($value in @('default','x86','ARM64','arm64')) {
-                $propertyFile=Join-Path $out ('preferred-'+$value+'.properties.txt')
+            foreach($propertyCase in @(Get-PythonControlPropertyCases)) {
+                $value=$propertyCase.requested
+                $measurementPaths=New-PythonControlMeasurementPaths $out $propertyCase
+                $propertyFile=$measurementPaths.properties;$prefix=$measurementPaths.prefix
                 $argv=@((Join-Path $work 'candidate/PCbuild/pythoncore.vcxproj'),'/t:PythonControlEvaluate',('/p:PythonControlProperties='+$propertyFile))+$common
                 if($value -cne 'default'){$argv+=@('/p:PreferredToolArchitecture='+$value)}
-                try {Invoke-PythonControlBuildCommand $msbuild $argv $work (Join-Path $out ('preferred-'+$value)) -ChildEnvironment $childEnvironment -TimeoutMinutes 2|Out-Null} catch {if(-not(Test-Path (Join-Path $out ('preferred-'+$value+'.command.json')))){throw}}
-                $measurements+=@{requested=$value;properties=if(Test-Path $propertyFile){Get-Content $propertyFile}else{$null}}
+                try {Invoke-PythonControlBuildCommand $msbuild $argv $work $prefix -ChildEnvironment $childEnvironment -TimeoutMinutes 2|Out-Null}
+                catch {if(-not(Test-Path -LiteralPath ($prefix+'.command.json'))){throw}}
+                # Paths were exclusively absent before this invocation, so this receipt is current.
+                $command=Get-Content -LiteralPath ($prefix+'.command.json') -Raw|ConvertFrom-Json
+                if($command.file -cne $msbuild -or ($command.arguments -join [char]0) -cne ($argv -join [char]0)){throw 'Property measurement receipt does not bind current invocation.'}
+                $measurements+=@{requested=$value;evidenceName=$propertyCase.evidenceName;commandReceipt=$prefix+'.command.json';commandPassed=$command.passed;exitCode=$command.exitCode;properties=if(Test-Path $propertyFile){Get-Content $propertyFile}else{$null}}
             }
             $candidateSelection=@('/p:PythonControlHost=Hostarm64');$mechanism='explicit conditional CLToolPath/LinkToolPath fallback; Preferred property unsupported/unresolved'
             foreach($measurement in $measurements) {
-                if($measurement.requested -cin @('ARM64','arm64') -and @($measurement.properties|Where-Object {$_ -match '^(CLToolPath|VC_ExecutablePath_ARM64)=.*(?i:Hostarm64)[\\/]arm64[\\/]'}).Count -gt 0) {
+                if($measurement.commandPassed -eq $true -and $measurement.requested -cin @('ARM64','arm64') -and @($measurement.properties|Where-Object {$_ -match '^(CLToolPath|VC_ExecutablePath_ARM64)=.*(?i:Hostarm64)[\\/]arm64[\\/]'}).Count -gt 0) {
                     $candidateSelection=@('/p:PreferredToolArchitecture='+$measurement.requested);$mechanism='PreferredToolArchitecture='+$measurement.requested;break
                 }
             }
