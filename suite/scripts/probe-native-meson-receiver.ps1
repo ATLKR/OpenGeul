@@ -51,17 +51,20 @@ function Assert-MesonNativeIdentity($Identity) {
 function Assert-MesonFixtureQueries($Queries,[string]$Dependencies) {
     $root=$Dependencies.Replace('\','/').TrimEnd('/')
     $versions=@($Queries.versions.stdout.Trim() -split '\r?\n')
-    $paths=@($Queries.paths.stdout.Trim() -split '\r?\n'|ForEach-Object {$_.Replace('\','/')})
+    $graphitePaths=@($Queries.'graphite-path'.stdout.Trim() -split '\r?\n'|ForEach-Object {$_.Replace('\','/')})
+    $icuPaths=@($Queries.'icu-path'.stdout.Trim() -split '\r?\n'|ForEach-Object {$_.Replace('\','/')})
+    $prefixPaths=@($Queries.'prefix-path'.stdout.Trim() -split '\r?\n'|ForEach-Object {$_.Replace('\','/')})
     $expected=@(($root+'/graphite/graphite2-uninstalled.pc'),($root+'/icu/icu-uc-uninstalled.pc'))
     if($Queries.'tool-version'.stdout.Trim() -cne '2.4.3' -or
        $versions.Count -ne 2 -or $versions[0] -cne '1.3.15' -or $versions[1] -cne '78.3' -or
-       $paths.Count -ne 2 -or $paths[0] -ine $expected[0] -or $paths[1] -ine $expected[1] -or
+       $graphitePaths.Count -ne 1 -or $graphitePaths[0] -ine $expected[0] -or
+       $icuPaths.Count -ne 1 -or $icuPaths[0] -ine $expected[1] -or
        $Queries.'graphite-sentinel'.stdout.Trim() -cne 'graphite' -or $Queries.'icu-sentinel'.stdout.Trim() -cne 'icu' -or
-       $Queries.'prefix-path'.stdout.Trim().Replace('\','/') -ine ($root+'/prefix pc/prefix-control.pc') -or
+       $prefixPaths.Count -ne 1 -or $prefixPaths[0] -ine ($root+'/prefix pc/prefix-control.pc') -or
        [string]::IsNullOrWhiteSpace($Queries.cflags.stdout) -or [string]::IsNullOrWhiteSpace($Queries.libs.stdout)) {
         throw 'Candidate pkgconf did not select the exact nonempty samefixture Graphite/ICU/prefix entries.'
     }
-    return [ordered]@{passed=$true;pkgconfVersion='2.4.3';selectedPaths=$paths;versions=$versions;prefixPreserved=$true}
+    return [ordered]@{passed=$true;pkgconfVersion='2.4.3';selectedPaths=@($graphitePaths[0],$icuPaths[0]);versions=$versions;prefixPreserved=$true}
 }
 
 function Get-MesonFileIdentity([string]$Path) {
@@ -287,7 +290,7 @@ function Invoke-NativeMesonReceiverControl([string]$WorkDirectory,[string]$Outpu
         }
         Invoke-MesonObservation $python @((Join-Path $fixture 'receiver.py'),'compare','--original',$evidence,'--candidate',$evidence,'--output',(Join-Path $evidence 'recipe-parity.json')) $work (Join-Path $evidence 'recipe-parity')|Out-Null
         $receipt.stage='independent-samefixture-pkgconf-list-arms';$receipt.pkgQueries=@()
-        $queries=@(@('tool-version','--version'),@('exists','--exists','graphite2','icu-uc'),@('versions','--modversion','graphite2','icu-uc'),@('paths','--path','graphite2','icu-uc'),@('cflags','--cflags','graphite2','icu-uc'),@('libs','--libs','graphite2','icu-uc'),@('graphite-sentinel','--variable=fixture_control','graphite2'),@('icu-sentinel','--variable=fixture_control','icu-uc'),@('prefix-path','--path','prefix-control'))
+        $queries=@(@('tool-version','--version'),@('exists','--exists','graphite2','icu-uc'),@('versions','--modversion','graphite2','icu-uc'),@('graphite-path','--path','graphite2'),@('icu-path','--path','icu-uc'),@('cflags','--cflags','graphite2','icu-uc'),@('libs','--libs','graphite2','icu-uc'),@('graphite-sentinel','--variable=fixture_control','graphite2'),@('icu-sentinel','--variable=fixture_control','icu-uc'),@('prefix-path','--path','prefix-control'))
         foreach($arm in @('original','candidate')) {
             $armQueries=@{}
             foreach($query in $queries) {

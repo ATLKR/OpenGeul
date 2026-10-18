@@ -88,13 +88,14 @@ foreach($bad in @(@{pid=0;creationTimeRawTicks='134050123456789123';processMachi
 $queries=@{
  'tool-version'=[pscustomobject]@{stdout="2.4.3`n"};
  versions=[pscustomobject]@{stdout="1.3.15`n78.3`n"};
- paths=[pscustomobject]@{stdout="C:/fixtures/graphite/graphite2-uninstalled.pc`nC:/fixtures/icu/icu-uc-uninstalled.pc`n"};
+ 'graphite-path'=[pscustomobject]@{stdout="C:/fixtures/graphite/graphite2-uninstalled.pc`n"};
+ 'icu-path'=[pscustomobject]@{stdout="C:/fixtures/icu/icu-uc-uninstalled.pc`n"};
  'graphite-sentinel'=[pscustomobject]@{stdout='graphite'};'icu-sentinel'=[pscustomobject]@{stdout='icu'};
  'prefix-path'=[pscustomobject]@{stdout='C:/fixtures/prefix pc/prefix-control.pc'};
  cflags=[pscustomobject]@{stdout='-IC:/fixtures/include'};libs=[pscustomobject]@{stdout='C:/fixtures/fixture.lib'}
 }
 Assert-MesonFixtureQueries $queries 'C:/fixtures'|Out-Null
-foreach($name in @('tool-version','versions','paths','graphite-sentinel','icu-sentinel','prefix-path','cflags','libs')) {
+foreach($name in @('tool-version','versions','graphite-path','icu-path','graphite-sentinel','icu-sentinel','prefix-path','cflags','libs')) {
  $bad=$queries.Clone();$bad[$name]=[pscustomobject]@{stdout=''}
  $rejected=$false;try{Assert-MesonFixtureQueries $bad 'C:/fixtures'|Out-Null}catch{$rejected=$true}
  if(-not $rejected){throw ('Machine fallback or empty '+$name+' accepted')}
@@ -200,7 +201,7 @@ class PrepareContractTests(unittest.TestCase):
 
 
 class ShallowAncestryContractTests(unittest.TestCase):
-    def test_two_parent_hops_require_three_checkout_generations(self):
+    def test_three_parent_hops_require_four_checkout_generations(self):
         # Local test objects only: no clone, network, remote or source commit
         # fabrication. Git's actual shallow boundary controls the same gate.
         with tempfile.TemporaryDirectory(prefix='receiver-shallow-fixture-') as folder:
@@ -214,12 +215,14 @@ class ShallowAncestryContractTests(unittest.TestCase):
             parent = git('rev-parse', 'HEAD').stdout.strip()
             git('-c', 'user.name=Receiver fixture', '-c', 'user.email=receiver@example.invalid',
                 'commit', '-q', '--allow-empty', '-m', 'local shallow fixture Control1')
-            middle = git('rev-parse', 'HEAD').stdout.strip()
+            first = git('rev-parse', 'HEAD').stdout.strip()
+            git('-c', 'user.name=Receiver fixture', '-c', 'user.email=receiver@example.invalid',
+                'commit', '-q', '--allow-empty', '-m', 'local shallow fixture Control2')
             git('-c', 'user.name=Receiver fixture', '-c', 'user.email=receiver@example.invalid',
                 'commit', '-q', '--allow-empty', '-m', 'local shallow fixture child')
             child = git('rev-parse', 'HEAD').stdout.strip()
             shallow = root / '.git/shallow'
-            shallow.write_text(middle + '\n')
+            shallow.write_text(first + '\n')
             self.assertEqual(1, git('merge-base', '--is-ancestor', parent, 'HEAD', check=False).returncode)
             shallow.write_text(parent + '\n')
             self.assertEqual(0, git('merge-base', '--is-ancestor', parent, 'HEAD', check=False).returncode)
