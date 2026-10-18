@@ -1,0 +1,14 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Applied identically in both arms; only this host input differs. Keep x64 freeze helper mapping. -->
+  <PropertyGroup Condition="'$(Platform)' == 'ARM64' and '$(PythonControlHost)' != ''">
+    <CLToolPath>$(VCToolsInstallDir)bin\$(PythonControlHost)\arm64\</CLToolPath>
+    <LinkToolPath>$(CLToolPath)</LinkToolPath>
+  </PropertyGroup>
+  <Target Name="PythonControlEvaluate">
+    <WriteLinesToFile File="$(PythonControlProperties)" Overwrite="true"
+      Lines="Platform=$(Platform);PreferredToolArchitecture=$(PreferredToolArchitecture);CLToolPath=$(CLToolPath);LinkToolPath=$(LinkToolPath);CLToolExe=$(CLToolExe);LinkToolExe=$(LinkToolExe);VCToolsInstallDir=$(VCToolsInstallDir);VC_ExecutablePath_ARM64=$(VC_ExecutablePath_ARM64);ExecutablePath=$(ExecutablePath);IncludeExternals=$(IncludeExternals);DisableGil=$(DisableGil);UseJIT=$(UseJIT);UseTIER2=$(UseTIER2)" />
+  </Target>
+  <Target Name="PythonControlRecordTools" BeforeTargets="ClCompile;Link">
+    <Message Importance="high" Text="PythonControl actual task override: Platform=$(Platform) VCToolsInstallDir=$(VCToolsInstallDir) VCToolsVersion=$(VCToolsVersion) CLToolPath=$(CLToolPath) LinkToolPath=$(LinkToolPath) PreferredToolArchitecture=$(PreferredToolArchitecture)" />
+  </Target>
+</Project>

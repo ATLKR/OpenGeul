@@ -1,0 +1,60 @@
+name: OpenGeul native ARM64 CPython host A/B diagnostic
+'on':
+  push:
+    branches: [work/opengeul-office-native-python-control]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  python-host-ab:
+    runs-on: windows-11-arm
+    timeout-minutes: 90
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Reserve component diagnostic and evidence time
+        shell: pwsh
+        run: |
+          $started=[DateTime]::UtcNow
+          $deadline=$started.AddMinutes(80).ToString('o')
+          $owned=Join-Path $env:RUNNER_TEMP ('opengeul-python-control-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT)
+          if(Test-Path $owned){throw 'Preserve prior Python control evidence.'}
+          New-Item -ItemType Directory $owned|Out-Null
+          $receipt=Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;diagnosticMinutes=80;jobTimeoutMinutes=90;nominalReserveMinutes=10;runnerSetupIncluded=$false}|
+            ConvertTo-Json|Set-Content $receipt -Encoding utf8NoBOM
+          "OPENGEUL_PYTHON_ROOT=$owned"|Add-Content $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_PYTHON_DEADLINE=$deadline"|Add-Content $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_PYTHON_BUDGET_RECEIPT=$receipt"|Add-Content $env:GITHUB_ENV -Encoding utf8
+      - name: Preserve exact committed source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Verify focused Python diagnostic contracts
+        shell: pwsh
+        run: python -m unittest suite.tests.test_native_python_control -v
+      - name: Reconstruct authentic source and compare MSBuild host tools
+        shell: pwsh
+        run: |
+          ./suite/scripts/probe-native-python.ps1 -PythonControlOutput "$env:OPENGEUL_PYTHON_ROOT/evidence" -PythonControlWorkRoot "$env:OPENGEUL_PYTHON_ROOT/work" -PythonControlDeadline $env:OPENGEUL_PYTHON_DEADLINE
+          if(-not $?){throw 'Python diagnostic failed; preserve all existing evidence.'}
+      - name: Retain complete bounded Python control diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-python-control-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+            ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/job-budget.json
+            ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/work/baseline/PCbuild/
+            ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/work/candidate/PCbuild/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error

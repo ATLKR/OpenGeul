@@ -1,0 +1,56 @@
+# CPython host control
+
+The failed Native21 build used HostX86 ARM64-target link-time code generation and
+reported C1002/32-bit heap exhaustion before an automatic HostX64 retry. MSBuild
+still failed. This diagnostic reconstructs pinned complete Python sources using
+the authentic LibreOffice preactions, patch order, zero-fuzz GNU patch and CRLF
+restoration. No product patch is installed.
+
+Both arms use authentic patched pcbuild.sln `pythoncore` Release|ARM64, original
+`/maxcpucount`, `/MP`, `/O2`, `/GL`, `/LTCG`, `/Zm200`, v145/VS18 and SDK 26100.
+The default baseline must emit HostX86 paths. Installed property rules are
+measured for PreferredToolArchitecture values first; a measured ARM64 selection
+uses that property alone. If unresolved, the candidate explicitly sets conditional
+CLToolPath/LinkToolPath for ARM64 and reports this fallback mechanism separately.
+The authentic x64 freeze-helper mapping remains. Actual absolute compiler/linker paths and evaluated VCToolsInstallDir/version
+are bound to inventoried pre/post-build PE/hash/version identities; wrong roots
+and toolsets fail admission. Property names alone never admit the result. Baseline requires direct MSBuild exit1, exactly one summary error and only the
+original HACL C1002 diagnostic (repeated summary allowed). Crashes, unrelated
+errors and a zero-exit direct linker cannot reproduce the baseline. Candidate
+feasibility can be retained after a successful baseline, but overall workflow
+success requires exact baseline reproduction plus candidate native build/KAT.
+
+The unchanged candidate python.vcxproj builds the native interpreter after the
+solution core target. The solution `python` target would require all its extension
+dependencies; no dependencies or modules are removed to imitate a full solution.
+Full extension/Office/Base/UI coverage remains pending compiled LO externals.
+The bootstrap directory named pythonx86 contains an authenticated AMD64 Python
+build helper, not a product output. Original source/project/generated/object
+bytes were not retained; this is source-pinned reconstruction, not exact replay.
+
+The native controller observes the live interpreter executable, loaded DLL and
+IsWow64Process2 (0/AA64) while built-in _sha2 KATs wait for release. Fixed SHA224,
+SHA256, SHA384 and SHA512 vectors cover empty/abc/million-a, streaming, copy and
+111/112/127/128/129-byte padding boundaries. The expected values are committed
+constants, generated independently during implementation with Python hashlib;
+the tested interpreter imports _sha2 directly and never uses that oracle.
+
+Artifacts retain MSBuild binlogs, command receipts, complete object/resource
+inputs, response/tlog files, generated headers and hash inventories. Source
+archives are official pin-verified downloads. All diagnostic MSBuild child processes receive a selected environment allowlist,
+excluding runner credentials and arbitrary variables. The parent environment is
+never changed; only allowed values are read. The owned bounded command wrapper
+clears the child ProcessStartInfo environment and adds those explicit values. The raw inherited PATH travels through private work storage
+and is deleted in finally. The sanitized known tool PATH is digest-recorded;
+MSBuild may also retain these known tool paths in binlogs/evaluation evidence.
+This exception is explicit because tool discovery requires them. No inherited
+credential-bearing PATH values enter those logs.
+
+The global component budget is 80 minutes including downloads, with a 90-minute
+job cap and nominal ten-minute upload reserve. Each build has a 22-minute cap;
+remaining time is shared. Original full-solution Python duration (~5m11) is
+context, not a duration promise. Failures preserve artifacts; command receipts
+prove direct process identity/death and pipe drain only, not descendant census.
+Runtime observer records its own candidate child cleanup separately, observes
+through the retained Popen CreateProcess handle, and records creation FILETIME. Rollback is
+to stop dispatching this branch-only workflow; no production settings change.

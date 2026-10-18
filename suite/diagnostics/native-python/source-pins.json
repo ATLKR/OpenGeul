@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "python": {
+    "bytes": 23160540,
+    "sha256": "1e66a7945a48390ee4c2a4268a0e4185884059a13c4aab6d148aa208deea4a76",
+    "filename": "Python-3.13.15.tar.xz"
+  },
+  "libreoffice": {
+    "bytes": 302435508,
+    "sha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+    "filename": "libreoffice-26.8.1.1.tar.xz"
+  },
+  "recipes": {
+    "ExternalProject_python3.mk": "b31e4d779484a4d153155b025daf8b03678e1984abde4fe5c6c038ccb7d43445",
+    "UnpackedTarball_python3.mk": "30e94107243dc063993b7dd51440f1c5055a5924e3ec83b69d568e80d3cf28ec",
+    "decimal.patch.1": "785fb3d1ca6f8afe35459cb35fa008607b12d88a2d37f6cb953b5e9416b86095",
+    "destdir-darwin.patch.1": "e3fa28db28ccc3aab525b615c08eedae1ed86940f2a54bdb669162fa27c2561b",
+    "i100492-freebsd.patch.1": "95a12902d89f4614c95cffaec94db98cba925f074c9adbed627e2b8532aa3e40",
+    "internal-zlib.patch.0": "7390f77486beb0eca5e55310590bd4aec5d362815891a195236590c855ef9316",
+    "lzma.patch.1": "195f22935cf35cb8bd7ea3f86989b66c6f2207108a4868ec2ca1f8be9379c453",
+    "python-3.3.0-darwin.patch.1": "6e135971af1c44db26540091fa93ba8d306f4649a8a644dd71106b241026d0d4",
+    "python-3.5.4-msvc-disable.patch.1": "19a01c74d321ad0fe238d02f1b80d29b3072f718ff8df3f7aeabd93cfac4a27b",
+    "python-3.7.6-msvc-ssl.patch.1": "9457ccc2b035d80ab8614bcab38715a5ebfe270d62208edfa21fe85e7aec3bb4",
+    "setuptools.patch.1": "c6dbb22b72a4ffc30c507c37c0bcb581d028499c2940bbca60beca5f2feea854",
+    "sqlite3.patch.1": "2b509bfad459619a8514df480e230faef6b20c2c40039a955040134bcde483ae",
+    "ubsan.patch.0": "82409633b7af85ec28f07d2a4d88dac230a9b0c6eae87e709490bab7ac7c89d1",
+    "missinginclude.patch": "858f6a977567b1a31c4d9c22516b7031f573682ce1db45e45fefde91bdd69517",
+    "werror-undef.patch": "b574da588a57e63e1ee49c6a8126dee397d050a454f41c6bc219371346d72064",
+    "UnpackedTarball_zlib.mk": "adf46139c83be01f8be2e133f13c29e94c04637408bfb6e20726ddb0c05ec59d"
+  },
+  "patches": [
+    "i100492-freebsd.patch.1",
+    "python-3.3.0-darwin.patch.1",
+    "python-3.7.6-msvc-ssl.patch.1",
+    "python-3.5.4-msvc-disable.patch.1",
+    "ubsan.patch.0",
+    "setuptools.patch.1",
+    "sqlite3.patch.1",
+    "lzma.patch.1",
+    "decimal.patch.1",
+    "destdir-darwin.patch.1",
+    "internal-zlib.patch.0"
+  ],
+  "zlib": {
+    "filename": "zlib-1.3.2.tar.xz",
+    "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+    "bytes": 1320064
+  },
+  "bootstrap": {
+    "filename": "python.3.12.8.nupkg",
+    "sha256": "406856be971d957e0bee7a5cefe20a5ec78d70a495e9e33cd0e53d31faec049d",
+    "bytes": 14465481
+  },
+  "zlibPatches": [
+    "missinginclude.patch",
+    "werror-undef.patch"
+  ],
+  "zlibX64Copies": [
+    "adler32.c",
+    "compress.c",
+    "crc32.c",
+    "deflate.c",
+    "inffast.c",
+    "inflate.c",
+    "inftrees.c",
+    "trees.c",
+    "zutil.c"
+  ],
+  "effectiveTrees": {
+    "python": "05c374e9bc992f9c8e9a1d1f7e7c1b7ba5c3bc28bc40dd96d5a39b1615bad68e",
+    "zlib": "05ed5a853412e36e29cf0293f84f0d22b15622e107130bb95e6d4e127c3cc76b"
+  }
+}
