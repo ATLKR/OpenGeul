@@ -1,0 +1,49 @@
+name: Native ARM64 ATL prerequisite control
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed diagnostic branch commit (40 lowercase hex)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-arm64-atl-prerequisite-control
+  cancel-in-progress: false
+
+jobs:
+  native-atl-control:
+    if: github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/opengeul-office-native-atl-control' && inputs.source_sha == github.sha
+    runs-on: windows-11-arm
+    timeout-minutes: 18
+    steps:
+      - name: Preserve exact diagnostic source bytes
+        shell: pwsh
+        env:
+          EXPECTED_DIAGNOSTIC_SHA: ${{ inputs.source_sha }}
+        run: |
+          if ($env:EXPECTED_DIAGNOSTIC_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:EXPECTED_DIAGNOSTIC_SHA -cne $env:GITHUB_SHA) { throw 'Exact reviewed diagnostic source SHA is required.' }
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Compare native ATL header and library path prerequisites
+        shell: pwsh
+        run: |
+          ./suite/scripts/probe-native-atl.ps1 -WorkDirectory .work/native-atl-control -OutputDirectory .work/native-atl-evidence
+          if (-not $?) { throw 'Native ATL prerequisite diagnostic is incomplete; inspect retained original evidence.' }
+      - name: Preserve original ATL control evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-atl-control-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .work/native-atl-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "upstreamArchive": {
+    "url": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
+    "bytes": 302435508,
+    "sha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785"
+  },
+  "files": [
+    {
+      "name": "Library_so_activex.mk",
+      "archiveMember": "libreoffice-26.8.1.1/extensions/Library_so_activex.mk",
+      "bytes": 1376,
+      "sha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c"
+    },
+    {
+      "name": "StdAfx2.h",
+      "archiveMember": "libreoffice-26.8.1.1/extensions/source/activex/StdAfx2.h",
+      "bytes": 2565,
+      "sha256": "e0a30c7436840c52cbc319406960c3320a917db27f9d1ce48cf4140eeca166ae"
+    },
+    {
+      "name": "com_MSC_class.mk",
+      "archiveMember": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_class.mk",
+      "bytes": 29428,
+      "sha256": "e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada"
+    },
+    {
+      "name": "Helper.mk",
+      "archiveMember": "libreoffice-26.8.1.1/solenv/gbuild/Helper.mk",
+      "bytes": 14492,
+      "sha256": "968bb797d966c4c75b77132e25ba1e42d762943b7c2e4a43593b0bddcc4e17f9"
+    },
+    {
+      "name": "com_MSC_defs.mk",
+      "archiveMember": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_defs.mk",
+      "bytes": 10340,
+      "sha256": "c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14"
+    },
+    {
+      "name": "configure-atl-selection.sh",
+      "archiveMember": "libreoffice-26.8.1.1/configure.ac",
+      "parentBytes": 606697,
+      "parentSha256": "412040c7a2e84ab8305613b902dc5f0485f11d745e51a77969332aa058d6f31c",
+      "physicalLfRanges": [
+        [
+          678,
+          695
+        ],
+        [
+          16297,
+          16311
+        ]
+      ],
+      "bytes": 1134,
+      "sha256": "2c2f2a7ba147cc05ecf4eb614f1faa496535c672a05f8f3fa2973c36df20943e"
+    },
+    {
+      "name": "failure-context.json",
+      "kind": "retained native22 configuration context; observations null when unavailable",
+      "bytes": 725,
+      "sha256": "3f78394d0adcd6cbdd0d7b6495523184d0df618407af77ccb6f88ce177a874f2"
+    }
+  ],
+  "officialComponents": {
+    "url": "https://learn.microsoft.com/en-us/visualstudio/install/workload-component-id-vs-enterprise?view=visualstudio",
+    "moniker": "visualstudio",
+    "documentedComponentVersion": "18.0.11123.170",
+    "actualNative22VsVersion": "18.10.12224.181",
+    "ids": [
+      "Microsoft.VisualStudio.Component.VC.ATL.ARM64",
+      "Microsoft.VisualStudio.Component.VC.ATL.ARM64.Spectre"
+    ],
+    "installedMembership": null
+  },
+  "scope": "Diagnostic reproduces ATL configure path selection and native compiler/linker argument route; does not run full configure/gbuild or qualify any product."
+}

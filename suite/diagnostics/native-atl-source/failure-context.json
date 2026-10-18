@@ -1,0 +1,21 @@
+{
+  "runId": "39086437590",
+  "jobId": "117553896207",
+  "runAttempt": 1,
+  "commit": "7f12d671fe0eae1fc353f2fc53dbc2d75551274a",
+  "tree": "b811bfd5527348630d8c5019d850990a40b2c10c",
+  "vsVersion": "18.10.12224.181",
+  "toolset": "v145",
+  "compilerVersion": "14.51.36231",
+  "ATL_INCLUDE": "/cygdrive/c/PROGRA~1/MICROS~2/18/ENTERP~1/VC/Tools/MSVC/1451~1.362/atlmfc/include",
+  "ATL_LIB": "/cygdrive/c/PROGRA~1/MICROS~2/18/ENTERP~1/VC/Tools/MSVC/1451~1.362/atlmfc/lib/spectre/arm64",
+  "fatalPhysicalLfLines": [
+    99,
+    100,
+    104,
+    106
+  ],
+  "actualHeaderPresence": null,
+  "actualArm64AtlsPresence": null,
+  "CXX": "/cygdrive/c/PROGRA~1/MICROS~2/18/ENTERP~1/VC/Tools/MSVC/1451~1.362/bin/HOSTAR~1/arm64/cl.exe"
+}
