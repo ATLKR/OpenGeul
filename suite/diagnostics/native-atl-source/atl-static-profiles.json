@@ -1,0 +1,376 @@
+{
+  "schemaVersion": 1,
+  "scope": "Exact actual control1 static ATL build input profiles; metadata only, no Microsoft library/object payload. Native consumption is separate and unobserved.",
+  "actualRun": {
+    "run_id": 39096715646,
+    "job_id": 117584601702,
+    "source_commit": "410f289c2d3cd28ad2920627e435ac119abbaad7",
+    "tree": "940f833a19ebfb4b8ce1bfe5983f1d2fa1ca2f3a",
+    "census_path": "work/native-atl-control-39096715646/artifact-12124862279/evidence/atl-census.json",
+    "census_bytes": 2399,
+    "census_sha256": "36167bb04148b97abc01c0a8e97c4c9ffc4a788275b00edb538eaa8ba896a71c"
+  },
+  "sourceClosureContext": {
+    "primaryEvidence": "Exact actual-run library byte length and SHA256 joins",
+    "catalogAuthenticationChainComplete": false,
+    "catalogDeclaredHashMatchesResponse": false,
+    "catalogDeclaredLengthMatchesResponse": false,
+    "packages": [
+      {
+        "id": "Microsoft.VC.14.51.ATL.ARM64.base",
+        "version": "14.51.36244",
+        "declaredPackageBytes": 1418453,
+        "observedPackageBytes": 1407914,
+        "declaredPackageSha256": "62887bdfaca3b78c6420e2b8b1464a9b3f7f3cc43bc4a9001ab89ffac8212cfc",
+        "observedPackageSha256": "62887bdfaca3b78c6420e2b8b1464a9b3f7f3cc43bc4a9001ab89ffac8212cfc",
+        "packageSha256MatchesDeclared": true,
+        "packageLengthMatchesDeclared": false,
+        "combinedPackageHashMatchesFieldFromClosure": false,
+        "note": "Combined field is false because byte length differs; do not misreport the matching package SHA256 as mismatched."
+      },
+      {
+        "id": "Microsoft.VC.14.51.ATL.ARM64.Spectre.base",
+        "version": "14.51.36244",
+        "declaredPackageBytes": 1412491,
+        "observedPackageBytes": 1400628,
+        "declaredPackageSha256": "1add9d0db6e3c3417afc0208e03648b3ce215f90dcc6ce69c9b27c5228ceb654",
+        "observedPackageSha256": "1add9d0db6e3c3417afc0208e03648b3ce215f90dcc6ce69c9b27c5228ceb654",
+        "packageSha256MatchesDeclared": true,
+        "packageLengthMatchesDeclared": false,
+        "combinedPackageHashMatchesFieldFromClosure": false,
+        "note": "Combined field is false because byte length differs; do not misreport the matching package SHA256 as mismatched."
+      }
+    ],
+    "bootstrapExecuted": false,
+    "bootstrapPayloadDecode": "Local attempt failed and invalid zero buffers discarded, per closure report; no source attestation invented.",
+    "proprietaryInputHandling": "Official VSIX/bootstrap/libraries/object payloads remain only in local work. No Microsoft library/object code enters Git or public artifacts. Only bounded non-code names, offsets, machine/header facts and hashes may be committed or retained as diagnostic evidence."
+  },
+  "profiles": [
+    {
+      "kind": "regular",
+      "bytes": 2946396,
+      "sha256": "432551ac196e927308246b7be3ada5fb89cf46da510ee02a01ee593cd72cb941",
+      "aa64ObjectCount": 5,
+      "arm64EcObjectCount": 5,
+      "members": [
+        {
+          "ordinal": 0,
+          "headerOffset": 8,
+          "payloadOffset": 68,
+          "rawName": "/",
+          "resolvedName": "/",
+          "payloadBytes": 40007,
+          "payloadSha256": "7a92357f15182211bfb7a657adbf5a6a96870e784598d7713ae30331528f8cca",
+          "kind": "archiveIndexMetadata",
+          "machine": null
+        },
+        {
+          "ordinal": 1,
+          "headerOffset": 40076,
+          "payloadOffset": 40136,
+          "rawName": "/",
+          "resolvedName": "/",
+          "payloadBytes": 37745,
+          "payloadSha256": "043c0b06d7e7e22d70a0d7b7ee66e5b727610085ffda01e7eef1f426eea7dd94",
+          "kind": "archiveIndexMetadata",
+          "machine": null
+        },
+        {
+          "ordinal": 2,
+          "headerOffset": 77882,
+          "payloadOffset": 77942,
+          "rawName": "//",
+          "resolvedName": "//",
+          "payloadBytes": 1010,
+          "payloadSha256": "1a3b740577c5484b7f3777f268b9dd428ca829a8fbfbeaec5ab2bbcf7e86460b",
+          "kind": "longnamesMetadata",
+          "machine": null
+        },
+        {
+          "ordinal": 3,
+          "headerOffset": 78952,
+          "payloadOffset": 79012,
+          "rawName": "/<ECSYMBOLS>/",
+          "resolvedName": "/<ECSYMBOLS>/",
+          "payloadBytes": 38725,
+          "payloadSha256": "6927704838d6f00a0d80e346a7a7fb2e0be398953ee419055422a6a0a1190a1b",
+          "kind": "ecSymbolIndexMetadata",
+          "machine": null
+        },
+        {
+          "ordinal": 4,
+          "headerOffset": 117738,
+          "payloadOffset": 117798,
+          "rawName": "/0",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64ec\\qithunk.obj",
+          "payloadBytes": 890828,
+          "payloadSha256": "e2f1fda32b43a6b3dc6c044f96bb0aedb9c473447263a17db446b433226a3bb3",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 5,
+          "headerOffset": 1008626,
+          "payloadOffset": 1008686,
+          "rawName": "/101",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64ec\\stdcallthunk.obj",
+          "payloadBytes": 2805,
+          "payloadSha256": "3bd5f90a13d913efdddf927e38dbe6ea5a5275e9affb8c15f70c307579f92eab",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 6,
+          "headerOffset": 1011492,
+          "payloadOffset": 1011552,
+          "rawName": "/207",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64ec\\stdafx.obj",
+          "payloadBytes": 397251,
+          "payloadSha256": "79cb38a07163da91d2f8c639f4d49fd28ee7914e81d1f41c2d241d1e37d417fa",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 7,
+          "headerOffset": 1408804,
+          "payloadOffset": 1408864,
+          "rawName": "/307",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64ec\\atlthunk.obj",
+          "payloadBytes": 80968,
+          "payloadSha256": "785bf3197fac223ef35d710b4e7266bed135323b0734b82bac476460d85d24b3",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 8,
+          "headerOffset": 1489832,
+          "payloadOffset": 1489892,
+          "rawName": "/409",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64ec\\atlbase.obj",
+          "payloadBytes": 64448,
+          "payloadSha256": "ad40232e18c3183bf3435b905ba79f23b263786ae66c24c72493d0c0225517e1",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 9,
+          "headerOffset": 1554340,
+          "payloadOffset": 1554400,
+          "rawName": "/510",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64\\qithunk.obj",
+          "payloadBytes": 890781,
+          "payloadSha256": "130ea282248f682e4c836e17e6e0033000cb0ee4032e5c59223a9fb0898a0f80",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        },
+        {
+          "ordinal": 10,
+          "headerOffset": 2445182,
+          "payloadOffset": 2445242,
+          "rawName": "/609",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64\\stdcallthunk.obj",
+          "payloadBytes": 1750,
+          "payloadSha256": "b92ad49529724f0e0eb254b625698cabb37b9353974cc1caad5781897c15a1c1",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        },
+        {
+          "ordinal": 11,
+          "headerOffset": 2446992,
+          "payloadOffset": 2447052,
+          "rawName": "/713",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64\\stdafx.obj",
+          "payloadBytes": 393295,
+          "payloadSha256": "c5dbcca2af5f91b3dccd021c244f3b330c45bef167c9813e181c0417928bf7da",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        },
+        {
+          "ordinal": 12,
+          "headerOffset": 2840348,
+          "payloadOffset": 2840408,
+          "rawName": "/811",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64\\atlthunk.obj",
+          "payloadBytes": 63674,
+          "payloadSha256": "04ee8825e6b76f0dc57c912e1154a0f77ee4b20b53dc0be756dbbd71c142d747",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        },
+        {
+          "ordinal": 13,
+          "headerOffset": 2904082,
+          "payloadOffset": 2904142,
+          "rawName": "/911",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r\\arm64\\atlbase.obj",
+          "payloadBytes": 42254,
+          "payloadSha256": "03b266b738160760dddbe713d47bad7cf5197b702fe072f53c5154a5fe2585d5",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        }
+      ]
+    },
+    {
+      "kind": "spectre",
+      "bytes": 2947096,
+      "sha256": "7a32366151c447bd69ee9f0c25feb9885bb76157350c9d3fcf735a542d58d500",
+      "aa64ObjectCount": 5,
+      "arm64EcObjectCount": 5,
+      "members": [
+        {
+          "ordinal": 0,
+          "headerOffset": 8,
+          "payloadOffset": 68,
+          "rawName": "/",
+          "resolvedName": "/",
+          "payloadBytes": 40015,
+          "payloadSha256": "7cd716c4c3ffdf1248ef00197a48646420027e6329c701920409d62b3e1239e0",
+          "kind": "archiveIndexMetadata",
+          "machine": null
+        },
+        {
+          "ordinal": 1,
+          "headerOffset": 40084,
+          "payloadOffset": 40144,
+          "rawName": "/",
+          "resolvedName": "/",
+          "payloadBytes": 37753,
+          "payloadSha256": "f7559fcdaf6f700f1bd9f634209004ef8bb7d7947f230d2e1b756ed64fa56310",
+          "kind": "archiveIndexMetadata",
+          "machine": null
+        },
+        {
+          "ordinal": 2,
+          "headerOffset": 77898,
+          "payloadOffset": 77958,
+          "rawName": "//",
+          "resolvedName": "//",
+          "payloadBytes": 1090,
+          "payloadSha256": "c5ccca5d862b5eb55b15f135e84a487db5d6ef088e76259a417587e701f1be48",
+          "kind": "longnamesMetadata",
+          "machine": null
+        },
+        {
+          "ordinal": 3,
+          "headerOffset": 79048,
+          "payloadOffset": 79108,
+          "rawName": "/<ECSYMBOLS>/",
+          "resolvedName": "/<ECSYMBOLS>/",
+          "payloadBytes": 38733,
+          "payloadSha256": "9e06f024554f6114d1178164445db078076619519c73e5d3126604f9810dbdbc",
+          "kind": "ecSymbolIndexMetadata",
+          "machine": null
+        },
+        {
+          "ordinal": 4,
+          "headerOffset": 117842,
+          "payloadOffset": 117902,
+          "rawName": "/0",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64ec\\qithunk.obj",
+          "payloadBytes": 890844,
+          "payloadSha256": "ef656928acaf4d6f418a78bbca18b661a24d8e3d65f84825c7d9bb344e926727",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 5,
+          "headerOffset": 1008746,
+          "payloadOffset": 1008806,
+          "rawName": "/109",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64ec\\stdcallthunk.obj",
+          "payloadBytes": 2839,
+          "payloadSha256": "21adca40dd9a86e88a8a8a25d75189b5a19d4d04f5529b8aeef2585b2e8d6d02",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 6,
+          "headerOffset": 1011646,
+          "payloadOffset": 1011706,
+          "rawName": "/223",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64ec\\stdafx.obj",
+          "payloadBytes": 397299,
+          "payloadSha256": "5da1c07e2245ca1b76bafe2bc39cf437ded06099fef751b06a1b993bd0c6bdf5",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 7,
+          "headerOffset": 1409006,
+          "payloadOffset": 1409066,
+          "rawName": "/331",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64ec\\atlthunk.obj",
+          "payloadBytes": 80992,
+          "payloadSha256": "ac3c6df6b1a615c2b03fbea91434adf456a43e60a87631f2a8e2259e85678a9f",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 8,
+          "headerOffset": 1490058,
+          "payloadOffset": 1490118,
+          "rawName": "/441",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64ec\\atlbase.obj",
+          "payloadBytes": 64624,
+          "payloadSha256": "66ab63ef1ac7857378d48ad37fe783de9ff246b86bf9867aca721ced2a1b05d3",
+          "kind": "ordinaryCoffObject",
+          "machine": 42561
+        },
+        {
+          "ordinal": 9,
+          "headerOffset": 1554742,
+          "payloadOffset": 1554802,
+          "rawName": "/550",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64\\qithunk.obj",
+          "payloadBytes": 890797,
+          "payloadSha256": "0ed36f2f5475aaa5a6d36127e44393429142b2fd39e783464d68b737c5a007cd",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        },
+        {
+          "ordinal": 10,
+          "headerOffset": 2445600,
+          "payloadOffset": 2445660,
+          "rawName": "/657",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64\\stdcallthunk.obj",
+          "payloadBytes": 1784,
+          "payloadSha256": "6956e413780386776b3debffae031ae508fb9e66e20d2f24453d17ca2bc6187f",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        },
+        {
+          "ordinal": 11,
+          "headerOffset": 2447444,
+          "payloadOffset": 2447504,
+          "rawName": "/769",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64\\stdafx.obj",
+          "payloadBytes": 393343,
+          "payloadSha256": "4b5f7d4beb33b26ca8f2464b0186d81dba92f82fc3c748456ec58e5e15a86243",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        },
+        {
+          "ordinal": 12,
+          "headerOffset": 2840848,
+          "payloadOffset": 2840908,
+          "rawName": "/875",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64\\atlthunk.obj",
+          "payloadBytes": 63698,
+          "payloadSha256": "b3ee040a18ba05ad08253611a3bb1d5fc3fec63a2ed11adc223c401bbdc51e7f",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        },
+        {
+          "ordinal": 13,
+          "headerOffset": 2904606,
+          "payloadOffset": 2904666,
+          "rawName": "/983",
+          "resolvedName": "D:\\a\\_work\\1\\s\\Intermediate\\VC7Libs\\Ship\\ATLMFC\\Src\\ATL\\atls\\atls.vcxproj\\objr_r_spectre\\arm64\\atlbase.obj",
+          "payloadBytes": 42430,
+          "payloadSha256": "114fd19868bfa3a620f8fd5b76c465d0872e58b40331238e347b267dabad0bb7",
+          "kind": "ordinaryCoffObject",
+          "machine": 43620
+        }
+      ]
+    }
+  ]
+}

@@ -59,6 +59,18 @@
       "kind": "retained native22 configuration context; observations null when unavailable",
       "bytes": 725,
       "sha256": "3f78394d0adcd6cbdd0d7b6495523184d0df618407af77ccb6f88ce177a874f2"
+    },
+    {
+      "name": "atl-static-archive.ps1",
+      "kind": "dedicated diagnostic static archive classifier/profile; non-code archive metadata only",
+      "bytes": 12692,
+      "sha256": "a10492c0bb68109915df6ce5c504dfb7d73a7dbee979fb5266a33d6468f68e5f"
+    },
+    {
+      "name": "atl-static-profiles.json",
+      "kind": "dedicated diagnostic static archive classifier/profile; non-code archive metadata only",
+      "bytes": 15936,
+      "sha256": "fde4d26a6ac95f132d3782208497c8e31df23d8850b39b61ae2eb3aeab00b57b"
     }
   ],
   "officialComponents": {
@@ -72,5 +84,5 @@
     ],
     "installedMembership": null
   },
-  "scope": "Diagnostic reproduces ATL configure path selection and native compiler/linker argument route; does not run full configure/gbuild or qualify any product."
+  "scope": "Diagnostic reproduces ATL configure path selection and native compiler/linker argument route against exact classified static build inputs. Mixed available AA64/A641 variants are explicit; actual all-consumed-AA64 proof is separate. No full configure/gbuild or product qualification."
 }

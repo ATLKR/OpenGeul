@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import pathlib
@@ -62,7 +63,17 @@ class NativeAtlControlTests(unittest.TestCase):
         lib = tools/'atlmfc/lib/spectre/arm64/atls.lib'
         lib.parent.mkdir(parents=True)
         lib.write_bytes(coff_archive(machine))
+        data = lib.read_bytes()
+        member = dict(ordinal=0, headerOffset=8, payloadOffset=68, rawName='probe.obj/', resolvedName='probe.obj',
+                      payloadBytes=20, payloadSha256=hashlib.sha256(data[68:]).hexdigest(), kind='ordinaryCoffObject', machine=machine)
+        profiles = [dict(kind=kind, bytes=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                         aa64ObjectCount=int(machine == 0xaa64), arm64EcObjectCount=int(machine == 0xa641), members=[member])
+                    for kind in ('regular','spectre')]
+        (self.root/'census-profiles.json').write_text(json.dumps(profiles))
         return tools, inc, lib
+
+    def census_call(self, tools):
+        return f"Get-AtlCensus {quote(tools)} @(Get-Content -Raw {quote(self.root/'census-profiles.json')}|ConvertFrom-Json)"
 
     def test_selected_vs18_default_toolset_is_bound_without_other_vs_fallback(self):
         inp, tools = self.toolchain()
@@ -78,14 +89,14 @@ class NativeAtlControlTests(unittest.TestCase):
 
     def test_census_requires_headers_and_selected_arm64_archive(self):
         tools, inc, lib = self.census()
-        data = json.loads(self.ps(f"Get-AtlCensus {quote(tools)}|ConvertTo-Json -Depth 12 -Compress"))
-        self.assertTrue(data['ready'])
+        data = json.loads(self.ps(self.census_call(tools)+"|ConvertTo-Json -Depth 12 -Compress"))
+        self.assertTrue(data['readyForNativeLinkMeasurement'])
         self.assertEqual([0xaa64], data['selectedLibrary']['machines'])
         self.assertEqual(str(lib), data['selectedLibrary']['path'])
         self.assertTrue(all(item['sha256'] for item in data['headers']))
         (inc/'atlbase.h').unlink()
-        data = json.loads(self.ps(f"Get-AtlCensus {quote(tools)}|ConvertTo-Json -Depth 12 -Compress"))
-        self.assertFalse(data['ready'])
+        data = json.loads(self.ps(self.census_call(tools)+"|ConvertTo-Json -Depth 12 -Compress"))
+        self.assertFalse(data['readyForNativeLinkMeasurement'])
         self.assertIsNone(data['headers'][0]['sha256'])
         self.assertEqual('missing', data['headers'][0]['status'])
 
@@ -95,21 +106,21 @@ class NativeAtlControlTests(unittest.TestCase):
         regular = tools/'atlmfc/lib/arm64/atls.lib'
         regular.parent.mkdir(parents=True)
         regular.write_bytes(coff_archive())
-        data = json.loads(self.ps(f"Get-AtlCensus {quote(tools)}|ConvertTo-Json -Depth 12 -Compress"))
-        self.assertFalse(data['ready'])
+        data = json.loads(self.ps(self.census_call(tools)+"|ConvertTo-Json -Depth 12 -Compress"))
+        self.assertFalse(data['readyForNativeLinkMeasurement'])
         self.assertEqual(str(lib), data['selectedLibrary']['path'])
         self.assertIsNone(data['selectedLibrary']['sha256'])
 
     def test_foreign_arm64ec_archive_and_linked_headers_are_rejected(self):
         tools, inc, _ = self.census(0xa641)
-        data = json.loads(self.ps(f"Get-AtlCensus {quote(tools)}|ConvertTo-Json -Depth 12 -Compress"))
-        self.assertFalse(data['ready'])
+        data = json.loads(self.ps(self.census_call(tools)+"|ConvertTo-Json -Depth 12 -Compress"))
+        self.assertFalse(data['readyForNativeLinkMeasurement'])
         self.assertEqual('rejected', data['selectedLibrary']['status'])
         target = self.root/'outside.h'; target.write_text('outside')
         (inc/'atlbase.h').unlink()
         (inc/'atlbase.h').symlink_to(target)
-        data = json.loads(self.ps(f"Get-AtlCensus {quote(tools)}|ConvertTo-Json -Depth 12 -Compress"))
-        self.assertFalse(data['ready'])
+        data = json.loads(self.ps(self.census_call(tools)+"|ConvertTo-Json -Depth 12 -Compress"))
+        self.assertFalse(data['readyForNativeLinkMeasurement'])
         self.assertEqual('rejected', data['headers'][0]['status'])
 
     def test_nonzero_diagnostic_is_admitted_only_with_normal_drained_completion(self):
@@ -170,16 +181,21 @@ class NativeAtlControlTests(unittest.TestCase):
         log.write_text('Note: including file: '+str(self.root/'other/atlbase.h')+'\n')
         self.ps(f"Assert-AtlHeaderInclusion {quote(log)} {quote(header)}", success=False)
 
-    def test_link_admission_requires_selected_archive_extraction_and_aa64_output(self):
-        lib = str(self.root/'atls.lib')
+    def test_native_consumption_requires_archive_loaded_and_map_evidence(self):
+        _, _, lib = self.census()
         log = self.root/'link.log'
-        log.write_text('Searching '+lib+':\n')
-        self.ps(f"Assert-AtlArchiveExtraction {quote(log)} {quote(lib)}", success=False)
-        log.write_text('    Loaded '+lib+'(atlcom.obj)\n')
-        data = json.loads(self.ps(f"Assert-AtlArchiveExtraction {quote(log)} {quote(lib)}|ConvertTo-Json -Compress"))
-        self.assertEqual('atlcom.obj', data['member'])
-        log.write_text('    Loaded '+str(self.root/'other/atls.lib')+'(atlcom.obj)\n')
-        self.ps(f"Assert-AtlArchiveExtraction {quote(log)} {quote(lib)}", success=False)
+        mapping = self.root/'link.map'
+        mapping.write_text(' 0001:00000000 ?owned@@YAXXZ 0000000140001000 f atls:probe.obj\n')
+        command = (f"$pin=@(Get-Content -Raw {quote(self.root/'census-profiles.json')}|ConvertFrom-Json)|Where-Object kind -eq 'spectre'; "
+                   f"$library=Read-AtlStaticArchive {quote(lib)} $pin; Assert-AtlNativeConsumption @({quote(log)}) {quote(mapping)} $library|ConvertTo-Json -Depth 12 -Compress")
+        log.write_text('Searching '+str(lib)+':\n')
+        self.ps(command, success=False)
+        log.write_text('    Loaded '+str(lib)+'(probe.obj)\n')
+        data = json.loads(self.ps(command))
+        self.assertTrue(data['nativeConsumedOnlyVerified'])
+        self.assertEqual('probe.obj', data['consumedMembers'][0]['resolvedName'])
+        log.write_text('    Loaded '+str(self.root/'other/atls.lib')+'(probe.obj)\n')
+        self.ps(command, success=False)
 
     def test_control_classifies_path_axes_without_claiming_engine_qualification(self):
         command = "Get-AtlControlConclusion $false $true $false $true|ConvertTo-Json -Compress"

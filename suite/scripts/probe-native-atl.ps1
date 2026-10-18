@@ -6,6 +6,7 @@ $ErrorActionPreference='Stop'
 # The reviewed driver has a real InvocationName guard: dot-sourcing defines
 # ownership/download/PE helpers without starting an engine build.
 . (Join-Path $PSScriptRoot 'build-native-engine.ps1') -WorkDirectory $WorkDirectory -OutputDirectory $OutputDirectory
+. (Join-Path $PSScriptRoot '../diagnostics/native-atl-source/atl-static-archive.ps1')
 
 function Get-AtlToolchainPlan($Instances) {
     $selected=@($Instances|Where-Object {
@@ -27,28 +28,29 @@ function Get-AtlToolchainPlan($Instances) {
         defaultVersionSha256=(Get-FileHash -LiteralPath $default -Algorithm SHA256).Hash.ToLowerInvariant()}
 }
 
-function Get-AtlFile([string]$Path,[switch]$Library) {
+function Get-AtlFile([string]$Path) {
     $record=[ordered]@{path=[IO.Path]::GetFullPath($Path);status='missing';bytes=$null;sha256=$null;machines=$null;error=$null}
     try {
         Assert-UnlinkedPath $Path
         if(-not(Test-Path -LiteralPath $Path)) {return $record}
         $file=Get-Item -LiteralPath $Path -Force
-        $limit=if($Library){67108864}else{1048576}
-        if($file.PSIsContainer -or $file.Length -le 0 -or $file.Length -gt $limit) {throw 'ATL census requires a bounded nonempty regular file.'}
+        if($file.PSIsContainer -or $file.Length -le 0 -or $file.Length -gt 1048576) {throw 'ATL census requires a bounded nonempty regular file.'}
         $record.bytes=$file.Length
         $record.sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-        if($Library) {$record.machines=@((Get-Arm64ImportLibrary $Path).machines)}
         $record.status='verified'
     } catch {$record.status='rejected';$record.error=$_.Exception.Message}
     return $record
 }
 
-function Get-AtlCensus([string]$CompilerRoot) {
+function Get-AtlCensus([string]$CompilerRoot,[object[]]$Profiles=@()) {
     Assert-UnlinkedPath $CompilerRoot
+    if(-not $Profiles.Count) {$Profiles=(Get-Content -LiteralPath (Join-Path $PSScriptRoot '../diagnostics/native-atl-source/atl-static-profiles.json') -Raw|ConvertFrom-Json).profiles}
+    $regularPin=@($Profiles|Where-Object kind -eq 'regular');$spectrePin=@($Profiles|Where-Object kind -eq 'spectre')
+    if($Profiles.Count -ne 2 -or $regularPin.Count -ne 1 -or $spectrePin.Count -ne 1) {throw 'Exactly the regular and Spectre ATL static profiles are required.'}
     $include=Join-Path $CompilerRoot 'atlmfc/include'
     $headers=@('atlbase.h','atlcom.h','atlctl.h')|ForEach-Object {Get-AtlFile (Join-Path $include $_)}
-    $regular=Get-AtlFile (Join-Path $CompilerRoot 'atlmfc/lib/arm64/atls.lib') -Library
-    $spectre=Get-AtlFile (Join-Path $CompilerRoot 'atlmfc/lib/spectre/arm64/atls.lib') -Library
+    $regular=Get-AtlStaticLibrary (Join-Path $CompilerRoot 'atlmfc/lib/arm64/atls.lib') $regularPin[0]
+    $spectre=Get-AtlStaticLibrary (Join-Path $CompilerRoot 'atlmfc/lib/spectre/arm64/atls.lib') $spectrePin[0]
     # Match the authenticated configure.ac parent-directory selection exactly.
     $spectreParent=Join-Path $CompilerRoot 'atlmfc/lib/spectre'
     Assert-UnlinkedPath $spectreParent
@@ -56,7 +58,8 @@ function Get-AtlCensus([string]$CompilerRoot) {
     $selected=if($selectSpectre){$spectre}else{$regular}
     return [ordered]@{includeDirectory=$include;headers=@($headers);libraries=@($regular,$spectre);
         spectreParentExists=$selectSpectre;selectedLibrary=$selected;
-        ready=(@($headers|Where-Object status -ne 'verified').Count -eq 0 -and $selected.status -eq 'verified')}
+        readyForNativeLinkMeasurement=(@($headers|Where-Object status -ne 'verified').Count -eq 0 -and $selected.readyForNativeLinkMeasurement -eq $true);
+        nativeConsumedOnlyVerified=$null}
 }
 
 function Assert-AtlCommandCompletion($Receipt) {
@@ -81,17 +84,6 @@ function Invoke-AtlObservation([string]$File,[string[]]$Arguments,[string]$Work,
     $completion=Assert-AtlCommandCompletion (Get-Content -LiteralPath ($Prefix+'.command.json') -Raw|ConvertFrom-Json)
     $completion.commandReceipt=$Prefix+'.command.json';$completion.stdout=$Prefix+'.stdout.log';$completion.stderr=$Prefix+'.stderr.log'
     return $completion
-}
-
-function Assert-AtlArchiveExtraction([string]$Log,[string]$Library) {
-    $expected=([IO.Path]::GetFullPath($Library)).Replace('\','/').ToLowerInvariant()
-    foreach($line in [IO.File]::ReadAllLines($Log)) {
-        if($line -match '^\s*Loaded\s+(.+?atls\.lib)\(([^)]+)\)\s*$') {
-            $actual=$Matches[1].Trim().Replace('\','/').ToLowerInvariant();$member=$Matches[2]
-            if($actual -ceq $expected) {return [ordered]@{library=$Library;member=$member;line=$line;log=$Log}}
-        }
-    }
-    throw 'Linker output does not prove extraction from the selected ARM64 atls.lib.'
 }
 
 function Get-AtlControlConclusion([bool]$BaselineHeader,[bool]$CandidateHeader,[bool]$BaselineLink,[bool]$CandidateLink) {
@@ -172,7 +164,7 @@ function Invoke-NativeAtlControl([string]$WorkDirectory,[string]$OutputDirectory
     $paths=New-BuildDirectories $WorkDirectory $OutputDirectory;$work=$paths.work;$evidence=$paths.output
     $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'));$previous=$script:NativeEngineBuildBudget
     $cygwin='';$failure=$null;$retentionFailure=$null
-    $receipt=[ordered]@{schemaVersion=1;kind='native-arm64-atl-prerequisite-control';diagnosticOnly=$true;causalCorrectionProven=$false;completed=$false;status='failed';stage='native-host';
+    $receipt=[ordered]@{schemaVersion=2;kind='native-arm64-atl-prerequisite-control';diagnosticOnly=$true;causalCorrectionProven=$false;nativeConsumedOnlyVerified=$null;completed=$false;status='failed';stage='native-host';
         startedUtc=[DateTime]::UtcNow.ToString('o');fullEngineQualified=$false;guiVerified=$false;runtimeExecuted=$false;
         installsVsAtlOrProduct=$false;configuredPaths=$null;candidatePaths=$null;baselineHeader=$null;candidateHeader=$null;baselineLink=$null;candidateLink=$null;retentionErrors=@()}
     try {
@@ -211,9 +203,10 @@ function Invoke-NativeAtlControl([string]$WorkDirectory,[string]$OutputDirectory
             $ids=@(Get-Content -LiteralPath $r.stdout|ForEach-Object {$_.Trim()}|Where-Object {$_})
             $receipt.components+=@{id=$id;selectedInstanceContains=($receipt.toolchain.instanceId -cin $ids);commandReceipt=$r.receipt}
         }
-        $receipt.stage='strict-atl-census';$receipt.census=Get-AtlCensus $tools
+        $profiles=(Get-Content -LiteralPath (Join-Path $evidence 'atl-static-profiles.json') -Raw|ConvertFrom-Json).profiles
+        $receipt.stage='classify-atl-static-input';$receipt.census=Get-AtlCensus $tools $profiles
         Write-BuildJson (Join-Path $evidence 'atl-census.json') $receipt.census
-        if(-not $receipt.census.ready) {$receipt.status='missing-or-rejected-atl-prerequisites';throw 'Selected ATL header/library census failed; install nothing and retain the exact missing/rejected observations.'}
+        if(-not $receipt.census.readyForNativeLinkMeasurement) {$receipt.status='missing-or-unclassified-atl-input';throw 'Selected ATL headers or exact static input classification failed; install nothing and retain the original observations.'}
         $receipt.stage='selected-arm64-windows-sdk'
         $sdk=(Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Windows Kits/Installed Roots' -Name KitsRoot10).KitsRoot10
         Assert-UnlinkedPath $sdk
@@ -314,14 +307,26 @@ int main() { return static_cast<int>(_Module.RegisterServer(FALSE)); }
             Confirm-FileIdentity $toolIdentity.path $toolIdentity.size SHA256 $toolIdentity.sha256|Out-Null
             Confirm-FileIdentity $receipt.census.selectedLibrary.path $receipt.census.selectedLibrary.bytes SHA256 $receipt.census.selectedLibrary.sha256|Out-Null
             $result=Write-AtlMakeControl ($mode+'-link') $arguments $link $work $evidence $bash $cygpath $unixWork
+            $result.outputPath=$exe;$result.mapPath=Join-Path $evidence ($mode+'-atl.map');$result.nativeConsumedOnlyVerified=$null
             $receipt[$mode+'Link']=$result
-            if($result.succeeded) {
-                $result.outputPe=Get-ProductPeIdentity $exe
-                if($result.outputPe.role -cne 'nativeArm64') {throw 'ATL control output is not native ARM64.'}
-                $result.archiveExtraction=Assert-AtlArchiveExtraction $result.stdout $receipt.census.selectedLibrary.path
-            }
+            Confirm-FileIdentity $receipt.census.selectedLibrary.path $receipt.census.selectedLibrary.bytes SHA256 $receipt.census.selectedLibrary.sha256|Out-Null
         }
+        # Preserve both original arm results before a strict consumption oracle
+        # can stop on a genuinely ambiguous native linker/map output format.
+        $proofErrors=@()
+        foreach($mode in @('baseline','candidate')) {
+            $result=$receipt[$mode+'Link']
+            if(-not $result.succeeded) {continue}
+            try {
+                $result.outputPe=Get-ProductPeIdentity $result.outputPath
+                if($result.outputPe.role -cne 'nativeArm64') {throw 'ATL control output is not native ARM64.'}
+                $result.nativeConsumption=Assert-AtlNativeConsumption @($result.stdout,$result.stderr) $result.mapPath $receipt.census.selectedLibrary
+                $result.nativeConsumedOnlyVerified=$true
+            } catch {$result.nativeConsumedOnlyVerified=$false;$result.nativeConsumptionError=$_.Exception.Message;$proofErrors+=,$_.Exception.Message}
+        }
+        if($proofErrors.Count) {$receipt.nativeConsumedOnlyVerified=$false;$receipt.status='native-atl-consumption-inconclusive';throw 'Actual selected-atls consumption is unresolved/non-native; retain all Loaded/map evidence without native admission.'}
         if(-not $receipt.candidateLink.succeeded) {throw 'Windows-path ATL library candidate did not link; library path cause remains unproved.'}
+        $receipt.nativeConsumedOnlyVerified=$receipt.candidateLink.nativeConsumedOnlyVerified
         if(-not $receipt.baselineHeader.succeeded) {$receipt.baselineHeader.expectedFailure=Assert-AtlExpectedFailure @($receipt.baselineHeader.stdout,$receipt.baselineHeader.stderr) Header}
         if(-not $receipt.baselineLink.succeeded) {$receipt.baselineLink.expectedFailure=Assert-AtlExpectedFailure @($receipt.baselineLink.stdout,$receipt.baselineLink.stderr) Library}
         $receipt.conclusion=Get-AtlControlConclusion $receipt.baselineHeader.succeeded $receipt.candidateHeader.succeeded $receipt.baselineLink.succeeded $receipt.candidateLink.succeeded
