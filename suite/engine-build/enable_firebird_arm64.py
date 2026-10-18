@@ -422,8 +422,8 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     # All source and patch checks precede source writes. The fresh build tree is
     # owned by this invocation; a repeated or changed hook is rejected above.
     bootstrap = install_module_bootstrap(source, evidence)
-    for (_, before, after), paths in zip(atl_consumers, atl_consumer_evidence):
-        for name, raw in (('original', before), ('effective', after)):
+    for (_, consumer_original, consumer_effective), paths in zip(atl_consumers, atl_consumer_evidence):
+        for name, raw in (('original', consumer_original), ('effective', consumer_effective)):
             with paths[name].open('xb') as stream:
                 stream.write(raw)
     for name, raw in (('original', harfbuzz_original), ('effective', harfbuzz_changed)):
