@@ -163,6 +163,65 @@ def _atl_native_paths(source: Path, lock: dict):
     return target, original, changed
 
 
+def _harfbuzz_native_meson_paths(source: Path, lock: dict):
+    """Plan the HarfBuzz-only Cygwin to bundled Windows Meson boundary."""
+    recipe = lock['recipe']
+    target = source / recipe['path']
+    if any(path.is_symlink() or not path.is_dir()
+           for path in (source / 'external', target.parent)):
+        raise ValueError('HarfBuzz Meson source hook requires regular recipe directories')
+    original = _regular(target)
+    if len(original) != recipe['size'] or hashlib.sha256(original).hexdigest() != recipe['sha256']:
+        raise ValueError('HarfBuzz Meson recipe SHA256 differs from the pinned source')
+    hook = r'''# OpenGeul: only native Windows Meson needs these Cygwin process boundaries.
+harfbuzz_meson_env :=
+harfbuzz_meson_pkg_config_path = ${PKG_CONFIG_PATH}$(LIBO_PATH_SEPARATOR)$(gb_UnpackedTarball_workdir)/graphite$(if $(SYSTEM_ICU),,$(LIBO_PATH_SEPARATOR)$(gb_UnpackedTarball_workdir)/icu)
+ifeq ($(OS)_$(CPUNAME)_$(COM)_$(OS_FOR_BUILD),WNT_AARCH64_MSC_WNT)
+ifneq ($(filter %-cygwin,$(MAKE_HOST)),)
+ifeq ($(BUILD_PLATFORM),$(HOST_PLATFORM))
+ifeq ($(strip $(WSL)$(PYTHON_FOR_BUILD)$(SYSTEM_PYTHON)),)
+ifneq ($(filter MESON,$(BUILD_TYPE)),)
+# Keep shell quoting separate from the literal double quotes parsed by Meson.
+harfbuzz_meson_shquote = '$(subst ','"'"',$(1))'
+define harfbuzz_meson_native_path
+$(eval harfbuzz_meson_path := $(shell cygpath -lm $(call harfbuzz_meson_shquote,$(1))))$(if $(filter 0,$(.SHELLSTATUS)),,$(error HarfBuzz Meson path conversion failed))$(if $(strip $(harfbuzz_meson_path)),,$(error HarfBuzz Meson path conversion returned no path))$(harfbuzz_meson_path)
+endef
+define harfbuzz_meson_native_executable
+$(if $(strip $(1)),,$(error HarfBuzz Meson $(2) executable is empty))$(eval harfbuzz_meson_path := $(shell value=$(call harfbuzz_meson_shquote,$(1)); value=$${value#"$${value%%[![:space:]]*}"}; value=$${value%"$${value##*[![:space:]]}"}; test -f "$$value" && cygpath -lm "$$value"))$(if $(filter 0,$(.SHELLSTATUS)),,$(error HarfBuzz Meson $(2) executable validation/conversion failed; wrappers and flags are unsupported))$(if $(strip $(harfbuzz_meson_path)),,$(error HarfBuzz Meson path conversion returned no path))$(harfbuzz_meson_path)
+endef
+harfbuzz_meson_cc := $(call harfbuzz_meson_native_executable,$(CC),CC)
+harfbuzz_meson_cxx := $(call harfbuzz_meson_native_executable,$(CXX),CXX)
+# Split native or POSIX lists per entry; a drive-letter colon is never a separator.
+harfbuzz_meson_pkg_prefix := $(shell value=$(call harfbuzz_meson_shquote,$(PKG_CONFIG_PATH)); out=; item=; \
+    emit() { if [ -n "$$item" ]; then native=$$(cygpath -lm "$$item") || return 7; \
+        [ -n "$$native" ] || return 8; out="$${out:+$$out;}$$native"; fi; item=; }; \
+    while [ -n "$$value" ]; do char=$${value%"$${value#?}"}; value=$${value#?}; \
+        case "$$char" in (';') emit || exit $$?;; (':') \
+            case "$$item" in ([a-zA-Z]) item="$$item:";; (*) emit || exit $$?;; esac;; \
+            (*) item="$$item$$char";; esac; done; emit || exit $$?; printf '%s' "$$out")
+ifneq ($(filter 0,$(.SHELLSTATUS)),0)
+$(error HarfBuzz Meson pkg-config path conversion failed)
+endif
+harfbuzz_meson_pkg_config_path := $(harfbuzz_meson_pkg_prefix)$(if $(harfbuzz_meson_pkg_prefix),;)$(call harfbuzz_meson_native_path,$(gb_UnpackedTarball_workdir)/graphite)$(if $(SYSTEM_ICU),,;$(call harfbuzz_meson_native_path,$(gb_UnpackedTarball_workdir)/icu))
+harfbuzz_meson_env = export CC=$(call harfbuzz_meson_shquote,"$(harfbuzz_meson_cc)") CXX=$(call harfbuzz_meson_shquote,"$(harfbuzz_meson_cxx)") &&
+endif
+endif
+endif
+endif
+endif
+
+'''.encode('utf-8')
+    marker = b'# cannot use CROSS_COMPILING as condition since we have cross-compilation "light" for cases where\n'
+    changed = original.replace(marker, hook + marker)
+    old = b'\t\tPKG_CONFIG_PATH="${PKG_CONFIG_PATH}$(LIBO_PATH_SEPARATOR)$(gb_UnpackedTarball_workdir)/graphite$(if $(SYSTEM_ICU),,$(LIBO_PATH_SEPARATOR)$(gb_UnpackedTarball_workdir)/icu)" \\\n'
+    new = (b'\t\t$(harfbuzz_meson_env) \\\n'
+           b'\t\tPKG_CONFIG_PATH="$(harfbuzz_meson_pkg_config_path)" \\\n')
+    changed = changed.replace(old, new)
+    if len(changed) != recipe['afterSize'] or hashlib.sha256(changed).hexdigest() != recipe['afterSha256']:
+        raise ValueError('HarfBuzz Meson recipe result SHA256 differs from its lock')
+    return target, original, changed
+
+
 def install_module_bootstrap(source: Path, evidence: Path | None = None) -> dict:
     """Correct the pinned unpack helper's inverted git-hooks selection only."""
     lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))['moduleBootstrap']
@@ -233,6 +292,8 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     mdds, mdds_original, mdds_changed, mdds_output, mdds_patch = _mdds_equality(source, lock['mddsEquality'])
     python, python_original, python_changed, python_output, python_payload = _python_native_host(source, lock['pythonNativeHost'])
     atl, atl_original, atl_changed = _atl_native_paths(source, lock['atlNativePaths'])
+    harfbuzz, harfbuzz_original, harfbuzz_changed = _harfbuzz_native_meson_paths(source, lock['harfbuzzNativeMesonPaths'])
+    harfbuzz_evidence = {}
     atl_evidence = {}
     python_evidence = {}
     mdds_evidence = {}
@@ -246,6 +307,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                         'effective': evidence / 'effective-Library_so_activex.mk'}
         if any(path.exists() or path.is_symlink() for path in atl_evidence.values()):
             raise ValueError('ATL recipe evidence already exists')
+        harfbuzz_evidence = {'original': evidence / 'original-ExternalProject_harfbuzz.mk',
+                             'effective': evidence / 'effective-ExternalProject_harfbuzz.mk'}
+        if any(path.exists() or path.is_symlink() for path in harfbuzz_evidence.values()):
+            raise ValueError('HarfBuzz Meson recipe evidence already exists')
         project_evidence = {'original': evidence / 'original-ExternalProject_firebird.mk',
                             'effective': evidence / 'effective-ExternalProject_firebird.mk'}
         if any(path.exists() or path.is_symlink() for path in project_evidence.values()):
@@ -272,6 +337,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     # All source and patch checks precede source writes. The fresh build tree is
     # owned by this invocation; a repeated or changed hook is rejected above.
     bootstrap = install_module_bootstrap(source, evidence)
+    for name, raw in (('original', harfbuzz_original), ('effective', harfbuzz_changed)):
+        if harfbuzz_evidence:
+            with harfbuzz_evidence[name].open('xb') as stream:
+                stream.write(raw)
     for name, raw in (('original', atl_original), ('effective', atl_changed)):
         if atl_evidence:
             with atl_evidence[name].open('xb') as stream:
@@ -308,6 +377,9 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         mdds.write_bytes(mdds_changed)
         python.write_bytes(python_changed)
         atl.write_bytes(atl_changed)
+        harfbuzz.write_bytes(harfbuzz_changed)
+        if _regular(harfbuzz) != harfbuzz_changed:
+            raise ValueError('Effective HarfBuzz Meson recipe bytes changed after write')
         if _regular(atl) != atl_changed:
             raise ValueError('Effective ATL source hook bytes changed after write')
         if _regular(python) != python_changed or _regular(python_output) != python_payload:
@@ -362,6 +434,11 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                                'afterSha256': lock['atlNativePaths']['recipe']['afterSha256'],
                                'scope': lock['atlNativePaths']['scope'],
                                'evidence': {name: str(path) for name, path in atl_evidence.items()}},
+            'harfbuzzNativeMesonPaths': {'path': lock['harfbuzzNativeMesonPaths']['recipe']['path'],
+                                       'beforeSha256': lock['harfbuzzNativeMesonPaths']['recipe']['sha256'],
+                                       'afterSha256': lock['harfbuzzNativeMesonPaths']['recipe']['afterSha256'],
+                                       'scope': lock['harfbuzzNativeMesonPaths']['scope'],
+                                       'evidence': {name: str(path) for name, path in harfbuzz_evidence.items()}},
             'nativeBuildVerified': False, 'basePersistenceVerified': False}
 
 

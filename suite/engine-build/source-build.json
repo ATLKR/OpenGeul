@@ -361,5 +361,25 @@
       "allConsumedLibraryArchitectureVerified": false,
       "engineQualified": false
     }
+  },
+  "harfbuzzNativeMesonPaths": {
+    "scope": "HarfBuzz recipe only; WNT_AARCH64_MSC with OS_FOR_BUILD WNT, real GNU make MAKE_HOST ending -cygwin, equal build/host and no WSL, bundled Windows Python and internal Meson; native executable CC/CXX argv and native per-entry pkg-config list; other profiles/options/global make state unchanged",
+    "recipe": {
+      "path": "external/harfbuzz/ExternalProject_harfbuzz.mk",
+      "size": 3074,
+      "sha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+      "afterSize": 5921,
+      "afterSha256": "f959b6f564baf45777f531b588932b2e969bdfbf21ffdb41630874838415cfcb"
+    },
+    "diagnosticEvidence": {
+      "runId": 39100682885,
+      "sourceOnlyCauseEstablished": true,
+      "originalSiteReproduced": false,
+      "causalCorrectionProven": false,
+      "harfbuzzSetupSucceeded": false,
+      "harfbuzzCompileSucceeded": false,
+      "nativeEngineQualified": false,
+      "windowsControlRunId": null
+    }
   }
 }
