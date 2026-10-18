@@ -53,6 +53,8 @@ jobs:
           path: |
             ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
             ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/job-budget.json
+            ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/work/python3/PCbuild/
+            ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/work/zlib/
             ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/work/baseline/PCbuild/
             ${{ runner.temp }}/opengeul-python-control-${{ github.run_id }}-${{ github.run_attempt }}/work/candidate/PCbuild/
           include-hidden-files: true

@@ -148,13 +148,54 @@ def unzip(archive,target):
         z.extractall(target)
 
 
+def patch_targets(patch, level):
+    targets=[]
+    for line in patch.read_bytes().split(b'\n'):
+        if not line.startswith(b'+++ '):continue
+        name=line[4:].split(b'\t',1)[0].rstrip(b'\r').decode('utf-8')
+        if name=='/dev/null':continue
+        parts=Path(name).parts[level:]
+        if not parts or '..' in parts or Path(*parts).is_absolute():raise ValueError('Unsafe patch target')
+        targets.append(Path(*parts))
+    if not targets:raise ValueError('No authentic patch target headers')
+    return sorted(set(targets))
+
+
+def snapshot_patch_targets(source, targets, destination, after=False):
+    destination.mkdir(parents=True,exist_ok=False)
+    records=[]
+    for relative in targets:
+        for suffix in (['','.orig','.rej'] if after else ['']):
+            name=Path(str(relative)+suffix);path=source/name
+            if not path.is_file():
+                if not suffix:records.append({'path':name.as_posix(),'exists':False})
+                continue
+            data=path.read_bytes();retained=destination/name;retained.parent.mkdir(parents=True,exist_ok=True);retained.write_bytes(data)
+            records.append({'path':name.as_posix(),'exists':True,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'crBytes':data.count(b'\r'),'lfBytes':data.count(b'\n'),'crlfPairs':data.count(b'\r\n'),'retainedPath':str(retained)})
+    return records
+
+
 def apply_patch(source, patch, tool, out):
-    level=patch.name.rsplit('.',1)[-1]
-    argv=[str(tool),'-f','-s','-p'+(level if level.isdigit() else ('0' if patch.name in ['missinginclude.patch','werror-undef.patch'] else '1')),'--fuzz=0','-i',str(patch.resolve())]
-    result=subprocess.run(argv,cwd=source,capture_output=True,timeout=90)
-    Path(str(out)+'.stdout.log').write_bytes(result.stdout);Path(str(out)+'.stderr.log').write_bytes(result.stderr)
-    write_json(str(out)+'.json',{'argv':argv,'cwd':str(source),'exitCode':result.returncode})
-    if result.returncode: raise ValueError('Authentic patch failed: '+patch.name)
+    suffix=patch.name.rsplit('.',1)[-1]
+    level=int(suffix) if suffix.isdigit() else (0 if patch.name in ['missinginclude.patch','werror-undef.patch'] else 1)
+    # Authentic LO recipe explicitly requires --binary for Git-bash mixed-EOL patches.
+    # Always select byte-preserving I/O; the full effective source-tree pins remain mandatory.
+    argv=[str(tool),'-f','-s','-p'+str(level),'--fuzz=0','--binary','-i',str(patch.resolve())]
+    evidence=Path(str(out)+'.files');targets=patch_targets(patch,level)
+    receipt={'argv':argv,'cwd':str(source),'exitCode':None,'patch':identity(patch),'transport':'binary','before':snapshot_patch_targets(source,targets,evidence/'before')}
+    stdout=stderr=b''
+    try:
+        result=subprocess.run(argv,cwd=source,capture_output=True,timeout=90)
+        stdout=result.stdout;stderr=result.stderr;receipt['exitCode']=result.returncode
+        if result.returncode:raise ValueError('Authentic patch failed: '+patch.name)
+    except BaseException as error:
+        receipt['error']=str(error)
+        if isinstance(error,subprocess.TimeoutExpired):stdout=error.stdout or b'';stderr=error.stderr or b''
+        raise
+    finally:
+        receipt['after']=snapshot_patch_targets(source,targets,evidence/'after',after=True)
+        Path(str(out)+'.stdout.log').write_bytes(stdout);Path(str(out)+'.stderr.log').write_bytes(stderr)
+        write_json(str(out)+'.json',receipt)
 
 
 def prepare(data, cache, work, out, patch_tool):

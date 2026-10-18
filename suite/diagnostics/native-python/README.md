@@ -4,7 +4,8 @@ The failed Native21 build used HostX86 ARM64-target link-time code generation an
 reported C1002/32-bit heap exhaustion before an automatic HostX64 retry. MSBuild
 still failed. This diagnostic reconstructs pinned complete Python sources using
 the authentic LibreOffice preactions, patch order, zero-fuzz GNU patch and CRLF
-restoration. No product patch is installed.
+restoration. GNU patch explicitly uses --binary, as the LO recipe requires for
+Git-bash mixed line endings; full-tree hashes still require authentic bytes. No product patch is installed.
 
 Both arms use authentic patched pcbuild.sln `pythoncore` Release|ARM64, original
 `/maxcpucount`, `/MP`, `/O2`, `/GL`, `/LTCG`, `/Zm200`, v145/VS18 and SDK 26100.
@@ -35,6 +36,9 @@ SHA256, SHA384 and SHA512 vectors cover empty/abc/million-a, streaming, copy and
 constants, generated independently during implementation with Python hashlib;
 the tested interpreter imports _sha2 directly and never uses that oracle.
 
+Each patch retains its raw before/after targets, .orig/.rej files, source/patch
+hashes and CR/LF counts even on failure. The artifact also includes partial
+preparation PCbuild and zlib directories before either A/B arm exists.
 Artifacts retain MSBuild binlogs, command receipts, complete object/resource
 inputs, response/tlog files, generated headers and hash inventories. Source
 archives are official pin-verified downloads. All diagnostic MSBuild child processes receive a selected environment allowlist,

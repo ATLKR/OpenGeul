@@ -169,3 +169,50 @@ class RoundOneChildBoundaryTests(unittest.TestCase):
             proof=json.loads(Path(str(prefix)+'.command.json').read_text())
             self.assertFalse(proof['passed']);self.assertTrue(proof['forcedTermination']);self.assertTrue(proof['directProcessDeathVerified'])
             self.assertIn('before timeout',Path(str(prefix)+'.stdout.log').read_text())
+
+class PreparationTransportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):SPEC.loader.exec_module(control)
+
+    def patch_tool(self):
+        import shutil,os
+        tool=shutil.which('patch')
+        if not tool:
+            candidate=Path(os.environ.get('ProgramFiles','C:/Program Files'))/'Git/usr/bin/patch.exe'
+            if candidate.is_file():tool=str(candidate)
+        self.assertTrue(tool,'Real GNU patch required for preparation transport regression')
+        return Path(tool)
+
+    def fixture(self, tmp, drift=False):
+        source=Path(tmp)/'source';(source/'PCbuild').mkdir(parents=True)
+        raw=(ROOT/'suite/diagnostics/native-python/preparation-fixtures/openssl.props').read_bytes()
+        self.assertEqual(__import__('hashlib').sha256(raw).hexdigest(),'02c2037ca9a4e89fa2ccfb557f51b4a71672bbbacd2bbd3851026f2e7f8dea0e')
+        if drift:raw=raw.replace(b'<_DLLSuffix>-3</_DLLSuffix>',b'<_DLLSuffix>-99</_DLLSuffix>')
+        (source/'PCbuild/openssl.props').write_bytes(raw)
+        return source,ROOT/'suite/diagnostics/native-python/python-3.7.6-msvc-ssl.patch.1'
+
+    def test_authentic_mixed_eol_patch_preserves_binary_source_bytes(self):
+        import json,hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            source,patch=self.fixture(tmp);prefix=Path(tmp)/'patch'
+            control.apply_patch(source,patch,self.patch_tool(),prefix)
+            command=json.loads(Path(str(prefix)+'.json').read_text())
+            self.assertIn('--binary',command['argv'],'Git/MSYS patch must use explicit byte-preserving I/O for authentic mixed-EOL patch')
+            result=(source/'PCbuild/openssl.props').read_bytes()
+            self.assertEqual(hashlib.sha256(result).hexdigest(),'80462ef8f222e7bcd8c775963872bd77066a8d9f44eb5517641fda53de037d33')
+
+    def test_failed_authentic_patch_retains_targets_rejects_and_stage_hashes(self):
+        import json,hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            source,patch=self.fixture(tmp,drift=True);prefix=Path(tmp)/'patch'
+            before=(source/'PCbuild/openssl.props').read_bytes()
+            with self.assertRaises(ValueError):control.apply_patch(source,patch,self.patch_tool(),prefix)
+            evidence=Path(str(prefix)+'.files')
+            self.assertTrue((evidence/'before/PCbuild/openssl.props').is_file(),'Pre-patch raw target missing')
+            self.assertEqual((evidence/'before/PCbuild/openssl.props').read_bytes(),before)
+            self.assertEqual((evidence/'after/PCbuild/openssl.props').read_bytes(),before)
+            self.assertTrue((evidence/'after/PCbuild/openssl.props.rej').is_file(),'GNU patch rejection bytes missing')
+            receipt=json.loads(Path(str(prefix)+'.json').read_text())
+            self.assertEqual(receipt['exitCode'],1)
+            self.assertEqual(receipt['before'][0]['sha256'],hashlib.sha256(before).hexdigest())
+            self.assertTrue(receipt['after']);self.assertTrue(receipt['patch']['sha256'])
