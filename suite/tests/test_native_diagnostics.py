@@ -155,15 +155,30 @@ class NativeDiagnosticsTests(unittest.TestCase):
         (self.profile / 'crash' / 'own.dmp').write_bytes(b'owned crash')
         evidence = self.root / 'evidence'
         backend = job.backend()
+        # A real runtime lives inside its owned payload. C:/Office would make
+        # runtime.parent protect the whole C: drive on native Windows.
+        backend.runtime = self.payload / 'Office'
+        original_identity = job.identity
+        def owned_identity(handle):
+            identity = original_identity(handle)
+            return dict(identity, image=str(backend.runtime / 'program' / Path(identity['image']).name))
+        job.identity = owned_identity
         def remove_profile():
             manifest = json.loads(next(evidence.glob('*/manifest.json')).read_text())
             self.assertTrue(manifest['archiveComplete'])
             self.assertTrue(next(evidence.glob('*/crash/own.dmp')).is_file())
             shutil.rmtree(self.profile)
         backend.profile = SimpleNamespace(name=str(self.profile), cleanup=remove_profile)
-        with patch.dict(os.environ, {'OPENGEUL_SUITE_DIAGNOSTICS': str(evidence)}), redirect_stderr(io.StringIO()):
+        cleanup_stderr = io.StringIO()
+        # Job.run_cleanup has its own redirect; retain that inner stream too.
+        with patch.dict(os.environ, {'OPENGEUL_SUITE_DIAGNOSTICS': str(evidence)}), \
+                patch.object(importlib.import_module(Job.__module__), 'redirect_stderr',
+                             side_effect=lambda unused: redirect_stderr(cleanup_stderr)):
             proof = job.run_cleanup(backend)
-        self.assertTrue(proof['success'])
+        self.assertTrue(proof['success'], json.dumps({
+            'cleanup': proof, 'stderr': cleanup_stderr.getvalue(), 'calls': job.calls, 'clock': job.now,
+            'runtime': str(backend.runtime), 'payload': str(self.payload),
+            'profile': str(self.profile), 'evidence': str(evidence)}, ensure_ascii=False))
         self.assertFalse(any(row[0] == 'force' for row in job.calls))
         self.assertFalse(self.profile.exists())
         manifests = list(evidence.glob('*/manifest.json'))

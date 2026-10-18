@@ -637,6 +637,51 @@ class AuthenticatedSource(unittest.TestCase):
             self.assertEqual(hook.read_bytes(), original)
             self.assertFalse((hook.parent / 'firebird-windows-arm64.patch').exists())
 
+    def test_lo_hook_cli_serializes_original_source_hash_and_all_consumer_evidence(self):
+        lock = json.loads((PORT / 'source-build.json').read_text())
+        with tempfile.TemporaryDirectory(prefix='source hook cli ') as folder:
+            root = Path(folder)
+            originals = {
+                lock['sourceHook']['path']: (self.lo_patches / 'UnpackedTarball_firebird.mk').read_bytes(),
+                'external/firebird/ExternalProject_firebird.mk': (ROOT / 'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes(),
+                'configure.ac': self.lo_configure.read_bytes(),
+                'bin/unpack-sources': (ROOT / 'suite/tests/fixtures/native-source-tar/unpack-sources').read_bytes(),
+                'external/zstd/UnpackedTarball_zstd.mk': (ROOT / 'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes(),
+            }
+            for relative, raw in originals.items():
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+            self.mdds_recipe(root)
+            evidence = root / 'evidence'; evidence.mkdir()
+            self.cli_command = [sys.executable, str(PORT / 'enable_firebird_arm64.py'),
+                                '--libreoffice-source', str(root), '--evidence-directory', str(evidence)]
+            self.cli_result = subprocess.run(self.cli_command, cwd=ROOT, capture_output=True, text=True, timeout=30)
+            self.assertEqual(0, self.cli_result.returncode, self.cli_result.stdout + self.cli_result.stderr)
+            receipt = json.loads(self.cli_result.stdout)
+            self.assertEqual('', self.cli_result.stderr)
+            self.assertIsInstance(receipt['beforeSha256'], str)
+            self.assertEqual(lock['sourceHook']['sha256'], receipt['beforeSha256'])
+            self.assertEqual(lock['sourceHook']['path'], receipt['sourceHook'])
+            self.assertEqual('source-hook-installed-native-build-pending', receipt['status'])
+            self.assertFalse(receipt['nativeBuildVerified'])
+            self.assertFalse(receipt['basePersistenceVerified'])
+            recipes = receipt['atlConsumerNativePaths']['recipes']
+            self.assertEqual([pin['path'] for pin in lock['atlConsumerNativePaths']['recipes']],
+                             [item['path'] for item in recipes])
+            self.assertEqual(5, len(recipes))
+            for pin, item in zip(lock['atlConsumerNativePaths']['recipes'], recipes):
+                self.assertEqual(pin['sha256'], item['beforeSha256'])
+                self.assertEqual(pin['afterSha256'], item['afterSha256'])
+                for kind, size_key, sha_key in (('original', 'size', 'sha256'),
+                                               ('effective', 'afterSize', 'afterSha256')):
+                    retained = evidence / (kind + '-' + Path(pin['path']).name)
+                    self.assertEqual(retained, Path(item['evidence'][kind]))
+                    raw = retained.read_bytes()
+                    self.assertEqual(pin[size_key], len(raw))
+                    self.assertEqual(pin[sha_key], hashlib.sha256(raw).hexdigest())
+                    if kind == 'effective': self.assertEqual(raw, (root / pin['path']).read_bytes())
+
     def test_lo_hook_installation_is_pinned_and_arm64_only(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

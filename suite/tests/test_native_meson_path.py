@@ -191,9 +191,14 @@ class MesonRecipeReplayTests(unittest.TestCase):
     def candidate(self, source, original):
         # Before implementation the original recipe supplies a meaningful RED
         # at the actual command/env boundary instead of an import failure.
-        if not hasattr(installer(), '_harfbuzz_native_meson_paths'): return original
-        recipe=source/RECIPE; recipe.parent.mkdir(parents=True); recipe.write_bytes(original)
-        return plan(source)[2]
+        if not hasattr(installer(), '_harfbuzz_native_meson_paths'):
+            effective = original
+        else:
+            recipe=source/RECIPE; recipe.parent.mkdir(parents=True); recipe.write_bytes(original)
+            effective = plan(source)[2]
+        require_posix_recipe_replay(os.name, Path('/usr/bin/make'), Path('/bin/bash'),
+            os.environ.get(SOURCE_FLAG) == '1' or os.environ.get(CYGWIN_FLAG) == '1')
+        return effective
 
     def test_genuine_recipe_passes_both_compilers_and_native_dependency_entries(self):
         with tempfile.TemporaryDirectory(prefix='meson-replay-') as folder:

@@ -18,7 +18,7 @@ def quote(value):return "'"+str(value).replace("'","''")+"'"
 class NativeArchiveToolTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='native-archive-tool-');self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name)
+        self.root=Path(self.temp.name).resolve(strict=True)
         self.compiler=self.root/"selected VS's toolchain/VC/Tools/MSVC/14.51.36231"
         self.tool=self.compiler/'bin/Hostarm64/arm64/lib.exe';self.tool.parent.mkdir(parents=True)
         self.pe(0xaa64)

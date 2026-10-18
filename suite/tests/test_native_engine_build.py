@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import unittest
 
+from suite.tests.test_native_crt_probe import OwnedInheritedPipeFixture
+
 SOURCE=Path(__file__).resolve().parents[1]/'scripts/build-native-engine.ps1'
 PWSH=shutil.which('pwsh') or '/workspace/work/opengeul-improvements/work/ime-api-review/powershell/pwsh'
 
@@ -23,7 +25,7 @@ class NativeEngineBuildTests(unittest.TestCase):
         self.assertTrue(Path(PWSH).is_file(),'Portable PowerShell is required for command-boundary tests')
         self.temp=tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name)
+        self.root=Path(self.temp.name).resolve(strict=True)
 
     def ps(self,body):
         script=self.root/'case.ps1'
@@ -56,7 +58,17 @@ class NativeEngineBuildTests(unittest.TestCase):
             ['export', 'OPENGEUL_LIBREOFFICE_MESON_SOURCE=/owned/lo source'],
             ['export', 'OPENGEUL_LIBREOFFICE_PYTHON_PATCHES=/owned/lo source/external/python3']],
             [argv for argv in parsed if argv and argv[0] == 'export'])
-        result = subprocess.run(['bash','-n',str(script)],capture_output=True,text=True)
+        bash = 'bash'
+        if os.name == 'nt':
+            git = shutil.which('git')
+            self.assertIsNotNone(git, 'Git for Windows is required for the Bash syntax check')
+            git_path = Path(git).resolve(strict=True)
+            self.assertEqual('git.exe', git_path.name.casefold())
+            self.assertIn(git_path.parent.name.casefold(), {'bin', 'cmd'})
+            bash_path = git_path.parent.parent/'bin/bash.exe'
+            self.assertTrue(bash_path.is_file(), 'Git for Windows Bash is required for the syntax check')
+            bash = str(bash_path)
+        result = subprocess.run([bash,'-n',str(script)],capture_output=True,text=True)
         self.assertEqual(0,result.returncode,result.stderr)
         atl_source = (SOURCE.parents[1]/'tests/test_native_atl_path.py').read_text()
         methods = re.findall(r'    def test_producer_mandates_actual_source_and_replay\(self\):\n(.*?)(?=\n    def |\n\nclass |\Z)',
@@ -313,18 +325,20 @@ class NativeEngineBuildTests(unittest.TestCase):
         return parent,child,self.root/'descendant.pid'
 
     def test_exited_parent_cannot_restart_deadline_for_inherited_output_pipes(self):
-        parent,child,pidfile=self.pipe_descendant(4)
         prefix=self.root/'inherited'
-        self.ps(f"try {{ Invoke-LoggedCommand {quote(os.sys.executable)} @({quote(parent)},{quote(child)},{quote(pidfile)}) {quote(self.root)} {quote(prefix)} -TimeoutMinutes (1.0/60) | Out-Null }} catch {{ }}")
-        receipt=json.loads((self.root/'inherited.command.json').read_text())
-        self.assertFalse(receipt['passed'],'Direct exit 0 cannot qualify a command whose output EOF missed its deadline')
-        self.assertEqual(0,receipt['exitCode'])
-        self.assertLess(receipt['elapsedSeconds'],3)
-        self.assertFalse(receipt['pipeDrainComplete'])
-        self.assertFalse(receipt['forcedTermination'])
-        self.assertTrue(receipt['directProcessDeathVerified'])
-        self.assertEqual('unproved-after-direct-process-exit',receipt['processTreeCleanup'])
-        self.assertIn('direct parent exited',(self.root/'inherited.stdout.log').read_text())
+        with OwnedInheritedPipeFixture(self.root) as fixture:
+            arguments=','.join(map(quote,fixture.arguments))
+            self.ps(f"try {{ Invoke-LoggedCommand {quote(os.sys.executable)} @({arguments}) {quote(self.root)} {quote(prefix)} -TimeoutMinutes (1.0/60) | Out-Null }} catch {{ }}")
+            receipt=json.loads((self.root/'inherited.command.json').read_text())
+            self.assertFalse(receipt['passed'],'Direct exit 0 cannot qualify a command whose output EOF missed its deadline')
+            self.assertEqual(0,receipt['exitCode'])
+            self.assertLess(receipt['elapsedSeconds'],3)
+            self.assertFalse(receipt['pipeDrainComplete'])
+            self.assertFalse(receipt['forcedTermination'])
+            self.assertTrue(receipt['directProcessDeathVerified'])
+            self.assertEqual('unproved-after-direct-process-exit',receipt['processTreeCleanup'])
+            self.assertIn('direct parent exited',(self.root/'inherited.stdout.log').read_text())
+        self.assertEqual(0,fixture.observation['exitCode'])
 
     def test_pipe_eof_inside_original_deadline_preserves_final_descendant_output(self):
         parent,child,pidfile=self.pipe_descendant(.15)

@@ -23,7 +23,7 @@ class NativeIsqlIcuTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='native-isql-icu-')
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.source = self.root / "owned source's tree"
         self.icu = self.source / 'workdir/UnpackedTarball/icu/source/lib'
         self.icu.mkdir(parents=True)
