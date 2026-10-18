@@ -1,0 +1,430 @@
+name: OpenGeul ordinary native Windows unit diagnostic
+'on':
+  push:
+    branches:
+    - work/opengeul-office-windows-unit-diagnostic-2
+    paths:
+    - .github/workflows/office-windows-unit-diagnostic.yml
+permissions:
+  contents: read
+concurrency:
+  group: ordinary-windows-units-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  ordinary-native-windows-units:
+    if: github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/opengeul-office-windows-unit-diagnostic-2'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - architecture: x64
+          runner: windows-2025
+        - architecture: arm64
+          runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OPENGEUL_WINDOWS_UNIT_ARCHITECTURE: ${{ matrix.architecture }}
+      OPENGEUL_WINDOWS_UNIT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+    steps:
+    - name: Bind workflow D, tested Root R and shared deadline before checkout
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        if($env:GITHUB_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:OPENGEUL_WINDOWS_UNIT_WORKFLOW_SHA -cne $env:GITHUB_SHA){throw 'Immutable workflow D identity is required.'}
+        $started=[DateTime]::UtcNow
+        $deadline=$started.AddMinutes(18).ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+        $evidence=Join-Path $env:RUNNER_TEMP ('opengeul-windows-units-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT+'-'+$env:OPENGEUL_WINDOWS_UNIT_ARCHITECTURE)
+        if(Test-Path -LiteralPath $evidence){throw 'Preserve the original ordinary-unit evidence directory.'}
+        New-Item -ItemType Directory -Path $evidence|Out-Null
+        $record=[ordered]@{schemaVersion=1;scope='ordinary-native-Windows-units-only';origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;
+            workflowCommit=$env:GITHUB_SHA;workflowDefinitionCommit=$env:OPENGEUL_WINDOWS_UNIT_WORKFLOW_SHA;workflowRef=$env:GITHUB_WORKFLOW_REF;
+            testedSourceCommit='1514661a9d9917a681caa8aa78e44dc6571f3acc';testedSourceTree='7cdf407390bf5cc2a5192bf2cbc45d59c132e727';
+            architecture=$env:OPENGEUL_WINDOWS_UNIT_ARCHITECTURE;jobMinutes=20;controlMinutes=18;nominalUploadReserveMinutes=2;runnerSetupIncluded=$false;
+            engineQualified=$false;runtimeQualified=$false;releaseQualified=$false}
+        [IO.File]::WriteAllText((Join-Path $evidence 'job-budget-and-source.json'),($record|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+        "OPENGEUL_WINDOWS_UNIT_EVIDENCE=$evidence"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+        "OPENGEUL_WINDOWS_UNIT_DEADLINE_UTC=$deadline"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+        git config --global core.autocrlf false
+        if($LASTEXITCODE -ne 0){throw 'Git exact-byte checkout configuration failed.'}
+        git config --global core.longpaths true
+        if($LASTEXITCODE -ne 0){throw 'Git long-path checkout configuration failed.'}
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: 1514661a9d9917a681caa8aa78e44dc6571f3acc
+        path: tested-source
+        fetch-depth: 1
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: ${{ matrix.architecture }}
+    - name: Run exact Root ordinary unit discovery with native identity and owned logs
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $tested=Join-Path $env:GITHUB_WORKSPACE 'tested-source'
+        $evidence=$env:OPENGEUL_WINDOWS_UNIT_EVIDENCE
+        $deadline=$env:OPENGEUL_WINDOWS_UNIT_DEADLINE_UTC
+        $expectedSource='1514661a9d9917a681caa8aa78e44dc6571f3acc'
+        $expectedTree='7cdf407390bf5cc2a5192bf2cbc45d59c132e727'
+        $previousBudget=$null
+        $receipt=[ordered]@{schemaVersion=1;scope='ordinary-native-Windows-units-only';status='failed';passed=$false;stage='source-preflight';
+            architecture=$env:OPENGEUL_WINDOWS_UNIT_ARCHITECTURE;workflowCommit=$env:GITHUB_SHA;workflowDefinitionCommit=$env:OPENGEUL_WINDOWS_UNIT_WORKFLOW_SHA;
+            workflowRef=$env:GITHUB_WORKFLOW_REF;repository=$env:GITHUB_REPOSITORY;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;
+            testedSourceCommit=$expectedSource;testedSourceTree=$expectedTree;testedLocalRootCommit='0e21e2b985b4f0ca83cfb02772422d7845669074';
+            engineQualified=$false;runtimeQualified=$false;releaseQualified=$false;startedUtc=[DateTime]::UtcNow.ToString('o')}
+        function Save-UnitRecord([string]$Name,$Value) {
+            $path=Join-Path $evidence $Name
+            if(Test-Path -LiteralPath $path){throw 'Preserve original unit diagnostic metadata.'}
+            [IO.File]::WriteAllText($path,($Value|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
+        }
+        function Read-UnitGit([string[]]$Arguments) {
+            $value=& git -C $tested @Arguments
+            if($LASTEXITCODE -ne 0){throw ('Tested checkout Git command failed: '+($Arguments -join ' '))}
+            return ($value -join "`n")
+        }
+        function Assert-UnitNormalCommand([string]$Prefix) {
+            $record=Get-Content -LiteralPath ($Prefix+'.command.json') -Raw|ConvertFrom-Json
+            if($record.passed -ne $true -or $record.exitCode -ne 0 -or $record.pipeDrainComplete -ne $true -or
+               $record.forcedTermination -ne $false -or $record.directProcessDeathVerified -ne $true -or
+               $record.processTreeCleanup -cne 'not-requested' -or @($record.cleanupErrors).Count -ne 0) {
+                throw 'Ordinary unit diagnostics require normal exit0, complete drain, verified death and unforced owned cleanup.'
+            }
+            return $record
+        }
+        function Assert-UnitProcessIdentity($Identity,[int]$ExpectedMachine,[int]$ExpectedPid) {
+            [uint64]$ticks=0
+            if($null -eq $Identity -or $Identity.pid -ne $ExpectedPid -or $ExpectedPid -le 0 -or
+               $Identity.processMachine -ne 0 -or $Identity.nativeMachine -ne $ExpectedMachine -or
+               $Identity.creationTimeRawTicks -isnot [string] -or $Identity.creationTimeRawTicks -cnotmatch '^[1-9][0-9]{15,19}$' -or
+               -not [uint64]::TryParse($Identity.creationTimeRawTicks,[ref]$ticks) -or $ticks -eq 0) {
+                throw 'Actual native Python PID, raw FILETIME and IsWow64Process2 identity are required.'
+            }
+        }
+        try {
+            if(-not $IsWindows -or $PSVersionTable.PSVersion.Major -lt 7){throw 'Native Windows PowerShell7 is required.'}
+            if($receipt.workflowCommit -cnotmatch '^[0-9a-f]{40}$' -or $receipt.workflowDefinitionCommit -cne $receipt.workflowCommit){throw 'Immutable workflow D identity is absent or mismatched.'}
+            if($receipt.workflowCommit -ceq $expectedSource){throw 'Workflow D must remain distinct from tested Root R.'}
+            $receipt.sourceBefore=[ordered]@{head=(Read-UnitGit @('rev-parse','HEAD'));tree=(Read-UnitGit @('rev-parse','HEAD^{tree}'));
+                status=(Read-UnitGit @('status','--porcelain','--untracked-files=all'))}
+            if($receipt.sourceBefore.head -cne $expectedSource -or $receipt.sourceBefore.tree -cne $expectedTree -or $receipt.sourceBefore.status){throw 'Tested checkout is not the exact clean immutable Root R.'}
+            if(Test-Path -LiteralPath (Join-Path $tested '.github/workflows/office-windows-unit-diagnostic.yml')){throw 'Diagnostic workflow leaked into the tested Root checkout.'}
+            Save-UnitRecord 'source-before.json' $receipt.sourceBefore
+            $driver=Join-Path $tested 'suite/scripts/build-native-engine.ps1'
+            $receipt.driverSha256=(Get-FileHash -LiteralPath $driver -Algorithm SHA256).Hash.ToLowerInvariant()
+            # Import existing ownership/deadline helpers under their real inert guard.
+            # The ARM64 engine entrypoint and its host guard are not invoked here.
+            . $driver -DeadlineUtc $deadline
+            $previousBudget=$script:NativeEngineBuildBudget
+            $script:NativeEngineBuildBudget=New-NativeBuildBudget $deadline 18
+            $receipt.budget=$script:NativeEngineBuildBudget.record
+            $python=(Get-Command python -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+            $receipt.tools=@('python','pwsh','git','bash')|ForEach-Object {
+                $path=(Get-Command $_ -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+                [ordered]@{name=$_;path=$path;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
+            }
+            $receipt.stage='pinned-unit-tooling'
+            $pdf=Join-Path $evidence 'install-pypdf'
+            Invoke-LoggedCommand $python @('-m','pip','install','--require-hashes','--only-binary=:all:','-r','suite/config/pdf-e2e-requirements.txt') $tested $pdf -TimeoutMinutes 4|Out-Null
+            $receipt.pypdf=Assert-UnitNormalCommand $pdf
+            $image=Join-Path $evidence 'install-pillow'
+            Invoke-LoggedCommand $python @('-m','pip','install','--only-binary=:all:','Pillow==12.3.0') $tested $image -TimeoutMinutes 4|Out-Null
+            $receipt.pillow=Assert-UnitNormalCommand $image
+            $receipt.stage='ordinary-unit-discovery'
+            $bootstrap=Join-Path $evidence 'unit-bootstrap.py'
+            $bootstrapText=@'
+        """Native Windows ordinary-unit recorder; the external controller owns deadlines."""
+        import argparse
+        import ctypes
+        from ctypes import wintypes
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import re
+        import struct
+        import subprocess
+        import sys
+        import traceback
+
+        EXPECTED_SOURCE_COMMIT = '1514661a9d9917a681caa8aa78e44dc6571f3acc'
+        EXPECTED_SOURCE_TREE = '7cdf407390bf5cc2a5192bf2cbc45d59c132e727'
+        EXPECTED_PYTHON_VERSION = (3, 12)
+        ENVIRONMENT_KEYS = (
+            'OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE', 'OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY',
+            'OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY', 'OPENGEUL_FIREBIRD_SOURCE_ARCHIVE',
+            'OPENGEUL_MDDS_SOURCE_ARCHIVE', 'OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES',
+            'OPENGEUL_LIBREOFFICE_CONFIGURE_AC', 'OPENGEUL_LIBREOFFICE_MDDS_PATCHES',
+            'OPENGEUL_LIBREOFFICE_CONFIGURE_SOURCE', 'OPENGEUL_PKGCONF_OFFICIAL_TOOL',
+            'OPENGEUL_LIBREOFFICE_ATL_SOURCE', 'OPENGEUL_LIBREOFFICE_MESON_SOURCE',
+            'OPENGEUL_LIBREOFFICE_PYTHON_PATCHES', 'OPENGEUL_TEST_RUNTIME',
+            'PYTHONUTF8', 'PYTHONDONTWRITEBYTECODE', 'CYGWIN',
+        )
+
+
+        def python_identity(expected_machine):
+            if sys.platform != 'win32' or os.name != 'nt':
+                raise RuntimeError('This bootstrap requires native Windows Python')
+            pointer_bits = struct.calcsize('P') * 8
+            raw = Path(sys.executable).read_bytes()
+            if pointer_bits != 64 or len(raw) < 64 or raw[:2] != b'MZ':
+                raise RuntimeError('A 64-bit PE Python executable is required')
+            offset = struct.unpack_from('<I', raw, 60)[0]
+            if offset + 26 > len(raw) or raw[offset:offset + 4] != b'PE\0\0':
+                raise RuntimeError('Python executable has no intact PE header')
+            machine = struct.unpack_from('<H', raw, offset + 4)[0]
+            magic = struct.unpack_from('<H', raw, offset + 24)[0]
+            identity = {'executable': sys.executable, 'size': len(raw),
+                        'sha256': hashlib.sha256(raw).hexdigest(), 'machine': machine,
+                        'optionalHeaderMagic': magic, 'expectedMachine': expected_machine,
+                        'pointerBits': pointer_bits, 'sysPlatform': sys.platform,
+                        'osName': os.name, 'version': sys.version,
+                        'versionInfo': list(sys.version_info),
+                        'expectedVersion': list(EXPECTED_PYTHON_VERSION)}
+            if (machine != expected_machine or magic != 0x20b or
+                    tuple(sys.version_info[:2]) != EXPECTED_PYTHON_VERSION):
+                raise RuntimeError('Python PE architecture or version mismatch: ' + json.dumps(identity))
+            return identity
+
+
+        def windows_api():
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.GetCurrentProcess.argtypes = []
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+            kernel.GetProcessTimes.restype = wintypes.BOOL
+            kernel.IsWow64Process2.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.USHORT), ctypes.POINTER(wintypes.USHORT)]
+            kernel.IsWow64Process2.restype = wintypes.BOOL
+            return kernel
+
+
+        def process_identity(kernel, handle, pid, expected_machine):
+            creation, exited, system, user = (wintypes.FILETIME() for _ in range(4))
+            if not kernel.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exited), ctypes.byref(system), ctypes.byref(user)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            process, native = wintypes.USHORT(), wintypes.USHORT()
+            if not kernel.IsWow64Process2(handle, ctypes.byref(process), ctypes.byref(native)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            identity = {'pid': pid, 'creationTimeRawTicks': str(ticks),
+                        'processMachine': process.value, 'nativeMachine': native.value,
+                        'expectedMachine': expected_machine}
+            return identity
+
+
+        def require_native_identity(identity):
+            if (identity['pid'] <= 0 or int(identity['creationTimeRawTicks']) <= 0 or
+                    identity['processMachine'] != 0 or
+                    identity['nativeMachine'] != identity['expectedMachine']):
+                raise RuntimeError('Native process identity mismatch: ' + json.dumps(identity))
+
+
+        def observed_log(path):
+            raw = path.read_bytes()
+            result = {'path': str(path), 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(),
+                      'encoding': 'utf-8', 'skipLines': [], 'classSetUpClassSkipLines': [],
+                      'ranSummaryLines': [], 'resultSummaryLines': [],
+                      'reportedRunCounts': [], 'reportedSummaryCounts': [],
+                      'classSetUpClassSkipsAreExecutedTests': False}
+            try:
+                text = raw.decode('utf-8')
+            except UnicodeDecodeError as error:
+                result['decodeError'] = str(error)
+                return result
+            for line in text.splitlines(keepends=True):
+                if re.match(r'^.+ \.\.\. skipped ', line):
+                    result['skipLines'].append(line)
+                    if line.startswith('setUpClass ('):
+                        result['classSetUpClassSkipLines'].append(line)
+                ran = re.match(r'^Ran ([0-9]+) tests? in ', line)
+                if ran:
+                    result['ranSummaryLines'].append(line)
+                    result['reportedRunCounts'].append(int(ran.group(1)))
+                if re.match(r'^(?:OK|FAILED)(?:[\r\n]| \(|$)', line):
+                    result['resultSummaryLines'].append(line)
+                    result['reportedSummaryCounts'].append({key: int(value) for key, value in
+                        re.findall(r'(failures|errors|skipped|expected failures|unexpected successes)=([0-9]+)', line)})
+            result['observedSkipLineCount'] = len(result['skipLines'])
+            result['observedClassSetUpClassSkipLineCount'] = len(result['classSetUpClassSkipLines'])
+            return result
+
+
+        def write_receipt_once(evidence, receipt):
+            target = evidence / 'unittest-bootstrap-receipt.json'
+            temporary = evidence / '.unittest-bootstrap-receipt.json.tmp'
+            with temporary.open('x', encoding='utf-8', newline='\n') as stream:
+                json.dump(receipt, stream, indent=2, ensure_ascii=False)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            # On the required Windows platform, rename fails if target already exists.
+            os.rename(temporary, target)
+
+
+        def main():
+            parser = argparse.ArgumentParser(description=__doc__)
+            parser.add_argument('--source', required=True, type=Path)
+            parser.add_argument('--evidence', required=True, type=Path)
+            parser.add_argument('--architecture', required=True, choices=('x64', 'arm64'))
+            args = parser.parse_args()
+            expected_machine = {'x64': 0x8664, 'arm64': 0xaa64}[args.architecture]
+            command = [sys.executable, '-m', 'unittest', 'discover', '-s', 'suite/tests', '-v']
+            receipt = {'schemaVersion': 1, 'scope': 'ordinary-native-windows-unit-only',
+                       'status': 'starting', 'architecture': args.architecture,
+                       'sourceArgument': str(args.source), 'expectedSourceCommit': EXPECTED_SOURCE_COMMIT,
+                       'expectedSourceTree': EXPECTED_SOURCE_TREE, 'sourceGitVerificationOwner': 'parent-controller',
+                       'workflowGithubSha': os.environ.get('GITHUB_SHA'), 'command': command,
+                       'environment': {key: os.environ.get(key) for key in ENVIRONMENT_KEYS},
+                       'childPid': None, 'childWaitCompleted': False, 'unitExitCode': None,
+                       'unitOutputEof': False, 'unitOutputCopiedBytes': 0,
+                       'childOutputPipeClosed': False, 'unitLogClosed': False,
+                       'lifetimeObservation': 'unit-child-wait-and-merged-output-eof-only',
+                       'errors': [], 'qualification': {'ordinaryUnitObservationOnly': True,
+                           'nativeRuntimeQualified': False, 'componentReceiverFeasible': None,
+                           'engineQualified': False, 'officeQualified': False, 'core59Qualified': False}}
+            unit_exit = None
+            bootstrap_exit = 1
+            log_created = False
+            merged = None
+            log_path = args.evidence / 'unittest-discovery.log'
+            try:
+                receipt['python'] = python_identity(expected_machine)
+                source = args.source.resolve(strict=True)
+                if not source.is_dir() or not (source / 'suite/tests').is_dir():
+                    raise RuntimeError('The verified source root and suite/tests directory are required')
+                receipt['cwd'] = str(source)
+                args.evidence.mkdir(parents=True, exist_ok=True)
+                for name in ('unittest-discovery.log', 'unittest-bootstrap-receipt.json', '.unittest-bootstrap-receipt.json.tmp'):
+                    output = args.evidence / name
+                    if output.exists() or output.is_symlink():
+                        raise FileExistsError('Fresh unit output required: ' + str(output))
+                kernel = windows_api()
+                receipt['bootstrapIdentity'] = process_identity(kernel, kernel.GetCurrentProcess(), os.getpid(), expected_machine)
+                require_native_identity(receipt['bootstrapIdentity'])
+                receipt['status'] = 'launching-unittest'
+                with log_path.open('xb') as merged:
+                    log_created = True
+                    child = subprocess.Popen(command, cwd=str(source), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    receipt['childPid'] = child.pid
+                    try:
+                        try:
+                            receipt['childIdentity'] = process_identity(kernel, wintypes.HANDLE(int(child._handle)), child.pid, expected_machine)
+                            require_native_identity(receipt['childIdentity'])
+                        except Exception:
+                            receipt['errors'].append({'stage': 'child-identity', 'traceback': traceback.format_exc()})
+                        while True:
+                            block = child.stdout.read(65536)
+                            if block == b'':
+                                receipt['unitOutputEof'] = True
+                                break
+                            merged.write(block)
+                            receipt['unitOutputCopiedBytes'] += len(block)
+                    finally:
+                        try:
+                            child.stdout.close()
+                            receipt['childOutputPipeClosed'] = child.stdout.closed
+                        finally:
+                            # The external controller owns the deadline and process-tree
+                            # termination. Observe only this actual child's normal wait.
+                            unit_exit = child.wait()
+                            receipt['unitExitCode'] = unit_exit
+                            receipt['childWaitCompleted'] = True
+                receipt['status'] = 'unittest-exited' if not receipt['errors'] else 'identity-observation-failed'
+                bootstrap_exit = unit_exit if unit_exit != 0 else (1 if receipt['errors'] else 0)
+            except Exception:
+                receipt['status'] = 'bootstrap-failed'
+                receipt['errors'].append({'stage': 'bootstrap', 'traceback': traceback.format_exc()})
+                traceback.print_exc()
+                bootstrap_exit = unit_exit if unit_exit not in (None, 0) else 1
+            finally:
+                receipt['unitLogClosed'] = merged is not None and merged.closed
+                if log_created:
+                    try:
+                        receipt['logObservation'] = observed_log(log_path)
+                        if 'decodeError' in receipt['logObservation']:
+                            receipt['errors'].append({'stage': 'log-decode',
+                                'error': receipt['logObservation']['decodeError']})
+                            receipt['status'] = 'bootstrap-failed'
+                            if bootstrap_exit == 0:
+                                bootstrap_exit = 1
+                    except Exception:
+                        receipt['errors'].append({'stage': 'log-observation', 'traceback': traceback.format_exc()})
+                        receipt['status'] = 'bootstrap-failed'
+                        if bootstrap_exit == 0:
+                            bootstrap_exit = 1
+                receipt['bootstrapExitCode'] = bootstrap_exit
+                try:
+                    if sys.platform == 'win32':
+                        args.evidence.mkdir(parents=True, exist_ok=True)
+                        write_receipt_once(args.evidence, receipt)
+                except Exception:
+                    traceback.print_exc()
+                    if bootstrap_exit == 0:
+                        bootstrap_exit = 1
+            return bootstrap_exit
+
+
+        if __name__ == '__main__':
+            raise SystemExit(main())
+
+        '@
+            if(Test-Path -LiteralPath $bootstrap){throw 'Preserve the original inline bootstrap.'}
+            [IO.File]::WriteAllText($bootstrap,$bootstrapText,[Text.UTF8Encoding]::new($false))
+            $receipt.bootstrapSha256=(Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
+            $unit=Join-Path $evidence 'unit-bootstrap'
+            $unitError=$null
+            try {Invoke-LoggedCommand $python @($bootstrap,'--source',$tested,'--evidence',$evidence,'--architecture',$env:OPENGEUL_WINDOWS_UNIT_ARCHITECTURE) $tested $unit -TimeoutMinutes 12|Out-Null}
+            catch {$unitError=$_}
+            if(Test-Path -LiteralPath ($unit+'.command.json')){$receipt.unitCommand=Get-Content -LiteralPath ($unit+'.command.json') -Raw|ConvertFrom-Json}
+            if(Test-Path -LiteralPath (Join-Path $evidence 'unittest-bootstrap-receipt.json')){$receipt.unitResult=Get-Content -LiteralPath (Join-Path $evidence 'unittest-bootstrap-receipt.json') -Raw|ConvertFrom-Json}
+            if($null -ne $unitError){throw $unitError}
+            $receipt.unitCommand=Assert-UnitNormalCommand $unit
+            # The bootstrap propagates the exact unittest exit and enforces native
+            # process identity before returning success; its original receipt/log stay
+            # separate from this workflow/controller ownership receipt.
+            if($null -eq $receipt.unitResult){throw 'Actual unittest bootstrap receipt is missing.'}
+            $u=$receipt.unitResult
+            $machine=if($env:OPENGEUL_WINDOWS_UNIT_ARCHITECTURE -ceq 'arm64'){0xaa64}else{0x8664}
+            if($u.status -cne 'unittest-exited' -or $u.unitExitCode -ne 0 -or $u.bootstrapExitCode -ne 0 -or @($u.errors).Count -ne 0 -or
+               $u.childWaitCompleted -ne $true -or $u.unitOutputEof -ne $true -or $u.childOutputPipeClosed -ne $true -or $u.unitLogClosed -ne $true -or
+               $u.architecture -cne $env:OPENGEUL_WINDOWS_UNIT_ARCHITECTURE -or $u.workflowGithubSha -cne $receipt.workflowCommit -or
+               $u.expectedSourceCommit -cne $expectedSource -or $u.expectedSourceTree -cne $expectedTree -or
+               [IO.Path]::GetFullPath($u.cwd) -ine [IO.Path]::GetFullPath($tested) -or
+               $u.python.pointerBits -ne 64 -or $u.python.machine -ne $machine -or $u.python.sysPlatform -cne 'win32' -or $u.python.osName -cne 'nt' -or
+               $u.python.versionInfo[0] -ne 3 -or $u.python.versionInfo[1] -ne 12 -or
+               $u.unitOutputCopiedBytes -ne $u.logObservation.size -or $u.logObservation.decodeError) {throw 'Actual ordinary-unit result or native/source/log binding is incomplete.'}
+            Assert-UnitProcessIdentity $u.bootstrapIdentity $machine $receipt.unitCommand.pid
+            Assert-UnitProcessIdentity $u.childIdentity $machine $u.childPid
+            $counts=@($u.logObservation.reportedRunCounts);$summaries=@($u.logObservation.resultSummaryLines)
+            if($counts.Count -eq 0 -or $counts[-1] -le 0 -or $summaries.Count -eq 0 -or $summaries[-1] -cnotmatch '^OK(?:\s|$)'){throw 'Original unittest framework completion is absent or unsuccessful.'}
+            $receipt.stage='source-after-unit-discovery'
+            $receipt.sourceAfter=[ordered]@{head=(Read-UnitGit @('rev-parse','HEAD'));tree=(Read-UnitGit @('rev-parse','HEAD^{tree}'));
+                status=(Read-UnitGit @('status','--porcelain','--untracked-files=all'))}
+            Save-UnitRecord 'source-after.json' $receipt.sourceAfter
+            if($receipt.sourceAfter.head -cne $expectedSource -or $receipt.sourceAfter.tree -cne $expectedTree -or $receipt.sourceAfter.status){throw 'Ordinary unit discovery changed the tested source checkout.'}
+            Assert-NativeBuildTimeRemaining
+            $receipt.passed=$true;$receipt.status='ordinary-unit-discovery-passed';$receipt.stage='complete'
+        } catch {$receipt.error=$_.Exception.ToString();$receipt.failedStage=$receipt.stage;throw}
+        finally {
+            # Retain post-failure source state too; never hide a mutated checkout.
+            if($null -eq $receipt.sourceAfter -and (Test-Path -LiteralPath (Join-Path $tested '.git'))) {
+                try {$receipt.sourceAfter=[ordered]@{head=(Read-UnitGit @('rev-parse','HEAD'));tree=(Read-UnitGit @('rev-parse','HEAD^{tree}'));status=(Read-UnitGit @('status','--porcelain','--untracked-files=all'))}}
+                catch {$receipt.sourceAfterError=$_.Exception.ToString()}
+            }
+            $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
+            if($script:NativeEngineBuildBudget){$receipt.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}
+            Save-UnitRecord 'windows-unit-diagnostic-receipt.json' $receipt
+            $script:NativeEngineBuildBudget=$previousBudget
+        }
+    - name: Retain ordinary-unit evidence on every outcome
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: ordinary-windows-units-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/opengeul-windows-units-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}/
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 7
