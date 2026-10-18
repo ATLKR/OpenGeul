@@ -93,6 +93,9 @@ class AuthenticatedSource(unittest.TestCase):
             raise unittest.SkipTest('A C preprocessor/compiler and GNU patch are required')
 
     def mdds_recipe(self, root):
+        python = root / 'external/python3/ExternalProject_python3.mk'
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_bytes((ROOT / 'suite/tests/fixtures/native-python-host' / python.name).read_bytes())
         target = root / 'external/mdds/UnpackedTarball_mdds.mk'
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((ROOT / 'suite/tests/fixtures/native-mdds-equality' / target.name).read_bytes())
@@ -642,11 +645,14 @@ class AuthenticatedSource(unittest.TestCase):
             zstd_original=(ROOT/'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes();zstd.write_bytes(zstd_original)
             mdds = self.mdds_recipe(root)
             mdds_original = mdds.read_bytes()
+            python = root / 'external/python3/ExternalProject_python3.mk'
+            python_original = python.read_bytes()
+            python_targets = python.with_name('opengeul-native-arm64-tools.targets')
             upstream = mdds.parent / 'gcc-12-silence-use-after-free.patch.1'
             upstream_original = upstream.read_bytes()
             evidence = root / 'evidence'
             evidence.mkdir()
-            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch'):
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch', 'changed-python-recipe', 'linked-python-recipe', 'python-targets-collision', 'python-evidence-collision', 'python-payload-evidence-collision', 'forged-python-targets', 'missing-python-lock'):
                 with self.subTest(invalid=invalid):
                     if invalid == 'changed-helper':
                         bootstrap.write_bytes(pristine + b'\nchanged\n')
@@ -682,10 +688,22 @@ class AuthenticatedSource(unittest.TestCase):
                         (mdds.parent/'opengeul-arm64-equality.patch.1').write_bytes(b'prior patch')
                     elif invalid == 'changed-mdds-upstream-patch':
                         upstream.write_bytes(upstream_original+b'changed')
+                    elif invalid == 'changed-python-recipe':
+                        python.write_bytes(python_original+b'changed')
+                    elif invalid == 'linked-python-recipe':
+                        saved_python = root/'saved-python'; saved_python.write_bytes(python_original)
+                        python.unlink(); python.symlink_to(saved_python)
+                    elif invalid == 'python-targets-collision':
+                        python_targets.write_bytes(b'prior targets')
+                    elif invalid == 'python-evidence-collision':
+                        (evidence/'effective-ExternalProject_python3.mk').write_bytes(b'prior evidence')
+                    elif invalid == 'python-payload-evidence-collision':
+                        (evidence/'effective-opengeul-native-arm64-tools.targets').write_bytes(b'prior evidence')
                     expected_bootstrap = bootstrap.read_bytes()
                     expected_project=project.read_bytes()
                     expected_zstd=zstd.read_bytes()
                     expected_mdds=mdds.read_bytes()
+                    expected_python=python.read_bytes()
                     installer = module()
                     if invalid == 'changed-mdds-patch':
                         bundle = root/'changed-port'; bundle.mkdir(exist_ok=True)
@@ -694,14 +712,31 @@ class AuthenticatedSource(unittest.TestCase):
                         bad_patch = bundle/'opengeul-arm64-equality.patch.1'
                         bad_patch.write_bytes(bad_patch.read_bytes()+b'changed')
                         installer.HERE = bundle
-                    with self.assertRaisesRegex(ValueError, 'SHA256|regular file|exists'):
-                        installer.install(root, evidence)
+                    elif invalid in ('forged-python-targets', 'missing-python-lock'):
+                        bundle = root/invalid; bundle.mkdir()
+                        for name in ('source-build.json', 'firebird-windows-arm64.patch', 'libreoffice-enable-arm64-firebird.patch', 'opengeul-arm64-equality.patch.1', 'opengeul-native-arm64-tools.targets'):
+                            shutil.copyfile(PORT/name,bundle/name)
+                        if invalid == 'forged-python-targets':
+                            (bundle/'opengeul-native-arm64-tools.targets').write_bytes(b'forged targets')
+                        else:
+                            manifest = json.loads((bundle/'source-build.json').read_text())
+                            del manifest['pythonNativeHost']
+                            (bundle/'source-build.json').write_text(json.dumps(manifest))
+                        installer.HERE = bundle
+                    if invalid == 'missing-python-lock':
+                        with self.assertRaises(KeyError):
+                            installer.install(root, evidence)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'SHA256|regular file|exists'):
+                            installer.install(root, evidence)
                     self.assertEqual(original, target.read_bytes())
                     self.assertEqual(self.lo_configure.read_bytes(), configure.read_bytes())
                     self.assertEqual(expected_bootstrap, bootstrap.read_bytes())
                     self.assertEqual(expected_project,project.read_bytes())
                     self.assertEqual(expected_zstd,zstd.read_bytes())
                     self.assertEqual(expected_mdds,mdds.read_bytes())
+                    self.assertEqual(expected_python,python.read_bytes())
+                    self.assertFalse((evidence/'original-ExternalProject_python3.mk').exists())
                     self.assertFalse((evidence/'original-UnpackedTarball_mdds.mk').exists())
                     self.assertFalse((target.parent / 'firebird-windows-arm64.patch').exists())
                     self.assertFalse((evidence / 'original-unpack-sources').exists())
@@ -722,7 +757,16 @@ class AuthenticatedSource(unittest.TestCase):
                     upstream.write_bytes(upstream_original)
                     (mdds.parent/'opengeul-arm64-equality.patch.1').unlink(missing_ok=True)
                     (evidence/'effective-UnpackedTarball_mdds.mk').unlink(missing_ok=True)
+                    if python.is_symlink(): python.unlink()
+                    python.write_bytes(python_original)
+                    python_targets.unlink(missing_ok=True)
+                    (evidence/'effective-ExternalProject_python3.mk').unlink(missing_ok=True)
+                    (evidence/'effective-opengeul-native-arm64-tools.targets').unlink(missing_ok=True)
             receipt = module().install(root, evidence)
+            self.assertEqual(python_original,(evidence/'original-ExternalProject_python3.mk').read_bytes())
+            self.assertEqual(python.read_bytes(),(evidence/'effective-ExternalProject_python3.mk').read_bytes())
+            self.assertEqual(python_targets.read_bytes(),(evidence/'effective-opengeul-native-arm64-tools.targets').read_bytes())
+            self.assertEqual(hashlib.sha256(python_targets.read_bytes()).hexdigest(),receipt['pythonNativeHost']['targetsSha256'])
             changed = target.read_text()
             self.assertTrue(changed.startswith(original.decode()))
             self.assertIn('ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)', changed)

@@ -322,5 +322,27 @@
       "afterSha256": "6ea1f9515d843c298c4754a235957fae860c66f75411b2541d8929431970f9d8",
       "stage": "Existing GCC12 patch; equality correction must leave unchanged"
     }
+  },
+  "pythonNativeHost": {
+    "scope": "WNT_AARCH64 only; late import overrides CLToolPath and LinkToolPath only for Platform ARM64; authentic x64 freeze helper mapping unchanged",
+    "recipe": {
+      "path": "external/python3/ExternalProject_python3.mk",
+      "size": 10931,
+      "sha256": "b31e4d779484a4d153155b025daf8b03678e1984abde4fe5c6c038ccb7d43445",
+      "afterSize": 11076,
+      "afterSha256": "cb6c9996e5ee7be941a23bcce9884e5a4c6458b6a9ce06860d4e2e2a793c93de"
+    },
+    "targets": {
+      "filename": "opengeul-native-arm64-tools.targets",
+      "size": 347,
+      "sha256": "3f993bc582b10890ffdd4ec9bf1ab0d50de064c0889f57687d1f6b4b63fd1e22"
+    },
+    "diagnosticEvidence": {
+      "runId": 39084133996,
+      "candidateFeasible": true,
+      "originalSiteReproduced": false,
+      "causalCorrectionProven": false,
+      "engineQualified": false
+    }
   }
 }

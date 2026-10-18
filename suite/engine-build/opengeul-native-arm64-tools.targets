@@ -1,0 +1,7 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Keep the authentic x64 freeze helper on its existing toolchain. -->
+  <PropertyGroup Condition="'$(Platform)' == 'ARM64'">
+    <CLToolPath>$(VCToolsInstallDir)bin\Hostarm64\arm64\</CLToolPath>
+    <LinkToolPath>$(CLToolPath)</LinkToolPath>
+  </PropertyGroup>
+</Project>

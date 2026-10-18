@@ -92,6 +92,34 @@ def _mdds_equality(source: Path, lock: dict):
     return target, original, changed, output, patch
 
 
+def _python_native_host(source: Path, lock: dict):
+    """Plan the proven late compiler/linker host override without changing Python."""
+    target = source / lock['recipe']['path']
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise ValueError('Python host source hook requires a regular recipe directory')
+    original = _regular(target)
+    recipe = lock['recipe']
+    if len(original) != recipe['size'] or hashlib.sha256(original).hexdigest() != recipe['sha256']:
+        raise ValueError('Python build recipe SHA256 differs from the pinned source')
+    name = lock['targets']['filename']
+    if Path(name).name != name or name != 'opengeul-native-arm64-tools.targets':
+        raise ValueError('Invalid Python host targets filename')
+    payload = _regular(HERE / name)
+    pin = lock['targets']
+    if len(payload) != pin['size'] or hashlib.sha256(payload).hexdigest() != pin['sha256']:
+        raise ValueError('Python host targets SHA256 differs from its lock')
+    output = target.parent / name
+    if output.exists() or output.is_symlink():
+        raise ValueError('Python host targets output already exists')
+    old = b'MSBuild.exe pcbuild.sln /t:Build $(gb_MSBUILD_CONFIG_AND_PLATFORM) \\\n'
+    new = old + (b'\t\t\t$(if $(filter WNT_AARCH64,$(OS)_$(CPUNAME)),/p:ForceImportAfterCppTargets="$(SRCDIR)/external/python3/'
+                 + name.encode('ascii') + b'") \\\n')
+    changed = original.replace(old, new)
+    if len(changed) != recipe['afterSize'] or hashlib.sha256(changed).hexdigest() != recipe['afterSha256']:
+        raise ValueError('Python build recipe result SHA256 differs from its lock')
+    return target, original, changed, output, payload
+
+
 def install_module_bootstrap(source: Path, evidence: Path | None = None) -> dict:
     """Correct the pinned unpack helper's inverted git-hooks selection only."""
     lock = json.loads((HERE / 'source-build.json').read_text(encoding='utf-8'))['moduleBootstrap']
@@ -160,6 +188,8 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     project, project_original, project_changed = _icu_build_path(source, lock['icuBuildPath'])
     zstd, zstd_original, zstd_changed = _zstd_source_links(source, lock['zstdSourceLinks'])
     mdds, mdds_original, mdds_changed, mdds_output, mdds_patch = _mdds_equality(source, lock['mddsEquality'])
+    python, python_original, python_changed, python_output, python_payload = _python_native_host(source, lock['pythonNativeHost'])
+    python_evidence = {}
     mdds_evidence = {}
     project_evidence = {}
     zstd_evidence = {}
@@ -179,6 +209,11 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                          'effective': evidence / 'effective-UnpackedTarball_mdds.mk'}
         if any(path.exists() or path.is_symlink() for path in mdds_evidence.values()):
             raise ValueError('MDDS unpack evidence already exists')
+        python_evidence = {'original': evidence / 'original-ExternalProject_python3.mk',
+                           'effective': evidence / 'effective-ExternalProject_python3.mk',
+                           'targets': evidence / 'effective-opengeul-native-arm64-tools.targets'}
+        if any(path.exists() or path.is_symlink() for path in python_evidence.values()):
+            raise ValueError('Python build recipe evidence already exists')
     hook = ('\n# OpenGeul native Windows ARM64 Firebird CPU identity port.\n'
             'ifeq ($(OS)_$(CPUNAME),WNT_AARCH64)\n'
             '$(eval $(call gb_UnpackedTarball_add_patches,firebird,\\\n'
@@ -200,6 +235,12 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         if mdds_evidence:
             with mdds_evidence[name].open('xb') as stream:
                 stream.write(raw)
+    for name, raw in (('original', python_original), ('effective', python_changed), ('targets', python_payload)):
+        if python_evidence:
+            with python_evidence[name].open('xb') as stream:
+                stream.write(raw)
+    with python_output.open('xb') as stream:
+        stream.write(python_payload)
     with mdds_output.open('xb') as stream:
         stream.write(mdds_patch)
     with output.open('xb') as stream:
@@ -212,6 +253,9 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         project.write_bytes(project_changed)
         zstd.write_bytes(zstd_changed)
         mdds.write_bytes(mdds_changed)
+        python.write_bytes(python_changed)
+        if _regular(python) != python_changed or _regular(python_output) != python_payload:
+            raise ValueError('Effective Python host source hook bytes changed after write')
         if _regular(mdds) != mdds_changed or _regular(mdds_output) != mdds_patch:
             raise ValueError('Effective MDDS source hook bytes changed after write')
         if _regular(project) != project_changed:
@@ -219,6 +263,7 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         if _regular(zstd) != zstd_changed:
             raise ValueError('Effective zstd unpack recipe bytes changed after write')
     except BaseException:
+        python_output.unlink(missing_ok=True)
         mdds_output.unlink(missing_ok=True)
         output.unlink(missing_ok=True)
         raise
@@ -249,6 +294,13 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                              'upstreamPatchSha256': lock['mddsEquality']['upstreamPatch']['sha256'],
                              'scope': lock['mddsEquality']['scope'],
                              'evidence': {name: str(path) for name, path in mdds_evidence.items()}},
+            'pythonNativeHost': {'path': lock['pythonNativeHost']['recipe']['path'],
+                                 'beforeSha256': lock['pythonNativeHost']['recipe']['sha256'],
+                                 'afterSha256': lock['pythonNativeHost']['recipe']['afterSha256'],
+                                 'targetsSha256': lock['pythonNativeHost']['targets']['sha256'],
+                                 'targetsPath': str(python_output),
+                                 'scope': lock['pythonNativeHost']['scope'],
+                                 'evidence': {name: str(path) for name, path in python_evidence.items()}},
             'nativeBuildVerified': False, 'basePersistenceVerified': False}
 
 

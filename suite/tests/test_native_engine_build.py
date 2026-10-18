@@ -42,7 +42,8 @@ class NativeEngineBuildTests(unittest.TestCase):
         self.assertIn("export OPENGEUL_MDDS_SOURCE_ARCHIVE='/owned/mdds.tar.xz'", raw)
         self.assertIn("export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE='/owned/firebird.tar.bz2'", raw)
         self.assertIn("export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES='/owned/lo source/external/firebird'", raw)
-        self.assertIn('/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port -v', raw)
+        self.assertIn("export OPENGEUL_LIBREOFFICE_PYTHON_PATCHES='/owned/lo source/external/python3'", raw)
+        self.assertIn('/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port suite.tests.test_native_python_host -v', raw)
         result = subprocess.run(['bash','-n',str(script)],capture_output=True,text=True)
         self.assertEqual(0,result.returncode,result.stderr)
 
