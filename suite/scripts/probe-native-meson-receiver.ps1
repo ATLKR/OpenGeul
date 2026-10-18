@@ -336,7 +336,7 @@ function Invoke-NativeMesonReceiverControl([string]$WorkDirectory,[string]$Outpu
                 }
                 if(-not $receipt.reachedBuildHelpers.tools.'ninja.exe'){throw 'Actual native Meson Ninja resolution was not captured.'}
                 $probe=Join-Path $build 'receiver-probe.exe';$receipt.probePe=Get-ProductPeIdentity $probe
-                $receipt.staticLibrary=Get-Arm64ImportLibrary (Join-Path $build 'receiver-parts.lib')
+                $receipt.staticLibrary=Get-Arm64ImportLibrary (Join-Path $build 'libreceiver-parts.a')
                 $receipt.stage='actual-native-tiny-executable'
                 $run=Invoke-MesonObservation $probe @() $build (Join-Path $evidence 'receiver-probe')
                 $identity=Get-Content -LiteralPath $run.stdout -Raw|ConvertFrom-Json

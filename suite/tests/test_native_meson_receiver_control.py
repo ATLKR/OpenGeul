@@ -201,7 +201,7 @@ class PrepareContractTests(unittest.TestCase):
 
 
 class ShallowAncestryContractTests(unittest.TestCase):
-    def test_three_parent_hops_require_four_checkout_generations(self):
+    def test_four_parent_hops_require_five_checkout_generations(self):
         # Local test objects only: no clone, network, remote or source commit
         # fabrication. Git's actual shallow boundary controls the same gate.
         with tempfile.TemporaryDirectory(prefix='receiver-shallow-fixture-') as folder:
@@ -218,6 +218,8 @@ class ShallowAncestryContractTests(unittest.TestCase):
             first = git('rev-parse', 'HEAD').stdout.strip()
             git('-c', 'user.name=Receiver fixture', '-c', 'user.email=receiver@example.invalid',
                 'commit', '-q', '--allow-empty', '-m', 'local shallow fixture Control2')
+            git('-c', 'user.name=Receiver fixture', '-c', 'user.email=receiver@example.invalid',
+                'commit', '-q', '--allow-empty', '-m', 'local shallow fixture Control3')
             git('-c', 'user.name=Receiver fixture', '-c', 'user.email=receiver@example.invalid',
                 'commit', '-q', '--allow-empty', '-m', 'local shallow fixture child')
             child = git('rev-parse', 'HEAD').stdout.strip()
