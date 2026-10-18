@@ -1,0 +1,725 @@
+name: OpenGeul Windows CRT serializer diagnostic
+'on':
+  push:
+    branches:
+    - work/opengeul-office-windows-crt-serializer-diagnostic
+    paths:
+    - .github/workflows/office-windows-crt-serializer-diagnostic.yml
+permissions:
+  contents: read
+concurrency:
+  group: windows-crt-serializer-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  serializer-observation:
+    if: github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/opengeul-office-windows-crt-serializer-diagnostic'
+    runs-on: windows-11-arm
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OPENGEUL_SERIALIZER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+    steps:
+    - name: Bind workflow D and tested R2 and start the shared deadline
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        if($env:GITHUB_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:OPENGEUL_SERIALIZER_WORKFLOW_SHA -cne $env:GITHUB_SHA){throw 'Immutable diagnostic workflow D identity is required.'}
+        $started=[DateTime]::UtcNow
+        $startedTick=[Environment]::TickCount64
+        $deadline=$started.AddMinutes(8).ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+        $evidence=Join-Path $env:RUNNER_TEMP ('opengeul-crt-serializer-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT)
+        if(Test-Path -LiteralPath $evidence){throw 'Preserve original serializer diagnostic evidence.'}
+        New-Item -ItemType Directory -Path $evidence|Out-Null
+        $record=[ordered]@{schemaVersion=1;scope='one-existing-serializer-case-instrumentation';startedUtc=$started.ToString('o');deadlineUtc=$deadline;startedTickCount64Milliseconds=$startedTick;
+            workflowCommit=$env:GITHUB_SHA;workflowDefinitionCommit=$env:OPENGEUL_SERIALIZER_WORKFLOW_SHA;workflowRef=$env:GITHUB_WORKFLOW_REF;
+            testedSourceCommit='1514661a9d9917a681caa8aa78e44dc6571f3acc';testedSourceTree='7cdf407390bf5cc2a5192bf2cbc45d59c132e727';
+            jobMinutes=10;controlMinutes=8;nominalUploadReserveMinutes=2;runnerProvisioningIncluded=$false;
+            originalRaceFixed=$false;engineQualified=$false;runtimeQualified=$false;releaseQualified=$false}
+        [IO.File]::WriteAllText((Join-Path $evidence 'budget-and-source.json'),($record|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
+        "OPENGEUL_SERIALIZER_EVIDENCE=$evidence"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+        "OPENGEUL_SERIALIZER_DEADLINE_UTC=$deadline"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+        "OPENGEUL_SERIALIZER_STARTED_TICK_MS=$startedTick"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+        git config --global core.autocrlf false
+        if($LASTEXITCODE -ne 0){throw 'Exact-byte Git checkout configuration failed.'}
+        git config --global core.longpaths true
+        if($LASTEXITCODE -ne 0){throw 'Long-path Git checkout configuration failed.'}
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: 1514661a9d9917a681caa8aa78e44dc6571f3acc
+        path: tested-source
+        fetch-depth: 1
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: arm64
+    - name: Observe exactly the existing serializer case without a cleanup remedy
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $tested=Join-Path $env:GITHUB_WORKSPACE 'tested-source'
+        $evidence=$env:OPENGEUL_SERIALIZER_EVIDENCE
+        $deadline=$env:OPENGEUL_SERIALIZER_DEADLINE_UTC
+        $expectedSource='1514661a9d9917a681caa8aa78e44dc6571f3acc'
+        $expectedTree='7cdf407390bf5cc2a5192bf2cbc45d59c132e727'
+        $previousBudget=$null
+        $receipt=[ordered]@{schemaVersion=1;scope='one-existing-serializer-case-instrumentation';status='failed';stage='source-preflight';
+            workflowCommit=$env:GITHUB_SHA;workflowDefinitionCommit=$env:OPENGEUL_SERIALIZER_WORKFLOW_SHA;workflowRef=$env:GITHUB_WORKFLOW_REF;
+            testedSourceCommit=$expectedSource;testedSourceTree=$expectedTree;testedLocalRootCommit='0e21e2b985b4f0ca83cfb02772422d7845669074';
+            startedUtc=[DateTime]::UtcNow.ToString('o');originalRaceFixed=$false;engineQualified=$false;runtimeQualified=$false;releaseQualified=$false}
+        function Save-SerializerRecord([string]$Name,$Value) {
+            $path=Join-Path $evidence $Name
+            if(Test-Path -LiteralPath $path){throw 'Preserve original serializer controller metadata.'}
+            [IO.File]::WriteAllText($path,($Value|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
+        }
+        function Read-SerializerGit([string[]]$Arguments) {
+            $value=& git -C $tested @Arguments
+            if($LASTEXITCODE -ne 0){throw ('Tested-source Git command failed: '+($Arguments -join ' '))}
+            return ($value -join "`n")
+        }
+        function Assert-SerializerSourceFile([string]$Relative,[long]$Size,[string]$Hash) {
+            $path=Join-Path $tested $Relative
+            $item=Get-Item -LiteralPath $path -Force
+            if($item.Length -ne $Size -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Hash){throw ('Pinned tested-source bytes differ: '+$Relative)}
+        }
+        try {
+            if(-not $IsWindows -or $PSVersionTable.PSVersion.Major -lt 7){throw 'Native Windows PowerShell7 is required.'}
+            if($receipt.workflowCommit -cnotmatch '^[0-9a-f]{40}$' -or $receipt.workflowDefinitionCommit -cne $receipt.workflowCommit -or $receipt.workflowCommit -ceq $expectedSource){throw 'Distinct immutable workflow D and tested-source R2 are required.'}
+            $receipt.sourceBefore=[ordered]@{head=(Read-SerializerGit @('rev-parse','HEAD'));tree=(Read-SerializerGit @('rev-parse','HEAD^{tree}'));status=(Read-SerializerGit @('status','--porcelain','--untracked-files=all'))}
+            if($receipt.sourceBefore.head -cne $expectedSource -or $receipt.sourceBefore.tree -cne $expectedTree -or $receipt.sourceBefore.status){throw 'Tested source is not the exact clean immutable R2 checkout.'}
+            if(Test-Path -LiteralPath (Join-Path $tested '.github/workflows/office-windows-crt-serializer-diagnostic.yml')){throw 'Diagnostic workflow leaked into tested source.'}
+            Save-SerializerRecord 'source-before.json' $receipt.sourceBefore
+            Assert-SerializerSourceFile 'suite/tests/test_native_crt_probe.py' 17444 '98d6050a074f94ec8d075f8fafaf71f45a887593f3e339941fe4b5d2488849be'
+            Assert-SerializerSourceFile 'suite/scripts/probe-native-crt.ps1' 15062 'e0de96ef807daa7390f68fc575f878eeb50f15107902a3401e2ca7b537aa916b'
+            Assert-SerializerSourceFile 'suite/scripts/build-native-engine.ps1' 96513 '501680337e44e33e4c58cfdfbdd4d39cc4d4925cf91f458ec93800b663c9a7b4'
+            # Import only existing ownership/deadline helpers under the real inert guard.
+            . (Join-Path $tested 'suite/scripts/build-native-engine.ps1') -DeadlineUtc $deadline
+            $previousBudget=$script:NativeEngineBuildBudget
+            # TickCount64 is monotonic elapsed milliseconds, not a process FILETIME.
+            # Bound the same first-step budget across checkout/setup as well as UTC.
+            [long]$startedTick=0
+            if($env:OPENGEUL_SERIALIZER_STARTED_TICK_MS -cnotmatch '^[0-9]{1,19}$' -or -not [long]::TryParse($env:OPENGEUL_SERIALIZER_STARTED_TICK_MS,[ref]$startedTick)){throw 'First-step monotonic budget identity is missing.'}
+            $setupElapsed=[Environment]::TickCount64-$startedTick
+            if($setupElapsed -lt 0 -or $setupElapsed -ge 480000){throw 'The shared first-step eight-minute budget expired during checkout/setup.'}
+            $script:NativeEngineBuildBudget=New-NativeBuildBudget $deadline ((480000-$setupElapsed)/60000.0)
+            $receipt.setupElapsedMonotonicMilliseconds=$setupElapsed
+            $receipt.budget=$script:NativeEngineBuildBudget.record
+            $receipt.controllerHost=Get-NativeBuildHost
+            $python=(Get-Command python -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+            $receipt.pythonPath=$python
+            $receipt.pythonSha256=(Get-FileHash -LiteralPath $python -Algorithm SHA256).Hash.ToLowerInvariant()
+            $observer=Join-Path $evidence 'serializer-observer.py'
+            if(Test-Path -LiteralPath $observer){throw 'Preserve original inline serializer observer.'}
+            $observerText=@'
+        """One exact CRT serializer unittest, with finite observational interposition."""
+        import argparse
+        import ast
+        from contextlib import redirect_stderr, redirect_stdout
+        import ctypes
+        import hashlib
+        import importlib.util
+        import io
+        import json
+        import os
+        from pathlib import Path
+        import re
+        import shutil
+        import stat
+        import struct
+        import subprocess
+        import sys
+        import tempfile
+        import traceback
+        import unittest
+        from unittest.mock import patch
+
+        SOURCE_COMMIT = '1514661a9d9917a681caa8aa78e44dc6571f3acc'
+        SOURCE_TREE = '7cdf407390bf5cc2a5192bf2cbc45d59c132e727'
+        METHOD = 'test_generated_cpp_serializes_actual_wstring_windows_paths_as_json'
+        PINS = {
+            'suite/tests/test_native_crt_probe.py': (17444, '98d6050a074f94ec8d075f8fafaf71f45a887593f3e339941fe4b5d2488849be'),
+            'suite/scripts/probe-native-crt.ps1': (15062, 'e0de96ef807daa7390f68fc575f878eeb50f15107902a3401e2ca7b537aa916b'),
+            'suite/scripts/build-native-engine.ps1': (96513, '501680337e44e33e4c58cfdfbdd4d39cc4d4925cf91f458ec93800b663c9a7b4'),
+        }
+        METHOD_RAW = (1760, '5cf141f34b0a41fd5f16288c332c96e745ed1c053db6dc3f059d9e678a4e2d7a')
+        METHOD_AST = '5ebdb1428b2390729a3092a6f554138e7fe6f196d6c63ad81d51769453ff71c0'
+        ORIGINAL_RUN = subprocess.run
+        ORIGINAL_POPEN = subprocess.Popen
+        ORIGINAL_TEMPORARY_DIRECTORY = tempfile.TemporaryDirectory
+        ORIGINAL_UNLINK = os.unlink
+
+
+        def failure(error):
+            return dict(type=type(error).__name__, message=str(error),
+                        winerror=getattr(error, 'winerror', None),
+                        traceback=''.join(traceback.format_exception(type(error), error, error.__traceback__)))
+
+
+        def digest(raw):
+            return dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+
+        def pe(path):
+            raw = Path(path).read_bytes()
+            result = dict(path=str(path), **digest(raw))
+            if len(raw) < 64 or raw[:2] != b'MZ':
+                raise ValueError('Observed image is not an intact PE: ' + str(path))
+            offset = struct.unpack_from('<I', raw, 60)[0]
+            if offset + 26 > len(raw) or raw[offset:offset + 4] != b'PE\0\0':
+                raise ValueError('Observed image has no intact PE header: ' + str(path))
+            result.update(machine=struct.unpack_from('<H', raw, offset + 4)[0],
+                          optionalHeaderMagic=struct.unpack_from('<H', raw, offset + 24)[0])
+            return result
+
+
+        def verify_source(source):
+            result = {}
+            for relative, (size, sha) in PINS.items():
+                raw = (source / relative).read_bytes()
+                result[relative] = digest(raw)
+                if len(raw) != size or result[relative]['sha256'] != sha:
+                    raise ValueError('Source pin mismatch: ' + relative)
+            raw = (source / 'suite/tests/test_native_crt_probe.py').read_bytes()
+            text = raw.decode('utf-8')
+            tree = ast.parse(text)
+            classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'NativeCrtProbeTests']
+            methods = [node for cls in classes for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == METHOD]
+            if len(classes) != 1 or len(methods) != 1:
+                raise ValueError('Exactly one pinned class and selected method are required')
+            method = methods[0]
+            first = min([method.lineno] + [node.lineno for node in method.decorator_list])
+            method_raw = ''.join(text.splitlines(keepends=True)[first - 1:method.end_lineno]).encode('utf-8')
+            method_ast = ast.dump(method, include_attributes=False).encode('utf-8')
+            result['selectedMethod'] = dict(**digest(method_raw), astSha256=hashlib.sha256(method_ast).hexdigest(),
+                                            firstLine=first, lastLine=method.end_lineno)
+            if (len(method_raw), hashlib.sha256(method_raw).hexdigest()) != METHOD_RAW or hashlib.sha256(method_ast).hexdigest() != METHOD_AST:
+                raise ValueError('Whole selected-method raw/AST pin mismatch')
+            shims = [node.value.value for node in ast.walk(method) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'shim' for target in node.targets)
+                     and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)]
+            if len(shims) != 1:
+                raise ValueError('Exactly one unchanged shim literal is required')
+            return result, shims[0]
+
+
+        class NativeApi:
+            class FileTime(ctypes.Structure):
+                _fields_ = [('low', ctypes.c_uint32), ('high', ctypes.c_uint32)]
+
+            def __init__(self):
+                self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                handle, dword, word, boolean = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint16, ctypes.c_int
+                signatures = {
+                    'GetCurrentProcess': ([], handle), 'GetProcessId': ([handle], dword),
+                    'GetProcessTimes': ([handle] + [ctypes.POINTER(self.FileTime)] * 4, boolean),
+                    'IsWow64Process2': ([handle, ctypes.POINTER(word), ctypes.POINTER(word)], boolean),
+                    'QueryFullProcessImageNameW': ([handle, dword, ctypes.c_wchar_p, ctypes.POINTER(dword)], boolean),
+                    'WaitForSingleObject': ([handle, dword], dword),
+                    'GetExitCodeProcess': ([handle, ctypes.POINTER(dword)], boolean),
+                    'GetFileAttributesW': ([ctypes.c_wchar_p], dword),
+                }
+                for name, (arguments, returns) in signatures.items():
+                    function = getattr(self.kernel, name)
+                    function.argtypes, function.restype = arguments, returns
+
+            def snapshot(self, handle_value, expected_pid):
+                result = dict(pid=expected_pid, complete=False, borrowedHandleValue=str(handle_value),
+                              handlePolicy='borrowed-existing-handle-no-duplicate-no-close')
+                try:
+                    handle = ctypes.c_void_p(handle_value)
+                    result['handlePid'] = self.kernel.GetProcessId(handle)
+                    if result['handlePid'] != expected_pid or expected_pid <= 0:
+                        raise RuntimeError('Borrowed handle PID mismatch')
+                    times = [self.FileTime() for _ in range(4)]
+                    if not self.kernel.GetProcessTimes(handle, *[ctypes.byref(item) for item in times]):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    result['creationTimeRawTicks'] = str((times[0].high << 32) | times[0].low)
+                    result['exitTimeRawTicks'] = str((times[1].high << 32) | times[1].low)
+                    process, native = ctypes.c_uint16(), ctypes.c_uint16()
+                    if not self.kernel.IsWow64Process2(handle, ctypes.byref(process), ctypes.byref(native)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    result.update(processMachine=process.value, nativeMachine=native.value,
+                                  architectureDeclaration=('native-arm64' if process.value == 0 and native.value == 0xaa64
+                                                           else 'foreign-or-other-architecture-observed-allowed'))
+                    image, length = ctypes.create_unicode_buffer(32768), ctypes.c_uint32(32768)
+                    if not self.kernel.QueryFullProcessImageNameW(handle, 0, image, ctypes.byref(length)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    result['image'] = image.value
+                    result['imagePe'] = pe(image.value)
+                    result['waitResultZeroTimeout'] = self.kernel.WaitForSingleObject(handle, 0)
+                    if result['waitResultZeroTimeout'] not in (0, 258):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    code = ctypes.c_uint32()
+                    if not self.kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    result['exitCode'] = code.value
+                    result['complete'] = (int(result['creationTimeRawTicks']) > 0 and
+                                          (result['waitResultZeroTimeout'] != 0 or int(result['exitTimeRawTicks']) > 0))
+                except Exception as error:
+                    result['error'] = failure(error)
+                return result
+
+            def attributes(self, path):
+                value = self.kernel.GetFileAttributesW(str(path))
+                return dict(api='GetFileAttributesW', value=value,
+                            winerror=ctypes.get_last_error() if value == 0xffffffff else None)
+
+
+        class BinaryPopen:
+            """Only the three pinned run calls; stdlib run owns wait/check/timeout/kill."""
+            def __init__(self, observer, record, arguments, keywords):
+                self.observer, self.record, self.real = observer, record, None
+                self.args = list(arguments[0])
+                if keywords != dict(text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE):
+                    observer.reject('popen-shape', 'Unexpected finite Popen keyword shape', repr(keywords))
+                self.encoding, self.errors = subprocess._text_encoding(), 'strict'
+                record.update(textEncoding=self.encoding, textErrors=self.errors,
+                              binaryCaptureInstrumentation=True, communicateCalls=[])
+                self.real = ORIGINAL_POPEN(*arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                observer.active_proxies += 1
+                record['pid'] = self.real.pid
+                record['before'] = observer.api.snapshot(int(self.real._handle), self.real.pid)
+                observer.checkpoint('phase-created')
+
+            def __enter__(self):
+                self.real.__enter__()
+                return self
+
+            def communicate(self, input=None, timeout=None):
+                if input is not None or (timeout is not None and not (self.record['kind'] == 'pwsh-generator' and timeout == 15)):
+                    self.observer.reject('communicate-shape', 'Unexpected finite communicate input/timeout', repr((input, timeout)))
+                number = len(self.record['communicateCalls']) + 1
+                if number > (2 if self.record['kind'] == 'pwsh-generator' else 1):
+                    self.observer.reject('communicate-count', 'Unexpected finite communicate call count', str(number))
+                call = dict(number=number, timeout=timeout, returned=False, outputEof=False)
+                self.record['communicateCalls'].append(call)
+                try:
+                    stdout, stderr = self.real.communicate(input, timeout=timeout)
+                    call.update(returned=True, outputEof=True)
+                    call['stdout'] = self.observer.save_bytes(self.record['kind'] + '.' + str(number) + '.stdout.raw', stdout)
+                    call['stderr'] = self.observer.save_bytes(self.record['kind'] + '.' + str(number) + '.stderr.raw', stderr)
+                    stdout = self.real._translate_newlines(stdout, self.encoding, self.errors)
+                    stderr = self.real._translate_newlines(stderr, self.encoding, self.errors)
+                    call.update(stdoutText=stdout, stderrText=stderr)
+                    if self.record['kind'] == 'serializer':
+                        try:
+                            self.record['parsedJson'] = json.loads(stdout)
+                        except Exception as error:
+                            self.record['jsonObservationError'] = failure(error)
+                    return stdout, stderr
+                except BaseException as error:
+                    call['error'] = failure(error)
+                    if not call['returned']:
+                        self.record['originalExceptionMayRetainStdlibPopenFrames'] = True
+                    else:
+                        self.observer.problem('binary-output-evidence-or-decoding', error)
+                    raise
+                finally:
+                    call['after'] = self.observer.api.snapshot(int(self.real._handle), self.real.pid)
+                    self.observer.checkpoint('phase-communicate-finished')
+
+            def poll(self):
+                self.record['stdlibPollCalls'] = self.record.get('stdlibPollCalls', 0) + 1
+                return self.real.poll()
+
+            def kill(self):
+                self.record['stdlibRunRequestedKill'] = True
+                return self.real.kill()
+
+            def wait(self, *arguments, **keywords):
+                return self.real.wait(*arguments, **keywords)
+
+            def __exit__(self, exc_type, exc, tb):
+                try:
+                    return self.real.__exit__(exc_type, exc, tb)
+                except BaseException as error:
+                    self.record['originalExitError'] = failure(error)
+                    self.record['originalExceptionMayRetainStdlibPopenFrames'] = True
+                    raise
+                finally:
+                    self.record['returncodeAfterExit'] = self.real.returncode
+                    self.record['stdoutClosedAfterExit'] = self.real.stdout.closed
+                    self.record['stderrClosedAfterExit'] = self.real.stderr.closed
+                    self.real = None
+                    self.observer.active_proxies -= 1
+                    self.record['proxyRealReferenceDropped'] = True
+                    self.observer.checkpoint('phase-context-exited')
+
+
+        class Observer:
+            def __init__(self, source, evidence):
+                self.source, self.evidence = source, evidence
+                self.api, self.module, self.shim = None, None, None
+                self.current, self.active_proxies, self.revision = None, 0, 0
+                self.contexts = []
+                self.record = dict(schemaVersion=1, scope='one-existing-portable-crt-serializer-case-observation',
+                    expectedSourceCommit=SOURCE_COMMIT, expectedSourceTree=SOURCE_TREE,
+                    sourceGitVerificationOwner='parent-controller', source=str(source), evidence=str(evidence),
+                    workflowGithubSha=os.environ.get('GITHUB_SHA'), final=False, stage='starting', runs=[], cleanups=[], errors=[],
+                    instrumentationPerturbsTiming=True, compilerVersion='unobserved-no-extra-command',
+                    textSemanticsBoundary='Only the three pinned valid-text calls use the original default encoding/errors and universal-newline conversion.',
+                    malformedTextBoundary='Manual decoding can raise in this observer where native Windows TextIO reader-thread decoding can fail differently; raw bytes are retained and that path is instrumentation-failed/inconclusive, never an equivalence or original-cause claim.',
+                    cleanupCauseProven=False, fixClaimed=False, engineQualified=False, runtimeQualified=False,
+                    productQualified=False, releaseQualified=False,
+                    originalStdlibExceptionFrameBoundary='Original exception tracebacks may retain original stdlib Popen locals; no frame clearing or release claim on that path.')
+
+            def problem(self, stage, error):
+                self.record['errors'].append(dict(stage=stage, **failure(error)))
+
+            def reject(self, stage, message, observed):
+                error = RuntimeError(message)
+                self.record['errors'].append(dict(stage=stage, observed=observed, **failure(error)))
+                raise error
+
+            def checkpoint(self, stage):
+                self.record.update(stage=stage, observerActiveProxyCount=self.active_proxies)
+                self.revision += 1
+                try:
+                    summary = dict(schemaVersion=1, final=self.record['final'],
+                        caseStatus=self.record.get('caseStatus', 'not-run'),
+                        diagnosticClassification=self.record.get('status', 'in-progress'),
+                        observerExitCode=self.record.get('observerExitCode'),
+                        nativeSelf=self.record.get('identity'), python=self.record.get('python'),
+                        expectedSourceCommit=SOURCE_COMMIT, expectedSourceTree=SOURCE_TREE,
+                        workflowGithubSha=self.record['workflowGithubSha'], sourcePinsVerified='sourceBefore' in self.record,
+                        phaseCount=len(self.record['runs']), cleanupContextCount=len(self.contexts),
+                        originalCleanupInvocationCount=sum(item['cleanupCalls'] for item in self.contexts),
+                        observationComplete=self.record.get('observationComplete', False),
+                        originalUnittestExitCode=self.record.get('caseResult', {}).get('originalUnittestExitCode'),
+                        testsRun=self.record.get('caseResult', {}).get('testsRun'),
+                        originalErrorCount=len(self.record.get('caseResult', {}).get('errors', [])),
+                        originalFailureCount=len(self.record.get('caseResult', {}).get('failures', [])),
+                        originalSkipCount=len(self.record.get('caseResult', {}).get('skipped', [])),
+                        observerErrorCount=len(self.record['errors']), observerActiveProxyCount=self.active_proxies,
+                        cleanupCauseProven=False, fixClaimed=False, engineQualified=False,
+                        runtimeQualified=False, productQualified=False, releaseQualified=False)
+                    for name, value in (('serializer-observer-receipt.json', self.record),
+                                        ('serializer-observer-summary.json', summary)):
+                        temporary = self.evidence / ('.' + name + '.' + str(self.revision) + '.tmp')
+                        with temporary.open('x', encoding='utf-8', newline='\n') as stream:
+                            json.dump(value, stream, ensure_ascii=False, indent=2)
+                            stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+                        os.replace(temporary, self.evidence / name)
+                    return True
+                except Exception as error:
+                    self.problem('receipt-checkpoint', error)
+                    return False
+
+            def save_bytes(self, name, raw):
+                if not isinstance(raw, bytes):
+                    raise TypeError('Captured output/artifact must remain binary')
+                path = self.evidence / name
+                with path.open('xb') as stream:
+                    stream.write(raw)
+                return dict(path=str(path), **digest(raw))
+
+            def file_snapshot(self, path, saved_name=None):
+                result = dict(path=str(path), attributes=self.api.attributes(path), exists=os.path.lexists(path))
+                if result['attributes']['value'] == 0xffffffff and result['attributes']['winerror'] not in (2, 3):
+                    self.problem('owned-file-attributes', ctypes.WinError(result['attributes']['winerror']))
+                try:
+                    metadata = path.lstat()
+                    result.update(mode=metadata.st_mode, size=metadata.st_size,
+                                  statFileAttributes=getattr(metadata, 'st_file_attributes', None))
+                    if saved_name is not None and stat.S_ISREG(metadata.st_mode):
+                        result['saved'] = self.save_bytes(saved_name, path.read_bytes())
+                except FileNotFoundError:
+                    pass
+                except Exception as error:
+                    result['error'] = failure(error)
+                    self.problem('owned-file-snapshot', error)
+                return result
+
+            def run(self, *arguments, **keywords):
+                kinds = ('pwsh-generator', 'compile', 'serializer')
+                index = len(self.record['runs'])
+                if index >= 3 or len(arguments) != 1 or not isinstance(arguments[0], list):
+                    self.reject('run-shape', 'Unexpected subprocess run shape/count', repr((arguments, keywords)))
+                kind = kinds[index]
+                outer = Path(self.contexts[0]['path'])
+                expected_keywords = dict(capture_output=True, text=True)
+                if kind == 'pwsh-generator':
+                    expected_keywords['timeout'] = 15
+                    if len(self.contexts) != 2:
+                        self.reject('generator-contexts', 'Generator requires the two original temporary contexts', str(len(self.contexts)))
+                    expected = [self.module.PWSH, '-NoProfile', '-File', str(Path(self.contexts[1]['path']) / 'test.ps1')]
+                elif kind == 'compile':
+                    expected = [self.record['resolvedCompiler'], '-std=c++17', '-Wall', '-Werror=multichar',
+                                str(outer / 'serializer.cpp'), '-o', str(outer / 'serializer')]
+                else:
+                    expected_keywords['check'] = True
+                    expected = [str(outer / 'serializer')]
+                if arguments[0] != expected or keywords != expected_keywords:
+                    self.reject('run-argv-keywords', 'Unexpected exact ' + kind + ' argv/kwargs', repr((arguments, keywords)))
+                record = dict(kind=kind, argv=list(arguments[0]), originalKwargs=dict(keywords),
+                              cwd=os.getcwd(), environmentPolicy='inherited-unchanged', popenCount=0)
+                self.record['runs'].append(record)
+                self.current = record
+                self.checkpoint('phase-starting')
+                try:
+                    result = ORIGINAL_RUN(*arguments, **keywords)
+                    record['completed'] = dict(args=list(result.args), returncode=result.returncode,
+                                               stdout=result.stdout, stderr=result.stderr)
+                    return result
+                except BaseException as error:
+                    record['originalRunError'] = failure(error)
+                    raise
+                finally:
+                    self.current = None
+                    self.checkpoint('phase-finished')
+
+            def popen(self, *arguments, **keywords):
+                if self.current is None or self.current['popenCount'] != 0:
+                    self.reject('popen-count', 'Unexpected finite Popen invocation', repr((arguments, keywords)))
+                self.current['popenCount'] = 1
+                return BinaryPopen(self, self.current, arguments, keywords)
+
+            def temporary_directory(self, *arguments, **keywords):
+                if arguments or keywords or len(self.contexts) >= 2:
+                    self.reject('temporary-directory-shape', 'Unexpected TemporaryDirectory shape/count', repr((arguments, keywords)))
+                temporary = ORIGINAL_TEMPORARY_DIRECTORY()
+                item = dict(kind=('outer-serializer' if not self.contexts else 'inner-pwsh'),
+                            path=temporary.name, cleanupCalls=0, unlinkAttempts=[])
+                self.contexts.append(item)
+                self.record['cleanups'].append(item)
+                original_cleanup = temporary.cleanup
+
+                def cleanup():
+                    item['cleanupCalls'] += 1
+                    if item['cleanupCalls'] != 1:
+                        self.reject('cleanup-count', 'Only one original cleanup invocation is permitted per context', repr(item))
+                    item['activeProxyCountBeforeCleanup'] = self.active_proxies
+                    item['observerRealPopenReferencesDropped'] = self.active_proxies == 0
+                    root = Path(item['path'])
+                    try:
+                        if item['kind'] == 'inner-pwsh':
+                            item['before'] = [self.file_snapshot(root / 'test.ps1', 'inner-test.ps1.raw')]
+                        else:
+                            item['before'] = [self.file_snapshot(root / name, 'outer-' + name + '.raw')
+                                              for name in ('probe.cpp', 'serializer.cpp', 'serializer', 'serializer.exe')]
+                            self.record['shim'] = self.save_bytes('shim.cpp.raw', self.shim.encode('utf-8'))
+                            if (root / 'probe.cpp').is_file():
+                                generated = (root / 'probe.cpp').read_text()
+                                body = re.search(r'static std::string json\(.*?\n}', generated, re.S).group()
+                                self.record['escapingBody'] = self.save_bytes('escaping-body.cpp.raw', body.encode('utf-8'))
+                            self.record['serializerImageCandidates'] = [str(root / 'serializer'), str(root / 'serializer.exe')]
+                    except Exception as error:
+                        self.problem('before-original-cleanup-snapshot', error)
+                    self.checkpoint('before-original-' + item['kind'] + '-cleanup')
+
+                    def unlink(path, *args, **kwargs):
+                        full = os.path.abspath(os.fspath(path))
+                        owned = os.path.normcase(os.path.abspath(root))
+                        try:
+                            inside = os.path.normcase(os.path.commonpath([owned, os.path.normcase(full)])) == owned
+                        except ValueError:
+                            inside = False
+                        if args or set(kwargs) - {'dir_fd'} or kwargs.get('dir_fd') is not None or not inside:
+                            self.reject('unlink-shape-or-path', 'Unexpected unlink outside this original owned temporary directory', repr((path, args, kwargs)))
+                        attempt = dict(path=os.fspath(path), kwargs=dict(kwargs),
+                                       before=self.file_snapshot(Path(full)), originalUnlinkInvocations=1)
+                        item['unlinkAttempts'].append(attempt)
+                        try:
+                            result = ORIGINAL_UNLINK(path, *args, **kwargs)
+                            attempt['returnedNormally'] = True
+                            return result
+                        except BaseException as error:
+                            attempt['error'] = failure(error)
+                            raise
+                        finally:
+                            attempt['after'] = self.file_snapshot(Path(full))
+                            self.checkpoint('original-unlink-observed')
+                    try:
+                        with patch.object(os, 'unlink', unlink):
+                            result = original_cleanup()
+                        item['returnedNormally'] = True
+                        return result
+                    except BaseException as error:
+                        item['originalCleanupError'] = failure(error)
+                        raise
+                    finally:
+                        item['directoryExistsAfter'] = os.path.lexists(root)
+                        self.checkpoint('after-original-' + item['kind'] + '-cleanup')
+                temporary.cleanup = cleanup
+                self.checkpoint('temporary-context-created')
+                return temporary
+
+            def observation_complete(self):
+                if self.record['errors'] or self.active_proxies or len(self.record['runs']) != 3 or len(self.contexts) != 2:
+                    return False
+                for item in self.contexts:
+                    if item['cleanupCalls'] != 1 or not item.get('observerRealPopenReferencesDropped'):
+                        return False
+                    required = ('test.ps1',) if item['kind'] == 'inner-pwsh' else ('probe.cpp', 'serializer.cpp')
+                    before = item.get('before', [])
+                    if any(not any(Path(row['path']).name == name and 'saved' in row for row in before) for name in required):
+                        return False
+                    if item['kind'] == 'outer-serializer' and not any(Path(row['path']).name in ('serializer', 'serializer.exe') and 'saved' in row for row in before):
+                        return False
+                if 'shim' not in self.record or 'escapingBody' not in self.record:
+                    return False
+                for run in self.record['runs']:
+                    calls = run.get('communicateCalls', [])
+                    if (not run.get('before', {}).get('complete') or not run.get('proxyRealReferenceDropped')
+                            or run.get('originalExceptionMayRetainStdlibPopenFrames') or not calls
+                            or not calls[-1].get('outputEof') or not calls[-1].get('after', {}).get('complete')
+                            or calls[-1]['after'].get('waitResultZeroTimeout') != 0
+                            or calls[-1]['after']['creationTimeRawTicks'] != run['before']['creationTimeRawTicks']
+                            or calls[-1]['after']['pid'] != run['before']['pid']
+                            or not run.get('stdoutClosedAfterExit') or not run.get('stderrClosedAfterExit')):
+                        return False
+                return True
+
+
+        def main():
+            parser = argparse.ArgumentParser(description=__doc__)
+            parser.add_argument('--source', required=True, type=Path)
+            parser.add_argument('--evidence', required=True, type=Path)
+            args = parser.parse_args()
+            source, evidence = args.source.resolve(strict=True), args.evidence.resolve()
+            evidence.mkdir(parents=True, exist_ok=True)
+            for name in ('serializer-observer-receipt.json', 'serializer-observer-summary.json', 'case.stdout.raw', 'case.stderr.raw'):
+                if os.path.lexists(evidence / name):
+                    raise FileExistsError('Fresh observer output required: ' + str(evidence / name))
+            observer = Observer(source, evidence)
+            initial_saved = observer.checkpoint('initial')
+            exit_code = 1
+            try:
+                if not initial_saved:
+                    raise RuntimeError('The fresh initial observer receipt could not be saved')
+                if sys.platform != 'win32' or os.name != 'nt' or struct.calcsize('P') != 8 or sys.version_info[:2] != (3, 12):
+                    raise RuntimeError('Native 64-bit Windows CPython3.12 is required')
+                if not sys.dont_write_bytecode:
+                    raise RuntimeError('Parent must supply PYTHONDONTWRITEBYTECODE=1 before source import')
+                if source == evidence or source in evidence.parents:
+                    raise ValueError('Observer evidence must remain outside the tested source')
+                observer.record['python'] = dict(executable=sys.executable, version=sys.version,
+                    versionInfo=list(sys.version_info), pointerBits=64, sysPlatform=sys.platform, osName=os.name, pe=pe(sys.executable))
+                if observer.record['python']['pe']['machine'] != 0xaa64 or observer.record['python']['pe']['optionalHeaderMagic'] != 0x20b:
+                    raise RuntimeError('Python executable must use the ARM64 PE32+ ABI')
+                observer.api = NativeApi()
+                observer.record['identity'] = observer.api.snapshot(int(observer.api.kernel.GetCurrentProcess()), os.getpid())
+                identity = observer.record['identity']
+                if not identity['complete'] or identity['processMachine'] != 0 or identity['nativeMachine'] != 0xaa64:
+                    raise RuntimeError('Actual native ARM64 observer identity is required')
+                observer.record['sourceBefore'], observer.shim = verify_source(source)
+                observer.record['resolvedCompiler'] = shutil.which('c++')
+                observer.checkpoint('verified-before-import')
+                spec = importlib.util.spec_from_file_location('_opengeul_exact_crt_probe', source / 'suite/tests/test_native_crt_probe.py')
+                observer.module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(observer.module)
+                case = observer.module.NativeCrtProbeTests(METHOD)
+                method = getattr(observer.module.NativeCrtProbeTests, METHOD)
+                observer.record['case'] = dict(id=case.id(), originalSkip=bool(getattr(method, '__unittest_skip__', False)),
+                                             originalSkipReason=getattr(method, '__unittest_skip_why__', None))
+                with (evidence / 'case.stdout.raw').open('xb') as stdout_binary, (evidence / 'case.stderr.raw').open('xb') as stderr_binary:
+                    with io.TextIOWrapper(stdout_binary, encoding=sys.stdout.encoding, errors=sys.stdout.errors, write_through=True) as stdout, \
+                            io.TextIOWrapper(stderr_binary, encoding=sys.stderr.encoding, errors=sys.stderr.errors, write_through=True) as stderr:
+                        with redirect_stdout(stdout), redirect_stderr(stderr), \
+                                patch.object(subprocess, 'run', observer.run), patch.object(subprocess, 'Popen', observer.popen), \
+                                patch.object(tempfile, 'TemporaryDirectory', observer.temporary_directory):
+                            result = unittest.TextTestRunner(stream=stderr, verbosity=2).run(unittest.TestSuite([case]))
+                        observer.record['caseResult'] = dict(testsRun=result.testsRun, successful=result.wasSuccessful(),
+                            errors=[dict(case=str(case), traceback=text) for case, text in result.errors],
+                            failures=[dict(case=str(case), traceback=text) for case, text in result.failures],
+                            skipped=[dict(case=str(case), reason=reason) for case, reason in result.skipped],
+                            originalUnittestExitCode=0 if result.wasSuccessful() else 1)
+                        observer.record['caseStatus'] = ('skip' if result.skipped else 'error' if result.errors
+                                                        else 'failure' if result.failures else 'passed')
+                observer.record['sourceAfter'], _ = verify_source(source)
+                observer.record['selectedMethodObjectUnchanged'] = getattr(observer.module.NativeCrtProbeTests, METHOD) is method
+                if not observer.record['selectedMethodObjectUnchanged']:
+                    raise RuntimeError('The pinned selected method object was replaced')
+                complete = observer.observation_complete()
+                observer.record['observationComplete'] = complete
+                if result.skipped:
+                    observer.record['status'] = 'inconclusive-original-skip'
+                elif observer.record['errors']:
+                    observer.record['status'] = 'observer-failed-inconclusive-original-case-result-retained'
+                elif not complete:
+                    observer.record['status'] = 'inconclusive-observation-boundary-original-case-result-retained'
+                elif not result.wasSuccessful():
+                    observer.record['status'] = 'original-case-failed'
+                else:
+                    observer.record['status'] = 'one-instrumented-sample-passed-no-fix-or-cause-claim'
+                    exit_code = 0
+            except BaseException as error:
+                observer.problem('observer', error)
+                observer.record['status'] = 'observer-failed-inconclusive'
+                traceback.print_exc()
+            finally:
+                for name in ('case.stdout.raw', 'case.stderr.raw'):
+                    if (evidence / name).is_file():
+                        try:
+                            observer.record[name] = dict(path=str(evidence / name), **digest((evidence / name).read_bytes()))
+                        except Exception as error:
+                            observer.problem('case-log-final-observation', error)
+                            exit_code = 1
+                            observer.record.update(status='observer-failed-inconclusive-original-case-result-retained', observationComplete=False)
+                observer.record.update(final=True, observerExitCode=exit_code)
+                if not observer.checkpoint('final'):
+                    exit_code = 1
+                    print('Serializer observation is inconclusive: final receipt/summary incomplete; retain the last partial checkpoint.', file=sys.stderr)
+            return exit_code
+
+
+        if __name__ == '__main__':
+            raise SystemExit(main())
+
+        '@
+            [IO.File]::WriteAllText($observer,$observerText,[Text.UTF8Encoding]::new($false))
+            $receipt.observerSha256=(Get-FileHash -LiteralPath $observer -Algorithm SHA256).Hash.ToLowerInvariant()
+            $receipt.stage='one-instrumented-existing-case'
+            $prefix=Join-Path $evidence 'serializer-observer'
+            $originalError=$null
+            try {Invoke-LoggedCommand $python @($observer,'--source',$tested,'--evidence',$evidence) $tested $prefix -TimeoutMinutes 8|Out-Null}
+            catch {$originalError=$_}
+            if(Test-Path -LiteralPath ($prefix+'.command.json')){$receipt.observerCommand=Get-Content -LiteralPath ($prefix+'.command.json') -Raw|ConvertFrom-Json}
+            # The Python-owned full receipt retains raw Windows identities unchanged.
+            # This controller reads only the small scalar summary and leaves that raw receipt intact.
+            if(Test-Path -LiteralPath (Join-Path $evidence 'serializer-observer-summary.json')){$receipt.observerSummary=Get-Content -LiteralPath (Join-Path $evidence 'serializer-observer-summary.json') -Raw|ConvertFrom-Json}
+            if($null -ne $originalError){throw $originalError}
+            $c=$receipt.observerCommand
+            if($null -eq $c -or $c.passed -ne $true -or $c.exitCode -ne 0 -or $c.pipeDrainComplete -ne $true -or
+               $c.forcedTermination -ne $false -or $c.directProcessDeathVerified -ne $true -or $c.processTreeCleanup -cne 'not-requested' -or @($c.cleanupErrors).Count -ne 0){throw 'Serializer observer did not exit normally with complete drain and unforced owned cleanup.'}
+            $s=$receipt.observerSummary
+            [uint64]$rawCreation=0
+            if($null -eq $s -or $s.final -ne $true -or $s.caseStatus -cne 'passed' -or $s.observerExitCode -ne 0 -or
+               $s.observationComplete -ne $true -or $s.sourcePinsVerified -ne $true -or $s.testsRun -ne 1 -or
+               $s.phaseCount -ne 3 -or $s.cleanupContextCount -ne 2 -or $s.originalCleanupInvocationCount -ne 2 -or
+               $s.originalErrorCount -ne 0 -or $s.originalFailureCount -ne 0 -or $s.originalSkipCount -ne 0 -or
+               $s.observerErrorCount -ne 0 -or $s.observerActiveProxyCount -ne 0 -or
+               $s.expectedSourceCommit -cne $expectedSource -or $s.expectedSourceTree -cne $expectedTree -or $s.workflowGithubSha -cne $receipt.workflowCommit -or
+               $s.nativeSelf.complete -ne $true -or $s.nativeSelf.pid -ne $c.pid -or $s.nativeSelf.handlePid -ne $c.pid -or
+               $s.nativeSelf.processMachine -ne 0 -or $s.nativeSelf.nativeMachine -ne 0xaa64 -or
+               $s.nativeSelf.creationTimeRawTicks -isnot [string] -or $s.nativeSelf.creationTimeRawTicks -cnotmatch '^[1-9][0-9]{15,19}$' -or
+               -not [uint64]::TryParse($s.nativeSelf.creationTimeRawTicks,[ref]$rawCreation) -or $rawCreation -eq 0 -or
+               $s.python.pointerBits -ne 64 -or $s.python.versionInfo[0] -ne 3 -or $s.python.versionInfo[1] -ne 12 -or
+               $s.python.pe.machine -ne 0xaa64 -or $s.python.pe.optionalHeaderMagic -ne 0x20b){throw 'The one-case diagnostic is failed, skipped or inconclusive; retain original receipt and trace without a fix claim.'}
+            $receipt.stage='source-after'
+            $receipt.sourceAfter=[ordered]@{head=(Read-SerializerGit @('rev-parse','HEAD'));tree=(Read-SerializerGit @('rev-parse','HEAD^{tree}'));status=(Read-SerializerGit @('status','--porcelain','--untracked-files=all'))}
+            Save-SerializerRecord 'source-after.json' $receipt.sourceAfter
+            if($receipt.sourceAfter.head -cne $expectedSource -or $receipt.sourceAfter.tree -cne $expectedTree -or $receipt.sourceAfter.status){throw 'Instrumented case changed the tested source checkout.'}
+            Assert-NativeBuildTimeRemaining
+            $receipt.status='one-instrumented-sample-complete';$receipt.stage='complete'
+        } catch {$receipt.error=$_.Exception.ToString();$receipt.failedStage=$receipt.stage;throw}
+        finally {
+            if($null -eq $receipt.sourceAfter -and (Test-Path -LiteralPath (Join-Path $tested '.git'))){
+                try {$receipt.sourceAfter=[ordered]@{head=(Read-SerializerGit @('rev-parse','HEAD'));tree=(Read-SerializerGit @('rev-parse','HEAD^{tree}'));status=(Read-SerializerGit @('status','--porcelain','--untracked-files=all'))}}
+                catch {$receipt.sourceAfterError=$_.Exception.ToString()}
+            }
+            $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
+            if($script:NativeEngineBuildBudget){$receipt.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}
+            Save-SerializerRecord 'serializer-controller-receipt.json' $receipt
+            $script:NativeEngineBuildBudget=$previousBudget
+        }
+    - name: Retain partial and complete original diagnostics on every outcome
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: windows-crt-serializer-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/opengeul-crt-serializer-${{ github.run_id }}-${{ github.run_attempt }}/
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 7
