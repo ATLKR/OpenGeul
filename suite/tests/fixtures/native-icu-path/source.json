@@ -1,0 +1,42 @@
+{
+  "libreofficeVersion": "26.8.1.1",
+  "archiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+  "members": [
+    {
+      "path": "external/firebird/ExternalProject_firebird.mk",
+      "sourceSha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
+      "fixture": "ExternalProject_firebird.mk",
+      "fixtureSha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
+      "sourceLines": "complete",
+      "licenseHeaderLines": "complete"
+    },
+    {
+      "path": "solenv/gbuild/Helper.mk",
+      "sourceSha256": "968bb797d966c4c75b77132e25ba1e42d762943b7c2e4a43593b0bddcc4e17f9",
+      "fixture": "cyg-path.mk",
+      "fixtureSha256": "1e824cf81edf7cd57310f11df8ffd7ff4a0415888a034905fa3f9bd18e65f3cb",
+      "sourceLines": [
+        75,
+        77
+      ],
+      "licenseHeaderLines": [
+        1,
+        18
+      ]
+    },
+    {
+      "path": "solenv/gbuild/platform/com_MSC_defs.mk",
+      "sourceSha256": "c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14",
+      "fixture": "windows-loader-path.mk",
+      "fixtureSha256": "e4dd4675f09217e7a4baf64c7fa4f711c9f71c1cab4567900242d71fb2b9a451",
+      "sourceLines": [
+        326,
+        335
+      ],
+      "licenseHeaderLines": [
+        1,
+        18
+      ]
+    }
+  ]
+}

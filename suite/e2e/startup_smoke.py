@@ -138,11 +138,21 @@ def run_native_attempt(suite, fixtures, output, attempt):
         record.update(screenshot=screenshot, screenshotCaptured=True)
         assert not api.windows(office_pid), api.external_window_message(office_pid, 'Office created an unowned visible top-level window')
         mark_stage(record, 'close-document')
-        api.request_close(hwnd, process.pid)
-        mark_stage(record, 'wait-document-close')
-        native.wait_for(lambda: not api.user.IsWindow(hwnd), seconds=20)
-        mark_stage(record, 'wait-editor-close')
-        native.wait_for(lambda: not api.user.IsWindow(child), seconds=10)
+        if module == 'calc':
+            if mode == 'existing':
+                baseline = native.calc_model_barrier.baseline_from_ooxml(source.read_bytes())
+                proof = native._verified_saved_calc_close_proof(suite, fixtures, source, baseline,
+                                                                expected_sha256=before)
+            else:
+                from generated_calc_close import freeze_generated_blank_calc
+                proof = freeze_generated_blank_calc(suite, api, process, hwnd, child, record)
+            native.close_document(api, process, hwnd, child, record, calc_close_proof=proof)
+        else:
+            api.request_close(hwnd, process.pid)
+            mark_stage(record, 'wait-document-close')
+            native.wait_for(lambda: not api.user.IsWindow(hwnd), seconds=20)
+            mark_stage(record, 'wait-editor-close')
+            native.wait_for(lambda: not api.user.IsWindow(child), seconds=10)
         mark_stage(record, 'find-home')
         home = native.wait_for(lambda: api.home(process), seconds=10)
         record['homeHwnd'] = int(home)

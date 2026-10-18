@@ -25,6 +25,14 @@ FORMAT_IDS = ('format-writer-odt', 'format-writer-docx', 'format-writer-doc', 'f
 RICH_IDS = ('rich-writer', 'rich-calc', 'rich-impress', 'rich-draw', 'rich-math', 'rich-base')
 
 
+def successful_cleanup(suite):
+    member = dict(pid=42, creationTime=123, handleValue=99, image=str(suite / 'Office/program/soffice.bin'), alive=True, exitCode=259)
+    return dict(schemaVersion=1, kind='owned-engine-job-cleanup', jobHandleValue=11,
+                expectedEngineImage=member['image'], gracefulQualified=True, forcedTermination=False,
+                jobEmptyVerified=True, initialMembers=[member], finalMembers=[dict(member, alive=False, exitCode=0)],
+                finalJobPids=[], launcherExitCode=0, errors=[])
+
+
 class SemanticContractTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(smoke, 'The executable Office feature harness is missing')
@@ -217,6 +225,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
         class Engine:
             def __init__(self,suite):
                 self.cleanup_errors=[]; self.closed=False; self.cleaned=False; engines.append(self)
+                self.cleanup_evidence=successful_cleanup(suite)
             def start(self): pass
             def load(self,url): return object()
             def store_new(self,document,path,filter_name):
@@ -237,6 +246,8 @@ class ExecutionBoundaryTests(unittest.TestCase):
         self.assertTrue(row['independentReopenVerified'])
         self.assertTrue(all(e.closed and e.cleaned for e in engines))
         self.assertEqual(64,len(row['sha256']))
+        self.assertIn('engineCleanups',row,'Each new feature engine generation must retain its cleanup proof')
+        self.assertEqual([item['phase'] for item in row['engineCleanups']],['create','independent-reopen'])
 
     def test_load_saved_is_readonly_macro_disabled_and_exact_filter_options(self):
         for case in (self.cases[4],self.cases[8]):
@@ -325,11 +336,12 @@ class ExecutionBoundaryTests(unittest.TestCase):
 
     def test_missing_reopen_cleanup_and_final_hash_never_pass(self):
         case=self.cases[0]
-        def fake_engine_factory(cleanup_error=False, erase=False):
+        def fake_engine_factory(cleanup_error=False, erase=False, missing_proof=False):
             saved=[]
             generations=[]
             class Engine:
-                def __init__(self,suite): self.cleanup_errors=[]; generations.append(self)
+                def __init__(self,suite):
+                    self.cleanup_errors=[]; self.cleanup_evidence=successful_cleanup(suite); generations.append(self)
                 def start(self): pass
                 def load(self,url): return object()
                 def store_new(self,document,path,filter_name):
@@ -340,14 +352,15 @@ class ExecutionBoundaryTests(unittest.TestCase):
                 def close_document(self,document): pass
                 def cleanup(self):
                     if cleanup_error: self.cleanup_errors.append('owned process still alive')
+                    if missing_proof: self.cleanup_evidence=None
                     if erase and len(generations)==2: saved[0].unlink()
             return Engine
-        for reason in ('cleanup','reopen','hash'):
+        for reason in ('cleanup','reopen','hash','proof'):
             with self.subTest(reason=reason):
                 out=self.output/reason
                 (out/'fixtures').mkdir(parents=True)
                 observed=smoke.expected(case)
-                with patch.object(smoke,'Engine',fake_engine_factory(reason=='cleanup',reason=='hash')), \
+                with patch.object(smoke,'Engine',fake_engine_factory(reason=='cleanup',reason=='hash',reason=='proof')), \
                      patch.object(smoke,'populate',return_value={}), \
                      patch.object(smoke,'observe',return_value=observed), \
                      patch.object(smoke,'load_saved',side_effect=RuntimeError('reopen failed') if reason=='reopen' else None,return_value=object()):
@@ -357,6 +370,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
                 self.assertFalse(row['guiVerified'])
                 if reason=='reopen': self.assertEqual('reopen failed',row['error']['message'])
                 elif reason=='hash': self.assertEqual('FileNotFoundError',row['error']['type'])
+                elif reason=='proof': self.assertIn('cleanup evidence',row['error']['message'])
                 else: self.assertIn('owned process still alive',row['cleanupErrors'])
 
     def test_manifest_filter_drift_is_setup_failure(self):

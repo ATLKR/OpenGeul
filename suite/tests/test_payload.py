@@ -37,6 +37,8 @@ def pe(machine=0x8664, *, managed=False, flags=1, dll=False):
     struct.pack_into('<H', data, optional, 0x10b if machine == 0x14c else 0x20b)
     count_offset = 92 if machine == 0x14c else 108
     struct.pack_into('<I', data, optional + count_offset, 16)
+    struct.pack_into('<II', data, optional+32, 0x1000, 0x200)
+    struct.pack_into('<II', data, optional+56, 0x2000, 0x200)
     section = optional + size
     data[section:section+8] = b'.text\0\0\0'
     struct.pack_into('<IIII', data, section+8, 512, 0x1000, 512, 512)
@@ -65,7 +67,8 @@ class PayloadFixture(unittest.TestCase):
             self.write(name, pe())
         self.write('OpenGeul.Office.dll', pe(0x14c, managed=True, dll=True))
         for name in ('worker/office_worker.py', 'worker/session.py', 'worker/native.py',
-                     'worker/native_windows.py', 'worker/dispatch.py'):
+                     'worker/native_windows.py', 'worker/dispatch.py', 'worker/calc_save.py',
+                     'worker/calc_close.py', 'worker/save_diagnostics.py', 'worker/native_diagnostics.py'):
             self.write(name, b'# worker source\n')
         for name in ('Notices/OpenGeul-Office-LICENSE.txt', 'Notices/LibreOffice-LICENSE.txt',
                      'Notices/CORRESPONDING_SOURCE.md', 'Office/LICENSE', 'Office/NOTICE'):
@@ -238,7 +241,8 @@ class PayloadTests(PayloadFixture):
         names = ('OpenGeul.Office.exe', 'OpenGeul.Office.dll', 'suite-product.json', 'suite-provenance.json',
                  'runtime-branding.json', 'Office/program/soffice.exe', 'Office/program/soffice.bin',
                  'Office/program/python.exe', 'Office/opengeul-branding.json',
-                 'worker/office_worker.py', 'worker/session.py', 'Notices/OpenGeul-Office-LICENSE.txt',
+                 'worker/office_worker.py', 'worker/session.py', 'worker/calc_save.py', 'worker/calc_close.py',
+                 'worker/save_diagnostics.py', 'worker/native_diagnostics.py', 'Notices/OpenGeul-Office-LICENSE.txt',
                  'Notices/LibreOffice-LICENSE.txt', 'Notices/CORRESPONDING_SOURCE.md',
                  'Sources/OpenGeul-Office-source.zip')
         for name in names:
@@ -599,6 +603,93 @@ class Arm64PayloadTests(PayloadFixture):
             self.write_json('suite-provenance.json', changed)
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'source lock'):
                 self.inventory()
+
+    def source_engine(self):
+        from suite.tests.test_prepare import source_build_fixture
+        archive, runtime, receipt_path, receipt = source_build_fixture(Path(self.temp.name))
+        self.provenance['runtime'] = runtime
+        self.write('Office/opengeul-source-build.json', receipt_path.read_bytes())
+        with zipfile.ZipFile(archive) as source:
+            for name in ('program/pyuno.pyd','program/ifbclient.dll','program/Engine12.dll','program/intl/fbintl.dll'):
+                self.write('Office/'+name,source.read(name))
+            for name in ('program/version.ini', 'program/setup.ini'):
+                original = source.read(name)
+                branded = original.replace(b'Vendor=The Document Foundation', b'Vendor=ATLKR')
+                self.write('Office/'+name, branded)
+                if branded != original:
+                    self.branding['modifiedFiles'][name] = dict(beforeSha256=digest(original), sha256=digest(branded))
+        self.branding['source'].update(buildId=runtime['sourceCoreCommit'],
+            sourceUrl='https://github.com/LibreOffice/core/tree/'+runtime['sourceCoreCommit'])
+        for name in ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+                     'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
+                     'vcruntime140_threads.dll'):
+            self.write('Office/program/'+name, pe(0xaa64, dll=True))
+        self.write('Office/share/readme/Microsoft-VC145-redistribution.html', b'Official VS2026 redistribution terms')
+        self.source_archive(); self.save_metadata()
+        return receipt
+
+    def test_source_engine_crt_and_terms_must_match_exact_receipted_bytes_after_inventory_rebuild(self):
+        for name in ('Office/program/vcruntime140.dll',
+                     'Office/share/readme/Microsoft-VC145-redistribution.html'):
+            with self.subTest(name=name):
+                self.source_engine()
+                self.write(name, self.read(name)+b'changed')
+                with self.assertRaisesRegex(ValueError, 'CRT|redistribution'):
+                    self.inventory()
+
+    def test_source_engine_payload_keeps_exact_authenticated_receipt_and_immutable_lock(self):
+        self.source_engine()
+        receipt = self.inventory()
+        self.assertIn('Office/opengeul-source-build.json', receipt['files'])
+        verify_payload(self.root, receipt)
+
+    def test_source_engine_final_metadata_requires_qualified_input_and_actual_branding_hash_join(self):
+        for mutation in ('before-hash', 'after-hash', 'effective-id', 'missing-version', 'setup-change', 'branding-core'):
+            with self.subTest(mutation=mutation):
+                self.source_engine()
+                if mutation == 'before-hash':
+                    self.branding['modifiedFiles']['program/version.ini']['beforeSha256'] = 'f'*64
+                elif mutation == 'after-hash':
+                    self.branding['modifiedFiles']['program/version.ini']['sha256'] = 'f'*64
+                elif mutation == 'branding-core':self.branding['source']['buildId'] = 'f'*40
+                elif mutation == 'missing-version':(self.root/'Office/program/version.ini').unlink()
+                elif mutation == 'setup-change':self.write('Office/program/setup.ini',self.read('Office/program/setup.ini')+b'; changed\n')
+                else:
+                    self.write('Office/program/version.ini',self.read('Office/program/version.ini').replace(
+                        self.provenance['runtime']['sourceCoreCommit'].encode(),b'f'*40))
+                    self.branding['modifiedFiles']['program/version.ini']['sha256'] = digest(self.read('Office/program/version.ini'))
+                self.save_metadata()
+                with self.assertRaisesRegex(ValueError, 'identity|buildid'):
+                    self.inventory()
+
+    def test_source_engine_payload_requires_the_locked_receipt_even_if_inventory_is_rebuilt(self):
+        self.source_engine()
+        (self.root/'Office/opengeul-source-build.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'receipt|source.build'):
+            self.inventory()
+        self.write('Office/opengeul-source-build.json', b'{"passed":true}')
+        with self.assertRaisesRegex(ValueError, 'receipt|source.build'):
+            self.inventory()
+
+    def test_source_engine_packaged_lock_binds_all_runtime_source_build_and_format_fields(self):
+        self.source_engine()
+        original = copy.deepcopy(self.provenance)
+        for key, value in (('format', 'msi'), ('size', 123), ('sourceCoreCommit', 'f'*40),
+                           ('sourceBuild', dict(original['runtime']['sourceBuild'], artifactId=999)),
+                           ('sourceBuild', dict(original['runtime']['sourceBuild'], artifactSha256='f'*64)),
+                           ('sourceBuild', dict(original['runtime']['sourceBuild'], receiptSha256='f'*64))):
+            changed = copy.deepcopy(original); changed['runtime'][key] = value
+            self.write_json('suite-provenance.json', changed)
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'source lock'):
+                self.inventory()
+
+    def test_source_engine_pinned_receipt_cannot_replace_native_base_qualification(self):
+        from suite.tests.test_prepare import pin_source_receipt
+        receipt = self.source_engine(); receipt['baseProof']['independentReopenVerified'] = False
+        pin_source_receipt(self.provenance['runtime'], self.root/'Office/opengeul-source-build.json', receipt)
+        self.source_archive(); self.save_metadata()
+        with self.assertRaisesRegex(ValueError, 'Base|source.build'):
+            self.inventory()
 
     def test_x64_companion_admission_does_not_grant_arm64_an_exception(self):
         name = 'Office/program/twain32shim.exe'

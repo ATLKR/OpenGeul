@@ -21,7 +21,7 @@
   },
   "portPatch": {
     "filename": "firebird-windows-arm64.patch",
-    "sha256": "448a17e7bc4b5646dd3369596ed177e6f76b99427424defa790904b6f31aa793",
+    "sha256": "dccca2b44bbb12ce06b75c227fa9a8fb530e5d6607904484d9f75732ae4cd58e",
     "strip": 0,
     "appliesAfter": "All pinned LibreOffice Windows Firebird patches"
   },
@@ -201,5 +201,225 @@
     "filename": "libreoffice-enable-arm64-firebird.patch",
     "sha256": "b279f950f2279372f2efe2b07cc4c7a77d5266f3032897142f1fc1b698db781f",
     "strip": 0
+  },
+  "zstdSourceLinks": {
+    "path": "external/zstd/UnpackedTarball_zstd.mk",
+    "sha256": "3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909",
+    "afterSha256": "6e2dc4deb222a3bc5385153d51778701fce4eb9f45d7e5cf4c0b3ceea75766d8",
+    "archive": {
+      "filename": "zstd-1.5.7.tar.gz",
+      "size": 2434947,
+      "sha256": "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
+    },
+    "scope": "WNT_AARCH64 exact zstd UnpackedTarget only; all other make children retain strict native links"
+  },
+  "moduleBootstrap": {
+    "path": "bin/unpack-sources",
+    "sha256": "912e88972e7fc7f61eb0b373187d80d2f2ab6e7462378dce979254fa31792715",
+    "afterSha256": "5fbba07a0945cff9a3ce5ae56208c9e5ad7c713701d6ae32cf08950fef0ee6d4",
+    "change": "Exclude git-hooks while linking extracted source modules into the core root"
+  },
+  "msvcPlatformHeader": {
+    "path": "src/include/gen/autoconfig_msvc.h",
+    "archiveBytes": 9408,
+    "archiveSha256": "e9a17ae0ccace8a8153ca6d4e07246fb7273abcfa0945a478eb655bd7de06537",
+    "beforeBytes": 9443,
+    "beforeSha256": "18e03d9c4a7ceabd02bf0ee54cafc9418e63cbe68f99e7a47eade81dea05b0b9",
+    "afterBytes": 9679,
+    "afterSha256": "518774a3f491e134cfd811f97580aae8962eaa82ae6fc1f08bb35e91e104bd8a",
+    "upstreamHeaderPatches": [
+      "firebird-cygwin-msvc-warnings.patch"
+    ],
+    "beforeStage": "After all25 locked upstream Windows patches"
+  },
+  "remoteArchitecture": {
+    "upstreamCommit": "c02ba31824f5cee34cc8966fc44b38e6b395152a",
+    "identity": {
+      "name": "arch_winnt_arm64",
+      "value": 44
+    },
+    "beforeStage": "After all25 locked upstream Windows patches; neither remote header is changed by those patches",
+    "headers": [
+      {
+        "path": "src/remote/remote_def.h",
+        "beforeBytes": 3339,
+        "beforeSha256": "375df38ca00c2aa43f3fff3a28175d77ffb9b79c4aced9d130201308f9840ab3",
+        "afterBytes": 3425,
+        "afterSha256": "753dc75502e0696d20ebeca9def5104836f9d2a97f3e2596cbf01b940b06ebe5",
+        "upstreamUrl": "https://raw.githubusercontent.com/FirebirdSQL/firebird/c02ba31824f5cee34cc8966fc44b38e6b395152a/src/remote/remote_def.h",
+        "upstreamSha256": "b3524addff39577d5760859f88ff0f5d77ca5c79b5a89bc6420d9e8c27d64c35"
+      },
+      {
+        "path": "src/remote/protocol.h",
+        "beforeBytes": 20762,
+        "beforeSha256": "3c98b1e9cd49c10f593b74ca9ae52851cfecd49f973e902d1683f3e5b066aa5b",
+        "afterBytes": 20786,
+        "afterSha256": "6ff9f5138f68403c35c9f11f42c3968ca8389e712ef24ddd87ac58646636e2eb",
+        "upstreamUrl": "https://raw.githubusercontent.com/FirebirdSQL/firebird/c02ba31824f5cee34cc8966fc44b38e6b395152a/src/remote/protocol.h",
+        "upstreamSha256": "47566aa027acb25dcad56d2d2d4618cb401883b906acef9dfca6cc740557bc64"
+      }
+    ]
+  },
+  "commonArchiveRecipe": {
+    "path": "builds/posix/Makefile.in",
+    "beforeStage": "After all 25 locked upstream Windows patches",
+    "beforeSha256": "d6262fca2a4fa052a8f3627fa54a03ce87774d222a1003c3d2ea996fa72b0a36",
+    "afterSha256": "4a6d7da15a8461df25cf494082e83222cadb7d9b0dbffd71cbf5e5aa4bd49180",
+    "condition": "PLATFORM=win32 and CpuType=aarch64",
+    "librarian": "Explicit OPENGEUL_FIREBIRD_LIB from selected COMPATH/bin/Hostarm64/arm64/lib.exe"
+  },
+  "icuBuildPath": {
+    "path": "external/firebird/ExternalProject_firebird.mk",
+    "sha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
+    "afterSha256": "c92eabab77eb0693ed93dcbd459608717c61935994bfe6c814c341237e86c742",
+    "change": "Use one Windows ARM64 loader-path helper call for ICU/source/lib and the actual Firebird Windows client DLL directory bin; other platforms retain the original expression"
+  },
+  "mddsEquality": {
+    "scope": "WNT_AARCH64 only; exact equality body relocated into class with const noexcept(nothrow_eq_comparable_v) unchanged",
+    "archive": {
+      "filename": "mdds-3.2.1.tar.xz",
+      "url": "https://dev-www.libreoffice.org/src/mdds-3.2.1.tar.xz",
+      "size": 648256,
+      "sha256": "673f5bb94612dbba581fc92b99b5e5dd1a53e29496a5dbc936432f6b0687c112"
+    },
+    "recipe": {
+      "path": "external/mdds/UnpackedTarball_mdds.mk",
+      "size": 645,
+      "sha256": "f315da733c95aeeae29656318289fae9a90bff2eab46478972a9d8472a10208a",
+      "afterSha256": "8b2c09e41163c700a87f18681df2d5f2543716448657f8e7850c8d63b50a936a"
+    },
+    "upstreamPatch": {
+      "filename": "gcc-12-silence-use-after-free.patch.1",
+      "sha256": "3411f0814815e06914ea1fbf50c5428af86cbed68c82c0481e09dd62bc8a22c6",
+      "strip": 1
+    },
+    "patch": {
+      "filename": "opengeul-arm64-equality.patch.1",
+      "size": 2362,
+      "sha256": "8bddef54230e818dadee067de53f0ab4971bf5c47764fdd2a05951144c92e8e3",
+      "strip": 1,
+      "appliesAfter": "gcc-12-silence-use-after-free.patch.1"
+    },
+    "headers": [
+      {
+        "path": "include/mdds/flat_segment_tree.hpp",
+        "beforeBytes": 29117,
+        "beforeSha256": "ad0e52219db6c8194cadee54b30cec34f55350c4b587a1bc1764d37701276fa8",
+        "afterBytes": 29794,
+        "afterSha256": "a3bac3e97208286097aa457cf884e0d14cda4e4e572450cb8ca3e09711423ef2"
+      },
+      {
+        "path": "include/mdds/flat_segment_tree_def.inl",
+        "beforeBytes": 27738,
+        "beforeSha256": "5afeba9fed6c8e821bb02c4dc654d29c18dcc23d51bffbc3f48986fc2b67b7b7",
+        "afterBytes": 26993,
+        "afterSha256": "49823be2452093155e6fd0cb3f3baf5f93e85ee0b3ae5746cc10ac299fdf095d"
+      }
+    ],
+    "nodeHeader": {
+      "path": "include/mdds/node.hpp",
+      "afterBytes": 13942,
+      "afterSha256": "6ea1f9515d843c298c4754a235957fae860c66f75411b2541d8929431970f9d8",
+      "stage": "Existing GCC12 patch; equality correction must leave unchanged"
+    }
+  },
+  "pythonNativeHost": {
+    "scope": "WNT_AARCH64 only; late import overrides CLToolPath and LinkToolPath only for Platform ARM64; authentic x64 freeze helper mapping unchanged",
+    "recipe": {
+      "path": "external/python3/ExternalProject_python3.mk",
+      "size": 10931,
+      "sha256": "b31e4d779484a4d153155b025daf8b03678e1984abde4fe5c6c038ccb7d43445",
+      "afterSize": 11076,
+      "afterSha256": "cb6c9996e5ee7be941a23bcce9884e5a4c6458b6a9ce06860d4e2e2a793c93de"
+    },
+    "targets": {
+      "filename": "opengeul-native-arm64-tools.targets",
+      "size": 347,
+      "sha256": "3f993bc582b10890ffdd4ec9bf1ab0d50de064c0889f57687d1f6b4b63fd1e22"
+    },
+    "diagnosticEvidence": {
+      "runId": 39084133996,
+      "candidateFeasible": true,
+      "originalSiteReproduced": false,
+      "causalCorrectionProven": false,
+      "engineQualified": false
+    }
+  },
+  "atlNativePaths": {
+    "scope": "ActiveX recipe only; WNT_AARCH64 and actual GNU make MAKE_HOST ending -cygwin; cygpath -lm quoted native include/library arguments; full atls.lib path bypasses T_LIBS word sorting via recipe-local ldflags; all other profiles and system libraries unchanged",
+    "recipe": {
+      "path": "extensions/Library_so_activex.mk",
+      "size": 1376,
+      "sha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c",
+      "afterSize": 2416,
+      "afterSha256": "454fd02b85c851f035d41731d2e889da03293e67c4e6bcdecb15aeba74caf9d8"
+    },
+    "diagnosticEvidence": {
+      "runId": 39098589144,
+      "nativePathCompileSucceeded": true,
+      "nativePathLinkSucceeded": true,
+      "allConsumedLibraryArchitectureVerified": false,
+      "engineQualified": false
+    }
+  },
+  "harfbuzzNativeMesonPaths": {
+    "scope": "HarfBuzz recipe only; WNT_AARCH64_MSC with OS_FOR_BUILD WNT, real GNU make MAKE_HOST ending -cygwin, equal build/host and no WSL, bundled Windows Python and internal Meson; native executable CC/CXX argv and native per-entry pkg-config list; other profiles/options/global make state unchanged",
+    "recipe": {
+      "path": "external/harfbuzz/ExternalProject_harfbuzz.mk",
+      "size": 3074,
+      "sha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+      "afterSize": 5921,
+      "afterSha256": "f959b6f564baf45777f531b588932b2e969bdfbf21ffdb41630874838415cfcb"
+    },
+    "diagnosticEvidence": {
+      "runId": 39100682885,
+      "sourceOnlyCauseEstablished": true,
+      "originalSiteReproduced": false,
+      "causalCorrectionProven": false,
+      "harfbuzzSetupSucceeded": false,
+      "harfbuzzCompileSucceeded": false,
+      "nativeEngineQualified": false,
+      "windowsControlRunId": null
+    }
+  },
+  "atlConsumerNativePaths": {
+    "scope": "Five remaining current gbuild ATL consumers only; WNT_AARCH64_MSC and real GNU make MAKE_HOST ending -cygwin; recipe-local quoted native include/resource/link arguments; only existing static ATL consumers bypass sorted T_LIBS through their existing ldflags; no global ATL state, ActiveX hook, feature graph or other profiles changed",
+    "recipes": [
+      {
+        "path": "embedserv/Library_emser.mk",
+        "size": 1586,
+        "sha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef",
+        "afterSize": 2768,
+        "afterSha256": "7f35d902d0711e96aaa13a1dd25a05d1fd04a010100d5e48719b2ec1c0dbe5a1"
+      },
+      {
+        "path": "extensions/Library_oleautobridge.mk",
+        "size": 1639,
+        "sha256": "815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8",
+        "afterSize": 2989,
+        "afterSha256": "b369233d2eec07295ca7adeb3e91b9bde2498ed7be96cb296e95e6d27a3b26ed"
+      },
+      {
+        "path": "winaccessibility/Library_uacccom.mk",
+        "size": 2200,
+        "sha256": "d5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062",
+        "afterSize": 3409,
+        "afterSha256": "7ec1fed59fad36368739d5917f46bd74f6560d33460bc73ea9438592356de815"
+      },
+      {
+        "path": "winaccessibility/Library_winaccessibility.mk",
+        "size": 2478,
+        "sha256": "0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4",
+        "afterSize": 3394,
+        "afterSha256": "c99e623c082accaa84efebf254876ee083effc071a1bd8de63ee10bcf6f45e6d"
+      },
+      {
+        "path": "winaccessibility/WinResTarget_uacccom.mk",
+        "size": 803,
+        "sha256": "9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00",
+        "afterSize": 1719,
+        "afterSha256": "58637ccbabc74afb3a84f27526a26b47ffdce1bfa2c814e5d369b84f2b2aca5c"
+      }
+    ]
   }
 }

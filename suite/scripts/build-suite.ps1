@@ -2,7 +2,9 @@ param(
     [string]$WorkDirectory = '.work/office-suite',
     [string]$OutputDirectory = '',
     [ValidateSet('x64', 'arm64')]
-    [string]$Architecture = 'x64'
+    [string]$Architecture = 'x64',
+    [string]$EngineArchive = '',
+    [string]$EngineReceipt = ''
 )
 $ErrorActionPreference = 'Stop'
 $Architecture = $Architecture.ToLowerInvariant()
@@ -22,7 +24,11 @@ try {
     if (Test-Path $shellPath) { throw 'Published shell directory already exists.' }
     dotnet publish suite/shell/OpenGeul.Office.csproj -c Release -r "win-$Architecture" --self-contained true -o $shellPath
     if ($LASTEXITCODE -ne 0) { throw 'Windows Suite shell publish failed.' }
-    python suite/prepare.py --architecture $Architecture --work $workPath --shell $shellPath --output $outputPath
+    $prepareArguments = @('suite/prepare.py', '--architecture', $Architecture, '--work', $workPath,
+                          '--shell', $shellPath, '--output', $outputPath)
+    if (-not [string]::IsNullOrWhiteSpace($EngineArchive)) { $prepareArguments += @('--engine-archive', $EngineArchive) }
+    if (-not [string]::IsNullOrWhiteSpace($EngineReceipt)) { $prepareArguments += @('--engine-receipt', $EngineReceipt) }
+    python @prepareArguments
     if ($LASTEXITCODE -ne 0) { throw 'Suite input/extraction/branding/inventory verification failed.' }
     $zipPath = $outputPath + '.zip'
     if (Test-Path $zipPath) { throw 'Suite ZIP output already exists.' }

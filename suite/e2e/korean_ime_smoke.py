@@ -628,7 +628,15 @@ def case(suite, fixtures, output, readiness, module, extension):
         record['savedText'] = package_text(source)
         window.capture_as_image().save(output / (name + '-saved.png'))
         assert not api.windows(office_pid), api.external_window_message(office_pid, 'IME opened an external Office document window')
-        close_document(api, process, hwnd, child, record)
+        calc_proof = None
+        if module == 'calc':
+            from windows_smoke import _verified_saved_calc_close_proof
+            from calc_model_barrier import baseline_from_ooxml
+            calc_proof = _verified_saved_calc_close_proof(suite, folder, source,
+                baseline_from_ooxml(original.read_bytes()), suffix=' ' + marker(module))
+            close_document(api, process, hwnd, child, record, calc_close_proof=calc_proof)
+        else:
+            close_document(api, process, hwnd, child, record)
         close_home(api, process, record)
         record['stage'] = 'actual-uno-reopen'
         result_path = folder / 'reopened.json'

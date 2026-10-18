@@ -39,7 +39,7 @@ class NativeDiagnostics:
         self.directory = root / uuid.uuid4().hex
         self.directory.mkdir(exist_ok=False)
         self.profile, self.process, self.witnesses = profile, process, None
-        self.manifest = {'schemaVersion': 1, 'ownedProfile': str(profile),
+        self.manifest = {'schemaVersion': 1, 'kind': 'owned-office-native-diagnostics', 'ownedProfile': str(profile),
                          'workerPid': os.getpid(), 'launcherPid': getattr(process, 'pid', None),
                          'archiveComplete': False, 'files': []}
         self._write_manifest()
@@ -100,3 +100,15 @@ class NativeDiagnostics:
         if self.witnesses is not None:
             self.witnesses.close()
             self.witnesses = None
+
+    def record_shutdown(self, record):
+        """Bind the explicit final shutdown proof to this owned archive."""
+        target = plain_path(self.directory / 'shutdown.json')
+        raw = (json.dumps(record, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode('utf-8')
+        if len(raw) > 256 * 1024:
+            raise ValueError('Owned shutdown receipt exceeded its finite limit')
+        target.write_bytes(raw)
+        files = [item for item in self.manifest['files'] if item['path'] != 'shutdown.json']
+        files.append(dict(path='shutdown.json', bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()))
+        self.manifest['files'] = files
+        self._write_manifest()

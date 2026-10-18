@@ -1,5 +1,6 @@
 """Execute Suite Korean setup architecture and offline source gates in PowerShell."""
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import tempfile
@@ -11,13 +12,13 @@ PWSH = shutil.which('pwsh')
 
 @unittest.skipUnless(PWSH, 'PowerShell is required to execute prerequisite gates')
 class SuiteKoreanArchitectureTests(unittest.TestCase):
-    def run_gate(self, body):
+    def run_gate(self, body, timezone=None):
         script = '''param([string]$Source)
 $ErrorActionPreference='Stop'
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Invalid prerequisite PowerShell source'}
-foreach($name in @('Assert-SuiteNativeArchitecture','Assert-SuiteKoreanOfflineSource')) {
+foreach($name in @('Assert-SuiteNativeArchitecture','Assert-SuitePlainPath','Assert-SuiteKoreanOfflineSource','Get-SuiteKoreanPreparationDeadline','Copy-SuiteKoreanServicingTail','Test-SuiteKoreanLegacyCollectorWindow')) {
     $functions=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
     if($functions.Count -ne 1){throw ('Missing single architecture gate: '+$name)}
     Invoke-Expression $functions[0].Extent.Text
@@ -27,7 +28,8 @@ foreach($name in @('Assert-SuiteNativeArchitecture','Assert-SuiteKoreanOfflineSo
             path = Path(directory)/'gate.ps1'
             path.write_text(script)
             result = subprocess.run([PWSH, '-NoProfile', '-NonInteractive', '-File', str(path), '-Source', str(SOURCE)],
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=30,
+                                    env=dict(os.environ, TZ=timezone) if timezone else None)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_native_requested_machine_must_equal_real_os_and_unemulated_controller(self):
@@ -89,6 +91,157 @@ try {
     if($message -cne 'original native ARM DISM failure 0x800f0950' -or $global:ArmInstallCalls.Count -ne 1){throw 'Original failure was hidden or retried'}
     if([IO.File]::ReadAllText($log) -cne 'original raw DISM output 0x800f0950'){throw 'Original DISM log was rewritten'}
 } finally { Remove-Item -LiteralPath $log -Force; Remove-Module Dism -Force }
+''')
+
+    def test_only_native_arm64_gets_1800_seconds_and_receipts_bind_utc_deadline(self):
+        self.run_gate('''
+$started=[DateTime]::Parse('2026-10-17T00:00:00.0000000Z',$null,[Globalization.DateTimeStyles]::RoundtripKind)
+foreach($row in @(@('x64',0,0x8664,600),@('arm64',0,0xAA64,1800))) {
+    $deadline=Get-SuiteKoreanPreparationDeadline -Architecture $row[0] -ProcessMachine $row[1] -NativeMachine $row[2] -StartedUtc $started
+    if($deadline.budgetSeconds -ne $row[3] -or $deadline.startedUtc -cne $started.ToString('o') -or $deadline.expiresUtc -cne $started.AddSeconds($row[3]).ToString('o')){throw 'Native budget or bounded UTC deadline is incorrect'}
+}
+foreach($row in @(@('arm64',0,0x8664),@('arm64',0x8664,0xAA64),@('x64',0,0xAA64),@('x86',0,0x8664))) {
+    $rejected=$false;try{Get-SuiteKoreanPreparationDeadline -Architecture $row[0] -ProcessMachine $row[1] -NativeMachine $row[2] -StartedUtc $started}catch{$rejected=$true}
+    if(-not $rejected){throw 'A transposed/emulated architecture received an extended budget'}
+}
+foreach($age in @(899,900,900.1,1800)) {
+    if((Test-SuiteKoreanLegacyCollectorWindow -Architecture 'arm64' -ElapsedSeconds $age) -ne ($age -le 900)){throw 'Extended ARM attempt was passed to the legacy collector'}
+    if(-not (Test-SuiteKoreanLegacyCollectorWindow -Architecture 'x64' -ElapsedSeconds $age)){throw 'Existing x64 collector routing changed'}
+}
+''')
+
+    def test_long_arm_failure_tail_is_bounded_and_preserves_original_and_existing_evidence(self):
+        self.run_gate('''
+$root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($root)
+try {
+    $source=Join-Path $root 'original.log';$target=Join-Path $root 'tail.log'
+    $bytes=[byte[]]::new(2097152);$bytes[$bytes.Length-1]=42;[IO.File]::WriteAllBytes($source,$bytes)
+    $record=Copy-SuiteKoreanServicingTail -Source $source -Destination $target
+    if($record.tailBytes -ne 1048576 -or -not $record.truncated -or $record.tailStart -ne 1048576 -or [IO.File]::ReadAllBytes($target)[1048575] -ne 42){throw 'Independent ARM diagnostics exceeded/lost its bounded tail'}
+    $rejected=$false;try{Copy-SuiteKoreanServicingTail -Source $source -Destination $target}catch{$rejected=$true}
+    if(-not $rejected -or (Get-Item -LiteralPath $source).Length -ne 2097152){throw 'Original/existing diagnostic evidence was overwritten'}
+}finally{Remove-Item -LiteralPath $root -Recurse -Force}
+''')
+
+    def test_controller_loop_uses_selected_deadline_at_the_observed_951_second_duration(self):
+        self.run_gate('''
+$loops=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.WhileStatementAst] -and $node.Condition.Extent.Text -ceq '$true'},$true))
+if($loops.Count -ne 1){throw 'Owned preparation wait loop missing or ambiguous'}
+$out=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($out)
+try {
+    foreach($row in @(@('arm64',0xAA64,951.6205443,$false),@('x64',0x8664,951.6205443,$true),@('arm64',0xAA64,1800.1,$true),@('x64',0x8664,599.9,$false))) {
+        $deadline=Get-SuiteKoreanPreparationDeadline -Architecture $row[0] -ProcessMachine 0 -NativeMachine $row[1] -StartedUtc ([DateTime]::UtcNow)
+        $clock=[pscustomobject]@{Elapsed=[pscustomobject]@{TotalMilliseconds=($row[2]*1000);TotalSeconds=$row[2]}}
+        $child=[pscustomobject]@{waits=0}
+        $child|Add-Member ScriptMethod WaitForExit {param($milliseconds) $this.waits++;return $true}
+        $timedOut=$false;$deadlineError='actual bounded preparation deadline';$failed=$false
+        try { Invoke-Expression $loops[0].Extent.Text } catch { $failed=$true;if($_.Exception.Message -cne $deadlineError){throw} }
+        if($failed -ne $row[3] -or $timedOut -ne $row[3]){throw ('Actual controller loop used the wrong architecture budget at '+$row[2]+' seconds')}
+        if($child.waits -ne $(if($row[3]){0}else{1})){throw 'Wait exceeded selected preparation budget'}
+    }
+}finally{Remove-Item -LiteralPath $out -Recurse -Force}
+''')
+
+    def test_worker_deadline_survives_json_string_or_typed_utc_timestamp_roundtrip(self):
+        self.run_gate('''
+$assignments=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$deadlineStart'},$true))
+if($assignments.Count -ne 1){throw 'Worker UTC timestamp assignment missing or ambiguous'}
+$started=[DateTime]::Parse('2026-10-17T00:00:00.1234567Z',$null,[Globalization.DateTimeStyles]::RoundtripKind)
+$original=[pscustomobject]@{preparationDeadline=[pscustomobject]@{startedUtc=$started.ToString('o')}}
+foreach($savedDeadline in @($original,($original|ConvertTo-Json|ConvertFrom-Json))) {
+    Invoke-Expression $assignments[0].Extent.Text
+    $deadline=Get-SuiteKoreanPreparationDeadline -Architecture 'arm64' -ProcessMachine 0 -NativeMachine 0xAA64 -StartedUtc $deadlineStart
+    if($deadlineStart.Kind -ne [DateTimeKind]::Utc -or $deadline.startedUtc -cne $started.ToString('o')){throw 'UTC deadline lost its kind or precision during JSON replay'}
+}
+''')
+
+    def test_controller_deadline_accepts_exact_utc_instants_and_rejects_changed_or_missing_ticks_in_each_timezone(self):
+        for timezone in ('UTC', 'America/Chicago'):
+            with self.subTest(timezone=timezone):
+                self.run_gate('''
+$helpers=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-SuiteKoreanUtcTicks'},$true))
+foreach($helper in $helpers){Invoke-Expression $helper.Extent.Text}
+$guards=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.Contains('$record.source.sourceCommit') -and $node.Clauses[0].Item1.Extent.Text.Contains('$record.profile.registered')},$true))
+if($guards.Count -ne 1){throw 'Actual controller readiness comparison missing or ambiguous'}
+$started=[DateTime]::Parse('2026-10-17T07:39:17.8129419Z',$null,[Globalization.DateTimeStyles]::RoundtripKind)
+$Architecture='arm64';$controllerHost=@{processMachine=0;nativeMachine=0xAA64};$head=@('a'*40)
+$deadline=Get-SuiteKoreanPreparationDeadline $Architecture 0 0xAA64 $started
+$original=[pscustomobject]@{source=[pscustomobject]@{sourceCommit=$head[0];job='windows-suite';architecture='arm64'};
+    preparationDeadline=[pscustomobject]@{budgetSeconds=1800;startedUtc=$deadline.startedUtc;expiresUtc=$deadline.expiresUtc};
+    nativeMachine=0xAA64;controllerMachine=0;profile=[pscustomobject]@{component=[pscustomobject]@{machine=0xAA64};registered=$true};
+    suiteOnly=$true;productInputVerified=$false;storeQualified=$false;capabilityAfter='Installed';restartNeeded=$false;userLanguageConfigured=$true}
+$json=$original|ConvertTo-Json -Depth 6
+foreach($record in @($original,($json|ConvertFrom-Json))) {
+    try{Invoke-Expression $guards[0].Extent.Text}catch{throw ('Actual controller rejected identical UTC deadline after JSON replay: '+$_.Exception.Message)}
+}
+foreach($field in @('startedUtc','expiresUtc')) {
+    foreach($mutation in @('plus-tick','minus-tick','null','missing','unspecified','local')) {
+        $record=$json|ConvertFrom-Json
+        $value=[DateTime]::Parse($original.preparationDeadline.$field,$null,[Globalization.DateTimeStyles]::RoundtripKind)
+        switch($mutation) {
+            'plus-tick'{$record.preparationDeadline.$field=$value.AddTicks(1)}
+            'minus-tick'{$record.preparationDeadline.$field=$value.AddTicks(-1)}
+            'null'{$record.preparationDeadline.$field=$null}
+            'missing'{$record.preparationDeadline.PSObject.Properties.Remove($field)}
+            'unspecified'{$record.preparationDeadline.$field=[DateTime]::SpecifyKind($value,[DateTimeKind]::Unspecified)}
+            'local'{$record.preparationDeadline.$field=$value.ToLocalTime()}
+        }
+        $rejected=$false;try{Invoke-Expression $guards[0].Extent.Text}catch{$rejected=$true}
+        if(-not $rejected){throw ('Actual controller accepted changed/missing UTC ticks: '+$field+' '+$mutation)}
+    }
+}
+$record=$json|ConvertFrom-Json;$record.preparationDeadline.budgetSeconds=1801
+$rejected=$false;try{Invoke-Expression $guards[0].Extent.Text}catch{$rejected=$true}
+if(-not $rejected){throw 'Controller accepted a weaker preparation budget'}
+''', timezone=timezone)
+
+    def test_arm_timeout_preserves_original_error_and_tails_when_cleanup_or_receipt_fails(self):
+        self.run_gate('''
+$catches=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.CatchClauseAst] -and $node.Body.Extent.Text.Contains('$originalControllerFailure=$_')},$true))
+if($catches.Count -ne 1){throw 'Owned controller failure handler missing or ambiguous'}
+$body=($catches[0].Body.Statements|ForEach-Object {$_.Extent.Text}) -join "`n"
+foreach($failureMode in @('cleanup','receipt','none')) {
+    $Architecture='arm64';$controllerHost=@{processMachine=0;nativeMachine=0xAA64};$deadline=@{budgetSeconds=1800}
+    $clock=[pscustomobject]@{Elapsed=[pscustomobject]@{TotalSeconds=1800}};$binding=@{};$timedOut=$true
+    $started=[DateTime]::UtcNow;$child=[pscustomobject]@{HasExited=$false;StartTime=$started;FailureMode=$failureMode}
+    $child|Add-Member ScriptMethod Kill {if($this.FailureMode -ceq 'cleanup'){throw 'cleanup race'}; $this.HasExited=$true}
+    $child|Add-Member ScriptMethod WaitForExit {param($milliseconds) return $true}
+    $script:tails=0;$script:receipts=0
+    function Save-SuiteArm64FailureDiagnostics {param($HostRecord,$Deadline) $script:tails++}
+    function Save-SuiteObservation {param($Name,$Value) $script:receipts++;if($failureMode -ceq 'receipt'){throw 'receipt write failed'}}
+    $message=$null
+    try { throw 'original preparation timeout' }
+    catch { try { Invoke-Expression $body } catch { $message=$_.Exception.Message } }
+    if($message -cne 'original preparation timeout' -or $script:tails -ne 1 -or $script:receipts -ne 1){throw ('Original timeout/tails were replaced by '+$failureMode+' failure')}
+}
+''')
+
+    def test_hidden_windows_ancestor_is_inspected_with_force_and_reparse_still_rejected(self):
+        self.run_gate('''
+$root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+$script:hiddenAncestor=Join-Path $root 'AppData';$nested=Join-Path $script:hiddenAncestor 'nested'
+[void][IO.Directory]::CreateDirectory($nested)
+$source=Join-Path $nested 'source.log';[IO.File]::WriteAllText($source,'original')
+$attributes=[IO.File]::GetAttributes($script:hiddenAncestor)
+if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){[IO.File]::SetAttributes($script:hiddenAncestor,($attributes -bor [IO.FileAttributes]::Hidden))}
+$script:observedHiddenForce=$false;$script:simulateReparse=$false
+function Get-Item {
+    param([string]$LiteralPath,[switch]$Force)
+    if($LiteralPath -ceq $script:hiddenAncestor) {
+        if(-not $Force){throw 'Could not find ordinary hidden AppData ancestor without Force'}
+        $script:observedHiddenForce=$true
+        if($script:simulateReparse){return [pscustomobject]@{Attributes=([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::ReparsePoint)}}
+    }
+    Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath -Force:$Force
+}
+try {
+    Assert-SuitePlainPath $source
+    if(-not $script:observedHiddenForce){throw 'Hidden ancestor was not inspected with Force'}
+    $script:simulateReparse=$true;$rejected=$false
+    try{Assert-SuitePlainPath $source}catch{if($_.Exception.Message -notlike '*reparse point*'){throw};$rejected=$true}
+    if(-not $rejected){throw 'Hidden reparse ancestor accepted'}
+    if([IO.File]::ReadAllText($source) -cne 'original'){throw 'Path inspection changed original bytes'}
+}finally{[IO.File]::SetAttributes($script:hiddenAncestor,$attributes);Remove-Item -LiteralPath $root -Recurse -Force}
 ''')
 
 if __name__ == '__main__': unittest.main()

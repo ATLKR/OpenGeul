@@ -148,48 +148,44 @@ class NativeDiagnosticsTests(unittest.TestCase):
     def test_cleanup_snapshots_before_termination_and_archives_before_profile_removal(self):
         import shutil
         from types import SimpleNamespace
+        from suite.tests.test_native_cleanup import Job
         native = importlib.import_module('native')
-        calls, alive = [], [True]
+        job = Job()
         (self.profile / 'crash').mkdir()
         (self.profile / 'crash' / 'own.dmp').write_bytes(b'owned crash')
         evidence = self.root / 'evidence'
-        class Witness:
-            def snapshot(self):
-                calls.append(('snapshot', alive[0]))
-                return [{'pid': 7, 'image': 'soffice.bin', 'creationTime': 123,
-                         'alive': alive[0], 'exitCode': 259 if alive[0] else 1}]
-            def close(self): calls.append(('witness-close',))
-        def terminate():
-            calls.append(('terminate',))
-            alive[0] = False
-        process = SimpleNamespace(open_diagnostic_witnesses=lambda: Witness(),
-            poll=lambda: None if alive[0] else 1, terminate=terminate,
-            wait=lambda timeout: 1, close=lambda: calls.append(('process-close',)))
-        backend = native.UnoBackend(self.payload / 'Office')
-        backend.process = process
-        backend.profile = SimpleNamespace(name=str(self.profile), cleanup=lambda: shutil.rmtree(self.profile))
+        backend = job.backend()
+        def remove_profile():
+            manifest = json.loads(next(evidence.glob('*/manifest.json')).read_text())
+            self.assertTrue(manifest['archiveComplete'])
+            self.assertTrue(next(evidence.glob('*/crash/own.dmp')).is_file())
+            shutil.rmtree(self.profile)
+        backend.profile = SimpleNamespace(name=str(self.profile), cleanup=remove_profile)
         with patch.dict(os.environ, {'OPENGEUL_SUITE_DIAGNOSTICS': str(evidence)}), redirect_stderr(io.StringIO()):
-            backend.cleanup()
-        self.assertLess(calls.index(('snapshot', True)), calls.index(('terminate',)))
-        self.assertLess(calls.index(('snapshot', False)), calls.index(('process-close',)))
+            proof = job.run_cleanup(backend)
+        self.assertTrue(proof['success'])
+        self.assertFalse(any(row[0] == 'force' for row in job.calls))
         self.assertFalse(self.profile.exists())
         manifests = list(evidence.glob('*/manifest.json'))
         self.assertEqual(1, len(manifests))
+        self.assertEqual('owned-office-native-diagnostics', json.loads(manifests[0].read_text())['kind'])
         self.assertEqual('crash/own.dmp', json.loads(manifests[0].read_text())['files'][0]['path'])
+        receipt = manifests[0].parent / 'shutdown.json'
+        self.assertEqual(proof, json.loads(receipt.read_text()))
+        item = next(row for row in json.loads(manifests[0].read_text())['files'] if row['path'] == 'shutdown.json')
+        import hashlib
+        self.assertEqual(item['bytes'], receipt.stat().st_size)
+        self.assertEqual(item['sha256'], hashlib.sha256(receipt.read_bytes()).hexdigest())
 
     def test_cleanup_with_diagnostics_disabled_preserves_process_lifecycle(self):
-        from types import SimpleNamespace
-        native = importlib.import_module('native')
-        calls = []
-        process = SimpleNamespace(poll=lambda: None, terminate=lambda: calls.append('terminate'),
-            wait=lambda timeout: calls.append('wait'), close=lambda: calls.append('close'),
-            open_diagnostic_witnesses=lambda: self.fail('disabled diagnostics queried process'))
-        backend = native.UnoBackend(self.payload / 'Office')
-        backend.process = process
-        backend.profile = SimpleNamespace(cleanup=lambda: calls.append('profile'))
-        with patch.dict(os.environ, {}, clear=True):
-            backend.cleanup()
-        self.assertEqual(['terminate', 'wait', 'close', 'profile'], calls)
+        from suite.tests.test_native_cleanup import Job
+        job = Job()
+        with patch.dict(os.environ, {}, clear=True), patch.object(self.module, 'create_diagnostics',
+                side_effect=AssertionError('disabled optional diagnostics were created')):
+            proof = job.run_cleanup(job.backend())
+        self.assertTrue(proof['success'])
+        self.assertTrue(job.closed and job.profile_removed)
+        self.assertEqual({row[1] for row in job.calls if row[0] == 'retain'}, {10,20})
 
     def test_style_configuration_failure_has_preparation_witness_and_original_cause(self):
         from types import SimpleNamespace as NS

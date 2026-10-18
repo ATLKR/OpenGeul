@@ -135,7 +135,14 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
             record['stage'] = 'assert-korean-tabbed-ui'
             record.update(require_korean_tabs(snapshot, office_pid, child))
         record['stage'] = 'close-document'
-        native.close_document(api, process, hwnd, child, record)
+        calc_proof = None
+        if module == 'calc':
+            baseline = native.calc_model_barrier.baseline_from_ooxml(original.read_bytes())
+            calc_proof = native._verified_saved_calc_close_proof(suite, output, copy, baseline,
+                                                               expected_sha256=before, role='korean-ui-copy')
+            native.close_document(api, process, hwnd, child, record, calc_close_proof=calc_proof)
+        else:
+            native.close_document(api, process, hwnd, child, record)
         native.close_home(api, process, record)
         record['stage'] = 'wait-engine-exit'
         record['officeExited'] = engine.exited(10)
