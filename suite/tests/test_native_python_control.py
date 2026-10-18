@@ -235,3 +235,112 @@ class CommandEnvironmentContractTests(unittest.TestCase):
         ps=PowerShellControlTests()
         with tempfile.TemporaryDirectory() as tmp:
             ps.ps("$case=@(Get-PythonControlPropertyCases)[2];$paths=New-PythonControlMeasurementPaths '"+tmp+"' $case;Set-Content ($paths.prefix+'.command.json') 'original receipt';$rejected=$false;try{New-PythonControlMeasurementPaths '"+tmp+"' $case|Out-Null}catch{$rejected=$true};if(-not $rejected -or (Get-Content ($paths.prefix+'.command.json') -Raw).Trim() -cne 'original receipt'){throw 'Existing receipt accepted or altered'}")
+
+class ActualControlThreeAdmissionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import json
+        SPEC.loader.exec_module(control)
+        cls.fixture=json.loads((ROOT/'suite/diagnostics/native-python/control3-baseline-fixture.json').read_text())
+        cls.log='\n'.join(row['raw'] for row in cls.fixture['lines'])
+        cls.inventory=cls.fixture['inventory']
+
+    def test_actual_tracker_wrappers_bind_child_tools_and_separate_freeze_helper(self):
+        binding=control.bind_tools(self.log,'baseline',self.inventory)
+        self.assertEqual(len(binding),2)
+        self.assertTrue(hasattr(control,'tool_commands'),'Executable-token parser missing')
+        commands=control.tool_commands(self.log)
+        self.assertTrue(any(c['origin']=='tracker-child' for c in commands))
+        self.assertTrue(all('.exe /' not in c['path'] for c in commands))
+        self.assertTrue(any('/x64/' in c['path'].replace('\\','/').lower() and ' /Od ' in c['arguments'] for c in commands))
+        wrapped=next(row['raw'] for row in self.fixture['lines'] if 'Tracker.exe' in row['raw'] and 'HostX86\\arm64\\CL.exe' in row['raw'])
+        bad=wrapped.replace(self.inventory['toolsRoot'],'C:\\UnselectedVS')
+        with self.assertRaises(ValueError):control.bind_tools(self.log.replace(wrapped,bad),'baseline',self.inventory)
+
+
+    def test_exact_observed_unicode_heap_site_is_variant_never_original_reproduction(self):
+        proof=control.admit_build(self.log,1,'baseline',self.inventory)
+        self.assertEqual(proof['status'],'observed-heap-site-variant')
+        self.assertFalse(proof['originalSiteReproduced']);self.assertFalse(proof['causalCorrectionProven'])
+        self.assertEqual(proof['observedHeapSite'],'Objects/unicodetype_db.h(4295)')
+        for bad in [self.log.replace('unicodetype_db.h(4295)','unicodetype_db.h(4296)'),self.log.replace('unicodetype_db.h(4295)','other.h(4295)'),self.log.replace('1 Error(s)','11 Error(s)'),self.log+'\nerror MSB4018: unrelated',self.log+'\nHacl_Hash_SHA2.c(243): fatal error C1002: compiler is out of heap space in pass 2']:
+            with self.assertRaises(ValueError):control.admit_build(bad,1,'baseline',self.inventory)
+        for code in [2,3221225477]:
+            with self.assertRaises(ValueError):control.admit_build(self.log,code,'baseline',self.inventory)
+
+    def candidate_model(self):
+        # Test-only routing model; no native candidate execution claim.
+        import re
+        rows=[]
+        for row in self.fixture['lines']:
+            text=row['raw']
+            if re.search(r'fatal error|32-bit linker|restarting link|FAILED|1 Error\(s\)',text,re.I):continue
+            rows.append(re.sub(r'HostX86([\\/])arm64',r'Hostarm64\1arm64',text,flags=re.I))
+        return '\n'.join(rows)+'\nBuild succeeded.\n0 Error(s)'
+
+    def test_candidate_product_flags_exclude_only_authentic_x64_freeze_helper(self):
+        log=self.candidate_model()
+        proof=control.admit_build(log,0,'candidate',self.inventory)
+        self.assertEqual(proof['status'],'passed')
+        self.assertTrue(proof['buildHostHelpers'])
+        self.assertTrue(any('/Od' in c['arguments'] for c in proof['buildHostHelpers']))
+        borrowed=log.replace('/GL','').replace('HostX86\\x64\\CL.exe /c','HostX86\\x64\\CL.exe /c /GL')
+        for bad in [borrowed,log.replace('/O2','/Od'),log.replace('Hostarm64','HostX86'),log.replace('_freeze_module','other_helper'),log.replace('VC\\Tools\\MSVC','Different\\Tools\\MSVC')]:
+            with self.assertRaises(ValueError):control.admit_build(bad,0,'candidate',self.inventory)
+
+    def test_actual_product_link_inputs_exclude_tracking_and_property_tokens(self):
+        self.assertTrue(hasattr(control,'link_input_evidence'),'Scoped product Link input parser missing')
+        expected=control.expected_inputs(ROOT/'suite/diagnostics/native-python')
+        evidence=control.link_input_evidence(self.log,self.inventory['productSourceRoot'],expected)
+        self.assertEqual(evidence['inputCount'],235)
+        polluted=self.log+'\npythoncore\\%(Filename).res\npythoncore\\pythoncore.vcxproj.res\npythoncore\\a.obj|b.obj'
+        self.assertEqual(control.link_input_evidence(polluted,self.inventory['productSourceRoot'],expected)['inputs'],evidence['inputs'])
+        for bad in [self.log.replace('getpath.obj"','extra.obj"'),self.log.replace('getpath.obj"','getpath.obj" \"extra.obj\"')]:
+            with self.assertRaises(ValueError):control.link_input_evidence(bad,self.inventory['productSourceRoot'],expected)
+
+    def test_variant_finalizer_retains_candidate_feasibility_and_fails_strict_workflow(self):
+        PowerShellControlTests().ps("$r=[ordered]@{passed=$false;causalCorrectionProven=$false;stage='runtime'};$failed=$false;try{Complete-PythonControlResult $r @{status='observed-heap-site-variant';originalSiteReproduced=$false} @{status='passed'} @{testsPassed=$true}}catch{$failed=$true};if(-not $failed -or $r.passed -or $r.causalCorrectionProven -or $r.originalSiteReproduced -or -not $r.candidateFeasible){throw 'Variant admitted as original causal success'}")
+
+class ReviewedActualParserGapTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import json
+        SPEC.loader.exec_module(control)
+        cls.fixture=json.loads((ROOT/'suite/diagnostics/native-python/control3-baseline-fixture.json').read_text())
+        cls.log='\n'.join(r['raw'] for r in cls.fixture['lines']);cls.inventory=cls.fixture['inventory']
+
+    def test_unknown_tracker_child_rejects_and_actual_sdk_rc_scope_is_retained(self):
+        bad=self.log.replace('HostX86\\arm64\\CL.exe"','HostX86\\arm64\\unknown.exe"')
+        with self.assertRaises(ValueError):control.admit_build(bad,1,'baseline',self.inventory)
+        proof=control.admit_build(self.log,1,'baseline',self.inventory)
+        self.assertTrue(proof['resourceCompilers'])
+        self.assertTrue(all(c['path'].lower().endswith('rc.exe') for c in proof['resourceCompilers']))
+        for bad in [self.log.replace('10.0.26100.0\\x86\\rc.exe','10.0.99999.0\\x86\\rc.exe'),self.log.replace('python_nt.res"','other.res"')]:
+            with self.assertRaises(ValueError):control.admit_build(bad,1,'baseline',self.inventory)
+
+    def test_each_product_cl_and_link_preserves_its_own_required_flags(self):
+        import re
+        def candidate_model(log):
+            rows=[]
+            for text in log.split('\n'):
+                if re.search(r'fatal error|32-bit linker|restarting link|FAILED|1 Error\(s\)',text,re.I):continue
+                rows.append(re.sub(r'HostX86([\\/])arm64',r'Hostarm64\1arm64',text,flags=re.I))
+            return '\n'.join(rows)+'\nBuild succeeded.\n0 Error(s)'
+        self.assertEqual(control.admit_build(candidate_model(self.log),0,'candidate',self.inventory)['status'],'passed')
+        for rows,flags in [({230271,230273},['/O2','/GL','/MP','/Zm200']),({298312},['/LTCG','/MACHINE:ARM64'])]:
+            for flag in flags:
+                changed='\n'.join(r['raw'].replace(flag,'') if r['physicalLf'] in rows else r['raw'] for r in self.fixture['lines'])
+                with self.assertRaises(ValueError,msg=flag+' baseline'):control.admit_build(changed,1,'baseline',self.inventory)
+                with self.assertRaises(ValueError,msg=flag+' candidate'):control.admit_build(candidate_model(changed),0,'candidate',self.inventory)
+
+    def test_link_argv_counts_unquoted_inputs_and_rejects_relative_extra_duplicate_response(self):
+        expected=control.expected_inputs(ROOT/'suite/diagnostics/native-python');e=control.link_input_evidence(self.log,self.inventory['productSourceRoot'],expected)
+        first=next(r['raw'] for r in self.fixture['lines'] if r['physicalLf']==298312)
+        for suffix in [' extra.obj',' "extra.obj"',' '+e['absoluteInputs'][0],' @unretained.rsp',' "@unretained.rsp"']:
+            changed=self.log.replace(first,first.rstrip('\r')+suffix+'\r')
+            with self.assertRaises(ValueError,msg=suffix):control.link_input_evidence(changed,self.inventory['productSourceRoot'],expected)
+        last=next(r['raw'] for r in self.fixture['lines'] if r['physicalLf']==298546)
+        moved=last.replace(' (TaskId:210)','')+'\n                     extra.obj (TaskId:210)\r'
+        with self.assertRaises(ValueError):control.link_input_evidence(self.log.replace(last,moved),self.inventory['productSourceRoot'],expected)
+        unquoted=self.log.replace('"'+e['absoluteInputs'][0]+'"',e['absoluteInputs'][0],1)
+        self.assertEqual(control.link_input_evidence(unquoted,self.inventory['productSourceRoot'],expected)['inputCount'],235)

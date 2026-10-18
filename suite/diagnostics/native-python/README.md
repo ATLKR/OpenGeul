@@ -15,8 +15,11 @@ uses that property alone. If unresolved, the candidate explicitly sets condition
 CLToolPath/LinkToolPath for ARM64 and reports this fallback mechanism separately.
 The authentic x64 freeze-helper mapping remains. Actual absolute compiler/linker paths and evaluated VCToolsInstallDir/version
 are bound to inventoried pre/post-build PE/hash/version identities; wrong roots
-and toolsets fail admission. Property names alone never admit the result. Baseline requires direct MSBuild exit1, exactly one summary error and only the
-original HACL C1002 diagnostic (repeated summary allowed). Crashes, unrelated
+and toolsets fail admission. Property names alone never admit the result. Baseline requires direct MSBuild exit1, exactly one summary error and only a
+known heap diagnostic (repeated summary allowed). Original HACL243 remains the
+only exact original-site reproduction. The separately observed, source-bound
+Objects/unicodetype_db.h4295 variant can permit candidate measurement, while
+originalSiteReproduced, causal correction and strict workflow success stay false. Crashes, unrelated
 errors and a zero-exit direct linker cannot reproduce the baseline. Candidate
 feasibility can be retained after a successful baseline, but overall workflow
 success requires exact baseline reproduction plus candidate native build/KAT.
@@ -68,3 +71,21 @@ arm64 remain distinct on Windows. Each measurement rejects prior output before
 launch and binds its receipt to the current exact argv. The earlier control2
 measured default/x86/uppercase ARM64 as x86; its lowercase request reused an
 uppercase path and did not establish a separate property result.
+
+Actual executable tokens are parsed separately from Tracker wrappers; the wrapper
+/c child tool is independently bound. ARM64 product flags are checked separately
+from unchanged same-VS x64 _freeze_module output commands, whose authentic /Od
+flags remain scoped as helper evidence. Link input closure uses only the direct
+ARM64 python313.dll command and contiguous object/resource continuation lines,
+with all 235 inputs bound to the product object directory. Property tables and
+Tracker /r aggregate tokens cannot supply product input evidence. Raw Link span
+lines, physical LF numbers and a byte-preserving span hash are retained.
+
+Tracker children are parsed before basename classification: unknown executables
+fail admission. The existing SDK resource compiler is separately scoped to the
+retained SdkBinPath, SDK10.0.26100.0, and exact python_nt.rc/python_nt.res paths.
+Each product CL invocation must carry its own /O2 /GL /MP /Zm200; each product
+Link must carry /LTCG /MACHINE:ARM64. Windows argv tokenization accounts for
+unquoted and relative object/resource operands, duplicates and response tokens.
+Unsupported response inputs and operands fail closed. The diagnostic task-end
+marker closes the expanded Link span so continuation operands cannot disappear.

@@ -37,7 +37,7 @@ function New-PythonControlMeasurementPaths([string]$Out,$Case) {
 }
 
 function Complete-PythonControlResult($Receipt,$Baseline,$Candidate,$Runtime) {
-    $Receipt.passed=$false;$Receipt.causalCorrectionProven=$false
+    $Receipt.passed=$false;$Receipt.causalCorrectionProven=$false;$Receipt.originalSiteReproduced=$Baseline.status -ceq 'reproduced'
     $Receipt.candidateFeasible=$Candidate.status -ceq 'passed' -and $Runtime.testsPassed -eq $true
     if($Baseline.status -cne 'reproduced' -or -not $Receipt.candidateFeasible) {
         $Receipt.stage='non-reproduction-or-incomplete-pair'
@@ -89,7 +89,7 @@ function Invoke-PythonControl([string]$ControlOutput,[string]$ControlWork,[strin
     }
     $paths=New-BuildDirectories $ControlWork $ControlOutput;$work=$paths.work;$out=$paths.output
     $oldBudget=$script:NativeEngineBuildBudget
-    $r=[ordered]@{schemaVersion=1;kind='native-cpython-host-ab';passed=$false;causalCorrectionProven=$false;engineQualified=$false;fullExtensionCoverage=$false;stage='native-host';startedUtc=[DateTime]::UtcNow.ToString('o');scopeDifferences=@('Minimal pcbuild.sln pythoncore target, then unchanged python.vcxproj Build interpreter target; surrounding make-j4 Office workload absent.','Original effective generated sources and objects not retained: source-pinned reconstruction.','x64 _freeze_module solution mapping remains authentic build-host helper; no x64 product fallback.');propertySupport=$null}
+    $r=[ordered]@{schemaVersion=1;kind='native-cpython-host-ab';passed=$false;causalCorrectionProven=$false;originalSiteReproduced=$false;engineQualified=$false;fullExtensionCoverage=$false;stage='native-host';startedUtc=[DateTime]::UtcNow.ToString('o');scopeDifferences=@('Minimal pcbuild.sln pythoncore target, then unchanged python.vcxproj Build interpreter target; surrounding make-j4 Office workload absent.','Original effective generated sources and objects not retained: source-pinned reconstruction.','x64 _freeze_module solution mapping remains authentic build-host helper; no x64 product fallback.');propertySupport=$null}
     try {
         $script:NativeEngineBuildBudget=New-NativeBuildBudget -DeadlineUtc $ControlDeadline -MaximumMinutes 80
         $r.budget=$script:NativeEngineBuildBudget.record;$r.host=Get-NativeBuildHost

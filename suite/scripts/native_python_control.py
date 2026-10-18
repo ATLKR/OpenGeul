@@ -59,6 +59,109 @@ def windows_path(value):
     return ntpath.normpath(value).replace('\\','/').rstrip('/').casefold()
 
 
+def windows_arguments(text):
+    """Tokenize non-executable Windows argv with CRT backslash/quote rules."""
+    text=re.sub(r'\s+\(TaskId:\d+\)\s*$','',text);out=[];i=0
+    while i<len(text):
+        while i<len(text) and text[i].isspace():i+=1
+        if i==len(text):break
+        word=[];quoted=False
+        while i<len(text) and (quoted or not text[i].isspace()):
+            if text[i]=='\\':
+                start=i
+                while i<len(text) and text[i]=='\\':i+=1
+                count=i-start
+                if i<len(text) and text[i]=='"':
+                    word.extend('\\'*(count//2))
+                    if count%2:word.append('"');i+=1;continue
+                else:word.extend('\\'*count);continue
+            if text[i]=='"':
+                if quoted and i+1<len(text) and text[i+1]=='"':word.append('"');i+=2;continue
+                quoted=not quoted;i+=1;continue
+            word.append(text[i]);i+=1
+        if quoted:raise ValueError('Unterminated Windows argv quote')
+        out.append(''.join(word))
+    return out
+
+
+def tool_commands(log):
+    """Parse actual executable tokens; Tracker metadata is never part of a tool path."""
+    lines=log.split('\n');commands=[]
+    first=re.compile(r'^\s*(?:\d+(?::\d+)?>)?\s*"?([A-Za-z]:[\\/][^\r\n]*?\.exe)"?\s+(/[^\r\n]*)',re.I)
+    task_end=re.compile(r'\(TaskId:\d+\)\s*$')
+    for i,line in enumerate(lines):
+        match=first.match(line)
+        if not match:continue
+        path,args=match.groups();origin='direct';wrapper=None
+        if path.replace('\\','/').rsplit('/',1)[-1].lower()=='tracker.exe':
+            child=re.search(r'\s/c\s+"([A-Za-z]:[^"\r\n]+\.exe)"\s*(.*)',args,re.I)
+            if not child:raise ValueError('Unparsed Tracker child executable')
+            wrapper=path;path,args=child.groups();origin='tracker-child'
+        if origin=='direct' and path.replace('\\','/').rsplit('/',1)[-1].lower() not in ['cl.exe','link.exe','rc.exe']:continue
+        raw=[line];end=i+1;terminated=bool(task_end.search(line))
+        if path.lower().endswith('link.exe') and not terminated:
+            while end<len(lines):
+                next_line=lines[end]
+                if first.match(next_line) or re.match(r'^\s*(?:Tracking command:|Task Parameter:|PythonControl |Build |Done )',next_line):break
+                raw.append(next_line);args+='\n'+next_line;end+=1
+                if task_end.search(next_line):terminated=True;break
+        commands.append({'path':path,'arguments':args,'origin':origin,'wrapper':wrapper,'physicalLfStart':i+1,'physicalLfEnd':end,'rawLines':raw,'expandedCommandTerminated':terminated})
+    return commands
+
+
+def scoped_commands(log, inventory):
+    root=windows_path(inventory['toolsRoot']);product=[];helpers=[];resources=[]
+    source=inventory.get('productSourceRoot')
+    for command in tool_commands(log):
+        path=windows_path(command['path'])
+        if re.search(r'/host[^/]+/arm64/(?:cl|link)\.exe$',path):
+            product.append(command);continue
+        if path.endswith('/rc.exe'):
+            import ntpath
+            bins={windows_path(p.strip()) for p in re.findall(r'^\s*SdkBinPath = ([^\r\n]+)',log,re.M)}
+            if windows_path(ntpath.dirname(path)) not in bins or not re.search(r'/10\.0\.26100\.0/(?:x86|arm64)/rc\.exe$',path):
+                raise ValueError('Resource compiler is outside selected pinned SDK bin scope')
+            tokens=windows_arguments(command['arguments'])
+            outputs=[t[3:] for t in tokens if t.lower().startswith('/fo')]
+            sources=[t for t in tokens if t.lower().endswith('.rc') and not t.startswith('/')]
+            expected_output=source+'/PCbuild/obj/313arm64_Release/pythoncore/python_nt.res' if source else ''
+            if not source or len(outputs)!=1 or windows_path(outputs[0])!=windows_path(expected_output) or len(sources)!=1 or windows_path(ntpath.join(source,'PCbuild',sources[0]))!=windows_path(source+'/PC/python_nt.rc'):
+                raise ValueError('Resource compiler input/output is outside authentic product resource scope')
+            resources.append(dict(command,scope='selected SDK10.0.26100.0 resource tool; exact python_nt resource',resourceOutput=outputs[0],resourceSource=sources[0]));continue
+        helper=re.fullmatch(re.escape(root)+r'/bin/host(?:x86|x64|arm64)/x64/(cl|link)\.exe',path)
+        if not helper:raise ValueError('Unbound compiler/linker outside product or authentic helper scope')
+        flag=r'/Fo"([^"\r\n]+)"' if helper[1]=='cl' else r'/OUT:"([^"\r\n]+)"'
+        target=re.search(flag,command['arguments'],re.I)
+        suffix='PCbuild/obj/313amd64_Release/_freeze_module' if helper[1]=='cl' else 'PCbuild/amd64/_freeze_module.exe'
+        if not source or not target or windows_path(target[1])!=windows_path(source+'/'+suffix):
+            raise ValueError('x64 build helper output is outside authentic _freeze_module scope')
+        helpers.append(dict(command,scope='unchanged x64 _freeze_module build host; same selected VS root'))
+    return product,helpers,resources
+
+
+def link_input_evidence(log, source_root, expected):
+    links=[c for c in tool_commands(log) if c['origin']=='direct' and re.search(r'/host[^/]+/arm64/link\.exe$',windows_path(c['path']))]
+    if len(links)!=1:raise ValueError('Exactly one actual expanded ARM64 product Link command required')
+    command=links[0];args=command['arguments']
+    if not command['expandedCommandTerminated']:raise ValueError('Expanded Link argv has no terminal task boundary')
+    output=re.search(r'/OUT:"([^"\r\n]+)"',args,re.I)
+    if not output or windows_path(output[1])!=windows_path(source_root+'/PCbuild/arm64/python313.dll'):
+        raise ValueError('Actual Link output differs from expected product DLL')
+    paths=[]
+    for token in windows_arguments(args):
+        if token.startswith('@'):raise ValueError('Unparsed Link response input is not expanded evidence')
+        if token.startswith('/'):
+            if re.search(r'\.(?:obj|res)$',token,re.I):raise ValueError('Unsupported Link option embeds object/resource input')
+            continue
+        if token.lower().endswith(('.obj','.res')):paths.append(token)
+        elif not token.lower().endswith('.lib'):raise ValueError('Unparsed Link operand')
+    import ntpath
+    expected_root=windows_path(source_root+'/PCbuild/obj/313arm64_Release/pythoncore')
+    if any(windows_path(ntpath.dirname(p))!=expected_root for p in paths):raise ValueError('Link input escaped product object root')
+    names=[ntpath.basename(p).lower() for p in paths];check_inputs(names,expected)
+    return {'inputCount':len(names),'inputs':names,'absoluteInputs':paths,'physicalLfStart':command['physicalLfStart'],'physicalLfEnd':command['physicalLfEnd'],'rawLines':command['rawLines'],'rawSpanSha256':hashlib.sha256('\n'.join(command['rawLines']).encode()).hexdigest(),'rawSpanConvention':'Inclusive physical LF lines joined by LF, excluding final LF; CR bytes preserved.'}
+
+
 def bind_tools(log, case, inventory):
     if not inventory:raise ValueError('Actual tool inventory binding required')
     root=windows_path(inventory['toolsRoot'])
@@ -67,13 +170,10 @@ def bind_tools(log, case, inventory):
     host='hostx86' if case=='baseline' else 'hostarm64'
     observed={windows_path(t['path']):t for t in inventory['observedTools']}
     expected={windows_path(t['path']):t for t in inventory['tools']}
-    matches=re.findall(r'^\s*(?:\d+(?::\d+)?>)?\s*"?([A-Za-z]:[\\/][^\r\n]*?[\\/](?:CL|link)\.exe)"?\s+/',log,re.I|re.M)
+    product,_,_=scoped_commands(log,inventory)
     selected=[]
-    for path in matches:
-        normalized=windows_path(path)
-        # Original solution has an x64 freeze helper; only ARM64-target invocations bind this arm.
-        if not re.search(r'/host[^/]+/arm64/(?:cl|link)\.exe$',normalized):continue
-        selected.append(normalized)
+    for command in product:
+        normalized=windows_path(command['path']);selected.append(normalized)
         if normalized not in expected or not normalized.startswith(root+'/bin/'+host+'/arm64/'):
             raise ValueError('Emitted tool path differs from selected inventoried root/host')
     proof=[]
@@ -100,28 +200,39 @@ def admit_build(log, code, case, inventory=None):
     binding=bind_tools(log,case,inventory)
     summaries=re.findall(r'^\s*(\d+) Error\(s\)\s*$',log,re.M)
     diagnostics=[line for line in log.splitlines() if re.search(r'\berror(?:\s+[A-Za-z]+\d+)?\s*:',line,re.I)]
+    product,helpers,resources=scoped_commands(log,inventory)
     log=log.replace('\\','/')
     host='HostX86' if case=='baseline' else 'Hostarm64'
-    commands='\n'.join(line for line in log.splitlines() if re.search(r'(?:^|/)(?:CL|link)\.exe"?\s+/',line,re.I))
+    commands='\n'.join(c['path'].replace('\\','/')+' '+c['arguments'] for c in product)
     for tool in ['CL.exe','link.exe']:
         if not re.search(re.escape(host)+r'/arm64/'+re.escape(tool),commands,re.I):
             raise ValueError('Actual selected '+host+' '+tool+' missing')
-    for flag in ['/O2','/GL','/MP','/Zm200','/LTCG','/MACHINE:ARM64']:
-        if not re.search(re.escape(flag)+r'(?=\s|$)',commands,re.I): raise ValueError('Missing '+flag)
+    for command in product:
+        tokens={t.casefold() for t in windows_arguments(command['arguments'])}
+        flags=['/o2','/gl','/mp','/zm200'] if command['path'].lower().endswith('cl.exe') else ['/ltcg','/machine:arm64']
+        if any(flag not in tokens for flag in flags):raise ValueError('Required flag missing from an actual product tool invocation')
+        if tokens.intersection({'/od','/o1','/gl-','/mp-','/ltcg:off'}):raise ValueError('Product optimization or parallelism disabled')
     if case=='baseline' and code==0 and 'Build succeeded.' in log and 'C1002' not in log and summaries and set(summaries)=={'0'} and not diagnostics:
-        return {'status':'non-reproduction','causalCorrectionProven':False,'toolBinding':binding}
+        return {'status':'non-reproduction','originalSiteReproduced':False,'causalCorrectionProven':False,'toolBinding':binding,'buildHostHelpers':helpers,'resourceCompilers':resources}
     if case=='baseline':
-        exact=r'Hacl_Hash_SHA2\.c\(243\): fatal error C1002: compiler is out of heap space in pass 2'
-        if not summaries or set(summaries)!={'1'} or not diagnostics or any(not re.search(exact,line,re.I) for line in diagnostics):
+        original=r'Hacl_Hash_SHA2\.c\(243\): fatal error C1002: compiler is out of heap space in pass 2'
+        variant=r'Objects[\\/]unicodetype_db\.h\(4295\): fatal error C1002: compiler is out of heap space in pass 2'
+        exact_original=bool(diagnostics) and all(re.search(original,line,re.I) for line in diagnostics)
+        observed_variant=bool(diagnostics) and all(re.search(variant,line,re.I) for line in diagnostics)
+        if not summaries or set(summaries)!={'1'} or not (exact_original or observed_variant):
             raise ValueError('Baseline error summary/diagnostics include unrelated failure')
-        required=[r'Hacl_Hash_SHA2\.c\(243\): fatal error C1002: compiler is out of heap space in pass 2',
-                  r'32-bit linker.*ran out of heap space',r'restarting link with 64-bit linker.*HostX64/arm64/link.exe',
+        if observed_variant:
+            source=inventory.get('productSourceRoot')
+            sites=[re.search(r'([A-Za-z]:[^\r\n]*?[\\/]Objects[\\/]unicodetype_db\.h)\(4295\)',line,re.I) for line in diagnostics]
+            if not source or any(not m or windows_path(m[1])!=windows_path(source+'/Objects/unicodetype_db.h') for m in sites):
+                raise ValueError('Observed heap variant source path is not bound to product source root')
+        required=[r'32-bit linker.*ran out of heap space',r'restarting link with 64-bit linker.*HostX64/arm64/link.exe',
                   r'Finished generating code',r'pythoncore.vcxproj.*FAILED\.',r'Build FAILED\.']
-        if code!=1 or not all(re.search(p,log,re.I) for p in required): raise ValueError('Exact original MSBuild failure not reproduced')
-        return {'status':'reproduced','causalCorrectionProven':False,'toolBinding':binding}
+        if code!=1 or not all(re.search(p,log,re.I) for p in required):raise ValueError('Expected complete MSBuild heap-failure sequence absent')
+        return {'status':'reproduced' if exact_original else 'observed-heap-site-variant','originalSiteReproduced':exact_original,'observedHeapSite':'Hacl_Hash_SHA2.c(243)' if exact_original else 'Objects/unicodetype_db.h(4295)','causalCorrectionProven':False,'toolBinding':binding,'buildHostHelpers':helpers,'resourceCompilers':resources}
     if code!=0 or 'Build succeeded.' not in log or not summaries or set(summaries)!={'0'} or diagnostics: raise ValueError('Candidate MSBuild failure')
     if re.search(r'HostX(?:86|64)/arm64/(?:CL|link)\.exe|/Od\b',commands,re.I) or re.search(r'restarting link|fatal error C1002',log,re.I): raise ValueError('Candidate host fallback or changed optimization')
-    return {'status':'passed','toolBinding':binding}
+    return {'status':'passed','toolBinding':binding,'buildHostHelpers':helpers,'resourceCompilers':resources}
 
 
 def admit_runtime(proof, exe, dll):
@@ -238,9 +349,10 @@ def collect(work,out,case):
 def admit(data,work,out,case):
     r=json.loads((out/(case+'-build.command.json')).read_text(encoding='utf-8-sig'))
     if r.get('forcedTermination') or not r.get('pipeDrainComplete') or not r.get('directProcessDeathVerified') or r.get('cleanupErrors'):raise ValueError('Build termination/drain incomplete')
-    text='\n'.join((out/(case+'-build.'+s+'.log')).read_text(errors='replace') for s in ['stdout','stderr'])
+    text='\n'.join((out/(case+'-build.'+s+'.log')).read_bytes().decode('utf-8',errors='replace') for s in ['stdout','stderr'])
     try:
         inventory=json.loads((out/(case+'-tool-inventory.json')).read_text(encoding='utf-8-sig'))
+        inventory['productSourceRoot']=r['workingDirectory']
         proof=admit_build(text,r['exitCode'],case,inventory)
     except ValueError as error:
         write_json(out/(case+'-admission.json'),{'status':'non-reproduction' if case=='baseline' else 'failed','causalCorrectionProven':False,'error':str(error)})
@@ -248,9 +360,7 @@ def admit(data,work,out,case):
     obj=work/case/'PCbuild/obj/313arm64_Release/pythoncore'
     inputs=[p.name.lower() for p in obj.iterdir() if p.suffix.lower() in ['.obj','.res']]
     check_inputs(inputs,expected_inputs(data))
-    # Check actual logged Link input paths too; directory contents alone can be stale.
-    logged=[p.lower() for p in re.findall(r'pythoncore[\\/]+([^\s"<>]+\.(?:obj|res))',text,re.I)]
-    check_inputs(sorted(set(logged)),expected_inputs(data))
+    proof['linkInputEvidence']=link_input_evidence(text,r['workingDirectory'],expected_inputs(data))
     proof['completeInputCount']=len(inputs);write_json(out/(case+'-admission.json'),proof)
 
 
