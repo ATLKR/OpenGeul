@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "kind": "native28-atl-library-path-control-source",
+  "producerBaseCommit": "bd887661c5c5b51fcdbed75126122980d6cd5051",
+  "productionDriver": {
+    "repositoryPath": "suite/scripts/build-native-engine.ps1",
+    "sha256": "501680337e44e33e4c58cfdfbdd4d39cc4d4925cf91f458ec93800b663c9a7b4"
+  },
+  "reusedInputs": [
+    {
+      "repositoryPath": "suite/diagnostics/native-atl-source/atl-static-archive.ps1",
+      "bytes": 12692,
+      "sha256": "a10492c0bb68109915df6ce5c504dfb7d73a7dbee979fb5266a33d6468f68e5f",
+      "originalCommit": "b1395bf062bc625493d73041ecb38e9ae4c7d9dd",
+      "originalGitBlob": "8c9cc8e25fdedff1c3a99ff803a7015537df49f2"
+    },
+    {
+      "repositoryPath": "suite/diagnostics/native-atl-source/atl-static-profiles.json",
+      "bytes": 15936,
+      "sha256": "fde4d26a6ac95f132d3782208497c8e31df23d8850b39b61ae2eb3aeab00b57b",
+      "originalCommit": "b1395bf062bc625493d73041ecb38e9ae4c7d9dd",
+      "originalGitBlob": "513acd9659e563081a0c2ff167e748b0292b8d47"
+    }
+  ],
+  "reusedFunctionOrigin": {
+    "commit": "b1395bf062bc625493d73041ecb38e9ae4c7d9dd",
+    "repositoryPath": "suite/scripts/probe-native-atl.ps1",
+    "functions": [
+      {
+        "name": "Get-AtlToolchainPlan",
+        "sha256": "ee6d89f73ef8fefb289f8a3bdda5303da671a051141489b717f829db16b5a932"
+      },
+      {
+        "name": "Get-AtlFile",
+        "sha256": "305fec303d6def9b40051dd3645659aad264ebadf0c8c44b00e0dc4493653a66"
+      },
+      {
+        "name": "Get-AtlCensus",
+        "sha256": "83fcf97288aa7eef04b9465a8dd0bfb2647007b93d9439d41f97116279a3d449"
+      }
+    ]
+  },
+  "selectionPolicy": {
+    "sourceArchiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+    "source": "configure.ac:16295-16311",
+    "rule": "Select atlmfc/lib/spectre parent when it exists; append arm64 leaf; no regular fallback if the selected leaf/file is missing. Native Windows direct invocation spelling is observed from selected compiler root, not exact historical Cygwin short-path replay."
+  },
+  "archivePayloadRetentionForbidden": true,
+  "neverExecuteFixture": true
+}
