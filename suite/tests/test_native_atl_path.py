@@ -533,8 +533,9 @@ class AtlGateFlagTests(unittest.TestCase):
         command = [sys.executable, '-m', 'unittest',
                    'suite.tests.test_native_atl_path.ActualAtlSourceTests']
         if replay: command.append('suite.tests.test_native_atl_path.AtlRecipeReplayTests')
+        # The aggregate covers ActiveX plus five pinned recipes; each make still has 30 seconds.
         return subprocess.run(command+['-v'], cwd=ROOT, env=env,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30 * (1 + len(CONSUMER_RECIPES)) if replay else 30)
 
     def test_shared_strict_source_mode_authenticates_and_replays_without_cygwin_requirement(self):
         require_posix_recipe_replay(os.name, Path('/usr/bin/make'), Path('/bin/bash'),
