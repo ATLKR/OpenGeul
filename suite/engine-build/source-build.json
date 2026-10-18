@@ -383,14 +383,14 @@
     }
   },
   "atlConsumerNativePaths": {
-    "scope": "Five remaining current gbuild ATL consumers only; WNT_AARCH64_MSC and real GNU make MAKE_HOST ending -cygwin; recipe-local quoted native include/resource/link arguments; only existing static ATL consumers bypass sorted T_LIBS through their existing ldflags; no global ATL state, ActiveX hook, feature graph or other profiles changed",
+    "scope": "Five remaining current gbuild ATL consumers only; WNT_AARCH64_MSC and real GNU make MAKE_HOST ending -cygwin; recipe-local quoted native include/resource/link arguments; only existing static ATL consumers bypass sorted T_LIBS through their existing ldflags; guarded native emser also forwards only its ATL link arguments to the authentic merged receiver when it is merged; no global ATL state, ActiveX hook, feature graph or other profiles changed",
     "recipes": [
       {
         "path": "embedserv/Library_emser.mk",
         "size": 1586,
         "sha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef",
-        "afterSize": 2768,
-        "afterSha256": "7f35d902d0711e96aaa13a1dd25a05d1fd04a010100d5e48719b2ec1c0dbe5a1"
+        "afterSize": 3045,
+        "afterSha256": "b26faf7c9a4bc1141eb59af6690d76cfb14fd5ec11f80aa9814a0518d530abe2"
       },
       {
         "path": "extensions/Library_oleautobridge.mk",

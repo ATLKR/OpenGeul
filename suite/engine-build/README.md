@@ -370,6 +370,12 @@ tests preserve both RC and dependency-generation arguments. The service/resource
 scope follows their explicit ATL include arguments; neither is claimed as an
 observed missing-header failure in Native24.
 
+Native27 reached the merged-library link and reported missing `atls.lib`.
+Native `emser` now also forwards its quoted ATL arguments to the real merged
+target when gbuild identifies it as merged; the root module initializes that
+target before component recipes. This source correction does not establish
+installed ATL availability or native archive-member consumption.
+
 All five inputs, output pins, and new evidence destinations are checked before
 source installation begins. Each original/effective recipe is retained with its
 hashes under `sourceHooks.atlConsumerNativePaths.recipes`. Validation failures

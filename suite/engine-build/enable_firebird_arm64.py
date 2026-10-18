@@ -198,6 +198,13 @@ endef
                  b'# Native paths with spaces must bypass the sorted T_LIBS word list.\n'
                  b'@P@_LINK_LIB := $(@P@_LIB)/atls.lib\n'
                  b'@P@_LIBS :=\n')
+        if name == 'emser':
+            hook += (b'# The root module initializes merged before reading its component recipes.\n'
+                     b'ifneq ($(call gb_LinkTarget__is_merged,$(call gb_Library_get_linktarget,emser)),)\n'
+                     b'$(eval $(call gb_Library_add_ldflags,merged,\\\n'
+                     b'\t-LIBPATH:$(@P@_LIB) $(@P@_LINK_LIB) \\\n'
+                     b'))\n'
+                     b'endif\n')
     hook = (hook + b'endif\nendif\n\n').replace(b'@P@', prefix)
     target = 'UAccCOM' if name in ('uacccom', 'uacccom_resource') else name
     kind = 'WinResTarget' if name == 'uacccom_resource' else 'Library'

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PORT = ROOT / 'suite/engine-build'
 FIXTURE = ROOT / 'suite/tests/fixtures/native-atl-path'
 CONSUMER_FIXTURE = ROOT / 'suite/tests/fixtures/native-atl-consumers'
+MERGED_FIXTURE = ROOT / 'suite/tests/fixtures/native-atl-merged'
 CONSUMER_RECIPES = (
     'embedserv/Library_emser.mk',
     'extensions/Library_oleautobridge.mk',
@@ -197,6 +198,90 @@ def assert_consumer_native_argv(case, name, before, after, native_include, nativ
                          after[1].count(atls), name+' intact atls.lib operand')
         case.assertEqual(name in CONSUMER_RECIPES[:2],
                          '-LIBPATH:'+native_lib in after[1], name+' original LIBPATH policy')
+
+
+def replay_emser_merged(root, raw, make, bash, *, merged=True, cpu='AARCH64',
+                        com='MSC', host='x86_64-pc-cygwin', include=INCLUDE,
+                        lib=LIB, adapter=True):
+    """Authentic target declarations/forwarding; finite scheduler/layout adapters."""
+    source = root/'source'
+    (source/'embedserv').mkdir(parents=True, exist_ok=True)
+    for relative, content in (
+            ('Library_merged.mk', (MERGED_FIXTURE/'Library_merged.mk').read_bytes()),
+            ('embedserv/Module_embedserv.mk', (MERGED_FIXTURE/'Module_embedserv.mk').read_bytes()),
+            ('embedserv/Library_emser.mk', raw)):
+        (source/relative).write_bytes(content)
+    observer = shlex.quote(sys.executable)+' '+shlex.quote(str(root/'observe.py'))
+    variables = ('SHELL := '+str(bash)+'\nOS := WNT\nCPUNAME := '+cpu+'\nCOM := '+com+'\n'
+        +('MAKE_HOST := '+host+'\n' if host is not None else '')+
+        'ATL_INCLUDE := '+include+'\nATL_LIB := '+lib+'\n'
+        'MERGELIBS := '+('TRUE' if merged else '')+'\n'
+        'SRCDIR := source\nWORKDIR := work\nINSTDIR := inst\n'
+        'INCLUDE := -Iexisting/include\nLIB := unchanged-library-environment\n'
+        'gb_FULLDEPS :=\ntrue := TRUE\n'
+        'gb_LinkTarget_LDFLAGS := -existing-global-link-flag\n'
+        'gb_LINK = '+observer+' --receiver=$@\n'
+        'gb_Helper_optional = $(2)\n'
+        'gb_Output_error = $(error $(1))\n'
+        # These adapters supply registry/layout context, not forwarding,
+        # membership, tuple interpretation or target-variable initialization.
+        'gb_Library_get_instdir = out\n'
+        'gb_Library_get_ilib_target = ilib/$(1)\n'
+        'gb_Library_get_exports_target = exports/$(1)\n'
+        'gb_Library_get_clean_target = clean/$(1)\n'
+        'gb_Module_MODULELOCATIONS := libreoffice:source/ embedserv:source/embedserv/\n'
+        'gb_Module_register_target = $(eval gb_Module_CURRENTTARGET := $(1))$(eval gb_Module_CURRENTCLEANTARGET := $(2))\n')
+    for kind in ('target','nonl10n_target','clean_target','l10n_target','check_target',
+                 'slowcheck_target','screenshot_target','coverage_target','subsequentcheck_target',
+                 'perfcheck_target','uicheck_target'):
+        variables += 'gb_Module_get_'+kind+' = module/'+kind+'/$(1)\n'
+    macros = b''.join((MERGED_FIXTURE/name).read_bytes()+b'\n' for name in (
+        'targetlocations-library.mk','library-declaration.mk','library-forwarding.mk',
+        'linktarget-initialization.mk','linktarget-merged.mk','linktarget-targettype.mk',
+        'msc-system-libs.mk','module-order.mk'))
+    macros += (FIXTURE/'linktarget-atl.mk').read_bytes()+b'\n'
+    macros += (CONSUMER_FIXTURE/'linktarget-defs.mk').read_bytes()+b'\n'
+    macros += (MERGED_FIXTURE/'pre_MergedLibsList.mk').read_bytes()+b'\n'
+    scheduling = b'''
+gb_Library_KNOWNLIBS := $(sort $(gb_MERGE_LIBRARY_LIST) emser merged)
+gb_Library_FILENAMES := $(foreach lib,$(gb_Library_KNOWNLIBS),$(lib):$(lib)lo.dll)
+# Restrict discovery to the two receivers; the actual include helpers and
+# root module calls still determine declaration order and initialize targets.
+define native_atl_save_macro
+define native_atl_$(1)
+$(value $(2))
+endef
+endef
+$(eval $(call native_atl_save_macro,add_targets,gb_Module_add_targets))
+$(eval $(call native_atl_save_macro,add_moduledirs,gb_Module_add_moduledirs))
+$(eval $(call native_atl_save_macro,read_targetfile,gb_Module__read_targetfile))
+gb_Module_add_targets = $(call native_atl_add_targets,$(1),$(filter Library_merged Library_emser,$(2)))
+gb_Module_add_moduledirs = $(call native_atl_add_moduledirs,$(1),$(filter embedserv,$(2)))
+gb_Module__read_targetfile = $(info ["include","$(2)"])$(call native_atl_read_targetfile,$(1),$(2),$(3))
+global_before := $(OS)|$(CPUNAME)|$(COM)|$(MAKE_HOST)|$(ATL_INCLUDE)|$(ATL_LIB)|$(LIB)|$(INCLUDE)|$(PATH)
+'''
+    invariant = b'''
+global_after := $(OS)|$(CPUNAME)|$(COM)|$(MAKE_HOST)|$(ATL_INCLUDE)|$(ATL_LIB)|$(LIB)|$(INCLUDE)|$(PATH)
+ifneq ($(global_before),$(global_after))
+$(error Recipe changed global configured state)
+endif
+$(info ["merged-match","$(call gb_LinkTarget__is_merged,$(call gb_Library_get_linktarget,emser))"])
+# Other libraries are dependency-only layout fixtures; no compile/build occurs.
+$(foreach lib,$(filter-out emser merged,$(gb_MERGEDLIBS)),$(eval $(call gb_Library_get_linktarget_target,$(lib)): ;))
+.PHONY: all
+all: $(call gb_Library_get_linktarget_target,emser) $(if $(MERGELIBS),$(call gb_Library_get_linktarget_target,merged))
+'''
+    commands = b''
+    for name in ('emser','merged') if merged else ('emser',):
+        commands += ('\n$(call gb_Library_get_linktarget_target,'+name+'):\n\t@').encode()
+        commands += (FIXTURE/'msc-link-argv.mk').read_bytes().lstrip(b'\t')
+    makefile = root/'merged-replay.mk'
+    makefile.write_bytes(variables.encode()+macros+scheduling+
+        (MERGED_FIXTURE/'RepositoryModule_host.mk').read_bytes()+invariant+commands)
+    env = dict(os.environ)
+    if adapter: env['PATH'] = str(root)+os.pathsep+env['PATH']
+    return subprocess.run([str(make),'--no-print-directory','-s','-f',str(makefile),'all'],
+        cwd=root,env=env,capture_output=True,text=True,timeout=30)
 
 
 def assert_consumer_replays(case, root, make, bash, candidates, actual=False):
@@ -462,6 +547,98 @@ class AtlConsumerSourceTests(unittest.TestCase):
 
 
 class AtlRecipeReplayTests(unittest.TestCase):
+    def test_emser_native_atl_link_arguments_follow_authentic_merged_receiver(self):
+        make, bash = require_posix_recipe_replay(os.name, Path('/usr/bin/make'), Path('/bin/bash'),
+            os.environ.get('OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE') == '1' or
+            os.environ.get('OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY') == '1')
+        provenance = json.loads((MERGED_FIXTURE/'source.json').read_text())
+        actual_source = os.environ.get('OPENGEUL_LIBREOFFICE_ATL_SOURCE')
+        required = (os.environ.get('OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE') == '1' or
+                    os.environ.get('OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY') == '1')
+        if required: self.assertTrue(actual_source, 'Mandatory pinned LibreOffice ATL source is missing')
+        for pin in provenance['members']:
+            fixture = (MERGED_FIXTURE/pin['fixture']).read_bytes()
+            self.assertEqual(pin['fixtureBytes'],len(fixture))
+            self.assertEqual(pin['fixtureSha256'],hashlib.sha256(fixture).hexdigest())
+            if actual_source:
+                path = Path(actual_source)/Path(pin['member']).relative_to('libreoffice-26.8.1.1')
+                self.assertFalse(any(item.is_symlink() for item in (path,*path.parents)))
+                raw = installer()._regular(path)
+                self.assertEqual(pin['bytes'],len(raw))
+                self.assertEqual(pin['sha256'],hashlib.sha256(raw).hexdigest())
+                if 'physicalLfRanges' in pin:
+                    lines = raw.splitlines(keepends=True)
+                    self.assertEqual(fixture,b''.join(b''.join(lines[start-1:end])
+                        for start,end in pin['physicalLfRanges']))
+                else: self.assertEqual(fixture,raw)
+        real_cygwin = os.environ.get('OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY') == '1'
+        if real_cygwin:
+            profile = subprocess.run([str(make),'--no-print-directory','-f','-','host'],
+                input='host:\n\t@echo $(MAKE_HOST)\n',capture_output=True,text=True,check=True)
+            self.assertTrue(profile.stdout.strip().endswith('-cygwin'),
+                            'Mandatory actual Cygwin GNU make profile is missing')
+        with tempfile.TemporaryDirectory(prefix='atl-merged-') as folder:
+            root = Path(folder)
+            write_consumer_source(root)
+            effective = consumer_plan(root)[0][2]
+            original = (CONSUMER_FIXTURE/CONSUMER_RECIPES[0]).read_bytes()
+            (root/'observe.py').write_text('import json,sys;print(json.dumps(sys.argv[1:]))\n')
+            options = {}
+            native_lib = NATIVE+'/lib/spectre/arm64'
+            if real_cygwin:
+                include, lib = root/'include', root/'library with spaces'
+                include.mkdir(); lib.mkdir()
+                options = dict(host=None,adapter=False,include=str(include),lib=str(lib))
+                native_lib = subprocess.run(['cygpath','-lm',str(lib)],capture_output=True,
+                                            text=True,check=True).stdout.strip()
+            else: consumer_adapter(root)
+
+            def run(raw, **changes):
+                current = dict(options); current.update(changes)
+                result = replay_emser_merged(root,raw,make,bash,**current)
+                self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+                rows = observed_argv(result.stdout)
+                declarations = [row[1] for row in rows if row[0]=='include']
+                links = {Path(row[0].split('=',1)[1]).name:row[1:]
+                         for row in rows if row[0].startswith('--receiver=')}
+                membership = [row[1] for row in rows if row[0]=='merged-match']
+                return declarations, links, membership
+
+            declarations, links, membership = run(effective)
+            self.assertEqual(['Library_merged','Library_emser'],declarations,
+                             'Authentic root module must initialize merged before emser')
+            self.assertIn('<>',membership[0], 'Authentic merged predicate must receive an encoded tuple')
+            self.assertIn('Library/emserlo.dll<>',membership[0])
+            self.assertEqual(1,links['mergedlo.dll'].count(native_lib+'/atls.lib'),
+                             'Native emser ATL operand must survive on the actual merged receiver: '+repr(links))
+            self.assertEqual(1,links['mergedlo.dll'].count('-LIBPATH:'+native_lib))
+            for target in ('emserlo.dll','mergedlo.dll'):
+                self.assertEqual(1,links[target].count(native_lib+'/atls.lib'))
+                for system in ('gdi32.lib','ole32.lib','oleaut32.lib','uuid.lib','user32.lib'):
+                    self.assertIn(system,links[target])
+                self.assertIn('-existing-global-link-flag',links[target])
+            self.assertIn('/ignore:4049',links['mergedlo.dll'])
+            self.assertIn('/ignore:4217',links['mergedlo.dll'])
+
+            # The pristine unquoted T_LIBS control needs its original safe
+            # POSIX spelling. Candidate-only observations above keep the real
+            # converted directory with spaces in strict Cygwin mode.
+            _, pristine, _ = run(original,lib=LIB)
+            configured_lib = LIB
+            # This control exercises the actual add_libs merged forwarding,
+            # independently of the new native add_ldflags call.
+            self.assertEqual(1,pristine['mergedlo.dll'].count(configured_lib+'/atls.lib'))
+            without_atl = lambda argv: [item for item in argv if item not in (
+                configured_lib+'/atls.lib',native_lib+'/atls.lib','-LIBPATH:'+native_lib)]
+            self.assertEqual(without_atl(pristine['mergedlo.dll']),without_atl(links['mergedlo.dll']))
+            standalone_order, standalone, standalone_membership = run(effective,merged=False)
+            self.assertEqual(['Library_emser'],standalone_order)
+            self.assertEqual([''],standalone_membership)
+            self.assertEqual(links['emserlo.dll'],standalone['emserlo.dll'])
+            self.assertNotIn('mergedlo.dll',standalone)
+            for changes in (dict(cpu='X86_64'),dict(com='GCC'),dict(host='x86_64-w64-mingw32')):
+                self.assertEqual(run(original,**changes),run(effective,**changes),changes)
+
     def test_actual_recipe_argv_normalizes_only_arm64_cygwin_and_fails_closed(self):
         make, bash = require_posix_recipe_replay(os.name, Path('/usr/bin/make'), Path('/bin/bash'),
             os.environ.get('OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE') == '1' or
@@ -544,7 +721,7 @@ class AtlGateFlagTests(unittest.TestCase):
         result = self.invoke(self.actual_source(), require_source=True, replay=True)
         self.assertEqual(0, result.returncode, result.stdout+result.stderr)
         self.assertNotIn('skipped', result.stderr)
-        self.assertIn('Ran 2 tests', result.stderr)
+        self.assertIn('Ran 3 tests', result.stderr)
 
     def test_strict_cygwin_flag_alone_requires_source_without_skip(self):
         result = self.invoke(None, require_cygwin=True)
