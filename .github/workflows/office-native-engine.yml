@@ -6,6 +6,18 @@ name: OpenGeul native ARM64 Office engine source build
       - .github/workflows/office-native-engine.yml
       - suite/scripts/build-native-engine.ps1
       - suite/engine-build/**
+      - suite/tests/test_firebird_arm64_port.py
+      - suite/tests/test_native_python_host.py
+      - suite/tests/test_native_atl_path.py
+      - suite/tests/test_native_meson_path.py
+      - suite/tests/fixtures/native-python-host/**
+      - suite/tests/fixtures/native-atl-path/**
+      - suite/tests/fixtures/native-atl-consumers/**
+      - suite/tests/fixtures/native-meson-path/**
+      - suite/tests/fixtures/native-mdds-equality/**
+      - suite/tests/fixtures/native-icu-path/**
+      - suite/tests/fixtures/native-source-tar/**
+      - suite/tests/fixtures/native-zstd-unpack/**
   workflow_dispatch:
 permissions:
   contents: read
