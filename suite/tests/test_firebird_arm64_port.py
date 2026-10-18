@@ -99,6 +99,12 @@ class AuthenticatedSource(unittest.TestCase):
         atl = root / 'extensions/Library_so_activex.mk'
         atl.parent.mkdir(exist_ok=True)
         atl.write_bytes((ROOT / 'suite/tests/fixtures/native-atl-path' / atl.name).read_bytes())
+        for relative in ('embedserv/Library_emser.mk', 'extensions/Library_oleautobridge.mk',
+                         'winaccessibility/Library_uacccom.mk', 'winaccessibility/Library_winaccessibility.mk',
+                         'winaccessibility/WinResTarget_uacccom.mk'):
+            consumer = root / relative
+            consumer.parent.mkdir(parents=True, exist_ok=True)
+            consumer.write_bytes((ROOT / 'suite/tests/fixtures/native-atl-consumers' / relative).read_bytes())
         python = root / 'external/python3/ExternalProject_python3.mk'
         python.parent.mkdir(parents=True, exist_ok=True)
         python.write_bytes((ROOT / 'suite/tests/fixtures/native-python-host' / python.name).read_bytes())
@@ -662,9 +668,42 @@ class AuthenticatedSource(unittest.TestCase):
             upstream_original = upstream.read_bytes()
             evidence = root / 'evidence'
             evidence.mkdir()
-            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch', 'changed-python-recipe', 'linked-python-recipe', 'python-targets-collision', 'python-evidence-collision', 'python-payload-evidence-collision', 'forged-python-targets', 'missing-python-lock', 'changed-atl-recipe', 'linked-atl-recipe', 'atl-original-evidence-collision', 'atl-effective-evidence-collision', 'missing-atl-lock', 'changed-harfbuzz-recipe', 'linked-harfbuzz-recipe', 'harfbuzz-original-evidence-collision', 'harfbuzz-effective-evidence-collision', 'missing-harfbuzz-lock'):
+            consumer_paths = ('embedserv/Library_emser.mk', 'extensions/Library_oleautobridge.mk',
+                              'winaccessibility/Library_uacccom.mk', 'winaccessibility/Library_winaccessibility.mk',
+                              'winaccessibility/WinResTarget_uacccom.mk')
+            consumer_originals = {relative: (root / relative).read_bytes() for relative in consumer_paths}
+            self.assertIn('atlConsumerNativePaths', json.loads((PORT / 'source-build.json').read_text()),
+                          'Five authentic ATL consumers require a pinned install plan')
+            def tree_state():
+                return {str(path.relative_to(root)): ('link', os.readlink(path)) if path.is_symlink()
+                        else ('directory',) if path.is_dir() else ('file', path.read_bytes())
+                        for path in root.rglob('*')}
+            new_invalid = tuple(('atl-consumer', relative, failure) for relative in consumer_paths
+                                for failure in ('missing', 'changed', 'linked-recipe', 'linked-parent',
+                                                'original-evidence', 'effective-evidence'))
+            for invalid in ('changed-helper', 'linked-helper', 'evidence-collision', 'changed-build-recipe', 'linked-build-recipe', 'build-evidence-collision', 'changed-zstd-recipe', 'linked-zstd-recipe', 'zstd-evidence-collision', 'changed-mdds-recipe', 'linked-mdds-recipe', 'mdds-evidence-collision', 'mdds-patch-collision', 'changed-mdds-upstream-patch', 'changed-mdds-patch', 'changed-python-recipe', 'linked-python-recipe', 'python-targets-collision', 'python-evidence-collision', 'python-payload-evidence-collision', 'forged-python-targets', 'missing-python-lock', 'changed-atl-recipe', 'linked-atl-recipe', 'atl-original-evidence-collision', 'atl-effective-evidence-collision', 'missing-atl-lock', 'changed-harfbuzz-recipe', 'linked-harfbuzz-recipe', 'harfbuzz-original-evidence-collision', 'harfbuzz-effective-evidence-collision', 'missing-harfbuzz-lock', 'missing-atl-consumers-lock') + new_invalid:
                 with self.subTest(invalid=invalid):
-                    if invalid == 'changed-harfbuzz-recipe':
+                    consumer = None
+                    saved_parent = None
+                    if isinstance(invalid, tuple):
+                        _, relative, failure = invalid
+                        consumer = root / relative
+                        if failure == 'missing':
+                            consumer.unlink()
+                        elif failure == 'changed':
+                            consumer.write_bytes(consumer_originals[relative] + b'changed')
+                        elif failure == 'linked-recipe':
+                            saved_consumer = root / 'saved-atl-consumer'
+                            saved_consumer.write_bytes(consumer_originals[relative])
+                            consumer.unlink(); consumer.symlink_to(saved_consumer)
+                        elif failure == 'linked-parent':
+                            saved_parent = root / 'saved-atl-consumer-parent'
+                            consumer.parent.rename(saved_parent)
+                            consumer.parent.symlink_to(saved_parent, target_is_directory=True)
+                        else:
+                            kind = failure.split('-', 1)[0]
+                            (evidence / (kind + '-' + consumer.name)).write_bytes(b'prior consumer evidence')
+                    elif invalid == 'changed-harfbuzz-recipe':
                         harfbuzz.write_bytes(harfbuzz_original+b'changed')
                     elif invalid == 'linked-harfbuzz-recipe':
                         saved_harfbuzz=root/'saved-harfbuzz'; saved_harfbuzz.write_bytes(harfbuzz_original)
@@ -742,7 +781,7 @@ class AuthenticatedSource(unittest.TestCase):
                         bad_patch = bundle/'opengeul-arm64-equality.patch.1'
                         bad_patch.write_bytes(bad_patch.read_bytes()+b'changed')
                         installer.HERE = bundle
-                    elif invalid in ('forged-python-targets', 'missing-python-lock', 'missing-atl-lock', 'missing-harfbuzz-lock'):
+                    elif invalid in ('forged-python-targets', 'missing-python-lock', 'missing-atl-lock', 'missing-harfbuzz-lock', 'missing-atl-consumers-lock'):
                         bundle = root/invalid; bundle.mkdir()
                         for name in ('source-build.json', 'firebird-windows-arm64.patch', 'libreoffice-enable-arm64-firebird.patch', 'opengeul-arm64-equality.patch.1', 'opengeul-native-arm64-tools.targets'):
                             shutil.copyfile(PORT/name,bundle/name)
@@ -750,16 +789,25 @@ class AuthenticatedSource(unittest.TestCase):
                             (bundle/'opengeul-native-arm64-tools.targets').write_bytes(b'forged targets')
                         else:
                             manifest = json.loads((bundle/'source-build.json').read_text())
+                            if invalid == 'missing-atl-consumers-lock':
+                                self.assertIn('atlConsumerNativePaths', manifest, 'Five authentic ATL consumers require a pinned install plan')
                             del manifest[{'missing-python-lock':'pythonNativeHost', 'missing-atl-lock':'atlNativePaths',
-                                          'missing-harfbuzz-lock':'harfbuzzNativeMesonPaths'}[invalid]]
+                                          'missing-harfbuzz-lock':'harfbuzzNativeMesonPaths',
+                                          'missing-atl-consumers-lock':'atlConsumerNativePaths'}[invalid]]
                             (bundle/'source-build.json').write_text(json.dumps(manifest))
                         installer.HERE = bundle
-                    if invalid in ('missing-python-lock', 'missing-atl-lock', 'missing-harfbuzz-lock'):
+                    expected_tree = tree_state() if isinstance(invalid, tuple) else None
+                    if invalid in ('missing-python-lock', 'missing-atl-lock', 'missing-harfbuzz-lock', 'missing-atl-consumers-lock'):
                         with self.assertRaises(KeyError):
+                            installer.install(root, evidence)
+                    elif expected_tree is not None:
+                        with self.assertRaisesRegex((ValueError, FileNotFoundError), 'SHA256|regular file|regular.*director|exists|No such file'):
                             installer.install(root, evidence)
                     else:
                         with self.assertRaisesRegex(ValueError, 'SHA256|regular file|exists'):
                             installer.install(root, evidence)
+                    if expected_tree is not None:
+                        self.assertEqual(expected_tree, tree_state(), 'Consumer validation must precede every source/evidence write')
                     self.assertEqual(original, target.read_bytes())
                     self.assertEqual(self.lo_configure.read_bytes(), configure.read_bytes())
                     self.assertEqual(expected_bootstrap, bootstrap.read_bytes())
@@ -775,6 +823,14 @@ class AuthenticatedSource(unittest.TestCase):
                     self.assertFalse((evidence / 'original-unpack-sources').exists())
                     self.assertFalse((evidence/'original-ExternalProject_firebird.mk').exists())
                     self.assertFalse((evidence/'original-UnpackedTarball_zstd.mk').exists())
+                    if consumer is not None:
+                        if saved_parent is not None:
+                            consumer.parent.unlink()
+                            saved_parent.rename(consumer.parent)
+                        if consumer.is_symlink(): consumer.unlink()
+                        consumer.write_bytes(consumer_originals[relative])
+                        (evidence / ('original-' + consumer.name)).unlink(missing_ok=True)
+                        (evidence / ('effective-' + consumer.name)).unlink(missing_ok=True)
                     if bootstrap.is_symlink():
                         bootstrap.unlink()
                     bootstrap.write_bytes(pristine)
@@ -804,6 +860,15 @@ class AuthenticatedSource(unittest.TestCase):
                     (evidence/'effective-ExternalProject_python3.mk').unlink(missing_ok=True)
                     (evidence/'effective-opengeul-native-arm64-tools.targets').unlink(missing_ok=True)
             receipt = module().install(root, evidence)
+            consumer_receipt = receipt['atlConsumerNativePaths']
+            self.assertEqual(consumer_paths, tuple(item['path'] for item in consumer_receipt['recipes']))
+            for item in consumer_receipt['recipes']:
+                relative = item['path']
+                consumer = root / relative
+                self.assertEqual(consumer_originals[relative], Path(item['evidence']['original']).read_bytes())
+                self.assertEqual(consumer.read_bytes(), Path(item['evidence']['effective']).read_bytes())
+                self.assertEqual(hashlib.sha256(consumer_originals[relative]).hexdigest(), item['beforeSha256'])
+                self.assertEqual(hashlib.sha256(consumer.read_bytes()).hexdigest(), item['afterSha256'])
             self.assertEqual(harfbuzz_original,(evidence/'original-ExternalProject_harfbuzz.mk').read_bytes())
             self.assertEqual(harfbuzz.read_bytes(),(evidence/'effective-ExternalProject_harfbuzz.mk').read_bytes())
             self.assertEqual(hashlib.sha256(harfbuzz_original).hexdigest(),receipt['harfbuzzNativeMesonPaths']['beforeSha256'])

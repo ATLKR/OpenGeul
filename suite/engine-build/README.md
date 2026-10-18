@@ -357,6 +357,25 @@ make. Original/effective recipes and hashes are retained under
 `sourceHooks.atlNativePaths`; existing source pins and qualification gates stay
 unchanged.
 
+Native24 exposed the same include-path boundary in `embedserv/Library_emser.mk`.
+The additive `atlConsumerNativePaths` lock covers that recipe, the OLE automation
+bridge, both Windows accessibility libraries, and the UAccCOM resource recipe.
+Each complete pristine recipe and its effective bytes are pinned separately.
+Their private conversions apply only to `WNT_AARCH64_MSC` with genuine Cygwin
+GNU make; the existing ActiveX hook remains byte-identical. The three existing
+static ATL library consumers route their full `atls.lib` operand through their
+existing linker flags. UAccCOM keeps its original absence of `LIBPATH`; the
+include-only service and resource recipes ignore `ATL_LIB` entirely. Resource
+tests preserve both RC and dependency-generation arguments. The service/resource
+scope follows their explicit ATL include arguments; neither is claimed as an
+observed missing-header failure in Native24.
+
+All five inputs, output pins, and new evidence destinations are checked before
+source installation begins. Each original/effective recipe is retained with its
+hashes under `sourceHooks.atlConsumerNativePaths.recipes`. Validation failures
+leave source and evidence unchanged. Installation still uses an owned fresh
+source tree and does not promise rollback after arbitrary filesystem I/O errors.
+
 The native driver exports `OPENGEUL_LIBREOFFICE_ATL_SOURCE` as the pristine
 extracted LibreOffice root and sets both `OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1`
 and `OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY=1`. The shared source flag requires

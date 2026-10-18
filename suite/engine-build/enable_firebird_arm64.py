@@ -163,6 +163,83 @@ def _atl_native_paths(source: Path, lock: dict):
     return target, original, changed
 
 
+_ATL_CONSUMERS = (
+    ('embedserv/Library_emser.mk', 'emser', b'-I$(ATL_INCLUDE)', 'libpath'),
+    ('extensions/Library_oleautobridge.mk', 'oleautobridge', b'$(foreach inc,$(ATL_INCLUDE),-I$(inc))', 'libpath'),
+    ('winaccessibility/Library_uacccom.mk', 'uacccom', b'$(foreach i,$(ATL_INCLUDE), -I$(i))', 'def'),
+    ('winaccessibility/Library_winaccessibility.mk', 'winaccessibility', b'$(foreach i,$(ATL_INCLUDE), -I$(i))', ''),
+    ('winaccessibility/WinResTarget_uacccom.mk', 'uacccom_resource', b'$(foreach i,$(ATL_INCLUDE), -I$(i))', ''),
+)
+
+
+def _atl_consumer_native_recipe(original: bytes, consumer: tuple) -> bytes:
+    """Render only the five enumerated recipe-local ATL argument corrections."""
+    relative, name, include, link = consumer
+    prefix = (name + '_native_atl').encode('ascii')
+    hook = (b'# OpenGeul: keep native ATL arguments local to this recipe.\n'
+            b'@P@_INCLUDE := ' + include + b'\n')
+    if link:
+        hook += (b'@P@_LIB := $(ATL_LIB)\n'
+                 b'@P@_LIBS := $(ATL_LIB)/atls.lib\n'
+                 b'@P@_LINK_LIB :=\n')
+    hook += r'''ifeq ($(OS)_$(CPUNAME)_$(COM),WNT_AARCH64_MSC)
+ifneq ($(filter %-cygwin,$(MAKE_HOST)),)
+ifeq ($(strip $(ATL_INCLUDE)),)
+$(error ATL include path is empty)
+endif
+@P@_shquote = '$(subst ','"'"',$(1))'
+define @P@_path
+$(if $(strip $(1)),,$(error ATL path is empty))$(eval @P@_converted := $(shell cygpath -lm $(call @P@_shquote,$(1))))$(if $(filter 0,$(.SHELLSTATUS)),,$(error ATL path conversion failed))$(if $(strip $(@P@_converted)),,$(error ATL path conversion returned no path))"$(@P@_converted)"
+endef
+@P@_INCLUDE := $(foreach i,$(ATL_INCLUDE), -I$(call @P@_path,$(i)))
+'''.encode('ascii')
+    if link:
+        hook += (b'@P@_LIB := $(call @P@_path,$(ATL_LIB))\n'
+                 b'# Native paths with spaces must bypass the sorted T_LIBS word list.\n'
+                 b'@P@_LINK_LIB := $(@P@_LIB)/atls.lib\n'
+                 b'@P@_LIBS :=\n')
+    hook = (hook + b'endif\nendif\n\n').replace(b'@P@', prefix)
+    target = 'UAccCOM' if name in ('uacccom', 'uacccom_resource') else name
+    kind = 'WinResTarget' if name == 'uacccom_resource' else 'Library'
+    marker = ('$(eval $(call gb_' + kind + '_' + kind + ',' + target + '))').encode('ascii')
+    replacements = [(marker, hook + marker),
+                    (b'\t' + include + b' \\\n', b'\t$(' + prefix + b'_INCLUDE) \\\n')]
+    if link:
+        replacements.append((b'\t$(ATL_LIB)/atls.lib \\\n', b'\t$(' + prefix + b'_LIBS) \\\n'))
+        if link == 'libpath':
+            replacements.append((b'\t-LIBPATH:$(ATL_LIB) \\\n',
+                                 b'\t-LIBPATH:$(' + prefix + b'_LIB) $(' + prefix + b'_LINK_LIB) \\\n'))
+        else:
+            replacements.append((b'\t/DEF:$(SRCDIR)/winaccessibility/source/UAccCOM/UAccCOM.def \\\n',
+                                 b'\t/DEF:$(SRCDIR)/winaccessibility/source/UAccCOM/UAccCOM.def $(' + prefix + b'_LINK_LIB) \\\n'))
+    changed = original
+    for before, after in replacements:
+        if changed.count(before) != 1:
+            raise ValueError('ATL consumer recipe anchor differs: ' + relative)
+        changed = changed.replace(before, after, 1)
+    return changed
+
+
+def _atl_consumer_native_paths(source: Path, lock: dict):
+    """Authenticate every remaining production ATL consumer before any writes."""
+    pins = lock['recipes']
+    if [pin['path'] for pin in pins] != [item[0] for item in _ATL_CONSUMERS]:
+        raise ValueError('ATL consumer recipe paths differ from the finite source contract')
+    plans = []
+    for consumer, recipe in zip(_ATL_CONSUMERS, pins):
+        target = source / recipe['path']
+        if any(path.is_symlink() or not path.is_dir() for path in (source, target.parent)):
+            raise ValueError('ATL consumer source hook requires regular recipe directories')
+        original = _regular(target)
+        if len(original) != recipe['size'] or hashlib.sha256(original).hexdigest() != recipe['sha256']:
+            raise ValueError('ATL consumer recipe SHA256 differs from the pinned source')
+        changed = _atl_consumer_native_recipe(original, consumer)
+        if len(changed) != recipe['afterSize'] or hashlib.sha256(changed).hexdigest() != recipe['afterSha256']:
+            raise ValueError('ATL consumer recipe result SHA256 differs from its lock')
+        plans.append((target, original, changed))
+    return plans
+
+
 def _harfbuzz_native_meson_paths(source: Path, lock: dict):
     """Plan the HarfBuzz-only Cygwin to bundled Windows Meson boundary."""
     recipe = lock['recipe']
@@ -292,7 +369,9 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     mdds, mdds_original, mdds_changed, mdds_output, mdds_patch = _mdds_equality(source, lock['mddsEquality'])
     python, python_original, python_changed, python_output, python_payload = _python_native_host(source, lock['pythonNativeHost'])
     atl, atl_original, atl_changed = _atl_native_paths(source, lock['atlNativePaths'])
+    atl_consumers = _atl_consumer_native_paths(source, lock['atlConsumerNativePaths'])
     harfbuzz, harfbuzz_original, harfbuzz_changed = _harfbuzz_native_meson_paths(source, lock['harfbuzzNativeMesonPaths'])
+    atl_consumer_evidence = []
     harfbuzz_evidence = {}
     atl_evidence = {}
     python_evidence = {}
@@ -307,6 +386,12 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                         'effective': evidence / 'effective-Library_so_activex.mk'}
         if any(path.exists() or path.is_symlink() for path in atl_evidence.values()):
             raise ValueError('ATL recipe evidence already exists')
+        for consumer, _, _ in atl_consumers:
+            paths = {'original': evidence / ('original-' + consumer.name),
+                     'effective': evidence / ('effective-' + consumer.name)}
+            if any(path.exists() or path.is_symlink() for path in paths.values()):
+                raise ValueError('ATL consumer recipe evidence already exists')
+            atl_consumer_evidence.append(paths)
         harfbuzz_evidence = {'original': evidence / 'original-ExternalProject_harfbuzz.mk',
                              'effective': evidence / 'effective-ExternalProject_harfbuzz.mk'}
         if any(path.exists() or path.is_symlink() for path in harfbuzz_evidence.values()):
@@ -337,6 +422,10 @@ def install(source: Path, evidence: Path | None = None) -> dict:
     # All source and patch checks precede source writes. The fresh build tree is
     # owned by this invocation; a repeated or changed hook is rejected above.
     bootstrap = install_module_bootstrap(source, evidence)
+    for (_, before, after), paths in zip(atl_consumers, atl_consumer_evidence):
+        for name, raw in (('original', before), ('effective', after)):
+            with paths[name].open('xb') as stream:
+                stream.write(raw)
     for name, raw in (('original', harfbuzz_original), ('effective', harfbuzz_changed)):
         if harfbuzz_evidence:
             with harfbuzz_evidence[name].open('xb') as stream:
@@ -377,7 +466,12 @@ def install(source: Path, evidence: Path | None = None) -> dict:
         mdds.write_bytes(mdds_changed)
         python.write_bytes(python_changed)
         atl.write_bytes(atl_changed)
+        for consumer, _, after in atl_consumers:
+            consumer.write_bytes(after)
         harfbuzz.write_bytes(harfbuzz_changed)
+        for consumer, _, after in atl_consumers:
+            if _regular(consumer) != after:
+                raise ValueError('Effective ATL consumer source hook bytes changed after write')
         if _regular(harfbuzz) != harfbuzz_changed:
             raise ValueError('Effective HarfBuzz Meson recipe bytes changed after write')
         if _regular(atl) != atl_changed:
@@ -434,6 +528,14 @@ def install(source: Path, evidence: Path | None = None) -> dict:
                                'afterSha256': lock['atlNativePaths']['recipe']['afterSha256'],
                                'scope': lock['atlNativePaths']['scope'],
                                'evidence': {name: str(path) for name, path in atl_evidence.items()}},
+            'atlConsumerNativePaths': {
+                'scope': lock['atlConsumerNativePaths']['scope'],
+                'recipes': [{'path': str(consumer.relative_to(source)).replace('\\', '/'),
+                             'beforeSha256': hashlib.sha256(before).hexdigest(),
+                             'afterSha256': hashlib.sha256(after).hexdigest(),
+                             'evidence': {name: str(path) for name, path in
+                                          (atl_consumer_evidence[index] if atl_consumer_evidence else {}).items()}}
+                            for index, (consumer, before, after) in enumerate(atl_consumers)]},
             'harfbuzzNativeMesonPaths': {'path': lock['harfbuzzNativeMesonPaths']['recipe']['path'],
                                        'beforeSha256': lock['harfbuzzNativeMesonPaths']['recipe']['sha256'],
                                        'afterSha256': lock['harfbuzzNativeMesonPaths']['recipe']['afterSha256'],

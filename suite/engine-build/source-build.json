@@ -381,5 +381,45 @@
       "nativeEngineQualified": false,
       "windowsControlRunId": null
     }
+  },
+  "atlConsumerNativePaths": {
+    "scope": "Five remaining current gbuild ATL consumers only; WNT_AARCH64_MSC and real GNU make MAKE_HOST ending -cygwin; recipe-local quoted native include/resource/link arguments; only existing static ATL consumers bypass sorted T_LIBS through their existing ldflags; no global ATL state, ActiveX hook, feature graph or other profiles changed",
+    "recipes": [
+      {
+        "path": "embedserv/Library_emser.mk",
+        "size": 1586,
+        "sha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef",
+        "afterSize": 2768,
+        "afterSha256": "7f35d902d0711e96aaa13a1dd25a05d1fd04a010100d5e48719b2ec1c0dbe5a1"
+      },
+      {
+        "path": "extensions/Library_oleautobridge.mk",
+        "size": 1639,
+        "sha256": "815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8",
+        "afterSize": 2989,
+        "afterSha256": "b369233d2eec07295ca7adeb3e91b9bde2498ed7be96cb296e95e6d27a3b26ed"
+      },
+      {
+        "path": "winaccessibility/Library_uacccom.mk",
+        "size": 2200,
+        "sha256": "d5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062",
+        "afterSize": 3409,
+        "afterSha256": "7ec1fed59fad36368739d5917f46bd74f6560d33460bc73ea9438592356de815"
+      },
+      {
+        "path": "winaccessibility/Library_winaccessibility.mk",
+        "size": 2478,
+        "sha256": "0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4",
+        "afterSize": 3394,
+        "afterSha256": "c99e623c082accaa84efebf254876ee083effc071a1bd8de63ee10bcf6f45e6d"
+      },
+      {
+        "path": "winaccessibility/WinResTarget_uacccom.mk",
+        "size": 803,
+        "sha256": "9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00",
+        "afterSize": 1719,
+        "afterSha256": "58637ccbabc74afb3a84f27526a26b47ffdce1bfa2c814e5d369b84f2b2aca5c"
+      }
+    ]
   }
 }
