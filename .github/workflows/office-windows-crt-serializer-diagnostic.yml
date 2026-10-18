@@ -239,14 +239,18 @@ jobs:
                     process, native = ctypes.c_uint16(), ctypes.c_uint16()
                     if not self.kernel.IsWow64Process2(handle, ctypes.byref(process), ctypes.byref(native)):
                         raise ctypes.WinError(ctypes.get_last_error())
-                    result.update(processMachine=process.value, nativeMachine=native.value,
-                                  architectureDeclaration=('native-arm64' if process.value == 0 and native.value == 0xaa64
-                                                           else 'foreign-or-other-architecture-observed-allowed'))
+                    result.update(processMachine=process.value, nativeMachine=native.value)
                     image, length = ctypes.create_unicode_buffer(32768), ctypes.c_uint32(32768)
                     if not self.kernel.QueryFullProcessImageNameW(handle, 0, image, ctypes.byref(length)):
                         raise ctypes.WinError(ctypes.get_last_error())
                     result['image'] = image.value
                     result['imagePe'] = pe(image.value)
+                    image_machine = result['imagePe']['machine']
+                    result['architectureDeclaration'] = (
+                        'arm64-image-on-arm64' if image_machine == 0xaa64 and native.value == 0xaa64 else
+                        'x64-image-on-arm64' if image_machine == 0x8664 and native.value == 0xaa64 else
+                        'foreign-or-other-image-host-pair-observed-allowed')
+                    result['architectureEvidenceScope'] = 'Measured PE machine and raw API pair only; no instruction-engine claim'
                     result['waitResultZeroTimeout'] = self.kernel.WaitForSingleObject(handle, 0)
                     if result['waitResultZeroTimeout'] not in (0, 258):
                         raise ctypes.WinError(ctypes.get_last_error())
@@ -258,6 +262,72 @@ jobs:
                                           (result['waitResultZeroTimeout'] != 0 or int(result['exitTimeRawTicks']) > 0))
                 except Exception as error:
                     result['error'] = failure(error)
+                return result
+
+            def snapshot_after(self, handle_value, expected_pid, before, prior_reference):
+                """Post-communicate state; image/PE evidence stays explicitly prior."""
+                result = dict(pid=expected_pid, complete=False, borrowedHandleValue=str(handle_value),
+                              handlePolicy='borrowed-existing-handle-no-duplicate-no-close',
+                              measurementPhase='post-communicate-process-state', queryErrors={})
+                handle = ctypes.c_void_p(handle_value)
+                try:
+                    result['handlePid'] = self.kernel.GetProcessId(handle)
+                    if result['handlePid'] == 0:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                except Exception as error:
+                    result['queryErrors']['GetProcessId'] = failure(error)
+                try:
+                    times = [self.FileTime() for _ in range(4)]
+                    if not self.kernel.GetProcessTimes(handle, *[ctypes.byref(item) for item in times]):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    result['creationTimeRawTicks'] = str((times[0].high << 32) | times[0].low)
+                    result['exitTimeRawTicks'] = str((times[1].high << 32) | times[1].low)
+                except Exception as error:
+                    result['queryErrors']['GetProcessTimes'] = failure(error)
+                try:
+                    result['waitResultZeroTimeout'] = self.kernel.WaitForSingleObject(handle, 0)
+                    if result['waitResultZeroTimeout'] not in (0, 258):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                except Exception as error:
+                    result['queryErrors']['WaitForSingleObject'] = failure(error)
+                try:
+                    code = ctypes.c_uint32()
+                    if not self.kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    result['exitCode'] = code.value
+                except Exception as error:
+                    result['queryErrors']['GetExitCodeProcess'] = failure(error)
+                try:
+                    prior = before if isinstance(before, dict) else {}
+                    prior_image, prior_pe = prior.get('image'), prior.get('imagePe')
+                    prior_sha = hashlib.sha256(json.dumps(before, sort_keys=True, ensure_ascii=False,
+                        separators=(',', ':')).encode('utf-8')).hexdigest()
+                    valid_pe = (isinstance(prior_pe, dict) and type(prior_pe.get('machine')) is int
+                        and 0 < prior_pe['machine'] <= 0xffff and prior_pe.get('optionalHeaderMagic') in (0x10b, 0x20b)
+                        and type(prior_pe.get('bytes')) is int and prior_pe['bytes'] > 0
+                        and isinstance(prior_pe.get('sha256'), str) and re.fullmatch('[0-9a-f]{64}', prior_pe['sha256']) is not None
+                        and prior_pe.get('path') == prior_image)
+                    binding = dict(priorComplete=prior.get('complete') is True,
+                        priorImageMeasurementValid=isinstance(prior_image, str) and bool(prior_image.strip()) and valid_pe,
+                        priorReferenceValid=isinstance(prior_reference, str) and re.fullmatch(r'/runs/[0-2]/before', prior_reference) is not None,
+                        sameBorrowedHandle=prior.get('borrowedHandleValue') == str(handle_value),
+                        samePid=expected_pid > 0 and prior.get('pid') == expected_pid and prior.get('handlePid') == expected_pid and result.get('handlePid') == expected_pid,
+                        sameCreationTimeRawTicks=isinstance(result.get('creationTimeRawTicks'), str)
+                            and re.fullmatch('[1-9][0-9]*', result['creationTimeRawTicks']) is not None
+                            and prior.get('creationTimeRawTicks') == result['creationTimeRawTicks'])
+                    result['priorIdentityBinding'] = binding
+                    result['priorImageMeasurement'] = dict(measurementTiming='prior-before-communicate-not-post-query',
+                        snapshotReference=prior_reference, snapshotSha256=prior_sha,
+                        snapshotHashEncoding='Python JSON sorted keys, compact separators, UTF-8, ensure_ascii=False',
+                        priorImagePath=prior_image, priorImagePe=prior_pe,
+                        priorProcessMachine=prior.get('processMachine'), priorNativeMachine=prior.get('nativeMachine'),
+                        priorArchitectureDeclaration=prior.get('architectureDeclaration'))
+                    result['complete'] = (not result['queryErrors'] and all(binding.values())
+                        and result.get('waitResultZeroTimeout') == 0
+                        and isinstance(result.get('exitTimeRawTicks'), str)
+                        and re.fullmatch('[1-9][0-9]*', result['exitTimeRawTicks']) is not None)
+                except Exception as error:
+                    result['priorBindingError'] = failure(error)
                 return result
 
             def attributes(self, path):
@@ -316,7 +386,8 @@ jobs:
                         self.observer.problem('binary-output-evidence-or-decoding', error)
                     raise
                 finally:
-                    call['after'] = self.observer.api.snapshot(int(self.real._handle), self.real.pid)
+                    call['after'] = self.observer.api.snapshot_after(int(self.real._handle), self.real.pid,
+                        self.record['before'], '/runs/' + str(('pwsh-generator', 'compile', 'serializer').index(self.record['kind'])) + '/before')
                     self.observer.checkpoint('phase-communicate-finished')
 
             def poll(self):
