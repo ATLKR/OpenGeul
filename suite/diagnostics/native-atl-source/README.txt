@@ -1,9 +1,10 @@
 This is a diagnostic-only reproduction of the native22 ATL prerequisite failure.
 
 The selected toolchain is frozen to VS18 Enterprise 18.10.12224.181, v145
-14.51.36231. A changed runner fails closed for review. The workflow accepts only
-an exact reviewed commit on work/opengeul-office-native-atl-control; it does not
-run on main, pull requests, push, schedules, or product workflows.
+14.51.36231. A changed runner fails closed for review. The workflow accepts manual
+dispatch with matching source_sha, or pushes on work/opengeul-office-native-atl-control
+for explicitly listed diagnostic paths. Every accepted run uses the immutable
+event SHA. It does not run on main, pull requests, schedules, or product workflows.
 
 source.json pins exact members of the locally rehashed official LibreOffice
 26.8.1.1 source archive. configure-atl-selection.sh consists only of the two
@@ -36,4 +37,5 @@ compiler descendant process handles or claim descendant job membership.
 
 No observation here qualifies an engine, Python build, Base, GUI or release.
 All qualification flags stay false. Actual Windows outcomes remain unobserved
-until root publishes and dispatches a separately reviewed diagnostic commit.
+until root publishes a separately reviewed diagnostic commit for a matching
+push or manual dispatch.

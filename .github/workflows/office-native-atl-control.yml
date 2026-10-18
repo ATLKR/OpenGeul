@@ -1,6 +1,15 @@
 name: Native ARM64 ATL prerequisite control
 
 on:
+  push:
+    branches:
+      - work/opengeul-office-native-atl-control
+    paths:
+      - .github/workflows/office-native-atl-control.yml
+      - suite/scripts/probe-native-atl.ps1
+      - suite/scripts/build-native-engine.ps1
+      - suite/diagnostics/native-atl-source/**
+      - suite/tests/test_native_atl_control.py
   workflow_dispatch:
     inputs:
       source_sha:
@@ -17,21 +26,21 @@ concurrency:
 
 jobs:
   native-atl-control:
-    if: github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/opengeul-office-native-atl-control' && inputs.source_sha == github.sha
+    if: github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/opengeul-office-native-atl-control' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.source_sha == github.sha))
     runs-on: windows-11-arm
     timeout-minutes: 18
     steps:
       - name: Preserve exact diagnostic source bytes
         shell: pwsh
         env:
-          EXPECTED_DIAGNOSTIC_SHA: ${{ inputs.source_sha }}
+          EXPECTED_DIAGNOSTIC_SHA: ${{ github.sha }}
         run: |
           if ($env:EXPECTED_DIAGNOSTIC_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:EXPECTED_DIAGNOSTIC_SHA -cne $env:GITHUB_SHA) { throw 'Exact reviewed diagnostic source SHA is required.' }
           git config --global core.autocrlf false
           git config --global core.longpaths true
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Compare native ATL header and library path prerequisites
         shell: pwsh
