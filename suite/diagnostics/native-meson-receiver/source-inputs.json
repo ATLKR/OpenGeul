@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "productionBaseCommit": "b30ba8ae89b1fae10a3a634579b6284b1de33f80",
+  "archiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+  "archive": "libreoffice-26.8.1.1.tar.xz",
+  "provenance": "Complete members copied from authenticated frozen Native23 diagnosis; matching archive/member pins retained in work/native23-meson-path-diagnosis/sourcepins.json",
+  "files": [
+    {
+      "file": "source/ExternalProject_harfbuzz.mk",
+      "archiveMember": "libreoffice-26.8.1.1/external/harfbuzz/ExternalProject_harfbuzz.mk",
+      "bytes": 3074,
+      "sha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50"
+    },
+    {
+      "file": "source/ExternalProject.mk",
+      "archiveMember": "libreoffice-26.8.1.1/solenv/gbuild/ExternalProject.mk",
+      "bytes": 9705,
+      "sha256": "e82523e2048f88b30a08e0752223112dfe3493a0f9b8b61c1310e0612ec31792"
+    },
+    {
+      "file": "source/Helper.mk",
+      "archiveMember": "libreoffice-26.8.1.1/solenv/gbuild/Helper.mk",
+      "bytes": 14492,
+      "sha256": "968bb797d966c4c75b77132e25ba1e42d762943b7c2e4a43593b0bddcc4e17f9"
+    },
+    {
+      "file": "source/com_MSC_defs.mk",
+      "archiveMember": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_defs.mk",
+      "bytes": 10340,
+      "sha256": "c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14"
+    }
+  ],
+  "productionBaseTree": "b2f1171683f6855c2522baeb2ffc851f448be145",
+  "productionBinding": {
+    "moduleSha256": "9e75389f116b90bac6123b6c2300ad7bc4085ad8db67e1159cde0d9b42e7ba5a",
+    "lockSha256": "a21430430a0e95665bc763911ae3c9ad91f7feee7484e44b3d2e725e26e304bb",
+    "plannerCodeSha256": "95343aaef0ee0bbedd910e20b61dbbe8a5105e7eedb5f2297c9f41efe7abe112",
+    "originalRecipeSha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+    "candidateRecipeSha256": "f959b6f564baf45777f531b588932b2e969bdfbf21ffdb41630874838415cfcb"
+  }
+}

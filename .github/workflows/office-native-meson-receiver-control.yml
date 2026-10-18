@@ -1,0 +1,80 @@
+name: OpenGeul native Meson component receiver feasibility control
+'on':
+  push:
+    branches: [work/suite-native-meson-control]
+    paths:
+      - .github/workflows/office-native-meson-receiver-control.yml
+      - suite/scripts/probe-native-meson-receiver.ps1
+      - suite/diagnostics/native-meson-receiver/**
+      - suite/tests/test_native_meson_receiver*.py
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-hex github.sha of this workflow run
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: native-meson-receiver-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-meson-component-receiver:
+    if: github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/suite-native-meson-control'
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Start control deadline and bind immutable source before checkout
+        shell: pwsh
+        env:
+          OPENGEUL_MESON_CONTROL_REQUESTED_SHA: ${{ inputs.source_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $started = [DateTime]::UtcNow
+          $deadline = $started.AddMinutes(18).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+          $owned = Join-Path $env:RUNNER_TEMP ('opengeul-native-meson-receiver-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $owned) { throw 'Preserve the original control job-budget receipt.' }
+          New-Item -ItemType Directory -Path $owned | Out-Null
+          $receipt = Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';scope='component-receiver-feasibility-only';startedUtc=$started.ToString('o');deadlineUtc=$deadline;controlMinutes=18;jobTimeoutMinutes=20;nominalReserveMinutes=2;runnerSetupIncluded=$false;sourceSha=$env:GITHUB_SHA;requestedSourceSha=$env:OPENGEUL_MESON_CONTROL_REQUESTED_SHA} |
+            ConvertTo-Json | Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
+          "OPENGEUL_MESON_CONTROL_DEADLINE_UTC=$deadline" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_MESON_CONTROL_BUDGET_RECEIPT=$receipt" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          if ($env:GITHUB_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'github.sha must be an immutable 40-hex source commit.' }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            if ($env:OPENGEUL_MESON_CONTROL_REQUESTED_SHA -cnotmatch '^[0-9a-fA-F]{40}$') { throw 'source_sha must be an immutable 40-hex source commit.' }
+            if ($env:OPENGEUL_MESON_CONTROL_REQUESTED_SHA -cne $env:GITHUB_SHA) { throw 'source_sha must exactly equal immutable github.sha.' }
+          }
+          git config --global core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw 'Could not preserve exact source line endings.' }
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { throw 'Could not enable long source paths.' }
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Probe native Meson component receiver feasibility
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./suite/scripts/probe-native-meson-receiver.ps1 -WorkDirectory .work/native-meson-receiver -OutputDirectory .work/native-meson-receiver-evidence -DeadlineUtc $env:OPENGEUL_MESON_CONTROL_DEADLINE_UTC
+          if (-not $?) { throw 'Native Meson receiver control failed.' }
+      - name: Retain component receiver evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-meson-receiver-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/opengeul-native-meson-receiver-${{ github.run_id }}-${{ github.run_attempt }}/
+            .work/native-meson-receiver-evidence/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
