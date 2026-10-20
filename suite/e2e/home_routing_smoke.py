@@ -30,6 +30,7 @@ OPEN_CAPTION='OpenGeul Office에서 문서 열기'
 OPEN_FILENAME_ID='1148'  # Actual Home native Open, distinct from Save Edit1001.
 OFFICE_MODULES=('writer','calc','impress','draw','math','base')
 OPEN_ROUTES=tuple((module,extension) for module,extension,_ in features.FORMATS)+(('hwp','hwp'),('hwp','hwpx'))
+MAX_HOME_AGGREGATE_BYTES=32*1024*1024
 
 # The pinned pywinauto capture reads the screen rectangle without focusing or
 # painting the window. Run it in one hidden, bounded child, separate from UNO.
@@ -189,7 +190,7 @@ def click_home_action(api,process,home,module,record):
         operation=name;return function()
     try:
         assert process.poll() is None
-        Desktop(backend='win32').window(handle=home).wrapper_object().set_focus()
+        native.activate_owned_suite(api,process,home,record)
         native.wait_for(lambda:api.user.GetAncestor(api.user.GetForegroundWindow(),2)==home,10)
         api.require_foreground(home)
         evidence.update(home=api._focus_window(home),foreground=api._focus_window(api.user.GetForegroundWindow()))
@@ -299,7 +300,7 @@ def shell_menu_action(api,process,document,label,record):
     evidence=dict(documentHwnd=document,shellPid=process.pid,label=label,fileClicks=0,actionClicks=0,success=False)
     record.setdefault('shellMenuActions',[]).append(evidence)
     assert process.poll() is None and api.user.IsWindow(document) and api.pid(document)==process.pid
-    Desktop(backend='win32').window(handle=document).wrapper_object().set_focus();api.require_foreground(document)
+    native.activate_owned_suite(api,process,document,record);api.require_foreground(document)
     shell=Desktop(backend='uia').window(handle=document).wrapper_object()
     files=[item for item in shell.descendants(control_type='MenuItem') if item.element_info.name=='파일'
         and item.element_info.process_id==process.pid and item.is_visible() and item.is_enabled()]
@@ -515,7 +516,11 @@ class HomeCase:
     def screenshot(self,hwnd,label):
         from pywinauto import Desktop
         window=Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-        window.set_focus();self.api.require_foreground(hwnd)
+        if self.api.pid(hwnd)==self.process.pid:
+            native.activate_owned_suite(self.api,self.process,hwnd,self.record)
+        else:
+            window.set_focus()  # Existing separately bound HWP window path.
+        self.api.require_foreground(hwnd)
         name=self.record['case']+'-'+label+'.png';window.capture_as_image().save(self.output/name)
         self.record.setdefault('screenshots',[]).append(name)
 
@@ -875,6 +880,14 @@ def run_home_cases(suite,output,inputs,hwp_inputs):
     return records
 
 
+def write_home_aggregate(output,report):
+    """Keep every field/native integer within the frozen readers' byte limit."""
+    raw=json.dumps(report,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8')
+    assert len(raw)<=MAX_HOME_AGGREGATE_BYTES, 'Home aggregate exceeds the byte limit: '+str(len(raw))
+    path=Path(output)/'home-routing.json';_unlinked(path)
+    with path.open('xb') as stream:stream.write(raw)
+
+
 def main():
     if not __debug__:raise RuntimeError('Home native assertions cannot run under Python -O')
     if os.name!='nt':raise RuntimeError('Actual Windows native GUI execution is required')
@@ -905,7 +918,13 @@ def main():
     report=summarize(records);report.update(suite=str(suite),features=str(feature_root),hwpFixtures=str(hwp_root),nativeIntegrity=integrity)
     if run_error is not None:report['runError']=run_error
     report['success']=report['success'] and integrity['success'] is True and run_error is None
-    (output/'home-routing.json').write_text(json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
+    try:write_home_aggregate(output,report)
+    except Exception as exc:
+        failure=dict(schemaVersion=1,kind='home-aggregate-write-failure',success=False,aggregateComplete=False,
+            byteLimit=MAX_HOME_AGGREGATE_BYTES,error=type(exc).__name__+': '+str(exc)[:1024])
+        with (output/'home-routing-write-failure.json').open('xb') as stream:
+            stream.write(json.dumps(failure,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8'))
+        return 1
     return 0 if report['success'] else 1
 
 

@@ -24,6 +24,8 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import engine_smoke as baseline
 from engine_smoke import Engine
+from base_read_lifetime import (call as lifetime_call, close_resources, observe_database,
+    preserve_cleanup_errors, read_rows)
 
 CATALOG = Path(__file__).resolve().parents[1] / 'config/feature-catalog.json'
 FORMATS = (
@@ -189,16 +191,13 @@ def _normal_text(value):
     return value.replace('\r\n', '\n').replace('\r', '\n').rstrip('\n')
 
 
-def _rows(connection):
-    result = connection.createStatement().executeQuery('SELECT "ID", "TEXT_VALUE", "AMOUNT" FROM "OPENGEUL_SMOKE" ORDER BY "ID"')
-    rows = []
-    while result.next():
-        rows.append(dict(id=result.getInt(1), text=result.getString(2), amount=result.getInt(3)))
-    return rows
+def _rows(connection, diagnostics=None):
+    return read_rows(connection, diagnostics)
 
 
-def _base_crud(document):
-    connection = document.DataSource.getIsolatedConnection('', '')
+def _base_crud(document, diagnostics=None):
+    connection = lifetime_call(diagnostics, 'connection.open-isolated', lambda: document.DataSource.getIsolatedConnection('', ''))
+    primary = None
     try:
         connection.setAutoCommit(False)
         connection.createStatement().execute('CREATE TABLE "OPENGEUL_SMOKE" ("ID" INTEGER NOT NULL PRIMARY KEY, "TEXT_VALUE" VARCHAR(128), "AMOUNT" INTEGER)')
@@ -209,7 +208,7 @@ def _base_crud(document):
         insert(1, marker('base'), 42)
         insert(2, 'delete-me', 9)
         connection.commit()
-        initial = _rows(connection)
+        initial = _rows(connection, diagnostics)
         assert initial == [dict(id=1, text=marker('base'), amount=42), dict(id=2, text='delete-me', amount=9)], 'Initial CRUD fixture is wrong'
         update = connection.prepareStatement('UPDATE "OPENGEUL_SMOKE" SET "TEXT_VALUE"=?, "AMOUNT"=? WHERE "ID"=1')
         update.setString(1, marker('base') + ' updated'); update.setInt(2, 55)
@@ -217,17 +216,20 @@ def _base_crud(document):
         insert(3, marker('base') + ' inserted', 13)
         assert connection.createStatement().executeUpdate('DELETE FROM "OPENGEUL_SMOKE" WHERE "ID"=2') == 1, 'DELETE did not remove one row'
         connection.commit()
-        committed = _rows(connection)
+        committed = _rows(connection, diagnostics)
         assert committed == base_rows(True), 'Committed CRUD state is wrong'
         connection.createStatement().executeUpdate('UPDATE "OPENGEUL_SMOKE" SET "AMOUNT"=999 WHERE "ID"=1')
         connection.createStatement().executeUpdate('DELETE FROM "OPENGEUL_SMOKE" WHERE "ID"=3')
         insert(4, 'rollback-me', 99)
         connection.rollback()
-        rolled_back = _rows(connection)
+        rolled_back = _rows(connection, diagnostics)
         assert rolled_back == committed, 'ROLLBACK did not restore committed state'
         return dict(initialRows=initial, committedRows=committed, rolledBackRows=rolled_back)
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        connection.close()
+        close_resources([('connection.close', connection.close)], primary, diagnostics)
 
 
 def populate(engine, case, document):
@@ -291,7 +293,7 @@ def populate(engine, case, document):
             if module == 'impress': _fix_impress_geometry(engine, shape, wanted[0])
             if module == 'draw': shape.setPropertyValue('FillColor', wanted[0]['color'])
     elif module == 'math': document.setPropertyValue('Formula', RICH_FORMULA)
-    elif module == 'base': return _base_crud(document)
+    elif module == 'base': return _base_crud(document, getattr(engine, 'lifetime_diagnostics', None))
     return {}
 
 
@@ -318,7 +320,7 @@ def _writer_paragraphs(text):
     return paragraphs
 
 
-def observe(case, document):
+def observe(case, document, diagnostics=None):
     module, rich = case['module'], case['kind'] == 'rich'
     if module == 'writer':
         if not rich: return dict(text=_normal_text(document.getText().getString()))
@@ -366,10 +368,7 @@ def observe(case, document):
         return dict(pages=result)
     if module == 'math': return dict(formula=''.join(document.getPropertyValue('Formula').split()))
     if module == 'base':
-        source = document.DataSource
-        connection = source.getConnection('', '')
-        try: return dict(databaseUrl=source.getPropertyValue('URL'), rows=_rows(connection))
-        finally: connection.close()
+        return observe_database(document, diagnostics)
     raise ValueError('Unknown module')
 
 
@@ -554,6 +553,10 @@ def run_case(suite, output, case):
         for phase in ('create', 'independent-reopen'):
             record['stage'] = phase
             engine, document = Engine(suite), None
+            engine.base_lifetime_enabled = case['module'] == 'base'
+            diagnostics = getattr(engine, 'lifetime_diagnostics', None) if case['module'] == 'base' else None
+            phase_error = None
+            phase_cleanup_errors = []
             engines.append(engine)
             try:
                 engine.start()
@@ -566,24 +569,35 @@ def run_case(suite, output, case):
                     else:
                         document = engine.load(baseline.FACTORIES[case['module']])
                     record['creationCheckpoints'] = populate(engine, case, document)
-                    record['createdObservation'] = observe(case, document)
+                    record['createdObservation'] = observe(case, document, diagnostics) if diagnostics is not None else observe(case, document)
                     validate_observation(case, record['createdObservation'], phase=phase)
                     if case['module'] == 'base': document.store()
                     else: store_new(engine, case, document, path)
                 else:
                     document = load_saved(engine, case, path)
-                    record['observed'] = observe(case, document)
+                    record['observed'] = observe(case, document, diagnostics) if diagnostics is not None else observe(case, document)
                     validate_observation(case, record['observed'], phase=phase)
                     record['independentReopenVerified'] = True
+            except Exception as exc:
+                phase_error = exc
+                raise
             finally:
                 try: engine.close_document(document)
-                except Exception as exc: engine.cleanup_errors.append('generated document: ' + str(exc))
+                except Exception as exc:
+                    engine.cleanup_errors.append('generated document: ' + str(exc))
+                    phase_cleanup_errors.append(('generated document', exc))
                 try: engine.cleanup()
-                except Exception as exc: engine.cleanup_errors.append('owned cleanup: ' + str(exc))
+                except Exception as exc:
+                    engine.cleanup_errors.append('owned cleanup: ' + str(exc))
+                    phase_cleanup_errors.append(('owned cleanup', exc))
                 cleanup = getattr(engine, 'cleanup_evidence', None)
                 record.setdefault('engineCleanups', []).append(dict(phase=phase, evidence=cleanup))
-                if engine.cleanup_errors: raise RuntimeError('Owned engine cleanup failed: ' + '; '.join(engine.cleanup_errors))
-                baseline.validate_cleanup_evidence(cleanup)
+                if engine.cleanup_errors:
+                    problem = RuntimeError('Owned engine cleanup failed: ' + '; '.join(engine.cleanup_errors))
+                    preserve_cleanup_errors(phase_error, phase_cleanup_errors + [('owned cleanup', problem)])
+                else:
+                    try: baseline.validate_cleanup_evidence(cleanup)
+                    except Exception as exc: preserve_cleanup_errors(phase_error, [('owned cleanup proof', exc)])
             # Firebird finalizes its embedded backup during close; hash only after
             # each model and owned process have fully disposed.
             package_proof = validate_container(case, path)

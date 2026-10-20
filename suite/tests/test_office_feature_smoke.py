@@ -267,14 +267,16 @@ class ExecutionBoundaryTests(unittest.TestCase):
     def test_crud_performs_real_committed_and_rolled_back_sql_transitions(self):
         db=self.root/'transaction.db'
         class Result:
-            def __init__(self,cursor): self.iterator=iter(cursor.fetchall()); self.row=None
+            def __init__(self,cursor): self.cursor=cursor; self.iterator=iter(cursor.fetchall()); self.row=None
             def next(self):
                 self.row=next(self.iterator,None); return self.row is not None
             def getInt(self,index): return int(self.row[index-1])
             def getString(self,index): return self.row[index-1]
+            def close(self): self.cursor.close()
         class Statement:
             def __init__(self,connection,sql=None): self.connection=connection; self.sql=sql; self.values={}
             def execute(self,sql): self.connection.execute(sql)
+            def close(self): pass  # SQLite cursors are owned and closed by Result.
             def executeQuery(self,sql): return Result(self.connection.execute(sql))
             def setInt(self,index,value): self.values[index]=value
             setString=setInt
@@ -301,6 +303,29 @@ class ExecutionBoundaryTests(unittest.TestCase):
             # Windows forbids deleting the owned fixture until this handle closes.
             connection.close()
         self.assertEqual([(row['id'],row['text'],row['amount']) for row in smoke.base_rows(True)],actual)
+
+    def test_base_read_error_remains_primary_after_document_and_owned_cleanup_failures(self):
+        case=next(case for case in self.cases if case['id']=='format-base-odb');events=[]
+        primary=ValueError('original Base read error');document_error=OSError('document close failed')
+        class Engine:
+            def __init__(self,suite):
+                self.cleanup_errors=[];self.cleanup_evidence=successful_cleanup(suite)
+            def start(self):pass
+            def service(self,name):return SimpleNamespace(initNew=lambda:None,DataSource=SimpleNamespace(setPropertyValue=lambda *args:None))
+            def close_document(self,document):
+                events.append('document.close');raise document_error
+            def cleanup(self):
+                events.append('owned.cleanup');self.cleanup_errors.append('forced job remains a failure')
+        with patch.object(smoke,'Engine',Engine),patch.object(smoke,'store_new'),patch.object(smoke,'populate',return_value={}), \
+             patch.object(smoke,'observe',side_effect=primary):
+            row=smoke.run_case(self.suite,self.output,case)
+        self.assertEqual(events,['document.close','owned.cleanup'])
+        self.assertEqual(row['status'],'failed');self.assertEqual(row['error']['type'],'ValueError')
+        self.assertEqual(row['error']['message'],'original Base read error')
+        self.assertTrue(any('document close failed' in e for e in row['cleanupErrors']))
+        self.assertTrue(any('forced job' in e for e in row['cleanupErrors']))
+        self.assertIn('owned cleanup',row['error']['traceback'])
+        self.assertIn(document_error,[error for stage,error in primary.base_cleanup_errors])
 
     def test_partial_results_preserved_and_next_case_runs_after_exception(self):
         seen=[]

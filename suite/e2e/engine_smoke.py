@@ -17,6 +17,8 @@ import traceback
 import uuid
 
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from base_read_lifetime import LifetimeTrace, call as lifetime_call, observe_database, resource_scope
 
 FILES = {'writer': 'OpenGeul-writer.docx', 'calc': 'OpenGeul-calc.xlsx',
          'impress': 'OpenGeul-impress.pptx', 'draw': 'OpenGeul-draw.odg',
@@ -114,10 +116,13 @@ class Engine:
         self.process = self.profile = self.desktop = self.uno = None
         self.cleanup_errors = []
         self._job_witness = None
+        self.base_lifetime_enabled = False
+        self.lifetime_diagnostics = LifetimeTrace()
         self.cleanup_evidence = dict(schemaVersion=1, kind='owned-engine-job-cleanup',
             expectedEngineImage=str(self.runtime / 'program/soffice.bin'), gracefulQualified=False,
             forcedTermination=False, jobEmptyVerified=False, initialMembers=[], finalMembers=[],
-            finalJobPids=None, launcherExitCode=None, snapshots=[], errors=[])
+            finalJobPids=None, launcherExitCode=None, snapshots=[], errors=[],
+            lifetimeDiagnostics=self.lifetime_diagnostics.receipt)
 
     def start(self):
         if os.name != 'nt':
@@ -175,10 +180,14 @@ class Engine:
 
     def close_document(self, document):
         if document is not None:
-            # Only generated test documents reach this helper. Discarding during
-            # failure cleanup is explicit; user documents are never loaded.
-            document.setModified(False)
-            document.close(False)
+            # Only generated test documents reach this helper.
+            if self.base_lifetime_enabled:
+                with resource_scope(self.lifetime_diagnostics) as own:
+                    own('document.close', lambda: document.close(False))
+                    lifetime_call(self.lifetime_diagnostics, 'document.setModified', lambda: document.setModified(False))
+            else:
+                document.setModified(False)
+                document.close(False)
 
     def _cleanup_error(self, stage, exc):
         self.cleanup_errors.append(stage + ': ' + type(exc).__name__ + ': ' + str(exc))
@@ -245,7 +254,10 @@ class Engine:
                 self._cleanup_error('retain owned members', exc)
         if self.desktop is not None:
             try:
-                if self.desktop.terminate() is False:
+                returned = self.lifetime_diagnostics.call('desktop.terminate', self.desktop.terminate, record_return=True)
+                if type(returned) is not bool:
+                    raise TypeError('Private desktop termination returned a non-boolean')
+                if returned is False:
                     raise RuntimeError('Private desktop vetoed graceful termination')
             except Exception as exc:
                 self._cleanup_error('desktop termination', exc)
@@ -281,6 +293,10 @@ class Engine:
                 self._job_witness.close()
             except Exception as exc:
                 self._cleanup_error('retained member handle close', exc)
+        try:
+            self.lifetime_diagnostics.require_complete()
+        except Exception as exc:
+            self._cleanup_error('lifetime diagnostics', exc)
         if self.process is not None and dead and not self.cleanup_errors:
             self.cleanup_evidence['gracefulQualified'] = True
             try:
@@ -349,7 +365,7 @@ def populate(engine, module, document):
             connection.close()
 
 
-def observe(module, document):
+def observe(module, document, diagnostics=None):
     if module == 'writer':
         return {'text': document.getText().getString()}
     if module == 'calc':
@@ -375,17 +391,7 @@ def observe(module, document):
     if module == 'math':
         return {'formula': document.getPropertyValue('Formula')}
     if module == 'base':
-        source = document.DataSource
-        connection = source.getConnection('', '')
-        try:
-            result = connection.createStatement().executeQuery(
-                'SELECT "ID", "TEXT_VALUE", "AMOUNT" FROM "OPENGEUL_SMOKE" ORDER BY "ID"')
-            rows = []
-            while result.next():
-                rows.append({'id': result.getInt(1), 'text': result.getString(2), 'amount': result.getInt(3)})
-            return {'rows': rows, 'databaseUrl': source.getPropertyValue('URL')}
-        finally:
-            connection.close()
+        return observe_database(document, diagnostics)
     raise ValueError('Unknown test module: ' + module)
 
 
@@ -407,6 +413,8 @@ def run_case(suite, output, module, specification, verify_ui=False):
     if verify_ui and module in UI_MODULES:
         result['expected']['uiSuffix'] = 'UI-OpenGeul-' + module
     engine = Engine(suite)
+    engine.base_lifetime_enabled = module == 'base'
+    diagnostics = getattr(engine, 'lifetime_diagnostics', None) if module == 'base' else None
     document = None
     started = time.monotonic()
     try:
@@ -423,7 +431,7 @@ def run_case(suite, output, module, specification, verify_ui=False):
             else:
                 document = engine.load(specification['factory'])
             populate(engine, module, document)
-            verify_content(module, observe(module, document))
+            verify_content(module, observe(module, document, diagnostics) if diagnostics is not None else observe(module, document))
             if module == 'base':
                 document.store()
             else:
@@ -432,7 +440,7 @@ def run_case(suite, output, module, specification, verify_ui=False):
             engine.close_document(document)
             document = None
             document = engine.load(path.as_uri())
-        observed = observe(module, document)
+        observed = observe(module, document, diagnostics) if diagnostics is not None else observe(module, document)
         verify_content(module, observed, verify_ui)
         result.update(status='passed', observed=observed)
     except Exception as exc:
@@ -443,7 +451,8 @@ def run_case(suite, output, module, specification, verify_ui=False):
             engine.close_document(document)
         except Exception as exc:
             engine.cleanup_errors.append('generated document: ' + type(exc).__name__ + ': ' + str(exc))
-        engine.cleanup()
+        try: engine.cleanup()
+        except Exception as exc: engine.cleanup_errors.append('owned cleanup: ' + type(exc).__name__ + ': ' + str(exc))
         result['engineCleanup'] = getattr(engine, 'cleanup_evidence', None)
         if engine.cleanup_errors:
             result['cleanupErrors'] = engine.cleanup_errors

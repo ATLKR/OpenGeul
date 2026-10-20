@@ -47,7 +47,13 @@ def launch_suite(command, suite, output, name):
     with (output / (name + '-stderr.log')).open('xb') as stderr:
         process = subprocess.Popen(command, cwd=suite, shell=False, stderr=stderr)
     process.opengeul_evidence_output, process.opengeul_evidence_case = output, name
+    process.opengeul_suite_root = Path(suite).resolve()
     return process
+
+
+def activate_owned_suite(api, process, hwnd, record):
+    from suite_window_activation import activate_suite_window
+    return activate_suite_window(api.require_foreground, process, hwnd, record)
 
 
 def is_owned_startup_error(dialog_pid, shell_pid, owner_pid, caption, class_name):
@@ -965,7 +971,7 @@ def new_module(suite, output, module, *, fixtures=None):
         record['stage'] = 'prepare-window'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
-        window.set_focus()
+        activate_owned_suite(api, process, hwnd, record)
         wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
         screenshot = name + '-attached.png'
         record['stage'] = 'capture-attached'
@@ -1019,7 +1025,7 @@ def capture_home(suite, output):
         record['stage'] = 'prepare-home'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
-        window.set_focus()
+        activate_owned_suite(api, process, hwnd, record)
         record['stage'] = 'verify-home-labels'
         home_uia = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
         labels = require_home_labels([button.element_info.name for button in home_uia.descendants(control_type='Button')])
@@ -1141,7 +1147,7 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
         record['stage'] = 'prepare-window'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
-        window.set_focus()
+        activate_owned_suite(api, process, hwnd, record)
         wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
         screenshot = module + ('-before.png' if physical_input else '-attached.png')
         record['stage'] = 'capture-attached'

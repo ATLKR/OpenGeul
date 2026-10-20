@@ -17,6 +17,8 @@ class CalcFailureCleanupTests(unittest.TestCase):
         path=Path(__file__).resolve().parents[1]/'e2e/calc_failure_cleanup.py'
         self.assertTrue(path.is_file(),'RED: pre-input failure needs an explicit owned-close path')
         self.api=importlib.import_module('calc_failure_cleanup')
+        early=importlib.import_module('calc_early_cleanup')
+        blocker=patch.object(early,'_BLOCK_LATER_LAUNCHES',False);blocker.start();self.addCleanup(blocker.stop)
         self.fixture=boundary_fixture.GeneratedCalcCloseTests();self.fixture.setUp();self.addCleanup(self.fixture.doCleanups)
         self.Desktop,_,self.buttons=self.fixture.boundary()
         f=self.fixture
@@ -140,11 +142,11 @@ class CalcFailureCleanupTests(unittest.TestCase):
         import writer_model_reader
         import writer_style_smoke
         f=self.fixture
-        for kind in ('save','close'):
-            with self.subTest(kind=kind):
+        for kind,early in (('save',False),('close',False),('save',True),('close',True)):
+            with self.subTest(kind=kind,early=early):
                 calls=[];f.exit_code=None
-                output=f.root/('physical-'+kind);output.mkdir()
-                failure=RuntimeError('first pending getter failed')
+                output=f.root/('physical-'+kind+str(early));output.mkdir()
+                failure=RuntimeError('launch focus failed' if early else 'first pending getter failed')
                 test=self
                 class Reader:
                     def __init__(self,*a,**kw):calls.append('reader-created')
@@ -154,14 +156,17 @@ class CalcFailureCleanupTests(unittest.TestCase):
                     self.assertEqual('calc',record.get('module'))
                     self.assertEqual(f.data,saved.path.read_bytes())
                     calls.append('bind-before-observer');return object()
-                def finish(api,process,record,proof,observer):
-                    self.assertIs(observer,self.observer)
-                    self.assertIn('first pending getter failed',record['error'])
+                def finish(api,process,record,proof,observer,*,observer_never_started=False):
+                    self.assertEqual(early,observer_never_started)
+                    self.assertIs(observer,None if early else self.observer)
+                    self.assertIn(str(failure),record['error'])
                     self.assertFalse(record['success'])
                     calls.append('explicit-close');f.exit_code=0
                     record['failureCleanup']={'success':True,'productShutdownQualified':False}
                 noop=lambda *a,**kw:None
-                window=NS(maximize=noop,set_focus=noop,capture_as_image=lambda:NS(save=noop))
+                def focus():
+                    if early:raise failure
+                window=NS(maximize=noop,set_focus=focus,capture_as_image=lambda:NS(save=noop))
                 desktop=lambda **kw:NS(window=lambda **kw:NS(wrapper_object=lambda:window))
                 f.windows.user.GetAncestor=lambda h,k:10
                 f.windows.user.GetForegroundWindow=lambda:10
@@ -171,6 +176,8 @@ class CalcFailureCleanupTests(unittest.TestCase):
                     patch.object(native,'require_engine_fixture',return_value=f.source),
                     patch.object(save,'launch_suite',return_value=f.process),
                     patch.object(native,'launch_suite',return_value=f.process),
+                    patch.object(save,'activate_owned_suite',side_effect=lambda *a,**kw:focus()),
+                    patch.object(native,'activate_owned_suite',side_effect=lambda *a,**kw:focus()),
                     patch.object(save,'Windows',return_value=f.windows),
                     patch.object(lifecycle,'LifecycleWindows',return_value=f.windows),
                     patch.object(save,'verified_attachment',return_value=(10,15,20,8)),
@@ -187,10 +194,11 @@ class CalcFailureCleanupTests(unittest.TestCase):
                 from contextlib import ExitStack
                 with ExitStack() as stack:
                     for p in patches:stack.enter_context(p)
-                    with self.assertRaisesRegex(RuntimeError,'first pending getter failed'):
+                    with self.assertRaisesRegex(RuntimeError,str(failure)):
                         if kind=='save':save.physical_case(f.suite,f.owned,output)
                         else:close.CalcCloseCase(f.suite,f.owned,output,'save').run()
-                self.assertEqual(['bind-before-observer','reader-created','first-read','release-observer','explicit-close'],calls)
+                self.assertEqual(['bind-before-observer','explicit-close'] if early else
+                    ['bind-before-observer','reader-created','first-read','release-observer','explicit-close'],calls)
 
 
 if __name__=='__main__':unittest.main()

@@ -131,6 +131,8 @@ def run_native_attempt(suite, fixtures, output, attempt):
         engine = EngineProcessWitness(office_pid)
         record['officeCreationTime'] = engine.creation_time
         assert api.pid(child) == office_pid and api.user.IsWindow(child), 'Embedded engine identity changed during capture'
+        mark_stage(record, 'activate-owned-window')
+        native.activate_owned_suite(api, process, hwnd, record)
         mark_stage(record, 'capture-attached')
         from pywinauto import Desktop
         screenshot = attempt['case'] + '-attached.png'

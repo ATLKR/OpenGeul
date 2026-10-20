@@ -107,7 +107,7 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
         record['stage'] = 'prepare-owned-native-focus'
-        window.set_focus()
+        native.activate_owned_suite(api, process, hwnd, record)
         api.require_foreground(hwnd)
         Desktop(backend='win32').window(handle=child).wrapper_object().click_input()
         record['keyboardFocusHwnd'] = native.wait_for(lambda: api.require_editor_focus(hwnd, child), seconds=10)

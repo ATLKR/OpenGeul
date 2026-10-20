@@ -149,7 +149,8 @@ class HomeRoutingContracts(unittest.TestCase):
                     return SimpleNamespace(element_info=info,click_input=lambda:boundary.calls.append(('tile-click',boundary.clock.value)))
                 modules['pywinauto.controls.uiawrapper']=SimpleNamespace(UIAWrapper=wrapper)
                 record={}
-                with patch.dict(sys.modules,modules),patch.object(self.api.time,'monotonic',boundary.clock.monotonic):
+                with patch.dict(sys.modules,modules),patch.object(self.api.time,'monotonic',boundary.clock.monotonic), \
+                     patch.object(self.api.native,'activate_owned_suite',side_effect=lambda api,process,hwnd,record:api.require_foreground(hwnd)):
                     if mode=='valid':self.api.click_home_action(boundary.api,boundary.process,11,'calc',record)
                     else:
                         with self.assertRaises(Exception):self.api.click_home_action(boundary.api,boundary.process,11,'calc',record)
@@ -696,6 +697,85 @@ class HomeRoutingContracts(unittest.TestCase):
                 self.assertEqual(code,0 if failure=='none' else 1)
                 report=json.loads((output/'home-routing.json').read_text());self.assertEqual(report['success'],failure=='none')
                 if failure=='archive':self.assertIn('unqualified native shutdown',report['nativeIntegrity']['error'])
+
+    def run_aggregate_main(self,root,rows):
+        from types import SimpleNamespace
+        import home_fixture_inputs
+        suite=root/'Suite';suite.mkdir();feature=root/'features';feature.mkdir();fixtures=root/'hwp';fixtures.mkdir()
+        (fixtures/'provenance.json').write_text('{}');output=root/'output'
+        argv=['home_routing_smoke.py','--suite',str(suite),'--features',str(feature),'--hwp-fixtures',str(fixtures),'--output',str(output)]
+        def retained_cases(*args):
+            for row in rows:
+                (output/(row['case']+'-result.json')).write_bytes(json.dumps(row,ensure_ascii=False).encode('utf-8'))
+            return rows
+        with patch.object(self.api,'os',SimpleNamespace(name='nt')),patch.object(sys,'argv',argv), \
+             patch.object(self.api,'load_feature_inputs',return_value={}), \
+             patch.object(home_fixture_inputs,'require_hwp_fixture_provenance',return_value={}), \
+             patch.object(self.api,'run_home_cases',side_effect=retained_cases), \
+             patch.object(self.api,'verify_native_archives',return_value=dict(success=True,qualifiedShutdowns=23)):
+            return self.api.main(),output
+
+    def aggregate_rows(self):
+        rows=[dict(spec,success=True,cleanClose=True,forcedCleanup=False,attachments=[]) for spec in self.api.build_plan()]
+        rows[0]['attachments']=[{} for _ in range(23)]
+        inventory=dict(schemaVersion=1,architecture='x64',files=[dict(path='한글/'+str(n),bytes=n,sha256='a'*64) for n in range(100)])
+        for row in rows:
+            if row['case'] in ('tile-calc','home-open-calc-ods','home-open-calc-xlsx','home-open-calc-xls','home-open-calc-csv'):
+                row['calcReader']=dict(inventory=copy.deepcopy(inventory),nativeCreation=134370086799550953,
+                    handle=2**40,abovePrecision=2**53+1,value=17.0,flag=True,missing=None)
+            elif row['case']=='document-file-open':
+                for key in ('sharedWriterBefore','sharedWriterAfter'):
+                    row[key]=dict(inventory=copy.deepcopy(inventory),nativeCreation=134370086799550953)
+        return rows
+
+    def test_home_aggregate_is_lossless_compact_utf8_with_all_seven_full_inventories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows=self.aggregate_rows();code,output=self.run_aggregate_main(Path(directory).resolve(),rows)
+            self.assertEqual(code,0);raw=(output/'home-routing.json').read_bytes();parsed=json.loads(raw)
+            compact=json.dumps(parsed,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8')
+            self.assertEqual(raw,compact,'The Home aggregate is still pretty printed or translated by platform text I/O')
+            self.assertEqual(parsed['cases'],rows)
+            def same_types(before,after):
+                self.assertIs(type(after),type(before))
+                if isinstance(before,dict):
+                    self.assertEqual(list(before),list(after))
+                    for key in before:same_types(before[key],after[key])
+                elif isinstance(before,list):
+                    self.assertEqual(len(before),len(after))
+                    for left,right in zip(before,after):same_types(left,right)
+                else:self.assertEqual(before,after)
+            same_types(rows,parsed['cases'])
+            contexts=[row['calcReader'] for row in parsed['cases'] if 'calcReader' in row]
+            contexts += [parsed['cases'][-1][key] for key in ('sharedWriterBefore','sharedWriterAfter')]
+            self.assertEqual(len(contexts),7)
+            for context in contexts:
+                self.assertEqual(len(context['inventory']['files']),100)
+                self.assertIs(type(context['nativeCreation']),int)
+                self.assertEqual(context['nativeCreation'],134370086799550953)
+
+    def test_home_aggregate_exact_byte_cap_and_nonfinite_values_fail_closed(self):
+        self.assertTrue(hasattr(self.api,'write_home_aggregate'),'A bounded Home aggregate producer is missing')
+        self.assertEqual(self.api.MAX_HOME_AGGREGATE_BYTES,32*1024*1024)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);report=dict(success=True,payload='')
+            overhead=len(json.dumps(report,separators=(',',':')).encode('utf-8'))
+            report['payload']='x'*(self.api.MAX_HOME_AGGREGATE_BYTES-overhead)
+            good=root/'good';good.mkdir();self.api.write_home_aggregate(good,report)
+            self.assertEqual((good/'home-routing.json').stat().st_size,self.api.MAX_HOME_AGGREGATE_BYTES)
+            bad=root/'bad';bad.mkdir();report['payload']+='x'
+            with self.assertRaisesRegex(AssertionError,'byte limit'):self.api.write_home_aggregate(bad,report)
+            self.assertFalse((bad/'home-routing.json').exists())
+            with self.assertRaises(ValueError):self.api.write_home_aggregate(bad,dict(success=True,value=float('nan')))
+
+    def test_oversized_aggregate_keeps_every_written_case_and_truthful_failure(self):
+        self.assertTrue(hasattr(self.api,'MAX_HOME_AGGREGATE_BYTES'),'A bounded Home aggregate producer is missing')
+        with tempfile.TemporaryDirectory() as directory,patch.object(self.api,'MAX_HOME_AGGREGATE_BYTES',64):
+            rows=self.aggregate_rows();code,output=self.run_aggregate_main(Path(directory).resolve(),rows)
+            self.assertEqual(code,1);self.assertFalse((output/'home-routing.json').exists())
+            failure=json.loads((output/'home-routing-write-failure.json').read_bytes())
+            self.assertIs(failure['success'],False);self.assertIn('byte limit',failure['error'])
+            for row in rows:
+                self.assertEqual(json.loads((output/(row['case']+'-result.json')).read_bytes()),row)
 
 
 if __name__=='__main__':unittest.main()

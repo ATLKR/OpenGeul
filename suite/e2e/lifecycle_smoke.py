@@ -788,7 +788,7 @@ class Case:
         self.record.setdefault('attachments', []).append({'hwnd': hwnd, 'parent': parent, 'child': child, 'officePid': office_pid})
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
-        window.set_focus()
+        native.activate_owned_suite(self.api, self.process, hwnd, self.record)
         native.wait_for(lambda: self.api.user.GetAncestor(self.api.user.GetForegroundWindow(), 2) == hwnd, 10)
         return hwnd, parent, child
 
@@ -817,7 +817,7 @@ class Case:
         plan = context.begin(marker)
         try:
             window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-            window.set_focus()
+            native.activate_owned_suite(self.api, self.process, hwnd, self.record)
             self.api.require_foreground(hwnd)
             native.prepare_editor_focus(self.api, hwnd, child, self.process.pid, attachments[0]['officePid'], self.record,
                 lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
@@ -837,7 +837,7 @@ class Case:
         from pywinauto import Desktop
         from pywinauto.keyboard import send_keys
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-        window.set_focus()
+        native.activate_owned_suite(self.api, self.process, hwnd, self.record)
         self.api.require_foreground(hwnd)
         shell = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
         items = [item for item in shell.descendants(control_type='MenuItem') if item.element_info.name == '파일'
@@ -1090,7 +1090,7 @@ def home_two_documents(case):
     buttons = [item for item in Desktop(backend='uia').window(handle=home).descendants(control_type='Button')
                if item.element_info.name == 'OpenGeul Writer' and item.element_info.process_id == case.process.pid]
     assert len(buttons) == 1, 'Owned Writer home tile must be unique'
-    Desktop(backend='win32').window(handle=home).wrapper_object().set_focus()
+    native.activate_owned_suite(case.api, case.process, home, case.record)
     case.api.require_foreground(home)
     buttons[0].click_input()
     first, _, child_first = case.attach()
@@ -1444,7 +1444,7 @@ def hwp_route(case):
     buttons = [item for item in Desktop(backend='uia').window(handle=home).descendants(control_type='Button')
                if item.element_info.name == 'OpenGeul HWP' and item.element_info.process_id == case.process.pid]
     assert len(buttons) == 1, 'Exact owned HWP tile must be unique'
-    Desktop(backend='win32').window(handle=home).wrapper_object().set_focus()
+    native.activate_owned_suite(case.api, case.process, home, case.record)
     case.api.require_foreground(home)
     buttons[0].click_input()
     verify_and_close(case.process)

@@ -21,7 +21,7 @@ import zipfile
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import calc_model_barrier
 from windows_smoke import (Windows, ascii_input, capture_failure, close_home,
-    launch_suite, prepare_editor_focus, require_engine_fixture, stop_owned_test_process,
+    launch_suite, activate_owned_suite, prepare_editor_focus, require_engine_fixture, stop_owned_test_process,
     verified_attachment, wait_for, write_result)
 
 MARKER='UI-OpenGeul-calc-CtrlS'
@@ -300,6 +300,7 @@ def physical_case(suite,fixtures,output):
     with source.open('xb') as f:f.write(source_bytes)
     expected=baseline['a1Text']+MARKER
     process=reader=cleanup_proof=None
+    observer_never_started=True
     record=dict(schemaVersion=1,case=CASE,kind='physical-uncommitted-calc-save',success=False,stage='launch',
         module='calc',sourceSha256=hashlib.sha256(source_bytes).hexdigest(),baseline=baseline,
         navigationKeys=[],commitKeys=[],saveShortcutCount=0,asyncValidationQualified=False)
@@ -308,6 +309,8 @@ def physical_case(suite,fixtures,output):
     prior={key:os.environ.get(key) for key in ('OPENGEUL_SUITE_DIAGNOSTICS',)}
     api=Windows()
     try:
+        from calc_early_cleanup import require_launch_permitted
+        require_launch_permitted()
         os.environ['OPENGEUL_SUITE_DIAGNOSTICS']=str(diagnostics)
         try:process=launch_suite([str(suite/'OpenGeul.Office.exe'),'--module','calc','--file',str(source)],suite,output,CASE)
         finally:
@@ -319,7 +322,7 @@ def physical_case(suite,fixtures,output):
         record.update(windowHwnd=hwnd,parentHwnd=parent,childHwnd=child,officePid=office_pid)
         cleanup_proof=bind_pre_input_cleanup(api,process,hwnd,parent,child,record,baseline_copy)
         window=Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-        window.maximize();window.set_focus()
+        window.maximize();activate_owned_suite(api,process,hwnd,record)
         wait_for(lambda:api.user.GetAncestor(api.user.GetForegroundWindow(),2)==hwnd,10)
         window.capture_as_image().save(output/(CASE+'-before.png'))
         record['stage']='focus-editor'
@@ -330,6 +333,7 @@ def physical_case(suite,fixtures,output):
         identity,data=_packaged_identity_file(suite,'suite-inventory.json')
         inventory=json.loads(data)
         deadline=time.monotonic()+calc_model_barrier.MAX_SECONDS
+        observer_never_started=False  # Intent precedes construction/start; None is not a launch witness.
         reader=OwnedModelReader(suite,output/'active-cell-reader',expected_service=calc_model_barrier.SERVICE,
             getter_contract=PENDING_GETTERS,shell_pid=process.pid,expected_shell_creation=creation,
             suite_hwnd=hwnd,parent_hwnd=parent,child_hwnd=child,office_pid=office_pid,expected_url=source.as_uri())
@@ -418,8 +422,9 @@ def physical_case(suite,fixtures,output):
         capture_failure(output,CASE,record,exc)
         raise
     finally:
-        finish_pre_input_cleanup(api,process,record,cleanup_proof,record.get('readerCleanup'))
-        if process is not None:stop_owned_test_process(process,record)
+        finish_pre_input_cleanup(api,process,record,cleanup_proof,record.get('readerCleanup'),
+                                 observer_never_started=observer_never_started)
+        if process is not None and not record.get('earlyCleanupOwnsFallback'):stop_owned_test_process(process,record)
         write_result(output,CASE,record)
 
 

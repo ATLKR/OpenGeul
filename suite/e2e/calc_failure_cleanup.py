@@ -91,7 +91,7 @@ def _require_pre_input(record,observer):
     assert isinstance(members,list) and members and all(m.get('waitResult')==0 and m.get('exitCode')==0 for m in members), 'Observer is not proved quiescent'
 
 
-def finish_pre_input_cleanup(api,process,record,proof,observer):
+def finish_pre_input_cleanup(api,process,record,proof,observer,*,observer_never_started=False):
     """Keep the primary failure; retain forced fallback if explicit cleanup fails."""
     import windows_smoke as native
     if proof is None:return
@@ -102,6 +102,11 @@ def finish_pre_input_cleanup(api,process,record,proof,observer):
     cleanup_record={k:record.get(k) for k in ('module','shellPid','windowHwnd','parentHwnd','childHwnd','officePid')}
     try:
         if not failed:return
+        if observer_never_started is True:
+            from calc_early_cleanup import require_early,run_early
+            require_early(record,observer_never_started,observer)
+            run_early(api,process,record,proof,evidence)
+            return
         _require_pre_input(record,observer)
         check=lambda:_verify_attachment(api,process,record,proof)
         check()
@@ -117,10 +122,21 @@ def finish_pre_input_cleanup(api,process,record,proof,observer):
         evidence['error']=type(exc).__name__+': '+str(exc)[:2048]
     finally:
         evidence['lastStage']=cleanup_record.get('stage')
-        for bound in (proof.engine,proof.shell):
-            try:bound.close()
+        if evidence.get('actor',{}).get('deathProved') is False:
+            evidence['productWitnessesRetained']=True
+        else:
+            for bound in (proof.engine,proof.shell):
+                try:bound.close()
+                except BaseException as exc:
+                    evidence.setdefault('handleErrors',[]).append(type(exc).__name__+': '+str(exc)[:2048])
+                    evidence['success']=False
+                    record['success']=False
+                    record['failureCleanup']=evidence
+        if 'parentReceiptPath' in evidence:
+            from calc_early_cleanup import write_original
+            from pathlib import Path
+            evidence['productHandlesReleased']=all(bound.handle is None for bound in (proof.engine,proof.shell))
+            try:write_original(Path(evidence['parentReceiptPath']),evidence)
             except BaseException as exc:
-                evidence.setdefault('handleErrors',[]).append(type(exc).__name__+': '+str(exc)[:2048])
+                evidence['receiptError']=type(exc).__name__+': '+str(exc)[:2048]
                 evidence['success']=False
-                record['success']=False
-                record['failureCleanup']=evidence

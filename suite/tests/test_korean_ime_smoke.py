@@ -229,6 +229,7 @@ class KoreanImePolicyTests(unittest.TestCase):
                         'pywinauto.keyboard': SimpleNamespace(send_keys=send_keys)}), \
                         patch.object(ime, 'require_engine_fixture', return_value=original), \
                         patch.object(ime, 'launch_suite', return_value=process), \
+                        patch.object(ime, 'activate_owned_suite', side_effect=lambda api,process,hwnd,record:api.require_foreground(hwnd)) as activated, \
                         patch.object(ime, 'Windows', return_value=api), \
                         patch.object(ime, 'verified_attachment', return_value=(11, 12, 22, 31)), \
                         patch.object(ime, 'CompositionObserver', return_value=observer), \
@@ -239,6 +240,7 @@ class KoreanImePolicyTests(unittest.TestCase):
                         ime.case(root, root, root, self.readiness(), module, extension)
                 self.assertEqual(calls, [('physical', ' ime-opengeul-' + module + ':', 0.04), ('activation', 1)])
                 self.assertEqual(typed.call_count, 1)
+                self.assertEqual(activated.call_count, 1)
                 self.assertGreater(len(sent), 0)
                 self.assertNotIn(' ime-opengeul-' + module + ':', [call.args[0] for call in send_keys.call_args_list])
                 record = written.call_args.args[2]

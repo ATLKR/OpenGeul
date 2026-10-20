@@ -48,6 +48,7 @@ class LifecycleSmokeTests(unittest.TestCase):
         with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
                                        'pywinauto.keyboard': SimpleNamespace(send_keys=keyboard)}), \
              patch.object(smoke.native, 'prepare_editor_focus', readiness), \
+             patch.object(smoke.native, 'activate_owned_suite', side_effect=lambda api,process,hwnd,record:api.require_foreground(hwnd)), \
              patch.object(smoke.native.ascii_input, 'type_ascii', ascii_input):
             case.edit(11, 22, '-LIFECYCLE-NEW-')
         readiness.assert_called_once()

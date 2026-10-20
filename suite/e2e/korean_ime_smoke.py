@@ -22,7 +22,7 @@ import time
 import uuid
 
 from windows_smoke import (Windows, INPUT_CASES, capture_failure, close_document,
-    close_home, collect_cases, launch_suite, package_text, require_engine_fixture,
+    close_home, collect_cases, launch_suite, activate_owned_suite, package_text, require_engine_fixture,
     stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input)
 from engine_smoke import verify_content
 import native_suite_architecture as native_arch
@@ -579,7 +579,7 @@ def case(suite, fixtures, output, readiness, module, extension):
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid)
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
-        window.set_focus()
+        activate_owned_suite(api, process, hwnd, record)
         wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
         record['stage'] = 'focus-editor'
         Desktop(backend='win32').window(handle=child).wrapper_object().click_input()

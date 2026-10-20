@@ -96,6 +96,7 @@ class CalcCloseCase(lifecycle.Case):
         self.choice,self.name=choice,'calc-close-'+choice
         self.output=output/self.name;self.output.mkdir(exist_ok=False)
         self.api=None;self.process=None;self.reader=None;self.deadline=None;self.cleanup_proof=None
+        self.observer_never_started=True
         self.record=dict(case=self.name,choice=choice,kind='physical-calc-uncommitted-close',success=False,module='calc',
             stage='setup',productCloseChanged=False,historicalDataLossEstablished=False,
             marker=marker(choice),navigationKeys=[],commitKeys=[],closeShortcutCount=0,beforeCloseActions=[],
@@ -112,6 +113,7 @@ class CalcCloseCase(lifecycle.Case):
     def start_reader(self,folder):
         from writer_model_reader import OwnedModelReader
         self.deadline=time.monotonic()+calc_model_barrier.MAX_SECONDS
+        self.observer_never_started=False  # Remains false after release or a partial constructor failure.
         self.reader=OwnedModelReader(self.suite,self.output/folder,expected_service=calc_model_barrier.SERVICE,
             getter_contract=calc_save.PENDING_GETTERS,shell_pid=self.process.pid,
             expected_shell_creation=self.creation,suite_hwnd=self.hwnd,parent_hwnd=self.parent,
@@ -186,6 +188,8 @@ class CalcCloseCase(lifecycle.Case):
         from pywinauto.keyboard import send_keys
         from writer_style_smoke import _packaged_identity_file
         try:
+            from calc_early_cleanup import require_launch_permitted
+            require_launch_permitted()
             original=native.require_engine_fixture(self.fixtures,'calc','xlsx');self.original=original
             raw=original.read_bytes();self.baseline=calc_model_barrier.baseline_from_ooxml(raw)
             folder=self.output/'fixtures';folder.mkdir()
@@ -206,7 +210,7 @@ class CalcCloseCase(lifecycle.Case):
             self.record.update(windowHwnd=self.hwnd,parentHwnd=self.parent,childHwnd=self.child,officePid=self.office_pid)
             self.cleanup_proof=bind_pre_input_cleanup(self.api,self.process,self.hwnd,self.parent,self.child,self.record,baseline_copy)
             window=Desktop(backend='win32').window(handle=self.hwnd).wrapper_object()
-            window.maximize();window.set_focus()
+            window.maximize();native.activate_owned_suite(self.api,self.process,self.hwnd,self.record)
             native.wait_for(lambda:self.api.user.GetAncestor(self.api.user.GetForegroundWindow(),2)==self.hwnd,10)
             self.screenshot(self.hwnd,'before')
             native.prepare_editor_focus(self.api,self.hwnd,self.child,self.process.pid,self.office_pid,self.record,
@@ -295,8 +299,9 @@ class CalcCloseCase(lifecycle.Case):
                 try:self.record['failedReaderCleanup']=self.reader.close(self.deadline)
                 except BaseException as later:self.record['failedReaderCleanupError']=str(later)
                 self.reader=None
-            finish_pre_input_cleanup(self.api,self.process,self.record,self.cleanup_proof,self.record.get('failedReaderCleanup'))
-            if self.process is not None:
+            finish_pre_input_cleanup(self.api,self.process,self.record,self.cleanup_proof,self.record.get('failedReaderCleanup'),
+                                     observer_never_started=self.observer_never_started)
+            if self.process is not None and not self.record.get('earlyCleanupOwnsFallback'):
                 # Authorized cleanup only for this launched generated-copy case;
                 # never dismiss an unexpected or foreign dialog to make it pass.
                 native.stop_owned_test_process(self.process,self.record)

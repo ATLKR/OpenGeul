@@ -79,7 +79,7 @@ def owned_saved_path(output, record):
 def click_suite_save(api, process, hwnd, record):
     from pywinauto import Desktop
     window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-    window.set_focus()
+    native.activate_owned_suite(api, process, hwnd, record)
     api.require_foreground(hwnd)
     root = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
     files = [item for item in root.descendants(control_type='MenuItem')
@@ -167,7 +167,7 @@ def run_gui(suite, fixtures, output):
                       engineImageVerified=True, nativeParentVerified=True)
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
-        window.set_focus()
+        native.activate_owned_suite(api, process, hwnd, record)
         api.require_foreground(hwnd)
         record['stage'] = 'focus-editor'
         native.prepare_editor_focus(api, hwnd, child, process.pid, pid, record,
