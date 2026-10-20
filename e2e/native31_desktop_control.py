@@ -1,0 +1,736 @@
+"""One CI-only read-only ARM64 desktop observation; never a readiness gate.
+
+The controller owns only its suspended diagnostic child and descendants. Legacy
+Source/Store bindings and privacy classifier remain byte-for-byte unchanged.
+"""
+from __future__ import annotations
+import argparse
+import ctypes
+from ctypes import wintypes as W
+import hashlib
+import importlib.util
+import json
+import ntpath
+import os
+from pathlib import Path
+import re
+import stat
+import struct
+import subprocess
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+BRANCH = 'refs/heads/work/opengeul-office-native31-desktop-control'
+WORKFLOW = 'ATLKR/OpenGeul/.github/workflows/office-native31-desktop-control.yml@' + BRANCH
+MAX_JSON = 256 * 1024
+MAX_FILES = 48
+MAX_IMAGE = 128 * 1024 * 1024
+SOURCE_FILES = ('e2e/native31_desktop_control.py', 'e2e/runner-ready.py',
+                'ci/policy.py', '.github/workflows/office-native31-desktop-control.yml')
+spec = importlib.util.spec_from_file_location('native31_legacy_classifier', ROOT / 'e2e/runner-ready.py')
+legacy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(legacy)
+require = legacy.require
+
+
+def flags():
+    return dict(readOnly=True, diagnosticOnly=True, actions=[], inputsPerformed=0,
+                readiness=False, hostReadyQualified=False, productQualified=False, productExecuted=False)
+
+
+def error_record(exc):
+    return {'type': type(exc).__name__, 'message': str(exc)[:2048]}
+
+
+class Budget:
+    def __init__(self, seconds=120, *, clock=time.monotonic, deadline=None):
+        self.clock = clock
+        self.deadline = clock() + seconds if deadline is None else deadline
+
+    def remaining(self, reserve=0):
+        remaining = self.deadline - self.clock() - reserve
+        if remaining <= 0:
+            raise TimeoutError('Original 120 second deadline exhausted')
+        return remaining
+
+
+def unaliased(path):
+    path = Path(path)
+    require(path.is_absolute() and '..' not in path.parts, 'Absolute unaliased path required')
+    for part in (path, *path.parents):
+        if part.exists() or part.is_symlink():
+            info = part.lstat()
+            require(not stat.S_ISLNK(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & 0x400,
+                    'Symlink/reparse path rejected')
+    return path
+
+
+class Evidence:
+    def __init__(self, path):
+        self.path = unaliased(path)
+
+    @classmethod
+    def create(cls, path, runner_temp):
+        path, runner_temp = unaliased(path), unaliased(runner_temp)
+        require(path.parent == runner_temp and runner_temp.is_dir() and not path.exists(),
+                'Output must be a fresh direct child of owned RUNNER_TEMP')
+        path.mkdir()
+        return cls(path)
+
+    def write(self, name, value):
+        require(re.fullmatch('[a-z0-9-]{1,64}', name), 'Invalid evidence name')
+        unaliased(self.path)
+        require(len(list(self.path.iterdir())) < MAX_FILES, 'Evidence file count exceeded')
+        raw = (json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode('utf-8')
+        require(len(raw) <= MAX_JSON, 'Evidence JSON exceeds 256 KiB')
+        with (self.path / (name + '.json')).open('xb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def validate_native(native):
+    legacy.integer(native.get('processId'))
+    legacy.integer(native.get('sessionId'), 0)
+    require(type(native.get('processMachine')) is int and native['processMachine'] == 0
+            and type(native.get('nativeMachine')) is int and native['nativeMachine'] == 0xAA64,
+            'Actual native ARM64 process required')
+
+
+def validate_execution(env, event, native, platform):
+    expected = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='Windows',
+                    RUNNER_ARCH='ARM64', GITHUB_REPOSITORY='ATLKR/OpenGeul', GITHUB_EVENT_NAME='push',
+                    GITHUB_JOB='observe', GITHUB_REF=BRANCH, GITHUB_WORKFLOW_REF=WORKFLOW,
+                    GITHUB_RUN_ATTEMPT='1', GITHUB_ACTOR='ATLKR', GITHUB_ACTOR_ID='65988341')
+    require(platform == 'nt' and all(env.get(k) == v for k, v in expected.items()), 'Exact hosted control binding required')
+    source = legacy.commit_sha(env.get('GITHUB_SHA'))
+    legacy.decimal(env.get('GITHUB_RUN_ID'))
+    legacy.public_repository(event.get('repository'), owned=True)
+    require(legacy.event_actor(event, env) == ('ATLKR', 65988341, 'User'), 'Owner actor required')
+    require(event.get('ref') == BRANCH and event.get('deleted') is False and event.get('after') == source,
+            'Actual push ref/deleted/after mismatch')
+    require(env.get('GITHUB_WORKFLOW_SHA') == source, 'Workflow SHA mismatch')
+    validate_native(native)
+    return dict(sourceCommit=source, runId=env['GITHUB_RUN_ID'],
+                runAttempt='1', repository='ATLKR/OpenGeul', workflowRef=WORKFLOW, ref=BRANCH,
+                event='push', job='observe', actor='ATLKR', actorId=65988341, actorType='User')
+
+
+def validate_context(env, event, checkout, native, platform):
+    context = validate_execution(env, event, native, platform)
+    require(checkout.get('head') == context['sourceCommit'] and checkout.get('dirty') is False,
+            'Checkout SHA or clean source mismatch')
+    legacy.commit_sha(checkout.get('tree'))
+    return {**context, 'sourceTree': checkout['tree']}
+
+
+def source_hashes():
+    result = {}
+    for name in SOURCE_FILES:
+        path = unaliased(ROOT / name)
+        with path.open('rb') as stream:
+            raw = stream.read(MAX_JSON + 1)
+        require(len(raw) <= MAX_JSON, 'Source file exceeds bounded receipt input')
+        result[name] = hashlib.sha256(raw).hexdigest()
+    return result
+
+
+def git_read(args, budget):
+    result = subprocess.run(['git', '-C', str(ROOT), *args], check=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=budget.remaining())
+    require(len(result.stdout) <= MAX_JSON, 'Git receipt too large')
+    return result.stdout.decode('utf-8').strip()
+
+
+def source_receipt(budget):
+    receipt = dict(head=git_read(['rev-parse', 'HEAD'], budget), tree=git_read(['rev-parse', 'HEAD^{tree}'], budget),
+                   dirty=bool(git_read(['status', '--porcelain=v1', '--untracked-files=all', '--ignored'], budget)))
+    receipt['files'] = source_hashes()
+    return receipt
+
+
+def same_host(before, after):
+    fields = ('sessionId', 'windowsDirectory', 'windowsVersion', 'imageOS', 'imageVersion', 'desktop', 'windowStation')
+    require(all(field in before and field in after and before[field] == after[field] for field in fields),
+            'Controller/observer session, Windows/image/desktop mismatch')
+
+
+def parking_point(rect):
+    left, top, right, bottom = rect
+    require(left < right and top < bottom, 'Taskbar rectangle empty')
+    return [(left + right) // 2, bottom - 1] if right - left >= bottom - top else [right - 1, (top + bottom) // 2]
+
+
+def classify(observed, session, windows, *, complete, stable):
+    require(complete and stable, 'Incomplete/unavailable/truncated/raced observation')
+    foreground = observed.get('foreground')
+    require(type(foreground) is dict, 'Foreground unavailable')
+    legacy.validate_windows({'foregroundHwnd': foreground['hwnd'], 'windows': [foreground], 'truncated': False})
+    trees = observed.get('uia')
+    require(type(trees) is list and 1 <= len(trees) <= 2, 'Complete target UIA required')
+    for tree in trees:
+        legacy.validate_uia(tree, tree['hwnd'])
+        require(not tree['truncated'] and 'error' not in tree and tree['nodes'], 'UIA unavailable/truncated')
+    foreground_trees = [tree for tree in trees if tree['hwnd'] == foreground['hwnd']]
+    require(len(foreground_trees) == 1 and all(node['processId'] == foreground['processId']
+            for node in foreground_trees[0]['nodes']), 'Foreground UIA ownership unavailable')
+    processes = observed.get('processes')
+    require(type(processes) is list and 1 <= len(processes) <= 8, 'Complete target processes required')
+    for process in processes:
+        require(process.get('createdFileTime', 0) > 0 and process.get('sessionId') == session
+                and process.get('imageBytes', 0) > 0 and process['imageBytes'] <= MAX_IMAGE
+                and re.fullmatch('[0-9a-f]{64}', process.get('imageSha256', ''))
+                and process.get('signature', {}).get('status') not in (None, '', 'Unavailable', 'UnknownError'),
+                'Process identity/image/signature unavailable')
+    require(sum(process.get('processId') == foreground['processId'] for process in processes) == 1,
+            'Foreground process identity unavailable')
+    try:
+        candidate = legacy.privacy_candidate(observed, session, windows)
+    except (ValueError, KeyError) as exc:
+        foreground = observed.get('foreground')
+        # A plausible privacy surface must not turn a failed strict match into absence.
+        attempted = foreground and (foreground.get('title') == 'Microsoft account'
+            or foreground.get('className') == 'Windows.UI.Core.CoreWindow')
+        attempted = attempted or any(node.get('automationId') == 'OobeSettingsAcceptButton'
+            or node.get('name') == 'Choose privacy settings for your device'
+            for tree in observed.get('uia', []) for node in tree.get('nodes', []))
+        require(not attempted, 'Attempted privacy candidate rejected: ' + str(exc))
+        return {**flags(), 'status': 'privacy-absent-observed', 'classifierRejection': error_record(exc),
+                'absenceScope': 'Complete current foreground only; original failure is not qualified'}
+    return {**flags(), 'status': 'privacy-match', 'candidate': candidate,
+            'candidateOperationNotExecuted': candidate['operation']}
+
+
+def run_owned(owner, budget, evidence):
+    result = {**flags(), 'success': False, 'forced': False, 'timedOut': False, 'naturalExit': False}
+    evidence.write('20-observer-launch', {**flags(), 'deadlineMonotonic': budget.deadline, 'stage': 'before-create'})
+    try:
+        budget.remaining(3)
+        owner.create_suspended()
+        owner.assign()
+        result['observer'] = owner.identity()
+        evidence.write('21-observer-bound', result['observer'])
+        budget.remaining(3)
+        owner.resume()
+        if not owner.wait(budget.remaining(3)):
+            raise TimeoutError('Diagnostic observer did not exit before original deadline reserve')
+        result['exitCode'] = owner.exit_code()
+        result['naturalExit'] = True
+        require(owner.descendants_empty(), 'Owned descendants remain after observer exit')
+        require(result['exitCode'] == 0, 'Observer returned diagnostic failure')
+        result['success'] = True
+    except Exception as exc:
+        result['failure'] = error_record(exc)
+        result['timedOut'] = isinstance(exc, TimeoutError)
+        needs_cleanup = owner.created and not result['naturalExit']
+        if owner.created and result['naturalExit']:
+            try:
+                needs_cleanup = not owner.descendants_empty()
+            except Exception as query:
+                needs_cleanup = True
+                result['cleanupQueryFailure'] = error_record(query)
+        if needs_cleanup:
+            result['forced'] = True
+            try:
+                owner.terminate_owned()
+            except Exception as cleanup:
+                result['cleanupFailure'] = error_record(cleanup)
+    finally:
+        try:
+            owner.close()
+        except Exception as cleanup:
+            result['success'] = False
+            result['cleanupFailure'] = error_record(cleanup)
+        result['success'] = result['success'] and not result['forced']
+        evidence.write('90-owned-lifecycle', result)
+    return result
+
+
+class Probe(legacy.WindowsProbe):
+    """Strict query-only replacement for permissive observation methods."""
+    def __init__(self):
+        super().__init__()
+        self.shell = ctypes.WinDLL('shell32', use_last_error=True)
+        for name, args, result in [
+            ('GetAncestor', [W.HWND, W.UINT], W.HWND), ('GetWindow', [W.HWND, W.UINT], W.HWND),
+            ('GetWindowLongPtrW', [W.HWND, ctypes.c_int], ctypes.c_ssize_t),
+            ('FindWindowW', [W.LPCWSTR, W.LPCWSTR], W.HWND),
+            ('WindowFromPhysicalPoint', [W.POINT], W.HWND),
+            ('GetThreadDesktop', [W.DWORD], W.HANDLE), ('GetProcessWindowStation', [], W.HANDLE),
+            ('GetUserObjectInformationW', [W.HANDLE, ctypes.c_int, W.LPVOID, W.DWORD, ctypes.POINTER(W.DWORD)], W.BOOL),
+            ('SetThreadDpiAwarenessContext', [W.HANDLE], W.HANDLE),
+            ('GetThreadDpiAwarenessContext', [], W.HANDLE),
+            ('AreDpiAwarenessContextsEqual', [W.HANDLE, W.HANDLE], W.BOOL)]:
+            api = getattr(self.user, name); api.argtypes = args; api.restype = result
+        self.kernel.GetCurrentThreadId.restype = W.DWORD
+
+    def named_object(self, handle):
+        require(handle, 'Desktop/window station handle unavailable')
+        buffer = ctypes.create_unicode_buffer(257); needed = W.DWORD()
+        require(self.user.GetUserObjectInformationW(handle, 2, buffer, ctypes.sizeof(buffer), ctypes.byref(needed)),
+                'Desktop/window station name unavailable')
+        legacy.text(buffer.value)
+        return buffer.value
+
+    def identity(self):
+        value = {**self.host(), 'sessionId': self.session_id(), 'windowsDirectory': self.windows_directory(),
+                 'windowsVersion': list(sys.getwindowsversion()[:5]),
+                 'imageOS': os.environ.get('ImageOS'), 'imageVersion': os.environ.get('ImageVersion'),
+                 'desktop': self.named_object(self.user.GetThreadDesktop(self.kernel.GetCurrentThreadId())),
+                 'windowStation': self.named_object(self.user.GetProcessWindowStation())}
+        validate_native(value)
+        require(all(value[k] for k in ('imageOS', 'imageVersion', 'desktop', 'windowStation')), 'Host image/desktop unavailable')
+        value['process'] = self.process_identity(self.kernel.GetCurrentProcess(), value['processId'])
+        return value
+
+    def process_identity(self, handle, pid):
+        state = self.startup_process_state(handle, pid)
+        require(state['createdFileTime'] > 0 and state['exitCode'] == 259, 'Process unavailable or exited')
+        size = W.DWORD(1025); buffer = ctypes.create_unicode_buffer(1025)
+        require(self.kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)) and size.value <= 1024,
+                'Process image path unavailable/truncated')
+        legacy.text(buffer.value, 1024)
+        return {'processId': pid, 'imagePath': buffer.value, **state}
+
+    def text_value(self, hwnd, class_name=False):
+        buffer = ctypes.create_unicode_buffer(258)
+        ctypes.set_last_error(0)
+        function = self.user.GetClassNameW if class_name else self.user.GetWindowTextW
+        length = function(hwnd, buffer, 258)
+        require(0 <= length <= 256 and (length or not class_name) and ctypes.get_last_error() == 0,
+                'Window text unavailable/truncated')
+        legacy.text(buffer.value)
+        return buffer.value
+
+    def window(self, hwnd):
+        require(hwnd and self.user.IsWindow(hwnd), 'Window absent/raced')
+        pid = W.DWORD(); tid = self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)); rect = W.RECT()
+        require(tid and pid.value and self.user.GetWindowRect(hwnd, ctypes.byref(rect)), 'Window identity/rectangle unavailable')
+        row = dict(hwnd=int(hwnd), processId=pid.value, threadId=int(tid), title=self.text_value(hwnd),
+                   className=self.text_value(hwnd, True), visible=bool(self.user.IsWindowVisible(hwnd)),
+                   enabled=bool(self.user.IsWindowEnabled(hwnd)), rectangle=[rect.left, rect.top, rect.right, rect.bottom])
+        legacy.validate_windows({'foregroundHwnd': int(hwnd), 'windows': [row], 'truncated': False})
+        return row
+
+    def target(self, hwnd):
+        row = self.window(hwnd)
+        for field, offset in [('style', -16), ('exStyle', -20)]:
+            ctypes.set_last_error(0); value = self.user.GetWindowLongPtrW(hwnd, offset)
+            require(value or not ctypes.get_last_error(), 'Window style unavailable')
+            row[field] = int(value) & 0xffffffff
+        row['rootHwnd'] = int(self.user.GetAncestor(hwnd, 2) or 0)
+        require(row['rootHwnd'], 'Window root unavailable')
+        ctypes.set_last_error(0)
+        row['ownerHwnd'] = int(self.user.GetWindow(hwnd, 4) or 0)
+        require(not ctypes.get_last_error(), 'Window owner query failed')
+        row['ownerAbsent'] = row['ownerHwnd'] == 0
+        return row
+
+    def census(self):
+        foreground = int(self.user.GetForegroundWindow() or 0)
+        # A zero result can represent a transient activation, so cannot prove absence.
+        require(foreground, 'Foreground unavailable/transient')
+        rows = [self.window(foreground)]; errors = []; truncated = False
+        def callback(hwnd, _):
+            nonlocal truncated
+            try:
+                if any(row['hwnd'] == int(hwnd) for row in rows): return True
+                if len(rows) == 64:
+                    truncated = True; return False
+                rows.append(self.window(hwnd)); return True
+            except Exception as exc:
+                errors.append(error_record(exc)); return False
+        cb = self.callback(callback)
+        result = bool(self.user.EnumWindows(cb, 0))
+        return dict(foregroundHwnd=foreground, windows=rows, truncated=truncated), errors, result
+
+    def taskbar(self):
+        class AppBarData(ctypes.Structure):
+            _fields_ = [('cbSize', W.DWORD), ('hWnd', W.HWND), ('uCallbackMessage', W.UINT),
+                        ('uEdge', W.UINT), ('rc', W.RECT), ('lParam', W.LPARAM)]
+        self.shell.SHAppBarMessage.argtypes = [W.DWORD, ctypes.POINTER(AppBarData)]
+        self.shell.SHAppBarMessage.restype = ctypes.c_size_t
+        hwnd = int(self.user.FindWindowW('Shell_TrayWnd', None) or 0)
+        target = self.target(hwnd)
+        require(target['className'] == 'Shell_TrayWnd' and target['visible'], 'Visible taskbar required')
+        data = AppBarData(); data.cbSize = ctypes.sizeof(data)
+        require(self.shell.SHAppBarMessage(5, ctypes.byref(data)), 'ABM_GETTASKBARPOS failed')
+        rectangle = [data.rc.left, data.rc.top, data.rc.right, data.rc.bottom]
+        point = parking_point(rectangle)
+        hit = int(self.user.WindowFromPhysicalPoint(W.POINT(*point)) or 0)
+        root = int(self.user.GetAncestor(hit, 2) or 0) if hit else 0
+        require(hit and root, 'Physical point hit/root unavailable')
+        return dict(taskbarHwnd=hwnd, taskbarRect=rectangle, chosenPhysicalPoint=point,
+                    actualPointHwnd=hit, actualRootHwnd=root, rootEqualsTaskbar=root == hwnd,
+                    pointerMoved=False, taskbar=target)
+
+    def strict_uia(self, hwnd):
+        # Same schema and bounds as legacy, but string overflow is an explicit error.
+        result = {'hwnd': hwnd, 'nodes': [], 'truncated': False}
+        try:
+            from pywinauto.uia_defines import IUIA
+            api = IUIA(); root = api.iuia.ElementFromHandle(hwnd); walker = api.iuia.ControlViewWalker; pending = [root]
+            while pending:
+                if len(result['nodes']) >= 64:
+                    result['truncated'] = True; break
+                element = pending.pop()
+                node = dict(name=element.CurrentName, controlType=int(element.CurrentControlType),
+                            automationId=element.CurrentAutomationId, className=element.CurrentClassName,
+                            processId=int(element.CurrentProcessId), enabled=bool(element.CurrentIsEnabled),
+                            offscreen=bool(element.CurrentIsOffscreen))
+                for key in ('name', 'automationId', 'className'): legacy.text(node[key])
+                result['nodes'].append(node)
+                child = walker.GetFirstChildElement(element); siblings = []
+                while child and len(siblings) + len(pending) + len(result['nodes']) < 64:
+                    siblings.append(child); child = walker.GetNextSiblingElement(child)
+                if child: result['truncated'] = True
+                pending.extend(reversed(siblings))
+        except Exception as exc:
+            result['error'] = {'type': type(exc).__name__, 'hresult': f'0x{getattr(exc,"hresult",0) & 0xffffffff:08x}'}
+        legacy.validate_uia(result, hwnd)
+        return result
+
+
+def image_receipt(path, budget):
+    path = unaliased(Path(path))
+    size = path.stat().st_size
+    require(0 < size <= MAX_IMAGE, 'Process image byte limit exceeded')
+    digest = hashlib.sha256(); total = 0
+    with path.open('rb') as stream:
+        header = stream.read(64)
+        require(len(header) == 64 and header[:2] == b'MZ', 'PE DOS header absent')
+        offset = struct.unpack_from('<I', header, 60)[0]
+        require(64 <= offset <= size - 6, 'PE offset invalid')
+        stream.seek(offset); pe = stream.read(6)
+        require(pe[:4] == b'PE\0\0', 'PE signature absent')
+        machine = struct.unpack_from('<H', pe, 4)[0]
+        stream.seek(0)
+        while True:
+            budget.remaining()
+            block = stream.read(min(1024 * 1024, MAX_IMAGE + 1 - total))
+            if not block: break
+            total += len(block); require(total <= size and total <= MAX_IMAGE, 'Image changed/oversized')
+            digest.update(block)
+    require(total == size == path.stat().st_size, 'Image size changed')
+    return dict(imageBytes=size, imageSha256=digest.hexdigest(), peMachine=machine)
+
+
+def signatures(paths, budget):
+    # Fixed script and JSON stdin; no interpolated paths, no profile or shell input.
+    script = "$ErrorActionPreference='Stop'; $p=[Console]::In.ReadToEnd()|ConvertFrom-Json; @($p|ForEach-Object { $s=Get-AuthenticodeSignature -LiteralPath $_ -ErrorAction Stop; @{status=[string]$s.Status;subject=[string]$s.SignerCertificate.Subject;issuer=[string]$s.SignerCertificate.Issuer;thumbprint=[string]$s.SignerCertificate.Thumbprint} })|ConvertTo-Json -Compress"
+    executable = Path(os.environ['NATIVE31_PWSH'])
+    result = subprocess.run([str(executable), '-NoProfile', '-NonInteractive', '-Command', script],
+        input=json.dumps(paths).encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=min(20, budget.remaining()))
+    require(result.returncode == 0 and len(result.stdout) <= 16384, 'Signature query failed/oversized')
+    values = json.loads(result.stdout.decode('utf-8-sig'))
+    if isinstance(values, dict): values = [values]
+    require(type(values) is list and len(values) == len(paths), 'Signature result count mismatch')
+    for value in values:
+        legacy.shape(value, ('status', 'subject', 'issuer', 'thumbprint'))
+        for field in value: legacy.text(value[field])
+        require(value['status'] not in ('', 'UnknownError', 'Unavailable'), 'Signature unavailable')
+        value['publisherMicrosoft'] = value['status'] == 'Valid' and bool(re.search(r'(?:CN|O)=Microsoft(?: Windows| Corporation)', value['subject']))
+    return values
+
+
+class OwnedObserver:
+    """Only this CreateProcess handle and its assigned job can be terminated."""
+    def __init__(self, probe, env, argv, budget, expected):
+        self.probe, self.env, self.argv, self.budget, self.expected = probe, env, argv, budget, expected
+        self.created = False; self.process = self.thread = self.job = None; self.assigned = False
+        kernel = self.probe.kernel
+        for name, args, result in [
+            ('CreateJobObjectW', [W.LPVOID, W.LPCWSTR], W.HANDLE),
+            ('SetInformationJobObject', [W.HANDLE, ctypes.c_int, W.LPVOID, W.DWORD], W.BOOL),
+            ('QueryInformationJobObject', [W.HANDLE, ctypes.c_int, W.LPVOID, W.DWORD, W.LPVOID], W.BOOL),
+            ('AssignProcessToJobObject', [W.HANDLE, W.HANDLE], W.BOOL),
+            ('TerminateJobObject', [W.HANDLE, W.UINT], W.BOOL),
+            ('TerminateProcess', [W.HANDLE, W.UINT], W.BOOL),
+            ('ResumeThread', [W.HANDLE], W.DWORD),
+            ('WaitForSingleObject', [W.HANDLE, W.DWORD], W.DWORD)]:
+            api = getattr(kernel, name); api.argtypes = args; api.restype = result
+
+    def create_suspended(self):
+        import _winapi
+        self.process, self.thread, self.pid, self.tid = _winapi.CreateProcess(
+            sys.executable, subprocess.list2cmdline(self.argv), None, None, False,
+            0x00000004 | 0x00000400 | 0x08000000, self.env, str(ROOT), subprocess.STARTUPINFO())
+        self.created = True
+
+    def assign(self):
+        class BasicLimit(ctypes.Structure):
+            _fields_ = [('perProcessTime', ctypes.c_int64), ('perJobTime', ctypes.c_int64),
+                        ('flags', W.DWORD), ('minWorkingSet', ctypes.c_size_t), ('maxWorkingSet', ctypes.c_size_t),
+                        ('activeProcessLimit', W.DWORD), ('affinity', ctypes.c_size_t),
+                        ('priority', W.DWORD), ('scheduling', W.DWORD)]
+        class IO(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_uint64) for name in ('readOps','writeOps','otherOps','readBytes','writeBytes','otherBytes')]
+        class Extended(ctypes.Structure):
+            _fields_ = [('basic', BasicLimit), ('io', IO), ('processMemory', ctypes.c_size_t),
+                        ('jobMemory', ctypes.c_size_t), ('peakProcessMemory', ctypes.c_size_t), ('peakJobMemory', ctypes.c_size_t)]
+        self.job = self.probe.kernel.CreateJobObjectW(None, None)
+        require(self.job, 'Owned job creation failed')
+        limit = Extended(); limit.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; no breakaway.
+        require(self.probe.kernel.SetInformationJobObject(self.job, 9, ctypes.byref(limit), ctypes.sizeof(limit)),
+                'Owned kill-on-close job configuration failed')
+        require(self.probe.kernel.AssignProcessToJobObject(self.job, self.process), 'Suspended observer assignment failed')
+        self.assigned = True
+
+    def identity(self):
+        identity = self.probe.process_identity(self.process, self.pid)
+        validate_native(identity)
+        require(identity['sessionId'] == self.expected['sessionId']
+                and ntpath.normcase(identity['imagePath']) == ntpath.normcase(sys.executable),
+                'Suspended observer executable/session mismatch')
+        receipt = image_receipt(identity['imagePath'], self.budget)
+        require(receipt['peMachine'] == 0xAA64, 'Observer executable PE is not ARM64')
+        require(receipt == self.expected['executable'], 'Controller/observer executable bytes mismatch')
+        return {**identity, **receipt, 'threadId': self.tid, 'processHandle': int(self.process),
+                'threadHandle': int(self.thread), 'jobHandle': int(self.job), 'assignedBeforeResume': self.assigned,
+                'argv': self.argv, 'environment': self.env, 'sourceFiles': self.expected['sourceFiles']}
+
+    def resume(self):
+        require(self.assigned, 'Observer must be job-owned before resume')
+        require(self.probe.kernel.ResumeThread(self.thread) == 1, 'Suspended observer resume failed')
+
+    def wait(self, seconds):
+        result = self.probe.kernel.WaitForSingleObject(self.process, max(1, int(seconds * 1000)))
+        require(result in (0, 258), 'Observer handle wait failed')
+        return result == 0
+
+    def exit_code(self):
+        code = W.DWORD()
+        require(self.probe.kernel.GetExitCodeProcess(self.process, ctypes.byref(code)), 'Observer exit code unavailable')
+        return code.value
+
+    def descendants_empty(self):
+        if not self.assigned: return True
+        class Accounting(ctypes.Structure):
+            _fields_ = [('userTime', ctypes.c_int64), ('kernelTime', ctypes.c_int64),
+                        ('periodUserTime', ctypes.c_int64), ('periodKernelTime', ctypes.c_int64),
+                        ('faults', W.DWORD), ('total', W.DWORD), ('active', W.DWORD), ('terminated', W.DWORD)]
+        account = Accounting()
+        require(self.probe.kernel.QueryInformationJobObject(self.job, 1, ctypes.byref(account), ctypes.sizeof(account), None),
+                'Owned job accounting unavailable')
+        return account.active == 0
+
+    def terminate_owned(self):
+        # The unassigned case is only this freshly created, still suspended handle.
+        if self.assigned:
+            require(self.probe.kernel.TerminateJobObject(self.job, 1), 'Owned diagnostic job termination failed')
+        elif self.created:
+            require(self.probe.kernel.TerminateProcess(self.process, 1), 'Owned suspended handle termination failed')
+
+    def close(self):
+        errors = []
+        for name in ('thread', 'process', 'job'):
+            handle = getattr(self, name)
+            if handle:
+                if not self.probe.kernel.CloseHandle(handle): errors.append(name)
+                setattr(self, name, None)
+        require(not errors, 'Owned handle close failed: ' + ','.join(errors))
+
+
+def capture(probe, evidence, budget, controller):
+    handles = []
+    previous = None
+    try:
+        evidence.write('30-observer-start', {**flags(), 'deadlineMonotonic': budget.deadline})
+        identity = probe.identity()
+        evidence.write('31-observer-host', identity)
+        same_host(controller['host'], identity)
+        bound, _ = legacy.bounded_object(evidence.path / '21-observer-bound.json')
+        require(identity['processId'] == bound['processId']
+                and identity['process']['createdFileTime'] == bound['createdFileTime'], 'Observer self/held identity mismatch')
+        source = source_receipt(budget)
+        event, digest = legacy.bounded_object(os.environ['GITHUB_EVENT_PATH'])
+        context = validate_context(os.environ, event, source, identity, os.name)
+        require(source['files'] == controller['sourceFiles'] and digest == controller['eventSha256'], 'Observer source/event changed')
+        evidence.write('32-observer-context', {**context, 'source': source, 'eventSha256': digest})
+        previous = probe.user.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+        require(previous, 'PMv2 query coordinate context unavailable')
+        require(probe.user.AreDpiAwarenessContextsEqual(probe.user.GetThreadDpiAwarenessContext(), ctypes.c_void_p(-4)),
+                'Physical PMv2 context mismatch')
+        census, errors, enumeration_ok = probe.census()
+        evidence.write('33-window-census', {**census, 'errors': errors, 'enumerationSucceeded': enumeration_ok})
+        legacy.validate_windows(census)
+        census_complete = enumeration_ok and not errors and not census['truncated']
+        # Preserve targeted blocker evidence even if the wider census is incomplete.
+        # The final classifier still rejects that incomplete observation.
+        taskbar = probe.taskbar()
+        evidence.write('34-physical-hit', taskbar)
+        target_hwnds = list(dict.fromkeys([census['foregroundHwnd'], taskbar['actualPointHwnd'],
+                                         taskbar['actualRootHwnd'], taskbar['taskbarHwnd']]))
+        targets = [probe.target(hwnd) for hwnd in target_hwnds]
+        evidence.write('35-target-windows', {'targets': targets})
+        census_foreground = next(row for row in census['windows'] if row['hwnd'] == census['foregroundHwnd'])
+        foreground_target = next(row for row in targets if row['hwnd'] == census['foregroundHwnd'])
+        # Classification uses this target snapshot, whose full metadata is rechecked
+        # below. Project only the exact legacy schema; retain and reject census drift.
+        foreground = {key: foreground_target[key] for key in
+                      ('hwnd', 'processId', 'threadId', 'title', 'className', 'visible', 'enabled', 'rectangle')}
+        require(foreground == census_foreground, 'Census-to-target foreground metadata raced')
+        # Target owners first; no arbitrary slice can discard a positive foreground.
+        pids = list(dict.fromkeys(row['processId'] for row in targets))
+        require(len(pids) <= 8, 'Target process bound exceeded')
+        processes = []
+        for index, pid in enumerate(pids):
+            budget.remaining()
+            evidence.write(f'40-process-{index}-before', {'processId': pid, 'stage': 'before-open'})
+            handle = probe.kernel.OpenProcess(0x1000, False, pid)
+            require(handle, 'Target process denied/unavailable')
+            handles.append((handle, pid))
+            process = probe.process_identity(handle, pid)
+            evidence.write(f'41-process-{index}-raw', process)
+            require(process['sessionId'] == identity['sessionId'], 'Target owner session mismatch')
+            process.update(image_receipt(process['imagePath'], budget))
+            processes.append(process)
+            evidence.write(f'42-process-{index}-image', process)
+        evidence.write('43-signatures-before', {'paths': [p['imagePath'] for p in processes]})
+        signed = signatures([p['imagePath'] for p in processes], budget)
+        for process, signature in zip(processes, signed): process['signature'] = signature
+        evidence.write('44-processes-complete', {'processes': processes})
+        trees = []
+        for index, hwnd in enumerate(dict.fromkeys([census['foregroundHwnd'], taskbar['actualRootHwnd']])):
+            budget.remaining()
+            evidence.write(f'50-uia-{index}-before', {'hwnd': hwnd, 'stage': 'before-COM'})
+            tree = probe.strict_uia(hwnd)
+            trees.append(tree)
+            evidence.write(f'51-uia-{index}-after', tree)
+            require(not tree['truncated'] and 'error' not in tree and tree['nodes'], 'UIA unavailable/truncated')
+            target = next(row for row in targets if row['hwnd'] == hwnd)
+            require(all(node['processId'] == target['processId'] for node in tree['nodes']), 'UIA target ownership mismatch')
+        evidence.write('60-screen-before', {'stage': 'before-capture'})
+        from PIL import ImageGrab
+        import io
+        screen = ImageGrab.grab(all_screens=False)
+        require(0 < screen.width <= 8192 and 0 < screen.height <= 8192 and screen.width * screen.height <= 20_000_000,
+                'Screenshot pixel bound exceeded')
+        buffer = io.BytesIO(); screen.save(buffer, format='PNG'); data = buffer.getvalue()
+        require(8 <= len(data) <= 8 * 1024 * 1024, 'Screenshot byte bound exceeded')
+        with (evidence.path / 'foreground-desktop.png').open('xb') as stream: stream.write(data)
+        evidence.write('61-screen-after', {'width': screen.width, 'height': screen.height,
+                       'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+        observed = {'foreground': foreground,
+                    'processes': processes, 'uia': trees}
+        evidence.write('70-raw-observation', {**flags(), **observed})
+        require(int(probe.user.GetForegroundWindow() or 0) == census['foregroundHwnd'], 'Foreground changed')
+        refreshed_targets = [probe.target(hwnd) for hwnd in target_hwnds]
+        refreshed_processes = [probe.process_identity(handle, pid) for handle, pid in handles]
+        evidence.write('71-identity-recheck', {'targets': refreshed_targets, 'processes': refreshed_processes,
+                                             'physicalHit': probe.taskbar()})
+        require(refreshed_targets == targets, 'Target HWND/PID/TID/metadata raced')
+        for before, after in zip(processes, refreshed_processes):
+            require(all(before[key] == after[key] for key in after), 'Held process creation/session/image/native raced')
+        require(probe.taskbar() == taskbar, 'Taskbar point identity raced')
+        same_host(identity, probe.identity())
+        budget.remaining()
+        result = classify(observed, identity['sessionId'], identity['windowsDirectory'], complete=census_complete, stable=True)
+        evidence.write('80-classification', result)
+        final_source = source_receipt(budget)
+        evidence.write('81-source-recheck', final_source)
+        require(final_source == source, 'Source changed during observation')
+        return result
+    finally:
+        cleanup = []
+        for handle, pid in handles:
+            if not probe.kernel.CloseHandle(handle): cleanup.append('process-handle:' + str(pid))
+        if previous:
+            restored = probe.user.SetThreadDpiAwarenessContext(previous)
+            if not (restored and probe.user.AreDpiAwarenessContextsEqual(probe.user.GetThreadDpiAwarenessContext(), previous)):
+                cleanup.append('DPI-context')
+        evidence.write('85-observer-cleanup', {'errors': cleanup, 'queryHandlesClosed': len(handles), 'pointerMoved': False})
+        require(not cleanup, 'Observer cleanup failed')
+
+
+def observer(args):
+    budget = Budget(deadline=args.deadline)
+    evidence = Evidence(args.output)
+    try:
+        budget.remaining()
+        controller, _ = legacy.bounded_object(evidence.path / '10-controller.json')
+        capture(Probe(), evidence, budget, controller)
+        budget.remaining()
+        return 0
+    except Exception as exc:
+        evidence.write('89-observer-failure', {**flags(), 'failure': error_record(exc),
+            'timedOut': isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)),
+            'forced': isinstance(exc, subprocess.TimeoutExpired)})
+        return 1
+
+
+def child_environment(env):
+    # An exact retained allowlist, excluding GitHub tokens and arbitrary Python startup options.
+    names = ('SYSTEMROOT', 'WINDIR', 'PATH', 'TEMP', 'TMP', 'USERPROFILE',
+             'APPDATA', 'LOCALAPPDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'PSModulePath',
+             'ImageOS', 'ImageVersion', 'GITHUB_ACTIONS', 'RUNNER_ENVIRONMENT', 'RUNNER_OS', 'RUNNER_ARCH',
+             'RUNNER_TEMP', 'GITHUB_REPOSITORY', 'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_JOB',
+             'GITHUB_REF', 'GITHUB_WORKFLOW_REF', 'GITHUB_SHA', 'GITHUB_WORKFLOW_SHA', 'GITHUB_RUN_ID',
+             'GITHUB_RUN_ATTEMPT', 'GITHUB_ACTOR', 'GITHUB_ACTOR_ID', 'NATIVE31_PWSH')
+    result = {name: env[name] for name in names if name in env}
+    result.update(PYTHONUTF8='1', PYTHONDONTWRITEBYTECODE='1')
+    return result
+
+
+def controller(args):
+    budget = Budget()  # The only deadline origin, before filesystem/native/source work.
+    evidence = Evidence.create(args.output, os.environ['RUNNER_TEMP'])
+    result = {**flags(), 'success': False, 'forced': False, 'timedOut': False}
+    evidence.write('00-start', {**result, 'deadlineMonotonic': budget.deadline, 'budgetSeconds': 120})
+    try:
+        require(os.name == 'nt', 'Actual Windows required')
+        probe = Probe(); host = probe.identity()
+        evidence.write('01-controller-host', host)
+        source_files = source_hashes()
+        event, event_digest = legacy.bounded_object(os.environ['GITHUB_EVENT_PATH'])
+        context = validate_execution(os.environ, event, host, os.name)
+        executable = image_receipt(sys.executable, budget)
+        require(executable['peMachine'] == 0xAA64, 'Controller executable must be ARM64 PE')
+        record = {**context, 'host': host, 'sourceFiles': source_files, 'executable': executable,
+                  'eventSha256': event_digest, 'deadlineMonotonic': budget.deadline}
+        evidence.write('10-controller', record)
+        argv = [sys.executable, '-B', str(Path(__file__).resolve()), '--observer', '--deadline', str(budget.deadline),
+                '--output', str(evidence.path)]
+        owned = OwnedObserver(probe, child_environment(os.environ), argv, budget,
+                              {'sessionId': host['sessionId'], 'executable': executable, 'sourceFiles': source_files})
+        result = run_owned(owned, budget, evidence)
+        child_failure = evidence.path / '89-observer-failure.json'
+        if child_failure.exists():
+            failure, _ = legacy.bounded_object(child_failure)
+            result['observerFailure'] = failure
+            result['success'] = False
+            result['timedOut'] = result['timedOut'] or failure.get('timedOut', False)
+            result['forced'] = result['forced'] or failure.get('forced', False)
+        if result['success']:
+            child_context, _ = legacy.bounded_object(evidence.path / '32-observer-context.json')
+            result['context'] = validate_context(os.environ, event, child_context['source'], host, os.name)
+            require(source_hashes() == source_files, 'Controller source files changed')
+            classification, _ = legacy.bounded_object(evidence.path / '80-classification.json')
+            require(classification.get('status') in ('privacy-match', 'privacy-absent-observed')
+                    and all(classification.get(k) == v for k, v in flags().items()), 'Invalid child result flags')
+            result['status'] = classification['status']
+        budget.remaining()
+    except Exception as exc:
+        result['success'] = False
+        result['failure'] = error_record(exc)
+        result['timedOut'] = result['timedOut'] or isinstance(exc, TimeoutError)
+    finally:
+        result['remainingSeconds'] = max(0, budget.deadline - time.monotonic())
+        evidence.write('99-result', result)
+    return 0 if result['success'] else 1
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--observer', action='store_true')
+    parser.add_argument('--deadline', type=float)
+    args = parser.parse_args()
+    require(args.observer == (args.deadline is not None), 'Observer/deadline arguments must be paired')
+    return observer(args) if args.observer else controller(args)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
