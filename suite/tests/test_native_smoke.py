@@ -546,6 +546,8 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
             error = None
             with ExitStack() as stack:
                 stack.enter_context(patch.dict(sys.modules, modules))
+                activated = stack.enter_context(patch.object(smoke, 'activate_owned_suite',
+                    side_effect=lambda api, process, hwnd, record: api.require_foreground(hwnd)))
                 for name, replacement in (
                         ('launch_suite', launch), ('Windows', lambda: api),
                         ('verified_attachment', lambda *args: (11, 22, 33, 200)),
@@ -561,6 +563,7 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                     smoke.document_case(suite, fixtures, output, module, extension, physical_input)
                 except Exception as exc:
                     error = exc
+                activated.assert_called_once_with(api, process, 11, activated.call_args.args[3])
             state.update(events=events, error=error, firstError=first_error, original=original,
                          record=json.loads((output / (module + '-result.json')).read_text(encoding='utf-8')),
                          snapshot=(output / 'calc-model-baseline.xlsx').read_bytes()

@@ -304,8 +304,11 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
         send_keys, type_ascii = Mock(), Mock()
         with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
                                        'pywinauto.keyboard': SimpleNamespace(send_keys=send_keys)}), \
+                patch.object(lifecycle.native, 'activate_owned_suite',
+                    side_effect=lambda api, process, hwnd, record: api.require_foreground(hwnd)) as activated, \
                 patch.object(lifecycle.native.ascii_input, 'type_ascii', type_ascii):
             case.edit(11, 22, '-LIFECYCLE-NEW-')
+        activated.assert_called_once_with(case.api, case.process, 11, case.record)
         type_ascii.assert_called_once_with(case.api, 11, 22, '-LIFECYCLE-NEW-', case.record, pause=0.025)
         self.assertEqual([call.args[0] for call in send_keys.call_args_list], ['^{F6}', '^{END}'])
         self.assertEqual(case.record['stage'], 'physical-editor-input')
@@ -352,11 +355,14 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                         patch.object(native, 'launch_suite', return_value=process), \
                         patch.object(native, 'Windows', return_value=api), \
                         patch.object(native, 'verified_attachment', return_value=(11, 12, 22, 88)), \
+                        patch.object(native, 'activate_owned_suite',
+                            side_effect=lambda api, process, hwnd, record: api.require_foreground(hwnd)) as activated, \
                         patch.object(native.ascii_input, 'type_ascii', type_ascii), \
                         patch.object(native, '_verified_saved_calc_close_proof', return_value=object()), \
                         patch.object(native, 'close_document'), patch.object(native, 'close_home'), \
                         patch.object(native, 'stop_owned_test_process'):
                     result = native.document_case(root, root, root, module, extension, True)
+                activated.assert_called_once_with(api, process, 11, result)
                 type_ascii.assert_called_once_with(api, 11, 22, marker, result, pause=0.04)
                 sent = [call.args[0] for call in send_keys.call_args_list]
                 self.assertNotIn(marker, sent)

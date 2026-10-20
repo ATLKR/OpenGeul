@@ -238,9 +238,14 @@ class OriginalEditHarness:
 
     def edit(self, marker):
         with patch.dict('sys.modules', self.modules), \
+             patch.object(lifecycle.native, 'activate_owned_suite',
+                 side_effect=lambda api, process, hwnd, record: api.require_foreground(hwnd)) as activated, \
              patch.object(lifecycle.native, 'prepare_editor_focus', self.prepare), \
              patch.object(lifecycle.native.ascii_input, 'type_ascii', self.inject):
-            lifecycle.Case.edit(self.case, 11, 22, marker)
+            try:
+                lifecycle.Case.edit(self.case, 11, 22, marker)
+            finally:
+                activated.assert_called_once_with(self.case.api, self.case.process, 11, self.case.record)
 
 
 class ExistingStalePredicateRedTests(unittest.TestCase):
