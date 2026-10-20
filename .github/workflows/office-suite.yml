@@ -100,6 +100,25 @@ jobs:
           !.work/suite-korean-readiness/fod-source/**/*.cab
         retention-days: 7
         if-no-files-found: error
+    - name: Suite native ARM64 privacy preparation
+      id: native31-privacy-prepare
+      if: "!cancelled() && github.ref == 'refs/heads/work/opengeul-office-arm64' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success'"
+      shell: pwsh
+      timeout-minutes: 3
+      run: |
+        $ErrorActionPreference = 'Stop'
+        ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
+    - name: Suite native31 setup and control originals
+      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          ${{ runner.temp }}/suite-native31-setup-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}/
+          ${{ runner.temp }}/suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
     - name: 실제 Office 엔진의 생성·편집·저장·재열기
       shell: pwsh
       run: |
@@ -434,6 +453,7 @@ jobs:
           .work/suite-startup/
           .work/suite-worker-diagnostics/
           .work/suite-native-integrity.json
+          .work/suite-native31-privacy-preparation/
           .work/office-suite/msi.msi.log
           .work/suite-office-features/
           .work/e2e-fixtures/

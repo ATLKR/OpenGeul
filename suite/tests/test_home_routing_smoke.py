@@ -478,14 +478,26 @@ class HomeRoutingContracts(unittest.TestCase):
         proof=NS(process=NS(pid=77),process_handle=555,bound=NS(pid=88,creation=222),bound_handle=888,hwnd=11,child=22)
         return case,dict(hwnd=11,parent=12,child=22,officePid=88),proof
 
+    @staticmethod
+    def capture_geometry_fixture(path,binding):
+        import csv_geometry_evidence as geometry
+        from test_csv_geometry_evidence import Boundary
+        from types import SimpleNamespace as NS
+        from PIL import Image
+        boundary=Boundary(geometry)
+        wrapper=NS(handle=11,process_id=lambda:77,is_visible=lambda:True,
+            rectangle=lambda:NS(left=-10,top=-10,right=1050,bottom=800),
+            capture_as_image=lambda:Image.new('RGB',(2,2),'white'))
+        geometry.capture_with_geometry(wrapper,binding,path,probe=geometry.GeometryProbe(boundary.user,boundary.shell))
+
     def test_csv_post_getter_png_is_bound_readonly_and_never_claims_grid_readiness(self):
         import home_calc_close
         from types import SimpleNamespace as NS
         from PIL import Image
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory).resolve();case,frame,proof=self.csv_checkpoint_fixture(root);calls=[]
-            def capture(hwnd,pid,path,timeout):
-                calls.append(('capture',hwnd,pid,timeout));Image.new('RGB',(2,2),'white').save(path)
+            def capture(hwnd,pid,path,timeout,*,binding):
+                calls.append(('capture',hwnd,pid,timeout));self.capture_geometry_fixture(path,binding)
                 return NS(returncode=0,stdout='',stderr='')
             with patch.object(home_calc_close,'verify_home_calc_close',side_effect=lambda *args:calls.append(('guard',))), \
                  patch.object(self.api,'_capture_checkpoint_png',side_effect=capture),patch.object(self.api.time,'monotonic',return_value=5.):
@@ -502,6 +514,65 @@ class HomeRoutingContracts(unittest.TestCase):
                 changed=copy.deepcopy(case.record);changed['csvPostGetterScreenshot']['nativeAfter'][field]=bad
                 with self.subTest(field=field),self.assertRaises(AssertionError):self.api.require_csv_post_getter_screenshot(changed)
 
+    def test_csv_capture_requires_complete_adjacent_geometry_for_the_same_binding_and_png(self):
+        import home_calc_close
+        from types import SimpleNamespace as NS
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            case,frame,proof=self.csv_checkpoint_fixture(Path(directory).resolve())
+            def capture(hwnd,pid,path,timeout,*,binding):
+                Image.new('RGB',(2,2),'white').save(path)
+                return NS(returncode=0,stdout='',stderr='')
+            with patch.object(home_calc_close,'verify_home_calc_close'),patch.object(self.api,'_capture_checkpoint_png',side_effect=capture), \
+                 patch.object(self.api.time,'monotonic',return_value=5.):
+                with self.assertRaises((AssertionError,FileNotFoundError)):
+                    case.csv_post_getter_screenshot(frame,proof)
+            self.assertFalse(case.record['csvPostGetterScreenshot']['passed'])
+
+    def test_live_csv_capture_rejects_incomplete_or_contradictory_nested_geometry(self):
+        import csv_geometry_evidence as geometry
+        import home_calc_close
+        from types import SimpleNamespace as NS
+        for reason in ('missing-native','skeleton','wrong-owner','raced-target'):
+            with self.subTest(reason=reason),tempfile.TemporaryDirectory() as directory:
+                case,frame,proof=self.csv_checkpoint_fixture(Path(directory).resolve())
+                def capture(hwnd,pid,path,timeout,*,binding):
+                    self.capture_geometry_fixture(path,binding)
+                    sidecar=path.with_name(geometry.SIDECAR_NAME);value=json.loads(sidecar.read_bytes())
+                    if reason=='missing-native':del value['before']['windows'][1]['clientScreenRect']
+                    elif reason=='skeleton':
+                        for edge in ('before','after'):
+                            value[edge]=dict(complete=True,errors=[],taskbar=dict(complete=True),
+                                windows=[dict(hwnd=h,complete=True) for h in (11,12,22)])
+                    elif reason=='wrong-owner':value['before']['windows'][2]['pid']=999
+                    else:value['after']['windows'][0]['windowRect'][0]-=1
+                    sidecar.write_bytes(geometry.receipt_bytes(value))
+                    return NS(returncode=0,stdout='',stderr='')
+                with patch.object(home_calc_close,'verify_home_calc_close'),patch.object(self.api,'_capture_checkpoint_png',side_effect=capture), \
+                     patch.object(self.api.time,'monotonic',return_value=5.):
+                    with self.assertRaises(AssertionError):case.csv_post_getter_screenshot(frame,proof)
+                self.assertIs(case.record['csvPostGetterScreenshot']['passed'],False)
+                self.assertEqual(len(case.record['screenshots']),1)
+
+    def test_live_csv_capture_allows_observed_cursor_and_taskbar_state_changes(self):
+        import csv_geometry_evidence as geometry
+        import home_calc_close
+        from types import SimpleNamespace as NS
+        with tempfile.TemporaryDirectory() as directory:
+            case,frame,proof=self.csv_checkpoint_fixture(Path(directory).resolve())
+            def capture(hwnd,pid,path,timeout,*,binding):
+                self.capture_geometry_fixture(path,binding)
+                sidecar=path.with_name(geometry.SIDECAR_NAME);value=json.loads(sidecar.read_bytes())
+                value['after']['physicalCursor']=[20,100]
+                value['after']['taskbar']['appBarState']=dict(raw=0,autoHide=False,alwaysOnTop=False)
+                sidecar.write_bytes(geometry.receipt_bytes(value))
+                return NS(returncode=0,stdout='',stderr='')
+            with patch.object(home_calc_close,'verify_home_calc_close'),patch.object(self.api,'_capture_checkpoint_png',side_effect=capture), \
+                 patch.object(self.api.time,'monotonic',return_value=5.):
+                case.csv_post_getter_screenshot(frame,proof)
+            self.assertIs(case.record['csvPostGetterScreenshot']['passed'],True)
+            self.api.require_csv_post_getter_screenshot(case.record)
+
     def test_csv_post_getter_capture_never_masks_original_guard_or_collector_failure(self):
         import home_calc_close
         from types import SimpleNamespace as NS
@@ -512,11 +583,11 @@ class HomeRoutingContracts(unittest.TestCase):
                 def guard(*args):
                     guards.append(True)
                     if failure=='before' or failure=='after' and len(guards)==2:raise OSError('original retained identity failure')
-                def capture(hwnd,pid,path,timeout):
+                def capture(hwnd,pid,path,timeout,*,binding):
                     captures.append(True)
                     if failure=='timeout':raise self.api.subprocess.TimeoutExpired(['owned-screenshot'],timeout)
                     if failure=='late':clock[0]=16.
-                    Image.new('RGB',(2,2),'white').save(path)
+                    self.capture_geometry_fixture(path,binding)
                     return NS(returncode=7 if failure=='collector' else 0,stdout='',stderr='original capture failure')
                 with patch.object(home_calc_close,'verify_home_calc_close',side_effect=guard),patch.object(self.api,'_capture_checkpoint_png',side_effect=capture), \
                      patch.object(self.api.time,'monotonic',side_effect=lambda:clock[0]):
@@ -531,23 +602,41 @@ class HomeRoutingContracts(unittest.TestCase):
         from PIL import Image
         import importlib.metadata
         with tempfile.TemporaryDirectory() as directory:
-            target=Path(directory).resolve()/'owned.png';calls=[]
+            target=Path(directory).resolve()/'home-open-calc-csv-calc-post-getter.png';calls=[]
+            import csv_geometry_evidence as geometry
+            from test_csv_geometry_evidence import Boundary
+            boundary=Boundary(geometry);probe=geometry.GeometryProbe(boundary.user,boundary.shell)
+            binding=dict(shellPid=77,shellCreationTime=111,shellHandleValue=555,officePid=88,
+                officeCreationTime=222,officeHandleValue=888,windowHwnd=11,parentHwnd=12,childHwnd=22)
             wrapper=NS(handle=11,process_id=lambda:77,is_visible=lambda:True,
+                rectangle=lambda:NS(left=-10,top=-10,right=1050,bottom=800),
                 capture_as_image=lambda:calls.append('capture') or Image.new('RGB',(2,2),'white'))
             desktop=NS(window=lambda handle:NS(wrapper_object=lambda:wrapper))
-            with patch.dict(sys.modules,{'pywinauto':NS(Desktop=lambda backend:desktop)}), \
-                 patch.object(sys,'argv',['collector','11','77',str(target)]),patch.object(importlib.metadata,'version',return_value='0.6.9'):
+            def initialized_desktop(backend):
+                boundary.context=456  # Dependency DPI initialization happens before saving a token.
+                return desktop
+            with patch.dict(sys.modules,{'pywinauto':NS(Desktop=initialized_desktop)}), \
+                 patch.object(sys,'argv',['collector','11','77',str(target),json.dumps(binding),str(SOURCE.parent)]), \
+                 patch.object(geometry,'GeometryProbe',return_value=probe),patch.object(importlib.metadata,'version',return_value='0.6.9'):
                 exec(self.api.CSV_CHECKPOINT_CAPTURE,{'__name__':'__main__'})
             self.assertEqual(calls,['capture']);self.assertTrue(target.is_file())
+            self.assertTrue(target.with_name('home-open-calc-csv-calc-post-getter-geometry.json').is_file(), 'Required geometry sidecar is missing')
             self.assertFalse(hasattr(wrapper,'set_focus'));self.assertFalse(hasattr(wrapper,'click_input'))
+            geometry_row=json.loads(target.with_name(geometry.SIDECAR_NAME).read_bytes())
+            self.assertEqual(geometry_row['dpiScope']['previousContext'],456);self.assertEqual(boundary.context,456)
 
     def test_screenshot_helper_has_one_bounded_hidden_child_and_no_retry(self):
         from types import SimpleNamespace as NS
         with patch.object(self.api.subprocess,'run',return_value=NS(returncode=0,stdout='',stderr='')) as run:
-            self.api._capture_checkpoint_png(11,77,Path('/owned/checkpoint.png'),3.25)
+            self.api._capture_checkpoint_png(11,77,Path('/owned/checkpoint.png'),3.25,binding={'windowHwnd':11,'shellPid':77})
         self.assertEqual(run.call_count,1);args,kwargs=run.call_args
         self.assertEqual(args[0][1:3],['-c',self.api.CSV_CHECKPOINT_CAPTURE]);self.assertEqual(kwargs['timeout'],3.25)
         self.assertFalse(kwargs.get('shell',False));self.assertIn('creationflags',kwargs)
+        self.assertEqual(json.loads(args[0][-2]),{'windowHwnd':11,'shellPid':77})
+        self.assertEqual(args[0][-1],str(SOURCE.parent.resolve()))
+        for invalid in (0,10.01):
+            with self.subTest(timeout=invalid),self.assertRaises(AssertionError):
+                self.api._capture_checkpoint_png(11,77,Path('/owned/checkpoint.png'),invalid,binding={})
 
     def test_main_keeps_case_failures_and_strict_archive_failure_nonzero(self):
         from types import SimpleNamespace

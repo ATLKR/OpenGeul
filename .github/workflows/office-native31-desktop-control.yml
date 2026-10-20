@@ -1,0 +1,48 @@
+name: OpenGeul native ARM64 read-only desktop control
+'on':
+  push:
+    branches:
+    - work/opengeul-office-native31-desktop-control
+permissions:
+  contents: read
+  actions: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  observe:
+    if: github.event.repository.private == false
+    runs-on: windows-11-arm
+    timeout-minutes: 10
+    steps:
+    - name: Preserve exact source bytes
+      shell: pwsh
+      run: git config --global core.autocrlf false
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: arm64
+    - name: Install pinned observation dependencies
+      shell: pwsh
+      timeout-minutes: 3
+      run: |
+        python -m pip install Pillow==12.3.0 pywinauto==0.6.9
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned probe dependency installation failed.' }
+    - name: Read-only desktop observation with owned finite observer
+      shell: pwsh
+      timeout-minutes: 3
+      run: |
+        $env:NATIVE31_PWSH = (Get-Process -Id $PID).Path
+        python -B e2e/native31_desktop_control.py --output "$env:RUNNER_TEMP/native31-desktop-control-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+        if ($LASTEXITCODE -ne 0) { throw 'Read-only desktop diagnostic failed; partial evidence is retained.' }
+    - name: Retain all partial diagnostic evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-native31-desktop-control-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/native31-desktop-control-${{ github.run_id }}-${{ github.run_attempt }}/
+        if-no-files-found: error
+        retention-days: 1

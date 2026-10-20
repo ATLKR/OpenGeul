@@ -34,24 +34,26 @@ OPEN_ROUTES=tuple((module,extension) for module,extension,_ in features.FORMATS)
 # The pinned pywinauto capture reads the screen rectangle without focusing or
 # painting the window. Run it in one hidden, bounded child, separate from UNO.
 CSV_CHECKPOINT_CAPTURE='''import sys
+import json
 from pathlib import Path
 from importlib.metadata import version
 from pywinauto import Desktop
 assert version('pywinauto') == '0.6.9'
 hwnd, pid = map(int, sys.argv[1:3])
 window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
-assert int(window.handle) == hwnd and int(window.process_id()) == pid
-assert window.is_visible()
-image = window.capture_as_image()
-assert image is not None
-with Path(sys.argv[3]).open('xb') as stream:
-    image.save(stream, format='PNG')
+# Import/initialize pywinauto before the helper saves a thread-DPI scope token.
+sys.path.insert(0, sys.argv[5])
+from csv_geometry_evidence import capture_with_geometry
+binding = json.loads(sys.argv[4])
+assert (binding['windowHwnd'], binding['shellPid']) == (hwnd, pid)
+capture_with_geometry(window, binding, Path(sys.argv[3]))
 '''
 
 
-def _capture_checkpoint_png(hwnd,pid,path,timeout):
+def _capture_checkpoint_png(hwnd,pid,path,timeout,*,binding):
     assert 0<timeout<=10
-    return subprocess.run([sys.executable,'-c',CSV_CHECKPOINT_CAPTURE,str(hwnd),str(pid),str(path)],
+    return subprocess.run([sys.executable,'-c',CSV_CHECKPOINT_CAPTURE,str(hwnd),str(pid),str(path),
+        json.dumps(binding,sort_keys=True,allow_nan=False),str(Path(__file__).resolve().parent)],
         capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=timeout,shell=False,
         creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
 
@@ -520,7 +522,7 @@ class HomeCase:
         value.update(nativeBefore=snapshot(),foregroundVerifiedBefore=True)
         remaining=value['deadline']-time.monotonic();assert remaining>0
         value['captureCount']=1
-        result=_capture_checkpoint_png(proof.hwnd,proof.process.pid,path,remaining)
+        result=_capture_checkpoint_png(proof.hwnd,proof.process.pid,path,remaining,binding=value['nativeBefore'])
         value.update(collectorExitCode=result.returncode,collectorStdout=result.stdout[:4096],collectorStderr=result.stderr[:4096])
         assert result.returncode==0, 'Owned post-getter screenshot failed: '+result.stderr[:4096]
         verify_home_calc_close(self.api,proof,self.record);self.api.require_foreground(proof.hwnd)
@@ -530,8 +532,10 @@ class HomeCase:
             assert image.format=='PNG';width,height=image.size
             assert 0<width<=20000 and 0<height<=20000 and width*height<=16_000_000
             image.verify()
-        value.update(bytes=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),width=width,height=height,
-                     finishedAt=time.monotonic())
+        value.update(bytes=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),width=width,height=height)
+        from csv_geometry_evidence import require_geometry_sidecar
+        require_geometry_sidecar(path,value['nativeBefore'],{key:value[key] for key in ('width','height','bytes','sha256')})
+        value['finishedAt']=time.monotonic()
         assert value['finishedAt']<=value['deadline']
         candidate=dict(self.record,screenshots=[*self.record['screenshots'],name],csvPostGetterScreenshot=dict(value,passed=True))
         require_csv_post_getter_screenshot(candidate)
