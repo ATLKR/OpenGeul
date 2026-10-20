@@ -202,16 +202,81 @@ class ControlContracts(unittest.TestCase):
         probe=object.__new__(m.Probe)
         foreground=0x123456789
         probe.user=SimpleNamespace(GetForegroundWindow=lambda:foreground,
-            EnumWindows=lambda callback,_: all(callback(hwnd,0) for hwnd in range(1,70)))
+            EnumWindows=lambda callback,_: all(callback(hwnd,0) for hwnd in range(1,270)))
         probe.callback=lambda callback: callback
         probe.window=lambda hwnd: {'hwnd':hwnd}
         census,errors,ok=probe.census()
         self.assertEqual(census['windows'][0]['hwnd'],foreground)
-        self.assertEqual(len(census['windows']),64); self.assertTrue(census['truncated']); self.assertFalse(ok)
+        self.assertEqual(len(census['windows']),256); self.assertTrue(census['truncated']); self.assertFalse(ok)
         probe.window=lambda hwnd: {'hwnd':hwnd} if hwnd==foreground else (_ for _ in ()).throw(OSError('denied'))
         census,errors,ok=probe.census()
         self.assertFalse(ok); self.assertEqual(errors[0]['type'],'OSError')
         self.assertEqual(census['windows'],[{'hwnd':foreground}])
+
+    def census_fixture(self,count):
+        foreground=copy.deepcopy(self.privacy_fixture()['foreground'])
+        return dict(foregroundHwnd=foreground['hwnd'],windows=[foreground]+[
+            {**copy.deepcopy(foreground),'hwnd':1000+i,'visible':False} for i in range(count-1)],truncated=False)
+
+    def test_diagnostic_census_validates_every_row_and_preserves_legacy_64(self):
+        self.assertEqual(m.MAX_CENSUS_WINDOWS,256);self.assertEqual(m.legacy.MAX_WINDOWS,64)
+        for count in (65,256):
+            value=self.census_fixture(count);before=copy.deepcopy(value)
+            m.validate_census(value);self.assertEqual(value,before)
+            with self.assertRaises(ValueError):m.legacy.validate_windows(value)
+        for mode in ('overflow','cross64duplicate','late-schema','late-type','late-text','foreground-missing','foreground-bool','truncated-int','tuple-rows','extra-top-key'):
+            with self.subTest(mode=mode):
+                value=self.census_fixture(257 if mode=='overflow' else 256)
+                if mode=='cross64duplicate':value['windows'][-1]['hwnd']=value['windows'][1]['hwnd']
+                elif mode=='late-schema':value['windows'][-1]['extra']=1
+                elif mode=='late-type':value['windows'][-1]['processId']=True
+                elif mode=='late-text':value['windows'][-1]['title']='bad\x00text'
+                elif mode=='foreground-missing':value['foregroundHwnd']=999999
+                elif mode=='foreground-bool':value['foregroundHwnd']=True
+                elif mode=='truncated-int':value['truncated']=0
+                elif mode=='tuple-rows':value['windows']=tuple(value['windows'])
+                elif mode=='extra-top-key':value['enumerationSucceeded']=True
+                with self.assertRaises(ValueError):m.validate_census(value)
+
+    def test_real_collector_boundaries_preserve_all_rows_and_actual_enum_result(self):
+        for count in (65,256,257):
+            with self.subTest(count=count):
+                rows=self.census_fixture(count)['windows'];lookup={r['hwnd']:r for r in rows}
+                probe=object.__new__(m.Probe);probe.callback=lambda callback:callback
+                probe.window=lambda hwnd:copy.deepcopy(lookup[hwnd])
+                probe.user=SimpleNamespace(GetForegroundWindow=lambda:rows[0]['hwnd'],
+                    EnumWindows=lambda callback,_:all(callback(r['hwnd'],0) for r in rows))
+                census,errors,ok=probe.census()
+                self.assertEqual(census['windows'],rows[:256]);self.assertEqual(errors,[])
+                self.assertEqual(ok,count<=256);self.assertEqual(census['truncated'],count>256)
+                m.validate_census(census)
+
+    def test_capture_large_complete_and_original_incomplete_census(self):
+        for count in (65,256):
+            for privacy in (True,False):
+                with self.subTest(count=count,privacy=privacy):
+                    code,records,closed,_=self.complete_capture_fixture(privacy=privacy,census_count=count)
+                    self.assertEqual(code,0);self.assertEqual(len(records['33-window-census']['windows']),count)
+                    self.assertEqual(records['80-classification']['status'],'privacy-match' if privacy else 'privacy-absent-observed')
+                    self.assertEqual(records['80-classification']['actions'],[]);self.assertEqual(closed,[77])
+        for count,truncated,enum_ok,errors in ((64,True,False,[]),(256,True,False,[]),
+                (65,False,False,[]),(65,False,True,[{'type':'OSError','message':'native census failure'}])):
+            code,records,closed,_=self.complete_capture_fixture(privacy=True,census_count=count,
+                census_truncated=truncated,census_enum_ok=enum_ok,census_errors=errors)
+            self.assertEqual(code,1);self.assertNotIn('80-classification',records)
+            self.assertIn('Incomplete/unavailable/truncated/raced',records['89-observer-failure']['failure']['message'])
+            self.assertEqual(len(records['33-window-census']['windows']),count);self.assertIn('70-raw-observation',records)
+            self.assertEqual(records['89-observer-failure']['inputsPerformed'],0);self.assertEqual(closed,[77])
+
+    def test_unicode_census_overflow_keeps_json_cap_and_fails_closed(self):
+        value=self.census_fixture(256)
+        for row in value['windows']:row.update(title='가'*256,className='나'*256)
+        self.assertGreater(len(m.encoded_json(value)),m.MAX_JSON);self.assertEqual(m.MAX_JSON,256*1024)
+        with self.assertRaisesRegex(ValueError,'256 KiB'):m.validate_census(value)
+        code,records,closed,_=self.complete_capture_fixture(privacy=True,census_count=256,census_unicode=True)
+        self.assertEqual(code,1);self.assertIn('31-observer-host',records);self.assertNotIn('80-classification',records)
+        self.assertIn('256 KiB',records['89-observer-failure']['failure']['message'])
+        self.assertEqual(records['89-observer-failure']['actions'],[]);self.assertEqual(records['89-observer-failure']['inputsPerformed'],0)
 
     def test_read_only_taskbar_records_foreign_root_without_input(self):
         class Function:
@@ -317,7 +382,7 @@ class ControlContracts(unittest.TestCase):
             self.assertEqual(raw['createdFileTime'],133999999999999999)
 
 
-    def complete_capture_fixture(self, *, privacy, target_changes=None, uia_error=False, dpi_api=None, close_failure=False, hit_drifts=False):
+    def complete_capture_fixture(self, *, privacy, target_changes=None, uia_error=False, dpi_api=None, close_failure=False, hit_drifts=False, census_count=1, census_truncated=False, census_enum_ok=True, census_unicode=False, census_errors=None):
         """Run real observer/capture/classifier using local fake native boundaries."""
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp); output=m.Evidence.create(folder/'capture',folder)
@@ -328,6 +393,8 @@ class ControlContracts(unittest.TestCase):
                 sample['uia'][0]['nodes']=[dict(name='Desktop',controlType=50033,automationId='',
                     className='',processId=200,enabled=True,offscreen=False)]
             census_window=copy.deepcopy(sample['foreground'])
+            census_rows=[copy.deepcopy(census_window)]+[{**copy.deepcopy(census_window),'hwnd':1000+i,'visible':False,
+                **({'title':'가'*256,'className':'나'*256} if census_unicode else {})} for i in range(census_count-1)]
             target={**copy.deepcopy(census_window),'style':0x10000000,'exStyle':0,'rootHwnd':12,'ownerHwnd':0,'ownerAbsent':True}
             target.update(target_changes or {})
             host=dict(processId=45,processMachine=0,nativeMachine=0xAA64,sessionId=1,windowsDirectory=r'C:\Windows',
@@ -359,7 +426,7 @@ class ControlContracts(unittest.TestCase):
                     GetThreadDpiAwarenessContext=lambda:1,AreDpiAwarenessContextsEqual=lambda *args:True,
                     GetForegroundWindow=lambda:12),
                 kernel=SimpleNamespace(OpenProcess=lambda *args:77,CloseHandle=lambda handle:closed.append(handle) or not close_failure),
-                census=lambda:({'foregroundHwnd':12,'windows':[copy.deepcopy(census_window)],'truncated':False},[],True),
+                census=lambda:({'foregroundHwnd':12,'windows':copy.deepcopy(census_rows),'truncated':census_truncated},copy.deepcopy(census_errors or []),census_enum_ok),
                 taskbar=hit_query,target=lambda hwnd:copy.deepcopy(target),
                 process_identity=lambda handle,pid:copy.deepcopy(process),
                 strict_uia=uia_query)

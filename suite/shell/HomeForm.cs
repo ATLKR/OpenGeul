@@ -76,6 +76,12 @@ internal sealed class HomeForm : Form
         Shown += (_, _) => { if (startup.ModuleId is not null) OpenModule(startup.ModuleId, startup.Path); };
     }
 
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        InitialWindowLayout.Apply(this);
+    }
+
     internal void OpenFile()
     {
         if (closing) return;

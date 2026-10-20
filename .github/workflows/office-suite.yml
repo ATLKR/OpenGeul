@@ -53,10 +53,29 @@ jobs:
     - name: Suite 단위 검사와 Windows shell 빌드 검사
       shell: pwsh
       run: |
-        python -m unittest discover -s suite/tests -v
-        if ($LASTEXITCODE -ne 0) { throw 'Suite unit tests failed.' }
+        $beforeCapabilityExit = 1
+        try {
+          python -B suite/scripts/unit-capability-receipt.py --phase before --output .work/suite-unit-capabilities
+          $beforeCapabilityExit = $LASTEXITCODE
+        } catch { Write-Host 'Before unit capability receipt failed.' }
+        $unitExit = 1
+        $unitFailure = $null
+        $afterCapabilityExit = 1
+        try {
+          python -m unittest discover -s suite/tests -v
+          $unitExit = $LASTEXITCODE
+        } catch { $unitFailure = $_ }
+        finally {
+          try {
+            python -B suite/scripts/unit-capability-receipt.py --phase after --output .work/suite-unit-capabilities
+            $afterCapabilityExit = $LASTEXITCODE
+          } catch { Write-Host 'After unit capability receipt failed.' }
+        }
+        if ($null -ne $unitFailure) { throw $unitFailure }
+        if ($unitExit -ne 0) { throw 'Suite unit tests failed.' }
         dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
         if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
+        if ($beforeCapabilityExit -ne 0 -or $afterCapabilityExit -ne 0) { throw 'Suite unit capability receipts failed.' }
     - name: 고정 버전의 패키지 경로 선택
       shell: pwsh
       run: |
@@ -454,6 +473,7 @@ jobs:
           .work/suite-worker-diagnostics/
           .work/suite-native-integrity.json
           .work/suite-native31-privacy-preparation/
+          .work/suite-unit-capabilities/
           .work/office-suite/msi.msi.log
           .work/suite-office-features/
           .work/e2e-fixtures/

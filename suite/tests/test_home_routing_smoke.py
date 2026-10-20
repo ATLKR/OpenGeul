@@ -485,8 +485,12 @@ class HomeRoutingContracts(unittest.TestCase):
         from types import SimpleNamespace as NS
         from PIL import Image
         boundary=Boundary(geometry)
+        boundary.work_rect=[0,0,1024,720]
+        boundary.rects.update({11:[0,0,1024,720],12:[8,55,1016,690],22:[8,55,1016,690]})
+        boundary.client.update({11:[0,0,1008,681],12:[0,0,1008,635],22:[0,0,1008,635]})
+        boundary.origins.update({11:[8,31],12:[8,55],22:[8,55]})
         wrapper=NS(handle=11,process_id=lambda:77,is_visible=lambda:True,
-            rectangle=lambda:NS(left=-10,top=-10,right=1050,bottom=800),
+            rectangle=lambda:NS(left=0,top=0,right=1024,bottom=720),
             capture_as_image=lambda:Image.new('RGB',(2,2),'white'))
         geometry.capture_with_geometry(wrapper,binding,path,probe=geometry.GeometryProbe(boundary.user,boundary.shell))
 
@@ -504,6 +508,8 @@ class HomeRoutingContracts(unittest.TestCase):
                 case.csv_post_getter_screenshot(frame,proof)
             self.assertEqual([r[0] for r in calls],['guard','capture','guard'])
             row=case.record['csvPostGetterScreenshot'];self.assertEqual(row['readerDeadline'],12.)
+            self.assertIs(case.record['csvWorkingAreaFit']['passed'],True)
+            self.assertEqual([item['edge'] for item in case.record['csvWorkingAreaFit']['observations']],['before','after'])
             self.assertFalse(row['gridVisibleVerified']);self.assertFalse(row['paintCompleteVerified']);self.assertTrue(row['visualReviewRequired'])
             self.assertEqual(case.record['screenshots'],['home-open-calc-csv-calc-attached.png',row['image']])
             self.api.require_csv_post_getter_screenshot(case.record)
@@ -572,6 +578,32 @@ class HomeRoutingContracts(unittest.TestCase):
                 case.csv_post_getter_screenshot(frame,proof)
             self.assertIs(case.record['csvPostGetterScreenshot']['passed'],True)
             self.api.require_csv_post_getter_screenshot(case.record)
+
+    def test_live_csv_capture_requires_observed_working_area_fit(self):
+        import csv_geometry_evidence as geometry
+        import home_calc_close
+        from types import SimpleNamespace as NS
+        for reason in ('suite-window','suite-client','embedded-client'):
+            with self.subTest(reason=reason),tempfile.TemporaryDirectory() as directory:
+                case,frame,proof=self.csv_checkpoint_fixture(Path(directory).resolve())
+                def capture(hwnd,pid,path,timeout,*,binding):
+                    self.capture_geometry_fixture(path,binding)
+                    sidecar=path.with_name(geometry.SIDECAR_NAME);value=json.loads(sidecar.read_bytes())
+                    for edge in ('before','after'):
+                        windows=value[edge]['windows']
+                        if reason=='suite-window':windows[0]['windowRect']=[0,0,1044,788]
+                        elif reason=='suite-client':windows[0]['clientScreenRect']=[8,31,1036,780]
+                        else:
+                            for row in windows[1:]:row['clientScreenRect']=[8,55,1036,758]
+                    sidecar.write_bytes(geometry.receipt_bytes(value))
+                    return NS(returncode=0,stdout='',stderr='')
+                with patch.object(home_calc_close,'verify_home_calc_close'),patch.object(self.api,'_capture_checkpoint_png',side_effect=capture), \
+                     patch.object(self.api.time,'monotonic',return_value=5.):
+                    with self.assertRaises(AssertionError):case.csv_post_getter_screenshot(frame,proof)
+                self.assertIs(case.record['csvPostGetterScreenshot']['passed'],False)
+                self.assertIs(case.record['csvWorkingAreaFit']['passed'],False)
+                self.assertFalse(case.record['csvPostGetterScreenshot']['gridVisibleVerified'])
+                self.assertFalse(case.record['csvPostGetterScreenshot']['paintCompleteVerified'])
 
     def test_csv_post_getter_capture_never_masks_original_guard_or_collector_failure(self):
         import home_calc_close

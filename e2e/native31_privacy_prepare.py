@@ -150,7 +150,7 @@ class PreparationSession:
         with c.physical_queries(probe, out, 'p33-post-dpi'):
             census, errors, enumerated = probe.census()
             out.write('p31-post-census', {**census, 'errors': errors, 'enumerationSucceeded': enumerated})
-            c.legacy.validate_windows(census)
+            c.validate_census(census)
             c.require(enumerated and not errors and not census['truncated'], 'Post-state census incomplete')
             hit = probe.taskbar()
             targets = [probe.target(hwnd) for hwnd in dict.fromkeys(
@@ -260,7 +260,7 @@ class PrivacyAdapter:
             census, errors, enumerated = probe.census()
             target = probe.target(hwnd)
             out.write('p11-fresh-native', {'census': census, 'errors': errors, 'enumerationSucceeded': enumerated, 'target': target})
-            c.legacy.validate_windows(census)
+            c.validate_census(census)
             c.require(enumerated and not errors and not census['truncated'] and census['foregroundHwnd'] == hwnd,
                       'Fresh privacy census incomplete or foreground changed')
             window = {key: target[key] for key in WINDOW_FIELDS}

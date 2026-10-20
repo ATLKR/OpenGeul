@@ -81,6 +81,12 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         };
     }
 
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        InitialWindowLayout.Apply(this);
+    }
+
     private async Task AttachAsync()
     {
         loading = true;

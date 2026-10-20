@@ -90,6 +90,25 @@ def require_csv_post_getter_screenshot(record):
     return value
 
 
+def require_csv_working_area_fit(geometry, receipt):
+    """A product placement check after strict admission; no paint conclusion."""
+    receipt.update(schemaVersion=1,kind='owned-csv-working-area-fit',passed=False,observations=[])
+    for edge in ('before','after'):
+        windows=geometry[edge]['windows'];suite=windows[0];area=suite['monitor']['workRect']
+        observation=dict(edge=edge,monitorHandle=suite['monitor']['handle'],workRect=list(area),
+            windows=[{key:row[key] for key in ('hwnd','role','windowRect','clientScreenRect')} for row in windows])
+        receipt['observations'].append(observation)
+        left,top,right,bottom=area
+        assert left<right and top<bottom, 'Selected monitor working area is empty'
+        for row in windows:
+            for field in ('windowRect','clientScreenRect'):
+                x1,y1,x2,y2=row[field]
+                assert left<=min(x1,x2)<max(x1,x2)<=right and top<=min(y1,y2)<max(y1,y2)<=bottom, \
+                    'CSV '+row['role']+' '+field+' exceeds the selected monitor working area'
+    receipt['passed']=True
+    return receipt
+
+
 def build_plan():
     return ([dict(case='tile-'+module,kind='tile',module=module) for module in OFFICE_MODULES]+
         [dict(case='home-open-cancel',kind='cancel')]+
@@ -534,7 +553,9 @@ class HomeCase:
             image.verify()
         value.update(bytes=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),width=width,height=height)
         from csv_geometry_evidence import require_geometry_sidecar
-        require_geometry_sidecar(path,value['nativeBefore'],{key:value[key] for key in ('width','height','bytes','sha256')})
+        geometry=require_geometry_sidecar(path,value['nativeBefore'],{key:value[key] for key in ('width','height','bytes','sha256')})
+        self.record['csvWorkingAreaFit']={}
+        require_csv_working_area_fit(geometry,self.record['csvWorkingAreaFit'])
         value['finishedAt']=time.monotonic()
         assert value['finishedAt']<=value['deadline']
         candidate=dict(self.record,screenshots=[*self.record['screenshots'],name],csvPostGetterScreenshot=dict(value,passed=True))

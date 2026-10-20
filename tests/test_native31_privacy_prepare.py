@@ -283,7 +283,12 @@ class ActionContracts(unittest.TestCase):
                 probe.identity=lambda:copy.deepcopy(host)
                 post_window={**observed['foreground'],'hwnd':99,'processId':300,'threadId':301,'title':'Program Manager','className':'Progman'}
                 old_census,old_target=probe.census,probe.target
-                probe.census=lambda:({'foregroundHwnd':99,'windows':[post_window],'truncated':False},[],True) if sent else old_census()
+                def full_census():
+                    value,errors,ok=({'foregroundHwnd':99,'windows':[post_window],'truncated':False},[],True) if sent else old_census()
+                    value=copy.deepcopy(value);row=value['windows'][0]
+                    value['windows'].extend({**row,'hwnd':1000+i,'visible':False} for i in range(255))
+                    return value,errors,ok
+                probe.census=full_census
                 probe.target=lambda hwnd:({**post_window,'style':0,'exStyle':0,'rootHwnd':99,'ownerHwnd':0,'ownerAbsent':True} if sent else old_target(hwnd))
                 probe.taskbar=lambda:dict(actualPointHwnd=99 if sent else 12,actualRootHwnd=99 if sent else 12,taskbarHwnd=99 if sent else 12)
                 source={**self.checkout,'files':{'test':'a'*64}}
@@ -308,6 +313,9 @@ class ActionContracts(unittest.TestCase):
                     session.classification=m.capture(probe,evidence,session.budget,controller,prepare_privacy=True)
                     result=session.run()
                 self.assertTrue(result['privacyPreparationQualified']);self.assertTrue(result['physicalTaskbarGatePassed'])
+                self.assertEqual(len(json.loads((evidence.path/'33-window-census.json').read_text())['windows']),256)
+                self.assertEqual(len(json.loads((evidence.path/'p31-post-census.json').read_text())['windows']),256)
+                if privacy:self.assertEqual(len(json.loads((evidence.path/'p11-fresh-native.json').read_text())['census']['windows']),256)
                 self.assertEqual(result['closeRequests'],int(privacy));self.assertEqual(len(sent),int(privacy))
                 self.assertEqual(result['inputsPerformed'],1);self.assertEqual(result['consentActions'],[])
                 for name in ('80-classification','p31-post-census','p32-post-hit','p35-post-screen-after',

@@ -30,6 +30,7 @@ PREPARE_BRANCH = 'refs/heads/work/opengeul-office-native31-privacy-prepare'
 PREPARE_WORKFLOW = 'ATLKR/OpenGeul/.github/workflows/office-native31-privacy-prepare.yml@' + PREPARE_BRANCH
 PREPARE_MAX_FILES = 72
 MAX_JSON = 256 * 1024
+MAX_CENSUS_WINDOWS = 256  # Native31 diagnostic only; legacy readiness remains 64.
 MAX_FILES = 48
 MAX_IMAGE = 128 * 1024 * 1024
 SOURCE_FILES = ('e2e/native31_desktop_control.py', 'e2e/runner-ready.py',
@@ -84,6 +85,24 @@ def diagnostic_error(message, **details):
 def encoded_json(value):
     # Escapes also preserve an invalid surrogate in a raw offending-property receipt.
     return (json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2) + '\n').encode('utf-8')
+
+
+def validate_census(value):
+    """Validate the full diagnostic census without changing legacy limits or rows."""
+    legacy.shape(value, ('foregroundHwnd', 'windows', 'truncated'))
+    legacy.integer(value['foregroundHwnd'])
+    require(type(value['truncated']) is bool and type(value['windows']) is list
+            and 1 <= len(value['windows']) <= MAX_CENSUS_WINDOWS, 'Diagnostic census bounds mismatch')
+    seen = set()
+    for row in value['windows']:
+        # A one-row view is only schema validation; never a replacement census
+        # or an assertion of enumeration completeness. Retain the original flag.
+        legacy.validate_windows({'foregroundHwnd': value['foregroundHwnd'],
+                                 'windows': [row], 'truncated': value['truncated']})
+        require(row['hwnd'] not in seen, 'Duplicate diagnostic census HWND')
+        seen.add(row['hwnd'])
+    require(value['foregroundHwnd'] in seen, 'Diagnostic census foreground absent')
+    require(len(encoded_json(value)) <= MAX_JSON, 'Diagnostic census JSON exceeds 256 KiB')
 
 
 def uia_property(field, value):
@@ -478,7 +497,7 @@ class Probe(legacy.WindowsProbe):
             nonlocal truncated
             try:
                 if any(row['hwnd'] == int(hwnd) for row in rows): return True
-                if len(rows) == 64:
+                if len(rows) == MAX_CENSUS_WINDOWS:
                     truncated = True; return False
                 rows.append(self.window(hwnd)); return True
             except Exception as exc:
@@ -711,7 +730,7 @@ def capture(probe, evidence, budget, controller, *, prepare_privacy=False, bindi
         with physical_queries(probe, evidence, '36-native-dpi'):
             census, errors, enumeration_ok = probe.census()
             evidence.write('33-window-census', {**census, 'errors': errors, 'enumerationSucceeded': enumeration_ok})
-            legacy.validate_windows(census)
+            validate_census(census)
             census_complete = enumeration_ok and not errors and not census['truncated']
             # Preserve targeted blocker evidence even if the wider census is incomplete.
             # The final classifier still rejects that incomplete observation.

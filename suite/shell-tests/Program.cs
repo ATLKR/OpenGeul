@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Drawing;
 using System.Text.Json;
 using OpenGeul.Office.Core;
 
@@ -587,6 +588,74 @@ AsyncTest("dispose terminates only the owned worker", async () =>
     try { Equal(true, Process.GetProcessById(id).HasExited); }
     catch (ArgumentException) { }
     Equal("alive", (await unrelated.SendAsync("echo", new { value = "alive" })).GetProperty("value").GetString());
+});
+
+Test("initial placement contains the observed normal window in the actual workarea", () =>
+{
+    var result = InitialWindowPlacement.Fit(new Rectangle(0, 0, 1044, 788), new Size(700, 500), new Rectangle(0, 0, 1024, 720));
+    Equal(new Rectangle(0, 0, 1024, 720), result.Bounds);
+    Equal(new Size(700, 500), result.MinimumSize);
+});
+Test("initial placement preserves fitting desktop bounds and location", () =>
+{
+    foreach (var bounds in new[] { new Rectangle(207, 151, 1266, 889), new Rectangle(307, 101, 1066, 839) })
+    {
+        var result = InitialWindowPlacement.Fit(bounds, new Size(700, 500), new Rectangle(0, 0, 1920, 1040));
+        Equal(bounds, result.Bounds);
+        Equal(new Size(700, 500), result.MinimumSize);
+    }
+});
+Test("initial placement shrinks only the oversized dimension", () =>
+{
+    var result = InitialWindowPlacement.Fit(new Rectangle(0, 0, 1400, 650), new Size(700, 500), new Rectangle(0, 0, 1024, 720));
+    Equal(new Rectangle(0, 35, 1024, 650), result.Bounds);
+});
+Test("initial placement recenters an off-work window without enlarging it", () =>
+{
+    var result = InitialWindowPlacement.Fit(new Rectangle(900, 600, 950, 700), new Size(700, 500), new Rectangle(0, 0, 1920, 1040));
+    Equal(new Rectangle(485, 170, 950, 700), result.Bounds);
+});
+Test("initial placement respects negative secondary monitor origins", () =>
+{
+    var result = InitialWindowPlacement.Fit(new Rectangle(-1700, -940, 1044, 788), new Size(700, 500), new Rectangle(-1600, -900, 1600, 860));
+    Equal(new Rectangle(-1322, -864, 1044, 788), result.Bounds);
+});
+Test("initial placement uses the supplied workarea for every taskbar edge", () =>
+{
+    foreach (var area in new[] { new Rectangle(0, 0, 1024, 720), new Rectangle(48, 0, 976, 768),
+        new Rectangle(0, 48, 1024, 720), new Rectangle(0, 0, 976, 768) })
+        Equal(area, InitialWindowPlacement.Fit(new Rectangle(0, 0, 1044, 788), new Size(700, 500), area).Bounds);
+});
+Test("initial placement accepts supplied 125 percent scaled sizes without scaling again", () =>
+{
+    var area = new Rectangle(0, 0, 1024, 720);
+    var document = InitialWindowPlacement.Fit(new Rectangle(0, 0, 1583, 1112), new Size(875, 625), area);
+    Equal(area, document.Bounds);
+    Equal(new Size(875, 625), document.MinimumSize);
+    var home = InitialWindowPlacement.Fit(new Rectangle(0, 0, 1333, 1049), new Size(1063, 875), area);
+    Equal(area, home.Bounds);
+    Equal(new Size(1024, 720), home.MinimumSize);
+});
+Test("initial placement caps supplied 150 percent minimum sizes to the workarea", () =>
+{
+    var area = new Rectangle(0, 0, 1024, 720);
+    foreach (var minimum in new[] { new Size(1050, 750), new Size(1275, 1050) })
+    {
+        var result = InitialWindowPlacement.Fit(new Rectangle(0, 0, 1900, 1300), minimum, area);
+        Equal(area, result.Bounds);
+        Equal(area.Size, result.MinimumSize);
+    }
+});
+Test("initial placement caps only minimum dimensions that exceed the workarea", () =>
+{
+    var result = InitialWindowPlacement.Fit(new Rectangle(0, 0, 1400, 900), new Size(1300, 500), new Rectangle(0, 0, 1024, 720));
+    Equal(new Size(1024, 500), result.MinimumSize);
+    Equal(new Rectangle(0, 0, 1024, 720), result.Bounds);
+});
+Test("initial placement rejects an empty working area", () =>
+{
+    foreach (var area in new[] { new Rectangle(0, 0, 0, 720), new Rectangle(0, 0, 1024, 0) })
+        Throws<ArgumentOutOfRangeException>(() => InitialWindowPlacement.Fit(new Rectangle(0, 0, 1044, 788), new Size(700, 500), area));
 });
 
 var failures = 0;
