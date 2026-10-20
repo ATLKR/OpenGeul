@@ -5,6 +5,7 @@ Source/Store bindings and privacy classifier remain byte-for-byte unchanged.
 """
 from __future__ import annotations
 import argparse
+from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes as W
 import hashlib
@@ -19,6 +20,7 @@ import struct
 import subprocess
 import sys
 import time
+import unicodedata
 
 ROOT = Path(__file__).resolve().parents[1]
 BRANCH = 'refs/heads/work/opengeul-office-native31-desktop-control'
@@ -40,7 +42,110 @@ def flags():
 
 
 def error_record(exc):
-    return {'type': type(exc).__name__, 'message': str(exc)[:2048]}
+    value = {'type': type(exc).__name__, 'message': str(exc)[:2048]}
+    if hasattr(exc, 'details'): value['details'] = exc.details
+    if hasattr(exc, 'cleanup_failures'): value['cleanupFailures'] = exc.cleanup_failures
+    return value
+
+
+def diagnostic_error(message, **details):
+    error = ValueError(message)
+    error.details = details
+    return error
+
+
+def encoded_json(value):
+    # Escapes also preserve an invalid surrogate in a raw offending-property receipt.
+    return (json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2) + '\n').encode('utf-8')
+
+
+def uia_property(field, value):
+    if field in ('name', 'automationId', 'className'):
+        limit = 2048 if field == 'name' else 256
+        require(type(value) is str, 'UIA ' + field + ' is not an available string')
+        require(len(value) <= limit, 'UIA ' + field + ' exceeds ' + str(limit) + ' characters')
+        allowed = '\r\n\t' if field == 'name' else ''
+        require(all((unicodedata.category(char) not in ('Cc', 'Cs')) or char in allowed for char in value),
+                'UIA ' + field + ' contains a forbidden control/surrogate')
+    elif field in ('controlType', 'processId'):
+        legacy.integer(value, 0)
+    else:
+        # COM UIA BOOL values can be bool or the exact native integer 0/1.
+        require(type(value) is bool or (type(value) is int and value in (0, 1)), 'UIA ' + field + ' is not BOOL 0/1')
+        value = bool(value)
+    return value
+
+
+def raw_property(value):
+    raw = {'pythonType': type(value).__name__[:256], 'valueAvailable': True}
+    if type(value) is str:
+        raw.update(value=value[:2048], length=len(value), valueTruncated=len(value) > 2048)
+    elif value is None or type(value) is bool or (type(value) is int and value.bit_length() <= 64):
+        raw['value'] = value
+    else:
+        raw['valueAvailable'] = False
+        if type(value) is float: raw['representation'] = repr(value)
+    return raw
+
+
+def validate_diagnostic_uia(value, hwnd):
+    require(type(value) is dict and set(value) in ({'hwnd', 'nodes', 'truncated'},
+            {'hwnd', 'nodes', 'truncated', 'error', 'partialNode'}), 'Diagnostic UIA fields mismatch')
+    legacy.integer(hwnd)
+    require(type(value['hwnd']) is int and value['hwnd'] == hwnd and type(value['nodes']) is list and len(value['nodes']) <= 64
+            and type(value['truncated']) is bool, 'Diagnostic UIA bounds mismatch')
+    for node in value['nodes']:
+        legacy.shape(node, ('name', 'controlType', 'automationId', 'className', 'processId', 'enabled', 'offscreen'))
+        for field, raw in node.items():
+            normalized = uia_property(field, raw)
+            require(type(normalized) is type(raw), 'Diagnostic UIA node must retain canonical native field types')
+    require(len(encoded_json(value)) <= MAX_JSON, 'Diagnostic UIA JSON bound exceeded')
+
+
+@contextmanager
+def physical_queries(probe, evidence, name):
+    # No third-party/UIA initialization is allowed while this token is outstanding.
+    user = probe.user
+    receipt = dict(requestedContext=-4, initialContext=None, previousContext=None, effectiveContext=None,
+                   restoreReturnedContext=None, finalContext=None, effectiveMatchesRequested=False,
+                   restored=False, primaryFailure=None, restoreFailure=None)
+    previous = None; primary = None; cleanup = []
+    try:
+        receipt['initialContext'] = int(user.GetThreadDpiAwarenessContext() or 0)
+        require(receipt['initialContext'], 'Initial thread DPI context unavailable')
+        previous = user.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+        receipt['previousContext'] = int(previous or 0)
+        require(previous, 'PMv2 query coordinate context unavailable')
+        receipt['effectiveContext'] = int(user.GetThreadDpiAwarenessContext() or 0)
+        receipt['effectiveMatchesRequested'] = bool(user.AreDpiAwarenessContextsEqual(
+            receipt['effectiveContext'], ctypes.c_void_p(-4)))
+        require(receipt['effectiveMatchesRequested'], 'Physical PMv2 context mismatch')
+        yield receipt
+    except Exception as exc:
+        primary = exc
+        receipt['primaryFailure'] = error_record(exc)
+        raise
+    finally:
+        if previous:
+            try:
+                receipt['restoreReturnedContext'] = int(user.SetThreadDpiAwarenessContext(previous) or 0)
+                receipt['finalContext'] = int(user.GetThreadDpiAwarenessContext() or 0)
+                receipt['restored'] = bool(receipt['restoreReturnedContext'] and receipt['finalContext']
+                    and user.AreDpiAwarenessContextsEqual(receipt['finalContext'], previous)
+                    and user.AreDpiAwarenessContextsEqual(receipt['finalContext'], receipt['initialContext']))
+                require(receipt['restored'], 'Physical query DPI restore failed')
+            except Exception as exc:
+                receipt['restoreFailure'] = error_record(exc)
+                cleanup.append({'stage': name, **error_record(exc)})
+        try:
+            evidence.write(name, receipt)
+        except Exception as exc:
+            cleanup.append({'stage': name + '-receipt', **error_record(exc)})
+        if cleanup:
+            if primary is None: primary = ValueError('Physical query DPI cleanup failed')
+            primary.cleanup_failures = getattr(primary, 'cleanup_failures', []) + cleanup
+            if receipt['primaryFailure'] is None: raise primary
+
 
 
 class Budget:
@@ -82,7 +187,7 @@ class Evidence:
         require(re.fullmatch('[a-z0-9-]{1,64}', name), 'Invalid evidence name')
         unaliased(self.path)
         require(len(list(self.path.iterdir())) < MAX_FILES, 'Evidence file count exceeded')
-        raw = (json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode('utf-8')
+        raw = encoded_json(value)
         require(len(raw) <= MAX_JSON, 'Evidence JSON exceeds 256 KiB')
         with (self.path / (name + '.json')).open('xb') as stream:
             stream.write(raw)
@@ -170,7 +275,7 @@ def classify(observed, session, windows, *, complete, stable):
     trees = observed.get('uia')
     require(type(trees) is list and 1 <= len(trees) <= 2, 'Complete target UIA required')
     for tree in trees:
-        legacy.validate_uia(tree, tree['hwnd'])
+        validate_diagnostic_uia(tree, tree['hwnd'])
         require(not tree['truncated'] and 'error' not in tree and tree['nodes'], 'UIA unavailable/truncated')
     foreground_trees = [tree for tree in trees if tree['hwnd'] == foreground['hwnd']]
     require(len(foreground_trees) == 1 and all(node['processId'] == foreground['processId']
@@ -366,29 +471,46 @@ class Probe(legacy.WindowsProbe):
                     pointerMoved=False, taskbar=target)
 
     def strict_uia(self, hwnd):
-        # Same schema and bounds as legacy, but string overflow is an explicit error.
+        """Retain full bounded names and the exact failing property's diagnostic data."""
         result = {'hwnd': hwnd, 'nodes': [], 'truncated': False}
+        location = dict(stage='initialize', nodeIndex=0, property=None, field=None)
+        partial = {}; raw = None
         try:
             from pywinauto.uia_defines import IUIA
             api = IUIA(); root = api.iuia.ElementFromHandle(hwnd); walker = api.iuia.ControlViewWalker; pending = [root]
+            fields = [('name', 'CurrentName'), ('controlType', 'CurrentControlType'),
+                      ('automationId', 'CurrentAutomationId'), ('className', 'CurrentClassName'),
+                      ('processId', 'CurrentProcessId'), ('enabled', 'CurrentIsEnabled'), ('offscreen', 'CurrentIsOffscreen')]
             while pending:
                 if len(result['nodes']) >= 64:
                     result['truncated'] = True; break
-                element = pending.pop()
-                node = dict(name=element.CurrentName, controlType=int(element.CurrentControlType),
-                            automationId=element.CurrentAutomationId, className=element.CurrentClassName,
-                            processId=int(element.CurrentProcessId), enabled=bool(element.CurrentIsEnabled),
-                            offscreen=bool(element.CurrentIsOffscreen))
-                for key in ('name', 'automationId', 'className'): legacy.text(node[key])
-                result['nodes'].append(node)
+                element = pending.pop(); partial = {}
+                for field, property_name in fields:
+                    location = dict(stage='property', nodeIndex=len(result['nodes']), property=property_name, field=field)
+                    raw = {'valueAvailable': False, 'pythonType': None}
+                    value = getattr(element, property_name)
+                    raw = raw_property(value)
+                    partial[field] = uia_property(field, value)
+                location = dict(stage='node-json-bound', nodeIndex=len(result['nodes']), property=None, field=None)
+                raw = None
+                # Reserve space for a full partial node, offending-value preview, and error.
+                require(len(encoded_json({**result, 'nodes': result['nodes'] + [partial]})) <= MAX_JSON - 65536,
+                        'UIA aggregate JSON capacity exhausted; node not appended')
+                result['nodes'].append(partial); partial = {}; raw = None
+                location = dict(stage='first-child', nodeIndex=len(result['nodes']) - 1, property=None, field=None)
                 child = walker.GetFirstChildElement(element); siblings = []
                 while child and len(siblings) + len(pending) + len(result['nodes']) < 64:
-                    siblings.append(child); child = walker.GetNextSiblingElement(child)
+                    siblings.append(child)
+                    location['stage'] = 'next-sibling'
+                    child = walker.GetNextSiblingElement(child)
                 if child: result['truncated'] = True
                 pending.extend(reversed(siblings))
         except Exception as exc:
-            result['error'] = {'type': type(exc).__name__, 'hresult': f'0x{getattr(exc,"hresult",0) & 0xffffffff:08x}'}
-        legacy.validate_uia(result, hwnd)
+            hresult = getattr(exc, 'hresult', None)
+            result['error'] = {**error_record(exc), **location, 'raw': raw,
+                               'hresult': f'0x{hresult & 0xffffffff:08x}' if type(hresult) is int else None}
+            result['partialNode'] = partial
+        # The caller persists this raw/partial record before structural validation.
         return result
 
 
@@ -535,7 +657,7 @@ class OwnedObserver:
 
 def capture(probe, evidence, budget, controller):
     handles = []
-    previous = None
+    primary = None
     try:
         evidence.write('30-observer-start', {**flags(), 'deadlineMonotonic': budget.deadline})
         identity = probe.identity()
@@ -549,29 +671,26 @@ def capture(probe, evidence, budget, controller):
         context = validate_context(os.environ, event, source, identity, os.name)
         require(source['files'] == controller['sourceFiles'] and digest == controller['eventSha256'], 'Observer source/event changed')
         evidence.write('32-observer-context', {**context, 'source': source, 'eventSha256': digest})
-        previous = probe.user.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
-        require(previous, 'PMv2 query coordinate context unavailable')
-        require(probe.user.AreDpiAwarenessContextsEqual(probe.user.GetThreadDpiAwarenessContext(), ctypes.c_void_p(-4)),
-                'Physical PMv2 context mismatch')
-        census, errors, enumeration_ok = probe.census()
-        evidence.write('33-window-census', {**census, 'errors': errors, 'enumerationSucceeded': enumeration_ok})
-        legacy.validate_windows(census)
-        census_complete = enumeration_ok and not errors and not census['truncated']
-        # Preserve targeted blocker evidence even if the wider census is incomplete.
-        # The final classifier still rejects that incomplete observation.
-        taskbar = probe.taskbar()
-        evidence.write('34-physical-hit', taskbar)
-        target_hwnds = list(dict.fromkeys([census['foregroundHwnd'], taskbar['actualPointHwnd'],
-                                         taskbar['actualRootHwnd'], taskbar['taskbarHwnd']]))
-        targets = [probe.target(hwnd) for hwnd in target_hwnds]
-        evidence.write('35-target-windows', {'targets': targets})
-        census_foreground = next(row for row in census['windows'] if row['hwnd'] == census['foregroundHwnd'])
-        foreground_target = next(row for row in targets if row['hwnd'] == census['foregroundHwnd'])
-        # Classification uses this target snapshot, whose full metadata is rechecked
-        # below. Project only the exact legacy schema; retain and reject census drift.
-        foreground = {key: foreground_target[key] for key in
-                      ('hwnd', 'processId', 'threadId', 'title', 'className', 'visible', 'enabled', 'rectangle')}
-        require(foreground == census_foreground, 'Census-to-target foreground metadata raced')
+        with physical_queries(probe, evidence, '36-native-dpi'):
+            census, errors, enumeration_ok = probe.census()
+            evidence.write('33-window-census', {**census, 'errors': errors, 'enumerationSucceeded': enumeration_ok})
+            legacy.validate_windows(census)
+            census_complete = enumeration_ok and not errors and not census['truncated']
+            # Preserve targeted blocker evidence even if the wider census is incomplete.
+            # The final classifier still rejects that incomplete observation.
+            taskbar = probe.taskbar()
+            evidence.write('34-physical-hit', taskbar)
+            target_hwnds = list(dict.fromkeys([census['foregroundHwnd'], taskbar['actualPointHwnd'],
+                                             taskbar['actualRootHwnd'], taskbar['taskbarHwnd']]))
+            targets = [probe.target(hwnd) for hwnd in target_hwnds]
+            evidence.write('35-target-windows', {'targets': targets})
+            census_foreground = next(row for row in census['windows'] if row['hwnd'] == census['foregroundHwnd'])
+            foreground_target = next(row for row in targets if row['hwnd'] == census['foregroundHwnd'])
+            # Classification uses this target snapshot, whose full metadata is rechecked
+            # below. Project only the exact legacy schema; retain and reject census drift.
+            foreground = {key: foreground_target[key] for key in
+                          ('hwnd', 'processId', 'threadId', 'title', 'className', 'visible', 'enabled', 'rectangle')}
+            require(foreground == census_foreground, 'Census-to-target foreground metadata raced')
         # Target owners first; no arbitrary slice can discard a positive foreground.
         pids = list(dict.fromkeys(row['processId'] for row in targets))
         require(len(pids) <= 8, 'Target process bound exceeded')
@@ -592,6 +711,18 @@ def capture(probe, evidence, budget, controller):
         signed = signatures([p['imagePath'] for p in processes], budget)
         for process, signature in zip(processes, signed): process['signature'] = signature
         evidence.write('44-processes-complete', {'processes': processes})
+        with physical_queries(probe, evidence, '62-screen-dpi'):
+            evidence.write('60-screen-before', {'stage': 'before-capture'})
+            from PIL import ImageGrab
+            import io
+            screen = ImageGrab.grab(all_screens=False)
+            require(0 < screen.width <= 8192 and 0 < screen.height <= 8192 and screen.width * screen.height <= 20_000_000,
+                    'Screenshot pixel bound exceeded')
+            buffer = io.BytesIO(); screen.save(buffer, format='PNG'); data = buffer.getvalue()
+            require(8 <= len(data) <= 8 * 1024 * 1024, 'Screenshot byte bound exceeded')
+            with (evidence.path / 'foreground-desktop.png').open('xb') as stream: stream.write(data)
+            evidence.write('61-screen-after', {'width': screen.width, 'height': screen.height,
+                           'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
         trees = []
         for index, hwnd in enumerate(dict.fromkeys([census['foregroundHwnd'], taskbar['actualRootHwnd']])):
             budget.remaining()
@@ -599,32 +730,27 @@ def capture(probe, evidence, budget, controller):
             tree = probe.strict_uia(hwnd)
             trees.append(tree)
             evidence.write(f'51-uia-{index}-after', tree)
-            require(not tree['truncated'] and 'error' not in tree and tree['nodes'], 'UIA unavailable/truncated')
+            if 'error' in tree:
+                raise diagnostic_error('UIA observation failed: ' + tree['error'].get('message', 'unavailable property'),
+                                       uiaFailure=tree['error'])
+            validate_diagnostic_uia(tree, hwnd)
+            require(not tree['truncated'] and tree['nodes'], 'UIA unavailable/truncated')
             target = next(row for row in targets if row['hwnd'] == hwnd)
             require(all(node['processId'] == target['processId'] for node in tree['nodes']), 'UIA target ownership mismatch')
-        evidence.write('60-screen-before', {'stage': 'before-capture'})
-        from PIL import ImageGrab
-        import io
-        screen = ImageGrab.grab(all_screens=False)
-        require(0 < screen.width <= 8192 and 0 < screen.height <= 8192 and screen.width * screen.height <= 20_000_000,
-                'Screenshot pixel bound exceeded')
-        buffer = io.BytesIO(); screen.save(buffer, format='PNG'); data = buffer.getvalue()
-        require(8 <= len(data) <= 8 * 1024 * 1024, 'Screenshot byte bound exceeded')
-        with (evidence.path / 'foreground-desktop.png').open('xb') as stream: stream.write(data)
-        evidence.write('61-screen-after', {'width': screen.width, 'height': screen.height,
-                       'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
         observed = {'foreground': foreground,
                     'processes': processes, 'uia': trees}
         evidence.write('70-raw-observation', {**flags(), **observed})
-        require(int(probe.user.GetForegroundWindow() or 0) == census['foregroundHwnd'], 'Foreground changed')
-        refreshed_targets = [probe.target(hwnd) for hwnd in target_hwnds]
-        refreshed_processes = [probe.process_identity(handle, pid) for handle, pid in handles]
-        evidence.write('71-identity-recheck', {'targets': refreshed_targets, 'processes': refreshed_processes,
-                                             'physicalHit': probe.taskbar()})
-        require(refreshed_targets == targets, 'Target HWND/PID/TID/metadata raced')
-        for before, after in zip(processes, refreshed_processes):
-            require(all(before[key] == after[key] for key in after), 'Held process creation/session/image/native raced')
-        require(probe.taskbar() == taskbar, 'Taskbar point identity raced')
+        with physical_queries(probe, evidence, '72-recheck-dpi'):
+            require(int(probe.user.GetForegroundWindow() or 0) == census['foregroundHwnd'], 'Foreground changed')
+            refreshed_targets = [probe.target(hwnd) for hwnd in target_hwnds]
+            refreshed_processes = [probe.process_identity(handle, pid) for handle, pid in handles]
+            refreshed_hit = probe.taskbar()
+            evidence.write('71-identity-recheck', {'targets': refreshed_targets, 'processes': refreshed_processes,
+                                                 'physicalHit': refreshed_hit})
+            require(refreshed_targets == targets, 'Target HWND/PID/TID/metadata raced')
+            for before, after in zip(processes, refreshed_processes):
+                require(all(before[key] == after[key] for key in after), 'Held process creation/session/image/native raced')
+            require(refreshed_hit == taskbar, 'Taskbar point identity raced')
         same_host(identity, probe.identity())
         budget.remaining()
         result = classify(observed, identity['sessionId'], identity['windowsDirectory'], complete=census_complete, stable=True)
@@ -633,16 +759,29 @@ def capture(probe, evidence, budget, controller):
         evidence.write('81-source-recheck', final_source)
         require(final_source == source, 'Source changed during observation')
         return result
+    except Exception as exc:
+        primary = exc
+        raise
     finally:
-        cleanup = []
+        cleanup = []; closed_count = 0
         for handle, pid in handles:
-            if not probe.kernel.CloseHandle(handle): cleanup.append('process-handle:' + str(pid))
-        if previous:
-            restored = probe.user.SetThreadDpiAwarenessContext(previous)
-            if not (restored and probe.user.AreDpiAwarenessContextsEqual(probe.user.GetThreadDpiAwarenessContext(), previous)):
-                cleanup.append('DPI-context')
-        evidence.write('85-observer-cleanup', {'errors': cleanup, 'queryHandlesClosed': len(handles), 'pointerMoved': False})
-        require(not cleanup, 'Observer cleanup failed')
+            try:
+                require(probe.kernel.CloseHandle(handle), 'Target query handle close failed')
+                closed_count += 1
+            except Exception as exc:
+                cleanup.append({'stage': 'process-handle', 'processId': pid, **error_record(exc)})
+        try:
+            evidence.write('85-observer-cleanup', {'errors': cleanup, 'queryHandlesClosed': closed_count,
+                'pointerMoved': False, 'primaryFailure': error_record(primary) if primary else None})
+        except Exception as exc:
+            cleanup.append({'stage': 'cleanup-receipt', **error_record(exc)})
+        if cleanup:
+            if primary is not None:
+                primary.cleanup_failures = getattr(primary, 'cleanup_failures', []) + cleanup
+            else:
+                failure = ValueError('Observer cleanup failed')
+                failure.cleanup_failures = cleanup
+                raise failure
 
 
 def observer(args):

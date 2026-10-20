@@ -19,6 +19,29 @@ else:
     m = None
 
 
+
+class FakeDpiAPI:
+    def __init__(self, fail_restore=False):
+        self.default=1;self.context=None;self.fail_restore=fail_restore;self.third_party_during_override=False
+    def GetThreadDpiAwarenessContext(self):return self.default if self.context is None else self.context
+    def SetThreadDpiAwarenessContext(self,value):
+        value=getattr(value,'value',value)
+        if value>=2**63:value-=2**64
+        previous=100+self.default if self.context is None else self.context
+        if value==-4:self.context=-4;return previous
+        if self.fail_restore or value!=100+self.default:return 0
+        self.context=None;return previous
+    def AreDpiAwarenessContextsEqual(self,left,right):
+        def effective(value):
+            value=getattr(value,'value',value)
+            if value>=2**63:value-=2**64
+            return value-100 if value>=100 else value
+        return effective(left)==effective(right)
+    def GetForegroundWindow(self):return 12
+    def initialize_third_party(self):
+        self.third_party_during_override=self.third_party_during_override or self.context is not None
+        self.default=2
+
 class ControlContracts(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(m, 'Dedicated read-only control is not implemented')
@@ -278,7 +301,9 @@ class ControlContracts(unittest.TestCase):
                     sessionId=1,processMachine=0,nativeMachine=0xAA64,imagePath=str(image),exitCode=259),
                 strict_uia=lambda hwnd: (_ for _ in ()).throw(TimeoutError('simulated COM hang boundary')))
             real_validate=m.validate_context
+            screen=SimpleNamespace(width=100,height=100,save=lambda stream,format:stream.write(b'fake-bounded-screen'))
             with patch.dict(os.environ,{**self.env,'GITHUB_EVENT_PATH':str(event)}), \
+                 patch.dict('sys.modules',{'PIL':SimpleNamespace(ImageGrab=SimpleNamespace(grab=lambda all_screens:screen))}), \
                  patch.object(m,'source_receipt',return_value=context), \
                  patch.object(m,'signatures',return_value=[{'status':'Valid'}]), \
                  patch.object(m,'validate_context',side_effect=lambda env,event,checkout,native,platform: real_validate(env,event,checkout,native,'nt')):
@@ -292,7 +317,7 @@ class ControlContracts(unittest.TestCase):
             self.assertEqual(raw['createdFileTime'],133999999999999999)
 
 
-    def complete_capture_fixture(self, *, privacy, target_changes=None):
+    def complete_capture_fixture(self, *, privacy, target_changes=None, uia_error=False, dpi_api=None, close_failure=False, hit_drifts=False):
         """Run real observer/capture/classifier using local fake native boundaries."""
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp); output=m.Evidence.create(folder/'capture',folder)
@@ -316,16 +341,29 @@ class ControlContracts(unittest.TestCase):
             image={key:process.pop(key) for key in ('imageBytes','imageSha256')}; image['peMachine']=0xAA64
             process['exitCode']=259
             taskbar=dict(actualPointHwnd=12,actualRootHwnd=12,taskbarHwnd=12)
-            closed=[]
+            closed=[]; hit_calls=[]
+            def hit_query():
+                hit_calls.append(1); value=copy.deepcopy(taskbar)
+                if hit_drifts and len(hit_calls)==2: value['actualRootHwnd']=99
+                return value
+            def uia_query(hwnd):
+                if dpi_api: dpi_api.initialize_third_party()
+                tree=copy.deepcopy(sample['uia'][0])
+                if uia_error:
+                    tree['error']={'type':'ValueError','message':'original UIA name failure','hresult':None,
+                        'stage':'property','nodeIndex':1,'property':'CurrentName','field':'name',
+                        'raw':{'pythonType':'NoneType','value':None,'valueAvailable':True}}
+                return tree
             probe=SimpleNamespace(identity=lambda:copy.deepcopy(host),
                 user=SimpleNamespace(SetThreadDpiAwarenessContext=lambda context:1,
                     GetThreadDpiAwarenessContext=lambda:1,AreDpiAwarenessContextsEqual=lambda *args:True,
                     GetForegroundWindow=lambda:12),
-                kernel=SimpleNamespace(OpenProcess=lambda *args:77,CloseHandle=lambda handle:closed.append(handle) or True),
+                kernel=SimpleNamespace(OpenProcess=lambda *args:77,CloseHandle=lambda handle:closed.append(handle) or not close_failure),
                 census=lambda:({'foregroundHwnd':12,'windows':[copy.deepcopy(census_window)],'truncated':False},[],True),
-                taskbar=lambda:copy.deepcopy(taskbar),target=lambda hwnd:copy.deepcopy(target),
+                taskbar=hit_query,target=lambda hwnd:copy.deepcopy(target),
                 process_identity=lambda handle,pid:copy.deepcopy(process),
-                strict_uia=lambda hwnd:copy.deepcopy(sample['uia'][0]))
+                strict_uia=uia_query)
+            if dpi_api: probe.user=dpi_api
             screen=SimpleNamespace(width=100,height=100,
                 save=lambda stream,format:stream.write(b'\x89PNG\r\n\x1a\nlocal-fake-screen'))
             pil=SimpleNamespace(ImageGrab=SimpleNamespace(grab=lambda all_screens:screen))
@@ -339,6 +377,8 @@ class ControlContracts(unittest.TestCase):
                  patch.object(m,'validate_context',side_effect=lambda env,event,checkout,native,platform: real_validate(env,event,checkout,native,'nt')):
                 exit_code=m.observer(SimpleNamespace(deadline=m.time.monotonic()+120,output=output.path))
             records={path.stem:json.loads(path.read_text()) for path in output.path.glob('*.json')}
+            records['_screenExists']=(output.path/'foreground-desktop.png').is_file()
+            records['_hitCalls']=len(hit_calls)
             return exit_code,records,closed,census_window
 
     def test_capture_census_to_target_metadata_race_fails_with_raw_evidence(self):
@@ -458,6 +498,136 @@ class ControlContracts(unittest.TestCase):
             failure=json.loads((output.path/'89-observer-failure.json').read_text())
             self.assertTrue(failure['forced']); self.assertTrue(failure['timedOut'])
             self.assertFalse(failure['readiness']); self.assertEqual(failure['actions'],[])
+
+
+    def collect_fake_uia(self, nodes):
+        properties={'name':'CurrentName','controlType':'CurrentControlType','automationId':'CurrentAutomationId',
+                    'className':'CurrentClassName','processId':'CurrentProcessId','enabled':'CurrentIsEnabled','offscreen':'CurrentIsOffscreen'}
+        elements=[SimpleNamespace(**{properties[key]:value for key,value in node.items()}) for node in nodes]
+        def sibling(element):
+            index=next(i for i,item in enumerate(elements) if item is element)
+            return elements[index+1] if index+1<len(elements) else None
+        walker=SimpleNamespace(GetFirstChildElement=lambda element:elements[1] if element is elements[0] and len(elements)>1 else None,
+                               GetNextSiblingElement=sibling)
+        api=SimpleNamespace(iuia=SimpleNamespace(ElementFromHandle=lambda hwnd:elements[0],ControlViewWalker=walker))
+        with patch.dict('sys.modules',{'pywinauto.uia_defines':SimpleNamespace(IUIA=lambda:api)}):
+            return m.Probe.strict_uia(object.__new__(m.Probe),12)
+
+    def test_diagnostic_uia_full_long_multiline_name_preserves_exact_classifier(self):
+        sample=self.privacy_fixture()
+        incidental=copy.deepcopy(sample['uia'][0]['nodes'][0])
+        incidental['name']='설명'*1000+'\r\n\t'+'x'*45
+        self.assertEqual(len(incidental['name']),2048)
+        sample['uia'][0]=self.collect_fake_uia(sample['uia'][0]['nodes']+[incidental])
+        self.assertNotIn('error',sample['uia'][0])
+        self.assertEqual(sample['uia'][0]['nodes'][-1]['name'],incidental['name'])
+        self.assertEqual(m.classify(sample,1,r'C:\Windows',complete=True,stable=True)['status'],'privacy-match')
+        sample['uia'][0]['nodes'][0]['name']+='\n'
+        with self.assertRaises(ValueError):m.classify(sample,1,r'C:\Windows',complete=True,stable=True)
+
+    def test_diagnostic_uia_invalid_property_retains_raw_offender(self):
+        for field,value in [('name','x'*2049),('name',None),('name',17),('name','bad\x00value'),
+                            ('name','bad\x7fvalue'),('automationId','a'*257),('className','bad\nclass')]:
+            with self.subTest(field=field,value_type=type(value).__name__):
+                node=copy.deepcopy(self.privacy_fixture()['uia'][0]['nodes'][0]);node[field]=value
+                tree=self.collect_fake_uia([node])
+                self.assertIn('error',tree)
+                error=tree['error'];self.assertIn('field',error)
+                self.assertEqual(error['field'],field);self.assertEqual(error['nodeIndex'],0)
+                self.assertTrue(error['message']);self.assertIn('hresult',error)
+                self.assertEqual(error['raw']['pythonType'],type(value).__name__)
+                self.assertEqual(error['raw']['value'],value[:2048] if isinstance(value,str) else value)
+                if isinstance(value,str):self.assertEqual(error['raw']['length'],len(value))
+                self.assertLessEqual(len(json.dumps(tree,ensure_ascii=False).encode()),256*1024)
+
+    def test_diagnostic_uia_node_and_json_truncation_cannot_classify(self):
+        node=copy.deepcopy(self.privacy_fixture()['uia'][0]['nodes'][0])
+        tree=self.collect_fake_uia([copy.deepcopy(node) for _ in range(65)])
+        self.assertTrue(tree['truncated']);self.assertLessEqual(len(tree['nodes']),64)
+        node['name']='😀'*2048
+        tree=self.collect_fake_uia([copy.deepcopy(node) for _ in range(64)])
+        self.assertIn('error',tree)
+        self.assertLessEqual(len(json.dumps(tree,ensure_ascii=False,indent=2).encode()),256*1024)
+
+
+    def test_uia_worst_case_offender_and_partial_node_stay_inside_json_cap(self):
+        node=copy.deepcopy(self.privacy_fixture()['uia'][0]['nodes'][0])
+        node.update(name='😀'*2048,automationId='😀'*256,className='😀'*256)
+        offender=copy.deepcopy(node);offender['className']='😀'*2049
+        tree=self.collect_fake_uia([copy.deepcopy(node) for _ in range(7)]+[offender])
+        self.assertIn('error',tree)
+        self.assertLessEqual(len(m.encoded_json(tree)),m.MAX_JSON)
+        self.assertIn(tree['error']['stage'],('property','node-json-bound'))
+        self.assertIn('partialNode',tree)
+
+    def test_uia_getter_exception_retains_hresult_position_and_partial_node(self):
+        class Element:
+            CurrentName='Name already read'
+            CurrentControlType=50033
+            @property
+            def CurrentAutomationId(self):
+                exc=OSError('COM property denied');exc.hresult=-2147467259;raise exc
+        api=SimpleNamespace(iuia=SimpleNamespace(ElementFromHandle=lambda hwnd:Element(),ControlViewWalker=object()))
+        with patch.dict('sys.modules',{'pywinauto.uia_defines':SimpleNamespace(IUIA=lambda:api)}):
+            tree=m.Probe.strict_uia(object.__new__(m.Probe),12)
+        self.assertEqual(tree['error']['property'],'CurrentAutomationId')
+        self.assertEqual(tree['error']['nodeIndex'],0)
+        self.assertEqual(tree['error']['type'],'OSError')
+        self.assertEqual(tree['error']['message'],'COM property denied')
+        self.assertEqual(tree['error']['hresult'],'0x80004005')
+        self.assertFalse(tree['error']['raw']['valueAvailable'])
+        self.assertEqual(tree['partialNode'],{'name':'Name already read','controlType':50033})
+
+    def test_capture_png_and_primary_uia_failure_survive_cleanup_failure(self):
+        exit_code,records,closed,_=self.complete_capture_fixture(privacy=True,uia_error=True,close_failure=True)
+        self.assertEqual(exit_code,1);self.assertTrue(records['_screenExists'])
+        self.assertIn('61-screen-after',records)
+        failure=records['89-observer-failure']['failure']
+        self.assertIn('original UIA name failure',failure['message'])
+        self.assertEqual(failure['details']['uiaFailure']['property'],'CurrentName')
+        self.assertTrue(failure['cleanupFailures'])
+        self.assertEqual(records['85-observer-cleanup']['queryHandlesClosed'],0)
+        self.assertEqual(records['85-observer-cleanup']['primaryFailure']['message'],failure['message'])
+        self.assertNotIn('80-classification',records)
+        self.assertEqual(records['89-observer-failure']['actions'],[])
+
+    def test_capture_restores_each_physical_phase_before_third_party_dpi_init(self):
+        dpi=FakeDpiAPI()
+        exit_code,records,closed,_=self.complete_capture_fixture(privacy=True,dpi_api=dpi)
+        self.assertEqual(exit_code,0)
+        self.assertFalse(dpi.third_party_during_override)
+        transactions=[records[name] for name in sorted(records) if name.endswith('-dpi')]
+        self.assertEqual(len(transactions),3)
+        self.assertTrue(all(record['restored'] for record in transactions))
+        self.assertEqual([record['initialContext'] for record in transactions],[1,1,2])
+
+
+    def test_capture_compares_retained_hit_without_reread_to_green(self):
+        code,records,closed,_=self.complete_capture_fixture(privacy=True,hit_drifts=True)
+        self.assertEqual(code,1)
+        self.assertEqual(records['71-identity-recheck']['physicalHit']['actualRootHwnd'],99)
+        self.assertEqual(records['_hitCalls'],2)
+        self.assertNotIn('80-classification',records)
+
+
+    def test_capture_restore_failure_alone_remains_nonzero(self):
+        code,records,closed,_=self.complete_capture_fixture(privacy=True,dpi_api=FakeDpiAPI(fail_restore=True))
+        self.assertEqual(code,1)
+        self.assertFalse(records['36-native-dpi']['restored'])
+        self.assertTrue(records['89-observer-failure']['failure']['cleanupFailures'])
+        self.assertNotIn('80-classification',records)
+        self.assertEqual(records['89-observer-failure']['actions'],[])
+
+    def test_physical_transaction_preserves_primary_and_failed_restore(self):
+        self.assertTrue(hasattr(m,'physical_queries'),'Scoped PMv2 transaction is missing')
+        with tempfile.TemporaryDirectory() as temp:
+            output=m.Evidence.create(Path(temp)/'capture',Path(temp));dpi=FakeDpiAPI(fail_restore=True)
+            with self.assertRaisesRegex(ValueError,'primary query failure') as caught:
+                with m.physical_queries(SimpleNamespace(user=dpi),output,'test-dpi'):
+                    raise ValueError('primary query failure')
+            record=json.loads((output.path/'test-dpi.json').read_text())
+            self.assertFalse(record['restored']);self.assertIsNotNone(record['restoreFailure'])
+            self.assertTrue(m.error_record(caught.exception)['cleanupFailures'])
 
     def test_no_mutating_product_or_desktop_calls(self):
         source=SCRIPT.read_text()
