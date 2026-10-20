@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 import json
+import os
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DATA = ROOT / 'suite/diagnostics/native-merged-package'
@@ -103,6 +104,27 @@ class MergedPackageReplayTests(unittest.TestCase):
         self.assertNotIn('contents: write',text)
         self.assertNotIn('build-native-engine.ps1 -Phase',text)
         self.assertNotIn('cancel-in-progress: true',text)
+        self.assertLess(controller.index("(Join-Path $evidence 'merged-control.sh')"),controller.index("(Join-Path $evidence 'authentic-merged-make')"))
+
+    def test_generated_make_environment_overrides_shadow_mkdir(self):
+        module=self.renderer()
+        with tempfile.TemporaryDirectory(prefix='merged-path-') as temporary:
+            root=pathlib.Path(temporary);module.prepare(DATA,root)
+            script=root/'generated.sh';quote=lambda value:"'"+str(value).replace("'","''")+"'"
+            body="$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile("+quote(SCRIPT)+",[ref]$tokens,[ref]$errors);$commands=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Write-BashScript'},$true));if($commands.Count -ne 1){throw 'Expected one genuine control script writer'};$script="+quote(script)+";$converted=@{evidence="+quote(root)+"};& ([ScriptBlock]::Create($commands[0].Extent.Text))"
+            self.powershell(body)
+            # Exercise the actual generated make environment and invocation.
+            # Cygwin-specific observer commands run in the Windows control;
+            # the local replay adapter keeps the original make protocol only.
+            core=[line for line in script.read_text().splitlines()
+                  if line.startswith(('set -','export PATH=','cd ','/usr/bin/make ','/usr/bin/stat '))]
+            shadow=root/'shadow';shadow.mkdir();fake=shadow/'mkdir'
+            fake.write_text('#!/bin/sh\nexit 0\n');fake.chmod(0o755)
+            environment=dict(os.environ,PATH=str(shadow)+os.pathsep+os.environ.get('PATH',''))
+            process=subprocess.run(['/bin/bash','--noprofile','--norc','-c','\n'.join(core)],cwd=root,env=environment,capture_output=True,text=True)
+            self.assertEqual(0,process.returncode,process.stdout+process.stderr)
+            self.assertEqual(b'invalid - merged lib\n',(root/'instdir/program/avmedialo.dll').read_bytes())
+            self.assertIn('export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',script.read_text())
 
 
 if __name__ == '__main__':

@@ -90,9 +90,45 @@ function Invoke-NativeMergedPackageControl([string]$WorkDirectory,[string]$Outpu
         $receipt.stage='authentic-gnu-make-replay'
         Invoke-LoggedCommand $pythonTool @((Join-Path $data 'render_control.py'),'--data',$data,'--output',$evidence,'--unix-data',$converted.data,'--unix-output',$converted.evidence) $repo (Join-Path $evidence 'render-authentic-control') -TimeoutMinutes 1|Out-Null
         $script=Join-Path $commands 'merged-control.sh'
-        Write-BashScript $script @('set -euo pipefail',"cd $(Quote-Bash $converted.evidence)",'/usr/bin/make --version',"/usr/bin/make --no-builtin-rules --no-builtin-variables --no-print-directory -f $(Quote-Bash ($converted.evidence+'/control.mk'))","/usr/bin/stat -c 'type=%F bytes=%s mode=%a' instdir/program/avmedialo.dll")
-        Invoke-CygwinScript $bash $cygpath $script $work (Join-Path $evidence 'authentic-merged-make') -NativeLinks|Out-Null
+        Write-BashScript $script @('set -euo pipefail',
+            'observe_tools() {',
+            '  for tool in mkdir sh make; do',
+            '    printf "phase=%s tool=%s\n" "$1" "$tool"',
+            '    type -a "$tool" || true',
+            '    resolved=$(command -v "$tool" || true)',
+            '    printf "command-v=%s\n" "$resolved"',
+            '    if [ "$1" = selected ]; then',
+            '      test -n "$resolved"',
+            '      /usr/bin/readlink -f -- "$resolved"',
+            '      /usr/bin/sha256sum -- "$resolved"',
+            '    elif [ -n "$resolved" ]; then',
+            '      /usr/bin/readlink -f -- "$resolved" || printf "inherited-readlink-unavailable\n"',
+            '      /usr/bin/sha256sum -- "$resolved" || printf "inherited-hash-unavailable\n"',
+            '    fi',
+            '  done',
+            '  if [ -x /usr/bin/which ]; then',
+            '    if [ "$1" = selected ]; then /usr/bin/which -a mkdir sh make; else /usr/bin/which -a mkdir sh make || true; fi',
+            '  else printf "which=not-installed; type and command-v retained\n"; fi',
+            '}',
+            'observe_tools inherited',
+            'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',
+            'observe_tools selected',
+            "cd $(Quote-Bash $converted.evidence)",
+            'native_root=$(/usr/bin/cygpath -w /)',
+            'native_evidence=$(/usr/bin/cygpath -w "$PWD")',
+            'printf "cygwin-root-native=%s\nevidence-native=%s\n" "$native_root" "$native_evidence"',
+            '/usr/bin/cygpath -u "$native_evidence"',
+            '/usr/bin/mkdir -p -- "$PWD/cygwin-native-path-witness"',
+            'printf "cygwin-native-path-witness\n" > "$PWD/cygwin-native-path-witness/probe.txt"',
+            '/usr/bin/cygpath -w "$PWD/cygwin-native-path-witness/probe.txt"',
+            '/usr/bin/make --version',
+            "/usr/bin/make --no-builtin-rules --no-builtin-variables --no-print-directory -f $(Quote-Bash ($converted.evidence+'/control.mk'))",
+            "/usr/bin/stat -c 'type=%F bytes=%s mode=%a' instdir/program/avmedialo.dll")
         Copy-Item -LiteralPath $script -Destination (Join-Path $evidence 'merged-control.sh') -ErrorAction Stop
+        Invoke-CygwinScript $bash $cygpath $script $work (Join-Path $evidence 'authentic-merged-make') -NativeLinks|Out-Null
+        $receipt.cygwinNativePathWitness=Get-ControlFile (Join-Path $evidence 'cygwin-native-path-witness/probe.txt') -MaximumBytes 64 -RetainHex
+        $pathWitnessExpected=[Convert]::ToHexString([Text.Encoding]::ASCII.GetBytes("cygwin-native-path-witness`n")).ToLowerInvariant()
+        if($receipt.cygwinNativePathWitness.hex -cne $pathWitnessExpected){throw 'Native .NET view differs from the Cygwin-created path witness.'}
         $marker=Join-Path $evidence 'instdir/program/avmedialo.dll'
         $receipt.marker=Get-ControlFile $marker -MaximumBytes 64 -RetainHex
         $expected=[Text.Encoding]::ASCII.GetBytes("invalid - merged lib`n")
