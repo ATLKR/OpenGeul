@@ -191,10 +191,47 @@ class NativeEngineBuildTests(unittest.TestCase):
         pin={'url':'https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz',
              'version':'26.8.1.1','size':archive.stat().st_size,'sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),
              'coreCommit':'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'}
+        fixture_size,fixture_hash=pin['size'],pin['sha256']
+        if original=='680(Build:1)':
+            pin.update(size=302435508,sha256='296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785')
         pin_path=self.root/'source-pin.json';pin_path.write_text(json.dumps(pin))
         evidence=self.root/'evidence';evidence.mkdir()
-        call=f"Set-RuntimeBuildIdentity {quote(runtime)} {quote(archive)} (Get-Content {quote(pin_path)} -Raw|ConvertFrom-Json) {quote('a'*40)} {quote(evidence)}"
+        self.refresh_identity_stage(runtime,evidence)
+        config=self.root/'identity-config.json';config.write_text(json.dumps(dict(LIBO_VERSION_MAJOR='26',LIBO_VERSION_MINOR='8',LIBO_VERSION_MICRO='1',LIBO_VERSION_PATCH='1',LIBO_VERSION_SUFFIX='')))
+        call=f"Set-RuntimeBuildIdentity {quote(runtime)} {quote(archive)} (Get-Content {quote(pin_path)} -Raw|ConvertFrom-Json) {quote('a'*40)} {quote(evidence)} (Get-Content {quote(config)} -Raw|ConvertFrom-Json -AsHashtable) (Get-Content {quote(self.root/'stage-summary.json')} -Raw|ConvertFrom-Json)"
+        if original=='680(Build:1)':
+            # Keep unit tests portable: only substitute the tiny archive fixture's
+            # descriptor at the existing authentication boundary. The real hash
+            # verifier still checks fixture bytes and all stage descriptors.
+            call=("$verifier=${function:Confirm-FileIdentity}; function Confirm-FileIdentity($Path,$Size,$Algorithm,$Hash) { "
+                  +f"if($Path -ceq {quote(archive)}) {{ if($Size -ne 302435508 -or $Hash -cne {quote(pin['sha256'])}) {{throw 'Source pin drift'}}; "
+                  +f"& $verifier $Path {fixture_size} $Algorithm {quote(fixture_hash)} "
+                  +"} else { & $verifier $Path $Size $Algorithm $Hash } }; "+call)
         return runtime,archive,pin_path,evidence,pin,call
+
+    def refresh_identity_stage(self,runtime,evidence):
+        import hashlib
+        rows=[]
+        for path in (runtime/'program').iterdir():
+            raw=path.read_bytes()
+            rows.append(dict(path='program/'+path.name,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),
+                             archivePath='main.zip',archiveMember='wrapper/program/'+path.name))
+        stage=evidence/'installed-runtime-stage.json'
+        stage.write_text(json.dumps(dict(schemaVersion=1,kind='source-built-installed-runtime-stage',passed=True,
+            runtimeRoot=str(runtime),configuredProduct='LibreOfficeDev',configuredVersion='26.8.1.1',
+            archives=[dict(kind='main',path='main.zip',wrapperRoot='wrapper')],files=rows)))
+        (self.root/'stage-summary.json').write_text(json.dumps(dict(passed=True,runtimeRoot=str(runtime),
+            receipt=dict(path=str(stage),bytes=stage.stat().st_size,sha256=hashlib.sha256(stage.read_bytes()).hexdigest()))))
+
+    def test_accepts_authentic_reconstructed_installed_fallback(self):
+        runtime,_,_,_,_,call=self.build_identity_fixture('680(Build:1)')
+        # Authentic reconstructed setup profile, not recovered historical bytes.
+        setup=runtime/'program/setup.ini'
+        setup.write_bytes(b'[Bootstrap]\r\nbuildid=680(Build:1)\r\n')
+        self.assertEqual('9d13ae895496c19d7702b77998d1c0f4ba0ab8e757c3a73671e87433eb227703',__import__('hashlib').sha256(setup.read_bytes()).hexdigest())
+        self.refresh_identity_stage(runtime,self.root/'evidence')
+        data=json.loads(self.ps(call+'|ConvertTo-Json -Depth 12 -Compress'))
+        self.assertEqual('installed-no-git-fallback',data['identityMode'])
 
     def test_runtime_identity_corrects_known_parent_git_or_empty_id_using_authenticated_source_pin(self):
         for original in ('a'*40,'','bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'):
@@ -231,10 +268,86 @@ class NativeEngineBuildTests(unittest.TestCase):
                     elif mutation=='missing-file':path.unlink()
                     elif mutation=='archive-hash':archive.write_bytes(b'x'*archive.stat().st_size)
                     else:archive.write_bytes(archive.read_bytes()+b'x')
+                    self.refresh_identity_stage(runtime,evidence)
                     before={p.name:p.read_bytes() for p in (runtime/'program').iterdir()}
                     self.rejected(call)
                     self.assertEqual(before,{p.name:p.read_bytes() for p in (runtime/'program').iterdir()})
-                    self.assertEqual([],list(evidence.iterdir()))
+                    diagnostic=json.loads((evidence/'runtime-build-identity-diagnostic.json').read_text())
+                    self.assertFalse(diagnostic['passed'])
+                    for name,raw in before.items():
+                        self.assertEqual(raw,(evidence/('original-runtime-'+name)).read_bytes())
+                    self.assertEqual(2,len(diagnostic['files']))
+                finally:self.root=old_root
+
+    def test_installed_identity_rejects_source_config_stage_and_mixed_originals_with_raw_retention(self):
+        import hashlib
+        for mutation in ('unknown-id','wrong-fallback','mixed','version','config','source-hash','stage-hash',
+                         'stage-size','stage-source','stage-duplicate','stage-missing','stage-archive','stage-bytes'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as folder:
+                old_root=self.root;self.root=Path(folder)
+                try:
+                    runtime,_,pin_path,evidence,_,call=self.build_identity_fixture('680(Build:1)')
+                    path=runtime/'program/setup.ini'
+                    if mutation in ('unknown-id','wrong-fallback','mixed'):
+                        value={'unknown-id':'f'*40,'wrong-fallback':'2680(Build:1)','mixed':'a'*40}[mutation]
+                        path.write_bytes(path.read_bytes().replace(b'680(Build:1)',value.encode()))
+                        self.refresh_identity_stage(runtime,evidence)
+                    elif mutation in ('version','source-hash'):
+                        pin=json.loads(pin_path.read_text());pin['version' if mutation=='version' else 'sha256']='26.8.2.1' if mutation=='version' else 'f'*64
+                        pin_path.write_text(json.dumps(pin))
+                    elif mutation=='config':
+                        config=self.root/'identity-config.json';data=json.loads(config.read_text());data['LIBO_VERSION_MINOR']='9';config.write_text(json.dumps(data))
+                    else:
+                        stage=evidence/'installed-runtime-stage.json';data=json.loads(stage.read_text())
+                        if mutation=='stage-hash':stage.write_text(stage.read_text()+' ')
+                        elif mutation=='stage-size':
+                            summary=self.root/'stage-summary.json';value=json.loads(summary.read_text());value['receipt']['bytes']+=1;summary.write_text(json.dumps(value))
+                        else:
+                            if mutation=='stage-source':data['configuredVersion']='26.8.2.1'
+                            elif mutation=='stage-duplicate':data['files'].append(data['files'][0].copy())
+                            elif mutation=='stage-missing':data['files'].pop()
+                            elif mutation=='stage-archive':data['files'][0]['archivePath']='help.zip'
+                            else:data['files'][0]['bytes']+=1
+                            stage.write_text(json.dumps(data))
+                            summary=self.root/'stage-summary.json';value=json.loads(summary.read_text());value['receipt'].update(bytes=stage.stat().st_size,sha256=hashlib.sha256(stage.read_bytes()).hexdigest());summary.write_text(json.dumps(value))
+                    before={p.name:p.read_bytes() for p in (runtime/'program').iterdir()}
+                    self.rejected(call)
+                    self.assertEqual(before,{p.name:p.read_bytes() for p in (runtime/'program').iterdir()})
+                    diagnostic=json.loads((evidence/'runtime-build-identity-diagnostic.json').read_text())
+                    self.assertFalse(diagnostic['passed'])
+                    for name,raw in before.items():self.assertEqual(raw,(evidence/('original-runtime-'+name)).read_bytes())
+                finally:self.root=old_root
+
+    def test_identity_snapshots_precede_utf8_rejection_and_never_overwrite_evidence(self):
+        runtime,_,_,evidence,_,call=self.build_identity_fixture()
+        path=runtime/'program/version.ini';path.write_bytes(b'[Version]\r\nbuildid=\xff\r\n')
+        self.refresh_identity_stage(runtime,evidence)
+        before={p.name:p.read_bytes() for p in (runtime/'program').iterdir()}
+        self.rejected(call)
+        saved={p.name:p.read_bytes() for p in evidence.iterdir()}
+        self.rejected(call)
+        self.assertEqual(saved,{p.name:p.read_bytes() for p in evidence.iterdir()})
+        self.assertEqual(before,{p.name:p.read_bytes() for p in (runtime/'program').iterdir()})
+        for name,raw in before.items():self.assertEqual(raw,(evidence/('original-runtime-'+name)).read_bytes())
+
+    def test_identity_retention_rejects_linked_oversized_and_empty_inputs(self):
+        for damage in ('linked','oversized','empty'):
+            with self.subTest(damage=damage),tempfile.TemporaryDirectory() as folder:
+                old_root=self.root;self.root=Path(folder)
+                try:
+                    runtime,_,_,evidence,_,call=self.build_identity_fixture()
+                    path=runtime/'program/version.ini'
+                    if damage=='linked':
+                        target=self.root/'target.ini';target.write_bytes(path.read_bytes());path.unlink();path.symlink_to(target)
+                    else:path.write_bytes(b'x'*65537 if damage=='oversized' else b'')
+                    before={p.name:p.read_bytes() for p in (runtime/'program').iterdir()}
+                    self.rejected(call)
+                    self.assertEqual(before,{p.name:p.read_bytes() for p in (runtime/'program').iterdir()})
+                    diagnostic=json.loads((evidence/'runtime-build-identity-diagnostic.json').read_text())
+                    self.assertEqual('rejected',diagnostic['files']['program/version.ini']['status'])
+                    self.assertEqual('retained',diagnostic['files']['program/setup.ini']['status'])
+                    self.assertFalse((evidence/'original-runtime-version.ini').exists())
+                    self.assertEqual(before['setup.ini'],(evidence/'original-runtime-setup.ini').read_bytes())
                 finally:self.root=old_root
 
     def test_final_runtime_identity_verification_rejects_wrong_missing_or_changed_effective_metadata(self):

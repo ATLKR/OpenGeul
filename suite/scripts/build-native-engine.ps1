@@ -124,41 +124,130 @@ function Read-RuntimeBuildIdentity([string]$Path,[string]$Section) {
     Assert-UnlinkedPath $Path
     if(-not(Test-Path -LiteralPath $Path -PathType Leaf)) {throw 'Generated runtime build identity file is missing.'}
     $encoding=[Text.UTF8Encoding]::new($false,$true)
-    $text=$encoding.GetString([IO.File]::ReadAllBytes($Path))
+    $raw=Read-BoundedIdentityBytes $Path
+    $text=$encoding.GetString($raw)
     $sections=[regex]::Matches($text,'(?m)^(?:\uFEFF)?[ \t]*\[([^\]\r\n]+)\]')
     $ids=[regex]::Matches($text,'(?im)^[ \t]*buildid[ \t]*=([^\r\n]*)')
     if($sections.Count -ne 1 -or $sections[0].Groups[1].Value -cne $Section -or $ids.Count -ne 1 -or $ids[0].Index -le $sections[0].Index) {throw 'Generated runtime build identity section/key is missing or ambiguous.'}
     return [ordered]@{text=$text;match=$ids[0];buildid=$ids[0].Groups[1].Value;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}
 }
 
-function Set-RuntimeBuildIdentity([string]$RuntimeRoot,[string]$Archive,$Pin,[string]$ParentCommit,[string]$EvidenceDirectory) {
-    if($Pin.coreCommit -cnotmatch '^[0-9a-f]{40}$' -or $ParentCommit -cnotmatch '^[0-9a-f]{40}$') {throw 'Externally pinned upstream and actual parent source identities are required.'}
-    Assert-UnlinkedPath $Archive;Assert-UnlinkedPath $EvidenceDirectory
-    Confirm-FileIdentity $Archive $Pin.size SHA256 $Pin.sha256|Out-Null
+function Read-BoundedIdentityBytes([string]$Path,[long]$Maximum=65536) {
+    Assert-UnlinkedPath $Path
+    $item=Get-Item -LiteralPath $Path -Force
+    if($item -isnot [IO.FileInfo] -or $item.Length -le 0 -or $item.Length -gt $Maximum) {throw 'Identity input must be a bounded regular file.'}
+    return ,([IO.File]::ReadAllBytes($Path))
+}
+
+function Write-NewIdentityBytes([string]$Path,[byte[]]$Bytes) {
+    if($Bytes.Length -gt 65536) {throw 'Identity evidence exceeds its output bound.'}
+    Assert-UnlinkedPath $Path
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try {$stream.Write($Bytes,0,$Bytes.Length)} finally {$stream.Dispose()}
+}
+
+function Get-InstalledIdentityDerivation($Pin,$Configuration) {
+    # This is one source-authenticated installer formula, not a label allowlist.
+    if($Pin.version -cne '26.8.1.1' -or $Pin.coreCommit -cne 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1' -or
+       $Pin.url -cne 'https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz' -or
+       $Pin.size -ne 302435508 -or $Pin.sha256 -cne '296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785') {throw 'Installed fallback requires the exact authenticated source version/archive/core.'}
+    $expected=[ordered]@{LIBO_VERSION_MAJOR='26';LIBO_VERSION_MINOR='8';LIBO_VERSION_MICRO='1';LIBO_VERSION_PATCH='1';LIBO_VERSION_SUFFIX=''}
+    foreach($key in $expected.Keys) {if($Configuration[$key] -cne $expected[$key]) {throw "Installed fallback configuration mismatch: $key"}}
+    $build=$Configuration.LIBO_VERSION_MAJOR+$Configuration.LIBO_VERSION_MINOR+'0'
+    $normal=[regex]::Match($build,'(\w+?)(\d+)')
+    $local=$normal.Groups[2].Value
+    return [ordered]@{rule='libreoffice-26.8.1.1-installer-no-git-v1';configuration=$expected;
+        build=$build;normalizedBuild=$local;installerBuildId=$Configuration.LIBO_VERSION_PATCH;
+        buildid=($local+'(Build:'+$Configuration.LIBO_VERSION_PATCH+')')}
+}
+
+function Set-RuntimeBuildIdentity([string]$RuntimeRoot,[string]$Archive,$Pin,[string]$ParentCommit,[string]$EvidenceDirectory,$Configuration,$StageSummary) {
+    Assert-UnlinkedPath $EvidenceDirectory
     if(-not(Test-Path -LiteralPath $EvidenceDirectory -PathType Container)) {throw 'Owned identity evidence directory is missing.'}
+    $diagnosticPath=Join-Path $EvidenceDirectory 'runtime-build-identity-diagnostic.json'
+    foreach($name in @('runtime-build-identity-diagnostic.json','original-runtime-version.ini','original-runtime-setup.ini')) {
+        if(Test-Path -LiteralPath (Join-Path $EvidenceDirectory $name)) {throw 'Original runtime identity evidence already exists.'}
+    }
+    $diagnostic=[ordered]@{schemaVersion=1;kind='runtime-build-identity-diagnostic';passed=$false;files=[ordered]@{}}
     $candidates=@()
-    foreach($item in @(@('version.ini','Version'),@('setup.ini','Bootstrap'))) {
-        $path=Join-Path $RuntimeRoot ('program/'+$item[0])
-        $original=Read-RuntimeBuildIdentity $path $item[1]
-        if($original.buildid -cnotin @('', $ParentCommit, $Pin.coreCommit)) {throw 'Generated runtime buildid is unrelated to the authenticated source or actual parent checkout.'}
-        $evidence=Join-Path $EvidenceDirectory ('original-runtime-'+$item[0])
-        if(Test-Path -LiteralPath $evidence) {throw 'Original runtime identity evidence already exists.'}
-        $candidates+=@{name=$item[0];path=$path;original=$original;evidence=$evidence}
+    try {
+        # Attempt BOTH snapshots before parsing or semantic/source/stage rejection.
+        foreach($item in @(@('version.ini','Version'),@('setup.ini','Bootstrap'))) {
+            $name='program/'+$item[0];$path=Join-Path $RuntimeRoot $name
+            $evidence=Join-Path $EvidenceDirectory ('original-runtime-'+$item[0])
+            $status=[ordered]@{attempted=$true;status='rejected';validation='not-validated';sourcePath=$path;evidencePath=$evidence}
+            $diagnostic.files[$name]=$status
+            try {
+                $raw=Read-BoundedIdentityBytes $path
+                Write-NewIdentityBytes $evidence $raw
+                $status.status='retained';$status.bytes=$raw.Length
+                $status.sha256=(Get-FileHash -LiteralPath $evidence -Algorithm SHA256).Hash.ToLowerInvariant()
+                $candidates+=@{name=$name;path=$path;section=$item[1];evidence=$evidence;status=$status}
+            } catch {$status.error=$_.Exception.Message.Substring(0,[Math]::Min(1024,$_.Exception.Message.Length))}
+        }
+        if($candidates.Count -ne 2) {throw 'Both original identity files must be retained before validation.'}
+        if($Pin.coreCommit -cnotmatch '^[0-9a-f]{40}$' -or $ParentCommit -cnotmatch '^[0-9a-f]{40}$') {throw 'Externally pinned upstream and actual parent source identities are required.'}
+        Assert-UnlinkedPath $Archive
+        Confirm-FileIdentity $Archive $Pin.size SHA256 $Pin.sha256|Out-Null
+        # Authenticate the separate detailed map BEFORE interpreting its mappings.
+        $reference=$StageSummary.receipt
+        $stagePath=Join-Path $EvidenceDirectory 'installed-runtime-stage.json'
+        if($StageSummary.passed -ne $true -or $StageSummary.runtimeRoot -cne $RuntimeRoot -or
+           $reference.path -cne $stagePath -or $reference.bytes -le 0 -or $reference.bytes -gt 33554432 -or
+           $reference.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Invalid compact installed stage receipt reference.'}
+        $stageRaw=Read-BoundedIdentityBytes $stagePath 33554432
+        Confirm-FileIdentity $stagePath $reference.bytes SHA256 $reference.sha256|Out-Null
+        $stage=([Text.UTF8Encoding]::new($false,$true)).GetString($stageRaw)|ConvertFrom-Json
+        if($stage.schemaVersion -ne 1 -or $stage.kind -cne 'source-built-installed-runtime-stage' -or $stage.passed -ne $true -or
+           $stage.runtimeRoot -cne $RuntimeRoot -or $stage.configuredVersion -cne $Pin.version -or
+           $stage.configuredProduct -cnotin @('LibreOffice','LibreOfficeDev')) {throw 'Installed stage receipt does not bind this source/runtime.'}
+        $main=@($stage.archives|Where-Object {$_.kind -ceq 'main'})
+        if($main.Count -ne 1 -or -not $main[0].path -or -not $main[0].wrapperRoot) {throw 'Installed stage requires one main archive.'}
+        $originals=[ordered]@{};$selected=$null
+        foreach($item in $candidates) {
+            $diagnostic.currentFile=$item.name
+            $rows=@($stage.files|Where-Object {$_.path -ieq $item.name})
+            if($rows.Count -ne 1 -or $rows[0].path -cne $item.name -or $rows[0].archivePath -cne $main[0].path -or
+               $rows[0].archiveMember -cne ($main[0].wrapperRoot+'/'+$item.name) -or
+               $rows[0].bytes -ne $item.status.bytes -or $rows[0].sha256 -cne $item.status.sha256) {throw 'Original identity bytes differ from unique main-archive mapping.'}
+            $originals[$item.name]=[ordered]@{archivePath=$rows[0].archivePath;archiveMember=$rows[0].archiveMember;bytes=$item.status.bytes;sha256=$item.status.sha256}
+            $original=Read-RuntimeBuildIdentity $item.evidence $item.section
+            # Refuse changes between snapshot and correction, even if parseable.
+            Read-BoundedIdentityBytes $item.path|Out-Null
+            if((Get-FileHash -LiteralPath $item.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $item.status.sha256) {throw 'Runtime identity changed after snapshot.'}
+            $item.original=$original;$item.status.validation='parsed-and-stage-bound'
+            if($null -eq $selected) {$selected=$original.buildid} elseif($selected -cne $original.buildid) {throw 'Original runtime identities use mixed identity modes.'}
+        }
+        $derivation=$null
+        if($selected -ceq '') {$mode='empty'}
+        elseif($selected -ceq $Pin.coreCommit) {$mode='pinned-core'}
+        elseif($selected -ceq $ParentCommit) {$mode='actual-parent'}
+        else {
+            $derivation=Get-InstalledIdentityDerivation $Pin $Configuration
+            if($selected -cne $derivation.buildid) {throw 'Generated runtime buildid is unrelated to the authenticated source or actual parent checkout.'}
+            $mode='installed-no-git-fallback'
+        }
+        foreach($item in $candidates) {$item.status.validation='validated'}
+        # Both inputs, source, stage mappings and selected mode passed before writes.
+        $files=[ordered]@{}
+        foreach($item in $candidates) {
+            $original=$item.original;$value=$original.match.Groups[1]
+            $changed=$original.text.Remove($value.Index,$value.Length).Insert($value.Index,$Pin.coreCommit)
+            [IO.File]::WriteAllBytes($item.path,([Text.UTF8Encoding]::new($false,$true)).GetBytes($changed))
+            $files[$item.name]=[ordered]@{originalBuildId=$original.buildid;buildid=$Pin.coreCommit;
+                corrected=($original.buildid -cne $Pin.coreCommit);beforeSha256=$original.sha256;
+                sha256=(Get-FileHash -LiteralPath $item.path -Algorithm SHA256).Hash.ToLowerInvariant()}
+        }
+        $diagnostic.passed=$true;$diagnostic.identityMode=$mode
+        return [ordered]@{schemaVersion=1;mechanism='explicit-generated-config-correction-from-authenticated-source-pin';
+            expectedBuildId=$Pin.coreCommit;sourceArchiveUrl=$Pin.url;sourceArchiveSha256=$Pin.sha256;sourceArchiveSize=$Pin.size;
+            identityMode=$mode;installedFallbackDerivation=$derivation;stageReceipt=$reference;originals=$originals;files=$files}
+    } catch {
+        $diagnostic.error=$_.Exception.Message.Substring(0,[Math]::Min(2048,$_.Exception.Message.Length));throw
+    } finally {
+        $json=$diagnostic|ConvertTo-Json -Depth 10
+        Write-NewIdentityBytes $diagnosticPath (([Text.UTF8Encoding]::new($false,$true)).GetBytes($json+"`n"))
     }
-    # Only generated configuration changes. Preserve original bytes before the
-    # explicit correction; no source Git repository or synthetic commit is made.
-    $files=[ordered]@{}
-    foreach($item in $candidates) {
-        Copy-Item -LiteralPath $item.path -Destination $item.evidence -ErrorAction Stop
-        $original=$item.original;$value=$original.match.Groups[1]
-        $changed=$original.text.Remove($value.Index,$value.Length).Insert($value.Index,$Pin.coreCommit)
-        [IO.File]::WriteAllBytes($item.path,([Text.UTF8Encoding]::new($false,$true)).GetBytes($changed))
-        $files['program/'+$item.name]=[ordered]@{originalBuildId=$original.buildid;buildid=$Pin.coreCommit;
-            corrected=($original.buildid -cne $Pin.coreCommit);beforeSha256=$original.sha256;
-            sha256=(Get-FileHash -LiteralPath $item.path -Algorithm SHA256).Hash.ToLowerInvariant()}
-    }
-    return [ordered]@{schemaVersion=1;mechanism='explicit-generated-config-correction-from-authenticated-source-pin';
-        expectedBuildId=$Pin.coreCommit;sourceArchiveUrl=$Pin.url;sourceArchiveSha256=$Pin.sha256;sourceArchiveSize=$Pin.size;files=$files}
 }
 
 function Assert-RuntimeBuildIdentity([string]$RuntimeRoot,$Pin,$Proof) {
@@ -1210,7 +1299,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.installedRuntimeStage=Get-Content -LiteralPath $staged.stdout -Raw|ConvertFrom-Json
             if($receipt.installedRuntimeStage.passed -ne $true -or $receipt.installedRuntimeStage.runtimeRoot -cne $instdir) {throw 'Source-built installed runtime staging did not verify its output.'}
             $receipt.stage='bind-authenticated-runtime-build-identity';Assert-NativeBuildTimeRemaining
-            $receipt.runtimeBuildIdentity=Set-RuntimeBuildIdentity $instdir $archive $pin $receipt.sourceCommit $evidence
+            $receipt.runtimeBuildIdentity=Set-RuntimeBuildIdentity $instdir $archive $pin $receipt.sourceCommit $evidence $receipt.configuration $receipt.installedRuntimeStage
             Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
             $receipt.stage='stage-authenticated-native-app-local-crt';Assert-NativeBuildTimeRemaining
             $receipt.appLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $instdir 'program') $crtTerms
