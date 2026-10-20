@@ -1,0 +1,3 @@
+# E2E tooling environment only. Never install into the packaged Office payload.
+# Official metadata: https://pypi.org/pypi/pypdf/6.21.0/json
+pypdf==6.21.0 --hash=sha256:3aec619699dacb1b73f57e87d9adaa4424814517b2cc028de20adba5a37af4c4

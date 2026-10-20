@@ -11,13 +11,22 @@
   "runtime": {
     "name": "LibreOffice",
     "version": "26.8.1.1",
-    "url": "https://mirror.clarkson.edu/tdf/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi",
-    "distributionUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi",
-    "size": 360910848,
-    "sha256": "97c2173752325af1da3d8731f41c8e09a7c4ad491cf55d9b1069fadb5668e6d7",
-    "checksumUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi.sha256",
+    "format": "source-built-zip",
+    "url": "https://github.com/ATLKR/OpenGeul/actions/runs/39421425925/artifacts/12282919794",
+    "size": 418941616,
+    "sha256": "d32489d38954d47d0e660324eef1d5553cfa1c0ab25ade6b28a46f530e8c01b3",
     "sourceUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
-    "sourceSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785"
+    "sourceSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+    "sourceCoreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
+    "sourceBuild": {
+      "receiptSha256": "f8a38ad3ec8cb9a77732187c78198224da419a08150407a33130e99d0f3c3ad7",
+      "sourceCommit": "023c474cb903bc437ac5aa14f3edc1a443b741ab",
+      "runId": 39421425925,
+      "artifactId": 12282919794,
+      "artifactSha256": "5c48ce85dfb153545a90fcbed916f65f04ecbdda3c328bb87ef9f42f7ded0dee",
+      "artifactSize": 419125513,
+      "patchManifestSha256": "1498c38049b84ef89a324329d59e9eaa21d72f8799f7fd88ba0c7474b616e501"
+    }
   },
   "hwp": {
     "version": "1.1.4",

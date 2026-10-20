@@ -1,0 +1,345 @@
+{
+  "archive": "libreoffice-26.8.1.1.tar.xz",
+  "archiveBytes": 302435508,
+  "archiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+  "scope": "Finite authentic merged-membership and Library/LinkTarget forwarding fixtures; no invented macro bodies, scheduler adapter, native tools or execution evidence.",
+  "sourceAuthority": {
+    "path": "work/native28-atl-library-diagnosis/source-angle.v1.json",
+    "bytes": 68779,
+    "sha256": "746be86428ed3ee0078fcbd34dfa46fe401421d9ac37d77efce762036c0db003"
+  },
+  "extraction": "Whole member bytes or concatenated inclusive physical LF ranges in listed order, preserving every selected byte and adding no separator or other bytes.",
+  "members": [
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/extensions/pre_MergedLibsList.mk",
+      "bytes": 4068,
+      "sha256": "38ba08a3dbab8777d08ba7b44976b4f7c781b3d043e9ec7a5b6f06d6d9f6d122",
+      "fixture": "pre_MergedLibsList.mk",
+      "fixtureBytes": 4068,
+      "fixtureSha256": "38ba08a3dbab8777d08ba7b44976b4f7c781b3d043e9ec7a5b6f06d6d9f6d122",
+      "availableMakeApi": [
+        "gb_MERGE_LIBRARY_LIST",
+        "gb_MERGEDLIBS"
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/Library_merged.mk",
+      "bytes": 1045,
+      "sha256": "39b9d854a709ccdd6a95813d5bde768a25c637b1837341581be4f9a9baae883f",
+      "fixture": "Library_merged.mk",
+      "fixtureBytes": 1045,
+      "fixtureSha256": "39b9d854a709ccdd6a95813d5bde768a25c637b1837341581be4f9a9baae883f"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/Library.mk",
+      "bytes": 16781,
+      "sha256": "1cab3987867b8e27fc395f1ef8145cfe6f791fa747f214aa69424e554b5e96d0",
+      "fixture": "library-forwarding.mk",
+      "fixtureBytes": 829,
+      "fixtureSha256": "0360e6aceaa8e081b5342cac4805086322a9b7c78a164af1c489b34fdc52ae70",
+      "physicalLfRanges": [
+        [
+          216,
+          222
+        ],
+        [
+          245,
+          245
+        ],
+        [
+          255,
+          257
+        ],
+        [
+          261,
+          261
+        ],
+        [
+          264,
+          264
+        ]
+      ],
+      "availableMakeApi": [
+        "gb_Library__forward_to_Linktarget",
+        "gb_Library_use_library_objects",
+        "gb_Library_add_defs",
+        "gb_Library_set_include",
+        "gb_Library_add_ldflags",
+        "gb_Library_add_libs",
+        "gb_Library_use_system_win32_libs"
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/LinkTarget.mk",
+      "bytes": 111066,
+      "sha256": "075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8",
+      "fixture": "linktarget-merged.mk",
+      "fixtureBytes": 1209,
+      "fixtureSha256": "8bd17812de860c94a2b5e3b1fd80ccb0e85db9359ba3bde78fb1e5e8ea8853fe",
+      "physicalLfRanges": [
+        [
+          1410,
+          1413
+        ],
+        [
+          1830,
+          1850
+        ]
+      ],
+      "availableMakeApi": [
+        "gb_LinkTarget__is_merged",
+        "gb_LinkTarget__use_linktarget_objects",
+        "gb_LinkTarget_use_library_objects"
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/TargetLocations.mk",
+      "bytes": 24547,
+      "sha256": "a5b0b1186c3bc5afa3a955887e14a9fdacfe7ab8dff1a40eca9de6b1767250ed",
+      "physicalLfRanges": [
+        [
+          128,
+          147
+        ],
+        [
+          258,
+          260
+        ],
+        [
+          378,
+          381
+        ],
+        [
+          434,
+          451
+        ]
+      ],
+      "fixture": "targetlocations-library.mk",
+      "fixtureBytes": 2471,
+      "fixtureSha256": "b1ae8b1644b0904990c30a20261b3f6428dee38ec905effbfb527725ddaf4312",
+      "availableMakeApi": [
+        "gb_LinkTarget__get_workdir_linktargetname",
+        "gb_LinkTarget__get_workdir_linktargetclass",
+        "gb_LinkTarget__get_workdir_linktargetobject",
+        "gb_LinkTarget_get_headers_target",
+        "gb_LinkTarget_get_objects_list",
+        "gb_LinkTarget_get_dep_target",
+        "gb_LinkTarget_get_dep_libraries_target",
+        "gb_LinkTarget_get_dep_externals_target",
+        "gb_LinkTarget_get_dep_statics_target",
+        "gb_LinkTarget_get_clean_target",
+        "gb_LinkTarget_get_target",
+        "gb_Library_get_headers_target",
+        "gb_Library_get_filename",
+        "gb_Library__get_workdir_linktargetname",
+        "gb_Library_get_target",
+        "gb_Library_get_target_for_build",
+        "gb_Library_get_linktarget",
+        "gb_Library_get_linktarget_target"
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/LinkTarget.mk",
+      "bytes": 111066,
+      "sha256": "075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8",
+      "physicalLfRanges": [
+        [
+          999,
+          1123
+        ]
+      ],
+      "fixture": "linktarget-initialization.mk",
+      "fixtureBytes": 7263,
+      "fixtureSha256": "78eea0c71b1a0ae8f2c178dc9af9d5a1b366406d05ee8ec04866ea6402a4cfcc",
+      "availableMakeApi": [
+        "gb_LinkTarget_LinkTarget"
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/Library.mk",
+      "bytes": 16781,
+      "sha256": "1cab3987867b8e27fc395f1ef8145cfe6f791fa747f214aa69424e554b5e96d0",
+      "physicalLfRanges": [
+        [
+          59,
+          107
+        ],
+        [
+          196,
+          197
+        ]
+      ],
+      "fixture": "library-declaration.mk",
+      "fixtureBytes": 2548,
+      "fixtureSha256": "30d39f39e87bd2bdd4c2b034eb91cb7f6eaa96c77299e4bf21ee5caefbd93250",
+      "availableMakeApi": [
+        "gb_Library_Library",
+        "gb_Library__Library_impl_copy",
+        "gb_Library__Library_impl",
+        "gb_Library_get_runtime_filename",
+        "gb_Library_get_runtime_filename_for_build"
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/LinkTarget.mk",
+      "bytes": 111066,
+      "sha256": "075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8",
+      "fixture": "linktarget-targettype.mk",
+      "fixtureBytes": 161,
+      "fixtureSha256": "086eed52b2156e8f47cd6a06a26f9c57ab70e0c35a9ebc44e14d0a00bd543aa8",
+      "physicalLfRanges": [
+        [
+          1945,
+          1950
+        ]
+      ],
+      "availableMakeApi": [
+        "gb_LinkTarget_set_targettype"
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_class.mk",
+      "bytes": 29428,
+      "sha256": "e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada",
+      "fixture": "msc-system-libs.mk",
+      "fixtureBytes": 575,
+      "fixtureSha256": "db077c6bb8c606c7c155942d2ce492d4053866c3267699046024e4ed1bed2a02",
+      "physicalLfRanges": [
+        [
+          313,
+          322
+        ]
+      ],
+      "availableMakeApi": [
+        "gb_MSVCRT_subst",
+        "gb_LinkTarget_use_system_win32_libs"
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/RepositoryModule_host.mk",
+      "bytes": 5556,
+      "sha256": "12cf00de78d9a887f565bc087358644f8598f07eba9abeb93f60d35490fc50b8",
+      "fixture": "RepositoryModule_host.mk",
+      "fixtureBytes": 5556,
+      "fixtureSha256": "12cf00de78d9a887f565bc087358644f8598f07eba9abeb93f60d35490fc50b8"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/embedserv/Module_embedserv.mk",
+      "bytes": 509,
+      "sha256": "fbabff348ddc257cb37708df2e1ff4e5224e9c4cb5049ca524938b0810dbb487",
+      "fixture": "Module_embedserv.mk",
+      "fixtureBytes": 509,
+      "fixtureSha256": "fbabff348ddc257cb37708df2e1ff4e5224e9c4cb5049ca524938b0810dbb487"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/Makefile.gbuild",
+      "bytes": 4383,
+      "sha256": "1078cee9cdfc50ae9902e6de32e0406a89ff20bb5dc3ca1ccd30d0b3a48d8a4f",
+      "fixture": "gbuild-module-entry.mk",
+      "fixtureBytes": 87,
+      "fixtureSha256": "793850fb4cb2cea8a66c42083c941f81cc9bf3cefbe7f3e197b877d33e6c06a1",
+      "physicalLfRanges": [
+        [
+          21,
+          21
+        ]
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/Module.mk",
+      "bytes": 24899,
+      "sha256": "3ddf03b7324b91c001d86d3802d20340701016766e01bdeaee54885b11bd09aa",
+      "fixture": "module-order.mk",
+      "fixtureBytes": 3785,
+      "fixtureSha256": "f80d9f814cf523254591b50985b19032b4a69cfd194a333f140a6e9bbd897512",
+      "physicalLfRanges": [
+        [
+          305,
+          325
+        ],
+        [
+          403,
+          437
+        ],
+        [
+          477,
+          480
+        ]
+      ],
+      "availableMakeApi": [
+        "gb_Module__read_targetfile",
+        "gb_Module_add_target",
+        "gb_Module__modulefile",
+        "gb_Module_add_moduledir",
+        "gb_Module_add_targets",
+        "gb_Module_add_moduledirs"
+      ]
+    }
+  ],
+  "reuse": [
+    {
+      "fixture": "../native-atl-path/linktarget-atl.mk",
+      "sourceManifest": "../native-atl-path/source.json",
+      "bytes": 1487,
+      "sha256": "834f6471da577aeee57f7f173fa8b11370c79edd3dbc42c1589099fa4e43a045",
+      "availableMakeApi": [
+        "gb_LinkTarget_set_include",
+        "gb_LinkTarget_add_ldflags",
+        "gb_LinkTarget_set_ldflags",
+        "gb_LinkTarget_add_libs"
+      ],
+      "boundary": "Existing authentic implementation kept unchanged; do not replace it with a test reconstruction."
+    },
+    {
+      "fixture": "../native-atl-consumers/linktarget-defs.mk",
+      "sourceManifest": "../native-atl-consumers/source.json",
+      "bytes": 195,
+      "sha256": "68b9d1012f43976817e89ae1b8d1d08f95f495ba7b2b48ef8d4df89c92f1c289",
+      "availableMakeApi": [
+        "gb_LinkTarget_add_defs"
+      ],
+      "boundary": "Existing authentic complete add_defs macro remains unchanged."
+    }
+  ],
+  "callerSuppliedBindings": {
+    "membership": "Bind actual profile/feature data and explicitly expose gb_Helper_optional. OS=WNT and nonempty MERGELIBS select emser; the other current four ATL targets are absent from the complete merged list.",
+    "targetIdentity": "Use authentic encoded tuple helpers from targetlocations-library.mk. gb_Library_get_linktarget returns Library/<filename><><installed target>; gb_LinkTarget_get_target unwraps the tuple. Identity/bare-name substitutions are not equivalent.",
+    "registryAndPaths": [
+      "gb_Library_FILENAMES",
+      "gb_Library_KNOWNLIBS",
+      "gb_Library_get_instdir",
+      "WORKDIR",
+      "INSTDIR"
+    ],
+    "remainingAdapters": "Disclose all finite non-ATL registry, layer/path, scheduler, component registration, resource, diagnostics and platform bindings omitted by the harness. Do not replace the selected authentic forwarding, tuple mapping or initialization macros.",
+    "initialization": "linktarget-initialization.mk contains the complete gb_LinkTarget_LinkTarget body. Its T_LDFLAGS := and T_LIBS := statements reset the target. Declare/initialize the real merged target before any forwarding append; a later declaration erases earlier forwarded additions.",
+    "fullMergedRecipe": "Library_merged.mk is the full authenticated recipe. library-declaration.mk provides complete Library_Library and __Library_impl macros that reach LinkTarget initialization. Preserve/disclose declaration order when adapting scheduler-only dependencies.",
+    "systemLibraries": "Use authentic library-forwarding.mk use_system_win32_libs wrapper and msc-system-libs.mk full substitution/forwarding implementation; do not replace their propagation with a suffix-only stub.",
+    "moduleOrder": "module-order.mk retains complete actual target/module include helpers. RepositoryModule_host.mk and Module_embedserv.mk are full originals. Bind/record a finite module-path and registration adapter if unrelated modules/targets are omitted; do not reverse merged-before-emser declaration order."
+  },
+  "additionalSourceAuthority": {
+    "path": "work/native-module-link-windows-access/source-members.json",
+    "bytes": 30370,
+    "sha256": "9696affef24ab69cc4d67f37d8c89f32f983f5857100d5bee43001a224511b6f"
+  },
+  "moduleOrderSourceAuthority": {
+    "path": "work/native28-atl-merged-implementation/module-order-inputs.v1.json",
+    "bytes": 1899,
+    "sha256": "b1762116039eb9dcd0a1719eab048a65fc8062fb55ea5680f4d968e43db7aa34"
+  },
+  "declarationOrder": {
+    "authorityFixture": "RepositoryModule_host.mk",
+    "firstMergedDeclarationPhysicalLfRange": [
+      14,
+      21
+    ],
+    "laterEmbedservPhysicalLfRange": [
+      50,
+      80
+    ],
+    "embedservTargetsFixture": "Module_embedserv.mk",
+    "targetReadSemanticsFixture": "module-order.mk",
+    "entrypointFixture": "gbuild-module-entry.mk",
+    "fact": "For nonempty MERGELIBS, real root RepositoryModule_host.mk reads Library_merged first; its comment explicitly identifies T_LIBS clearing. Only later does add_moduledirs reach embedserv, which declares Library_emser on WNT. Preserve this order, including actual := target initialization, in any finite replay."
+  }
+}

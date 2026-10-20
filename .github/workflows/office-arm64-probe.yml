@@ -6,6 +6,7 @@ on:
       - .github/workflows/office-arm64-probe.yml
       - suite/scripts/arm64-native-probe.py
       - suite/config/runtime.arm64.lock.json
+      - suite/config/runtime.arm64-baseline.lock.json
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,7 +28,7 @@ jobs:
       - name: Native host and upstream baseline inspection
         shell: pwsh
         run: |
-          python suite/scripts/arm64-native-probe.py --output .work/arm64-probe
+          python suite/scripts/arm64-native-probe.py --baseline-lock suite/config/runtime.arm64-baseline.lock.json --output .work/arm64-probe
           if ($LASTEXITCODE -ne 0) { throw 'Actual ARM64 native probe failed.' }
       - name: Actual compiler, SDK and Korean capability inventory
         if: always()

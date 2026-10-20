@@ -1,7 +1,7 @@
 name: OpenGeul ARM64 native Korean prerequisites
 'on':
   push:
-    branches: [work/opengeul-office-arm64]
+    branches: [work/opengeul-office-arm64-readiness]
     paths:
       - .github/workflows/office-arm64-ime-prerequisites.yml
       - suite/scripts/ensure-korean-ime.ps1
@@ -11,11 +11,16 @@ permissions:
 jobs:
   windows-suite:
     runs-on: windows-11-arm
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
@@ -31,6 +36,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 automation prerequisites failed.' }
           python -c "import platform,pywinauto,PIL; print(platform.machine(),pywinauto.__version__,PIL.__version__)"
           if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 automation imports failed.' }
+      - name: Check the native preparation deadline contract
+        shell: pwsh
+        run: |
+          python -m unittest suite.tests.test_suite_korean_architecture -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native Korean preparation boundary tests failed.' }
       - name: Actual native Microsoft Korean input method preparation
         shell: pwsh
         run: |
@@ -45,4 +55,5 @@ jobs:
             .work/suite-korean-readiness/
             !.work/suite-korean-readiness/fod-source/**/*.cab
           retention-days: 7
+          include-hidden-files: true
           if-no-files-found: error

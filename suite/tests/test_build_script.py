@@ -90,6 +90,18 @@ class BuildScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assert_build(root, events, 'arm64', root / 'dist/OpenGeul-Office-4.5.6-arm64-test-windows-arm64')
 
+    def test_source_engine_inputs_are_forwarded_as_separate_literal_arguments(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = str(root/'engine input.zip'); receipt = str(root/'source receipt.json')
+            result, events = self.run_build(root, Architecture='arm64', EngineArchive=archive, EngineReceipt=receipt)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            prepare = events[1]['arguments']
+            self.assertIn('--engine-archive', prepare)
+            self.assertEqual(prepare[prepare.index('--engine-archive')+1], archive)
+            self.assertIn('--engine-receipt', prepare)
+            self.assertEqual(prepare[prepare.index('--engine-receipt')+1], receipt)
+
     def test_accepted_uppercase_architecture_is_normalized_for_rid_prepare_and_output(self):
         for architecture, version in (('X64', '1.2.3-x64-test'), ('ARM64', '4.5.6-arm64-test')):
             with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as folder:

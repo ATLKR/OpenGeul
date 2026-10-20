@@ -264,6 +264,7 @@ class Windows:
         info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
         if not self.user.GetGUIThreadInfo(thread, ctypes.byref(info)): raise ctypes.WinError(ctypes.get_last_error())
         assert info.hwndFocus and (info.hwndFocus == child or self.user.IsChild(child, info.hwndFocus)), 'Keyboard focus is outside the embedded Office editor'
+        assert not info.hwndCapture, 'Owned editor mouse capture is still active before physical input'
         return int(info.hwndFocus)
 
     def _focus_window(self, hwnd):
@@ -338,7 +339,10 @@ def _editor_focus_snapshot_ready(snapshot, hwnd, child, shell_pid, office_pid, t
     if snapshot['focusWithinEditor']:
         assert ready, 'Observed foreign keyboard focus inside the editor hierarchy'
         assert focus['threadId'] == thread, 'Observed keyboard focus belongs to another editor thread'
-    return focus['hwnd'] if ready else None
+    capture = snapshot['capture']['hwnd']
+    assert type(capture) is int and capture >= 0, 'Invalid native mouse capture observation'
+    # Zero capture excludes current Win32 capture; it is not input completion.
+    return focus['hwnd'] if ready and capture == 0 else None
 
 
 def require_editor_focus_readiness(evidence, hwnd, child, shell_pid, office_pid):
@@ -371,9 +375,10 @@ def prepare_editor_focus(api, hwnd, child, shell_pid, office_pid, record,
                          click_editor, enter_document, seconds=5):
     """Send the original single click/Ctrl+F6, then only observe readiness.
 
-    A missing focus or a live setup control within this Suite may be pending.
+    A missing focus, live Suite setup control, or mouse capture may be pending.
     Foreign foreground/focus, changed ownership, and native query errors fail
-    immediately. This does not establish the cause of a previous focus failure.
+    immediately. Zero capture does not establish edit mode or input completion,
+    nor does this establish the cause of a previous focus failure.
     """
     assert 0 < seconds <= 10, 'Editor focus readiness must have a bounded deadline'
     started = time.monotonic()
@@ -474,7 +479,20 @@ def close_home(api, process, record):
     assert process.returncode == 0, 'Suite did not close cleanly'
 
 
-def close_document(api, process, hwnd, child, record):
+def _verified_saved_calc_close_proof(suite, owned_root, source, baseline, **options):
+    from generated_calc_close import freeze_saved_calc_from_baseline
+    return freeze_saved_calc_from_baseline(suite, owned_root, source, baseline, **options)
+
+
+def close_document(api, process, hwnd, child, record, *, calc_close_proof=None):
+    if record.get('module') == 'calc':
+        from generated_calc_close import (GeneratedBlankCalc, SavedCalcCopy,
+                                          close_generated_blank_calc, close_saved_calc_copy)
+        assert isinstance(calc_close_proof, (SavedCalcCopy, GeneratedBlankCalc)), 'Calc cleanup requires an explicit verified generated-copy or fresh-blank token'
+        closer = close_generated_blank_calc if isinstance(calc_close_proof, GeneratedBlankCalc) else close_saved_calc_copy
+        closer(api, process, hwnd, child, record, calc_close_proof)
+        return
+    assert calc_close_proof is None, 'Calc discard authorization cannot close another module'
     # HwndWrapper.close() adds a 2s deadline before our async teardown waits.
     # Post the same owned WM_CLOSE once, then use the explicit lifecycle bounds.
     record['stage'] = 'close-document'
@@ -579,7 +597,9 @@ def _base_runtime_id(value):
     return tuple(value)
 
 
-def _base_save_observation_state(observation, shell_pid, document, caption, frozen_dialog, frozen_root):
+def _base_save_observation_state(observation, shell_pid, document, caption, frozen_dialog, frozen_root, *, filename_id='1001'):
+    assert filename_id in ('1001','1148')
+    if filename_id=='1148':assert caption=='OpenGeul Office에서 문서 열기'
     if observation['apiError'] is not None:
         error = observation['apiError']
         raise AssertionError('Base native/UIA API failed: ' + str(error))
@@ -601,7 +621,7 @@ def _base_save_observation_state(observation, shell_pid, document, caption, froz
     assert type(root['enabled']) is bool and type(root['offscreen']) is bool
     controls = observation['controls']
     assert isinstance(controls, list) and _base_int(observation['rawCount']) == len(controls) <= 512, 'Incomplete bounded raw UIA enumeration'
-    candidates = {('1001', 50004): [], ('1', 50000): []}
+    candidates = {(filename_id, 50004): [], ('1', 50000): []}
     seen = set()
     for index, row in enumerate(controls):
         assert _base_int(row['index']) == index and type(row['controlType']) is int and row['controlType'] in BASE_SAVE_UIA_TYPES, 'Unexpected Base UIA control type or index'
@@ -640,7 +660,7 @@ def _base_save_observation_state(observation, shell_pid, document, caption, froz
                     and row['nativeWithinDialog'] is True), 'Foreign native Base control'
         else:
             assert row['native'] is None and row['nativeWithinDialog'] is False, 'Invented HWND for a DirectUI control'
-    actual_counts = {'filename':len(candidates[('1001',50004)]),'save':len(candidates[('1',50000)])}
+    actual_counts = {'filename':len(candidates[(filename_id,50004)]),'save':len(candidates[('1',50000)])}
     assert observation['candidateCounts'] == actual_counts and all(type(n) is int for n in observation['candidateCounts'].values()) and observation['countsComplete'] is True, 'Invalid raw Base candidate counts'
     assert all(len(rows) <= 1 for rows in candidates.values()), 'Exact Base filename or Save control is ambiguous'
     ready = root['enabled'] and not root['offscreen'] and all(len(rows) == 1 and rows[0]['enabled'] and not rows[0]['offscreen'] for rows in candidates.values())
@@ -724,8 +744,9 @@ def _base_raw_properties(element, call, result=None):
     return result
 
 
-def _base_raw_controls(api, accessible, uia, dialog, observation):
+def _base_raw_controls(api, accessible, uia, dialog, observation, *, filename_id='1001'):
     """Do not use descendants/elements_from_uia_array: both swallow COM errors."""
+    assert filename_id in ('1001','1148')
     last = 'UIA root'
     def call(operation, function):
         nonlocal last
@@ -749,7 +770,7 @@ def _base_raw_controls(api, accessible, uia, dialog, observation):
             observation['controls'].append(row)
             _base_raw_properties(element, call, row)
             elements.append(element)
-            if (row['automationId'], row['controlType']) in (('1001',50004),('1',50000)):
+            if (row['automationId'], row['controlType']) in ((filename_id,50004),('1',50000)):
                 row['ancestry'], cursor = [], element
                 for _ in range(32):
                     node = _base_raw_properties(cursor, call)
@@ -771,13 +792,14 @@ def _base_raw_controls(api, accessible, uia, dialog, observation):
     finally:
         if 'rawCount' in observation:
             observation['candidateCounts'] = {name:sum((row.get('automationId'),row.get('controlType')) == key for row in observation['controls'])
-                for name,key in (('filename',('1001',50004)),('save',('1',50000)))}
+                for name,key in (('filename',(filename_id,50004)),('save',('1',50000)))}
             observation['countsComplete'] = observation['querySucceeded']
     return elements
 
 
-def _wait_base_save_controls(api, process, document, caption, record):
+def _wait_base_save_controls(api, process, document, caption, record, *, open_dialog=False):
     start = time.monotonic()
+    filename_id='1148' if open_dialog else '1001'
     from pywinauto import Desktop
     from pywinauto.uia_defines import IUIA
     from pywinauto.uia_element_info import UIAElementInfo
@@ -787,7 +809,12 @@ def _wait_base_save_controls(api, process, document, caption, record):
              'maxObservations':BASE_SAVE_MAX_OBSERVATIONS, 'startedAt':start, 'deadline':start+BASE_SAVE_DIALOG_SECONDS,
              'finishedAt':start, 'fileMenuClicks':1, 'saveShortcuts':1, 'focusAction':None,
              'dialogHwnd':0, 'uiaRootRuntimeId':[], 'nativeAnchor':{}, 'observations':[], 'wrapperBindings':[], 'bindingError':None, 'ready':False}
-    record['baseSaveDialogReadiness'] = proof
+    if open_dialog:
+        assert caption == 'OpenGeul Office에서 문서 열기'
+        proof.pop('fileMenuClicks');proof.pop('saveShortcuts')
+        proof.update(kind='owned-open-dialog-readiness',trigger=dict(record['openTrigger']),filenameAutomationId=filename_id)
+        record['openDialogReadiness'] = proof
+    else: record['baseSaveDialogReadiness'] = proof
     dialog, native, accessible, uia = 0, None, None, None
     try:
         for sequence in range(BASE_SAVE_MAX_OBSERVATIONS):
@@ -825,7 +852,7 @@ def _wait_base_save_controls(api, process, document, caption, record):
                 if 'document' not in proof['nativeAnchor']: proof['nativeAnchor']['document'] = observation['before']['document']
                 if observed and 'dialog' not in proof['nativeAnchor']: proof['nativeAnchor']['dialog'] = observation['before']['dialog']
                 if observed:
-                    elements = _base_raw_controls(api, accessible, uia, dialog, observation)
+                    elements = _base_raw_controls(api, accessible, uia, dialog, observation, filename_id=filename_id)
                     if not proof['uiaRootRuntimeId'] and observation.get('uiaRoot'):
                         proof['uiaRootRuntimeId'] = observation['uiaRoot']['runtimeId']
             except Exception as exc:
@@ -837,7 +864,7 @@ def _wait_base_save_controls(api, process, document, caption, record):
                     if observation['apiError'] is None: observation['apiError'] = _base_api_error('native after snapshot',exc)
                 observation['finishedAt'] = time.monotonic()
             if observation['apiError'] is None: _base_native_continuity(proof['nativeAnchor'],observation)
-            state = _base_save_observation_state(observation, process.pid, document, caption, dialog, proof['uiaRootRuntimeId'])
+            state = _base_save_observation_state(observation, process.pid, document, caption, dialog, proof['uiaRootRuntimeId'], filename_id=filename_id)
             observation['state'] = state
             assert observation['finishedAt'] <= proof['deadline'], 'Base save dialog readiness deadline expired during observation'
             if state == 'ready':
@@ -848,7 +875,7 @@ def _wait_base_save_controls(api, process, document, caption, record):
                     binding_operation = operation
                     return function()
                 try:
-                    for key in (('1001',50004), ('1',50000)):
+                    for key in ((filename_id,50004), ('1',50000)):
                         row = next(row for row in observation['controls'] if (row['automationId'],row['controlType']) == key)
                         element = elements[row['index']]
                         wrapper = binding_call('UIAWrapper(UIAElementInfo)', lambda:UIAWrapper(UIAElementInfo(element)))
@@ -862,7 +889,10 @@ def _wait_base_save_controls(api, process, document, caption, record):
                     proof['bindingError'] = _base_api_error(binding_operation,exc)
                     raise
                 proof.update(ready=True, finishedAt=time.monotonic())
-                require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True)
+                if open_dialog:
+                    from home_routing_smoke import require_open_dialog_readiness
+                    require_open_dialog_readiness(proof, process.pid, document, before_input=True)
+                else:require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True)
                 return dialog, native, wrappers[0], wrappers[1]
             time.sleep(min(0.1, max(0,proof['deadline']-time.monotonic())))
         raise AssertionError('Base save readiness deadline or finite observation limit expired')
@@ -951,7 +981,13 @@ def new_module(suite, output, module, *, fixtures=None):
             record['stage'] = 'capture-saved-base'
             window.capture_as_image().save(output / 'new-base-saved.png')
         # A Save As failure never falls back to discarding the unsaved Base document.
-        close_document(api, process, hwnd, child, record)
+        calc_proof = None
+        if module == 'calc':
+            from generated_calc_close import freeze_generated_blank_calc
+            calc_proof = freeze_generated_blank_calc(suite, api, process, hwnd, child, record)
+            close_document(api, process, hwnd, child, record, calc_close_proof=calc_proof)
+        else:
+            close_document(api, process, hwnd, child, record)
         close_home(api, process, record)
         if saved_base is not None:
             record['stage'] = 'verify-base-after-cleanup'
@@ -1149,7 +1185,13 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
                           keyboardInputVerified=True, contentMutationVerified=True)
         assert not api.windows(office_pid), api.external_window_message(office_pid, 'Office created an unowned visible top-level window during the test')
         record.update(nativeParentVerified=True, noExternalOfficeWindow=True, screenshot=screenshot)
-        close_document(api, process, hwnd, child, record)
+        calc_proof = None
+        if module == 'calc':
+            calc_proof = _verified_saved_calc_close_proof(suite, fixtures, source, calc_baseline,
+                                                         suffix=EDITOR_MARKERS[module])
+            close_document(api, process, hwnd, child, record, calc_close_proof=calc_proof)
+        else:
+            close_document(api, process, hwnd, child, record)
         close_home(api, process, record)
         record['stage'] = 'verify-final-content'
         after = hashlib.sha256(source.read_bytes()).hexdigest()

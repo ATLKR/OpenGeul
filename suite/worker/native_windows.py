@@ -184,21 +184,24 @@ class ProcessDiagnosticsApi:
         code = wt.DWORD()
         if not self.get_exit(handle, ctypes.byref(code)):
             raise ctypes.WinError(ctypes.get_last_error())
-        return {'alive': waited == 258, 'exitCode': int(code.value), 'exitCodeHex': f'0x{code.value:08x}'}
+        return {'alive': waited == 258, 'waitResult': int(waited), 'exitCode': int(code.value),
+                'exitCodeHex': f'0x{code.value:08x}', 'getExitCodeProcessResult': True}
 
     def close(self, handle):
-        self.close_handle(handle)
+        if not self.close_handle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
 
 
 class JobProcessWitnesses:
     """Retain members' identities/exit codes across a load failure and cleanup."""
     def __init__(self, job, api=None):
         self.job, self.api, self.members = job, api or ProcessDiagnosticsApi(), {}
+        self.failed_members = {}
 
     def snapshot(self):
-        errors = []
+        errors = [row for handle, row in self.failed_members.values()]
         for pid in self.api.job_pids(self.job):
-            if pid in self.members:
+            if pid in self.members or pid in self.failed_members:
                 continue
             handle = None
             try:
@@ -206,10 +209,17 @@ class JobProcessWitnesses:
                 identity = dict(self.api.identity(handle), pid=pid)
                 self.members[pid] = (handle, identity)
             except Exception as exc:
+                row = {'pid': pid, 'error': {'type': type(exc).__name__, 'message': str(exc),
+                                           'winerror': getattr(exc, 'winerror', None)}}
+                errors.append(row)
                 if handle is not None:
-                    self.api.close(handle)
-                errors.append({'pid': pid, 'error': {'type': type(exc).__name__, 'message': str(exc),
-                                                    'winerror': getattr(exc, 'winerror', None)}})
+                    row['handleValue'] = int(handle)
+                    try:
+                        self.api.close(handle)
+                    except Exception as later:
+                        row['handleCloseError'] = {'type': type(later).__name__, 'message': str(later),
+                                                   'winerror': getattr(later, 'winerror', None)}
+                        self.failed_members[pid] = (handle, row)
         result = []
         for handle, identity in self.members.values():
             try:
@@ -219,10 +229,26 @@ class JobProcessWitnesses:
                                                    'winerror': getattr(exc, 'winerror', None)}))
         return result + errors
 
+    def retained_snapshot(self):
+        """Strict shutdown evidence; optional diagnostic errors cannot prove exit."""
+        rows = self.snapshot()
+        if any(row.get('error') or type(row.get('alive')) is not bool for row in rows):
+            raise RuntimeError('Retained private-job member observation failed: ' + repr(rows))
+        handles = {pid: int(handle) for pid, (handle, _) in self.members.items()}
+        return [dict(row, handleValue=handles[row['pid']]) for row in rows]
+
     def close(self):
-        for handle, identity in self.members.values():
-            self.api.close(handle)
-        self.members.clear()
+        first = None
+        for collection in (self.members, self.failed_members):
+            for pid, (handle, identity) in list(collection.items()):
+                try:
+                    self.api.close(handle)
+                    del collection[pid]
+                except Exception as exc:
+                    if first is None:
+                        first = exc
+        if first is not None:
+            raise first
 
 
 class OwnedOfficeProcess:
@@ -286,12 +312,56 @@ class OwnedOfficeProcess:
             raise ctypes.WinError(ctypes.get_last_error())
         return self.poll()
 
+    def wait_for_job_exit(self, witnesses, timeout, *, clock=None, sleeper=None):
+        """One deadline for every retained member and a fresh complete census.
+
+        The caller captures members before requesting shutdown and keeps this
+        witness, job and profile if death cannot be proved. This never forces a
+        process or treats the launcher's exit alone as Office shutdown.
+        """
+        if witnesses.job != self.job or not 0 < timeout <= 30:
+            raise ValueError('A bounded wait on this original private job is required')
+        clock, sleeper = clock or time.monotonic, sleeper or time.sleep
+        deadline = clock() + timeout
+        while True:
+            rows = witnesses.retained_snapshot()
+            censuses = []
+            pids = witnesses.api.job_pids(self.job, record=censuses.append)
+            result = dict(jobEmptyVerified=False, finalMembers=rows, finalJobPids=pids,
+                          launcherExitCode=None, launcherWaitResult=None, lastJobCensus=censuses[-1])
+            if not pids and all(row['alive'] is False and row.get('waitResult') == 0 for row in rows):
+                result['launcherExitCode'] = self.wait(timeout=0)
+                result['launcherWaitResult'] = 0
+                result['jobEmptyVerified'] = True
+                return result
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return result
+            for handle, _ in list(witnesses.members.values()):
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    break
+                waited = witnesses.api.wait_for(handle, max(1, int(remaining * 1000)))
+                if waited not in (0, 258):
+                    raise RuntimeError('Retained owned process wait failed')
+            # A signaled member may remain briefly in the job census. Bound
+            # discovery without a spin loop or a new per-child wait budget.
+            remaining = deadline - clock()
+            if remaining > 0:
+                sleeper(min(.01, remaining))
+
     def terminate(self):
         if not self.end_job(self.job, 1):
             raise ctypes.WinError(ctypes.get_last_error())
 
     def close(self):
-        for handle in (self.handle, self.job):
+        first = None
+        for name in ('handle', 'job'):
+            handle = getattr(self, name)
             if handle:
-                self.close_handle(handle)
-        self.handle = self.job = None
+                if self.close_handle(handle):
+                    setattr(self, name, None)
+                elif first is None:
+                    first = ctypes.WinError(ctypes.get_last_error())
+        if first is not None:
+            raise first

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "version": "0.2.0-dev",
+  "architecture": "arm64",
+  "shellRuntime": {
+    "name": ".NET Windows Desktop",
+    "version": "8.0.32",
+    "sourceUrl": "https://github.com/dotnet/runtime/tree/v8.0.32",
+    "desktopSourceUrl": "https://github.com/dotnet/winforms/tree/v8.0.32"
+  },
+  "runtime": {
+    "name": "LibreOffice",
+    "version": "26.8.1.1",
+    "url": "https://mirror.clarkson.edu/tdf/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi",
+    "distributionUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi",
+    "size": 360910848,
+    "sha256": "97c2173752325af1da3d8731f41c8e09a7c4ad491cf55d9b1069fadb5668e6d7",
+    "checksumUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi.sha256",
+    "sourceUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
+    "sourceSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785"
+  },
+  "hwp": {
+    "version": "1.1.4",
+    "sourceCommit": "131ccbf3ac10a82e1d6785b4c906fb836b912e73",
+    "url": "https://github.com/ATLKR/OpenGeul/releases/download/v1.1.4/OpenGeul_1.1.4_windows-arm64_unsigned-portable.zip",
+    "size": 31342223,
+    "sha256": "731a5157406cddcef273676aae0ed6e622bf83ee8d80907db427524ce0ae9115",
+    "sourceUrl": "https://github.com/ATLKR/OpenGeul/tree/131ccbf3ac10a82e1d6785b4c906fb836b912e73",
+    "provenanceUrl": "https://github.com/ATLKR/OpenGeul/releases/download/v1.1.4/provenance-arm64.json"
+  }
+}

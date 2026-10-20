@@ -266,34 +266,36 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         finally { busy = false; EnableSave(attached && !closing); }
     }
 
-    async Task<DocumentStatus> IDocumentSession.StatusAsync()
+    Task<DocumentStatus> IDocumentSession.StatusAsync() => ReadCloseStatusAsync("status", "status");
+    Task<DocumentStatus> IDocumentSession.PrepareCloseAsync() => ReadCloseStatusAsync("prepare-close", "prepareClose");
+
+    private async Task<DocumentStatus> ReadCloseStatusAsync(string command, string traceStage)
     {
-        TraceClose("status.begin");
+        TraceClose(traceStage + ".begin");
         try
         {
-            var result = await worker!.SendAsync("status", new { });
+            var result = await worker!.SendAsync(command, new { });
             ApplyStatus(result);
             var status = new DocumentStatus(result.GetProperty("modified").GetBoolean(), Text);
-            TraceClose("status.end", new { modified = status.Modified });
+            TraceClose(traceStage + ".end", new { modified = status.Modified });
             return status;
         }
         catch (Exception e)
         {
-            TraceClose("status.error", new { exceptionType = e.GetType().FullName });
+            TraceClose(traceStage + ".error", new { exceptionType = e.GetType().FullName });
             throw;
         }
     }
 
-    async Task<bool> IDocumentSession.CloseAsync(bool discard)
+    async Task<CloseResult> IDocumentSession.CloseAsync(bool discard)
     {
         TraceClose("sessionClose.begin", new { discard });
         try
         {
             var result = await worker!.SendAsync("close", new { discard });
-            var closed = result.TryGetProperty("closed", out var closedValue) && closedValue.GetBoolean()
-                && (!result.TryGetProperty("closeCancelled", out var cancelled) || !cancelled.GetBoolean());
-            TraceClose("sessionClose.end", new { discard, closed });
-            return closed;
+            var outcome = DocumentClose.FromWorkerResult(result);
+            TraceClose("sessionClose.end", new { discard, closed = outcome.Closed, hasWarning = outcome.Warning is not null });
+            return outcome;
         }
         catch (Exception e)
         {
@@ -316,14 +318,16 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             {
                 TraceClose("documentClose.begin");
                 var result = await DocumentClose.TryAsync(this, () => Task.FromResult(ChooseClose()), () => SaveDocumentAsync(false));
-                TraceClose("documentClose.result", new { closed = result.Closed, hasError = result.Error is not null });
+                TraceClose("documentClose.result", new { closed = result.Closed, hasError = result.Error is not null, hasWarning = result.Warning is not null });
                 if (!result.Closed)
                 {
                     if (result.Error is not null) Program.ShowError(result.Error, this);
                     return false;
                 }
                 attached = false;
-                // The document is already safely closed; shutdown cannot discard a live document.
+                if (result.Warning is not null)
+                    MessageBox.Show(this, result.Warning, "문서 종료 확인", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                // The document model is confirmed closed; release only this form's worker.
                 try { await worker!.SendAsync("shutdown", new { }); } catch (Exception) { }
             }
             await ReleaseWorkerAsync();

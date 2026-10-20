@@ -38,9 +38,14 @@ HWP 편집기는 Windows WebView2 런타임이 필요합니다. 사용자 LibreO
 Office 문서 창은 Suite가 만든 Panel HWND 아래의 UNO 프레임에서 편집합니다. 창마다
 전용 프로필·로컬 파이프·작업자를 쓰며 TCP UNO 서버는 열지 않습니다. 저장하지 않은
 문서를 닫을 때 저장·저장하지 않음·취소를 선택할 수 있습니다. 저장 실패나 취소는
-문서 창을 유지합니다. Calc에서 셀을 편집 중이면 Enter로 입력을 확정한 뒤 저장하세요.
-Suite 저장 경로는 문서 모델을 저장하며 미확정 셀 편집 버퍼의 저장은 보장하지 않습니다.
-갑작스러운 shell/운영체제 실패 후의 복구와 자동 저장은 별도
+문서 창을 유지합니다. Calc의 저장/Ctrl+S는 현재 셀의 일반 동기 입력을 처리하는
+native 저장 경로를 사용합니다. Calc는 Ctrl+W 등으로 닫을 때 입력을 처리한 뒤
+변경 표시와 관계없이 항상 저장·저장하지 않음·취소를 묻습니다. 저장은 저장 후 닫고,
+저장하지 않음은 파일을 덮어쓰지 않고 닫으며, 취소는 같은 문서 창을 유지합니다.
+Enter를 먼저 누르지 않은 A1 일반 영문 입력은 실제 x64 Windows에서 Ctrl+S와
+Ctrl+W 뒤 세 선택을 각각 실행해 저장 파일과 독립 재열기로 검증했습니다.
+이 검증은 비동기 유효성 검사·수식 수정 대화상자·모든 IME 조합의 입력 완료를
+보장하지 않습니다. 갑작스러운 shell/운영체제 실패 후의 복구와 자동 저장은 별도
 개발 과제입니다. 개발판에서는 원본을 보관하고 중요한 저장 결과를 확인하세요.
 
 Base는 데이터베이스 URL·현재 연결·등록된 드라이버와 Java 사용/실행 상태를 확인해 표시합니다.
@@ -62,16 +67,19 @@ dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
 ./suite/scripts/build-suite.ps1 -Architecture x64
 ```
 
-빌드 스크립트는 MSI를 관리자 설치 이미지로 **추출**하며 사용자 PC에 LibreOffice를
+기본 x64 빌드는 MSI를 관리자 설치 이미지로 **추출**하며 사용자 PC에 LibreOffice를
 설치하지 않습니다. MSI의 원래 cabinet에서 선택한 아키텍처의 정확한 File ID를 찾아 VC++ 구성 요소를 app-local로
 준비합니다. 서로 다른 아키텍처나 기존 출력과 충돌하면 거부합니다. Office 런타임은
 공유하므로 모듈마다 전체 엔진을 중복 배포하지 않습니다.
+ARM64 소스 빌드 ZIP의 인증 다운로드·입력 경로와 빌드 기한·실패 증거는
+[엔진 빌드 안내](engine-build/README.md#build-deadlines-and-authenticated-ingestion)를 참고하세요.
 
 출력 ZIP에는 제품 설정, 모든 파일의 inventory, 런타임 입력·브랜딩 증거, 정확한
-소스 커밋의 ZIP과 제3자 고지가 들어갑니다. 다음 명령은 패키지 전체를 다시 검사합니다.
+소스 커밋의 ZIP과 제3자 고지가 들어갑니다. 다음은 현재 0.2.0-dev 개발판 경로의
+예시이며, 실제로 검증할 압축 해제 폴더를 지정하면 패키지 전체를 다시 검사합니다.
 
 ```powershell
-python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.1.1-dev-windows-x64
+python suite/scripts/verify-suite.py dist/OpenGeul-Office-0.2.0-dev-windows-x64
 ```
 
 ## 검증을 읽는 방법

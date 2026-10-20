@@ -22,7 +22,9 @@ REQUIRED = frozenset({
     'suite-provenance.json', 'runtime-branding.json', 'Office/opengeul-branding.json',
     'Office/program/soffice.exe', 'Office/program/soffice.bin', 'Office/program/python.exe',
     'worker/office_worker.py', 'worker/session.py', 'worker/native.py',
-    'worker/native_windows.py', 'worker/dispatch.py', 'Notices/OpenGeul-Office-LICENSE.txt',
+    'worker/native_windows.py', 'worker/dispatch.py', 'worker/calc_save.py',
+    'worker/calc_close.py', 'worker/save_diagnostics.py', 'worker/native_diagnostics.py',
+    'Notices/OpenGeul-Office-LICENSE.txt',
     'Notices/LibreOffice-LICENSE.txt', 'Notices/CORRESPONDING_SOURCE.md',
     'Sources/OpenGeul-Office-source.zip',
 })
@@ -94,7 +96,38 @@ COMPANION_PE_ADMISSIONS = {
 # ARM64 exceptions require their own exact path/machine/hash review. Do not
 # inherit x64 compatibility helpers or assume that similarly named ARM64 MSI
 # companions have identical bytes. Unknown non-native assets fail closed.
-ARM64_COMPANION_PE_ADMISSIONS = {}
+ARM64_COMPANION_PE_ADMISSIONS = {
+    'Office/program/python-core-3.13.15/lib/pip/_vendor/distlib/t32.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '6b4195e640a85ac32eb6f9628822a622057df1e459df7c17a12f97aeabc9415b'},
+    'Office/program/python-core-3.13.15/lib/pip/_vendor/distlib/t64.exe': {
+        'machine': 0x8664, 'role': 'pythonLauncherTemplate',
+        'sha256': '81a618f21cb87db9076134e70388b6e9cb7c2106739011b6a51772d22cae06b7'},
+    'Office/program/python-core-3.13.15/lib/pip/_vendor/distlib/w32.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '47872cc77f8e18cf642f868f23340a468e537e64521d9a3a416c8b84384d064b'},
+    'Office/program/python-core-3.13.15/lib/pip/_vendor/distlib/w64.exe': {
+        'machine': 0x8664, 'role': 'pythonLauncherTemplate',
+        'sha256': '7a319ffaba23a017d7b1e18ba726ba6c54c53d6446db55f92af53c279894f8ad'},
+    'Office/program/python-core-3.13.15/lib/setuptools/cli-32.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb'},
+    'Office/program/python-core-3.13.15/lib/setuptools/cli-64.exe': {
+        'machine': 0x8664, 'role': 'pythonLauncherTemplate',
+        'sha256': 'bbb3de5707629e6a60a0c238cd477b28f07f0066982fda953fa6fcec39073a4a'},
+    'Office/program/python-core-3.13.15/lib/setuptools/cli.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb'},
+    'Office/program/python-core-3.13.15/lib/setuptools/gui-32.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c'},
+    'Office/program/python-core-3.13.15/lib/setuptools/gui-64.exe': {
+        'machine': 0x8664, 'role': 'pythonLauncherTemplate',
+        'sha256': '3471b6140eadc6412277dbbefe3fef8c345a0f1a59776086b80a3618c3a83e3b'},
+    'Office/program/python-core-3.13.15/lib/setuptools/gui.exe': {
+        'machine': 0x14c, 'role': 'pythonLauncherTemplate',
+        'sha256': '85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c'},
+}
 
 
 def _architecture(architecture: str) -> str:
@@ -262,10 +295,14 @@ def _source_archive(root: Path, provenance: dict, *, architecture: str):
             lock = _json_bytes(archive.read(name), name)
     except (zipfile.BadZipFile, KeyError, OSError) as error:
         raise ValueError('Invalid Suite corresponding-source archive') from error
+    locked_runtime = lock.get('runtime')
+    source_built = (provenance['runtime'].get('format') == 'source-built-zip'
+                    or isinstance(locked_runtime, dict) and locked_runtime.get('format') == 'source-built-zip')
     if (lock.get('schemaVersion') != 1 or lock.get('architecture') != architecture
             or lock.get('version') != provenance['version'] or not isinstance(lock.get('runtime'), dict)
             or any(lock['runtime'].get(key) != provenance['runtime'].get(key)
-                   for key in ('sha256', 'url', 'sourceUrl', 'sourceSha256'))):
+                   for key in ('sha256', 'url', 'sourceUrl', 'sourceSha256'))
+            or source_built and locked_runtime != provenance['runtime']):
         raise ValueError('Suite runtime/source provenance differs from its packaged source lock')
     if provenance.get('hwp') is not None and (not isinstance(lock.get('hwp'), dict)
             or any(lock['hwp'].get(key) != provenance['hwp'].get(key) for key in ('sha256', 'url'))):
@@ -303,6 +340,21 @@ def _metadata(root: Path, files: dict, *, architecture: str):
     elif provenance.get('hwp') is not None:
         raise ValueError('HWP provenance supplied without its payload')
     _source_archive(root, provenance, architecture=architecture)
+    runtime_format = runtime.get('format', 'msi')
+    if runtime_format == 'source-built-zip':
+        try:
+            from suite.prepare import validate_source_build_receipt, validate_source_build_runtime
+        except ModuleNotFoundError:
+            from prepare import validate_source_build_receipt, validate_source_build_runtime
+        receipt_path = root/'Office/opengeul-source-build.json'
+        if 'Office/opengeul-source-build.json' not in files:
+            raise ValueError('Source-built runtime is missing its externally locked source-build receipt')
+        proof = validate_source_build_receipt(runtime, receipt_path, architecture=architecture)
+        validate_source_build_runtime(root/'Office', proof, branding=_json(root/'runtime-branding.json'))
+        if 'Office/opengeul-msi-dependencies.json' in files:
+            raise ValueError('Source-built runtime cannot claim an MSI extraction receipt')
+    elif runtime_format != 'msi':
+        raise ValueError('Unsupported Suite runtime format')
     branding = _json(root/'runtime-branding.json')
     if branding != _json(root/'Office/opengeul-branding.json'):
         raise ValueError('Root/runtime branding receipts differ')

@@ -1,0 +1,110 @@
+name: OpenGeul native ARM64 Office engine source build
+'on':
+  push:
+    branches: [work/opengeul-office-native-engine]
+    paths:
+      - .github/workflows/office-native-engine.yml
+      - suite/scripts/build-native-engine.ps1
+      - suite/engine-build/**
+      - suite/tests/test_firebird_arm64_port.py
+      - suite/tests/test_native_python_host.py
+      - suite/tests/test_native_atl_path.py
+      - suite/tests/test_native_meson_path.py
+      - suite/tests/test_installed_runtime_stage.py
+      - suite/tests/fixtures/native-python-host/**
+      - suite/tests/fixtures/native-atl-path/**
+      - suite/tests/fixtures/native-atl-consumers/**
+      - suite/tests/fixtures/native-atl-merged/**
+      - suite/tests/fixtures/native-meson-path/**
+      - suite/tests/fixtures/native-mdds-equality/**
+      - suite/tests/fixtures/native-icu-path/**
+      - suite/tests/fixtures/native-source-tar/**
+      - suite/tests/fixtures/native-zstd-unpack/**
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-firebird-and-office:
+    runs-on: windows-11-arm
+    timeout-minutes: 360
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Reserve finalization and evidence time before checkout
+        shell: pwsh
+        run: |
+          $started = [DateTime]::UtcNow
+          $deadline = $started.AddMinutes(330).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+          $owned = Join-Path $env:RUNNER_TEMP ('opengeul-engine-budget-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $owned) { throw 'Preserve the original job-budget receipt.' }
+          New-Item -ItemType Directory -Path $owned | Out-Null
+          $receipt = Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;buildMinutes=330;jobTimeoutMinutes=360;nominalReserveMinutes=30;runnerSetupIncluded=$false} |
+            ConvertTo-Json | Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
+          "OPENGEUL_ENGINE_BUILD_DEADLINE_UTC=$deadline" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_ENGINE_BUDGET_RECEIPT=$receipt" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Record actual native toolchain and redistributable layout
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .work/native-engine-host-evidence | Out-Null
+          Copy-Item -LiteralPath $env:OPENGEUL_ENGINE_BUDGET_RECEIPT -Destination .work/native-engine-host-evidence/job-budget.json -ErrorAction Stop
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $instances = @(& $vswhere -all -format json | ConvertFrom-Json)
+          $instances | ConvertTo-Json -Depth 8 | Out-File .work/native-engine-host-evidence/visual-studio.json -Encoding utf8
+          $rows = @()
+          foreach ($instance in $instances) {
+            $redist = Join-Path $instance.installationPath 'VC/Redist/MSVC'
+            if (-not (Test-Path $redist)) { continue }
+            foreach ($file in Get-ChildItem $redist -Filter '*.dll' -File -Recurse | Where-Object FullName -Match '[\\/]arm64[\\/]') {
+              $stream = $file.OpenRead()
+              try {
+                $reader = [IO.BinaryReader]::new($stream)
+                $stream.Position = 60
+                $offset = $reader.ReadUInt32()
+                $stream.Position = $offset + 4
+                $machine = $reader.ReadUInt16()
+              } finally { $stream.Dispose() }
+              $rows += [ordered]@{path=$file.FullName;machine=$machine;bytes=$file.Length;fileVersion=$file.VersionInfo.FileVersion;productVersion=$file.VersionInfo.ProductVersion;sha256=(Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
+            }
+          }
+          ConvertTo-Json -InputObject $rows -Depth 5 | Out-File .work/native-engine-host-evidence/arm64-redist-layout.json -Encoding utf8
+      - name: Build and verify native Firebird before the full Office engine
+        shell: pwsh
+        run: |
+          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC
+          if (-not $?) { throw 'Native ARM64 Office source build or functional verification failed.' }
+      - name: Retain original source build diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-engine-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/native-engine-host-evidence/
+            .work/native-engine-evidence/
+            !.work/native-engine-evidence/*.zip
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain the qualified native engine input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-engine-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/native-engine-evidence/OpenGeul-Office-engine-arm64.zip
+            .work/native-engine-evidence/source-build-receipt.json
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0

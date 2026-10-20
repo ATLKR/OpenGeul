@@ -75,3 +75,14 @@ def trace_request(stage, request_id, *, ok=None, error_code=None, exception_type
 def trace_native_dispatch(sequence, command, native_command):
     _trace.record('suite.nativeDispatch', 'received',
                   {'receiptSequence': sequence, 'command': command, 'nativeCommand': native_command})
+
+
+def trace_calc_save(stage, command, *, state=None, result=None, exception_type=None):
+    details = {'nativeCommand': command}
+    if state is not None:
+        details['dispatchState'] = state
+    if result is not None:
+        details['dispatchResult'] = result
+    if exception_type is not None:
+        details['exceptionType'] = exception_type
+    _trace.record('suite.calcNativeSave', stage, details)

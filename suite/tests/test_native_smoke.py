@@ -402,7 +402,7 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
 
     @staticmethod
     def _write_document(path, module, suffix=''):
-        marker = 'Engine-OpenGeul-' + module + suffix
+        marker = 'Engine-OpenGeul-' + module + (' 한글' if module == 'calc' else '') + suffix
         with zipfile.ZipFile(path, 'w') as archive:
             if module == 'calc':
                 archive.writestr('xl/workbook.xml',
@@ -552,7 +552,7 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                         ('prepare_editor_focus', prepare_focus),
                         ('wait_for', wait_for),
                         ('CalcModelContext', FakeCalcContext), ('capture_failure', capture_failure),
-                        ('close_document', lambda *args: events.append('document-close')),
+                        ('close_document', lambda *args, **kwargs: (state.update(closeProof=kwargs.get('calc_close_proof')), events.append('document-close'))),
                         ('close_home', lambda *args: events.append('home-close')),
                         ('stop_owned_test_process', lambda *args: events.append('process-cleanup'))):
                     stack.enter_context(patch.object(smoke, name, replacement, create=True))
@@ -588,6 +588,7 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                          [('type', marker, 0.04)])
         self.assertNotIn('model-abort', events)
         self.assertTrue(run['record']['success'])
+        self.assertEqual(run['contextBaseline']['a1Text']+marker,dict(run['closeProof'].cells)['a1Text'])
 
     def test_calc_freezes_exact_ooxml_bytes_before_launch_and_passes_that_independent_baseline(self):
         run = self._run_document(replace_source_on_launch=True)

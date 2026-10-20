@@ -7,6 +7,7 @@ name: OpenGeul Office Suite 개발 검증
   workflow_dispatch: null
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: office-suite-${{ github.ref }}
   cancel-in-progress: true
@@ -18,8 +19,17 @@ env:
 jobs:
   windows-suite:
     if: github.event.repository.private == false
-    runs-on: windows-2025
-    timeout-minutes: 100
+    name: windows-suite (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - architecture: x64
+          runner: windows-2025
+        - architecture: arm64
+          runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
     steps:
     - name: 정확한 소스 바이트 보존
       shell: pwsh
@@ -32,6 +42,14 @@ jobs:
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
+        architecture: ${{ matrix.architecture }}
+    - name: 독립 PDF 검증 도구의 고정 해시 확인·설치
+      shell: pwsh
+      run: |
+        python -m pip install --require-hashes --only-binary=:all: -r suite/config/pdf-e2e-requirements.txt
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF verification tooling installation failed.' }
+        python -m pip install Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned image verification tooling installation failed.' }
     - name: Suite 단위 검사와 Windows shell 빌드 검사
       shell: pwsh
       run: |
@@ -42,19 +60,33 @@ jobs:
     - name: 고정 버전의 패키지 경로 선택
       shell: pwsh
       run: |
-        $lock = Get-Content suite/config/runtime.lock.json -Raw | ConvertFrom-Json
-        if ($lock.architecture -cne 'x64' -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite lock identity.' }
-        "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-x64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        $architecture = '${{ matrix.architecture }}'
+        $lockPath = if ($architecture -ceq 'arm64') { 'suite/config/runtime.arm64.lock.json' } else { 'suite/config/runtime.lock.json' }
+        $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
+        if ($lock.architecture -cne $architecture -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite lock identity.' }
+        "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
+      if: matrix.architecture == 'arm64'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath suite/config/runtime.arm64.lock.json -Output .work/source-engine-input
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
       shell: pwsh
-      run: ./suite/scripts/build-suite.ps1
+      run: |
+        if ('${{ matrix.architecture }}' -ceq 'arm64') {
+          ./suite/scripts/build-suite.ps1 -Architecture arm64 -EngineArchive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip -EngineReceipt .work/source-engine-input/source-build-receipt.json
+        } else {
+          ./suite/scripts/build-suite.ps1 -Architecture x64
+        }
       id: build
     - name: 실제 한국어 IME와 네이티브 UI 검사 준비
       shell: pwsh
       run: |
-        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        python -m pip install pywinauto==0.6.9
         if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
-        ./suite/scripts/ensure-korean-ime.ps1 -Output .work/suite-korean-readiness
+        ./suite/scripts/ensure-korean-ime.ps1 -Architecture '${{ matrix.architecture }}' -Output .work/suite-korean-readiness
         if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
       id: readiness
       if: '!cancelled() && steps.build.outcome == ''success'''
@@ -62,7 +94,7 @@ jobs:
       if: '!cancelled() && steps.build.outcome == ''success'''
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-suite-korean-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-suite-korean-readiness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: |
           .work/suite-korean-readiness/
           !.work/suite-korean-readiness/fod-source/**/*.cab
@@ -76,6 +108,50 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
       if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기
+      id: calc-save
+      shell: pwsh
+      run: |
+        python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+S verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+S 성공·실패 뒤 패키지 불변 확인
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+S verification.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+S 입력·저장·로컬 네이티브 진단 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-calc-save-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-calc-save/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
+    - name: Enter 없이 실제 Calc Ctrl+W 저장·버림·취소 관측
+      id: calc-close
+      shell: pwsh
+      run: |
+        python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+W choice probe failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+W 성공·실패 뒤 패키지 불변 확인
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+W choice probe.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+W 세 선택과 로컬 네이티브 진단 즉시 보존
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-calc-close-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-calc-close/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
     - name: 문서 형식 15개와 모듈 심화 기능 6개 의미 검증
       shell: pwsh
       run: |
@@ -84,6 +160,58 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Office format and feature semantic E2E failed.' }
       id: office-features
       if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 패키지 HWP 변환기로 출처가 고정된 Home 입력 생성
+      id: home-fixtures
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/home_fixture_inputs.py --suite $package --output .work/e2e-fixtures
+        if ($LASTEXITCODE -ne 0) { throw 'Owned HWP fixture generation or provenance failed.' }
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Home 타일·파일 열기·공통 문서 메뉴 25개 실제 입력
+      id: home-routes
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/home_routing_smoke.py --suite $package --features .work/suite-office-features --hwp-fixtures .work/e2e-fixtures --output .work/suite-home-routing
+        $homeExit = $LASTEXITCODE
+        python suite/scripts/verify-suite.py $package
+        $integrityExit = $LASTEXITCODE
+        if ($homeExit -ne 0 -or $integrityExit -ne 0) { throw "Home routing failed: physical=$homeExit integrity=$integrityExit" }
+      if: '!cancelled() && steps.office-features.outcome == ''success'' && steps.home-fixtures.outcome == ''success'''
+    - name: Home 입력·화면·문서별 네이티브 종료 증거 즉시 보존
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-home-routes-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/e2e-fixtures/
+          .work/suite-home-routing/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
+    - name: 다섯 모듈 PDF의 실제 페이지·한국어 텍스트 검증
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        $output = Join-Path $env:GITHUB_WORKSPACE '.work/suite-pdf-export'
+        & "$package/Office/program/python.exe" suite/e2e/pdf_export_smoke.py --produce --suite $package --output $output
+        $producerExit = $LASTEXITCODE
+        python suite/e2e/pdf_export_smoke.py --verify --suite $package --output $output
+        $verifierExit = $LASTEXITCODE
+        if ($producerExit -ne 0 -or $verifierExit -ne 0) { throw "PDF E2E failed: producer=$producerExit verifier=$verifierExit" }
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 형식·심화 기능·PDF 원본 검증 기록 즉시 보존
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-office-features-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-office-features/
+          .work/suite-pdf-export/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
     - name: 실제 한국어 조합·백스페이스·저장·재열기
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
@@ -96,7 +224,7 @@ jobs:
       if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-suite-korean-ime-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-suite-korean-ime-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         include-hidden-files: true
         path: |
           .work/suite-korean-ime/
@@ -115,7 +243,7 @@ jobs:
       if: '!cancelled() && steps.fixtures.outcome == ''success'''
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-suite-korean-ui-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-suite-korean-ui-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-korean-ui/
         retention-days: 7
         if-no-files-found: error
@@ -131,7 +259,7 @@ jobs:
       if: '!cancelled() && steps.fixtures.outcome == ''success'''
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-suite-writer-style-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-suite-writer-style-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-writer-style/
         retention-days: 7
         if-no-files-found: error
@@ -147,7 +275,7 @@ jobs:
       if: '!cancelled() && steps.fixtures.outcome == ''success'''
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-suite-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-suite-lifecycle-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-lifecycle/
         retention-days: 7
         if-no-files-found: error
@@ -163,7 +291,7 @@ jobs:
       if: '!cancelled() && steps.fixtures.outcome == ''success'''
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-suite-startup-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-suite-startup-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         include-hidden-files: true
         path: |
           .work/suite-startup/
@@ -202,8 +330,10 @@ jobs:
       shell: python
       run: |
         from pathlib import Path, PurePosixPath
-        import hashlib, json, os, re
-        def check_native_archives(root):
+        import hashlib, json, os, re, sys
+        sys.path.insert(0, str(Path.cwd()))
+        from suite.e2e.native_cleanup_receipt import MAX_RECEIPT_BYTES, load_cleanup_receipt, validate_cleanup_receipt
+        def check_native_archives(root, expected_engine_image):
             assert root.is_dir() and not root.is_symlink(), 'Owned native diagnostics are missing'
             manifests = sorted(root.glob('*/manifest.json'))
             assert manifests, 'No owned native diagnostic manifests were archived'
@@ -213,7 +343,7 @@ jobs:
                     with path.open('rb') as stream:
                         signature = stream.read(4)
                     assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
-            files = 0
+            files = shutdowns = 0
             for manifest in manifests:
                 record = json.loads(manifest.read_text(encoding='utf-8'))
                 assert record.get('schemaVersion') == 1 and record.get('archiveComplete') is True, 'Incomplete native archive: ' + str(manifest)
@@ -229,22 +359,72 @@ jobs:
                     assert type(item['bytes']) is int and path.stat().st_size == item['bytes'], 'Native archive file size differs'
                     assert re.fullmatch('[a-f0-9]{64}', item['sha256']) and hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256'], 'Native archive file hash differs'
                     files += 1
-            return dict(schemaVersion=1, kind='native-archive-integrity', success=True, completeArchives=len(manifests), verifiedFiles=files, crashDumps=0)
-        result = check_native_archives(Path('.work/suite-worker-diagnostics'))
+                # These five diagnostics roots are product UnoBackend archives.
+                # Observer evidence is outside them; a missing proof is never an exemption.
+                assert 'shutdown.json' in seen, 'Manifest-hashed product shutdown receipt is missing'
+                shutdown = manifest.parent / 'shutdown.json'
+                assert 0 < shutdown.stat().st_size <= MAX_RECEIPT_BYTES, 'Product shutdown receipt exceeds its finite limit'
+                validate_cleanup_receipt(load_cleanup_receipt(shutdown.read_bytes()),
+                                         expected_engine_image=str(expected_engine_image), launcher_pid=record.get('launcherPid'))
+                shutdowns += 1
+            return dict(schemaVersion=1, kind='native-archive-integrity', success=True, completeArchives=len(manifests), verifiedFiles=files, qualifiedShutdowns=shutdowns, crashDumps=0)
+        def check_evidence_crash_dumps(root):
+            assert root.is_dir() and not root.is_symlink(), 'Owned Calc evidence is missing'
+            for path in root.rglob('*'):
+                assert not path.is_symlink(), 'Linked Calc evidence paths are not accepted'
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        signature = stream.read(4)
+                    assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
+            return dict(success=True, crashDumps=0)
+        def check_all_native_archives(roots, evidence_roots, expected_engine_image):
+            records = []
+            for root in roots:
+                try:
+                    record = check_native_archives(Path(root), expected_engine_image)
+                except Exception as exc:
+                    record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+                record['root'] = str(root)
+                records.append(record)
+            evidence = []
+            for root in evidence_roots:
+                try:
+                    record = check_evidence_crash_dumps(Path(root))
+                except Exception as exc:
+                    record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+                record['root'] = str(root)
+                evidence.append(record)
+            success = bool(records) and bool(evidence) and all(record['success'] for record in records + evidence)
+            result = dict(schemaVersion=1, kind='native-archive-integrity', success=success, roots=records, evidenceRoots=evidence,
+                          completeArchives=sum(record.get('completeArchives', 0) for record in records),
+                          verifiedFiles=sum(record.get('verifiedFiles', 0) for record in records),
+                          qualifiedShutdowns=sum(record.get('qualifiedShutdowns', 0) for record in records))
+            if success:
+                result['crashDumps'] = 0
+            return result
+        roots = ('.work/suite-worker-diagnostics', '.work/suite-calc-save/diagnostics',
+                 '.work/suite-calc-close/calc-close-save/diagnostics',
+                 '.work/suite-calc-close/calc-close-discard/diagnostics',
+                 '.work/suite-calc-close/calc-close-cancel/diagnostics')
+        evidence_roots = ('.work/suite-calc-save', '.work/suite-calc-close')
+        result = check_all_native_archives(roots, evidence_roots, Path(os.environ['SUITE_PACKAGE']).resolve() / 'Office/program/soffice.bin')
         result.update(sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'])
         Path('.work/suite-native-integrity.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
         print(json.dumps(result))
+        assert result['success'], 'At least one owned native diagnostics root failed integrity or graceful shutdown qualification'
     - name: 원본 GUI·엔진·IME·반복 검증 기록 보존
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-suite-evidence-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         include-hidden-files: true
         path: |
           .work/suite-engine/
           .work/suite-engine-2/
           .work/suite-native/
           .work/suite-native-2/
+          .work/suite-calc-save/
+          .work/suite-calc-close/
           .work/suite-korean-readiness/
           !.work/suite-korean-readiness/fod-source/**/*.cab
           .work/suite-korean-ime/
@@ -255,15 +435,19 @@ jobs:
           .work/suite-worker-diagnostics/
           .work/suite-native-integrity.json
           .work/office-suite/msi.msi.log
-
           .work/suite-office-features/
+          .work/e2e-fixtures/
+          .work/suite-home-routing/
+          .work/suite-pdf-export/
+          .work/source-engine-input/*.json
         retention-days: 7
         if-no-files-found: warn
         compression-level: 6
     - name: 모든 검증을 통과한 Suite 개발 패키지 전달
+      if: success() && steps.home-routes.outcome == 'success'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-office-suite-x64-${{ github.run_id }}
+        name: opengeul-office-suite-${{ matrix.architecture }}-${{ github.run_id }}
         path: ${{ env.SUITE_PACKAGE }}.zip
         retention-days: 7
         if-no-files-found: error
