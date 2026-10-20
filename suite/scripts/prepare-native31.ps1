@@ -138,9 +138,20 @@ function Get-Native31GitText([string]$Root, [string[]]$Arguments, $State) {
     return [Text.Encoding]::UTF8.GetString($result.Stdout).Trim()
 }
 function Get-Native31Identity([string]$Root, $State) {
+    $null = Assert-Native31Path $Root
+    $inside = Get-Native31GitText $Root @('rev-parse', '--is-inside-work-tree') $State
+    $prefix = Get-Native31GitText $Root @('rev-parse', '--show-prefix') $State
     $top = Get-Native31GitText $Root @('rev-parse', '--show-toplevel') $State
-    Assert-Native31 ((Assert-Native31Path $top) -ceq $Root) 'Actual Git source root differs.'
-    return @{ root=$Root; head=(Get-Native31GitText $Root @('rev-parse', 'HEAD') $State);
+    $null = Assert-Native31Path $top
+    if ($inside -cne 'true' -or $prefix -cne '') {
+        $detail = @{requestedRoot=$Root; reportedTop=$top; insideWorkTree=$inside; prefix=$prefix; valuesTruncated=$false}
+        foreach ($key in @('requestedRoot','reportedTop','insideWorkTree','prefix')) {
+            if ($detail[$key].Length -gt 1024) { $detail[$key] = $detail[$key].Substring(0,1024); $detail.valuesTruncated = $true }
+        }
+        throw ('Requested directory is not an actual Git working-tree root: ' + ($detail | ConvertTo-Json -Compress))
+    }
+    return @{ root=$Root; gitTopLevel=$top; insideWorkTree=$inside; prefix=$prefix;
+        head=(Get-Native31GitText $Root @('rev-parse', 'HEAD') $State);
         tree=(Get-Native31GitText $Root @('rev-parse', 'HEAD^{tree}') $State);
         commonDir=(Assert-Native31Path (Get-Native31GitText $Root @('rev-parse', '--path-format=absolute', '--git-common-dir') $State)) }
 }

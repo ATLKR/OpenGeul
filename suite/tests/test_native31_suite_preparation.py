@@ -4,6 +4,7 @@ import importlib.util
 import json
 import hashlib
 import shutil
+import re
 import time
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from suite.tests.test_calc_matrix_workflow import workflow_steps, field, run_code
 
 ROOT=Path(__file__).resolve().parents[2]
 ADAPTER=ROOT/'e2e/native31_suite_prepare.py'
@@ -63,21 +65,37 @@ class SuitePreparationContracts(unittest.TestCase):
             self.assertEqual(seen[0][0],'observer' if observer else 'controller');self.assertEqual(seen[0][2]['binding'],self.m.control_binding(fake))
 
     def test_new_workflow_boundary_exists_after_servicing_before_fixtures(self):
-        import yaml
-        workflow=yaml.safe_load((ROOT/'.github/workflows/office-suite.yml').read_text())
-        steps=workflow['jobs']['windows-suite']['steps']
-        preparation=next(step for step in steps if step.get('id')=='native31-privacy-prepare')
+        steps=workflow_steps()
+        preparation=next(step for step in steps if field(step,'id')=='native31-privacy-prepare')
         index=steps.index(preparation);upload=steps[index+1]
-        self.assertIn('suite-korean-readiness',steps[index-1]['with']['name'])
-        self.assertEqual(steps[index+2]['id'],'fixtures');self.assertEqual(preparation['timeout-minutes'],3)
-        self.assertIn(self.m.BRANCH,preparation['if']);self.assertNotIn('matrix.architecture',preparation['if'])
-        self.assertIn('always()',upload['if']);self.assertIn(self.m.BRANCH,upload['if'])
-        self.assertEqual(upload['with']['retention-days'],7);self.assertTrue(upload['with']['include-hidden-files'])
-        self.assertIn('suite-native31-setup-',upload['with']['path']);self.assertIn('suite-native31-privacy-preparation-',upload['with']['path'])
-        aggregate=next(step for step in steps if step.get('with',{}).get('name','').startswith('opengeul-suite-evidence-'))
-        self.assertIn('.work/suite-native31-privacy-preparation/',aggregate['with']['path'])
-        self.assertNotIn('runner.temp',aggregate['with']['path'])
+        def setting(step,name):
+            # Existing field parser applied to the nested "with" indentation.
+            return field('\n'.join(line[2:] for line in step.splitlines()),name)
+        def paths(step):
+            match=re.search(r'^        path: \|\n((?:          .*\n)+)',step,re.M)
+            self.assertIsNotNone(match,'Upload has no literal path block')
+            return match.group(1)
+        self.assertIn('suite-korean-readiness',setting(steps[index-1],'name'))
+        self.assertEqual(field(steps[index+2],'id'),'fixtures');self.assertEqual(field(preparation,'timeout-minutes'),'3')
+        self.assertIn(self.m.BRANCH,field(preparation,'if'));self.assertNotIn('matrix.architecture',field(preparation,'if'))
+        self.assertIn('always()',field(upload,'if'));self.assertIn(self.m.BRANCH,field(upload,'if'))
+        self.assertEqual(setting(upload,'retention-days'),'7');self.assertEqual(setting(upload,'include-hidden-files'),'true')
+        self.assertIn('suite-native31-setup-',paths(upload));self.assertIn('suite-native31-privacy-preparation-',paths(upload))
+        aggregate=next(step for step in steps if (setting(step,'name') or '').startswith('opengeul-suite-evidence-'))
+        self.assertIn('.work/suite-native31-privacy-preparation/',paths(aggregate))
+        self.assertNotIn('runner.temp',paths(aggregate))
 
+
+    def test_workflow_contracts_run_without_site_packages(self):
+        names = ['suite.tests.test_native31_suite_preparation.SuitePreparationContracts.test_new_workflow_boundary_exists_after_servicing_before_fixtures',
+                 'suite.tests.test_native31_suite_preparation.PowerShellPreparationContracts.test_real_workflow_command_preserves_preparation_and_staging_failures']
+        code = ("import importlib.util,sys,unittest; assert importlib.util.find_spec('yaml') is None; "
+                "suite=unittest.defaultTestLoader.loadTestsFromNames(" + repr(names) + "); "
+                "result=unittest.TextTestRunner(verbosity=2).run(suite); "
+                "sys.exit(0 if result.wasSuccessful() and result.testsRun==2 and not result.skipped else 1)")
+        run = subprocess.run([sys.executable, '-S', '-B', '-c', code], cwd=ROOT,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stdout)
 
     def test_x64_native_not_applicable_is_bound_and_imports_no_arm_module(self):
         self.env['RUNNER_ARCH']='X64'
@@ -197,6 +215,7 @@ Write-Native31Json $env:TEST_PROOF @{proof=$proof;commands=$state.Commands}
             proof=folder/'proof.json';run=self.run_script(folder,code,{'GITHUB_SHA':sha,'TEST_ROOT':str(root),'TEST_SOURCE':str(source),'TEST_SETUP':str(setup),'TEST_PROOF':str(proof)})
             self.assertEqual(run.returncode,0,run.stdout);record=json.loads(proof.read_text())
             self.assertEqual(record['proof']['action']['head'],sha);self.assertEqual(record['proof']['action']['tree'],git('rev-parse','HEAD^{tree}'))
+            self.assertEqual(len(record['commands']),41);self.assertLessEqual(len(record['commands']),64)
             self.assertFalse((source/'.work').exists());self.assertFalse((source/'dist').exists());self.assertFalse(marker.exists())
             self.assertTrue((source/'.git').is_file());self.assertEqual(git('config','core.autocrlf'),'true')
             for name,item in record['proof']['files'].items():
@@ -209,6 +228,42 @@ Write-Native31Json $env:TEST_PROOF @{proof=$proof;commands=$state.Commands}
             # Same target is rejected without a second worktree checkout.
             run=self.run_script(folder,code,{'GITHUB_SHA':sha,'TEST_ROOT':str(root),'TEST_SOURCE':str(source),'TEST_SETUP':str(setup),'TEST_PROOF':str(proof)})
             self.assertNotEqual(run.returncode,0);self.assertIn('reuse rejected',run.stdout)
+
+    def test_real_git_root_identity_accepts_spelling_and_rejects_other_roots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);root,runner,sha,git=self.repository(folder)
+            proof=folder/'identity.json'
+            code="""$state = @{Clock=[Diagnostics.Stopwatch]::StartNew();Commands=[Collections.Generic.List[object]]::new()}
+$identity = Get-Native31Identity $env:TEST_ROOT $state
+Write-Native31Json $env:TEST_PROOF @{identity=$identity;commands=$state.Commands}
+"""
+            run=self.run_script(folder,code,{'TEST_ROOT':str(root)+os.sep,'TEST_PROOF':str(proof)})
+            self.assertEqual(run.returncode,0,run.stdout);record=json.loads(proof.read_text())
+            self.assertEqual(record['identity']['head'],sha);self.assertEqual(record['identity']['root'],str(root)+os.sep)
+            self.assertEqual(record['identity']['insideWorkTree'],'true');self.assertEqual(record['identity']['prefix'],'')
+            self.assertEqual(record['identity']['gitTopLevel'],git('rev-parse','--show-toplevel'))
+            for mode in ('nested','outside','other-repository'):
+                with self.subTest(mode=mode):
+                    candidate=root/'e2e' if mode=='nested' else folder
+                    if mode=='other-repository':
+                        other=folder/'other';other.mkdir();candidate,_,_,_=self.repository(other)
+                        subprocess.run(['git','-C',str(candidate),'commit','--allow-empty','-qm','different commit'],check=True)
+                    setup=runner/(mode+'-setup');setup.mkdir();source=runner/(mode+'-source')
+                    invoke="""$state = @{Clock=[Diagnostics.Stopwatch]::StartNew();Commands=[Collections.Generic.List[object]]::new()}
+try { New-Native31Source $env:TEST_ROOT $env:TEST_SOURCE $env:TEST_SETUP $state }
+catch { Write-Native31Json $env:TEST_FAILURE @{failure=$_.Exception.Message}; throw }
+"""
+                    failure=folder/(mode+'-failure.json')
+                    rejected=self.run_script(folder,invoke,{'GITHUB_SHA':sha,'TEST_ROOT':str(candidate),'TEST_SOURCE':str(source),'TEST_SETUP':str(setup),'TEST_FAILURE':str(failure)})
+                    self.assertNotEqual(rejected.returncode,0,rejected.stdout);self.assertFalse(source.exists())
+                    self.assertIn({'nested':'working-tree root','outside':'Git setup returned failure','other-repository':'Main HEAD/tree differs'}[mode],rejected.stdout)
+                    if mode=='nested':
+                        message=json.loads(failure.read_text())['failure']
+                        detail=json.loads(message.split(': ',1)[1])
+                        self.assertEqual(detail['requestedRoot'],str(candidate))
+                        self.assertEqual(detail['reportedTop'],git('rev-parse','--show-toplevel'))
+                        self.assertEqual(detail['insideWorkTree'],'true');self.assertEqual(detail['prefix'],'e2e/')
+                        self.assertFalse(detail['valuesTruncated'])
 
     def test_source_drift_and_setup_budget_fail_before_checkout(self):
         for mode in ('drift','expired'):
@@ -250,9 +305,7 @@ Write-Native31Json $env:TEST_RECORD @{timedOut=$result.TimedOut;forced=$result.F
             self.assertTrue(value['timedOut']);self.assertTrue(value['forced']);self.assertLess(value['seconds'],3.5);self.assertIn('partial',value['stdout'])
 
     def test_real_workflow_command_preserves_preparation_and_staging_failures(self):
-        import yaml
-        workflow=yaml.safe_load((ROOT/'.github/workflows/office-suite.yml').read_text())
-        step=next(s for s in workflow['jobs']['windows-suite']['steps'] if s.get('id')=='native31-privacy-prepare')
+        step=next(s for s in workflow_steps() if field(s,'id')=='native31-privacy-prepare')
         for arch,exit_code,stage_failure in (('arm64',0,False),('arm64',7,False),('arm64',0,True),('arm64',7,True),('x64',0,False)):
             with self.subTest(arch=arch,exit=exit_code,stage=stage_failure),tempfile.TemporaryDirectory() as temp:
                 folder=Path(temp);root,runner,sha,git=self.repository(folder)
@@ -270,7 +323,7 @@ Write-Native31Json $env:TEST_RECORD @{timedOut=$result.TimedOut;forced=$result.F
                     'GITHUB_REF':self.m.BRANCH,'GITHUB_WORKFLOW_REF':self.m.WORKFLOW,'GITHUB_SHA':sha,'GITHUB_WORKFLOW_SHA':sha,
                     'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1','GITHUB_ACTOR':'ATLKR','GITHUB_ACTOR_ID':'65988341',
                     'GITHUB_EVENT_PATH':str(event),'GITHUB_WORKSPACE':str(root),'RUNNER_TEMP':str(runner)}
-                script=folder/'workflow.ps1';script.write_text("$ErrorActionPreference='Stop'\n"+step['run'].replace('${{ matrix.architecture }}',arch))
+                script=folder/'workflow.ps1';script.write_text("$ErrorActionPreference='Stop'\n"+run_code(step).replace('${{ matrix.architecture }}',arch))
                 run=subprocess.run([self.pwsh,'-NoLogo','-NoProfile','-NonInteractive','-File',str(script)],cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=45)
                 self.assertEqual(run.returncode==0,exit_code==0 and not stage_failure,run.stdout)
                 output=runner/f'suite-native31-privacy-preparation-{arch}-123-1';setup=runner/f'suite-native31-setup-{arch}-123-1'
