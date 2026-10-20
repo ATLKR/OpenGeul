@@ -41,6 +41,26 @@ function Assert-IdentitySourceInputs([string]$Commit,[string]$Tree,[string]$Even
         explicitTreeInputRequired=($EventName -ceq 'workflow_dispatch');treeCryptographicallyBoundBySourceCommit=$true}
 }
 
+function Write-IdentityGitTrustScript([string]$Script,[string]$UnixParent,[string]$UnixEvidence){
+    foreach($path in @($UnixParent,$UnixEvidence)){
+        if($path -cnotmatch '^/[A-Za-z0-9_./:-]+$'){throw 'Exact shell-safe POSIX checkout/evidence paths required for Cygwin Git trust.'}
+    }
+    Write-BashScript $Script @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',
+        'test -n "${HOME:-}"',
+        'printf ''normal-cygwin-home-path: %s\n'' "$HOME"',
+        'if [ ! -d "$HOME" ]; then /usr/bin/mkdir -p -- "$HOME"; fi',
+        "cd $(Quote-Bash $UnixEvidence)",
+        'capture() { name=$1; shift; set +e; "$@" > "$name.stdout.raw" 2> "$name.stderr.raw"; child_status=$?; set -e; printf ''{"exitCode":%s}\n'' "$child_status" > "$name.status.json"; }',
+        'capture git-trust-before /usr/bin/git config --global --show-origin --get-all safe.directory',
+        "capture git-parent-before-trust /usr/bin/git -C $(Quote-Bash $UnixParent) rev-parse HEAD",
+        "capture git-trust-add /usr/bin/git config --global --add safe.directory $(Quote-Bash $UnixParent)",
+        'test "$child_status" -eq 0',
+        'capture git-trust-after /usr/bin/git config --global --show-origin --get-all safe.directory',
+        'test "$child_status" -eq 0',
+        "capture git-parent-after-trust /usr/bin/git -C $(Quote-Bash $UnixParent) rev-parse HEAD",
+        'test "$child_status" -eq 0')
+}
+
 function New-IdentityNoGitSource([string]$Repo,[string]$Evidence){
     if(-not $env:RUNNER_TEMP -or $env:GITHUB_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:GITHUB_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$'){
         throw 'Actual runner temp/run/attempt are required for a fresh owned no-Git source.'
@@ -161,6 +181,24 @@ function Invoke-NativeIdentityControl([string]$WorkDirectory,[string]$OutputDire
         $receipt.sourceArchive=Get-AuthenticatedDownload $pin.url $archive $pin.size SHA256 $pin.sha256 (Join-Path $evidence 'source-download.json')
         $receipt.stage='authentic-fragment-generation'
         Invoke-LoggedCommand $python @('-I','-B',$helper,'render','--archive',$archive,'--source-root',$sourceRoot,'--output',$generated,'--unix-output',$converted.generated,'--unix-parent',$converted.parent,'--unix-source',$converted.source) $repo (Join-Path $evidence 'render-authentic-control') -TimeoutMinutes 3|Out-Null
+        $receipt.stage='cygwin-exact-checkout-trust'
+        $trustScript=Join-Path $commands 'cygwin-exact-checkout-trust.sh'
+        Write-IdentityGitTrustScript $trustScript $converted.parent $converted.generated
+        Copy-Item -LiteralPath $trustScript -Destination (Join-Path $evidence 'cygwin-exact-checkout-trust.sh') -ErrorAction Stop
+        $trustCommand=Invoke-CygwinScript $bash $cygpath $trustScript $work (Join-Path $evidence 'cygwin-exact-checkout-trust') -NativeLinks
+        $afterTrust=[IO.File]::ReadAllText((Join-Path $generated 'git-parent-after-trust.stdout.raw')).TrimEnd("`r","`n")
+        if($afterTrust -cne $receipt.source.sourceCommit){throw 'Cygwin Git trust does not resolve the actual bound source commit.'}
+        $origins=@()
+        foreach($line in [IO.File]::ReadAllLines((Join-Path $generated 'git-trust-after.stdout.raw'))){
+            $parts=$line -split "`t",2
+            if($parts.Count -eq 2 -and $parts[0].StartsWith('file:',[StringComparison]::Ordinal) -and $parts[1] -ceq $converted.parent){$origins+=,$parts[0]}
+        }
+        if(-not $origins.Count){throw 'Exact Cygwin checkout trust entry and actual global config origin were not observed.'}
+        $receipt.cygwinGitTrust=[ordered]@{configuredEntry=$converted.parent;observedOrigins=$origins;
+            argv=@('/usr/bin/git','config','--global','--add','safe.directory',$converted.parent);
+            scope='normal ephemeral runner global config; exact checkout spelling only';homeOverridden=$false;gitEnvironmentRedirection=$false;
+            commandReceipt=$trustCommand.receipt;rawEvidenceDirectory=$generated;sourceCommit=$afterTrust}
+        $receipt.stage='authentic-fragment-generation'
         # The generated caller and complete original fragments exist in evidence BEFORE execution.
         Invoke-CygwinScript $bash $cygpath (Join-Path $generated 'generate-control.sh') $work (Join-Path $evidence 'authentic-generation') -NativeLinks|Out-Null
         $receipt.stage='fresh-fixture-producer-contract'

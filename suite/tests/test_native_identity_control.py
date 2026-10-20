@@ -193,6 +193,49 @@ class NativeIdentityControlTests(unittest.TestCase):
         self.assertNotIn('function Invoke-LoggedCommand', controller)
 
 
+class IdentityGitTrustTests(unittest.TestCase):
+    def test_cygwin_trust_is_exact_scoped_logged_and_precedes_authentic_generation(self):
+        pwsh = shutil.which('pwsh') or '/workspace/work/opengeul-improvements/work/ime-api-review/powershell/pwsh'
+        self.assertTrue(Path(pwsh).is_file())
+        parent = '/cygdrive/c/a/OpenGeul/OpenGeul'
+        controller_path = ROOT / 'suite/scripts/probe-native-identity-control.ps1'
+        def quote(value):
+            return "'"+str(value).replace("'", "''")+"'"
+        with tempfile.TemporaryDirectory(prefix='native30-git-trust-') as owned:
+            script = Path(owned) / 'trust.sh'
+            caller = Path(owned) / 'render-trust.ps1'
+            caller.write_text("$ErrorActionPreference='Stop'\n. "+quote(controller_path)+"\nWrite-IdentityGitTrustScript "+quote(script)+' '+quote(parent)+' '+quote(parent+'/.work/evidence/generated')+'\n')
+            result = subprocess.run([pwsh, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(caller)], capture_output=True, text=True, timeout=15)
+            self.assertEqual(0, result.returncode, result.stderr)
+            text = script.read_text()
+            subprocess.run(['/bin/bash', '-n', str(script)], check=True, capture_output=True, timeout=5)
+            self.assertEqual(["capture git-trust-add /usr/bin/git config --global --add safe.directory '"+parent+"'"], [line for line in text.splitlines() if '--add safe.directory' in line])
+            self.assertEqual(2, text.count('config --global --show-origin --get-all safe.directory'))
+            self.assertIn('if [ ! -d "$HOME" ]; then /usr/bin/mkdir -p -- "$HOME"; fi', text)
+            self.assertIn('normal-cygwin-home-path:', text)
+            self.assertLess(text.index('git-parent-before-trust'), text.index('git-trust-add'))
+            self.assertLess(text.index('git-trust-add'), text.index('git-parent-after-trust'))
+            self.assertNotRegex(text, r'(?:HOME|home|CODEX_HOME|GIT_[A-Za-z_]+)=|safe\.directory\s+[\'"]?\*|git\s+init|config\s+--global\s+--list')
+            self.assertNotIn('/native30-identity-nogit-', text)
+            # Refuse wildcard and shell-unbound inputs without executing Git/config.
+            caller.write_text("$ErrorActionPreference='Stop'\n. "+quote(controller_path)+"\nforeach($bad in @('*','/cygdrive/c/a/*','/unsafe path','../relative')){try{Write-IdentityGitTrustScript "+quote(script)+" $bad '/tmp/evidence';throw 'unsafe path accepted'}catch{if($_.Exception.Message -cnotlike 'Exact shell-safe POSIX*'){throw}}}\n")
+            result = subprocess.run([pwsh, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(caller)], capture_output=True, text=True, timeout=15)
+            self.assertEqual(0, result.returncode, result.stderr)
+        controller = controller_path.read_text()
+        main = controller[controller.index('function Invoke-NativeIdentityControl'):]
+        self.assertLess(main.index('Get-SourceRunBinding'), main.index('Write-IdentityGitTrustScript $trustScript $converted.parent $converted.generated'))
+        self.assertLess(main.index('cygwin-exact-checkout-trust\') -NativeLinks'), main.index("(Join-Path $generated 'generate-control.sh')"))
+        self.assertIn('observedOrigins=$origins', main)
+        self.assertIn('sourceCommit=$afterTrust', main)
+        manifest = CONTROL.source()
+        for row in manifest['members']:
+            for fragment in row['fragments']:
+                CONTROL.check((DATA / fragment['path']).read_bytes(), fragment, fragment['path'])
+        expressions = (DATA / 'control.py').read_text()
+        self.assertIn("['git', '-C', directory, 'log', '-n', '1', '--pretty=format:%H']", expressions)
+        self.assertIn("['git', 'log', '-1', '--format=%H']", expressions)
+
+
 class IdentityBudgetRegressionTests(unittest.TestCase):
     def test_actual_budget_deadline_uses_exact_json_string_in_both_time_zones(self):
         # Exact original bytes from run39416400170/attempt1, not a rebuilt receipt.
