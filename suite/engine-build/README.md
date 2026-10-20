@@ -170,9 +170,24 @@ The automated driver selects Visual Studio 2026 ARM64 C++ tools (MSVC18/v145)
 and Windows SDK 10.0.22000 or later;
 Skia/PDFium need that SDK floor. Native compiler discovery uses
 `Hostarm64/arm64`. The driver runs `make ExternalProject_firebird`, `make firebird`,
-then `make build` for the Full phase. It audits `instdir`, stages authenticated
-native app-local CRT files, proves Base persistence, and ZIPs that installation
-tree. It does not run `make instsetoo_native` or publish an upstream MSI.
+then `make build` for the Full phase. That target also builds the upstream
+archive installation sets. The driver stages a fresh runtime from its unique
+main installed archive and the built en-US and Korean help archives, retaining
+their hashes, member mappings and identical help-file overlaps separately.
+It then binds runtime identity, stages authenticated native app-local CRT files,
+audits every product PE, checks CRT imports, proves Base persistence, and ZIPs
+that verified installation tree. It does not publish an upstream MSI.
+
+Developer `instdir` is not the distribution: upstream gbuild deliberately writes
+`invalid - merged lib` marker files for libraries incorporated in `mergedlo.dll`.
+Upstream `gb_Helper_register_libraries_for_install` filters `gb_MERGEDLIBS` out
+of the installer file list. The driver consumes that built distribution policy
+without accepting markers as executable code. Help archives contribute only
+their `help/` subtree, and differing file overlaps fail staging. Main archive
+selection follows the configured product/version and actual language output
+directory; it does not assume a single en-US installation set. Missing or
+ambiguous archives fail instead of falling back to developer `instdir`. A small
+developer `avmedialo.dll` sample is retained as build diagnosis, not qualification.
 
 The explicit archive option overrides the distro's MSI packaging default while
 retaining its Java, ODK, help, extensions and Korean-language configuration.

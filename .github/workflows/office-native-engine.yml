@@ -10,9 +10,11 @@ name: OpenGeul native ARM64 Office engine source build
       - suite/tests/test_native_python_host.py
       - suite/tests/test_native_atl_path.py
       - suite/tests/test_native_meson_path.py
+      - suite/tests/test_installed_runtime_stage.py
       - suite/tests/fixtures/native-python-host/**
       - suite/tests/fixtures/native-atl-path/**
       - suite/tests/fixtures/native-atl-consumers/**
+      - suite/tests/fixtures/native-atl-merged/**
       - suite/tests/fixtures/native-meson-path/**
       - suite/tests/fixtures/native-mdds-equality/**
       - suite/tests/fixtures/native-icu-path/**

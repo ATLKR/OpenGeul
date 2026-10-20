@@ -1199,7 +1199,16 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.stage='authenticate-all-downloaded-source-archives';Assert-NativeBuildTimeRemaining
             $receipt.externalSources=Write-ExternalSourceInventory $downloads $pinOutput.stdout (Join-Path $evidence 'external-source-inventory.json') $knownPins (Join-Path $source 'workdir/UnpackedTarball/python3') -RequirePython
             Copy-Item (Join-Path $source 'download.lst') (Join-Path $evidence 'authenticated-download.lst')
-            $instdir=Join-Path $source 'instdir'
+            $receipt.stage='stage-source-built-installed-runtime';Assert-NativeBuildTimeRemaining
+            # Developer instdir includes intentional non-PE gb_MERGEDLIBS
+            # markers. Upstream AutoInstall excludes them from distribution.
+            # Qualify the actual installed main archive plus en-US/ko help.
+            $instdir=Join-Path $work 'installed-runtime'
+            $stageHelper=Join-Path $repo 'suite/engine-build/stage_installed_runtime.py'
+            Copy-Item -LiteralPath $stageHelper -Destination (Join-Path $evidence 'stage-installed-runtime.py')
+            $staged=Invoke-LoggedCommand $python @($stageHelper,'--source-root',$source,'--destination',$instdir,'--evidence-directory',$evidence) $repo (Join-Path $evidence 'installed-runtime-stage')
+            $receipt.installedRuntimeStage=Get-Content -LiteralPath $staged.stdout -Raw|ConvertFrom-Json
+            if($receipt.installedRuntimeStage.passed -ne $true -or $receipt.installedRuntimeStage.runtimeRoot -cne $instdir) {throw 'Source-built installed runtime staging did not verify its output.'}
             $receipt.stage='bind-authenticated-runtime-build-identity';Assert-NativeBuildTimeRemaining
             $receipt.runtimeBuildIdentity=Set-RuntimeBuildIdentity $instdir $archive $pin $receipt.sourceCommit $evidence
             Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
