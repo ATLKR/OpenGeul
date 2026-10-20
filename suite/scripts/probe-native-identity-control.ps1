@@ -99,8 +99,11 @@ function Invoke-NativeIdentityControl([string]$WorkDirectory,[string]$OutputDire
         qualifiedInputArtifact=$null;historicalNative29OriginalIniBytesObserved=$false;upstreamCoreCheckoutManufactured=$false}
     try{
         if(-not $DeadlineUtc -or -not $env:OPENGEUL_IDENTITY_CONTROL_BUDGET_RECEIPT){throw 'Original first-step deadline/budget receipt required.'}
-        $budget=Get-Content -LiteralPath $env:OPENGEUL_IDENTITY_CONTROL_BUDGET_RECEIPT -Raw|ConvertFrom-Json
-        if($budget.origin -cne 'first-user-step' -or $budget.deadlineUtc -cne $DeadlineUtc -or $budget.controlMinutes -ne 15 -or $budget.jobTimeoutMinutes -ne 20 -or $budget.nominalReserveMinutes -ne 5){throw 'Original shared identity budget changed.'}
+        $budgetRaw=Get-Content -LiteralPath $env:OPENGEUL_IDENTITY_CONTROL_BUDGET_RECEIPT -Raw
+        $budget=$budgetRaw|ConvertFrom-Json
+        $budgetDocument=[System.Text.Json.JsonDocument]::Parse($budgetRaw)
+        try{$budgetDeadlineUtc=$budgetDocument.RootElement.GetProperty('deadlineUtc').GetString()}finally{$budgetDocument.Dispose()}
+        if($budget.origin -cne 'first-user-step' -or $budgetDeadlineUtc -cne $DeadlineUtc -or $budget.controlMinutes -ne 15 -or $budget.jobTimeoutMinutes -ne 20 -or $budget.nominalReserveMinutes -ne 5){throw 'Original shared identity budget changed.'}
         $script:NativeEngineBuildBudget=New-NativeBuildBudget $DeadlineUtc 15;$receipt.budget=$script:NativeEngineBuildBudget.record
         Copy-Item -LiteralPath $env:OPENGEUL_IDENTITY_CONTROL_BUDGET_RECEIPT -Destination (Join-Path $evidence 'job-budget.json') -ErrorAction Stop
         $receipt.host=Get-NativeBuildHost

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -190,6 +191,63 @@ class NativeIdentityControlTests(unittest.TestCase):
             self.assertIn(guard, controller + (DATA / 'control.py').read_text())
         self.assertNotIn('Invoke-NativeEngineBuild ', controller)
         self.assertNotIn('function Invoke-LoggedCommand', controller)
+
+
+class IdentityBudgetRegressionTests(unittest.TestCase):
+    def test_actual_budget_deadline_uses_exact_json_string_in_both_time_zones(self):
+        # Exact original bytes from run39416400170/attempt1, not a rebuilt receipt.
+        budget_raw = (
+            b'{\r\n'
+            b'  "schemaVersion": 1,\r\n'
+            b'  "origin": "first-user-step",\r\n'
+            b'  "startedUtc": "2026-10-20T11:38:41.8155116Z",\r\n'
+            b'  "deadlineUtc": "2026-10-20T11:53:41.8155116Z",\r\n'
+            b'  "controlMinutes": 15,\r\n'
+            b'  "jobTimeoutMinutes": 20,\r\n'
+            b'  "nominalReserveMinutes": 5,\r\n'
+            b'  "runnerSetupIncluded": false\r\n'
+            b'}\r\n')
+        self.assertEqual('2c48ec3f6572560ddff748022595084ea7e0c9b9d74496713e9ab9d188a45d46', hashlib.sha256(budget_raw).hexdigest())
+        deadline = json.loads(budget_raw)['deadlineUtc']
+        controller = (ROOT / 'suite/scripts/probe-native-identity-control.ps1').read_text()
+        # Execute the actual controller read/check, stopping before budget creation,
+        # host probing or any other work. The historical deadline is never renewed.
+        check = re.search(r'(?ms)^        \$budget(?:Raw)?=.*?(?=^        \$script:NativeEngineBuildBudget=)', controller)
+        self.assertIsNotNone(check, 'Actual controller budget check must be extractable')
+        block = check.group()
+        pwsh = shutil.which('pwsh') or '/workspace/work/opengeul-improvements/work/ime-api-review/powershell/pwsh'
+        self.assertTrue(Path(pwsh).is_file(), 'Existing local PowerShell required for budget regression')
+        cases = (
+            ('actual-budget', budget_raw, deadline, True),
+            ('different-deadline-tick', budget_raw, deadline.replace('8155116', '8155117'), False),
+            ('equivalent-offset-not-exact-string', budget_raw.replace(deadline.encode(), deadline[:-1].encode()+b'+00:00'), deadline, False),
+            ('nonstring-deadline', budget_raw.replace(('"'+deadline+'"').encode(), b'0'), deadline, False),
+            ('wrong-origin', budget_raw.replace(b'first-user-step', b'wrong-origin'), deadline, False),
+            ('wrong-control-minutes', budget_raw.replace(b'"controlMinutes": 15', b'"controlMinutes": 16'), deadline, False),
+            ('wrong-job-minutes', budget_raw.replace(b'"jobTimeoutMinutes": 20', b'"jobTimeoutMinutes": 21'), deadline, False),
+            ('wrong-reserve-minutes', budget_raw.replace(b'"nominalReserveMinutes": 5', b'"nominalReserveMinutes": 4'), deadline, False))
+        with tempfile.TemporaryDirectory(prefix='native30-budget-') as owned:
+            budget_path = Path(owned) / 'job-budget.json'
+            script = Path(owned) / 'actual-controller-budget-check.ps1'
+            script.write_text(
+                'param([string]$BudgetPath,[string]$DeadlineUtc)\n'
+                "$ErrorActionPreference='Stop'\n"
+                '$env:OPENGEUL_IDENTITY_CONTROL_BUDGET_RECEIPT=$BudgetPath\n'
+                '[TimeZoneInfo]::ClearCachedData()\n'
+                '$observed=Get-Content -LiteralPath $BudgetPath -Raw|ConvertFrom-Json\n'
+                'Write-Output ("parsedDeadlineType="+$observed.deadlineUtc.GetType().FullName)\n'
+                'Write-Output ("localZone="+[TimeZoneInfo]::Local.Id)\n'
+                + block + "Write-Output 'Original budget accepted.'\n")
+            for zone in ('UTC', 'America/Los_Angeles'):
+                for name, raw, expected, accepted in cases:
+                    with self.subTest(zone=zone, case=name):
+                        budget_path.write_bytes(raw)
+                        result = subprocess.run([pwsh, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script), str(budget_path), expected],
+                                                capture_output=True, text=True, timeout=15, env=dict(os.environ, TZ=zone))
+                        print('budget-regression', zone, name, 'exit='+str(result.returncode), 'checkSha256='+hashlib.sha256(block.encode()).hexdigest(), result.stdout.strip())
+                        self.assertEqual(accepted, result.returncode == 0, result.stderr)
+                        if accepted:
+                            self.assertIn('Original budget accepted.', result.stdout)
 
 
 if __name__ == '__main__':
