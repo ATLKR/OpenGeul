@@ -181,17 +181,28 @@ class PowerShellPreparationContracts(unittest.TestCase):
         if not self.pwsh:self.skipTest('PowerShell is required for actual script boundaries')
         self.m=load('suite_prepare_ps_test',ADAPTER)
 
-    def repository(self,folder):
-        root=folder/'main';root.mkdir()
-        critical=('e2e/native31_desktop_control.py','e2e/runner-ready.py','ci/policy.py',
+    def critical_fixture_files(self):
+        return ('e2e/native31_desktop_control.py','e2e/runner-ready.py','ci/policy.py',
             '.github/workflows/office-native31-desktop-control.yml','e2e/native31_privacy_prepare.py',
             '.github/workflows/office-native31-privacy-prepare.yml','suite/e2e/native_window_evidence.py',*self.m.ADDITIONAL_SOURCE_FILES)
-        for name in critical:
+
+    def assert_committed_fixture_bytes(self,root,sha):
+        for name in self.critical_fixture_files():
+            working=(root/name).read_bytes()
+            blob=subprocess.check_output(['git','-C',str(root),'show',sha+':'+name],stderr=subprocess.PIPE)
+            self.assertTrue(working==blob,
+                f'Fixture {name} working bytes differ from Git blob {sha}: '
+                f'working={len(working)}/{hashlib.sha256(working).hexdigest()} '
+                f'committed={len(blob)}/{hashlib.sha256(blob).hexdigest()}')
+
+    def repository(self,folder):
+        root=folder/'main';root.mkdir()
+        for name in self.critical_fixture_files():
             target=root/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes((ROOT/name).read_bytes())
-        (root/'.gitattributes').write_text('* text eol=lf\n');(root/'.gitignore').write_text('.work/\ndist/\n')
+        (root/'.gitattributes').write_bytes(b'* text eol=lf\n');(root/'.gitignore').write_bytes(b'.work/\ndist/\n')
         def git(*args):return subprocess.check_output(['git','-C',str(root),*args],stderr=subprocess.PIPE).decode().strip()
         git('init','-q');git('config','user.email','test@example.invalid');git('config','user.name','Native31 contract')
-        git('add','.');git('commit','-qm','fixture');sha=git('rev-parse','HEAD');git('config','core.autocrlf','true')
+        git('add','.');git('commit','-qm','fixture');sha=git('rev-parse','HEAD');self.assert_committed_fixture_bytes(root,sha);git('config','core.autocrlf','true')
         (root/'.work').mkdir();(root/'.work/engine.bin').write_bytes(b'generated engine data')
         (root/'dist').mkdir();(root/'dist/package.zip').write_bytes(b'generated package')
         temp=folder/'runner';temp.mkdir()
@@ -304,6 +315,42 @@ Write-Native31Json $env:TEST_RECORD @{timedOut=$result.TimedOut;forced=$result.F
             self.assertEqual(run.returncode,0,run.stdout);value=json.loads(record.read_text())
             self.assertTrue(value['timedOut']);self.assertTrue(value['forced']);self.assertLess(value['seconds'],3.5);self.assertIn('partial',value['stdout'])
 
+    def write_entry_stub(self,root):
+        stub=root/'e2e/native31_suite_prepare.py'
+        stub.write_bytes("import json,os,sys\nfrom pathlib import Path\na=sys.argv;out=Path(a[a.index('--output')+1]);out.mkdir();(out/'99-result.json').write_text(json.dumps({'partial':'original','success':False}));Path(os.environ['TEST_INVOCATION']).write_text(json.dumps({'argv':a[1:],'cwd':os.getcwd()}));raise SystemExit(int(os.environ['TEST_ENTRY_EXIT']))\n".encode('utf-8'))
+        return stub
+
+    def test_fixture_lf_bytes_match_git_under_windows_text_translation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);root,runner,sha,git=self.repository(folder)
+            name='e2e/native31_suite_prepare.py';stub=root/name
+            lf=stub.read_bytes();self.assertNotIn(b'\r\n',lf)
+            # Controlled negative: actual working CRLF and actual normalized Git LF.
+            stub.write_text(lf.decode('utf-8'),encoding='utf-8',newline='\r\n')
+            git('add',name);git('commit','--allow-empty','-qm','controlled CRLF fixture')
+            sha=git('rev-parse','HEAD');working=stub.read_bytes()
+            blob=subprocess.check_output(['git','-C',str(root),'show',sha+':'+name])
+            self.assertIn(b'\r\n',working);self.assertEqual(blob,lf);self.assertNotEqual(working,blob)
+            code="""$state = @{Clock=[Diagnostics.Stopwatch]::StartNew();Commands=[Collections.Generic.List[object]]::new()}
+Get-Native31SourceProof $env:TEST_ROOT $env:GITHUB_SHA $state
+"""
+            rejected=self.run_script(folder,code,{'TEST_ROOT':str(root),'GITHUB_SHA':sha})
+            self.assertNotEqual(rejected.returncode,0);self.assertIn('Critical source bytes differ from exact commit',rejected.stdout)
+            print('controlled-newline-proof '+json.dumps(dict(workingBytes=len(working),workingSha256=hashlib.sha256(working).hexdigest(),
+                blobBytes=len(blob),blobSha256=hashlib.sha256(blob).hexdigest(),workingCRLF=working.count(b'\r\n'),
+                blobCRLF=blob.count(b'\r\n'),strictGuardExit=rejected.returncode,strictGuardRejected=True)))
+            original_write_text=Path.write_text
+            def windows_write_text(path,data,*args,**kwargs):
+                if kwargs.get('newline') is None:kwargs['newline']='\r\n'
+                return original_write_text(path,data,*args,**kwargs)
+            with patch.object(Path,'write_text',windows_write_text):self.write_entry_stub(root)
+            git('add',name);git('commit','-qm','entry fixture under Windows text translation');sha=git('rev-parse','HEAD')
+            blob=subprocess.check_output(['git','-C',str(root),'show',sha+':'+name])
+            self.assertEqual(stub.read_bytes(),blob,'Committed fixture stub differs from working bytes under Windows text translation')
+            self.assertNotIn(b'\r\n',stub.read_bytes());self.assert_committed_fixture_bytes(root,sha)
+            admitted=self.run_script(folder,code,{'TEST_ROOT':str(root),'GITHUB_SHA':sha})
+            self.assertEqual(admitted.returncode,0,admitted.stdout)
+
     def test_real_workflow_command_preserves_preparation_and_staging_failures(self):
         step=next(s for s in workflow_steps() if field(s,'id')=='native31-privacy-prepare')
         for arch,exit_code,stage_failure in (('arm64',0,False),('arm64',7,False),('arm64',0,True),('arm64',7,True),('x64',0,False)):
@@ -311,9 +358,9 @@ Write-Native31Json $env:TEST_RECORD @{timedOut=$result.TimedOut;forced=$result.F
                 folder=Path(temp);root,runner,sha,git=self.repository(folder)
                 # Real PowerShell/Git/process/caller. Only the committed fixture's
                 # Python action entry is a stub, so this also runs on Windows.
-                stub=root/'e2e/native31_suite_prepare.py'
-                stub.write_text("import json,os,sys\nfrom pathlib import Path\na=sys.argv;out=Path(a[a.index('--output')+1]);out.mkdir();(out/'99-result.json').write_text(json.dumps({'partial':'original','success':False}));Path(os.environ['TEST_INVOCATION']).write_text(json.dumps({'argv':a[1:],'cwd':os.getcwd()}));raise SystemExit(int(os.environ['TEST_ENTRY_EXIT']))\n")
+                stub=self.write_entry_stub(root)
                 git('add','e2e/native31_suite_prepare.py');git('commit','-qm','native entry boundary fixture');sha=git('rev-parse','HEAD')
+                self.assert_committed_fixture_bytes(root,sha)
                 event=folder/'event.json';event.write_text(json.dumps(dict(repository=dict(full_name='ATLKR/OpenGeul',id=123,private=False),
                     sender=dict(login='ATLKR',id=65988341,type='User'),ref=self.m.BRANCH,deleted=False,after=sha)))
                 if stage_failure:(root/'.work/suite-native31-privacy-preparation').mkdir()
@@ -325,14 +372,24 @@ Write-Native31Json $env:TEST_RECORD @{timedOut=$result.TimedOut;forced=$result.F
                     'GITHUB_EVENT_PATH':str(event),'GITHUB_WORKSPACE':str(root),'RUNNER_TEMP':str(runner)}
                 script=folder/'workflow.ps1';script.write_text("$ErrorActionPreference='Stop'\n"+run_code(step).replace('${{ matrix.architecture }}',arch))
                 run=subprocess.run([self.pwsh,'-NoLogo','-NoProfile','-NonInteractive','-File',str(script)],cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=45)
-                self.assertEqual(run.returncode==0,exit_code==0 and not stage_failure,run.stdout)
+                detail=f'arch={arch}, entryExit={exit_code}, stagingFailure={stage_failure}, callerExit={run.returncode}\n{run.stdout}'
+                self.assertEqual(run.returncode==0,exit_code==0 and not stage_failure,detail)
                 output=runner/f'suite-native31-privacy-preparation-{arch}-123-1';setup=runner/f'suite-native31-setup-{arch}-123-1'
-                self.assertEqual(json.loads((output/'99-result.json').read_text())['partial'],'original')
-                invocation=json.loads((folder/'invocation.json').read_text());self.assertEqual(Path(invocation['cwd']),runner/'suite-native31-source-arm64-123-1' if arch=='arm64' else root)
+                for required in (output/'99-result.json',folder/'invocation.json',setup/'20-entry-exit.json'):
+                    self.assertTrue(required.is_file(),f'Missing required fixture evidence {required}\n{detail}')
+                self.assertEqual(json.loads((output/'99-result.json').read_text())['partial'],'original',detail)
+                entry=json.loads((setup/'20-entry-exit.json').read_text());self.assertEqual(entry['exitCode'],exit_code,detail)
+                invocation=json.loads((folder/'invocation.json').read_text())
+                expected=runner/'suite-native31-source-arm64-123-1' if arch=='arm64' else root
+                self.assertTrue(Path(invocation['cwd']).samefile(expected),
+                    f'Recorded cwd {invocation["cwd"]!r} is not expected directory {str(expected)!r}\n{detail}')
                 if arch=='x64':self.assertFalse((runner/'suite-native31-source-x64-123-1').exists())
-                if exit_code:self.assertTrue((setup/'90-caller-failure.json').exists())
+                if exit_code:self.assertTrue((setup/'90-caller-failure.json').is_file(),detail)
                 if stage_failure:
+                    self.assertTrue((setup/'99-staging-failure.json').is_file(),detail)
                     record=json.loads((setup/'99-staging-failure.json').read_text());self.assertEqual(bool(record['primaryFailure']),bool(exit_code))
-                else:self.assertEqual((root/'.work/suite-native31-privacy-preparation/control/99-result.json').read_bytes(),(output/'99-result.json').read_bytes())
+                else:
+                    staged=root/'.work/suite-native31-privacy-preparation/control/99-result.json'
+                    self.assertTrue(staged.is_file(),detail);self.assertEqual(staged.read_bytes(),(output/'99-result.json').read_bytes(),detail)
 
 if __name__=='__main__':unittest.main()
