@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "diagnosticOnly": true,
+  "archive": {
+    "filename": "libreoffice-26.8.1.1.tar.xz",
+    "url": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
+    "bytes": 302435508,
+    "sha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+    "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1"
+  },
+  "producer": {
+    "commit": "12e3db981136e63450f16f70dfb6e38bd973e419",
+    "tree": "3c98a7afea0a170594d6f7e61c162e95aa6aaf26",
+    "path": "suite/scripts/build-native-engine.ps1",
+    "bytes": 104361,
+    "sha256": "b91a49f1937eaa11ff364f107bdf532dfae1430f2cf72dbb772a328316b7df9c"
+  },
+  "consumer": {
+    "commit": "2b325a6db10e3c5d9da1296315c2351bcbf25e5b",
+    "tree": "0499ff7b00cff32fc466fbab061131f540106b5a",
+    "root": "consumer-snapshot",
+    "files": [
+      {
+        "path": "suite/prepare.py",
+        "bytes": 48059,
+        "sha256": "f8c85318fe1926e179c99fad72db29fffc7c9825873c7a8f84bafd65557721b8"
+      },
+      {
+        "path": "suite/crt.py",
+        "bytes": 6303,
+        "sha256": "7a04b4b9ac95f8310a6af9a92db480a61270d1d3a42459a387d5ef1852713b48"
+      }
+    ]
+  },
+  "members": [
+    {
+      "member": "libreoffice-26.8.1.1/configure.ac",
+      "bytes": 606697,
+      "sha256": "412040c7a2e84ab8305613b902dc5f0485f11d745e51a77969332aa058d6f31c",
+      "fragments": [
+        {
+          "path": "version-declaration.ac",
+          "physicalLfRanges": [
+            [
+              21,
+              21
+            ]
+          ],
+          "bytes": 73,
+          "sha256": "a204c0e0ff2b1c92efcbef2f47cb975c0b677124802529ebd2f6965d434c52e4"
+        }
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/instsetoo_native/CustomTarget_setup.mk",
+      "bytes": 13198,
+      "sha256": "02cadf3c97b2109bb6f50c8610e2321b95feff066bee54805322963e7b1e17d4",
+      "fragments": [
+        {
+          "path": "developer-setup.mk",
+          "physicalLfRanges": [
+            [
+              116,
+              124
+            ]
+          ],
+          "bytes": 467,
+          "sha256": "e2c8d6e7920230c25d1364bf8603d02fae412ae1ae40187efeb7c1d1fac17491"
+        },
+        {
+          "path": "developer-version.mk",
+          "physicalLfRanges": [
+            [
+              181,
+              201
+            ]
+          ],
+          "bytes": 1056,
+          "sha256": "da0d144077c5e1b3ed5374d2e0d04e8968cd81c2eb0566899835862891fed8d3"
+        }
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/scp2/source/ooo/common_brand.scp",
+      "bytes": 24296,
+      "sha256": "428e1a1c231b9eb401d946f9add3233de65602aa3e960aac2faeaa4601519871",
+      "fragments": [
+        {
+          "path": "installed-profile-items.scp",
+          "physicalLfRanges": [
+            [
+              492,
+              499
+            ],
+            [
+              788,
+              795
+            ]
+          ],
+          "bytes": 448,
+          "sha256": "67990ce431a6ba0a845a1664052423c1d8cfd7a521330a9665b64bac8045ceb2"
+        }
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/bin/modules/installer/environment.pm",
+      "bytes": 5596,
+      "sha256": "68ee146a9fd4d0e20834a4ff151d28df744f336ba77ebab3bc8ce02d031898c9",
+      "fragments": [
+        {
+          "path": "environment-build.pl",
+          "physicalLfRanges": [
+            [
+              108,
+              108
+            ]
+          ],
+          "bytes": 112,
+          "sha256": "45936e0cfa3d02cafc916ead9a0dcbad5200a9f6ab6056d9026bd6118750e119"
+        }
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/bin/modules/installer/scriptitems.pm",
+      "bytes": 83237,
+      "sha256": "6c589309914488a401df69bc32483e576b04433ad7abb0849f04cac4d5dba4f7",
+      "fragments": [
+        {
+          "path": "replace-setup-variables.pl",
+          "physicalLfRanges": [
+            [
+              599,
+              646
+            ]
+          ],
+          "bytes": 1875,
+          "sha256": "0bb1a6dbf5e4695fe43e0b324cb53c200ca45ff2bde4e0f78b2f52adeb3ee6e5"
+        }
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/bin/modules/installer/profiles.pm",
+      "bytes": 7537,
+      "sha256": "349b8e04dde9a982bd1de6e521a4943d33c76c166561a11d2d2e4e5c8bee9dc1",
+      "fragments": [
+        {
+          "path": "sorting-profile.pl",
+          "physicalLfRanges": [
+            [
+              39,
+              69
+            ]
+          ],
+          "bytes": 719,
+          "sha256": "3254bb0b53e86c287992a02aa0e341f4e37542c6f8985b4f80dd38e9253a4b33"
+        },
+        {
+          "path": "windows-lineends.pl",
+          "physicalLfRanges": [
+            [
+              121,
+              129
+            ]
+          ],
+          "bytes": 161,
+          "sha256": "ad6f7db446e187dcdf9df3ab12854a09b5a59a649157e087069259fdfbd09c0a"
+        },
+        {
+          "path": "profile-formatting-context.pl",
+          "physicalLfRanges": [
+            [
+              178,
+              211
+            ]
+          ],
+          "bytes": 1311,
+          "sha256": "4471ca0bc631d9388d22d15a8be7b3dca1a2306eb5310300c9736073e1e4cff1"
+        }
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/bin/call_installer.sh",
+      "bytes": 1412,
+      "sha256": "e7455f4f45edbafb0363ec12dc06a5f8f400b1fcbda898428a3578d362cb4e1e",
+      "fragments": [
+        {
+          "path": "installer-buildid-context.sh",
+          "physicalLfRanges": [
+            [
+              12,
+              16
+            ],
+            [
+              37,
+              47
+            ]
+          ],
+          "bytes": 573,
+          "sha256": "f8c83d3c8b8f4ddd3256350d224eb4ea25c43aa75c99ab21a94a011f07e9d044"
+        }
+      ]
+    }
+  ],
+  "boundary": "Selected authentic complete routines/Make definitions/ProfileItems and context; installed INIs are finite buildid profile fragments. Configuration is a control input derived from authentic AC_INIT, never fresh configure output. Stage maps/core/empty/mutations are fixtures, never historical Native29 bytes or full installer products."
+}
