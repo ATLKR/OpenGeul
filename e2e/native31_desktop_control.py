@@ -1,4 +1,4 @@
-"""One CI-only read-only ARM64 desktop observation; never a readiness gate.
+"""CI-only ARM64 desktop observation and explicit privacy preparation control.
 
 The controller owns only its suspended diagnostic child and descendants. Legacy
 Source/Store bindings and privacy classifier remain byte-for-byte unchanged.
@@ -25,20 +25,29 @@ import unicodedata
 ROOT = Path(__file__).resolve().parents[1]
 BRANCH = 'refs/heads/work/opengeul-office-native31-desktop-control'
 WORKFLOW = 'ATLKR/OpenGeul/.github/workflows/office-native31-desktop-control.yml@' + BRANCH
+PREPARE_BRANCH = 'refs/heads/work/opengeul-office-native31-privacy-prepare'
+PREPARE_WORKFLOW = 'ATLKR/OpenGeul/.github/workflows/office-native31-privacy-prepare.yml@' + PREPARE_BRANCH
+PREPARE_MAX_FILES = 72
 MAX_JSON = 256 * 1024
 MAX_FILES = 48
 MAX_IMAGE = 128 * 1024 * 1024
 SOURCE_FILES = ('e2e/native31_desktop_control.py', 'e2e/runner-ready.py',
-                'ci/policy.py', '.github/workflows/office-native31-desktop-control.yml')
+                'ci/policy.py', '.github/workflows/office-native31-desktop-control.yml',
+                'e2e/native31_privacy_prepare.py', '.github/workflows/office-native31-privacy-prepare.yml',
+                'suite/e2e/native_window_evidence.py')
 spec = importlib.util.spec_from_file_location('native31_legacy_classifier', ROOT / 'e2e/runner-ready.py')
 legacy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(legacy)
 require = legacy.require
 
 
-def flags():
-    return dict(readOnly=True, diagnosticOnly=True, actions=[], inputsPerformed=0,
-                readiness=False, hostReadyQualified=False, productQualified=False, productExecuted=False)
+def flags(*, prepare_privacy=False):
+    value = dict(readOnly=True, diagnosticOnly=True, actions=[], inputsPerformed=0,
+                 readiness=False, hostReadyQualified=False, productQualified=False, productExecuted=False)
+    if prepare_privacy:
+        value.update(readOnly=False, consentActions=[], privacyPreparationQualified=False,
+                     physicalTaskbarGatePassed=False, closeRequests=0, physicalPointerGateInvocations=0)
+    return value
 
 
 def error_record(exc):
@@ -172,21 +181,24 @@ def unaliased(path):
 
 
 class Evidence:
-    def __init__(self, path):
+    def __init__(self, path, *, max_files=MAX_FILES):
+        require(max_files in (MAX_FILES, PREPARE_MAX_FILES), 'Unknown evidence file bound')
         self.path = unaliased(path)
+        self.max_files = max_files
 
     @classmethod
-    def create(cls, path, runner_temp):
+    def create(cls, path, runner_temp, *, max_files=MAX_FILES):
         path, runner_temp = unaliased(path), unaliased(runner_temp)
         require(path.parent == runner_temp and runner_temp.is_dir() and not path.exists(),
                 'Output must be a fresh direct child of owned RUNNER_TEMP')
         path.mkdir()
-        return cls(path)
+        return cls(path, max_files=max_files)
 
     def write(self, name, value):
         require(re.fullmatch('[a-z0-9-]{1,64}', name), 'Invalid evidence name')
         unaliased(self.path)
-        require(len(list(self.path.iterdir())) < MAX_FILES, 'Evidence file count exceeded')
+        limit = self.max_files if self.max_files == PREPARE_MAX_FILES else min(self.max_files, MAX_FILES)
+        require(len(list(self.path.iterdir())) < limit, 'Evidence file count exceeded')
         raw = encoded_json(value)
         require(len(raw) <= MAX_JSON, 'Evidence JSON exceeds 256 KiB')
         with (self.path / (name + '.json')).open('xb') as stream:
@@ -203,27 +215,28 @@ def validate_native(native):
             'Actual native ARM64 process required')
 
 
-def validate_execution(env, event, native, platform):
+def validate_execution(env, event, native, platform, *, prepare_privacy=False):
+    branch, workflow, job = (PREPARE_BRANCH, PREPARE_WORKFLOW, 'prepare') if prepare_privacy else (BRANCH, WORKFLOW, 'observe')
     expected = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='Windows',
                     RUNNER_ARCH='ARM64', GITHUB_REPOSITORY='ATLKR/OpenGeul', GITHUB_EVENT_NAME='push',
-                    GITHUB_JOB='observe', GITHUB_REF=BRANCH, GITHUB_WORKFLOW_REF=WORKFLOW,
+                    GITHUB_JOB=job, GITHUB_REF=branch, GITHUB_WORKFLOW_REF=workflow,
                     GITHUB_RUN_ATTEMPT='1', GITHUB_ACTOR='ATLKR', GITHUB_ACTOR_ID='65988341')
     require(platform == 'nt' and all(env.get(k) == v for k, v in expected.items()), 'Exact hosted control binding required')
     source = legacy.commit_sha(env.get('GITHUB_SHA'))
     legacy.decimal(env.get('GITHUB_RUN_ID'))
     legacy.public_repository(event.get('repository'), owned=True)
     require(legacy.event_actor(event, env) == ('ATLKR', 65988341, 'User'), 'Owner actor required')
-    require(event.get('ref') == BRANCH and event.get('deleted') is False and event.get('after') == source,
+    require(event.get('ref') == branch and event.get('deleted') is False and event.get('after') == source,
             'Actual push ref/deleted/after mismatch')
     require(env.get('GITHUB_WORKFLOW_SHA') == source, 'Workflow SHA mismatch')
     validate_native(native)
     return dict(sourceCommit=source, runId=env['GITHUB_RUN_ID'],
-                runAttempt='1', repository='ATLKR/OpenGeul', workflowRef=WORKFLOW, ref=BRANCH,
-                event='push', job='observe', actor='ATLKR', actorId=65988341, actorType='User')
+                runAttempt='1', repository='ATLKR/OpenGeul', workflowRef=workflow, ref=branch,
+                event='push', job=job, actor='ATLKR', actorId=65988341, actorType='User')
 
 
-def validate_context(env, event, checkout, native, platform):
-    context = validate_execution(env, event, native, platform)
+def validate_context(env, event, checkout, native, platform, *, prepare_privacy=False):
+    context = validate_execution(env, event, native, platform, prepare_privacy=prepare_privacy)
     require(checkout.get('head') == context['sourceCommit'] and checkout.get('dirty') is False,
             'Checkout SHA or clean source mismatch')
     legacy.commit_sha(checkout.get('tree'))
@@ -307,9 +320,9 @@ def classify(observed, session, windows, *, complete, stable):
             'candidateOperationNotExecuted': candidate['operation']}
 
 
-def run_owned(owner, budget, evidence):
-    result = {**flags(), 'success': False, 'forced': False, 'timedOut': False, 'naturalExit': False}
-    evidence.write('20-observer-launch', {**flags(), 'deadlineMonotonic': budget.deadline, 'stage': 'before-create'})
+def run_owned(owner, budget, evidence, *, prepare_privacy=False):
+    result = {**flags(prepare_privacy=prepare_privacy), 'success': False, 'forced': False, 'timedOut': False, 'naturalExit': False}
+    evidence.write('20-observer-launch', {**flags(prepare_privacy=prepare_privacy), 'deadlineMonotonic': budget.deadline, 'stage': 'before-create'})
     try:
         budget.remaining(3)
         owner.create_suspended()
@@ -655,7 +668,7 @@ class OwnedObserver:
         require(not errors, 'Owned handle close failed: ' + ','.join(errors))
 
 
-def capture(probe, evidence, budget, controller):
+def capture(probe, evidence, budget, controller, *, prepare_privacy=False):
     handles = []
     primary = None
     try:
@@ -668,7 +681,7 @@ def capture(probe, evidence, budget, controller):
                 and identity['process']['createdFileTime'] == bound['createdFileTime'], 'Observer self/held identity mismatch')
         source = source_receipt(budget)
         event, digest = legacy.bounded_object(os.environ['GITHUB_EVENT_PATH'])
-        context = validate_context(os.environ, event, source, identity, os.name)
+        context = validate_context(os.environ, event, source, identity, os.name, prepare_privacy=True) if prepare_privacy else validate_context(os.environ, event, source, identity, os.name)
         require(source['files'] == controller['sourceFiles'] and digest == controller['eventSha256'], 'Observer source/event changed')
         evidence.write('32-observer-context', {**context, 'source': source, 'eventSha256': digest})
         with physical_queries(probe, evidence, '36-native-dpi'):
@@ -784,17 +797,35 @@ def capture(probe, evidence, budget, controller):
                 raise failure
 
 
+def privacy_preparation_module():
+    spec = importlib.util.spec_from_file_location('native31_privacy_preparation', ROOT / 'e2e/native31_privacy_prepare.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def observer(args):
     budget = Budget(deadline=args.deadline)
-    evidence = Evidence(args.output)
+    prepare_privacy = getattr(args, 'prepare_privacy', False)
+    evidence = Evidence(args.output, max_files=PREPARE_MAX_FILES if prepare_privacy else MAX_FILES)
     try:
         budget.remaining()
         controller, _ = legacy.bounded_object(evidence.path / '10-controller.json')
-        capture(Probe(), evidence, budget, controller)
+        probe = Probe()
+        classification = capture(probe, evidence, budget, controller, prepare_privacy=prepare_privacy)
+        if prepare_privacy:
+            privacy_preparation_module().PreparationSession(sys.modules[__name__], probe, evidence, budget, controller, classification).run()
         budget.remaining()
         return 0
     except Exception as exc:
-        evidence.write('89-observer-failure', {**flags(), 'failure': error_record(exc),
+        action_flags = flags(prepare_privacy=prepare_privacy)
+        if prepare_privacy:
+            try:
+                action_flags = privacy_preparation_module().preparation_receipt(sys.modules[__name__], evidence)
+            except Exception as receipt_error:
+                action_flags.update(inputsPerformed=None, preparationReceiptFailure=error_record(receipt_error))
+            action_flags['privacyPreparationQualified'] = False
+        evidence.write('89-observer-failure', {**action_flags, 'failure': error_record(exc),
             'timedOut': isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)),
             'forced': isinstance(exc, subprocess.TimeoutExpired)})
         return 1
@@ -815,8 +846,9 @@ def child_environment(env):
 
 def controller(args):
     budget = Budget()  # The only deadline origin, before filesystem/native/source work.
-    evidence = Evidence.create(args.output, os.environ['RUNNER_TEMP'])
-    result = {**flags(), 'success': False, 'forced': False, 'timedOut': False}
+    prepare_privacy = getattr(args, 'prepare_privacy', False)
+    evidence = Evidence.create(args.output, os.environ['RUNNER_TEMP'], max_files=PREPARE_MAX_FILES if prepare_privacy else MAX_FILES)
+    result = {**flags(prepare_privacy=prepare_privacy), 'success': False, 'forced': False, 'timedOut': False}
     evidence.write('00-start', {**result, 'deadlineMonotonic': budget.deadline, 'budgetSeconds': 120})
     try:
         require(os.name == 'nt', 'Actual Windows required')
@@ -824,7 +856,7 @@ def controller(args):
         evidence.write('01-controller-host', host)
         source_files = source_hashes()
         event, event_digest = legacy.bounded_object(os.environ['GITHUB_EVENT_PATH'])
-        context = validate_execution(os.environ, event, host, os.name)
+        context = validate_execution(os.environ, event, host, os.name, prepare_privacy=prepare_privacy)
         executable = image_receipt(sys.executable, budget)
         require(executable['peMachine'] == 0xAA64, 'Controller executable must be ARM64 PE')
         record = {**context, 'host': host, 'sourceFiles': source_files, 'executable': executable,
@@ -832,9 +864,10 @@ def controller(args):
         evidence.write('10-controller', record)
         argv = [sys.executable, '-B', str(Path(__file__).resolve()), '--observer', '--deadline', str(budget.deadline),
                 '--output', str(evidence.path)]
+        if prepare_privacy: argv.append('--prepare-privacy')
         owned = OwnedObserver(probe, child_environment(os.environ), argv, budget,
                               {'sessionId': host['sessionId'], 'executable': executable, 'sourceFiles': source_files})
-        result = run_owned(owned, budget, evidence)
+        result = run_owned(owned, budget, evidence, prepare_privacy=prepare_privacy)
         child_failure = evidence.path / '89-observer-failure.json'
         if child_failure.exists():
             failure, _ = legacy.bounded_object(child_failure)
@@ -844,7 +877,7 @@ def controller(args):
             result['forced'] = result['forced'] or failure.get('forced', False)
         if result['success']:
             child_context, _ = legacy.bounded_object(evidence.path / '32-observer-context.json')
-            result['context'] = validate_context(os.environ, event, child_context['source'], host, os.name)
+            result['context'] = validate_context(os.environ, event, child_context['source'], host, os.name, prepare_privacy=prepare_privacy)
             require(source_hashes() == source_files, 'Controller source files changed')
             classification, _ = legacy.bounded_object(evidence.path / '80-classification.json')
             require(classification.get('status') in ('privacy-match', 'privacy-absent-observed')
@@ -856,6 +889,14 @@ def controller(args):
         result['failure'] = error_record(exc)
         result['timedOut'] = result['timedOut'] or isinstance(exc, TimeoutError)
     finally:
+        if prepare_privacy:
+            try:
+                privacy_preparation_module().finalize_preparation(sys.modules[__name__], evidence, result)
+            except Exception as exc:
+                result['success'] = False
+                result['privacyPreparationQualified'] = False
+                result['preparationReceiptFailure'] = error_record(exc)
+                result['inputsPerformed'] = None
         result['remainingSeconds'] = max(0, budget.deadline - time.monotonic())
         evidence.write('99-result', result)
     return 0 if result['success'] else 1
@@ -865,6 +906,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--observer', action='store_true')
+    parser.add_argument('--prepare-privacy', action='store_true', help='Explicit separately bound privacy-only close and physical taskbar control')
     parser.add_argument('--deadline', type=float)
     args = parser.parse_args()
     require(args.observer == (args.deadline is not None), 'Observer/deadline arguments must be paired')
