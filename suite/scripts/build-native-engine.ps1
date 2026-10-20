@@ -1068,6 +1068,7 @@ try:
     record['nativeProcesses'].append(dict(native(os.getpid()),role='uno-python'))
     for phase in ('create','reopen'):
         engine=smoke.Engine(repo/'suite');engine.runtime=runtime
+        engine.cleanup_evidence['expectedEngineImage']=str(runtime/'program/soffice.bin')
         document=None
         try:
             engine.start()

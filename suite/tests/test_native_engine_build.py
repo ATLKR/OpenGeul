@@ -141,6 +141,43 @@ class NativeEngineBuildTests(unittest.TestCase):
         self.ps(f"Write-BaseProofScript {quote(probe)}")
         compile(probe.read_text(encoding='utf-8'),str(probe),'exec')
 
+    def test_generated_native_base_probe_cleanup_tracks_installed_runtime_in_both_phases(self):
+        import ast
+        from suite.e2e import engine_smoke as smoke
+        probe=self.root/'probe.py'
+        self.ps(f"Write-BaseProofScript {quote(probe)}")
+        tree=ast.parse(probe.read_text(encoding='utf-8'),str(probe))
+        loops=[node for node in ast.walk(tree) if isinstance(node,ast.For)
+               and isinstance(node.target,ast.Name) and node.target.id=='phase']
+        self.assertEqual(1,len(loops))
+        loop=loops[0]
+        phases=ast.literal_eval(loop.iter)
+        self.assertEqual(('create','reopen'),phases)
+        setup_end=next(index for index,node in enumerate(loop.body) if isinstance(node,ast.Try))
+        start=loop.body[setup_end].body[0].value
+        self.assertIsInstance(start,ast.Call)
+        self.assertEqual(('engine','start'),(start.func.value.id,start.func.attr))
+        setup=compile(ast.Module(body=loop.body[:setup_end],type_ignores=[]),str(probe),'exec')
+        runtime=self.root/'fixture-installed-runtime'
+        for phase in phases:
+            with self.subTest(phase=phase):
+                scope=dict(smoke=smoke,repo=self.root/'fixture-repo',runtime=runtime,phase=phase)
+                exec(setup,scope)
+                engine=scope['engine']
+                self.assertIsInstance(engine,smoke.Engine)
+                self.assertEqual(runtime,engine.runtime)
+                # Synthetic retained-member fixture only; no Windows process is launched.
+                member=dict(pid=42,creationTime=123,handleValue=99,
+                            image=str(runtime/'program/soffice.bin'),alive=True,exitCode=259)
+                evidence=engine.cleanup_evidence
+                evidence.update(jobHandleValue=11,gracefulQualified=True,jobEmptyVerified=True,
+                                initialMembers=[member],finalMembers=[dict(member,alive=False,exitCode=0)],
+                                finalJobPids=[],launcherExitCode=0)
+                try:
+                    self.assertIs(evidence,smoke.validate_cleanup_evidence(evidence))
+                except ValueError as exc:
+                    self.fail(str(exc))
+
     def test_recipe_explicit_native_triples_visual_studio_and_firebird_first(self):
         raw=self.ps("[pscustomobject]@{configure=@(Get-ConfigureArguments);firebird=@(Get-BuildTargets Firebird);full=@(Get-BuildTargets Full)}|ConvertTo-Json -Compress")
         data=json.loads(raw)
