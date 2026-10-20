@@ -1,0 +1,70 @@
+name: Native29 ARM64 installed runtime and merged package preflight
+'on':
+  push:
+    branches: [work/opengeul-office-native29-combined-preflight]
+    paths:
+      - .github/workflows/office-native-merged-package-control.yml
+      - suite/scripts/probe-native-merged-package-control.ps1
+      - suite/diagnostics/native-merged-package/**
+      - suite/tests/test_native_merged_package_control.py
+      - suite/scripts/build-native-engine.ps1
+      - suite/engine-build/stage_installed_runtime.py
+      - suite/tests/test_installed_runtime_stage.py
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed diagnostic source commit
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: native29-combined-preflight
+  cancel-in-progress: false
+jobs:
+  native-combined-preflight:
+    if: github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/opengeul-office-native29-combined-preflight' && (github.event_name == 'push' || inputs.source_sha == github.sha)
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Reserve evidence finalization before checkout
+        shell: pwsh
+        run: |
+          $started=[DateTime]::UtcNow
+          $deadline=$started.AddMinutes(15).ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+          $owned=Join-Path $env:RUNNER_TEMP ('native29-merged-budget-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT)
+          if(Test-Path -LiteralPath $owned){throw 'Preserve original budget namespace.'}
+          New-Item -ItemType Directory $owned|Out-Null
+          $receipt=Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;controlMinutes=15;jobTimeoutMinutes=20;nominalReserveMinutes=5;runnerSetupIncluded=$false}|ConvertTo-Json|Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
+          "OPENGEUL_MERGED_CONTROL_DEADLINE_UTC=$deadline"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_MERGED_CONTROL_BUDGET_RECEIPT=$receipt"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Observe authentic GNU make sentinel and install exclusion
+        shell: pwsh
+        run: |
+          ./suite/scripts/probe-native-merged-package-control.ps1 -DeadlineUtc $env:OPENGEUL_MERGED_CONTROL_DEADLINE_UTC
+          if(-not $?){throw 'Merged source control is incomplete; retain original diagnostics.'}
+      - name: Retain owned raw diagnostic evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native29-combined-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/native29-merged-evidence/
+            ${{ runner.temp }}/native29-merged-budget-${{ github.run_id }}-${{ github.run_attempt }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7

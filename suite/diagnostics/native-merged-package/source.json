@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "archive": {
+    "filename": "libreoffice-26.8.1.1.tar.xz",
+    "bytes": 302435508,
+    "sha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785"
+  },
+  "members": [
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/LinkTarget.mk",
+      "memberBytes": 111066,
+      "memberSha256": "075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8",
+      "fixture": "linktarget-command.mk",
+      "fixtureBytes": 1712,
+      "fixtureSha256": "9595b1f12aa8f76652c959454e39d246ceea22efea4e1d0b4dac2b8bf1834072",
+      "physicalLfRanges": [
+        [
+          887,
+          907
+        ],
+        [
+          1401,
+          1403
+        ]
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/TargetLocations.mk",
+      "memberBytes": 24547,
+      "memberSha256": "a5b0b1186c3bc5afa3a955887e14a9fdacfe7ab8dff1a40eca9de6b1767250ed",
+      "fixture": "target-location.mk",
+      "fixtureBytes": 2239,
+      "fixtureSha256": "213dc384bb7c56691e9f71f7302ed47d725150f24972ca20a92318a4efebdafe",
+      "physicalLfRanges": [
+        [
+          128,
+          147
+        ],
+        [
+          434,
+          451
+        ]
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/Library.mk",
+      "memberBytes": 16781,
+      "memberSha256": "1cab3987867b8e27fc395f1ef8145cfe6f791fa747f214aa69424e554b5e96d0",
+      "fixture": "library-runtime-name.mk",
+      "fixtureBytes": 162,
+      "fixtureSha256": "949f7d61ca8c93f4fcb219733f10aad21b6bc1fbbe7c788fdc2505697a1564f5",
+      "physicalLfRanges": [
+        [
+          196,
+          197
+        ]
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/Helper.mk",
+      "memberBytes": 14492,
+      "memberSha256": "968bb797d966c4c75b77132e25ba1e42d762943b7c2e4a43593b0bddcc4e17f9",
+      "fixture": "install-registration.mk",
+      "fixtureBytes": 1058,
+      "fixtureSha256": "4562fbf8e31c7a091172b73c309722ae0e970ac4f09bca0f5a908a0cfd4d51e8",
+      "physicalLfRanges": [
+        [
+          200,
+          210
+        ],
+        [
+          225,
+          237
+        ]
+      ]
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/extensions/pre_MergedLibsList.mk",
+      "memberBytes": 4068,
+      "memberSha256": "38ba08a3dbab8777d08ba7b44976b4f7c781b3d043e9ec7a5b6f06d6d9f6d122",
+      "fixture": "pre_MergedLibsList.mk",
+      "fixtureBytes": 4068,
+      "fixtureSha256": "38ba08a3dbab8777d08ba7b44976b4f7c781b3d043e9ec7a5b6f06d6d9f6d122",
+      "physicalLfRanges": null
+    }
+  ],
+  "boundary": "Complete authentic selected macros or complete merged list; finite fixture registry/layer/options/scheduler bindings are disclosed in generated Makefile. No actual Native28 DLL bytes or runtime proof."
+}
