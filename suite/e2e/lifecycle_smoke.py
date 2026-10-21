@@ -297,9 +297,7 @@ def picker_filename_context(api, shell_pid, dialog, field, evidence):
     assert evidence['threadId'] > 0 and evidence['fieldLive'], 'Filename native field disappeared before focus observation'
     assert evidence['fieldPid'] == shell_pid > 0 and evidence['fieldRoot'] == dialog, 'Filename ownership changed before native text observation'
     assert evidence['fieldClass'] == 'Edit', 'Filename stopped being a standard native Edit'
-    info = native.GuiThreadInfo(cbSize=ctypes.sizeof(native.GuiThreadInfo))
-    if not api.user.GetGUIThreadInfo(evidence['threadId'], ctypes.byref(info)):
-        raise OSError(getattr(ctypes, 'get_last_error', lambda: 0)(), 'GetGUIThreadInfo for owned filename field failed')
+    info = api.query_gui_thread_info(evidence['threadId'])
     foreground = int(api.user.GetForegroundWindow() or 0)
     evidence.update(activeHwnd=int(info.hwndActive or 0), focusHwnd=int(info.hwndFocus or 0),
                     captureHwnd=int(info.hwndCapture or 0), menuOwnerHwnd=int(info.hwndMenuOwner or 0),
@@ -829,13 +827,12 @@ class Case:
                     lambda: native.click_owned_editor(self.api,self.process,hwnd,attachments[0]['parent'],child,attachments[0]['officePid'],self.record),
                     lambda: shortcuts.press('CTRL_F6'),seconds=min(entry_deadline,context.deadline)-time.monotonic())
                 shortcuts.editor_ready(self.record['editorFocusReadiness'])
-                self.api.require_editor_focus(hwnd, child)
+                # Each following phase performs its own fresh original-bound
+                # focus/capture guard within this existing model deadline.
                 shortcuts.press('CTRL_END')
-                self.api.require_editor_focus(hwnd, child)
                 typed=native.ascii_input.type_ascii(self.api, hwnd, child, marker, self.record, pause=0.025,deadline=shortcuts.deadline,
                     original_popen=self.process,native_binding=shortcuts.binding,prepared_library=self.prepared_library)
                 shortcuts.typed(typed)
-                self.api.require_editor_focus(hwnd, child)
                 shortcuts.complete_model(context,plan)
         except BaseException as exc:
             context.abort(exc)

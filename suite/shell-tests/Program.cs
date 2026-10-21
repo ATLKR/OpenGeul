@@ -36,6 +36,7 @@ if (args.Contains("--fake-worker"))
 var tests = new List<(string Name, Func<Task> Run)>();
 tests.AddRange(OwnedEditorFocusTests.Cases());
 tests.AddRange(OwnedDocumentMenuFocusTests.Cases());
+tests.AddRange(StandaloneSaveCloseIntentTests.Cases());
 void Test(string name, Action action) => tests.Add((name, () => { action(); return Task.CompletedTask; }));
 void AsyncTest(string name, Func<Task> action) => tests.Add((name, action));
 void Equal<T>(T expected, T actual)

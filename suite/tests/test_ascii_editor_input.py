@@ -360,7 +360,11 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
             native_binding=dict(shellPid=77,officePid=88,suiteHwnd=11,parentHwnd=12,childHwnd=22),prepared_library=case.prepared_library)
         self.assertEqual([call.args[0] for call in send_keys.call_args_list], ['^{F6}', '^{END}'])
         self.assertEqual(case.record['stage'], 'physical-editor-input')
-        self.assertGreaterEqual(len(case.api.focus_checks), 3)
+        # This boundary mocks session/ASCII guards. The real guarded phase
+        # regressions in test_lifecycle_post_shortcut cover current native drift.
+        self.assertEqual(case.api.focus_checks, [])
+        completion.complete.assert_called_once()
+        completion.abort.assert_not_called()
 
     def test_general_gui_routes_three_exact_markers_with_original_pacing_and_keeps_save_checks(self):
         native = load_sibling('windows_smoke')

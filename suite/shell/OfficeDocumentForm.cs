@@ -19,6 +19,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly bool closeDiagnostics = CloseDiagnosticsEnabled();
     private readonly SaveDiagnosticsTrace saveDiagnostics = new("suite.documentSave");
     private readonly SaveDiagnosticsTrace editorFocusDiagnostics = new("suite.editorFocus");
+    private readonly StandaloneSaveCloseIntent saveCloseIntent = new();
     private OwnedEditorFocus? editorFocus;
     private nint editorFocusFormHwnd, editorFocusPanelHwnd;
     private readonly int uiThreadId = Environment.CurrentManagedThreadId;
@@ -250,6 +251,19 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 guard = !attached ? "notAttached" : worker is null ? "workerMissing" : loading ? "loading" : "busy" });
             return false;
         }
+        var saveWorker = worker;
+        var saveHwnd = IsHandleCreated ? Handle : 0;
+        return await saveCloseIntent.RunAsync(saveWorker, closing,
+            () => SaveDocumentCoreAsync(saveAs, commandSequence, saveWorker),
+            () => worker,
+            () => Environment.CurrentManagedThreadId == uiThreadId && saveHwnd != 0 &&
+                !IsDisposed && !Disposing && IsHandleCreated && Handle == saveHwnd &&
+                attached && !loading && !busy && !closing && !closeApproved,
+            async () => { TraceClose("requestClose.deferredSave"); await RequestCloseAsync(); });
+    }
+
+    private async Task<bool> SaveDocumentCoreAsync(bool saveAs, long? commandSequence, WorkerClient saveWorker)
+    {
         busy = true;
         EnableSave(false);
         try
@@ -277,7 +291,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             var request = new Dictionary<string, object>();
             if (target is not null) { request["path"] = target; request["filter"] = filter!; }
             TraceSave("save.workerRequest", new { commandSequence });
-            var result = await worker.SendAsync("save", request, diagnosticCommandSequence: commandSequence);
+            var result = await saveWorker.SendAsync("save", request, diagnosticCommandSequence: commandSequence);
             if (target is not null) path = target;
             ApplyStatus(result);
             TraceSave("save.end", new { commandSequence, ok = true });
@@ -336,7 +350,16 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         TraceClose("requestClose.enter");
         if (IsDisposed || closeApproved) { TraceClose("requestClose.guarded", new { guard = "disposedOrApproved" }); return true; }
         if (closing) { TraceClose("requestClose.guarded", new { guard = "closing" }); return false; }
-        if (loading || busy) { TraceClose("requestClose.guarded", new { guard = "loadingOrBusy" }); SetStatus("진행 중인 문서 작업이 끝난 후 다시 닫아 주세요."); return false; }
+        if (loading) { TraceClose("requestClose.guarded", new { guard = "loadingOrBusy" }); SetStatus("진행 중인 문서 작업이 끝난 후 다시 닫아 주세요."); return false; }
+        if (Disposing) { TraceClose("requestClose.guarded", new { guard = "disposing" }); return false; }
+        if (busy)
+        {
+            var deferred = Environment.CurrentManagedThreadId == uiThreadId && IsHandleCreated &&
+                worker is not null && saveCloseIntent.RequestClose(worker);
+            TraceClose("requestClose.guarded", new { guard = deferred ? "standaloneSaveDeferred" : "loadingOrBusy" });
+            if (!deferred) SetStatus("진행 중인 문서 작업이 끝난 후 다시 닫아 주세요.");
+            return false;
+        }
         closing = true;
         resizeTimer.Stop(); statusTimer.Stop(); EnableSave(false);
         try
@@ -443,7 +466,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) ReleaseEditorFocus();
+        if (disposing) { saveCloseIntent.Invalidate(); ReleaseEditorFocus(); }
         base.Dispose(disposing);
     }
 
@@ -498,6 +521,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     private async Task ReleaseWorkerAsync()
     {
+        saveCloseIntent.Invalidate();
         ReleaseEditorFocus();
         var ownedWorker = worker;
         worker = null;

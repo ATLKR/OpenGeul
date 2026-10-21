@@ -200,6 +200,14 @@ class Windows:
         self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         return pid.value
 
+    def query_gui_thread_info(self, thread):
+        """Use the structure type belonging to this API instance's prototype."""
+        assert type(thread) is int and 0 < thread < 2**32, 'Owned native input thread must be a positive DWORD'
+        info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
+        if not self.user.GetGUIThreadInfo(thread, ctypes.byref(info)):
+            raise OSError(getattr(ctypes, 'get_last_error', lambda: 0)(), 'GetGUIThreadInfo for owned filename field failed')
+        return info
+
     def request_close(self, hwnd, shell_pid):
         assert self.user.IsWindow(hwnd), 'Close target is not a live window'
         assert self.pid(hwnd) == shell_pid, 'Close target belongs to a different process'
