@@ -91,6 +91,7 @@ def snapshot_scripts(preparation, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--architecture', choices=('x64', 'arm64'), required=True)
+    parser.add_argument('--compiler-mode', choices=('msvc', 'clang-lld'), default='clang-lld')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     assert os.name == 'nt', 'Native Windows diagnosis only'
@@ -99,7 +100,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     repository = Path(__file__).resolve().parents[2]
     e2e = repository / 'suite/e2e'
-    sources = [Path(__file__).resolve(), repository / 'suite/scripts/vsceip_policy.py', e2e / 'ascii_message_preparation.py',
+    sources = [Path(__file__).resolve(), e2e / 'native_compiler_tools.py', e2e / 'ascii_message_preparation.py',
                e2e / 'ascii_message_observer.cpp', e2e / 'ascii_message_protocol.h',
                e2e / 'native_suite_architecture.py', repository / 'suite/worker/native_windows.py']
     source_before = {str(path.relative_to(repository)): pin(path) for path in sources}
@@ -107,17 +108,13 @@ def main():
     assert re.fullmatch('[0-9a-f]{40}', source_commit)
     result = dict(kind='one-native-compiler-preparation-diagnosis', sourceCommit=source_commit,
                   runId=os.environ.get('GITHUB_RUN_ID'), attempt=os.environ.get('GITHUB_RUN_ATTEMPT'),
-                  architecture=args.architecture, python=sys.version, pythonExecutable=sys.executable,
+                  architecture=args.architecture, compilerMode=args.compiler_mode, python=sys.version, pythonExecutable=sys.executable,
                   sourceBefore=source_before, success=False, officePackageQualified=False)
     preparation = output / 'preparation'
     try:
         sys.path.insert(0, str(e2e))
         from ascii_message_preparation import prepare_observer
-        from vsceip_policy import temporary_vs_opt_out
-        result['vsceipPolicy'] = {}
-        with temporary_vs_opt_out(output, result['vsceipPolicy']):
-            descriptor = prepare_observer(preparation, architecture=args.architecture)
-        result['descriptor'] = descriptor
+        result['descriptor'] = prepare_observer(preparation, architecture=args.architecture, compiler_mode=args.compiler_mode)
         result['success'] = True
     except BaseException as exc:
         result['error'] = dict(type=type(exc).__name__, message=str(exc), traceback=traceback.format_exc())

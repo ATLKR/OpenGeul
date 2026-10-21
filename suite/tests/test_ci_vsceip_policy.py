@@ -1,6 +1,5 @@
 """Portable registry-boundary tests; never change the machine registry."""
 import importlib.util
-from contextlib import contextmanager
 import json
 from pathlib import Path
 import sys
@@ -218,25 +217,18 @@ class TemporaryPolicyTests(unittest.TestCase):
             with self.context(): pass
         self.assertFalse(self.receipt['restoredAndVerified'])
 
-    def run_driver(self, fail_restore):
+    def run_driver(self, fail_prepare):
         path = HELPER.parent / 'diagnose-ascii-preparation.py'
         spec = importlib.util.spec_from_file_location('ci_policy_driver_under_test', path)
         driver = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(driver)
         calls = []
         def prepare(*args, **kwargs):
-            calls.append('prepare')
+            calls.append(('prepare', kwargs.get('compiler_mode')))
+            if fail_prepare: raise RuntimeError('original preparation failed')
             return dict(fakeDescriptor=True)
-        @contextmanager
         def policy(output, receipt):
-            calls.append('setup')
-            receipt['appliedAndVerified'] = True
-            try:
-                yield receipt
-            finally:
-                calls.append('restore')
-                receipt['restoredAndVerified'] = not fail_restore
-                if fail_restore: raise OSError('restore failed after preparation')
+            self.fail('Failed policy experiment must not run in the LLVM probe')
         target = self.output / 'driver'
         original_path = list(sys.path)
         try:
@@ -250,21 +242,22 @@ class TemporaryPolicyTests(unittest.TestCase):
             sys.path[:] = original_path
         return code, calls, json.loads((target / 'diagnosis.json').read_bytes())
 
-    def test_driver_success_follows_restore_and_binds_all_seven_sources(self):
+    def test_driver_selects_llvm_without_policy_and_binds_all_seven_sources(self):
         code, calls, result = self.run_driver(False)
-        self.assertEqual((code, calls), (0, ['setup', 'prepare', 'restore']))
+        self.assertEqual((code, calls), (0, [('prepare', 'clang-lld')]))
         self.assertTrue(result['success'])
-        self.assertTrue(result['vsceipPolicy']['restoredAndVerified'])
+        self.assertNotIn('vsceipPolicy', result)
+        self.assertEqual(result['compilerMode'], 'clang-lld')
         self.assertEqual(len(result['sourceBefore']), 7)
-        self.assertIn('suite/scripts/vsceip_policy.py', {name.replace('\\', '/') for name in result['sourceBefore']})
+        self.assertIn('suite/e2e/native_compiler_tools.py', {name.replace('\\', '/') for name in result['sourceBefore']})
         self.assertEqual(result['sourceBefore'], result['sourceAfter'])
 
-    def test_driver_does_not_admit_descriptor_if_context_restoration_fails(self):
+    def test_driver_preserves_failed_llvm_preparation_without_policy(self):
         code, calls, result = self.run_driver(True)
-        self.assertEqual((code, calls), (1, ['setup', 'prepare', 'restore']))
+        self.assertEqual((code, calls), (1, [('prepare', 'clang-lld')]))
         self.assertFalse(result['success'])
         self.assertNotIn('descriptor', result)
-        self.assertIn('restore failed', result['error']['message'])
+        self.assertEqual(result['error']['message'], 'original preparation failed')
 
 
 if __name__ == '__main__':

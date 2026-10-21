@@ -276,9 +276,10 @@ def _write_json(path, value):
         os.fsync(stream.fileno())
 
 
-def prepare_observer(output_folder, *, architecture):
+def prepare_observer(output_folder, *, architecture, compiler_mode='msvc'):
     budget = _Budget()
     architecture = native_arch.require_architecture(architecture)
+    assert compiler_mode in ('msvc', 'clang-lld'), 'Unknown observer compiler mode'
     folder = _absolute(output_folder)
     folder.mkdir(parents=True, exist_ok=False)
     receipt = dict(schemaVersion=1, kind='ascii-message-observer-preparation', architecture=architecture,
@@ -312,14 +313,36 @@ def prepare_observer(output_folder, *, architecture):
         assert vcvars.is_file(), 'Native C++ compiler environment unavailable'
         library = folder / 'ascii-message-observer.dll'
         compile_script = folder / 'compile.cmd'
-        compile_script.write_text('@echo off\nset "VSCMD_SKIP_SENDTELEMETRY=1"\ncall "%~1"' + (' arm64' if architecture == 'arm64' else ' x64')
-            + ' >"%~2" 2>&1\nif errorlevel 1 exit /b 1\n'
-            + 'cl.exe /nologo /LD /O2 /MT /EHsc /std:c++17 /W4 /utf-8 "%~3" /link /MACHINE:'
-            + ('ARM64' if architecture == 'arm64' else 'X64')
-            + ' /OUT:"%~4" user32.lib kernel32.lib >"%~5" 2>"%~6"\nexit /b %errorlevel%\n', encoding='ascii')
+        tool_arguments = []
+        if compiler_mode == 'clang-lld':
+            from native_compiler_tools import pin_native_tool
+            llvm = _absolute(Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'LLVM/bin')
+            tool_arguments = [llvm / name for name in ('clang-cl.exe', 'lld-link.exe')]
+            receipt['compiler'] = dict(mode='clang-lld', before={}, after={})
+            for tool in tool_arguments:
+                receipt['compiler']['before'][tool.name] = pin_native_tool(tool, architecture, check=budget.now)
+            target = 'aarch64-pc-windows-msvc' if architecture == 'arm64' else 'x86_64-pc-windows-msvc'
+            compile_script.write_text('@echo off\nset "VSCMD_SKIP_SENDTELEMETRY=1"\ncall "%~1"'
+                + (' arm64' if architecture == 'arm64' else ' x64')
+                + ' >"%~2" 2>&1\nif errorlevel 1 exit /b 1\n'
+                + '"%~7" --target=' + target + ' /nologo /c /O2 /MT /EHsc /std:c++17 /W4 /utf-8 "%~3"'
+                + ' /Foascii_message_observer.obj >"%~5" 2>"%~6"\nif errorlevel 1 exit /b 1\n'
+                + '"%~8" /NOLOGO /DLL /MACHINE:' + ('ARM64' if architecture == 'arm64' else 'X64')
+                + ' /OUT:"%~4" /IMPLIB:ascii_message_observer.lib ascii_message_observer.obj user32.lib kernel32.lib'
+                + ' >>"%~5" 2>>"%~6"\nexit /b %errorlevel%\n', encoding='ascii')
+        else:
+            compile_script.write_text('@echo off\nset "VSCMD_SKIP_SENDTELEMETRY=1"\ncall "%~1"' + (' arm64' if architecture == 'arm64' else ' x64')
+                + ' >"%~2" 2>&1\nif errorlevel 1 exit /b 1\n'
+                + 'cl.exe /nologo /LD /O2 /MT /EHsc /std:c++17 /W4 /utf-8 "%~3" /link /MACHINE:'
+                + ('ARM64' if architecture == 'arm64' else 'X64')
+                + ' /OUT:"%~4" user32.lib kernel32.lib >"%~5" 2>"%~6"\nexit /b %errorlevel%\n', encoding='ascii')
         _run_stage(runtime, folder, 'compile', compile_script, budget, receipt,
                    [vcvars, folder / 'environment.log', folder / SOURCES[0], library,
-                    folder / 'compiler.stdout', folder / 'compiler.stderr'])
+                    folder / 'compiler.stdout', folder / 'compiler.stderr', *tool_arguments])
+        if tool_arguments:
+            for tool in tool_arguments:
+                receipt['compiler']['after'][tool.name] = pin_native_tool(tool, architecture, check=budget.now)
+            assert receipt['compiler']['before'] == receipt['compiler']['after'], 'Native compiler tools changed during preparation'
         native_arch.require_native_pe(library, architecture)
         receipt['library'] = dict(path=str(library), **_pin(library))
         for name in SOURCES:
@@ -341,6 +364,7 @@ def prepare_observer(output_folder, *, architecture):
     descriptor = dict(schemaVersion=1, kind='prepared-ascii-message-observer', architecture=architecture,
                 sourcePins=receipt['sourcePins'], library=receipt['library'],
                 preparationReceipt=dict(path=str(receipt_path), **_pin(receipt_path)))
+    if 'compiler' in receipt: descriptor['compiler'] = receipt['compiler']
     budget.now(cleanup=True)
     return descriptor
 
@@ -362,6 +386,14 @@ def require_prepared_library(descriptor, *, architecture=None):
         ('ascii-message-observer-preparation', 1, selected, True)
     assert type(receipt['schemaVersion']) is int and receipt['success'] is True and receipt['library'] == descriptor['library']
     assert receipt['sourcePins'] == descriptor['sourcePins'] and set(receipt['sourcePins']) == set(SOURCES)
+    if 'compiler' in receipt or 'compiler' in descriptor:
+        from native_compiler_tools import validate_tool_pin
+        compiler = receipt['compiler']
+        assert compiler == descriptor['compiler'] and set(compiler) == {'mode', 'before', 'after'}
+        assert compiler['mode'] == 'clang-lld' and compiler['before'] == compiler['after']
+        assert set(compiler['before']) == {'clang-cl.exe', 'lld-link.exe'}
+        for name, value in compiler['before'].items(): validate_tool_pin(value, selected, name)
+        assert receipt['stages'][1]['command'][-2:] == [compiler['before'][name]['path'] for name in ('clang-cl.exe', 'lld-link.exe')]
     native_arch.validate_native_architecture(receipt['nativeArchitecture'], selected)
     times = [receipt[key] for key in ('startedAt', 'finishedAt', 'workDeadline', 'deadline')]
     assert all(type(value) in (int, float) and math.isfinite(value) for value in times)
