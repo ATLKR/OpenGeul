@@ -406,7 +406,11 @@ class OriginalUsAdmissionTests(unittest.TestCase):
 
 class CoherentDiagnosticFocusTests(unittest.TestCase):
     def test_ready_snapshot_uses_pure_replay_without_second_query(self):
-        row={'before':{'editor':{'threadId':7}}};record={}
+        row={'before':{'editor':{'threadId':7}}};started=diag.time.monotonic()
+        record={'editorFocusReadiness':dict(schemaVersion=1,kind='owned-editor-focus-readiness',
+            ready=False,suiteHwnd=10,childHwnd=30,shellPid=1,officePid=2,clickAttempts=1,clickCompleted=True,
+            controlF6Attempts=0,controlF6Completed=False,startedAt=started,deadline=started+5,deadlineSeconds=5,
+            deadlineScope='editor-setup-and-focus')}
         api=SimpleNamespace(editor_focus_snapshot=lambda *a:row,
             require_editor_focus=lambda *a:(_ for _ in ()).throw(AssertionError('unjoined query')))
         with patch.object(diag.native,'_editor_focus_snapshot_ready',return_value=40) as replay:

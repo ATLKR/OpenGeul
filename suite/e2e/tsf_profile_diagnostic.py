@@ -9,6 +9,7 @@ import ctypes
 from ctypes import wintypes as W
 import hashlib
 import json
+import math
 import mmap
 import os
 from pathlib import Path
@@ -468,10 +469,40 @@ def retained_exit(probe, original, handle):
     return row
 
 
+def prepare_diagnostic_editor_focus(api, process, root, parent, child, office_pid, record, setup_deadline):
+    """One measured click and passive focus query, without Ctrl+F6 readiness."""
+    assert 'editorFocusReadiness' not in record, 'Diagnostic editor entry cannot be repeated'
+    started = time.monotonic()
+    assert type(setup_deadline) in (int, float) and math.isfinite(setup_deadline)
+    seconds = min(5, setup_deadline-started)
+    assert seconds > 0, 'Diagnostic editor entry deadline expired'
+    deadline = started + seconds
+    assert deadline <= setup_deadline
+    pending = record['editorFocusReadiness'] = dict(schemaVersion=1, kind='owned-editor-focus-readiness',
+        ready=False, suiteHwnd=root, childHwnd=child, shellPid=process.pid, officePid=office_pid,
+        startedAt=started, deadline=deadline, deadlineSeconds=seconds, deadlineScope='editor-setup-and-focus',
+        snapshots=[], clickAttempts=0, clickCompleted=False, controlF6Attempts=0, controlF6Completed=False)
+    record.setdefault('editorFocusReadinessRecords', []).append(pending)
+    assert time.monotonic() < deadline, 'Diagnostic editor entry deadline expired'
+    pending['clickAttempts'] = 1  # Callback intent; the shared click records actual native attempts.
+    native.click_owned_editor(api, process, root, parent, child, office_pid, record)
+    pending['clickCompleted'] = True
+    assert time.monotonic() < deadline, 'Diagnostic editor click exceeded the original entry deadline'
+    return wait_click_focus(api, root, child, process.pid, office_pid, record, setup_deadline)
+
+
 def wait_click_focus(api, root, child, shell_pid, office_pid, record, setup_deadline):
     # A diagnostic-only passive query after the one counted click; no Ctrl+F6 claim.
-    started = time.monotonic()
-    deadline = started + remaining_setup(setup_deadline, 5)
+    pending = record['editorFocusReadiness']
+    assert pending['schemaVersion'] == 1 and pending['kind'] == 'owned-editor-focus-readiness'
+    assert (pending['suiteHwnd'], pending['childHwnd'], pending['shellPid'], pending['officePid']) == (root, child, shell_pid, office_pid)
+    assert pending['ready'] is False and pending['clickAttempts'] == 1 and pending['clickCompleted'] is True
+    assert pending['controlF6Attempts'] == 0 and pending['controlF6Completed'] is False
+    started, deadline, seconds = (pending[key] for key in ('startedAt', 'deadline', 'deadlineSeconds'))
+    assert all(type(value) in (int, float) and math.isfinite(value) for value in (started, deadline, seconds))
+    assert pending['deadlineScope'] == 'editor-setup-and-focus' and 0 < seconds <= 5
+    assert deadline == started+seconds and deadline <= setup_deadline
+    assert started <= time.monotonic() < deadline, 'Diagnostic passive focus entry deadline expired'
     rows = []
     evidence = record['diagnosticFocusReadiness'] = dict(kind='diagnostic-click-only-focus',
         startedAt=started, deadline=deadline, snapshots=rows, ready=False, keyboardInputs=0)
@@ -487,8 +518,9 @@ def wait_click_focus(api, root, child, shell_pid, office_pid, record, setup_dead
         if focus:
             assert type(focus) is int and focus > 0
             assert native._editor_focus_snapshot_ready(row, root, child, shell_pid, office_pid, tid) == focus
-            assert time.monotonic() < deadline
-            evidence.update(ready=True, focusHwnd=focus, editorThreadId=tid)
+            finished = time.monotonic()
+            assert started <= finished < deadline, 'Diagnostic passive focus exceeded the original entry deadline'
+            evidence.update(ready=True, focusHwnd=focus, editorThreadId=tid, finishedAt=finished)
             return focus
         time.sleep(min(.05, max(0, deadline-time.monotonic())))
     raise AssertionError('Diagnostic click did not establish exact owned child focus')
@@ -614,6 +646,37 @@ def run_roundtrip(observer, guard, record, setup_deadline):
     assert observer.profile_restored, 'Diagnostic original profile/HKL restoration failed'
 
 
+def close_generated_diagnostic_copy(api, process, hwnd, child, record, proof, lease):
+    """Use the existing prompt-required generated-copy Discard authorization."""
+    started = time.monotonic()
+    evidence = record['diagnosticDocumentClose'] = dict(kind='prompt-required-generated-copy-discard',
+        startedAt=started, deadline=lease.deadline if lease is not None else None,
+        phaseLimitsSeconds=dict(promptReadinessFocus=20, dialogGone=20, rootGone=20, childGone=10),
+        maximumSequentialDeclaredSeconds=70, cleanDirectCloseSupported=False,
+        delegateAttempted=False, complete=False)
+    try:
+        assert lease is not None and lease.handle is not None, 'Original diagnostic engine lease is required for close'
+        def budget(): assert time.monotonic() < lease.deadline, 'Diagnostic original lifetime deadline expired during generated-copy close'
+        budget()
+        evidence['originalShell'] = lease.probe.process_snapshot(process)
+        budget()
+        assert evidence['originalShell'] == lease.shell, 'Original diagnostic shell generation changed before close'
+        evidence['originalEngine'] = lease.probe.engine_snapshot(lease.handle)
+        budget()
+        assert evidence['originalEngine'] == lease.engine, 'Original diagnostic engine generation changed before close'
+        assert record['windowHwnd'] == hwnd and record['childHwnd'] == child and record['shellPid'] == process.pid
+        assert record['officePid'] == lease.engine['pid']
+        evidence['delegateAttempted'] = True
+        native.close_document(api, process, hwnd, child, record, calc_close_proof=proof)
+        finished = time.monotonic()
+        assert started <= finished < lease.deadline, 'Diagnostic original lifetime deadline expired during generated-copy close'
+        evidence.update(complete=True, finishedAt=finished)
+        return evidence
+    except BaseException as exc:
+        evidence['error'] = _error(exc)
+        raise
+
+
 def close_clean_diagnostic_copy(api, process, hwnd, child, record, proof, lease, *, clock=time.monotonic, pause=time.sleep):
     """One normal close for this no-input copy; an unexpected modal is a failure."""
     from generated_calc_close import verify_saved_calc_copy
@@ -697,8 +760,7 @@ def case(suite, fixtures, output, readiness):
         record['setupBudget'] = dict(startedAt=started, deadline=setup_deadline, seconds=60)
         lease = EngineLease(api, process, suite, hwnd, parent, child, pid, started+180)
         record['retainedEngine'] = lease.record
-        native.click_owned_editor(api, process, hwnd, parent, child, pid, record)
-        focus = wait_click_focus(api, hwnd, child, process.pid, pid, record, setup_deadline)
+        focus = prepare_diagnostic_editor_focus(api, process, hwnd, parent, child, pid, record, setup_deadline)
         lease.focus = focus
         assert int(api.user.GetWindowThreadProcessId(focus, None)) == lease.tid
         record['attachments'].append(dict(officePid=pid, officeCreationTime=lease.engine['creationTime'], officeImage=lease.engine['image']))
@@ -717,7 +779,7 @@ def case(suite, fixtures, output, readiness):
             except BaseException as exc: record['cleanupErrors'].append(_error(exc))
         # Always attempt the original generated-copy normal close. No taskkill/Job termination.
         try:
-            if hwnd and api.user.IsWindow(hwnd): close_clean_diagnostic_copy(api, process, hwnd, child, record, proof, lease)
+            if hwnd and api.user.IsWindow(hwnd): close_generated_diagnostic_copy(api, process, hwnd, child, record, proof, lease)
             if process.poll() is None: native.close_home(api, process, record)
             assert process.poll() == 0, 'Original diagnostic shell did not exit zero'
             if lease is not None: lease.retire()
