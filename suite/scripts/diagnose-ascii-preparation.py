@@ -99,7 +99,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     repository = Path(__file__).resolve().parents[2]
     e2e = repository / 'suite/e2e'
-    sources = [Path(__file__).resolve(), e2e / 'ascii_message_preparation.py',
+    sources = [Path(__file__).resolve(), repository / 'suite/scripts/vsceip_policy.py', e2e / 'ascii_message_preparation.py',
                e2e / 'ascii_message_observer.cpp', e2e / 'ascii_message_protocol.h',
                e2e / 'native_suite_architecture.py', repository / 'suite/worker/native_windows.py']
     source_before = {str(path.relative_to(repository)): pin(path) for path in sources}
@@ -113,7 +113,11 @@ def main():
     try:
         sys.path.insert(0, str(e2e))
         from ascii_message_preparation import prepare_observer
-        result['descriptor'] = prepare_observer(preparation, architecture=args.architecture)
+        from vsceip_policy import temporary_vs_opt_out
+        result['vsceipPolicy'] = {}
+        with temporary_vs_opt_out(output, result['vsceipPolicy']):
+            descriptor = prepare_observer(preparation, architecture=args.architecture)
+        result['descriptor'] = descriptor
         result['success'] = True
     except BaseException as exc:
         result['error'] = dict(type=type(exc).__name__, message=str(exc), traceback=traceback.format_exc())
