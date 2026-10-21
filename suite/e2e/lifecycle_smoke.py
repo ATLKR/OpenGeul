@@ -731,8 +731,10 @@ class WriterModelContext:
 
 
 class Case:
-    def __init__(self, suite, fixtures, output, name, *, blank=False, home=False):
+    def __init__(self, suite, fixtures, output, name, *, blank=False, home=False, prepared_library=None):
         self.suite, self.fixtures, self.output, self.name = suite, fixtures, output, name
+        self.prepared_library = prepared_library
+        assert name not in ASCII_EDITOR_MARKERS or prepared_library is not None, 'Physical ASCII cohort must be prepared before launch'
         self.folder = output / 'fixtures' / name
         self.folder.mkdir()
         self.source = None if blank or home else copy_writer_fixture(fixtures, self.folder, '원본 문서 & ' + name + '.docx')
@@ -830,7 +832,8 @@ class Case:
                 self.api.require_editor_focus(hwnd, child)
                 shortcuts.press('CTRL_END')
                 self.api.require_editor_focus(hwnd, child)
-                typed=native.ascii_input.type_ascii(self.api, hwnd, child, marker, self.record, pause=0.025,deadline=shortcuts.deadline)
+                typed=native.ascii_input.type_ascii(self.api, hwnd, child, marker, self.record, pause=0.025,deadline=shortcuts.deadline,
+                    original_popen=self.process,native_binding=shortcuts.binding,prepared_library=self.prepared_library)
                 shortcuts.typed(typed)
                 self.api.require_editor_focus(hwnd, child)
                 shortcuts.complete_model(context,plan)
@@ -1496,11 +1499,12 @@ def main(argv=None):
     baseline_hashes = {path.name: digest(path) for path in fixtures.iterdir() if path.is_file()}
     output.mkdir(parents=True, exist_ok=False)
     (output / 'fixtures').mkdir()
+    prepared_library = native.prepare_ascii_cohort(suite, output)
     definitions = ((dirty_cancel_save, {}), (dirty_discard, {}), (new_saveas_cancel, {'blank': True}),
                    (failed_saveas, {}), (home_two_documents, {'home': True}), (resize_restore, {}),
                    (hwp_route, {'home': True}))
     cases = [(name, lambda name=name, action=action, options=options:
-              Case(suite, fixtures, output, name, **options).run(action))
+              Case(suite, fixtures, output, name, prepared_library=prepared_library if name in ASCII_EDITOR_MARKERS else None, **options).run(action))
              for name, (action, options) in zip(CASE_REQUIREMENTS, definitions)]
     records = native.collect_cases(cases, output)
     report = lifecycle_report(records)

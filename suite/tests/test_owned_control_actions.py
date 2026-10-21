@@ -258,11 +258,8 @@ class ControlPolicyTests(unittest.TestCase):
         self.assertIn('ownedKeyRelease',self.record['ownedControlActions'][0])
         self.assertIn('error',self.record['ownedControlActions'][0]['ownedKeyRelease'])
     def test_original_dialog_destruction_is_an_allowed_post_action_transition(self):
-        probe=object.__new__(self.policy.NativeControlProbe)
-        probe.user=NS(IsWindow=lambda h:h==11);probe._call=lambda f,*a:f(*a)
-        probe._window=lambda h:dict(pid=77)
-        probe.target_snapshot=lambda *a:(_ for _ in ()).throw(AssertionError('Destroyed dialog must not be queried'))
-        value=probe.transition_snapshot(None,self.process,11,44,'OpenGeul Office에서 문서 열기','OPEN_BUTTON',None)
+        probe,context=self.native_dialog_probe([False])
+        value=self.native_dialog_transition(probe,context)
         self.assertTrue(value['accepted']);self.assertEqual(value['transition'],'original-owned-dialog-destroyed')
     def test_raw_uia_provider_strings_are_bounded_before_retention_or_effects(self):
         probe=object.__new__(self.policy.NativeControlProbe);probe._call=lambda f,*a:f(*a)
@@ -270,6 +267,115 @@ class ControlPolicyTests(unittest.TestCase):
             CurrentControlType=50011,GetRuntimeId=lambda:[42,20],CurrentName='파일',CurrentAutomationId='x'*257,
             CurrentProcessId=77,CurrentIsOffscreen=False,CurrentIsEnabled=True)
         with self.assertRaises(AssertionError):probe._raw(element)
+    def native_dialog_probe(self, states):
+        self.probe=ControlProbe(self.process,self.clock)
+        self.dialog()
+        probe=object.__new__(self.policy.NativeControlProbe)
+        probe.clock=self.clock;probe.deadline=self.clock()+5
+        pending=iter(states);probe.user=NS(IsWindow=lambda hwnd:True if hwnd==11 else next(pending))
+        probe.process_snapshot=lambda process:copy.deepcopy(self.probe.identity)
+        probe._window=lambda hwnd:copy.deepcopy(self.probe.value['document' if hwnd==11 else 'scope'])
+        probe.target_snapshot=lambda *a:(_ for _ in ()).throw(AssertionError('Retained child UIA was queried after input'))
+        context=dict(document={k:self.probe.value['document'][k] for k in ('hwnd','pid','threadId','rootHwnd','rectangle')},
+            scope={k:self.probe.value['scope'][k] for k in ('hwnd','pid','threadId','rootHwnd','ownerHwnd','rectangle')},
+            originalProcess=copy.deepcopy(self.probe.identity),attachment=None)
+        return probe,context
+    def native_dialog_transition(self, probe, context, evidence=None):
+        return probe.transition_snapshot(None,self.process,11,44,self.readiness['caption'],'SAVE_BUTTON',object(),
+            context=context,evidence=evidence)
+    def test_stale_child_uia_is_never_queried_while_native_dialog_destruction_is_pending(self):
+        probe,context=self.native_dialog_probe([True,False]);error=None;value={}
+        try:value=self.native_dialog_transition(probe,context)
+        except BaseException as exc:error=exc
+        self.assertIsNone(error,'Native dialog observation touched the invalidated child provider')
+        self.assertTrue(value['accepted']);self.assertEqual(value['transition'],'original-owned-dialog-destroyed')
+        self.assertEqual(value['dialogObservationCount'],2)
+        self.assertEqual(value['lastLiveDialog']['ownerHwnd'],11)
+    def test_native_dialog_never_destroyed_remains_failed_under_the_original_action_deadline(self):
+        probe,context=self.native_dialog_probe([True]*10);self.probe.transition_snapshot=probe.transition_snapshot
+        def wait(seconds):self.clock.now+=2.5
+        with patch.object(self.policy.time,'sleep',side_effect=wait):
+            with self.assertRaisesRegex(AssertionError,'deadline'):self.save()
+        value=self.record['ownedControlActions'][0]
+        self.assertFalse(value['success']);self.assertEqual(value['inputCallAttempts'],1)
+        self.assertEqual(value['insertedInputs'],2);self.assertEqual(self.probe.calls.count('click'),1)
+        self.assertEqual(value['deadline'],6.);self.assertTrue(value['dpiScope']['restored'])
+    def test_native_dialog_death_at_or_after_deadline_cannot_be_accepted(self):
+        for at in (6.,7.):
+            with self.subTest(at=at):
+                self.clock.now=1.;probe,context=self.native_dialog_probe([False]);evidence={}
+                def is_window(hwnd):
+                    if hwnd==44:self.clock.now=at;return False
+                    return True
+                probe.user.IsWindow=is_window
+                with self.assertRaisesRegex(AssertionError,'deadline'):self.native_dialog_transition(probe,context,evidence)
+                self.assertIsNot(evidence.get('accepted'),True)
+    def test_pending_native_dialog_replacement_is_rejected_before_eventual_destruction(self):
+        for field,bad in [('pid',88),('threadId',99),('rootHwnd',99),('ownerHwnd',99),('className','Other'),('title','Other')]:
+            with self.subTest(field=field):
+                probe,context=self.native_dialog_probe([True,False]);self.probe.value['scope'][field]=bad;evidence={}
+                with self.assertRaisesRegex(AssertionError,'dialog.*identity|dialog.*changed'):
+                    self.native_dialog_transition(probe,context,evidence)
+                self.assertIsNot(evidence.get('accepted'),True)
+    def test_pending_dialog_rechecks_original_process_generation_before_acceptance(self):
+        probe,context=self.native_dialog_probe([True,False]);calls=[]
+        def identity(process):
+            calls.append(1);value=copy.deepcopy(self.probe.identity)
+            if len(calls)>1:value['creationTime']+=1
+            return value
+        probe.process_snapshot=identity;evidence={}
+        with self.assertRaisesRegex(AssertionError,'process.*changed'):
+            self.native_dialog_transition(probe,context,evidence)
+        self.assertIsNot(evidence.get('accepted'),True)
+    def test_pending_dialog_rechecks_original_document_identity_before_acceptance(self):
+        probe,context=self.native_dialog_probe([True,False]);calls=[]
+        def window(hwnd):
+            row=copy.deepcopy(self.probe.value['document' if hwnd==11 else 'scope'])
+            if hwnd==11:
+                calls.append(1)
+                if len(calls)>1:row['threadId']+=1
+            return row
+        probe._window=window;evidence={}
+        with self.assertRaisesRegex(AssertionError,'document.*identity'):
+            self.native_dialog_transition(probe,context,evidence)
+        self.assertIsNot(evidence.get('accepted'),True)
+    def test_native_query_failure_does_not_turn_into_a_destroyed_dialog_transition(self):
+        probe,context=self.native_dialog_probe([True,False]);evidence={}
+        def window(hwnd):raise OSError('native query unavailable')
+        probe._window=window
+        with self.assertRaisesRegex(OSError,'unavailable'):self.native_dialog_transition(probe,context,evidence)
+        self.assertIsNot(evidence.get('accepted'),True)
+    def raw_element(self, value):
+        return NS(CurrentNativeWindowHandle=value,CurrentBoundingRectangle=NS(left=0,top=0,right=40,bottom=20),
+            CurrentControlType=50011,GetRuntimeId=lambda:[42,20],CurrentName='파일',CurrentAutomationId='',
+            CurrentProcessId=77,CurrentIsOffscreen=False,CurrentIsEnabled=True)
+    def test_successful_null_uia_hwnd_is_the_only_noninteger_normalization(self):
+        probe=object.__new__(self.policy.NativeControlProbe);probe._call=lambda f,*a:f(*a);value=None;error=None
+        try:value=probe._raw(self.raw_element(None))
+        except BaseException as exc:error=exc
+        self.assertIsNone(error,'Documented successful UIA_HWND null must normalize to zero')
+        self.assertEqual(value['nativeHwnd'],0);self.assertIsNone(value['nativeHwndRaw'])
+        self.assertEqual(value['nativeHwndRawType'],'NoneType')
+    def test_invalid_uia_hwnd_types_and_ranges_fail_with_raw_diagnostics(self):
+        probe=object.__new__(self.policy.NativeControlProbe);probe._call=lambda f,*a:f(*a)
+        for value in (True,False,0.,1.,'0','1',-(2**31)-1,2**32,[],object()):
+            with self.subTest(type=type(value).__name__,value=repr(value)):
+                with self.assertRaisesRegex(AssertionError,'CurrentNativeWindowHandle.*type=.*value='):
+                    probe._raw(self.raw_element(value))
+    def test_signed_and_zero_uia_hwnd_values_preserve_the_exact_successful_raw_integer(self):
+        probe=object.__new__(self.policy.NativeControlProbe);probe._call=lambda f,*a:f(*a)
+        for raw in (0,20,-1,-(2**31),2**32-1):
+            with self.subTest(raw=raw):
+                value=probe._raw(self.raw_element(raw));self.assertEqual(value['nativeHwnd'],raw&0xffffffff)
+                self.assertIn('nativeHwndRaw',value,'Successful raw native handle value was discarded')
+                self.assertIs(type(value['nativeHwndRaw']),int);self.assertEqual(value['nativeHwndRaw'],raw)
+                self.assertEqual(value['nativeHwndRawType'],'int')
+    def test_uia_hwnd_property_exception_is_not_normalized_to_null(self):
+        probe=object.__new__(self.policy.NativeControlProbe);probe._call=lambda f,*a:f(*a)
+        class Failed:
+            @property
+            def CurrentNativeWindowHandle(self):raise OSError('UIA property failed')
+        with self.assertRaisesRegex(OSError,'UIA property failed'):probe._raw(Failed())
     def test_pointer_intent_write_cannot_hide_a_new_physical_obstruction(self):
         with patch.object(self.policy.os,'fsync',side_effect=lambda fd:self.probe.hit.update(uiaMatches=False)):
             with self.assertRaises(AssertionError):self.click()

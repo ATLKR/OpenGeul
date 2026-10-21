@@ -357,7 +357,7 @@ class ActionContracts(unittest.TestCase):
             calls=[]
             owner=SimpleNamespace(created=True,create_suspended=lambda:calls.append('create'),assign=lambda:calls.append('assign'),
                 identity=lambda:{'processId':45},resume=lambda:calls.append('resume'),wait=lambda seconds:False,
-                terminate_owned=lambda:calls.append('terminate-owned'),close=lambda:calls.append('close'))
+                terminate_owned=lambda:calls.append('terminate-owned'),close=lambda:calls.append('close'),cleanup_outcomes=[])
             budget=m.Budget();deadline=budget.deadline
             result=m.run_owned(owner,budget,evidence,prepare_privacy=True)
             p.finalize_preparation(m,evidence,result)

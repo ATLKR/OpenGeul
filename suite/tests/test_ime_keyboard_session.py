@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 E2E = Path(__file__).resolve().parents[1] / 'e2e'
 sys.path.insert(0, str(E2E))
@@ -20,7 +21,7 @@ else:
 
 class IMEKeyboardSessionTests(unittest.TestCase):
     def setUp(self): self.assertIsNotNone(keyboard, 'Missing first-admission IME keyboard session')
-    def fixture(self, directory, module='writer'):
+    def fixture(self, directory, module='writer', *, setup_deadline=10.):
         p, b, api, clock, probe, record = fixtures.CountedEditorShortcutsTests().fixture(directory)
         record.update(module=module, windowHwnd=11, parentHwnd=12, childHwnd=22, officePid=88)
         original_scope=probe.scope_snapshot
@@ -29,11 +30,32 @@ class IMEKeyboardSessionTests(unittest.TestCase):
             if probe.focus==0:result['focusWithinEditor']=False
             return result
         probe.scope_snapshot=scope
-        session = keyboard.IMEKeyboardSession(api, p, 11, 12, 22, 88, module, record, 10., probe=probe, clock=clock)
+        # The actual semantic replay contract is independently exercised by its
+        # reader suite. This explicit boundary double records session joins.
+        import ime_semantic_context as semantic
+        def validate(context, **kw):
+            assert context['success'] is True and context['module']==kw['module']==module
+            assert context['phase']==kw['phase'] and context['expectedPrefix']==kw['expected_prefix']
+            assert context['expectedNative']==kw['expected_native']
+            assert context['setupDeadline']==kw['setup_deadline']==setup_deadline
+            assert context['finishedAt']<=kw['now']<kw['setup_deadline']
+            context['replays']=context.get('replays',0)+1
+            return context
+        replay=patch.object(semantic,'require_ime_semantic_context',side_effect=validate)
+        replay.start();self.addCleanup(replay.stop)
+        session = keyboard.IMEKeyboardSession(api, p, 11, 12, 22, 88, module, record, setup_deadline, probe=probe, clock=clock)
         return session, p, b, api, clock, probe, record
     def setup(self, session):
         session.start(); session.focus_editor(6.); self.ready(session); session.navigate(); self.prefix(session); session.setup_complete()
+    def semantic(self,session,phase):
+        record=session.record;prefix=None if phase=='pre' else ' ime-opengeul-'+session.module+':'
+        context=dict(success=True,module=session.module,phase=phase,expectedPrefix=prefix,
+            expectedNative=dict(session.binding),setupDeadline=10.,readerDeadline=9.,finishedAt=session.clock())
+        record.setdefault('imeSemanticContexts',[]).append(context);record['imeSemanticContext']=context
+        session.semantic_ready(context,phase=phase)
+        return context
     def prefix(self, session):
+        self.semantic(session,'pre')
         record=session.record
         record.update(editorTid=44,keyboardFocusHwnd=33,asciiPrefix=' ime-opengeul-'+session.module+':',prefixInputLayout=0x04090409)
         receipt=ime_fixtures.KoreanImePolicyTests().ascii_receipt(session.module)
@@ -44,6 +66,7 @@ class IMEKeyboardSessionTests(unittest.TestCase):
             record['calcSetupContext']=dict(success=True,nativeImeObserved=False,
                 expectedNative=dict(session.binding),expectedPrefix=record['asciiPrefix'],
                 readerDeadline=9.,finishedAt=1.)
+        self.semantic(session,'post')
     def ready(self, session):
         receipt=dict(schemaVersion=1,kind='owned-editor-focus-readiness',ready=True,
             suiteHwnd=11,childHwnd=22,shellPid=77,officePid=88,deadlineSeconds=5.,
@@ -61,6 +84,170 @@ class IMEKeyboardSessionTests(unittest.TestCase):
         record['layoutRestored'] = True
         record['restoration'] = ime_fixtures.KoreanImePolicyTests().restoration()
         session.begin_save(record['restoration'], 31.); session.save(); session.close()
+    def test_owned_capture_settles_read_only_under_original_setup_deadline(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            s,p,b,api,clock,probe,record=self.fixture(directory)
+            original=probe.scope_snapshot;reads=[]
+            def scope(*args):
+                row=original(*args);reads.append(row)
+                if len(reads)==1:row['capture']=copy.deepcopy(row['parent'])
+                return row
+            probe.scope_snapshot=scope
+            with patch('time.sleep',side_effect=lambda seconds:setattr(clock,'now',clock.now+seconds)):
+                s.start()
+            s.close(RuntimeError('targeted admission slice ends before composition/save'))
+            ledger=record['imeKeyboardSession']['captureReadiness']
+            self.assertEqual(ledger['pollCount'],1)
+            self.assertEqual(ledger['deadline'],10.)
+            self.assertEqual(ledger['first']['scope']['capture']['hwnd'],12)
+            self.assertEqual(probe.sent,[])
+            self.assertEqual(probe.calls.count(('open',88)),1)
+    def test_unknown_capture_retains_rejected_fresh_scope_without_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s,p,b,api,clock,probe,record=self.fixture(directory);probe.capture=991
+            with self.assertRaises(AssertionError):s.start()
+            self.assertEqual(record['imeKeyboardSession']['lastGuardObservation']['scope']['capture']['hwnd'],991)
+            self.assertEqual(probe.sent,[])
+    def test_capture_wait_rechecks_generation_keyboard_and_focus_without_deadline_renewal(self):
+        from unittest.mock import patch
+        changes=(lambda probe:probe.engine.update(creationTime=probe.engine['creationTime']+1),
+                 lambda probe:setattr(probe,'layout',0x04120412),
+                 lambda probe:setattr(probe,'keys_down',[0x11]),
+                 lambda probe:setattr(probe,'focus',999))
+        for change in changes:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                s,p,b,api,clock,probe,record=self.fixture(directory);original=probe.scope_snapshot;pauses=[]
+                def scope(*args):
+                    row=original(*args);row['capture']=copy.deepcopy(row['parent']);return row
+                def pause(seconds):clock.now+=seconds;pauses.append(seconds);change(probe)
+                probe.scope_snapshot=scope
+                with patch('time.sleep',side_effect=pause),self.assertRaises(AssertionError):s.start()
+                self.assertEqual(pauses,[.05])
+                self.assertEqual(record['imeKeyboardSession']['captureReadiness']['deadline'],10.)
+                self.assertIn('scope',record['imeKeyboardSession']['lastGuardObservation'])
+                self.assertEqual(probe.sent,[])
+    def test_only_ctrl_f6_may_settle_host_focus_to_exact_child_during_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s,p,b,api,clock,probe,record=self.fixture(directory);original=probe.scope_snapshot
+            def scope(*args):
+                row=original(*args)
+                if probe.focus==11:
+                    row['focus']=copy.deepcopy(row['before']['suite']);row['focusWithinEditor']=False
+                return row
+            probe.scope_snapshot=scope;probe.focus=11;s.start();retain=s._retain
+            def durable(phase):
+                retain(phase)
+                if phase=='input-intent':probe.focus=22
+            s._retain=durable;s.focus_editor(6.);s.close(RuntimeError('targeted focus slice ends before composition/save'))
+            action=record['imeKeyboardSession']['actions'][0]
+            self.assertEqual(action['focusIntentTransition'],'owned-host-to-exact-original-editor-child')
+            self.assertEqual(len(probe.sent),1)
+    def test_ctrl_f6_intent_rejects_arbitrary_descendant_and_reverse_focus_change(self):
+        for initial,current in ((11,33),(22,11)):
+            with self.subTest(initial=initial,current=current),tempfile.TemporaryDirectory() as directory:
+                s,p,b,api,clock,probe,record=self.fixture(directory);original=probe.scope_snapshot
+                def scope(*args):
+                    row=original(*args)
+                    if probe.focus==11:
+                        row['focus']=copy.deepcopy(row['before']['suite']);row['focusWithinEditor']=False
+                    return row
+                probe.scope_snapshot=scope;probe.focus=initial;s.start();retain=s._retain
+                def durable(phase):
+                    retain(phase)
+                    if phase=='input-intent':probe.focus=current
+                s._retain=durable
+                with self.assertRaises(AssertionError):s.focus_editor(6.)
+                s.close();self.assertEqual(probe.sent,[])
+    def test_semantic_pre_must_be_actual_current_context_before_prefix_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s,p,b,api,clock,probe,record=self.fixture(directory)
+            s.start();s.focus_editor(6.);self.ready(s);s.navigate()
+            context=dict(success=True,module='writer',phase='pre',expectedPrefix=None,
+                expectedNative=dict(s.binding),setupDeadline=10.,readerDeadline=9.,finishedAt=1.)
+            record['imeSemanticContexts']=[context];record['imeSemanticContext']=context
+            with self.assertRaises(AssertionError):s.semantic_ready(copy.deepcopy(context),phase='pre')
+            s.close();self.assertEqual(len(probe.sent),2)
+    def test_semantic_context_replacement_after_prefix_blocks_korean_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s,p,b,api,clock,probe,record=self.fixture(directory)
+            s.start();s.focus_editor(6.);self.ready(s);s.navigate();self.prefix(s)
+            record['imeSemanticContexts'][0]=copy.deepcopy(record['imeSemanticContexts'][0])
+            with self.assertRaises(AssertionError):s.setup_complete()
+            s.close();self.assertEqual(len(probe.sent),2)
+    def test_pre_and_post_semantic_replay_join_native_generation_and_original_budget(self):
+        for phase,field,value in [('pre','expectedNative',{}),('pre','setupDeadline',11.),('post','success',False)]:
+            with self.subTest(phase=phase,field=field),tempfile.TemporaryDirectory() as directory:
+                s,p,b,api,clock,probe,record=self.fixture(directory)
+                s.start();s.focus_editor(6.);self.ready(s);s.navigate()
+                if phase=='post':self.semantic(s,'pre')
+                context=dict(success=True,module='writer',phase=phase,expectedPrefix=None if phase=='pre' else ' ime-opengeul-writer:',
+                    expectedNative=dict(s.binding),setupDeadline=10.,readerDeadline=9.,finishedAt=1.)
+                context[field]=value;record.setdefault('imeSemanticContexts',[]).append(context);record['imeSemanticContext']=context
+                with self.assertRaises(AssertionError):s.semantic_ready(context,phase=phase)
+                s.close();self.assertEqual(len(probe.sent),2)
+    def test_reader_capture_wait_expires_at_existing_twelve_second_cap_and_restores_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s,p,b,api,clock,probe,record=self.fixture(directory,setup_deadline=30.)
+            s.start();s.focus_editor(6.);self.ready(s);s.navigate()
+            record['imeSemanticContext']=dict(kind='ime-semantic-editing-context',module='writer',phase='pre',
+                expectedNative=dict(s.binding),startedAt=1.,readerDeadline=13.,setupDeadline=30.,success=False)
+            original=probe.scope_snapshot
+            def scope(*args):
+                row=original(*args);row['capture']=copy.deepcopy(row['parent']);return row
+            probe.scope_snapshot=scope;s.native_probe=True;probe.deadline=30.
+            with patch('time.sleep',side_effect=lambda seconds:setattr(clock,'now',clock.now+seconds)):
+                with self.assertRaisesRegex(AssertionError,'deadline'):s.require_context_target('imeSemanticContext')
+            self.assertEqual(clock.now,13.);self.assertEqual(s.deadline,30.);self.assertEqual(probe.deadline,30.)
+            self.assertEqual(record['imeKeyboardSession']['captureReadiness']['deadline'],13.)
+            s.close();self.assertEqual(len(probe.sent),2)
+    def test_reader_context_key_identity_binding_and_deadline_cannot_change_during_capture_wait(self):
+        for change in ('replace','binding','deadline'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                s,p,b,api,clock,probe,record=self.fixture(directory,setup_deadline=30.)
+                s.start();s.focus_editor(6.);self.ready(s);s.navigate()
+                context=dict(kind='ime-semantic-editing-context',module='writer',phase='pre',
+                    expectedNative=dict(s.binding),startedAt=1.,readerDeadline=13.,setupDeadline=30.,success=False)
+                record['imeSemanticContext']=context;original=probe.scope_snapshot
+                def scope(*args):
+                    row=original(*args);row['capture']=copy.deepcopy(row['parent']);return row
+                def pause(seconds):
+                    clock.now+=seconds
+                    if change=='replace':record['imeSemanticContext']=copy.deepcopy(context)
+                    elif change=='binding':context['expectedNative']['officeCreationTime']+=1
+                    else:context['readerDeadline']+=1
+                probe.scope_snapshot=scope
+                with patch('time.sleep',side_effect=pause),self.assertRaises(AssertionError):s.require_context_target('imeSemanticContext')
+                self.assertEqual(clock.now,1.05);self.assertEqual(s.deadline,30.)
+                s.close();self.assertEqual(len(probe.sent),2)
+    def test_prefix_gate_rejects_missing_or_mutated_actual_pre_without_more_input(self):
+        for altered in (False,True):
+            with self.subTest(altered=altered),tempfile.TemporaryDirectory() as directory:
+                s,p,b,api,clock,probe,record=self.fixture(directory)
+                s.start();s.focus_editor(6.);self.ready(s);s.navigate()
+                if altered:self.semantic(s,'pre')['success']=False
+                with self.assertRaises(AssertionError):s.require_prefix_ready()
+                s.close();self.assertEqual(len(probe.sent),2)
+    def test_navigation_focus_drift_during_intent_never_uses_ctrl_f6_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s,p,b,api,clock,probe,record=self.fixture(directory)
+            s.start();s.focus_editor(6.);self.ready(s);retain=s._retain
+            api.require_editor_focus=lambda hwnd,child:probe.focus
+            def durable(phase):
+                retain(phase)
+                if phase=='input-intent':probe.focus=22
+            s._retain=durable
+            with self.assertRaisesRegex(AssertionError,'focus changed'):s.navigate()
+            s.close();self.assertEqual(len(probe.sent),1)
+    def test_successful_reader_guard_restores_exact_previous_session_and_probe_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s,p,b,api,clock,probe,record=self.fixture(directory,setup_deadline=30.)
+            s.start();s.focus_editor(6.);self.ready(s);s.navigate();s.native_probe=True;probe.deadline=30.
+            record['imeSemanticContext']=dict(kind='ime-semantic-editing-context',module='writer',phase='pre',
+                expectedNative=dict(s.binding),startedAt=1.,readerDeadline=13.,setupDeadline=30.,success=False)
+            s.require_context_target('imeSemanticContext')
+            self.assertEqual(s.deadline,30.);self.assertEqual(probe.deadline,30.);self.assertEqual(len(probe.sent),2)
+            s.close(RuntimeError('targeted reader guard ends before composition/save'))
     def test_modules_emit_only_existing_exact_sequence_and_one_retained_engine(self):
         for module, sequence in [('writer', ['CTRL_F6','CTRL_END','CTRL_S']),
                                  ('calc', ['CTRL_F6','CTRL_HOME','F2','CTRL_END','ENTER','CTRL_S']),

@@ -271,7 +271,8 @@ def _perform(api, process, document, control, record, *, purpose, dialog=0, capt
         original_context()
         value['after']={}
         value['after']=probe.transition_snapshot(api,process,document,dialog,caption,purpose,control,
-            context=dict(document=anchor['document'],attachment=attachment),evidence=value['after'])
+            context=dict(document=anchor['document'],scope=anchor['scope'],originalProcess=original,
+                         attachment=attachment),evidence=value['after'])
         original_context()
         budget(); assert value['after']['accepted'] is True, 'Unexpected control transition after input'
         value['success']=True
@@ -369,14 +370,20 @@ class NativeControlProbe(NativeActivationProbe):
         return result
     def _raw(self,element):
         def get(name):return self._call(lambda:getattr(element,name))
-        raw=get('CurrentNativeWindowHandle');assert type(raw) is int and -(2**31)<=raw<2**32
+        raw=get('CurrentNativeWindowHandle')
+        # UIA_HWND is void*: a successful comtypes null result is None.
+        # No exception, arbitrary falsy value or integer-like object is a null.
+        assert raw is None or type(raw) is int and -(2**31)<=raw<2**32, \
+            'Invalid CurrentNativeWindowHandle: type='+type(raw).__name__+' value='+repr(raw)[:160]
+        handle=0 if raw is None else raw&0xffffffff
         box=get('CurrentBoundingRectangle');rectangle=[int(getattr(box,k)) for k in ('left','top','right','bottom')]
         kinds={50000:'Button',50004:'Edit',50011:'MenuItem',50032:'Window',50010:'MenuBar'}
         kind=int(get('CurrentControlType'));runtime=list(self._call(element.GetRuntimeId));name=str(get('CurrentName'))
         automation=str(get('CurrentAutomationId'))
         assert len(name)<=256 and len(automation)<=256 and 0<len(runtime)<=64
         assert all(type(v) is int and -(2**31)<=v<2**31 for v in runtime)
-        return dict(runtimeId=runtime,pid=int(get('CurrentProcessId')),nativeHwnd=raw&0xffffffff,
+        return dict(runtimeId=runtime,pid=int(get('CurrentProcessId')),nativeHwnd=handle,
+                    nativeHwndRaw=raw,nativeHwndRawType=type(raw).__name__,
                     automationId=automation,controlType=kinds.get(kind,str(kind)),name=name,
                     visible=not bool(get('CurrentIsOffscreen')),enabled=bool(get('CurrentIsEnabled')),rectangle=rectangle)
     def native_focus(self,thread):
@@ -430,6 +437,35 @@ class NativeControlProbe(NativeActivationProbe):
         return dict(point=list(point),hitHwnd=hit,pid=int(pid.value),rootHwnd=int(self._call(self.user.GetAncestor,hit,2) or 0) if hit else 0,
                     withinControl=bool(hit and (hit==handle or handle and self._call(self.user.IsChild,handle,hit) or not handle and match)),uiaMatches=match)
     def transition_snapshot(self,api,process,document,dialog,caption,purpose,control,*,context=None,evidence=None):
+        if dialog:
+            # Input may tear down a child UIA provider before IsWindow(dialog)
+            # becomes false. Observe the native original, never that child.
+            assert context is not None and 'originalProcess' in context and 'scope' in context
+            result=evidence if evidence is not None else {}
+            result.update(accepted=False,dialogObservationCount=0)
+            def original():
+                snapshot=self._call(self.process_snapshot,process);result['lastOriginalProcess']=snapshot
+                assert snapshot==context['originalProcess'], 'Original dialog process generation changed'
+                alive=bool(self._call(self.user.IsWindow,document));result['originalDocumentAlive']=alive
+                assert alive, 'Original control document disappeared'
+                row=self._call(self._window,document);result['lastOriginalDocument']=row
+                assert row['pid']==process.pid and all(row[k]==context['document'][k]
+                    for k in ('hwnd','pid','threadId','rootHwnd')), 'Original document native identity changed'
+            while True:
+                original();result['dialogObservationCount']+=1
+                alive=bool(self._call(self.user.IsWindow,dialog));result['originalDialogAlive']=alive
+                if not alive:
+                    original()
+                    assert self.clock()<self.deadline, 'Owned dialog transition deadline expired'
+                    result.update(accepted=True,transition='original-owned-dialog-destroyed');return result
+                row=self._call(self._window,dialog);result['lastLiveDialog']=row
+                frozen=context['scope']
+                assert all(row[k]==frozen[k] for k in ('hwnd','pid','threadId','rootHwnd','ownerHwnd')) \
+                    and row['hwnd']==dialog and row['pid']==process.pid and row['ownerHwnd']==document \
+                    and row['className']=='#32770' and row['title']==caption, 'Original native dialog identity changed'
+                remaining=self.deadline-self.clock()
+                assert remaining>0, 'Owned dialog transition deadline expired'
+                self._call(time.sleep,min(.01,remaining))
         doc_alive=bool(self._call(self.user.IsWindow,document));dialog_alive=bool(dialog and self._call(self.user.IsWindow,dialog))
         result=evidence if evidence is not None else {}
         result.update(originalDocumentAlive=doc_alive,originalDialogAlive=dialog_alive,accepted=False)
@@ -437,8 +473,6 @@ class NativeControlProbe(NativeActivationProbe):
         assert doc_alive and doc['pid']==process.pid, 'Original control document disappeared'
         if context is not None:
             assert all(doc[k]==context['document'][k] for k in ('hwnd','pid','threadId','rootHwnd')), 'Original document native identity changed'
-        if dialog and not dialog_alive:
-            result.update(accepted=True,transition='original-owned-dialog-destroyed');return result
         # A valid modal may invalidate the old File wrapper. Recognize the
         # exact declared transition from native identity before touching it.
         if not dialog and caption in PICKERS[1:]:

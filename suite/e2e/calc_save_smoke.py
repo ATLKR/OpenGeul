@@ -287,7 +287,7 @@ def await_reopen_job(helper,probe,record,*,clock=time.monotonic,pause=time.sleep
         raise
 
 
-def physical_case(suite,fixtures,output):
+def physical_case(suite,fixtures,output,*,prepared_library):
     from calc_failure_cleanup import bind_pre_input_cleanup,finish_pre_input_cleanup
     from generated_calc_close import freeze_saved_calc_copy
     from pywinauto import Desktop
@@ -351,7 +351,8 @@ def physical_case(suite,fixtures,output):
         with CountedEditorShortcuts(api,process,before['bindingBefore'],record,deadline) as shortcuts:
             selected,editing,pending=type_pending_a1(reader,baseline,MARKER,record,deadline,
                 navigate=shortcuts.navigate,require_focus=lambda:api.require_editor_focus(hwnd,child),
-                type_marker=lambda:ascii_input.type_ascii(api,hwnd,child,MARKER,record,pause=.04))
+                type_marker=lambda:ascii_input.type_ascii(api,hwnd,child,MARKER,record,pause=.04,deadline=deadline,
+                    original_popen=process,native_binding=before['bindingBefore'],prepared_library=prepared_library))
         record['beforeSave']=pending
         require_pending_input_observations(before,selected,editing,pending,baseline,MARKER,suite=suite,inventory=inventory,
             inventory_sha256=identity['sha256'],original_shell=record['originalShell'],
@@ -469,8 +470,9 @@ def main():
     fixtures=args.fixtures.resolve()
     assert fixtures!=output and fixtures not in output.parents and output not in fixtures.parents
     output.mkdir(parents=True,exist_ok=False)
+    prepared_library=native.prepare_ascii_cohort(suite,output)
     try:
-        record=physical_case(suite,fixtures,output)
+        record=physical_case(suite,fixtures,output,prepared_library=prepared_library)
     except BaseException as exc:
         result=output/(CASE+'-result.json')
         if result.is_file():record=json.loads(result.read_text(encoding='utf-8'))

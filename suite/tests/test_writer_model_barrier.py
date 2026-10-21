@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from editor_program_boundary import editor_program_factory
+from ascii_observer_boundary import AsciiObserverBoundary
 
 
 E2E = Path(__file__).resolve().parents[1] / 'e2e'
@@ -147,8 +148,9 @@ def case_fixture(frame,case_name='dirty-writer-cancel-save'):
         boundary=ascii_fixtures.FakeWindows()
         with patch.object(lifecycle.native.time,'sleep'):
             lifecycle.native.prepare_editor_focus(boundary,11,22,77,88,record,lambda:None,lambda:None)
-        with patch.object(lifecycle.native.ascii_input.time,'sleep'):
-            lifecycle.native.ascii_input.type_ascii(boundary,11,22,marker,record,pause=.025)
+        with patch.object(lifecycle.native.ascii_input.time,'sleep'), patch.object(lifecycle.native.ascii_input,'_observer',side_effect=AsciiObserverBoundary):
+            lifecycle.native.ascii_input.type_ascii(boundary,11,22,marker,record,pause=.025,deadline=plan.deadline,clock=clock,
+                original_popen=SimpleNamespace(pid=77),native_binding=binding,prepared_library={'kind':'test-only-prepared'})
         clock.pause(len(marker)*.025)
         receipt={}
         reader=ReadOnlySequence([model_observation(frame,prior+marker)],clock)
@@ -210,6 +212,7 @@ class OriginalEditHarness:
         self.case = object.__new__(lifecycle.Case)
         self.case.record = {'attachments': [{'hwnd': 11, 'parent': 12, 'child': 22, 'officePid': 88}]}
         self.case.process = SimpleNamespace(pid=77)
+        self.case.prepared_library={'kind':'test-only-prepared'}
         self.case.suite = self.frame.suite
         self.case._writer_model_context = lambda hwnd,child:self.completion
         self.case.api = SimpleNamespace(require_foreground=lambda hwnd: None,
@@ -230,7 +233,7 @@ class OriginalEditHarness:
     def prepare(self, api, hwnd, child, shell_pid, office_pid, record, click, enter, **options):
         click(); enter()
 
-    def inject(self, api, hwnd, child, marker, record, *, pause, deadline):
+    def inject(self, api, hwnd, child, marker, record, *, pause, deadline, original_popen, native_binding, prepared_library):
         self.events.append(('physical', marker, pause))
         self.body = next(self.bodies)
         self.clock.pause(len(marker)*pause)
@@ -368,8 +371,9 @@ class ExistingStalePredicateRedTests(unittest.TestCase):
         keyboard = lifecycle.native.ascii_input
         for marker in lifecycle.ASCII_EDITOR_MARKERS['dirty-writer-cancel-save']:
             api, record = fixtures.FakeWindows(), {}
-            with patch.object(keyboard.time, 'sleep'):
-                keyboard.type_ascii(api, 11, 22, marker, record, pause=0.025)
+            with patch.object(keyboard.time, 'sleep'), patch.object(keyboard,'_observer',side_effect=AsciiObserverBoundary):
+                keyboard.type_ascii(api, 11, 22, marker, record, pause=0.025,deadline=keyboard.time.monotonic()+60.,
+                    original_popen=SimpleNamespace(pid=77),native_binding=dict(suiteHwnd=11,childHwnd=22),prepared_library={'kind':'test-only-prepared'})
             receipt = record['asciiEditorInputs'][0]
             self.assertEqual(receipt['pauseSeconds'], 0.025)
             keyboard.require_ascii_receipt(receipt, marker, 11, 22)

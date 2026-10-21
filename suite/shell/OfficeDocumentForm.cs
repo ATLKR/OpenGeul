@@ -18,6 +18,9 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1500 };
     private readonly bool closeDiagnostics = CloseDiagnosticsEnabled();
     private readonly SaveDiagnosticsTrace saveDiagnostics = new("suite.documentSave");
+    private readonly SaveDiagnosticsTrace editorFocusDiagnostics = new("suite.editorFocus");
+    private OwnedEditorFocus? editorFocus;
+    private nint editorFocusFormHwnd, editorFocusPanelHwnd;
     private readonly int uiThreadId = Environment.CurrentManagedThreadId;
     private int closeDiagnosticCount;
     private WorkerClient? worker;
@@ -75,6 +78,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         FormClosing += OnDocumentClosing;
         FormClosed += (_, _) =>
         {
+            ReleaseEditorFocus();
             resizeTimer.Dispose();
             statusTimer.Dispose();
             if (IsHandleCreated) NativeWindowProperties.Remove(Handle);
@@ -107,6 +111,9 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             if (parentHwnd != editorPanel.Handle.ToInt64() || childHwnd == 0 || !NativeWindowProperties.IsChild(editorPanel.Handle, checked((nint)childHwnd)))
                 throw new SuiteException("문서 편집기를 OpenGeul 창 안에 연결하지 못했습니다. 패키지의 Windows 런타임을 확인해 주세요.");
             NativeWindowProperties.Set(Handle, editorPanel.Handle, checked((nint)childHwnd));
+            editorFocus = new OwnedEditorFocus(new NativeOwnedEditorFocus(Handle, editorPanel.Handle, checked((nint)childHwnd)),
+                Path.Combine(packageRoot, "Office", "program", "soffice.bin"));
+            editorFocusFormHwnd = Handle; editorFocusPanelHwnd = editorPanel.Handle;
             attached = true;
             sentSize = size;
             ApplyStatus(result);
@@ -390,6 +397,42 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         base.WndProc(ref m);
     }
 
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if ((keyData & Keys.KeyCode) == Keys.F6 && keyData != (Keys.Control | Keys.F6) && editorFocus is not null &&
+            editorFocusFormHwnd != 0 && editorFocusPanelHwnd != 0 &&
+            (msg.HWnd == editorFocusFormHwnd || msg.HWnd == editorFocusPanelHwnd))
+        {
+            editorFocusDiagnostics.Write("f6.unrouted", new { reason = "modifier mismatch", keyData = (int)keyData,
+                message = msg.Msg, messageHwnd = msg.HWnd.ToInt64(), wParam = msg.WParam.ToInt64(), lParam = msg.LParam.ToInt64(),
+                originalFormHwnd = editorFocusFormHwnd.ToInt64(), originalPanelHwnd = editorFocusPanelHwnd.ToInt64() },
+                worker?.ProcessId, worker?.DiagnosticTraceId);
+        }
+        if (keyData == (Keys.Control | Keys.F6) && editorFocus is not null &&
+            (msg.HWnd == Handle || msg.HWnd == editorPanel.Handle))
+        {
+            var available = attached && worker is not null && !loading && !busy && !closing && !closeApproved &&
+                !IsDisposed && !Disposing && Enabled && Visible && ActiveForm == this;
+            var result = editorFocus.Route((int)keyData, msg.HWnd.ToInt64(), available);
+            editorFocusDiagnostics.Write("ctrlF6", new { keyData = (int)keyData, message = msg.Msg,
+                messageHwnd = msg.HWnd.ToInt64(), wParam = msg.WParam.ToInt64(), lParam = msg.LParam.ToInt64(), available, result },
+                worker?.ProcessId, worker?.DiagnosticTraceId);
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    private void ReleaseEditorFocus()
+    {
+        var owned = editorFocus; editorFocus = null; editorFocusFormHwnd = editorFocusPanelHwnd = 0; owned?.Dispose();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) ReleaseEditorFocus();
+        base.Dispose(disposing);
+    }
+
     private static bool CloseDiagnosticsEnabled()
     {
         try { return !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OPENGEUL_SUITE_DIAGNOSTICS")); }
@@ -441,6 +484,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     private async Task ReleaseWorkerAsync()
     {
+        ReleaseEditorFocus();
         var ownedWorker = worker;
         worker = null;
         if (ownedWorker is null) return;

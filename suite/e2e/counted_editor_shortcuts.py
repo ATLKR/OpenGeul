@@ -186,27 +186,32 @@ class CountedEditorShortcuts:
         self._retain('admission')
         self._budget()
 
-    def _guard(self):
+    def _observe_guard(self):
+        self._budget(); b = self.binding
+        row = {}; self.receipt['lastGuardObservation'] = row
+        row['shell'] = self.probe.process_snapshot(self.process)
+        self._budget(); row['engine'] = self.probe.engine_snapshot(self.handle)
+        self._budget(); row['scope'] = self.probe.scope_snapshot(self.api, b)
+        thread = row['scope']['before']['editor']['threadId']
+        self._budget(); row['keyboard'] = self.probe.keyboard_snapshot(thread)
+        return row
+
+    def _validate_guard(self, row):
         from windows_smoke import _editor_focus_snapshot_ready
-        self._budget(); p, b = self.process, self.binding
-        shell = self.probe.process_snapshot(p)
-        self._budget(); engine = self.probe.engine_snapshot(self.handle)
+        b = self.binding; shell, engine, scope, keyboard = (row[key] for key in ('shell','engine','scope','keyboard'))
         assert shell == self.original_shell, 'Retained original shell generation changed'
         assert engine == self.original_engine, 'Retained original engine HANDLE/generation changed'
-        self._budget(); scope = self.probe.scope_snapshot(self.api, b)
         thread = scope['before']['editor']['threadId']
         if self.thread is None: self.thread = thread
         assert thread == self.thread, 'Owned editor input thread changed'
-        focus = _editor_focus_snapshot_ready(scope, b['suiteHwnd'], b['childHwnd'], b['shellPid'], b['officePid'], self.thread)
-        assert focus, 'Strict owned editor focus is not ready'
+        _editor_focus_snapshot_ready(scope, b['suiteHwnd'], b['childHwnd'], b['shellPid'], b['officePid'], self.thread)
+        assert scope['focusWithinEditor'] is True and scope['focus']['isWindow'] and scope['focus']['pid'] == b['officePid'], 'Strict owned editor focus is not ready'
         parent = scope['parent']
         assert (parent['hwnd'], parent['pid'], parent['rootHwnd'], parent['isWindow']) == \
             (b['parentHwnd'], b['shellPid'], b['suiteHwnd'], True), 'Owned editor parent changed'
         assert all(scope[key] is True for key in ('suiteOwnsParent', 'parentOwnsChild', 'parentVisible',
                                                   'parentEnabled', 'childVisible', 'childEnabled')), 'Owned editor ancestry is not available'
         self._budget(); self.api.require_foreground(b['suiteHwnd'])
-        assert self.api.require_editor_focus(b['suiteHwnd'], b['childHwnd']) == focus, 'Strict editor focus changed before shortcut'
-        self._budget(); keyboard = self.probe.keyboard_snapshot(self.thread)
         assert keyboard['targetLayout'] == keyboard['currentThreadLayout'] == US_LAYOUT, 'Shortcut requires exact English US layout'
         assert keyboard['keysDown'] == [], 'Shortcut requires neutral modifier and navigation keys'
         assert keyboard['capsLockOn'] is False and keyboard['scrollLockOn'] is False, 'Shortcut lock state is not neutral'
@@ -215,7 +220,16 @@ class CountedEditorShortcuts:
         if self.lock_state is None: self.lock_state = locks
         assert locks == self.lock_state, 'Native lock state changed during shortcut sequence'
         self._budget()
-        return dict(shell=shell, engine=engine, scope=scope, keyboard=keyboard)
+
+    def _guard(self):
+        from capture_readiness import settle_owned_capture
+        row = settle_owned_capture(self._observe_guard,self._validate_guard,self.receipt,self.binding,self.deadline,clock=self.clock)
+        b = self.binding
+        # This separate strict native query may race a new capture; retain the
+        # failure conservatively rather than catching arbitrary assertions.
+        assert self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd']) == row['scope']['focus']['hwnd'], 'Strict editor focus changed before shortcut'
+        self._budget()
+        return row
 
     def __enter__(self):
         assert not self.active and not self.finished, 'Counted shortcut session cannot restart'

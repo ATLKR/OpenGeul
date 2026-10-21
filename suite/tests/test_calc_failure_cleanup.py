@@ -198,8 +198,8 @@ class CalcFailureCleanupTests(unittest.TestCase):
                 with ExitStack() as stack:
                     for p in patches:stack.enter_context(p)
                     with self.assertRaisesRegex(RuntimeError,str(failure)):
-                        if kind=='save':save.physical_case(f.suite,f.owned,output)
-                        else:close.CalcCloseCase(f.suite,f.owned,output,'save').run()
+                        if kind=='save':save.physical_case(f.suite,f.owned,output,prepared_library={'kind':'test-only-prepared'})
+                        else:close.CalcCloseCase(f.suite,f.owned,output,'save',prepared_library={'kind':'test-only-prepared'}).run()
                 self.assertEqual(['bind-before-observer','explicit-close'] if early else
                     ['bind-before-observer','reader-created','first-read','release-observer','explicit-close'],calls)
 

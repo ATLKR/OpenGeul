@@ -45,7 +45,17 @@ def _insert_once(owner, shortcut, before, after):
     owner.receipt['actions'].append(action)
     owner._retain('input-intent'); owner._budget()
     action['beforeInsertion'] = before()
-    assert action['beforeInsertion']['scope']['focus']['hwnd'] == action['before']['scope']['focus']['hwnd'], 'Focus changed while retaining input intent'
+    initial, current = action['before']['scope'], action['beforeInsertion']['scope']
+    unchanged = current['focus']['hwnd'] == initial['focus']['hwnd']
+    b = owner.binding
+    entered_exact_child = (isinstance(owner, FirstAdmissionEditorSession) and shortcut == 'CTRL_F6'
+        and initial['focus']['hwnd'] in (b['suiteHwnd'], b['parentHwnd'])
+        and initial['focus']['pid'] == b['shellPid']
+        and initial['focus']['threadId'] == initial['before']['suite']['threadId']
+        and current['focus']['hwnd'] == b['childHwnd'] and current['focusWithinEditor'] is True
+        and current['focus']['pid'] == b['officePid'] and current['focus']['threadId'] == owner.thread)
+    assert unchanged or entered_exact_child, 'Focus changed while retaining input intent'
+    action['focusIntentTransition'] = 'unchanged' if unchanged else 'owned-host-to-exact-original-editor-child'
     action.update(inputCallAttempts=1, inputCountBasis='probe.send entered; OS entry/return unavailable')
     value = owner.probe.send(input_buffer(events))
     if type(value) is not int or not 0 <= value <= len(events):
@@ -146,14 +156,16 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
         self.receipt['firstShortcutAdmission'] = admit_shortcut_generation(p,a['parent'],a['child'],engine,self.receipt['engineHandleAdmittedAt'])
         self._retain('admission'); self._budget()
 
-    def _owned_guard(self):
+    def _observe_owned_guard(self):
+        row = super()._observe_guard()
+        self._budget(); row['focusKeyboard'] = self.probe.keyboard_snapshot(row['scope']['focus']['threadId'])
+        return row
+
+    def _validate_owned_guard(self, row, editor_required):
         from windows_smoke import _editor_focus_snapshot_ready
-        self._budget(); b = self.binding
-        shell = self.probe.process_snapshot(self.process)
-        self._budget(); engine = self.probe.engine_snapshot(self.handle)
+        b = self.binding; shell, engine, scope, keyboard, focus_keyboard = (row[key] for key in ('shell','engine','scope','keyboard','focusKeyboard'))
         assert shell == self.original_shell, 'Retained original shell generation changed'
         assert engine == self.original_engine, 'Retained original engine HANDLE/generation changed'
-        self._budget(); scope = self.probe.scope_snapshot(self.api, b)
         thread = scope['before']['editor']['threadId']
         if self.thread is None: self.thread = thread
         assert thread == self.thread, 'Owned editor input thread changed'
@@ -163,10 +175,9 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
         assert all(scope[key] is True for key in ('suiteOwnsParent', 'parentOwnsChild', 'parentVisible', 'parentEnabled', 'childVisible', 'childEnabled')), 'Owned editor ancestry is not available'
         focus = scope['focus']
         assert focus['hwnd'] and focus['isWindow'] and focus['rootHwnd'] == b['suiteHwnd'] and focus['pid'] in (b['shellPid'], b['officePid']), 'Input requires owned root or editor focus'
-        assert scope['capture']['hwnd'] == 0, 'Owned editor mouse capture is active'
+        if editor_required:
+            assert scope['focusWithinEditor'] is True and focus['pid'] == b['officePid'], 'Strict editor readiness is required before navigation'
         self._budget(); self.api.require_foreground(b['suiteHwnd'])
-        keyboard = self.probe.keyboard_snapshot(self.thread)
-        focus_keyboard = self.probe.keyboard_snapshot(focus['threadId'])
         for observed in (keyboard, focus_keyboard):
             assert observed['targetLayout'] == observed['currentThreadLayout'] == US_LAYOUT, 'Shortcut requires exact English US layout'
             assert observed['keysDown'] == [], 'Shortcut requires neutral modifier and navigation keys'
@@ -176,17 +187,22 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
         if self.lock_state is None: self.lock_state = locks
         assert locks == self.lock_state and tuple(focus_keyboard[key] for key in ('capsLockOn', 'scrollLockOn', 'numLockOn')) == locks, 'Native lock state changed'
         self._budget()
-        return dict(shell=shell, engine=engine, scope=scope, keyboard=keyboard, focusKeyboard=focus_keyboard)
+
+    def _capture_guard(self, editor_required):
+        from capture_readiness import settle_owned_capture
+        result = settle_owned_capture(self._observe_owned_guard,
+            lambda row:self._validate_owned_guard(row,editor_required),self.receipt,self.binding,self.deadline,clock=self.clock)
+        if editor_required:
+            b = self.binding
+            assert self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd']) == result['scope']['focus']['hwnd']
+            self._budget()
+        return result
+
+    def _owned_guard(self):
+        return self._capture_guard(False)
 
     def _guard(self):
-        result = self._owned_guard()
-        from windows_smoke import _editor_focus_snapshot_ready
-        b = self.binding
-        focus = _editor_focus_snapshot_ready(result['scope'], b['suiteHwnd'], b['childHwnd'], b['shellPid'], b['officePid'], self.thread)
-        assert focus, 'Strict editor readiness is required before navigation'
-        self._budget()
-        assert self.api.require_editor_focus(b['suiteHwnd'], b['childHwnd']) == focus
-        return result
+        return self._capture_guard(True)
 
     def _expected(self, step):
         assert self.active and not self.finished, 'Editor program is not active'

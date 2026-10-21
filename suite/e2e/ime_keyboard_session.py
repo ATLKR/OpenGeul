@@ -43,6 +43,7 @@ class IMEKeyboardSession:
         self.shared_admission = None
         self.tid = self.focus = self.locks = None
         self.phase = 'new'; self.failed = None; self.finished = False
+        self.semantic_pre = self.semantic_post = None
         self.output = self.stem = None
         self.receipt = dict(schemaVersion=1, kind='owned-first-admission-ime-keyboard',
             success=False, module=module, startedAt=clock(), setupDeadline=setup_deadline,
@@ -108,11 +109,22 @@ class IMEKeyboardSession:
         except BaseException as exc:
             self.close(exc)
             raise
-    def _guard(self, *, strict=True):
-        from windows_smoke import _editor_focus_snapshot_ready
+    def _observe_guard(self, strict):
         self._budget();b=self.binding
-        shell=self.probe.process_snapshot(self.process)
-        self._budget();engine=self.probe.engine_snapshot(self.handle)
+        row={};self.receipt['lastGuardObservation']=row
+        row['shell']=self.probe.process_snapshot(self.process)
+        self._budget();row['engine']=self.probe.engine_snapshot(self.handle)
+        self._budget();row['scope']=self.probe.scope_snapshot(self.api,b)
+        scope=row['scope']
+        target=scope['before']['editor'] if strict else (scope['focus'] if scope['focus']['hwnd'] else scope['before']['foreground'])
+        thread=target['threadId']
+        assert type(thread) is int and thread>0, 'IME guard has no measured keyboard thread'
+        row['keyboardThreadId']=thread
+        self._budget();row['keyboard']=self.probe.keyboard_snapshot(thread)
+        return row
+    def _validate_guard(self, row, strict):
+        from windows_smoke import _editor_focus_snapshot_ready
+        b=self.binding;shell,engine,scope,keyboard=(row[key] for key in ('shell','engine','scope','keyboard'))
         assert shell==self.shell and engine==self.engine, 'Retained IME native generation changed'
         joined=join_shortcut_generation(self.process,b['parentHwnd'],b['childHwnd'],engine)
         assert joined==self.shared_admission, 'Shared IME shortcut generation admission changed'
@@ -122,26 +134,22 @@ class IMEKeyboardSession:
             old=prior[key]
             assert (old[0],old[2])==(engine['pid'],engine['creationTime']) and _same(old[1],engine['image']), 'Owned click generation differs from retained IME engine'
             self.receipt['separateClickGenerationJoined']=True
-        self._budget();scope=self.probe.scope_snapshot(self.api,b)
         tid=scope['before']['editor']['threadId']
         assert type(tid) is int and tid>0
         if self.tid is None:self.tid=tid
         assert tid==self.tid, 'Owned IME editor thread changed'
-        focus=_editor_focus_snapshot_ready(scope,b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],self.tid)
-        assert scope['capture']['hwnd']==0, 'IME keyboard requires no native mouse capture'
+        _editor_focus_snapshot_ready(scope,b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],self.tid)
         parent=scope['parent']
         assert (parent['hwnd'],parent['pid'],parent['rootHwnd'],parent['isWindow'])==(b['parentHwnd'],b['shellPid'],b['suiteHwnd'],True), 'IME owned parent changed'
         assert all(scope[key] is True for key in ('suiteOwnsParent','parentOwnsChild','parentVisible','parentEnabled','childVisible','childEnabled')), 'IME owned ancestry unavailable'
-        self._budget();self.api.require_foreground(b['suiteHwnd'])
+        target=scope['focus'] if scope['focus']['hwnd'] else scope['before']['foreground']
+        assert target['pid'] in (b['shellPid'],b['officePid']) and target['rootHwnd']==b['suiteHwnd'] and target['isWindow'], 'IME focus transition has no owned keyboard target'
         if strict:
-            assert focus and self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd'])==focus, 'Strict IME editor focus unavailable'
-            keyboard_thread=self.tid;self.focus=focus
+            assert scope['focusWithinEditor'] is True and scope['focus']['pid']==b['officePid'], 'Strict IME editor focus unavailable'
+            assert row['keyboardThreadId']==self.tid
         else:
-            target=scope['focus'] if scope['focus']['hwnd'] else scope['before']['foreground']
-            assert target['pid'] in (b['shellPid'],b['officePid']) and target['rootHwnd']==b['suiteHwnd'] and target['isWindow'], 'IME focus transition has no owned keyboard target'
-            keyboard_thread=target['threadId']
-            assert type(keyboard_thread) is int and keyboard_thread>0
-        self._budget();keyboard=self.probe.keyboard_snapshot(keyboard_thread)
+            assert row['keyboardThreadId']==target['threadId']
+        self._budget();self.api.require_foreground(b['suiteHwnd'])
         assert keyboard['targetLayout']==keyboard['currentThreadLayout']==US_LAYOUT, 'IME shortcut requires exact original US layout'
         assert keyboard['keysDown']==[], 'IME shortcut requires neutral keys'
         locks=tuple(keyboard[key] for key in ('capsLockOn','scrollLockOn','numLockOn'))
@@ -149,7 +157,20 @@ class IMEKeyboardSession:
         if self.locks is None:self.locks=locks
         assert locks==self.locks, 'IME lock state changed'
         self._budget()
-        return dict(shell=shell,engine=engine,scope=scope,keyboard=keyboard,keyboardThreadId=keyboard_thread)
+    def _guard(self, *, strict=True, context_check=None):
+        from capture_readiness import settle_owned_capture
+        def validate(row):
+            self._validate_guard(row,strict)
+            if context_check is not None:context_check()
+        row=settle_owned_capture(lambda:self._observe_guard(strict),validate,
+            self.receipt,self.binding,self.deadline,clock=self.clock)
+        if strict:
+            b=self.binding;focus=row['scope']['focus']['hwnd']
+            assert focus and self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd'])==focus, 'Strict IME editor focus changed before shortcut'
+            self.focus=focus
+        if context_check is not None:context_check()
+        self._budget()
+        return row
     def _press(self, preset, *, transition=False):
         self._budget();events=shortcut_events(preset)
         action=dict(shortcut=preset,events=events,bufferHex=bytes(input_buffer(events)).hex(),
@@ -158,7 +179,17 @@ class IMEKeyboardSession:
         action['knownPrefixReleasePlans']={str(n):dict(events=owned_release_events(events,n),bufferHex=bytes(input_buffer(owned_release_events(events,n))).hex()) for n in range(len(events))}
         self.receipt['actions'].append(action);self._retain('input-intent');self._budget()
         action['beforeInsertion']=self._guard(strict=not transition)
-        assert action['beforeInsertion']['scope']['focus']['hwnd']==action['before']['scope']['focus']['hwnd'], 'IME focus changed while retaining intent'
+        initial,current=action['before']['scope'],action['beforeInsertion']['scope'];b=self.binding
+        unchanged=current['focus']['hwnd']==initial['focus']['hwnd']
+        entered_exact_child=(transition and preset=='CTRL_F6'
+            and initial['focus']['hwnd'] in (b['suiteHwnd'],b['parentHwnd'])
+            and initial['focus']['pid']==b['shellPid']
+            and initial['focus']['threadId']==initial['before']['suite']['threadId']
+            and current['focus']['hwnd']==b['childHwnd'] and current['focusWithinEditor'] is True
+            and current['focus']['pid']==b['officePid'] and current['focus']['threadId']==self.tid)
+        assert unchanged or entered_exact_child, 'IME focus changed while retaining intent'
+        action['focusIntentTransition']='unchanged' if unchanged else 'owned-host-to-exact-original-editor-child'
+        self._budget()
         action.update(inputCallAttempts=1,inputCountBasis='native shortcut call attempted; return unavailable')
         value=self.probe.send(input_buffer(events))
         if type(value) is not int or not 0<=value<=len(events):
@@ -213,15 +244,80 @@ class IMEKeyboardSession:
             for preset in SETUP[self.module]:self._press(preset)
             self.phase='navigated'
         return self._run(navigate)
+    def _replay_semantic(self, phase):
+        from ime_semantic_context import require_ime_semantic_context
+        self._budget();contexts=self.record.get('imeSemanticContexts')
+        assert isinstance(contexts,list) and len(contexts) in (1,2), 'IME requires actual finite semantic contexts'
+        assert contexts[0] is self.semantic_pre and self.record.get('imeSemanticContext') is contexts[-1], 'Actual IME semantic context identity changed'
+        if phase=='post':
+            assert len(contexts)==2 and contexts[1] is self.semantic_post, 'Actual POST semantic context identity changed'
+        context=self.semantic_pre if phase=='pre' else self.semantic_post
+        result=require_ime_semantic_context(context,module=self.module,expected_native=self.binding,
+            setup_deadline=self.setup_deadline,now=self.clock(),phase=phase,
+            expected_prefix=None if phase=='pre' else self.record.get('asciiPrefix'))
+        self._budget()
+        return result
+    def semantic_ready(self, context, *, phase):
+        def acknowledge():
+            assert phase in ('pre','post'), 'Unknown IME semantic acknowledgement phase'
+            assert self.phase==('navigated' if phase=='pre' else 'semantic-pre-ready'), 'IME semantic acknowledgement cannot repeat or reorder'
+            contexts=self.record.get('imeSemanticContexts')
+            count=1 if phase=='pre' else 2
+            assert isinstance(contexts,list) and len(contexts)==count and contexts[-1] is context, 'IME acknowledgement requires its actual returned semantic context'
+            assert self.record.get('imeSemanticContext') is context, 'IME latest semantic context changed'
+            if phase=='pre':self.semantic_pre=context
+            else:
+                assert contexts[0] is self.semantic_pre, 'Actual PRE semantic context changed before POST'
+                self.semantic_post=context
+                self._replay_semantic('pre')
+            self._replay_semantic(phase);self._guard()
+            self.receipt.setdefault('semanticReadiness',[]).append(dict(phase=phase,acknowledgedAt=self.clock(),
+                readerFinishedAt=context['finishedAt'],readerDeadline=context['readerDeadline'],setupDeadline=self.setup_deadline))
+            self._budget();self.phase='semantic-'+phase+'-ready'
+        return self._run(acknowledge)
+    def require_prefix_ready(self):
+        def current():
+            assert self.phase=='semantic-pre-ready', 'Physical IME prefix requires completed PRE semantic cleanup'
+            self._replay_semantic('pre')
+            return self._guard()
+        return self._run(current)
+    def require_context_target(self, context_key):
+        def current():
+            assert context_key in ('imeSemanticContext','calcSetupContext'), 'Unknown IME reader context key'
+            assert self.phase in ('navigated','semantic-pre-ready','semantic-post-ready'), 'IME reader target phase unavailable'
+            assert self.deadline==self.setup_deadline, 'IME reader guard cannot nest or renew another phase'
+            context=self.record.get(context_key)
+            assert isinstance(context,dict), 'Actual IME reader context is missing'
+            started=context.get('startedAt');deadline=context.get('readerDeadline')
+            def validate_context():
+                assert self.record.get(context_key) is context, 'Actual IME reader context identity changed'
+                assert context.get('expectedNative')==self.binding, 'IME reader context native binding changed'
+                assert context.get('setupDeadline')==self.setup_deadline, 'IME reader context setup deadline changed'
+                assert _number(started) and _number(deadline) and context.get('startedAt')==started and context.get('readerDeadline')==deadline
+                assert started<=self.clock()<deadline==min(self.setup_deadline,started+12.), 'IME reader context deadline/order changed'
+                if context_key=='imeSemanticContext':
+                    assert context.get('kind')=='ime-semantic-editing-context' and context.get('module')==self.module and context.get('phase') in ('pre','post')
+                else:
+                    assert self.module=='calc' and context.get('kind')=='ime-calc-single-observation-setup'
+            validate_context();previous=self.deadline
+            if self.native_probe:previous_probe=self.probe.deadline
+            self.deadline=deadline
+            if self.native_probe:self.probe.deadline=deadline
+            try:return self._guard(context_check=validate_context)
+            finally:
+                self.deadline=previous
+                if self.native_probe:self.probe.deadline=previous_probe
+        return self._run(current)
     def require_target(self):
         def current():
-            assert self.phase in ('navigated','composition'), 'IME setup target is unavailable'
+            assert self.phase in ('navigated','semantic-pre-ready','semantic-post-ready','composition'), 'IME setup target is unavailable'
             return self._guard()
         return self._run(current)
     def setup_complete(self):
         def complete():
             from korean_ime_smoke import require_ascii_prefix
-            assert self.phase=='navigated', 'IME setup cannot complete before navigation'
+            assert self.phase=='semantic-post-ready', 'IME setup requires PRE and POST semantic cleanup'
+            self._replay_semantic('pre');self._replay_semantic('post')
             require_ascii_prefix(self.record)
             assert (self.record['editorTid'],self.record['keyboardFocusHwnd']) == (self.tid,self.focus), 'IME prefix differs from retained editor'
             if self.module=='calc':

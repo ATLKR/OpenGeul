@@ -65,12 +65,22 @@ class FakeWindows:
 class AsciiEditorInputTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(keyboard, 'Missing source-supported physical ASCII editor injector')
+        from ascii_observer_boundary import AsciiObserverBoundary
+        self.observer_patch = patch.object(keyboard, '_observer', side_effect=AsciiObserverBoundary)
+        self.observer_patch.start(); self.addCleanup(self.observer_patch.stop)
+
+    def type_ascii(self, *args, **kwargs):
+        kwargs.setdefault('original_popen', SimpleNamespace(pid=77))
+        kwargs.setdefault('native_binding', dict(suiteHwnd=11, childHwnd=22))
+        kwargs.setdefault('prepared_library', {'kind':'test-only-observer-boundary'})
+        kwargs.setdefault('deadline', kwargs.get('clock', keyboard.time.monotonic)() + 60.)
+        return keyboard.type_ascii(*args, **kwargs)
 
     def test_optional_absolute_deadline_blocks_expired_input_without_changing_default_receipts(self):
         for deadline in (1., True, float('nan'), float('inf')):
             api, record = FakeWindows(), {}
             with self.subTest(deadline=deadline), self.assertRaises(AssertionError):
-                keyboard.type_ascii(api, 11, 22, 'a', record, pause=.04,
+                self.type_ascii(api, 11, 22, 'a', record, pause=.04,
                     deadline=deadline, clock=lambda: 1.)
             self.assertEqual(api.sent, [])
 
@@ -79,7 +89,7 @@ class AsciiEditorInputTests(unittest.TestCase):
         def advance(seconds): now[0] += seconds
         with patch.object(keyboard.time, 'sleep', side_effect=advance) as sleep:
             with self.assertRaisesRegex(AssertionError, 'deadline'):
-                keyboard.type_ascii(api, 11, 22, 'ab', record, pause=.04,
+                self.type_ascii(api, 11, 22, 'ab', record, pause=.04,
                     deadline=1.02, clock=lambda: now[0])
         self.assertEqual(len(api.sent), 1)
         self.assertAlmostEqual(sleep.call_args.args[0], .02)
@@ -93,7 +103,7 @@ class AsciiEditorInputTests(unittest.TestCase):
             return result
         api.require_editor_focus = delayed_focus
         with self.assertRaisesRegex(AssertionError, 'deadline'):
-            keyboard.type_ascii(api, 11, 22, 'a', record, pause=.04,
+            self.type_ascii(api, 11, 22, 'a', record, pause=.04,
                 deadline=2., clock=lambda: now[0])
         self.assertEqual(api.sent, [])
 
@@ -101,7 +111,7 @@ class AsciiEditorInputTests(unittest.TestCase):
         api, record = api or FakeWindows(), {}
         kw.setdefault('pause', 0.025)
         with patch.object(keyboard.time, 'sleep') as sleep:
-            keyboard.type_ascii(api, 11, 22, text, record, **kw)
+            self.type_ascii(api, 11, 22, text, record, **kw)
         return api, record['asciiEditorInputs'][0], sleep
 
     def test_win64_input_abi_has_keyboard_offset_eight_and_size_forty(self):
@@ -153,7 +163,7 @@ class AsciiEditorInputTests(unittest.TestCase):
         api, record = FakeWindows(counts=(1, 1)), {}
         try:
             with patch.object(keyboard.time, 'sleep'), self.assertRaisesRegex(AssertionError, 'inserted 1 of 4'):
-                keyboard.type_ascii(api, 11, 22, ':', record, pause=0.04)
+                self.type_ascii(api, 11, 22, ':', record, pause=0.04)
         except ValueError as exc:
             self.fail('Colon needs a physical plan before partial insertion can be bounded: ' + str(exc))
         self.assertEqual([sent[0] for sent in api.sent], [4, 1])
@@ -218,7 +228,7 @@ class AsciiEditorInputTests(unittest.TestCase):
         # Prefix [Shift down, A down] needs A up then Shift up. No text retry.
         api, record = FakeWindows([2]), {}
         with self.assertRaisesRegex(AssertionError, 'inserted 2 of 4'):
-            keyboard.type_ascii(api, 11, 22, 'Ab', record, pause=0.025)
+            self.type_ascii(api, 11, 22, 'Ab', record, pause=0.025)
         receipt = record['asciiEditorInputs'][0]
         self.assertIs(receipt['success'], False)
         self.assertEqual(len(receipt['actions']), 1)
@@ -232,7 +242,7 @@ class AsciiEditorInputTests(unittest.TestCase):
         for inserted, expected in ((0, []), (1, [0x2a]), (3, [0x2a])):
             api, record = FakeWindows([inserted]), {}
             with self.subTest(inserted=inserted), self.assertRaises(AssertionError):
-                keyboard.type_ascii(api, 11, 22, 'A', record, pause=0.025)
+                self.type_ascii(api, 11, 22, 'A', record, pause=0.025)
             cleanup = record['asciiEditorInputs'][0]['actions'][0].get('cleanup', {})
             self.assertEqual([row['scan'] for row in cleanup.get('events', [])], expected)
             self.assertEqual(len(api.sent), 2 if expected else 1)
@@ -240,7 +250,7 @@ class AsciiEditorInputTests(unittest.TestCase):
     def test_cleanup_failure_retains_original_partial_input_failure(self):
         api, record = FakeWindows([2, RuntimeError('cleanup failed')]), {}
         with self.assertRaisesRegex(AssertionError, 'inserted 2 of 4'):
-            keyboard.type_ascii(api, 11, 22, 'A', record, pause=0.025)
+            self.type_ascii(api, 11, 22, 'A', record, pause=0.025)
         receipt = record['asciiEditorInputs'][0]
         self.assertIn('inserted 2 of 4', receipt['error'])
         self.assertIn('cleanup failed', receipt['actions'][0]['cleanup']['error'])
@@ -254,7 +264,7 @@ class AsciiEditorInputTests(unittest.TestCase):
             return count
         api.user.SendInput = send
         with self.assertRaisesRegex(AssertionError, 'foreign editor focus'):
-            keyboard.type_ascii(api, 11, 22, 'ab', record, pause=0.025)
+            self.type_ascii(api, 11, 22, 'ab', record, pause=0.025)
         self.assertEqual(len(api.sent), 1)
         self.assertIs(record['asciiEditorInputs'][0]['success'], False)
 
@@ -262,7 +272,7 @@ class AsciiEditorInputTests(unittest.TestCase):
         api, record = FakeWindows(), {}
         api.user.GetWindowThreadProcessId = lambda hwnd, _: 99 if api.sent else 44
         with self.assertRaisesRegex(AssertionError, 'thread changed'):
-            keyboard.type_ascii(api, 11, 22, 'ab', record, pause=0.025)
+            self.type_ascii(api, 11, 22, 'ab', record, pause=0.025)
         self.assertEqual(len(api.sent), 1)
         self.assertIs(record['asciiEditorInputs'][0]['success'], False)
 
@@ -326,6 +336,7 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
         case = object.__new__(lifecycle.Case)
         case.record = {'attachments': [{'hwnd': 11, 'parent': 12, 'child': 22, 'officePid': 88}]}
         case.process, case.api = SimpleNamespace(pid=77), FakeWindows()
+        case.prepared_library={'kind':'test-only-prepared'}
         # Isolate this existing navigation/input contract. Completion itself is
         # covered by the real-policy regressions in test_writer_model_barrier.
         completion = SimpleNamespace(begin=Mock(return_value=object()), complete=Mock(), abort=Mock())
@@ -345,7 +356,8 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
             case.edit(11, 22, '-LIFECYCLE-NEW-')
         activated.assert_called_once_with(case.api, case.process, 11, case.record)
         clicked.assert_called_once_with(case.api,case.process,11,12,22,88,case.record)
-        type_ascii.assert_called_once_with(case.api, 11, 22, '-LIFECYCLE-NEW-', case.record, pause=0.025,deadline=completion.deadline)
+        type_ascii.assert_called_once_with(case.api, 11, 22, '-LIFECYCLE-NEW-', case.record, pause=0.025,deadline=completion.deadline,original_popen=case.process,
+            native_binding=dict(shellPid=77,officePid=88,suiteHwnd=11,parentHwnd=12,childHwnd=22),prepared_library=case.prepared_library)
         self.assertEqual([call.args[0] for call in send_keys.call_args_list], ['^{F6}', '^{END}'])
         self.assertEqual(case.record['stage'], 'physical-editor-input')
         self.assertGreaterEqual(len(case.api.focus_checks), 3)
@@ -400,7 +412,7 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                         patch.object(native, '_verified_saved_calc_close_proof', return_value=object()), \
                         patch.object(native, 'close_document'), patch.object(native, 'close_home'), \
                         patch.object(native, 'stop_owned_test_process'):
-                    result = native.document_case(root, root, root, module, extension, True)
+                    result = native.document_case(root, root, root, module, extension, True,prepared_library={'kind':'test-only-prepared'})
                 activated.assert_called_once_with(api, process, 11, result)
                 clicked.assert_called_once_with(api,process,11,12,22,88,result)
                 self.assertEqual(type_ascii.call_count,1)

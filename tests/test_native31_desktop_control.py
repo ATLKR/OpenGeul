@@ -129,7 +129,7 @@ class ControlContracts(unittest.TestCase):
 
     def test_owned_lifecycle_normal_timeout_and_launch_failure(self):
         class Owner:
-            def __init__(self, mode): self.mode=mode; self.calls=[]; self.created=False
+            def __init__(self, mode): self.mode=mode; self.calls=[]; self.created=False; self.cleanup_outcomes=[]
             def create_suspended(self):
                 self.calls.append('create'); self.created=True
                 if self.mode=='launch': raise OSError('launch failed')
@@ -139,6 +139,7 @@ class ControlContracts(unittest.TestCase):
             def wait(self, seconds): self.calls.append('wait'); return self.mode!='timeout'
             def exit_code(self): return 0
             def descendants_empty(self): return True
+            def accounting(self): return {'querySucceeded':True,'activeProcesses':0}
             def terminate_owned(self): self.calls.append('terminate')
             def close(self): self.calls.append('close')
         for mode in ['normal','timeout','launch']:
@@ -149,6 +150,7 @@ class ControlContracts(unittest.TestCase):
                 self.assertEqual(result['forced'],mode!='normal')
                 self.assertEqual(result['timedOut'],mode=='timeout')
                 self.assertFalse(result['readiness'])
+                self.assertEqual(result['jobRetiredNaturally'],mode=='normal')
                 if mode=='normal': self.assertEqual(owner.calls,['create','assign','identity','resume','wait','close'])
                 else: self.assertIn('terminate',owner.calls)
                 self.assertTrue((out.path/'20-observer-launch.json').exists())
@@ -493,6 +495,7 @@ class ControlContracts(unittest.TestCase):
             calls=[]
             class Owner:
                 created=False
+                def __init__(self): self.cleanup_outcomes=[]
                 def create_suspended(self): self.created=True; calls.append('create')
                 def invoke(self,name,value=None):
                     calls.append(name)
@@ -504,6 +507,7 @@ class ControlContracts(unittest.TestCase):
                 def wait(self,seconds): return True
                 def exit_code(self): return self.invoke('exit',0)
                 def descendants_empty(self): return self.invoke('account',True)
+                def accounting(self): return self.invoke('account',{'querySucceeded':True,'activeProcesses':0})
                 def terminate_owned(self): calls.append('terminate')
                 def close(self): self.invoke('close')
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temp:

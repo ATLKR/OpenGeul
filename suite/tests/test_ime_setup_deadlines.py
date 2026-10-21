@@ -8,16 +8,30 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
 import korean_ime_smoke as ime
+import test_ime_mode_receipts as mode_fixtures
 
 
 class SetupDeadlineTests(unittest.TestCase):
     def observer(self, now, *, status=0):
         value=ime.NativeState();value.ack=1;value.status=status
-        def send(*args):now[0]+=1.;return 1
+        value.snapshotEvidence=dict(copyReturn=1,ackBefore=1,ackAfter=1,stable=True)
+        value.tsfCaptured=1;value.profileChangeAttempted=1
+        value.threadMode=ime.native_mode.NativeModeReceipt(**mode_fixtures.ThreadModeReceiptTests().receipt(1))
+        counter=patch.object(ime.native_mode,"counter_budget",return_value=(100000,1000))
+        counter.start();self.addCleanup(counter.stop)
+        def send(*args):
+            now[0]+=1.
+            value.commandBudgets=ime.NativeState.from_buffer_copy(observer.mapping).commandBudgets
+            return 1
         observer=ime.CompositionObserver.__new__(ime.CompositionObserver)
         observer.api=NS(user=NS(SendMessageTimeoutW=send,GetKeyboardLayout=lambda tid:0x04120412))
-        observer.focus=33;observer.tid=44;observer.commands=[];observer.activation_attempted=False
+        observer.focus=33;observer.tid=44;observer.commands=[];observer.activation_attempted=False;observer.command_attempts=set()
         observer.mapping=bytearray(__import__('ctypes').sizeof(ime.NativeState))
+        def publish(pointer,command,counter,frequency):
+            target=pointer._obj;slot=target.commandBudgets[command-1]
+            if slot.counter or slot.frequency:return 0
+            slot.counter=counter;slot.frequency=frequency;target.command=command;return 1
+        observer.dll=NS(PublishCommand=publish)
         observer.require_target=lambda:None;observer.state=lambda:value
         return observer
     def test_setup_command_send_and_ack_share_remaining_five_second_subdeadline(self):

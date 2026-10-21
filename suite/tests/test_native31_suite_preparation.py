@@ -130,7 +130,7 @@ class SuitePreparationContracts(unittest.TestCase):
             host={**self.native,'process':{'createdFileTime':100},'windowsDirectory':r'C:\Windows'}
             class Owner:
                 def __init__(self,probe,environment,argv,budget,expected):
-                    self.created=False;self.environment=environment;self.argv=argv;self.budget=budget;self.expected=expected;seen.append(self)
+                    self.created=False;self.environment=environment;self.argv=argv;self.budget=budget;self.expected=expected;self.cleanup_outcomes=[];seen.append(self)
                 def create_suspended(self):self.created=True
                 def assign(self):pass
                 def identity(self):return {'processId':45,'argv':self.argv,'deadline':self.budget.deadline}
@@ -145,6 +145,7 @@ class SuitePreparationContracts(unittest.TestCase):
                     return True
                 def exit_code(self):return 0
                 def descendants_empty(self):return True
+                def accounting(self):return {'querySucceeded':True,'activeProcesses':0}
                 def close(self):pass
             fake_os=SimpleNamespace(**{**vars(os),'name':'nt','environ':env})
             with patch.object(core,'os',fake_os),patch.object(core,'Probe',return_value=SimpleNamespace(identity=lambda:host)), \
@@ -158,6 +159,7 @@ class SuitePreparationContracts(unittest.TestCase):
             for key in ('GITHUB_REF','GITHUB_JOB','GITHUB_WORKFLOW_REF'):self.assertEqual(owner.environment[key],env[key])
             self.assertIn('suite/scripts/prepare-native31.ps1',owner.expected['sourceFiles'])
             self.assertTrue(json.loads((output/'99-result.json').read_text())['privacyPreparationQualified'])
+            self.assertTrue(json.loads((output/'99-result.json').read_text())['jobRetiredNaturally'])
 
     def test_observer_keeps_absolute_deadline_and_injects_only_additional_source_receipt(self):
         core=self.core;binding=self.m.control_binding(core);seen=[]

@@ -48,6 +48,24 @@ CALC_PENDING_OPERATIONS = [CALC_OPERATIONS[0],
     'owned-test-accessible.A1-editor.XAccessibleText.getText']+CALC_OPERATIONS[1:]
 _CALC_PENDING_CONTRACT = _ModelContract(CALC_MODEL_SERVICE,CALC_PENDING_GETTER_CONTRACT,
     'existing-owned-calc-pending-input','owned-calc-pending-reader-cleanup',tuple(CALC_PENDING_OPERATIONS))
+WRITER_EDIT_GETTER_CONTRACT='writer-active-edit-context-v1'
+CALC_EDIT_GETTER_CONTRACT='calc-a1-active-edit-context-v1'
+IMPRESS_MODEL_SERVICE='com.sun.star.presentation.PresentationDocument'
+IMPRESS_EDIT_GETTER_CONTRACT='impress-active-edit-context-v1'
+_WRITER_EDIT_CONTRACT=_ModelContract(WRITER_MODEL_SERVICE,WRITER_EDIT_GETTER_CONTRACT,
+    'existing-owned-writer-edit-context','owned-writer-edit-context-reader-cleanup',
+    ('resolve-existing-owned-frame','retained-controller.getViewCursor','ViewCursor.isCollapsed',
+     'ViewCursor.getText','ViewCursor.getEnd','Text.getEnd','Text.compareRegionEnds','Text.getString',
+     'isModified','verify-retained-generation'))
+_CALC_EDIT_CONTRACT=_ModelContract(CALC_MODEL_SERVICE,CALC_EDIT_GETTER_CONTRACT,
+    'existing-owned-calc-edit-context','owned-calc-edit-context-reader-cleanup',
+    tuple([CALC_OPERATIONS[0],'XSelectionSupplier.getSelection.rangeAddress',
+           'owned-native-frame.XAccessible.actual-A1-editing-context']+CALC_OPERATIONS[1:]))
+_IMPRESS_EDIT_CONTRACT=_ModelContract(IMPRESS_MODEL_SERVICE,IMPRESS_EDIT_GETTER_CONTRACT,
+    'existing-owned-impress-edit-context','owned-impress-edit-context-reader-cleanup',
+    ('resolve-existing-owned-frame','owned-native-frame.XAccessible.actual-active-Outliner-editing-context',
+     'isModified','verify-retained-generation'))
+_EDIT_MODULES={_WRITER_EDIT_CONTRACT:'writer',_CALC_EDIT_CONTRACT:'calc',_IMPRESS_EDIT_CONTRACT:'impress'}
 PROCESS_KEYS = ('pid','creationTime','image','handleValue','waitResult','exitCode')
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -57,7 +75,7 @@ from native_accessibility import private_pipe as _parse_private_pipe
 def _model_contract(expected_service,getter_contract):
     """Only the caller selects a fixed contract; receipt fields never select it."""
     assert type(expected_service) is str and type(getter_contract) is str, 'Explicit model service/getter contract is required'
-    for contract in (_WRITER_CONTRACT,_CALC_CONTRACT,_CALC_PENDING_CONTRACT):
+    for contract in (_WRITER_CONTRACT,_CALC_CONTRACT,_CALC_PENDING_CONTRACT,*_EDIT_MODULES):
         if (expected_service,getter_contract)==(contract.service,contract.getters):return contract
     raise AssertionError('Unsupported explicit model service/getter pair')
 
@@ -391,6 +409,14 @@ def _require_owned_observation(observation,binding,suite_root,contract):
         from calc_pending_input import require_pending_receipt
         _require_calc_selection(observation.get('calcSelection'))
         require_pending_receipt(observation.get('pendingInput'),binding['childHwnd'])
+    if contract in _EDIT_MODULES:
+        from ime_semantic_context import require_edit_context
+        require_edit_context(observation.get('editContext'),_EDIT_MODULES[contract],binding['childHwnd'])
+        assert type(observation.get('isModified')) is bool
+        if contract==_CALC_EDIT_CONTRACT:
+            from calc_pending_input import require_pending_receipt
+            _require_calc_values(observation);_require_calc_selection(observation.get('calcSelection'))
+            require_pending_receipt(observation['editContext'].get('pendingInput'),binding['childHwnd'])
     return observation
 
 
@@ -920,7 +946,7 @@ class _UnoReader:
     def __init__(self,config,anchor,*,contract=_WRITER_CONTRACT):
         self.config=config;self.contract=contract;self.diagnostic={'proxyTypes':{},'frameEnumeration':[]}
         self.model=self.controller=self.frame=self.desktop=self.context=self.local_context=None
-        self.retained={};self.pending_input=None
+        self.retained={};self.pending_input=None;self.edit_context=None
         try:
             import uno
             self.local_context=uno.getComponentContext();self.proxy_type=type(self.local_context)
@@ -984,7 +1010,25 @@ class _UnoReader:
 
     def read(self):
         before=self.snapshot()
-        if self.contract in (_CALC_CONTRACT,_CALC_PENDING_CONTRACT):
+        if self.contract in _EDIT_MODULES:
+            from ime_semantic_context import EditingContextReader
+            module=_EDIT_MODULES[self.contract]
+            if self.edit_context is None:
+                self.edit_context=EditingContextReader(module,self.frame,self.controller,self.model,
+                    self.config['child_hwnd'],deadline=self.config['readerDeadline'])
+            editing=self.edit_context.read()
+            value=dict(editContext=editing,isModified=self.model.isModified())
+            assert type(value['isModified']) is bool
+            if module=='writer':value['bodyText']=editing['textAfter']
+            if module=='calc':
+                sheet=self.model.getSheets().getByIndex(0)
+                value.update(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
+                    b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
+                    d1Formula=sheet.getCellRangeByName('D1').getFormula(),d1Value=sheet.getCellRangeByName('D1').getValue(),
+                    calcSelection=read_calc_selection(self.controller))
+                _require_calc_values(value)
+            after=self.snapshot()
+        elif self.contract in (_CALC_CONTRACT,_CALC_PENDING_CONTRACT):
             sheet=self.model.getSheets().getByIndex(0)
             pending={}
             if self.contract==_CALC_PENDING_CONTRACT:
@@ -1009,6 +1053,7 @@ class _UnoReader:
 
     def release(self):
         # Client references only. The live document is never closed/disposed.
+        if getattr(self,'edit_context',None) is not None:self.edit_context.release();self.edit_context=None
         if self.pending_input is not None:self.pending_input.release();self.pending_input=None
         self.model=self.controller=self.frame=self.desktop=self.context=self.local_context=None
 

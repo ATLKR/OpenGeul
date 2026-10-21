@@ -160,6 +160,11 @@ class AccessiblePendingReader:
         self.frame = self.peer = self.root = self.document = self.editor = None
         self.previous = None
 
+    def read_edit_context(self):
+        """New explicit caret contract; the legacy read receipt is unchanged."""
+        from ime_semantic_context import capture_calc_edit_context
+        return capture_calc_edit_context(self)
+
     def _verify_peer(self):
         assert self.frame is not None and self.peer is not None, 'Pending-input reader has been released'
         assert self.frame.getContainerWindow() == self.peer and int(self.peer.getWindowHandle((), 1)) == self.child_hwnd, 'Verified frame peer/HWND changed during pending-input capture'

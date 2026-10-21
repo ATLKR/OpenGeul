@@ -9,6 +9,7 @@ import sys
 import tempfile
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 E2E = Path(__file__).resolve().parents[1] / 'e2e'
 sys.path.insert(0, str(E2E))
@@ -114,6 +115,43 @@ class CountedEditorShortcutsTests(unittest.TestCase):
     def full(self, session):
         session.navigate('^{HOME}')
         session.navigate('{F2}^{END}')
+    def test_owned_capture_at_admission_settles_without_repeating_navigation_or_reopening_engine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f=self.fixture(directory);probe=f[4];original=probe.scope_snapshot;reads=[]
+            def scope(api,binding):
+                row=original(api,binding);reads.append(row)
+                if len(reads)==1:row['capture']=copy.deepcopy(row['parent'])
+                return row
+            probe.scope_snapshot=scope
+            with patch('time.sleep',side_effect=lambda seconds:setattr(f[3],'now',f[3].now+seconds)):
+                with self.session(f) as session:self.full(session)
+            self.assertEqual(len(probe.sent),3)
+            self.assertEqual(sum(c==('open',88) for c in probe.calls),1)
+            self.assertEqual(session.receipt['captureReadiness']['pollCount'],1)
+            self.assertEqual(session.receipt['captureReadiness']['first']['scope']['capture']['hwnd'],12)
+    def test_rejected_fresh_capture_scope_is_retained_before_guard_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f=self.fixture(directory);f[4].capture=991
+            with self.assertRaisesRegex(AssertionError,'capture'):
+                with self.session(f):self.fail('Unknown capture was admitted')
+            receipt=f[5]['editorShortcutSessions'][0]
+            self.assertEqual(receipt['lastGuardObservation']['scope']['capture']['hwnd'],991)
+            self.assertEqual(f[4].sent,[])
+    def test_owned_capture_wait_keeps_generation_layout_neutral_keys_and_editor_focus_strict(self):
+        mutations=(lambda f:f[4].engine.update(creationTime=f[4].engine['creationTime']+1),
+                   lambda f:setattr(f[4],'layout',0x04120412),lambda f:setattr(f[4],'keys_down',[0x11]),
+                   lambda f:setattr(f[4],'focus',999))
+        for mutate in mutations:
+            with self.subTest(mutate=mutate),tempfile.TemporaryDirectory() as directory:
+                f=self.fixture(directory);probe=f[4];original=probe.scope_snapshot
+                def scope(api,binding):
+                    row=original(api,binding);row['capture']=copy.deepcopy(row['parent']);return row
+                probe.scope_snapshot=scope
+                def pause(seconds):f[3].now+=seconds;mutate(f)
+                with patch('time.sleep',side_effect=pause),self.assertRaises(AssertionError):
+                    with self.session(f):self.fail('Changed capture context admitted')
+                self.assertEqual(probe.sent,[])
+                self.assertIn('scope',f[5]['editorShortcutSessions'][0]['lastGuardObservation'])
     def test_generation_ledger_preserves_first_admission_time_without_a_handle_or_alias(self):
         with tempfile.TemporaryDirectory() as directory:
             p,b,api,clock,probe,record=self.fixture(directory)

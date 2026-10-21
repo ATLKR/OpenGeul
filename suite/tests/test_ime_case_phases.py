@@ -12,14 +12,17 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
 import korean_ime_smoke as ime
 import windows_smoke as native
 import test_korean_ime_smoke as fixtures
+from ascii_observer_boundary import AsciiObserverBoundary
 
 
 class IMECasePhaseTests(unittest.TestCase):
-    def run_case(self, module, *, fail_context=False, fail_mode=False):
+    def run_case(self, module, *, fail_context=False, fail_mode=False, fail_semantic=None):
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
         root=Path(directory.name);calls=[];offset=[0.];clock=time.monotonic
         original=root/('OpenGeul-'+module+'.'+dict(ime.INPUT_CASES)[module]);original.write_bytes(b'unchanged fixture')
-        process=NS(pid=77);records=[];observer_installed=[False];layout=[0x04090409]
+        process=NS(pid=77);records=[];observer_installed=[False];layout=[0x04090409];prepared=object()
+        binding=dict(shellPid=77,officePid=31,suiteHwnd=11,parentHwnd=12,childHwnd=22,rootHwnd=11,
+            shellCreationTime=2**55,officeCreationTime=2**55+100,expectedImage=str(root/'Office/program/soffice.bin'))
         policy=fixtures.KoreanImePolicyTests();record_template=policy.record()
         observed=dict(text='Engine-OpenGeul-'+module+' 한글 '+ime.marker(module),formula='=SUM(B1:C1)',value=42,pageCount=1)
         user=NS(GetKeyboardLayout=lambda tid:layout[0],GetAsyncKeyState=lambda key:0,GetKeyState=lambda key:0,
@@ -31,12 +34,18 @@ class IMECasePhaseTests(unittest.TestCase):
         desktop=NS(window=lambda **kw:NS(wrapper_object=lambda:window))
         class Keyboard:
             def __init__(inner,api,p,hwnd,parent,child,pid,kind,record,deadline):
-                inner.api=api;inner.tid=41;inner.focus=51;inner.record=record;inner.binding={'actualFirstAdmission':True};records.append(record)
+                inner.api=api;inner.process=p;inner.tid=41;inner.focus=51;inner.record=record;inner.binding=binding;records.append(record)
             def start(inner):calls.append('admission')
             def focus_editor(inner,deadline):calls.append('CTRL_F6')
             def editor_ready(inner,receipt):calls.append('ready')
             def navigate(inner):calls.append(('navigate',module))
             def require_target(inner):return None
+            def require_context_target(inner,key):
+                self.assertIn(key,inner.record);calls.append(('reader-guard',key))
+            def require_prefix_ready(inner):calls.append('prefix-ready')
+            def semantic_ready(inner,context,*,phase):
+                self.assertIs(context,inner.record['imeSemanticContext'])
+                calls.append(('semantic-ready',phase))
             def setup_complete(inner):calls.append('setup-complete')
             def begin_save(inner,restoration,deadline):
                 self.assertEqual(restoration,policy.restoration());self.assertTrue(inner.record['layoutRestored'])
@@ -57,6 +66,8 @@ class IMECasePhaseTests(unittest.TestCase):
                 inner.api=api;inner.tid=41;inner.focus=51;inner.commands=[];inner.activation_attempted=False;inner.restored=False
                 inner.native_architecture=dict(processMachine=0,nativeMachine=0x8664,processArchitecture='x64',nativeArchitecture='x64')
                 inner.target_architecture=dict(inner.native_architecture);calls.append('observer-installed')
+            @property
+            def restoration_required(inner):return inner.activation_attempted
             def require_target(inner):return None
             def command(inner,command,**kw):
                 calls.append(('command',command))
@@ -78,9 +89,31 @@ class IMECasePhaseTests(unittest.TestCase):
             record['editorFocusReadiness']={'deadline':record['imeSetupBudget']['deadline']};click();enter();return 51
         def context(suite,source,original_bytes,record,deadline,**kw):
             self.assertFalse(observer_installed[0]);ime.require_ascii_prefix(record)
+            record['calcSetupContext']={'actualReaderContext':True};kw['require_current']()
             calls.append('reader-observation')
             if fail_context:raise RuntimeError('calc context rejected')
             calls.append('reader-natural-cleanup')
+        def semantic(suite,source,original_bytes,record,deadline,**kw):
+            self.assertFalse(observer_installed[0]);phase=kw['phase']
+            self.assertEqual(deadline,record['imeSetupBudget']['deadline'])
+            self.assertEqual(kw['expected_native'],binding)
+            self.assertEqual(kw['original_shell'],{'originalPopen':True})
+            context=dict(success=False,phase=phase);record['imeSemanticContext']=context;kw['require_current']()
+            if phase=='pre':self.assertFalse(record.get('asciiEditorInputs'));self.assertIsNone(kw.get('expected_prefix'))
+            else:
+                ime.require_ascii_prefix(record);self.assertEqual(kw['expected_prefix'],record['asciiPrefix'])
+            calls.append(('semantic-read',phase))
+            if fail_semantic==phase:raise RuntimeError('semantic '+phase+' rejected')
+            calls.append(('semantic-natural-cleanup',phase))
+            context['success']=True
+            record.setdefault('imeSemanticContexts',[]).append(context);record['imeSemanticContext']=context
+            return context
+        original_ascii=ime.ascii_input.type_ascii
+        def type_ascii(*args,**kw):
+            self.assertIs(kw['original_popen'],process);self.assertIs(kw['native_binding'],binding)
+            self.assertIs(kw['prepared_library'],prepared)
+            self.assertEqual(kw['deadline'],records[0]['imeSetupBudget']['deadline']);self.assertEqual(kw['pause'],.04)
+            calls.append('ascii-forward');return original_ascii(*args,**kw)
         def physical(observer,token,record):record['keyTokens'].append(token);calls.append(('physical',token))
         def wait(predicate,seconds):
             value=predicate()
@@ -101,6 +134,8 @@ class IMECasePhaseTests(unittest.TestCase):
             patch.object(ime,'activate_owned_suite'),patch.object(ime,'IMEKeyboardSession',Keyboard),
             patch.object(native,'prepare_editor_focus',side_effect=prepare),patch.object(native,'click_owned_editor'),
             patch.object(ime,'retained_setup_shell',return_value={'originalPopen':True}),patch.object(ime,'observe_calc_setup',side_effect=context),
+            patch.object(ime.ascii_input,'type_ascii',side_effect=type_ascii),patch.object(ime.ascii_input,'_observer',side_effect=AsciiObserverBoundary),
+            patch.object(ime,'observe_ime_semantic_setup',side_effect=semantic,create=True),
             patch.object(ime,'CompositionObserver',Observer),patch.object(ime,'physical_key',side_effect=physical),
             patch.object(ime,'wait_for',side_effect=wait),patch.object(ime,'package_text',side_effect=package),
             patch.object(ime,'close_document'),patch.object(ime,'close_home'),patch.object(native,'_verified_saved_calc_close_proof',return_value={'proof':True}),
@@ -110,9 +145,41 @@ class IMECasePhaseTests(unittest.TestCase):
             patch.object(ime.time,'monotonic',side_effect=lambda:clock()+offset[0]),patch.object(ime.ascii_input.time,'sleep')]
             for patcher in patchers:stack.enter_context(patcher)
             error=None;result=None
-            try:result=ime.case(root,root,root,policy.readiness(),module,dict(ime.INPUT_CASES)[module])
+            try:result=ime.case(root,root,root,policy.readiness(),module,dict(ime.INPUT_CASES)[module],prepared_library=prepared)
             except Exception as exc:error=exc
         return calls,records[0],result,error
+    def test_pre_and_post_semantic_cleanup_bracket_one_prefix_before_observer(self):
+        for module in ('writer','calc','impress'):
+            with self.subTest(module=module):
+                calls,record,result,error=self.run_case(module)
+                self.assertIsNone(error,repr(error))
+                before=calls.index(('semantic-natural-cleanup','pre'))
+                prefix=calls.index('prefix-ready');after=calls.index(('semantic-natural-cleanup','post'))
+                self.assertLess(before,prefix);self.assertLess(prefix,after);self.assertLess(after,calls.index('observer-installed'))
+                self.assertLess(calls.index(('semantic-ready','post')),calls.index(('command',1)))
+                self.assertEqual(len(record['asciiEditorInputs']),1)
+    def test_pre_or_post_semantic_failure_blocks_observer_korean_and_save_without_prefix_retry(self):
+        for phase in ('pre','post'):
+            with self.subTest(phase=phase):
+                calls,record,result,error=self.run_case('writer',fail_semantic=phase)
+                self.assertIsInstance(error,RuntimeError);self.assertIn('semantic '+phase+' rejected',str(error))
+                self.assertNotIn('observer-installed',calls);self.assertNotIn(('command',1),calls);self.assertNotIn('CTRL_S',calls)
+                self.assertEqual(calls.count('prefix-ready'),int(phase=='post'))
+                self.assertEqual(len(record.get('asciiEditorInputs',[])),int(phase=='post'))
+    def test_all_reader_callbacks_use_their_existing_context_cap(self):
+        for module in ('writer','calc','impress'):
+            with self.subTest(module=module):
+                calls,record,result,error=self.run_case(module);self.assertIsNone(error,repr(error))
+                guarded=[row[1] for row in calls if isinstance(row,tuple) and row[0]=='reader-guard']
+                self.assertEqual(guarded,['imeSemanticContext','imeSemanticContext']+(['calcSetupContext'] if module=='calc' else []))
+    def test_ascii_prefix_forwards_original_process_binding_descriptor_and_setup_deadline(self):
+        for module in ('writer','calc','impress'):
+            with self.subTest(module=module):
+                calls,record,result,error=self.run_case(module);self.assertIsNone(error,repr(error))
+                self.assertEqual(calls.count('ascii-forward'),1)
+                self.assertEqual(len(record['asciiMessageObservers']),1)
+                self.assertTrue(record['asciiMessageObservers'][0]['success'])
+                self.assertIs(record['asciiMessageObservers'][0]['semanticInsertionProved'],False)
     def test_all_modules_restore_before_one_existing_save_sequence_and_charge_original_budget(self):
         for module in ('writer','calc','impress'):
             with self.subTest(module=module):
@@ -133,3 +200,39 @@ class IMECasePhaseTests(unittest.TestCase):
         self.assertEqual(calls.count(('command',2)),1);self.assertEqual(calls.count(('command',4)),1)
         self.assertFalse(any(isinstance(value,tuple) and value[0]=='physical' for value in calls))
         self.assertNotIn('CTRL_S',calls);self.assertIn('keyboard-close',calls)
+
+
+class IMECohortPreparationTests(unittest.TestCase):
+    def run_main(self, architecture='x64', *, preparation_failure=False):
+        directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
+        root=Path(directory.name);suite=root/'Suite';suite.mkdir();fixture=root/'fixtures';fixture.mkdir()
+        output=root/'evidence';readiness=root/'readiness.json'
+        (suite/'suite-inventory.json').write_text(json.dumps(dict(schemaVersion=1,architecture=architecture)))
+        value=fixtures.KoreanImePolicyTests().readiness();machine={'x64':0x8664,'arm64':0xaa64}[architecture]
+        value['nativeMachine']=machine;value['controllerMachine']=0;value.setdefault('source',{})['architecture']=architecture
+        value['profile']['component']['machine']=machine;readiness.write_text(json.dumps(value))
+        descriptor=object();calls=[]
+        def prepare(folder,*,architecture):
+            self.assertEqual(folder,output/'ascii-observer-preparation');self.assertTrue(output.is_dir())
+            calls.append(('prepare',architecture))
+            if preparation_failure:raise RuntimeError('bounded native preparation failed')
+            return descriptor
+        def case(*args,prepared_library):
+            self.assertIs(prepared_library,descriptor);self.assertEqual(calls[0],('prepare',architecture))
+            calls.append(('case',args[4]));return dict(success=True,imeVerified=True)
+        native_arch=dict(processMachine=0,nativeMachine=machine,processArchitecture=architecture,nativeArchitecture=architecture)
+        with patch.object(ime,'os',NS(name='nt')),patch.object(ime.native_arch,'observe_native_architecture',return_value=native_arch),patch.object(ime.ascii_input,'prepare_observer',side_effect=prepare,create=True),patch.object(ime,'case',side_effect=case):
+            error=None;result=None
+            try:result=ime.main(['--suite',str(suite),'--fixtures',str(fixture),'--readiness',str(readiness),'--output',str(output)])
+            except Exception as exc:error=exc
+        return calls,result,error
+    def test_prepare_once_before_all_original_case_setup_phases_for_both_architectures(self):
+        for architecture in ('x64','arm64'):
+            with self.subTest(architecture=architecture):
+                calls,result,error=self.run_main(architecture)
+                self.assertIsNone(error,repr(error));self.assertEqual(result,0)
+                self.assertEqual(calls,[('prepare',architecture),('case','writer'),('case','calc'),('case','impress')])
+    def test_preparation_failure_starts_no_case_or_editor_setup_budget(self):
+        calls,result,error=self.run_main(preparation_failure=True)
+        self.assertIsInstance(error,RuntimeError);self.assertIn('bounded native preparation failed',str(error))
+        self.assertEqual(calls,[('prepare','x64')])

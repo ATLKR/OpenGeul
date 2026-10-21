@@ -10,6 +10,8 @@ LABELS = {'CTRL_F6':'^{F6}', 'CTRL_HOME':'^{HOME}', 'F2':'{F2}', 'CTRL_END':'^{E
 class EditorProgramBoundary:
     def __init__(self, api, process, attachment, program, record, deadline, *, marker=None, inject=lambda key,**kw:None):
         self.deadline, self.record, self.inject = deadline, record, inject
+        self.binding = dict(shellPid=process.pid,officePid=attachment['officePid'],
+            suiteHwnd=attachment['hwnd'],parentHwnd=attachment['parent'],childHwnd=attachment['child'])
         self.record.setdefault('editorFocusReadiness', {'ready':True})
     def __enter__(self): return self
     def __exit__(self, *args): return False

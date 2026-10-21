@@ -23,6 +23,7 @@ class LifecycleSmokeTests(unittest.TestCase):
         case = object.__new__(smoke.Case)
         case.record = {'attachments': [{'hwnd': 11, 'parent': 12, 'child': 22, 'officePid': 88}]}
         case.process = SimpleNamespace(pid=77)
+        case.prepared_library={'kind':'test-only-prepared'}
         # This test isolates the unchanged focus/input protocol. Real completion
         # and stale-title rejection are exercised by test_writer_model_barrier.
         completion = SimpleNamespace(begin=Mock(return_value=object()), complete=Mock(), abort=Mock())
@@ -57,7 +58,8 @@ class LifecycleSmokeTests(unittest.TestCase):
         readiness.assert_called_once()
         clicked.assert_called_once_with(case.api,case.process,11,12,22,88,case.record)
         window.click_input.assert_called_once()
-        ascii_input.assert_called_once_with(case.api,11,22,'-LIFECYCLE-NEW-',case.record,pause=0.025,deadline=completion.deadline)
+        ascii_input.assert_called_once_with(case.api,11,22,'-LIFECYCLE-NEW-',case.record,pause=0.025,deadline=completion.deadline,original_popen=case.process,
+            native_binding=dict(shellPid=77,officePid=88,suiteHwnd=11,parentHwnd=12,childHwnd=22),prepared_library=case.prepared_library)
         self.assertEqual(observed, ['^{F6}', 'ready', '^{END}', 'marker'])
 
     def test_lifecycle_rejects_missing_or_ambiguous_attachment_before_editor_input(self):

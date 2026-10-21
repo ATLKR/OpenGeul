@@ -27,8 +27,10 @@ from windows_smoke import (Windows, INPUT_CASES, capture_failure, close_document
     stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input)
 from engine_smoke import verify_content
 import native_suite_architecture as native_arch
+import ime_thread_mode as native_mode
 from ime_keyboard_session import IMEKeyboardSession
 from ime_calc_setup import observe_calc_setup
+from ime_semantic_context import observe_ime_semantic_setup
 
 EXPECTED_KEYS = list('gksrmf') + ['BACKSPACE', 'f', 'RIGHT']
 SCANS = dict(zip('qwertyuiopasdfghjklzxcvbnm',
@@ -198,7 +200,15 @@ class NativeState(ctypes.Structure):
                 ('activeProfileLayout', ctypes.c_uint64), ('profileManagerHresult', ctypes.c_int32),
                 ('previousProfileHresult', ctypes.c_int32), ('activateProfileHresult', ctypes.c_int32),
                 ('activeProfileHresult', ctypes.c_int32), ('activateLayoutError', ctypes.c_uint32),
-                ('events', NativeEvent * 512)]
+                ('events', NativeEvent * 512),
+                ('commandBudgets', native_mode.NativeCommandBudget * 4),
+                ('targetHwnd', ctypes.c_uint64), ('rootHwnd', ctypes.c_uint64),
+                ('previousTsfOpen', ctypes.c_int32), ('previousTsfConversion', ctypes.c_int32),
+                ('tsfCaptured', ctypes.c_uint32), ('profileChangeAttempted', ctypes.c_uint32),
+                ('immContextPresent', ctypes.c_uint32), ('immConversionSucceeded', ctypes.c_uint32),
+                ('immOpen', ctypes.c_uint32), ('immConversion', ctypes.c_uint32), ('immSentence', ctypes.c_uint32),
+                ('threadMode', native_mode.NativeModeReceipt),
+                ('commandRejection', native_mode.NativeCommandRejection), ('nativeAttemptedMask', ctypes.c_uint32)]
 
 
 OBSERVER_SOURCE = r'''
@@ -207,6 +217,8 @@ OBSERVER_SOURCE = r'''
 #include <imm.h>
 #include <msctf.h>
 #include <stdint.h>
+#include "ime_thread_mode_windows.h"
+#include "ime_command_admission.h"
 struct Event { uint32_t sequence,message,flags,pid,tid; uint64_t hwnd,layout;
     int32_t compositionBytes,resultBytes; uint32_t origin; WCHAR composition[256],result[256]; };
 struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
@@ -215,19 +227,24 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     uint32_t previousProfileType,previousLanguage; WCHAR previousClsid[40],previousProfile[40];
     uint64_t previousProfileLayout; uint32_t activeProfileType; uint64_t activeProfileLayout;
     int32_t profileManagerHresult,previousProfileHresult,activateProfileHresult,activeProfileHresult;
-    uint32_t activateLayoutError; Event events[512]; };
+    uint32_t activateLayoutError; Event events[512];
+    opengeul_ime::CommandBudget commandBudgets[4]; uint64_t targetHwnd,rootHwnd;
+    int32_t previousTsfOpen,previousTsfConversion; uint32_t tsfCaptured,profileChangeAttempted;
+    uint32_t immContextPresent,immConversionSucceeded,immOpen,immConversion,immSentence;
+    opengeul_ime::ModeReceipt threadMode; opengeul_ime::CommandRejection commandRejection; uint32_t nativeAttemptedMask; };
 static State* shared = nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
 static bool haveOldProfile = false;
 static bool initialized = false;
+static opengeul_ime::CommandAdmission commandAdmission = {};
 static bool connect() {
     if (!shared) {
         mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,L"__MAPPING__");
         if (!mapping) return false;
         shared=(State*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(State));
     }
-    return shared && shared->magic==0x4f47494d && shared->version==1
+    return shared && shared->magic==0x4f47494d && shared->version==3
         && shared->pid==GetCurrentProcessId() && shared->tid==GetCurrentThreadId();
 }
 static ITfInputProcessorProfileMgr* profiles() {
@@ -238,79 +255,144 @@ static ITfInputProcessorProfileMgr* profiles() {
     shared->profileManagerHresult=CoCreateInstance(clsid,nullptr,CLSCTX_INPROC_SERVER,iid,(void**)&mgr);
     return mgr;
 }
+static bool budget(const opengeul_ime::CommandBudget& limits) {
+    LARGE_INTEGER now={},frequency={};
+    return limits.counter>0 && QueryPerformanceFrequency(&frequency)
+        && uint64_t(frequency.QuadPart)==limits.frequency && QueryPerformanceCounter(&now)
+        && now.QuadPart>0 && uint64_t(now.QuadPart)<limits.counter;
+}
+static void failure(int32_t status) { if (!shared->status) shared->status=status; }
+static bool original_target(HWND hwnd,bool input) {
+    DWORD pid=0; const auto tid=GetWindowThreadProcessId(hwnd,&pid);
+    return IsWindow(hwnd) && uint64_t(UINT_PTR(hwnd))==shared->targetHwnd
+        && pid==shared->pid && tid==shared->tid && tid==GetCurrentThreadId()
+        && (!input || (GetFocus()==hwnd && uint64_t(UINT_PTR(GetAncestor(GetForegroundWindow(),GA_ROOT)))==shared->rootHwnd));
+}
+static bool same_profile(const TF_INPUTPROCESSORPROFILE& a,const TF_INPUTPROCESSORPROFILE& b) {
+    return a.dwProfileType==b.dwProfileType && a.langid==b.langid && a.hkl==b.hkl
+        && IsEqualGUID(a.clsid,b.clsid) && IsEqualGUID(a.guidProfile,b.guidProfile);
+}
+static bool korean_profile(ITfInputProcessorProfileMgr* mgr, const GUID& category) {
+    TF_INPUTPROCESSORPROFILE value={}; GUID clsid,profile;
+    CLSIDFromString(L"__CLSID__",&clsid); CLSIDFromString(L"__PROFILE__",&profile);
+    return mgr && mgr->GetActiveProfile(category,&value)==S_OK
+        && value.dwProfileType==TF_PROFILETYPE_INPUTPROCESSOR && value.langid==0x0412
+        && IsEqualGUID(value.clsid,clsid) && IsEqualGUID(value.guidProfile,profile)
+        && (UINT_PTR(GetKeyboardLayout(0))&0xffff)==0x0412;
+}
+static bool observe_imm(HWND hwnd) {
+    shared->immContextPresent=shared->immConversionSucceeded=0;
+    shared->immOpen=shared->immConversion=shared->immSentence=0;
+    HIMC context=ImmGetContext(hwnd);
+    if (!context) return false;
+    shared->immContextPresent=1; shared->immOpen=ImmGetOpenStatus(context);
+    DWORD conversion=0,sentence=0;
+    shared->immConversionSucceeded=ImmGetConversionStatus(context,&conversion,&sentence);
+    shared->immConversion=conversion;shared->immSentence=sentence;
+    ImmReleaseContext(hwnd,context);
+    return shared->immConversionSucceeded!=0;
+}
 static void command(HWND hwnd, UINT sequence) {
-    if (!sequence || sequence!=shared->command || shared->ack==sequence) return;
-    HIMC himc=ImmGetContext(hwnd);
-    if (!initialized) {
-        shared->previousLayout=(uint64_t)(UINT_PTR)GetKeyboardLayout(0);
-        shared->previousOpen=himc ? ImmGetOpenStatus(himc) : 0;
-        DWORD conversion=0,sentence=0;
-        if(himc) ImmGetConversionStatus(himc,&conversion,&sentence);
-        shared->previousConversion=conversion; shared->previousSentence=sentence;
-        initialized=true;
-    }
-    shared->status=0;
+    const auto publishedSequence=InterlockedCompareExchange((volatile LONG*)&shared->command,0,0);
+    if (sequence<1 || sequence>4 || sequence!=UINT(publishedSequence) || shared->ack==sequence) return;
+    MemoryBarrier();
+    const auto published=shared->commandBudgets[sequence-1];
+    opengeul_ime::CommandLease lease(commandAdmission,shared->commandRejection,sequence,published);
+    shared->nativeAttemptedMask=commandAdmission.attemptedMask;
+    if (!lease.Entered()) return; // Never overwrite active status/receipt/ACK on rejection.
+    const auto limits=lease.budget;
+    shared->status=0; shared->threadMode=opengeul_ime::ModeReceipt{};
     ITfInputProcessorProfileMgr* mgr=profiles();
     GUID category; CLSIDFromString(L"{34745C63-B2F0-4784-8B67-5E12C8701A31}",&category);
-    if (sequence==1) {
+    if (!original_target(hwnd,sequence!=4)) failure(-43);
+    if (!budget(limits)) failure(-20);
+    if (sequence==1 && !shared->status) {
+        shared->previousLayout=uint64_t(UINT_PTR(GetKeyboardLayout(0)));
         shared->previousProfileHresult=mgr ? mgr->GetActiveProfile(category,&oldProfile) : E_UNEXPECTED;
         haveOldProfile=(shared->previousProfileHresult==S_OK);
         if (haveOldProfile) {
-            shared->previousProfileType=oldProfile.dwProfileType; shared->previousLanguage=oldProfile.langid;
-            shared->previousProfileLayout=(uint64_t)(UINT_PTR)oldProfile.hkl;
+            shared->previousProfileType=oldProfile.dwProfileType;shared->previousLanguage=oldProfile.langid;
+            shared->previousProfileLayout=uint64_t(UINT_PTR(oldProfile.hkl));
             StringFromGUID2(oldProfile.clsid,shared->previousClsid,40);
             StringFromGUID2(oldProfile.guidProfile,shared->previousProfile,40);
+        } else failure(-8);
+        if (!observe_imm(hwnd)) failure(-3);
+        shared->previousOpen=shared->immOpen;shared->previousConversion=shared->immConversion;
+        shared->previousSentence=shared->immSentence;
+        if (!shared->status) {
+            opengeul_ime::WindowsThreadMode api(shared->threadMode,limits.counter,limits.frequency);
+            opengeul_ime::CaptureThreadMode(api,shared->threadMode);
+            if (shared->threadMode.status) failure(shared->threadMode.status);
+            else {
+                shared->previousTsfOpen=shared->threadMode.beforeOpen;
+                shared->previousTsfConversion=shared->threadMode.beforeConversion;
+                shared->tsfCaptured=1; initialized=true;
+            }
         }
-        if (!haveOldProfile) { shared->status=-8; shared->activateProfileHresult=E_UNEXPECTED; }
-        else {
+        if (!budget(limits)) failure(-20);
+        if (!shared->status) {
+            shared->profileChangeAttempted=1;
+            SetLastError(0); HKL korean=LoadKeyboardLayoutW(L"00000412",0);
+            if (!korean || (UINT_PTR(korean)&0xffff)!=0x0412) {shared->activateLayoutError=GetLastError();failure(-1);}
+            else if (!budget(limits)) failure(-20);
+            else if (!ActivateKeyboardLayout(korean,0)) {shared->activateLayoutError=GetLastError();failure(-1);}
+            if (!budget(limits)) failure(-20);
+            if (!shared->status) {
+                GUID clsid,profile; CLSIDFromString(L"__CLSID__",&clsid);CLSIDFromString(L"__PROFILE__",&profile);
+                shared->activateProfileHresult=mgr->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0412,clsid,profile,nullptr,0);
+                if (shared->activateProfileHresult!=S_OK) failure(-2);
+            }
+        }
+    } else if ((sequence==2 || sequence==3) && !shared->status) {
+        if (!initialized || !shared->tsfCaptured) failure(-39);
+        else if (!observe_imm(hwnd)) failure(-3); // Existing HIMC context gate remains fatal.
+        else if (!korean_profile(mgr,category)) failure(-40);
+        if (!shared->status) {
+            opengeul_ime::WindowsThreadMode api(shared->threadMode,limits.counter,limits.frequency);
+            opengeul_ime::SetThreadMode(api,shared->threadMode,sequence,shared->previousTsfOpen,shared->previousTsfConversion);
+            if (shared->threadMode.status) failure(shared->threadMode.status);
+            if (!observe_imm(hwnd)) failure(-3);
+            else if (!shared->immOpen || bool(shared->immConversion&IME_CMODE_NATIVE)!=(sequence==3)) failure(-41);
+        }
+    } else if (sequence==4 && !shared->status) {
+        if (!initialized || !haveOldProfile || !shared->tsfCaptured || !shared->profileChangeAttempted) failure(-42);
+        if (!shared->status) {
             SetLastError(0);
-            HKL korean=LoadKeyboardLayoutW(L"00000412",0);
-            if (!korean || ((UINT_PTR)korean & 0xffff)!=0x0412 || !ActivateKeyboardLayout(korean,0)) {
-                shared->activateLayoutError=GetLastError(); shared->status=-1;
-            } else shared->activateLayoutError=0;
-            GUID clsid,profile;
-            CLSIDFromString(L"__CLSID__",&clsid); CLSIDFromString(L"__PROFILE__",&profile);
-            shared->activateProfileHresult=mgr->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0412,clsid,profile,nullptr,0);
-            if (shared->activateProfileHresult!=S_OK && !shared->status) shared->status=-2;
+            if (!ActivateKeyboardLayout(HKL(UINT_PTR(shared->previousLayout)),0)) {shared->activateLayoutError=GetLastError();failure(-7);}
+            if (!budget(limits)) failure(-20);
+            if (!shared->status) {
+                shared->activateProfileHresult=mgr ? mgr->ActivateProfile(oldProfile.dwProfileType,oldProfile.langid,
+                    oldProfile.clsid,oldProfile.guidProfile,
+                    oldProfile.dwProfileType==TF_PROFILETYPE_INPUTPROCESSOR ? nullptr : oldProfile.hkl,0) : E_UNEXPECTED;
+                if (shared->activateProfileHresult!=S_OK) failure(-6);
+            }
+            TF_INPUTPROCESSORPROFILE restored={};
+            if (!mgr || mgr->GetActiveProfile(category,&restored)!=S_OK || !same_profile(restored,oldProfile)) failure(-40);
+            if (!shared->status) {
+                opengeul_ime::WindowsThreadMode api(shared->threadMode,limits.counter,limits.frequency);
+                opengeul_ime::SetThreadMode(api,shared->threadMode,4,shared->previousTsfOpen,shared->previousTsfConversion);
+                if (shared->threadMode.status) failure(shared->threadMode.status);
+                if (!observe_imm(hwnd)) failure(-3);
+                else if (shared->immOpen!=shared->previousOpen || shared->immConversion!=shared->previousConversion
+                         || shared->immSentence!=shared->previousSentence) failure(-41);
+            }
         }
-    } else if (sequence==2 || sequence==3) {
-        DWORD conversion=0,sentence=0;
-        if (!himc || !ImmGetConversionStatus(himc,&conversion,&sentence)) shared->status=-3;
-        else {
-            // The following real WM_IME_COMPOSITION stream proves the effect.
-            if (!ImmSetOpenStatus(himc,TRUE)) shared->status=-4;
-            if (!ImmSetConversionStatus(himc, sequence==3 ? conversion|IME_CMODE_NATIVE : conversion&~IME_CMODE_NATIVE,sentence)) shared->status=-5;
-        }
-    } else if (sequence==4) {
-        // With flags 0 ActivateProfile requires the current input language to match.
-        // Restore this owned thread's HKL before its exact original TSF profile:
-        // https://learn.microsoft.com/windows/win32/api/msctf/nf-msctf-itfinputprocessorprofilemgr-activateprofile
-        SetLastError(0);
-        if (!ActivateKeyboardLayout((HKL)(UINT_PTR)shared->previousLayout,0)) {
-            shared->activateLayoutError=GetLastError(); shared->status=-7;
-        } else shared->activateLayoutError=0;
-        shared->activateProfileHresult=(mgr && haveOldProfile) ? mgr->ActivateProfile(oldProfile.dwProfileType,oldProfile.langid,
-            oldProfile.clsid,oldProfile.guidProfile,
-            oldProfile.dwProfileType==TF_PROFILETYPE_INPUTPROCESSOR ? nullptr : oldProfile.hkl,0) : E_UNEXPECTED;
-        if (shared->activateProfileHresult!=S_OK && !shared->status) shared->status=-6;
-        if (himc) { ImmSetOpenStatus(himc,shared->previousOpen);
-            ImmSetConversionStatus(himc,shared->previousConversion,shared->previousSentence); }
-    }
-    if (himc) ImmReleaseContext(hwnd,himc);
+    } else if (sequence<1 || sequence>4) failure(-44);
     TF_INPUTPROCESSORPROFILE current={};
-    shared->activeLanguage=0; shared->activeProfileType=0; shared->activeProfileLayout=0;
-    shared->activeClsid[0]=0; shared->activeProfile[0]=0;
+    shared->activeLanguage=0;shared->activeProfileType=0;shared->activeProfileLayout=0;
+    shared->activeClsid[0]=0;shared->activeProfile[0]=0;
     shared->activeProfileHresult=mgr ? mgr->GetActiveProfile(category,&current) : E_UNEXPECTED;
     if (mgr) {
         if (shared->activeProfileHresult==S_OK) {
-            shared->activeLanguage=current.langid;
-            shared->activeProfileType=current.dwProfileType;
-            shared->activeProfileLayout=(uint64_t)(UINT_PTR)current.hkl;
-            StringFromGUID2(current.clsid,shared->activeClsid,40);
-            StringFromGUID2(current.guidProfile,shared->activeProfile,40);
+            shared->activeLanguage=current.langid;shared->activeProfileType=current.dwProfileType;
+            shared->activeProfileLayout=uint64_t(UINT_PTR(current.hkl));
+            StringFromGUID2(current.clsid,shared->activeClsid,40);StringFromGUID2(current.guidProfile,shared->activeProfile,40);
         }
         mgr->Release();
     }
+    if (!budget(limits)) failure(-20);
+    // Per-command TSF references and the in-thread command lease are closed before ACK.
+    lease.Finish();
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&shared->ack,sequence);
 }
 static void observe(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
@@ -351,6 +433,23 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPA
     return CallNextHookEx(nullptr,code,wp,lp);
 }
 extern "C" __declspec(dllexport) unsigned int StateSize() { return sizeof(State); }
+extern "C" __declspec(dllexport) unsigned int PublishCommand(State* target,UINT sequence,uint64_t counter,uint64_t frequency) {
+    // This export runs in the controller's DLL copy. Do not connect to the hook
+    // target, apply its PID/TID guard, or retain this transient mapping pointer.
+    if (!target || target->magic!=0x4f47494d || target->version!=3) return 0;
+    if (!opengeul_ime::InstallCommandBudget(target->commandBudgets,sequence,{counter,frequency})) return 0;
+    MemoryBarrier(); InterlockedExchange((volatile LONG*)&target->command,sequence); return 1;
+}
+extern "C" __declspec(dllexport) unsigned int ReadSnapshot(State* source,State* destination,UINT* ackBefore,UINT* ackAfter) {
+    // Controller-side acquire of the hook's published ACK precedes the copy.
+    // These mapping/output pointers are transient and must never be retained.
+    if (!source || !destination || source==destination || !ackBefore || !ackAfter
+        || source->magic!=0x4f47494d || source->version!=3) return 0;
+    *ackBefore=(UINT)InterlockedCompareExchange((volatile LONG*)&source->ack,0,0);
+    MemoryBarrier(); CopyMemory(destination,source,sizeof(State)); MemoryBarrier();
+    *ackAfter=(UINT)InterlockedCompareExchange((volatile LONG*)&source->ack,0,0);
+    return (*ackBefore==*ackAfter && destination->ack==*ackBefore) ? 1 : 2;
+}
 BOOL WINAPI DllMain(HINSTANCE,DWORD,LPVOID) { return TRUE; }
 '''
 
@@ -407,11 +506,13 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
     native_arch.require_architecture(architecture)
     remaining_setup(setup_deadline, 60, clock=clock)
     source, library = folder / 'ime-observer.cpp', folder / 'ime-observer.dll'
+    for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h'):
+        (folder / name).write_bytes(Path(__file__).with_name(name).read_bytes())
     source.write_text(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
         .replace('__CLSID__', profile['providerClsid']).replace('__PROFILE__', profile['profileGuid']), encoding='utf-8')
     compiler = shutil.which('cl.exe')
     command = ['cl.exe', '/nologo', '/LD', '/O2', '/MT', '/EHsc', '/utf-8', str(source),
-               '/link', '/MACHINE:' + ('ARM64' if architecture == 'arm64' else 'X64'), '/OUT:' + str(library), 'user32.lib', 'imm32.lib', 'ole32.lib']
+               '/link', '/MACHINE:' + ('ARM64' if architecture == 'arm64' else 'X64'), '/OUT:' + str(library), 'user32.lib', 'imm32.lib', 'ole32.lib', 'oleaut32.lib', 'uuid.lib']
     if compiler and architecture == 'x64':
         result = subprocess.run(command, cwd=folder, capture_output=True,
             timeout=remaining_setup(setup_deadline, 60, clock=clock))
@@ -439,12 +540,14 @@ class CompositionObserver:
             native_arch.observe_native_architecture(), architecture)
         self.target_architecture = native_arch.observe_owned_process(pid, architecture)
         self.api, self.root, self.child, self.focus, self.pid = api, root, child, focus, pid
+        self.expected_profile = dict(profile)
         self.tid = int(api.user.GetWindowThreadProcessId(focus, None))
         assert self.tid and api.pid(focus) == pid, 'Observer target is not the owned editor input thread'
         self.mapping_name = 'Local\\OpenGeulIme_' + uuid.uuid4().hex
         self.mapping = mmap.mmap(-1, ctypes.sizeof(NativeState), tagname=self.mapping_name)
         state = NativeState()
-        state.magic, state.version, state.pid, state.tid = 0x4f47494d, 1, pid, self.tid
+        state.magic, state.version, state.pid, state.tid = 0x4f47494d, 3, pid, self.tid
+        state.targetHwnd, state.rootHwnd = focus, root
         self.mapping[:] = bytes(state)
         try:
             library = compile_observer(folder, self.mapping_name, profile,
@@ -456,6 +559,11 @@ class CompositionObserver:
         self.dll = ctypes.WinDLL(str(library), use_last_error=True)
         self.dll.StateSize.restype = ctypes.c_uint32
         assert self.dll.StateSize() == ctypes.sizeof(NativeState), 'Native observer memory layout differs from controller'
+        self.dll.PublishCommand.argtypes = [ctypes.POINTER(NativeState), ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint64]
+        self.dll.PublishCommand.restype = ctypes.c_uint32
+        self.dll.ReadSnapshot.argtypes = [ctypes.POINTER(NativeState), ctypes.POINTER(NativeState),
+            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32)]
+        self.dll.ReadSnapshot.restype = ctypes.c_uint32
         api.user.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, W.HINSTANCE, W.DWORD]
         api.user.SetWindowsHookExW.restype = W.HANDLE
         api.user.UnhookWindowsHookEx.argtypes = [W.HANDLE]
@@ -465,6 +573,7 @@ class CompositionObserver:
         api.user.GetKeyboardLayout.argtypes = [W.DWORD]
         api.user.GetKeyboardLayout.restype = W.HANDLE
         self.hooks, self.commands, self.restored = [], [], False
+        self.command_attempts = set()
         self.activation_attempted = False
         try:
             for kind, name in ((4, 'HookCall'), (3, 'HookGet')):
@@ -479,30 +588,38 @@ class CompositionObserver:
             raise
 
     def state(self):
-        return NativeState.from_buffer_copy(self.mapping[:])
+        view = NativeState.from_buffer(self.mapping)
+        snapshot, before, after = NativeState(), ctypes.c_uint32(), ctypes.c_uint32()
+        try:
+            copied = self.dll.ReadSnapshot(ctypes.byref(view), ctypes.byref(snapshot),
+                ctypes.byref(before), ctypes.byref(after))
+        finally:
+            del view
+        assert type(copied) is int and copied in (1, 2), 'Native IME ACK acquire/copy failed'
+        snapshot.snapshotEvidence = dict(copyReturn=copied, ackBefore=int(before.value),
+            ackAfter=int(after.value), stable=copied == 1 and before.value == after.value == snapshot.ack)
+        return snapshot
 
     def require_target(self):
         assert self.api.require_editor_focus(self.root, self.child) == self.focus, 'IME input focus HWND changed'
         assert self.api.pid(self.focus) == self.pid and self.api.user.GetWindowThreadProcessId(self.focus, None) == self.tid, 'IME target process/thread identity changed'
 
-    def command(self, command, *, setup_deadline=None):
-        self.require_target()
-        # Only setup callers supply this deadline. Real composition and exact
-        # restoration retain their original native command policy.
-        bounded_deadline = (time.monotonic() + remaining_setup(setup_deadline, 5)
-                            if setup_deadline is not None else None)
-        if command == 1:
-            self.activation_attempted = True
-        self.mapping[NativeState.command.offset:NativeState.command.offset + 4] = command.to_bytes(4, 'little')
-        result = ctypes.c_size_t()
-        milliseconds = (int(remaining_setup(bounded_deadline, 5) * 1000)
-                        if bounded_deadline is not None else 5000)
-        assert milliseconds > 0, 'Shared IME setup has no native command budget'
-        if not self.api.user.SendMessageTimeoutW(self.focus, 0x8351, command, 0, 2, milliseconds, ctypes.byref(result)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        state = wait_for(lambda: (value if (value := self.state()).ack == command else None),
-            remaining_setup(bounded_deadline, 5))
-        self.commands.append({'command': command, 'status': state.status,
+    def require_restore_target(self):
+        assert self.api.user.IsWindow(self.focus), 'Original restore HWND no longer exists'
+        assert self.api.pid(self.focus) == self.pid and self.api.user.GetWindowThreadProcessId(self.focus, None) == self.tid, 'Original restore process/thread changed'
+        assert self.api.user.GetAncestor(self.focus, 2) == self.root and (self.focus == self.child or self.api.user.IsChild(self.child, self.focus)), 'Original restore HWND left its owned child'
+
+    @property
+    def restoration_required(self):
+        return self.activation_attempted and 4 not in self.command_attempts and self.state().profileChangeAttempted == 1
+
+    def _command_snapshot(self, state, command):
+        limits = state.commandBudgets[command - 1]
+        return {'command': command, 'status': int(state.status), 'nativeAck': int(state.ack),
+            'snapshotEvidence': dict(state.snapshotEvidence),
+            'publishedCommand': int(state.command), 'nativeAttemptedMask': int(state.nativeAttemptedMask),
+            'commandRejection': {name: int(getattr(state.commandRejection, name))
+                for name, _ in native_mode.NativeCommandRejection._fields_},
             'layout': int(self.api.user.GetKeyboardLayout(self.tid) or 0),
             'activeLanguage': state.activeLanguage, 'activeClsid': utf16(state.activeClsid),
             'activeProfile': utf16(state.activeProfile), 'previousLayout': state.previousLayout,
@@ -511,14 +628,73 @@ class CompositionObserver:
             'previousProfileLayout': state.previousProfileLayout, 'activeProfileType': state.activeProfileType,
             'activeProfileLayout': state.activeProfileLayout, 'profileManagerHresult': state.profileManagerHresult,
             'previousProfileHresult': state.previousProfileHresult, 'activateProfileHresult': state.activateProfileHresult,
-            'activeProfileHresult': state.activeProfileHresult, 'activateLayoutError': state.activateLayoutError})
-        assert state.status == 0, 'Owned native IME command failed: ' + str(self.commands[-1])
-        remaining_setup(setup_deadline, 5)
-        if command == 4:
-            wait_for(lambda: int(self.api.user.GetKeyboardLayout(self.tid) or 0) == state.previousLayout, 5)
-            validate_restoration(self.commands[-1])
-            self.restored = True
-        return self.commands[-1]
+            'activeProfileHresult': state.activeProfileHresult, 'activateLayoutError': state.activateLayoutError,
+            'observerClsid': native_mode.OBSERVER_CLSID, 'threadMode': native_mode.receipt_dict(state.threadMode),
+            'tsfModeCaptured': int(state.tsfCaptured), 'profileChangeAttempted': int(state.profileChangeAttempted),
+            'previousTsfOpen': int(state.previousTsfOpen), 'previousTsfConversion': int(state.previousTsfConversion),
+            'modeDeadlineCounter': int(limits.counter), 'modeCounterFrequency': int(limits.frequency),
+            'immState': dict(contextPresent=int(state.immContextPresent), conversionSucceeded=int(state.immConversionSucceeded),
+                open=int(state.immOpen), conversion=int(state.immConversion), sentence=int(state.immSentence))}
+
+    def command(self, command, *, setup_deadline=None):
+        assert type(command) is int and command in (1, 2, 3, 4)
+        assert command not in self.command_attempts, 'Original native IME command cannot retry or renew its budget'
+        self.command_attempts.add(command)
+        row = dict(command=command, acknowledged=False, success=False, nativeCallAttempts=0)
+        self.commands.append(row)  # Failure/rejection evidence survives a missing ACK.
+        try:
+            if command == 4: self.require_restore_target()
+            else: self.require_target()
+            bounded_deadline = time.monotonic() + remaining_setup(setup_deadline, 5)
+            counter, frequency = native_mode.counter_budget(bounded_deadline, clock=time.monotonic)
+            slot = native_mode.NativeCommandBudget(counter, frequency)
+            offset = NativeState.commandBudgets.offset + (command - 1) * ctypes.sizeof(slot)
+            assert not any(self.mapping[offset:offset + ctypes.sizeof(slot)]), 'Native IME command budget was already published'
+            row.update(deadline=bounded_deadline, requestedBudget=dict(counter=counter, frequency=frequency))
+            view = NativeState.from_buffer(self.mapping)
+            try: published = self.dll.PublishCommand(ctypes.byref(view), command, counter, frequency)
+            finally: del view
+            row['nativePublicationReturn'] = published if type(published) is int else repr(published)
+            assert type(published) is int and published == 1, 'Native IME command publication failed'
+            if command == 1: self.activation_attempted = True
+            result = ctypes.c_size_t()
+            milliseconds = int(remaining_setup(bounded_deadline, 5) * 1000)
+            assert milliseconds > 0, 'Shared IME setup has no native command budget'
+            row['nativeCallAttempts'] = 1
+            if not self.api.user.SendMessageTimeoutW(self.focus, 0x8351, command, 0, 2, milliseconds, ctypes.byref(result)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            state = wait_for(lambda: (value if (value := self.state()).snapshotEvidence['stable']
+                and value.ack == command and value.snapshotEvidence['ackBefore'] == command
+                and value.snapshotEvidence['ackAfter'] == command else None),
+                remaining_setup(bounded_deadline, 5))
+            row.update(self._command_snapshot(state, command), acknowledged=True)
+            assert state.status == 0, 'Owned native IME command failed: ' + str(row)
+            assert not row['commandRejection']['count'], 'Conflicting native IME command was rejected; subsequent input is blocked'
+            assert (row['modeDeadlineCounter'], row['modeCounterFrequency']) == (counter, frequency), 'Native IME command used a different published budget'
+            assert state.tsfCaptured == 1, 'Original TSF mode state was not captured before profile activation'
+            native_mode.require_mode_receipt(row['threadMode'], command,
+                previous=(int(state.previousTsfOpen), int(state.previousTsfConversion)) if command == 4 else None)
+            if command in (2, 3, 4):
+                assert state.immContextPresent == state.immConversionSucceeded == 1, 'Original HIMC conversion getter failed'
+                if command in (2, 3):
+                    assert state.immOpen and bool(state.immConversion & 1) == (command == 3), 'HIMC mode does not acknowledge requested conversion'
+                    assert (state.activeProfileHresult == 0 and state.activeLanguage == 0x0412
+                        and utf16(state.activeClsid).lower() == self.expected_profile['providerClsid'].lower()
+                        and utf16(state.activeProfile).lower() == self.expected_profile['profileGuid'].lower()), 'Mode acknowledgement changed the attested Korean TSF profile'
+                else:
+                    assert (state.immOpen, state.immConversion, state.immSentence) == (state.previousOpen, state.previousConversion, state.previousSentence), 'Exact original IMM state was not read back'
+            remaining_setup(bounded_deadline, 5)
+            if command == 4:
+                assert int(self.api.user.GetKeyboardLayout(self.tid) or 0) == state.previousLayout, 'Original input layout was not restored'
+                validate_restoration(row)
+                self.restored = True
+            row['success'] = True
+            return row
+        except BaseException as exc:
+            row['error'] = type(exc).__name__ + ': ' + str(exc)
+            try: row['nativeStateAtFailure'] = self._command_snapshot(self.state(), command)
+            except BaseException as later: row['failureSnapshotError'] = type(later).__name__ + ': ' + str(later)
+            raise
 
     def events(self):
         state = self.state()
@@ -613,7 +789,7 @@ def retained_setup_shell(process, suite, keyboard):
     return evidence
 
 
-def case(suite, fixtures, output, readiness, module, extension):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     name = 'ime-' + module
@@ -655,14 +831,30 @@ def case(suite, fixtures, output, readiness, module, extension):
         keyboard.navigate()
         focus = keyboard.focus
         record.update(editorTid=keyboard.tid, keyboardFocusHwnd=focus)
-        prepare_ascii_prefix(keyboard, module, record,
-            lambda prefix: ascii_input.type_ascii(api, hwnd, child, prefix, record,
-                pause=0.04, deadline=setup_deadline))
+        record['stage'] = 'verify-pre-prefix-editing-context'
+        pre = observe_ime_semantic_setup(suite, source, original_bytes, record, setup_deadline,
+            original_shell=retained_setup_shell(process, suite, keyboard),
+            expected_native=dict(keyboard.binding),
+            require_current=lambda: keyboard.require_context_target('imeSemanticContext'), phase='pre')
+        keyboard.semantic_ready(pre, phase='pre')
+        def send_prefix(prefix):
+            keyboard.require_prefix_ready()
+            return ascii_input.type_ascii(api, hwnd, child, prefix, record,
+                pause=0.04, deadline=setup_deadline, original_popen=keyboard.process,
+                native_binding=keyboard.binding, prepared_library=prepared_library)
+        prepare_ascii_prefix(keyboard, module, record, send_prefix)
+        record['stage'] = 'verify-post-prefix-editing-context'
+        post = observe_ime_semantic_setup(suite, source, original_bytes, record, setup_deadline,
+            original_shell=retained_setup_shell(process, suite, keyboard),
+            expected_native=dict(keyboard.binding),
+            require_current=lambda: keyboard.require_context_target('imeSemanticContext'), phase='post', expected_prefix=record['asciiPrefix'])
+        keyboard.semantic_ready(post, phase='post')
         if module == 'calc':
             record['stage'] = 'verify-calc-context-before-ime-observer'
             observe_calc_setup(suite, source, original_bytes, record, setup_deadline,
                 original_shell=retained_setup_shell(process, suite, keyboard),
-                expected_native=dict(keyboard.binding), require_current=keyboard.require_target)
+                expected_native=dict(keyboard.binding),
+                require_current=lambda: keyboard.require_context_target('calcSetupContext'))
         record['stage'] = 'install-owned-thread-observer'
         observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'],
             architecture=record['architecture'], setup_deadline=setup_deadline)
@@ -743,7 +935,7 @@ def case(suite, fixtures, output, readiness, module, extension):
         if observer is not None:
             try:
                 record['events'] = observer.events()
-                if observer.activation_attempted and api.user.IsWindow(observer.focus):
+                if observer.restoration_required and api.user.IsWindow(observer.focus):
                     record['restoration'] = observer.command(4)
                     record['layoutRestored'] = observer.restored
             except Exception as exc:
@@ -789,8 +981,9 @@ def main(argv=None):
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
     output.mkdir(parents=True, exist_ok=False)
     readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
+    prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
     results = collect_cases([('ime-' + module, lambda module=module, extension=extension:
-        case(suite, fixtures, output, readiness, module, extension)) for module, extension in INPUT_CASES], output)
+        case(suite, fixtures, output, readiness, module, extension, prepared_library=prepared_library)) for module, extension in INPUT_CASES], output)
     success = len(results) == 3 and all(row.get('success') is True and row.get('imeVerified') is True for row in results)
     report = {'schemaVersion': 1, 'kind': 'native-korean-ime', 'success': success,
               'imeVerified': success, 'suiteOnly': True, 'tests': results,

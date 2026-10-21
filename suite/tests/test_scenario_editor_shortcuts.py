@@ -113,6 +113,54 @@ class ScenarioEditorShortcutsTests(unittest.TestCase):
                     session.press('CTRL_F6')
                     session.editor_ready(dict(ready=True))
             self.assertEqual(len(probe.sent), 1)
+    def test_ctrl_f6_admits_only_host_to_exact_original_child_during_durable_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f=self.fixture(directory);probe=f[4];probe.focus=11;original_scope=probe.scope_snapshot
+            def scope(api,binding):
+                row=original_scope(api,binding)
+                if probe.focus==11:row['focus']=copy.deepcopy(row['before']['suite']);row['focusWithinEditor']=False
+                return row
+            probe.scope_snapshot=scope;f[2].require_editor_focus=lambda *args:probe.focus
+            with self.session(f,'PENDING_CALC_ENTRY') as session:
+                retain=session._retain
+                def transition(stage):
+                    retain(stage)
+                    if stage=='input-intent':probe.focus=22
+                session._retain=transition;self.enter_ready(session,f)
+            action=session.receipt['actions'][0]
+            self.assertEqual((action['before']['scope']['focus']['hwnd'],action['beforeInsertion']['scope']['focus']['hwnd']),(11,22))
+            self.assertEqual(action['inputCallAttempts'],1);self.assertEqual(action['insertedInputs'],4)
+            self.assertEqual(len(probe.sent),1)
+    def test_first_admission_capture_settles_before_its_single_original_ctrl_f6(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            f=self.fixture(directory);probe=f[4];original=probe.scope_snapshot;reads=[]
+            def scope(api,binding):
+                row=original(api,binding);reads.append(row)
+                if len(reads)==1:row['capture']=copy.deepcopy(row['parent'])
+                return row
+            probe.scope_snapshot=scope
+            with patch('time.sleep',side_effect=lambda seconds:setattr(f[3],'now',f[3].now+seconds)):
+                with self.session(f,'PENDING_CALC_ENTRY') as session:self.enter_ready(session,f)
+            self.assertEqual(len(probe.sent),1)
+            self.assertEqual(session.receipt['captureReadiness']['pollCount'],1)
+    def test_ctrl_f6_drift_does_not_admit_editor_to_host_or_host_to_other_editor_descendant(self):
+        for first,last in ((33,11),(11,33)):
+            with self.subTest(first=first,last=last),tempfile.TemporaryDirectory() as directory:
+                f=self.fixture(directory);probe=f[4];probe.focus=first;original=probe.scope_snapshot
+                def scope(api,binding):
+                    row=original(api,binding)
+                    if probe.focus==11:row['focus']=copy.deepcopy(row['before']['suite']);row['focusWithinEditor']=False
+                    return row
+                probe.scope_snapshot=scope
+                with self.assertRaisesRegex(AssertionError,'Focus changed'):
+                    with self.session(f,'PENDING_CALC_ENTRY') as session:
+                        retain=session._retain
+                        def transition(stage):
+                            retain(stage)
+                            if stage=='input-intent':probe.focus=last
+                        session._retain=transition;session.press('CTRL_F6')
+                self.assertEqual(probe.sent,[])
     def test_ascii_phase_requires_exact_counted_receipt_before_save(self):
         for mutation in (lambda r: r.update(text='other'), lambda r: r['actions'][0].update(inserted=0)):
             with tempfile.TemporaryDirectory() as directory:

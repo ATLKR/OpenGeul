@@ -1140,9 +1140,21 @@ class CalcModelContext:
             if self.receipt is not None:self.receipt.setdefault('evidenceWriteErrors',[]).append(type(later).__name__+': '+str(later))
 
 
-def document_case(suite, fixtures, output, module, extension, physical_input):
+def prepare_ascii_cohort(suite, output):
+    """Validate inventory and prepare once, before any physical-input case."""
+    from writer_style_smoke import _packaged_identity_file
+    from native_suite_architecture import require_architecture
+    identity, raw = _packaged_identity_file(suite, 'suite-inventory.json')
+    inventory = json.loads(raw)
+    assert type(inventory.get('schemaVersion')) is int and inventory['schemaVersion'] == 1, 'Invalid Suite inventory'
+    architecture = require_architecture(inventory.get('architecture'))
+    return ascii_input.prepare_observer(output / 'ascii-message-observer', architecture=architecture)
+
+
+def document_case(suite, fixtures, output, module, extension, physical_input, *, prepared_library=None):
     from pywinauto import Desktop
     assert (module, extension) in (INPUT_CASES if physical_input else ATTACH_CASES), 'Module is not eligible for this test mode'
+    assert not physical_input or prepared_library is not None, 'Physical ASCII cohort must be prepared before launch'
     source = require_engine_fixture(fixtures, module, extension)
     if physical_input:
         assert 'Engine-OpenGeul-' + module in package_text(source), 'Generated source marker is missing'
@@ -1199,7 +1211,8 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
                 for shortcut in navigation: shortcuts.press(shortcut)
                 focus = api.require_editor_focus(hwnd, child)
                 record['stage'] = 'type-marker'
-                typed=ascii_input.type_ascii(api, hwnd, child, marker, record, pause=0.04,deadline=shortcuts.deadline)
+                typed=ascii_input.type_ascii(api, hwnd, child, marker, record, pause=0.04,deadline=shortcuts.deadline,
+                    original_popen=process,native_binding=shortcuts.binding,prepared_library=prepared_library)
                 shortcuts.typed(typed)
                 if module == 'calc': shortcuts.press('ENTER')
                 api.require_editor_focus(hwnd, child)
@@ -1251,8 +1264,8 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
         write_result(output, module, record)
 
 
-def edit_module(suite, fixtures, output, module, extension):
-    return document_case(suite, fixtures, output, module, extension, physical_input=True)
+def edit_module(suite, fixtures, output, module, extension, *, prepared_library):
+    return document_case(suite, fixtures, output, module, extension, physical_input=True,prepared_library=prepared_library)
 
 
 def attach_module(suite, fixtures, output, module, extension):
@@ -1335,9 +1348,10 @@ def main():
     assert fixtures != output and fixtures not in output.parents, 'Evidence must be outside generated fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
     output.mkdir(parents=True, exist_ok=False)
+    prepared_library = prepare_ascii_cohort(suite, output)
     cases = [('home', lambda: capture_home(suite, output))]
     for module, extension in INPUT_CASES:
-        cases.append((module, lambda module=module, extension=extension: edit_module(suite, fixtures, output, module, extension)))
+        cases.append((module, lambda module=module, extension=extension: edit_module(suite, fixtures, output, module, extension,prepared_library=prepared_library)))
     for module, extension in ATTACH_CASES:
         cases.append((module, lambda module=module, extension=extension: attach_module(suite, fixtures, output, module, extension)))
     for module in NEW_MODULES:

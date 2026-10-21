@@ -93,8 +93,9 @@ def report(rows):
 
 class CalcCloseCase(lifecycle.Case):
     """Reuse owned Suite dialog/window helpers without Writer model operations."""
-    def __init__(self,suite,fixtures,output,choice):
+    def __init__(self,suite,fixtures,output,choice,*,prepared_library):
         self.suite,self.fixtures,self.root=suite,fixtures,output
+        self.prepared_library=prepared_library
         self.choice,self.name=choice,'calc-close-'+choice
         self.output=output/self.name;self.output.mkdir(exist_ok=False)
         self.api=None;self.process=None;self.reader=None;self.deadline=None;self.cleanup_proof=None
@@ -232,7 +233,8 @@ class CalcCloseCase(lifecycle.Case):
             with CountedEditorShortcuts(self.api,self.process,before['bindingBefore'],self.record,self.deadline) as shortcuts:
                 selected,editing,pending=calc_save.type_pending_a1(self.reader,self.baseline,marker(self.choice),self.record,self.deadline,
                     navigate=shortcuts.navigate,require_focus=lambda:self.api.require_editor_focus(self.hwnd,self.child),
-                    type_marker=lambda:native.ascii_input.type_ascii(self.api,self.hwnd,self.child,marker(self.choice),self.record,pause=.04))
+                    type_marker=lambda:native.ascii_input.type_ascii(self.api,self.hwnd,self.child,marker(self.choice),self.record,pause=.04,deadline=self.deadline,
+                        original_popen=self.process,native_binding=before['bindingBefore'],prepared_library=self.prepared_library))
             self.record['beforeClose']=pending
             calc_save.require_pending_input_observations(before,selected,editing,pending,self.baseline,marker(self.choice),suite=self.suite,inventory=inventory,
                 inventory_sha256=identity['sha256'],original_shell=self.record['originalShell'],
@@ -339,7 +341,8 @@ def main():
     assert suite!=output and suite not in output.parents and output not in suite.parents
     assert fixtures!=output and fixtures not in output.parents and output not in fixtures.parents
     output.mkdir(parents=True,exist_ok=False)
-    definitions=[('calc-close-'+choice,lambda choice=choice:CalcCloseCase(suite,fixtures,output,choice).run()) for choice in CHOICES]
+    prepared_library=native.prepare_ascii_cohort(suite,output)
+    definitions=[('calc-close-'+choice,lambda choice=choice:CalcCloseCase(suite,fixtures,output,choice,prepared_library=prepared_library).run()) for choice in CHOICES]
     results=native.collect_cases(definitions,output);summary=report(results)
     (output/'results.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
     return 0 if summary['success'] else 1

@@ -363,8 +363,44 @@ def classify(observed, session, windows, *, complete, stable):
             'candidateOperationNotExecuted': candidate['operation']}
 
 
+def await_job_retirement(owner, budget, receipt):
+    """Observe only the retained Job, inside the original cleanup reserve."""
+    receipt['startedMonotonic'] = budget.clock()
+    try:
+        for _ in range(4096):
+            budget.remaining(3)
+            started = budget.clock()
+            row = {'phase': 'job-retirement', 'startedMonotonic': started}
+            try:
+                row.update(owner.accounting())
+            except Exception as exc:
+                row.update(querySucceeded=None, failure=error_record(exc))
+                raise
+            finally:
+                finished = budget.clock()
+                row.update(finishedMonotonic=finished,
+                           remainingSeconds=max(0, budget.deadline - finished))
+                receipt['sampleCount'] += 1
+                receipt['samples'].append(row)
+                if len(receipt['samples']) > 64:
+                    del receipt['samples'][16]
+                    receipt['samplesDropped'] += 1
+            require(row['querySucceeded'] is True, 'Owned job accounting unavailable')
+            budget.remaining(3)  # A zero returned after the reserve is not readiness.
+            if row['activeProcesses'] == 0:
+                return
+            time.sleep(min(0.05, budget.remaining(3)))
+        raise TimeoutError('Owned job retirement observation count exhausted')
+    finally:
+        receipt['finishedMonotonic'] = budget.clock()
+        receipt['remainingSeconds'] = max(0, budget.deadline - receipt['finishedMonotonic'])
+
+
 def run_owned(owner, budget, evidence, *, prepare_privacy=False):
-    result = {**flags(prepare_privacy=prepare_privacy), 'success': False, 'forced': False, 'timedOut': False, 'naturalExit': False}
+    result = {**flags(prepare_privacy=prepare_privacy), 'success': False, 'forced': False,
+              'timedOut': False, 'naturalExit': False, 'jobRetiredNaturally': False,
+              'jobRetirement': {'deadlineMonotonic': budget.deadline, 'cleanupReserveSeconds': 3,
+                                'sampleCount': 0, 'samplesDropped': 0, 'samples': []}}
     evidence.write('20-observer-launch', {**flags(prepare_privacy=prepare_privacy), 'deadlineMonotonic': budget.deadline, 'stage': 'before-create'})
     try:
         budget.remaining(3)
@@ -377,20 +413,19 @@ def run_owned(owner, budget, evidence, *, prepare_privacy=False):
         if not owner.wait(budget.remaining(3)):
             raise TimeoutError('Diagnostic observer did not exit before original deadline reserve')
         result['exitCode'] = owner.exit_code()
+        # The process handle can signal before the Job's accounting retires it
+        # or its descendants. Natural root exit alone cannot qualify containment.
         result['naturalExit'] = True
-        require(owner.descendants_empty(), 'Owned descendants remain after observer exit')
+        await_job_retirement(owner, budget, result['jobRetirement'])
+        result['jobRetiredNaturally'] = True
         require(result['exitCode'] == 0, 'Observer returned diagnostic failure')
         result['success'] = True
     except Exception as exc:
         result['failure'] = error_record(exc)
         result['timedOut'] = isinstance(exc, TimeoutError)
-        needs_cleanup = owner.created and not result['naturalExit']
-        if owner.created and result['naturalExit']:
-            try:
-                needs_cleanup = not owner.descendants_empty()
-            except Exception as query:
-                needs_cleanup = True
-                result['cleanupQueryFailure'] = error_record(query)
+        # Unknown or nonzero accounting is never treated as an empty Job.
+        # Do not retry a failed query or spend the reserved cleanup time polling.
+        needs_cleanup = owner.created and not result['jobRetiredNaturally']
         if needs_cleanup:
             result['forced'] = True
             try:
@@ -403,6 +438,7 @@ def run_owned(owner, budget, evidence, *, prepare_privacy=False):
         except Exception as cleanup:
             result['success'] = False
             result['cleanupFailure'] = error_record(cleanup)
+        result['ownedCleanupOutcomes'] = list(owner.cleanup_outcomes)
         result['success'] = result['success'] and not result['forced']
         evidence.write('90-owned-lifecycle', result)
     return result
@@ -618,6 +654,7 @@ class OwnedObserver:
     def __init__(self, probe, env, argv, budget, expected):
         self.probe, self.env, self.argv, self.budget, self.expected = probe, env, argv, budget, expected
         self.created = False; self.process = self.thread = self.job = None; self.assigned = False
+        self.cleanup_outcomes = []
         kernel = self.probe.kernel
         for name, args, result in [
             ('CreateJobObjectW', [W.LPVOID, W.LPCWSTR], W.HANDLE),
@@ -683,31 +720,65 @@ class OwnedObserver:
         require(self.probe.kernel.GetExitCodeProcess(self.process, ctypes.byref(code)), 'Observer exit code unavailable')
         return code.value
 
-    def descendants_empty(self):
-        if not self.assigned: return True
+    def accounting(self):
+        require(self.assigned and self.job, 'Owned job accounting requires the retained assigned Job')
         class Accounting(ctypes.Structure):
             _fields_ = [('userTime', ctypes.c_int64), ('kernelTime', ctypes.c_int64),
                         ('periodUserTime', ctypes.c_int64), ('periodKernelTime', ctypes.c_int64),
-                        ('faults', W.DWORD), ('total', W.DWORD), ('active', W.DWORD), ('terminated', W.DWORD)]
+                        ('faults', ctypes.c_uint32), ('total', ctypes.c_uint32),
+                        ('active', ctypes.c_uint32), ('terminated', ctypes.c_uint32)]
         account = Accounting()
-        require(self.probe.kernel.QueryInformationJobObject(self.job, 1, ctypes.byref(account), ctypes.sizeof(account), None),
-                'Owned job accounting unavailable')
-        return account.active == 0
+        result = self.probe.kernel.QueryInformationJobObject(self.job, 1, ctypes.byref(account), ctypes.sizeof(account), None)
+        fields = {'totalUserTime100ns': 'userTime', 'totalKernelTime100ns': 'kernelTime',
+                  'periodUserTime100ns': 'periodUserTime', 'periodKernelTime100ns': 'periodKernelTime',
+                  'totalPageFaultCount': 'faults', 'totalProcesses': 'total',
+                  'activeProcesses': 'active', 'totalTerminatedProcesses': 'terminated'}
+        return {'jobHandle': int(self.job), 'queryClass': 1, 'bufferBytes': ctypes.sizeof(account),
+                'queryResult': int(result), 'querySucceeded': bool(result),
+                'lastError': None if result else getattr(ctypes, 'get_last_error', lambda: 0)(),
+                **{key: int(getattr(account, field)) if result else None for key, field in fields.items()}}
+
+    def descendants_empty(self):
+        if not self.assigned: return True
+        receipt = self.accounting()
+        require(receipt['querySucceeded'], 'Owned job accounting unavailable')
+        return receipt['activeProcesses'] == 0
+
+    def cleanup_call(self, operation, handle, *arguments):
+        # Mandatory cleanup is never gated by an expired observation deadline.
+        row = {'operation': operation, 'handle': int(handle), 'startedMonotonic': self.budget.clock()}
+        if arguments: row['exitCodeArgument'] = arguments[0]
+        try:
+            result = getattr(self.probe.kernel, operation)(handle, *arguments)
+            row.update(nativeResult=int(result), succeeded=bool(result),
+                       lastError=None if result else getattr(ctypes, 'get_last_error', lambda: 0)())
+            return bool(result)
+        except Exception as exc:
+            row.update(nativeResult=None, succeeded=False, failure=error_record(exc))
+            raise
+        finally:
+            row['finishedMonotonic'] = self.budget.clock()
+            row['remainingSeconds'] = max(0, self.budget.deadline - row['finishedMonotonic'])
+            self.cleanup_outcomes.append(row)
 
     def terminate_owned(self):
         # The unassigned case is only this freshly created, still suspended handle.
         if self.assigned:
-            require(self.probe.kernel.TerminateJobObject(self.job, 1), 'Owned diagnostic job termination failed')
+            require(self.cleanup_call('TerminateJobObject', self.job, 1), 'Owned diagnostic job termination failed')
         elif self.created:
-            require(self.probe.kernel.TerminateProcess(self.process, 1), 'Owned suspended handle termination failed')
+            require(self.cleanup_call('TerminateProcess', self.process, 1), 'Owned suspended handle termination failed')
 
     def close(self):
         errors = []
         for name in ('thread', 'process', 'job'):
             handle = getattr(self, name)
             if handle:
-                if not self.probe.kernel.CloseHandle(handle): errors.append(name)
-                setattr(self, name, None)
+                try:
+                    if not self.cleanup_call('CloseHandle', handle): errors.append(name)
+                except Exception:
+                    errors.append(name)
+                finally:
+                    setattr(self, name, None)
         require(not errors, 'Owned handle close failed: ' + ','.join(errors))
 
 

@@ -504,7 +504,7 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                 enter()
                 events.append('focus-ready')
 
-            def type_ascii(api, hwnd, child, marker, record, *, pause, deadline):
+            def type_ascii(api, hwnd, child, marker, record, *, pause, deadline, original_popen, native_binding, prepared_library):
                 events.append(('type', marker, pause))
                 if failure == 'input': raise first_error
 
@@ -571,7 +571,7 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                     stack.enter_context(patch.object(smoke, name, replacement, create=True))
                 stack.enter_context(patch.object(smoke.ascii_input, 'type_ascii', type_ascii))
                 try:
-                    smoke.document_case(suite, fixtures, output, module, extension, physical_input)
+                    smoke.document_case(suite, fixtures, output, module, extension, physical_input,prepared_library={'kind':'test-only-prepared'} if physical_input else None)
                 except Exception as exc:
                     error = exc
                 activated.assert_called_once_with(api, process, 11, activated.call_args.args[3])
