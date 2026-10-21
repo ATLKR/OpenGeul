@@ -323,14 +323,15 @@ def _open_button_recheck(api,accessible,button,process,dialog,proof):
 
 def open_dialog_action(api,process,home,record,path=None,*,document=None):
     from pywinauto import Desktop
-    from pywinauto.keyboard import send_keys
     operation=dict(openButtonClicks=0,cancelEscapeCount=0,success=False)
     record.setdefault('openDialogs',[]).append(operation)
+    record['stage']='trigger-owned-open-dialog'
     if document is None:
         click_home_action(api,process,home,'open',record);trigger='home-button'
     else:
         shell_menu_action(api,process,document,'열기…',record);trigger='document-menu'
     operation['openTrigger']=dict(kind=trigger,clicks=1)
+    record['stage']='wait-owned-open-dialog-readiness'
     dialog,window,filename,button=wait_open_dialog(api,process,home,operation)
     proof=operation['openDialogReadiness'];require_open_dialog_readiness(proof,process.pid,home,before_input=True)
     def owned():
@@ -340,13 +341,21 @@ def open_dialog_action(api,process,home,record,path=None,*,document=None):
     owned();proof.update(action='cancel' if path is None else 'open',actionStartedAt=time.monotonic())
     require_open_dialog_readiness(proof,process.pid,home)
     if path is None:
-        operation['cancelEscapeCount']=1;send_keys('{ESC}',pause=.1)
+        record['stage']='send-owned-open-dialog-escape'
+        operation['cancelEscapeCount']=1
+        native.send_owned_dialog_escape(api,process,home,filename,record,dialog=dialog,
+            caption=OPEN_CAPTION,readiness=proof)
     else:
+        record['stage']='assign-owned-open-filename'
         path=Path(path);_unlinked(path);assert path.is_file()
         accessible=Desktop(backend='uia').window(handle=dialog).wrapper_object()
         lifecycle.set_owned_picker_filename(api,process.pid,home,dialog,accessible,filename,str(path),operation,expected_title=OPEN_CAPTION)
         owned();operation['openButtonAncestry']=_open_button_recheck(api,accessible,button,process,dialog,proof)
-        operation['openButtonClicks']=1;button.click_input()
+        record['stage']='click-owned-open-button'
+        operation['openButtonClicks']=1
+        native.click_owned_control(api,process,home,button,record,purpose='OPEN_BUTTON',
+            dialog=dialog,caption=OPEN_CAPTION,readiness=proof)
+    record['stage']='wait-owned-open-dialog-disappearance'
     native.wait_for(lambda:not api.user.IsWindow(dialog),seconds=20)
     operation['success']=True
     return operation

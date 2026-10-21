@@ -14,6 +14,7 @@ The letter scans also match the separately verified Korean IME physical probe.
 from __future__ import annotations
 
 import ctypes
+import math
 import time
 
 
@@ -132,7 +133,14 @@ def _release_inserted_prefix(user, events, inserted, action):
         cleanup['error'] = type(exc).__name__ + ': ' + str(exc)
 
 
-def type_ascii(api, hwnd, child, text, record, *, pause):
+def type_ascii(api, hwnd, child, text, record, *, pause, deadline=None, clock=time.monotonic):
+    def remaining():
+        if deadline is None: return pause
+        assert type(deadline) in (int, float) and math.isfinite(deadline), 'Invalid ASCII input deadline'
+        value = deadline - clock()
+        assert value > 0, 'ASCII input deadline expired'
+        return min(pause, value)
+    remaining()
     plan = ascii_actions(text)  # Validate the entire marker before inserting anything.
     assert ctypes.sizeof(ctypes.c_void_p) == 8 and ctypes.sizeof(Input) == 40, 'ASCII input requires the exact Win64 INPUT ABI'
     assert pause in (0.025, 0.04), 'Preserve the existing editor input pacing'
@@ -144,6 +152,8 @@ def type_ascii(api, hwnd, child, text, record, *, pause):
     receipt = {'schemaVersion': 1, 'text': text, 'inputMethod': 'SendInput-scancode',
                'unicodeInputUsed': False, 'pauseSeconds': pause, 'documentHwnd': hwnd,
                'childHwnd': child, 'inputSize': 40, 'actions': [], 'success': False}
+    if deadline is not None:
+        receipt.update(absoluteDeadline=deadline, startedAt=clock())
     record.setdefault('asciiEditorInputs', []).append(receipt)
     try:
         thread = None
@@ -155,17 +165,23 @@ def type_ascii(api, hwnd, child, text, record, *, pause):
             assert action['before']['editorThreadId'] == thread, 'ASCII editor input thread changed'
             payload = input_buffer(action['events'])
             action.update(bufferHex=bytes(payload).hex(), requested=len(payload))
+            remaining()
             action['inserted'] = int(user.SendInput(len(payload), payload, 40))
             if action['inserted'] != len(payload):
                 if 0 <= action['inserted'] < len(payload):
                     _release_inserted_prefix(user, action['events'], action['inserted'], action)
                 raise AssertionError(f"ASCII SendInput inserted {action['inserted']} of {len(payload)} events at character {action['index']}")
-            time.sleep(pause)
+            time.sleep(remaining())
             action['after'] = _snapshot(api, hwnd, child)
             _require_snapshot(action['after'])
             assert action['after']['editorThreadId'] == thread, 'ASCII editor input thread changed'
+            remaining()
         receipt['success'] = True
         require_ascii_receipt(receipt, text, hwnd, child)
+        if deadline is not None:
+            remaining()
+            receipt['finishedAt'] = clock()
+            assert receipt['startedAt'] <= receipt['finishedAt'] < deadline, 'ASCII input deadline or clock changed'
         return receipt
     except Exception as exc:
         receipt.update(success=False, error=type(exc).__name__ + ': ' + str(exc))

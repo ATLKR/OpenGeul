@@ -211,7 +211,8 @@ class KoreanImePolicyTests(unittest.TestCase):
                 window = SimpleNamespace(maximize=lambda: None, set_focus=lambda: None, click_input=lambda: None)
                 desktop = SimpleNamespace(window=lambda **kw: SimpleNamespace(wrapper_object=lambda: window))
                 process = SimpleNamespace(pid=77)
-                def command(value):
+                def command(value, **kw):
+                    self.assertEqual(kw['setup_deadline'], saved_record[0]['imeSetupBudget']['deadline'])
                     calls.append(('activation', value))
                     raise ProbeDone()
                 observer = SimpleNamespace(api=api, tid=41, activation_attempted=False, focus=51,
@@ -223,8 +224,40 @@ class KoreanImePolicyTests(unittest.TestCase):
                 real_type_ascii = ascii_input.type_ascii
                 def physical(*args, **kw):
                     calls.append(('physical', args[3], kw['pause']))
+                    self.assertEqual(kw['deadline'],saved_record[0]['imeSetupBudget']['deadline'])
                     return real_type_ascii(*args, **kw)
                 send_keys = unittest.mock.Mock()
+                saved_record = []
+                class Keyboard:
+                    def __init__(inner, api,p,hwnd,parent,child,pid,kind,record,deadline):
+                        self.assertIs(p,process);self.assertEqual((hwnd,parent,child,pid,kind),(11,12,22,31,module))
+                        inner.api=api;inner.tid=41;inner.focus=51;inner.binding={'trueFirstAdmission':True}
+                        inner.record=record;saved_record.append(record)
+                    def start(inner):calls.append('keyboard-admitted')
+                    def focus_editor(inner, deadline):calls.append('counted-ctrl-f6')
+                    def editor_ready(inner, receipt):
+                        self.assertIs(receipt,inner.record['editorFocusReadiness']);calls.append('readiness-acknowledged')
+                    def navigate(inner):calls.append(('counted-navigation',module))
+                    def require_target(inner):return None
+                    def setup_complete(inner):calls.append('us-setup-complete')
+                    def close(inner, primary=None):calls.append('keyboard-closed')
+                def prepare(api,hwnd,child,shell_pid,pid,record,click,ctrl_f6,**kw):
+                    self.assertLessEqual(kw['seconds'],5.)
+                    record['editorFocusReadiness']={'deadline':record['imeSetupBudget']['deadline']}
+                    click();ctrl_f6();return 51
+                def calc_context(suite,source,original_bytes,record,deadline,**kw):
+                    self.assertEqual(original_bytes,b'unchanged original fixture')
+                    self.assertEqual(kw['expected_native'],{'trueFirstAdmission':True})
+                    self.assertIs(kw['original_shell'],retained_shell)
+                    ime.require_ascii_prefix(record);kw['require_current']()
+                    record['calcSetupContext']={'success':True,'naturalCleanupCompleted':True}
+                    calls.append('calc-context-cleaned-before-observer')
+                def install(*args,**kw):
+                    ime.require_ascii_prefix(saved_record[0])
+                    if module=='calc':self.assertTrue(saved_record[0]['calcSetupContext']['naturalCleanupCompleted'])
+                    self.assertEqual(kw['setup_deadline'],saved_record[0]['imeSetupBudget']['deadline'])
+                    calls.append('observer-installed');return observer
+                retained_shell={'trueRetainedPopen':True}
                 with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
                         'pywinauto.keyboard': SimpleNamespace(send_keys=send_keys)}), \
                         patch.object(ime, 'require_engine_fixture', return_value=original), \
@@ -232,13 +265,23 @@ class KoreanImePolicyTests(unittest.TestCase):
                         patch.object(ime, 'activate_owned_suite', side_effect=lambda api,process,hwnd,record:api.require_foreground(hwnd)) as activated, \
                         patch.object(ime, 'Windows', return_value=api), \
                         patch.object(ime, 'verified_attachment', return_value=(11, 12, 22, 31)), \
-                        patch.object(ime, 'CompositionObserver', return_value=observer), \
+                        patch.object(ime, 'CompositionObserver', side_effect=install), \
+                        patch.object(ime, 'IMEKeyboardSession', Keyboard), \
+                        patch.object(ime, 'observe_calc_setup', side_effect=calc_context) as context, \
+                        patch.object(ime, 'retained_setup_shell', return_value=retained_shell), \
+                        patch('windows_smoke.prepare_editor_focus', side_effect=prepare), \
+                        patch('windows_smoke.click_owned_editor', side_effect=lambda *args:calls.append('owned-editor-click')), \
                         patch.object(ascii_input, 'type_ascii', side_effect=physical) as typed, \
                         patch.object(ascii_input.time, 'sleep'), patch.object(ime, 'capture_failure'), \
                         patch.object(ime, 'stop_owned_test_process'), patch.object(ime, 'write_result') as written:
                     with self.assertRaises(ProbeDone):
                         ime.case(root, root, root, self.readiness(), module, extension)
-                self.assertEqual(calls, [('physical', ' ime-opengeul-' + module + ':', 0.04), ('activation', 1)])
+                expected=['keyboard-admitted','owned-editor-click','counted-ctrl-f6','readiness-acknowledged',
+                    ('counted-navigation',module),('physical',' ime-opengeul-'+module+':',.04)]
+                if module=='calc':expected.append('calc-context-cleaned-before-observer')
+                expected.extend(['observer-installed','us-setup-complete',('activation',1),'keyboard-closed'])
+                self.assertEqual(calls,expected)
+                self.assertEqual(context.call_count,int(module=='calc'))
                 self.assertEqual(typed.call_count, 1)
                 self.assertEqual(activated.call_count, 1)
                 self.assertGreater(len(sent), 0)

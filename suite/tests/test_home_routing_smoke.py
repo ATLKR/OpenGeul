@@ -259,6 +259,8 @@ class HomeRoutingContracts(unittest.TestCase):
                 with patch.object(self.api,'wait_open_dialog',side_effect=ready),patch.object(self.api,'click_home_action'), \
                     patch.object(self.api,'require_open_dialog_readiness'),patch.object(self.api.lifecycle,'set_owned_picker_filename',side_effect=filename), \
                     patch.object(self.api,'_open_button_recheck',return_value=[]), \
+                    patch.object(self.api.native,'send_owned_dialog_escape',side_effect=escape), \
+                    patch.object(self.api.native,'click_owned_control',side_effect=lambda *a,**k:button.click_input()), \
                     patch.dict(sys.modules,{'pywinauto':SimpleNamespace(Desktop=lambda **k:SimpleNamespace(window=lambda **k:SimpleNamespace(wrapper_object=lambda:object()))),'pywinauto.keyboard':SimpleNamespace(send_keys=escape)}),patch.object(self.api.native,'wait_for',side_effect=lambda check,seconds=60:check()):
                     if mode in ('foreign','bad-readback'):
                         with self.assertRaises(AssertionError):self.api.open_dialog_action(api,SimpleNamespace(pid=77,poll=lambda:None),11,record,None if mode=='cancel' else target)

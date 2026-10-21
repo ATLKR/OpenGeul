@@ -16,6 +16,8 @@ import traceback
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import calc_model_barrier
+from counted_editor_shortcuts import CountedEditorShortcuts
+from scenario_editor_shortcuts import FirstAdmissionEditorSession, ReaderBoundEditorCommand
 import calc_save_smoke as calc_save
 import lifecycle_smoke as lifecycle
 import windows_smoke as native
@@ -120,15 +122,15 @@ class CalcCloseCase(lifecycle.Case):
             child_hwnd=self.child,office_pid=self.office_pid,expected_url=self.source.as_uri())
         return self.reader.start(self.deadline)
 
-    def choose_existing_prompt(self):
+    def choose_existing_prompt(self,deadline=None):
         from pywinauto import Desktop
         from generated_calc_close import require_calc_prompt_buttons
-        deadline=time.monotonic()+20
+        if deadline is None:deadline=time.monotonic()+20
         def remaining():
             seconds=deadline-time.monotonic()
             assert seconds>0, 'Original Calc choice deadline expired'
             return seconds
-        dialog,accessible=self.dialog(self.hwnd,'OpenGeul Calc')
+        dialog,accessible=self.dialog(self.hwnd,'OpenGeul Calc',deadline=deadline)
         expected=BUTTONS[self.choice]
         def observe():
             labels=[item.element_info.name for item in accessible.descendants()]
@@ -185,7 +187,6 @@ class CalcCloseCase(lifecycle.Case):
         from calc_failure_cleanup import bind_pre_input_cleanup,finish_pre_input_cleanup
         from generated_calc_close import freeze_saved_calc_copy
         from pywinauto import Desktop
-        from pywinauto.keyboard import send_keys
         from writer_style_smoke import _packaged_identity_file
         try:
             from calc_early_cleanup import require_launch_permitted
@@ -213,9 +214,14 @@ class CalcCloseCase(lifecycle.Case):
             window.maximize();native.activate_owned_suite(self.api,self.process,self.hwnd,self.record)
             native.wait_for(lambda:self.api.user.GetAncestor(self.api.user.GetForegroundWindow(),2)==self.hwnd,10)
             self.screenshot(self.hwnd,'before')
-            native.prepare_editor_focus(self.api,self.hwnd,self.child,self.process.pid,self.office_pid,self.record,
-                lambda:Desktop(backend='win32').window(handle=self.child).wrapper_object().click_input(),
-                lambda:send_keys('^{F6}',pause=.1))
+            entry_deadline=time.monotonic()+5
+            with FirstAdmissionEditorSession(self.api,self.process,
+                    dict(hwnd=self.hwnd,parent=self.parent,child=self.child,officePid=self.office_pid),
+                    'PENDING_CALC_ENTRY',self.record,entry_deadline) as shortcuts:
+                native.prepare_editor_focus(self.api,self.hwnd,self.child,self.process.pid,self.office_pid,self.record,
+                    lambda:native.click_owned_editor(self.api,self.process,self.hwnd,self.parent,self.child,self.office_pid,self.record),
+                    lambda:shortcuts.press('CTRL_F6'),seconds=entry_deadline-time.monotonic())
+                shortcuts.editor_ready(self.record['editorFocusReadiness'])
             self.record['originalShell']={}
             self.creation=lifecycle.retained_writer_shell(self.process,self.suite,self.record['originalShell'])
             identity,data=_packaged_identity_file(self.suite,'suite-inventory.json');inventory=json.loads(data)
@@ -223,9 +229,10 @@ class CalcCloseCase(lifecycle.Case):
             before=self.start_reader('before-close-reader');self.record['beforeInput']=before
             calc_save.require_uncommitted_cells(before,self.baseline)
             self.record['stage']='type-without-enter'
-            selected,editing,pending=calc_save.type_pending_a1(self.reader,self.baseline,marker(self.choice),self.record,self.deadline,
-                navigate=lambda keys:send_keys(keys,pause=.1),require_focus=lambda:self.api.require_editor_focus(self.hwnd,self.child),
-                type_marker=lambda:native.ascii_input.type_ascii(self.api,self.hwnd,self.child,marker(self.choice),self.record,pause=.04))
+            with CountedEditorShortcuts(self.api,self.process,before['bindingBefore'],self.record,self.deadline) as shortcuts:
+                selected,editing,pending=calc_save.type_pending_a1(self.reader,self.baseline,marker(self.choice),self.record,self.deadline,
+                    navigate=shortcuts.navigate,require_focus=lambda:self.api.require_editor_focus(self.hwnd,self.child),
+                    type_marker=lambda:native.ascii_input.type_ascii(self.api,self.hwnd,self.child,marker(self.choice),self.record,pause=.04))
             self.record['beforeClose']=pending
             calc_save.require_pending_input_observations(before,selected,editing,pending,self.baseline,marker(self.choice),suite=self.suite,inventory=inventory,
                 inventory_sha256=identity['sha256'],original_shell=self.record['originalShell'],
@@ -239,10 +246,12 @@ class CalcCloseCase(lifecycle.Case):
             self.api.require_editor_focus(self.hwnd,self.child)
             self.record['stage']='single-physical-ctrl-w'
             self.record['closeShortcutCount']=1;self.record['beforeCloseActions'].append('ctrl-w')
-            send_keys('^w',pause=.1)
+            close_deadline=time.monotonic()+20
+            with ReaderBoundEditorCommand(self.api,self.process,before['bindingBefore'],'CTRL_W',self.record,close_deadline) as command:
+                command.press()
             require_original_close(self.record);self.record['originalCloseVerified']=True
             self.record['stage']='require-existing-save-discard-cancel-prompt'
-            self.choose_existing_prompt()
+            self.choose_existing_prompt(close_deadline)
             if self.choice=='cancel':
                 self.record['stage']='verify-cancel-before-any-later-save'
                 assert self.process.poll() is None and self.api.user.IsWindow(self.hwnd) and self.api.user.IsWindow(self.child)

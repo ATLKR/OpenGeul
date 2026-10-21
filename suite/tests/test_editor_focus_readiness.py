@@ -65,6 +65,67 @@ class EditorFocusReadinessTests(unittest.TestCase):
 
     def advance(self, seconds): self.clock += seconds
 
+    def test_setup_callback_consumes_the_same_entry_deadline_as_focus(self):
+        api = self.api([11, 34, 34, 34])
+        def click(): self.inputs.append('click'); self.advance(.21)
+        with self.assertRaisesRegex(AssertionError, 'deadline'):
+            self.prepare(api, click=click, seconds=.2)
+        self.assertEqual(self.inputs, ['click'])
+
+    def test_ctrl_f6_time_cannot_start_another_focus_budget(self):
+        api = self.api([11, 34, 34, 34])
+        def enter(): self.inputs.append('CTRL+F6'); self.advance(.21)
+        with self.assertRaisesRegex(AssertionError, 'deadline'):
+            self.prepare(api, enter=enter, seconds=.2)
+        self.assertEqual(self.inputs, ['click', 'CTRL+F6'])
+
+    def test_final_strict_query_cannot_qualify_focus_after_entry_deadline(self):
+        api = self.api([11, 34, 34, 34])
+        strict = api.require_editor_focus
+        def late(hwnd, child):
+            result = strict(hwnd, child); self.advance(.21); return result
+        api.require_editor_focus = late
+        with self.assertRaisesRegex(AssertionError, 'deadline'):
+            self.prepare(api, seconds=.2)
+        self.assertFalse(self.record['editorFocusReadiness']['ready'])
+
+    def test_entry_budget_rejects_boolean_or_nonfinite_seconds_before_input(self):
+        for seconds in [True, False, float('nan'), float('inf')]:
+            with self.subTest(seconds=seconds):
+                self.inputs.clear()
+                with self.assertRaises(AssertionError): self.prepare(self.api([34]), seconds=seconds)
+                self.assertEqual(self.inputs, [])
+
+    def test_receipt_finalization_cannot_return_ready_after_shared_deadline(self):
+        replay = native.require_editor_focus_readiness
+        def late(*args):
+            value = replay(*args); self.advance(.21); return value
+        with mock.patch.object(native, 'require_editor_focus_readiness', side_effect=late):
+            with self.assertRaisesRegex(AssertionError, 'deadline'):
+                self.prepare(self.api([11,34,34,34]), seconds=.2)
+        self.assertFalse(self.record['editorFocusReadiness']['ready'])
+
+    def test_validation_time_cannot_start_the_click_after_entry_deadline(self):
+        validate = native._editor_focus_snapshot_ready
+        def late(*args):
+            value = validate(*args); self.advance(.21); return value
+        with mock.patch.object(native, '_editor_focus_snapshot_ready', side_effect=late):
+            with self.assertRaisesRegex(AssertionError, 'deadline'):
+                self.prepare(self.api([11,34,34]), seconds=.2)
+        self.assertEqual(self.inputs, [])
+
+    def test_validation_time_cannot_start_ctrl_f6_after_entry_deadline(self):
+        validate = native._editor_focus_snapshot_ready
+        calls = []
+        def late(*args):
+            value = validate(*args); calls.append(None)
+            if len(calls) == 2: self.advance(.21)
+            return value
+        with mock.patch.object(native, '_editor_focus_snapshot_ready', side_effect=late):
+            with self.assertRaisesRegex(AssertionError, 'deadline'):
+                self.prepare(self.api([11,34,34]), seconds=.2)
+        self.assertEqual(self.inputs, ['click'])
+
     def prepare(self, api, click=None, enter=None, seconds=.2):
         with mock.patch.object(native.time, 'monotonic', side_effect=lambda: self.clock), \
                 mock.patch.object(native.time, 'sleep', side_effect=self.advance):

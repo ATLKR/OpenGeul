@@ -180,7 +180,8 @@ def dialog_uia_identity(accessible, dialog, shell_pid, evidence=None):
 def set_owned_picker_filename(api, shell_pid, document, dialog, accessible, field, target, record, *,
                             expected_title='OpenGeul Writer — 다른 이름으로 저장'):
     """Assign only the verified fixture filename; document text still uses physical input."""
-    assert expected_title in ('OpenGeul Writer — 다른 이름으로 저장','OpenGeul Office에서 문서 열기'), 'Unsupported owned filename dialog'
+    assert expected_title in ('OpenGeul Writer — 다른 이름으로 저장','OpenGeul Office에서 문서 열기',
+                              'OpenGeul Base — 다른 이름으로 저장'), 'Unsupported owned filename dialog'
     filename_id='1148' if expected_title=='OpenGeul Office에서 문서 열기' else '1001'
     receipt = {'method': 'Win32-Edit-EM_REPLACESEL', 'expected': str(target), 'before': None, 'after': None,
                'assignmentAttempts': 0, 'selectionSetAttempts': 0, 'focusClickAttempts': 0, 'success': False,
@@ -808,7 +809,6 @@ class Case:
 
     def edit(self, hwnd, child, marker):
         from pywinauto import Desktop
-        from pywinauto.keyboard import send_keys
         self.record['stage'] = 'physical-editor-input'
         attachments = [row for row in self.record.get('attachments', [])
                        if row['hwnd'] == hwnd and row['child'] == child]
@@ -819,15 +819,21 @@ class Case:
             window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
             native.activate_owned_suite(self.api, self.process, hwnd, self.record)
             self.api.require_foreground(hwnd)
-            native.prepare_editor_focus(self.api, hwnd, child, self.process.pid, attachments[0]['officePid'], self.record,
-                lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
-                lambda: send_keys('^{F6}', pause=0.1))
-            self.api.require_editor_focus(hwnd, child)
-            send_keys('^{END}', pause=0.1)
-            self.api.require_editor_focus(hwnd, child)
-            native.ascii_input.type_ascii(self.api, hwnd, child, marker, self.record, pause=0.025)
-            self.api.require_editor_focus(hwnd, child)
-            context.complete(plan)
+            entry_deadline=time.monotonic()+5
+            with native.FirstAdmissionEditorSession(self.api,self.process,attachments[0],
+                    'LIFECYCLE_WRITER',self.record,entry_deadline,marker=marker) as shortcuts:
+                shortcuts.join_model(context,plan)
+                native.prepare_editor_focus(self.api, hwnd, child, self.process.pid, attachments[0]['officePid'], self.record,
+                    lambda: native.click_owned_editor(self.api,self.process,hwnd,attachments[0]['parent'],child,attachments[0]['officePid'],self.record),
+                    lambda: shortcuts.press('CTRL_F6'),seconds=min(entry_deadline,context.deadline)-time.monotonic())
+                shortcuts.editor_ready(self.record['editorFocusReadiness'])
+                self.api.require_editor_focus(hwnd, child)
+                shortcuts.press('CTRL_END')
+                self.api.require_editor_focus(hwnd, child)
+                typed=native.ascii_input.type_ascii(self.api, hwnd, child, marker, self.record, pause=0.025,deadline=shortcuts.deadline)
+                shortcuts.typed(typed)
+                self.api.require_editor_focus(hwnd, child)
+                shortcuts.complete_model(context,plan)
         except BaseException as exc:
             context.abort(exc)
             raise
@@ -835,17 +841,20 @@ class Case:
 
     def shell_command(self, hwnd, keys):
         from pywinauto import Desktop
-        from pywinauto.keyboard import send_keys
-        window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
+        assert keys in ('','^s','^+s'), 'Unsupported original shell command'
+        self.record['stage']='focus-owned-shell-file-menu'
         native.activate_owned_suite(self.api, self.process, hwnd, self.record)
         self.api.require_foreground(hwnd)
         shell = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
         items = [item for item in shell.descendants(control_type='MenuItem') if item.element_info.name == '파일'
                  and item.element_info.process_id == self.process.pid and item.is_visible() and item.is_enabled()]
         assert len(items) == 1, 'Exact shell-owned File menu is required'
-        items[0].click_input()
-        self.api.require_foreground(hwnd)
-        if keys: send_keys(keys, pause=0.1)
+        native.click_owned_control(self.api,self.process,hwnd,items[0],self.record,purpose='FILE_MENU')
+        if keys:
+            self.record['stage']='send-owned-shell-save-shortcut'
+            native.send_host_menu_shortcut(self.api,self.process,hwnd,items[0],self.record,
+                shortcut='CTRL_S' if keys=='^s' else 'CTRL_SHIFT_S',
+                caption='OpenGeul Writer — 다른 이름으로 저장')
 
     def new_from_menu(self, hwnd):
         from pywinauto import Desktop
@@ -855,7 +864,7 @@ class Case:
         self.api.require_foreground(hwnd)
         candidates[0].click_input()
 
-    def dialog(self, owner, title):
+    def dialog(self, owner, title, deadline=None):
         from pywinauto import Desktop
         def find():
             matches = [hwnd for hwnd in self.api.windows(self.process.pid)
@@ -866,7 +875,9 @@ class Case:
             native.require_dialog_identity(self.api.pid(hwnd), self.process.pid, self.api.user.GetWindow(hwnd, 4),
                                            owner, self.api.title(hwnd), title, self.api.class_name(hwnd))
             return hwnd, Desktop(backend='uia').window(handle=hwnd).wrapper_object()
-        return native.wait_for(find, 20)
+        seconds=20 if deadline is None else deadline-time.monotonic()
+        assert seconds>0,'Original owned dialog deadline expired'
+        return native.wait_for(find, seconds)
 
     def click_dialog(self, owner, title, text, choice, allowed):
         from pywinauto import Desktop

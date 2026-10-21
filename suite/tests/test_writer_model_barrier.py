@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
+from editor_program_boundary import editor_program_factory
 
 
 E2E = Path(__file__).resolve().parents[1] / 'e2e'
@@ -207,7 +208,7 @@ class OriginalEditHarness:
         self.events = []
         self.title_checks = 0
         self.case = object.__new__(lifecycle.Case)
-        self.case.record = {'attachments': [{'hwnd': 11, 'child': 22, 'officePid': 88}]}
+        self.case.record = {'attachments': [{'hwnd': 11, 'parent': 12, 'child': 22, 'officePid': 88}]}
         self.case.process = SimpleNamespace(pid=77)
         self.case.suite = self.frame.suite
         self.case._writer_model_context = lambda hwnd,child:self.completion
@@ -226,10 +227,10 @@ class OriginalEditHarness:
     def keys(self, keys, **options):
         self.events.append(('keys', keys, options))
 
-    def prepare(self, api, hwnd, child, shell_pid, office_pid, record, click, enter):
+    def prepare(self, api, hwnd, child, shell_pid, office_pid, record, click, enter, **options):
         click(); enter()
 
-    def inject(self, api, hwnd, child, marker, record, *, pause):
+    def inject(self, api, hwnd, child, marker, record, *, pause, deadline):
         self.events.append(('physical', marker, pause))
         self.body = next(self.bodies)
         self.clock.pause(len(marker)*pause)
@@ -240,12 +241,16 @@ class OriginalEditHarness:
         with patch.dict('sys.modules', self.modules), \
              patch.object(lifecycle.native, 'activate_owned_suite',
                  side_effect=lambda api, process, hwnd, record: api.require_foreground(hwnd)) as activated, \
+             patch.object(lifecycle.native, 'click_owned_editor',
+                 side_effect=lambda *args: self.events.append(('click',))) as clicked, \
              patch.object(lifecycle.native, 'prepare_editor_focus', self.prepare), \
+             patch.object(lifecycle.native, 'FirstAdmissionEditorSession', editor_program_factory(self.keys)), \
              patch.object(lifecycle.native.ascii_input, 'type_ascii', self.inject):
             try:
                 lifecycle.Case.edit(self.case, 11, 22, marker)
             finally:
                 activated.assert_called_once_with(self.case.api, self.case.process, 11, self.case.record)
+                clicked.assert_called_once_with(self.case.api, self.case.process, 11, 12, 22, 88, self.case.record)
 
 
 class ExistingStalePredicateRedTests(unittest.TestCase):

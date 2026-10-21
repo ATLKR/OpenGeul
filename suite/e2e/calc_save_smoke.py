@@ -20,6 +20,9 @@ import zipfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import calc_model_barrier
+from counted_editor_shortcuts import CountedEditorShortcuts
+import windows_smoke as native
+from scenario_editor_shortcuts import FirstAdmissionEditorSession, ReaderBoundEditorCommand
 from windows_smoke import (Windows, ascii_input, capture_failure, close_home,
     launch_suite, activate_owned_suite, prepare_editor_focus, require_engine_fixture, stop_owned_test_process,
     verified_attachment, wait_for, write_result)
@@ -288,7 +291,6 @@ def physical_case(suite,fixtures,output):
     from calc_failure_cleanup import bind_pre_input_cleanup,finish_pre_input_cleanup
     from generated_calc_close import freeze_saved_calc_copy
     from pywinauto import Desktop
-    from pywinauto.keyboard import send_keys
     from lifecycle_smoke import retained_writer_shell
     from writer_model_reader import OwnedModelReader,require_model_reader_cleanup
     from writer_style_smoke import _packaged_identity_file
@@ -326,9 +328,14 @@ def physical_case(suite,fixtures,output):
         wait_for(lambda:api.user.GetAncestor(api.user.GetForegroundWindow(),2)==hwnd,10)
         window.capture_as_image().save(output/(CASE+'-before.png'))
         record['stage']='focus-editor'
-        prepare_editor_focus(api,hwnd,child,process.pid,office_pid,record,
-            lambda:Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
-            lambda:send_keys('^{F6}',pause=.1))
+        entry_deadline=time.monotonic()+5
+        with FirstAdmissionEditorSession(api,process,
+                dict(hwnd=hwnd,parent=parent,child=child,officePid=office_pid),
+                'PENDING_CALC_ENTRY',record,entry_deadline) as shortcuts:
+            prepare_editor_focus(api,hwnd,child,process.pid,office_pid,record,
+                lambda:native.click_owned_editor(api,process,hwnd,parent,child,office_pid,record),
+                lambda:shortcuts.press('CTRL_F6'),seconds=entry_deadline-time.monotonic())
+            shortcuts.editor_ready(record['editorFocusReadiness'])
         record['originalShell']={};creation=retained_writer_shell(process,suite,record['originalShell'])
         identity,data=_packaged_identity_file(suite,'suite-inventory.json')
         inventory=json.loads(data)
@@ -341,9 +348,10 @@ def physical_case(suite,fixtures,output):
         before=reader.start(deadline);record['beforeInput']=before
         require_uncommitted_cells(before,baseline)
         record['stage']='physical-edit-without-enter'
-        selected,editing,pending=type_pending_a1(reader,baseline,MARKER,record,deadline,
-            navigate=lambda keys:send_keys(keys,pause=.1),require_focus=lambda:api.require_editor_focus(hwnd,child),
-            type_marker=lambda:ascii_input.type_ascii(api,hwnd,child,MARKER,record,pause=.04))
+        with CountedEditorShortcuts(api,process,before['bindingBefore'],record,deadline) as shortcuts:
+            selected,editing,pending=type_pending_a1(reader,baseline,MARKER,record,deadline,
+                navigate=shortcuts.navigate,require_focus=lambda:api.require_editor_focus(hwnd,child),
+                type_marker=lambda:ascii_input.type_ascii(api,hwnd,child,MARKER,record,pause=.04))
         record['beforeSave']=pending
         require_pending_input_observations(before,selected,editing,pending,baseline,MARKER,suite=suite,inventory=inventory,
             inventory_sha256=identity['sha256'],original_shell=record['originalShell'],
@@ -358,7 +366,10 @@ def physical_case(suite,fixtures,output):
         # No focus action, input acceptance or model setter may occur here.
         api.require_editor_focus(hwnd,child)
         record['stage']='single-physical-ctrl-s'
-        record['saveShortcutCount']=1;send_keys('^s',pause=.1)
+        save_deadline=time.monotonic()+30
+        record['saveShortcutCount']=1
+        with ReaderBoundEditorCommand(api,process,before['bindingBefore'],'CTRL_S',record,save_deadline) as command:
+            command.press()
         require_actions(record)
         def saved():
             raw=source.read_bytes();cells=read_cells(raw)
@@ -366,7 +377,9 @@ def physical_case(suite,fixtures,output):
             require_grid(cells,baseline,expected)
             return dict(sha256=hashlib.sha256(raw).hexdigest(),bytes=len(raw),cells=cells)
         record['stage']='wait-exact-durable-workbook'
-        record['persisted']=wait_for(saved,30)
+        remaining=save_deadline-time.monotonic();assert remaining>0,'Original Calc save deadline expired'
+        record['persisted']=wait_for(saved,remaining)
+        assert time.monotonic()<=save_deadline,'Original Calc save deadline expired during durable workbook observation'
         assert record['persisted']['sha256']!=record['sourceSha256']
         assert not api.windows(office_pid),'Office created an unowned visible top-level window'
         window.capture_as_image().save(output/(CASE+'-saved.png'))

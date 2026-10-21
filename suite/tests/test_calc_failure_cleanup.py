@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace as NS
 import unittest
+from editor_program_boundary import EditorProgramBoundary
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -184,6 +185,8 @@ class CalcFailureCleanupTests(unittest.TestCase):
                     patch.object(native,'verified_attachment',return_value=(10,15,20,8)),
                     patch.object(save,'prepare_editor_focus',side_effect=noop),
                     patch.object(native,'prepare_editor_focus',side_effect=noop),
+                    patch.object(save,'FirstAdmissionEditorSession',EditorProgramBoundary),
+                    patch.object(close,'FirstAdmissionEditorSession',EditorProgramBoundary),
                     patch.object(lifecycle,'retained_writer_shell',return_value=9007199254741007),
                     patch.object(writer_style_smoke,'_packaged_identity_file',return_value=({'sha256':'a'*64},b'{}')),
                     patch.object(writer_model_reader,'OwnedModelReader',Reader),

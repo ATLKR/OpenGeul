@@ -105,8 +105,14 @@ def activate_suite_window(require_foreground, process, hwnd, record, *, probe=No
             _owned_window(value, hwnd, process.pid)
             return value
 
+        def sample_foreground():
+            value = probe.foreground(); evidence['foregroundSamples'].append(value)
+            detail = getattr(probe, 'last_foreground_snapshot', None)
+            if detail is not None: evidence.setdefault('foregroundDetails', []).append(dict(detail))
+            return value
+
         before = observe(); evidence['windowBefore'] = before
-        budget(); foreground = probe.foreground(); evidence['foregroundSamples'].append(foreground)
+        budget(); foreground = sample_foreground()
         if foreground != hwnd:
             budget(); caption = probe.caption(hwnd); evidence['caption'] = caption
             assert caption['state'] & (1 | 0x8000 | 0x10000) == 0, 'Caption is unavailable'
@@ -130,7 +136,7 @@ def activate_suite_window(require_foreground, process, hwnd, record, *, probe=No
             assert evidence['clickCompleted'] is True and evidence['insertedInputs'] == 2
             while True:
                 observe()
-                budget(); foreground = probe.foreground(); evidence['foregroundSamples'].append(foreground)
+                budget(); foreground = sample_foreground()
                 if foreground == hwnd: break
                 assert len(evidence['foregroundSamples']) < 102 and clock() < deadline, 'Owned Suite foreground was not established'
                 pause(min(.1, max(0, deadline - clock())))
@@ -154,6 +160,16 @@ def activate_suite_window(require_foreground, process, hwnd, record, *, probe=No
         if evidence['ready'] and evidence['finishedAt'] > deadline:
             evidence.update(ready=False, error='Owned Suite activation completed after deadline')
             if primary is None: primary = AssertionError(evidence['error'])
+        if primary is not None:
+            try:
+                from activation_failure_diagnostics import collect_failure_diagnostics
+                foreign = next((value for value in reversed(evidence['foregroundSamples']) if value != hwnd), 0)
+                evidence['failureDiagnostics'] = collect_failure_diagnostics(hwnd, process.pid,
+                    evidence.get('windowBefore', {}).get('threadId', 0), foreign, clock=clock)
+            except BaseException as exc:
+                try: message = str(exc)[:512]
+                except BaseException: message = '<unprintable diagnostic exception>'
+                evidence['failureDiagnosticsError'] = type(exc).__name__ + ': ' + message
         if output is not None and stem is not None:
             try:
                 # Final retention must also run after an expired action budget.
@@ -294,7 +310,9 @@ class NativeActivationProbe:
 
     def foreground(self):
         hwnd = self._call(self.user.GetForegroundWindow)
-        return int(self._call(self.user.GetAncestor, hwnd, 2) or 0) if hwnd else 0
+        root = int(self._call(self.user.GetAncestor, hwnd, 2) or 0) if hwnd else 0
+        self.last_foreground_snapshot = dict(rawHwnd=int(hwnd or 0), rootHwnd=root)
+        return root
 
     def caption(self, hwnd):
         value = TitleBarInfo(cbSize=C.sizeof(TitleBarInfo))
@@ -328,16 +346,23 @@ class NativeActivationProbe:
     def click(self, receipt):
         receipt.update(clickCompleted=False, inputCallAttempts=0, insertedInputs=None,
                        inputCountBasis='native button call not attempted')
-        assert not any(self._call(self.user.GetAsyncKeyState, key) & 0x8000 for key in (1, 2, 4, 5, 6)), 'A physical mouse button is already held'
+        receipt['physicalButtonStateSamples'] = []
+        for key in (1, 2, 4, 5, 6):
+            state = self._call(self.user.GetAsyncKeyState, key)
+            receipt['physicalButtonStateSamples'].append(dict(virtualKey=key, rawState=int(state)))
+            assert not state & 0x8000, 'A physical mouse button is already held'
         position = Point()
         self._required(self._call(self.user.GetPhysicalCursorPos, C.byref(position)), 'Before-click physical cursor')
-        assert [int(position.x), int(position.y)] == receipt['chosenPhysicalPoint'], 'Physical cursor changed before caption click'
+        receipt['beforeClickCursorReadback'] = [int(position.x), int(position.y)]
+        assert receipt['beforeClickCursorReadback'] == receipt['chosenPhysicalPoint'], 'Physical cursor changed before caption click'
         swapped = bool(self._call(self.user.GetSystemMetrics, 23))
+        receipt['swappedPrimary'] = swapped
         down, up = (0x0008, 0x0010) if swapped else (0x0002, 0x0004)
         receipt.update(primaryButton='right' if swapped else 'left', requestedInputs=2)
         payload = (Input * 2)(Input(type=0, data=InputData(mouse=MouseInput(flags=down))),
                               Input(type=0, data=InputData(mouse=MouseInput(flags=up))))
-        assert self.clock() < self.deadline, 'Owned caption input deadline expired'
+        receipt['inputStartedAt'] = self.clock()
+        assert receipt['inputStartedAt'] < self.deadline, 'Owned caption input deadline expired'
         receipt['inputCallAttempts'] = 1
         receipt['inputCountBasis'] = 'native button call attempted; return unavailable'
         # One serial button down/up call; no wrapper focus method is reachable.
@@ -349,4 +374,5 @@ class NativeActivationProbe:
             try: release['inserted'] = int(self.user.SendInput(1, prefix, C.sizeof(Input)))
             except BaseException as exc: release['error'] = type(exc).__name__ + ': ' + str(exc)[:1024]
         assert inserted == 2, 'Owned caption click had partial native insertion'
-        assert self.clock() < self.deadline, 'Owned caption input completed after deadline'
+        receipt['inputFinishedAt'] = self.clock()
+        assert receipt['inputFinishedAt'] < self.deadline, 'Owned caption input completed after deadline'

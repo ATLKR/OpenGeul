@@ -10,6 +10,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from editor_program_boundary import editor_program_factory
 import zipfile
 
 
@@ -423,8 +424,9 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                 archive.writestr(member, '<document><text>' + marker + '</text></document>')
 
     def _run_document(self, module='calc', *, failure=None, abort_raises=False,
-                      replace_source_on_launch=False, physical_input=True):
+                      replace_source_on_launch=False, physical_input=True, late_save=False):
         events, state = [], {}
+        clock=[1.]
         first_error = RuntimeError({
             'begin': 'before-input model rejected',
             'complete': 'model completion rejected',
@@ -486,18 +488,23 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
 
             real_wait_for = smoke.wait_for
             def wait_for(check, seconds=10):
-                if failure == 'save' and seconds == 30:
+                if failure == 'save' and 20 < seconds <= 30:
                     self.assertFalse(check(), 'The original save XML gate must really observe a missing marker')
                     events.append('saved-xml-check-failed')
                     raise first_error
+                if late_save and 20 < seconds <= 30:
+                    result=check()
+                    self.assertTrue(result,'The late predicate must really observe the saved marker')
+                    clock[0]+=31
+                    return result
                 return real_wait_for(check, seconds)
 
-            def prepare_focus(api, hwnd, child, shell_pid, office_pid, record, click, enter):
+            def prepare_focus(api, hwnd, child, shell_pid, office_pid, record, click, enter, **options):
                 click()
                 enter()
                 events.append('focus-ready')
 
-            def type_ascii(api, hwnd, child, marker, record, *, pause):
+            def type_ascii(api, hwnd, child, marker, record, *, pause, deadline):
                 events.append(('type', marker, pause))
                 if failure == 'input': raise first_error
 
@@ -545,13 +552,17 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
             }
             error = None
             with ExitStack() as stack:
+                if late_save: stack.enter_context(patch.object(smoke.time,'monotonic',side_effect=lambda:clock[0]))
                 stack.enter_context(patch.dict(sys.modules, modules))
                 activated = stack.enter_context(patch.object(smoke, 'activate_owned_suite',
                     side_effect=lambda api, process, hwnd, record: api.require_foreground(hwnd)))
+                clicked = stack.enter_context(patch.object(smoke, 'click_owned_editor',
+                    side_effect=lambda *args: events.append('editor-click')))
                 for name, replacement in (
                         ('launch_suite', launch), ('Windows', lambda: api),
                         ('verified_attachment', lambda *args: (11, 22, 33, 200)),
                         ('prepare_editor_focus', prepare_focus),
+                        ('FirstAdmissionEditorSession', editor_program_factory(send_keys)),
                         ('wait_for', wait_for),
                         ('CalcModelContext', FakeCalcContext), ('capture_failure', capture_failure),
                         ('close_document', lambda *args, **kwargs: (state.update(closeProof=kwargs.get('calc_close_proof')), events.append('document-close'))),
@@ -564,6 +575,10 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                 except Exception as exc:
                     error = exc
                 activated.assert_called_once_with(api, process, 11, activated.call_args.args[3])
+                if physical_input:
+                    clicked.assert_called_once_with(api, process, 11, 22, 33, 200, activated.call_args.args[3])
+                else:
+                    clicked.assert_not_called()
             state.update(events=events, error=error, firstError=first_error, original=original,
                          record=json.loads((output / (module + '-result.json')).read_text(encoding='utf-8')),
                          snapshot=(output / 'calc-model-baseline.xlsx').read_bytes()
@@ -578,14 +593,14 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
         self.assertIn(('model-begin', marker), events,
                       'Calc physical input bypassed the owned before-input model gate')
         ordered = ['focus-ready', 'model-context', ('model-begin', marker),
-                   ('keys', '^{HOME}{F2}^{END}', 0.1), ('type', marker, 0.04),
+                   ('keys', '^{HOME}', 0.1), ('keys', '{F2}', 0.1), ('keys', '^{END}', 0.1), ('type', marker, 0.04),
                    ('keys', '{ENTER}', 0.1), 'model-completion-observed',
                    'reader-normal-close', 'reader-cleanup-validated', ('keys', '^s', 0.1),
                    'document-close', 'home-close']
         self.assertEqual(sorted(events.index(event) for event in ordered),
                          [events.index(event) for event in ordered])
         self.assertEqual([event for event in events if isinstance(event, tuple) and event[0] == 'keys'],
-                         [('keys', '^{F6}', 0.1), ('keys', '^{HOME}{F2}^{END}', 0.1),
+                         [('keys', '^{F6}', 0.1), ('keys', '^{HOME}', 0.1), ('keys', '{F2}', 0.1), ('keys', '^{END}', 0.1),
                           ('keys', '{ENTER}', 0.1), ('keys', '^s', 0.1)])
         self.assertEqual([event for event in events if isinstance(event, tuple) and event[0] == 'type'],
                          [('type', marker, 0.04)])
@@ -656,6 +671,19 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
         self.assertEqual('RuntimeError: saved marker verification failed', run['record']['error'])
         self.assertNotIn('document-close', run['events'])
 
+    def test_saved_marker_predicate_returning_after_original_save_deadline_cannot_pass(self):
+        for module in ('writer','calc'):
+            with self.subTest(module=module):
+                run=self._run_document(module,late_save=True)
+                self.assertIsInstance(run['error'],AssertionError)
+                self.assertIn('save deadline',str(run['error']))
+                self.assertFalse(run['record']['success'])
+                self.assertNotIn('document-close',run['events'])
+                self.assertEqual(run['events'].count(('keys','^s',.1)),1)
+                if module=='calc':
+                    self.assertEqual(run['sealedCompletion'],run['record']['calcModelCompletion'])
+                    self.assertNotIn('model-abort',run['events'])
+
     def test_completed_real_calc_context_abort_preserves_sealed_proof_and_does_not_persist_again(self):
         context = object.__new__(smoke.CalcModelContext)
         context.reader = None
@@ -677,7 +705,8 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                 self.assertIsNone(run['error'])
                 self.assertNotIn('model-context', run['events'])
                 self.assertIsNone(run['snapshot'])
-                self.assertEqual([('keys', '^{F6}', 0.1), ('keys', navigation, 0.1), ('keys', '^s', 0.1)],
+                pieces = ['^{END}'] if module == 'writer' else ['{TAB}', '{F2}', '^{END}']
+                self.assertEqual([('keys', '^{F6}', 0.1), *[('keys', key, 0.1) for key in pieces], ('keys', '^s', 0.1)],
                     [event for event in run['events'] if isinstance(event, tuple) and event[0] == 'keys'])
                 self.assertTrue(run['record']['success'])
 

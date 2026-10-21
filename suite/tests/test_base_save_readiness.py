@@ -131,6 +131,22 @@ class NativeBoundary:
         if keys=='^s': self.calls.append(('save-shortcut',self.clock.value))
         elif keys=='^a': self.calls.append(('select-filename',self.clock.value))
         else: self.calls.append(('type-path',self.clock.value));self.current_value=keys
+    def assign_filename(self, api, pid, document, dialog, accessible, field, target, record, **kwargs):
+        # Readiness orchestration substitutes the separately tested native
+        # filename boundary; it does not claim a real Windows Edit transaction.
+        field.click_input()
+        self.calls.append(('assign-filename',self.clock.value))
+        before=self.current_value;self.current_value=str(target)
+        record.setdefault('pickerFilenameInputs',[]).append(dict(method='Win32-Edit-EM_REPLACESEL',
+            expected=str(target),before=before,after=self.current_value,success=True))
+    def measured_click(self, api, process, document, control, record, **kwargs):
+        if kwargs['purpose']=='FILE_MENU':self.calls.append(('file-menu-click',self.clock.value))
+        else:
+            assert kwargs['purpose']=='SAVE_BUTTON'
+            control.click_input()
+    def counted_shortcut(self, *args, **kwargs):
+        assert kwargs['shortcut']=='CTRL_S'
+        self.send_keys('^s')
     def modules(self):
         return {'pywinauto':SimpleNamespace(Desktop=lambda backend:self.desktop(backend)),
           'pywinauto.keyboard':SimpleNamespace(send_keys=self.send_keys),
@@ -142,6 +158,7 @@ class NativeBoundary:
 
 class BaseSaveReadinessTests(unittest.TestCase):
     def run_case(self, states, *, mutate=None, clock_frozen=False):
+        import lifecycle_smoke
         boundary=NativeBoundary(states)
         if mutate: mutate(boundary)
         with tempfile.TemporaryDirectory() as directory:
@@ -150,13 +167,16 @@ class BaseSaveReadinessTests(unittest.TestCase):
             with patch.dict(sys.modules,boundary.modules()), \
                  patch.object(smoke.time,'monotonic',side_effect=boundary.clock.monotonic), \
                  patch.object(smoke.time,'sleep',side_effect=(lambda seconds:None) if clock_frozen else boundary.clock.sleep), \
+                 patch.object(smoke,'click_owned_control',side_effect=boundary.measured_click), \
+                 patch.object(smoke,'send_host_menu_shortcut',side_effect=boundary.counted_shortcut), \
+                 patch.object(lifecycle_smoke,'set_owned_picker_filename',side_effect=boundary.assign_filename), \
                  patch.object(smoke,'saved_base_evidence',return_value={'sha256':'a'*64,'bytes':19,'connection':'sdbc:embedded:firebird'}):
                 try: result=smoke.save_new_base(boundary.api,boundary.process,11,fixtures,root,record);error=None
                 except Exception as exc: result=None;error=exc
             return boundary,record,result,error
 
     def no_filename_or_save_input(self,boundary):
-        self.assertEqual([name for name,_ in boundary.calls if name in ('filename-click','select-filename','type-path','save-click')],[])
+        self.assertEqual([name for name,_ in boundary.calls if name in ('filename-click','select-filename','type-path','assign-filename','save-click')],[])
         self.assertEqual(sum(name=='file-menu-click' for name,_ in boundary.calls),1)
         self.assertEqual(sum(name=='save-shortcut' for name,_ in boundary.calls),1)
 
@@ -168,7 +188,7 @@ class BaseSaveReadinessTests(unittest.TestCase):
         self.assertIsInstance(proof,dict,'Missing bounded readiness receipt')
         self.assertEqual(len(proof['observations']),2)
         self.assertEqual([o['state'] for o in proof['observations']],['pending','ready'])
-        self.assertEqual([n for n,_ in b.calls],['file-menu-click','save-shortcut','dialog-focus','filename-click','select-filename','type-path','screenshot','save-click'])
+        self.assertEqual([n for n,_ in b.calls],['file-menu-click','save-shortcut','dialog-focus','filename-click','assign-filename','screenshot','save-click'])
         self.assertLessEqual(proof['finishedAt'],proof['deadline'])
         smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION)
 
@@ -393,15 +413,15 @@ class BaseSaveReadinessTests(unittest.TestCase):
 
     def test_existing_filename_readback_mismatch_still_prevents_save(self):
         def setup(b):
-            original=b.send_keys
-            def send(keys,**kwargs):
-                original(keys,**kwargs)
-                if keys not in ('^s','^a'): b.current_value='wrong target'
-            b.send_keys=send
+            original=b.assign_filename
+            def assign(*args,**kwargs):
+                original(*args,**kwargs)
+                b.current_value='wrong target'
+            b.assign_filename=assign
         b,r,_,error=self.run_case([lambda b:[b.edit,b.save]],mutate=setup)
         self.assertIsNotNone(error)
         self.assertIn('filename differs',str(error))
-        self.assertEqual(sum(name=='type-path' for name,_ in b.calls),1)
+        self.assertEqual(sum(name=='assign-filename' for name,_ in b.calls),1)
         self.assertEqual(sum(name=='save-click' for name,_ in b.calls),0)
 
     def test_lazy_uia_preparation_consumes_the_original_dialog_deadline(self):

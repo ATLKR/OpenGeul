@@ -34,7 +34,7 @@ class CalcCloseProbeTests(unittest.TestCase):
             is_visible=lambda:True,is_enabled=lambda:True))
         case=object.__new__(self.api.CalcCloseCase)
         case.api=f.windows;case.process=f.process;case.hwnd=10;case.choice='discard';case.record={}
-        case.dialog=lambda owner,title:(30,accessible);case.screenshot=lambda *a:None
+        case.dialog=lambda owner,title,**options:(30,accessible);case.screenshot=lambda *a:None
         with patch.dict(sys.modules,{'pywinauto':NS(Desktop=Desktop)}), \
              patch('windows_smoke.wait_for',side_effect=lambda check,seconds=60:check() or (_ for _ in ()).throw(AssertionError('not ready'))), \
              self.assertRaises(AssertionError):

@@ -12,6 +12,7 @@ from ctypes import wintypes as W
 import hashlib
 import json
 import mmap
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,8 @@ from windows_smoke import (Windows, INPUT_CASES, capture_failure, close_document
     stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input)
 from engine_smoke import verify_content
 import native_suite_architecture as native_arch
+from ime_keyboard_session import IMEKeyboardSession
+from ime_calc_setup import observe_calc_setup
 
 EXPECTED_KEYS = list('gksrmf') + ['BACKSPACE', 'f', 'RIGHT']
 SCANS = dict(zip('qwertyuiopasdfghjklzxcvbnm',
@@ -79,6 +82,11 @@ def marker(module):
 
 
 def activate_after_ascii_prefix(observer, module, record, send_ascii):
+    prepare_ascii_prefix(observer, module, record, send_ascii)
+    return observer.command(1)
+
+
+def prepare_ascii_prefix(observer, module, record, send_ascii):
     # The marker scaffold belongs to setup, before switching input language or
     # IME conversion mode. Only the Hangul below is typed through Korean IME.
     record['stage'] = 'type-ascii-prefix-before-ime'
@@ -91,7 +99,7 @@ def activate_after_ascii_prefix(observer, module, record, send_ascii):
     record.update(asciiPrefix=prefix, prefixInputLayout=layout,
                   stage='activate-microsoft-korean-profile')
     require_ascii_prefix(record)
-    return observer.command(1)
+    return prefix
 
 
 def require_ascii_prefix(record):
@@ -351,21 +359,32 @@ def utf16(array):
     return bytes(array).decode('utf-16-le').split('\0', 1)[0]
 
 
-def discover_msvc(folder, vswhere, *, architecture='x64'):
+def remaining_setup(deadline, old_limit, *, clock=None):
+    if deadline is None:
+        return old_limit
+    assert type(deadline) in (int, float) and math.isfinite(deadline), 'Invalid shared IME setup deadline'
+    remaining = deadline - (time.monotonic() if clock is None else clock())
+    assert remaining > 0, 'Shared IME setup deadline expired'
+    return min(old_limit, remaining)
+
+
+def discover_msvc(folder, vswhere, *, architecture='x64', setup_deadline=None, clock=time.monotonic):
     native_arch.require_architecture(architecture)
     component = ('Microsoft.VisualStudio.Component.VC.Tools.ARM64' if architecture == 'arm64'
                  else 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64')
     command = [str(vswhere), '-latest', '-products', '*', '-requires',
         component, '-property', 'installationPath']
-    started = time.monotonic()
+    started = clock()
+    timeout = remaining_setup(setup_deadline, 60, clock=clock)
 
     def preserve(result, outcome):
         def encoded(value):
             return value.encode('utf-8') if isinstance(value, str) else value or b''
         (folder / 'compiler-discovery.log').write_bytes(encoded(getattr(result, 'stdout', None)) + encoded(getattr(result, 'stderr', None)))
         (folder / 'compiler-discovery.json').write_text(json.dumps({
-            'stage': 'discover-msvc', 'command': command, 'timeoutSeconds': 60,
-            'elapsedSeconds': time.monotonic() - started, 'outcome': outcome,
+            'stage': 'discover-msvc', 'command': command, 'timeoutSeconds': timeout,
+            'setupDeadline': setup_deadline,
+            'elapsedSeconds': clock() - started, 'outcome': outcome,
             'returncode': getattr(result, 'returncode', None),
             'exceptionType': type(result).__name__ if isinstance(result, Exception) else None,
             'exceptionMessage': str(result) if isinstance(result, Exception) else None,
@@ -374,17 +393,19 @@ def discover_msvc(folder, vswhere, *, architecture='x64'):
     try:
         # A hosted VS installation query exceeded 10s before compilation.
         # Allow the same one-shot bound as cl.exe, retaining the original output.
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
         preserve(exc, 'timeout' if isinstance(exc, subprocess.TimeoutExpired) else 'launch-error')
         raise
     preserve(result, 'complete' if result.returncode == 0 else 'nonzero-exit')
     result.check_returncode()
+    remaining_setup(setup_deadline, 60, clock=clock)
     return result.stdout.strip()
 
 
-def compile_observer(folder, mapping, profile, *, architecture='x64'):
+def compile_observer(folder, mapping, profile, *, architecture='x64', setup_deadline=None, clock=time.monotonic):
     native_arch.require_architecture(architecture)
+    remaining_setup(setup_deadline, 60, clock=clock)
     source, library = folder / 'ime-observer.cpp', folder / 'ime-observer.dll'
     source.write_text(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
         .replace('__CLSID__', profile['providerClsid']).replace('__PROFILE__', profile['profileGuid']), encoding='utf-8')
@@ -392,23 +413,28 @@ def compile_observer(folder, mapping, profile, *, architecture='x64'):
     command = ['cl.exe', '/nologo', '/LD', '/O2', '/MT', '/EHsc', '/utf-8', str(source),
                '/link', '/MACHINE:' + ('ARM64' if architecture == 'arm64' else 'X64'), '/OUT:' + str(library), 'user32.lib', 'imm32.lib', 'ole32.lib']
     if compiler and architecture == 'x64':
-        result = subprocess.run(command, cwd=folder, capture_output=True, timeout=60)
+        result = subprocess.run(command, cwd=folder, capture_output=True,
+            timeout=remaining_setup(setup_deadline, 60, clock=clock))
     else:
         vswhere = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Microsoft Visual Studio/Installer/vswhere.exe'
-        found = discover_msvc(folder, vswhere, architecture=architecture)
+        found = discover_msvc(folder, vswhere, architecture=architecture,
+            setup_deadline=setup_deadline, clock=clock)
         vcvars = Path(found) / ('VC/Auxiliary/Build/vcvarsall.bat' if architecture == 'arm64'
                                 else 'VC/Auxiliary/Build/vcvars64.bat')
         assert vcvars.is_file(), 'Microsoft native ' + architecture + ' C++ build tools are required for the in-process observer'
         script = folder / 'compile-observer.cmd'
         script.write_text('@echo off\ncall "' + str(vcvars) + '"' + (' arm64' if architecture == 'arm64' else '') + '\nif errorlevel 1 exit /b 1\n' + subprocess.list2cmdline(command) + '\n', encoding='utf-8')
-        result = subprocess.run(['cmd.exe', '/d', '/c', str(script)], cwd=folder, capture_output=True, timeout=60)
+        result = subprocess.run(['cmd.exe', '/d', '/c', str(script)], cwd=folder,
+            capture_output=True, timeout=remaining_setup(setup_deadline, 60, clock=clock))
     (folder / 'compiler.log').write_bytes(result.stdout + result.stderr)
     assert result.returncode == 0 and library.is_file(), 'The native IME observer did not compile; inspect compiler.log'
+    remaining_setup(setup_deadline, 60, clock=clock)
     return native_arch.require_native_pe(library, architecture)
 
 
 class CompositionObserver:
-    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64'):
+    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None):
+        remaining_setup(setup_deadline, 60)
         self.native_architecture = native_arch.validate_native_architecture(
             native_arch.observe_native_architecture(), architecture)
         self.target_architecture = native_arch.observe_owned_process(pid, architecture)
@@ -420,7 +446,12 @@ class CompositionObserver:
         state = NativeState()
         state.magic, state.version, state.pid, state.tid = 0x4f47494d, 1, pid, self.tid
         self.mapping[:] = bytes(state)
-        library = compile_observer(folder, self.mapping_name, profile, architecture=architecture)
+        try:
+            library = compile_observer(folder, self.mapping_name, profile,
+                architecture=architecture, setup_deadline=setup_deadline)
+        except BaseException:
+            self.close()
+            raise
         native_arch.require_native_pe(library, architecture)
         self.dll = ctypes.WinDLL(str(library), use_last_error=True)
         self.dll.StateSize.restype = ctypes.c_uint32
@@ -437,10 +468,12 @@ class CompositionObserver:
         self.activation_attempted = False
         try:
             for kind, name in ((4, 'HookCall'), (3, 'HookGet')):
+                remaining_setup(setup_deadline, 60)
                 address = ctypes.cast(getattr(self.dll, name), ctypes.c_void_p)
                 handle = api.user.SetWindowsHookExW(kind, address, self.dll._handle, self.tid)
                 if not handle: raise ctypes.WinError(ctypes.get_last_error())
                 self.hooks.append(handle)
+            remaining_setup(setup_deadline, 60)
         except Exception:
             self.close()
             raise
@@ -452,15 +485,23 @@ class CompositionObserver:
         assert self.api.require_editor_focus(self.root, self.child) == self.focus, 'IME input focus HWND changed'
         assert self.api.pid(self.focus) == self.pid and self.api.user.GetWindowThreadProcessId(self.focus, None) == self.tid, 'IME target process/thread identity changed'
 
-    def command(self, command):
+    def command(self, command, *, setup_deadline=None):
         self.require_target()
+        # Only setup callers supply this deadline. Real composition and exact
+        # restoration retain their original native command policy.
+        bounded_deadline = (time.monotonic() + remaining_setup(setup_deadline, 5)
+                            if setup_deadline is not None else None)
         if command == 1:
             self.activation_attempted = True
         self.mapping[NativeState.command.offset:NativeState.command.offset + 4] = command.to_bytes(4, 'little')
         result = ctypes.c_size_t()
-        if not self.api.user.SendMessageTimeoutW(self.focus, 0x8351, command, 0, 2, 5000, ctypes.byref(result)):
+        milliseconds = (int(remaining_setup(bounded_deadline, 5) * 1000)
+                        if bounded_deadline is not None else 5000)
+        assert milliseconds > 0, 'Shared IME setup has no native command budget'
+        if not self.api.user.SendMessageTimeoutW(self.focus, 0x8351, command, 0, 2, milliseconds, ctypes.byref(result)):
             raise ctypes.WinError(ctypes.get_last_error())
-        state = wait_for(lambda: (value if (value := self.state()).ack == command else None), 5)
+        state = wait_for(lambda: (value if (value := self.state()).ack == command else None),
+            remaining_setup(bounded_deadline, 5))
         self.commands.append({'command': command, 'status': state.status,
             'layout': int(self.api.user.GetKeyboardLayout(self.tid) or 0),
             'activeLanguage': state.activeLanguage, 'activeClsid': utf16(state.activeClsid),
@@ -472,6 +513,7 @@ class CompositionObserver:
             'previousProfileHresult': state.previousProfileHresult, 'activateProfileHresult': state.activateProfileHresult,
             'activeProfileHresult': state.activeProfileHresult, 'activateLayoutError': state.activateLayoutError})
         assert state.status == 0, 'Owned native IME command failed: ' + str(self.commands[-1])
+        remaining_setup(setup_deadline, 5)
         if command == 4:
             wait_for(lambda: int(self.api.user.GetKeyboardLayout(self.tid) or 0) == state.previousLayout, 5)
             validate_restoration(self.commands[-1])
@@ -557,13 +599,28 @@ def reopen_one(suite, source, module):
         assert not engine.cleanup_errors, 'UNO reopen cleanup failed: ' + str(engine.cleanup_errors)
 
 
+def retained_setup_shell(process, suite, keyboard):
+    # This later, fuller Popen observation is joined to the keyboard's true
+    # first admission; it is never presented as an earlier reader witness.
+    from lifecycle_smoke import retained_writer_shell
+    from writer_model_barrier import require_original_shell
+    keyboard.require_target()
+    evidence = {}
+    retained_writer_shell(process, suite, evidence)
+    require_original_shell(evidence, keyboard.binding, suite)
+    assert evidence['handleValue'] == keyboard.shell['handleValue'], 'Calc setup replaced the original Popen HANDLE'
+    keyboard.require_target()
+    return evidence
+
+
 def case(suite, fixtures, output, readiness, module, extension):
     from pywinauto import Desktop
-    from pywinauto.keyboard import send_keys
+    from windows_smoke import click_owned_editor, prepare_editor_focus
     name = 'ime-' + module
     folder = output / name
     folder.mkdir()
     original = require_engine_fixture(fixtures, module, extension)
+    original_bytes = original.read_bytes()
     source = folder / original.name
     shutil.copyfile(original, source)
     before = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -572,7 +629,7 @@ def case(suite, fixtures, output, readiness, module, extension):
               'file': str(source), 'success': False, 'imeVerified': False, 'stage': 'attach',
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
               'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}
-    observer = None
+    observer = keyboard = primary = None
     api = Windows()
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
@@ -580,29 +637,52 @@ def case(suite, fixtures, output, readiness, module, extension):
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
         activate_owned_suite(api, process, hwnd, record)
-        wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd, 10)
+        setup_started = time.monotonic()
+        setup_deadline = setup_started + 60
+        record['imeSetupBudget'] = dict(startedAt=setup_started, deadline=setup_deadline,
+            deadlineScope='focus-navigation-ascii-reader-cleanup-observer-and-native-mode-setup')
+        wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd,
+            remaining_setup(setup_deadline, 10))
+        keyboard = IMEKeyboardSession(api, process, hwnd, parent, child, office_pid,
+            module, record, setup_deadline)
+        keyboard.start()
         record['stage'] = 'focus-editor'
-        Desktop(backend='win32').window(handle=child).wrapper_object().click_input()
-        send_keys('^{F6}', pause=0.1)
-        api.require_editor_focus(hwnd, child)
-        if module == 'writer': send_keys('^{END}', pause=0.1)
-        elif module == 'calc': send_keys('^{HOME}{F2}^{END}', pause=0.1)
-        else: send_keys('{TAB}{F2}^{END}', pause=0.1)
-        focus = api.require_editor_focus(hwnd, child)
+        prepare_editor_focus(api, hwnd, child, process.pid, office_pid, record,
+            lambda: click_owned_editor(api, process, hwnd, parent, child, office_pid, record),
+            lambda: keyboard.focus_editor(record['editorFocusReadiness']['deadline']),
+            seconds=remaining_setup(setup_deadline, 5))
+        keyboard.editor_ready(record['editorFocusReadiness'])
+        keyboard.navigate()
+        focus = keyboard.focus
+        record.update(editorTid=keyboard.tid, keyboardFocusHwnd=focus)
+        prepare_ascii_prefix(keyboard, module, record,
+            lambda prefix: ascii_input.type_ascii(api, hwnd, child, prefix, record,
+                pause=0.04, deadline=setup_deadline))
+        if module == 'calc':
+            record['stage'] = 'verify-calc-context-before-ime-observer'
+            observe_calc_setup(suite, source, original_bytes, record, setup_deadline,
+                original_shell=retained_setup_shell(process, suite, keyboard),
+                expected_native=dict(keyboard.binding), require_current=keyboard.require_target)
         record['stage'] = 'install-owned-thread-observer'
         observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'],
-            architecture=record['architecture'])
+            architecture=record['architecture'], setup_deadline=setup_deadline)
         record.update(nativeArchitecture=observer.native_architecture, targetArchitecture=observer.target_architecture)
-        record.update(editorTid=observer.tid, keyboardFocusHwnd=focus)
-        active = activate_after_ascii_prefix(observer, module, record,
-            lambda prefix: ascii_input.type_ascii(api, hwnd, child, prefix, record, pause=0.04))
-        wait_for(lambda: int(api.user.GetKeyboardLayout(observer.tid) or 0) & 0xffff == 0x0412, 10)
+        assert observer.tid == keyboard.tid, 'Native observer differs from retained keyboard editor thread'
+        keyboard.setup_complete()
+        require_ascii_prefix(record)
+        record['stage'] = 'activate-microsoft-korean-profile'
+        active = observer.command(1, setup_deadline=setup_deadline)
+        wait_for(lambda: int(api.user.GetKeyboardLayout(observer.tid) or 0) & 0xffff == 0x0412,
+            remaining_setup(setup_deadline, 10))
         profile = readiness['profile']
         assert active['activeLanguage'] == 0x0412 and active['activeClsid'].lower() == profile['providerClsid'].lower() and active['activeProfile'].lower() == profile['profileGuid'].lower(), 'Focused editor TSF profile differs from the attested Microsoft IME'
         record['activeLayout'] = int(api.user.GetKeyboardLayout(observer.tid) or 0)
         record['activeProfile'] = active
-        observer.command(2)  # Exercise the owned IME's alphanumeric-mode switch.
-        observer.command(3)
+        observer.command(2, setup_deadline=setup_deadline)  # Existing context gate; actual composition proves editing.
+        observer.command(3, setup_deadline=setup_deadline)
+        remaining_setup(setup_deadline, 60)
+        record['imeSetupBudget']['finishedAt'] = time.monotonic()
+        assert record['imeSetupBudget']['finishedAt'] <= setup_deadline, 'Native IME setup exceeded its shared deadline'
         record['stage'] = 'physical-dubeolsik-composition'
         for token, expected in zip(EXPECTED_KEYS[:-1], ('ㅎ', '하', '한', 'ㄱ', '그', '글', '그', '글')):
             after = len(observer.events())
@@ -619,12 +699,15 @@ def case(suite, fixtures, output, readiness, module, extension):
         record['imeCommands'] = observer.commands
         observer.close()
         observer = None
-        api.require_editor_focus(hwnd, child)
-        if module == 'calc': send_keys('{ENTER}', pause=0.1)
+        save_started = time.monotonic()
+        save_deadline = save_started + 30
+        record['imeSaveBudget'] = dict(startedAt=save_started, deadline=save_deadline)
+        keyboard.begin_save(record['restoration'], save_deadline)
         record['stage'] = 'save-ctrl-s'
-        send_keys('^s', pause=0.1)
-        wait_for(lambda: marker(module) in package_text(source), 30)
-        wait_for(lambda: not api.title(hwnd).startswith('* '), 10)
+        keyboard.save()
+        keyboard.close()
+        wait_for(lambda: marker(module) in package_text(source), remaining_setup(save_deadline, 30))
+        wait_for(lambda: not api.title(hwnd).startswith('* '), remaining_setup(save_deadline, 10))
         record['savedText'] = package_text(source)
         window.capture_as_image().save(output / (name + '-saved.png'))
         assert not api.windows(office_pid), api.external_window_message(office_pid, 'IME opened an external Office document window')
@@ -653,6 +736,7 @@ def case(suite, fixtures, output, readiness, module, extension):
         assert record['originalFixtureUnchanged'], 'IME test altered the engine baseline fixture'
         return record
     except Exception as exc:
+        primary = exc
         capture_failure(output, name, record, exc)
         raise
     finally:
@@ -668,6 +752,10 @@ def case(suite, fixtures, output, readiness, module, extension):
                 record['imeCommands'] = observer.commands
                 try: observer.close()
                 except Exception as exc: record.update(success=False, hookCleanupError=str(exc))
+        if keyboard is not None:
+            try: keyboard.close(primary)
+            except Exception as exc:
+                record.update(success=False, keyboardCleanupError=type(exc).__name__ + ': ' + str(exc))
         stop_owned_test_process(process, record)
         write_result(output, name, record)
 

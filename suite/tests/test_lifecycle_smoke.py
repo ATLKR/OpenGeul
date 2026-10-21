@@ -7,6 +7,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from editor_program_boundary import editor_program_factory
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -20,7 +21,7 @@ SPEC.loader.exec_module(smoke)
 class LifecycleSmokeTests(unittest.TestCase):
     def test_lifecycle_observes_shared_focus_readiness_once_before_navigation_and_marker_input(self):
         case = object.__new__(smoke.Case)
-        case.record = {'attachments': [{'hwnd': 11, 'child': 22, 'officePid': 88}]}
+        case.record = {'attachments': [{'hwnd': 11, 'parent': 12, 'child': 22, 'officePid': 88}]}
         case.process = SimpleNamespace(pid=77)
         # This test isolates the unchanged focus/input protocol. Real completion
         # and stale-title rejection are exercised by test_writer_model_barrier.
@@ -34,7 +35,7 @@ class LifecycleSmokeTests(unittest.TestCase):
         def keyboard(keys, **options):
             if keys == '^{END}': self.assertIn('ready', observed, 'Navigation must follow actual focus readiness')
             observed.append(keys)
-        def prepare(api, hwnd, child, shell_pid, office_pid, record, click_editor, enter_document):
+        def prepare(api, hwnd, child, shell_pid, office_pid, record, click_editor, enter_document, **options):
             self.assertEqual((hwnd, child, shell_pid, office_pid), (11, 22, 77, 88))
             click_editor()
             enter_document()
@@ -48,12 +49,15 @@ class LifecycleSmokeTests(unittest.TestCase):
         with patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=lambda **kw: desktop),
                                        'pywinauto.keyboard': SimpleNamespace(send_keys=keyboard)}), \
              patch.object(smoke.native, 'prepare_editor_focus', readiness), \
+             patch.object(smoke.native, 'FirstAdmissionEditorSession', editor_program_factory(keyboard)), \
              patch.object(smoke.native, 'activate_owned_suite', side_effect=lambda api,process,hwnd,record:api.require_foreground(hwnd)), \
+             patch.object(smoke.native, 'click_owned_editor', side_effect=lambda *args:window.click_input()) as clicked, \
              patch.object(smoke.native.ascii_input, 'type_ascii', ascii_input):
             case.edit(11, 22, '-LIFECYCLE-NEW-')
         readiness.assert_called_once()
+        clicked.assert_called_once_with(case.api,case.process,11,12,22,88,case.record)
         window.click_input.assert_called_once()
-        ascii_input.assert_called_once_with(case.api,11,22,'-LIFECYCLE-NEW-',case.record,pause=0.025)
+        ascii_input.assert_called_once_with(case.api,11,22,'-LIFECYCLE-NEW-',case.record,pause=0.025,deadline=completion.deadline)
         self.assertEqual(observed, ['^{F6}', 'ready', '^{END}', 'marker'])
 
     def test_lifecycle_rejects_missing_or_ambiguous_attachment_before_editor_input(self):

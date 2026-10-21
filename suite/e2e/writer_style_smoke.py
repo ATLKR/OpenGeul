@@ -121,7 +121,6 @@ def close_engine_witness(engine, record):
 
 def run_gui(suite, fixtures, output):
     from pywinauto import Desktop
-    from pywinauto.keyboard import send_keys
     record = dict(case=CASE, module='writer', kind='native-writer-style', success=False,
                   guiVerified=False, stage='verify-generated-fixture', copiedFixture=COPY,
                   inputMethod='physical-keyboard', unicodeInputUsed=False,
@@ -170,13 +169,18 @@ def run_gui(suite, fixtures, output):
         native.activate_owned_suite(api, process, hwnd, record)
         api.require_foreground(hwnd)
         record['stage'] = 'focus-editor'
-        native.prepare_editor_focus(api, hwnd, child, process.pid, pid, record,
-            lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
-            lambda: send_keys('^{F6}', pause=0.1, vk_packet=False))
-        record['stage'] = 'physical-heading1-shortcut'
-        send_keys('^{HOME}', pause=0.1, vk_packet=False)
-        api.require_editor_focus(hwnd, child)
-        send_keys('^1', pause=0.1, vk_packet=False)
+        entry_deadline=time.monotonic()+5
+        with native.FirstAdmissionEditorSession(api,process,
+                dict(hwnd=hwnd,parent=parent,child=child,officePid=pid),
+                'WRITER_STYLE',record,entry_deadline) as shortcuts:
+            native.prepare_editor_focus(api, hwnd, child, process.pid, pid, record,
+                lambda: native.click_owned_editor(api,process,hwnd,parent,child,pid,record),
+                lambda: shortcuts.press('CTRL_F6'),seconds=entry_deadline-time.monotonic())
+            shortcuts.editor_ready(record['editorFocusReadiness'])
+            record['stage'] = 'physical-heading1-shortcut'
+            shortcuts.press('CTRL_HOME')
+            api.require_editor_focus(hwnd, child)
+            shortcuts.press('CTRL_1')
         record['keyboardFocusHwnd'] = api.require_editor_focus(hwnd, child)
         native.wait_for(lambda: api.title(hwnd).startswith('* '), 12)
         assert not engine.exited(0), 'Owned Writer engine exited during physical style input'

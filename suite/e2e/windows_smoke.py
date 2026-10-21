@@ -33,6 +33,8 @@ ascii_input = importlib.util.module_from_spec(_ascii_spec)
 _ascii_spec.loader.exec_module(ascii_input)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import calc_model_barrier
+from scenario_editor_shortcuts import FirstAdmissionEditorSession
+from owned_control_actions import click_owned_control, send_host_menu_shortcut, send_owned_dialog_escape
 
 INPUT_CASES = (('writer', 'docx'), ('calc', 'xlsx'), ('impress', 'pptx'))
 EDITOR_MARKERS = {module: 'UI-OpenGeul-' + module for module, _ in INPUT_CASES}
@@ -54,6 +56,11 @@ def launch_suite(command, suite, output, name):
 def activate_owned_suite(api, process, hwnd, record):
     from suite_window_activation import activate_suite_window
     return activate_suite_window(api.require_foreground, process, hwnd, record)
+
+
+def click_owned_editor(api, process, hwnd, parent, child, office_pid, record):
+    from editor_click_readiness import click_editor_once
+    return click_editor_once(api.require_foreground, process, hwnd, parent, child, office_pid, record)
 
 
 def is_owned_startup_error(dialog_pid, shell_pid, owner_pid, caption, class_name):
@@ -357,6 +364,10 @@ def require_editor_focus_readiness(evidence, hwnd, child, shell_pid, office_pid)
     assert evidence['ready'] is True, 'Editor focus was not ready'
     assert (evidence['suiteHwnd'], evidence['childHwnd'], evidence['shellPid'], evidence['officePid']) == (hwnd, child, shell_pid, office_pid), 'Readiness receipt belongs to another editor generation'
     assert 0 < evidence['deadlineSeconds'] <= 10, 'Editor readiness deadline is not bounded'
+    assert evidence['deadlineScope'] == 'editor-setup-and-focus', 'Editor readiness has no shared entry deadline'
+    assert all(type(evidence[key]) in (int, float) and math.isfinite(evidence[key])
+               for key in ('startedAt', 'deadline', 'deadlineSeconds')), 'Invalid editor readiness clock'
+    assert evidence['deadline'] == evidence['startedAt'] + evidence['deadlineSeconds'], 'Editor readiness entry deadline differs'
     assert all(type(evidence[key]) is int and evidence[key] == 1 for key in ('clickAttempts', 'controlF6Attempts')), 'Editor setup input was repeated or omitted'
     assert evidence['clickCompleted'] is True and evidence['controlF6Completed'] is True, 'Original editor setup input did not complete'
     rows = evidence['snapshots']
@@ -366,62 +377,70 @@ def require_editor_focus_readiness(evidence, hwnd, child, shell_pid, office_pid)
     previous, focus = -1, None
     for index, row in enumerate(rows):
         assert row['elapsedSeconds'] >= 0 and row['elapsedSeconds'] >= previous, 'Editor focus observation time moved backwards'
+        assert row['elapsedSeconds'] <= evidence['deadlineSeconds'], 'Editor setup exceeded the shared entry deadline'
         previous = row['elapsedSeconds']
         observed = _editor_focus_snapshot_ready(row, hwnd, child, shell_pid, office_pid, evidence['editorThreadId'])
         if index >= 2:
             if index < len(rows) - 1: assert not observed, 'Focus polling continued after readiness'
             focus = observed
-        if index >= 3:
-            assert row['elapsedSeconds'] <= evidence['pollStartedSeconds'] + evidence['deadlineSeconds'], 'Editor focus became ready after the bounded deadline'
     assert focus and focus == evidence['focusHwnd'], 'Final strict focus differs from the ready owned editor'
     return evidence
 
 
 def prepare_editor_focus(api, hwnd, child, shell_pid, office_pid, record,
                          click_editor, enter_document, seconds=5):
-    """Send the original single click/Ctrl+F6, then only observe readiness.
+    """Share one entry deadline across single click/Ctrl+F6 and focus observations.
 
     A missing focus, live Suite setup control, or mouse capture may be pending.
     Foreign foreground/focus, changed ownership, and native query errors fail
     immediately. Zero capture does not establish edit mode or input completion,
     nor does this establish the cause of a previous focus failure.
     """
-    assert 0 < seconds <= 10, 'Editor focus readiness must have a bounded deadline'
+    assert type(seconds) in (int, float) and math.isfinite(seconds) and 0 < seconds <= 10, 'Editor focus readiness must have a bounded deadline'
     started = time.monotonic()
+    deadline = started + seconds
     evidence = {'schemaVersion': 1, 'kind': 'owned-editor-focus-readiness', 'ready': False,
                 'suiteHwnd': hwnd, 'childHwnd': child, 'shellPid': shell_pid,
-                'officePid': office_pid, 'deadlineSeconds': seconds, 'snapshots': [],
+                'officePid': office_pid, 'deadlineSeconds': seconds, 'startedAt': started,
+                'deadline': deadline, 'deadlineScope': 'editor-setup-and-focus', 'snapshots': [],
                 'clickAttempts': 0, 'clickCompleted': False,
                 'controlF6Attempts': 0, 'controlF6Completed': False}
     record['editorFocusReadiness'] = evidence
     record.setdefault('editorFocusReadinessRecords', []).append(evidence)
 
     def observe(phase):
+        assert time.monotonic() < deadline, 'Editor focus shared entry deadline expired'
         snapshot = api.editor_focus_snapshot(hwnd, child, shell_pid, office_pid)
         snapshot.update(phase=phase, elapsedSeconds=round(time.monotonic() - started, 6))
         evidence['snapshots'].append(snapshot)
+        assert time.monotonic() <= deadline, 'Editor focus query exceeded the shared entry deadline'
         evidence.setdefault('editorThreadId', snapshot['before']['editor']['threadId'])
         return _editor_focus_snapshot_ready(snapshot, hwnd, child, shell_pid, office_pid, evidence['editorThreadId'])
 
     try:
         observe('before-click')
+        assert time.monotonic() < deadline, 'Editor click cannot start after the shared entry deadline'
         evidence['clickAttempts'] += 1
         click_editor()
         evidence['clickCompleted'] = True
+        assert time.monotonic() < deadline, 'Editor click exceeded the shared entry deadline'
         observe('after-click')
+        assert time.monotonic() < deadline, 'Editor Ctrl+F6 cannot start after the shared entry deadline'
         evidence['controlF6Attempts'] += 1
         enter_document()
         evidence['controlF6Completed'] = True
+        assert time.monotonic() < deadline, 'Editor Ctrl+F6 exceeded the shared entry deadline'
         focus = observe('after-control-f6')
         evidence['pollStartedSeconds'] = evidence['snapshots'][-1]['elapsedSeconds']
-        deadline = started + evidence['pollStartedSeconds'] + seconds
         while not focus and time.monotonic() < deadline:
             time.sleep(min(.05, max(0, deadline - time.monotonic())))
+            if time.monotonic() >= deadline: break
             focus = observe('wait')
             if time.monotonic() > deadline: focus = None
         assert focus, 'Owned editor keyboard focus did not become ready before the deadline'
         # Preserve the original strict guard immediately before callers type.
         strict_focus = api.require_editor_focus(hwnd, child)
+        assert time.monotonic() <= deadline, 'Final strict editor focus query exceeded the shared entry deadline'
         assert strict_focus == focus, 'Owned editor focus changed before physical input'
         assert api.pid(focus) == office_pid, 'Observed foreign keyboard focus before editor input'
         evidence.update(ready=True, focusHwnd=focus)
@@ -431,7 +450,11 @@ def prepare_editor_focus(api, hwnd, child, shell_pid, office_pid, record,
         evidence['ready'] = False
         raise
     finally:
-        evidence['elapsedSeconds'] = round(time.monotonic() - started, 6)
+        finished = time.monotonic()
+        evidence['elapsedSeconds'] = round(finished - started, 6)
+        if evidence['ready'] and finished > deadline:
+            evidence['ready'] = False
+            raise AssertionError('Editor readiness finalization exceeded the shared entry deadline')
 
 
 def package_text(path):
@@ -913,7 +936,7 @@ def _wait_base_save_controls(api, process, document, caption, record, *, open_di
 
 def save_new_base(api, process, hwnd, fixtures, output, record):
     from pywinauto import Desktop
-    from pywinauto.keyboard import send_keys
+    import lifecycle_smoke as lifecycle
     target = new_base_target(fixtures)
     caption = 'OpenGeul Base — 다른 이름으로 저장'
     record['newBaseSaveAsVerified'] = False
@@ -924,9 +947,9 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
              if item.element_info.name == '파일' and item.element_info.process_id == process.pid
              and item.is_visible() and item.is_enabled()]
     assert len(menus) == 1, 'The exact shell-owned File menu is required for the Save shortcut'
-    menus[0].click_input()
-    api.require_foreground(hwnd)
-    send_keys('^s', pause=0.1)
+    click_owned_control(api, process, hwnd, menus[0], record, purpose='FILE_MENU')
+    record['stage'] = 'send-owned-base-save-shortcut'
+    send_host_menu_shortcut(api, process, hwnd, menus[0], record, shortcut='CTRL_S', caption=caption)
 
     record['stage'] = 'wait-save-dialog'
     dialog, native, filename, save_button = _wait_base_save_controls(api, process, hwnd, caption, record)
@@ -935,10 +958,9 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
                             api.title(dialog), caption, native.class_name())
     record['stage'] = 'type-save-path'
     record['baseSaveDialogReadiness']['filenameInputStartedAt'] = time.monotonic()
-    filename.click_input()
-    api.require_foreground(dialog)
-    send_keys('^a', pause=0.1)
-    send_keys(literal_keys(str(target)), with_spaces=True, pause=0.01)
+    accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
+    lifecycle.set_owned_picker_filename(api, process.pid, hwnd, dialog, accessible, filename, str(target),
+                                       record, expected_title=caption)
     assert filename.iface_value.CurrentValue == str(target), 'Save As filename differs from the fresh owned target'
     native.capture_as_image().save(output / 'new-base-save-as.png')
     require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
@@ -946,7 +968,8 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     api.require_foreground(dialog)
     assert not target.exists(), 'Save As target appeared before the verified Save click'
     record['stage'] = 'click-save'
-    save_button.click_input()
+    click_owned_control(api, process, hwnd, save_button, record, purpose='SAVE_BUTTON', dialog=dialog,
+                        caption=caption, readiness=record['baseSaveDialogReadiness'])
     record['stage'] = 'wait-save-dialog-close'
     wait_for(lambda: not api.user.IsWindow(dialog), seconds=20)
     record['stage'] = 'validate-saved-base'
@@ -1119,7 +1142,6 @@ class CalcModelContext:
 
 def document_case(suite, fixtures, output, module, extension, physical_input):
     from pywinauto import Desktop
-    from pywinauto.keyboard import send_keys
     assert (module, extension) in (INPUT_CASES if physical_input else ATTACH_CASES), 'Module is not eligible for this test mode'
     source = require_engine_fixture(fixtures, module, extension)
     if physical_input:
@@ -1153,36 +1175,45 @@ def document_case(suite, fixtures, output, module, extension, physical_input):
         record['stage'] = 'capture-attached'
         window.capture_as_image().save(output / screenshot)
         if physical_input:
-            record['stage'] = 'focus-editor'
-            api.require_foreground(hwnd)
-            # A physical click gives the embedded process focus; Ctrl+F6 enters its document.
-            prepare_editor_focus(api, hwnd, child, process.pid, office_pid, record,
-                lambda: Desktop(backend='win32').window(handle=child).wrapper_object().click_input(),
-                lambda: send_keys('^{F6}', pause=0.1))
-            calc_plan=None
-            if module=='calc':
-                record['stage']='begin-calc-model-observation'
-                calc_context=CalcModelContext(suite,source,output,process,
-                    dict(hwnd=hwnd,parent=parent,child=child,officePid=office_pid),record,calc_baseline)
-                calc_plan=calc_context.begin(EDITOR_MARKERS[module])
-            record['stage'] = 'navigate-editor'
-            if module == 'writer': send_keys('^{END}', pause=0.1)
-            elif module == 'calc': send_keys('^{HOME}{F2}^{END}', pause=0.1)
-            else: send_keys('{TAB}{F2}^{END}', pause=0.1)
             marker = EDITOR_MARKERS[module]
-            focus = api.require_editor_focus(hwnd, child)
-            record['stage'] = 'type-marker'
-            ascii_input.type_ascii(api, hwnd, child, marker, record, pause=0.04)
-            if module == 'calc': send_keys('{ENTER}', pause=0.1)
-            api.require_editor_focus(hwnd, child)
-            if module=='calc':
-                record['stage']='complete-calc-model-observation'
-                calc_context.complete(calc_plan)
-                calc_context_completed=True
-            record['stage'] = 'save-keyboard'
-            send_keys('^s', pause=0.1)
+            entry_deadline=time.monotonic()+5
+            with FirstAdmissionEditorSession(api,process,
+                    dict(hwnd=hwnd,parent=parent,child=child,officePid=office_pid),
+                    'GUI_'+module.upper(),record,entry_deadline,marker=marker) as shortcuts:
+                record['stage'] = 'focus-editor'
+                api.require_foreground(hwnd)
+                prepare_editor_focus(api, hwnd, child, process.pid, office_pid, record,
+                    lambda: click_owned_editor(api,process,hwnd,parent,child,office_pid,record),
+                    lambda: shortcuts.press('CTRL_F6'), seconds=entry_deadline-time.monotonic())
+                shortcuts.editor_ready(record['editorFocusReadiness'])
+                calc_plan=None
+                if module=='calc':
+                    record['stage']='begin-calc-model-observation'
+                    calc_context=CalcModelContext(suite,source,output,process,
+                        dict(hwnd=hwnd,parent=parent,child=child,officePid=office_pid),record,calc_baseline)
+                    calc_plan=calc_context.begin(marker)
+                    shortcuts.join_model(calc_context,calc_plan)
+                record['stage'] = 'navigate-editor'
+                navigation={'writer':('CTRL_END',),'calc':('CTRL_HOME','F2','CTRL_END'),
+                            'impress':('TAB','F2','CTRL_END')}[module]
+                for shortcut in navigation: shortcuts.press(shortcut)
+                focus = api.require_editor_focus(hwnd, child)
+                record['stage'] = 'type-marker'
+                typed=ascii_input.type_ascii(api, hwnd, child, marker, record, pause=0.04,deadline=shortcuts.deadline)
+                shortcuts.typed(typed)
+                if module == 'calc': shortcuts.press('ENTER')
+                api.require_editor_focus(hwnd, child)
+                if module=='calc':
+                    record['stage']='complete-calc-model-observation'
+                    shortcuts.complete_model(calc_context,calc_plan)
+                    calc_context_completed=True
+                record['stage'] = 'save-keyboard'
+                save_deadline=time.monotonic()+30
+                shortcuts.save_phase(save_deadline);shortcuts.press('CTRL_S')
             record['stage'] = 'wait-saved-marker'
-            wait_for(lambda: marker in package_text(source), seconds=30)
+            remaining=save_deadline-time.monotonic();assert remaining>0,'Original GUI save deadline expired'
+            wait_for(lambda: marker in package_text(source), seconds=remaining)
+            assert time.monotonic()<=save_deadline,'Original GUI save deadline expired during persisted-marker observation'
             assert hashlib.sha256(source.read_bytes()).hexdigest() != before, 'Saved file bytes did not change'
             wait_for(lambda: not api.title(hwnd).startswith('* '), seconds=10)
             record['stage'] = 'capture-edited'
