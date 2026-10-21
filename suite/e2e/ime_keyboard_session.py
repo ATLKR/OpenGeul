@@ -165,8 +165,10 @@ class IMEKeyboardSession:
         row=settle_owned_capture(lambda:self._observe_guard(strict),validate,
             self.receipt,self.binding,self.deadline,clock=self.clock)
         if strict:
-            b=self.binding;focus=row['scope']['focus']['hwnd']
-            assert focus and self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd'])==focus, 'Strict IME editor focus changed before shortcut'
+            from windows_smoke import _editor_focus_snapshot_ready
+            b=self.binding
+            focus=_editor_focus_snapshot_ready(row['scope'],b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],self.tid)
+            assert focus and focus==row['scope']['focus']['hwnd'], 'Strict IME editor focus changed before shortcut'
             self.focus=focus
         if context_check is not None:context_check()
         self._budget()

@@ -1,0 +1,114 @@
+name: OpenGeul disposable ARM TSF profile diagnostic
+'on':
+  push:
+    branches:
+    - work/opengeul-office-native35-tsf-diagnostic
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: office-tsf-profile-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  windows-tsf-profile-diagnostic:
+    if: github.event.repository.private == false
+    runs-on: windows-11-arm
+    timeout-minutes: 75
+    steps:
+    - name: Preserve exact checkout bytes
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: arm64
+    - name: Select locked native ARM Suite
+      shell: pwsh
+      run: |
+        $lock = Get-Content suite/config/runtime.arm64.lock.json -Raw | ConvertFrom-Json
+        if ($lock.architecture -cne 'arm64' -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected native ARM lock.' }
+        "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-arm64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - name: Fetch locked native source-built engine
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath suite/config/runtime.arm64.lock.json -Output .work/source-engine-input
+    - name: Build disposable native ARM Suite
+      id: build
+      shell: pwsh
+      run: |
+        ./suite/scripts/build-suite.ps1 -Architecture arm64 -EngineArchive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip -EngineReceipt .work/source-engine-input/source-build-receipt.json
+    - name: Prepare actual Korean prerequisite for this genuine diagnostic job
+      id: readiness
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Diagnostic UI prerequisites failed.' }
+        ./suite/scripts/ensure-tsf-profile-korean-ime.ps1 -Architecture arm64 -Output .work/suite-korean-readiness
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean prerequisite failed.' }
+    - name: Genuine fixed-binding diagnostic privacy preparation
+      id: native35-tsf-privacy-prepare
+      if: '!cancelled() && steps.build.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      shell: pwsh
+      timeout-minutes: 3
+      run: |
+        ./suite/scripts/prepare-native35-tsf-profile.ps1 -Architecture arm64 -Workspace $env:GITHUB_WORKSPACE -RunnerTemp $env:RUNNER_TEMP
+    - name: Generate owned engine fixtures
+      id: fixtures
+      if: '!cancelled() && steps.native35-tsf-privacy-prepare.outcome == ''success'''
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Generated engine fixtures failed.' }
+    - name: Preserve exact committed diagnostic source
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      run: |
+        git archive --format=zip --output=.work/tsf-profile-source.zip HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'Exact source archive failed.' }
+    - name: Observe one disposable Calc profile roundtrip without keyboard input or mode writes
+      id: diagnostic
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: pwsh
+      timeout-minutes: 8
+      run: |
+        $diagnosticExit = 1
+        try {
+          python -B suite/e2e/tsf_profile_diagnostic.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-tsf-profile-diagnostic
+          $diagnosticExit = $LASTEXITCODE
+        } finally {
+          python -B suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+          $integrityExit = $LASTEXITCODE
+        }
+        if ($diagnosticExit -ne 0 -or $integrityExit -ne 0) { throw "Disposable diagnostic failed: profile=$diagnosticExit integrity=$integrityExit" }
+    - name: Preserve original diagnostic and prerequisite evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-tsf-profile-diagnostic-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-tsf-profile-diagnostic/
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
+          .work/suite-engine/
+          .work/source-engine-input/source-build-receipt.json
+          .work/tsf-profile-source.zip
+          .work/suite-native35-tsf-profile-privacy-preparation/
+          ${{ runner.temp }}/suite-native35-tsf-profile-setup-arm64-${{ github.run_id }}-${{ github.run_attempt }}/
+          ${{ runner.temp }}/suite-native35-tsf-profile-privacy-preparation-arm64-${{ github.run_id }}-${{ github.run_attempt }}/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error

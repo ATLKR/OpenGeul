@@ -193,8 +193,10 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
         result = settle_owned_capture(self._observe_owned_guard,
             lambda row:self._validate_owned_guard(row,editor_required),self.receipt,self.binding,self.deadline,clock=self.clock)
         if editor_required:
+            from windows_smoke import _editor_focus_snapshot_ready
             b = self.binding
-            assert self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd']) == result['scope']['focus']['hwnd']
+            focus = _editor_focus_snapshot_ready(result['scope'],b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],self.thread)
+            assert focus and focus == result['scope']['focus']['hwnd'], 'Strict editor readiness requires the guarded scope'
             self._budget()
         return result
 
