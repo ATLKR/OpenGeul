@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import struct
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -39,8 +40,83 @@ class NativeCompilerToolTests(unittest.TestCase):
         self.path = Path(temp.name).resolve() / 'clang-cl.exe'
         self.path.write_bytes(executable())
 
-    def pin(self, architecture='x64', check=lambda: None):
-        return self.tools.pin_native_tool(self.path, architecture, check=check)
+    def pin(self, architecture='x64', check=lambda: None, **kwargs):
+        return self.tools.pin_native_tool(self.path, architecture, check=check, **kwargs)
+
+    def test_stable_windows_path_and_fd_ctime_difference_is_valid(self):
+        original = os.fstat
+        def fd_stat(fd):
+            value = original(fd)
+            fields = {key: getattr(value, key) for key in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+            fields['st_ctime_ns'] += 123456700
+            return SimpleNamespace(**fields)
+        with patch.object(self.tools.os, 'fstat', side_effect=fd_stat):
+            value = self.pin()
+        self.assertEqual(value['sha256'], hashlib.sha256(self.path.read_bytes()).hexdigest())
+
+    def test_same_held_fd_metadata_mutation_is_rejected(self):
+        original, calls = os.fstat, []
+        def fd_stat(fd):
+            value = original(fd)
+            calls.append(fd)
+            fields = {key: getattr(value, key) for key in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+            if len(calls) == 2: fields['st_mtime_ns'] += 1
+            return SimpleNamespace(**fields)
+        facts = {}
+        with patch.object(self.tools.os, 'fstat', side_effect=fd_stat):
+            with self.assertRaisesRegex(AssertionError, 'held FD changed'):
+                self.pin(facts=facts)
+        self.assertEqual(len(calls), 2)
+        self.assertNotEqual(facts['fdBefore']['st_mtime_ns'], facts['fdAfter']['st_mtime_ns'])
+
+    def test_same_path_metadata_mutation_is_rejected(self):
+        original, calls = Path.stat, []
+        def path_stat(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path == self.path and not kwargs.get('follow_symlinks') is False:
+                calls.append(True)
+                if len(calls) == 3:
+                    fields = {key: getattr(value, key) for key in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                    fields['st_ino'] += 1
+                    return SimpleNamespace(**fields)
+            return value
+        facts = {}
+        with patch.object(Path, 'stat', path_stat):
+            with self.assertRaisesRegex(AssertionError, 'path changed'):
+                self.pin(facts=facts)
+        self.assertNotEqual(facts['pathBefore']['st_ino'], facts['pathAfter']['st_ino'])
+
+    def test_stable_fd_size_must_match_path_and_streamed_bytes(self):
+        original = os.fstat
+        def fd_stat(fd):
+            value = original(fd)
+            fields = {key: getattr(value, key) for key in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+            fields['st_size'] += 1
+            return SimpleNamespace(**fields)
+        facts = {}
+        with patch.object(self.tools.os, 'fstat', side_effect=fd_stat):
+            with self.assertRaisesRegex(AssertionError, 'streamed bytes'):
+                self.pin(facts=facts)
+        self.assertEqual(set(facts), {'pathBefore', 'fdBefore', 'fdAfter', 'pathAfter'})
+        self.assertEqual(facts['fdBefore'], facts['fdAfter'])
+
+    def test_final_path_snapshot_crossing_original_deadline_keeps_facts_and_rejects_pin(self):
+        original, calls, expired = Path.stat, [], False
+        def path_stat(path, *args, **kwargs):
+            nonlocal expired
+            value = original(path, *args, **kwargs)
+            if path == self.path and not kwargs.get('follow_symlinks') is False:
+                calls.append(True)
+                if len(calls) == 3: expired = True
+            return value
+        def check():
+            if expired: raise TimeoutError('original deadline after path snapshot')
+        facts = {}
+        with patch.object(Path, 'stat', path_stat):
+            with self.assertRaisesRegex(TimeoutError, 'after path snapshot'):
+                self.pin(check=check, facts=facts)
+        self.assertEqual(set(facts), {'pathBefore', 'fdBefore', 'fdAfter', 'pathAfter'})
+        self.assertTrue(all(type(v) is int for row in facts.values() for v in row.values()))
 
     def test_native_executable_pin_has_exact_hash_size_and_host_machine(self):
         value = self.pin()
@@ -188,6 +264,29 @@ class NativeClangPreparationTests(unittest.TestCase):
             descriptor['compiler'] = proof['compiler']
         self.mutate(descriptor, corrupt)
         with self.assertRaises(AssertionError): base.m.require_prepared_library(descriptor)
+
+    def test_failed_preparation_retains_bounded_raw_same_api_stat_facts(self):
+        original, calls = os.fstat, []
+        def fd_stat(fd):
+            value = original(fd)
+            calls.append(fd)
+            fields = {key: getattr(value, key) for key in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+            if len(calls) == 2: fields['st_mtime_ns'] += 1
+            return SimpleNamespace(**fields)
+        with patch.object(os, 'fstat', side_effect=fd_stat):
+            with self.assertRaisesRegex(AssertionError, 'held FD changed'): self.clang()
+        proof = self.proof()
+        self.assertFalse(proof['success'])
+        self.assertEqual([row['stage'] for row in proof['stages']], ['discovery'])
+        self.assertEqual(proof['compilerStatFacts']['after'], {})
+        self.assertEqual(set(proof['compilerStatFacts']['before']), {'clang-cl.exe'})
+        facts = proof['compilerStatFacts']['before']['clang-cl.exe']
+        self.assertEqual(set(facts), {'pathBefore', 'fdBefore', 'fdAfter'})
+        self.assertNotEqual(facts['fdBefore']['st_mtime_ns'], facts['fdAfter']['st_mtime_ns'])
+        for row in facts.values():
+            self.assertEqual(set(row), {'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'})
+            self.assertTrue(all(type(v) is int and v.bit_length() <= 256 for v in row.values()))
+        self.assertTrue(all(p.closed and not p.forced for p in self.runtime.processes))
 
     def test_new_mode_keeps_original_nonempty_job_timeout_and_owned_cleanup(self):
         self.runtime.states[1] = [(0, 1, 0)]

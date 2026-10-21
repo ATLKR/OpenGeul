@@ -319,8 +319,11 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='msvc'):
             llvm = _absolute(Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'LLVM/bin')
             tool_arguments = [llvm / name for name in ('clang-cl.exe', 'lld-link.exe')]
             receipt['compiler'] = dict(mode='clang-lld', before={}, after={})
+            receipt['compilerStatFacts'] = dict(before={}, after={})
             for tool in tool_arguments:
-                receipt['compiler']['before'][tool.name] = pin_native_tool(tool, architecture, check=budget.now)
+                facts = {}
+                receipt['compilerStatFacts']['before'][tool.name] = facts
+                receipt['compiler']['before'][tool.name] = pin_native_tool(tool, architecture, check=budget.now, facts=facts)
             target = 'aarch64-pc-windows-msvc' if architecture == 'arm64' else 'x86_64-pc-windows-msvc'
             compile_script.write_text('@echo off\nset "VSCMD_SKIP_SENDTELEMETRY=1"\ncall "%~1"'
                 + (' arm64' if architecture == 'arm64' else ' x64')
@@ -341,7 +344,9 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='msvc'):
                     folder / 'compiler.stdout', folder / 'compiler.stderr', *tool_arguments])
         if tool_arguments:
             for tool in tool_arguments:
-                receipt['compiler']['after'][tool.name] = pin_native_tool(tool, architecture, check=budget.now)
+                facts = {}
+                receipt['compilerStatFacts']['after'][tool.name] = facts
+                receipt['compiler']['after'][tool.name] = pin_native_tool(tool, architecture, check=budget.now, facts=facts)
             assert receipt['compiler']['before'] == receipt['compiler']['after'], 'Native compiler tools changed during preparation'
         native_arch.require_native_pe(library, architecture)
         receipt['library'] = dict(path=str(library), **_pin(library))
