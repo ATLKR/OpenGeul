@@ -1,8 +1,9 @@
 """Portable typed transport fakes; no actual Windows hooks or dispatch proof."""
 import ctypes as C
 import importlib.util
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -22,6 +23,7 @@ class AsciiMessageWindowsTests(unittest.TestCase):
         sys.path.insert(0, str(SOURCE.parent)); self.addCleanup(lambda: sys.path.remove(str(SOURCE.parent)))
         spec = importlib.util.spec_from_file_location('tested_ascii_message_windows', SOURCE)
         self.m = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.m)
+        self.directory=tempfile.TemporaryDirectory();self.addCleanup(self.directory.cleanup)
         from ascii_message_protocol import State, Event, MAGIC, VERSION, CAPACITY
         self.State, self.Event = State, Event
         self.raw = C.create_string_buffer(C.sizeof(State)); self.calls = []
@@ -188,7 +190,7 @@ class AsciiMessageWindowsTests(unittest.TestCase):
         self.assertEqual(2, self.record['transportCleanup']['unhookAttempts'])
 
     def native(self, *, engine_creation=200):
-        suite = Path('/owned/opengeul')
+        suite = (Path(self.directory.name) / 'owned' / 'opengeul').resolve()
         shell = dict(pid=77,handleValue=555,image=str(suite/'OpenGeul.Office.exe'),creationTime=100,waitResult=258)
         engine = dict(pid=88,handleValue=666,image=str(suite/'Office/program/soffice.bin'),creationTime=engine_creation,waitResult=258)
         process = NS(pid=77,_handle=555,args=[shell['image']],opengeul_suite_root=suite,
@@ -212,8 +214,8 @@ class AsciiMessageWindowsTests(unittest.TestCase):
         probe.thread=99
         import native_suite_architecture as architecture
         self.enterContext(patch.object(architecture,'observe_native_architecture',return_value=observed))
-        self.enterContext(patch.dict(sys.modules,{'ascii_message_preparation':NS(require_prepared_library=lambda *a,**k:Path('/prepared/ascii-message-observer.dll'))}))
-        self.enterContext(patch.object(C,'WinDLL',return_value=self.dll,create=True))
+        self.enterContext(patch.dict(sys.modules,{'ascii_message_preparation':NS(require_prepared_library=lambda *a,**k:suite/'prepared/ascii-message-observer.dll')}))
+        self.library_loader=self.enterContext(patch.object(C,'WinDLL',return_value=self.dll,create=True))
         return probe,native,engine,window
 
     def test_native_admission_joins_original_shell_engine_and_target_before_library_hooking(self):
@@ -224,6 +226,43 @@ class AsciiMessageWindowsTests(unittest.TestCase):
         self.assertEqual({'controller':1,'shell':1,'engine':1},self.record['nativeSessions'])
         self.assertFalse(any(isinstance(r,tuple) and r[0]=='install' for r in self.calls))
         self.assertTrue(probe.close()['engineHandleReleased']); self.assertEqual(1,self.calls.count('close-engine'))
+
+    def test_native_fixture_admits_with_drive_required_windows_path_semantics(self):
+        # PureWindowsPath exposes Windows' rooted-without-drive distinction on
+        # Linux too. Model the current drive in admission and its shared image
+        # comparator without replacing any production admission/identity guard.
+        class WindowsFixturePath(PureWindowsPath):
+            def resolve(self, strict=False):
+                if self.is_absolute(): return self
+                if self.root: return type(self)('Z:' + str(self))
+                return type(self)(r'Z:\fixture-current') / self
+        import counted_editor_shortcuts
+        with patch.dict(globals(), {'Path':WindowsFixturePath}), \
+             patch.object(self.m,'Path',WindowsFixturePath), \
+             patch.object(counted_editor_shortcuts,'Path',WindowsFixturePath):
+            probe,native,engine,window = self.native()
+            try:
+                self.assertEqual(self.target,probe.admit())
+                suite=probe.process.opengeul_suite_root
+                self.assertTrue(suite.is_absolute());self.assertTrue(suite.drive)
+                self.assertEqual(str(suite/'OpenGeul.Office.exe'),probe.process.args[0])
+                self.assertEqual(str(suite/'Office/program/soffice.bin'),probe.binding['expectedImage'])
+                loaded=WindowsFixturePath(self.library_loader.call_args.args[0])
+                self.assertTrue(loaded.is_absolute());self.assertTrue(loaded.drive)
+                self.assertEqual(suite/'prepared/ascii-message-observer.dll',loaded)
+            finally:
+                probe.close()
+
+    def test_drive_less_root_remains_rejected_before_engine_or_library_admission(self):
+        with patch.object(self.m,'Path',PureWindowsPath):
+            probe,native,engine,window = self.native()
+            probe.process.opengeul_suite_root=PureWindowsPath('/owned/opengeul')
+            try:
+                with self.assertRaises(AssertionError):probe.admit()
+                self.assertNotIn('open-engine',self.calls)
+                self.library_loader.assert_not_called()
+            finally:
+                probe.close()
 
     def test_native_wrong_generation_never_loads_or_installs_and_retained_handle_is_closed(self):
         probe,native,engine,window = self.native(engine_creation=201)

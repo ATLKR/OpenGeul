@@ -205,7 +205,7 @@ class IMECasePhaseTests(unittest.TestCase):
 class IMECohortPreparationTests(unittest.TestCase):
     def run_main(self, architecture='x64', *, preparation_failure=False):
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
-        root=Path(directory.name);suite=root/'Suite';suite.mkdir();fixture=root/'fixtures';fixture.mkdir()
+        root=Path(directory.name).resolve();suite=root/'Suite';suite.mkdir();fixture=root/'fixtures';fixture.mkdir()
         output=root/'evidence';readiness=root/'readiness.json'
         (suite/'suite-inventory.json').write_text(json.dumps(dict(schemaVersion=1,architecture=architecture)))
         value=fixtures.KoreanImePolicyTests().readiness();machine={'x64':0x8664,'arm64':0xaa64}[architecture]
@@ -226,6 +226,25 @@ class IMECohortPreparationTests(unittest.TestCase):
             try:result=ime.main(['--suite',str(suite),'--fixtures',str(fixture),'--readiness',str(readiness),'--output',str(output)])
             except Exception as exc:error=exc
         return calls,result,error
+    def test_temp_alias_is_canonicalized_before_preparation_expectations(self):
+        # Real lexical aliases replay the resolve-before-expectation boundary
+        # exposed by Windows long/8.3 temporary names, without symlink privileges.
+        for architecture,failed in (('x64',False),('arm64',False),('x64',True)):
+            with self.subTest(architecture=architecture,preparation_failure=failed):
+                with tempfile.TemporaryDirectory() as directory:
+                    parent=Path(directory).resolve();(parent/'bridge').mkdir();(parent/'case').mkdir()
+                    alias=parent/'bridge'/'..'/'case'
+                    self.assertNotEqual(alias,alias.resolve())
+                    temporary=NS(name=str(alias),cleanup=lambda:None)
+                    with patch.object(tempfile,'TemporaryDirectory',return_value=temporary):
+                        calls,result,error=self.run_main(architecture,preparation_failure=failed)
+                    if failed:
+                        self.assertIsInstance(error,RuntimeError)
+                        self.assertIn('bounded native preparation failed',str(error))
+                        self.assertEqual(calls,[('prepare',architecture)])
+                    else:
+                        self.assertIsNone(error,repr(error));self.assertEqual(result,0)
+                        self.assertEqual(calls,[('prepare',architecture),('case','writer'),('case','calc'),('case','impress')])
     def test_prepare_once_before_all_original_case_setup_phases_for_both_architectures(self):
         for architecture in ('x64','arm64'):
             with self.subTest(architecture=architecture):

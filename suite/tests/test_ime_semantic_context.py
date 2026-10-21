@@ -2,7 +2,7 @@
 import importlib
 import copy
 import io
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import sys
 import tempfile
 import time
@@ -264,7 +264,7 @@ class SemanticSetupTests(unittest.TestCase):
     def setUp(self):
         self.api=importlib.import_module('ime_semantic_context')
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.frame=synthetic_frame(Path(self.temp.name)/'Suite','unused')
+        self.frame=synthetic_frame((Path(self.temp.name)/'Suite').resolve(),'unused')
         self.native={k:self.frame.binding[k] for k in ('shellPid','shellCreationTime','officePid',
             'officeCreationTime','expectedImage','suiteHwnd','parentHwnd','childHwnd','rootHwnd')}
         self.shell=original_shell_fixture(self.frame.binding,self.frame.suite)
@@ -477,6 +477,33 @@ class SemanticSetupTests(unittest.TestCase):
     def test_pure_windows_source_uri_replay_does_not_use_the_reviewers_host_os(self):
         self.assertEqual(self.api._source_uri('D:\\a b\\owned.docx'),'file:///D:/a%20b/owned.docx')
         self.assertEqual(self.api._source_uri('/a b/owned.docx'),'file:///a%20b/owned.docx')
+
+
+class SemanticFixturePathTests(unittest.TestCase):
+    def test_aliased_temporary_root_reaches_all_three_actual_pre_and_post_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory);(parent/'alias-parent').mkdir()
+            alias=parent/'alias-parent'/'..'
+            temporary=NS(name=str(alias),cleanup=lambda:None)
+            case=SemanticSetupTests('test_three_modules_pre_and_post_use_exact_live_text_with_distinct_modified_contracts')
+            with patch.object(tempfile,'TemporaryDirectory',return_value=temporary):
+                case.debug()
+
+    def test_native_admission_replays_drive_and_unc_paths_without_host_path_conversion(self):
+        api=importlib.import_module('ime_semantic_context')
+        for suite in (PureWindowsPath(r'C:\Users\RUNNER~1\Suite'),PureWindowsPath(r'\\server\share\Suite')):
+            with self.subTest(suite=str(suite)):
+                native=dict(shellPid=11,shellCreationTime=101,officePid=22,officeCreationTime=202,
+                    expectedImage=str(suite/'Office/program/soffice.bin'),suiteHwnd=33,
+                    rootHwnd=33,parentHwnd=44,childHwnd=55)
+                self.assertIs(api._native(native,suite),native)
+                native['expectedImage']=str(suite.parent/'Foreign/Office/program/soffice.bin')
+                with self.assertRaises(AssertionError):api._native(native,suite)
+        suite=PureWindowsPath(r'C:\Users\runneradmin\Suite')
+        native['expectedImage']=r'C:\Users\RUNNER~1\Suite\Office\program\soffice.bin'
+        with self.assertRaises(AssertionError):api._native(native,suite)
+        native['expectedImage']=str(suite/'Office/program/soffice.bin')
+        self.assertIs(api._native(native,suite),native)
 
 
 if __name__=='__main__':unittest.main()
