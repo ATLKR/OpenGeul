@@ -312,7 +312,7 @@ def prepare_observer(output_folder, *, architecture):
         assert vcvars.is_file(), 'Native C++ compiler environment unavailable'
         library = folder / 'ascii-message-observer.dll'
         compile_script = folder / 'compile.cmd'
-        compile_script.write_text('@echo off\ncall "%~1"' + (' arm64' if architecture == 'arm64' else ' x64')
+        compile_script.write_text('@echo off\nset "VSCMD_SKIP_SENDTELEMETRY=1"\ncall "%~1"' + (' arm64' if architecture == 'arm64' else ' x64')
             + ' >"%~2" 2>&1\nif errorlevel 1 exit /b 1\n'
             + 'cl.exe /nologo /LD /O2 /MT /EHsc /std:c++17 /W4 /utf-8 "%~3" /link /MACHINE:'
             + ('ARM64' if architecture == 'arm64' else 'X64')
