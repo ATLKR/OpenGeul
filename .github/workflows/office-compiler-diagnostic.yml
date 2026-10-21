@@ -1,0 +1,53 @@
+name: Office native compiler preparation diagnosis
+'on':
+  push:
+    branches:
+    - work/opengeul-office-native35-compiler-diagnostic
+permissions:
+  contents: read
+concurrency:
+  group: office-compiler-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  compiler-diagnostic:
+    if: github.event.repository.private == false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - architecture: x64
+          runner: windows-2025
+        - architecture: arm64
+          runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    steps:
+    - name: Preserve source bytes
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: ${{ matrix.architecture }}
+    - name: Observe one original compiler preparation
+      shell: pwsh
+      run: |
+        python -B suite/scripts/diagnose-ascii-preparation.py --architecture '${{ matrix.architecture }}' --output "$env:GITHUB_WORKSPACE/.work/native35-compiler-${{ matrix.architecture }}"
+        if ($LASTEXITCODE -ne 0) { throw 'Original compiler preparation failed; diagnostic evidence is retained.' }
+    - name: Preserve original preparation and installed environment scripts
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-compiler-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/native35-compiler-${{ matrix.architecture }}
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 14

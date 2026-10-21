@@ -7,6 +7,7 @@ This module does not launch Office or grant an input deadline.
 from __future__ import annotations
 
 import ctypes as C
+from ctypes import wintypes as W
 import hashlib
 import json
 import math
@@ -97,6 +98,100 @@ class _Runtime:
                     terminatedProcesses=result.terminated, rawHex=bytes(result).hex())
 
 
+def _remaining_member_diagnostic(runtime, process, budget, stage, sample):
+    """One optional, read-only census under the original work deadline.
+
+    A newly opened HANDLE is only a witness to these later samples. Neither
+    the PID census nor matching membership checks is an atomic historical
+    identity/exit proof. No diagnostic result qualifies natural Job closure.
+    """
+    diagnostic = dict(triggerSample=sample, workDeadline=budget.work_deadline,
+                      identityCap=8, members=[], identityEnumerationComplete=False,
+                      naturalExitProved=False)
+    stage['remainingMemberDiagnostic'] = diagnostic  # Mark once, including failure.
+    try:
+        budget.now()
+        api = runtime.diagnostics
+        def record(group):
+            diagnostic['census'] = group
+        pids = api.job_pids(process.job, record=record, check=budget.now)
+        budget.now()
+        census = diagnostic['census']
+        assert census['classification'] == 'complete', 'Diagnostic Job census is incomplete'
+        assert (type(pids) is list and len(pids) <= 128 and len(set(pids)) == len(pids)
+                and all(type(pid) is int and 0 < pid <= 0xffffffff for pid in pids)
+                and census['calls'][-1]['pids'] == pids), 'Invalid diagnostic Job PID list'
+        if len(pids) > diagnostic['identityCap']:
+            diagnostic['identityOmission'] = 'Complete census exceeds identity cap 8; no member HANDLEs opened'
+            return
+        for pid in pids:
+            budget.now()
+            row = dict(pid=pid, calls=[], identityScope='newly-retained-diagnostic-samples-only',
+                       classification='racy-or-unavailable', handleClosed=False)
+            diagnostic['members'].append(row)
+            handle = None
+            try:
+                def call(name, function, *args):
+                    event = dict(api=name, startedAt=budget.now())
+                    row['calls'].append(event)
+                    result = function(*args)
+                    event.update(result=int(result), lastError=getattr(C, 'get_last_error', lambda: None)(),
+                                 finishedAt=time.monotonic())
+                    budget.now()
+                    return result
+
+                # Register ownership immediately on return, BEFORE any clock
+                # check; even expiry during OpenProcess must close this HANDLE.
+                opened = dict(api='OpenProcess', startedAt=budget.now())
+                row['calls'].append(opened)
+                handle = api.open_process(0x00101000, False, pid)
+                error = getattr(C, 'get_last_error', lambda: None)()
+                row['handleValue'] = int(handle or 0)
+                opened.update(result=row['handleValue'], lastError=error, finishedAt=time.monotonic())
+                budget.now()
+                assert handle, 'Diagnostic OpenProcess failed'
+
+                def membership(name):
+                    member = W.BOOL()
+                    succeeded = bool(call('IsProcessInJob', api.is_in_job, handle, process.job, C.byref(member)))
+                    row[name] = dict(apiSucceeded=succeeded, inOwnedJob=bool(member.value))
+                    assert succeeded and member.value, 'Diagnostic member left the retained private Job'
+                membership('membershipBefore')
+                image, length = C.create_unicode_buffer(1024), W.DWORD(1024)
+                assert call('QueryFullProcessImageNameW', api.query_image, handle, 0, image, C.byref(length)), 'Diagnostic image query failed'
+                assert 0 < length.value < 1024, 'Diagnostic image exceeds its bound'
+                row['image'] = image.value
+                creation, exited, kernel, user = W.FILETIME(), W.FILETIME(), W.FILETIME(), W.FILETIME()
+                assert call('GetProcessTimes', api.get_times, handle, C.byref(creation), C.byref(exited),
+                            C.byref(kernel), C.byref(user)), 'Diagnostic process-time query failed'
+                row['creationTime'] = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+                assert row['creationTime'] > 0, 'Diagnostic process creation time is unavailable'
+                waited = int(call('WaitForSingleObject', api.wait_for, handle, 0))
+                assert waited in (0, 258), 'Diagnostic member wait failed'
+                code = W.DWORD()
+                assert call('GetExitCodeProcess', api.get_exit, handle, C.byref(code)), 'Diagnostic exit query failed'
+                row['state'] = dict(waitResult=waited, exitCode=int(code.value))
+                membership('membershipAfter')
+                row['classification'] = 'consistent-at-separate-diagnostic-samples'
+            except BaseException as exc:
+                row['error'] = dict(type=type(exc).__name__[:128], message=str(exc)[:512])
+            finally:
+                if handle:
+                    # Mandatory release is not an optional new observation and
+                    # still runs when the original work deadline has expired.
+                    try:
+                        row['handleClosed'] = bool(api.close_handle(handle))
+                        assert row['handleClosed'], 'Diagnostic CloseHandle failed'
+                    except BaseException as exc:
+                        row['closeError'] = dict(type=type(exc).__name__[:128], message=str(exc)[:512])
+            budget.now()
+        diagnostic['identityEnumerationComplete'] = all(
+            row['classification'] == 'consistent-at-separate-diagnostic-samples' and row['handleClosed']
+            for row in diagnostic['members'])
+    except BaseException as exc:
+        diagnostic['error'] = dict(type=type(exc).__name__[:128], message=str(exc)[:512])
+
+
 def _run_stage(runtime, folder, stage, script, budget, receipt, arguments):
     assert script.parent == folder and script.name in ('discover.cmd', 'compile.cmd')
     for value in arguments:
@@ -135,6 +230,8 @@ def _run_stage(runtime, folder, stage, script, budget, receipt, arguments):
                 if sample['activeProcesses'] == 0:
                     row.update(natural=True, finishedAt=budget.now())
                     break
+                if 'remainingMemberDiagnostic' not in row:
+                    _remaining_member_diagnostic(runtime, process, budget, row, sample)
             remaining = budget.work_deadline - budget.now()
             time.sleep(min(.025, remaining))
     except BaseException as exc:
