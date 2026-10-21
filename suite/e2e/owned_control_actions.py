@@ -16,7 +16,7 @@ import time
 from suite_window_activation import NativeActivationProbe, Point, Rect
 
 CAP = 128 * 1024
-PURPOSES = ('FILE_MENU', 'OPEN_BUTTON', 'SAVE_BUTTON', 'DIALOG_ESCAPE')
+PURPOSES = ('FILE_MENU', 'SAVE_MENU', 'OPEN_BUTTON', 'SAVE_BUTTON', 'DIALOG_ESCAPE')
 PICKERS = ('OpenGeul Office에서 문서 열기', 'OpenGeul Writer — 다른 이름으로 저장',
            'OpenGeul Base — 다른 이름으로 저장')
 
@@ -141,7 +141,7 @@ def _perform(api, process, document, control, record, *, purpose, dialog=0, capt
              readiness=None, shortcut=None, probe=None, clock=time.monotonic, seconds=5):
     assert type(seconds) in (int,float) and math.isfinite(seconds) and 0 < seconds <= 5
     assert purpose in PURPOSES and (shortcut is None or shortcut in ('CTRL_S','CTRL_SHIFT_S','ESCAPE'))
-    if shortcut is None:assert purpose in ('FILE_MENU','OPEN_BUTTON','SAVE_BUTTON')
+    if shortcut is None:assert purpose in ('FILE_MENU','SAVE_MENU','OPEN_BUTTON','SAVE_BUTTON')
     elif purpose=='FILE_MENU':assert shortcut in ('CTRL_S','CTRL_SHIFT_S') and caption in PICKERS[1:]
     else:assert purpose=='DIALOG_ESCAPE' and shortcut=='ESCAPE' and caption==PICKERS[0]
     started=clock(); deadline=started+seconds
@@ -167,6 +167,9 @@ def _perform(api, process, document, control, record, *, purpose, dialog=0, capt
         process.opengeul_control_sequence=sequence+1; stem=name+'-owned-control-'+format(sequence,'03d'); value['receiptStem']=stem
         expected=str((suite/'OpenGeul.Office.exe').resolve())
         assert isinstance(process.args,(list,tuple)) and str(Path(process.args[0]).resolve())==expected
+        if probe is None and purpose=='SAVE_MENU':
+            from owned_save_menu import NativeSaveMenuProbe
+            probe=NativeSaveMenuProbe(deadline,clock)
         probe=probe if probe is not None else NativeControlProbe(deadline,clock)
         budget(); original=probe.process_snapshot(process)
         assert (original['pid'],original['handleValue'],original['image'],original['waitResult'])==(process.pid,int(process._handle),expected,258)
@@ -176,9 +179,16 @@ def _perform(api, process, document, control, record, *, purpose, dialog=0, capt
         assert getattr(process,'opengeul_activation_binding',binding)==binding, 'Activation/control Popen generation differs'
         process.opengeul_control_binding=binding; value['originalProcess']=original
         attachment=witness=None
-        if purpose=='FILE_MENU' and shortcut is not None:
+        if purpose=='SAVE_MENU' or purpose=='FILE_MENU' and shortcut is not None:
             attachment,witness=_original_attachment(record,process,document)
             assert attachment is not None, 'Host-menu shortcut requires its original attachment'
+        if purpose=='SAVE_MENU':
+            from owned_save_menu import file_click_anchor, home_engine_witness, require_save_menu_target
+            value['saveMenuFileAnchor']=file_click_anchor(record,document,original,started)
+            home_witness,basis=home_engine_witness(record,document,attachment)
+            assert witness is None or home_witness is None or witness==home_witness, 'Existing original engine witnesses differ'
+            witness=home_witness if home_witness is not None else witness
+            value['engineAdmissionBasis']=basis
         value.update(originalAttachment=attachment,originalEngineWitness=witness,priorEngineGenerationWitnessJoined=False)
         if attachment is not None:
             engine_handle=probe.open_engine(attachment['officePid']);value['engineHandle']=engine_handle
@@ -208,10 +218,19 @@ def _perform(api, process, document, control, record, *, purpose, dialog=0, capt
             snap['shellCreationTime']=original['creationTime']
             snap['foregroundProcessGeneration']=(original if snap['foreground']['pid']==process.pid else None)
             value['lastObservation']=snap
-            budget(); return snap,_target(snap,purpose,document,process.pid,dialog,caption,readiness,
-                                         operation='pointer' if shortcut is None else 'keyboard')
+            budget()
+            if purpose=='SAVE_MENU':
+                anchor=require_save_menu_target(snap,document,process.pid,caption,value['saveMenuFileAnchor'])
+            else:
+                anchor=_target(snap,purpose,document,process.pid,dialog,caption,readiness,
+                               operation='pointer' if shortcut is None else 'keyboard')
+            return snap,anchor
         if shortcut is None:
             budget(); probe.enter_dpi(value['dpiScope']); assert value['dpiScope']['verified'] is True
+        if purpose=='SAVE_MENU':
+            original_context();budget()
+            control=probe.discover_save_menu(api,document,control,record,value)
+            budget();original_context()
         before,anchor=observe(); value['before']=before
         if engine_handle is not None:
             value['shortcutGenerationAdmission']=admit_shortcut_generation(process,attachment['parent'],attachment['child'],original_engine,value['engineAdmittedAt'])
@@ -219,8 +238,9 @@ def _perform(api, process, document, control, record, *, purpose, dialog=0, capt
             rect=before['control']['rectangle']; point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
             value['chosenPhysicalPoint']=point
             def hit():
-                budget(); row=probe.point_snapshot(dialog or document,point,control)
-                assert row['point']==point and row['pid']==process.pid and row['rootHwnd']==(dialog or document)
+                target_scope=before['scope']['hwnd'] if purpose=='SAVE_MENU' else dialog or document
+                budget(); row=probe.point_snapshot(target_scope,point,control)
+                assert row['point']==point and row['pid']==process.pid and row['rootHwnd']==target_scope
                 assert row['withinControl'] is True and row['uiaMatches'] is True, 'Measured control point is obstructed'
                 return row
             value['beforeMoveHit']=hit(); value['pointerMoveIntent']=True; retain('pointer-intent')
@@ -293,7 +313,7 @@ def _perform(api, process, document, control, record, *, purpose, dialog=0, capt
                 value.update(success=False,dpiRestoreError=_error(exc))
                 if primary is None: primary=exc
         value['finishedAt']=clock()
-        if value['success'] and value['finishedAt']>deadline:
+        if value['success'] and (value['finishedAt']>=deadline if purpose=='SAVE_MENU' else value['finishedAt']>deadline):
             value.update(success=False,error='Owned control completed after deadline')
             if primary is None: primary=AssertionError(value['error'])
         if output is not None and stem is not None:

@@ -72,6 +72,16 @@ class AsciiObserverWiringTests(unittest.TestCase):
         with patch.object(ascii_input,'_observer',side_effect=factory),patch.object(ascii_input.time,'sleep'):
             with self.assertRaisesRegex(OSError,'stop'): self.call('a')
         self.assertFalse(self.record['asciiEditorInputs'][0]['success'])
+    def test_whole_observer_boundary_requires_initial_phase_and_marks_no_native_observation(self):
+        boundary=AsciiObserverBoundary(self.api,self.process,self.binding,self.prepared,self.record,101.)
+        with self.assertRaisesRegex(AssertionError,'initial'):
+            boundary.arm(ascii_input.ascii_actions('U')[0])
+        self.assertEqual(boundary.receipt['actions'],[])
+        with boundary:
+            boundary.arm(ascii_input.ascii_actions('U')[0]);boundary.finish(1)
+        phase=boundary.receipt['initialQueueReadiness']
+        self.assertFalse(phase['observedNative']);self.assertEqual(phase['deadline'],101.)
+        self.assertEqual(phase['kind'],'test-only-initial-queue-phase')
 
 
 if __name__=='__main__': unittest.main()

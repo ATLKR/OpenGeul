@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 class CallerRedTests(unittest.TestCase):
-    def test_base_sends_original_single_shortcut_through_counted_host_contract(self):
+    def test_base_clicks_original_save_menu_once_without_keyboard_shortcut(self):
         import windows_smoke as native
         from test_base_save_readiness import NativeBoundary
         b = NativeBoundary([lambda b: []])
@@ -24,7 +24,7 @@ class CallerRedTests(unittest.TestCase):
         def legacy(*args, **kwargs): raise AssertionError('Opaque keyboard input reached')
         modules = b.modules(); modules['pywinauto.keyboard'] = NS(send_keys=legacy)
         def measured_click(*args, **kwargs): calls.append(('click', kwargs['purpose']))
-        def counted(*args, **kwargs): calls.append(('shortcut', kwargs['shortcut']))
+        def counted(*args, **kwargs): raise AssertionError('Base Save must use its measured menu item')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root/'fixtures').mkdir()
             with patch.dict(sys.modules, modules), \
@@ -34,7 +34,7 @@ class CallerRedTests(unittest.TestCase):
                 try: native.save_new_base(b.api, b.process, 11, root/'fixtures', root, {})
                 except BaseException as exc: error = str(exc)
         self.assertEqual(error, 'STOP_AFTER_TRIGGER', 'Base still uses opaque shortcut input')
-        self.assertEqual(calls, [('click', 'FILE_MENU'), ('shortcut', 'CTRL_S')])
+        self.assertEqual(calls, [('click', 'FILE_MENU'), ('click', 'SAVE_MENU')])
 
     def test_lifecycle_preserves_file_click_and_ctrl_shift_s_without_opaque_keyboard(self):
         import lifecycle_smoke as life

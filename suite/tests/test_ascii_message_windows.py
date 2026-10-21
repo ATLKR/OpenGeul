@@ -43,7 +43,7 @@ class AsciiMessageWindowsTests(unittest.TestCase):
         self.kernel.FreeLibrary = Fn(lambda *a: self.note('free-library', True))
         self.kernel.GetCurrentProcessId = Fn(lambda: 77)
         self.kernel.GetCurrentThreadId = Fn(lambda: 66)
-        self.user.RegisterWindowMessageW = Fn(lambda name: 0xc001 if 'Start' in name else 0xc002)
+        self.user.RegisterWindowMessageW = Fn(lambda name: 0xc001 if 'Start' in name else 0xc003 if 'Readiness' in name else 0xc002)
         def hook(kind, *args):
             self.calls.append(('install', kind))
             return 0 if self.install_fail == kind else 1000 + kind
@@ -54,7 +54,14 @@ class AsciiMessageWindowsTests(unittest.TestCase):
             state = self.State.from_address(C.addressof(self.raw))
             if self.ack:
                 if message == 0xc001: state.recording = 1; state.ack = 1
-                else: state.recording = 0; state.stopAck = 2
+                elif message == 0xc002: state.recording = 0; state.stopAck = 2
+                else:
+                    sample=state.readiness.sample
+                    sample.pid=self.target['pid'];sample.tid=self.target['tid'];sample.hwnd=self.target['hwnd']
+                    sample.layout=self.target['layout'];sample.engineCreationTime=123456
+                    sample.queueFlags=0x1c07;sample.keyboardSucceeded=1;sample.callbackDepth=1
+                    sample.tickStarted=sample.tickFinished=100000
+                    state.readiness.ack=state.readiness.request
             return self.send_ok
         self.user.SendMessageTimeoutW = Fn(send)
         def read(pointer):
@@ -69,6 +76,8 @@ class AsciiMessageWindowsTests(unittest.TestCase):
         self.dll.StateSize = Fn(lambda: C.sizeof(State))
         self.dll.EventSize = Fn(lambda: C.sizeof(Event))
         self.dll.EventsOffset = Fn(lambda: State.events.offset)
+        self.dll.ReadinessSampleSize = Fn(lambda: C.sizeof(self.m.QueueSample))
+        self.dll.ReadinessOffset = Fn(lambda: State.readiness.offset)
         self.dll.HookCall, self.dll.HookGet = C.c_void_p(11), C.c_void_p(12)
 
     def note(self, value, result): self.calls.append(value); return result
@@ -87,6 +96,7 @@ class AsciiMessageWindowsTests(unittest.TestCase):
         self.assertEqual(88, state.pid); self.assertEqual(99, state.tid)
         self.assertEqual(123456, state.engineCreationTime); self.assertEqual(1, state.command)
         self.assertEqual([('install', 4), ('install', 3)], [x for x in self.calls if isinstance(x, tuple) and x[0] == 'install'])
+        t.query_initial_readiness()
         self.assertEqual(0, t.arm(0)); self.assertEqual(1, state.armedEpoch)
         stop = t.stop(); self.assertTrue(stop['recordingStopped'])
         self.assertFalse(stop['remoteCallbackQuiescenceProved'])
@@ -153,7 +163,7 @@ class AsciiMessageWindowsTests(unittest.TestCase):
         t.close()
 
     def test_each_committed_row_is_acquired_before_and_after_immutable_copy(self):
-        t = self.transport(); t.start(); t.arm(0)
+        t = self.transport(); t.start(); t.query_initial_readiness(); t.arm(0)
         state = self.State.from_address(C.addressof(self.raw)); state.count = 2
         state.events[0].sequence = 1; state.events[0].actionEpoch = 1
         state.events[1].sequence = 0
@@ -168,7 +178,7 @@ class AsciiMessageWindowsTests(unittest.TestCase):
     def test_overflow_status_reserved_or_wrong_commit_fail_closed(self):
         for name in ('overflow', 'status', 'reserved', 'sequence'):
             with self.subTest(name=name):
-                t = self.transport(); t.start(); t.arm(0)
+                t = self.transport(); t.start(); t.query_initial_readiness(); t.arm(0)
                 state = self.State.from_address(C.addressof(self.raw)); state.count = 1; state.events[0].sequence = 1
                 if name in ('reserved', 'sequence'): setattr(state.events[0], name, 2)
                 else: setattr(state, name, 1)

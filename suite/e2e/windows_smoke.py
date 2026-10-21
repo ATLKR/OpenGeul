@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import calc_model_barrier
 from scenario_editor_shortcuts import FirstAdmissionEditorSession
 from owned_control_actions import click_owned_control, send_host_menu_shortcut, send_owned_dialog_escape
+from owned_save_menu import require_save_menu_action, detached_save_menu_action
 
 INPUT_CASES = (('writer', 'docx'), ('calc', 'xlsx'), ('impress', 'pptx'))
 EDITOR_MARKERS = {module: 'UI-OpenGeul-' + module for module, _ in INPUT_CASES}
@@ -277,7 +278,16 @@ class Windows:
         info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
         if not self.user.GetGUIThreadInfo(thread, ctypes.byref(info)): raise ctypes.WinError(ctypes.get_last_error())
         assert info.hwndFocus and (info.hwndFocus == child or self.user.IsChild(child, info.hwndFocus)), 'Keyboard focus is outside the embedded Office editor'
-        assert not info.hwndCapture, 'Owned editor mouse capture is still active before physical input'
+        try:
+            assert not info.hwndCapture, 'Owned editor mouse capture is still active before physical input'
+        except AssertionError as primary:
+            try:
+                from focus_rejection_diagnostics import retain_capture_rejection
+                retain_capture_rejection(self, hwnd, child, thread, info, primary)
+            except BaseException as diagnostic_error:
+                try: primary.opengeul_focus_rejection_error = type(diagnostic_error).__name__
+                except BaseException: pass
+            raise
         return int(info.hwndFocus)
 
     def _focus_window(self, hwnd):
@@ -696,7 +706,7 @@ def _base_save_observation_state(observation, shell_pid, document, caption, froz
     return 'ready' if ready else 'pending'
 
 
-def require_base_save_dialog_readiness(evidence, shell_pid, document_hwnd, caption, *, before_input=False):
+def require_base_save_dialog_readiness(evidence, shell_pid, document_hwnd, caption, *, before_input=False, expected_trigger='owned-save-menu-pointer'):
     """Replay actual native/UIA receipts without loading Windows libraries."""
     _base_int(shell_pid, positive=True); _base_int(document_hwnd, positive=True)
     assert type(before_input) is bool
@@ -706,7 +716,13 @@ def require_base_save_dialog_readiness(evidence, shell_pid, document_hwnd, capti
     assert _base_int(evidence['budgetSeconds']) == BASE_SAVE_DIALOG_SECONDS and _base_int(evidence['maxObservations']) == BASE_SAVE_MAX_OBSERVATIONS
     start, deadline, finished = (_base_time(evidence[key]) for key in ('startedAt', 'deadline', 'finishedAt'))
     assert deadline == start + BASE_SAVE_DIALOG_SECONDS and start <= finished <= deadline, 'Base readiness exceeded its original deadline'
-    assert _base_int(evidence['fileMenuClicks']) == 1 and _base_int(evidence['saveShortcuts']) == 1 and evidence['ready'] is True, 'Original Base inputs or readiness changed'
+    assert expected_trigger in ('legacy-shortcut','owned-save-menu-pointer')
+    assert _base_int(evidence['fileMenuClicks']) == 1 and evidence['ready'] is True, 'Original Base inputs or readiness changed'
+    if expected_trigger=='owned-save-menu-pointer':
+        assert evidence['trigger']==expected_trigger and _base_int(evidence['saveShortcuts'])==0 and _base_int(evidence['saveMenuClicks'])==1, 'Base pointer trigger/counts differ'
+    else:
+        assert evidence.get('trigger','legacy-shortcut')==expected_trigger and _base_int(evidence['saveShortcuts'])==1 and _base_int(evidence.get('saveMenuClicks',0))==0, 'Legacy Base shortcut trigger/counts differ'
+        assert 'saveMenuAction' not in evidence, 'Legacy shortcut proof contains a pointer action'
     focus = evidence['focusAction']
     dialog = _base_int(evidence['dialogHwnd'], positive=True)
     root = _base_runtime_id(evidence['uiaRootRuntimeId'])
@@ -736,6 +752,8 @@ def require_base_save_dialog_readiness(evidence, shell_pid, document_hwnd, capti
     assert evidence['bindingError'] is None, 'Raw Base wrapper binding failed'
     if not before_input or 'filenameInputStartedAt' in evidence:
         assert _base_time(evidence['filenameInputStartedAt']) >= finished, 'Filename input preceded exact Base readiness'
+    if expected_trigger=='owned-save-menu-pointer':
+        require_save_menu_action(evidence['saveMenuAction'],shell_pid,document_hwnd,caption,evidence)
     return evidence
 
 
@@ -826,8 +844,9 @@ def _base_raw_controls(api, accessible, uia, dialog, observation, *, filename_id
     return elements
 
 
-def _wait_base_save_controls(api, process, document, caption, record, *, open_dialog=False):
+def _wait_base_save_controls(api, process, document, caption, record, *, open_dialog=False, expected_trigger='owned-save-menu-pointer', save_menu_action=None):
     start = time.monotonic()
+    assert expected_trigger in ('legacy-shortcut','owned-save-menu-pointer')
     filename_id='1148' if open_dialog else '1001'
     from pywinauto import Desktop
     from pywinauto.uia_defines import IUIA
@@ -843,7 +862,11 @@ def _wait_base_save_controls(api, process, document, caption, record, *, open_di
         proof.pop('fileMenuClicks');proof.pop('saveShortcuts')
         proof.update(kind='owned-open-dialog-readiness',trigger=dict(record['openTrigger']),filenameAutomationId=filename_id)
         record['openDialogReadiness'] = proof
-    else: record['baseSaveDialogReadiness'] = proof
+    else:
+        if expected_trigger=='owned-save-menu-pointer':
+            proof.update(trigger=expected_trigger,saveShortcuts=0,saveMenuClicks=1,
+                         saveMenuAction=detached_save_menu_action(save_menu_action))
+        record['baseSaveDialogReadiness'] = proof
     dialog, native, accessible, uia = 0, None, None, None
     try:
         for sequence in range(BASE_SAVE_MAX_OBSERVATIONS):
@@ -921,7 +944,7 @@ def _wait_base_save_controls(api, process, document, caption, record, *, open_di
                 if open_dialog:
                     from home_routing_smoke import require_open_dialog_readiness
                     require_open_dialog_readiness(proof, process.pid, document, before_input=True)
-                else:require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True)
+                else:require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True, expected_trigger=expected_trigger)
                 return dialog, native, wrappers[0], wrappers[1]
             time.sleep(min(0.1, max(0,proof['deadline']-time.monotonic())))
         raise AssertionError('Base save readiness deadline or finite observation limit expired')
@@ -940,6 +963,7 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     target = new_base_target(fixtures)
     caption = 'OpenGeul Base — 다른 이름으로 저장'
     record['newBaseSaveAsVerified'] = False
+    record.update(newBaseSaveMenuActionVerified=False, saveShortcutViaOwnedMenu=False)
     record['stage'] = 'focus-save-menu'
     api.require_foreground(hwnd)
     shell = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
@@ -948,14 +972,19 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
              and item.is_visible() and item.is_enabled()]
     assert len(menus) == 1, 'The exact shell-owned File menu is required for the Save shortcut'
     click_owned_control(api, process, hwnd, menus[0], record, purpose='FILE_MENU')
-    record['stage'] = 'send-owned-base-save-shortcut'
-    send_host_menu_shortcut(api, process, hwnd, menus[0], record, shortcut='CTRL_S', caption=caption)
+    record['stage'] = 'click-owned-base-save-menu'
+    trigger = click_owned_control(api, process, hwnd, menus[0], record, purpose='SAVE_MENU', caption=caption)
+    record['baseSaveMenuAction'] = trigger
 
     record['stage'] = 'wait-save-dialog'
-    dialog, native, filename, save_button = _wait_base_save_controls(api, process, hwnd, caption, record)
+    dialog, native, filename, save_button = _wait_base_save_controls(api, process, hwnd, caption, record, expected_trigger='owned-save-menu-pointer', save_menu_action=trigger)
     api.require_foreground(dialog)
     require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
                             api.title(dialog), caption, native.class_name())
+    require_base_save_dialog_readiness(record['baseSaveDialogReadiness'], process.pid, hwnd, caption, before_input=True, expected_trigger='owned-save-menu-pointer')
+    require_save_menu_action(trigger, process.pid, hwnd, caption, record['baseSaveDialogReadiness'])
+    record['newBaseSaveMenuActionVerified'] = True
+    require_base_save_menu_record(record,process.pid,hwnd,before_input=True)
     record['stage'] = 'type-save-path'
     record['baseSaveDialogReadiness']['filenameInputStartedAt'] = time.monotonic()
     accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
@@ -976,9 +1005,23 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     evidence = wait_for(lambda: saved_base_evidence(target), seconds=30)
     wait_for(lambda: not api.title(hwnd).startswith('* '), seconds=10)
     record.update(saveAsDialogVerified=True, saveAsDialogHwnd=int(dialog), saveAsFilenameAutomationId='1001',
-                  saveAsButtonAutomationId='1', saveShortcutViaOwnedMenu=True,
+                  saveAsButtonAutomationId='1', saveShortcutViaOwnedMenu=False,
                   savedFile=target.name, beforeCleanupSha256=evidence['sha256'])
     return target
+
+
+def require_base_save_menu_record(record, shell_pid, hwnd, *, before_input=False):
+    """Join bounded readiness embedding to the original separately retained action."""
+    caption='OpenGeul Base — 다른 이름으로 저장'
+    proof=record['baseSaveDialogReadiness'];action=record['baseSaveMenuAction']
+    assert record['newBaseSaveMenuActionVerified'] is True and record.get('saveShortcutViaOwnedMenu') is False
+    assert proof['saveMenuAction']==action
+    assert [row for row in record['ownedControlActions'] if row['purpose']=='SAVE_MENU']==[action]
+    from owned_save_menu import file_click_anchor
+    assert action['saveMenuFileAnchor']==file_click_anchor(record,hwnd,action['originalProcess'],action['startedAt'])
+    require_base_save_dialog_readiness(proof,shell_pid,hwnd,caption,before_input=before_input,expected_trigger='owned-save-menu-pointer')
+    require_save_menu_action(action,shell_pid,hwnd,caption,proof)
+    return action
 
 
 def new_module(suite, output, module, *, fixtures=None):
@@ -1025,6 +1068,7 @@ def new_module(suite, output, module, *, fixtures=None):
             record.update(newBaseSaveAsVerified=True, savedFileSurvivedCleanup=True,
                           savedFileSha256=final['sha256'], savedFileBytes=final['bytes'],
                           savedDatabaseUrl=final['connection'])
+            require_base_save_menu_record(record,process.pid,hwnd)
         record.update(success=True, cleanClose=True, newDocumentVerified=True, stage='complete')
         return record
     except Exception as exc:

@@ -11,6 +11,7 @@ import math
 import time
 
 from ascii_message_progress import CharacterProgress, MAX_CHARACTER_EVENTS
+from ascii_queue_readiness import MAX_QUERIES, retain_sample, require_initial_queue_sample
 
 
 def _error(exc):
@@ -81,6 +82,28 @@ class OwnedAsciiObserver:
             self._guard()
             self.probe.start()
             self._guard()
+            ledger = dict(deadline=self.deadline, startedAt=self._now(), pollCount=0,
+                first=[], last=[], ready=False, semanticInsertionProved=False,
+                limitation='Nonconsuming target-thread queue/key snapshot; GetQueueStatus changes newness bookkeeping, not dispatch/semantic proof.')
+            self.receipt['initialQueueReadiness'] = ledger
+            previous_tick = None
+            while True:
+                assert ledger['pollCount'] < MAX_QUERIES, 'Initial ASCII queue observation bound exceeded'
+                self._guard()
+                row = self.probe.query_initial_readiness()
+                retain_sample(ledger, row)
+                self._budget()
+                self._guard()
+                ready = require_initial_queue_sample(row, self.target,
+                    self.binding['officeCreationTime'], request=ledger['pollCount'])
+                assert previous_tick is None or row['tickStarted'] >= previous_tick, 'Initial ASCII queue native time regressed'
+                previous_tick = row['tickFinished']
+                if ready:
+                    ready_at = self._now()
+                    self._budget()
+                    ledger.update(ready=True, readyAt=ready_at)
+                    break
+                self.pause(min(.01, self._budget()))
             self.active = True
             return self
         except BaseException as exc:

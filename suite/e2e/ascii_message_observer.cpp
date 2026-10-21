@@ -9,6 +9,7 @@ using OpenGeulAscii::State;
 State* shared = nullptr;
 HANDLE mapping = nullptr;
 volatile LONG active = 0;
+volatile LONG querying = 0;
 DWORD ownerThread = 0;
 bool stopped = true;
 bool releaseFailed = false;
@@ -23,6 +24,9 @@ std::int32_t incrementSigned(std::int32_t* value) {
 
 LONG load(const std::uint32_t* value) {
     return InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(const_cast<std::uint32_t*>(value)),0,0);
+}
+LONG loadSigned(const std::int32_t* value) {
+    return InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(const_cast<std::int32_t*>(value)),0,0);
 }
 void publish(std::uint32_t* value,LONG next) {
     InterlockedExchange(reinterpret_cast<volatile LONG*>(value),next);
@@ -81,10 +85,13 @@ void start(const CWPSTRUCT& message) {
     if(!shared) { forgetView(); return; }
     // The controller publishes command last, after initializing the mapping.
     const LONG command=load(&shared->command);
-    const UINT startMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Start.v1");
-    const UINT stopMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Stop.v1");
+    const UINT startMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Start.v2");
+    const UINT stopMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Stop.v2");
+    const UINT readinessMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Readiness.v2");
     if(command!=1 || !header(shared) || shared->controllerPid!=message.wParam || shared->nonce!=nonce
        || shared->startMessage!=startMessage || shared->stopMessage!=stopMessage
+       || shared->readinessMessage!=readinessMessage || shared->readinessReserved
+       || load(&shared->readiness.request) || load(&shared->readiness.ack)
        || !identity(shared,message.hwnd) || shared->count!=0 || shared->overflow || shared->status
        || shared->layout!=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)))) {
         publishSigned(&shared->status,-1);
@@ -109,6 +116,55 @@ void stop(const CWPSTRUCT& message) {
     // Retain our OWN mapping HANDLE/view. Unhook success in the controller is
     // not proof that an already-entered remote callback has finished. Release
     // here only on a future nonreentrant same-thread start or DLL lifetime end.
+}
+void queryReadiness(const CWPSTRUCT& message,UINT startMessage,UINT stopMessage,UINT readinessMessage) {
+    if(!shared || stopped || ownerThread!=GetCurrentThreadId() || shared->controllerPid!=message.wParam
+       || shared->nonce!=static_cast<std::uint64_t>(message.lParam) || load(&shared->command)!=1
+       || load(&shared->armedEpoch) || loadSigned(&shared->count)) return;
+    const auto request=static_cast<std::uint32_t>(load(&shared->readiness.request));
+    if(!request || request>8192 || request!=static_cast<std::uint32_t>(load(&shared->readiness.ack))+1) return;
+    // A reentrant query must never overwrite the active sample or its ACK.
+    if(InterlockedCompareExchange(&querying,1,0)!=0) return;
+    struct QueryLease { ~QueryLease(){InterlockedExchange(&querying,0);} } lease;
+    OpenGeulAscii::QueueSample sample{};
+    static_assert(QS_INPUT==0x1c07);  // Modern mouse/key/raw/touch/pointer mask.
+    sample.queueFlags=QS_INPUT; sample.pid=GetCurrentProcessId(); sample.tid=GetCurrentThreadId();
+    sample.hwnd=std::uint64_t(reinterpret_cast<std::uintptr_t>(message.hwnd));
+    sample.engineCreationTime=shared->engineCreationTime;
+    sample.layout=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)));
+    sample.callbackDepth=static_cast<std::uint32_t>(InterlockedCompareExchange(&active,0,0));
+    sample.tickStarted=GetTickCount64();
+    const auto admitted=[&]() {
+        return header(shared) && !shared->readinessReserved && shared->startMessage==startMessage
+            && shared->stopMessage==stopMessage && shared->readinessMessage==readinessMessage
+            && message.message==readinessMessage
+            && identity(shared,message.hwnd) && shared->controllerPid==message.wParam
+            && shared->nonce==static_cast<std::uint64_t>(message.lParam)
+            && shared->layout==std::uint64_t(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)))
+            && !stopped && ownerThread==GetCurrentThreadId() && load(&shared->command)==1
+            && load(&shared->recording)==1 && load(&shared->ack)==1
+            && !loadSigned(&shared->status) && !loadSigned(&shared->overflow)
+            && !load(&shared->armedEpoch) && !loadSigned(&shared->count)
+            && static_cast<std::uint32_t>(load(&shared->readiness.request))==request
+            && static_cast<std::uint32_t>(load(&shared->readiness.ack))==request-1;
+    };
+    if(!admitted() || sample.layout!=shared->layout) {
+        sample.status=-1;
+    } else {
+        // Nonconsuming, but GetQueueStatus changes LOW-word newness bookkeeping.
+        // Neither this snapshot nor neutral thread keys prove dispatch/semantics.
+        sample.queueStatus=GetQueueStatus(QS_INPUT);  // Zero is a VALID result.
+        if(!admitted()) sample.status=-3;
+        else {
+            sample.keyboardSucceeded=GetKeyboardState(sample.keyboard)?1:0;
+            sample.keyboardError=sample.keyboardSucceeded?0:GetLastError();
+            if(!sample.keyboardSucceeded) sample.status=-2;
+            if(!admitted()) sample.status=-3;
+        }
+    }
+    sample.tickFinished=GetTickCount64();
+    shared->readiness.sample=sample;
+    publish(&shared->readiness.ack,static_cast<LONG>(request));  // Publish last.
 }
 void observe(const MSG& message,WPARAM removed) {
     if(!shared || stopped || !load(&shared->recording) || ownerThread!=GetCurrentThreadId()) return;
@@ -146,10 +202,12 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookCall(int code,WPARAM wp,LP
     Callback callback;
     if(code==HC_ACTION && lp) {
         const CWPSTRUCT& message=*reinterpret_cast<const CWPSTRUCT*>(lp);
-        const UINT startMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Start.v1");
-        const UINT stopMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Stop.v1");
+        const UINT startMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Start.v2");
+        const UINT stopMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Stop.v2");
+        const UINT readinessMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Readiness.v2");
         if(startMessage && message.message==startMessage) start(message);
         else if(stopMessage && message.message==stopMessage) stop(message);
+        else if(readinessMessage && message.message==readinessMessage) queryReadiness(message,startMessage,stopMessage,readinessMessage);
     }
     return CallNextHookEx(nullptr,code,wp,lp);
 }
@@ -162,6 +220,8 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPA
 extern "C" __declspec(dllexport) unsigned int StateSize() { return sizeof(State); }
 extern "C" __declspec(dllexport) unsigned int EventSize() { return sizeof(Event); }
 extern "C" __declspec(dllexport) unsigned int EventsOffset() { return offsetof(State,events); }
+extern "C" __declspec(dllexport) unsigned int ReadinessSampleSize() { return sizeof(OpenGeulAscii::QueueSample); }
+extern "C" __declspec(dllexport) unsigned int ReadinessOffset() { return offsetof(State,readiness); }
 extern "C" __declspec(dllexport) unsigned int ReadWord(const std::uint32_t* word) { return static_cast<unsigned int>(load(word)); }
 extern "C" __declspec(dllexport) void PublishWord(std::uint32_t* word,unsigned int value) { publish(word,static_cast<LONG>(value)); }
 BOOL WINAPI DllMain(HINSTANCE,DWORD reason,LPVOID) {

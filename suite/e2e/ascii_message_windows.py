@@ -11,7 +11,8 @@ from pathlib import Path
 import time
 import uuid
 
-from ascii_message_protocol import State, Event, MAGIC, VERSION, CAPACITY
+from ascii_message_protocol import State, Event, QueueSample, Readiness, MAGIC, VERSION, CAPACITY
+from ascii_queue_readiness import MAX_QUERIES, retain_sample, require_initial_queue_sample
 from counted_editor_shortcuts import (CountedEditorShortcuts, NativeShortcutProbe,
     join_shortcut_generation, _same_image)
 
@@ -35,7 +36,10 @@ class MessageTransport:
         assert type(self.nonce) is int and 0 < self.nonce <= 0xffffffffffffffff
         self.mapping = self.view = self.state = None
         self.hooks = []; self.closed = False; self.cursor = 0
-        self.start_message = self.stop_message = None
+        self.start_message = self.stop_message = self.readiness_message = None
+        self.readiness_requests = 0
+        self.readiness_failed = self.readiness_inflight = self.initial_queue_ready = False
+        self.last_readiness_tick = None
         for name in ('GetCurrentProcessId','GetCurrentThreadId'):
             function = getattr(kernel,name)
             function.argtypes, function.restype = (), C.c_uint32
@@ -55,10 +59,13 @@ class MessageTransport:
             (library, 'ReadWord', (C.POINTER(D),), D),
             (library, 'PublishWord', (C.POINTER(D),D), None),
             (library, 'StateSize', (), D), (library, 'EventSize', (), D),
-            (library, 'EventsOffset', (), D)):
+            (library, 'EventsOffset', (), D),
+            (library, 'ReadinessSampleSize', (), D), (library, 'ReadinessOffset', (), D)):
             function = getattr(lib, name); function.argtypes, function.restype = arguments, result
         assert (library.StateSize(), library.EventSize(), library.EventsOffset()) == \
             (C.sizeof(State), C.sizeof(Event), State.events.offset), 'Native ASCII observer ABI differs'
+        assert (library.ReadinessSampleSize(), library.ReadinessOffset()) == \
+            (C.sizeof(QueueSample), State.readiness.offset), 'Native ASCII readiness ABI differs'
         receipt['transport'] = dict(controllerPid=self.controller_pid, controllerTid=self.controller_tid,
             nonce=self.nonce, hookAttempts=[], controls=[], remoteCallbackQuiescenceProved=False)
 
@@ -76,15 +83,20 @@ class MessageTransport:
     def _publish(self, name, value):
         self.dll.PublishWord(self._word(name), value)
 
+    def _readiness_word(self, name):
+        return C.cast(self.view + State.readiness.offset + getattr(Readiness, name).offset,
+                      C.POINTER(C.c_uint32))
+
     def _header(self):
         assert self.state is not None, 'ASCII observer mapping is not admitted'
         assert (self.state.magic, self.state.version, self.state.stateSize, self.state.eventSize, self.state.capacity) == \
             (MAGIC, VERSION, C.sizeof(State), C.sizeof(Event), CAPACITY), 'ASCII observer ABI changed'
         expected = (self.target['pid'], self.target['tid'], self.target['hwnd'], self.target['layout'],
-                    self.creation, self.controller_pid, self.nonce, self.start_message, self.stop_message)
+                    self.creation, self.controller_pid, self.nonce, self.start_message, self.stop_message, self.readiness_message)
         observed = tuple(getattr(self.state, key) for key in ('pid','tid','hwnd','layout','engineCreationTime',
-            'controllerPid','nonce','startMessage','stopMessage'))
+            'controllerPid','nonce','startMessage','stopMessage','readinessMessage'))
         assert observed == expected, 'ASCII observer immutable target/header changed'
+        assert self.state.readinessReserved == 0, 'ASCII observer readiness reserved field changed'
         assert self._read('overflow') == self._read('status') == 0, 'ASCII observer native overflow/status failed'
         count = self._read('count')
         assert 0 <= count <= CAPACITY, 'ASCII observer native count exceeded its bound'
@@ -97,26 +109,37 @@ class MessageTransport:
         row = dict(message=message, hwnd=self.target['hwnd'], pid=self.target['pid'],
             tid=self.target['tid'], creationTime=self.creation, startedAt=self.clock(),
             flags=0x22, timeoutMilliseconds=timeout)
-        self.record['transport']['controls'].append(row)
+        readiness = message == self.readiness_message
+        if readiness:
+            controls = self.record['transport'].setdefault('readinessControls', dict(pollCount=0, first=[], last=[]))
+            self.record['transport']['lastReadinessControlIntent'] = row
+        else:
+            self.record['transport']['controls'].append(row)
         result = C.c_uint64()
         _clear_error()
         assert row['startedAt'] < self.deadline, 'ASCII observer control deadline expired at intent'
         row['timeoutMilliseconds'] = min(row['timeoutMilliseconds'], int(self._budget() * 1000))
         assert row['timeoutMilliseconds'] > 0, 'ASCII observer deadline has no complete control millisecond'
-        value = self.user.SendMessageTimeoutW(self.target['hwnd'], message, self.controller_pid,
-            C.c_int64(self.nonce).value, row['flags'], row['timeoutMilliseconds'], C.byref(result))
-        error = _error()
-        row.update(nativeReturn=int(value or 0), lastError=error, messageResult=result.value, returnedAt=self.clock())
-        assert value, 'ASCII observer inert control failed (lastError=' + str(error) + ')'
-        self._budget()
+        try:
+            value = self.user.SendMessageTimeoutW(self.target['hwnd'], message, self.controller_pid,
+                C.c_int64(self.nonce).value, row['flags'], row['timeoutMilliseconds'], C.byref(result))
+            error = _error()
+            row.update(nativeReturn=int(value or 0), lastError=error, messageResult=result.value, returnedAt=self.clock())
+            assert value, 'ASCII observer inert control failed (lastError=' + str(error) + ')'
+            self._budget()
+        finally:
+            if readiness: retain_sample(controls, row)
 
     def start(self):
         self._budget()
-        self.start_message = int(self.user.RegisterWindowMessageW('OpenGeul.AsciiObserver.Start.v1'))
+        self.start_message = int(self.user.RegisterWindowMessageW('OpenGeul.AsciiObserver.Start.v2'))
         self._budget()
-        self.stop_message = int(self.user.RegisterWindowMessageW('OpenGeul.AsciiObserver.Stop.v1'))
+        self.stop_message = int(self.user.RegisterWindowMessageW('OpenGeul.AsciiObserver.Stop.v2'))
+        self._budget()
+        self.readiness_message = int(self.user.RegisterWindowMessageW('OpenGeul.AsciiObserver.Readiness.v2'))
         assert 0xc000 <= self.start_message <= 0xffff and 0xc000 <= self.stop_message <= 0xffff \
-            and self.start_message != self.stop_message, 'Observer control message registration failed'
+            and 0xc000 <= self.readiness_message <= 0xffff \
+            and len({self.start_message, self.stop_message, self.readiness_message}) == 3, 'Observer control message registration failed'
         name = f'Local\\OpenGeulAscii_{self.controller_pid}_{self.nonce:016x}'
         _clear_error()
         self._budget()
@@ -132,6 +155,7 @@ class MessageTransport:
         for key, value in dict(magic=MAGIC, version=VERSION, stateSize=C.sizeof(State),
             eventSize=C.sizeof(Event), capacity=CAPACITY, pid=self.target['pid'], tid=self.target['tid'],
             controllerPid=self.controller_pid, startMessage=self.start_message, stopMessage=self.stop_message,
+            readinessMessage=self.readiness_message,
             nonce=self.nonce, hwnd=self.target['hwnd'], engineCreationTime=self.creation, layout=self.target['layout']).items():
             setattr(self.state, key, value)
         self._publish('command', 1)
@@ -154,13 +178,66 @@ class MessageTransport:
 
     def arm(self, index):
         self._budget()
+        assert self.initial_queue_ready, 'Initial ASCII queue readiness is required before arm'
         count = self._header()
         assert count == self.cursor, 'ASCII observer baseline has pending/unread messages'
         assert self._read('recording') == self._read('ack') == 1, 'ASCII observer is not recording'
+        assert type(index) is int and 0 <= index <= 255 and self._read('armedEpoch') == index, 'ASCII observer prior arm epoch changed'
         self._publish('armedIndex', index)
         self._publish('armedEpoch', index + 1)
         self._budget()
         return count
+
+    def _copy_readiness(self):
+        # Copy even after a failed/expired control to retain UNTRUSTED raw ACKs;
+        # this performs no window/process/input query or new control message.
+        request = int(self.dll.ReadWord(self._readiness_word('request')))
+        ack = int(self.dll.ReadWord(self._readiness_word('ack')))
+        raw = C.string_at(self.view + State.readiness.offset + Readiness.sample.offset, C.sizeof(QueueSample))
+        after = int(self.dll.ReadWord(self._readiness_word('ack')))
+        request_after = int(self.dll.ReadWord(self._readiness_word('request')))
+        sample = QueueSample.from_buffer_copy(raw)
+        row = {key: int(getattr(sample, key)) for key, _ in QueueSample._fields_ if key != 'keyboard'}
+        row.update(request=request, requestAfter=request_after, ack=ack, ackAfter=after,
+                   keyboardState=[int(value) for value in sample.keyboard])
+        self.record['transport']['lastInitialQueueObservation'] = row
+        return row
+
+    def query_initial_readiness(self):
+        assert not self.readiness_failed, 'Initial ASCII readiness transaction already failed'
+        assert not self.readiness_inflight and not self.initial_queue_ready, 'Initial ASCII readiness cannot restart or overlap'
+        self.readiness_inflight = True
+        try:
+            self._budget(); self.identity()
+            assert self._header() == self.cursor == 0 and self._read('armedEpoch') == 0, 'Initial readiness has a nonzero ASCII count/epoch'
+            assert self._read('recording') == self._read('ack') == self._read('command') == 1, 'Initial readiness is not in the original started phase'
+            assert int(self.dll.ReadWord(self._readiness_word('ack'))) == self.readiness_requests, 'Initial readiness has an outstanding ACK'
+            assert self.readiness_requests < MAX_QUERIES, 'Initial ASCII readiness query bound exceeded'
+            self.readiness_requests += 1
+            self._budget()
+            self.dll.PublishWord(self._readiness_word('request'), self.readiness_requests)
+            try:
+                self._control(self.readiness_message)
+            except BaseException:
+                try: self._copy_readiness()
+                except BaseException as later:
+                    self.record['transport']['readinessCopyError'] = type(later).__name__
+                raise
+            row = self._copy_readiness()
+            assert self._header() == 0 and self._read('armedEpoch') == 0, 'Initial readiness count/epoch changed after query'
+            assert self._read('recording') == self._read('ack') == self._read('command') == 1, 'Initial readiness phase changed after query'
+            self.identity(); self._budget()
+            ready = require_initial_queue_sample(row, self.target, self.creation, request=self.readiness_requests)
+            assert self.last_readiness_tick is None or row['tickStarted'] >= self.last_readiness_tick, 'Initial native queue time regressed'
+            self.last_readiness_tick = row['tickFinished']
+            self._budget()
+            self.initial_queue_ready = ready
+            return row
+        except BaseException:
+            self.readiness_failed = True
+            raise
+        finally:
+            self.readiness_inflight = False
 
     def read_events(self, after):
         self._budget()
@@ -339,6 +416,7 @@ manufactures an earlier model-reader observation or reuses a closed HANDLE.
 
     def start(self): self.transport.start()
     def arm(self,index): return self.transport.arm(index)
+    def query_initial_readiness(self): return self.transport.query_initial_readiness()
     def read_events(self,after): return self.transport.read_events(after)
     def can_stop(self): return self.transport is not None and self.transport.can_stop()
     def stop(self): return self.transport.stop()

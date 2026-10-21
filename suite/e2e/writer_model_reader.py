@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import namedtuple
 import ctypes
 from ctypes import wintypes as W
+import hashlib
 import importlib.util
 import json
 import math
@@ -89,9 +90,12 @@ def _require_calc_values(value):
     assert type(value.get('isModified')) is bool, 'Invalid Calc modified state'
 
 
-def read_calc_selection(controller):
+def read_calc_selection(controller,*,capture=None):
     """Fixed XSelectionSupplier/range getters; never accepts input or sets selection."""
+    if capture is not None:
+        capture.clear();capture.update(stage='getSelection',controller=controller,selected=None)
     selected=controller.getSelection()
+    if capture is not None:capture.update(stage='getRangeAddress',selected=selected)
     assert selected is not None, 'Calc has no single cell/range selection'
     address=selected.getRangeAddress()
     # ScCellRangeObj::getSpreadsheet creates a fresh wrapper; proxy equality
@@ -102,6 +106,7 @@ def read_calc_selection(controller):
             ('sheet','Sheet'),('startColumn','StartColumn'),('startRow','StartRow'),
             ('endColumn','EndColumn'),('endRow','EndRow'))})
     _require_calc_selection(value)
+    if capture is not None:capture.clear()
     return value
 
 
@@ -615,6 +620,120 @@ def _read_json(path):
     return json.loads(data.decode('utf-8'))
 
 
+def _calc_selection_diagnostic_header(sequence,action,reader,capture,deadline,error,*,clock=time.monotonic):
+    """Only local data: this skeleton accompanies an already fatal reader error."""
+    selected=capture.get('selected')
+    proxy=None if selected is None else dict(type=type(selected).__name__,module=type(selected).__module__,localId=id(selected))
+    return dict(schemaVersion=1,kind='failed-calc-selection-diagnostic',status='not-started',reason=None,
+        sequence=sequence,action=action,helperPid=os.getpid(),readerDeadline=deadline,startedAt=clock(),
+        primaryErrorSha256=hashlib.sha256(json.dumps(error,ensure_ascii=False,allow_nan=False).encode()).hexdigest(),
+        selectedProxy=proxy,selectionStage=capture.get('stage'),interfaceNames=None,implementation=None,
+        services=None,preCount=None,postCount=None,rawCounts=[],indexedAddresses=[],calls=[],guard=None,
+        pendingRequest=False,errors=[],qualification=False)
+
+
+class _SelectionDiagnosticStop(Exception):pass
+
+
+def _collect_calc_selection_diagnostic(directory,reader,anchor,capture,header,*,clock=time.monotonic):
+    """Post-failure observations only; never alters the primary reply or accepts a range."""
+    state=json.loads(json.dumps(header,allow_nan=False));directory=Path(directory)
+    selected=capture.get('selected');records=0
+    def emit():
+        nonlocal records
+        assert records<140,'Selection diagnostic record bound exceeded'
+        data=json.dumps(state,ensure_ascii=False,allow_nan=False).encode()
+        assert len(data)<=65536,'Selection diagnostic byte bound exceeded'
+        path=directory/f'selection-diagnostic-{header["sequence"]:03d}-{records:03d}.json';records+=1
+        _atomic_json(path,state)
+    def check():
+        if clock()>=_finite(state['readerDeadline']):raise _SelectionDiagnosticStop('deadline')
+        if (directory/f'request-{header["sequence"]+1:03d}.json').exists():
+            state['pendingRequest']=True;raise _SelectionDiagnosticStop('pending-request')
+    def guard(side):
+        check();state['guard']=dict(side=side,startedAt=clock(),finishedAt=None,native=None,uno=None)
+        state['guard']['native']=anchor.snapshot();check()
+        state['guard']['uno']=reader.snapshot();check();state['guard']['finishedAt']=clock()
+    def call(name,function,project):
+        value=None
+        try:
+            check();assert len(state['calls'])<69,'Selection diagnostic getter bound exceeded'
+            guard('before');check()
+            row=dict(getter=name,intentAt=clock(),returnedAt=None,result=None,guardAfter=False)
+            state['calls'].append(row);state['status']='reading';emit();check()
+            value=function();row['returnedAt']=clock();row['result']=project(value)
+            guard('after');row['guardAfter']=True;emit();return value
+        finally:value=None
+    def names(value):
+        assert type(value) in (tuple,list) and len(value)<=64,'Invalid bounded interface metadata'
+        result=[item.typeName for item in value]
+        assert all(type(name) is str and 0<len(name)<=256 for name in result),'Invalid interface name'
+        state['interfaceNames']=result;return result
+    def text(value):
+        assert type(value) is str and len(value)<=256,'Invalid bounded service text'
+        return value
+    def services(value):
+        assert type(value) in (tuple,list) and len(value)<=64,'Invalid bounded service metadata'
+        result=[text(item) for item in value];state['services']=result;return result
+    def count(value,key):
+        state['rawCounts'].append(dict(phase=key,raw=scalar(value)))
+        assert type(value) is int and 0<=value<=0x7fffffff,'Invalid exact range count'
+        state[key]=value;return value
+    def scalar(value):
+        result=dict(type=type(value).__name__,value=None)
+        if type(value) is str and len(value)>256:result.update(omitted=True,length=len(value))
+        elif type(value) is int and value.bit_length()>64:result.update(omitted=True,bitLength=value.bit_length())
+        elif type(value) is float and not math.isfinite(value):result.update(omitted=True,nonfinite=True)
+        elif type(value) in (int,float,str,bool,type(None)):result['value']=value
+        else:result['omitted']=True
+        return result
+    def proxy(value):
+        assert type(value) is reader.proxy_type,'Indexed range proxy type mismatch'
+        return dict(type=type(value).__name__,module=type(value).__module__,localId=id(value))
+    def address(value,index):
+        fields={key:getattr(value,source) for key,source in (
+            ('sheet','Sheet'),('startColumn','StartColumn'),('startRow','StartRow'),
+            ('endColumn','EndColumn'),('endRow','EndRow'))}
+        raw={key:scalar(v) for key,v in fields.items()}
+        valid=all(type(v) is int and 0<=v<=(0x7fff if key=='sheet' else 0x7fffffff) for key,v in fields.items())
+        state['indexedAddresses'].append(dict(index=index,address=fields if valid else None,raw=raw))
+        assert valid,'Invalid exact range address scalar'
+        return fields
+    try:
+        emit();check()
+        if selected is None:raise _SelectionDiagnosticStop('no-selection')
+        if type(selected) is not reader.proxy_type:raise _SelectionDiagnosticStop('proxy-type-mismatch')
+        if capture.get('controller') is not reader.controller:raise _SelectionDiagnosticStop('controller-mismatch')
+        call('XTypeProvider.getTypes',lambda:selected.getTypes(),names)
+        reported=state['interfaceNames']
+        if 'com.sun.star.lang.XServiceInfo' in reported:
+            def implementation(value):state['implementation']=text(value);return value
+            call('XServiceInfo.getImplementationName',lambda:selected.getImplementationName(),implementation)
+            call('XServiceInfo.getSupportedServiceNames',lambda:selected.getSupportedServiceNames(),services)
+        if not set(reported)&{'com.sun.star.sheet.XSheetCellRanges','com.sun.star.sheet.XSheetCellRangeContainer'}:
+            raise _SelectionDiagnosticStop('unsupported-interfaces')
+        call('XIndexAccess.getCount.before',lambda:selected.getCount(),lambda v:count(v,'preCount'))
+        if state['preCount']>32:raise _SelectionDiagnosticStop('range-count-bound')
+        for index in range(state['preCount']):
+            child=None
+            try:
+                child=call(f'XIndexAccess.getByIndex[{index}]',lambda:selected.getByIndex(index),proxy)
+                call(f'XCellRangeAddressable.getRangeAddress[{index}]',lambda:child.getRangeAddress(),lambda v:address(v,index))
+            finally:child=None
+        call('XIndexAccess.getCount.after',lambda:selected.getCount(),lambda v:count(v,'postCount'))
+        if state['preCount']!=state['postCount']:raise _SelectionDiagnosticStop('range-count-changed')
+        state['status']='complete'
+    except _SelectionDiagnosticStop as exc:state.update(status='partial',reason=str(exc))
+    except BaseException as exc:
+        state['status']='error';state['errors'].append(dict(type=type(exc).__name__,message=str(exc)[:1024]))
+    finally:
+        selected=None;capture.clear()
+        try:emit()
+        except BaseException as exc:
+            state['status']='error';state['errors'].append(dict(type=type(exc).__name__,message=str(exc)[:1024]))
+    return state
+
+
 def _worker_native():
     directory=Path(__file__).resolve().parents[1]/'worker'
     sys.path.insert(0,str(directory))
@@ -946,7 +1065,7 @@ class _UnoReader:
     def __init__(self,config,anchor,*,contract=_WRITER_CONTRACT):
         self.config=config;self.contract=contract;self.diagnostic={'proxyTypes':{},'frameEnumeration':[]}
         self.model=self.controller=self.frame=self.desktop=self.context=self.local_context=None
-        self.retained={};self.pending_input=None;self.edit_context=None
+        self.retained={};self.pending_input=None;self.edit_context=None;self.calc_selection_capture=None
         try:
             import uno
             self.local_context=uno.getComponentContext();self.proxy_type=type(self.local_context)
@@ -1009,6 +1128,7 @@ class _UnoReader:
         return raw
 
     def read(self):
+        self.calc_selection_capture={}
         before=self.snapshot()
         if self.contract in _EDIT_MODULES:
             from ime_semantic_context import EditingContextReader
@@ -1025,7 +1145,7 @@ class _UnoReader:
                 value.update(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
                     b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
                     d1Formula=sheet.getCellRangeByName('D1').getFormula(),d1Value=sheet.getCellRangeByName('D1').getValue(),
-                    calcSelection=read_calc_selection(self.controller))
+                    calcSelection=read_calc_selection(self.controller,capture=self.calc_selection_capture))
                 _require_calc_values(value)
             after=self.snapshot()
         elif self.contract in (_CALC_CONTRACT,_CALC_PENDING_CONTRACT):
@@ -1036,7 +1156,7 @@ class _UnoReader:
                 if self.pending_input is None:
                     self.pending_input=AccessiblePendingReader(self.frame,self.config['child_hwnd'],
                         deadline=self.config['readerDeadline'])
-                pending=dict(calcSelection=read_calc_selection(self.controller),pendingInput=self.pending_input.read())
+                pending=dict(calcSelection=read_calc_selection(self.controller,capture=self.calc_selection_capture),pendingInput=self.pending_input.read())
             value=dict(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
                 b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
                 d1Formula=sheet.getCellRangeByName('D1').getFormula(),d1Value=sheet.getCellRangeByName('D1').getValue(),
@@ -1053,6 +1173,7 @@ class _UnoReader:
 
     def release(self):
         # Client references only. The live document is never closed/disposed.
+        if getattr(self,'calc_selection_capture',None) is not None:self.calc_selection_capture.clear()
         if getattr(self,'edit_context',None) is not None:self.edit_context.release();self.edit_context=None
         if self.pending_input is not None:self.pending_input.release();self.pending_input=None
         self.model=self.controller=self.frame=self.desktop=self.context=self.local_context=None
@@ -1318,7 +1439,7 @@ def _helper(directory,*,explicit_model=False):
             path=directory/f'request-{sequence:03d}.json'
             if not path.exists():time.sleep(.005);continue
             request=_read_json(path);action=request.get('action')
-            reply=dict(sequence=sequence,action=action,readerPid=os.getpid(),ok=False);observation=None
+            reply=dict(sequence=sequence,action=action,readerPid=os.getpid(),ok=False);observation=None;diagnostic=None;selection_capture=None
             try:
                 assert request.get('sequence')==sequence and action in ('start','read','release')
                 if action=='release':
@@ -1355,7 +1476,35 @@ def _helper(directory,*,explicit_model=False):
                     pendingInputDiagnostic=getattr(exc,'pending_input_diagnostic',
                         getattr(getattr(reader,'pending_input',None),'last_diagnostic',None)),
                     observerProxiesReleased=getattr(exc,'observer_proxies_released',None),pythonIdentity=identity,nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None))
+                selection_capture=getattr(reader,'calc_selection_capture',None)
+                if selection_capture:
+                    # Detach every nested primary snapshot before diagnostic reads
+                    # may update the reader's mutable observation dictionaries.
+                    reply['error']=json.loads(json.dumps(reply['error'],ensure_ascii=False,allow_nan=False))
+                    try:
+                        diagnostic=_calc_selection_diagnostic_header(sequence,action,reader,selection_capture,
+                            config['readerDeadline'],reply['error'],clock=time.monotonic)
+                        reply['calcSelectionDiagnostic']=diagnostic
+                    except BaseException as later:
+                        # Optional local metadata must never withhold the primary.
+                        reply['calcSelectionDiagnostic']=dict(schemaVersion=1,kind='failed-calc-selection-diagnostic',
+                            status='unavailable',reason='header-error',sequence=sequence,action=action,
+                            helperPid=reply['readerPid'],readerDeadline=config['readerDeadline'],startedAt=None,
+                            primaryErrorSha256=None,selectedProxy=None,selectionStage=None,interfaceNames=None,
+                            implementation=None,services=None,preCount=None,postCount=None,rawCounts=[],
+                            indexedAddresses=[],calls=[],guard=None,pendingRequest=False,
+                            errors=[dict(type=type(later).__name__,message='Diagnostic header preparation failed')],qualification=False)
             _atomic_json(directory/f'reply-{sequence:03d}.json',reply);sequence+=1
+            if selection_capture is not None:
+                try:
+                    if diagnostic is not None:
+                        _collect_calc_selection_diagnostic(directory,reader,anchor,selection_capture,diagnostic,clock=time.monotonic)
+                except BaseException as later:
+                    # The original failed reply is already immutable and visible.
+                    try:_atomic_json(directory/f'selection-diagnostic-{sequence-1:03d}-unexpected.json',
+                        dict(qualification=False,type=type(later).__name__,message=str(later)[:1024]))
+                    except BaseException:pass
+                finally:selection_capture.clear()
             if action=='release':return 0 if reply['ok'] else 1
     finally:
         if reader:reader.release()

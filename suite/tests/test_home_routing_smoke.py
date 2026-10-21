@@ -249,7 +249,7 @@ class HomeRoutingContracts(unittest.TestCase):
                     title=lambda h:self.api.OPEN_CAPTION,class_name=lambda h:'#32770',require_foreground=lambda h:calls.append(('foreground',h)))
                 window=SimpleNamespace(class_name=lambda:'#32770')
                 button=SimpleNamespace(click_input=lambda:(calls.append(('open',44)),live.clear()))
-                record={};proof=dict(finishedAt=0.)
+                record={};proof=dict(finishedAt=0.);cancel_waits=[]
                 def ready(*args):args[-1]['openDialogReadiness']=proof;return 44,window,object(),button
                 def filename(*args,**kwargs):
                     calls.append(('filename',str(args[6])))
@@ -257,6 +257,7 @@ class HomeRoutingContracts(unittest.TestCase):
                     args[7]['pickerFilenameInputs']=[{'expected':str(args[6]),'after':str(args[6])}]
                 def escape(*args,**kwargs):calls.append(('cancel',44));live.clear()
                 with patch.object(self.api,'wait_open_dialog',side_effect=ready),patch.object(self.api,'click_home_action'), \
+                    patch.object(self.api,'wait_cancelled_home',side_effect=lambda *a:cancel_waits.append(a[3]),create=True), \
                     patch.object(self.api,'require_open_dialog_readiness'),patch.object(self.api.lifecycle,'set_owned_picker_filename',side_effect=filename), \
                     patch.object(self.api,'_open_button_recheck',return_value=[]), \
                     patch.object(self.api.native,'send_owned_dialog_escape',side_effect=escape), \
@@ -268,6 +269,7 @@ class HomeRoutingContracts(unittest.TestCase):
                 self.assertEqual([name for name,*_ in calls].count('open'),int(mode=='open'))
                 self.assertEqual([name for name,*_ in calls].count('cancel'),int(mode=='cancel'))
                 self.assertEqual(len(record['openDialogs']),1)
+                self.assertEqual(cancel_waits,[44] if mode=='cancel' else [])
 
     def test_actual_case_dispatch_uses_physical_home_routes_and_menu_close_once(self):
         from types import SimpleNamespace

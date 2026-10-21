@@ -121,7 +121,7 @@ class PreparationTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def prepare(self, architecture='x64'):
-        return m.prepare_observer(self.output, architecture=architecture)
+        return m.prepare_observer(self.output, architecture=architecture, compiler_mode='msvc')
 
     def proof(self): return json.loads((self.output / 'preparation.json').read_bytes())
 

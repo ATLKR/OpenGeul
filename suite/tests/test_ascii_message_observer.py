@@ -25,6 +25,7 @@ class Probe:
         self.target = dict(TARGET); self.calls = []; self.installed = 0
         self.stop_error = self.close_error = self.admit_error = self.start_error = None
         self.seen = 0
+        self.readiness_requests = 0
     def admit(self):
         self.calls.append('admit')
         if self.admit_error: raise self.admit_error
@@ -34,6 +35,13 @@ class Probe:
         self.calls.append('start'); self.installed = 2
         if self.start_error: raise self.start_error
     def arm(self, index): self.calls.append(('arm', index)); return self.seen
+    def query_initial_readiness(self):
+        self.calls.append('queue-query'); self.readiness_requests += 1
+        n = self.readiness_requests
+        return dict(request=n,requestAfter=n,ack=n,ackAfter=n,status=0,queueFlags=0x1c07,
+            queueStatus=0,keyboardSucceeded=1,keyboardError=0,callbackDepth=1,
+            **self.target,engineCreationTime=200,tickStarted=1000+n,tickFinished=1000+n,
+            keyboardState=[0]*256)
     def read_events(self, after):
         self.calls.append(('read', after)); rows = self.batches.pop(0) if self.batches else []
         if rows: self.seen = rows[-1]['sequence']
@@ -60,7 +68,7 @@ class AsciiMessageObserverTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(); self.addCleanup(self.directory.cleanup)
         self.process = NS(pid=77, opengeul_evidence_output=Path(self.directory.name),
                           opengeul_evidence_case='owned-ascii-case')
-        self.binding = dict(shellPid=77, officePid=88, childHwnd=TARGET['hwnd'])
+        self.binding = dict(shellPid=77, officePid=88, officeCreationTime=200, childHwnd=TARGET['hwnd'])
         self.clock = Clock(); self.record = {}
 
     def observer(self, probe=None, deadline=101.):

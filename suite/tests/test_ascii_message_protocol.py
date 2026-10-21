@@ -28,8 +28,12 @@ class AsciiMessageProtocolTests(unittest.TestCase):
         self.assertEqual(96, ctypes.sizeof(p.Event))
         self.assertEqual(32, p.Event.hwnd.offset)
         self.assertEqual(80, p.Event.shiftState.offset)
-        self.assertEqual(112, p.State.events.offset)
-        self.assertEqual(112 + 4096 * 96, ctypes.sizeof(p.State))
+        self.assertEqual(2, p.VERSION)
+        self.assertEqual(328, ctypes.sizeof(p.QueueSample))
+        self.assertEqual(336, ctypes.sizeof(p.Readiness))
+        self.assertEqual(120, p.State.readiness.offset)
+        self.assertEqual(456, p.State.events.offset)
+        self.assertEqual(456 + 4096 * 96, ctypes.sizeof(p.State))
         self.assertEqual(8, ctypes.alignment(p.State))
 
     def test_full_handle_filetime_and_signed_modifier_state_survive_decoding(self):
@@ -38,6 +42,11 @@ class AsciiMessageProtocolTests(unittest.TestCase):
         rows = self.protocol.committed_events(bytes(state), after=0)
         self.assertEqual(0x123456789, rows[0]['hwnd'])
         self.assertEqual(-32768, rows[0]['shiftState'])
+
+    def test_legacy_state_version_is_rejected_instead_of_reusing_old_layout(self):
+        state = self.state(); state.version = 1
+        with self.assertRaisesRegex(AssertionError, 'ABI'):
+            self.protocol.committed_events(bytes(state), after=0)
 
     def test_a_reserved_uncommitted_row_is_not_fabricated_into_evidence(self):
         state = self.state(); state.count = 2; state.events[0].sequence = 1

@@ -3,7 +3,7 @@ import ctypes as C
 
 
 MAGIC = 0x4f47414b
-VERSION = 1
+VERSION = 2
 CAPACITY = 4096
 
 
@@ -17,6 +17,18 @@ class Event(C.Structure):
     _fields_ += [('flags', C.c_uint32), ('reserved', C.c_uint32)]
 
 
+class QueueSample(C.Structure):
+    _fields_ = [('status', C.c_int32)]
+    _fields_ += [(name, C.c_uint32) for name in
+        ('queueFlags', 'queueStatus', 'keyboardSucceeded', 'keyboardError', 'callbackDepth', 'pid', 'tid')]
+    _fields_ += [(name, C.c_uint64) for name in ('hwnd', 'engineCreationTime', 'layout', 'tickStarted', 'tickFinished')]
+    _fields_ += [('keyboard', C.c_uint8 * 256)]
+
+
+class Readiness(C.Structure):
+    _fields_ = [('request', C.c_uint32), ('ack', C.c_uint32), ('sample', QueueSample)]
+
+
 class State(C.Structure):
     _fields_ = [(name, C.c_uint32) for name in
         ('magic', 'version', 'stateSize', 'eventSize', 'capacity', 'pid', 'tid', 'controllerPid',
@@ -24,11 +36,13 @@ class State(C.Structure):
     _fields_ += [(name, C.c_int32) for name in ('count', 'overflow', 'activeCallbacks', 'status')]
     _fields_ += [(name, C.c_uint32) for name in ('armedIndex', 'armedEpoch', 'command', 'stopAck')]
     _fields_ += [(name, C.c_uint64) for name in ('nonce', 'hwnd', 'engineCreationTime', 'layout')]
+    _fields_ += [('readinessMessage', C.c_uint32), ('readinessReserved', C.c_uint32), ('readiness', Readiness)]
     _fields_ += [('events', Event * CAPACITY)]
 
 
-assert C.sizeof(Event) == 96 and State.events.offset == 112
-assert C.sizeof(State) == 112 + CAPACITY * 96
+assert C.sizeof(Event) == 96 and State.events.offset == 456
+assert C.sizeof(QueueSample) == 328 and C.sizeof(Readiness) == 336 and State.readiness.offset == 120
+assert C.sizeof(State) == 456 + CAPACITY * 96
 
 
 def committed_events(raw, *, after):

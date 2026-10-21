@@ -178,6 +178,29 @@ class EditorClickPolicyTests(unittest.TestCase):
                 probe.after_move=race
                 with self.assertRaises(AssertionError):self.run_click(p,c,probe,r)
                 self.assertEqual(probe.calls.count('move'),1);self.assertNotIn('click',probe.calls)
+    def test_geometry_rejection_retains_the_actual_comparison_without_another_query(self):
+        for frame_number,phase in [(3,'before-pointer-intent'),(4,'after-pointer-move'),(5,'before-button-input')]:
+            with self.subTest(phase=phase),tempfile.TemporaryDirectory() as folder:
+                p,c,probe,r=self.fixture(folder);original=probe.editor_snapshot;frames=[]
+                def observe(*args):
+                    value=original(*args)
+                    if len(frames)+1==frame_number:value['editor']['clientScreenRect'][0]+=1
+                    frames.append(value);return value
+                probe.editor_snapshot=observe
+                with self.assertRaisesRegex(AssertionError,'geometry changed'):
+                    self.run_click(p,c,probe,r)
+                result=r['editorClicks'][0]
+                self.assertIn('geometryRejection',result,'Actual changed frame was discarded')
+                rejected=result['geometryRejection']
+                self.assertEqual(rejected['phase'],phase)
+                self.assertIs(rejected['observedFrame'],frames[-1])
+                self.assertEqual(rejected['expectedFrame']['editor']['clientScreenRect'][0],8)
+                self.assertEqual(rejected['observedFrame']['editor']['clientScreenRect'][0],9)
+                self.assertEqual(len(frames),frame_number)
+                self.assertEqual(probe.calls.count('move'),int(frame_number>3))
+                self.assertNotIn('click',probe.calls)
+                final,=Path(folder).glob('*-result.json')
+                self.assertEqual(json.loads(final.read_bytes())['geometryRejection'],rejected)
     def test_query_failures_restore_dpi_and_close_any_admitted_handle(self):
         for failure in ['shell','frame','engine-open','engine','hit']:
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as folder:

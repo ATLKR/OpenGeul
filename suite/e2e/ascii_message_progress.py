@@ -78,12 +78,15 @@ class CharacterProgress:
             assert row['sequence'] == self.sequence + 1 <= MAX_SESSION_EVENTS, 'Queue sequence is noncontiguous or replayed'
             assert row['actionEpoch'] == self.index + 1, 'Queue action epoch changed'
             assert all(row[key] == self.target[key] for key in ('pid', 'tid', 'hwnd', 'layout')), 'Queue native target changed'
-            assert row['origin'] == 1 and row['remove'] in (0, 1) and row['flags'] == 0, 'Unknown queue source flags'
+            # PeekMessage permits PM_NOYIELD(2) with PM_NOREMOVE(0) or
+            # PM_REMOVE(1). Preserve the raw hook value; only bit0 consumes.
+            assert row['origin'] == 1 and row['remove'] & ~0x3 == 0 and row['flags'] == 0, 'Unknown queue source flags'
+            consumed = bool(row['remove'] & 0x1)
             assert row['messageTime'] <= 0xffffffff, 'Invalid native message time'
             assert row['message'] in (0x100, 0x101, 0x102), 'Unexpected system or keyboard message'
             if row['message'] == 0x102:
                 assert row['wParam'] == ord(self.action['character']), 'Observed ASCII character differs'
-                if row['remove']:
+                if consumed:
                     assert self.character_sequence is None, 'Duplicate consumed ASCII character'
                     assert self.main_down_sequence is not None, 'ASCII character preceded its keydown'
                     self.character_sequence = row['sequence']
@@ -97,7 +100,7 @@ class CharacterProgress:
                 assert flags & 0xffff == 1 and (flags >> 16) & 0xff == expected['scan'], 'ASCII key scan or repeat differs'
                 assert flags & (1 << 24 | 1 << 29) == 0, 'ASCII key is extended or a system key'
                 assert (flags >> 30) & 3 == (3 if up else 0), 'ASCII key transition flags differ'
-                if row['remove']:
+                if consumed:
                     if not up and expected['scan'] == self.main_scan:
                         self.main_down_sequence = row['sequence']
                     self.key_index += 1

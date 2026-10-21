@@ -25,6 +25,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 import windows_smoke as native
 import lifecycle_smoke as lifecycle
 import office_feature_smoke as features
+from home_cancel_readiness import wait_cancelled_home, require_cancelled_home_readiness
 
 OPEN_CAPTION='OpenGeul Office에서 문서 열기'
 OPEN_FILENAME_ID='1148'  # Actual Home native Open, distinct from Save Edit1001.
@@ -356,7 +357,10 @@ def open_dialog_action(api,process,home,record,path=None,*,document=None):
         native.click_owned_control(api,process,home,button,record,purpose='OPEN_BUTTON',
             dialog=dialog,caption=OPEN_CAPTION,readiness=proof)
     record['stage']='wait-owned-open-dialog-disappearance'
-    native.wait_for(lambda:not api.user.IsWindow(dialog),seconds=20)
+    if path is None:
+        wait_cancelled_home(api,process,home,dialog,record,operation)
+    else:
+        native.wait_for(lambda:not api.user.IsWindow(dialog),seconds=20)
     operation['success']=True
     return operation
 
@@ -590,7 +594,7 @@ class HomeCase:
         self.screenshot(attachment['hwnd'],module+'-attached')
         if module=='base' and source is None:
             native.save_new_base(self.api,self.process,attachment['hwnd'],self.folder,self.output,self.record)
-            native.require_base_save_dialog_readiness(self.record['baseSaveDialogReadiness'],self.process.pid,attachment['hwnd'],'OpenGeul Base — 다른 이름으로 저장')
+            native.require_base_save_dialog_readiness(self.record['baseSaveDialogReadiness'],self.process.pid,attachment['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-save-menu-pointer')
         return frame
 
     def close_frame(self,frame,*,menu=False):
@@ -797,6 +801,7 @@ def require_case_result(record,suite):
         if spec['kind']=='cancel':
             assert proof['action']=='cancel' and operation['cancelEscapeCount']==1 and operation['openButtonClicks']==0
             assert not operation.get('pickerFilenameInputs') and record['cancelPreservedHomeOnly'] is True
+            require_cancelled_home_readiness(operation['cancelOwnerReadiness'],pid,home,record['originalShell'],open_readiness=proof)
         else:
             assert proof['action']=='open' and operation['openButtonClicks']==1 and operation['cancelEscapeCount']==0
             require_open_filename_receipt(operation,pid,home,copies[index]['path'])
@@ -833,8 +838,12 @@ def require_case_result(record,suite):
         if spec.get('extension')=='csv':require_csv_post_getter_screenshot(record)
     if spec['kind']=='tile' and spec['module']=='base':
         frame,=frames
-        native.require_base_save_dialog_readiness(record['baseSaveDialogReadiness'],pid,frame['hwnd'],'OpenGeul Base — 다른 이름으로 저장')
+        native.require_base_save_dialog_readiness(record['baseSaveDialogReadiness'],pid,frame['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-save-menu-pointer')
         assert record['saveAsDialogVerified'] is True
+        assert record['newBaseSaveMenuActionVerified'] is True and record.get('saveShortcutViaOwnedMenu') is False
+        trigger=native.require_base_save_menu_record(record,pid,frame['hwnd'])
+        assert trigger['engineAdmissionBasis']=='existing-home-retained-engine'
+        assert (trigger['originalEngine']['pid'],trigger['originalEngine']['creationTime'],trigger['originalEngine']['image'])==(frame['officePid'],frame['officeCreationTime'],frame['officeImage'])
     if spec.get('module')=='hwp':
         ready=record['hwpReadiness'];exit=record['hwpExit']
         assert ready['filenameObserved'] is True and ready['postload']['postLoadEditorVerified'] is ready['postload']['toolbarEnabled'] is True

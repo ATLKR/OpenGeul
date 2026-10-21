@@ -160,15 +160,24 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
             budget(); pause(min(.05, max(0, deadline - clock())))
         evidence['chosenPhysicalPoint'] = list(point); evidence['qualifiedHit'] = hit
         evidence['qualifiedFrame'] = frame
-        assert observe() == frame, 'Owned editor geometry changed before pointer intent'
+        actual = observe()
+        if actual != frame:
+            evidence['geometryRejection'] = dict(phase='before-pointer-intent', expectedFrame=frame, observedFrame=actual)
+        assert actual == frame, 'Owned editor geometry changed before pointer intent'
         evidence['pointerMoveIntent'] = True; retain('pointer-intent')
         budget(); probe.move(point, evidence)
         assert evidence['pointerReadback'] == list(point), 'Physical editor pointer readback differs'
-        assert observe() == frame, 'Owned editor geometry changed after pointer move'
+        actual = observe()
+        if actual != frame:
+            evidence['geometryRejection'] = dict(phase='after-pointer-move', expectedFrame=frame, observedFrame=actual)
+        assert actual == frame, 'Owned editor geometry changed after pointer move'
         budget(); fresh = probe.editor_hit(child, point); evidence['beforeClickHit'] = fresh
         assert fresh == hit and _hit_ready(fresh, hwnd, child, office_pid, identity[2][2], point), 'Owned editor hit changed after pointer move'
         # Recheck both process generations and geometry after the physical hit.
-        assert observe() == frame, 'Owned editor geometry changed before button input'
+        actual = observe()
+        if actual != frame:
+            evidence['geometryRejection'] = dict(phase='before-button-input', expectedFrame=frame, observedFrame=actual)
+        assert actual == frame, 'Owned editor geometry changed before button input'
         evidence['clickAttempts'] = 1; evidence['requestedInputs'] = 2; retain('click-intent')
         budget(); probe.click(evidence)
         assert evidence['clickCompleted'] is True and evidence['insertedInputs'] == 2
