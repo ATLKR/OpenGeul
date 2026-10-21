@@ -25,6 +25,7 @@ PROGRAMS = {
     'GUI_IMPRESS': ('CTRL_F6', 'EDITOR_READY', 'TAB', 'F2', 'CTRL_END', 'ASCII', 'SAVE_PHASE', 'CTRL_S'),
     'WRITER_STYLE': ('CTRL_F6', 'EDITOR_READY', 'CTRL_HOME', 'CTRL_1'),
     'PENDING_CALC_ENTRY': ('CTRL_F6', 'EDITOR_READY'),
+    'KOREAN_UI_ENTRY': ('CTRL_F6', 'EDITOR_READY'),
     'LIFECYCLE_WRITER': ('MODEL_STARTED', 'CTRL_F6', 'EDITOR_READY', 'CTRL_END', 'ASCII', 'MODEL_COMPLETE'),
 }
 
@@ -152,16 +153,60 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
             officeCreationTime=engine['creationTime'], expectedImage=engine['image'], suiteHwnd=a['hwnd'],
             parentHwnd=a['parent'], childHwnd=a['child'], rootHwnd=a['hwnd'])
         self.receipt.update(originalShell=shell, originalEngine=engine)
-        self.receipt['admissionSnapshot'] = self._owned_guard()
+        self.receipt['admissionSnapshot'] = self._initial_admission_guard()
         self.receipt['firstShortcutAdmission'] = admit_shortcut_generation(p,a['parent'],a['child'],engine,self.receipt['engineHandleAdmittedAt'])
         self._retain('admission'); self._budget()
 
-    def _observe_owned_guard(self):
+    def _initial_host_thread(self,row):
+        """Only a noninput initial admission may lack a native focus recipient."""
+        from windows_smoke import _editor_focus_snapshot_ready
+        b=self.binding;scope=row['scope']
+        assert row['shell']==self.original_shell and row['engine']==self.original_engine, 'Initial admission generation changed'
+        thread=scope['before']['editor']['threadId']
+        _editor_focus_snapshot_ready(scope,b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],thread)
+        focus=scope['focus']
+        assert all(type(focus[key]) is int and focus[key]==0 for key in ('hwnd','pid','threadId','rootHwnd')), 'Initial missing focus requires exact native integer zero'
+        assert focus['isWindow'] is False, 'Initial missing focus requires exact false liveness'
+        assert (focus['hwnd'],focus['isWindow'],focus['pid'],focus['threadId'],focus['rootHwnd'])==(0,False,0,0,0), 'Initial missing focus has contradictory native identity'
+        assert scope['focusWithinEditor'] is False, 'Initial missing focus cannot be editor readiness'
+        host=scope['before']['suite']
+        assert type(host['threadId']) is int and host['threadId']>0, 'Initial host keyboard requires its positive native thread'
+        for edge in ('before','after'):
+            assert scope[edge]['suite']==host, 'Original Suite host thread identity changed'
+            foreground=scope[edge]['foreground']
+            assert all(foreground[key]==host[key] for key in ('hwnd','isWindow','pid','threadId','rootHwnd')), 'Initial missing focus requires the exact original Suite foreground'
+        parent=scope['parent']
+        assert (parent['hwnd'],parent['pid'],parent['rootHwnd'],parent['isWindow'])==(b['parentHwnd'],b['shellPid'],b['suiteHwnd'],True), 'Initial admission parent changed'
+        assert all(scope[key] is True for key in ('suiteOwnsParent','parentOwnsChild','parentVisible','parentEnabled','childVisible','childEnabled')), 'Initial admission ancestry is not available'
+        return host['threadId']
+
+    def _observe_owned_guard(self,*,initial_admission=False):
         row = super()._observe_guard()
-        self._budget(); row['focusKeyboard'] = self.probe.keyboard_snapshot(row['scope']['focus']['threadId'])
+        row['focusKeyboard']=None
+        if initial_admission and row['scope']['focus']['hwnd']==0:
+            thread=self._initial_host_thread(row);self._budget()
+            witness=dict(schemaVersion=1,kind='owned-initial-admission-without-focus',
+                physicalInputAllowed=False,inputRecipientHwnd=None,hostKeyboardThreadId=thread,
+                startedAt=self.clock(),deadline=self.entry_deadline)
+            row['initialMissingFocusAdmission']=witness
+            witness['hostBefore']=self.api._focus_window(self.binding['suiteHwnd'])
+            witness['hostBeforeReturnedAt']=self.clock();self._budget()
+            assert witness['hostBefore']==row['scope']['before']['suite'], 'Initial host thread changed before keyboard sample'
+            row['initialHostKeyboard']=self.probe.keyboard_snapshot(thread)
+            witness['keyboardReturnedAt']=self.clock();self._budget()
+            witness['hostAfter']=self.api._focus_window(self.binding['suiteHwnd'])
+            witness['hostAfterReturnedAt']=self.clock();self._budget()
+            assert witness['hostAfter']==witness['hostBefore'], 'Initial host thread changed during keyboard sample'
+            witness['shellAfter']=self.probe.process_snapshot(self.process);self._budget()
+            witness['engineAfter']=self.probe.engine_snapshot(self.handle)
+            witness['finishedAt']=self.clock();self._budget()
+        elif row['scope']['focus']['hwnd']:
+            thread=row['scope']['focus']['threadId']
+            assert type(thread) is int and thread>0, 'Focused keyboard query requires its positive native thread'
+            self._budget();row['focusKeyboard']=self.probe.keyboard_snapshot(thread)
         return row
 
-    def _validate_owned_guard(self, row, editor_required):
+    def _validate_owned_guard(self, row, editor_required,*,initial_admission=False):
         from windows_smoke import _editor_focus_snapshot_ready
         b = self.binding; shell, engine, scope, keyboard, focus_keyboard = (row[key] for key in ('shell','engine','scope','keyboard','focusKeyboard'))
         assert shell == self.original_shell, 'Retained original shell generation changed'
@@ -174,7 +219,22 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
         assert (parent['hwnd'], parent['pid'], parent['rootHwnd'], parent['isWindow']) == (b['parentHwnd'], b['shellPid'], b['suiteHwnd'], True), 'Owned editor parent changed'
         assert all(scope[key] is True for key in ('suiteOwnsParent', 'parentOwnsChild', 'parentVisible', 'parentEnabled', 'childVisible', 'childEnabled')), 'Owned editor ancestry is not available'
         focus = scope['focus']
-        assert focus['hwnd'] and focus['isWindow'] and focus['rootHwnd'] == b['suiteHwnd'] and focus['pid'] in (b['shellPid'], b['officePid']), 'Input requires owned root or editor focus'
+        if initial_admission and focus['hwnd']==0:
+            assert not editor_required, 'Missing initial focus cannot authorize editor input'
+            host_thread=self._initial_host_thread(row);witness=row['initialMissingFocusAdmission']
+            assert type(witness['schemaVersion']) is int and witness['schemaVersion']==1 and witness['kind']=='owned-initial-admission-without-focus'
+            assert witness['physicalInputAllowed'] is False and witness['inputRecipientHwnd'] is None
+            assert type(witness['hostKeyboardThreadId']) is int and witness['hostKeyboardThreadId']>0
+            assert row['focusKeyboard'] is None and witness['hostKeyboardThreadId']==host_thread
+            assert witness['hostBefore']==witness['hostAfter']==scope['before']['suite']
+            assert witness['shellAfter']==self.original_shell and witness['engineAfter']==self.original_engine, 'Initial admission generation changed during host sample'
+            assert witness['deadline']==self.entry_deadline==self.deadline
+            times=[witness[key] for key in ('startedAt','hostBeforeReturnedAt','keyboardReturnedAt','hostAfterReturnedAt','finishedAt')]
+            assert all(type(value) in (int,float) and math.isfinite(value) for value in times)
+            assert self.receipt['startedAt']<=times[0] and times==sorted(times) and times[-1]<self.entry_deadline
+            focus_keyboard=row['initialHostKeyboard']
+        else:
+            assert focus['hwnd'] and focus['isWindow'] and focus['rootHwnd'] == b['suiteHwnd'] and focus['pid'] in (b['shellPid'], b['officePid']), 'Input requires owned root or editor focus'
         if editor_required:
             assert scope['focusWithinEditor'] is True and focus['pid'] == b['officePid'], 'Strict editor readiness is required before navigation'
         self._budget(); self.api.require_foreground(b['suiteHwnd'])
@@ -188,13 +248,24 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
         assert locks == self.lock_state and tuple(focus_keyboard[key] for key in ('capsLockOn', 'scrollLockOn', 'numLockOn')) == locks, 'Native lock state changed'
         self._budget()
 
+    def _initial_admission_guard(self):
+        from capture_readiness import settle_owned_capture
+        assert not self.active and not self.finished and self.index==0
+        assert not self.receipt['actions'] and not self.receipt['phases'], 'Initial admission cannot repeat after an input phase'
+        assert self.deadline==self.entry_deadline, 'Initial admission cannot renew its entry deadline'
+        return settle_owned_capture(lambda:self._observe_owned_guard(initial_admission=True),
+            lambda row:self._validate_owned_guard(row,False,initial_admission=True),
+            self.receipt,self.binding,self.deadline,clock=self.clock)
+
     def _capture_guard(self, editor_required):
         from capture_readiness import settle_owned_capture
         result = settle_owned_capture(self._observe_owned_guard,
             lambda row:self._validate_owned_guard(row,editor_required),self.receipt,self.binding,self.deadline,clock=self.clock)
         if editor_required:
+            from windows_smoke import _editor_focus_snapshot_ready
             b = self.binding
-            assert self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd']) == result['scope']['focus']['hwnd']
+            focus = _editor_focus_snapshot_ready(result['scope'],b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],self.thread)
+            assert focus and focus == result['scope']['focus']['hwnd'], 'Strict editor readiness requires the guarded scope'
             self._budget()
         return result
 
@@ -234,7 +305,7 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
             require_editor_focus_readiness(evidence, b['suiteHwnd'], b['childHwnd'], b['shellPid'], b['officePid'])
             assert self.clock() < self.entry_deadline, 'Shared editor entry deadline expired'
             observed = self._guard()
-            self.deadline = (self.entry_deadline if self.program == 'PENDING_CALC_ENTRY' else
+            self.deadline = (self.entry_deadline if self.program in ('PENDING_CALC_ENTRY','KOREAN_UI_ENTRY') else
                              self.model_plan.deadline if self.model_plan is not None else self.clock() + 5)
             self.probe.deadline = self.deadline; self.receipt.update(inputDeadline=self.deadline,deadline=self.deadline)
             self._phase('EDITOR_READY', dict(focusHwnd=evidence['focusHwnd'], snapshot=observed))

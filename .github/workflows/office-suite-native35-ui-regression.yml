@@ -1,0 +1,305 @@
+name: OpenGeul native35 focused x64 UI regression
+'on':
+  push:
+    branches: [work/opengeul-office-native35-ui-regression]
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  windows-ui-regression:
+    if: github.event.repository.private == false
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+    - name: Preserve exact source bytes
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      id: checkout
+      with:
+        persist-credentials: false
+    - name: Archive the exact committed experimental source
+      if: always() && steps.checkout.outcome == 'success'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $output = Join-Path $env:GITHUB_WORKSPACE '.work/suite-native35-source'
+        New-Item -ItemType Directory -Path $output -ErrorAction Stop | Out-Null
+        $head = (git rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Checkout HEAD differs from the triggering source.' }
+        $tree = (git rev-parse 'HEAD^{tree}').Trim()
+        if ($LASTEXITCODE -ne 0) { throw 'Source tree identity failed.' }
+        $archive = Join-Path $output 'source.zip'
+        git archive --format=zip --output $archive HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'Exact committed source archive failed.' }
+        $identity = [ordered]@{
+          schemaVersion = 1
+          kind = 'experimental-focused-x64-native-ui-regression-source'
+          sourceCommit = $head
+          sourceTree = $tree
+          runId = $env:GITHUB_RUN_ID
+          runAttempt = $env:GITHUB_RUN_ATTEMPT
+          workflow = '.github/workflows/office-suite-native35-ui-regression.yml'
+          job = 'windows-ui-regression'
+          architecture = 'x64'
+          experimentalOnly = $true
+          mainQualification = $false
+          archiveBytes = (Get-Item -LiteralPath $archive).Length
+          archiveSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        $identity | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output 'source-identity.json') -Encoding utf8
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: x64
+    - name: Prepare pinned native UI and independent PDF tools
+      shell: pwsh
+      run: |
+        python -m pip install --require-hashes --only-binary=:all: -r suite/config/pdf-e2e-requirements.txt
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF verification tooling installation failed.' }
+        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI prerequisites failed.' }
+    - name: Build and verify the existing Core shell policies
+      shell: pwsh
+      run: |
+        dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+        if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
+    - name: Build the pinned x64 Suite package
+      id: build
+      shell: pwsh
+      run: |
+        $lock = Get-Content suite/config/runtime.lock.json -Raw | ConvertFrom-Json
+        if ($lock.architecture -cne 'x64' -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite identity.' }
+        "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-x64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        ./suite/scripts/build-suite.ps1 -Architecture x64
+        if ($LASTEXITCODE -ne 0) { throw 'Suite package build failed.' }
+    - name: 실제 Office 엔진의 생성·편집·저장·재열기
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
+      id: fixtures
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 문서 형식 15개와 모듈 심화 기능 6개 의미 검증
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/office_feature_smoke.py --suite $package --output .work/suite-office-features
+        if ($LASTEXITCODE -ne 0) { throw 'Office format and feature semantic E2E failed.' }
+      id: office-features
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 패키지 HWP 변환기로 출처가 고정된 Home 입력 생성
+      id: home-fixtures
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/home_fixture_inputs.py --suite $package --output .work/e2e-fixtures
+        if ($LASTEXITCODE -ne 0) { throw 'Owned HWP fixture generation or provenance failed.' }
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기
+      id: calc-save
+      shell: pwsh
+      run: |
+        python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+S verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+S 성공·실패 뒤 패키지 불변 확인
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+S verification.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Enter 없이 실제 Calc Ctrl+W 저장·버림·취소 관측
+      id: calc-close
+      shell: pwsh
+      run: |
+        python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+W choice probe failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Calc Ctrl+W 성공·실패 뒤 패키지 불변 확인
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+W choice probe.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: Home 타일·파일 열기·공통 문서 메뉴 25개 실제 입력
+      id: home-routes
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/home_routing_smoke.py --suite $package --features .work/suite-office-features --hwp-fixtures .work/e2e-fixtures --output .work/suite-home-routing
+        $homeExit = $LASTEXITCODE
+        python suite/scripts/verify-suite.py $package
+        $integrityExit = $LASTEXITCODE
+        if ($homeExit -ne 0 -or $integrityExit -ne 0) { throw "Home routing failed: physical=$homeExit integrity=$integrityExit" }
+      if: '!cancelled() && steps.office-features.outcome == ''success'' && steps.home-fixtures.outcome == ''success'''
+    - name: 한국어 탭 메뉴의 실제 접근성·화면 확인
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ui_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean native Tabbed UI verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: 저장·취소·실패·창 복원·HWP 실행 수명 검사
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/lifecycle_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-lifecycle
+        if ($LASTEXITCODE -ne 0) { throw 'Actual native document lifecycle verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: 첫 번째 전체 Suite GUI·편집 후 의미 검증
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine/fixtures --output .work/suite-native
+        if ($LASTEXITCODE -ne 0) { throw 'First complete native UI verification failed.' }
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine --verify-ui
+        if ($LASTEXITCODE -ne 0) { throw 'First post-GUI semantic verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+    - name: 새 문서 집합으로 전체 UI·E2E를 두 번째 독립 실행
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine-2
+        if ($LASTEXITCODE -ne 0) { throw 'Second fresh engine fixtures failed.' }
+        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine-2/fixtures --output .work/suite-native-2
+        if ($LASTEXITCODE -ne 0) { throw 'Second complete native UI verification failed.' }
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine-2 --verify-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Second post-GUI semantic verification failed.' }
+        python suite/scripts/verify-suite.py $package
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during the complete native validation.' }
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Verify package integrity after every attempted UI round
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during focused native validation.' }
+    - name: 모든 네이티브 진단 보존·해시와 크래시 부재 확인
+      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      shell: python
+      run: |
+        from pathlib import Path, PurePosixPath
+        import hashlib, json, os, re, sys
+        sys.path.insert(0, str(Path.cwd()))
+        from suite.e2e.native_cleanup_receipt import MAX_RECEIPT_BYTES, load_cleanup_receipt, validate_cleanup_receipt
+        def check_native_archives(root, expected_engine_image):
+            assert root.is_dir() and not root.is_symlink(), 'Owned native diagnostics are missing'
+            manifests = sorted(root.glob('*/manifest.json'))
+            assert manifests, 'No owned native diagnostic manifests were archived'
+            for path in root.rglob('*'):
+                assert not path.is_symlink(), 'Linked native diagnostic paths are not accepted'
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        signature = stream.read(4)
+                    assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
+            files = shutdowns = 0
+            for manifest in manifests:
+                record = json.loads(manifest.read_text(encoding='utf-8'))
+                assert record.get('schemaVersion') == 1 and record.get('archiveComplete') is True, 'Incomplete native archive: ' + str(manifest)
+                assert isinstance(record.get('files'), list), 'Native archive file list is missing'
+                seen = set()
+                for item in record['files']:
+                    name = item['path']
+                    relative = PurePosixPath(name)
+                    assert name and '\\' not in name and ':' not in name and not relative.is_absolute() and '..' not in relative.parts and relative.as_posix() == name and name not in seen, 'Unsafe or duplicate native archive member'
+                    seen.add(name)
+                    path = manifest.parent.joinpath(*relative.parts)
+                    assert path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve()), 'Native archive member is missing or escaped its profile'
+                    assert type(item['bytes']) is int and path.stat().st_size == item['bytes'], 'Native archive file size differs'
+                    assert re.fullmatch('[a-f0-9]{64}', item['sha256']) and hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256'], 'Native archive file hash differs'
+                    files += 1
+                # These five diagnostics roots are product UnoBackend archives.
+                # Observer evidence is outside them; a missing proof is never an exemption.
+                assert 'shutdown.json' in seen, 'Manifest-hashed product shutdown receipt is missing'
+                shutdown = manifest.parent / 'shutdown.json'
+                assert 0 < shutdown.stat().st_size <= MAX_RECEIPT_BYTES, 'Product shutdown receipt exceeds its finite limit'
+                validate_cleanup_receipt(load_cleanup_receipt(shutdown.read_bytes()),
+                                         expected_engine_image=str(expected_engine_image), launcher_pid=record.get('launcherPid'))
+                shutdowns += 1
+            return dict(schemaVersion=1, kind='native-archive-integrity', success=True, completeArchives=len(manifests), verifiedFiles=files, qualifiedShutdowns=shutdowns, crashDumps=0)
+        def check_evidence_crash_dumps(root):
+            assert root.is_dir() and not root.is_symlink(), 'Owned Calc evidence is missing'
+            for path in root.rglob('*'):
+                assert not path.is_symlink(), 'Linked Calc evidence paths are not accepted'
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        signature = stream.read(4)
+                    assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
+            return dict(success=True, crashDumps=0)
+        def check_all_native_archives(roots, evidence_roots, expected_engine_image):
+            records = []
+            for root in roots:
+                try:
+                    record = check_native_archives(Path(root), expected_engine_image)
+                except Exception as exc:
+                    record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+                record['root'] = str(root)
+                records.append(record)
+            evidence = []
+            for root in evidence_roots:
+                try:
+                    record = check_evidence_crash_dumps(Path(root))
+                except Exception as exc:
+                    record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+                record['root'] = str(root)
+                evidence.append(record)
+            success = bool(records) and bool(evidence) and all(record['success'] for record in records + evidence)
+            result = dict(schemaVersion=1, kind='native-archive-integrity', success=success, roots=records, evidenceRoots=evidence,
+                          completeArchives=sum(record.get('completeArchives', 0) for record in records),
+                          verifiedFiles=sum(record.get('verifiedFiles', 0) for record in records),
+                          qualifiedShutdowns=sum(record.get('qualifiedShutdowns', 0) for record in records))
+            if success:
+                result['crashDumps'] = 0
+            return result
+        roots = ('.work/suite-worker-diagnostics', '.work/suite-calc-save/diagnostics',
+                 '.work/suite-calc-close/calc-close-save/diagnostics',
+                 '.work/suite-calc-close/calc-close-discard/diagnostics',
+                 '.work/suite-calc-close/calc-close-cancel/diagnostics')
+        evidence_roots = ('.work/suite-calc-save', '.work/suite-calc-close')
+        result = check_all_native_archives(roots, evidence_roots, Path(os.environ['SUITE_PACKAGE']).resolve() / 'Office/program/soffice.bin')
+        result.update(sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'])
+        Path('.work/suite-native-integrity.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+        print(json.dumps(result))
+        assert result['success'], 'At least one owned native diagnostics root failed integrity or graceful shutdown qualification'
+    - name: Preserve exact source and all original experimental evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-native35-ui-regression-x64-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-native35-source/
+          .work/suite-engine/
+          .work/suite-engine-2/
+          .work/suite-native/
+          .work/suite-native-2/
+          .work/suite-calc-save/
+          .work/suite-calc-close/
+          .work/suite-korean-ui/
+          .work/suite-lifecycle/
+          .work/suite-worker-diagnostics/
+          .work/suite-native-integrity.json
+          .work/office-suite/msi.msi.log
+          .work/suite-office-features/
+          .work/e2e-fixtures/
+          .work/suite-home-routing/
+          dist/**/suite-inventory.json
+          dist/**/suite-provenance.json
+          dist/**/runtime-branding.json
+        retention-days: 7
+        if-no-files-found: error
+        compression-level: 6

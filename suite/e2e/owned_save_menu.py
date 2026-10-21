@@ -33,6 +33,14 @@ def _point(value):
     assert all(type(part) is int and -(2**31)<=part<2**31 for part in value), 'Invalid physical Save point'
 
 
+def _picker_identity(window, document, pid, thread, caption):
+    for key in ('hwnd','pid','threadId','rootHwnd','ownerHwnd'):_integer(window[key])
+    assert window['hwnd']==window['rootHwnd'] and window['hwnd']!=document
+    assert (window['pid'],window['threadId'],window['ownerHwnd'],window['className'],window['title'])==(pid,thread,document,'#32770',caption), 'Original Save picker identity changed'
+    assert type(window['visible']) is type(window['enabled']) is bool, 'Unknown Save picker readiness state'
+    return {key:window[key]for key in ('hwnd','pid','threadId','rootHwnd','ownerHwnd','className','title')}
+
+
 def detached_save_menu_action(action):
     assert isinstance(action,dict)
     raw=json.dumps(action,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode()
@@ -181,6 +189,29 @@ def require_save_menu_action(action, shell_pid, document, caption, readiness):
     assert readiness['trigger']=='owned-save-menu-pointer' and readiness['fileMenuClicks']==readiness['saveMenuClicks']==1 and readiness['saveShortcuts']==0
     for key in ('fileMenuClicks','saveMenuClicks','saveShortcuts'):_integer(readiness[key],positive=False)
     assert action['finishedAt'] <= readiness['startedAt'] <= readiness['finishedAt']
+    witness=after['pickerReadiness']
+    assert type(witness['schemaVersion']) is int and witness['schemaVersion']==1
+    assert witness['kind']=='same-owned-save-picker-readiness' and _time(witness['deadline'])==action['deadline']
+    pending=_integer(witness['pendingObservationCount'],positive=False)
+    total=_integer(after['observationCount']);assert pending<total<=501
+    expected=_picker_identity(picker,document,shell_pid,action['before']['document']['threadId'],caption)
+    def retained(row):
+        assert _picker_identity(row['window'],document,shell_pid,expected['threadId'],caption)==expected, 'Retained Save picker was replaced'
+        for key in ('pid','handleValue','creationTime','waitResult'):_integer(row['process'][key])
+        assert row['process']==original, 'Retained Save picker process generation changed'
+        return _time(row['at'])
+    first,last=witness['firstObservation'],witness['lastObservation']
+    first_at,last_at=retained(first),retained(last)
+    assert action['startedAt']<=_time(action['inputStartedAt'])<=_time(action['inputFinishedAt'])<=first_at<=last_at<=action['finishedAt']
+    assert last['window']==picker, 'Final Save picker differs from readiness witness'
+    if pending:
+        unready=witness['lastPendingObservation'];at=retained(unready)
+        assert first_at<=at<=last_at
+        assert not(first['window']['visible'] and first['window']['enabled']) and not(unready['window']['visible'] and unready['window']['enabled'])
+        if pending==1:assert first==unready
+    else:
+        assert witness['lastPendingObservation'] is None and first['window']['visible'] is first['window']['enabled'] is True
+        assert first==last, 'Immediate Save picker readiness changed its retained observation'
     return action
 
 
@@ -264,17 +295,28 @@ class NativeSaveMenuProbe(NativeControlProbe):
             assert doc['visible'] is True and doc['iconic'] is False and doc['cloaked'] == 0
             foreground = self._window(self.foreground()); result['foreground'] = foreground
             result['observationCount'] += 1
+            witness=result.get('pickerReadiness')
+            observation=dict(at=_time(self.clock()),window=copy.deepcopy(foreground),process=copy.deepcopy(original))
+            if witness is not None:witness['lastObservation']=copy.deepcopy(observation)
             assert foreground['pid'] == process.pid and foreground['threadId'] == doc['threadId'], 'Foreign foreground after Save-menu click'
+            if witness is not None:
+                assert _picker_identity(foreground,document,process.pid,doc['threadId'],caption)==_picker_identity(witness['firstObservation']['window'],document,process.pid,doc['threadId'],caption), 'First Save picker was replaced or disappeared'
             if foreground['hwnd'] not in (document, context['scope']['hwnd']):
-                assert foreground['rootHwnd'] == foreground['hwnd'] and foreground['ownerHwnd'] == document
-                assert foreground['className'] == '#32770' and foreground['title'] == caption, 'Unexpected Save-menu picker'
-                assert foreground['visible'] is foreground['enabled'] is True
-                element = self._call(lambda: self.desktop.window(handle=foreground['hwnd']).wrapper_object().element_info._element)
-                info = self._raw(element); result['newPicker'] = info
-                assert info['nativeHwnd'] == foreground['hwnd'] and info['pid'] == process.pid and info['runtimeId']
-                assert info['controlType'] == 'Window' and info['name'] == caption and info['visible'] is info['enabled'] is True
-                budget(); result.update(accepted=True, transition='exact-owned-save-picker'); return result
-            if foreground['hwnd'] != document:
+                _picker_identity(foreground,document,process.pid,doc['threadId'],caption)
+                if witness is None:
+                    witness=dict(schemaVersion=1,kind='same-owned-save-picker-readiness',deadline=self.deadline,
+                        pendingObservationCount=0,firstObservation=copy.deepcopy(observation),
+                        lastObservation=copy.deepcopy(observation),lastPendingObservation=None)
+                    result['pickerReadiness']=witness
+                if foreground['visible'] is foreground['enabled'] is True:
+                    element = self._call(lambda: self.desktop.window(handle=foreground['hwnd']).wrapper_object().element_info._element)
+                    info = self._raw(element); result['newPicker'] = info
+                    assert info['nativeHwnd'] == foreground['hwnd'] and info['pid'] == process.pid and info['runtimeId']
+                    assert info['controlType'] == 'Window' and info['name'] == caption and info['visible'] is info['enabled'] is True
+                    budget(); result.update(accepted=True, transition='exact-owned-save-picker'); return result
+                witness['pendingObservationCount']+=1
+                witness['lastPendingObservation']=copy.deepcopy(observation)
+            elif foreground['hwnd'] != document:
                 assert all(foreground[k] == context['scope'][k] for k in ('hwnd', 'pid', 'threadId', 'rootHwnd', 'ownerHwnd')), 'Original Save popup changed after click'
             remaining = self.deadline - self.clock(); assert remaining > 0, 'Owned Save-menu transition deadline expired'
             self._call(time.sleep, min(.01, remaining))

@@ -1,6 +1,7 @@
 """Finite native Korean Tabbed UI evidence for four embedded Office modules.
 
-Only copied engine fixtures are opened; no input or save commands are sent.
+Only copied engine fixtures are opened. One measured editor click and fixed
+Ctrl+F6 establish focus; text and save commands are not part of this program.
 --probe-only records accessibility without claiming Korean UI verification.
 Actual VCL objects are read through the exact owned process's private pipe.
 The OS UIA tree is retained separately as diagnostic evidence. Each reader runs
@@ -79,6 +80,21 @@ def capture_bounded(child, office_pid, destination):
     return json.loads(destination.read_text(encoding='utf-8'))
 
 
+def prepare_korean_ui_focus(api,process,hwnd,parent,child,office_pid,module,record):
+    """One closed entry program for the four native UI observation modules."""
+    assert module in MODULES and record.get('module')==module, 'Unknown Korean UI focus module'
+    deadline=time.monotonic()+5
+    with native.FirstAdmissionEditorSession(api,process,
+            dict(hwnd=hwnd,parent=parent,child=child,officePid=office_pid),
+            'KOREAN_UI_ENTRY',record,deadline) as shortcuts:
+        focus=native.prepare_editor_focus(api,hwnd,child,process.pid,office_pid,record,
+            lambda:native.click_owned_editor(api,process,hwnd,parent,child,office_pid,record),
+            lambda:shortcuts.press('CTRL_F6'),seconds=deadline-time.monotonic())
+        shortcuts.editor_ready(record['editorFocusReadiness'])
+    record.update(keyboardFocusHwnd=focus,nativeInputFocusPrepared=True)
+    return focus
+
+
 def run_case(suite, fixtures, output, module, *, probe_only=False):
     case = 'korean-ui-' + module
     record = dict(case=case, module=module, success=False, stage='verify-fixture',
@@ -109,9 +125,7 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         record['stage'] = 'prepare-owned-native-focus'
         native.activate_owned_suite(api, process, hwnd, record)
         api.require_foreground(hwnd)
-        Desktop(backend='win32').window(handle=child).wrapper_object().click_input()
-        record['keyboardFocusHwnd'] = native.wait_for(lambda: api.require_editor_focus(hwnd, child), seconds=10)
-        record['nativeInputFocusPrepared'] = True
+        prepare_korean_ui_focus(api,process,hwnd,parent,child,office_pid,module,record)
         record['stage'] = 'capture-screenshot'
         screenshot = case + '-attached.png'
         window.capture_as_image().save(output / screenshot)

@@ -51,6 +51,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         MinimumSize = new Size(700, 500);
         var menu = new MenuStrip();
         var file = new ToolStripMenuItem("파일");
+        file.DropDownOpening += (_, _) => FocusFileMenu(menu, file);
         file.DropDownItems.Add(new ToolStripMenuItem("새 문서", null, (_, _) => create(module.Id)));
         file.DropDownItems.Add(new ToolStripMenuItem("열기…", null, (_, _) => open()));
         file.DropDownItems.Add(new ToolStripSeparator());
@@ -83,6 +84,19 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             statusTimer.Dispose();
             if (IsHandleCreated) NativeWindowProperties.Remove(Handle);
         };
+    }
+
+    private void FocusFileMenu(MenuStrip menu, ToolStripMenuItem file)
+    {
+        // Opening our menu must return keyboard focus from the embedded editor.
+        // Keep this tied to the genuine File opening event; never activate a window.
+        OwnedDocumentMenuFocus.OnOpening(Environment.CurrentManagedThreadId, uiThreadId,
+            () => new(attached, worker is not null, loading, busy, closing, closeApproved,
+                IsHandleCreated && !IsDisposed && !Disposing, Visible, Enabled, ActiveForm == this,
+                ReferenceEquals(MainMenuStrip, menu) && ReferenceEquals(menu.Parent, this) &&
+                    ReferenceEquals(menu.FindForm(), this) && ReferenceEquals(file.Owner, menu),
+                menu.IsHandleCreated && !menu.IsDisposed && !menu.Disposing,
+                menu.Visible, menu.Enabled, menu.CanFocus), menu.Focus);
     }
 
     protected override void OnLoad(EventArgs e)

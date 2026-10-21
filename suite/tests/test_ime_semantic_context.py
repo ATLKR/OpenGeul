@@ -243,6 +243,7 @@ class SemanticGetterTests(unittest.TestCase):
                     reader.model=NS(getText=lambda:body,isModified=lambda:False)
                 elif module=='calc':
                     original,fixture=self.calc();reader.frame=fixture.frame
+                    reader.proxy_type=NS  # Explicit synthetic counterpart of the retained local PyUNO type.
                     reader.controller=NS(getSelection=lambda:NS(getRangeAddress=lambda:NS(Sheet=0,StartColumn=0,StartRow=0,EndColumn=0,EndRow=0)))
                     cells={'A1':NS(getString=lambda:'Existing A1'),'B1':NS(getValue=lambda:17.),
                         'C1':NS(getValue=lambda:25.),'D1':NS(getValue=lambda:42.,getFormula=lambda:'=SUM(B1:C1)')}

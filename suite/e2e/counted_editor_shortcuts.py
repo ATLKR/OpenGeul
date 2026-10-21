@@ -193,6 +193,7 @@ class CountedEditorShortcuts:
         self._budget(); row['engine'] = self.probe.engine_snapshot(self.handle)
         self._budget(); row['scope'] = self.probe.scope_snapshot(self.api, b)
         thread = row['scope']['before']['editor']['threadId']
+        assert type(thread) is int and thread>0, 'Owned editor keyboard query requires its positive native thread'
         self._budget(); row['keyboard'] = self.probe.keyboard_snapshot(thread)
         return row
 
@@ -224,10 +225,11 @@ class CountedEditorShortcuts:
     def _guard(self):
         from capture_readiness import settle_owned_capture
         row = settle_owned_capture(self._observe_guard,self._validate_guard,self.receipt,self.binding,self.deadline,clock=self.clock)
+        from windows_smoke import _editor_focus_snapshot_ready
         b = self.binding
-        # This separate strict native query may race a new capture; retain the
-        # failure conservatively rather than catching arbitrary assertions.
-        assert self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd']) == row['scope']['focus']['hwnd'], 'Strict editor focus changed before shortcut'
+        # Strict focus and zero capture belong to this same fresh guarded scope.
+        focus = _editor_focus_snapshot_ready(row['scope'],b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],self.thread)
+        assert focus and focus == row['scope']['focus']['hwnd'], 'Strict editor focus changed before shortcut'
         self._budget()
         return row
 

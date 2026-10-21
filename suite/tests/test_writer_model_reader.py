@@ -1412,7 +1412,8 @@ class CalcPendingGetterContracts(unittest.TestCase):
         api=self.api;uno,events,objects=ExplicitOwnedModelContracts().make_calc_uno()
         sheet=objects['model'].getSheets().getByIndex(0)
         area=NS(Sheet=0,StartColumn=0,StartRow=0,EndColumn=0,EndRow=0)
-        objects['controller'].getSelection=lambda: NS(getRangeAddress=lambda:area,getSpreadsheet=lambda:sheet)
+        selected=type(objects['controller'])('selection');selected.getRangeAddress=lambda:area;selected.getSpreadsheet=lambda:sheet
+        objects['controller'].getSelection=lambda:selected
         class Pending:
             def __init__(self,frame,child,*,deadline):
                 self.assert_frame=frame;self.assert_child=child;self.assert_deadline=deadline
@@ -1420,7 +1421,7 @@ class CalcPendingGetterContracts(unittest.TestCase):
             def release(self):events.append('pending-proxies-release')
         contract=api._model_contract(api.CALC_MODEL_SERVICE,self.GETTERS)
         module=NS(AccessiblePendingReader=Pending,require_pending_receipt=lambda raw,child_hwnd:raw)
-        with patch.dict('sys.modules',{'uno':uno,'calc_pending_input':module}):
+        with patch.dict('sys.modules',{'uno':uno,'calc_pending_input':module}),patch.object(api.time,'monotonic',return_value=1.):
             reader=api._UnoReader(dict(child_hwnd=22,expected_url='file:///C:/owned.xlsx',readerDeadline=100.0),
                 NS(base={'privatePipe':'OpenGeul_'+'a'*32}),contract=contract)
             events.clear();value=reader.read()
@@ -1465,7 +1466,7 @@ class CalcPendingGetterContracts(unittest.TestCase):
         selection=NS(getRangeAddress=lambda:calls.append('range') or address,
                      getSpreadsheet=lambda:calls.append('sheet') or sheet)
         controller=NS(getSelection=lambda:calls.append('selection') or selection)
-        value=api.read_calc_selection(controller)
+        value=api.read_calc_selection(controller,deadline=10.,clock=lambda:1.)
         self.assertEqual(calls,['selection','range'])
         self.assertIs(api.require_calc_a1_selection(value),value)
         for field in ('sheet','startColumn','startRow','endColumn','endRow'):
@@ -1482,7 +1483,7 @@ class CalcPendingGetterContracts(unittest.TestCase):
         # not by equality with another independently allocated sheet wrapper.
         address=NS(Sheet=0,StartColumn=0,StartRow=0,EndColumn=0,EndRow=0)
         selected=NS(getRangeAddress=lambda:address,getSpreadsheet=lambda:object())
-        value=self.api.read_calc_selection(NS(getSelection=lambda:selected))
+        value=self.api.read_calc_selection(NS(getSelection=lambda:selected),deadline=10.,clock=lambda:1.)
         self.api.require_calc_a1_selection(value)
 
 

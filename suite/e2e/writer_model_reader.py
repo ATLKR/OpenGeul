@@ -90,24 +90,173 @@ def _require_calc_values(value):
     assert type(value.get('isModified')) is bool, 'Invalid Calc modified state'
 
 
-def read_calc_selection(controller,*,capture=None):
-    """Fixed XSelectionSupplier/range getters; never accepts input or sets selection."""
+_SELECTION_FIELDS=(('sheet','Sheet'),('startColumn','StartColumn'),('startRow','StartRow'),
+                   ('endColumn','EndColumn'),('endRow','EndRow'))
+_SELECTION_INTERFACES={'com.sun.star.sheet.XSheetCellRanges','com.sun.star.sheet.XSheetCellRangeContainer'}
+
+
+def _selection_scalar(value):
+    """Bounded local projection; never stringify an unknown UNO object."""
+    result=dict(type=type(value).__name__,value=None)
+    if type(value) is str and len(value)>256:result.update(omitted=True,length=len(value))
+    elif type(value) is int and value.bit_length()>64:result.update(omitted=True,bitLength=value.bit_length())
+    elif type(value) is float and not math.isfinite(value):result.update(omitted=True,nonfinite=True)
+    elif type(value) in (int,float,str,bool,type(None)):result['value']=value
+    else:result['omitted']=True
+    return result
+
+
+def _calc_selection_attempt(capture):
+    value=capture.get('shapeWitness')
+    if value is None:return None
+    raw=json.dumps(value,ensure_ascii=False,allow_nan=False).encode('utf-8')
+    assert len(raw)<=65536,'Calc selection witness exceeded its finite byte bound'
+    return json.loads(raw)
+
+
+def read_calc_selection(controller,*,deadline,capture=None,proxy_type=None,clock=None):
+    """Read one rectangle from the retained controller under its original budget.
+
+    XSelectionSupplier permits an object or a collection. Only a missing scalar
+    method lookup plus a positively reported sheet-range interface selects the
+    indexed path; errors from an existing scalar getter are never caught here.
+    """
+    clock=clock or time.monotonic;deadline=_finite(deadline)
+    proxy_type=proxy_type or type(controller)
+    assert type(controller) is proxy_type,'Calc selection controller proxy type changed'
+    witness=dict(schemaVersion=1,kind='owned-calc-selection-shape',shape='addressable-range',
+        complete=False,helperPid=os.getpid(),controllerId=id(controller),proxyTypeId=id(proxy_type),
+        proxyTypeName=proxy_type.__name__,proxyTypeModule=proxy_type.__module__,selectedId=None,childId=None,
+        readerDeadline=deadline,startedAt=clock(),finishedAt=None,singularLookupMissing=False,
+        interfaceNames=None,preCount=None,postCount=None,index=None,rawCounts=[],rawAddress={},address=None,calls=[])
     if capture is not None:
-        capture.clear();capture.update(stage='getSelection',controller=controller,selected=None)
-    selected=controller.getSelection()
+        capture.clear();capture.update(stage='getSelection',controller=controller,selected=None,shapeWitness=witness)
+    def check():
+        if _finite(clock())>=deadline:raise TimeoutError('Original Calc selection reader deadline expired')
+    def call(name,getter,project):
+        check();row=dict(getter=name,startedAt=clock(),returnedAt=None,result=None);witness['calls'].append(row)
+        if capture is not None:capture['stage']=name
+        value=None
+        try:
+            check()  # Recording intent must not let a getter cross the original deadline.
+            value=getter();row['returnedAt']=clock();row['result']=project(value)
+            check();return value
+        except BaseException as exc:
+            row['error']=dict(type=type(exc).__name__,message=str(exc)[:1024]);raise
+        finally:value=None  # Exception tracebacks must not retain a transient indexed proxy.
+    def proxy(value,key):
+        if value is not None:witness[key]=id(value)
+        return None if value is None else dict(proxyId=id(value),typeId=id(type(value)))
+    def types(value):
+        assert type(value) in (tuple,list) and len(value)<=64,'Invalid bounded Calc selection interface metadata'
+        names=[item.typeName for item in value]
+        assert all(type(n) is str and 0<len(n)<=256 for n in names),'Invalid Calc selection interface name'
+        witness['interfaceNames']=names;return names
+    def count(value,key):
+        raw=_selection_scalar(value);witness['rawCounts'].append(dict(phase=key,raw=raw))
+        if type(value) is int and 0<=value<=0x7fffffff:witness[key]=value
+        return raw
+    def address(value):
+        fields={}
+        for key,source in _SELECTION_FIELDS:
+            fields[key]=getattr(value,source);witness['rawAddress'][key]=_selection_scalar(fields[key])
+        assert all(type(n) is int and 0<=n<=(0x7fff if key=='sheet' else 0x7fffffff)
+                   for key,n in fields.items()),'Invalid exact Calc range address scalar'
+        assert fields['startColumn']<=fields['endColumn'] and fields['startRow']<=fields['endRow'],'Reversed Calc range address'
+        witness['address']=fields;return dict(witness['rawAddress'])
+    selected=call('XSelectionSupplier.getSelection',lambda:controller.getSelection(),lambda v:proxy(v,'selectedId'))
     if capture is not None:capture.update(stage='getRangeAddress',selected=selected)
-    assert selected is not None, 'Calc has no single cell/range selection'
-    address=selected.getRangeAddress()
+    assert selected is not None,'Calc has no single cell/range selection'
+    assert type(selected) is proxy_type,'Calc selection proxy type changed'
+    check()
+    try:getter=selected.getRangeAddress
+    except AttributeError:
+        witness.update(shape='cell-range-container',singularLookupMissing=True)
+        call('XTypeProvider.getTypes',lambda:selected.getTypes(),types)
+        if not set(witness['interfaceNames'])&_SELECTION_INTERFACES:raise
+        before=call('XIndexAccess.getCount.before',lambda:selected.getCount(),lambda v:count(v,'preCount'))
+        assert type(before) is int and before==1,'Calc selection must contain exactly one range'
+        witness['index']=0
+        child=None
+        try:
+            child=call('XIndexAccess.getByIndex[0]',lambda:selected.getByIndex(0),lambda v:proxy(v,'childId'))
+            assert type(child) is proxy_type,'Calc indexed range proxy type changed'
+            call('XCellRangeAddressable.getRangeAddress[0]',lambda:child.getRangeAddress(),address)
+            after=call('XIndexAccess.getCount.after',lambda:selected.getCount(),lambda v:count(v,'postCount'))
+            assert type(after) is int and after==1,'Calc selection range count changed'
+        finally:child=None
+    else:call('XCellRangeAddressable.getRangeAddress',getter,address)
     # ScCellRangeObj::getSpreadsheet creates a fresh wrapper; proxy equality
     # with separately fetched Sheet0 is not sheet identity. getSelection is
     # bound to this already verified retained controller's own DocShell.
-    value=dict(readOnly=True,source='retained-controller.getSelection',range={
-        key:getattr(address,source) for key,source in (
-            ('sheet','Sheet'),('startColumn','StartColumn'),('startRow','StartRow'),
-            ('endColumn','EndColumn'),('endRow','EndRow'))})
+    witness.update(complete=True,finishedAt=clock());check()
+    value=dict(readOnly=True,source='retained-controller.getSelection',range=witness['address'],shapeWitness=witness)
     _require_calc_selection(value)
     if capture is not None:capture.clear()
     return value
+
+
+def _same_selection_fact(actual,expected):
+    """Receipt joins keep JSON scalar types; Python True == 1 is insufficient."""
+    if type(actual) is not type(expected):return False
+    if isinstance(expected,dict):
+        return set(actual)==set(expected) and all(_same_selection_fact(actual[k],v) for k,v in expected.items())
+    if isinstance(expected,list):
+        return len(actual)==len(expected) and all(_same_selection_fact(a,b) for a,b in zip(actual,expected))
+    return actual==expected
+
+
+def _require_calc_selection_witness(value):
+    proof=value['shapeWitness'];area=value['range']
+    assert isinstance(proof,dict) and set(proof)=={'schemaVersion','kind','shape','complete','helperPid','controllerId',
+        'proxyTypeId','proxyTypeName','proxyTypeModule','selectedId','childId','readerDeadline','startedAt','finishedAt',
+        'singularLookupMissing','interfaceNames','preCount','postCount','index','rawCounts','rawAddress','address','calls'}
+    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==1
+    assert proof['kind']=='owned-calc-selection-shape' and proof['complete'] is True
+    for key in ('helperPid','controllerId','proxyTypeId','selectedId'):_positive(proof[key])
+    assert all(type(proof[k]) is str and 0<len(proof[k])<=256 for k in ('proxyTypeName','proxyTypeModule'))
+    start=_finite(proof['startedAt']);finish=_finite(proof['finishedAt']);deadline=_finite(proof['readerDeadline'])
+    assert start<=finish<deadline
+    assert _same_selection_fact(proof['address'],area) and set(proof['rawAddress'])==set(area)
+    raw={key:dict(type='int',value=n) for key,n in area.items()}
+    assert _same_selection_fact(proof['rawAddress'],raw)
+    assert all(n<=(0x7fff if key=='sheet' else 0x7fffffff) for key,n in area.items())
+    expected=['XSelectionSupplier.getSelection']
+    if proof['shape']=='addressable-range':
+        assert proof['singularLookupMissing'] is False and proof['interfaceNames'] is None
+        assert all(proof[k] is None for k in ('childId','preCount','postCount','index')) and proof['rawCounts']==[]
+        expected+=['XCellRangeAddressable.getRangeAddress'];results=[dict(proxyId=proof['selectedId'],typeId=proof['proxyTypeId']),raw]
+    else:
+        assert proof['shape']=='cell-range-container' and proof['singularLookupMissing'] is True
+        names=proof['interfaceNames']
+        assert isinstance(names,list) and len(names)<=64 and all(type(n) is str and 0<len(n)<=256 for n in names)
+        assert set(names)&_SELECTION_INTERFACES
+        assert type(proof['preCount']) is type(proof['postCount']) is int and proof['preCount']==proof['postCount']==1
+        assert type(proof['index']) is int and proof['index']==0;_positive(proof['childId'])
+        count=dict(type='int',value=1)
+        assert _same_selection_fact(proof['rawCounts'],[dict(phase='preCount',raw=count),dict(phase='postCount',raw=count)])
+        expected+=['XTypeProvider.getTypes','XIndexAccess.getCount.before','XIndexAccess.getByIndex[0]',
+                   'XCellRangeAddressable.getRangeAddress[0]','XIndexAccess.getCount.after']
+        results=[dict(proxyId=proof['selectedId'],typeId=proof['proxyTypeId']),names,count,
+                 dict(proxyId=proof['childId'],typeId=proof['proxyTypeId']),raw,count]
+    calls=proof['calls'];assert isinstance(calls,list) and len(calls)==len(expected)
+    last=start
+    for row,name,result in zip(calls,expected,results):
+        assert isinstance(row,dict) and set(row)=={'getter','startedAt','returnedAt','result'}
+        assert row['getter']==name and _same_selection_fact(row['result'],result)
+        begin=_finite(row['startedAt']);end=_finite(row['returnedAt']);assert last<=begin<=end<=finish
+        last=end
+    _calc_selection_attempt(dict(shapeWitness=proof))
+
+
+def _require_calc_selection_owner(selection,observation):
+    if 'shapeWitness' not in selection:return  # Historical scalar receipts only; fresh-source audit requires proof.
+    proof=selection['shapeWitness'];proxy=observation['unoSnapshots']['before']['proxyIdentity']
+    assert proof['helperPid']==observation['readerProcess']['pid']==proxy['helperPid']
+    assert proof['controllerId']==proxy['retainedIds']['controller']
+    for name,key in (('proxyTypeId','proxyTypeId'),('proxyTypeName','proxyTypeName'),('proxyTypeModule','proxyTypeModule')):
+        assert proof[name]==proxy[key],'Calc selection witness belongs to another PyUNO type'
+    assert _finite(observation['readStartedAt'])<=proof['startedAt']<=proof['finishedAt']<=_finite(observation['readFinishedAt'])
 
 
 def _require_calc_selection(value):
@@ -117,6 +266,7 @@ def _require_calc_selection(value):
     assert isinstance(area,dict) and set(area)=={'sheet','startColumn','startRow','endColumn','endRow'}
     assert all(type(n) is int and n>=0 for n in area.values()), 'Invalid Calc range address'
     assert area['startColumn']<=area['endColumn'] and area['startRow']<=area['endRow']
+    if 'shapeWitness' in value:_require_calc_selection_witness(value)
     return value
 
 
@@ -413,6 +563,7 @@ def _require_owned_observation(observation,binding,suite_root,contract):
     if contract==_CALC_PENDING_CONTRACT:
         from calc_pending_input import require_pending_receipt
         _require_calc_selection(observation.get('calcSelection'))
+        _require_calc_selection_owner(observation['calcSelection'],observation)
         require_pending_receipt(observation.get('pendingInput'),binding['childHwnd'])
     if contract in _EDIT_MODULES:
         from ime_semantic_context import require_edit_context
@@ -421,6 +572,7 @@ def _require_owned_observation(observation,binding,suite_root,contract):
         if contract==_CALC_EDIT_CONTRACT:
             from calc_pending_input import require_pending_receipt
             _require_calc_values(observation);_require_calc_selection(observation.get('calcSelection'))
+            _require_calc_selection_owner(observation['calcSelection'],observation)
             require_pending_receipt(observation['editContext'].get('pendingInput'),binding['childHwnd'])
     return observation
 
@@ -627,7 +779,7 @@ def _calc_selection_diagnostic_header(sequence,action,reader,capture,deadline,er
     return dict(schemaVersion=1,kind='failed-calc-selection-diagnostic',status='not-started',reason=None,
         sequence=sequence,action=action,helperPid=os.getpid(),readerDeadline=deadline,startedAt=clock(),
         primaryErrorSha256=hashlib.sha256(json.dumps(error,ensure_ascii=False,allow_nan=False).encode()).hexdigest(),
-        selectedProxy=proxy,selectionStage=capture.get('stage'),interfaceNames=None,implementation=None,
+        selectedProxy=proxy,selectionStage=capture.get('stage'),selectionAttempt=error.get('calcSelectionAttempt'),interfaceNames=None,implementation=None,
         services=None,preCount=None,postCount=None,rawCounts=[],indexedAddresses=[],calls=[],guard=None,
         pendingRequest=False,errors=[],qualification=False)
 
@@ -1145,7 +1297,8 @@ class _UnoReader:
                 value.update(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
                     b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
                     d1Formula=sheet.getCellRangeByName('D1').getFormula(),d1Value=sheet.getCellRangeByName('D1').getValue(),
-                    calcSelection=read_calc_selection(self.controller,capture=self.calc_selection_capture))
+                    calcSelection=read_calc_selection(self.controller,deadline=self.config['readerDeadline'],
+                        proxy_type=self.proxy_type,capture=self.calc_selection_capture))
                 _require_calc_values(value)
             after=self.snapshot()
         elif self.contract in (_CALC_CONTRACT,_CALC_PENDING_CONTRACT):
@@ -1156,7 +1309,8 @@ class _UnoReader:
                 if self.pending_input is None:
                     self.pending_input=AccessiblePendingReader(self.frame,self.config['child_hwnd'],
                         deadline=self.config['readerDeadline'])
-                pending=dict(calcSelection=read_calc_selection(self.controller,capture=self.calc_selection_capture),pendingInput=self.pending_input.read())
+                pending=dict(calcSelection=read_calc_selection(self.controller,deadline=self.config['readerDeadline'],
+                    proxy_type=self.proxy_type,capture=self.calc_selection_capture),pendingInput=self.pending_input.read())
             value=dict(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
                 b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
                 d1Formula=sheet.getCellRangeByName('D1').getFormula(),d1Value=sheet.getCellRangeByName('D1').getValue(),
@@ -1475,9 +1629,18 @@ def _helper(directory,*,explicit_model=False):
                     unoDiagnostic=getattr(reader,'diagnostic',getattr(exc,'uno_diagnostic',None)),
                     pendingInputDiagnostic=getattr(exc,'pending_input_diagnostic',
                         getattr(getattr(reader,'pending_input',None),'last_diagnostic',None)),
+                    impressGeometryDiagnostic=getattr(exc,'impress_geometry_diagnostic',None),
                     observerProxiesReleased=getattr(exc,'observer_proxies_released',None),pythonIdentity=identity,nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None))
                 selection_capture=getattr(reader,'calc_selection_capture',None)
                 if selection_capture:
+                    # Returned count/address facts precede every assertion. Keep
+                    # their bounded local projection in the primary reply before
+                    # a release request can preempt optional remote diagnostics.
+                    try:
+                        attempt=_calc_selection_attempt(selection_capture)
+                        if attempt is not None:reply['error']['calcSelectionAttempt']=attempt
+                    except BaseException:
+                        reply['error']['calcSelectionAttempt']=dict(unavailable=True,reason='local-projection-error')
                     # Detach every nested primary snapshot before diagnostic reads
                     # may update the reader's mutable observation dictionaries.
                     reply['error']=json.loads(json.dumps(reply['error'],ensure_ascii=False,allow_nan=False))
@@ -1490,7 +1653,8 @@ def _helper(directory,*,explicit_model=False):
                         reply['calcSelectionDiagnostic']=dict(schemaVersion=1,kind='failed-calc-selection-diagnostic',
                             status='unavailable',reason='header-error',sequence=sequence,action=action,
                             helperPid=reply['readerPid'],readerDeadline=config['readerDeadline'],startedAt=None,
-                            primaryErrorSha256=None,selectedProxy=None,selectionStage=None,interfaceNames=None,
+                            primaryErrorSha256=None,selectedProxy=None,selectionStage=None,
+                            selectionAttempt=reply['error'].get('calcSelectionAttempt'),interfaceNames=None,
                             implementation=None,services=None,preCount=None,postCount=None,rawCounts=[],
                             indexedAddresses=[],calls=[],guard=None,pendingRequest=False,
                             errors=[dict(type=type(later).__name__,message='Diagnostic header preparation failed')],qualification=False)

@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace as NS
+from unittest.mock import patch
 import unittest
 
 E2E = Path(__file__).resolve().parents[1] / 'e2e'
@@ -36,7 +37,7 @@ class Probe:
                 rectangle=[8, 55, 1016, 690], clientScreenRect=[8, 55, 1016, 690]),
             parentWithinSuite=True, editorWithinParent=True)
         self.calls = []; self.foreground_root = 11; self.occluded = 0
-        self.fail = None; self.after_move = None; self.after_click = None
+        self.fail = None; self.after_move = None; self.after_click = None; self.position = None
     def enter_dpi(self, receipt):
         self.calls.append('dpi-enter'); receipt.update(previousContext=123, verified=True, restored=False)
         if self.fail == 'dpi-enter': raise OSError('DPI entry failed')
@@ -77,7 +78,12 @@ class Probe:
     def move(self, point, receipt):
         self.calls.append('move'); receipt.update(pointerMoveAttempts=1,
             pointerSetReturned=True, pointerReadback=list(point))
+        self.position = list(point)
         if self.after_move: self.after_move()
+    def pointer(self):
+        self.calls.append('cursor')
+        if self.fail == 'cursor': raise OSError('cursor query failed')
+        return list(self.position)
     def click(self, receipt):
         self.calls.append('click')
         intent, = self.process.opengeul_evidence_output.glob('*-click-intent.json')
@@ -107,6 +113,126 @@ class EditorClickPolicyTests(unittest.TestCase):
         def strict(hwnd): self.assertEqual(probe.foreground_root, hwnd)
         return self.mod.click_editor_once(strict, p, 11, 22, 33, 88, record,
             probe=probe, clock=c, pause=c.sleep)
+    def replay(self, result):
+        return self.mod.require_geometry_settlement(result, hwnd=11, parent=22, child=33, shell_pid=77, office_pid=88)
+    def test_actual_shaped_late_geometry_settles_without_another_pointer_or_button(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder)
+            old=[9,56,1001,675]; new=[8,55,1016,690]
+            probe.frame['editor'].update(rectangle=old[:],clientScreenRect=old[:])
+            original=probe.editor_hit; hits=[]
+            def hit(*args):
+                value=original(*args);hits.append(value)
+                if len(hits)==2:probe.frame['editor'].update(rectangle=new[:],clientScreenRect=new[:])
+                return value
+            probe.editor_hit=hit
+            result=self.run_click(p,c,probe,r)
+            self.assertTrue(result['ready'])
+            self.assertEqual((probe.calls.count('move'),probe.calls.count('click')),(1,1))
+            self.assertEqual(result['chosenPhysicalPoint'],[505,365])
+            ledger=result['geometrySettlement']
+            self.assertEqual((ledger['pollCount'],ledger['pendingCount']),(2,1))
+            self.assertEqual(ledger['rows'][0]['beforeFrame']['editor']['rectangle'],old)
+            self.assertEqual(ledger['rows'][0]['afterFrame']['editor']['rectangle'],new)
+            self.assertEqual(self.replay(result)['editor']['rectangle'],new)
+            self.assertEqual(result['deadline'],2.)
+            self.assertTrue(result['engineHandleReleased']);self.assertTrue(result['dpiScope']['restored'])
+    def test_valid_geometry_change_immediately_after_move_uses_coherent_current_frame(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder)
+            probe.after_move=lambda:probe.frame['editor']['clientScreenRect'].__setitem__(0,9)
+            result=self.run_click(p,c,probe,r)
+            self.assertTrue(result['ready']);self.assertEqual(result['geometrySettlement']['pendingCount'],0)
+            self.assertEqual(self.replay(result)['editor']['clientScreenRect'][0],9)
+            self.assertEqual((probe.calls.count('move'),probe.calls.count('click')),(1,1))
+    def test_post_pointer_non_geometry_point_hit_and_cursor_changes_are_fatal(self):
+        for change in ['hwnd','pid','threadId','rootHwnd','visible','enabled','hierarchy','escape','point','hit','cursor','malformed']:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as folder:
+                p,c,probe,r=self.fixture(folder)
+                def race():
+                    if change in ['hwnd','pid','threadId','rootHwnd']:probe.frame['editor'][change]+=1
+                    elif change in ['visible','enabled']:probe.frame['editor'][change]=False
+                    elif change=='hierarchy':probe.frame['editorWithinParent']=False
+                    elif change=='escape':probe.frame['editor']['rectangle'][0]=0
+                    elif change=='point':probe.frame['editor']['clientScreenRect'][0]=600
+                    elif change=='hit':probe.occluded=1
+                    elif change=='cursor':probe.position=[1,2]
+                    else:probe.frame['editor']['rectangle']=[True,55,1016,690]
+                probe.after_move=race
+                with self.assertRaises((AssertionError,KeyError)):self.run_click(p,c,probe,r)
+                self.assertEqual(probe.calls.count('move'),1);self.assertNotIn('click',probe.calls)
+                self.assertTrue(r['editorClicks'][0]['engineHandleReleased']);self.assertTrue(r['editorClicks'][0]['dpiScope']['restored'])
+    def test_persistent_geometry_is_bounded_by_original_deadline_and_shared_history(self):
+        for cap in [102,3]:
+            with self.subTest(cap=cap),tempfile.TemporaryDirectory() as folder:
+                p,c,probe,r=self.fixture(folder);original=probe.editor_snapshot;frames=[]
+                def observe(*args):
+                    value=original(*args)
+                    if 'move' in probe.calls:
+                        value['editor']['clientScreenRect'][0]=8+len(frames)%2;frames.append(value)
+                    return value
+                probe.editor_snapshot=observe
+                with patch.object(self.mod,'MAX_PREFLIGHT_ROWS',cap):
+                    with self.assertRaises(AssertionError):self.run_click(p,c,probe,r)
+                result=r['editorClicks'][0]
+                self.assertEqual(probe.calls.count('move'),1);self.assertNotIn('click',probe.calls)
+                self.assertLessEqual(len(result['preflight'])+len(result['geometrySettlement']['rows']),cap)
+                self.assertFalse(result['ready']);self.assertTrue(result['engineHandleReleased']);self.assertTrue(result['dpiScope']['restored'])
+    def test_expiry_after_cursor_observation_cannot_admit_button_authority(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder);original=probe.pointer
+            def late():
+                value=original();c.now=2.;return value
+            probe.pointer=late
+            with self.assertRaisesRegex(AssertionError,'deadline'):self.run_click(p,c,probe,r)
+            self.assertNotIn('click',probe.calls);self.assertEqual(probe.calls.count('move'),1)
+            self.assertEqual(r['editorClicks'][0]['geometrySettlement']['rows'][0]['cursorReadback'],probe.position)
+            self.assertTrue(r['editorClicks'][0]['engineHandleReleased'])
+    def test_expiry_during_pure_replay_prevents_click_intent_and_input(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder);original=self.mod.require_geometry_settlement
+            def late(*args,**kwargs):
+                frame=original(*args,**kwargs);c.now=2.;return frame
+            with patch.object(self.mod,'require_geometry_settlement',side_effect=late):
+                with self.assertRaisesRegex(AssertionError,'deadline'):self.run_click(p,c,probe,r)
+            self.assertNotIn('click',probe.calls);self.assertEqual(probe.calls.count('move'),1)
+            self.assertEqual(list(Path(folder).glob('*-click-intent.json')),[])
+            self.assertTrue(r['editorClicks'][0]['engineHandleReleased']);self.assertTrue(r['editorClicks'][0]['dpiScope']['restored'])
+    def test_geometry_receipt_bound_cannot_become_partial_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder);original=probe.move
+            def move(point,receipt):
+                original(point,receipt)
+                self.mod.MAX_RECEIPT_BYTES=len(json.dumps(receipt,separators=(',',':')).encode())+100
+            probe.move=move
+            with self.assertRaisesRegex(AssertionError,'finite limit'):self.run_click(p,c,probe,r)
+            self.assertNotIn('click',probe.calls);self.assertEqual(probe.calls.count('move'),1)
+            self.assertFalse(r['editorClicks'][0]['ready']);self.assertTrue(r['editorClicks'][0]['engineHandleReleased'])
+    def test_pure_settlement_replay_rejects_tampered_success_and_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder);result=self.run_click(p,c,probe,r)
+            for change in ['count','pending','deadline','cursor','hit','identity','frame','late','classification','unknown','bool-time']:
+                with self.subTest(change=change):
+                    value=copy.deepcopy(result);ledger=value['geometrySettlement'];row=ledger['rows'][-1]
+                    if change=='count':ledger['pollCount']+=1
+                    elif change=='pending':ledger['pendingCount']+=1
+                    elif change=='deadline':ledger['deadline']+=1
+                    elif change=='cursor':row['cursorReadback']=[1,2]
+                    elif change=='hit':row['hit']['hitHwnd']+=1
+                    elif change=='identity':row['afterFrame']['editor']['pid']+=1
+                    elif change=='frame':row['afterFrame']['editor']['clientScreenRect'][0]+=1
+                    elif change=='late':row['finishedAt']=value['deadline']
+                    elif change=='classification':row['classification']='geometry-pending'
+                    elif change=='unknown':ledger['unexpected']=True
+                    else:row['startedAt']=True
+                    with self.assertRaises(AssertionError):self.replay(value)
+    def test_native_pointer_query_is_read_only_and_preserves_physical_coordinates(self):
+        probe=self.mod.NativeEditorClickProbe.__new__(self.mod.NativeEditorClickProbe);calls=[]
+        def read(position):
+            calls.append('GetPhysicalCursorPos');position._obj.x=-7;position._obj.y=365;return 1
+        probe.user=NS(GetPhysicalCursorPos=read);probe._call=lambda fn,*args:fn(*args)
+        probe._required=lambda value,label:self.assertTrue(value,label)
+        self.assertEqual(probe.pointer(),[-7,365]);self.assertEqual(calls,['GetPhysicalCursorPos'])
     def test_occlusion_is_observed_before_one_measured_click(self):
         with tempfile.TemporaryDirectory() as folder:
             p,c,probe,r = self.fixture(folder); probe.occluded = 3
@@ -165,7 +291,7 @@ class EditorClickPolicyTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):self.run_click(p,c,probe,r)
                 self.assertNotIn('click',probe.calls)
     def test_change_after_pointer_never_reselects_or_sends_button(self):
-        for change in ['engine','shell','rectangle','hit','foreground','pointer']:
+        for change in ['engine','shell','hit','foreground','pointer']:
             with self.subTest(change=change),tempfile.TemporaryDirectory() as folder:
                 p,c,probe,r=self.fixture(folder)
                 def race():
@@ -179,7 +305,7 @@ class EditorClickPolicyTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):self.run_click(p,c,probe,r)
                 self.assertEqual(probe.calls.count('move'),1);self.assertNotIn('click',probe.calls)
     def test_geometry_rejection_retains_the_actual_comparison_without_another_query(self):
-        for frame_number,phase in [(3,'before-pointer-intent'),(4,'after-pointer-move'),(5,'before-button-input')]:
+        for frame_number,phase in [(3,'before-pointer-intent')]:
             with self.subTest(phase=phase),tempfile.TemporaryDirectory() as folder:
                 p,c,probe,r=self.fixture(folder);original=probe.editor_snapshot;frames=[]
                 def observe(*args):
@@ -202,7 +328,7 @@ class EditorClickPolicyTests(unittest.TestCase):
                 final,=Path(folder).glob('*-result.json')
                 self.assertEqual(json.loads(final.read_bytes())['geometryRejection'],rejected)
     def test_query_failures_restore_dpi_and_close_any_admitted_handle(self):
-        for failure in ['shell','frame','engine-open','engine','hit']:
+        for failure in ['shell','frame','engine-open','engine','hit','cursor']:
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as folder:
                 p,c,probe,r=self.fixture(folder);probe.fail=failure
                 with self.assertRaises(OSError):self.run_click(p,c,probe,r)
