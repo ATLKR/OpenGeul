@@ -82,7 +82,7 @@ class Clock:
 class ControlProbe:
     def __init__(self, process, clock):
         self.clock = clock; self.calls = []; self.process = process
-        self.identity = dict(pid=77, handleValue=1234, image=str(process.opengeul_suite_root/'OpenGeul.Office.exe'),
+        self.identity = dict(pid=77, handleValue=1234, image=str((process.opengeul_suite_root/'OpenGeul.Office.exe').resolve()),
                              creationTime=134370148289625043, waitResult=258)
         doc = dict(hwnd=11, pid=77, threadId=9, rootHwnd=11, visible=True, enabled=True,
                    iconic=False, cloaked=0, rectangle=[0,0,900,700], ownerHwnd=0, title='OpenGeul Writer', className='Form')
@@ -103,7 +103,7 @@ class ControlProbe:
         self.keys = dict(targetLayout=0x04090409,currentThreadLayout=0x04090409,keysDown=[],
                          capsLockOn=False,scrollLockOn=False,numLockOn=True)
         self.inserted = None; self.fail = None; self.after_move = None; self.after_input = None
-        self.engine=dict(pid=88,handleValue=2345,image=str(process.opengeul_suite_root/'Office/program/soffice.bin'),creationTime=134370148305653808,waitResult=258)
+        self.engine=dict(pid=88,handleValue=2345,image=str((process.opengeul_suite_root/'Office/program/soffice.bin').resolve()),creationTime=134370148305653808,waitResult=258)
     def enter_dpi(self,r): r.update(previousContext=18,verified=True); self.calls.append('dpi-enter')
     def restore_dpi(self,r): r['restored']=self.fail!='restore'; self.calls.append('dpi-restore')
     def process_snapshot(self,p): return copy.deepcopy(self.identity)
@@ -426,6 +426,20 @@ class ControlPolicyTests(unittest.TestCase):
         self.probe.engine['creationTime']+=1
         with self.assertRaises(AssertionError):self.shortcut()
         self.assertEqual(len([c for c in self.probe.calls if isinstance(c,tuple) and c[0]=='send']),1)
+    def test_native_fixture_images_remain_canonical_when_temp_name_has_an_alias(self):
+        # A real existing parent/.. alias works on Windows without symlink
+        # privileges and exercises the same resolve/native-image boundary.
+        parent=self.root/'alias-parent';parent.mkdir()
+        alias=parent/'..';self.assertNotEqual(alias,alias.resolve())
+        nested=type(self)('test_file_click_has_durable_intent_before_one_move_and_one_native_click')
+        temporary=NS(name=str(alias),cleanup=lambda:None)
+        try:
+            with patch.object(tempfile,'TemporaryDirectory',return_value=temporary):nested.setUp()
+            self.assertTrue(nested.click()['success'])
+            self.assertTrue(nested.shortcut()['success'])
+            self.assertEqual(nested.probe.identity['image'],str((alias/'OpenGeul.Office.exe').resolve()))
+            self.assertEqual(nested.probe.engine['image'],str((alias/'Office/program/soffice.bin').resolve()))
+        finally:nested.doCleanups()
 
 
 if __name__ == '__main__': unittest.main()
