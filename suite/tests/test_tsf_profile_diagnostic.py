@@ -327,14 +327,17 @@ class DiagnosticCompilationTests(unittest.TestCase):
 
 
 class PrerequisiteBindingTests(unittest.TestCase):
-    def test_korean_prerequisite_is_exact_one_literal_copy(self):
+    def test_korean_prerequisite_is_exact_two_fixed_job_bindings(self):
         scripts=E2E.parent/'scripts'
         old=(scripts/'ensure-korean-ime.ps1').read_bytes()
         new=(scripts/'ensure-tsf-profile-korean-ime.ps1').read_bytes()
-        before=b"$env:GITHUB_JOB -cne 'windows-suite'"
-        after=b"$env:GITHUB_JOB -cne 'windows-tsf-profile-diagnostic'"
-        self.assertEqual(old.count(before),1);self.assertEqual(new.count(after),1)
-        self.assertEqual(old.replace(before,after),new)
+        expected=old
+        for prefix in (b"$env:GITHUB_JOB", b"$record.source.job"):
+            before=prefix+b" -cne 'windows-suite'"
+            after=prefix+b" -cne 'windows-tsf-profile-diagnostic'"
+            self.assertEqual(old.count(before),1);self.assertEqual(new.count(after),1)
+            expected=expected.replace(before,after)
+        self.assertEqual(expected,new)
         self.assertIn(b"{ 1800 } else { 600 }",new)
     def test_diagnostic_workflow_has_genuine_fixed_job_and_separate_branch(self):
         import yaml
@@ -566,6 +569,58 @@ class OriginalThreadAdmissionTests(unittest.TestCase):
         self.assertEqual(keyboard,[]);self.assertEqual(closed,[80])
         self.assertEqual(raised.exception.diagnosticEngineLease['initialThreadId'],0)
         self.assertNotIn('initialLayout',raised.exception.diagnosticEngineLease)
+
+
+class ReturnedPrerequisiteGateTests(unittest.TestCase):
+    def returned_gate(self,job,*,change=None):
+        # Execute the actual isolated readback predicate, not the installer/worker.
+        # Scalars mirror the source-bound 39586057796 ARM readiness boundary.
+        script=(E2E.parent/'scripts/ensure-tsf-profile-korean-ime.ps1').read_text()
+        begin="        if ($record.source.sourceCommit -cne $head[0] -or"
+        self.assertEqual(script.count(begin),1)
+        gate=script[script.index(begin):].split('\n    } catch {',1)[0]
+        helper_begin='function Get-SuiteKoreanUtcTicks('
+        helper=script[script.index(helper_begin):].split('\nfunction Test-SuiteKoreanLegacyCollectorWindow',1)[0]
+        context=dict(sourceCommit='b2a5c44aa693efc6bf6697d9411989e9223a0166',architecture='arm64',nativeMachine=0xaa64,
+            preparationDeadline=dict(budgetSeconds=1800,startedUtc='2026-10-21T10:42:37.3920755Z',expiresUtc='2026-10-21T11:12:37.3920755Z'))
+        record=dict(source=dict(sourceCommit=context['sourceCommit'],job=job,architecture='arm64'),
+            preparationDeadline=copy.deepcopy(context['preparationDeadline']),nativeMachine=0xaa64,controllerMachine=0,
+            profile=dict(registered=True,component=dict(machine=0xaa64)),suiteOnly=True,productInputVerified=False,
+            storeQualified=False,capabilityAfter='Installed',restartNeeded=False,userLanguageConfigured=True)
+        if change is not None:change(record)
+        harness="""param([string]$Fixture)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$fixtureValue=Get-Content -LiteralPath $Fixture -Raw | ConvertFrom-Json
+$record=$fixtureValue.record
+$head=@($fixtureValue.context.sourceCommit)
+$Architecture=$fixtureValue.context.architecture
+$deadline=$fixtureValue.context.preparationDeadline
+$controllerHost=[pscustomobject]@{nativeMachine=$fixtureValue.context.nativeMachine}
+"""+helper+"\ntry {\n"+gate+"\nWrite-Output 'accepted'; exit 0\n} catch { Write-Output 'rejected'; exit 17 }\n"
+        parser=shutil.which('pwsh')
+        self.assertIsNotNone(parser,'Existing PowerShell capability is required; no silent skip')
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder);(path/'gate.ps1').write_text(harness)
+            (path/'fixture.json').write_text(__import__('json').dumps(dict(record=record,context=context)))
+            result=subprocess.run([parser,'-NoProfile','-NonInteractive','-File',str(path/'gate.ps1'),'-Fixture',str(path/'fixture.json')],capture_output=True,text=True,timeout=10)
+        self.assertIn(result.returncode,(0,17),result.stdout+result.stderr)
+        self.assertEqual(result.stderr,'')
+        return result.returncode,result.stdout.strip()
+    def test_actual_shaped_diagnostic_job_is_accepted(self):
+        self.assertEqual(self.returned_gate('windows-tsf-profile-diagnostic'),(0,'accepted'))
+    def test_original_suite_job_is_rejected(self):
+        self.assertEqual(self.returned_gate('windows-suite'),(17,'rejected'))
+    def test_arbitrary_job_is_rejected(self):
+        self.assertEqual(self.returned_gate('unrelated-job'),(17,'rejected'))
+    def test_other_original_readback_predicates_still_reject_mismatch(self):
+        mutations=(lambda r:r['source'].__setitem__('sourceCommit','0'*40),
+            lambda r:r['preparationDeadline'].__setitem__('budgetSeconds',1801),
+            lambda r:r.__setitem__('controllerMachine',0x8664),lambda r:r.__setitem__('capabilityAfter','NotPresent'),
+            lambda r:r.__setitem__('restartNeeded',True),lambda r:r['profile'].__setitem__('registered',False))
+        for change in mutations:
+            with self.subTest(change=mutations.index(change)):
+                self.assertEqual(self.returned_gate('windows-tsf-profile-diagnostic',change=change),(17,'rejected'))
 
 
 if __name__=='__main__':unittest.main()

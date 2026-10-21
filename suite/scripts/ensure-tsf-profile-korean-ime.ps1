@@ -172,7 +172,7 @@ if (-not $Worker) {
         }
         if ($child.ExitCode -ne 0) { throw 'Suite Korean prerequisite worker failed; inspect the original setup logs and failure.json.' }
         $record=Get-Content -LiteralPath (Join-Path $out 'readiness.json') -Raw | ConvertFrom-Json
-        if ($record.source.sourceCommit -cne $head[0] -or $record.source.job -cne 'windows-suite' -or
+        if ($record.source.sourceCommit -cne $head[0] -or $record.source.job -cne 'windows-tsf-profile-diagnostic' -or
             $record.source.architecture -cne $Architecture -or
             $record.preparationDeadline.budgetSeconds -ne $deadline.budgetSeconds -or
             (Get-SuiteKoreanUtcTicks $record.preparationDeadline.startedUtc) -ne (Get-SuiteKoreanUtcTicks $deadline.startedUtc) -or
