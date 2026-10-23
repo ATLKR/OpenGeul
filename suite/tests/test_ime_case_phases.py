@@ -20,7 +20,7 @@ from ascii_observer_boundary import AsciiObserverBoundary
 
 class IMECasePhaseTests(unittest.TestCase):
     def run_case(self, module, *, fail_context=False, fail_mode=False, fail_semantic=None, empty_retirement_failure=False,
-                 focus_failure=None, diagnostic_error=None):
+                 focus_failure=None, diagnostic_error=None, fail_navigation=False):
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
         root=Path(directory.name);calls=[];offset=[0.];clock=time.monotonic
         original=root/('OpenGeul-'+module+'.'+dict(ime.INPUT_CASES)[module]);original.write_bytes(b'unchanged fixture')
@@ -49,6 +49,14 @@ class IMECasePhaseTests(unittest.TestCase):
             def navigate(inner):
                 calls.append(('navigate',module))
                 if focus_failure is not None:raise focus_failure
+            def navigate_calc(inner,suite,source,original_bytes,**kw):
+                self.assertEqual(module,'calc')
+                self.assertEqual(suite,root);self.assertEqual(original_bytes,b'unchanged fixture')
+                self.assertEqual(kw['original_shell'],{'originalPopen':True})
+                calls.extend(['calc-navigation-start0','CTRL_HOME','calc-navigation-read1','calc-navigation-release2'])
+                if fail_navigation:raise RuntimeError('Calc source A1 navigation rejected')
+                inner.record['calcNavigationContext']={'success':True}
+                inner.navigate()
             def require_target(inner):return None
             def require_context_target(inner,key):
                 self.assertIn(key,inner.record);calls.append(('reader-guard',key))
@@ -207,6 +215,22 @@ class IMECasePhaseTests(unittest.TestCase):
                 self.assertLess(before,prefix);self.assertLess(prefix,after);self.assertLess(after,calls.index('observer-installed'))
                 self.assertLess(calls.index(('semantic-ready','post')),calls.index(('command',1)))
                 self.assertEqual(len(record['asciiEditorInputs']),1)
+    def test_calc_source_navigation_and_cleanup_precede_semantic_prefix_and_observer(self):
+        calls,record,result,error=self.run_case('calc')
+        self.assertIsNone(error,repr(error))
+        self.assertIn('calc-navigation-start0',calls,'Calc production path skipped its source barrier')
+        self.assertLess(calls.index('calc-navigation-start0'),calls.index('CTRL_HOME'))
+        self.assertLess(calls.index('CTRL_HOME'),calls.index('calc-navigation-read1'))
+        self.assertLess(calls.index('calc-navigation-read1'),calls.index('calc-navigation-release2'))
+        self.assertLess(calls.index('calc-navigation-release2'),calls.index(('semantic-read','pre')))
+        self.assertTrue(record['calcNavigationContext']['success'])
+    def test_calc_failed_source_navigation_stops_before_semantic_prefix_or_observer(self):
+        calls,record,result,error=self.run_case('calc',fail_navigation=True)
+        self.assertIsInstance(error,RuntimeError)
+        self.assertIn('Calc source A1 navigation rejected',str(error))
+        self.assertNotIn(('semantic-read','pre'),calls)
+        self.assertNotIn('prefix-ready',calls);self.assertNotIn('observer-installed',calls)
+        self.assertNotIn('CTRL_S',calls);self.assertIn('keyboard-close',calls)
     def test_pre_or_post_semantic_failure_blocks_observer_korean_and_save_without_prefix_retry(self):
         for phase in ('pre','post'):
             with self.subTest(phase=phase):

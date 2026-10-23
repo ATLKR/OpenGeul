@@ -59,6 +59,7 @@ WRITER_EDIT_GETTER_CONTRACT='writer-active-edit-context-v1'
 CALC_EDIT_GETTER_CONTRACT='calc-a1-active-edit-context-v1'
 IMPRESS_MODEL_SERVICE='com.sun.star.presentation.PresentationDocument'
 IMPRESS_EDIT_GETTER_CONTRACT='impress-active-edit-context-v1'
+IMPRESS_FOCUSED_GETTER_CONTRACT='impress-focused-view-edit-context-v2'
 _WRITER_EDIT_CONTRACT=_ModelContract(WRITER_MODEL_SERVICE,WRITER_EDIT_GETTER_CONTRACT,
     'existing-owned-writer-edit-context','owned-writer-edit-context-reader-cleanup',
     ('resolve-existing-owned-frame','retained-controller.getViewCursor','ViewCursor.isCollapsed',
@@ -72,7 +73,17 @@ _IMPRESS_EDIT_CONTRACT=_ModelContract(IMPRESS_MODEL_SERVICE,IMPRESS_EDIT_GETTER_
     'existing-owned-impress-edit-context','owned-impress-edit-context-reader-cleanup',
     ('resolve-existing-owned-frame','owned-native-frame.XAccessible.actual-active-Outliner-editing-context',
      'isModified','verify-retained-generation'))
-_EDIT_MODULES={_WRITER_EDIT_CONTRACT:'writer',_CALC_EDIT_CONTRACT:'calc',_IMPRESS_EDIT_CONTRACT:'impress'}
+_IMPRESS_FOCUSED_CONTRACT=_ModelContract(IMPRESS_MODEL_SERVICE,IMPRESS_FOCUSED_GETTER_CONTRACT,
+    'existing-owned-impress-focused-view-edit-context','owned-impress-focused-view-edit-context-reader-cleanup',
+    ('resolve-existing-owned-frame',
+     'original-component-peer.XVclContainer.getWindows.positive-focused-view',
+     'retained-focused-peer.XWindow2.hasFocus',
+     'same-peer.XAccessible.AccessibleDrawDocumentView',
+     'original-component.full-reciprocal-accessible-parent-index-path',
+     'owned-focused-document.XAccessible.actual-Outliner-editing-context',
+     'isModified','verify-retained-generation'))
+_EDIT_MODULES={_WRITER_EDIT_CONTRACT:'writer',_CALC_EDIT_CONTRACT:'calc',_IMPRESS_EDIT_CONTRACT:'impress',
+    _IMPRESS_FOCUSED_CONTRACT:'impress'}
 PROCESS_KEYS = ('pid','creationTime','image','handleValue','waitResult','exitCode')
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -729,7 +740,8 @@ def _require_owned_observation(observation,binding,suite_root,contract):
         require_pending_receipt(observation.get('pendingInput'),binding['childHwnd'])
     if contract in _EDIT_MODULES:
         from ime_semantic_context import require_edit_context
-        require_edit_context(observation.get('editContext'),_EDIT_MODULES[contract],binding['childHwnd'])
+        require_edit_context(observation.get('editContext'),_EDIT_MODULES[contract],binding['childHwnd'],
+            getter_contract=contract.getters)
         assert type(observation.get('isModified')) is bool
         if contract==_CALC_EDIT_CONTRACT:
             from calc_pending_input import require_pending_receipt
@@ -1450,7 +1462,7 @@ class _UnoReader:
             module=_EDIT_MODULES[self.contract]
             if self.edit_context is None:
                 self.edit_context=EditingContextReader(module,self.frame,self.controller,self.model,
-                    self.config['child_hwnd'],deadline=self.config['readerDeadline'])
+                    self.config['child_hwnd'],deadline=self.config['readerDeadline'],getter_contract=self.contract.getters)
             editing=self.edit_context.read()
             value=dict(editContext=editing,isModified=self.model.isModified())
             assert type(value['isModified']) is bool
@@ -1811,6 +1823,8 @@ def _helper(directory,*,explicit_model=False):
                     pendingInputDiagnostic=getattr(exc,'pending_input_diagnostic',
                         getattr(getattr(reader,'pending_input',None),'last_diagnostic',None)),
                     impressGeometryDiagnostic=getattr(exc,'impress_geometry_diagnostic',None),
+                    impressDiscoveryDiagnostic=getattr(exc,'impress_discovery_diagnostic',None),
+                    impressFocusedViewDiagnostic=getattr(exc,'impress_focused_view_diagnostic',None),
                     observerProxiesReleased=getattr(exc,'observer_proxies_released',None),pythonIdentity=identity,nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None))
                 selection_capture=getattr(reader,'calc_selection_capture',None)
                 if selection_capture:

@@ -1,4 +1,4 @@
-name: OpenGeul native ARM64 input and reader diagnostics
+name: OpenGeul native ARM64 raw message diagnostic
 'on':
   push:
     branches:
@@ -27,9 +27,6 @@ jobs:
         - architecture: arm64
           runner: windows-11-arm
           diagnostic: raw-message
-        - architecture: arm64
-          runner: windows-11-arm
-          diagnostic: calc-close-cost
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -73,7 +70,7 @@ jobs:
           workflowRef = $env:GITHUB_WORKFLOW_REF
           architecture = 'arm64'
           diagnosticKind = '${{ matrix.diagnostic }}'
-          scope = 'Separate fresh ARM runners for production IME or CalcClose diagnostic cohorts; no full Suite or release qualification.'
+          scope = 'Single fresh ARM64 raw-message diagnostic cohort on the exact recorded source; diagnostic evidence only.'
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $context 'workflow-context.json') -Encoding utf8
     - name: 독립 PDF 검증 도구의 고정 해시 확인·설치
       shell: pwsh

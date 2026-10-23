@@ -17,6 +17,69 @@ from counted_editor_shortcuts import (CountedEditorShortcuts, NativeShortcutProb
     join_shortcut_generation, _same_image)
 
 
+REJECTED_VALIDATION_MAX_DEPTH = 8
+REJECTED_VALIDATION_MAX_NODES = 512
+REJECTED_VALIDATION_MAX_BYTES = 16 * 1024
+
+
+def _copy_rejected_validation_row(row):
+    """Detach bounded exact primitives, without repr, JSON or native queries.
+
+    Bytes conservatively bound compact UTF-8 JSON for the copied row only.
+    Unsupported values/cycles/limits reject the whole row; identity never truncates.
+    """
+    nodes, remaining = REJECTED_VALIDATION_MAX_NODES, REJECTED_VALIDATION_MAX_BYTES
+    active = set()
+
+    def charge(size):
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0: raise ValueError('Rejected validation byte bound exceeded')
+
+    def copy(value, depth):
+        nonlocal nodes
+        if depth > REJECTED_VALIDATION_MAX_DEPTH or nodes <= 0:
+            raise ValueError('Rejected validation structure bound exceeded')
+        nodes -= 1
+        kind = type(value)
+        if value is None: charge(4); return None
+        if kind is bool: charge(5); return value
+        if kind is int:
+            if not -9223372036854775808 <= value <= 18446744073709551615:
+                raise ValueError('Rejected validation integer is not native-width')
+            charge(20); return value
+        if kind is float:
+            if not -1.7976931348623157e308 <= value <= 1.7976931348623157e308:
+                raise ValueError('Rejected validation float is not finite')
+            charge(24); return value
+        if kind is str:
+            if len(value) > remaining: raise ValueError('Rejected validation string bound exceeded')
+            encoded = value.encode('utf-8')  # At most four times the bounded character count.
+            charge(2 + len(encoded) + sum(5 if ord(c) < 32 else 1 if c in '\\"' else 0 for c in value))
+            return value
+        if kind is not dict and kind is not list: raise ValueError('Rejected validation value is not a primitive')
+        if id(value) in active: raise ValueError('Rejected validation row contains a cycle')
+        if len(value) * (2 if kind is dict else 1) > nodes:
+            raise ValueError('Rejected validation node bound exceeded')
+        active.add(id(value)); charge(2)
+        try:
+            if kind is list:
+                result = []
+                for item in value:
+                    charge(1); result.append(copy(item, depth + 1))
+            else:
+                result = {}
+                for key, item in value.items():
+                    if type(key) is not str: raise ValueError('Rejected validation key is not text')
+                    charge(2); result[copy(key, depth + 1)] = copy(item, depth + 1)
+            return result
+        finally:
+            active.remove(id(value))
+
+    if type(row) is not dict: raise ValueError('Rejected validation row is not a dictionary')
+    return copy(row, 0)
+
+
 def _error():
     return getattr(C, 'get_last_error', lambda: 0)()
 
@@ -313,8 +376,31 @@ manufactures an earlier model-reader observation or reuses a closed HANDLE.
     # Reuse the reviewed strict native scope/capture policy unchanged. These
     # methods contain observations only; no shortcut delivery method is used.
     _observe_guard = CountedEditorShortcuts._observe_guard
-    _validate_guard = CountedEditorShortcuts._validate_guard
     _guard = CountedEditorShortcuts._guard
+
+    def _validate_guard(self, row):
+        try:
+            return CountedEditorShortcuts._validate_guard(self, row)
+        except BaseException:
+            # This may be a cleanup rejection after an earlier non-guard error.
+            # Freeze once before unwind can replace lastGuardObservation again.
+            try:
+                if not getattr(self, '_first_rejected_validation_attempted', False):
+                    self._first_rejected_validation_attempted = True
+                    frozen = dict(schemaVersion=1, kind='first-rejected-ascii-native-validation',
+                        source='NativeAsciiProbe._validate_guard', rowRetained=False,
+                        provenance='first-rejection-of-this-validator; may-be-cleanup-after-earlier-error',
+                        copyLimits=dict(depth=REJECTED_VALIDATION_MAX_DEPTH,
+                            nodes=REJECTED_VALIDATION_MAX_NODES, bytes=REJECTED_VALIDATION_MAX_BYTES))
+                    self.receipt['firstRejectedValidation'] = frozen
+                    try:
+                        detached = _copy_rejected_validation_row(row)
+                        frozen.update(row=detached, rowRetained=True)
+                    except BaseException:
+                        frozen['unretainedReason'] = 'bounded-primitive-copy-unavailable'
+            except BaseException:
+                pass  # Secondary metadata failure cannot replace the original validation error.
+            raise
 
     def __init__(self, api, process, binding, prepared, receipt, deadline, clock):
         self.api, self.process, self.binding = api, process, dict(binding)
