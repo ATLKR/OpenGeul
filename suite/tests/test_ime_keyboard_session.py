@@ -46,11 +46,16 @@ class IMEKeyboardSessionTests(unittest.TestCase):
         session = keyboard.IMEKeyboardSession(api, p, 11, 12, 22, 88, module, record, setup_deadline, probe=probe, clock=clock)
         return session, p, b, api, clock, probe, record
     def setup(self, session):
-        session.start(); session.focus_editor(6.); self.ready(session); session.navigate(); self.prefix(session); session.setup_complete()
+        session.start(); session.focus_editor(6.); self.ready(session); self.navigate(session); self.prefix(session); session.setup_complete()
+    def navigate(self, session):
+        if session.module=='calc':
+            from test_ime_calc_navigation import navigate_session
+            navigate_session(session)
+        else:session.navigate()
     def semantic(self,session,phase):
         record=session.record;prefix=None if phase=='pre' else ' ime-opengeul-'+session.module+':'
         context=dict(success=True,module=session.module,phase=phase,expectedPrefix=prefix,
-            expectedNative=dict(session.binding),setupDeadline=10.,readerDeadline=9.,finishedAt=session.clock())
+            expectedNative=dict(session.binding),setupDeadline=10.,readerDeadline=9.,startedAt=session.clock(),finishedAt=session.clock())
         record.setdefault('imeSemanticContexts',[]).append(context);record['imeSemanticContext']=context
         session.semantic_ready(context,phase=phase)
         return context
@@ -398,7 +403,7 @@ class IMEKeyboardSessionTests(unittest.TestCase):
         for module in ('writer','calc','impress'):
             with self.subTest(module=module),tempfile.TemporaryDirectory() as directory:
                 s,p,b,api,clock,probe,record=self.fixture(directory,module)
-                s.start();s.focus_editor(6.);self.ready(s);s.navigate()
+                s.start();s.focus_editor(6.);self.ready(s);self.navigate(s)
                 if module=='calc':self.prefix(s);record['calcSetupContext']['success']=False
                 with self.assertRaises(AssertionError):s.setup_complete()
                 s.close();self.assertFalse(record['imeKeyboardSession']['success'])

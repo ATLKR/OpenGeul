@@ -1,5 +1,5 @@
 # Diagnostic-only; never a Main Suite or release qualification.
-name: OpenGeul current component discovery diagnostic
+name: OpenGeul focused Impress component diagnostic
 'on':
   push:
     branches:
@@ -17,7 +17,7 @@ env:
   DOTNET_NOLOGO: '1'
 jobs:
   windows-suite:
-    if: github.event.repository.private == false && github.ref == 'refs/heads/work/native35-current-component-discovery'
+    if: github.event_name == 'push' && github.repository == 'ATLKR/OpenGeul' && github.actor_id == '65988341' && github.run_attempt == 1 && github.event.repository.private == false && github.ref == 'refs/heads/work/native35-current-component-discovery'
     name: windows-suite (${{ matrix.architecture }})
     strategy:
       fail-fast: false
@@ -63,7 +63,10 @@ jobs:
           ref = $env:GITHUB_REF
           workflowRef = $env:GITHUB_WORKFLOW_REF
           architecture = 'x64'
-          scope = 'Unchanged three production IME cases with bounded failure-only discovery observations; no release or full Suite qualification.'
+          scope = 'Three physical IME cases with explicit Impress focused-view V2 and Calc A1 navigation barrier in this exact candidate source; diagnostic only.'
+          impressGetterContract = 'impress-focused-view-edit-context-v2'
+          calcNavigationReadinessRequired = $true
+          legacyImpressGlobalDiscoveryEquivalent = $false
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $context 'context.json') -Encoding utf8
     - name: 독립 PDF 검증 도구의 고정 해시 확인·설치
       shell: pwsh
@@ -116,7 +119,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
       if: '!cancelled() && steps.build.outcome == ''success'''
-    - name: Diagnostic unchanged physical IME cases and bounded component discovery
+    - name: Diagnostic physical IME cases with focused Impress V2 and Calc A1 readiness
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh

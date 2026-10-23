@@ -1041,7 +1041,11 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             lambda: keyboard.focus_editor(record['editorFocusReadiness']['deadline']),
             seconds=remaining_setup(setup_deadline, 5))
         keyboard.editor_ready(record['editorFocusReadiness'])
-        keyboard.navigate()
+        if module == 'calc':
+            keyboard.navigate_calc(suite, source, original_bytes,
+                original_shell=retained_setup_shell(process, suite, keyboard))
+        else:
+            keyboard.navigate()
         focus = keyboard.focus
         record.update(editorTid=keyboard.tid, keyboardFocusHwnd=focus)
         record['stage'] = 'verify-pre-prefix-editing-context'

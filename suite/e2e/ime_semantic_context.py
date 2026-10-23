@@ -22,6 +22,9 @@ MAX_TEXT=1024*1024
 SOURCE='libreoffice-26.8.1.1'
 PREFIXES={module:' ime-opengeul-'+module+':' for module in ('writer','calc','impress')}
 GETTERS={module:module+('-a1' if module=='calc' else '')+'-active-edit-context-v1' for module in PREFIXES}
+IMPRESS_LEGACY_GETTER='impress-active-edit-context-v1'
+IMPRESS_FOCUSED_GETTER='impress-focused-view-edit-context-v2'
+GETTERS['impress']=IMPRESS_FOCUSED_GETTER
 SERVICES=dict(writer='com.sun.star.text.TextDocument',calc='com.sun.star.sheet.SpreadsheetDocument',
               impress='com.sun.star.presentation.PresentationDocument')
 CONTAINER_ROLES={21,40,49,51,56,66,67}
@@ -115,8 +118,17 @@ def _path_proxies(root,path,call,*,retained=None):
     return nodes
 
 
-def require_edit_context(value,module,child_hwnd):
+def _edit_contract(module,getter_contract):
+    if getter_contract is None:
+        return IMPRESS_LEGACY_GETTER if module=='impress' else GETTERS[module]
+    allowed=(IMPRESS_LEGACY_GETTER,IMPRESS_FOCUSED_GETTER) if module=='impress' else (GETTERS[module],)
+    assert type(getter_contract) is str and getter_contract in allowed, 'Unsupported explicit editing-context getter'
+    return getter_contract
+
+
+def require_edit_context(value,module,child_hwnd,*,getter_contract=None):
     assert module in PREFIXES and isinstance(value,dict)
+    getter_contract=_edit_contract(module,getter_contract)
     assert value.get('kind')=='actual-gui-editing-context' and value.get('module')==module
     assert value.get('sourceTag')==SOURCE and value.get('readOnly') is True and value.get('targetStable') is True
     assert type(value.get('childHwnd')) is int and value['childHwnd']==child_hwnd
@@ -150,7 +162,12 @@ def require_edit_context(value,module,child_hwnd):
                     assert type(binding.get('paragraphIndex')) is int and binding['paragraphIndex']==0
                     assert paragraph is not None and paragraph['textBefore']==paragraph['textAfter']==pending['editor']['text']
             else:assert count==0 and paragraph is None
-        else:_require_impress_binding(value)
+        else:
+            _require_impress_binding(value)
+            if getter_contract==IMPRESS_FOCUSED_GETTER:
+                from impress_focused_view import require_focus_binding
+                require_focus_binding(binding)
+            else:assert 'focusBinding' not in binding, 'Focused-view evidence is not the global v1 contract'
     return value
 
 
@@ -215,8 +232,8 @@ def _require_impress_binding(value):
     else:assert value['paragraphCount']==0 and value['paragraph'] is None
 
 
-def edit_context_ready(value,module,expected_text,child_hwnd):
-    require_edit_context(value,module,child_hwnd);_text(expected_text)
+def edit_context_ready(value,module,expected_text,child_hwnd,*,getter_contract=None):
+    require_edit_context(value,module,child_hwnd,getter_contract=getter_contract);_text(expected_text)
     if module=='writer':
         return (value['cursorCollapsed'] and value['cursorTextIsBody'] and value['bodyEndComparison']==0
             and value['textBefore']==value['textAfter']==expected_text)
@@ -229,14 +246,16 @@ def edit_context_ready(value,module,expected_text,child_hwnd):
 
 class EditingContextReader:
     """Retain original proxies. Getter failures propagate; no API-error defaults."""
-    def __init__(self,module,frame,controller,model,child_hwnd,*,deadline,clock=time.monotonic):
+    def __init__(self,module,frame,controller,model,child_hwnd,*,deadline,clock=time.monotonic,getter_contract=None):
         assert module in PREFIXES and type(child_hwnd) is int and child_hwnd>0
+        self.getter_contract=_edit_contract(module,getter_contract)
         self.module,self.frame,self.controller,self.model=module,frame,controller,model
         self.child_hwnd,self.deadline,self.clock=child_hwnd,_time(deadline),clock
         self.body=self.cursor=self.peer=self.root=self.document=self.shape=self.paragraph=None
         self.container_root=self.component_peer=None
         self.document_path=self.document_nodes=self.document_children=None
         self.calc=None;self.identities={name:uuid.uuid4().hex for name in ('root','document','shape','paragraph','body','cursor')}
+        self.focused_view=None
         if module=='writer':
             self.body=self.call(model.getText);self.cursor=self.call(controller.getViewCursor)
         elif module=='calc':
@@ -489,9 +508,14 @@ class EditingContextReader:
                 writerBinding=dict(verified=True,bodyIdentity=self.identities['body'],cursorIdentity=self.identities['cursor']))
             assert self.call(self.model.getText)==self.body and self.call(self.controller.getViewCursor)==self.cursor
         elif self.module=='calc':value.update(self.calc.read_edit_context())
+        elif self.getter_contract==IMPRESS_FOCUSED_GETTER:
+            from impress_focused_view import FocusedViewReader
+            if self.focused_view is None:self.focused_view=FocusedViewReader(self)
+            value.update(self.focused_view.read())
         else:value.update(self._impress())
-        return require_edit_context(value,self.module,self.child_hwnd)
+        return require_edit_context(value,self.module,self.child_hwnd,getter_contract=self.getter_contract)
     def release(self):
+        if self.focused_view is not None:self.focused_view.release();self.focused_view=None
         if self.calc is not None:
             self.calc.semantic_paragraph=None;self.calc.release();self.calc=None
         self.body=self.cursor=self.peer=self.root=self.document=self.shape=self.paragraph=None
@@ -657,6 +681,9 @@ def _sample(observation,context,inventory,*,previous=None):
         for name in ('bodyIdentity','cursorIdentity','rootIdentity','documentIdentity','editorIdentity',
                      'shapeIdentity','paragraphIdentity','documentPath','shapeIndex','paragraphIndex'):
             if name in before:assert after.get(name)==before[name], 'Retained GUI editing identity changed: '+name
+        if module=='impress':
+            from impress_focused_view import require_focus_binding
+            require_focus_binding(after,previous=before)
     baseline=context['baseline'];phase=context['phase']
     expected=baseline['text']+(context['expectedPrefix'] if phase=='post' else '')
     modified=observation['isModified'];assert type(modified) is bool
@@ -667,7 +694,7 @@ def _sample(observation,context,inventory,*,previous=None):
         require_pending_receipt(observation['editContext']['pendingInput'],native['childHwnd'],
             previous=previous['editContext']['pendingInput'] if previous is not None else None)
     if module=='writer':assert observation.get('bodyText')==observation['editContext']['textAfter'], 'Writer model/body observation disagrees'
-    ready=edit_context_ready(observation['editContext'],module,expected,native['childHwnd'])
+    ready=edit_context_ready(observation['editContext'],module,expected,native['childHwnd'],getter_contract=GETTERS[module])
     if module=='writer' and phase=='post':ready=ready and modified is True
     if module=='calc' and ready:
         require_pending_receipt(observation['editContext']['pendingInput'],native['childHwnd'],expected,require_editor=True)
