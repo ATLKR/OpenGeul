@@ -340,21 +340,78 @@ class EditingContextReader:
         from calc_pending_input import _inside
         assert root_visible and _inside(root_row['rectangle'],container_row['rectangle']), 'Component root is outside its visible original container'
         component_binding=dict(containerRoot=container_row,before=before)
+        # Copy only facts returned by this traversal. The over-bound node is
+        # deliberately unqueried, and paths remain component-root relative.
+        ancestors=[];returned=[];returned_headers=0
+        attempt=dict(stage='fixed-bound',failedPath=[],failedNode=None)
         def discover(accessible,parent=None,index=None,path=()):
-            nonlocal visited
+            nonlocal visited,returned_headers
+            node=dict(path=list(path),visit=visited+1,headerReturned=False,
+                role=None,stateBits=None,visible=None,childCount=None,childCountReturned=False)
+            attempt.update(stage='fixed-bound',failedPath=list(path),failedNode=node)
             visited+=1;assert visited<=256 and len(path)<=8, 'Accessible discovery exceeded fixed bound'
+            attempt['stage']='node-header'
             header=self._node_header(accessible,parent,index)
             context,role,visible,_=header
+            node.update(headerReturned=True,role=role,stateBits=header[3]['stateBits'],visible=visible)
+            ancestors.append(node);returned.append(node);returned_headers+=1
+            if len(returned)>16:returned.pop(0)
             if role==83:
                 if visible:
+                    attempt['stage']='document-geometry'
                     _,_,_,row=self._node_geometry(header,path=path)
                     documents.append((accessible,context,path,row))
+                ancestors.pop()
                 return
-            if role not in CONTAINER_ROLES:return
-            count=self.call(context.getAccessibleChildCount);assert type(count) is int and 0<=count<=64
-            for child in range(count):discover(self.call(context.getAccessibleChild,child),accessible,child,path+(child,))
+            if role not in CONTAINER_ROLES:ancestors.pop();return
+            attempt['stage']='child-count-getter'
+            count=self.call(context.getAccessibleChildCount)
+            node.update(childCount=count,childCountReturned=True);attempt['stage']='child-count-bound'
+            assert type(count) is int and 0<=count<=64
+            for child in range(count):
+                attempt.update(stage='child-getter',failedPath=list(path+(child,)),
+                    failedNode=dict(path=list(path+(child,)),visit=visited+1,headerReturned=False,
+                        role=None,stateBits=None,visible=None,childCount=None,childCountReturned=False))
+                discover(self.call(context.getAccessibleChild,child),accessible,child,path+(child,))
+            ancestors.pop()
         if self.document is None:
-            discover(self.root);assert len(documents)<=1, 'Original Impress document is ambiguous'
+            try:discover(self.root)
+            except BaseException as exc:
+                # Optional local projection never adds UNO/clock queries or
+                # replaces the original exception, even if projection fails.
+                try:
+                    def scalar(value):
+                        if value is None or type(value) is bool:return value
+                        if type(value) is int and value.bit_length()<=64:return value
+                        return dict(type=type(value).__name__[:80],valueRetained=False)
+                    def row(value):
+                        return {key:list(item) if key=='path' else scalar(item) for key,item in value.items()}
+                    def geometry(value):
+                        return {key:[scalar(part) for part in item] if key=='rectangle' else scalar(item)
+                            for key,item in value.items()}
+                    caps=[]
+                    if attempt['stage']=='fixed-bound':
+                        if visited>256:caps.append('visits')
+                        if len(attempt['failedPath'])>8:caps.append('depth')
+                    elif attempt['stage']=='child-count-bound':
+                        caps.append('children' if type(attempt['failedNode']['childCount']) is int else 'children-type')
+                    diagnostic=dict(schemaVersion=1,kind='failed-impress-accessible-discovery',
+                        module='impress',sourceTag=SOURCE,childHwnd=self.child_hwnd,
+                        readerDeadline=self.deadline,stage=attempt['stage'],failedCaps=caps,
+                        limits=dict(visits=256,depth=8,children=64),visitedCount=visited,
+                        returnedHeaderCount=returned_headers,failedPath=list(attempt['failedPath']),
+                        failedDepth=len(attempt['failedPath']),rootBasis=IMPRESS_ROOT_BASIS,root=geometry(root_row),
+                        componentBinding=dict(containerRoot=geometry(component_binding['containerRoot']),
+                            before={key:scalar(value) for key,value in component_binding['before'].items()}),
+                        componentBindingAfter='not-reached',
+                        failedNode=row(attempt['failedNode']),ancestors=[row(value) for value in ancestors],
+                        returnedNodes=[row(value) for value in returned],returnedNodeLimit=16,
+                        returnedNodesTruncated=returned_headers>len(returned),qualification=False)
+                    assert len(json.dumps(diagnostic,allow_nan=False).encode('utf-8'))<=32768
+                    exc.impress_discovery_diagnostic=diagnostic
+                except BaseException:pass
+                raise
+            assert len(documents)<=1, 'Original Impress document is ambiguous'
         else:
             _path_proxies(self.root,self.document_path,self.call,retained=self.document_nodes)
             context,role,visible,row=self._node(self.document,path=self.document_path)

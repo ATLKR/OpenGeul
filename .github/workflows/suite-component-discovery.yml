@@ -1,0 +1,144 @@
+# Diagnostic-only; never a Main Suite or release qualification.
+name: OpenGeul current component discovery diagnostic
+'on':
+  push:
+    branches:
+    - work/native35-current-component-discovery
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: component-discovery-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  windows-suite:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/work/native35-current-component-discovery'
+    name: windows-suite (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - architecture: x64
+          runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+    - name: 정확한 소스 바이트 보존
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: ${{ matrix.architecture }}
+    - name: Record diagnostic-only current component scope
+      shell: pwsh
+      run: |
+        $context = '.work/component-discovery-context'
+        New-Item -ItemType Directory -Path $context | Out-Null
+        $tree = (git rev-parse 'HEAD^{tree}').Trim()
+        if ($LASTEXITCODE -ne 0 -or $tree -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Source tree identity is missing.' }
+        [ordered]@{
+          schemaVersion = 1
+          diagnosticOnly = $true
+          productQualified = $false
+          wholePairQualified = $false
+          officeReplacementCertified = $false
+          mainUnitOrWholeSuiteQualificationPerformed = $false
+          mainNativePrivacySetupPerformed = $false
+          success = $false
+          sourceCommit = $env:GITHUB_SHA
+          sourceTree = $tree
+          runId = $env:GITHUB_RUN_ID
+          runAttempt = $env:GITHUB_RUN_ATTEMPT
+          ref = $env:GITHUB_REF
+          workflowRef = $env:GITHUB_WORKFLOW_REF
+          architecture = 'x64'
+          scope = 'Unchanged three production IME cases with bounded failure-only discovery observations; no release or full Suite qualification.'
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $context 'context.json') -Encoding utf8
+    - name: 독립 PDF 검증 도구의 고정 해시 확인·설치
+      shell: pwsh
+      run: |
+        python -m pip install --require-hashes --only-binary=:all: -r suite/config/pdf-e2e-requirements.txt
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF verification tooling installation failed.' }
+        python -m pip install Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned image verification tooling installation failed.' }
+    - name: 고정 버전의 패키지 경로 선택
+      shell: pwsh
+      run: |
+        $architecture = '${{ matrix.architecture }}'
+        $lockPath = if ($architecture -ceq 'arm64') { 'suite/config/runtime.arm64.lock.json' } else { 'suite/config/runtime.lock.json' }
+        $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
+        if ($lock.architecture -cne $architecture -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite lock identity.' }
+        "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
+      shell: pwsh
+      run: |
+        if ('${{ matrix.architecture }}' -ceq 'arm64') {
+          ./suite/scripts/build-suite.ps1 -Architecture arm64 -EngineArchive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip -EngineReceipt .work/source-engine-input/source-build-receipt.json
+        } else {
+          ./suite/scripts/build-suite.ps1 -Architecture x64
+        }
+      id: build
+    - name: 실제 한국어 IME와 네이티브 UI 검사 준비
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
+        ./suite/scripts/ensure-korean-ime.ps1 -Architecture '${{ matrix.architecture }}' -Output .work/suite-korean-readiness
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
+      id: readiness
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 한국어 입력 환경의 준비·실패 기록 즉시 보존
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-component-discovery-readiness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
+        retention-days: 7
+        if-no-files-found: error
+    - name: 실제 Office 엔진의 생성·편집·저장·재열기
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
+      id: fixtures
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Diagnostic unchanged physical IME cases and bounded component discovery
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and content verification failed.' }
+      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      id: component-discovery
+    - name: Preserve all current component diagnostic originals
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-component-discovery-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/component-discovery-context/
+          .work/suite-korean-ime/
+          .work/suite-worker-diagnostics/
+          .work/suite-engine/
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
+          .work/office-suite/**/*.log
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: warn
+        compression-level: 6
