@@ -49,7 +49,9 @@ jobs:
         [ordered]@{
           schemaVersion = 1
           diagnosticOnly = $true
-          nativePrivacySetupPerformed = $false
+          mainNativePrivacySetupPerformed = $false
+          diagnosticPreparationSeparatelyRecorded = $true
+          diagnosticPreparationEvidence = '.work/suite-input-witness-preparation/'
           privacyPreparationQualified = $false
           hostReadyQualified = $false
           productQualified = $false
@@ -108,6 +110,26 @@ jobs:
         include-hidden-files: true
         retention-days: 7
         if-no-files-found: error
+    - name: Diagnostic privacy and desktop preparation
+      id: diagnostic-preparation
+      if: "!cancelled() && github.ref == 'refs/heads/work/native35-arm64-input-witness' && steps.readiness.outcome == 'success'"
+      timeout-minutes: 3
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        ./suite/scripts/prepare-native35-input-witness.ps1
+    - name: Preserve diagnostic desktop preparation originals
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-native35-desktop-preparation-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-input-witness-preparation/
+          ${{ runner.temp }}/suite-input-witness-setup-${{ github.run_id }}-${{ github.run_attempt }}/
+          ${{ runner.temp }}/suite-input-witness-preparation-${{ github.run_id }}-${{ github.run_attempt }}/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: warn
     - name: 실제 Office 엔진의 생성·편집·저장·재열기
       shell: pwsh
       run: |
@@ -115,12 +137,12 @@ jobs:
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "!cancelled() && steps.readiness.outcome == 'success' && steps.diagnostic-preparation.outcome == 'success'"
     - name: Native ARM64 physical input witness diagnostic
       id: input-witness
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
-      if: "!cancelled() && github.ref == 'refs/heads/work/native35-arm64-input-witness' && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success'"
+      if: "!cancelled() && github.ref == 'refs/heads/work/native35-arm64-input-witness' && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success' && steps.diagnostic-preparation.outcome == 'success'"
       shell: pwsh
       run: |
         python suite/e2e/ime_input_witness.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-input-witness
@@ -135,6 +157,7 @@ jobs:
         path: |
           .work/suite-input-witness/
           .work/suite-input-witness-context/
+          .work/suite-input-witness-preparation/
           .work/suite-korean-readiness/
           .work/suite-engine/
           .work/suite-worker-diagnostics/

@@ -96,30 +96,42 @@ class Native35InputWitnessWorkflowTests(unittest.TestCase):
         self.assertIn('GH_TOKEN: ${{ github.token }}', fetch)
         self.assertEqual(field(fetch, 'if'), "matrix.architecture == 'arm64'")
 
-    def test_privacy_is_omitted_and_metadata_cannot_transfer_qualification(self):
+    def test_main_privacy_entry_is_omitted_and_diagnostic_preparation_is_separately_recorded(self):
         for forbidden in ('prepare-native31.ps1', 'native31_suite_prepare.py',
-                          'native31-privacy-prepare', 'suite-native31-privacy-preparation',
-                          'suite-native31-setup'):
+                          'suite-native31-privacy-preparation', 'suite-native31-setup'):
             self.assertNotIn(forbidden, self.source)
         metadata = named(self.source, 'Record diagnostic workflow scope')
         code = run_code(metadata)
-        for field_name in ('nativePrivacySetupPerformed', 'privacyPreparationQualified',
+        for field_name in ('mainNativePrivacySetupPerformed', 'privacyPreparationQualified',
                            'hostReadyQualified', 'productQualified', 'officeReplacementCertified', 'success'):
             self.assertRegex(code, re.escape(field_name) + r'\s*=\s*\$false\b')
         self.assertRegex(code, r'diagnosticOnly\s*=\s*\$true\b')
+        self.assertNotRegex(code, r'\bnativePrivacySetupPerformed\b')
+        self.assertRegex(code, r'diagnosticPreparationSeparatelyRecorded\s*=\s*\$true\b')
+        self.assertIn("diagnosticPreparationEvidence = '.work/suite-input-witness-preparation/'", code)
         self.assertIn('.work/suite-input-witness-context', code)
         self.assertIn('workflow-context.json', code)
         self.assertLess(self.steps.index(metadata), next(i for i, step in enumerate(self.steps) if field(step, 'id') == 'build'))
-        # Omission is explicit and never changes the actual hosted context.
+        # The Main entry stays omitted; diagnostic preparation never spoofs context.
         self.assertNotRegex(self.source, r'\$env:GITHUB_[A-Z_]+\s*=')
         self.assertNotRegex(self.source, r'\$env:RUNNER_[A-Z_]+\s*=')
 
-    def test_witness_waits_for_real_readiness_and_fixtures(self):
+    def test_witness_and_fixtures_wait_for_separate_diagnostic_preparation(self):
         readiness = next(i for i, step in enumerate(self.steps) if field(step, 'id') == 'readiness')
+        preparation = next(i for i, step in enumerate(self.steps) if field(step, 'id') == 'diagnostic-preparation')
         fixtures = next(i for i, step in enumerate(self.steps) if field(step, 'id') == 'fixtures')
         witness = next(i for i, step in enumerate(self.steps) if field(step, 'id') == 'input-witness')
-        self.assertLess(readiness, fixtures)
+        self.assertLess(readiness, preparation)
+        self.assertLess(preparation, fixtures)
         self.assertLess(fixtures, witness)
+        prepare = self.steps[preparation]
+        self.assertEqual(field(prepare, 'timeout-minutes'), '3')
+        preparation_code = run_code(prepare)
+        self.assertIn('./suite/scripts/prepare-native35-input-witness.ps1', preparation_code)
+        self.assertIn("$ErrorActionPreference = 'Stop'", preparation_code)
+        self.assertNotIn('$LASTEXITCODE', preparation_code)
+        self.assertIn("steps.readiness.outcome == 'success'", field(prepare, 'if'))
+        self.assertIn("steps.diagnostic-preparation.outcome == 'success'", field(self.steps[fixtures], 'if'))
         probe = self.steps[witness]
         code = run_code(probe)
         command = ('python suite/e2e/ime_input_witness.py --suite $env:SUITE_PACKAGE '
@@ -129,10 +141,18 @@ class Native35InputWitnessWorkflowTests(unittest.TestCase):
         self.assertIn(command, code)
         self.assertIn("if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 input witness diagnostic failed.' }", code)
         condition = field(probe, 'if')
-        for dependency in ('fixtures', 'readiness'):
+        for dependency in ('fixtures', 'readiness', 'diagnostic-preparation'):
             self.assertIn('steps.' + dependency + ".outcome == 'success'", condition)
         self.assertIn(BRANCH, condition)
         self.assertIn('!cancelled()', condition)
+
+    def test_preparation_always_uploads_staged_and_original_evidence_without_source_checkout(self):
+        upload = named(self.source, 'Preserve diagnostic desktop preparation originals')
+        self.assertEqual(field(upload, 'if'), 'always()')
+        for value in ('include-hidden-files: true', 'retention-days: 7', '.work/suite-input-witness-preparation/',
+                      '${{ runner.temp }}/suite-input-witness-setup-', '${{ runner.temp }}/suite-input-witness-preparation-'):
+            self.assertIn(value, upload)
+        self.assertNotIn('suite-input-witness-source-', upload)
 
     def test_witness_inherits_exact_main_worker_diagnostics_root_before_launch(self):
         witness = named(self.source, 'Native ARM64 physical input witness diagnostic')
@@ -154,6 +174,7 @@ class Native35InputWitnessWorkflowTests(unittest.TestCase):
         self.assertIn('include-hidden-files: true', upload)
         self.assertIn('retention-days: 7', upload)
         for path in ('.work/suite-input-witness/', '.work/suite-input-witness-context/', '.work/suite-korean-readiness/',
+                     '.work/suite-input-witness-preparation/',
                      '.work/suite-engine/', '.work/suite-worker-diagnostics/',
                      '.work/office-suite/msi.msi.log', '.work/office-suite/**/*.log',
                      '.work/source-engine-input/*.json', '.work/source-engine-input/*.log'):

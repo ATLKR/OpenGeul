@@ -162,7 +162,8 @@ def diagnostic_report(original):
     report.update(kind='native-ime-input-witness-diagnostic', diagnosticOnly=True,
                   productionCaseOutcomeObserved=original.get('success') is True,
                   success=False, imeVerified=False, officeReplacementCertified=False,
-                  nativePrivacySetupPerformed=False, privacyPreparationQualified=False,
+                  mainNativePrivacySetupPerformed=False, diagnosticPreparationSeparatelyRecorded=True,
+                  diagnosticPreparationEvidence='.work/suite-input-witness-preparation/', privacyPreparationQualified=False,
                   hostReadyQualified=False, productQualified=False, qualification=False)
     return report
 
@@ -208,7 +209,8 @@ def _observer_class(production):
                 if self.witness_folder.is_dir():
                     report = dict(schemaVersion=1, kind='pre-downstream-native-input-witness',
                         diagnosticOnly=True, success=False, officeReplacementCertified=False,
-                        nativePrivacySetupPerformed=False, qualification=False,
+                        mainNativePrivacySetupPerformed=False, diagnosticPreparationSeparatelyRecorded=True,
+                        diagnosticPreparationEvidence='.work/suite-input-witness-preparation/', qualification=False,
                         nativeRows=self.native_rows, witnessRows=self.witness_rows, beforeUnhookNativeSnapshot=snapshot,
                         nativeRowsAndRawSnapshotAreSeparateAcquireCopies=True,
                         snapshotError=None if failure is None else type(failure).__name__ + ': ' + str(failure),
@@ -290,7 +292,9 @@ def source_binding(environment, repository):
         committed = subprocess.run(['git', '-C', str(repository), 'cat-file', 'blob', head + ':suite/e2e/' + name], capture_output=True, check=True).stdout
         assert path.read_bytes() == committed, 'Diagnostic executable source differs from committed bytes'
         files.append(_file_pin(path))
-    return dict(binding, gitHead=head, sourceFiles=files, diagnosticOnly=True, nativePrivacySetupPerformed=False)
+    return dict(binding, gitHead=head, sourceFiles=files, diagnosticOnly=True,
+                mainNativePrivacySetupPerformed=False, diagnosticPreparationSeparatelyRecorded=True,
+                diagnosticPreparationEvidence='.work/suite-input-witness-preparation/')
 
 
 def main(argv=None):

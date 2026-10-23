@@ -96,7 +96,10 @@ class InputWitnessTests(unittest.TestCase):
         self.assertFalse(result['success'])
         self.assertFalse(result['imeVerified'])
         self.assertFalse(result['officeReplacementCertified'])
-        self.assertFalse(result['nativePrivacySetupPerformed'])
+        self.assertFalse(result['mainNativePrivacySetupPerformed'])
+        self.assertNotIn('nativePrivacySetupPerformed', result)
+        self.assertTrue(result['diagnosticPreparationSeparatelyRecorded'])
+        self.assertEqual(result['diagnosticPreparationEvidence'], '.work/suite-input-witness-preparation/')
         self.assertTrue(result['productionCaseOutcomeObserved'])
 
     def test_harness_restores_production_globals_and_keeps_original_exception(self):
