@@ -106,9 +106,13 @@ class SemanticGetterTests(unittest.TestCase):
         document=Accessible(83,children=[shape],rectangle=(10,10,95,95))
         root=Accessible(40,children=[document],rectangle=(0,0,100,100))
         container_root=Accessible(49,children=[root],rectangle=(0,0,100,100))
-        component=NS(getProperty=lambda name:root)
+        document.getImplementationName=lambda:'AccessibleDrawDocumentView'
+        document.getSupportedServiceNames=lambda:('com.sun.star.drawing.AccessibleDrawDocumentView',)
+        focused=NS(getProperty=lambda name:document,hasFocus=lambda:True)
+        component=NS(getProperty=lambda name:root,hasFocus=lambda:False,
+            getWindows=lambda:(focused,),isChild=lambda child:child is focused)
         peer=NS(getWindowHandle=lambda *a:456,getProperty=lambda name:container_root,
-            isChild=lambda child:child is component)
+            isChild=lambda child:child is component or child is focused)
         frame=NS(getContainerWindow=lambda:peer,getComponentWindow=lambda:component)
         controller=NS(getFrame=lambda:frame);model=NS(getCurrentController=lambda:controller)
         frame.getController=lambda:controller;controller.getModel=lambda:model
@@ -318,6 +322,15 @@ class SemanticSetupTests(unittest.TestCase):
                     before=copy.deepcopy(checks),after=copy.deepcopy(checks)))
             editing['candidateObservations']=[dict(shapeIndex=0,paragraphCount=1,shape=shape,
                 paragraphIndex=0,paragraph=para,caretPosition=end if ready else -1)]
+            focus_checks=dict(hasFocus=True,peerPathStable=True,properComponentChild=True,properContainerChild=True,
+                distinctComponentPeer=True,distinctContainerPeer=True,sameAccessible=True,accessiblePathStable=True,
+                role=83,stateBits=state,implementationName='AccessibleDrawDocumentView',
+                serviceNames=['com.sun.star.drawing.AccessibleDrawDocumentView'])
+            editing['accessibleBinding']['focusBinding']=dict(contract='impress-focused-view-edit-context-v2',
+                scope='positive-focused-semantic-view',peerIdentity='a'*32,peerPath=[0],
+                search=dict(visitedCount=2,limits=dict(visits=256,depth=8,children=64),unknownBranches=[],
+                    unvisitedBranchCount=0,censusComplete=False,stop='positive-global-focus'),
+                before=copy.deepcopy(focus_checks),after=copy.deepcopy(focus_checks))
             if not ready:
                 editing.update(targetFound=False,paragraphCount=0,paragraph=None)
                 for key in ('shapeIdentity','paragraphIdentity','shapeIndex','paragraphIndex','shape','paragraph'):

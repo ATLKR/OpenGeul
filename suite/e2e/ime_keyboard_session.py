@@ -44,6 +44,7 @@ class IMEKeyboardSession:
         self.tid = self.focus = self.locks = None
         self.phase = 'new'; self.failed = None; self.finished = False
         self.semantic_pre = self.semantic_post = None
+        self.calc_navigation = self.calc_navigation_times = self.calc_navigation_url = None
         self.output = self.stem = None
         self.receipt = dict(schemaVersion=1, kind='owned-first-admission-ime-keyboard',
             success=False, module=module, startedAt=clock(), setupDeadline=setup_deadline,
@@ -243,11 +244,104 @@ class IMEKeyboardSession:
     def navigate(self):
         def navigate():
             assert self.phase=='focused', 'IME setup navigation cannot repeat or reorder'
+            assert self.module!='calc', 'Calc requires its source-bound pre-F2 navigation barrier'
             for preset in SETUP[self.module]:self._press(preset)
             self.phase='navigated'
         return self._run(navigate)
+    def require_calc_navigation_initial_target(self):
+        """Read-only admission before evaluating navigate_calc's shell argument."""
+        def current():
+            assert self.module=='calc' and self.phase=='focused', 'Calc initial navigation shell phase unavailable'
+            assert self.deadline==self.setup_deadline==self.receipt['setupDeadline'], 'Calc initial navigation shell budget changed'
+            assert self.calc_navigation is self.calc_navigation_times is self.calc_navigation_url is None, 'Calc navigation already admitted'
+            assert 'calcNavigationContext' not in self.record and 'calcNavigationReadiness' not in self.receipt, 'Calc navigation context already exists'
+            assert len(self.receipt['actions'])==1, 'Calc initial shell requires its single original CtrlF6'
+            action=self.receipt['actions'][0]
+            assert action['shortcut']=='CTRL_F6' and all(type(action[key]) is int and action[key]==value
+                for key,value in (('requestedInputs',4),('insertedInputs',4),('inputCallAttempts',1))), 'Calc initial CtrlF6 is incomplete'
+            acknowledged=self.receipt.get('editorReadinessAcknowledgedAt')
+            assert _number(acknowledged) and action['finishedAt']<=acknowledged<self.setup_deadline, 'Calc initial editor readiness is not acknowledged'
+            return self._guard()
+        return self._run(current)
+    def require_calc_navigation_target(self):
+        def current():
+            assert self.module=='calc' and self.phase in ('calc-navigation-initial','calc-navigation-home'), 'Calc navigation reader phase unavailable'
+            assert self.deadline==self.setup_deadline, 'Calc navigation guard cannot renew or nest another budget'
+            context=self.record.get('calcNavigationContext')
+            assert isinstance(context,dict), 'Actual Calc navigation context is missing'
+            if self.calc_navigation is None:
+                self.calc_navigation=context
+                self.calc_navigation_times=(context.get('startedAt'),context.get('readerDeadline'))
+            started,deadline=self.calc_navigation_times
+            def validate():
+                assert self.record.get('calcNavigationContext') is self.calc_navigation is context, 'Actual Calc navigation context changed'
+                assert context.get('kind')=='ime-calc-pre-edit-navigation' and context.get('expectedNative')==self.binding
+                assert context.get('expectedUrl')==self.calc_navigation_url, 'Original Calc navigation document URL changed'
+                assert context.get('setupDeadline')==self.setup_deadline
+                assert context.get('startedAt')==started and context.get('readerDeadline')==deadline
+                assert _number(started) and _number(deadline) and started<=self.clock()<deadline==min(self.setup_deadline,started+12.), 'Calc navigation reader deadline changed or expired'
+            validate();previous=self.deadline
+            if self.native_probe:previous_probe=self.probe.deadline
+            self.deadline=deadline
+            if self.native_probe:self.probe.deadline=deadline
+            try:return self._guard(context_check=validate)
+            finally:
+                self.deadline=previous
+                if self.native_probe:self.probe.deadline=previous_probe
+        return self._run(current)
+    def navigate_calc(self,suite,source,original_bytes,*,original_shell,reader_factory=None):
+        def navigate():
+            from ime_calc_navigation import observe_calc_navigation,require_calc_navigation
+            assert self.module=='calc' and self.phase=='focused', 'Calc navigation cannot repeat or reorder'
+            assert self.calc_navigation is None and len(self.receipt['actions'])==1
+            assert original_shell['pid']==self.shell['pid'] and original_shell['handleValue']==self.shell['handleValue']
+            assert original_shell['nativeCreation']['fileTime']==self.shell['creationTime']
+            assert _same(original_shell['nativeImage'],self.shell['image']), 'Calc navigation replaced original Popen identity'
+            self.calc_navigation_url=Path(source).as_uri()
+            self.phase='calc-navigation-initial'
+            def home():
+                assert self.phase=='calc-navigation-initial' and len(self.receipt['actions'])==1, 'Calc CtrlHome cannot repeat or reorder'
+                self.require_calc_navigation_target()
+                assert 'initial' in self.calc_navigation and 'homeCommand' not in self.calc_navigation
+                self.phase='calc-navigation-home'
+                previous=self.deadline
+                if self.native_probe:previous_probe=self.probe.deadline
+                self.deadline=self.calc_navigation_times[1]
+                if self.native_probe:self.probe.deadline=self.deadline
+                try:self._press('CTRL_HOME')
+                finally:
+                    self.deadline=previous
+                    if self.native_probe:self.probe.deadline=previous_probe
+                return self.receipt['actions'][-1]
+            context=observe_calc_navigation(suite,source,original_bytes,self.record,self.setup_deadline,
+                original_shell=original_shell,expected_native=self.binding,
+                require_current=self.require_calc_navigation_target,send_home=home,
+                reader_factory=reader_factory,clock=self.clock)
+            assert context is self.calc_navigation is self.record.get('calcNavigationContext')
+            require_calc_navigation(context,suite=suite,expected_native=self.binding,expected_url=self.calc_navigation_url,
+                setup_deadline=self.setup_deadline,now=self.clock())
+            assert context['homeCommand'] is self.receipt['actions'][1]
+            self.phase='calc-navigation-ready'
+            self.receipt['calcNavigationReadiness']=dict(finishedAt=context['finishedAt'],
+                readerDeadline=context['readerDeadline'],acknowledgedAt=self.clock())
+            self._press('F2');self._press('CTRL_END');self.phase='navigated'
+        return self._run(navigate)
     def _replay_semantic(self, phase):
         from ime_semantic_context import require_ime_semantic_context
+        if self.module=='calc':
+            from ime_calc_navigation import require_calc_navigation,_time as _time_navigation
+            assert self.calc_navigation is not None and self.record.get('calcNavigationContext') is self.calc_navigation, 'Actual Calc navigation proof changed or is missing'
+            require_calc_navigation(self.calc_navigation,suite=self.process.opengeul_suite_root,
+                expected_native=self.binding,expected_url=self.calc_navigation_url,setup_deadline=self.setup_deadline,now=self.clock())
+            readiness=self.receipt['calcNavigationReadiness'];actions=self.receipt['actions']
+            assert [row['shortcut'] for row in actions]==['CTRL_F6','CTRL_HOME','F2','CTRL_END']
+            assert self.calc_navigation['homeCommand'] is actions[1]
+            assert _time_navigation(readiness['finishedAt'])==self.calc_navigation['finishedAt'] and _time_navigation(readiness['readerDeadline'])==self.calc_navigation['readerDeadline']
+            pre=self.record['imeSemanticContexts'][0]
+            assert (self.calc_navigation['finishedAt'] <= _time_navigation(readiness['acknowledgedAt'])
+                <= _time_navigation(actions[2]['startedAt']) <= _time_navigation(actions[2]['finishedAt'])
+                <= _time_navigation(actions[3]['startedAt']) <= _time_navigation(actions[3]['finishedAt'])
+                <= _time_navigation(pre['startedAt'])), 'Calc semantic PRE overlaps original source navigation or F2/End'
         self._budget();contexts=self.record.get('imeSemanticContexts')
         assert isinstance(contexts,list) and len(contexts) in (1,2), 'IME requires actual finite semantic contexts'
         assert contexts[0] is self.semantic_pre and self.record.get('imeSemanticContext') is contexts[-1], 'Actual IME semantic context identity changed'

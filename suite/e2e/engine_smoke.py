@@ -116,6 +116,7 @@ class Engine:
         self.process = self.profile = self.desktop = self.uno = None
         self.cleanup_errors = []
         self._job_witness = None
+        self.fixture_lifetime = None
         self.base_lifetime_enabled = False
         self.lifetime_diagnostics = LifetimeTrace()
         self.cleanup_evidence = dict(schemaVersion=1, kind='owned-engine-job-cleanup',
@@ -181,13 +182,29 @@ class Engine:
     def close_document(self, document):
         if document is not None:
             # Only generated test documents reach this helper.
+            lease = getattr(self, 'fixture_lifetime', None)
+            if lease is not None:
+                lease.require_active()
             if self.base_lifetime_enabled:
                 with resource_scope(self.lifetime_diagnostics) as own:
                     own('document.close', lambda: document.close(False))
                     lifetime_call(self.lifetime_diagnostics, 'document.setModified', lambda: document.setModified(False))
+            elif lease is not None:
+                self.lifetime_diagnostics.call('document.setModified', lambda: document.setModified(False))
+                lease.require_active()
+                self.lifetime_diagnostics.call('document.close', lambda: document.close(False))
             else:
                 document.setModified(False)
                 document.close(False)
+            if lease is not None:
+                lease.require_active()
+
+    def acquire_fixture_lifetime(self):
+        from fixture_desktop_lifetime import FixtureDesktopLease
+        assert getattr(self, 'fixture_lifetime', None) is None, 'Fixture Desktop lifetime cannot restart'
+        self.fixture_lifetime = FixtureDesktopLease(self.desktop, self.lifetime_diagnostics)
+        self.cleanup_evidence['fixtureDesktopLifetime'] = self.fixture_lifetime.receipt
+        self.fixture_lifetime.register()
 
     def _cleanup_error(self, stage, exc):
         self.cleanup_errors.append(stage + ': ' + type(exc).__name__ + ': ' + str(exc))
@@ -252,6 +269,12 @@ class Engine:
                 self._capture_members('before-desktop-termination')
             except Exception as exc:
                 self._cleanup_error('retain owned members', exc)
+        lease = getattr(self, 'fixture_lifetime', None)
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception as exc:
+                self._cleanup_error('fixture desktop lifetime release', exc)
         if self.desktop is not None:
             try:
                 returned = self.lifetime_diagnostics.call('desktop.terminate', self.desktop.terminate, record_return=True)
@@ -306,8 +329,15 @@ class Engine:
                 self._cleanup_error('graceful exit proof', exc)
 
 
-def _shape(engine, document, page, service, text, position, size):
+def _shape(engine, document, page, service, text, position, size, *, fixed_text_frame=False):
+    assert type(fixed_text_frame) is bool and (not fixed_text_frame or service == 'com.sun.star.drawing.TextShape'), \
+        'Fixed generated frame requires an explicit boolean TextShape opt-in'
     shape = document.createInstance(service)
+    if fixed_text_frame:
+        # Keep the supplied fixture size stable when entering text edit.
+        shape.setPropertyValue('TextAutoGrowHeight', False)
+        shape.setPropertyValue('TextAutoGrowWidth', False)
+        shape.setPropertyValue('TextFitToSize', engine.uno.Enum('com.sun.star.drawing.TextFitToSizeType', 'NONE'))
     point = engine.uno.createUnoStruct('com.sun.star.awt.Point')
     point.X, point.Y = position
     dimensions = engine.uno.createUnoStruct('com.sun.star.awt.Size')
@@ -340,7 +370,8 @@ def populate(engine, module, document):
         _shape(engine, document, page,
                'com.sun.star.drawing.TextShape' if module == 'impress' else 'com.sun.star.drawing.RectangleShape',
                marker(module), (2500, 2500) if module == 'impress' else (1000, 1000),
-               (20000, 6000) if module == 'impress' else (6000, 2500))
+               (20000, 6000) if module == 'impress' else (6000, 2500),
+               fixed_text_frame=(module == 'impress'))
     elif module == 'math':
         document.setPropertyValue('Formula', FORMULA)
     elif module == 'base':
@@ -419,6 +450,10 @@ def run_case(suite, output, module, specification, verify_ui=False):
     started = time.monotonic()
     try:
         engine.start()
+        engine.acquire_fixture_lifetime()
+        from fixture_desktop_lifetime import require_fixture_members
+        require_fixture_members(engine._capture_members('fixture-before-first-load'),
+                                engine.cleanup_evidence['expectedEngineImage'])
         if verify_ui:
             document = engine.load(path.as_uri())
         else:

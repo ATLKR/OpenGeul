@@ -22,6 +22,9 @@ MAX_TEXT=1024*1024
 SOURCE='libreoffice-26.8.1.1'
 PREFIXES={module:' ime-opengeul-'+module+':' for module in ('writer','calc','impress')}
 GETTERS={module:module+('-a1' if module=='calc' else '')+'-active-edit-context-v1' for module in PREFIXES}
+IMPRESS_LEGACY_GETTER='impress-active-edit-context-v1'
+IMPRESS_FOCUSED_GETTER='impress-focused-view-edit-context-v2'
+GETTERS['impress']=IMPRESS_FOCUSED_GETTER
 SERVICES=dict(writer='com.sun.star.text.TextDocument',calc='com.sun.star.sheet.SpreadsheetDocument',
               impress='com.sun.star.presentation.PresentationDocument')
 CONTAINER_ROLES={21,40,49,51,56,66,67}
@@ -115,8 +118,17 @@ def _path_proxies(root,path,call,*,retained=None):
     return nodes
 
 
-def require_edit_context(value,module,child_hwnd):
+def _edit_contract(module,getter_contract):
+    if getter_contract is None:
+        return IMPRESS_LEGACY_GETTER if module=='impress' else GETTERS[module]
+    allowed=(IMPRESS_LEGACY_GETTER,IMPRESS_FOCUSED_GETTER) if module=='impress' else (GETTERS[module],)
+    assert type(getter_contract) is str and getter_contract in allowed, 'Unsupported explicit editing-context getter'
+    return getter_contract
+
+
+def require_edit_context(value,module,child_hwnd,*,getter_contract=None):
     assert module in PREFIXES and isinstance(value,dict)
+    getter_contract=_edit_contract(module,getter_contract)
     assert value.get('kind')=='actual-gui-editing-context' and value.get('module')==module
     assert value.get('sourceTag')==SOURCE and value.get('readOnly') is True and value.get('targetStable') is True
     assert type(value.get('childHwnd')) is int and value['childHwnd']==child_hwnd
@@ -150,7 +162,12 @@ def require_edit_context(value,module,child_hwnd):
                     assert type(binding.get('paragraphIndex')) is int and binding['paragraphIndex']==0
                     assert paragraph is not None and paragraph['textBefore']==paragraph['textAfter']==pending['editor']['text']
             else:assert count==0 and paragraph is None
-        else:_require_impress_binding(value)
+        else:
+            _require_impress_binding(value)
+            if getter_contract==IMPRESS_FOCUSED_GETTER:
+                from impress_focused_view import require_focus_binding
+                require_focus_binding(binding)
+            else:assert 'focusBinding' not in binding, 'Focused-view evidence is not the global v1 contract'
     return value
 
 
@@ -215,8 +232,8 @@ def _require_impress_binding(value):
     else:assert value['paragraphCount']==0 and value['paragraph'] is None
 
 
-def edit_context_ready(value,module,expected_text,child_hwnd):
-    require_edit_context(value,module,child_hwnd);_text(expected_text)
+def edit_context_ready(value,module,expected_text,child_hwnd,*,getter_contract=None):
+    require_edit_context(value,module,child_hwnd,getter_contract=getter_contract);_text(expected_text)
     if module=='writer':
         return (value['cursorCollapsed'] and value['cursorTextIsBody'] and value['bodyEndComparison']==0
             and value['textBefore']==value['textAfter']==expected_text)
@@ -229,14 +246,16 @@ def edit_context_ready(value,module,expected_text,child_hwnd):
 
 class EditingContextReader:
     """Retain original proxies. Getter failures propagate; no API-error defaults."""
-    def __init__(self,module,frame,controller,model,child_hwnd,*,deadline,clock=time.monotonic):
+    def __init__(self,module,frame,controller,model,child_hwnd,*,deadline,clock=time.monotonic,getter_contract=None):
         assert module in PREFIXES and type(child_hwnd) is int and child_hwnd>0
+        self.getter_contract=_edit_contract(module,getter_contract)
         self.module,self.frame,self.controller,self.model=module,frame,controller,model
         self.child_hwnd,self.deadline,self.clock=child_hwnd,_time(deadline),clock
         self.body=self.cursor=self.peer=self.root=self.document=self.shape=self.paragraph=None
         self.container_root=self.component_peer=None
         self.document_path=self.document_nodes=self.document_children=None
         self.calc=None;self.identities={name:uuid.uuid4().hex for name in ('root','document','shape','paragraph','body','cursor')}
+        self.focused_view=None
         if module=='writer':
             self.body=self.call(model.getText);self.cursor=self.call(controller.getViewCursor)
         elif module=='calc':
@@ -340,21 +359,78 @@ class EditingContextReader:
         from calc_pending_input import _inside
         assert root_visible and _inside(root_row['rectangle'],container_row['rectangle']), 'Component root is outside its visible original container'
         component_binding=dict(containerRoot=container_row,before=before)
+        # Copy only facts returned by this traversal. The over-bound node is
+        # deliberately unqueried, and paths remain component-root relative.
+        ancestors=[];returned=[];returned_headers=0
+        attempt=dict(stage='fixed-bound',failedPath=[],failedNode=None)
         def discover(accessible,parent=None,index=None,path=()):
-            nonlocal visited
+            nonlocal visited,returned_headers
+            node=dict(path=list(path),visit=visited+1,headerReturned=False,
+                role=None,stateBits=None,visible=None,childCount=None,childCountReturned=False)
+            attempt.update(stage='fixed-bound',failedPath=list(path),failedNode=node)
             visited+=1;assert visited<=256 and len(path)<=8, 'Accessible discovery exceeded fixed bound'
+            attempt['stage']='node-header'
             header=self._node_header(accessible,parent,index)
             context,role,visible,_=header
+            node.update(headerReturned=True,role=role,stateBits=header[3]['stateBits'],visible=visible)
+            ancestors.append(node);returned.append(node);returned_headers+=1
+            if len(returned)>16:returned.pop(0)
             if role==83:
                 if visible:
+                    attempt['stage']='document-geometry'
                     _,_,_,row=self._node_geometry(header,path=path)
                     documents.append((accessible,context,path,row))
+                ancestors.pop()
                 return
-            if role not in CONTAINER_ROLES:return
-            count=self.call(context.getAccessibleChildCount);assert type(count) is int and 0<=count<=64
-            for child in range(count):discover(self.call(context.getAccessibleChild,child),accessible,child,path+(child,))
+            if role not in CONTAINER_ROLES:ancestors.pop();return
+            attempt['stage']='child-count-getter'
+            count=self.call(context.getAccessibleChildCount)
+            node.update(childCount=count,childCountReturned=True);attempt['stage']='child-count-bound'
+            assert type(count) is int and 0<=count<=64
+            for child in range(count):
+                attempt.update(stage='child-getter',failedPath=list(path+(child,)),
+                    failedNode=dict(path=list(path+(child,)),visit=visited+1,headerReturned=False,
+                        role=None,stateBits=None,visible=None,childCount=None,childCountReturned=False))
+                discover(self.call(context.getAccessibleChild,child),accessible,child,path+(child,))
+            ancestors.pop()
         if self.document is None:
-            discover(self.root);assert len(documents)<=1, 'Original Impress document is ambiguous'
+            try:discover(self.root)
+            except BaseException as exc:
+                # Optional local projection never adds UNO/clock queries or
+                # replaces the original exception, even if projection fails.
+                try:
+                    def scalar(value):
+                        if value is None or type(value) is bool:return value
+                        if type(value) is int and value.bit_length()<=64:return value
+                        return dict(type=type(value).__name__[:80],valueRetained=False)
+                    def row(value):
+                        return {key:list(item) if key=='path' else scalar(item) for key,item in value.items()}
+                    def geometry(value):
+                        return {key:[scalar(part) for part in item] if key=='rectangle' else scalar(item)
+                            for key,item in value.items()}
+                    caps=[]
+                    if attempt['stage']=='fixed-bound':
+                        if visited>256:caps.append('visits')
+                        if len(attempt['failedPath'])>8:caps.append('depth')
+                    elif attempt['stage']=='child-count-bound':
+                        caps.append('children' if type(attempt['failedNode']['childCount']) is int else 'children-type')
+                    diagnostic=dict(schemaVersion=1,kind='failed-impress-accessible-discovery',
+                        module='impress',sourceTag=SOURCE,childHwnd=self.child_hwnd,
+                        readerDeadline=self.deadline,stage=attempt['stage'],failedCaps=caps,
+                        limits=dict(visits=256,depth=8,children=64),visitedCount=visited,
+                        returnedHeaderCount=returned_headers,failedPath=list(attempt['failedPath']),
+                        failedDepth=len(attempt['failedPath']),rootBasis=IMPRESS_ROOT_BASIS,root=geometry(root_row),
+                        componentBinding=dict(containerRoot=geometry(component_binding['containerRoot']),
+                            before={key:scalar(value) for key,value in component_binding['before'].items()}),
+                        componentBindingAfter='not-reached',
+                        failedNode=row(attempt['failedNode']),ancestors=[row(value) for value in ancestors],
+                        returnedNodes=[row(value) for value in returned],returnedNodeLimit=16,
+                        returnedNodesTruncated=returned_headers>len(returned),qualification=False)
+                    assert len(json.dumps(diagnostic,allow_nan=False).encode('utf-8'))<=32768
+                    exc.impress_discovery_diagnostic=diagnostic
+                except BaseException:pass
+                raise
+            assert len(documents)<=1, 'Original Impress document is ambiguous'
         else:
             _path_proxies(self.root,self.document_path,self.call,retained=self.document_nodes)
             context,role,visible,row=self._node(self.document,path=self.document_path)
@@ -432,9 +508,14 @@ class EditingContextReader:
                 writerBinding=dict(verified=True,bodyIdentity=self.identities['body'],cursorIdentity=self.identities['cursor']))
             assert self.call(self.model.getText)==self.body and self.call(self.controller.getViewCursor)==self.cursor
         elif self.module=='calc':value.update(self.calc.read_edit_context())
+        elif self.getter_contract==IMPRESS_FOCUSED_GETTER:
+            from impress_focused_view import FocusedViewReader
+            if self.focused_view is None:self.focused_view=FocusedViewReader(self)
+            value.update(self.focused_view.read())
         else:value.update(self._impress())
-        return require_edit_context(value,self.module,self.child_hwnd)
+        return require_edit_context(value,self.module,self.child_hwnd,getter_contract=self.getter_contract)
     def release(self):
+        if self.focused_view is not None:self.focused_view.release();self.focused_view=None
         if self.calc is not None:
             self.calc.semantic_paragraph=None;self.calc.release();self.calc=None
         self.body=self.cursor=self.peer=self.root=self.document=self.shape=self.paragraph=None
@@ -600,6 +681,9 @@ def _sample(observation,context,inventory,*,previous=None):
         for name in ('bodyIdentity','cursorIdentity','rootIdentity','documentIdentity','editorIdentity',
                      'shapeIdentity','paragraphIdentity','documentPath','shapeIndex','paragraphIndex'):
             if name in before:assert after.get(name)==before[name], 'Retained GUI editing identity changed: '+name
+        if module=='impress':
+            from impress_focused_view import require_focus_binding
+            require_focus_binding(after,previous=before)
     baseline=context['baseline'];phase=context['phase']
     expected=baseline['text']+(context['expectedPrefix'] if phase=='post' else '')
     modified=observation['isModified'];assert type(modified) is bool
@@ -610,7 +694,7 @@ def _sample(observation,context,inventory,*,previous=None):
         require_pending_receipt(observation['editContext']['pendingInput'],native['childHwnd'],
             previous=previous['editContext']['pendingInput'] if previous is not None else None)
     if module=='writer':assert observation.get('bodyText')==observation['editContext']['textAfter'], 'Writer model/body observation disagrees'
-    ready=edit_context_ready(observation['editContext'],module,expected,native['childHwnd'])
+    ready=edit_context_ready(observation['editContext'],module,expected,native['childHwnd'],getter_contract=GETTERS[module])
     if module=='writer' and phase=='post':ready=ready and modified is True
     if module=='calc' and ready:
         require_pending_receipt(observation['editContext']['pendingInput'],native['childHwnd'],expected,require_editor=True)

@@ -248,6 +248,9 @@ class KoreanImePolicyTests(unittest.TestCase):
                     def editor_ready(inner, receipt):
                         self.assertIs(receipt,inner.record['editorFocusReadiness']);calls.append('readiness-acknowledged')
                     def navigate(inner):calls.append(('counted-navigation',module))
+                    def navigate_calc(inner,suite,source,original_bytes,**kw):
+                        self.assertEqual(module,'calc');self.assertIs(kw['original_shell'],retained_shell)
+                        inner.navigate()
                     def require_target(inner):return None
                     def require_context_target(inner,key):self.assertIn(key,inner.record)
                     def require_prefix_ready(inner):

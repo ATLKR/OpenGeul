@@ -69,6 +69,12 @@ class EngineEvidenceTests(unittest.TestCase):
             def start(self):
                 pass
 
+            def acquire_fixture_lifetime(self):
+                pass  # This fixture models only final-byte/cleanup boundaries.
+
+            def _capture_members(self, phase):
+                return self.cleanup_evidence['initialMembers']
+
             def load(self, url):
                 return object()
 

@@ -936,17 +936,19 @@ def reopen_one(suite, source, module):
         assert not engine.cleanup_errors, 'UNO reopen cleanup failed: ' + str(engine.cleanup_errors)
 
 
-def retained_setup_shell(process, suite, keyboard):
+def retained_setup_shell(process, suite, keyboard, *, calc_navigation_initial=False):
     # This later, fuller Popen observation is joined to the keyboard's true
     # first admission; it is never presented as an earlier reader witness.
     from lifecycle_smoke import retained_writer_shell
     from writer_model_barrier import require_original_shell
-    keyboard.require_target()
+    assert type(calc_navigation_initial) is bool, 'Unknown retained IME shell admission mode'
+    require_target = keyboard.require_calc_navigation_initial_target if calc_navigation_initial else keyboard.require_target
+    require_target()
     evidence = {}
     retained_writer_shell(process, suite, evidence)
     require_original_shell(evidence, keyboard.binding, suite)
     assert evidence['handleValue'] == keyboard.shell['handleValue'], 'Calc setup replaced the original Popen HANDLE'
-    keyboard.require_target()
+    require_target()
     return evidence
 
 
@@ -1041,7 +1043,11 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             lambda: keyboard.focus_editor(record['editorFocusReadiness']['deadline']),
             seconds=remaining_setup(setup_deadline, 5))
         keyboard.editor_ready(record['editorFocusReadiness'])
-        keyboard.navigate()
+        if module == 'calc':
+            keyboard.navigate_calc(suite, source, original_bytes,
+                original_shell=retained_setup_shell(process, suite, keyboard, calc_navigation_initial=True))
+        else:
+            keyboard.navigate()
         focus = keyboard.focus
         record.update(editorTid=keyboard.tid, keyboardFocusHwnd=focus)
         record['stage'] = 'verify-pre-prefix-editing-context'
