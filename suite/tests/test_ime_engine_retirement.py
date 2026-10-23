@@ -110,7 +110,7 @@ class Fixture:
                 member['image']=str(self.suite/'Office/program'/Path(member['image']).name)
         raw=(json.dumps(proof,ensure_ascii=False)+'\n').encode();(folder/'shutdown.json').write_bytes(raw)
         manifest=dict(schemaVersion=1,kind='owned-office-native-diagnostics',archiveComplete=True,
-            launcherPid=proof['launcherPid'],workerPid=555,ownedProfile=str(self.folder/'private-profile'),
+            launcherPid=proof['launcherPid'],workerPid=555,ownedProfile=self.original_profile['canonicalPath'],
             files=[dict(path='shutdown.json',bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())])
         (folder/'manifest.json').write_text(json.dumps(manifest));return folder,manifest,proof
     def verify(self, lease):

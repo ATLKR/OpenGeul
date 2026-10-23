@@ -105,27 +105,32 @@ class SemanticGetterTests(unittest.TestCase):
         if extra_paragraph:shape.set_children([paragraph,Accessible(41,text='')])
         document=Accessible(83,children=[shape],rectangle=(10,10,95,95))
         root=Accessible(40,children=[document],rectangle=(0,0,100,100))
-        peer=NS(getWindowHandle=lambda *a:456,getProperty=lambda name:root)
-        frame=NS(getContainerWindow=lambda:peer)
+        container_root=Accessible(49,children=[root],rectangle=(0,0,100,100))
+        component=NS(getProperty=lambda name:root)
+        peer=NS(getWindowHandle=lambda *a:456,getProperty=lambda name:container_root,
+            isChild=lambda child:child is component)
+        frame=NS(getContainerWindow=lambda:peer,getComponentWindow=lambda:component)
+        controller=NS(getFrame=lambda:frame);model=NS(getCurrentController=lambda:controller)
+        frame.getController=lambda:controller;controller.getModel=lambda:model
         roles=dict(ROLES,DOCUMENT_PRESENTATION=83,SHAPE=52)
         uno=NS(getConstantByName=lambda name:(STATES if '.AccessibleStateType.' in name else roles)[name.rsplit('.',1)[-1]])
         return frame,paragraph,shape,document,uno
     def test_impress_caret_is_from_the_active_accessible_outliner_paragraph(self):
         frame,paragraph,shape,doc,uno=self.impress()
         with patch.dict(sys.modules,uno=uno):
-            reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+            reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
             self.assertTrue(self.api.edit_context_ready(reader.read(),'impress','Baseline',456))
     def test_impress_undefined_caret_or_selection_or_multiple_paragraphs_never_qualifies(self):
         for args in [dict(caret=-1),dict(selection=(-1,-1)),dict(selection=(0,8)),dict(extra_paragraph=True)]:
             with self.subTest(args=args):
                 frame,paragraph,shape,doc,uno=self.impress(**args)
                 with patch.dict(sys.modules,uno=uno):
-                    reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+                    reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
                     self.assertFalse(self.api.edit_context_ready(reader.read(),'impress','Baseline',456))
     def test_impress_changed_native_peer_or_retained_paragraph_identity_fails(self):
         frame,paragraph,shape,doc,uno=self.impress()
         with patch.dict(sys.modules,uno=uno):
-            reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+            reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
             reader.read();replacement=Accessible(41,text='Baseline');shape.set_children([replacement])
             with self.assertRaises(AssertionError):reader.read()
     def test_known_null_or_bool_or_float_caret_is_not_coerced_to_zero(self):
@@ -133,25 +138,25 @@ class SemanticGetterTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 frame,paragraph,shape,doc,uno=self.impress(caret=bad)
                 with patch.dict(sys.modules,uno=uno):
-                    reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+                    reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
                     with self.assertRaises(AssertionError):reader.read()
     def test_getter_deadline_does_not_reset_or_admit_late_readiness(self):
         reader,_,_=self.writer();self.now=10.
         with self.assertRaises((AssertionError,TimeoutError)):reader.read()
     def test_impress_document_replacement_during_metric_read_rejects_old_exact_text(self):
         frame,paragraph,shape,doc,uno=self.impress()
-        root=frame.getContainerWindow().getProperty('XAccessible')
+        root=frame.getComponentWindow().getProperty('XAccessible')
         def replaced_count():
             root.set_children([Accessible(83,children=[Accessible(52)])])
             return 8
         paragraph.getCharacterCount=replaced_count
         with patch.dict(sys.modules,uno=uno):
-            reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+            reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
             with self.assertRaises(AssertionError):reader.read()
     def test_impress_retained_shape_replacement_rejects_before_foreign_metric_getter(self):
         frame,paragraph,shape,doc,uno=self.impress()
         with patch.dict(sys.modules,uno=uno):
-            reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+            reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
             reader.read()
             foreign=Accessible(41,text='Baseline')
             foreign.getCaretPosition=lambda:(_ for _ in ()).throw(RuntimeError('Foreign metric getter queried'))
@@ -162,7 +167,7 @@ class SemanticGetterTests(unittest.TestCase):
             with self.subTest(options=options):
                 frame,paragraph,shape,doc,uno=self.impress(**options)
                 with patch.dict(sys.modules,uno=uno):
-                    reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+                    reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
                     value=reader.read()
                 rows=value.get('candidateObservations',[])
                 self.assertEqual(len(rows),1)
@@ -198,7 +203,7 @@ class SemanticGetterTests(unittest.TestCase):
     def test_accessible_raw_binding_and_geometry_are_replayed_not_just_verified_flag(self):
         frame,paragraph,shape,doc,uno=self.impress()
         with patch.dict(sys.modules,uno=uno):
-            reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+            reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
             raw=reader.read()
         for mutate in (lambda v:v['accessibleBinding']['document'].update(role=84),
                        lambda v:v['accessibleBinding'].update(shapeIndex=True),
@@ -225,7 +230,7 @@ class SemanticGetterTests(unittest.TestCase):
             return 8
         paragraph.getCaretPosition=add_impress
         with patch.dict(sys.modules,uno=uno):
-            reader=self.api.EditingContextReader('impress',frame,object(),object(),456,deadline=10.,clock=lambda:self.now)
+            reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,deadline=10.,clock=lambda:self.now)
             with self.assertRaises(AssertionError):reader.read()
     def test_explicit_helper_dispatch_collects_actual_getters_and_releases_only_its_proxies(self):
         for module in ('writer','calc','impress'):
@@ -250,8 +255,9 @@ class SemanticGetterTests(unittest.TestCase):
                     reader.model=NS(getSheets=lambda:NS(getByIndex=lambda index:NS(getCellRangeByName=lambda name:cells[name])),isModified=lambda:False)
                 else:
                     frame,paragraph,shape,doc,uno=self.impress()
-                    reader.frame=frame;reader.controller=NS(getSelection=lambda:self.fail('Generic Impress selection is not the GUI caret'))
-                    reader.model=NS(isModified=lambda:False)
+                    reader.frame=frame;reader.controller=frame.getController()
+                    reader.controller.getSelection=lambda:self.fail('Generic Impress selection is not the GUI caret')
+                    reader.model=reader.controller.getModel();reader.model.isModified=lambda:False
                     patcher=patch.dict(sys.modules,uno=uno);patcher.start();self.addCleanup(patcher.stop)
                 value=reader.read();retained=reader.edit_context;second=reader.read()
                 self.assertIs(retained,reader.edit_context)
@@ -301,9 +307,15 @@ class SemanticSetupTests(unittest.TestCase):
             doc=dict(role=83,stateBits=state,rectangle=[10,10,95,95])
             shape=dict(role=52,stateBits=state,rectangle=[15,15,80,45])
             para=dict(role=41,stateBits=state,rectangle=[20,20,70,35])
+            checks=dict(frameController=True,controllerFrame=True,modelController=True,controllerModel=True,
+                containerPeer=True,containerAccessible=True,componentPeer=True,componentDistinct=True,
+                properContainerChild=True,componentAccessible=True,containerHwnd=self.native['childHwnd'])
             editing['accessibleBinding']=dict(verified=True,rootIdentity='1'*32,documentIdentity='2'*32,
                 shapeIdentity='3'*32,paragraphIdentity='4'*32,root=root,document=doc,shape=shape,paragraph=para,
-                documentPath=[0],shapeIndex=0,paragraphIndex=0,visitedCount=2)
+                documentPath=[0],shapeIndex=0,paragraphIndex=0,visitedCount=2,
+                rootBasis='original-frame-current-component-window',componentBinding=dict(
+                    containerRoot=dict(role=49,stateBits=state,rectangle=[0,0,100,100]),
+                    before=copy.deepcopy(checks),after=copy.deepcopy(checks)))
             editing['candidateObservations']=[dict(shapeIndex=0,paragraphCount=1,shape=shape,
                 paragraphIndex=0,paragraph=para,caretPosition=end if ready else -1)]
             if not ready:

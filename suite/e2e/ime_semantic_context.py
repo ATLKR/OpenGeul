@@ -25,6 +25,9 @@ GETTERS={module:module+('-a1' if module=='calc' else '')+'-active-edit-context-v
 SERVICES=dict(writer='com.sun.star.text.TextDocument',calc='com.sun.star.sheet.SpreadsheetDocument',
               impress='com.sun.star.presentation.PresentationDocument')
 CONTAINER_ROLES={21,40,49,51,56,66,67}
+IMPRESS_ROOT_BASIS='original-frame-current-component-window'
+IMPRESS_COMPONENT_CHECKS={'frameController','controllerFrame','modelController','controllerModel','containerPeer',
+    'containerAccessible','componentPeer','componentDistinct','properContainerChild','componentAccessible'}
 W='http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 A='http://schemas.openxmlformats.org/drawingml/2006/main'
 P='http://schemas.openxmlformats.org/presentationml/2006/main'
@@ -166,8 +169,21 @@ def _accessible_row(value,role,outer=None):
 def _require_impress_binding(value):
     binding=value['accessibleBinding'];visited=binding.get('visitedCount')
     assert type(visited) is int and 1<=visited<=256
+    assert binding.get('rootBasis')==IMPRESS_ROOT_BASIS
+    component=binding.get('componentBinding')
+    assert isinstance(component,dict) and set(component)=={'containerRoot','before','after'}
+    for phase in ('before','after'):
+        checks=component[phase]
+        assert isinstance(checks,dict) and set(checks)==IMPRESS_COMPONENT_CHECKS|{'containerHwnd'}
+        assert type(checks['containerHwnd']) is int and checks['containerHwnd']==value['childHwnd']
+        assert all(checks[name] is True for name in IMPRESS_COMPONENT_CHECKS)
+    container=component['containerRoot']
+    assert isinstance(container,dict) and container.get('role') in CONTAINER_ROLES|{83}
+    container_rectangle=_accessible_row(container,container['role'])
+    from calc_pending_input import _visible
+    assert _visible(container['stateBits']), 'Original container accessible root is not visible'
     root=binding.get('root');assert isinstance(root,dict) and root.get('role') in CONTAINER_ROLES|{83}
-    outer=_accessible_row(root,root['role'])
+    outer=_accessible_row(root,root['role'],container_rectangle)
     candidates=value.get('candidateObservations');assert isinstance(candidates,list) and len(candidates)<=64
     if 'documentIdentity' not in binding:
         assert not value['targetFound'] and value['paragraphCount']==0 and value['paragraph'] is None and not candidates
@@ -218,6 +234,7 @@ class EditingContextReader:
         self.module,self.frame,self.controller,self.model=module,frame,controller,model
         self.child_hwnd,self.deadline,self.clock=child_hwnd,_time(deadline),clock
         self.body=self.cursor=self.peer=self.root=self.document=self.shape=self.paragraph=None
+        self.container_root=self.component_peer=None
         self.document_path=self.document_nodes=self.document_children=None
         self.calc=None;self.identities={name:uuid.uuid4().hex for name in ('root','document','shape','paragraph','body','cursor')}
         if module=='writer':
@@ -234,16 +251,41 @@ class EditingContextReader:
                 assert uno.getConstantByName('com.sun.star.accessibility.AccessibleStateType.'+name)==expected
             self.peer=self.call(frame.getContainerWindow)
             assert self.peer is not None and self.call(self.peer.getWindowHandle,(),1)==child_hwnd
-            self.root=self.call(self.peer.getProperty,'XAccessible');assert self.root is not None
+            self.container_root=self.call(self.peer.getProperty,'XAccessible');assert self.container_root is not None
+            assert self.call(frame.getController)==controller
+            assert self.call(controller.getFrame)==frame and self.call(model.getCurrentController)==controller
+            assert self.call(controller.getModel)==model
+            # XFrame's current component is the semantic view root; its native
+            # container remains the original HWND anchor. Never fall back to
+            # traversing container chrome when the component is unavailable.
+            self.component_peer=self.call(frame.getComponentWindow)
+            assert self.component_peer is not None and self.component_peer!=self.peer
+            assert self.call(self.peer.isChild,self.component_peer) is True, 'Component is outside the original native container'
+            self.root=self.call(self.component_peer.getProperty,'XAccessible');assert self.root is not None
+            self._peer()
     def call(self,function,*args):
         assert _time(self.clock())<self.deadline, 'Original editing-context deadline expired'
         value=function(*args)
         assert _time(self.clock())<self.deadline, 'Original editing-context getter exceeded deadline'
         return value
     def _peer(self):
-        assert self.call(self.frame.getContainerWindow)==self.peer
-        assert self.call(self.peer.getWindowHandle,(),1)==self.child_hwnd
-        assert self.call(self.peer.getProperty,'XAccessible')==self.root, 'Original accessible native peer changed'
+        checks={}
+        def check(name,value):
+            checks[name]=value
+            assert value is True, 'Original component binding changed: '+name
+        check('frameController',self.call(self.frame.getController)==self.controller)
+        check('controllerFrame',self.call(self.controller.getFrame)==self.frame)
+        check('modelController',self.call(self.model.getCurrentController)==self.controller)
+        check('controllerModel',self.call(self.controller.getModel)==self.model)
+        check('containerPeer',self.call(self.frame.getContainerWindow)==self.peer)
+        checks['containerHwnd']=self.call(self.peer.getWindowHandle,(),1)
+        assert type(checks['containerHwnd']) is int and checks['containerHwnd']==self.child_hwnd
+        check('containerAccessible',self.call(self.peer.getProperty,'XAccessible')==self.container_root)
+        check('componentPeer',self.call(self.frame.getComponentWindow)==self.component_peer)
+        check('componentDistinct',self.component_peer!=self.peer)
+        check('properContainerChild',self.call(self.peer.isChild,self.component_peer))
+        check('componentAccessible',self.call(self.component_peer.getProperty,'XAccessible')==self.root)
+        return checks
     def _node_header(self,accessible,parent=None,index=None):
         from calc_pending_input import _visible
         context=self.call(accessible.getAccessibleContext);role=self.call(context.getAccessibleRole)
@@ -290,9 +332,14 @@ class EditingContextReader:
     def _node(self,accessible,parent=None,index=None,*,path=()):
         return self._node_geometry(self._node_header(accessible,parent,index),path=path)
     def _impress(self):
-        self._peer();documents=[];visited=0
-        _,root_role,_,root_row=self._node(self.root)
+        before=self._peer();documents=[];visited=0
+        _,container_role,container_visible,container_row=self._node(self.container_root)
+        assert container_role in CONTAINER_ROLES|{83} and container_visible
+        _,root_role,root_visible,root_row=self._node(self.root)
         assert root_role in CONTAINER_ROLES|{83}
+        from calc_pending_input import _inside
+        assert root_visible and _inside(root_row['rectangle'],container_row['rectangle']), 'Component root is outside its visible original container'
+        component_binding=dict(containerRoot=container_row,before=before)
         def discover(accessible,parent=None,index=None,path=()):
             nonlocal visited
             visited+=1;assert visited<=256 and len(path)<=8, 'Accessible discovery exceeded fixed bound'
@@ -315,8 +362,10 @@ class EditingContextReader:
             documents=[(self.document,context,tuple(self.document_path),row)]
             visited=len(self.document_path)+1
         result=dict(targetFound=False,paragraphCount=0,paragraph=None,candidateObservations=[],
-            accessibleBinding=dict(verified=True,rootIdentity=self.identities['root'],root=root_row,visitedCount=visited))
-        if not documents:self._peer();return result
+            accessibleBinding=dict(verified=True,rootIdentity=self.identities['root'],root=root_row,visitedCount=visited,
+                rootBasis=IMPRESS_ROOT_BASIS,componentBinding=component_binding))
+        if not documents:
+            component_binding['after']=self._peer();return result
         document,context,path,row=documents[0]
         if self.document is None:self.document=document
         assert document==self.document, 'Retained presentation document changed'
@@ -359,17 +408,16 @@ class EditingContextReader:
             assert role==52 and visible and self.call(sc.getAccessibleChildCount)==1, 'Retained Outliner paragraph span changed'
             _,role,visible,_=self._node(paragraph,shape,0,path=path+(index,0))
             assert role==41 and visible, 'Retained active Outliner paragraph became unavailable'
-            result.update(targetFound=True,paragraphCount=1,paragraph=data,
-                accessibleBinding=dict(verified=True,rootIdentity=self.identities['root'],root=root_row,
-                    documentIdentity=self.identities['document'],shapeIdentity=self.identities['shape'],
+            result.update(targetFound=True,paragraphCount=1,paragraph=data)
+            result['accessibleBinding'].update(shapeIdentity=self.identities['shape'],
                     paragraphIdentity=self.identities['paragraph'],documentPath=list(path),shapeIndex=index,
-                    paragraphIndex=0,document=row,shape=shape_row,paragraph=paragraph_row,visitedCount=visited))
+                    paragraphIndex=0,document=row,shape=shape_row,paragraph=paragraph_row,visitedCount=visited)
         elif self.shape is not None:raise AssertionError('Retained active Outliner edit disappeared')
         assert self.call(context.getAccessibleChildCount)==len(self.document_children), 'Retained presentation child count changed'
         for index,child in enumerate(self.document_children):
             assert self.call(context.getAccessibleChild,index)==child, 'Retained presentation shape identity changed'
         _path_proxies(self.root,list(path),self.call,retained=document_nodes)
-        self._peer();return result
+        component_binding['after']=self._peer();return result
     def read(self):
         value=dict(kind='actual-gui-editing-context',module=self.module,sourceTag=SOURCE,
             readOnly=True,targetStable=True,childHwnd=self.child_hwnd)
@@ -390,6 +438,7 @@ class EditingContextReader:
         if self.calc is not None:
             self.calc.semantic_paragraph=None;self.calc.release();self.calc=None
         self.body=self.cursor=self.peer=self.root=self.document=self.shape=self.paragraph=None
+        self.container_root=self.component_peer=None
         self.document_path=self.document_nodes=self.document_children=None
         self.model=self.controller=self.frame=None
 
