@@ -4,6 +4,7 @@ These getters describe the sampled GUI insertion destination. Native insertion
 and queue receipts never replace exact edit-buffer and saved/model effects.
 """
 from __future__ import annotations
+import base64
 import copy
 import hashlib
 import io
@@ -15,6 +16,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 
 MAX_TEXT=1024*1024
 SOURCE='libreoffice-26.8.1.1'
@@ -242,19 +244,51 @@ class EditingContextReader:
         assert self.call(self.frame.getContainerWindow)==self.peer
         assert self.call(self.peer.getWindowHandle,(),1)==self.child_hwnd
         assert self.call(self.peer.getProperty,'XAccessible')==self.root, 'Original accessible native peer changed'
-    def _node(self,accessible,parent=None,index=None):
-        from calc_pending_input import _inside,_visible
+    def _node_header(self,accessible,parent=None,index=None):
+        from calc_pending_input import _visible
         context=self.call(accessible.getAccessibleContext);role=self.call(context.getAccessibleRole)
         assert type(role) is int
         if parent is not None:
             assert self.call(context.getAccessibleParent)==parent and self.call(context.getAccessibleIndexInParent)==index
             assert self.call(self.call(parent.getAccessibleContext).getAccessibleChild,index)==accessible
         state=self.call(context.getAccessibleStateSet);assert type(state) is int
-        point=self.call(context.getLocationOnScreen);size=self.call(context.getSize)
-        parts=[point.X,point.Y,size.Width,size.Height]
-        assert all(type(part) is int and -(2**31)<=part<2**31 for part in parts)
-        rectangle=[point.X,point.Y,point.X+size.Width,point.Y+size.Height];assert _inside(rectangle,rectangle)
-        return context,role,_visible(state),dict(role=role,stateBits=state,rectangle=rectangle)
+        return context,role,_visible(state),dict(role=role,stateBits=state)
+    def _node_geometry(self,header,*,path=()):
+        from calc_pending_input import _inside
+        context,role,visible,row=header
+        components={};rectangle=None;stage='location'
+        try:
+            point=self.call(context.getLocationOnScreen)
+            stage='point-components';components['x']=point.X;components['y']=point.Y
+            stage='size';size=self.call(context.getSize)
+            stage='size-components';components['width']=size.Width;components['height']=size.Height
+            stage='components';parts=[components[name] for name in ('x','y','width','height')]
+            assert all(type(part) is int and -(2**31)<=part<2**31 for part in parts)
+            x,y,width,height=parts;rectangle=[x,y,x+width,y+height]
+            stage='positive-extent';assert _inside(rectangle,rectangle)
+        except BaseException as exc:
+            # Only values already returned by this failed attempt are projected.
+            # No proxy getters, clock samples, or cleanup run for diagnostics.
+            def scalar(value):
+                if value is None or type(value) is bool:return value
+                if type(value) is int and value.bit_length()<=64:return value
+                if type(value) is float and math.isfinite(value):return value
+                if type(value) is str and len(value)<=128:return value
+                return dict(type=type(value).__name__[:80],valueRetained=False)
+            try:
+                diagnostic=dict(schemaVersion=1,kind='failed-impress-accessible-geometry',
+                    module='impress',sourceTag=SOURCE,childHwnd=self.child_hwnd,
+                    readerDeadline=self.deadline,role=scalar(role),stateBits=scalar(row['stateBits']),
+                    path=list(path),stage=stage,components={key:scalar(value) for key,value in components.items()},
+                    rectangle=rectangle,qualification=False)
+                assert len(path)<=10 and all(type(index) is int and 0<=index<64 for index in path)
+                assert len(json.dumps(diagnostic,allow_nan=False).encode('utf-8'))<=4096
+                exc.impress_geometry_diagnostic=diagnostic
+            except BaseException:pass  # Optional local metadata never replaces the original exception.
+            raise
+        return context,role,visible,dict(row,rectangle=rectangle)
+    def _node(self,accessible,parent=None,index=None,*,path=()):
+        return self._node_geometry(self._node_header(accessible,parent,index),path=path)
     def _impress(self):
         self._peer();documents=[];visited=0
         _,root_role,_,root_row=self._node(self.root)
@@ -262,9 +296,12 @@ class EditingContextReader:
         def discover(accessible,parent=None,index=None,path=()):
             nonlocal visited
             visited+=1;assert visited<=256 and len(path)<=8, 'Accessible discovery exceeded fixed bound'
-            context,role,visible,row=self._node(accessible,parent,index)
+            header=self._node_header(accessible,parent,index)
+            context,role,visible,_=header
             if role==83:
-                if visible:documents.append((accessible,context,path,row))
+                if visible:
+                    _,_,_,row=self._node_geometry(header,path=path)
+                    documents.append((accessible,context,path,row))
                 return
             if role not in CONTAINER_ROLES:return
             count=self.call(context.getAccessibleChildCount);assert type(count) is int and 0<=count<=64
@@ -273,7 +310,7 @@ class EditingContextReader:
             discover(self.root);assert len(documents)<=1, 'Original Impress document is ambiguous'
         else:
             _path_proxies(self.root,self.document_path,self.call,retained=self.document_nodes)
-            context,role,visible,row=self._node(self.document)
+            context,role,visible,row=self._node(self.document,path=self.document_path)
             assert role==83 and visible, 'Retained presentation document became unavailable'
             documents=[(self.document,context,tuple(self.document_path),row)]
             visited=len(self.document_path)+1
@@ -295,16 +332,20 @@ class EditingContextReader:
         for index in range(count):
             shape=self.call(context.getAccessibleChild,index)
             assert shape==self.document_children[index], 'Retained presentation shape identity changed'
-            shape_context,role,visible,shape_row=self._node(shape,document,index)
+            header=self._node_header(shape,document,index)
+            shape_context,role,visible,_=header
             if role!=52 or not visible:continue
+            _,_,_,shape_row=self._node_geometry(header,path=path+(index,))
             n=self.call(shape_context.getAccessibleChildCount);assert type(n) is int and 0<=n<=16
             candidate=dict(shapeIndex=index,paragraphCount=n,shape=shape_row)
             result['candidateObservations'].append(candidate)
             if n!=1:continue
             paragraph=self.call(shape_context.getAccessibleChild,0)
             if shape==self.shape:assert paragraph==self.paragraph, 'Retained Outliner paragraph changed'
-            paragraph_context,role,visible,paragraph_row=self._node(paragraph,shape,0)
+            header=self._node_header(paragraph,shape,0)
+            paragraph_context,role,visible,_=header
             if role!=41 or not visible:continue
+            _,_,_,paragraph_row=self._node_geometry(header,path=path+(index,0))
             caret=_integer(self.call(paragraph_context.getCaretPosition),-1)
             candidate.update(paragraphIndex=0,paragraph=paragraph_row,caretPosition=caret)
             if caret>=0:candidates.append((shape,paragraph,paragraph_context,index,shape_row,paragraph_row))
@@ -314,9 +355,9 @@ class EditingContextReader:
             if self.shape is None:self.shape,self.paragraph=shape,paragraph
             assert shape==self.shape and paragraph==self.paragraph, 'Retained Outliner paragraph changed'
             data=_paragraph(paragraph_context,self.call)
-            sc,role,visible,_=self._node(shape,document,index)
+            sc,role,visible,_=self._node(shape,document,index,path=path+(index,))
             assert role==52 and visible and self.call(sc.getAccessibleChildCount)==1, 'Retained Outliner paragraph span changed'
-            _,role,visible,_=self._node(paragraph,shape,0)
+            _,role,visible,_=self._node(paragraph,shape,0,path=path+(index,0))
             assert role==41 and visible, 'Retained active Outliner paragraph became unavailable'
             result.update(targetFound=True,paragraphCount=1,paragraph=data,
                 accessibleBinding=dict(verified=True,rootIdentity=self.identities['root'],root=root_row,
@@ -395,6 +436,42 @@ NATIVE_KEYS=frozenset(('shellPid','shellCreationTime','officePid','officeCreatio
     'expectedImage','suiteHwnd','parentHwnd','childHwnd','rootHwnd'))
 MAX_SAMPLES=120
 MAX_CONTEXT_BYTES=8*1024*1024
+MAX_INVENTORY_BYTES=4*1024*1024
+MAX_ENCODED_INVENTORY_BYTES=6*1024*1024
+INVENTORY_ENCODING='zlib-base64-v1'
+
+
+def _encode_inventory(raw):
+    """Retain exact packaged bytes without multiplying pretty JSON escaping."""
+    assert isinstance(raw,bytes) and 0<len(raw)<=MAX_INVENTORY_BYTES, 'Original inventory exceeds its finite bound'
+    data=base64.b64encode(zlib.compress(raw,6)).decode('ascii')
+    assert len(data)<=MAX_ENCODED_INVENTORY_BYTES, 'Encoded inventory exceeds its finite bound'
+    return dict(encoding=INVENTORY_ENCODING,rawBytes=len(raw),data=data)
+
+
+def _inventory(context):
+    """Decode only the source-fixed codec, then verify the original byte pin."""
+    assert 'inventoryJson' not in context, 'Legacy raw inventory is not current semantic evidence'
+    evidence=context.get('inventoryEvidence')
+    assert isinstance(evidence,dict) and set(evidence)=={'encoding','rawBytes','data'}, 'Incomplete encoded inventory evidence'
+    assert evidence['encoding']==INVENTORY_ENCODING, 'Unexpected inventory encoding'
+    size=evidence['rawBytes'];data=evidence['data']
+    assert type(size) is int and 0<size<=MAX_INVENTORY_BYTES, 'Original inventory exceeds its finite bound'
+    assert isinstance(data,str) and 0<len(data)<=MAX_ENCODED_INVENTORY_BYTES, 'Encoded inventory exceeds its finite bound'
+    try:
+        packed=base64.b64decode(data.encode('ascii'),validate=True)
+        assert base64.b64encode(packed).decode('ascii')==data, 'Noncanonical inventory base64'
+        decoder=zlib.decompressobj()
+        raw=decoder.decompress(packed,MAX_INVENTORY_BYTES+1)
+    except (ValueError,zlib.error) as exc:
+        raise AssertionError('Malformed encoded inventory') from exc
+    assert len(raw)<=MAX_INVENTORY_BYTES, 'Inventory decoded beyond its finite bound'
+    assert decoder.eof and not decoder.unused_data and not decoder.unconsumed_tail, 'Incomplete or trailing inventory stream'
+    assert len(raw)==size, 'Original inventory byte count changed'
+    assert hashlib.sha256(raw).hexdigest()==context['inventorySha256'], 'Original inventory hash changed'
+    inventory=json.loads(raw.decode('utf-8'))
+    assert isinstance(inventory,dict), 'Original inventory is not a JSON object'
+    return inventory
 
 
 def _phase(module,phase,prefix):
@@ -450,7 +527,7 @@ def _source_uri(path):
     return parsed.as_uri()
 
 
-def _sample(observation,context,*,previous=None):
+def _sample(observation,context,inventory,*,previous=None):
     """Validate all ownership/safety first; only typed GUI states may be pending."""
     from writer_model_barrier import require_original_shell,require_python_identity
     from writer_model_reader import require_owned_model_observation,require_calc_a1_selection
@@ -462,7 +539,7 @@ def _sample(observation,context,*,previous=None):
     require_owned_model_observation(observation,binding,suite,
         expected_service=SERVICES[module],getter_contract=GETTERS[module])
     require_original_shell(context['originalShell'],binding,suite)
-    require_python_identity(observation['pythonIdentity'],suite,json.loads(context['inventoryJson']),context['inventorySha256'])
+    require_python_identity(observation['pythonIdentity'],suite,inventory,context['inventorySha256'])
     assert context['startedAt']<=_time(observation['readStartedAt'])<=_time(observation['readFinishedAt'])<context['readerDeadline'], 'Semantic read exceeded its original deadline'
     if previous is not None:
         assert previous['bindingBefore']==binding, 'Retained semantic reader binding changed'
@@ -511,9 +588,7 @@ def require_ime_semantic_context(context,*,module,expected_native,setup_deadline
     baseline=fixture_baseline(module,original);assert context['baseline']==baseline
     assert context.get('diskBeforeSha256')==context.get('diskAfterSha256')==baseline['sourceSha256']
     assert _source_uri(context['sourcePath'])==context['expectedUrl']
-    inventory=context['inventoryJson'];assert isinstance(inventory,str) and len(inventory.encode('utf-8'))<=4*1024*1024
-    assert hashlib.sha256(inventory.encode('utf-8')).hexdigest()==context['inventorySha256']
-    assert isinstance(json.loads(inventory),dict)
+    inventory=_inventory(context)
     observations=context['observations'];assert isinstance(observations,list) and 1<=len(observations)<=MAX_SAMPLES
     timings=context['sampleTimings'];assert isinstance(timings,list) and len(timings)==len(observations)
     previous=None
@@ -522,7 +597,7 @@ def require_ime_semantic_context(context,*,module,expected_native,setup_deadline
         assert isinstance(timing,dict) and set(timing)=={'requestedAt','receivedAt'}
         assert start<=_time(timing['requestedAt'])<=_time(observation['readStartedAt'])<=_time(observation['readFinishedAt'])<=_time(timing['receivedAt'])<deadline, 'Actual semantic request/receive order changed'
         if index:assert _time(timings[index-1]['receivedAt'])<=_time(timing['requestedAt'])
-        ready=_sample(observation,context,previous=previous)
+        ready=_sample(observation,context,inventory,previous=previous)
         assert ready is (index==len(observations)-1), 'Semantic poll history differs from actual first readiness'
         previous=observation
     assert context['observation']==observations[-1]
@@ -586,8 +661,8 @@ def observe_ime_semantic_setup(suite,source,original_bytes,record,setup_deadline
         context['diskBeforeSha256']=hashlib.sha256(source.read_bytes()).hexdigest()
         assert context['diskBeforeSha256']==baseline['sourceSha256'], 'Original IME disk file changed before semantic capture'
         identity,raw=_packaged_identity_file(suite,'suite-inventory.json')
-        assert len(raw)<=4*1024*1024
-        context.update(inventoryJson=raw.decode('utf-8'),inventorySha256=identity['sha256'])
+        context.update(inventoryEvidence=_encode_inventory(raw),inventorySha256=identity['sha256'])
+        inventory=_inventory(context)
         require_current();assert _time(clock())<deadline, 'Semantic reader construction exceeded original deadline'
         factory=OwnedModelReader if reader_factory is None else reader_factory
         reader=factory(suite,source.parent/('ime-semantic-reader-'+phase),
@@ -607,7 +682,7 @@ def observe_ime_semantic_setup(suite,source,original_bytes,record,setup_deadline
             context['sampleTimings'].append(dict(requestedAt=requested,receivedAt=received))
             assert requested<=_time(observation['readStartedAt'])<=_time(observation['readFinishedAt'])<=received<deadline, 'Actual semantic request/receive order changed'
             require_current()
-            ready=_sample(observation,context,previous=previous)
+            ready=_sample(observation,context,inventory,previous=previous)
             assert _time(clock())<deadline, 'Semantic observation arrived after its original deadline'
             assert len(json.dumps(context,ensure_ascii=False).encode('utf-8'))<=MAX_CONTEXT_BYTES
             if ready:break

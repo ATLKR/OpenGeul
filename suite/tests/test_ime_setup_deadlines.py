@@ -14,6 +14,7 @@ import test_ime_mode_receipts as mode_fixtures
 class SetupDeadlineTests(unittest.TestCase):
     def observer(self, now, *, status=0):
         value=ime.NativeState();value.ack=1;value.status=status
+        value.magic=0x4f47494d;value.version=4;value.pid=88;value.tid=44;value.targetHwnd=33;value.rootHwnd=11
         value.snapshotEvidence=dict(copyReturn=1,ackBefore=1,ackAfter=1,stable=True)
         value.tsfCaptured=1;value.profileChangeAttempted=1
         value.threadMode=ime.native_mode.NativeModeReceipt(**mode_fixtures.ThreadModeReceiptTests().receipt(1))
@@ -26,6 +27,7 @@ class SetupDeadlineTests(unittest.TestCase):
         observer=ime.CompositionObserver.__new__(ime.CompositionObserver)
         observer.api=NS(user=NS(SendMessageTimeoutW=send,GetKeyboardLayout=lambda tid:0x04120412))
         observer.focus=33;observer.tid=44;observer.commands=[];observer.activation_attempted=False;observer.command_attempts=set()
+        observer.root=11;observer.child=22;observer.pid=88;observer.original_tsf=observer.original_context=None
         observer.mapping=bytearray(__import__('ctypes').sizeof(ime.NativeState))
         def publish(pointer,command,counter,frequency):
             target=pointer._obj;slot=target.commandBudgets[command-1]

@@ -200,6 +200,14 @@ class Windows:
         self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         return pid.value
 
+    def query_gui_thread_info(self, thread):
+        """Use the structure type belonging to this API instance's prototype."""
+        assert type(thread) is int and 0 < thread < 2**32, 'Owned native input thread must be a positive DWORD'
+        info = GuiThreadInfo(cbSize=ctypes.sizeof(GuiThreadInfo))
+        if not self.user.GetGUIThreadInfo(thread, ctypes.byref(info)):
+            raise OSError(getattr(ctypes, 'get_last_error', lambda: 0)(), 'GetGUIThreadInfo for owned filename field failed')
+        return info
+
     def request_close(self, hwnd, shell_pid):
         assert self.user.IsWindow(hwnd), 'Close target is not a live window'
         assert self.pid(hwnd) == shell_pid, 'Close target belongs to a different process'
@@ -448,11 +456,12 @@ def prepare_editor_focus(api, hwnd, child, shell_pid, office_pid, record,
             focus = observe('wait')
             if time.monotonic() > deadline: focus = None
         assert focus, 'Owned editor keyboard focus did not become ready before the deadline'
-        # Preserve the original strict guard immediately before callers type.
-        strict_focus = api.require_editor_focus(hwnd, child)
-        assert time.monotonic() <= deadline, 'Final strict editor focus query exceeded the shared entry deadline'
+        # Focus, ownership and zero capture belong to the same final full row.
+        final_row=evidence['snapshots'][-1]
+        strict_focus = _editor_focus_snapshot_ready(final_row,hwnd,child,shell_pid,office_pid,evidence['editorThreadId'])
+        assert time.monotonic() <= deadline, 'Final strict editor focus validation exceeded the shared entry deadline'
         assert strict_focus == focus, 'Owned editor focus changed before physical input'
-        assert api.pid(focus) == office_pid, 'Observed foreign keyboard focus before editor input'
+        assert final_row['focus']['pid'] == office_pid, 'Observed foreign keyboard focus before editor input'
         evidence.update(ready=True, focusHwnd=focus)
         require_editor_focus_readiness(evidence, hwnd, child, shell_pid, office_pid)
         return focus

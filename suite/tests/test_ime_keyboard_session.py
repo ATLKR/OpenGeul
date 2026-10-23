@@ -82,7 +82,11 @@ class IMEKeyboardSessionTests(unittest.TestCase):
     def restore_save(self, session, record):
         record['prefixInputLayout'] = 0x04090409
         record['layoutRestored'] = True
-        record['restoration'] = ime_fixtures.KoreanImePolicyTests().restoration()
+        from ime_typed_policy_fixtures import complete_record
+        record.update(readiness=ime_fixtures.KoreanImePolicyTests().readiness(),
+            windowHwnd=session.binding['suiteHwnd'],officePid=session.binding['officePid'],
+            restoration=ime_fixtures.KoreanImePolicyTests().restoration())
+        complete_record(record)
         session.begin_save(record['restoration'], 31.); session.save(); session.close()
     def test_owned_capture_settles_read_only_under_original_setup_deadline(self):
         from unittest.mock import patch

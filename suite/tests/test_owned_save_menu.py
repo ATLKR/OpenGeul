@@ -37,10 +37,16 @@ class SaveMenuTests(unittest.TestCase):
         self.file_receipt=dict(schemaVersion=1,kind='owned-shell-control-action',success=True,purpose='FILE_MENU',shortcut=None,documentHwnd=11,clickAttempts=1,inputCallAttempts=1,requestedInputs=2,insertedInputs=2,nativeInsertionCountVerified=True,originalProcess=copy.deepcopy(self.probe.identity),before=file_snapshot,startedAt=0.,deadline=5.,finishedAt=.9)
         engine=self.probe.engine
         self.record=dict(ownedControlActions=[self.file_receipt],attachments=[dict(hwnd=11,parent=55,child=56,officePid=88,officeCreationTime=engine['creationTime'],officeImage=engine['image'],liveProcessBinding=dict(pid=88,creationTime=engine['creationTime'],nativeImage=engine['image'],expectedImage=engine['image'],waitResult=258,handleValue=9876,nativeCreation=dict(fileTime=engine['creationTime'])))])
-        self.probe.transition_snapshot=lambda *a,**k:dict(accepted=True,transition='exact-owned-save-picker',foreground=dict(hwnd=44,rootHwnd=44,pid=77,threadId=native_thread,ownerHwnd=11,className='#32770',title=CAPTION,visible=True,enabled=True),newPicker=dict(nativeHwnd=44,pid=77,runtimeId=[42,44],name=CAPTION,controlType='Window',visible=True,enabled=True))
+        def transition(*args,**kwargs):
+            foreground=dict(hwnd=44,rootHwnd=44,pid=77,threadId=native_thread,ownerHwnd=11,className='#32770',title=CAPTION,visible=True,enabled=True)
+            row=dict(at=self.clock(),window=copy.deepcopy(foreground),process=copy.deepcopy(self.probe.identity))
+            return dict(accepted=True,transition='exact-owned-save-picker',observationCount=1,foreground=foreground,
+                pickerReadiness=dict(schemaVersion=1,kind='same-owned-save-picker-readiness',deadline=self.record['ownedControlActions'][-1]['deadline'],pendingObservationCount=0,firstObservation=copy.deepcopy(row),lastObservation=copy.deepcopy(row),lastPendingObservation=None),
+                newPicker=dict(nativeHwnd=44,pid=77,runtimeId=[42,44],name=CAPTION,controlType='Window',visible=True,enabled=True))
+        self.probe.transition_snapshot=transition
         original_click=self.probe.click
         def click(receipt):
-            original_click(receipt);receipt['beforeClickCursorReadback']=list(receipt['chosenPhysicalPoint'])
+            receipt['inputStartedAt']=self.clock();original_click(receipt);receipt['inputFinishedAt']=self.clock();receipt['beforeClickCursorReadback']=list(receipt['chosenPhysicalPoint'])
         self.probe.click=click
         original_move=self.probe.move
         def move(point,receipt):original_move(point,receipt);receipt['pointerSetReturned']=True
@@ -163,6 +169,69 @@ class SaveNativeTransitionTests(unittest.TestCase):
         self.probe._raw=raw
         with self.assertRaisesRegex(AssertionError,'deadline'):self.transition({})
 
+    def test_first_owned_picker_pending_flags_settle_on_same_candidate(self):
+        for flag in ('visible','enabled'):
+            with self.subTest(flag=flag):
+                self.setUp();self.foregrounds=[44];self.picker[flag]=False;pauses=[];queries=[];raw=self.probe._raw
+                self.probe._raw=lambda element:(queries.append(self.clock())or raw(element))
+                def pause(seconds):
+                    self.assertEqual(queries,[]);pauses.append(seconds);self.clock.now+=seconds;self.picker[flag]=True
+                error=None;value={}
+                with patch.object(time,'sleep',side_effect=pause):
+                    try:value=self.transition({})
+                    except BaseException as exc:error=exc
+                self.assertIsNone(error,'A first exact owned but unready picker must be observed within the original budget')
+                self.assertTrue(value['accepted']);self.assertEqual(pauses,[.01]);self.assertEqual(len(queries),1)
+                witness=value['pickerReadiness'];self.assertEqual(witness['pendingObservationCount'],1)
+                self.assertIs(witness['firstObservation']['window'][flag],False);self.assertIs(witness['lastObservation']['window'][flag],True)
+                self.assertEqual(witness['deadline'],6.);self.assertEqual(value['observationCount'],2)
+    def test_same_hidden_picker_expires_under_original_deadline(self):
+        self.foregrounds=[44];self.picker['visible']=False;evidence={};pauses=[]
+        def pause(seconds):pauses.append(seconds);self.clock.now+=seconds
+        with patch.object(time,'sleep',side_effect=pause):
+            with self.assertRaisesRegex(AssertionError,'deadline|bound'):self.transition(evidence)
+        self.assertLessEqual(self.clock(),6.);self.assertLessEqual(evidence['observationCount'],501)
+        self.assertIsNot(evidence.get('accepted'),True);self.assertNotIn('newPicker',evidence)
+        self.assertTrue(pauses);self.assertTrue(all(0<s<=.01 for s in pauses))
+    def test_pending_candidate_does_not_renew_original_finite_observation_limit(self):
+        self.foregrounds=[44];self.picker['visible']=False;evidence={};pauses=[]
+        with patch.object(time,'sleep',side_effect=lambda seconds:pauses.append(seconds)):
+            with self.assertRaisesRegex(AssertionError,'bound'):self.transition(evidence)
+        self.assertEqual(evidence['observationCount'],501);self.assertEqual(self.clock(),1.)
+        self.assertEqual(len(pauses),501);self.assertTrue(all(s==.01 for s in pauses))
+    def test_pinned_candidate_replacement_foreign_or_generation_never_becomes_ready(self):
+        mutations={'hwnd':55,'pid':88,'threadId':10,'rootHwnd':99,'ownerHwnd':22,'className':'Other','title':'Other','visible':None,'generation':None,'original-document':None}
+        for key,bad in mutations.items():
+            with self.subTest(key=key):
+                self.setUp();self.foregrounds=[44];self.picker['visible']=False;evidence={}
+                def pause(seconds):
+                    self.clock.now+=seconds;self.picker['visible']=True
+                    if key=='generation':self.probe.process_snapshot=lambda p:{'changed':True}
+                    elif key=='original-document':self.current=11
+                    else:
+                        self.picker[key]=bad
+                        if key=='hwnd':self.picker['rootHwnd']=bad;self.current=bad
+                with patch.object(time,'sleep',side_effect=pause):
+                    with self.assertRaises(AssertionError):self.transition(evidence)
+                self.assertIn('pickerReadiness',evidence,'First valid hidden candidate must be retained before the later rejected observation')
+                self.assertEqual(evidence['pickerReadiness']['firstObservation']['window']['hwnd'],44)
+                self.assertIsNot(evidence.get('accepted'),True);self.assertNotIn('newPicker',evidence)
+    def test_missing_pinned_candidate_preserves_original_query_failure(self):
+        self.foregrounds=[44];self.picker['visible']=False;evidence={}
+        def pause(seconds):
+            self.clock.now+=seconds
+            self.probe._window=lambda hwnd:(_ for _ in()).throw(OSError('original picker no longer live'))if hwnd==44 else copy.deepcopy(self.doc)
+        with patch.object(time,'sleep',side_effect=pause):
+            with self.assertRaisesRegex(OSError,'no longer live'):self.transition(evidence)
+        self.assertIn('pickerReadiness',evidence);self.assertIsNot(evidence.get('accepted'),True)
+    def test_hidden_picker_settlement_keeps_final_ui_a_readiness_strict(self):
+        self.foregrounds=[44];self.picker['visible']=False;evidence={}
+        self.probe._raw=lambda element:dict(nativeHwnd=44,pid=77,runtimeId=[42,44],controlType='Window',name=CAPTION,visible=False,enabled=True)
+        def pause(seconds):self.clock.now+=seconds;self.picker['visible']=True
+        with patch.object(time,'sleep',side_effect=pause):
+            with self.assertRaises(AssertionError):self.transition(evidence)
+        self.assertIn('pickerReadiness',evidence);self.assertEqual(evidence['newPicker']['visible'],False);self.assertIsNot(evidence.get('accepted'),True)
+
 class SaveReplayTests(unittest.TestCase):
     def setUp(self):
         self.f=SaveMenuTests('test_root_focused_visible_dropdown_clicks_exact_save_once_without_keyboard');self.f.setUp();self.addCleanup(self.f.doCleanups)
@@ -234,6 +303,50 @@ class SaveReplayTests(unittest.TestCase):
         }.items():
             with self.subTest(label=label):
                 changed=copy.deepcopy(generic);mutate(changed['originalEngineWitness']);ready=copy.deepcopy(self.readiness);ready['saveMenuAction']=copy.deepcopy(changed)
+                with self.assertRaises(AssertionError):self.module.require_save_menu_action(changed,77,11,CAPTION,ready)
+    def test_first_last_picker_witness_identity_generation_and_budget_are_replayed(self):
+        action=copy.deepcopy(self.action);action.update(inputStartedAt=1.,inputFinishedAt=1.)
+        row=dict(at=1.,window=copy.deepcopy(action['after']['foreground']),process=copy.deepcopy(action['originalProcess']))
+        action['after'].update(observationCount=1,pickerReadiness=dict(schemaVersion=1,kind='same-owned-save-picker-readiness',deadline=action['deadline'],pendingObservationCount=0,firstObservation=copy.deepcopy(row),lastObservation=copy.deepcopy(row),lastPendingObservation=None))
+        mutations={
+            'first-hwnd':lambda w:w['firstObservation']['window'].update(hwnd=99),
+            'first-pid-type':lambda w:w['firstObservation']['window'].update(pid=77.),
+            'first-thread':lambda w:w['firstObservation']['window'].update(threadId=99),
+            'last-window':lambda w:w['lastObservation']['window'].update(ownerHwnd=99),
+            'first-generation':lambda w:w['firstObservation']['process'].update(creationTime=1),
+            'first-generation-type':lambda w:w['firstObservation']['process'].update(creationTime=float(w['firstObservation']['process']['creationTime'])),
+            'started-before-input':lambda w:w['firstObservation'].update(at=.5),
+            'renewed-budget':lambda w:w.update(deadline=7.),
+            'boolean-count':lambda w:w.update(pendingObservationCount=False),
+            'ready-first-claims-pending':lambda w:w.update(pendingObservationCount=1),
+        }
+        for label,mutate in mutations.items():
+            with self.subTest(label=label):
+                changed=copy.deepcopy(action);mutate(changed['after']['pickerReadiness']);ready=copy.deepcopy(self.readiness);ready['saveMenuAction']=copy.deepcopy(changed)
+                with self.assertRaises(AssertionError):self.module.require_save_menu_action(changed,77,11,CAPTION,ready)
+    def test_last_pending_witness_is_not_ready_replaced_or_unbound(self):
+        action=copy.deepcopy(self.action);action.update(inputStartedAt=1.,inputFinishedAt=1.)
+        ready_row=dict(at=1.,window=copy.deepcopy(action['after']['foreground']),process=copy.deepcopy(action['originalProcess']))
+        pending=copy.deepcopy(ready_row);pending['window']['visible']=False
+        action['after'].update(observationCount=2,pickerReadiness=dict(schemaVersion=1,kind='same-owned-save-picker-readiness',deadline=action['deadline'],pendingObservationCount=1,firstObservation=copy.deepcopy(pending),lastObservation=copy.deepcopy(ready_row),lastPendingObservation=copy.deepcopy(pending)))
+        ready=copy.deepcopy(self.readiness);ready['saveMenuAction']=copy.deepcopy(action)
+        self.assertIs(self.module.require_save_menu_action(action,77,11,CAPTION,ready),action)
+        for label,mutate in {
+            'ready':lambda w:w['window'].update(visible=True),
+            'replacement':lambda w:w['window'].update(hwnd=99,rootHwnd=99),
+            'generation':lambda w:w['process'].update(creationTime=1),
+        }.items():
+            with self.subTest(label=label):
+                changed=copy.deepcopy(action);mutate(changed['after']['pickerReadiness']['lastPendingObservation']);ready=copy.deepcopy(self.readiness);ready['saveMenuAction']=copy.deepcopy(changed)
+                with self.assertRaises(AssertionError):self.module.require_save_menu_action(changed,77,11,CAPTION,ready)
+    def test_zero_pending_requires_the_same_complete_first_and_last_observation(self):
+        for label in ('time','rectangle'):
+            with self.subTest(label=label):
+                changed=copy.deepcopy(self.action)
+                if label=='time':
+                    changed['finishedAt']=1.1;changed['after']['pickerReadiness']['lastObservation']['at']=1.05
+                else:changed['after']['pickerReadiness']['firstObservation']['window']['rectangle']=[0,0,100,100]
+                ready=copy.deepcopy(self.readiness);ready['saveMenuAction']=copy.deepcopy(changed)
                 with self.assertRaises(AssertionError):self.module.require_save_menu_action(changed,77,11,CAPTION,ready)
     def test_embedded_pointer_action_must_equal_original_raw_action(self):
         changed=copy.deepcopy(self.readiness);changed['saveMenuAction']['receiptStem']='another-action'

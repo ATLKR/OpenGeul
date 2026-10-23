@@ -232,15 +232,17 @@ class CaptureAndPublicationTests(unittest.TestCase):
     def test_capture_uses_one_selection_and_original_getter_acceptance_unchanged(self):
         self.feature();calls=[];selected=NS(getRangeAddress=lambda:calls.append('range') or
             NS(Sheet=0,StartColumn=0,StartRow=0,EndColumn=0,EndRow=0))
-        capture={};value=api.read_calc_selection(NS(getSelection=lambda:calls.append('selection') or selected),capture=capture)
+        capture={};value=api.read_calc_selection(NS(getSelection=lambda:calls.append('selection') or selected),
+            deadline=10.,clock=lambda:1.,capture=capture)
         self.assertEqual(calls,['selection','range']);self.assertEqual(capture,{})
         self.assertIs(api.require_calc_a1_selection(value),value)
     def test_original_missing_method_stays_fatal_with_same_proxy_capture(self):
-        self.feature();selected=Proxy();capture={};calls=[]
-        with self.assertRaises(AttributeError):api.read_calc_selection(NS(getSelection=lambda:calls.append(1) or selected),capture=capture)
+        self.feature();selected=NS(calls=[]);capture={};calls=[]  # No positive spreadsheet collection interface.
+        with self.assertRaises(AttributeError):api.read_calc_selection(NS(getSelection=lambda:calls.append(1) or selected),
+            deadline=10.,clock=lambda:1.,capture=capture)
         self.assertEqual(calls,[1]);self.assertIs(capture['selected'],selected)
         self.assertEqual(selected.calls,[])
-    def helper(self,*,publication_failure=False,header_failure=False):
+    def helper(self,*,publication_failure=False,header_failure=False,captured_attempt=None,immediate_release=False):
         self.feature();temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup);directory=Path(temp.name)
         config={'expected_service':api.CALC_MODEL_SERVICE,'getter_contract':api.CALC_PENDING_GETTER_CONTRACT,'suite':str(directory),'readerDeadline':10.}
         (directory/'configuration.json').write_text(json.dumps(config));(directory/'request-000.json').write_text('{"sequence":0,"action":"start"}')
@@ -249,6 +251,7 @@ class CaptureAndPublicationTests(unittest.TestCase):
             def __init__(self,*args,**kwargs):
                 holder['reader']=self;self.controller=object();self.proxy_type=Proxy;self.last_snapshot=mutable
                 self.calc_selection_capture={'stage':'getRangeAddress','selected':Proxy(),'controller':self.controller}
+                if captured_attempt is not None:self.calc_selection_capture['shapeWitness']=captured_attempt
             def read(self):raise AttributeError('getRangeAddress')
             def release(self):events.append('release');self.calc_selection_capture.clear()
         anchor=NS(snapshot=lambda:{'native':'original'},last_snapshot={'native':'original'},profile=None,close=lambda:[])
@@ -259,7 +262,7 @@ class CaptureAndPublicationTests(unittest.TestCase):
                 holder['publishedObject']=value
                 if publication_failure:raise OSError('primary publication failed')
             result=original(path,value)
-            if path.name=='reply-000.json' and header_failure:
+            if path.name=='reply-000.json' and (header_failure or immediate_release):
                 (directory/'request-001.json').write_text('{"sequence":1,"action":"release"}')
             return result
         def diagnostic(path,reader,native,capture,header,**kwargs):
@@ -309,6 +312,20 @@ class CaptureAndPublicationTests(unittest.TestCase):
         reply=json.loads((directory/'reply-000.json').read_bytes())
         self.assertFalse(reply['ok']);self.assertEqual(reply['error']['message'],'getRangeAddress')
         self.assertEqual(reply['calcSelectionDiagnostic']['reason'],'header-error')
+        self.assertEqual(holder['reader'].calc_selection_capture,{})
+    def test_returned_count_is_in_primary_and_header_before_immediate_release(self):
+        from suite.tests.test_calc_selection_shapes import SelectionShapeTests
+        fixture=SelectionShapeTests();fixture.fixture(count=2)
+        with self.assertRaises(AssertionError):fixture.read()
+        attempt=fixture.capture['shapeWitness']
+        directory,events,holder=self.helper(captured_attempt=attempt,immediate_release=True)
+        reply=json.loads((directory/'reply-000.json').read_bytes())
+        frozen=reply['error']['calcSelectionAttempt']
+        self.assertEqual(frozen['preCount'],2)
+        self.assertEqual(frozen['rawCounts'][0]['raw'],dict(type='int',value=2))
+        self.assertEqual(reply['calcSelectionDiagnostic']['selectionAttempt'],frozen)
+        self.assertFalse(reply['ok']);self.assertEqual(events,['publish','diagnostic','release'])
+        self.assertIsNone(frozen['index']);self.assertEqual(frozen['rawAddress'],{})
         self.assertEqual(holder['reader'].calc_selection_capture,{})
 
 

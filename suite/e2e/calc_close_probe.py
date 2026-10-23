@@ -110,15 +110,17 @@ class CalcCloseCase(lifecycle.Case):
         try:cleanup=self.reader.close(self.deadline)
         finally:self.reader=None
         require_model_reader_cleanup(cleanup,binding,self.deadline,expected_service=calc_model_barrier.SERVICE,
-            getter_contract=calc_save.PENDING_GETTERS)
+            getter_contract=self.reader_getter_contract)
         return cleanup
 
     def start_reader(self,folder):
         from writer_model_reader import OwnedModelReader
+        assert folder in ('before-close-reader','after-cancel-reader'), 'Unsupported Calc close reader phase'
+        self.reader_getter_contract=(calc_save.PENDING_GETTERS if folder=='before-close-reader' else calc_save.LEGACY_PENDING_GETTERS)
         self.deadline=time.monotonic()+calc_model_barrier.MAX_SECONDS
         self.observer_never_started=False  # Remains false after release or a partial constructor failure.
         self.reader=OwnedModelReader(self.suite,self.output/folder,expected_service=calc_model_barrier.SERVICE,
-            getter_contract=calc_save.PENDING_GETTERS,shell_pid=self.process.pid,
+            getter_contract=self.reader_getter_contract,shell_pid=self.process.pid,
             expected_shell_creation=self.creation,suite_hwnd=self.hwnd,parent_hwnd=self.parent,
             child_hwnd=self.child,office_pid=self.office_pid,expected_url=self.source.as_uri())
         return self.reader.start(self.deadline)
@@ -264,7 +266,7 @@ class CalcCloseCase(lifecycle.Case):
                 after=self.start_reader('after-cancel-reader');self.record['afterCancel']=after
                 from writer_model_reader import require_owned_model_observation
                 require_owned_model_observation(after,after['bindingBefore'],self.suite,
-                    expected_service=calc_model_barrier.SERVICE,getter_contract=calc_save.PENDING_GETTERS)
+                    expected_service=calc_model_barrier.SERVICE,getter_contract=calc_save.LEGACY_PENDING_GETTERS)
                 require_same_native_binding(before['bindingBefore'],after['bindingBefore'])
                 from writer_model_reader import canonical_profile_projection
                 old=before['nativeSnapshots']['controllerBefore'];new=after['nativeSnapshots']['controllerBefore']

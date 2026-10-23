@@ -135,6 +135,129 @@ def validate_restoration(receipt):
     return receipt
 
 
+def original_empty_us_profile(row):
+    return (all(type(row.get(key)) is int and row[key] == value for key, value in
+        (('previousLayout', 0x04090409), ('previousProfileType', 2), ('previousLanguage', 0x0409), ('previousProfileLayout', 0x04090409)))
+        and all(type(row.get(key)) is str and row[key].lower() == '{00000000-0000-0000-0000-000000000000}' for key in ('previousClsid', 'previousProfile')))
+
+
+def require_mode_context(row):
+    context = row['nativeContext']
+    assert type(row.get('policyVersion')) is int and row['policyVersion'] == 4
+    assert type(context) is dict and set(context) == {'magic', 'version', 'pid', 'tid', 'targetHwnd', 'rootHwnd'}
+    assert all(type(value) is int and 0 < value < 2**64 for value in context.values())
+    assert context['magic'] == 0x4f47494d and context['version'] == 4 and context['pid'] < 2**32 and context['tid'] < 2**32, 'Native typed policy context/version changed'
+    return tuple(context[key] for key in ('magic', 'version', 'pid', 'tid', 'targetHwnd', 'rootHwnd'))
+
+
+def require_tsf_pipeline(record):
+    """Replay wire4 values and every command; no EMPTY scalar or restoration alias."""
+    assert type(record.get('imePolicyVersion')) is int and record['imePolicyVersion'] == 4
+    commands = record['imeCommands']
+    assert type(commands) is list and len(commands) == 4 and [row['command'] for row in commands] == [1, 2, 3, 4], 'Original one-shot TSF command pipeline is incomplete'
+    assert record['activeProfile'] == commands[0] and record['restoration'] == commands[3]
+    context = require_mode_context(commands[0])
+    assert context[2:] == (record['officePid'], record['editorTid'], record['keyboardFocusHwnd'], record['windowHwnd']), 'Native TSF context differs from the original editor'
+    original = native_mode.require_typed_mode_receipt(commands[0]['threadMode'], 1, allow_empty=original_empty_us_profile(commands[0]))
+    origin = 'empty' if original[0][1] == 0 else 'i4'
+    profile = require_readiness(record['readiness'], architecture=record.get('architecture', 'x64'))['profile']
+    for sequence, row in enumerate(commands, 1):
+        assert require_mode_context(row) == context
+        assert type(row['startedAt']) in (int, float) and math.isfinite(row['startedAt']) and row['startedAt'] >= 0
+        if sequence > 1: assert commands[sequence-2]['startedAt'] <= row['startedAt'], 'TSF command observation times moved backwards'
+        for key in ('command', 'nativeAck', 'publishedCommand', 'nativeAttemptedMask', 'nativeCallAttempts', 'nativePublicationReturn', 'status', 'tsfModeCaptured', 'profileChangeAttempted'):
+            assert type(row[key]) is int
+        assert row['nativeAck'] == row['publishedCommand'] == sequence
+        assert row['acknowledged'] is True and row['success'] is True and row['nativeCallAttempts'] == row['nativePublicationReturn'] == 1 and row['status'] == 0
+        assert set(row['snapshotEvidence']) == {'copyReturn', 'ackBefore', 'ackAfter', 'stable'} and all(type(row['snapshotEvidence'][key]) is int for key in ('copyReturn', 'ackBefore', 'ackAfter'))
+        assert row['snapshotEvidence'] == dict(copyReturn=1, ackBefore=sequence, ackAfter=sequence, stable=True)
+        assert row['snapshotEvidence']['stable'] is True
+        assert set(row['commandRejection']) == {'count', 'sequence', 'during', 'reason'} and all(type(value) is int for value in row['commandRejection'].values())
+        assert row['nativeAttemptedMask'] == (1 << sequence)-1 and row['commandRejection'] == dict(count=0, sequence=0, during=0, reason=0)
+        assert (row['modeDeadlineCounter'], row['modeCounterFrequency']) == (row['requestedBudget']['counter'], row['requestedBudget']['frequency'])
+        assert all(type(row[key]) is int and 0 < row[key] < 2**63 for key in ('modeDeadlineCounter', 'modeCounterFrequency'))
+        observed = native_mode.require_typed_mode_receipt(row['threadMode'], sequence, original=original if sequence != 1 else None, allow_empty=original_empty_us_profile(row) if sequence == 1 else False)
+        expected_tags = native_mode.typed_pair_dict(observed)
+        assert type(row['typedValues']) is dict and set(row['typedValues']) == set(expected_tags)
+        for key, expected in expected_tags.items():
+            actual = row['typedValues'][key]
+            assert type(actual) is dict and set(actual) == set(expected) and all(type(actual[name]) is type(value) and actual[name] == value for name, value in expected.items()), 'Typed JSON tags differ from the exact raw receipt'
+        assert row['tsfOrigin'] == origin
+        assert row['tsfModeCaptured'] == row['profileChangeAttempted'] == 1
+        for key in ('layout', 'previousLayout', 'previousProfileType', 'previousLanguage', 'previousProfileLayout', 'activeProfileType', 'activeProfileLayout', 'activeLanguage'):
+            assert type(row[key]) is int and 0 <= row[key] < 2**64
+        for key in ('profileManagerHresult', 'previousProfileHresult', 'activateProfileHresult', 'activeProfileHresult', 'activateLayoutError'):
+            assert type(row[key]) is int and row[key] == 0
+        assert row['previousImmState'] == commands[0]['previousImmState']
+        assert set(row['previousImmState']) == {'open', 'conversion', 'sentence'}
+        imm = row['immState']
+        assert set(imm) == {'contextPresent', 'conversionSucceeded', 'open', 'conversion', 'sentence'}
+        assert all(type(value) is int and 0 <= value < 2**32 for value in (*imm.values(), *row['previousImmState'].values()))
+        assert imm['contextPresent'] == imm['conversionSucceeded'] == 1
+        if sequence in (1, 2, 3):
+            assert row['activeLanguage'] == 0x0412 and row['activeClsid'].lower() == profile['providerClsid'].lower() and row['activeProfile'].lower() == profile['profileGuid'].lower() and row['layout'] & 0xffff == 0x0412
+        if sequence in (2, 3): assert imm['open'] and bool(imm['conversion'] & 1) == (sequence == 3), 'IMM mode did not acknowledge the exact TSF request'
+    restored = commands[3]
+    assert commands[0]['previousImmState'] == {key: commands[0]['immState'][key] for key in ('open', 'conversion', 'sentence')}, 'Original IMM capture metadata differs from its raw getters'
+    validate_restoration(restored)
+    assert {key: restored['immState'][key] for key in ('open', 'conversion', 'sentence')} == commands[0]['previousImmState'], 'Original IMM state did not return'
+    facts = dict(profileHklRestored=True, immEqual=True,
+        typedStateEqual=commands[0]['typedValues'] == restored['typedValues'],
+        restorationDisposition='empty-origin-retirement-required' if origin == 'empty' else 'concrete-restored')
+    assert all(restored.get(key) == value and type(restored.get(key)) is type(value) for key, value in facts.items()), 'Typed restoration disposition differs from raw observations'
+    return origin, facts
+
+
+def _require_precommand_retirement_join(record):
+    admission = record['imeEngineRetirement']['admission']
+    assert type(record['imeCommands'][0]['startedAt']) in (int, float) and math.isfinite(record['imeCommands'][0]['startedAt'])
+    assert admission['finishedAt'] <= record['imeCommands'][0]['startedAt'], 'Independent engine HANDLE was not admitted before command1'
+    assert record['imeKeyboardSession']['setupFinishedAt'] <= admission['startedAt'], 'Engine HANDLE admission predates the original completed setup'
+    assert (admission['editorTid'], admission['focusHwnd']) == (record['editorTid'], record['keyboardFocusHwnd'])
+
+
+def original_ime_profile(record):
+    """Use the original POST reader's native directory witness, never the proof."""
+    from writer_model_reader import canonical_profile_projection
+    from ime_semantic_context import require_ime_semantic_context
+    context = record['imeSemanticContext']
+    keyboard = record['imeKeyboardSession']
+    native = keyboard['expectedNative']
+    deadline = record['imeSetupBudget']['deadline']
+    assert context.get('success') is True and context.get('phase') == 'post'
+    assert context['expectedNative'] == native and context['setupDeadline'] == deadline, 'Original semantic profile belongs to another setup/generation'
+    # Replay at the retained historical completion anchor. Reopen/save time
+    # cannot renew setup or manufacture a fresh native observation.
+    require_ime_semantic_context(context,module=record['module'],expected_native=native,
+        setup_deadline=deadline,now=context['finishedAt'],phase='post',expected_prefix=record['asciiPrefix'])
+    readiness = keyboard['semanticReadiness']
+    assert type(readiness) is list and len(readiness) == 2
+    for row, phase, source in zip(readiness, ('pre', 'post'), (context['preContext'], context)):
+        assert type(row) is dict and set(row) == {'phase', 'readerFinishedAt', 'readerDeadline', 'setupDeadline', 'acknowledgedAt'} and row['phase'] == phase
+        assert all(type(row[key]) in (int, float) and math.isfinite(row[key]) and row[key] >= 0 for key in ('readerFinishedAt', 'readerDeadline', 'setupDeadline', 'acknowledgedAt'))
+        assert (row['readerFinishedAt'], row['readerDeadline'], row['setupDeadline']) == (source['finishedAt'], source['readerDeadline'], deadline)
+        assert row['readerFinishedAt'] <= row['acknowledgedAt'] < deadline
+    assert readiness[0]['acknowledgedAt'] <= context['startedAt']
+    finished = keyboard['setupFinishedAt']
+    assert type(finished) in (int, float) and math.isfinite(finished) and readiness[-1]['acknowledgedAt'] <= finished < deadline, 'Semantic acknowledgement/setup chronology changed'
+    observation = context['observation']
+    assert all(observation['bindingBefore'][key] == value for key, value in native.items()), 'Original semantic profile differs from the retained engine'
+    raw = observation['nativeSnapshots']['controllerBefore']
+    return canonical_profile_projection(raw['profileDirectory']['witness'], raw['profileUrl'])
+
+
+def require_ime_save_disposition(record, restoration):
+    assert record['restoration'] == restoration
+    origin, facts = require_tsf_pipeline(record)
+    if origin == 'empty':
+        from ime_engine_retirement import require_ime_retirement_admission
+        require_ime_retirement_admission(record['imeEngineRetirement'], expected_native=record['imeKeyboardSession']['expectedNative'],
+            expected_run=record['readiness']['source'], expected_case=record['case'], expected_source=record['readiness']['source']['sourceCommit'],
+            expected_original_profile=original_ime_profile(record))
+        _require_precommand_retirement_join(record)
+    return facts
+
+
 def validate_ime_evidence(record):
     architecture = native_arch.require_architecture(record.get('architecture', 'x64'))
     for field in ('nativeArchitecture', 'targetArchitecture'):
@@ -167,10 +290,18 @@ def validate_ime_evidence(record):
     observed = record.get('reopened', {})
     verify_content(record['module'], observed)
     assert expected in observed.get('text', ''), 'Actual UNO reopen lost the Korean marker'
-    assert record.get('layoutRestored') is True, 'Owned input thread state was not restored'
+    assert record.get('layoutRestored') is True, 'Original owned profile/HKL was not restored'
     validate_restoration(record.get('restoration'))
+    origin, facts = require_tsf_pipeline(record)
+    if origin == 'empty':
+        from ime_engine_retirement import require_ime_engine_retirement
+        _require_precommand_retirement_join(record)
+        require_ime_engine_retirement(record['imeEngineRetirement'], expected_native=record['imeKeyboardSession']['expectedNative'],
+            expected_run=record['readiness']['source'], expected_case=record['case'], expected_source=record['readiness']['source']['sourceCommit'],
+            expected_original_profile=original_ime_profile(record))
+        assert record['imeCommands'][3]['startedAt'] <= record['imeEngineRetirement']['proofPhase']['closeReturnedAt'], 'Engine retirement predates the original restoration command'
     assert record['prefixInputLayout'] == record['restoration']['previousLayout'], 'ASCII setup and original input-state capture used different layouts'
-    return {'imeVerified': True, 'backspaceCompositionVerified': True,
+    return {'imeVerified': True, 'backspaceCompositionVerified': True, **facts,
             'savedKoreanVerified': True, 'reopenedKoreanVerified': True}
 
 
@@ -218,6 +349,7 @@ OBSERVER_SOURCE = r'''
 #include <msctf.h>
 #include <stdint.h>
 #include "ime_thread_mode_windows.h"
+#include "ime_typed_origin.h"
 #include "ime_command_admission.h"
 struct Event { uint32_t sequence,message,flags,pid,tid; uint64_t hwnd,layout;
     int32_t compositionBytes,resultBytes; uint32_t origin; WCHAR composition[256],result[256]; };
@@ -237,6 +369,7 @@ static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
 static bool haveOldProfile = false;
 static bool initialized = false;
+static opengeul_ime::TypedPair originalTsf = {};
 static opengeul_ime::CommandAdmission commandAdmission = {};
 static bool connect() {
     if (!shared) {
@@ -244,7 +377,7 @@ static bool connect() {
         if (!mapping) return false;
         shared=(State*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(State));
     }
-    return shared && shared->magic==0x4f47494d && shared->version==3
+    return shared && shared->magic==0x4f47494d && shared->version==4
         && shared->pid==GetCurrentProcessId() && shared->tid==GetCurrentThreadId();
 }
 static ITfInputProcessorProfileMgr* profiles() {
@@ -321,11 +454,16 @@ static void command(HWND hwnd, UINT sequence) {
         shared->previousSentence=shared->immSentence;
         if (!shared->status) {
             opengeul_ime::WindowsThreadMode api(shared->threadMode,limits.counter,limits.frequency);
-            opengeul_ime::CaptureThreadMode(api,shared->threadMode);
+            const auto allowEmpty=haveOldProfile && opengeul_ime::EmptyOriginUsProfile(shared->previousLayout,
+                oldProfile.dwProfileType,oldProfile.langid,uint64_t(UINT_PTR(oldProfile.hkl)),
+                IsEqualGUID(oldProfile.clsid,GUID_NULL),IsEqualGUID(oldProfile.guidProfile,GUID_NULL));
+            opengeul_ime::CaptureOriginalTypedMode(api,shared->threadMode,originalTsf,allowEmpty);
             if (shared->threadMode.status) failure(shared->threadMode.status);
             else {
-                shared->previousTsfOpen=shared->threadMode.beforeOpen;
-                shared->previousTsfConversion=shared->threadMode.beforeConversion;
+                if (opengeul_ime::PairConcrete(originalTsf)) {
+                    shared->previousTsfOpen=originalTsf.open.value;
+                    shared->previousTsfConversion=originalTsf.conversion.value;
+                } // EMPTY has no original numeric state; legacy scalar slots stay unused.
                 shared->tsfCaptured=1; initialized=true;
             }
         }
@@ -349,7 +487,9 @@ static void command(HWND hwnd, UINT sequence) {
         else if (!korean_profile(mgr,category)) failure(-40);
         if (!shared->status) {
             opengeul_ime::WindowsThreadMode api(shared->threadMode,limits.counter,limits.frequency);
-            opengeul_ime::SetThreadMode(api,shared->threadMode,sequence,shared->previousTsfOpen,shared->previousTsfConversion);
+            if (sequence==2 && opengeul_ime::PairEmpty(originalTsf))
+                opengeul_ime::SetEmptyOriginAsciiMode(api,shared->threadMode,originalTsf);
+            else opengeul_ime::SetThreadMode(api,shared->threadMode,sequence,shared->previousTsfOpen,shared->previousTsfConversion);
             if (shared->threadMode.status) failure(shared->threadMode.status);
             if (!observe_imm(hwnd)) failure(-3);
             else if (!shared->immOpen || bool(shared->immConversion&IME_CMODE_NATIVE)!=(sequence==3)) failure(-41);
@@ -370,7 +510,9 @@ static void command(HWND hwnd, UINT sequence) {
             if (!mgr || mgr->GetActiveProfile(category,&restored)!=S_OK || !same_profile(restored,oldProfile)) failure(-40);
             if (!shared->status) {
                 opengeul_ime::WindowsThreadMode api(shared->threadMode,limits.counter,limits.frequency);
-                opengeul_ime::SetThreadMode(api,shared->threadMode,4,shared->previousTsfOpen,shared->previousTsfConversion);
+                if (opengeul_ime::PairEmpty(originalTsf))
+                    opengeul_ime::CaptureEmptyOriginReturn(api,shared->threadMode,originalTsf);
+                else opengeul_ime::SetThreadMode(api,shared->threadMode,4,shared->previousTsfOpen,shared->previousTsfConversion);
                 if (shared->threadMode.status) failure(shared->threadMode.status);
                 if (!observe_imm(hwnd)) failure(-3);
                 else if (shared->immOpen!=shared->previousOpen || shared->immConversion!=shared->previousConversion
@@ -436,7 +578,7 @@ extern "C" __declspec(dllexport) unsigned int StateSize() { return sizeof(State)
 extern "C" __declspec(dllexport) unsigned int PublishCommand(State* target,UINT sequence,uint64_t counter,uint64_t frequency) {
     // This export runs in the controller's DLL copy. Do not connect to the hook
     // target, apply its PID/TID guard, or retain this transient mapping pointer.
-    if (!target || target->magic!=0x4f47494d || target->version!=3) return 0;
+    if (!target || target->magic!=0x4f47494d || target->version!=4) return 0;
     if (!opengeul_ime::InstallCommandBudget(target->commandBudgets,sequence,{counter,frequency})) return 0;
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&target->command,sequence); return 1;
 }
@@ -444,7 +586,7 @@ extern "C" __declspec(dllexport) unsigned int ReadSnapshot(State* source,State* 
     // Controller-side acquire of the hook's published ACK precedes the copy.
     // These mapping/output pointers are transient and must never be retained.
     if (!source || !destination || source==destination || !ackBefore || !ackAfter
-        || source->magic!=0x4f47494d || source->version!=3) return 0;
+        || source->magic!=0x4f47494d || source->version!=4) return 0;
     *ackBefore=(UINT)InterlockedCompareExchange((volatile LONG*)&source->ack,0,0);
     MemoryBarrier(); CopyMemory(destination,source,sizeof(State)); MemoryBarrier();
     *ackAfter=(UINT)InterlockedCompareExchange((volatile LONG*)&source->ack,0,0);
@@ -506,7 +648,7 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
     native_arch.require_architecture(architecture)
     remaining_setup(setup_deadline, 60, clock=clock)
     source, library = folder / 'ime-observer.cpp', folder / 'ime-observer.dll'
-    for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h'):
+    for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h', 'ime_typed_origin.h'):
         (folder / name).write_bytes(Path(__file__).with_name(name).read_bytes())
     source.write_text(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
         .replace('__CLSID__', profile['providerClsid']).replace('__PROFILE__', profile['profileGuid']), encoding='utf-8')
@@ -546,7 +688,7 @@ class CompositionObserver:
         self.mapping_name = 'Local\\OpenGeulIme_' + uuid.uuid4().hex
         self.mapping = mmap.mmap(-1, ctypes.sizeof(NativeState), tagname=self.mapping_name)
         state = NativeState()
-        state.magic, state.version, state.pid, state.tid = 0x4f47494d, 3, pid, self.tid
+        state.magic, state.version, state.pid, state.tid = 0x4f47494d, 4, pid, self.tid
         state.targetHwnd, state.rootHwnd = focus, root
         self.mapping[:] = bytes(state)
         try:
@@ -575,6 +717,7 @@ class CompositionObserver:
         self.hooks, self.commands, self.restored = [], [], False
         self.command_attempts = set()
         self.activation_attempted = False
+        self.original_tsf = self.original_context = None
         try:
             for kind, name in ((4, 'HookCall'), (3, 'HookGet')):
                 remaining_setup(setup_deadline, 60)
@@ -616,6 +759,8 @@ class CompositionObserver:
     def _command_snapshot(self, state, command):
         limits = state.commandBudgets[command - 1]
         return {'command': command, 'status': int(state.status), 'nativeAck': int(state.ack),
+            'policyVersion': int(state.version),
+            'nativeContext': {key: int(getattr(state, key)) for key in ('magic', 'version', 'pid', 'tid', 'targetHwnd', 'rootHwnd')},
             'snapshotEvidence': dict(state.snapshotEvidence),
             'publishedCommand': int(state.command), 'nativeAttemptedMask': int(state.nativeAttemptedMask),
             'commandRejection': {name: int(getattr(state.commandRejection, name))
@@ -634,13 +779,14 @@ class CompositionObserver:
             'previousTsfOpen': int(state.previousTsfOpen), 'previousTsfConversion': int(state.previousTsfConversion),
             'modeDeadlineCounter': int(limits.counter), 'modeCounterFrequency': int(limits.frequency),
             'immState': dict(contextPresent=int(state.immContextPresent), conversionSucceeded=int(state.immConversionSucceeded),
-                open=int(state.immOpen), conversion=int(state.immConversion), sentence=int(state.immSentence))}
+                open=int(state.immOpen), conversion=int(state.immConversion), sentence=int(state.immSentence)),
+            'previousImmState': dict(open=int(state.previousOpen), conversion=int(state.previousConversion), sentence=int(state.previousSentence))}
 
     def command(self, command, *, setup_deadline=None):
         assert type(command) is int and command in (1, 2, 3, 4)
         assert command not in self.command_attempts, 'Original native IME command cannot retry or renew its budget'
         self.command_attempts.add(command)
-        row = dict(command=command, acknowledged=False, success=False, nativeCallAttempts=0)
+        row = dict(command=command, acknowledged=False, success=False, nativeCallAttempts=0, startedAt=time.monotonic())
         self.commands.append(row)  # Failure/rejection evidence survives a missing ACK.
         try:
             if command == 4: self.require_restore_target()
@@ -672,8 +818,17 @@ class CompositionObserver:
             assert not row['commandRejection']['count'], 'Conflicting native IME command was rejected; subsequent input is blocked'
             assert (row['modeDeadlineCounter'], row['modeCounterFrequency']) == (counter, frequency), 'Native IME command used a different published budget'
             assert state.tsfCaptured == 1, 'Original TSF mode state was not captured before profile activation'
-            native_mode.require_mode_receipt(row['threadMode'], command,
-                previous=(int(state.previousTsfOpen), int(state.previousTsfConversion)) if command == 4 else None)
+            context = require_mode_context(row)
+            assert context[2:] == (self.pid, self.tid, self.focus, self.root), 'Native mode snapshot changed the original target'
+            if command == 1:
+                assert self.original_tsf is None and self.original_context is None, 'Original typed memento cannot be replaced'
+                observed = native_mode.require_typed_mode_receipt(row['threadMode'], 1, allow_empty=original_empty_us_profile(row))
+            else:
+                assert context == self.original_context, 'Typed original belongs to another native context'
+                observed = native_mode.require_typed_mode_receipt(row['threadMode'], command, original=self.original_tsf)
+            row['typedValues'] = native_mode.typed_pair_dict(observed)
+            origin = observed if command == 1 else self.original_tsf
+            row['tsfOrigin'] = 'empty' if origin[0][1] == 0 else 'i4'
             if command in (2, 3, 4):
                 assert state.immContextPresent == state.immConversionSucceeded == 1, 'Original HIMC conversion getter failed'
                 if command in (2, 3):
@@ -684,9 +839,15 @@ class CompositionObserver:
                 else:
                     assert (state.immOpen, state.immConversion, state.immSentence) == (state.previousOpen, state.previousConversion, state.previousSentence), 'Exact original IMM state was not read back'
             remaining_setup(bounded_deadline, 5)
+            if command == 1:
+                self.original_tsf, self.original_context = observed, context
             if command == 4:
                 assert int(self.api.user.GetKeyboardLayout(self.tid) or 0) == state.previousLayout, 'Original input layout was not restored'
                 validate_restoration(row)
+                row.update(profileHklRestored=True, immEqual=True,
+                    typedStateEqual=observed == self.original_tsf,
+                    restorationDisposition='empty-origin-retirement-required' if row['tsfOrigin'] == 'empty' else 'concrete-restored')
+                remaining_setup(bounded_deadline, 5)
                 self.restored = True
             row['success'] = True
             return row
@@ -792,6 +953,7 @@ def retained_setup_shell(process, suite, keyboard):
 def case(suite, fixtures, output, readiness, module, extension, *, prepared_library):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
+    from ime_engine_retirement import admit_ime_retirement
     name = 'ime-' + module
     folder = output / name
     folder.mkdir()
@@ -801,11 +963,11 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     shutil.copyfile(original, source)
     before = hashlib.sha256(source.read_bytes()).hexdigest()
     process = launch_suite([str(suite / 'OpenGeul.Office.exe'), '--module', module, '--file', str(source)], suite, output, name)
-    record = {'module': module, 'kind': 'native-korean-ime', 'shellPid': process.pid,
+    record = {'module': module, 'case': name, 'imePolicyVersion': 4, 'kind': 'native-korean-ime', 'shellPid': process.pid,
               'file': str(source), 'success': False, 'imeVerified': False, 'stage': 'attach',
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
               'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}
-    observer = keyboard = primary = None
+    observer = keyboard = retirement = primary = None
     api = Windows()
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
@@ -863,6 +1025,12 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         keyboard.setup_complete()
         require_ascii_prefix(record)
         record['stage'] = 'activate-microsoft-korean-profile'
+        # Origin is unknown until command1. Admit a separate read-only HANDLE
+        # while the original keyboard HANDLE is still live, before any activation.
+        retirement = admit_ime_retirement(keyboard=keyboard, original_shell=process, suite=suite,
+            case_name=name, record=record, setup_deadline=setup_deadline,
+            run_binding=readiness['source'], diagnostics_root=Path(os.environ['OPENGEUL_SUITE_DIAGNOSTICS']),
+            original_profile=original_ime_profile(record))
         active = observer.command(1, setup_deadline=setup_deadline)
         wait_for(lambda: int(api.user.GetKeyboardLayout(observer.tid) or 0) & 0xffff == 0x0412,
             remaining_setup(setup_deadline, 10))
@@ -889,6 +1057,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         record['restoration'] = observer.command(4)
         record['layoutRestored'] = observer.restored
         record['imeCommands'] = observer.commands
+        record.update({key: record['restoration'][key] for key in
+            ('profileHklRestored', 'immEqual', 'typedStateEqual', 'restorationDisposition')})
         observer.close()
         observer = None
         save_started = time.monotonic()
@@ -913,6 +1083,9 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         else:
             close_document(api, process, hwnd, child, record)
         close_home(api, process, record)
+        if record['activeProfile']['tsfOrigin'] == 'empty':
+            retirement.verify_after_close_home(close_returned_at=time.monotonic())
+        retirement.close()  # Required proof/release precedes independent reopen.
         record['stage'] = 'actual-uno-reopen'
         result_path = folder / 'reopened.json'
         command = [str(suite / 'Office/program/python.exe'), str(Path(__file__).resolve()),
@@ -948,8 +1121,15 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             try: keyboard.close(primary)
             except Exception as exc:
                 record.update(success=False, keyboardCleanupError=type(exc).__name__ + ': ' + str(exc))
-        stop_owned_test_process(process, record)
-        write_result(output, name, record)
+        retirement_failure = None
+        if retirement is not None:
+            try: retirement.close(primary)
+            except Exception as exc:
+                record.update(success=False, retirementCleanupError=type(exc).__name__ + ': ' + str(exc))
+                if primary is None: retirement_failure = exc
+        try: stop_owned_test_process(process, record)
+        finally: write_result(output, name, record)
+        if retirement_failure is not None: raise retirement_failure
 
 
 def main(argv=None):

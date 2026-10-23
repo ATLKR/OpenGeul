@@ -66,6 +66,7 @@ class KoreanImePolicyTests(unittest.TestCase):
 
     def readiness(self):
         return {'suiteOnly': True, 'nativeMachine': 0x8664, 'controllerMachine': 0,
+                  'source':dict(sourceCommit='a'*40,job='windows-suite',repository='ATLKR/OpenGeul',sourceRun='1',runAttempt='1',architecture='x64'),
                   'capabilityAfter': 'Installed', 'restartNeeded': False,
                   'userLanguageConfigured': True,
                   'profile': {'inputTip': '0412:{A1A1A1A1-1111-2222-3333-444444444444}{B2B2B2B2-1111-2222-3333-444444444444}',
@@ -93,7 +94,7 @@ class KoreanImePolicyTests(unittest.TestCase):
                                     ('그', ''), ('글', ''), ('그', ''), ('글', ''), ('', '글')]:
             events.append({'message': 0x10f, 'pid': 31, 'tid': 41, 'hwnd': 51,
                            'layout': 0x0412, 'composition': composition, 'result': result})
-        return {'module': 'writer', 'windowHwnd': 11, 'childHwnd': 22,
+        record = {'module': 'writer', 'windowHwnd': 11, 'childHwnd': 22,
                 'officePid': 31, 'editorTid': 41, 'keyboardFocusHwnd': 51,
                 'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False,
                 'keyTokens': list('gksrmf') + ['BACKSPACE', 'f', 'RIGHT'],
@@ -107,6 +108,8 @@ class KoreanImePolicyTests(unittest.TestCase):
                 'asciiPrefix': ' ime-opengeul-writer:', 'prefixInputLayout': 0x04090409,
                 'asciiEditorInputs': [self.ascii_receipt()],
                 'layoutRestored': True, 'restoration': self.restoration()}
+        from ime_typed_policy_fixtures import complete_record
+        return complete_record(record)
 
     def test_real_dubeolsik_commit_backspace_save_and_reopen_satisfy_policy(self):
         result = ime.validate_ime_evidence(self.record())
@@ -239,6 +242,7 @@ class KoreanImePolicyTests(unittest.TestCase):
                         self.assertIs(p,process);self.assertEqual((hwnd,parent,child,pid,kind),(11,12,22,31,module))
                         inner.api=api;inner.process=p;inner.tid=41;inner.focus=51;inner.binding=binding
                         inner.record=record;saved_record.append(record)
+                        record['imeKeyboardSession']={'expectedNative':dict(binding)}
                     def start(inner):calls.append('keyboard-admitted')
                     def focus_editor(inner, deadline):calls.append('counted-ctrl-f6')
                     def editor_ready(inner, receipt):
@@ -270,7 +274,8 @@ class KoreanImePolicyTests(unittest.TestCase):
                     self.assertEqual(kw['expected_native'],binding);self.assertIs(kw['original_shell'],retained_shell)
                     if phase=='pre':self.assertFalse(record.get('asciiEditorInputs'))
                     else:ime.require_ascii_prefix(record);self.assertEqual(kw['expected_prefix'],record['asciiPrefix'])
-                    context=dict(success=True,phase=phase);record['imeSemanticContext']=context
+                    from ime_typed_policy_fixtures import profile_context
+                    context=profile_context(binding,deadline);context['phase']=phase;record['imeSemanticContext']=context
                     record.setdefault('imeSemanticContexts',[]).append(context);kw['require_current']()
                     semantic_calls.append(('getter-cleaned',phase));return context
                 def install(*args,**kw):
@@ -279,14 +284,24 @@ class KoreanImePolicyTests(unittest.TestCase):
                     self.assertEqual(kw['setup_deadline'],saved_record[0]['imeSetupBudget']['deadline'])
                     calls.append('observer-installed');return observer
                 retained_shell={'trueRetainedPopen':True}
+                def admit_retirement(**kw):
+                    self.assertIs(kw['original_shell'],process)
+                    self.assertEqual(kw['setup_deadline'],saved_record[0]['imeSetupBudget']['deadline'])
+                    calls.append('retirement-admitted')
+                    return SimpleNamespace(close=lambda primary=None:calls.append('retirement-closed'))
                 with ExitStack() as stack:
                     activated=stack.enter_context(patch.object(ime,'activate_owned_suite',side_effect=lambda api,process,hwnd,record:api.require_foreground(hwnd)))
                     context=stack.enter_context(patch.object(ime,'observe_calc_setup',side_effect=calc_context))
                     typed=stack.enter_context(patch.object(ascii_input,'type_ascii',side_effect=physical))
                     written=stack.enter_context(patch.object(ime,'write_result'))
                     for patcher in [
+                        # This test doubles the semantic observation boundary;
+                        # full pure replay is covered by typed public fixtures.
+                        patch.object(ime,'original_ime_profile',return_value={'testOnlySemanticBoundary':True}),
                         patch.dict('sys.modules',{'pywinauto':SimpleNamespace(Desktop=lambda **kw:desktop),
-                            'pywinauto.keyboard':SimpleNamespace(send_keys=send_keys)}),
+                            'pywinauto.keyboard':SimpleNamespace(send_keys=send_keys),
+                            'ime_engine_retirement':SimpleNamespace(admit_ime_retirement=admit_retirement)}),
+                        patch.dict(ime.os.environ,{'OPENGEUL_SUITE_DIAGNOSTICS':str(root/'diagnostics')}),
                         patch.object(ime,'require_engine_fixture',return_value=original),
                         patch.object(ime,'launch_suite',return_value=process),patch.object(ime,'Windows',return_value=api),
                         patch.object(ime,'verified_attachment',return_value=(11,12,22,31)),
@@ -303,7 +318,7 @@ class KoreanImePolicyTests(unittest.TestCase):
                 expected=['keyboard-admitted','owned-editor-click','counted-ctrl-f6','readiness-acknowledged',
                     ('counted-navigation',module),('physical',' ime-opengeul-'+module+':',.04)]
                 if module=='calc':expected.append('calc-context-cleaned-before-observer')
-                expected.extend(['observer-installed','us-setup-complete',('activation',1),'keyboard-closed'])
+                expected.extend(['observer-installed','us-setup-complete','retirement-admitted',('activation',1),'keyboard-closed','retirement-closed'])
                 self.assertEqual(calls,expected)
                 self.assertEqual(semantic_calls,[('getter-cleaned','pre'),('ack','pre'),('getter-cleaned','post'),('ack','post')])
                 self.assertEqual(context.call_count,int(module=='calc'))

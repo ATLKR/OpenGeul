@@ -165,8 +165,10 @@ class IMEKeyboardSession:
         row=settle_owned_capture(lambda:self._observe_guard(strict),validate,
             self.receipt,self.binding,self.deadline,clock=self.clock)
         if strict:
-            b=self.binding;focus=row['scope']['focus']['hwnd']
-            assert focus and self.api.require_editor_focus(b['suiteHwnd'],b['childHwnd'])==focus, 'Strict IME editor focus changed before shortcut'
+            from windows_smoke import _editor_focus_snapshot_ready
+            b=self.binding
+            focus=_editor_focus_snapshot_ready(row['scope'],b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],self.tid)
+            assert focus and focus==row['scope']['focus']['hwnd'], 'Strict IME editor focus changed before shortcut'
             self.focus=focus
         if context_check is not None:context_check()
         self._budget()
@@ -331,9 +333,10 @@ class IMEKeyboardSession:
         return self._run(complete)
     def begin_save(self, restoration, save_deadline):
         def save_phase():
-            from korean_ime_smoke import validate_restoration
+            from korean_ime_smoke import validate_restoration, require_ime_save_disposition
             assert self.phase=='composition', 'IME save requires completed setup and composition'
             validate_restoration(restoration)
+            require_ime_save_disposition(self.record, restoration)
             assert self.record.get('layoutRestored') is True and self.record.get('prefixInputLayout')==restoration['previousLayout']==US_LAYOUT, 'IME save requires exact original US restoration'
             assert _number(save_deadline) and self.clock()<save_deadline<=self.clock()+30, 'IME save deadline exceeds original bound'
             self.deadline=save_deadline

@@ -31,7 +31,9 @@ MARKER='UI-OpenGeul-calc-CtrlS'
 CASE='calc-active-cell-save'
 NS=calc_model_barrier.NS
 MAX_BYTES=16*1024*1024
-PENDING_GETTERS='calc-a1-b1-c1-d1-pending-input-v1'
+from writer_model_reader import CALC_PENDING_INITIAL_GETTER_CONTRACT, CALC_PENDING_GETTER_CONTRACT
+PENDING_GETTERS=CALC_PENDING_INITIAL_GETTER_CONTRACT
+LEGACY_PENDING_GETTERS=CALC_PENDING_GETTER_CONTRACT
 
 
 def read_cells(data):
@@ -206,11 +208,16 @@ def type_pending_a1(reader,baseline,marker,record,deadline,*,navigate,require_fo
 
 def require_pending_input_observations(before,selected,editing,pending,baseline,marker,**context):
     """Pure strict replay joins the input receipt to the original native reader."""
-    from writer_model_reader import require_calc_a1_selection
+    from writer_model_reader import require_calc_a1_selection,require_calc_pending_program_phase
     from calc_pending_input import require_pending_receipt
     child=before['bindingBefore']['childHwnd']
+    require_calc_pending_program_phase(before,expected_action='start',expected_sequence=0,expected_phase='initial')
+    sequence=0
     earlier=before
     for row in (selected,editing,pending):
+        phase=require_calc_pending_program_phase(row,expected_action='read',expected_phase='strict')
+        assert phase['requestSequence']>sequence, 'Calc pending observation RPC sequence did not advance'
+        sequence=phase['requestSequence']
         require_pending_observation(before,row,baseline,getter_contract=PENDING_GETTERS,**context)
         assert earlier['readFinishedAt']<=row['readStartedAt'], 'Pending-input receipt order does not match physical input boundaries'
         require_calc_a1_selection(row['calcSelection'])

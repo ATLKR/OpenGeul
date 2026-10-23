@@ -172,6 +172,7 @@ class CalcSaveSmokeTests(unittest.TestCase):
         from test_calc_model_barrier import observation
         from test_writer_model_barrier import synthetic_frame,original_shell_fixture
         import writer_model_reader as reader
+        from test_calc_initial_selection_program import program_observation
         self.assertTrue(callable(getattr(self.api,'require_pending_input_observations',None)))
         basic=self.pending_rows()
         with tempfile.TemporaryDirectory() as directory:
@@ -183,6 +184,7 @@ class CalcSaveSmokeTests(unittest.TestCase):
                 ui=copy.deepcopy(part['pendingInput']);ui['childHwnd']=frame.binding['childHwnd']
                 row.update(kind='existing-owned-calc-pending-input',operations=list(reader.CALC_PENDING_OPERATIONS),
                     calcSelection=copy.deepcopy(part['calcSelection']),pendingInput=ui)
+                program_observation(row,index)
                 rows.append(row)
             context=dict(suite=frame.suite,inventory=frame.inventory,inventory_sha256=frame.inventory_sha256,
                 original_shell=original_shell_fixture(frame.binding,frame.suite),expected_url=frame.binding['documentUrl'],deadline=12.)
@@ -190,7 +192,16 @@ class CalcSaveSmokeTests(unittest.TestCase):
             for mutate in (lambda r:r[1]['calcSelection']['range'].update(startRow=7,endRow=7),
                            lambda r:r[3]['pendingInput']['editor'].update(text=self.expected+'suffix'),
                            lambda r:r[3]['bindingAfter'].update(officeCreationTime=999),
-                           lambda r:r[3].update(readStartedAt=.5)):
+                           lambda r:r[3].update(readStartedAt=.5),
+                           lambda r:program_observation(r[0],1),
+                           lambda r:program_observation(r[1],0),
+                           lambda r:r[2]['calcSelectionPhase'].update(requestSequence=1),
+                           lambda r:r[3]['calcSelectionPhase'].update(requestSequence=True),
+                           lambda r:r[3]['calcSelectionPhase'].update(program=reader.CALC_PENDING_GETTER_CONTRACT),
+                           lambda r:r[1].update(calcInitialSelection=copy.deepcopy(r[0]['calcInitialSelection'])),
+                           lambda r:r[0]['calcInitialSelection']['shapeWitness'].update(postCount=1),
+                           lambda r:r[0]['calcInitialSelection']['shapeWitness'].update(controllerId=999),
+                           lambda r:r[0].update(isModified=True)):
                 changed=copy.deepcopy(rows);mutate(changed)
                 with self.subTest(mutate=mutate),self.assertRaises(AssertionError):
                     self.api.require_pending_input_observations(*changed,self.base,self.api.MARKER,**context)

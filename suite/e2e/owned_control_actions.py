@@ -406,6 +406,31 @@ class NativeControlProbe(NativeActivationProbe):
                     nativeHwndRaw=raw,nativeHwndRawType=type(raw).__name__,
                     automationId=automation,controlType=kinds.get(kind,str(kind)),name=name,
                     visible=not bool(get('CurrentIsOffscreen')),enabled=bool(get('CurrentIsEnabled')),rectangle=rectangle)
+    def _focused_identity(self,element):
+        """Only the four identity properties consumed by the focused walk."""
+        def get(name):return self._call(lambda:getattr(element,name))
+        def invalid(field,value,detail):
+            raise AssertionError('Invalid focused identity '+field+': type='+type(value).__name__[:64]+' '+detail)
+        raw=get('CurrentNativeWindowHandle')
+        if not (raw is None or type(raw) is int and -(2**31)<=raw<2**32):
+            invalid('nativeHwnd',raw,'expected null or signed32/uint32')
+        pid=get('CurrentProcessId')
+        if not (type(pid) is int and 0<pid<2**32):
+            invalid('pid',pid,'expected positive DWORD')
+        kind=get('CurrentControlType')
+        if not (type(kind) is int and 0<kind<2**31):
+            invalid('controlType',kind,'expected positive signed32 CONTROLTYPEID')
+        runtime=self._call(lambda:element.GetRuntimeId())
+        if type(runtime) not in (list,tuple):
+            invalid('runtimeId',runtime,'expected bounded list/tuple')
+        if not 0<len(runtime)<=64:
+            invalid('runtimeId',runtime,'length='+str(len(runtime))+' expected1..64')
+        for index,value in enumerate(runtime):
+            if not (type(value) is int and -(2**31)<=value<2**31):
+                invalid('runtimeId['+str(index)+']',value,'expected signed32')
+        kinds={50000:'Button',50004:'Edit',50011:'MenuItem',50032:'Window',50010:'MenuBar'}
+        return dict(runtimeId=list(runtime),pid=pid,nativeHwnd=0 if raw is None else raw&0xffffffff,
+                    controlType=kinds.get(kind,str(kind)))
     def native_focus(self,thread):
         state=GuiThreadInfo(cbSize=C.sizeof(GuiThreadInfo));self._required(self._call(self.user.GetGUIThreadInfo,thread,C.byref(state)),'GetGUIThreadInfo(original control thread)')
         focus=int(state.focus or 0);pid=C.c_uint32()
@@ -441,7 +466,7 @@ class NativeControlProbe(NativeActivationProbe):
         focused=[];cursor=self._call(uia.iuia.GetFocusedElement)
         for _ in range(32):
             if not cursor:break
-            row=self._raw(cursor);focused.append({k:row[k] for k in ('runtimeId','pid','nativeHwnd','controlType')})
+            row=self._focused_identity(cursor);focused.append(row)
             if self._call(uia.iuia.CompareElements,cursor,root):break
             cursor=self._call(uia.iuia.ControlViewWalker.GetParentElement,cursor)
         menu_handles=[row['nativeHwnd'] for row in ancestry if row['controlType'] in ('MenuItem','MenuBar') and row['nativeHwnd']]
@@ -513,6 +538,41 @@ class NativeControlProbe(NativeActivationProbe):
                     assert gui['activeHwnd']==document and gui['focusRootHwnd']==document and not gui['captureHwnd'] and not gui['menuOwnerHwnd'], 'Consumed menu focus escaped original document'
                     result.update(accepted=True,transition='consumed-menu-original-editor-return');return result
         snap=self.target_snapshot(api,document,control,dialog,purpose);result['native']=snap
+        if purpose=='FILE_MENU' and not dialog and caption in PICKERS[1:]:
+            foreground=snap['foreground']
+            if foreground['hwnd']!=document and foreground['className']=='#32770' and foreground['title']==caption:
+                # The modal can appear after the first foreground read. The
+                # old File target is no longer an enabled input recipient.
+                # Verify the declared transition, never relax its pre-input guard.
+                assert context is not None and context.get('originalProcess') is not None
+                def verify_picker(row):
+                    doc,fg,gui=(row[key] for key in ('document','foreground','gui'))
+                    _window(doc,document,process.pid,enabled=False)
+                    assert all(doc[key]==context['document'][key] for key in ('hwnd','pid','threadId','rootHwnd')), 'Original picker document identity changed'
+                    assert doc['enabled'] is False, 'Owned modal did not disable its original document'
+                    _window(fg,fg['hwnd'],process.pid)
+                    assert fg['hwnd']!=document and fg['ownerHwnd']==document and fg['threadId']==doc['threadId'], 'New picker owner or thread differs'
+                    assert fg['className']=='#32770' and fg['title']==caption, 'Declared picker identity changed'
+                    assert gui['threadId']==doc['threadId'] and gui['activeHwnd']==fg['hwnd'], 'Declared picker is not active on the original thread'
+                    assert gui['focusHwnd']>0 and gui['focusPid']==process.pid and gui['focusRootHwnd']==fg['hwnd'], 'Declared picker focus escaped'
+                    assert type(gui['flags']) is int and not gui['flags'] & 0x1e and not gui['captureHwnd'] and not gui['menuOwnerHwnd'], 'Declared picker has menu or capture activity'
+                verify_picker(snap)
+                result['pickerProcessBefore']=self._call(self.process_snapshot,process)
+                assert result['pickerProcessBefore']==context['originalProcess'], 'Original picker process generation changed'
+                from pywinauto import Desktop
+                element=self._call(lambda:Desktop(backend='uia').window(handle=foreground['hwnd']).wrapper_object().element_info._element)
+                info=self._raw(element);result['newPicker']=info
+                assert info['nativeHwnd']==foreground['hwnd'] and info['pid']==process.pid and info['runtimeId']
+                assert info['controlType']=='Window' and info['name']==caption and info['visible'] is True and info['enabled'] is True
+                doc=self._call(self._window,document)
+                fg=self._call(self._window,self._call(self.foreground))
+                after=dict(document=doc,foreground=fg,gui=self._call(self.native_focus,doc['threadId']))
+                result['pickerNativeAfter']=after
+                verify_picker(after)
+                assert all(fg[key]==foreground[key] for key in ('hwnd','pid','threadId','rootHwnd','ownerHwnd')), 'Declared picker was replaced during UIA verification'
+                result['pickerProcessAfter']=self._call(self.process_snapshot,process)
+                assert result['pickerProcessAfter']==context['originalProcess'], 'Original picker process generation changed'
+                result.update(accepted=True,transition='exact-owned-save-picker');return result
         if purpose=='FILE_MENU':_target(snap,purpose,document,process.pid,dialog,caption,None,
                                      operation='keyboard' if caption else 'pointer')
         else:

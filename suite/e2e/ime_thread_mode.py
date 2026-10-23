@@ -87,6 +87,72 @@ def require_mode_receipt(receipt, command, *, previous=None):
     return receipt
 
 
+def _typed_pair(receipt, prefix):
+    result = []
+    for key in ('Open', 'Conversion'):
+        hr, kind, value = (receipt[prefix+key+'Hr'], receipt[prefix+key+'Type'], receipt[prefix+key])
+        assert (hr, kind) in ((0, 3), (1, 0)), 'Unsupported typed TSF value'
+        result.append((hr, kind, value if kind == 3 else None))
+    return tuple(result)
+
+
+def require_original_pair(pair):
+    assert type(pair) is tuple and len(pair) == 2 and all(type(value) is tuple and len(value) == 3 for value in pair), 'Immutable original TSF pair is missing'
+    for hr, kind, value in pair:
+        assert type(hr) is int and type(kind) is int
+        assert ((hr, kind) == (1, 0) and value is None) or ((hr, kind) == (0, 3) and type(value) is int and -2**31 <= value < 2**31), 'Invalid original TSF tag'
+    assert all(value[:2] == pair[0][:2] for value in pair), 'Mixed original TSF pair is not admitted'
+    return pair
+
+
+def typed_pair_dict(pair):
+    result = {}
+    for key, (hr, kind, value) in zip(('open', 'conversion'), pair):
+        result[key] = dict(hresult=hr, variantType=kind, kind='i4' if kind == 3 else 'empty')
+        if kind == 3: result[key]['value'] = value
+    return result
+
+
+def require_typed_mode_receipt(receipt, command, *, original=None, allow_empty=False):
+    """Wire4 policy; old concrete validation remains the strict delegate."""
+    assert type(command) is int and command in (1, 2, 3, 4) and type(allow_empty) is bool
+    assert type(receipt) is dict and set(receipt) == {name for name, _ in NativeModeReceipt._fields_}, 'Incomplete typed mode receipt'
+    for name, kind in NativeModeReceipt._fields_:
+        value = receipt[name]
+        lower, upper = (-2**31, 2**31) if kind is ctypes.c_int32 else (0, 2**32)
+        assert type(value) is int and lower <= value < upper, 'Invalid typed mode field: ' + name
+    before = _typed_pair(receipt, 'before')
+    if command == 1:
+        assert original is None
+        require_original_pair(before)
+        if before[0][1] == 3:
+            require_mode_receipt(receipt, 1)
+            return before
+        assert allow_empty, 'Empty original TSF state requires the exact original US profile'
+    else:
+        require_original_pair(original)
+        if original[0][1] == 3 or command == 3 or (command == 2 and all(value[1] == 3 for value in before)):
+            require_mode_receipt(receipt, command, previous=tuple(value[2] for value in original) if command == 4 else None)
+            return _typed_pair(receipt, 'after')
+    for name in ('status', 'cleanupStatus', 'managerHr', 'compartmentManagerHr', 'enumerationHr', 'enumerationNextHr', 'openGetHr', 'conversionGetHr', 'variantClearHr'):
+        assert receipt[name] == 0, 'Typed mode operation/cleanup failed: ' + name
+    assert receipt['installedMask'] == 3 and 2 <= receipt['enumerationCount'] <= 64
+    assert all(receipt[name] == 1 for name in ('managerPresent', 'compartmentManagerPresent', 'enumeratorPresent', 'openPresent', 'conversionPresent', 'modulePresent', 'lookupPresent', 'managerCallAttempts', 'nextFetched'))
+    expected_refs = 6 if command == 2 else 5
+    assert receipt['releaseCalls'] == 1 and receipt['referencesAcquired'] == receipt['referencesReleased'] == expected_refs
+    if command in (1, 4):
+        assert all(receipt[name] == 0 for name in ('openSetCalls', 'conversionSetCalls', 'clientId', 'clientIdCalls', 'clientPresent'))
+        assert all(receipt[name] == NOT_ATTEMPTED for name in ('clientQueryHr', 'clientHr', 'openSetHr', 'conversionSetHr', 'afterOpenHr', 'afterConversionHr'))
+        return before
+    assert command == 2 and all(value[:2] == (1, 0) for value in before), 'Only both-EMPTY Korean state may initialize a new ASCII target'
+    assert receipt['clientPresent'] == receipt['clientIdCalls'] == receipt['openSetCalls'] == receipt['conversionSetCalls'] == 1 and receipt['clientId'] > 0
+    assert all(receipt[name] == 0 for name in ('clientQueryHr', 'clientHr', 'openSetHr', 'conversionSetHr', 'afterOpenHr', 'afterConversionHr'))
+    assert (receipt['requestedOpen'], receipt['requestedConversion']) == (1, 0), 'New ASCII target must be explicit open1/full ALPHANUMERIC0'
+    after = _typed_pair(receipt, 'after')
+    assert after == ((0, 3, 1), (0, 3, 0)), 'Explicit new ASCII target was not read back exactly'
+    return after
+
+
 def counter_budget(deadline, *, clock=time.monotonic, counter=None, frequency=None):
     """Conservatively translate the remaining parent budget to native QPC ticks.
 

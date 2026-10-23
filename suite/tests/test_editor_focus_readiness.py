@@ -79,14 +79,16 @@ class EditorFocusReadinessTests(unittest.TestCase):
             self.prepare(api, enter=enter, seconds=.2)
         self.assertEqual(self.inputs, ['click', 'CTRL+F6'])
 
-    def test_final_strict_query_cannot_qualify_focus_after_entry_deadline(self):
+    def test_final_coherent_validation_cannot_qualify_focus_after_entry_deadline(self):
         api = self.api([11, 34, 34, 34])
-        strict = api.require_editor_focus
-        def late(hwnd, child):
-            result = strict(hwnd, child); self.advance(.21); return result
-        api.require_editor_focus = late
-        with self.assertRaisesRegex(AssertionError, 'deadline'):
-            self.prepare(api, seconds=.2)
+        strict = native._editor_focus_snapshot_ready;seen=[]
+        def late(*args):
+            result=strict(*args);seen.append(id(args[0]))
+            if seen.count(id(args[0]))>1:self.advance(.21)
+            return result
+        with mock.patch.object(native,'_editor_focus_snapshot_ready',side_effect=late):
+            with self.assertRaisesRegex(AssertionError, 'deadline'):
+                self.prepare(api, seconds=.2)
         self.assertFalse(self.record['editorFocusReadiness']['ready'])
 
     def test_entry_budget_rejects_boolean_or_nonfinite_seconds_before_input(self):
@@ -183,13 +185,14 @@ class EditorFocusReadinessTests(unittest.TestCase):
         self.assertTrue(all(row['focus']['hwnd'] == 34 and row['capture']['hwnd'] == 33
                             for row in evidence['snapshots']))
 
-    def test_strict_before_input_guard_rejects_capture_reappearing_after_ready_snapshot(self):
+    def test_following_input_guard_rejects_capture_after_coherent_readiness(self):
         api = self.api([34], captures=[0, 0, 0, 33])
+        self.assertEqual(self.prepare(api),34)
         with self.assertRaisesRegex(AssertionError, 'capture'):
-            self.prepare(api)
+            api.require_editor_focus(11,33)
         self.assertEqual(self.clock, 0)
         self.assertEqual(self.inputs, ['click', 'CTRL+F6'])
-        self.assertFalse(self.record['editorFocusReadiness']['ready'])
+        self.assertTrue(self.record['editorFocusReadiness']['ready'])
         self.assertEqual(self.record['editorFocusReadiness']['snapshots'][-1]['capture']['hwnd'], 0)
 
     def test_foreign_focus_fails_immediately_without_more_input(self):

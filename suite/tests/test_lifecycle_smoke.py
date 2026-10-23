@@ -154,6 +154,7 @@ class LifecycleSmokeTests(unittest.TestCase):
             result._obj.value=len(actual.encode('utf-16-le'))//2
             return 1
         api.user.GetGUIThreadInfo=gui_info
+        api.query_gui_thread_info=lambda thread: smoke.native.Windows.query_gui_thread_info(api, thread)
         api.user.GetWindowThreadProcessId=lambda handle,pointer:111
         api.user.GetForegroundWindow=lambda:500
         api.user.SendMessageTimeoutW=native_text

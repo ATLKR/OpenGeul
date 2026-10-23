@@ -87,6 +87,7 @@ class ObserverModeJoinTests(unittest.TestCase):
         import korean_ime_smoke as ime
         self.assertTrue(hasattr(ime.NativeState,'threadMode'),'Observer does not retain native mode state')
         state=ime.NativeState();state.ack=command;state.status=status
+        state.magic=0x4f47494d;state.version=4;state.pid=88;state.tid=44;state.targetHwnd=33;state.rootHwnd=11
         state.snapshotEvidence=dict(copyReturn=1,ackBefore=command,ackAfter=command,stable=True)
         state.tsfCaptured=1;state.profileChangeAttempted=1
         state.previousTsfOpen=1;state.previousTsfConversion=0x20
@@ -98,6 +99,7 @@ class ObserverModeJoinTests(unittest.TestCase):
         observer=ime.CompositionObserver.__new__(ime.CompositionObserver)
         observer.focus=33;observer.child=22;observer.root=11;observer.pid=88;observer.tid=44
         observer.commands=[];observer.activation_attempted=False;observer.restored=False;observer.command_attempts=set()
+        observer.original_tsf=((0,3,1),(0,3,0x20));observer.original_context=(0x4f47494d,4,88,44,33,11)
         observer.expected_profile=dict(providerClsid='{A028AE76-01B1-46C2-99C4-ACD9858AE02F}',profileGuid='{B5FE1F02-D5F2-4445-9C03-C568F23C99A1}')
         state.activeLanguage=0x0412
         for field,value in [('activeClsid',observer.expected_profile['providerClsid']),('activeProfile',observer.expected_profile['profileGuid'])]:

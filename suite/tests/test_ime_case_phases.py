@@ -1,5 +1,6 @@
 """Real IME case orchestration against finite native/reader boundary doubles."""
 from contextlib import ExitStack
+import copy
 import json
 from pathlib import Path
 import sys
@@ -16,7 +17,7 @@ from ascii_observer_boundary import AsciiObserverBoundary
 
 
 class IMECasePhaseTests(unittest.TestCase):
-    def run_case(self, module, *, fail_context=False, fail_mode=False, fail_semantic=None):
+    def run_case(self, module, *, fail_context=False, fail_mode=False, fail_semantic=None, empty_retirement_failure=False):
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
         root=Path(directory.name);calls=[];offset=[0.];clock=time.monotonic
         original=root/('OpenGeul-'+module+'.'+dict(ime.INPUT_CASES)[module]);original.write_bytes(b'unchanged fixture')
@@ -24,6 +25,9 @@ class IMECasePhaseTests(unittest.TestCase):
         binding=dict(shellPid=77,officePid=31,suiteHwnd=11,parentHwnd=12,childHwnd=22,rootHwnd=11,
             shellCreationTime=2**55,officeCreationTime=2**55+100,expectedImage=str(root/'Office/program/soffice.bin'))
         policy=fixtures.KoreanImePolicyTests();record_template=policy.record()
+        if empty_retirement_failure:
+            from ime_typed_policy_fixtures import complete_record
+            complete_record(record_template,empty=True)
         observed=dict(text='Engine-OpenGeul-'+module+' 한글 '+ime.marker(module),formula='=SUM(B1:C1)',value=42,pageCount=1)
         user=NS(GetKeyboardLayout=lambda tid:layout[0],GetAsyncKeyState=lambda key:0,GetKeyState=lambda key:0,
             GetWindowThreadProcessId=lambda hwnd,pointer:41,GetForegroundWindow=lambda:11,GetAncestor=lambda hwnd,kind:11,
@@ -35,6 +39,7 @@ class IMECasePhaseTests(unittest.TestCase):
         class Keyboard:
             def __init__(inner,api,p,hwnd,parent,child,pid,kind,record,deadline):
                 inner.api=api;inner.process=p;inner.tid=41;inner.focus=51;inner.record=record;inner.binding=binding;records.append(record)
+                record['imeKeyboardSession']={'expectedNative':dict(binding)}
             def start(inner):calls.append('admission')
             def focus_editor(inner,deadline):calls.append('CTRL_F6')
             def editor_ready(inner,receipt):calls.append('ready')
@@ -46,9 +51,12 @@ class IMECasePhaseTests(unittest.TestCase):
             def semantic_ready(inner,context,*,phase):
                 self.assertIs(context,inner.record['imeSemanticContext'])
                 calls.append(('semantic-ready',phase))
-            def setup_complete(inner):calls.append('setup-complete')
+            def setup_complete(inner):
+                inner.record['imeKeyboardSession']['setupFinishedAt']=clock()+offset[0]
+                calls.append('setup-complete')
             def begin_save(inner,restoration,deadline):
-                self.assertEqual(restoration,policy.restoration());self.assertTrue(inner.record['layoutRestored'])
+                ime.validate_restoration(restoration);ime.require_ime_save_disposition(inner.record,restoration)
+                self.assertEqual(restoration,inner.record['restoration']);self.assertTrue(inner.record['layoutRestored'])
                 self.assertEqual(deadline,inner.record['imeSaveBudget']['deadline'])
                 self.assertAlmostEqual(deadline-inner.record['imeSaveBudget']['startedAt'],30.)
                 calls.append('save-budget-started')
@@ -72,13 +80,13 @@ class IMECasePhaseTests(unittest.TestCase):
             def command(inner,command,**kw):
                 calls.append(('command',command))
                 if command==4:
-                    layout[0]=0x04090409;inner.restored=True;value=policy.restoration()
+                    layout[0]=0x04090409;inner.restored=True;value=copy.deepcopy(record_template['imeCommands'][3])
                 else:
                     self.assertEqual(kw['setup_deadline'],records[0]['imeSetupBudget']['deadline'])
-                    value=dict(command=command,status=-3 if fail_mode and command==2 else 0,
-                        activeLanguage=0x0412,activeClsid=policy.readiness()['profile']['providerClsid'],
-                        activeProfile=policy.readiness()['profile']['profileGuid'])
+                    value=copy.deepcopy(record_template['imeCommands'][command-1])
+                    value['status']=-3 if fail_mode and command==2 else 0
                     if command==1:inner.activation_attempted=True;layout[0]=0x04120412
+                value['startedAt']=clock()+offset[0]
                 inner.commands.append(value)
                 if value['status']!=0:raise AssertionError('native command status -3')
                 return value
@@ -98,7 +106,9 @@ class IMECasePhaseTests(unittest.TestCase):
             self.assertEqual(deadline,record['imeSetupBudget']['deadline'])
             self.assertEqual(kw['expected_native'],binding)
             self.assertEqual(kw['original_shell'],{'originalPopen':True})
-            context=dict(success=False,phase=phase);record['imeSemanticContext']=context;kw['require_current']()
+            from ime_typed_policy_fixtures import profile_context
+            context=profile_context(binding,deadline);context.update(success=False,phase=phase)
+            record['imeSemanticContext']=context;kw['require_current']()
             if phase=='pre':self.assertFalse(record.get('asciiEditorInputs'));self.assertIsNone(kw.get('expected_prefix'))
             else:
                 ime.require_ascii_prefix(record);self.assertEqual(kw['expected_prefix'],record['asciiPrefix'])
@@ -126,9 +136,30 @@ class IMECasePhaseTests(unittest.TestCase):
                 self.assertLess(records[0]['imeSaveBudget']['deadline']-(clock()+offset[0]),28.)
             return observed['text']
         def reopen(command,**kw):
+            calls.append('independent-reopen')
             Path(command[-1]).write_text(json.dumps(observed));return NS(returncode=0,stdout=b'',stderr=b'')
+        class Retirement:
+            closed=False
+            def close(inner,primary=None):
+                if not inner.closed:calls.append('retirement-close');inner.closed=True
+            def verify_after_close_home(inner,**kw):
+                self.assertTrue(empty_retirement_failure);self.assertEqual(calls[-1],'home-close')
+                calls.append('first-retirement-wait');raise RuntimeError('original engine not signaled at first observation')
+        def admit_retirement(**kw):
+            self.assertIs(kw['original_shell'],process)
+            self.assertEqual(kw['setup_deadline'],records[0]['imeSetupBudget']['deadline'])
+            self.assertIn('setup-complete',calls);self.assertNotIn(('command',1),calls)
+            if empty_retirement_failure:
+                records[0]['imeEngineRetirement']={'admission':dict(startedAt=clock()+offset[0],finishedAt=clock()+offset[0],editorTid=41,focusHwnd=51)}
+            calls.append('retirement-admitted');return Retirement()
         with ExitStack() as stack:
-            patchers = [patch.dict('sys.modules',{'pywinauto':NS(Desktop=lambda **kw:desktop)}),
+            # This suite checks case orchestration. The separate real-provider
+            # fixture tests replay the actual admission/final proof validators.
+            # The semantic observer/qualifier is a boundary double here; public
+            # typed tests independently run the complete real PRE/POST replay.
+            patchers = [patch.dict('sys.modules',{'pywinauto':NS(Desktop=lambda **kw:desktop),'ime_engine_retirement':NS(admit_ime_retirement=admit_retirement,require_ime_retirement_admission=lambda proof,**kw:proof)}),
+            patch.object(ime,'original_ime_profile',return_value={'testOnlySemanticBoundary':True}),
+            patch.dict(ime.os.environ,{'OPENGEUL_SUITE_DIAGNOSTICS':str(root/'diagnostics')}),
             patch.object(ime,'require_engine_fixture',return_value=original),patch.object(ime,'launch_suite',return_value=process),
             patch.object(ime,'Windows',return_value=api),patch.object(ime,'verified_attachment',return_value=(11,12,22,31)),
             patch.object(ime,'activate_owned_suite'),patch.object(ime,'IMEKeyboardSession',Keyboard),
@@ -138,10 +169,10 @@ class IMECasePhaseTests(unittest.TestCase):
             patch.object(ime,'observe_ime_semantic_setup',side_effect=semantic,create=True),
             patch.object(ime,'CompositionObserver',Observer),patch.object(ime,'physical_key',side_effect=physical),
             patch.object(ime,'wait_for',side_effect=wait),patch.object(ime,'package_text',side_effect=package),
-            patch.object(ime,'close_document'),patch.object(ime,'close_home'),patch.object(native,'_verified_saved_calc_close_proof',return_value={'proof':True}),
+            patch.object(ime,'close_document'),patch.object(ime,'close_home',side_effect=lambda *a:calls.append('home-close')),patch.object(native,'_verified_saved_calc_close_proof',return_value={'proof':True}),
             patch('calc_model_barrier.baseline_from_ooxml',return_value={'baseline':True}),
             patch.object(ime.subprocess,'run',side_effect=reopen),patch.object(ime,'capture_failure'),
-            patch.object(ime,'stop_owned_test_process'),patch.object(ime,'write_result'),
+            patch.object(ime,'stop_owned_test_process',side_effect=lambda *a:calls.append('final-stop')),patch.object(ime,'write_result'),
             patch.object(ime.time,'monotonic',side_effect=lambda:clock()+offset[0]),patch.object(ime.ascii_input.time,'sleep')]
             for patcher in patchers:stack.enter_context(patcher)
             error=None;result=None
@@ -200,6 +231,14 @@ class IMECasePhaseTests(unittest.TestCase):
         self.assertEqual(calls.count(('command',2)),1);self.assertEqual(calls.count(('command',4)),1)
         self.assertFalse(any(isinstance(value,tuple) and value[0]=='physical' for value in calls))
         self.assertNotIn('CTRL_S',calls);self.assertIn('keyboard-close',calls)
+    def test_empty_origin_first_observation_failure_blocks_reopen_and_closes_before_force(self):
+        calls,record,result,error=self.run_case('writer',empty_retirement_failure=True)
+        self.assertIsInstance(error,RuntimeError);self.assertIn('first observation',str(error))
+        self.assertLess(calls.index('retirement-admitted'),calls.index(('command',1)))
+        self.assertLess(calls.index('home-close'),calls.index('first-retirement-wait'))
+        self.assertLess(calls.index('first-retirement-wait'),calls.index('retirement-close'))
+        self.assertLess(calls.index('retirement-close'),calls.index('final-stop'))
+        self.assertNotIn('independent-reopen',calls);self.assertIsNone(result)
 
 
 class IMECohortPreparationTests(unittest.TestCase):

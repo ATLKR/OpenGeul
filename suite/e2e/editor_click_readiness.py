@@ -61,6 +61,57 @@ def _hit_ready(hit, hwnd, child, office_pid, thread, point):
     return False
 
 
+def _frame_metadata(frame):
+    geometry = {'suite': {'rectangle'}, 'parent': {'rectangle', 'clientScreenRect'},
+                'editor': {'rectangle', 'clientScreenRect'}}
+    return {key: ({k: v for k, v in value.items() if k not in geometry[key]}
+                  if key in geometry else value) for key, value in frame.items()}
+
+
+def _point_in_editor(point, frame):
+    assert type(point) in (list, tuple) and len(point) == 2
+    assert all(type(v) is int and -(2**31) <= v < 2**31 for v in point)
+    left, top, right, bottom = _rectangle(frame['editor']['clientScreenRect'])
+    assert left <= point[0] < right and top <= point[1] < bottom, 'Fixed physical point left the owned editor'
+
+
+def require_geometry_settlement(evidence, *, hwnd, parent, child, shell_pid, office_pid):
+    """Replay only observed rounds; receipt readiness flags never waive a guard."""
+    ledger = evidence['geometrySettlement']
+    assert type(ledger) is dict and set(ledger) == {'point','initialFrame','deadline','rows','pollCount','pendingCount','ready','settledFrame','readyAt'}
+    initial, hit, point = evidence['qualifiedFrame'], evidence['qualifiedHit'], evidence['chosenPhysicalPoint']
+    identity = _frame_identity(initial, hwnd, parent, child, shell_pid, office_pid)
+    rectangle = initial['editor']['clientScreenRect']
+    assert point == [(rectangle[0]+rectangle[2])//2, (rectangle[1]+rectangle[3])//2]
+    assert ledger['point'] == point and ledger['initialFrame'] == initial and ledger['deadline'] == evidence['deadline']
+    assert ledger['ready'] is True and type(ledger['pollCount']) is int and type(ledger['pendingCount']) is int
+    rows = ledger['rows']
+    assert type(rows) is list and 0 < len(rows) == ledger['pollCount'] and len(rows)+len(evidence['preflight']) <= MAX_PREFLIGHT_ROWS
+    assert ledger['pendingCount'] == len(rows)-1
+    previous = evidence['startedAt']
+    for index, row in enumerate(rows):
+        assert set(row) == {'startedAt','beforeFrame','hit','afterFrame','cursorReadback','finishedAt','classification'}
+        assert all(type(row[k]) in (int,float) and math.isfinite(row[k]) for k in ('startedAt','finishedAt'))
+        assert previous <= row['startedAt'] <= row['finishedAt'] < evidence['deadline']
+        previous = row['finishedAt']
+        for name in ('beforeFrame','afterFrame'):
+            frame = row[name]
+            assert _frame_identity(frame, hwnd, parent, child, shell_pid, office_pid) == identity
+            assert _frame_metadata(frame) == _frame_metadata(initial), 'Owned editor non-geometry state changed'
+            _point_in_editor(point, frame)
+        assert row['hit'] == hit and _hit_ready(row['hit'], hwnd, child, office_pid, identity[2][2], point), 'Fixed-point editor hit changed'
+        assert row['cursorReadback'] == point and all(type(v) is int for v in row['cursorReadback']), 'Physical editor cursor changed'
+        coherent = row['beforeFrame'] == row['afterFrame']
+        assert coherent == (index == len(rows)-1), 'Unexpected coherent/pending geometry history'
+        assert row['classification'] == ('coherent' if coherent else 'geometry-pending')
+    assert ledger['settledFrame'] == rows[-1]['afterFrame']
+    assert type(ledger['readyAt']) in (int,float) and math.isfinite(ledger['readyAt'])
+    assert previous <= ledger['readyAt'] < evidence['deadline']
+    raw = (json.dumps(evidence, ensure_ascii=False, separators=(',', ':'), allow_nan=False)+'\n').encode()
+    assert len(raw) <= MAX_RECEIPT_BYTES, 'Owned editor click receipt exceeds finite limit'
+    return ledger['settledFrame']
+
+
 def click_editor_once(require_foreground, process, hwnd, parent, child, office_pid, record,
                       *, probe=None, clock=time.monotonic, pause=time.sleep):
     """The single editor setup click; shares prepare_editor_focus's entry budget."""
@@ -76,6 +127,14 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
 
     def budget():
         assert clock() < deadline, 'Owned editor shared entry deadline expired'
+
+    def capture(row, key, value):
+        row[key] = value
+        raw = (json.dumps(evidence, ensure_ascii=False, separators=(',', ':'), allow_nan=False)+'\n').encode()
+        if len(raw) > MAX_RECEIPT_BYTES:
+            del row[key]
+            row['omittedObservation'] = key
+            raise AssertionError('Owned editor click receipt exceeds finite limit')
 
     def retain(phase):
         budget()
@@ -135,10 +194,11 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
         generations[key] = engine_generation; process.opengeul_editor_click_generations = generations
         evidence['originalEngine'] = engine
 
-        def observe():
+        def observe(row=None, key=None):
             budget(); assert probe.process_snapshot(process) == shell, 'Original Suite generation changed'
             budget(); assert probe.engine_snapshot(handle) == engine, 'Owned engine generation changed'
             budget(); frame = probe.editor_snapshot(hwnd, parent, child)
+            if row is not None: capture(row, key, frame)
             assert _frame_identity(frame, hwnd, parent, child, process.pid, office_pid) == identity, 'Owned editor window identity changed'
             budget(); assert probe.foreground() == hwnd, 'Owned editor foreground changed'
             budget(); require_foreground(hwnd)
@@ -167,17 +227,35 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
         evidence['pointerMoveIntent'] = True; retain('pointer-intent')
         budget(); probe.move(point, evidence)
         assert evidence['pointerReadback'] == list(point), 'Physical editor pointer readback differs'
-        actual = observe()
-        if actual != frame:
-            evidence['geometryRejection'] = dict(phase='after-pointer-move', expectedFrame=frame, observedFrame=actual)
-        assert actual == frame, 'Owned editor geometry changed after pointer move'
-        budget(); fresh = probe.editor_hit(child, point); evidence['beforeClickHit'] = fresh
-        assert fresh == hit and _hit_ready(fresh, hwnd, child, office_pid, identity[2][2], point), 'Owned editor hit changed after pointer move'
-        # Recheck both process generations and geometry after the physical hit.
-        actual = observe()
-        if actual != frame:
-            evidence['geometryRejection'] = dict(phase='before-button-input', expectedFrame=frame, observedFrame=actual)
-        assert actual == frame, 'Owned editor geometry changed before button input'
+        ledger = dict(point=list(point), initialFrame=frame, deadline=deadline,
+                      rows=[], pollCount=0, pendingCount=0, ready=False)
+        evidence['geometrySettlement'] = ledger
+        while True:
+            budget()
+            assert len(evidence['preflight'])+len(ledger['rows']) < MAX_PREFLIGHT_ROWS, 'Owned editor shared geometry history exceeded'
+            row = dict(startedAt=clock()); ledger['rows'].append(row); ledger['pollCount'] += 1
+            before = observe(row, 'beforeFrame')
+            assert _frame_metadata(before) == _frame_metadata(frame), 'Owned editor non-geometry state changed'
+            _point_in_editor(point, before)
+            budget(); fresh = probe.editor_hit(child, point); capture(row, 'hit', fresh); budget()
+            assert fresh == hit and _hit_ready(fresh, hwnd, child, office_pid, identity[2][2], point), 'Owned editor hit changed after pointer move'
+            actual = observe(row, 'afterFrame')
+            assert _frame_metadata(actual) == _frame_metadata(frame), 'Owned editor non-geometry state changed'
+            _point_in_editor(point, actual)
+            budget(); cursor = probe.pointer(); capture(row, 'cursorReadback', cursor); budget()
+            assert cursor == list(point) and all(type(v) is int for v in cursor), 'Physical editor cursor changed'
+            row['finishedAt'] = clock(); budget()
+            coherent = before == actual
+            row['classification'] = 'coherent' if coherent else 'geometry-pending'
+            if coherent:
+                ledger.update(ready=True, settledFrame=actual, readyAt=clock())
+                budget()
+                frame = require_geometry_settlement(evidence, hwnd=hwnd, parent=parent, child=child,
+                    shell_pid=process.pid, office_pid=office_pid)
+                budget(); evidence['beforeClickHit'] = fresh
+                break
+            ledger['pendingCount'] += 1
+            budget(); pause(min(.05, max(0, deadline-clock())))
         evidence['clickAttempts'] = 1; evidence['requestedInputs'] = 2; retain('click-intent')
         budget(); probe.click(evidence)
         assert evidence['clickCompleted'] is True and evidence['insertedInputs'] == 2
@@ -235,6 +313,11 @@ class NativeEditorClickProbe(NativeActivationProbe):
 
     def engine_snapshot(self, handle):
         return self.process_snapshot(SimpleNamespace(_handle=handle))
+
+    def pointer(self):
+        position = Point()
+        self._required(self._call(self.user.GetPhysicalCursorPos, C.byref(position)), 'GetPhysicalCursorPos(owned editor)')
+        return [int(position.x), int(position.y)]
 
     def close_engine(self, handle, receipt):
         # HANDLE release remains mandatory after the shared deadline expires.
