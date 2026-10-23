@@ -1,4 +1,4 @@
-name: OpenGeul native ARM64 input witness diagnostic
+name: OpenGeul native ARM64 input and reader diagnostics
 'on':
   push:
     branches:
@@ -19,13 +19,17 @@ env:
 jobs:
   windows-suite:
     if: github.event.repository.private == false && github.ref == 'refs/heads/work/native35-arm64-input-witness'
-    name: windows-suite (${{ matrix.architecture }})
+    name: windows-suite (${{ matrix.architecture }}, ${{ matrix.diagnostic }})
     strategy:
       fail-fast: false
       matrix:
         include:
         - architecture: arm64
           runner: windows-11-arm
+          diagnostic: raw-message
+        - architecture: arm64
+          runner: windows-11-arm
+          diagnostic: calc-close-cost
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -46,20 +50,30 @@ jobs:
       run: |
         $context = '.work/suite-input-witness-context'
         New-Item -ItemType Directory -Force $context | Out-Null
+        $tree = (git rev-parse 'HEAD^{tree}').Trim()
+        if ($LASTEXITCODE -ne 0 -or $tree -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Source tree identity is missing.' }
         [ordered]@{
           schemaVersion = 1
           diagnosticOnly = $true
           mainNativePrivacySetupPerformed = $false
+          mainUnitOrWholeSuiteQualificationPerformed = $false
           diagnosticPreparationSeparatelyRecorded = $true
           diagnosticPreparationEvidence = '.work/suite-input-witness-preparation/'
           privacyPreparationQualified = $false
           hostReadyQualified = $false
           productQualified = $false
+          wholePairQualified = $false
           officeReplacementCertified = $false
           success = $false
           sourceCommit = $env:GITHUB_SHA
+          sourceTree = $tree
+          runId = $env:GITHUB_RUN_ID
+          runAttempt = $env:GITHUB_RUN_ATTEMPT
           ref = $env:GITHUB_REF
           workflowRef = $env:GITHUB_WORKFLOW_REF
+          architecture = 'arm64'
+          diagnosticKind = '${{ matrix.diagnostic }}'
+          scope = 'Separate fresh ARM runners for production IME or CalcClose diagnostic cohorts; no full Suite or release qualification.'
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $context 'workflow-context.json') -Encoding utf8
     - name: 독립 PDF 검증 도구의 고정 해시 확인·설치
       shell: pwsh
@@ -105,8 +119,10 @@ jobs:
       if: '!cancelled() && steps.build.outcome == ''success'''
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-native35-korean-readiness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
-        path: .work/suite-korean-readiness/
+        name: opengeul-native35-korean-readiness-${{ matrix.diagnostic }}-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
         include-hidden-files: true
         retention-days: 7
         if-no-files-found: error
@@ -122,7 +138,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-native35-desktop-preparation-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-native35-desktop-preparation-diagnostic-${{ matrix.diagnostic }}-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: |
           .work/suite-input-witness-preparation/
           ${{ runner.temp }}/suite-input-witness-setup-${{ github.run_id }}-${{ github.run_attempt }}/
@@ -138,27 +154,38 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
       if: "!cancelled() && steps.readiness.outcome == 'success' && steps.diagnostic-preparation.outcome == 'success'"
-    - name: Native ARM64 physical input witness diagnostic
+    - name: Native ARM64 physical raw message witness diagnostic
       id: input-witness
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
-      if: "!cancelled() && github.ref == 'refs/heads/work/native35-arm64-input-witness' && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success' && steps.diagnostic-preparation.outcome == 'success'"
+      if: "!cancelled() && github.ref == 'refs/heads/work/native35-arm64-input-witness' && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success' && steps.diagnostic-preparation.outcome == 'success' && matrix.diagnostic == 'raw-message'"
       shell: pwsh
       run: |
-        python suite/e2e/ime_input_witness.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-input-witness
+        python suite/e2e/ime_raw_message_witness.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-input-witness
         if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 input witness diagnostic failed.' }
+    - name: Original CalcClose cases with existing-call timing
+      id: existing-call-timing
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      if: "!cancelled() && github.ref == 'refs/heads/work/native35-arm64-input-witness' && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success' && steps.diagnostic-preparation.outcome == 'success' && matrix.diagnostic == 'calc-close-cost'"
+      shell: pwsh
+      run: |
+        python suite/e2e/calc_close_existing_call_timing.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close-timing
+        if ($LASTEXITCODE -ne 0) { throw 'Original CalcClose diagnostic cohort failed.' }
     - name: Preserve raw native35 diagnostic evidence on success or failure
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: opengeul-native35-input-witness-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: opengeul-native35-${{ matrix.diagnostic }}-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         include-hidden-files: true
         # Keep generated native .cpp sources and every raw diagnostic output.
         path: |
           .work/suite-input-witness/
+          .work/suite-calc-close-timing/
           .work/suite-input-witness-context/
           .work/suite-input-witness-preparation/
           .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
           .work/suite-engine/
           .work/suite-worker-diagnostics/
           .work/office-suite/msi.msi.log

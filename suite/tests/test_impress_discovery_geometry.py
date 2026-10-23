@@ -19,9 +19,9 @@ class ImpressDiscoveryGeometryTests(unittest.TestCase):
 
     def tree(self):
         frame,paragraph,shape,document,uno=self.fixture.impress()
-        root=frame.getContainerWindow().getProperty('XAccessible')
+        root=frame.getComponentWindow().getProperty('XAccessible')
         patcher=patch.dict(sys.modules,uno=uno);patcher.start();self.addCleanup(patcher.stop)
-        reader=self.api.EditingContextReader('impress',frame,object(),object(),456,
+        reader=self.api.EditingContextReader('impress',frame,frame.getController(),frame.getController().getModel(),456,
             deadline=10.,clock=lambda:self.fixture.now)
         return reader,root,document,shape,paragraph
 

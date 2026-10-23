@@ -221,6 +221,63 @@ def _candidate(manifest_raw, shutdown_raw):
     return m,s,identities[0][:3]
 
 
+def _ownership_header(raw):
+    """Bounded ownership routing; this never qualifies an incomplete archive."""
+    m=_json(raw,MAX_MANIFEST)
+    _need(type(m.get('schemaVersion')) is int and m['schemaVersion']==1
+          and m.get('kind')=='owned-office-native-diagnostics'
+          and type(m.get('archiveComplete')) is bool,'Unknown archive ownership header')
+    _need(_int(m.get('launcherPid'),1,0xffffffff) and _int(m.get('workerPid'),1,0xffffffff),'Invalid archive ownership PID')
+    profile=m.get('ownedProfile')
+    _need(type(profile) is str and '\0' not in profile and len(profile)<=32767
+          and re.fullmatch('[A-Za-z]:',ntpath.splitdrive(profile)[0])
+          and ntpath.isabs(profile) and len(profile)>3 and ntpath.normpath(profile)==profile,
+          'Archive profile must be an unaliased local absolute path')
+    for part in profile[3:].split('\\'):
+        _need(part and part[-1] not in '. ' and not any(c in '<>:"|?*~' or ord(c)<32 for c in part)
+              and not re.fullmatch(r'(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])',
+                                   part.split('.')[0].rstrip(' ').upper()),
+              'Ambiguous Win32 archive profile component')
+    _need(type(m.get('files')) is list and len(m['files'])<=MAX_MEMBERS,'Archive ownership member cap exceeded')
+    return m,_image(profile)
+
+
+def _unrelated_incomplete(manifest_raw, events_raw, admission):
+    m,profile=_ownership_header(manifest_raw)
+    _need(m['archiveComplete'] is False and m['files']==[]
+          and profile!=admission['originalProfile']['canonicalPath'],
+          'Incomplete original or ambiguous archive cannot be excluded')
+    _need(type(events_raw) is bytes and 0<len(events_raw)<=MAX_SHUTDOWN,'Unrelated journal descriptor cap exceeded')
+    lines=events_raw.splitlines();_need(lines,'Missing unrelated native observations')
+    expected=_image(admission['native']['expectedImage']);launcher_image=expected[:-4]+'.exe'
+    target=(admission['native']['officePid'],admission['native']['officeCreationTime'],expected)
+    identity=launcher_identity=None
+    for index,line in enumerate(lines):
+        event=_json(line,MAX_SHUTDOWN)
+        _need(type(event.get('phase')) is str and 1<=len(event['phase'])<=128
+              and (index!=0 or event['phase']=='before-ui-bootstrap')
+              and 'processQueryError' not in event,'Unknown unrelated journal observation')
+        rows=event.get('processes');_need(type(rows) is list and 1<=len(rows)<=128,'Unrelated process observation cap exceeded')
+        seen=set();engines=[];launchers=[]
+        for row in rows:
+            _need(type(row) is dict and not any('error' in key.lower() for key in row),'Unknown unrelated native identity')
+            _need(_int(row.get('pid'),1,0xffffffff) and _int(row.get('creationTime'),1)
+                  and row['pid'] not in seen,'Invalid/duplicate unrelated process identity');seen.add(row['pid'])
+            _need(type(row.get('alive')) is bool and type(row.get('waitResult')) is int
+                  and row['waitResult']==(258 if row['alive'] else 0)
+                  and row.get('getExitCodeProcessResult') is True and _int(row.get('exitCode'),0,0xffffffff),
+                  'Incomplete unrelated native process state')
+            image=_image(row.get('image'));observed=(row['pid'],row['creationTime'],image)
+            if image.endswith('\\program\\soffice.bin'):engines.append(observed)
+            if row['pid']==m['launcherPid']:launchers.append(observed)
+        _need(len(engines)==len(launchers)==1 and engines[0][2]==expected and launchers[0][2]==launcher_image,
+              'Unrelated launcher/engine source join differs')
+        if identity is None:identity,launcher_identity=engines[0],launchers[0]
+        _need(engines[0]==identity and launchers[0]==launcher_identity and identity!=target,
+              'Original or changed engine cannot be excluded by a profile label')
+    return profile,identity
+
+
 class _FileTime(C.Structure):
     _fields_=[('low',C.c_uint32),('high',C.c_uint32)]
 
@@ -382,14 +439,23 @@ class _Lease:
                 _need(match and int(match[1])<=0xffffffff and stat.S_ISREG(info.st_mode) and 1<=info.st_size<=1048576,'Unexpected root sidecar/shape/size')
                 sidecars.append(dict(name=p.name,bytes=info.st_size))
             _need(len(archives)<=MAX_ARCHIVES and len(sidecars)<=MAX_SIDECARS,'Shared root archive/sidecar cap exceeded')
-        rows=[];matches=[];total=0;n=self.frozen['native'];target=(n['officePid'],n['officeCreationTime'],_image(n['expectedImage']))
+        rows=[];unrelated=[];matches=[];total=0;n=self.frozen['native'];target=(n['officePid'],n['officeCreationTime'],_image(n['expectedImage']))
         for folder in archives:
             manifest=_read(folder/'manifest.json',min(MAX_MANIFEST,MAX_DESCRIPTORS-total),self.check);total+=len(manifest)
+            header,profile=_ownership_header(manifest)
+            if header['archiveComplete'] is False and profile!=self.frozen['originalProfile']['canonicalPath']:
+                events=_read(folder/'events.jsonl',min(MAX_SHUTDOWN,MAX_DESCRIPTORS-total),self.check);total+=len(events)
+                profile,identity=_unrelated_incomplete(manifest,events,self.frozen)
+                unrelated.append(dict(uuid=folder.name,manifest=_descriptor(manifest),events=_descriptor(events),
+                    profile=profile,engine=dict(pid=identity[0],creationTime=identity[1],image=identity[2])))
+                continue
             shutdown=_read(folder/'shutdown.json',min(MAX_SHUTDOWN,MAX_DESCRIPTORS-total),self.check);total+=len(shutdown)
             m,s,identity=_candidate(manifest,shutdown)
             row=dict(uuid=folder.name,manifest=_descriptor(manifest),shutdown=_descriptor(shutdown),engine=dict(pid=identity[0],creationTime=identity[1],image=identity[2]))
             rows.append(row)
-            if identity==target:matches.append((folder,m,s,row))
+            if identity==target:
+                _need(profile==self.frozen['originalProfile']['canonicalPath'],'Original archive profile differs')
+                matches.append((folder,m,s,row))
         _need(len(matches)==1,'Exactly one original engine archive is required')
         folder,m,s,row=matches[0];validate_cleanup_receipt(s,expected_engine_image=n['expectedImage'],launcher_pid=m['launcherPid'])
         wanted={r['path']:r for r in m['files']};actual={};pending=[folder];count=0;content=0
@@ -407,7 +473,8 @@ class _Lease:
                 if name in wanted:_need(value==wanted[name],'Selected archive member hash/length differs')
                 if name=='manifest.json':_need(raw==_raw(row['manifest'],MAX_MANIFEST),'Selected manifest changed')
         _need(set(wanted)|{'manifest.json'}<=set(actual)<=set(wanted)|{'manifest.json','events.jsonl'},'Selected archive member missing')
-        self.proof['scan']=dict(rootEntries=sorted(p.name for p in entries),sidecars=sidecars,candidates=rows,descriptorBytes=total)
+        self.proof['scan']=dict(rootEntries=sorted(p.name for p in entries),sidecars=sidecars,candidates=rows,
+            unrelatedIncomplete=unrelated,descriptorBytes=total)
         self.proof['archive']=dict(uuid=folder.name,manifest=row['manifest'],shutdown=row['shutdown'],members=sorted(actual.values(),key=lambda v:v['path']),totalBytes=content)
     def verify_after_close_home(self, *, close_returned_at):
         _need(not self.started and not self.close_attempted,'Retirement proof cannot repeat or reopen');self.started=True
@@ -466,7 +533,9 @@ def require_ime_engine_retirement(proof, *, expected_native, expected_run, expec
     close=proof['close'];_last_error(close);_need(type(close.get('attempts')) is int and close['attempts']==1 and close.get('api')=='CloseHandle' and _int(close.get('handleValue'),1)
         and close['handleValue']==h and close.get('result') is True and start<=_time(close['finishedAt'])<=end,'Retirement handle release is missing or late')
     scan=proof['scan'];names=scan['rootEntries'];_need(type(names) is list and len(names)<=512 and names==sorted(set(names)),'Incomplete/unbounded root enumeration')
-    candidates=scan['candidates'];sidecars=scan['sidecars'];_need(type(candidates) is list and len(candidates)<=256 and type(sidecars) is list and len(sidecars)<=256,'Root descriptor count exceeds cap')
+    candidates=scan['candidates'];sidecars=scan['sidecars'];unrelated=scan.get('unrelatedIncomplete',[])
+    _need(type(candidates) is list and type(unrelated) is list and len(candidates)+len(unrelated)<=MAX_ARCHIVES
+          and type(sidecars) is list and len(sidecars)<=MAX_SIDECARS,'Root descriptor count exceeds cap')
     classified=[]
     for side in sidecars:
         match=re.fullmatch('worker-save-([1-9][0-9]*)-[0-9a-f]{32}\\.jsonl',side['name'])
@@ -475,10 +544,24 @@ def require_ime_engine_retirement(proof, *, expected_native, expected_run, expec
     for row in candidates:
         _need(re.fullmatch('[0-9a-f]{32}',row['uuid'] or ''),'Invalid archive UUID');classified.append(row['uuid'])
         mr,sr=_raw(row['manifest'],MAX_MANIFEST),_raw(row['shutdown'],MAX_SHUTDOWN);total+=len(mr)+len(sr);_need(total<=MAX_DESCRIPTORS,'Descriptor aggregate cap exceeded')
+        _,profile=_ownership_header(mr)
         m,s,identity=_candidate(mr,sr);projection=row['engine']
         _need(type(projection) is dict and set(projection)=={'pid','creationTime','image'} and _int(projection['pid'],1,0xffffffff)
               and _int(projection['creationTime'],1) and projection==dict(pid=identity[0],creationTime=identity[1],image=identity[2]),'Candidate engine projection changed')
-        if identity==target:matches.append((row,m,s))
+        if identity==target:
+            _need(profile==a['originalProfile']['canonicalPath'],'Original archive profile differs')
+            matches.append((row,m,s))
+    for row in unrelated:
+        _need(type(row) is dict and set(row)=={'uuid','manifest','events','profile','engine'}
+              and re.fullmatch('[0-9a-f]{32}',row['uuid'] or ''),'Invalid unrelated incomplete archive row')
+        classified.append(row['uuid'])
+        mr,er=_raw(row['manifest'],MAX_MANIFEST),_raw(row['events'],MAX_SHUTDOWN);total+=len(mr)+len(er)
+        _need(total<=MAX_DESCRIPTORS,'Descriptor aggregate cap exceeded')
+        profile,identity=_unrelated_incomplete(mr,er,a);projection=row['engine']
+        _need(row['profile']==profile and type(projection) is dict and set(projection)=={'pid','creationTime','image'}
+              and _int(projection['pid'],1,0xffffffff) and _int(projection['creationTime'],1)
+              and projection==dict(pid=identity[0],creationTime=identity[1],image=identity[2]),
+              'Unrelated archive ownership projection changed')
     _need(sorted(classified)==names and len(classified)==len(set(classified)) and type(scan['descriptorBytes']) is int and scan['descriptorBytes']==total,'Root scan incomplete or count forged')
     _need(len(matches)==1,'Exactly one original archive required');row,m,s=matches[0];archive=proof['archive']
     _need(archive['uuid']==row['uuid'] and archive['manifest']==row['manifest'] and archive['shutdown']==row['shutdown'],'Selected archive differs from exact candidate')

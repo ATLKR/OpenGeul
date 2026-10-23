@@ -950,6 +950,57 @@ def retained_setup_shell(process, suite, keyboard):
     return evidence
 
 
+def retain_ime_focus_failure_diagnostics(record, process, keyboard):
+    """Append one separate native observation after the primary focus failure."""
+    field = 'imeFocusFailureDiagnostics'
+    if record.get('stage') != 'focus-editor' or record.get('success') is not False or field in record:
+        return
+    receipt = dict(schemaVersion=1, kind='ime-focus-failure-separate-native-observation',
+        status='unavailable', triggerStage='focus-editor', actionOutcomeUnaffected=True,
+        historicalScopeJoined=False,
+        observationScope='failure-time separate observation after primary failure capture; no earlier HWND, process generation or input recipient is identified',
+        bindingSource='original IMEKeyboardSession.binding and matching case record',
+        foreignRootHintSource='unavailable')
+    record[field] = receipt  # Reserve the attempt before any import or native call.
+    try:
+        assert isinstance(record.get('error'), str) and isinstance(record.get('traceback'), str), 'Primary failure was not retained'
+        binding = keyboard.binding
+        keys = ('shellPid', 'officePid', 'suiteHwnd', 'parentHwnd', 'childHwnd', 'rootHwnd',
+                'shellCreationTime', 'officeCreationTime')
+        original = {key: binding[key] for key in keys}
+        for key, value in original.items():
+            assert type(value) is int and 0 < value < 2**(32 if key in ('shellPid', 'officePid') else 64), 'Invalid original native diagnostic binding'
+        assert original['rootHwnd'] == original['suiteHwnd'] and original['shellPid'] != original['officePid']
+        assert original['officeCreationTime'] >= original['shellCreationTime']
+        assert type(process.pid) is int and process.pid == original['shellPid']
+        for key, source in (('shellPid', 'shellPid'), ('officePid', 'officePid'), ('suiteHwnd', 'windowHwnd'),
+                            ('parentHwnd', 'parentHwnd'), ('childHwnd', 'childHwnd')):
+            assert type(record[source]) is int and record[source] == original[key], 'Case native diagnostic binding changed'
+        session = record['imeKeyboardSession']
+        assert all(type(session['expectedNative'][key]) is int and session['expectedNative'][key] == value
+                   for key, value in original.items()), 'Keyboard native diagnostic binding changed'
+        tid = keyboard.tid
+        tid = tid if type(tid) is int and 0 < tid < 2**32 else 0
+        foreign = 0
+        scope = session.get('lastGuardObservation', {}).get('scope', {})
+        for edge in ('after', 'before'):
+            candidate = scope.get(edge, {}).get('foreground', {}).get('rootHwnd')
+            if type(candidate) is int and 0 < candidate < 2**64 and candidate != original['suiteHwnd']:
+                foreign = candidate
+                receipt['foreignRootHintSource'] = 'lastGuardObservation.scope.' + edge + '.foreground.rootHwnd'
+                break
+        receipt.update(originalBinding=original, ownedThreadId=tid, foreignRootHint=foreign)
+        from activation_failure_diagnostics import collect_failure_diagnostics, MAX_BYTES
+        observation = collect_failure_diagnostics(original['suiteHwnd'], original['shellPid'], tid, foreign)
+        receipt.update(status='retained', observation=observation)
+        assert len(json.dumps(receipt, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()) <= MAX_BYTES, 'Separate failure diagnostic receipt exceeds existing byte bound'
+    except BaseException as exc:
+        receipt.pop('observation', None)
+        try: message = str(exc)
+        except BaseException: message = '<unprintable diagnostic exception>'
+        receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
+
+
 def case(suite, fixtures, output, readiness, module, extension, *, prepared_library):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
@@ -1103,6 +1154,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     except Exception as exc:
         primary = exc
         capture_failure(output, name, record, exc)
+        retain_ime_focus_failure_diagnostics(record, process, keyboard)
         raise
     finally:
         if observer is not None:

@@ -6,18 +6,21 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+import traceback
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
 import korean_ime_smoke as ime
 import windows_smoke as native
+import activation_failure_diagnostics as failure_native
 import test_korean_ime_smoke as fixtures
 from ascii_observer_boundary import AsciiObserverBoundary
 
 
 class IMECasePhaseTests(unittest.TestCase):
-    def run_case(self, module, *, fail_context=False, fail_mode=False, fail_semantic=None, empty_retirement_failure=False):
+    def run_case(self, module, *, fail_context=False, fail_mode=False, fail_semantic=None, empty_retirement_failure=False,
+                 focus_failure=None, diagnostic_error=None):
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
         root=Path(directory.name);calls=[];offset=[0.];clock=time.monotonic
         original=root/('OpenGeul-'+module+'.'+dict(ime.INPUT_CASES)[module]);original.write_bytes(b'unchanged fixture')
@@ -43,7 +46,9 @@ class IMECasePhaseTests(unittest.TestCase):
             def start(inner):calls.append('admission')
             def focus_editor(inner,deadline):calls.append('CTRL_F6')
             def editor_ready(inner,receipt):calls.append('ready')
-            def navigate(inner):calls.append(('navigate',module))
+            def navigate(inner):
+                calls.append(('navigate',module))
+                if focus_failure is not None:raise focus_failure
             def require_target(inner):return None
             def require_context_target(inner,key):
                 self.assertIn(key,inner.record);calls.append(('reader-guard',key))
@@ -152,6 +157,18 @@ class IMECasePhaseTests(unittest.TestCase):
             if empty_retirement_failure:
                 records[0]['imeEngineRetirement']={'admission':dict(startedAt=clock()+offset[0],finishedAt=clock()+offset[0],editorTid=41,focusHwnd=51)}
             calls.append('retirement-admitted');return Retirement()
+        def capture_failure(output,name,record,exc):
+            calls.append('capture-failure')
+            record.update(success=False,error=type(exc).__name__+': '+str(exc),
+                traceback=''.join(traceback.format_exception(type(exc),exc,exc.__traceback__)))
+        def collect_failure(*args,**kw):
+            calls.append('failure-observation')
+            self.assertEqual(args,(11,77,41,0));self.assertEqual(kw,{})
+            self.assertEqual(records[0]['stage'],'focus-editor')
+            self.assertIn('error',records[0]);self.assertIn('traceback',records[0])
+            self.assertLess(calls.index('capture-failure'),calls.index('failure-observation'))
+            if diagnostic_error is not None:raise diagnostic_error
+            return dict(kind='activation-failure-native-diagnostics',actionOutcomeUnaffected=True)
         with ExitStack() as stack:
             # This suite checks case orchestration. The separate real-provider
             # fixture tests replay the actual admission/final proof validators.
@@ -171,7 +188,8 @@ class IMECasePhaseTests(unittest.TestCase):
             patch.object(ime,'wait_for',side_effect=wait),patch.object(ime,'package_text',side_effect=package),
             patch.object(ime,'close_document'),patch.object(ime,'close_home',side_effect=lambda *a:calls.append('home-close')),patch.object(native,'_verified_saved_calc_close_proof',return_value={'proof':True}),
             patch('calc_model_barrier.baseline_from_ooxml',return_value={'baseline':True}),
-            patch.object(ime.subprocess,'run',side_effect=reopen),patch.object(ime,'capture_failure'),
+            patch.object(ime.subprocess,'run',side_effect=reopen),patch.object(ime,'capture_failure',side_effect=capture_failure),
+            patch.object(failure_native,'collect_failure_diagnostics',side_effect=collect_failure),
             patch.object(ime,'stop_owned_test_process',side_effect=lambda *a:calls.append('final-stop')),patch.object(ime,'write_result'),
             patch.object(ime.time,'monotonic',side_effect=lambda:clock()+offset[0]),patch.object(ime.ascii_input.time,'sleep')]
             for patcher in patchers:stack.enter_context(patcher)
@@ -239,6 +257,118 @@ class IMECasePhaseTests(unittest.TestCase):
         self.assertLess(calls.index('first-retirement-wait'),calls.index('retirement-close'))
         self.assertLess(calls.index('retirement-close'),calls.index('final-stop'))
         self.assertNotIn('independent-reopen',calls);self.assertIsNone(result)
+    def test_focus_failure_collects_once_after_primary_capture_before_cleanup_in_each_module(self):
+        for module in ('writer','calc','impress'):
+            with self.subTest(module=module):
+                primary=RuntimeError('original focus guard rejected')
+                calls,record,result,error=self.run_case(module,focus_failure=primary)
+                self.assertIs(error,primary);self.assertIsNone(result)
+                self.assertEqual(record['stage'],'focus-editor');self.assertFalse(record['success'])
+                self.assertIn('original focus guard rejected',record['error'])
+                self.assertIn('raise focus_failure',record['traceback'])
+                self.assertEqual(calls.count('failure-observation'),1)
+                self.assertLess(calls.index('failure-observation'),calls.index('keyboard-close'))
+                self.assertLess(calls.index('keyboard-close'),calls.index('final-stop'))
+                self.assertEqual(record['keyTokens'],[]);self.assertNotIn('observer-installed',calls)
+                self.assertNotIn(('command',1),calls);self.assertNotIn('CTRL_S',calls)
+                receipt=record['imeFocusFailureDiagnostics']
+                self.assertTrue(receipt['actionOutcomeUnaffected']);self.assertFalse(receipt['historicalScopeJoined'])
+                self.assertEqual(receipt['status'],'retained')
+    def test_secondary_base_exceptions_cannot_replace_the_actual_focus_failure_or_cleanup(self):
+        class Unprintable(BaseException):
+            def __str__(self):raise SystemExit('formatting must remain secondary')
+        for secondary in (KeyboardInterrupt('observer interrupted'),SystemExit(8),Unprintable()):
+            with self.subTest(secondary=type(secondary).__name__):
+                primary=RuntimeError('original focus guard rejected')
+                calls,record,result,error=self.run_case('writer',focus_failure=primary,diagnostic_error=secondary)
+                self.assertIs(error,primary);self.assertIsNone(result)
+                self.assertEqual(record['error'],'RuntimeError: original focus guard rejected')
+                self.assertIn('raise focus_failure',record['traceback'])
+                self.assertEqual(calls.count('failure-observation'),1)
+                self.assertIn('keyboard-close',calls);self.assertIn('final-stop',calls)
+                self.assertEqual(record['imeFocusFailureDiagnostics']['status'],'unavailable')
+    def test_success_and_later_reader_failure_do_not_collect_focus_diagnostics(self):
+        for options in ({},{'fail_semantic':'pre'},{'fail_semantic':'post'}):
+            with self.subTest(options=options):
+                calls,record,result,error=self.run_case('writer',**options)
+                self.assertEqual(error is None,not options)
+                self.assertNotIn('failure-observation',calls)
+                self.assertNotIn('imeFocusFailureDiagnostics',record)
+
+
+class IMEFocusFailureDiagnosticTests(unittest.TestCase):
+    def context(self):
+        binding=dict(shellPid=77,officePid=31,suiteHwnd=11,parentHwnd=12,childHwnd=22,
+            rootHwnd=11,shellCreationTime=2**55,officeCreationTime=2**55+100)
+        record=dict(stage='focus-editor',success=False,error='original error',traceback='original traceback',
+            shellPid=77,officePid=31,windowHwnd=11,parentHwnd=12,childHwnd=22,
+            imeKeyboardSession={'expectedNative':dict(binding),'lastGuardObservation':{'scope':{
+                'before':{'foreground':{'rootHwnd':28}},'after':{'foreground':{'rootHwnd':29}}}}})
+        return record,NS(pid=77),NS(binding=binding,tid=41)
+    def test_raw_collector_receipt_and_original_failure_are_preserved_with_explicit_provenance(self):
+        record,process,keyboard=self.context();before=copy.deepcopy(record)
+        raw=dict(kind='activation-failure-native-diagnostics',actionOutcomeUnaffected=True,foreignWindows=[{'pid':99}])
+        with patch.object(failure_native,'collect_failure_diagnostics',return_value=raw) as collect:
+            ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+            first=record['imeFocusFailureDiagnostics']
+            ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+            self.assertIs(record['imeFocusFailureDiagnostics'],first)
+        collect.assert_called_once_with(11,77,41,29)
+        receipt=record.pop('imeFocusFailureDiagnostics')
+        self.assertEqual(record,before);self.assertIs(receipt['observation'],raw)
+        self.assertFalse(receipt['historicalScopeJoined']);self.assertTrue(receipt['actionOutcomeUnaffected'])
+        self.assertIn('failure-time separate observation',receipt['observationScope'])
+        self.assertEqual(receipt['foreignRootHintSource'],'lastGuardObservation.scope.after.foreground.rootHwnd')
+        self.assertEqual(receipt['originalBinding'],keyboard.binding)
+    def test_missing_guard_has_no_invented_hint_and_unknown_thread_remains_zero(self):
+        record,process,keyboard=self.context();record['imeKeyboardSession'].pop('lastGuardObservation');keyboard.tid=None
+        with patch.object(failure_native,'collect_failure_diagnostics',return_value={}) as collect:
+            ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+        collect.assert_called_once_with(11,77,0,0)
+        self.assertEqual(record['imeFocusFailureDiagnostics']['foreignRootHintSource'],'unavailable')
+    def test_once_only_includes_unavailable_attempt_and_never_retries_after_context_repair(self):
+        record,process,keyboard=self.context();keyboard.binding['shellPid']=78
+        with patch.object(failure_native,'collect_failure_diagnostics') as collect:
+            ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+            first=copy.deepcopy(record['imeFocusFailureDiagnostics']);keyboard.binding['shellPid']=77
+            ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+        collect.assert_not_called();self.assertEqual(record['imeFocusFailureDiagnostics'],first)
+        self.assertEqual(first['status'],'unavailable')
+    def test_foreign_hint_rejects_boolean_or_owned_root_and_falls_back_without_inventing_identity(self):
+        for candidate in (True,0,-1,2**64,11):
+            with self.subTest(candidate=candidate):
+                record,process,keyboard=self.context()
+                record['imeKeyboardSession']['lastGuardObservation']['scope']['after']['foreground']['rootHwnd']=candidate
+                with patch.object(failure_native,'collect_failure_diagnostics',return_value={}) as collect:
+                    ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+                collect.assert_called_once_with(11,77,41,28)
+                self.assertEqual(record['imeFocusFailureDiagnostics']['foreignRootHintSource'],
+                    'lastGuardObservation.scope.before.foreground.rootHwnd')
+    def test_invalid_original_context_never_issues_a_native_query(self):
+        for field,value in [('suiteHwnd',True),('childHwnd',0),('officePid',2**32),('shellCreationTime',0)]:
+            with self.subTest(field=field):
+                record,process,keyboard=self.context();keyboard.binding[field]=value
+                with patch.object(failure_native,'collect_failure_diagnostics') as collect:
+                    ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+                collect.assert_not_called();self.assertEqual(record['imeFocusFailureDiagnostics']['status'],'unavailable')
+    def test_other_stage_success_or_unretained_primary_never_queries(self):
+        for change in ({'stage':'actual-uno-reopen'},{'success':True},{'traceback':None}):
+            with self.subTest(change=change):
+                record,process,keyboard=self.context();record.update(change)
+                with patch.object(failure_native,'collect_failure_diagnostics') as collect:
+                    ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+                collect.assert_not_called()
+    def test_oversize_or_nonserializable_result_cannot_break_final_failure_retention(self):
+        for raw in ({'large':'x'*failure_native.MAX_BYTES},{'bad':object()}):
+            with self.subTest(rawType=next(iter(raw))):
+                record,process,keyboard=self.context()
+                with patch.object(failure_native,'collect_failure_diagnostics',return_value=raw) as collect:
+                    ime.retain_ime_focus_failure_diagnostics(record,process,keyboard)
+                collect.assert_called_once()
+                receipt=record['imeFocusFailureDiagnostics']
+                self.assertEqual(receipt['status'],'unavailable');self.assertNotIn('observation',receipt)
+                self.assertLessEqual(len(json.dumps(receipt,ensure_ascii=False).encode()),failure_native.MAX_BYTES)
+                self.assertEqual(record['error'],'original error');self.assertEqual(record['traceback'],'original traceback')
 
 
 class IMECohortPreparationTests(unittest.TestCase):
