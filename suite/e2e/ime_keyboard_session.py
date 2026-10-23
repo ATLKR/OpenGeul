@@ -248,6 +248,21 @@ class IMEKeyboardSession:
             for preset in SETUP[self.module]:self._press(preset)
             self.phase='navigated'
         return self._run(navigate)
+    def require_calc_navigation_initial_target(self):
+        """Read-only admission before evaluating navigate_calc's shell argument."""
+        def current():
+            assert self.module=='calc' and self.phase=='focused', 'Calc initial navigation shell phase unavailable'
+            assert self.deadline==self.setup_deadline==self.receipt['setupDeadline'], 'Calc initial navigation shell budget changed'
+            assert self.calc_navigation is self.calc_navigation_times is self.calc_navigation_url is None, 'Calc navigation already admitted'
+            assert 'calcNavigationContext' not in self.record and 'calcNavigationReadiness' not in self.receipt, 'Calc navigation context already exists'
+            assert len(self.receipt['actions'])==1, 'Calc initial shell requires its single original CtrlF6'
+            action=self.receipt['actions'][0]
+            assert action['shortcut']=='CTRL_F6' and all(type(action[key]) is int and action[key]==value
+                for key,value in (('requestedInputs',4),('insertedInputs',4),('inputCallAttempts',1))), 'Calc initial CtrlF6 is incomplete'
+            acknowledged=self.receipt.get('editorReadinessAcknowledgedAt')
+            assert _number(acknowledged) and action['finishedAt']<=acknowledged<self.setup_deadline, 'Calc initial editor readiness is not acknowledged'
+            return self._guard()
+        return self._run(current)
     def require_calc_navigation_target(self):
         def current():
             assert self.module=='calc' and self.phase in ('calc-navigation-initial','calc-navigation-home'), 'Calc navigation reader phase unavailable'
