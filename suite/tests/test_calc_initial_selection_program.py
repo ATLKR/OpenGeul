@@ -250,7 +250,7 @@ class ProgramTransportTests(unittest.TestCase):
         for folder,expected in [('before-close-reader',PROGRAM),('after-cancel-reader',api.CALC_PENDING_GETTER_CONTRACT)]:
             case=object.__new__(close.CalcCloseCase);case.suite=Path('C:/Suite');case.output=Path('C:/out')
             case.process=NS(pid=77);case.creation=111;case.hwnd=11;case.parent=12;case.child=22;case.office_pid=88
-            case.source=Path('/owned.xlsx');case.observer_never_started=True;seen=[]
+            case.source=Path(__file__).resolve().with_name('owned.xlsx');case.observer_never_started=True;seen=[]
             fake=NS(start=lambda deadline:{'start':True},close=lambda deadline:{'closed':True})
             def make(*args,**kwargs):seen.append(('factory',kwargs['getter_contract']));return fake
             def clean(*args,**kwargs):seen.append(('cleanup',kwargs['getter_contract']))
