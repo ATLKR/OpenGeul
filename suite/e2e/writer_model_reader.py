@@ -1811,6 +1811,7 @@ def _helper(directory,*,explicit_model=False):
                     pendingInputDiagnostic=getattr(exc,'pending_input_diagnostic',
                         getattr(getattr(reader,'pending_input',None),'last_diagnostic',None)),
                     impressGeometryDiagnostic=getattr(exc,'impress_geometry_diagnostic',None),
+                    impressDiscoveryDiagnostic=getattr(exc,'impress_discovery_diagnostic',None),
                     observerProxiesReleased=getattr(exc,'observer_proxies_released',None),pythonIdentity=identity,nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None))
                 selection_capture=getattr(reader,'calc_selection_capture',None)
                 if selection_capture:

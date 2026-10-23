@@ -1,0 +1,147 @@
+name: OpenGeul native ARM64 input witness diagnostic
+'on':
+  push:
+    branches:
+    - work/native35-arm64-input-witness
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: suite-native35-input-witness-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+# diagnosticOnly: every receipt and artifact is diagnostic evidence.
+# This workflow does not qualify a package or publish a release.
+jobs:
+  windows-suite:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/work/native35-arm64-input-witness'
+    name: windows-suite (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - architecture: arm64
+          runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+    - name: 정확한 소스 바이트 보존
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: ${{ matrix.architecture }}
+    - name: Record diagnostic workflow scope
+      shell: pwsh
+      run: |
+        $context = '.work/suite-input-witness-context'
+        New-Item -ItemType Directory -Force $context | Out-Null
+        [ordered]@{
+          schemaVersion = 1
+          diagnosticOnly = $true
+          nativePrivacySetupPerformed = $false
+          privacyPreparationQualified = $false
+          hostReadyQualified = $false
+          productQualified = $false
+          officeReplacementCertified = $false
+          success = $false
+          sourceCommit = $env:GITHUB_SHA
+          ref = $env:GITHUB_REF
+          workflowRef = $env:GITHUB_WORKFLOW_REF
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $context 'workflow-context.json') -Encoding utf8
+    - name: 독립 PDF 검증 도구의 고정 해시 확인·설치
+      shell: pwsh
+      run: |
+        python -m pip install --require-hashes --only-binary=:all: -r suite/config/pdf-e2e-requirements.txt
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF verification tooling installation failed.' }
+        python -m pip install Pillow==12.3.0
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned image verification tooling installation failed.' }
+    - name: 고정 버전의 패키지 경로 선택
+      shell: pwsh
+      run: |
+        $architecture = '${{ matrix.architecture }}'
+        $lockPath = if ($architecture -ceq 'arm64') { 'suite/config/runtime.arm64.lock.json' } else { 'suite/config/runtime.lock.json' }
+        $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
+        if ($lock.architecture -cne $architecture -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite lock identity.' }
+        "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
+      if: matrix.architecture == 'arm64'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath suite/config/runtime.arm64.lock.json -Output .work/source-engine-input
+    - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
+      shell: pwsh
+      run: |
+        if ('${{ matrix.architecture }}' -ceq 'arm64') {
+          ./suite/scripts/build-suite.ps1 -Architecture arm64 -EngineArchive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip -EngineReceipt .work/source-engine-input/source-build-receipt.json
+        } else {
+          ./suite/scripts/build-suite.ps1 -Architecture x64
+        }
+      id: build
+    - name: 실제 한국어 IME와 네이티브 UI 검사 준비
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
+        ./suite/scripts/ensure-korean-ime.ps1 -Architecture '${{ matrix.architecture }}' -Output .work/suite-korean-readiness
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
+      id: readiness
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: 한국어 입력 환경의 준비·실패 기록 즉시 보존
+      if: '!cancelled() && steps.build.outcome == ''success'''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-native35-korean-readiness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-korean-readiness/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
+    - name: 실제 Office 엔진의 생성·편집·저장·재열기
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
+      id: fixtures
+      if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Native ARM64 physical input witness diagnostic
+      id: input-witness
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      if: "!cancelled() && github.ref == 'refs/heads/work/native35-arm64-input-witness' && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/e2e/ime_input_witness.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-input-witness
+        if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 input witness diagnostic failed.' }
+    - name: Preserve raw native35 diagnostic evidence on success or failure
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-native35-input-witness-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        # Keep generated native .cpp sources and every raw diagnostic output.
+        path: |
+          .work/suite-input-witness/
+          .work/suite-input-witness-context/
+          .work/suite-korean-readiness/
+          .work/suite-engine/
+          .work/suite-worker-diagnostics/
+          .work/office-suite/msi.msi.log
+          .work/office-suite/**/*.log
+          .work/source-engine-input/*.json
+          .work/source-engine-input/*.log
+        retention-days: 7
+        if-no-files-found: warn
+        compression-level: 6

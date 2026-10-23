@@ -121,7 +121,7 @@ class FocusedControlIdentityTests(unittest.TestCase):
         for runtime in ([], list(range(65)), [True], [2**31], [-2**31-1], ['42']):
             with self.subTest(runtime=runtime):
                 self.focus.runtime = runtime
-                with self.assertRaises(AssertionError) as failure:self.action()
+                with self.assertRaises(AssertionError) as failure:self.action(keyboard=True)
                 self.assertIn('focused identity',str(failure.exception).lower())
                 self.assertIn('runtime',str(failure.exception).lower())
                 self.assertLess(len(str(failure.exception)),256)
@@ -166,14 +166,103 @@ class FocusedControlIdentityTests(unittest.TestCase):
 
     def test_identity_provider_error_remains_fatal_without_metadata_fallback(self):
         self.focus.errors['CurrentProcessId'] = OSError('focused identity provider failure')
-        with self.assertRaisesRegex(OSError,'focused identity provider failure'):self.action()
+        with self.assertRaisesRegex(OSError,'focused identity provider failure'):self.action(keyboard=True)
         self.no_input()
 
     def test_focus_identity_query_cannot_renew_original_action_deadline(self):
         self.focus.on_runtime = lambda:setattr(self.clock,'now',6.)
-        with self.assertRaisesRegex(AssertionError,'deadline'):self.action()
+        with self.assertRaisesRegex(AssertionError,'deadline'):self.action(keyboard=True)
         self.no_input()
         self.assertEqual(self.native.deadline,6.)
+
+    def test_empty_focused_runtime_is_unqueried_for_original_file_pointer(self):
+        self.focus.runtime = ()
+        error = None; value = None
+        try:value = self.action()
+        except BaseException as exc:error = exc
+        self.assertIsNone(error,'An unconsumed focused identity still blocks the measured File pointer')
+        self.assertTrue(value['success'])
+        self.assertEqual((value['clickAttempts'],value['requestedInputs'],value['insertedInputs']),(1,2,2))
+        self.assertEqual(self.focus.reads,[])
+        self.assertEqual(value['before']['focusAncestry'],[])
+        self.assertEqual(value['before']['focusAncestryBasis'],'unqueried-original-file-pointer')
+
+    def test_throwing_focused_provider_is_unqueried_for_original_file_pointer(self):
+        calls = []
+        def focused():
+            calls.append('GetFocusedElement')
+            raise OSError('unconsumed focused provider was queried')
+        self.native.uia.iuia.GetFocusedElement = focused
+        error = None; value = None
+        try:value = self.action()
+        except BaseException as exc:error = exc
+        self.assertIsNone(error,'An unconsumed provider still blocks the measured File pointer')
+        self.assertTrue(value['success'])
+        self.assertEqual(calls,[])
+        self.assertEqual(value['before']['focusAncestry'],[])
+
+    def test_pointer_same_scope_transition_does_not_query_unconsumed_focused_provider(self):
+        self.native.user.IsWindow = lambda hwnd:True
+        def focused():raise OSError('unconsumed transition focused provider was queried')
+        self.native.uia.iuia.GetFocusedElement = focused
+        error = None; value = None
+        try:value = self.native.transition_snapshot(None,self.process,11,0,None,'FILE_MENU',self.control)
+        except BaseException as exc:error = exc
+        self.assertIsNone(error,'The same-scope pointer transition still queries an unused provider')
+        self.assertTrue(value['accepted'])
+        self.assertEqual(value['transition'],'same-original-control-scope')
+        self.assertEqual(value['native']['focusAncestry'],[])
+        self.assertEqual(value['native']['focusAncestryBasis'],'unqueried-original-file-pointer')
+        self.no_input()
+
+    def test_default_and_keyboard_snapshots_keep_strict_focused_identity(self):
+        self.focus.runtime = ()
+        for options in ({},{'operation':'keyboard'}):
+            with self.subTest(options=options):
+                with self.assertRaisesRegex(AssertionError,'focused identity runtimeId'):
+                    self.native.target_snapshot(None,11,self.control,0,'FILE_MENU',**options)
+        self.no_input()
+
+    def test_file_pointer_with_other_foreground_keeps_strict_focused_identity(self):
+        self.focus.runtime = ()
+        self.native.foreground = lambda:99
+        self.native._window = lambda hwnd:dict(copy.deepcopy(self.boundary.value['document']),hwnd=hwnd,rootHwnd=hwnd)
+        with self.assertRaisesRegex(AssertionError,'focused identity runtimeId'):
+            self.native.target_snapshot(None,11,self.control,0,'FILE_MENU',operation='pointer')
+        self.no_input()
+
+    def test_dialog_and_non_file_pointer_snapshots_keep_strict_focused_identity(self):
+        self.focus.runtime = ()
+        for dialog,purpose in ((44,'FILE_MENU'),(44,'OPEN_BUTTON'),(44,'SAVE_BUTTON'),(0,'SAVE_MENU')):
+            with self.subTest(dialog=dialog,purpose=purpose):
+                with self.assertRaisesRegex(AssertionError,'focused identity runtimeId'):
+                    self.native.target_snapshot(None,11,self.control,dialog,purpose,operation='pointer')
+        self.no_input()
+
+    def test_unknown_snapshot_operation_is_rejected_before_focused_query(self):
+        with self.assertRaises(AssertionError):
+            self.native.target_snapshot(None,11,self.control,0,'FILE_MENU',operation='unknown')
+        self.assertEqual(self.focus.reads,[])
+        self.no_input()
+
+    def test_unqueried_focus_preserves_native_capture_and_original_root_guards(self):
+        self.focus.runtime = ()
+        for field in ('captureHwnd','focusRootHwnd'):
+            with self.subTest(field=field):
+                original = self.boundary.value['gui'][field]
+                self.boundary.value['gui'][field] = 999
+                with self.assertRaises(AssertionError):self.action()
+                self.no_input()
+                self.boundary.value['gui'][field] = original
+
+    def test_keyboard_transition_keeps_focused_provider_failure_fatal(self):
+        self.native.user.IsWindow = lambda hwnd:True
+        def focused():raise OSError('strict transition focused provider failed')
+        self.native.uia.iuia.GetFocusedElement = focused
+        with self.assertRaisesRegex(OSError,'strict transition focused provider failed'):
+            self.native.transition_snapshot(None,self.process,11,0,'OpenGeul Writer — 다른 이름으로 저장',
+                                            'FILE_MENU',self.control)
+        self.no_input()
 
 
 if __name__ == '__main__':

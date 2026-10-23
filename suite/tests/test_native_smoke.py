@@ -488,11 +488,12 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
 
             real_wait_for = smoke.wait_for
             def wait_for(check, seconds=10):
-                if failure == 'save' and 20 < seconds <= 30:
+                save_wait = state.get('documentRecord', {}).get('stage') == 'wait-saved-marker'
+                if failure == 'save' and save_wait:
                     self.assertFalse(check(), 'The original save XML gate must really observe a missing marker')
                     events.append('saved-xml-check-failed')
                     raise first_error
-                if late_save and 20 < seconds <= 30:
+                if late_save and save_wait:
                     result=check()
                     self.assertTrue(result,'The late predicate must really observe the saved marker')
                     clock[0]+=31
@@ -500,6 +501,7 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                 return real_wait_for(check, seconds)
 
             def prepare_focus(api, hwnd, child, shell_pid, office_pid, record, click, enter, **options):
+                state['documentRecord'] = record
                 click()
                 enter()
                 events.append('focus-ready')
@@ -658,7 +660,11 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
         self.assertEqual('RuntimeError: physical input failed', run['record']['error'])
 
     def test_original_save_xml_failure_preserves_sealed_model_completion_without_second_cleanup(self):
-        run = self._run_document(failure='save')
+        # (now + 30) - now rounds above 30 at this monotonic reading.
+        now = 63.99999999999999
+        with patch.object(smoke.time, 'monotonic', return_value=now), \
+                patch.object(smoke.time, 'sleep', side_effect=AssertionError('Save XML fixture fell through to real polling')):
+            run = self._run_document(failure='save')
         self.assertIs(run['error'], run['firstError'])
         self.assertIn('reader-cleanup-validated', run['events'])
         self.assertIn('saved-xml-check-failed', run['events'])

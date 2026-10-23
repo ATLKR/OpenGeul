@@ -214,7 +214,11 @@ def _perform(api, process, document, control, record, *, purpose, dialog=0, capt
                 assert value['lastAttachmentObservation']['binding']==attachment and value['lastAttachmentObservation']['valid'] is True, 'Original attachment ancestry changed'
         def observe():
             original_context()
-            budget(); snap=probe.target_snapshot(api,document,control,dialog,purpose)
+            budget()
+            if purpose=='FILE_MENU' and shortcut is None:
+                snap=probe.target_snapshot(api,document,control,dialog,purpose,operation='pointer')
+            else:
+                snap=probe.target_snapshot(api,document,control,dialog,purpose)
             snap['shellCreationTime']=original['creationTime']
             snap['foregroundProcessGeneration']=(original if snap['foreground']['pid']==process.pid else None)
             value['lastObservation']=snap
@@ -452,7 +456,8 @@ class NativeControlProbe(NativeActivationProbe):
             and bool(self._call(self.user.IsChild,doc,parent)) and bool(self._call(self.user.IsChild,parent,child)))
         return dict(binding=dict(binding),windows=rows,exported=exported,valid=bool(valid),
             focusUnderOriginalChild=bool(focus and (focus==child or self._call(self.user.IsChild,child,focus))))
-    def target_snapshot(self,api,document,control,dialog,purpose):
+    def target_snapshot(self,api,document,control,dialog,purpose,*,operation='keyboard'):
+        assert operation in ('pointer','keyboard'), 'Unsupported owned control snapshot operation'
         uia=self.uia;element=self._call(lambda:control.element_info._element)
         scope=dialog or document;root=self._call(lambda:self.desktop.window(handle=scope).wrapper_object().element_info._element)
         props=self._raw(element);ancestry=[];cursor=element
@@ -463,16 +468,22 @@ class NativeControlProbe(NativeActivationProbe):
         else:raise AssertionError('Control UIA ancestry exceeded bound')
         doc=self._window(document);scope_row=self._window(scope);fg=self.foreground();foreground=self._window(fg)
         gui=self.native_focus(scope_row['threadId']);focus=gui['focusHwnd']
-        focused=[];cursor=self._call(uia.iuia.GetFocusedElement)
-        for _ in range(32):
-            if not cursor:break
-            row=self._focused_identity(cursor);focused.append(row)
-            if self._call(uia.iuia.CompareElements,cursor,root):break
-            cursor=self._call(uia.iuia.ControlViewWalker.GetParentElement,cursor)
+        focused=[];focus_basis='unqueried-original-file-pointer'
+        # This exact _target pointer branch uses native focus and the measured
+        # File recipient. It does not consume the currently focused UIA tree.
+        if not (operation=='pointer' and purpose=='FILE_MENU' and not dialog and foreground['hwnd']==document):
+            focus_basis='strict-focused-identity-walk'
+            cursor=self._call(uia.iuia.GetFocusedElement)
+            for _ in range(32):
+                if not cursor:break
+                row=self._focused_identity(cursor);focused.append(row)
+                if self._call(uia.iuia.CompareElements,cursor,root):break
+                cursor=self._call(uia.iuia.ControlViewWalker.GetParentElement,cursor)
         menu_handles=[row['nativeHwnd'] for row in ancestry if row['controlType'] in ('MenuItem','MenuBar') and row['nativeHwnd']]
         under=any(focus==handle or bool(self._call(self.user.IsChild,handle,focus)) for handle in menu_handles) if focus else False
         return dict(document=doc,scope=scope_row,control=props,ancestry=ancestry,gui=gui,foreground=foreground,
-                    foregroundOwnerChain=self._owner_chain(fg,document),focusAncestry=focused,nativeFocusUnderMenu=under)
+                    foregroundOwnerChain=self._owner_chain(fg,document),focusAncestry=focused,
+                    focusAncestryBasis=focus_basis,nativeFocusUnderMenu=under)
     def point_snapshot(self,scope,point,control):
         hit=int(self._call(self.user.WindowFromPhysicalPoint,Point(*point)) or 0);pid=C.c_uint32()
         if hit:self._required(self._call(self.user.GetWindowThreadProcessId,hit,C.byref(pid)),'Physical control hit PID')
@@ -537,7 +548,11 @@ class NativeControlProbe(NativeActivationProbe):
                     assert observed['valid'] is True and observed['binding']==attachment and observed['focusUnderOriginalChild'] is True, 'Save returned to another attachment'
                     assert gui['activeHwnd']==document and gui['focusRootHwnd']==document and not gui['captureHwnd'] and not gui['menuOwnerHwnd'], 'Consumed menu focus escaped original document'
                     result.update(accepted=True,transition='consumed-menu-original-editor-return');return result
-        snap=self.target_snapshot(api,document,control,dialog,purpose);result['native']=snap
+        if purpose=='FILE_MENU' and caption is None:
+            snap=self.target_snapshot(api,document,control,dialog,purpose,operation='pointer')
+        else:
+            snap=self.target_snapshot(api,document,control,dialog,purpose)
+        result['native']=snap
         if purpose=='FILE_MENU' and not dialog and caption in PICKERS[1:]:
             foreground=snap['foreground']
             if foreground['hwnd']!=document and foreground['className']=='#32770' and foreground['title']==caption:
