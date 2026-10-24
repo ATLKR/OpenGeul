@@ -29,6 +29,8 @@ if SOURCE.is_file():
 
 
 def navigation_fixture(directory, binding=None):
+    # Match the retained process fixture, including Windows short temp paths.
+    directory = Path(directory).resolve()
     frame = synthetic_frame(Path(directory) / 'Suite', 'unused')
     if binding is not None:
         frame.binding.update(binding)
@@ -284,6 +286,17 @@ class CalcNavigationTests(unittest.TestCase):
 
 
 class KeyboardNavigationTests(unittest.TestCase):
+    def test_navigation_fixture_uses_the_retained_process_resolved_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spelling = Path(directory) / 'spelling'
+            spelling.mkdir()
+            session, data, probe, record, factory, order = self.session(spelling / '..')
+            self.assertEqual(data.frame.suite, session.process.opengeul_suite_root)
+            self.assertEqual(data.source.parent, session.process.opengeul_evidence_output)
+            self.navigate(session, data, factory)
+            self.assertTrue(record['calcNavigationContext']['success'])
+            session.close(RuntimeError('bounded navigation regression ends here'))
+
     def session(self, directory):
         from test_ime_keyboard_session import IMEKeyboardSessionTests
         fixture = IMEKeyboardSessionTests()
