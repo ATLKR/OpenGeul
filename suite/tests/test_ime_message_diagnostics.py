@@ -5,11 +5,13 @@ import sys
 import shutil
 import subprocess
 import tempfile
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from suite.tests import test_korean_ime_smoke as fixtures
+from native_executable_cleanup import remove_completed_image
 ime = fixtures.ime
 
 
@@ -107,12 +109,15 @@ int main(){
 }
 '''
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); cpp = root/'diagnostics.cpp'; exe = root/'diagnostics'
+            root = Path(temp); cpp = root/'diagnostics.cpp'; exe = root/('diagnostics.exe' if os.name == 'nt' else 'diagnostics')
             cpp.write_text(prefix + declaration + assertions + state + producer + main)
             build = subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', str(cpp), '-o', str(exe)], capture_output=True, text=True, timeout=30)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=5)
-            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            try:
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            finally:
+                remove_completed_image(root, exe, run)
 
     def observer(self):
         state = ime.NativeState()

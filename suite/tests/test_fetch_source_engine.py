@@ -34,10 +34,17 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json;
 using System.Collections.Generic;
+public sealed class EngineProxySpy : IWebProxy {
+ public static int Calls;
+ public ICredentials Credentials { get; set; }
+ public bool IsBypassed(Uri destination) { Interlocked.Increment(ref Calls);return true; }
+ public Uri GetProxy(Uri destination) { Interlocked.Increment(ref Calls);return destination; }
+}
 public sealed class EngineFakeHttp : HttpMessageHandler {
  public static List<object> Events = new List<object>();
  string root; bool api;
- HttpClient local = new HttpClient(new HttpClientHandler { AllowAutoRedirect=false });
+ // Real transport is exclusively to the owned 127.0.0.1 fixture, never a system proxy.
+ HttpClient local = new HttpClient(new HttpClientHandler { AllowAutoRedirect=false, UseProxy=false });
  public EngineFakeHttp(string root, bool api) { this.root=root;this.api=api; }
  protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) {
   string path=request.RequestUri.AbsolutePath;
@@ -75,6 +82,9 @@ public sealed class EngineUnknownLength : HttpContent {
 '@
 [IO.File]::WriteAllText((Join-Path $Root 'harness-ready'), 'compiled')
 . $Script
+$scenario=Get-Content (Join-Path $Root 'scenario.json') -Raw|ConvertFrom-Json
+# This process belongs only to the fixture; never inspect or change host proxy settings.
+if($scenario.proxySpy) { [Net.Http.HttpClient]::DefaultProxy=[EngineProxySpy]::new() }
 $api=[Net.Http.HttpClient]::new([EngineFakeHttp]::new($Root,$true))
 $download=[Net.Http.HttpClient]::new([EngineFakeHttp]::new($Root,$false))
 try {
@@ -83,6 +93,7 @@ try {
  Invoke-SourceEngineFetch @parameters
 } finally {
  ConvertTo-Json -InputObject @([EngineFakeHttp]::Events) -Depth 5|Set-Content (Join-Path $Root 'events.json')
+ @{calls=[EngineProxySpy]::Calls}|ConvertTo-Json|Set-Content (Join-Path $Root 'proxy-calls.json')
  $api.Dispose();$download.Dispose()
 }
 '''
@@ -197,18 +208,32 @@ class FetchSourceEngineTests(unittest.TestCase):
             self.assertEqual(metadata['artifact']['id'], 456)
             self.assertEqual(metadata['run']['head_sha'], 'a'*40)
 
+    def test_loopback_fixture_never_consults_process_default_proxy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);_,_,_,scenario,engine,receipt=self.fixture(root)
+            with loopback_responses(root) as origin:
+                scenario.update(loopbackOrigin=origin,proxySpy=True);self.save(root,'scenario',scenario)
+                result,events=self.run_fetch(root)
+            self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+            self.assertEqual(['artifact','run','redirect','blob'],[event['endpoint'] for event in events])
+            self.assertEqual(0,json.loads((root/'proxy-calls.json').read_text())['calls'],
+                             'Owned loopback requests must not perform ambient proxy discovery')
+            self.assertEqual(engine,(root/'output'/ENGINE).read_bytes())
+            self.assertEqual(receipt,(root/'output'/RECEIPT).read_bytes())
+
     def test_actual_stalled_metadata_and_artifact_bodies_cancel_with_sanitized_audit(self):
         for endpoint in ('artifact','blob'):
             with self.subTest(endpoint=endpoint),tempfile.TemporaryDirectory() as folder:
                 root=Path(folder);_,_,_,scenario,_,_=self.fixture(root)
                 with loopback_responses(root,stalled=endpoint) as origin:
                     scenario['loopbackOrigin']=origin;self.save(root,'scenario',scenario)
-                    result,_=self.run_fetch(root,timeout_seconds=1)
+                    result,events=self.run_fetch(root,timeout_seconds=1)
                 self.assertNotEqual(0,result.returncode,'A body stall must not outlive the original fetch budget')
                 audit=json.loads((root/'output/source-engine-download.json').read_text())
-                self.assertFalse(audit['passed']);self.assertTrue(audit['deadlineExceeded'])
-                self.assertEqual(1,audit['timeoutSeconds']);self.assertLess(audit['elapsedSeconds'],3)
-                self.assertEqual('github-metadata' if endpoint=='artifact' else 'authenticated-outer-zip',audit['stage'])
+                detail=json.dumps(dict(audit=audit,events=events))
+                self.assertFalse(audit['passed'],detail);self.assertTrue(audit['deadlineExceeded'],detail)
+                self.assertEqual(1,audit['timeoutSeconds'],detail);self.assertLess(audit['elapsedSeconds'],3,detail)
+                self.assertEqual('github-metadata' if endpoint=='artifact' else 'authenticated-outer-zip',audit['stage'],detail)
                 self.assertFalse((root/'output'/ENGINE).exists())
                 partial=root/'output/github-artifact.zip'
                 if endpoint=='blob':
@@ -225,9 +250,10 @@ class FetchSourceEngineTests(unittest.TestCase):
             self.assertNotEqual(0,result.returncode,'Four fresh per-request budgets must not replace the original total deadline')
             self.assertGreaterEqual(len(events),3)
             audit=json.loads((root/'output/source-engine-download.json').read_text())
-            self.assertFalse(audit['passed']);self.assertTrue(audit['deadlineExceeded'])
-            self.assertEqual(2,audit['timeoutSeconds']);self.assertLess(audit['elapsedSeconds'],4)
-            self.assertEqual('authenticated-outer-zip',audit['stage'])
+            detail=json.dumps(dict(audit=audit,events=events))
+            self.assertFalse(audit['passed'],detail);self.assertTrue(audit['deadlineExceeded'],detail)
+            self.assertEqual(2,audit['timeoutSeconds'],detail);self.assertLess(audit['elapsedSeconds'],4,detail)
+            self.assertEqual('authenticated-outer-zip',audit['stage'],detail)
             self.assertFalse((root/'output'/ENGINE).exists())
 
     def test_timeout_override_is_positive_and_never_exceeds_production_cap(self):
