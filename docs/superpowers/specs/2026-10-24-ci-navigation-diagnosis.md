@@ -36,3 +36,20 @@ Implementation: test the bounded native producer/ABI and controller cleanup;
 integrate an opt-in navigation-only case using the original input and semantic
 path; test workflow separation and non-delivery; obtain independent review;
 run one targeted experiment and interpret its evidence before behavior changes.
+
+## Experiment 40140460250, source 97b4eb2
+
+Both native architectures produced complete eight-event queue traces for the
+original TAB/F2/Ctrl+End sequence and reached caret 26 in the expected paragraph
+under the unchanged PRE deadline. No window-procedure entry/return rows were
+observed. Thus absence of those rows is compatible with successful editing
+readiness and does not establish failure or a blocked queue. The earlier caret
+failure was not reproduced; instrumentation can affect timing. No editor
+behavior correction is claimed from this experiment.
+
+The navigation-only case then incorrectly invoked normal saved-only keyboard
+completion. Repair only that diagnostic disposal: retain the intentionally
+incomplete keyboard receipt, verify handle release/retention/deadline, and keep
+normal saved-only completion unchanged. Restore acceptance mode to validate the
+independently supported shared saved-read repair on both native architectures.
+The diagnostic evidence cannot replace any required acceptance gate.

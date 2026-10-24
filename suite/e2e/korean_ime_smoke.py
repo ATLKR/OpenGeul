@@ -1147,8 +1147,10 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             require_current=lambda: keyboard.require_context_target('imeSemanticContext'), phase='pre')
         keyboard.semantic_ready(pre, phase='pre')
         if diagnose_navigation:
+            from navigation_diagnostic import stop_navigation_keyboard
             navigation_trace.close()
-            keyboard.close()
+            record['stage'] = 'navigation-diagnostic-cleanup'
+            stop_navigation_keyboard(keyboard)
             close_document(api, process, hwnd, child, record)
             close_home(api, process, record)
             record.update(success=True, stage='navigation-diagnostic-complete', imeVerified=False,

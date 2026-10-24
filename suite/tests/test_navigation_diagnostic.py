@@ -65,4 +65,71 @@ class NavigationAdmissionTests(unittest.TestCase):
                         '--output',str(output),'--diagnose-navigation','impress'])
                 prepare.assert_not_called();self.assertFalse(output.exists())
 
+
+class NavigationKeyboardDisposalTests(unittest.TestCase):
+    def session(self):
+        import tempfile
+        import test_ime_keyboard_session as keyboard_tests
+        owner=keyboard_tests.IMEKeyboardSessionTests();owner.setUp();self.addCleanup(owner.doCleanups)
+        directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
+        session,*rest=owner.fixture(directory.name,module='impress')
+        session.start();session.focus_editor(6.);owner.ready(session);session.navigate();owner.semantic(session,'pre')
+        record=session.record
+        record.update(kind='native-navigation-diagnostic',acceptanceEligible=False,imeVerified=False,
+            imeSetupBudget={'deadline':session.setup_deadline},navigationDiagnostic={
+                'kind':'owned-navigation-diagnostic','acceptanceEligible':False,
+                'deadline':session.setup_deadline,'cleanupErrors':[],
+                'cleanup':{'controllerResourcesReleased':True,'engineHandleReleased':True}})
+        return session
+    def test_real_close_releases_handle_but_remains_incomplete_nonacceptance(self):
+        import navigation_diagnostic as diagnostic
+        session=self.session();result=diagnostic.stop_navigation_keyboard(session)
+        self.assertTrue(session.finished);self.assertTrue(session.receipt['engineHandleReleased'])
+        self.assertFalse(session.receipt['success']);self.assertEqual(session.phase,'semantic-pre-ready')
+        self.assertIn('NavigationDiagnosticStop',session.receipt['error'])
+        self.assertTrue(result['engineHandleReleased']);self.assertFalse(result['acceptanceEligible'])
+        import json
+        persisted=json.loads((session.output/(session.stem+'-session-result.json')).read_text())
+        self.assertFalse(persisted['success']);self.assertTrue(persisted['engineHandleReleased'])
+        self.assertIn('NavigationDiagnosticStop',persisted['error'])
+    def test_normal_close_still_rejects_same_unsaved_session(self):
+        session=self.session()
+        with self.assertRaisesRegex(AssertionError,'incomplete'):session.close()
+        self.assertFalse(session.receipt['success']);self.assertTrue(session.receipt['engineHandleReleased'])
+    def test_wrong_mode_phase_or_deadline_cannot_use_diagnostic_disposal(self):
+        import navigation_diagnostic as diagnostic
+        for mutation in (lambda s:s.record.update(acceptanceEligible=True),
+                         lambda s:setattr(s,'phase','navigated'),
+                         lambda s:setattr(s,'deadline',11.),
+                         lambda s:setattr(s.clock,'now',10.)):
+            with self.subTest(mutation=mutation):
+                session=self.session();mutation(session)
+                with self.assertRaises(AssertionError):diagnostic.stop_navigation_keyboard(session)
+                self.assertFalse(session.finished)
+                session.close(RuntimeError('test cleanup'))
+    def test_cleanup_and_retention_failures_are_not_hidden_by_intentional_stop(self):
+        import navigation_diagnostic as diagnostic
+        from unittest.mock import patch
+        for kind in ('close','retain'):
+            with self.subTest(kind=kind):
+                session=self.session()
+                target=session.probe if kind=='close' else session
+                method='close_engine' if kind=='close' else '_retain'
+                with patch.object(target,method,side_effect=OSError('synthetic '+kind+' failure')):
+                    with self.assertRaises(AssertionError):diagnostic.stop_navigation_keyboard(session)
+                self.assertFalse(session.receipt['success'])
+                self.assertTrue(session.receipt['cleanupErrors'] if kind=='close' else session.receipt['retentionError'])
+
+    def test_cleanup_overrun_fails_without_budget_renewal(self):
+        import navigation_diagnostic as diagnostic
+        from unittest.mock import patch
+        session=self.session();original=session.probe.close_engine
+        def release(handle):
+            result=original(handle);session.clock.now=10.;return result
+        with patch.object(session.probe,'close_engine',side_effect=release):
+            with self.assertRaisesRegex(AssertionError,'deadline expired during'):
+                diagnostic.stop_navigation_keyboard(session)
+        self.assertTrue(session.receipt['engineHandleReleased'])
+        self.assertFalse(session.receipt['success']);self.assertEqual(session.deadline,10.)
+
 if __name__=='__main__':unittest.main()

@@ -197,7 +197,7 @@ class IMECasePhaseTests(unittest.TestCase):
             # The semantic observer/qualifier is a boundary double here; public
             # typed tests independently run the complete real PRE/POST replay.
             patchers = [patch.dict('sys.modules',{'pywinauto':NS(Desktop=lambda **kw:desktop),'ime_engine_retirement':NS(admit_ime_retirement=admit_retirement,require_ime_retirement_admission=lambda proof,**kw:proof)}),
-            patch.dict('sys.modules',{'navigation_diagnostic':NS(NavigationTrace=NavigationTrace)}),
+            patch.dict('sys.modules',{'navigation_diagnostic':NS(NavigationTrace=NavigationTrace,stop_navigation_keyboard=lambda keyboard: keyboard.close(RuntimeError('intentional diagnostic stop')))}),
             patch.object(ime,'original_ime_profile',return_value={'testOnlySemanticBoundary':True}),
             patch.dict(ime.os.environ,{'OPENGEUL_SUITE_DIAGNOSTICS':str(root/'diagnostics')}),
             patch.object(ime,'require_engine_fixture',return_value=original),patch.object(ime,'launch_suite',return_value=process),
