@@ -20,7 +20,7 @@ from ascii_observer_boundary import AsciiObserverBoundary
 
 class IMECasePhaseTests(unittest.TestCase):
     def run_case(self, module, *, fail_context=False, fail_mode=False, fail_semantic=None, empty_retirement_failure=False,
-                 focus_failure=None, diagnostic_error=None, fail_navigation=False):
+                 focus_failure=None, diagnostic_error=None, fail_navigation=False, diagnose_navigation=False):
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
         root=Path(directory.name);calls=[];offset=[0.];clock=time.monotonic
         original=root/('OpenGeul-'+module+'.'+dict(ime.INPUT_CASES)[module]);original.write_bytes(b'unchanged fixture')
@@ -79,6 +79,20 @@ class IMECasePhaseTests(unittest.TestCase):
                 calls.append('CTRL_S');offset[0]+=3.
             def close(inner,primary=None):
                 if not getattr(inner,'closed',False):calls.append('keyboard-close');inner.closed=True
+        class NavigationTrace:
+            def __init__(inner,api_arg,process_arg,binding_arg,prepared_arg,record,deadline):
+                self.assertIs(process_arg,process);self.assertEqual(binding_arg,binding)
+                self.assertIs(prepared_arg,prepared)
+                self.assertEqual(deadline,record['imeSetupBudget']['deadline'])
+                inner.record=record;inner.closed=False
+                record['navigationDiagnostic']={'acceptanceEligible':False}
+            def start(inner):calls.append('navigation-trace-start')
+            def close(inner,primary=None):
+                if inner.closed:return
+                inner.closed=True
+                calls.append('navigation-trace-snapshot')
+                inner.record['navigationDiagnostic']['snapshot']={'status':'complete','events':[]}
+                calls.append('navigation-trace-close')
         class Observer:
             def __init__(inner,*args,**kw):
                 self.assertFalse(observer_installed[0]);observer_installed[0]=True
@@ -183,6 +197,7 @@ class IMECasePhaseTests(unittest.TestCase):
             # The semantic observer/qualifier is a boundary double here; public
             # typed tests independently run the complete real PRE/POST replay.
             patchers = [patch.dict('sys.modules',{'pywinauto':NS(Desktop=lambda **kw:desktop),'ime_engine_retirement':NS(admit_ime_retirement=admit_retirement,require_ime_retirement_admission=lambda proof,**kw:proof)}),
+            patch.dict('sys.modules',{'navigation_diagnostic':NS(NavigationTrace=NavigationTrace)}),
             patch.object(ime,'original_ime_profile',return_value={'testOnlySemanticBoundary':True}),
             patch.dict(ime.os.environ,{'OPENGEUL_SUITE_DIAGNOSTICS':str(root/'diagnostics')}),
             patch.object(ime,'require_engine_fixture',return_value=original),patch.object(ime,'launch_suite',return_value=process),
@@ -202,7 +217,7 @@ class IMECasePhaseTests(unittest.TestCase):
             patch.object(ime.time,'monotonic',side_effect=lambda:clock()+offset[0]),patch.object(ime.ascii_input.time,'sleep')]
             for patcher in patchers:stack.enter_context(patcher)
             error=None;result=None
-            try:result=ime.case(root,root,root,policy.readiness(),module,dict(ime.INPUT_CASES)[module],prepared_library=prepared)
+            try:result=ime.case(root,root,root,policy.readiness(),module,dict(ime.INPUT_CASES)[module],prepared_library=prepared,diagnose_navigation=diagnose_navigation)
             except Exception as exc:error=exc
         return calls,records[0],result,error
     def test_pre_and_post_semantic_cleanup_bracket_one_prefix_before_observer(self):
@@ -318,6 +333,33 @@ class IMECasePhaseTests(unittest.TestCase):
                 self.assertEqual(error is None,not options)
                 self.assertNotIn('failure-observation',calls)
                 self.assertNotIn('imeFocusFailureDiagnostics',record)
+
+
+    def test_navigation_diagnostic_brackets_original_navigation_pre_only(self):
+        calls,record,result,error=self.run_case('impress',diagnose_navigation=True)
+        self.assertIsNone(error,repr(error));self.assertTrue(result['success'])
+        self.assertFalse(result['acceptanceEligible']);self.assertFalse(result['imeVerified'])
+        self.assertLess(calls.index('ready'),calls.index('navigation-trace-start'))
+        self.assertLess(calls.index('navigation-trace-start'),calls.index(('navigate','impress')))
+        self.assertLess(calls.index(('semantic-natural-cleanup','pre')),calls.index('navigation-trace-snapshot'))
+        self.assertLess(calls.index('navigation-trace-close'),calls.index('home-close'))
+        self.assertEqual(calls.count('navigation-trace-snapshot'),1)
+        for value in ('ascii-forward','observer-installed','CTRL_S',('semantic-read','post')):self.assertNotIn(value,calls)
+
+    def test_navigation_diagnostic_failure_snapshots_before_capture_and_no_retry(self):
+        calls,record,result,error=self.run_case('impress',diagnose_navigation=True,fail_semantic='pre')
+        self.assertIsInstance(error,RuntimeError);self.assertIn('semantic pre rejected',str(error))
+        self.assertLess(calls.index('navigation-trace-snapshot'),calls.index('capture-failure'))
+        self.assertEqual(calls.count(('navigate','impress')),1)
+        self.assertEqual(calls.count('navigation-trace-snapshot'),1)
+        self.assertFalse(record['acceptanceEligible']);self.assertFalse(record['success'])
+        self.assertNotIn('ascii-forward',calls);self.assertNotIn('observer-installed',calls)
+
+    def test_default_case_never_installs_navigation_trace(self):
+        calls,record,result,error=self.run_case('impress')
+        self.assertIsNone(error,repr(error));self.assertTrue(result['imeVerified'])
+        self.assertNotIn('navigation-trace-start',calls);self.assertNotIn('navigationDiagnostic',record)
+
 
 
 class IMEFocusFailureDiagnosticTests(unittest.TestCase):

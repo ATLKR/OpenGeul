@@ -1087,10 +1087,11 @@ def retain_ime_focus_failure_diagnostics(record, process, keyboard):
         receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
+    assert not diagnose_navigation or module == 'impress', 'Navigation experiment is scoped to Impress'
     name = 'ime-' + module
     folder = output / name
     folder.mkdir()
@@ -1104,7 +1105,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
               'file': str(source), 'success': False, 'imeVerified': False, 'stage': 'attach',
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
               'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}
-    observer = keyboard = retirement = primary = None
+    observer = keyboard = retirement = primary = navigation_trace = None
     api = Windows()
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
@@ -1127,6 +1128,11 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             lambda: keyboard.focus_editor(record['editorFocusReadiness']['deadline']),
             seconds=remaining_setup(setup_deadline, 5))
         keyboard.editor_ready(record['editorFocusReadiness'])
+        if diagnose_navigation:
+            from navigation_diagnostic import NavigationTrace
+            record.update(kind='native-navigation-diagnostic', acceptanceEligible=False)
+            navigation_trace = NavigationTrace(api, process, keyboard.binding, prepared_library, record, setup_deadline)
+            navigation_trace.start()
         if module == 'calc':
             keyboard.navigate_calc(suite, source, original_bytes,
                 original_shell=retained_setup_shell(process, suite, keyboard, calc_navigation_initial=True))
@@ -1140,6 +1146,15 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             expected_native=dict(keyboard.binding),
             require_current=lambda: keyboard.require_context_target('imeSemanticContext'), phase='pre')
         keyboard.semantic_ready(pre, phase='pre')
+        if diagnose_navigation:
+            navigation_trace.close()
+            keyboard.close()
+            close_document(api, process, hwnd, child, record)
+            close_home(api, process, record)
+            record.update(success=True, stage='navigation-diagnostic-complete', imeVerified=False,
+                acceptanceEligible=False, originalFixtureUnchanged=original.read_bytes() == original_bytes)
+            assert record['originalFixtureUnchanged'], 'Navigation experiment altered baseline fixture'
+            return record
         def send_prefix(prefix):
             keyboard.require_prefix_ready()
             return ascii_input.type_ascii(api, hwnd, child, prefix, record,
@@ -1244,11 +1259,13 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         return record
     except Exception as exc:
         primary = exc
+        if navigation_trace is not None: navigation_trace.close(primary)
         if observer is not None: retain_ime_message_diagnostics(record, observer)
         capture_failure(output, name, record, exc)
         retain_ime_focus_failure_diagnostics(record, process, keyboard)
         raise
     finally:
+        if navigation_trace is not None: navigation_trace.close(primary)
         if observer is not None:
             retain_ime_message_diagnostics(record, observer)
             try:
@@ -1283,6 +1300,7 @@ def main(argv=None):
     parser.add_argument('--fixtures', type=Path)
     parser.add_argument('--readiness', type=Path)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--diagnose-navigation', choices=('impress',))
     parser.add_argument('--verify-one', choices=dict(INPUT_CASES))
     parser.add_argument('--file', type=Path)
     parser.add_argument('--reopen-output', type=Path)
@@ -1293,6 +1311,7 @@ def main(argv=None):
     assert isinstance(inventory, dict) and inventory.get('schemaVersion') == 1, 'Suite inventory identity is missing'
     architecture = native_arch.require_architecture(inventory.get('architecture'))
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
+    assert not (args.verify_one and args.diagnose_navigation), 'Reopen and navigation modes are mutually exclusive'
     if args.verify_one:
         assert args.file and args.reopen_output, 'The owned reopen fixture and receipt are required'
         observed = reopen_one(suite, args.file.resolve(), args.verify_one)
@@ -1304,9 +1323,27 @@ def main(argv=None):
     fixtures, output = args.fixtures.resolve(), args.output.resolve()
     assert suite != output and suite not in output.parents and fixtures != output and fixtures not in output.parents, 'Evidence must be outside the payload and baseline fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
+    if args.diagnose_navigation:
+        # Same source-bound owner-push/first-attempt admission as the native suite.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('navigation_ci_admission', Path(__file__).resolve().parents[2] / 'e2e/native31_suite_prepare.py')
+        admission = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(admission)
+        validate_context, read_event = admission.validate_context, admission.read_event
+        binding = validate_context(os.environ, read_event(), architecture, os.name)
     output.mkdir(parents=True, exist_ok=False)
     readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
     prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
+    if args.diagnose_navigation:
+        module = args.diagnose_navigation
+        results = collect_cases([('ime-' + module, lambda: case(suite, fixtures, output, readiness,
+            module, dict(INPUT_CASES)[module], prepared_library=prepared_library, diagnose_navigation=True))], output)
+        success = len(results) == 1 and results[0].get('success') is True
+        report = dict(schemaVersion=1, kind='native-navigation-diagnostic', success=success,
+            acceptanceEligible=False, imeVerified=False, tests=results, runBinding=binding,
+            architecture=architecture, expectedCaseCount=1)
+        (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        return 0 if success else 1
     results = collect_cases([('ime-' + module, lambda module=module, extension=extension:
         case(suite, fixtures, output, readiness, module, extension, prepared_library=prepared_library)) for module, extension in INPUT_CASES], output)
     success = len(results) == 3 and all(row.get('success') is True and row.get('imeVerified') is True for row in results)

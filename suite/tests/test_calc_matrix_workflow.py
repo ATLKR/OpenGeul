@@ -24,7 +24,7 @@ def expected_engine(folder):
 ROOTS = ('.work/suite-worker-diagnostics', '.work/suite-calc-save/diagnostics',
          *('.work/suite-calc-close/calc-close-' + choice + '/diagnostics'
            for choice in ('save', 'discard', 'cancel')))
-READY = "'!cancelled() && steps.fixtures.outcome == ''success'''"
+READY = '"env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' && (!cancelled() && steps.fixtures.outcome == \'success\')"'
 
 
 def workflow_steps():
@@ -60,7 +60,8 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
     def test_independent_probes_precede_existing_fixture_mutations(self):
         steps = workflow_steps()
         fixture = next(i for i, step in enumerate(steps) if field(step, 'id') == 'fixtures')
-        old_gui = next(i for i, step in enumerate(steps) if 'korean_ime_smoke.py --suite' in step)
+        old_gui = next(i for i, step in enumerate(steps) if 'korean_ime_smoke.py --suite' in step
+                       and '--output .work/suite-korean-ime' in step)
         for name, script in [('calc-save', 'calc_save_smoke.py'), ('calc-close', 'calc_close_probe.py')]:
             with self.subTest(name=name):
                 probe_index = next((i for i, step in enumerate(steps) if field(step, 'id') == name), None)
@@ -87,7 +88,7 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
                 self.assertIn('retention-days: 7', evidence)
                 self.assertIn('if-no-files-found: error', evidence)
                 self.assertIn('${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}', evidence)
-        final = next(step for step in steps if field(step, 'if') == 'always()')
+        final = next(step for step in steps if field(step, 'if') == '"env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' && (always())"')
         for name in ('calc-save', 'calc-close'):
             self.assertIn('.work/suite-' + name + '/', final)
 

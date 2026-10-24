@@ -11,7 +11,7 @@ from pathlib import Path
 import time
 import uuid
 
-from ascii_message_protocol import State, Event, QueueSample, Readiness, MAGIC, VERSION, CAPACITY
+from ascii_message_protocol import State, Event, QueueSample, Readiness, MAGIC, VERSION, CAPACITY, TraceEvent, TRACE_VERSION, TRACE_CAPACITY
 from ascii_queue_readiness import MAX_QUERIES, retain_sample, require_initial_queue_sample
 from counted_editor_shortcuts import (CountedEditorShortcuts, NativeShortcutProbe,
     join_shortcut_generation, _same_image)
@@ -89,9 +89,11 @@ def _clear_error():
 
 
 class MessageTransport:
-    """One private mapping and exactly two thread-specific hook installations."""
+    """One private mapping; optional diagnostic return hook stays on the owned thread."""
     def __init__(self, user, kernel, library, target, creation_time, receipt,
-                 deadline, clock, identity, *, nonce=None):
+                 deadline, clock, identity, *, nonce=None, diagnostic_mode=False):
+        assert type(diagnostic_mode) is bool
+        self.diagnostic_mode=diagnostic_mode
         self.user, self.kernel, self.dll = user, kernel, library
         self.target, self.creation = dict(target), creation_time
         self.record, self.deadline, self.clock, self.identity = receipt, deadline, clock, identity
@@ -159,6 +161,7 @@ class MessageTransport:
         observed = tuple(getattr(self.state, key) for key in ('pid','tid','hwnd','layout','engineCreationTime',
             'controllerPid','nonce','startMessage','stopMessage','readinessMessage'))
         assert observed == expected, 'ASCII observer immutable target/header changed'
+        assert (self.state.traceVersion,self.state.traceEnabled,self.state.traceReserved)==(TRACE_VERSION,int(self.diagnostic_mode),0),'Navigation trace immutable header changed'
         assert self.state.readinessReserved == 0, 'ASCII observer readiness reserved field changed'
         assert self._read('overflow') == self._read('status') == 0, 'ASCII observer native overflow/status failed'
         count = self._read('count')
@@ -218,11 +221,12 @@ class MessageTransport:
         for key, value in dict(magic=MAGIC, version=VERSION, stateSize=C.sizeof(State),
             eventSize=C.sizeof(Event), capacity=CAPACITY, pid=self.target['pid'], tid=self.target['tid'],
             controllerPid=self.controller_pid, startMessage=self.start_message, stopMessage=self.stop_message,
-            readinessMessage=self.readiness_message,
+            readinessMessage=self.readiness_message,traceVersion=TRACE_VERSION,traceEnabled=int(self.diagnostic_mode),
             nonce=self.nonce, hwnd=self.target['hwnd'], engineCreationTime=self.creation, layout=self.target['layout']).items():
             setattr(self.state, key, value)
         self._publish('command', 1)
-        for kind, export in ((4, 'HookCall'), (3, 'HookGet')):
+        hook_specs=((4,'HookCall'),(3,'HookGet'))+(((12,'HookReturn'),) if self.diagnostic_mode else ())
+        for kind, export in hook_specs:
             self._budget(); self.identity(); self._budget()
             row = dict(kind=kind, threadId=self.target['tid'], attemptedAt=self.clock())
             self.record['transport']['hookAttempts'].append(row)
@@ -323,6 +327,34 @@ class MessageTransport:
         if rows: self.cursor = rows[-1]['sequence']
         return rows
 
+    def read_navigation_trace(self):
+        """Acquire published passive rows; never infer semantic handler acceptance."""
+        self._budget();self.identity();self._header();self._budget()
+        assert self._read('traceVersion')==TRACE_VERSION and self._read('traceEnabled')==1,'Navigation trace is not enabled'
+        assert not self._read('traceReserved') and not self._read('traceRejected'),'Navigation trace identity/header rejected'
+        count=self._read('traceCount');assert 0<=count<=TRACE_CAPACITY,'Navigation trace count exceeds capacity'
+        rows=[]
+        for index in range(count):
+            self._budget()
+            address=self.view+State.traceEvents.offset+index*C.sizeof(TraceEvent)
+            commit=C.cast(address,C.POINTER(C.c_uint32))
+            sequence=int(self.dll.ReadWord(commit))
+            if not sequence:break
+            assert sequence==index+1,'Navigation trace publication sequence changed'
+            raw=C.string_at(address,C.sizeof(TraceEvent))
+            assert int(self.dll.ReadWord(commit))==sequence,'Navigation trace publication changed during copy'
+            event=TraceEvent.from_buffer_copy(raw)
+            assert event.sequence==sequence and not event.reserved and not event.flags,'Navigation trace row invalid'
+            assert (event.pid,event.tid,event.hwnd,event.engineCreationTime)==(self.target['pid'],self.target['tid'],self.target['hwnd'],self.creation),'Navigation trace target changed'
+            assert event.origin in (1,2,3) and event.message in (0x100,0x101,0x104,0x105) and event.vk in (9,0x71,0x11,0x75,0x23),'Navigation trace message outside scope'
+            rows.append({key:int(getattr(event,key)) for key,_ in TraceEvent._fields_ if key not in ('reserved','flags')})
+        overflow=self._read('traceOverflow')
+        assert overflow in (0,1) and not self._read('traceRejected'),'Navigation trace rejected during copy'
+        self.identity();self._budget()
+        return dict(schemaVersion=TRACE_VERSION,status='overflow' if overflow else ('partial' if len(rows)<count else 'complete'),
+            capacity=TRACE_CAPACITY,reservedCount=count,events=rows,semanticHandlerProved=False,
+            handleLifetimeProved=False)
+
     def can_stop(self):
         return bool(self.hooks and self.view and self.start_message)
 
@@ -402,7 +434,9 @@ manufactures an earlier model-reader observation or reuses a closed HANDLE.
                 pass  # Secondary metadata failure cannot replace the original validation error.
             raise
 
-    def __init__(self, api, process, binding, prepared, receipt, deadline, clock):
+    def __init__(self, api, process, binding, prepared, receipt, deadline, clock, *, diagnostic_mode=False):
+        assert type(diagnostic_mode) is bool
+        self.diagnostic_mode=diagnostic_mode
         self.api, self.process, self.binding = api, process, dict(binding)
         self.prepared, self.receipt = prepared, receipt
         self.deadline, self.clock = deadline, clock
@@ -478,7 +512,7 @@ manufactures an earlier model-reader observation or reuses a closed HANDLE.
         self.probe.kernel.FreeLibrary.restype = C.c_int32
         self.dll = C.WinDLL(str(library_path),use_last_error=True)
         self.transport = MessageTransport(self.probe.user,self.probe.kernel,self.dll,self.target,
-            engine['creationTime'],self.receipt,self.deadline,self.clock,self._identity)
+            engine['creationTime'],self.receipt,self.deadline,self.clock,self._identity,diagnostic_mode=self.diagnostic_mode)
         self._budget()
         return dict(self.target)
 
@@ -504,6 +538,7 @@ manufactures an earlier model-reader observation or reuses a closed HANDLE.
     def arm(self,index): return self.transport.arm(index)
     def query_initial_readiness(self): return self.transport.query_initial_readiness()
     def read_events(self,after): return self.transport.read_events(after)
+    def read_navigation_trace(self): return self.transport.read_navigation_trace()
     def can_stop(self): return self.transport is not None and self.transport.can_stop()
     def stop(self): return self.transport.stop()
 

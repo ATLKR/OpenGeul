@@ -25,6 +25,13 @@ struct Readiness {
     QueueSample sample;
 };
 
+constexpr std::uint32_t TraceVersion = 1;
+constexpr std::uint32_t TraceCapacity = 128;
+struct TraceEvent {
+    std::uint32_t sequence, origin, message, vk, pid, tid, reserved, flags;
+    std::uint64_t hwnd, engineCreationTime, focusHwnd, captureHwnd, counter, frequency, nativeTick, lParam, layout;
+};
+
 struct State {
     std::uint32_t magic, version, stateSize, eventSize, capacity, pid, tid, controllerPid;
     std::uint32_t startMessage, stopMessage, recording, ack;
@@ -34,6 +41,10 @@ struct State {
     std::uint32_t readinessMessage, readinessReserved;
     Readiness readiness;
     Event events[Capacity];
+    std::uint32_t traceVersion, traceEnabled;
+    std::int32_t traceCount, traceOverflow;
+    std::uint32_t traceRejected, traceReserved;
+    TraceEvent traceEvents[TraceCapacity];
 };
 
 static_assert(sizeof(Event) == 96);
@@ -43,6 +54,8 @@ static_assert(sizeof(QueueSample) == 328);
 static_assert(sizeof(Readiness) == 336);
 static_assert(offsetof(State, readiness) == 120);
 static_assert(offsetof(State, events) == 456);
-static_assert(sizeof(State) == 456 + Capacity * sizeof(Event));
+static_assert(sizeof(TraceEvent) == 104);
+static_assert(offsetof(State, traceVersion) == 456 + Capacity * sizeof(Event));
+static_assert(sizeof(State) == 456 + Capacity * sizeof(Event) + 24 + TraceCapacity * sizeof(TraceEvent));
 static_assert(alignof(State) == 8);
 }  // namespace OpenGeulAscii

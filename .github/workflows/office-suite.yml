@@ -12,6 +12,8 @@ concurrency:
   group: office-suite-${{ github.ref }}
   cancel-in-progress: true
 env:
+  # Temporary diagnostic commit: this mode deliberately fails qualification after evidence upload.
+  OPENGEUL_SUITE_RUN_MODE: navigation-diagnostic
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -31,6 +33,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     steps:
+    - name: Validate fixed Suite run mode
+      id: run-mode
+      shell: pwsh
+      run: |
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic')) {
+          throw 'Unknown Suite run mode.'
+        }
     - name: 정확한 소스 바이트 보존
       shell: pwsh
       run: |
@@ -146,21 +155,46 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
       if: '!cancelled() && steps.build.outcome == ''success'''
+    - name: Targeted Impress navigation diagnostic (not acceptance)
+      id: navigation-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-navigation-diagnostic/worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-navigation-diagnostic --diagnose-navigation impress
+        if ($LASTEXITCODE -ne 0) { throw 'Targeted navigation diagnostic failed.' }
+    - name: Preserve targeted navigation evidence only
+      id: navigation-diagnostic-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-navigation-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-navigation-diagnostic/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
+    - name: Diagnostic run deliberately cannot qualify Suite acceptance
+      id: diagnostic-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Navigation diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
     - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기
       id: calc-save
       shell: pwsh
       run: |
         python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save
         if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+S verification failed.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: Calc Ctrl+S 성공·실패 뒤 패키지 불변 확인
       shell: pwsh
       run: |
         python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
         if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+S verification.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: Calc Ctrl+S 입력·저장·로컬 네이티브 진단 즉시 보존
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-calc-save-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -174,15 +208,15 @@ jobs:
       run: |
         python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close
         if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+W choice probe failed.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: Calc Ctrl+W 성공·실패 뒤 패키지 불변 확인
       shell: pwsh
       run: |
         python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
         if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+W choice probe.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: Calc Ctrl+W 세 선택과 로컬 네이티브 진단 즉시 보존
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-calc-close-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -197,7 +231,7 @@ jobs:
         & "$package/Office/program/python.exe" suite/e2e/office_feature_smoke.py --suite $package --output .work/suite-office-features
         if ($LASTEXITCODE -ne 0) { throw 'Office format and feature semantic E2E failed.' }
       id: office-features
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
     - name: 패키지 HWP 변환기로 출처가 고정된 Home 입력 생성
       id: home-fixtures
       shell: pwsh
@@ -205,7 +239,7 @@ jobs:
         $package = (Resolve-Path $env:SUITE_PACKAGE).Path
         python suite/e2e/home_fixture_inputs.py --suite $package --output .work/e2e-fixtures
         if ($LASTEXITCODE -ne 0) { throw 'Owned HWP fixture generation or provenance failed.' }
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
     - name: Home 타일·파일 열기·공통 문서 메뉴 25개 실제 입력
       id: home-routes
       shell: pwsh
@@ -216,9 +250,9 @@ jobs:
         python suite/scripts/verify-suite.py $package
         $integrityExit = $LASTEXITCODE
         if ($homeExit -ne 0 -or $integrityExit -ne 0) { throw "Home routing failed: physical=$homeExit integrity=$integrityExit" }
-      if: '!cancelled() && steps.office-features.outcome == ''success'' && steps.home-fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.office-features.outcome == 'success' && steps.home-fixtures.outcome == 'success')"
     - name: Home 입력·화면·문서별 네이티브 종료 증거 즉시 보존
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-home-routes-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -238,9 +272,9 @@ jobs:
         python suite/e2e/pdf_export_smoke.py --verify --suite $package --output $output
         $verifierExit = $LASTEXITCODE
         if ($producerExit -ne 0 -or $verifierExit -ne 0) { throw "PDF E2E failed: producer=$producerExit verifier=$verifierExit" }
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
     - name: 형식·심화 기능·PDF 원본 검증 기록 즉시 보존
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-office-features-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -257,9 +291,9 @@ jobs:
       run: |
         python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime
         if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and content verification failed.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success')"
     - name: IME 입력·엔진 크래시 원본 기록 즉시 보존
-      if: '!cancelled() && steps.fixtures.outcome == ''success'' && steps.readiness.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-korean-ime-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -276,9 +310,9 @@ jobs:
       run: |
         python suite/e2e/korean_ui_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui
         if ($LASTEXITCODE -ne 0) { throw 'Actual Korean native Tabbed UI verification failed.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: korean-ui 원본 검증 기록 즉시 보존
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-korean-ui-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -292,9 +326,9 @@ jobs:
       run: |
         python suite/e2e/writer_style_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-writer-style
         if ($LASTEXITCODE -ne 0) { throw 'Physical Writer Heading 1 save and independent reopen failed.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: Writer 스타일 원본 검증 기록 즉시 보존
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-writer-style-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -308,9 +342,9 @@ jobs:
       run: |
         python suite/e2e/lifecycle_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-lifecycle
         if ($LASTEXITCODE -ne 0) { throw 'Actual native document lifecycle verification failed.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: lifecycle 원본 검증 기록 즉시 보존
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-lifecycle-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -324,9 +358,9 @@ jobs:
       run: |
         python suite/e2e/startup_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-startup --attempts 40
         if ($LASTEXITCODE -ne 0) { throw 'At least one independent startup failed.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: startup 원본 검증 기록 즉시 보존
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-startup-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -347,7 +381,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'First complete native UI verification failed.' }
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine --verify-ui
         if ($LASTEXITCODE -ne 0) { throw 'First post-GUI semantic verification failed.' }
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: 새 문서 집합으로 전체 UI·E2E를 두 번째 독립 실행
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
@@ -362,9 +396,9 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Second post-GUI semantic verification failed.' }
         python suite/scripts/verify-suite.py $package
         if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during the complete native validation.' }
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
     - name: 모든 네이티브 진단 보존·해시와 크래시 부재 확인
-      if: '!cancelled() && steps.fixtures.outcome == ''success'''
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
       shell: python
       run: |
         from pathlib import Path, PurePosixPath
@@ -451,7 +485,7 @@ jobs:
         print(json.dumps(result))
         assert result['success'], 'At least one owned native diagnostics root failed integrity or graceful shutdown qualification'
     - name: 원본 GUI·엔진·IME·반복 검증 기록 보존
-      if: always()
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (always())"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-evidence-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -484,7 +518,7 @@ jobs:
         if-no-files-found: warn
         compression-level: 6
     - name: 모든 검증을 통과한 Suite 개발 패키지 전달
-      if: success() && steps.home-routes.outcome == 'success'
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (success() && steps.home-routes.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-office-suite-${{ matrix.architecture }}-${{ github.run_id }}

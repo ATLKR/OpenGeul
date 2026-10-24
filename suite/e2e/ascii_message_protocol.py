@@ -29,6 +29,13 @@ class Readiness(C.Structure):
     _fields_ = [('request', C.c_uint32), ('ack', C.c_uint32), ('sample', QueueSample)]
 
 
+TRACE_VERSION = 1
+TRACE_CAPACITY = 128
+
+class TraceEvent(C.Structure):
+    _fields_ = [(name,C.c_uint32) for name in ('sequence','origin','message','vk','pid','tid','reserved','flags')]
+    _fields_ += [(name,C.c_uint64) for name in ('hwnd','engineCreationTime','focusHwnd','captureHwnd','counter','frequency','nativeTick','lParam','layout')]
+
 class State(C.Structure):
     _fields_ = [(name, C.c_uint32) for name in
         ('magic', 'version', 'stateSize', 'eventSize', 'capacity', 'pid', 'tid', 'controllerPid',
@@ -38,11 +45,13 @@ class State(C.Structure):
     _fields_ += [(name, C.c_uint64) for name in ('nonce', 'hwnd', 'engineCreationTime', 'layout')]
     _fields_ += [('readinessMessage', C.c_uint32), ('readinessReserved', C.c_uint32), ('readiness', Readiness)]
     _fields_ += [('events', Event * CAPACITY)]
+    _fields_ += [('traceVersion',C.c_uint32),('traceEnabled',C.c_uint32),('traceCount',C.c_int32),('traceOverflow',C.c_int32),('traceRejected',C.c_uint32),('traceReserved',C.c_uint32),('traceEvents',TraceEvent * TRACE_CAPACITY)]
 
 
 assert C.sizeof(Event) == 96 and State.events.offset == 456
 assert C.sizeof(QueueSample) == 328 and C.sizeof(Readiness) == 336 and State.readiness.offset == 120
-assert C.sizeof(State) == 456 + CAPACITY * 96
+assert C.sizeof(TraceEvent) == 104 and State.traceVersion.offset == 456 + CAPACITY * 96
+assert C.sizeof(State) == 456 + CAPACITY * 96 + 24 + TRACE_CAPACITY * 104
 
 
 def committed_events(raw, *, after):

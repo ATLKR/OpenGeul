@@ -91,6 +91,8 @@ void start(const CWPSTRUCT& message) {
     if(command!=1 || !header(shared) || shared->controllerPid!=message.wParam || shared->nonce!=nonce
        || shared->startMessage!=startMessage || shared->stopMessage!=stopMessage
        || shared->readinessMessage!=readinessMessage || shared->readinessReserved
+       || shared->traceVersion!=OpenGeulAscii::TraceVersion || shared->traceEnabled>1
+       || shared->traceCount || shared->traceOverflow || shared->traceRejected || shared->traceReserved
        || load(&shared->readiness.request) || load(&shared->readiness.ack)
        || !identity(shared,message.hwnd) || shared->count!=0 || shared->overflow || shared->status
        || shared->layout!=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)))) {
@@ -166,6 +168,38 @@ void queryReadiness(const CWPSTRUCT& message,UINT startMessage,UINT stopMessage,
     shared->readiness.sample=sample;
     publish(&shared->readiness.ack,static_cast<LONG>(request));  // Publish last.
 }
+// Separate navigation diagnostics; no text, waits, dispatch or input mutation.
+void traceNavigation(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,std::uint32_t origin) {
+    if(!shared || stopped || !load(&shared->recording) || !load(&shared->traceEnabled)
+       || ownerThread!=GetCurrentThreadId()) return;
+    if(message!=WM_KEYDOWN && message!=WM_KEYUP && message!=WM_SYSKEYDOWN && message!=WM_SYSKEYUP) return;
+    if(wp!=VK_TAB && wp!=VK_F2 && wp!=VK_CONTROL && wp!=VK_F6 && wp!=VK_END) return;
+    if(std::uint64_t(reinterpret_cast<std::uintptr_t>(hwnd))!=shared->hwnd) return;
+    if(!header(shared) || shared->traceVersion!=OpenGeulAscii::TraceVersion
+       || shared->traceReserved || !identity(shared,hwnd)) {
+        publish(&shared->traceRejected,1);return;
+    }
+    if(loadSigned(&shared->traceCount)>=static_cast<LONG>(OpenGeulAscii::TraceCapacity)) {
+        publishSigned(&shared->traceOverflow,1);return;
+    }
+    LONG index=incrementSigned(&shared->traceCount)-1;
+    if(index<0 || index>=static_cast<LONG>(OpenGeulAscii::TraceCapacity)) {
+        publishSigned(&shared->traceOverflow,1);return;
+    }
+    auto& event=shared->traceEvents[index];
+    event.origin=origin;event.message=message;event.vk=static_cast<std::uint32_t>(wp);
+    event.pid=GetCurrentProcessId();event.tid=GetCurrentThreadId();
+    event.hwnd=shared->hwnd;event.engineCreationTime=shared->engineCreationTime;
+    // Handle values are observations, not lifetime/generation identities.
+    event.focusHwnd=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetFocus()));
+    event.captureHwnd=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetCapture()));
+    LARGE_INTEGER counter{},frequency{};
+    if(QueryPerformanceCounter(&counter)) event.counter=counter.QuadPart;
+    if(QueryPerformanceFrequency(&frequency)) event.frequency=frequency.QuadPart;
+    event.nativeTick=GetTickCount64();event.lParam=static_cast<std::uint64_t>(lp);
+    event.layout=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)));
+    publish(&event.sequence,index+1);
+}
 void observe(const MSG& message,WPARAM removed) {
     if(!shared || stopped || !load(&shared->recording) || ownerThread!=GetCurrentThreadId()) return;
     if(message.message<WM_KEYDOWN || message.message>WM_UNICHAR) return;
@@ -208,13 +242,27 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookCall(int code,WPARAM wp,LP
         if(startMessage && message.message==startMessage) start(message);
         else if(stopMessage && message.message==stopMessage) stop(message);
         else if(readinessMessage && message.message==readinessMessage) queryReadiness(message,startMessage,stopMessage,readinessMessage);
+        else traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,2);
     }
     return CallNextHookEx(nullptr,code,wp,lp);
 }
 extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPARAM lp) {
     if(code<0) return CallNextHookEx(nullptr,code,wp,lp);
     Callback callback;
-    if(code==HC_ACTION && lp) observe(*reinterpret_cast<const MSG*>(lp),wp);
+    if(code==HC_ACTION && lp) {
+        const auto& message=*reinterpret_cast<const MSG*>(lp);
+        if(wp==PM_REMOVE) traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,1);
+        observe(message,wp);
+    }
+    return CallNextHookEx(nullptr,code,wp,lp);
+}
+extern "C" __declspec(dllexport) LRESULT CALLBACK HookReturn(int code,WPARAM wp,LPARAM lp) {
+    if(code<0) return CallNextHookEx(nullptr,code,wp,lp);
+    Callback callback;
+    if(code==HC_ACTION && lp) {
+        const auto& message=*reinterpret_cast<const CWPRETSTRUCT*>(lp);
+        traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,3);
+    }
     return CallNextHookEx(nullptr,code,wp,lp);
 }
 extern "C" __declspec(dllexport) unsigned int StateSize() { return sizeof(State); }

@@ -170,3 +170,20 @@ Calc 시트·수식 재계산, Impress 슬라이드, Draw 도형, Math 수식, B
 이는 실제 엔진 기능 검사이며 물리적 GUI 입력 검사를 대신하지 않습니다.
 `config/feature-catalog.json`은 시험별 판정 범위를 기록합니다. 해당 실행의
 `office-features.json`과 원본 문서를 확인해야 실제 통과로 볼 수 있습니다.
+
+### Bounded CI navigation diagnosis
+
+`office-suite.yml` has an explicit `OPENGEUL_SUITE_RUN_MODE`. The temporary
+`navigation-diagnostic` mode keeps the same owner-push/first-attempt privacy
+admission and runs only the original Impress navigation plus PRE semantic
+check after normal native preparation. It records owned-thread queue removal,
+window-procedure entry/return and the existing UNO caret observation. No keys
+are retried and no deadline or semantic assertion changes. Evidence is named
+`opengeul-suite-navigation-diagnostic-<arch>-<run>-<attempt>`.
+
+The mode deliberately ends with a non-acceptance failure after evidence upload;
+it cannot deliver packages or establish IME success. Missing/overflowed trace
+rows are inconclusive. Window-procedure return does not prove a particular
+application shortcut handler ran. A substantive corrective commit must select
+`acceptance` and pass every normal gate on both architectures before delivery.
+Do not use an unchanged rerun or an empty commit to evade first-attempt admission.

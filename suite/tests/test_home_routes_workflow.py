@@ -16,6 +16,12 @@ FOCUSED = ROOT / '.github/workflows/office-home-routes.yml'
 MATRIX = ROOT / '.github/workflows/office-suite.yml'
 BUILD_READY = "'!cancelled() && steps.build.outcome == ''success'''"
 HOME_READY = "'!cancelled() && steps.office-features.outcome == ''success'' && steps.home-fixtures.outcome == ''success'''"
+def expected_condition(path, original):
+    if path != MATRIX:return original
+    expression=original[1:-1].replace("''", "'") if original.startswith("'") else original
+    return '"env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' && ('+expression+')"'
+
+
 BASE_NAMES = (
     '정확한 소스 바이트 보존', '독립 PDF 검증 도구의 고정 해시 확인·설치',
     'Suite 단위 검사와 Windows shell 빌드 검사', '고정 버전의 패키지 경로 선택',
@@ -77,16 +83,16 @@ class HomeWorkflowChecks:
 
     def check_inputs_and_route(self, path):
         feature = step_by_id(path, 'office-features')
-        self.assertEqual(field(feature, 'if'), BUILD_READY)
+        self.assertEqual(field(feature, 'if'), expected_condition(path, BUILD_READY))
         code = run_code(feature)
         self.assertIn('& "$package/Office/program/python.exe" suite/e2e/office_feature_smoke.py --suite $package --output .work/suite-office-features', code)
         self.assertNotIn('--case', code, 'Home needs all fifteen fresh format fixtures from the canonical twenty-one cases')
         fixture = step_by_id(path, 'home-fixtures')
-        self.assertEqual(field(fixture, 'if'), BUILD_READY)
+        self.assertEqual(field(fixture, 'if'), expected_condition(path, BUILD_READY))
         self.assertIn('python suite/e2e/home_fixture_inputs.py --suite $package --output .work/e2e-fixtures', run_code(fixture))
         self.assertIn('if ($LASTEXITCODE -ne 0)', run_code(fixture))
         home = step_by_id(path, 'home-routes')
-        self.assertEqual(field(home, 'if'), HOME_READY)
+        self.assertEqual(field(home, 'if'), expected_condition(path, HOME_READY))
         code = run_code(home)
         self.assertIn('python suite/e2e/home_routing_smoke.py --suite $package --features .work/suite-office-features --hwp-fixtures .work/e2e-fixtures --output .work/suite-home-routing', code)
         self.assertNotIn('OPENGEUL_SUITE_DIAGNOSTICS:', home, 'Harness owns separate product diagnostics per case')
@@ -107,10 +113,10 @@ class HomeWorkflowChecks:
         pdf = next(step for step in records if 'pdf_export_smoke.py --produce' in step)
         self.assertLess(records.index(step_by_id(MATRIX, 'home-routes')), records.index(pdf))
         delivery = records[-1]
-        self.assertEqual(field(delivery, 'if'), "success() && steps.home-routes.outcome == 'success'")
+        self.assertEqual(field(delivery, 'if'), expected_condition(MATRIX, "success() && steps.home-routes.outcome == 'success'" ))
 
     def check_evidence(self, path):
-        evidence = next(step for step in steps(path) if field(step, 'if') == 'always()')
+        evidence = next(step for step in steps(path) if field(step, 'if') == expected_condition(path, 'always()'))
         for folder in ('.work/suite-office-features/', '.work/e2e-fixtures/', '.work/suite-home-routing/'):
             self.assertIn(folder, evidence)
         self.assertIn('include-hidden-files: true', evidence)
