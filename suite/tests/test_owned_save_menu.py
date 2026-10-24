@@ -163,6 +163,46 @@ class SaveNativeTransitionTests(unittest.TestCase):
         self.foregrounds=[44];self.picker['pid']=88;evidence={}
         with self.assertRaises(AssertionError):self.transition(evidence)
         self.assertEqual(evidence['foreground']['pid'],88);self.assertIsNot(evidence.get('accepted'),True)
+    def test_rejected_foreground_retains_document_transitions_and_original_thread_state(self):
+        self.foregrounds=[11,11,44];self.picker.update(pid=88,visible=False);evidence={};queries=[]
+        self.probe.native_focus=lambda tid:queries.append(tid)or dict(threadId=tid,activeHwnd=55,focusHwnd=55)
+        def pause(seconds):self.clock.now+=seconds;self.doc['enabled']=False
+        with patch.object(time,'sleep',side_effect=pause):
+            with self.assertRaisesRegex(AssertionError,'Foreign foreground'):self.transition(evidence)
+        self.assertEqual(queries,[9]);self.assertEqual(evidence['originalThreadGui']['activeHwnd'],55)
+        history=evidence['transitionHistory']
+        self.assertEqual([row['document']['enabled'] for row in history],[True,False,False])
+        self.assertEqual([row['foreground']['pid'] for row in history],[77,77,88])
+        self.assertEqual(history[-1]['observationNumber'],3);self.assertFalse(evidence['accepted'])
+        self.assertTrue(all('title' not in row['foreground'] and 'title' not in row['document'] for row in history))
+        self.assertNotIn('newPicker',evidence)
+    def test_rejection_diagnostic_error_preserves_ownership_failure(self):
+        self.foregrounds=[44];self.picker['pid']=88;evidence={}
+        self.probe.native_focus=lambda tid:(_ for _ in()).throw(OSError('thread unavailable'))
+        with self.assertRaisesRegex(AssertionError,'Foreign foreground'):self.transition(evidence)
+        self.assertEqual(evidence['originalThreadGuiError'],'OSError: thread unavailable')
+        self.assertFalse(evidence['accepted']);self.assertEqual(evidence['observationCount'],1)
+    def test_rejection_diagnostic_does_not_query_after_original_deadline(self):
+        self.foregrounds=[44];self.picker['pid']=88;evidence={};queries=[]
+        window=self.probe._window
+        def observe(hwnd):
+            value=window(hwnd)
+            if hwnd==44:self.clock.now=6.
+            return value
+        self.probe._window=observe;self.probe.native_focus=lambda tid:queries.append(tid)
+        with self.assertRaisesRegex(AssertionError,'Foreign foreground'):self.transition(evidence)
+        self.assertEqual(queries,[]);self.assertIn('deadline',evidence['originalThreadGuiError'])
+    def test_transition_history_is_bounded_and_keeps_first_and_rejected_states(self):
+        self.foregrounds=[11]*30+[44];self.picker['pid']=88;evidence={}
+        self.probe.native_focus=lambda tid:dict(threadId=tid)
+        def pause(seconds):self.clock.now+=seconds;self.doc['enabled']=not self.doc['enabled']
+        with patch.object(time,'sleep',side_effect=pause):
+            with self.assertRaisesRegex(AssertionError,'Foreign foreground'):self.transition(evidence)
+        self.assertEqual(len(evidence['transitionHistory']),16)
+        self.assertEqual(evidence['droppedTransitionCount'],15)
+        self.assertEqual(evidence['transitionHistory'][0]['observationNumber'],1)
+        self.assertEqual(evidence['transitionHistory'][-1]['observationNumber'],31)
+        self.assertEqual(evidence['transitionHistory'][-1]['foreground']['pid'],88)
     def test_save_picker_arrival_after_original_deadline_cannot_pass(self):
         self.foregrounds=[44]
         def raw(element):self.clock.now=6.;return dict(nativeHwnd=44,pid=77,runtimeId=[42,44],controlType='Window',name=CAPTION,visible=True,enabled=True)
@@ -198,6 +238,7 @@ class SaveNativeTransitionTests(unittest.TestCase):
         with patch.object(time,'sleep',side_effect=lambda seconds:pauses.append(seconds)):
             with self.assertRaisesRegex(AssertionError,'bound'):self.transition(evidence)
         self.assertEqual(evidence['observationCount'],501);self.assertEqual(self.clock(),1.)
+        self.assertEqual(len(evidence['transitionHistory']),1);self.assertEqual(evidence['droppedTransitionCount'],0)
         self.assertEqual(len(pauses),501);self.assertTrue(all(s==.01 for s in pauses))
     def test_pinned_candidate_replacement_foreign_or_generation_never_becomes_ready(self):
         mutations={'hwnd':55,'pid':88,'threadId':10,'rootHwnd':99,'ownerHwnd':22,'className':'Other','title':'Other','visible':None,'generation':None,'original-document':None}

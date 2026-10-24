@@ -283,7 +283,8 @@ class NativeSaveMenuProbe(NativeControlProbe):
                             *, context=None, evidence=None):
         assert purpose == 'SAVE_MENU' and not dialog and caption == BASE_CAPTION
         result = evidence if evidence is not None else {}
-        result.update(accepted=False, observationCount=0)
+        result.update(accepted=False, observationCount=0, transitionHistory=[], droppedTransitionCount=0)
+        previous_state = None
         def budget():
             assert self.clock() < self.deadline, 'Owned Save-menu transition deadline expired'
         while True:
@@ -295,10 +296,33 @@ class NativeSaveMenuProbe(NativeControlProbe):
             assert doc['visible'] is True and doc['iconic'] is False and doc['cloaked'] == 0
             foreground = self._window(self.foreground()); result['foreground'] = foreground
             result['observationCount'] += 1
+            # Passive, compact state changes explain the interval before the
+            # first picker appears. Keep the first and latest changes, including
+            # a rejected foreground; never retain document titles or add input.
+            fields = ('hwnd', 'pid', 'threadId', 'rootHwnd', 'ownerHwnd', 'visible', 'enabled', 'iconic', 'cloaked')
+            state = {name: {key: window.get(key) for key in fields}
+                     for name, window in (('document', doc), ('foreground', foreground))}
+            if state != previous_state:
+                history = result['transitionHistory']
+                if len(history) == 16:
+                    del history[1]
+                    result['droppedTransitionCount'] += 1
+                history.append(dict(at=_time(self.clock()), observationNumber=result['observationCount'], **state))
+                previous_state = state
             witness=result.get('pickerReadiness')
             observation=dict(at=_time(self.clock()),window=copy.deepcopy(foreground),process=copy.deepcopy(original))
             if witness is not None:witness['lastObservation']=copy.deepcopy(observation)
-            assert foreground['pid'] == process.pid and foreground['threadId'] == doc['threadId'], 'Foreign foreground after Save-menu click'
+            if foreground['pid'] != process.pid or foreground['threadId'] != doc['threadId']:
+                # One read-only query of the original thread can distinguish a
+                # local active dialog from the foreign global foreground. Its
+                # failure must not mask or postpone the ownership rejection.
+                try:
+                    budget()
+                    result['originalThreadGui'] = self.native_focus(doc['threadId'])
+                    budget()
+                except Exception as exc:
+                    result['originalThreadGuiError'] = (type(exc).__name__ + ': ' + str(exc))[:256]
+                raise AssertionError('Foreign foreground after Save-menu click')
             if witness is not None:
                 assert _picker_identity(foreground,document,process.pid,doc['threadId'],caption)==_picker_identity(witness['firstObservation']['window'],document,process.pid,doc['threadId'],caption), 'First Save picker was replaced or disappeared'
             if foreground['hwnd'] not in (document, context['scope']['hwnd']):

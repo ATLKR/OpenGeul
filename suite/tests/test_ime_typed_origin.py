@@ -124,8 +124,9 @@ class TypedReceiptPolicyTests(unittest.TestCase):
     def test_exact_concrete_restore_remains_old_strict_path(self):
         r=mode_fixtures.ThreadModeReceiptTests().receipt(4);self.policy(r,4,original=((0,3,1),(0,3,0x21)))
         with self.assertRaises(AssertionError):self.policy(r,4,original=((0,3,1),(0,3,0x20)))
-    def test_original_native_state_layout_unchanged_and_semantic_version4(self):
-        self.assertEqual(ctypes.sizeof(ime.NativeState),553720)
+    def test_original_native_state_prefix_and_semantic_version4_survive_diagnostics(self):
+        self.assertEqual(ime.NativeState.diagnosticCount.offset,553720)
+        self.assertEqual(ctypes.sizeof(ime.NativeState),566016)
         self.assertIn('shared->version==4',ime.OBSERVER_SOURCE)
         self.assertIn('target->version!=4',ime.OBSERVER_SOURCE)
         self.assertIn('source->version!=4',ime.OBSERVER_SOURCE)

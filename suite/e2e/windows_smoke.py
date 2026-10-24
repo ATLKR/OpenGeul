@@ -499,18 +499,27 @@ def capture_failure(output, name, record, exc):
 
 
 def stop_owned_test_process(process, record):
-    if process.poll() is not None: return
+    exit_code = process.poll()
+    receipt = dict(shellPid=process.pid, forceRequested=False, shellExitCode=exit_code,
+                   gracefulShutdownVerified=False, disposition='already-exited')
+    record['testProcessCleanup'] = receipt
+    if exit_code is not None: return
     try:
         # Only this launched generated-fixture test and its descendants are eligible.
+        # Retain intent before taskkill: a killed worker cannot finish its own
+        # archive. This controller receipt never qualifies a graceful shutdown.
+        receipt.update(forceRequested=True, disposition='stop-unconfirmed')
         subprocess.run(['taskkill.exe', '/PID', str(process.pid), '/T', '/F'], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-        process.wait(timeout=5)
+        receipt.update(shellExitCode=process.wait(timeout=5), disposition='forced-stop-returned')
     except Exception as exc:
         exit_code = process.poll()
+        receipt.update(shellExitCode=exit_code, errorType=type(exc).__name__)
         if isinstance(exc, subprocess.CalledProcessError) and exc.returncode == 128 and exit_code == 0:
             # The owned shell completed normal shutdown between poll and taskkill.
             # Preserve any original case failure; this is only secondary cleanup evidence.
             record.update(cleanupExitRaceVerified=True, cleanupProcessExitCode=exit_code)
+            receipt['disposition'] = 'exit-zero-after-taskkill-not-found'
             return
         record.update(success=False, cleanupError=type(exc).__name__ + ': ' + str(exc),
                       cleanupProcessExitCode=exit_code,

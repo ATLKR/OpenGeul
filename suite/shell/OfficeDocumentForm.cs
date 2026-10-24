@@ -279,7 +279,10 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                     FileName = path is null ? "새 문서." + module.DefaultExtension : Path.GetFileName(path)
                 };
                 if (path is not null) dialog.InitialDirectory = Path.GetDirectoryName(path);
-                if (dialog.ShowDialog(this) != DialogResult.OK)
+                TraceSave("save.dialogBegin", new { commandSequence });
+                var dialogResult = dialog.ShowDialog(this);
+                TraceSave("save.dialogEnd", new { commandSequence, result = dialogResult.ToString() });
+                if (dialogResult != DialogResult.OK)
                 {
                     TraceSave("save.dialogCancelled", new { commandSequence });
                     return false;

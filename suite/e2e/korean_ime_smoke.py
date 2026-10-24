@@ -316,6 +316,15 @@ class NativeEvent(ctypes.Structure):
                 ('result', ctypes.c_uint16 * 256)]
 
 
+class NativeDiagnosticEvent(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in
+                ('sequence', 'message', 'origin', 'pid', 'tid', 'commandAck')] + [
+                (name, ctypes.c_uint64) for name in
+                ('hwnd', 'layout', 'wparam', 'lparam', 'focusHwnd', 'counter')] + [
+                (name, ctypes.c_uint32) for name in
+                ('immContextPresent', 'immConversionSucceeded', 'immOpen', 'immConversion', 'immSentence')]
+
+
 class NativeState(ctypes.Structure):
     _fields_ = [('magic', ctypes.c_uint32), ('version', ctypes.c_uint32),
                 ('pid', ctypes.c_uint32), ('tid', ctypes.c_uint32),
@@ -339,7 +348,9 @@ class NativeState(ctypes.Structure):
                 ('immContextPresent', ctypes.c_uint32), ('immConversionSucceeded', ctypes.c_uint32),
                 ('immOpen', ctypes.c_uint32), ('immConversion', ctypes.c_uint32), ('immSentence', ctypes.c_uint32),
                 ('threadMode', native_mode.NativeModeReceipt),
-                ('commandRejection', native_mode.NativeCommandRejection), ('nativeAttemptedMask', ctypes.c_uint32)]
+                ('commandRejection', native_mode.NativeCommandRejection), ('nativeAttemptedMask', ctypes.c_uint32),
+                ('diagnosticCount', ctypes.c_int32), ('diagnosticOverflow', ctypes.c_int32),
+                ('diagnostics', NativeDiagnosticEvent * 128)]
 
 
 OBSERVER_SOURCE = r'''
@@ -353,6 +364,9 @@ OBSERVER_SOURCE = r'''
 #include "ime_command_admission.h"
 struct Event { uint32_t sequence,message,flags,pid,tid; uint64_t hwnd,layout;
     int32_t compositionBytes,resultBytes; uint32_t origin; WCHAR composition[256],result[256]; };
+struct DiagnosticEvent { uint32_t sequence,message,origin,pid,tid,commandAck;
+    uint64_t hwnd,layout,wparam,lparam,focusHwnd,counter;
+    uint32_t immContextPresent,immConversionSucceeded,immOpen,immConversion,immSentence; };
 struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     uint32_t command,ack; uint64_t previousLayout; uint32_t previousOpen,previousConversion,previousSentence;
     int32_t status; uint32_t activeLanguage; WCHAR activeClsid[40],activeProfile[40];
@@ -363,7 +377,8 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     opengeul_ime::CommandBudget commandBudgets[4]; uint64_t targetHwnd,rootHwnd;
     int32_t previousTsfOpen,previousTsfConversion; uint32_t tsfCaptured,profileChangeAttempted;
     uint32_t immContextPresent,immConversionSucceeded,immOpen,immConversion,immSentence;
-    opengeul_ime::ModeReceipt threadMode; opengeul_ime::CommandRejection commandRejection; uint32_t nativeAttemptedMask; };
+    opengeul_ime::ModeReceipt threadMode; opengeul_ime::CommandRejection commandRejection; uint32_t nativeAttemptedMask;
+    volatile LONG diagnosticCount,diagnosticOverflow; DiagnosticEvent diagnostics[128]; };
 static State* shared = nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
@@ -537,9 +552,37 @@ static void command(HWND hwnd, UINT sequence) {
     lease.Finish();
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&shared->ack,sequence);
 }
+// Passive, bounded owned-target observations. Never mutate command receipts or IME mode.
+static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
+    if (message!=WM_INPUTLANGCHANGE && message!=WM_IME_NOTIFY && message!=WM_KEYDOWN && message!=WM_CHAR) return;
+    DWORD pid=0; const auto tid=GetWindowThreadProcessId(hwnd,&pid);
+    if (uint64_t(UINT_PTR(hwnd))!=shared->targetHwnd || pid!=shared->pid
+        || tid!=shared->tid || GetCurrentThreadId()!=shared->tid) return;
+    // The producer is the one retained editor thread; saturated rows are never overwritten.
+    if (shared->diagnosticCount>=128) { InterlockedExchange(&shared->diagnosticOverflow,1); return; }
+    const LONG index=InterlockedIncrement(&shared->diagnosticCount)-1;
+    if (index<0 || index>=128) { InterlockedExchange(&shared->diagnosticOverflow,1); return; }
+    DiagnosticEvent* event=&shared->diagnostics[index];
+    event->message=message;event->origin=origin;event->pid=pid;event->tid=tid;
+    event->commandAck=shared->ack;event->hwnd=uint64_t(UINT_PTR(hwnd));
+    event->layout=uint64_t(UINT_PTR(GetKeyboardLayout(0)));
+    event->wparam=uint64_t(wp);event->lparam=uint64_t(UINT_PTR(lp));
+    event->focusHwnd=uint64_t(UINT_PTR(GetFocus()));
+    LARGE_INTEGER counter={}; if (QueryPerformanceCounter(&counter)) event->counter=uint64_t(counter.QuadPart);
+    HIMC context=ImmGetContext(hwnd);
+    if (context) {
+        event->immContextPresent=1;event->immOpen=ImmGetOpenStatus(context);
+        DWORD conversion=0,sentence=0;
+        event->immConversionSucceeded=ImmGetConversionStatus(context,&conversion,&sentence);
+        event->immConversion=conversion;event->immSentence=sentence;
+        ImmReleaseContext(hwnd,context);
+    }
+    MemoryBarrier(); InterlockedExchange((volatile LONG*)&event->sequence,index+1);
+}
 static void observe(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
     if (!connect()) return;
     if (message==0x8351) { command(hwnd,(UINT)wp); return; }
+    observe_diagnostic(hwnd,message,wp,lp,origin);
     if (message!=WM_IME_STARTCOMPOSITION && message!=WM_IME_ENDCOMPOSITION && message!=WM_IME_COMPOSITION) return;
     DWORD pid=0; if(GetWindowThreadProcessId(hwnd,&pid)!=shared->tid || pid!=shared->pid) return;
     LONG index=InterlockedIncrement(&shared->count)-1;
@@ -875,6 +918,20 @@ class CompositionObserver:
         events = self.events()[after:]
         return any(row['message'] == 0x10f and row['composition'] == expected for row in events)
 
+    def diagnostics(self):
+        state = self.state()
+        assert 0 <= state.diagnosticCount <= 128, 'Invalid passive message diagnostic count'
+        rows = []
+        for index in range(state.diagnosticCount):
+            row = state.diagnostics[index]
+            if row.sequence != index + 1: break  # An unpublished tail is not evidence.
+            assert (row.pid, row.tid, row.hwnd) == (self.pid, self.tid, self.focus), 'Foreign passive message diagnostic'
+            assert row.message in (0x51, 0x282, 0x100, 0x102) and row.origin in (1, 2), 'Unknown passive message diagnostic'
+            rows.append({name: int(getattr(row, name)) for name, _ in NativeDiagnosticEvent._fields_})
+        status = 'overflow' if state.diagnosticOverflow else ('partial' if len(rows) != state.diagnosticCount else 'complete')
+        return dict(schemaVersion=1, kind='passive-owned-ime-messages', status=status,
+                    capacity=128, observedCount=int(state.diagnosticCount), events=rows)
+
     def close(self):
         errors = []
         for hook in reversed(getattr(self, 'hooks', [])):
@@ -918,6 +975,14 @@ def physical_key(observer, token, record):
     assert user.SendInput(len(payload), payload, ctypes.sizeof(Input)) == len(payload), 'Physical scan-code input was not fully delivered'
     record['keyTokens'].append(token)
     record.setdefault('scanCodeInputs', []).extend(rows)
+
+
+def retain_ime_message_diagnostics(record, observer):
+    if 'imeMessageDiagnostics' in record: return  # Preserve the pre-restoration snapshot.
+    try:
+        record['imeMessageDiagnostics'] = observer.diagnostics()
+    except Exception as exc:
+        record['imeMessageDiagnostics'] = dict(status='unavailable', error=(type(exc).__name__ + ': ' + str(exc))[:240])
 
 
 def reopen_one(suite, source, module):
@@ -1111,6 +1176,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         wait_for(lambda: any(row['result'] == '글' for row in observer.events()), 10)
         record['events'] = observer.events()
         record['stage'] = 'restore-owned-input-thread'
+        retain_ime_message_diagnostics(record, observer)
         record['restoration'] = observer.command(4)
         record['layoutRestored'] = observer.restored
         record['imeCommands'] = observer.commands
@@ -1159,11 +1225,13 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         return record
     except Exception as exc:
         primary = exc
+        if observer is not None: retain_ime_message_diagnostics(record, observer)
         capture_failure(output, name, record, exc)
         retain_ime_focus_failure_diagnostics(record, process, keyboard)
         raise
     finally:
         if observer is not None:
+            retain_ime_message_diagnostics(record, observer)
             try:
                 record['events'] = observer.events()
                 if observer.restoration_required and api.user.IsWindow(observer.focus):

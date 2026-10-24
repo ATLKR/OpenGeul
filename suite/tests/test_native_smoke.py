@@ -100,6 +100,57 @@ class NativeSmokeTests(unittest.TestCase):
             api.attached(SimpleNamespace(pid=31, poll=lambda: None))
         api.user.GetPropW.assert_not_called()
 
+    def test_forced_cleanup_retains_attempt_and_observed_exit_without_hiding_primary_failure(self):
+        process = SimpleNamespace(pid=123, poll=lambda: None, wait=lambda timeout: 1)
+        record = {'success': False, 'error': 'original IME composition failure'}
+        def kill(argv, **options):
+            self.assertEqual(argv, ['taskkill.exe', '/PID', '123', '/T', '/F'])
+            self.assertTrue(record.get('testProcessCleanup', {}).get('forceRequested'),
+                            'Termination intent must survive a failed native command')
+            return SimpleNamespace(returncode=0)
+        with patch.object(smoke.subprocess, 'run', side_effect=kill):
+            smoke.stop_owned_test_process(process, record)
+        receipt = record.get('testProcessCleanup', {})
+        self.assertEqual(receipt.get('disposition'), 'forced-stop-returned')
+        self.assertEqual(receipt.get('shellExitCode'), 1)
+        self.assertFalse(receipt.get('gracefulShutdownVerified', True))
+        self.assertFalse(record['success'])
+        self.assertEqual(record['error'], 'original IME composition failure')
+
+    def test_failed_forced_cleanup_keeps_unconfirmed_outcome(self):
+        process = SimpleNamespace(pid=123, poll=lambda: None)
+        record = {'success': False, 'error': 'original IME composition failure'}
+        with patch.object(smoke.subprocess, 'run', side_effect=smoke.subprocess.TimeoutExpired('taskkill', 15)):
+            smoke.stop_owned_test_process(process, record)
+        receipt = record.get('testProcessCleanup', {})
+        self.assertEqual(receipt.get('disposition'), 'stop-unconfirmed')
+        self.assertIsNone(receipt.get('shellExitCode'))
+        self.assertTrue(receipt.get('forceRequested'))
+        self.assertEqual(record['error'], 'original IME composition failure')
+
+    def test_already_exited_cleanup_records_code_without_termination(self):
+        for code in (0, 7):
+            with self.subTest(code=code):
+                process = SimpleNamespace(pid=123, poll=lambda: code)
+                record = {'success': False, 'error': 'primary'}
+                with patch.object(smoke.subprocess, 'run', side_effect=AssertionError('already-exited process must not be killed')):
+                    smoke.stop_owned_test_process(process, record)
+                receipt = record['testProcessCleanup']
+                self.assertEqual(receipt['disposition'], 'already-exited')
+                self.assertEqual(receipt['shellExitCode'], code)
+                self.assertFalse(receipt['forceRequested'])
+                self.assertFalse(receipt['gracefulShutdownVerified'])
+
+    def test_taskkill_return_without_shell_exit_remains_unconfirmed(self):
+        process = SimpleNamespace(pid=123, poll=lambda: None,
+            wait=Mock(side_effect=smoke.subprocess.TimeoutExpired('owned shell', 5)))
+        record = {'success': False, 'error': 'primary'}
+        with patch.object(smoke.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
+            smoke.stop_owned_test_process(process, record)
+        self.assertEqual(record['testProcessCleanup']['disposition'], 'stop-unconfirmed')
+        self.assertFalse(record['testProcessCleanup']['gracefulShutdownVerified'])
+        self.assertEqual(record['error'], 'primary')
+
     def test_taskkill_not_found_is_secondary_exit_race_only_after_verified_exit_zero(self):
         process = SimpleNamespace(pid=123, poll=Mock(side_effect=[None, 0]))
         record = {'success': False, 'error': 'original close timeout'}
@@ -108,6 +159,8 @@ class NativeSmokeTests(unittest.TestCase):
             smoke.stop_owned_test_process(process, record)
         self.assertTrue(record['cleanupExitRaceVerified'])
         self.assertEqual(record['cleanupProcessExitCode'], 0)
+        self.assertEqual(record['testProcessCleanup']['disposition'], 'exit-zero-after-taskkill-not-found')
+        self.assertFalse(record['testProcessCleanup']['gracefulShutdownVerified'])
         self.assertNotIn('cleanupError', record)
         self.assertFalse(record['success'])
         self.assertEqual(record['error'], 'original close timeout')
