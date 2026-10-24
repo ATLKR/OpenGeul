@@ -160,11 +160,52 @@ class IMEKeyboardSession:
         self._budget()
     def _guard(self, *, strict=True, context_check=None):
         from capture_readiness import settle_owned_capture
+        diagnostic=None
+        def sample(capture):
+            # Passive evidence only: never release capture, inject input or extend
+            # the shared deadline. The low GetAsyncKeyState bit is not delivery proof.
+            diagnostic['sampleAttempts']+=1
+            result=dict(status='unavailable',capture=dict(capture),observedAt=self.clock(),buttons=[])
+            try:
+                for key in (1,2,4,5,6):
+                    self._budget()
+                    state=int(self.probe.user.GetAsyncKeyState(key))
+                    self._budget()
+                    result['buttons'].append(dict(virtualKey=key,rawState=state,down=bool(state & 0x8000)))
+                result.update(status='observed',finishedAt=self.clock())
+            except Exception as exc:result['error']=_error(exc)
+            return result
         def validate(row):
+            nonlocal diagnostic
             self._validate_guard(row,strict)
             if context_check is not None:context_check()
-        row=settle_owned_capture(lambda:self._observe_guard(strict),validate,
-            self.receipt,self.binding,self.deadline,clock=self.clock)
+            scope=row['scope'];capture=scope['capture'];b=self.binding
+            expected={b['shellPid']:scope['before']['suite']['threadId'],
+                      b['officePid']:scope['before']['editor']['threadId']}
+            owned=(type(capture.get('hwnd')) is int and capture['hwnd']>0
+                and capture.get('isWindow') is True and capture.get('rootHwnd')==b['suiteHwnd']
+                and capture.get('pid') in expected
+                and capture.get('threadId')==expected[capture['pid']]>0)
+            if not owned:return
+            # Repeated metadata is not HWND lifetime proof; handles can be reused.
+            identity={key:capture[key] for key in ('hwnd','pid','threadId','rootHwnd','isWindow')}
+            if diagnostic is None:
+                diagnostic=dict(deadline=self.deadline,sampleAttempts=0)
+                self.receipt['captureButtonDiagnostics']=diagnostic
+                diagnostic['first']=sample(identity)
+            elif ('final' not in diagnostic and identity==diagnostic['first']['capture']
+                  and 0<self.deadline-self.clock()<=.05):
+                diagnostic['final']=sample(identity)
+        try:
+            row=settle_owned_capture(lambda:self._observe_guard(strict),validate,
+                self.receipt,self.binding,self.deadline,clock=self.clock)
+        finally:
+            if diagnostic is not None and 'final' not in diagnostic:
+                # No stale native query after failure/settlement. Oversleep can
+                # leave no final pre-deadline sample; say so rather than infer it.
+                diagnostic['final']=dict(status='unavailable',reason=(
+                    'original-deadline-exhausted' if self.clock()>=self.deadline
+                    else 'no-final-original-capture-observation'))
         if strict:
             from windows_smoke import _editor_focus_snapshot_ready
             b=self.binding

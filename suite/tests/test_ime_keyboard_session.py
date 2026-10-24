@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 E2E = Path(__file__).resolve().parents[1] / 'e2e'
@@ -152,6 +153,77 @@ class IMEKeyboardSessionTests(unittest.TestCase):
             action=record['imeKeyboardSession']['actions'][0]
             self.assertEqual(action['focusIntentTransition'],'owned-host-to-exact-original-editor-child')
             self.assertEqual(len(probe.sent),1)
+    def capture_during_focus_intent(self, directory, read_buttons):
+        s,p,b,api,clock,probe,record=self.fixture(directory,module='calc')
+        original=probe.scope_snapshot;captured=[False]
+        def scope(*args):
+            row=original(*args)
+            if captured[0]:
+                row['focus']=copy.deepcopy(row['before']['editor']);row['focusWithinEditor']=True
+                row['capture']=copy.deepcopy(row['before']['editor'])
+            else:
+                row['focus']=copy.deepcopy(row['before']['suite']);row['focusWithinEditor']=False
+            return row
+        probe.scope_snapshot=scope;probe.user=SimpleNamespace(GetAsyncKeyState=read_buttons)
+        s.start();retain=s._retain
+        def durable(phase):
+            retain(phase)
+            if phase=='input-intent':captured[0]=True
+        s._retain=durable
+        return s,clock,probe,record
+    def test_capture_after_focus_intent_records_buttons_without_sending_or_extending_budget(self):
+        for down in (False,True):
+            with self.subTest(buttonDown=down),tempfile.TemporaryDirectory() as directory:
+                reads=[]
+                def buttons(key):reads.append(key);return -32768 if down and key==1 else 0
+                s,clock,probe,record=self.capture_during_focus_intent(directory,buttons)
+                with patch('time.sleep',side_effect=lambda seconds:setattr(clock,'now',clock.now+seconds)):
+                    with self.assertRaisesRegex(AssertionError,'Owned capture readiness deadline expired'):s.focus_editor(6.)
+                d=record['imeKeyboardSession']['captureButtonDiagnostics']
+                self.assertEqual(d['deadline'],6.);self.assertEqual(s.deadline,10.)
+                self.assertEqual(len(reads),10);self.assertEqual(d['sampleAttempts'],2)
+                for row in (d['first'],d['final']):
+                    self.assertEqual(row['status'],'observed');self.assertLess(row['finishedAt'],6.)
+                    self.assertEqual(row['capture']['hwnd'],22);self.assertEqual(row['capture']['pid'],88)
+                    self.assertEqual(row['buttons'][0]['down'],down)
+                action=record['imeKeyboardSession']['actions'][0]
+                self.assertEqual(action['inputCallAttempts'],0);self.assertIsNone(action['insertedInputs'])
+                self.assertEqual(probe.sent,[]);s.close()
+    def test_capture_button_diagnostic_error_and_expiry_preserve_primary_without_late_queries(self):
+        for mode in ('error','expired'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as directory:
+                reads=[]
+                def buttons(key):
+                    reads.append(key)
+                    if mode=='error':raise OSError('button query unavailable')
+                    return 0
+                s,clock,probe,record=self.capture_during_focus_intent(directory,buttons)
+                def pause(seconds):clock.now=6. if mode=='expired' else clock.now+seconds
+                with patch('time.sleep',side_effect=pause):
+                    with self.assertRaisesRegex(AssertionError,'Owned capture readiness deadline expired'):s.focus_editor(6.)
+                d=record['imeKeyboardSession']['captureButtonDiagnostics']
+                self.assertEqual(probe.sent,[]);self.assertEqual(s.deadline,10.)
+                if mode=='error':
+                    self.assertEqual(len(reads),2);self.assertIn('OSError',d['first']['error'])
+                else:
+                    self.assertEqual(len(reads),5);self.assertEqual(d['final']['status'],'unavailable')
+                    self.assertEqual(d['final']['reason'],'original-deadline-exhausted')
+                s.close()
+    def test_capture_button_query_crossing_deadline_stops_without_another_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reads=[]
+            def buttons(key):
+                reads.append(key);clock.now=6.;return 0
+            s,clock,probe,record=self.capture_during_focus_intent(directory,buttons)
+            with self.assertRaisesRegex(AssertionError,'Owned capture readiness deadline expired after validation'):
+                s.focus_editor(6.)
+            d=record['imeKeyboardSession']['captureButtonDiagnostics']
+            self.assertEqual(reads,[1]);self.assertEqual(d['sampleAttempts'],1)
+            self.assertEqual(d['first']['status'],'unavailable')
+            self.assertIn('IME keyboard deadline expired',d['first']['error'])
+            self.assertEqual(d['final']['reason'],'original-deadline-exhausted')
+            self.assertEqual(probe.sent,[]);self.assertEqual(s.deadline,10.)
+            s.close()
     def test_ctrl_f6_intent_rejects_arbitrary_descendant_and_reverse_focus_change(self):
         for initial,current in ((11,33),(22,11)):
             with self.subTest(initial=initial,current=current),tempfile.TemporaryDirectory() as directory:

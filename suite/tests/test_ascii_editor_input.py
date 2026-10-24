@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+import zipfile
 from unittest.mock import Mock, patch
 from editor_program_boundary import editor_program_factory
 
@@ -373,7 +374,12 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
             with self.subTest(module=module), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 source = root / ('OpenGeul-' + module + '.' + extension)
-                source.write_text('Engine-OpenGeul-' + module)
+                part = {'writer': 'word/document.xml', 'calc': 'xl/worksheets/sheet1.xml',
+                        'impress': 'ppt/slides/slide1.xml'}[module]
+                def write_package(text):
+                    with zipfile.ZipFile(source, 'w') as archive:
+                        archive.writestr(part, '<document><text>' + text + '</text></document>')
+                write_package('Engine-OpenGeul-' + module)
                 original_bytes = source.read_bytes()
                 marker = 'UI-OpenGeul-' + module
                 api = FakeWindows()
@@ -386,7 +392,7 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                 events = []
                 def send(keys, **kw):
                     events.append(('keys', keys))
-                    if keys == '^s': source.write_text('Engine-OpenGeul-' + module + marker)
+                    if keys == '^s': write_package('Engine-OpenGeul-' + module + marker)
                 send_keys = Mock(side_effect=send)
                 type_ascii = Mock(side_effect=lambda *args, **kw: events.append(('type', args[3])))
                 # This existing test isolates navigation/input/save routing with
@@ -404,7 +410,6 @@ class AsciiEditorIntegrationTests(unittest.TestCase):
                         patch.object(native, 'CalcModelContext', return_value=completion) as model_context, \
                         patch.object(native, 'FirstAdmissionEditorSession', editor_program_factory(send_keys)), \
                         patch.object(native, 'require_engine_fixture', return_value=source), \
-                        patch.object(native, 'package_text', side_effect=lambda path: path.read_text()), \
                         patch.object(native, 'launch_suite', return_value=process), \
                         patch.object(native, 'Windows', return_value=api), \
                         patch.object(native, 'verified_attachment', return_value=(11, 12, 22, 88)), \

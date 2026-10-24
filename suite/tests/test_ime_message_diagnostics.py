@@ -66,14 +66,16 @@ class MessageDiagnosticsTests(unittest.TestCase):
 using DWORD=uint32_t;using LONG=int32_t;using UINT=uint32_t;
 using HWND=uintptr_t;using HIMC=uintptr_t;using WPARAM=uintptr_t;using LPARAM=intptr_t;using UINT_PTR=uintptr_t;
 constexpr UINT WM_INPUTLANGCHANGE=0x51,WM_IME_NOTIFY=0x282,WM_KEYDOWN=0x100,WM_CHAR=0x102;
+constexpr UINT WM_IME_SETCONTEXT=0x281,WM_SETFOCUS=7,WM_KILLFOCUS=8;
 struct LARGE_INTEGER { int64_t QuadPart; };
 DWORD windowPid=31,windowTid=41,currentTid=41;bool contextPresent=true;int reads=0,releases=0;
+uintptr_t currentContext=0x100,currentFocus=51;
 DWORD GetWindowThreadProcessId(HWND,DWORD* pid){*pid=windowPid;return windowTid;}
 DWORD GetCurrentThreadId(){return currentTid;}
 uintptr_t GetKeyboardLayout(int){return 0x0412;}
-HWND GetFocus(){return 51;}
+HWND GetFocus(){return currentFocus;}
 bool QueryPerformanceCounter(LARGE_INTEGER* c){c->QuadPart=1234;return true;}
-HIMC ImmGetContext(HWND){++reads;return contextPresent?1:0;}
+HIMC ImmGetContext(HWND){++reads;return contextPresent?currentContext:0;}
 bool ImmGetOpenStatus(HIMC){return false;}
 bool ImmGetConversionStatus(HIMC,DWORD* c,DWORD* s){*c=1;*s=8;return true;}
 bool ImmReleaseContext(HWND,HIMC){++releases;return true;}
@@ -98,10 +100,19 @@ int main(){
  const auto first=instance.diagnostics[0];
  assert(first.sequence==1 && first.immOpen==0 && first.wparam==71 && first.lparam==34);
  assert(first.counter==1234 && first.layout==0x0412 && first.commandAck==3);
+ assert(first.himc==0x100);
  assert(instance.ack==3 && instance.immOpen==1 && reads==1 && releases==1);
  contextPresent=false;observe_diagnostic(51,WM_IME_NOTIFY,8,0,1);
- assert(instance.diagnostics[1].sequence==2 && instance.diagnostics[1].immContextPresent==0 && releases==1);
- for(int i=2;i<128;++i)observe_diagnostic(51,WM_INPUTLANGCHANGE,0,0,1);
+ assert(instance.diagnostics[1].sequence==2 && instance.diagnostics[1].immContextPresent==0 && instance.diagnostics[1].himc==0 && releases==1);
+ contextPresent=true;currentContext=0x200;
+ observe_diagnostic(51,WM_IME_SETCONTEXT,1,0,1);
+ assert(instance.diagnostics[2].himc==0x200 && instance.diagnostics[2].message==WM_IME_SETCONTEXT);
+ observe_diagnostic(51,WM_SETFOCUS,0,0,1);assert(instance.diagnostics[3].himc==0x200);
+ currentFocus=99;
+ observe_diagnostic(51,WM_KILLFOCUS,99,0,1);
+ assert(instance.diagnostics[4].himc==0x200 && instance.diagnostics[4].focusHwnd==99);
+ observe_diagnostic(99,WM_SETFOCUS,51,0,1);assert(instance.diagnosticCount==5);
+ for(int i=5;i<128;++i)observe_diagnostic(51,WM_INPUTLANGCHANGE,0,0,1);
  int priorReads=reads;
  for(int i=0;i<200;++i)observe_diagnostic(51,WM_CHAR,103,0,2);
  assert(instance.diagnosticCount==128 && instance.diagnosticOverflow==1 && reads==priorReads);
@@ -125,6 +136,20 @@ int main(){
         observer.pid, observer.tid, observer.focus = 31, 41, 51
         observer.state = lambda: state
         return observer, state
+
+    def test_focus_and_context_transitions_retain_himc_values_without_requiring_focus_stability(self):
+        observer, state = self.observer()
+        state.diagnosticCount = 3
+        for index, message in enumerate((0x281, 7, 8)):
+            row = state.diagnostics[index]
+            row.sequence, row.message, row.origin = index+1, message, 1
+            row.pid, row.tid, row.hwnd = 31, 41, 51
+            row.himc = 0x100 if index == 0 else 0x200
+            row.focusHwnd = 99 if message == 8 else 51
+        receipt = observer.diagnostics()
+        self.assertEqual(receipt['status'], 'complete')
+        self.assertEqual([row['himc'] for row in receipt['events']], [0x100, 0x200, 0x200])
+        self.assertEqual(receipt['events'][-1]['focusHwnd'], 99)
 
     def test_only_published_rows_are_returned_without_changing_command_receipt(self):
         observer, state = self.observer()

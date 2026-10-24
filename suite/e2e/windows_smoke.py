@@ -11,6 +11,7 @@ import ctypes
 from ctypes import wintypes
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -483,6 +484,44 @@ def package_text(path):
                          if (name == 'word/document.xml' or name == 'xl/sharedStrings.xml'
                              or name.startswith('xl/worksheets/') or name.startswith('ppt/slides/'))
                          and name.endswith('.xml'))
+
+
+def wait_saved_marker(source, marker, before_sha256, deadline, record):
+    """Observe this generated document's save under its original deadline.
+
+    An unreadable file is only a retry candidate, not proof of a sharing
+    violation. Persistent denial still fails. XML and hash use the same bytes.
+    """
+    receipt=record['savedMarkerRead']=dict(deadline=deadline,attempts=0,transientCount=0)
+    def budget():
+        assert time.monotonic()<deadline,'Original GUI save deadline expired during persisted-marker observation'
+    def transient(exc):
+        row=dict(kind=type(exc).__name__,errno=getattr(exc,'errno',None),
+                 winerror=getattr(exc,'winerror',None),observedAt=time.monotonic())
+        receipt['transientCount']+=1
+        receipt.setdefault('firstTransient',row);receipt['lastTransient']=row
+    def check():
+        budget();receipt['attempts']+=1
+        try:
+            payload=source.read_bytes()
+        except (PermissionError,FileNotFoundError) as exc:
+            transient(exc);budget();return False
+        budget()
+        try:
+            text=package_text(io.BytesIO(payload))
+        except zipfile.BadZipFile as exc:
+            transient(exc);budget();return False
+        budget()
+        if marker not in text:return False
+        digest=hashlib.sha256(payload).hexdigest()
+        budget()
+        assert digest!=before_sha256,'Saved file bytes did not change'
+        return digest
+    budget()
+    digest=wait_for(check,seconds=deadline-time.monotonic())
+    budget()
+    receipt.update(sha256=digest,observedAt=time.monotonic())
+    return digest
 
 
 def write_result(output, name, record):
@@ -1286,10 +1325,7 @@ def document_case(suite, fixtures, output, module, extension, physical_input, *,
                 save_deadline=time.monotonic()+30
                 shortcuts.save_phase(save_deadline);shortcuts.press('CTRL_S')
             record['stage'] = 'wait-saved-marker'
-            remaining=save_deadline-time.monotonic();assert remaining>0,'Original GUI save deadline expired'
-            wait_for(lambda: marker in package_text(source), seconds=remaining)
-            assert time.monotonic()<=save_deadline,'Original GUI save deadline expired during persisted-marker observation'
-            assert hashlib.sha256(source.read_bytes()).hexdigest() != before, 'Saved file bytes did not change'
+            wait_saved_marker(source,marker,before,save_deadline,record)
             wait_for(lambda: not api.title(hwnd).startswith('* '), seconds=10)
             record['stage'] = 'capture-edited'
             window.capture_as_image().save(output / (module + '-edited.png'))

@@ -126,7 +126,7 @@ class TypedReceiptPolicyTests(unittest.TestCase):
         with self.assertRaises(AssertionError):self.policy(r,4,original=((0,3,1),(0,3,0x20)))
     def test_original_native_state_prefix_and_semantic_version4_survive_diagnostics(self):
         self.assertEqual(ime.NativeState.diagnosticCount.offset,553720)
-        self.assertEqual(ctypes.sizeof(ime.NativeState),566016)
+        self.assertEqual(ctypes.sizeof(ime.NativeState),567040)
         self.assertIn('shared->version==4',ime.OBSERVER_SOURCE)
         self.assertIn('target->version!=4',ime.OBSERVER_SOURCE)
         self.assertIn('source->version!=4',ime.OBSERVER_SOURCE)

@@ -322,7 +322,8 @@ class NativeDiagnosticEvent(ctypes.Structure):
                 (name, ctypes.c_uint64) for name in
                 ('hwnd', 'layout', 'wparam', 'lparam', 'focusHwnd', 'counter')] + [
                 (name, ctypes.c_uint32) for name in
-                ('immContextPresent', 'immConversionSucceeded', 'immOpen', 'immConversion', 'immSentence')]
+                ('immContextPresent', 'immConversionSucceeded', 'immOpen', 'immConversion', 'immSentence')] + [
+                ('himc', ctypes.c_uint64)]
 
 
 class NativeState(ctypes.Structure):
@@ -366,7 +367,7 @@ struct Event { uint32_t sequence,message,flags,pid,tid; uint64_t hwnd,layout;
     int32_t compositionBytes,resultBytes; uint32_t origin; WCHAR composition[256],result[256]; };
 struct DiagnosticEvent { uint32_t sequence,message,origin,pid,tid,commandAck;
     uint64_t hwnd,layout,wparam,lparam,focusHwnd,counter;
-    uint32_t immContextPresent,immConversionSucceeded,immOpen,immConversion,immSentence; };
+    uint32_t immContextPresent,immConversionSucceeded,immOpen,immConversion,immSentence; uint64_t himc; };
 struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     uint32_t command,ack; uint64_t previousLayout; uint32_t previousOpen,previousConversion,previousSentence;
     int32_t status; uint32_t activeLanguage; WCHAR activeClsid[40],activeProfile[40];
@@ -554,7 +555,8 @@ static void command(HWND hwnd, UINT sequence) {
 }
 // Passive, bounded owned-target observations. Never mutate command receipts or IME mode.
 static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
-    if (message!=WM_INPUTLANGCHANGE && message!=WM_IME_NOTIFY && message!=WM_KEYDOWN && message!=WM_CHAR) return;
+    if (message!=WM_INPUTLANGCHANGE && message!=WM_IME_NOTIFY && message!=WM_KEYDOWN && message!=WM_CHAR
+        && message!=WM_IME_SETCONTEXT && message!=WM_SETFOCUS && message!=WM_KILLFOCUS) return;
     DWORD pid=0; const auto tid=GetWindowThreadProcessId(hwnd,&pid);
     if (uint64_t(UINT_PTR(hwnd))!=shared->targetHwnd || pid!=shared->pid
         || tid!=shared->tid || GetCurrentThreadId()!=shared->tid) return;
@@ -570,6 +572,8 @@ static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT o
     event->focusHwnd=uint64_t(UINT_PTR(GetFocus()));
     LARGE_INTEGER counter={}; if (QueryPerformanceCounter(&counter)) event->counter=uint64_t(counter.QuadPart);
     HIMC context=ImmGetContext(hwnd);
+    // Opaque handle value only: equality is not a context lifetime/generation proof.
+    event->himc=uint64_t(UINT_PTR(context));
     if (context) {
         event->immContextPresent=1;event->immOpen=ImmGetOpenStatus(context);
         DWORD conversion=0,sentence=0;
@@ -926,7 +930,7 @@ class CompositionObserver:
             row = state.diagnostics[index]
             if row.sequence != index + 1: break  # An unpublished tail is not evidence.
             assert (row.pid, row.tid, row.hwnd) == (self.pid, self.tid, self.focus), 'Foreign passive message diagnostic'
-            assert row.message in (0x51, 0x282, 0x100, 0x102) and row.origin in (1, 2), 'Unknown passive message diagnostic'
+            assert row.message in (0x51, 0x282, 0x100, 0x102, 0x281, 7, 8) and row.origin in (1, 2), 'Unknown passive message diagnostic'
             rows.append({name: int(getattr(row, name)) for name, _ in NativeDiagnosticEvent._fields_})
         status = 'overflow' if state.diagnosticOverflow else ('partial' if len(rows) != state.diagnosticCount else 'complete')
         return dict(schemaVersion=1, kind='passive-owned-ime-messages', status=status,
