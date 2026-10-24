@@ -76,6 +76,18 @@ def read_cells(data):
         return result
 
 
+def saving_workbook_snapshot(source,baseline,expected,deadline,receipt):
+    raw=native.read_saving_document(source,deadline,receipt)
+    if raw is None:return False
+    cells=read_cells(raw)
+    assert time.monotonic()<deadline,'Original Calc save deadline expired during durable workbook observation'
+    if cells['a1Text']==baseline['a1Text']:return False
+    require_grid(cells,baseline,expected)
+    result=dict(sha256=hashlib.sha256(raw).hexdigest(),bytes=len(raw),cells=cells)
+    assert time.monotonic()<deadline,'Original Calc save deadline expired during durable workbook observation'
+    return result
+
+
 def require_grid(observed,baseline,expected_text):
     assert observed.get('a1Text')==expected_text,'Saved A1 lost, changed or duplicated the physical edit'
     for key in ('b1Value','c1Value','d1Value'):
@@ -379,14 +391,10 @@ def physical_case(suite,fixtures,output,*,prepared_library):
         with ReaderBoundEditorCommand(api,process,before['bindingBefore'],'CTRL_S',record,save_deadline) as command:
             command.press()
         require_actions(record)
-        def saved():
-            raw=source.read_bytes();cells=read_cells(raw)
-            if cells['a1Text']==baseline['a1Text']:return False
-            require_grid(cells,baseline,expected)
-            return dict(sha256=hashlib.sha256(raw).hexdigest(),bytes=len(raw),cells=cells)
         record['stage']='wait-exact-durable-workbook'
+        read_receipt=record['savedWorkbookRead']={}
         remaining=save_deadline-time.monotonic();assert remaining>0,'Original Calc save deadline expired'
-        record['persisted']=wait_for(saved,remaining)
+        record['persisted']=wait_for(lambda:saving_workbook_snapshot(source,baseline,expected,save_deadline,read_receipt),remaining)
         assert time.monotonic()<=save_deadline,'Original Calc save deadline expired during durable workbook observation'
         assert record['persisted']['sha256']!=record['sourceSha256']
         assert not api.windows(office_pid),'Office created an unowned visible top-level window'

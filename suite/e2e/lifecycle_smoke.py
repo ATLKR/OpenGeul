@@ -11,6 +11,7 @@ from collections import Counter
 import ctypes
 from ctypes import wintypes
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -74,7 +75,11 @@ def owned_target(folder, name):
 
 def writer_evidence(path, required=(), forbidden=()):
     unlinked(path)
-    with zipfile.ZipFile(path) as package:
+    return writer_evidence_bytes(path.read_bytes(),required,forbidden)
+
+
+def writer_evidence_bytes(payload, required=(), forbidden=()):
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
         assert package.testzip() is None, 'Saved Writer package has a corrupt ZIP member'
         document = ET.fromstring(package.read('word/document.xml'))
         body = document.find(WRITER_NS + 'body')
@@ -92,7 +97,7 @@ def writer_evidence(path, required=(), forbidden=()):
         assert text.count(marker) == 1, 'Writer body must contain the exact marker once: ' + marker
     for marker in forbidden:
         assert marker not in text, 'Writer body contains a forbidden marker: ' + marker
-    return {'sha256': digest(path), 'bytes': path.stat().st_size, 'bodyText': text,
+    return {'sha256': hashlib.sha256(payload).hexdigest(), 'bytes': len(payload), 'bodyText': text,
             'bodyParagraphs': paragraphs, 'requiredMarkers': list(required), 'forbiddenMarkers': list(forbidden)}
 
 
@@ -930,13 +935,23 @@ class Case:
 
     def saved(self, hwnd, path, required, forbidden=()):
         self.record['stage'] = 'verify-saved-body'
+        deadline=time.monotonic()+35
+        receipt={}
+        self.record.setdefault('savedReadObservations',[]).append(receipt)
         def persisted():
-            if not path.is_file(): return None
-            evidence = writer_evidence(path)
+            assert time.monotonic()<deadline,'Original lifecycle save deadline expired'
+            unlinked(path)
+            payload=native.read_saving_document(path,deadline,receipt)
+            if payload is None:return None
+            evidence = writer_evidence_bytes(payload)
+            assert time.monotonic()<deadline,'Original lifecycle save deadline expired after parsing'
             if any(evidence['bodyText'].count(marker) != 1 for marker in required): return None
             if any(marker in evidence['bodyText'] for marker in forbidden): return None
-            return writer_evidence(path, required, forbidden)
-        evidence = native.wait_for(persisted, 35)
+            result=writer_evidence_bytes(payload,required,forbidden)
+            assert time.monotonic()<deadline,'Original lifecycle save deadline expired after validation'
+            return result
+        evidence = native.wait_for(persisted,deadline-time.monotonic())
+        assert time.monotonic()<deadline,'Original lifecycle save deadline expired'
         native.wait_for(lambda: not self.api.title(hwnd).startswith('* '), 12)
         self.record.setdefault('savedDocuments', []).append({'path': str(path), **evidence})
         return evidence

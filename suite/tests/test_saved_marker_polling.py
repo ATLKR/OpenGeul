@@ -12,6 +12,21 @@ from suite.tests.test_native_smoke import smoke
 class SavedMarkerPollingTests(unittest.TestCase):
     marker = 'UI-OpenGeul-calc'
 
+    def test_shared_byte_boundary_retries_only_read_errors_and_preserves_empty_bytes(self):
+        receipt={};source=unittest.mock.Mock()
+        source.read_bytes.side_effect=[PermissionError(13,'denied'),FileNotFoundError(2,'missing'),b'']
+        with patch.object(smoke.time,'monotonic',return_value=1.):
+            self.assertIsNone(smoke.read_saving_document(source,2.,receipt))
+            self.assertIsNone(smoke.read_saving_document(source,2.,receipt))
+            self.assertEqual(smoke.read_saving_document(source,2.,receipt),b'')
+            source.read_bytes.side_effect=IsADirectoryError(21,'not a file')
+            with self.assertRaises(IsADirectoryError):smoke.read_saving_document(source,2.,receipt)
+        self.assertEqual(receipt['transientCount'],2)
+        self.assertEqual(receipt['attempts'],4)
+        with patch.object(smoke.time,'monotonic',return_value=2.):
+            with self.assertRaisesRegex(AssertionError,'save deadline'):smoke.read_saving_document(source,2.,receipt)
+        self.assertEqual(source.read_bytes.call_count,4)
+
     def package(self, text=None):
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, 'w') as archive:

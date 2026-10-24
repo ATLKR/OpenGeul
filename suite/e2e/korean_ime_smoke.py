@@ -10,6 +10,7 @@ import argparse
 import ctypes
 from ctypes import wintypes as W
 import hashlib
+import io
 import json
 import mmap
 import math
@@ -647,6 +648,20 @@ def utf16(array):
     return bytes(array).decode('utf-16-le').split('\0', 1)[0]
 
 
+def wait_saved_ime_marker(source, module, deadline, record):
+    from windows_smoke import read_saving_document
+    receipt=record.setdefault('imeSavedRead',{})
+    def persisted():
+        payload=read_saving_document(source,deadline,receipt)
+        if payload is None:return False
+        text=package_text(io.BytesIO(payload))
+        remaining_setup(deadline,30)
+        return marker(module) in text
+    result=wait_for(persisted,remaining_setup(deadline,30))
+    remaining_setup(deadline,30)
+    return result
+
+
 def remaining_setup(deadline, old_limit, *, clock=None):
     if deadline is None:
         return old_limit
@@ -1195,7 +1210,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         record['stage'] = 'save-ctrl-s'
         keyboard.save()
         keyboard.close()
-        wait_for(lambda: marker(module) in package_text(source), remaining_setup(save_deadline, 30))
+        wait_saved_ime_marker(source,module,save_deadline,record)
         wait_for(lambda: not api.title(hwnd).startswith('* '), remaining_setup(save_deadline, 10))
         record['savedText'] = package_text(source)
         window.capture_as_image().save(output / (name + '-saved.png'))

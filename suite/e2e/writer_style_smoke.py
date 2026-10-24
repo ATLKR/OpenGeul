@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -33,14 +34,36 @@ COPY = 'fixtures/writer-heading1.docx'
 
 
 def docx_style_evidence(path):
-    evidence = lifecycle.writer_evidence(path)
-    with zipfile.ZipFile(path) as package:
+    lifecycle.unlinked(path)
+    return docx_style_evidence_bytes(path.read_bytes())
+
+
+def docx_style_evidence_bytes(payload):
+    evidence = lifecycle.writer_evidence_bytes(payload)
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
         root = ET.fromstring(package.read('word/document.xml'))
     first = root.find('w:body/w:p', {'w': WORD_NS})
     assert first is not None, 'Writer fixture has no first body paragraph'
     style = first.find('w:pPr/w:pStyle', {'w': WORD_NS})
     evidence['firstParagraphStyleId'] = style.get('{' + WORD_NS + '}val') if style is not None else None
     return evidence
+
+
+def wait_saved_style(source, baseline, deadline, record):
+    receipt=record.setdefault('savedStyleRead',{})
+    def budget():
+        assert time.monotonic()<deadline,'Original Writer style save deadline expired'
+    def persisted():
+        budget();lifecycle.unlinked(source)
+        payload=native.read_saving_document(source,deadline,receipt)
+        if payload is None:return None
+        evidence=docx_style_evidence_bytes(payload)
+        budget()
+        return saved_style_ready(baseline,evidence)
+    budget()
+    result=native.wait_for(persisted,deadline-time.monotonic())
+    budget()
+    return result
 
 
 def require_saved_style(baseline, saved):
@@ -187,10 +210,8 @@ def run_gui(suite, fixtures, output):
         record['physicalStyleShortcutSent'] = True
         record['stage'] = 'save-via-suite-menu'
         click_suite_save(api, process, hwnd, record)
-        def persisted():
-            evidence = docx_style_evidence(source)
-            return saved_style_ready(baseline, evidence)
-        record['savedDocument'] = native.wait_for(persisted, 35)
+        save_deadline=time.monotonic()+35
+        record['savedDocument'] = wait_saved_style(source,baseline,save_deadline,record)
         native.wait_for(lambda: not api.title(hwnd).startswith('* '), 12)
         record.update(docxHeading1Verified=True, textUnchanged=True)
         record['stage'] = 'capture-saved-editor'

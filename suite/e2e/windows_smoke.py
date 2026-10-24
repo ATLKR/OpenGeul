@@ -486,6 +486,34 @@ def package_text(path):
                          and name.endswith('.xml'))
 
 
+def _record_save_read_transient(receipt, exc):
+    row=dict(kind=type(exc).__name__,errno=getattr(exc,'errno',None),
+             winerror=getattr(exc,'winerror',None),observedAt=time.monotonic())
+    receipt['transientCount']+=1
+    receipt.setdefault('firstTransient',row);receipt['lastTransient']=row
+
+
+def read_saving_document(source, deadline, receipt):
+    """Read one save-readiness snapshot; None requests another bounded poll.
+
+    Only read errors are retryable here. Parsing, input and independent final
+    reads retain their own fatal checks. Empty bytes are not a retry sentinel.
+    """
+    def budget():
+        assert time.monotonic()<deadline,'Original document save deadline expired during byte observation'
+    budget()
+    receipt.setdefault('deadline',deadline)
+    assert receipt['deadline']==deadline,'Original document save deadline changed'
+    receipt.setdefault('attempts',0);receipt.setdefault('transientCount',0)
+    receipt['attempts']+=1
+    try:
+        raw=source.read_bytes()
+    except (PermissionError,FileNotFoundError) as exc:
+        _record_save_read_transient(receipt,exc);budget();return None
+    budget()
+    return raw
+
+
 def wait_saved_marker(source, marker, before_sha256, deadline, record):
     """Observe this generated document's save under its original deadline.
 
@@ -495,22 +523,13 @@ def wait_saved_marker(source, marker, before_sha256, deadline, record):
     receipt=record['savedMarkerRead']=dict(deadline=deadline,attempts=0,transientCount=0)
     def budget():
         assert time.monotonic()<deadline,'Original GUI save deadline expired during persisted-marker observation'
-    def transient(exc):
-        row=dict(kind=type(exc).__name__,errno=getattr(exc,'errno',None),
-                 winerror=getattr(exc,'winerror',None),observedAt=time.monotonic())
-        receipt['transientCount']+=1
-        receipt.setdefault('firstTransient',row);receipt['lastTransient']=row
     def check():
-        budget();receipt['attempts']+=1
-        try:
-            payload=source.read_bytes()
-        except (PermissionError,FileNotFoundError) as exc:
-            transient(exc);budget();return False
-        budget()
+        payload=read_saving_document(source,deadline,receipt)
+        if payload is None:return False
         try:
             text=package_text(io.BytesIO(payload))
         except zipfile.BadZipFile as exc:
-            transient(exc);budget();return False
+            _record_save_read_transient(receipt,exc);budget();return False
         budget()
         if marker not in text:return False
         digest=hashlib.sha256(payload).hexdigest()
