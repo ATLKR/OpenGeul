@@ -96,6 +96,7 @@ void start(const CWPSTRUCT& message) {
        || shared->captureVersion!=OpenGeulAscii::CaptureVersion || shared->captureEnabled>1
        || shared->captureCount || shared->captureOverflow || shared->captureRejected || shared->captureExpired
        || shared->captureReserved || shared->capturePadding
+       || shared->retrievalVersion!=OpenGeulAscii::RetrievalVersion || shared->retrievalClaimed || shared->retrievalRejected || shared->retrievalExpired
        || (shared->captureEnabled ? (!shared->captureDeadline || !shared->captureFrequency || shared->traceEnabled)
                                   : (shared->captureDeadline || shared->captureFrequency))
        || load(&shared->readiness.request) || load(&shared->readiness.ack)
@@ -261,6 +262,94 @@ void traceNavigation(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,std::uint32_t or
     event.layout=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)));
     publish(&event.sequence,index+1);
 }
+// Bounded retrieval metadata is independent of the already committed capture row.
+static bool retrievalReading=false;
+static const wchar_t* const retrievalModules[]={L"mergedlo.dll",L"vcllo.dll",L"sal3.dll",L"user32.dll",L"win32u.dll",L"ntdll.dll",L"kernel32.dll",L"kernelbase.dll",L"combase.dll",L"ole32.dll",L"imm32.dll",L"msctf.dll",L"imkrtip.dll"};
+bool retrievalClock(std::uint64_t& counter) {
+    if(captureClock(counter))return true;
+    if(load(&shared->captureExpired))publish(&shared->retrievalExpired,1);
+    else publish(&shared->retrievalRejected,load(&shared->retrievalRejected)|4);
+    return false;
+}
+void traceRetrieval(const MSG& message,WPARAM removalFlags,std::uint32_t captureSequence) {
+    if(!shared || stopped || !load(&shared->captureEnabled) || !load(&shared->recording))return;
+    if(message.message!=0x201 && message.message!=0x202)return;
+    if(removalFlags!=1 && removalFlags!=3)return;
+    if(std::uint64_t(reinterpret_cast<std::uintptr_t>(message.hwnd))!=shared->hwnd)return;
+    if(retrievalReading){publish(&shared->retrievalRejected,load(&shared->retrievalRejected)|2);return;}
+    std::uint64_t stamp=0;if(!retrievalClock(stamp))return;
+    if(ownerThread!=GetCurrentThreadId())return;
+    if(!retrievalClock(stamp))return;
+    const std::uint32_t bucket=message.message==0x201?0:(removalFlags==1?1:2), bit=1u<<bucket;
+    if(load(&shared->retrievalClaimed)&bit)return;
+    if(!header(shared) || shared->retrievalVersion!=OpenGeulAscii::RetrievalVersion || !captureSequence || captureSequence>OpenGeulAscii::CaptureCapacity) {
+        publish(&shared->retrievalRejected,load(&shared->retrievalRejected)|1);return;
+    }
+    const auto& capture=shared->captureEvents[captureSequence-1];
+    if(load(&capture.sequence)!=static_cast<LONG>(captureSequence) || capture.origin!=1 || capture.message!=message.message || capture.removeFlags!=removalFlags
+       || capture.hwnd!=shared->hwnd || capture.pid!=shared->pid || capture.tid!=shared->tid || capture.engineCreationTime!=shared->engineCreationTime
+       || capture.wParam!=std::uint64_t(message.wParam) || capture.lParam!=std::uint64_t(message.lParam) || capture.frequency!=shared->captureFrequency || capture.finishedCounter>stamp) {
+        publish(&shared->retrievalRejected,load(&shared->retrievalRejected)|1);return;
+    }
+    retrievalReading=true;struct Exit {~Exit(){retrievalReading=false;}} exit;
+    publish(&shared->retrievalClaimed,load(&shared->retrievalClaimed)|bit);
+    OpenGeulAscii::RetrievalEvent row{};
+    row.captureSequence=captureSequence;row.bucket=bucket;row.message=message.message;row.removeFlags=static_cast<std::uint32_t>(removalFlags);
+    row.pid=capture.pid;row.tid=capture.tid;row.hwnd=capture.hwnd;row.engineCreationTime=capture.engineCreationTime;
+    row.counter=stamp;row.frequency=shared->captureFrequency;row.lParam=capture.lParam;
+    row.pointX=message.pt.x;row.pointY=message.pt.y;
+    POINT origin{};
+    if(!retrievalClock(stamp))return;
+    row.originSucceeded=ClientToScreen(message.hwnd,&origin)?1:0;
+    if(!row.originSucceeded){row.originError=GetLastError();row.flags|=1;}
+    if(!retrievalClock(stamp))return;
+    if(row.originSucceeded){row.clientOriginX=origin.x;row.clientOriginY=origin.y;}
+    if(bucket) {
+        row.stackRequested=1;
+        void* addresses[OpenGeulAscii::RetrievalFrames]{};
+        struct Clear {void** p;~Clear(){for(std::uint32_t i=0;i<OpenGeulAscii::RetrievalFrames;++i)*reinterpret_cast<void* volatile*>(p+i)=nullptr;}} clear{addresses};
+        if(!retrievalClock(stamp))return;
+        const auto count=CaptureStackBackTrace(0,OpenGeulAscii::RetrievalFrames,addresses,nullptr);
+        if(!retrievalClock(stamp))return;
+        if(count>OpenGeulAscii::RetrievalFrames){publish(&shared->retrievalRejected,load(&shared->retrievalRejected)|1);return;}
+        row.frameCount=count;row.frameCapReached=count==OpenGeulAscii::RetrievalFrames?1:0;
+        if(!count)row.flags|=2;
+        HMODULE modules[sizeof(retrievalModules)/sizeof(*retrievalModules)]{};
+        for(std::size_t i=0;i<sizeof(modules)/sizeof(*modules);++i) {
+            if(!retrievalClock(stamp))return;
+            modules[i]=GetModuleHandleW(retrievalModules[i]);
+            if(!retrievalClock(stamp))return;
+        }
+        for(std::uint32_t i=0;i<count;++i) {
+            HMODULE module=nullptr,again=nullptr;
+            if(!retrievalClock(stamp))return;
+            const bool mapped=GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<const wchar_t*>(addresses[i]),&module)!=0;
+            if(!retrievalClock(stamp))return;
+            if(!mapped)row.flags|=4;
+            std::uint32_t id=0;
+            for(std::uint32_t j=0;j<sizeof(modules)/sizeof(*modules);++j)if(module && module==modules[j]){id=j+1;break;}
+            if(mapped && id) {
+                if(!retrievalClock(stamp))return;
+                const bool remapped=GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<const wchar_t*>(addresses[i]),&again)!=0;
+                if(!retrievalClock(stamp))return;
+                if(!remapped)row.flags|=4;
+                if(!retrievalClock(stamp))return;
+                const auto named=GetModuleHandleW(retrievalModules[id-1]);
+                if(!retrievalClock(stamp))return;
+                const auto address=reinterpret_cast<std::uintptr_t>(addresses[i]),base=reinterpret_cast<std::uintptr_t>(module);
+                if(remapped && again==module && named==module && address>=base && address-base<=0xffffffffu) {
+                    row.frames[i].moduleId=id;row.frames[i].rva=static_cast<std::uint32_t>(address-base);
+                } else row.flags|=8;
+            }
+            if(!row.frames[i].moduleId)++row.unknownFrames;
+        }
+    }
+    if(!retrievalClock(row.finishedCounter))return;
+    shared->retrievalEvents[bucket]=row;
+    publish(&shared->retrievalEvents[bucket].sequence,bucket+1);
+}
 void observe(const MSG& message,WPARAM removed) {
     if(!shared || stopped || !load(&shared->recording) || ownerThread!=GetCurrentThreadId()) return;
     if(message.message<WM_KEYDOWN || message.message>WM_UNICHAR) return;
@@ -314,7 +403,12 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPA
     if(code==HC_ACTION && lp) {
         const auto& message=*reinterpret_cast<const MSG*>(lp);
         if(wp==PM_REMOVE) traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,1);
-        if((wp & PM_REMOVE)!=0) traceCapture(message.hwnd,message.message,message.wParam,message.lParam,1,wp);
+        if((wp & PM_REMOVE)!=0) {
+            const auto before=shared && load(&shared->captureEnabled)?loadSigned(&shared->captureCount):0;
+            traceCapture(message.hwnd,message.message,message.wParam,message.lParam,1,wp);
+            if(shared && load(&shared->captureEnabled) && loadSigned(&shared->captureCount)==before+1)
+                traceRetrieval(message,wp,static_cast<std::uint32_t>(before+1));
+        }
         observe(message,wp);
     }
     return CallNextHookEx(nullptr,code,wp,lp);

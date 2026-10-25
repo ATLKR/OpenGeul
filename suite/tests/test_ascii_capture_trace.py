@@ -87,6 +87,8 @@ struct Callback {~Callback(){}};
 int navigationCalls=0,observeCalls=0;
 void traceNavigation(HWND,UINT,WPARAM,LPARAM,uint32_t){++navigationCalls;}
 void observe(const MSG&,WPARAM){++observeCalls;}
+int retrievalCalls=0;
+void traceRetrieval(const MSG&,WPARAM,uint32_t sequence){++retrievalCalls;assert(shared->captureEvents[sequence-1].sequence==sequence);}
 LRESULT CallNextHookEx(void*,int,WPARAM,LPARAM){return 0;}
 '''
         checks='static_assert(sizeof(OpenGeulAscii::State)=='+str(C.sizeof(p.State))+');\n'
@@ -118,7 +120,7 @@ int main(){
  assert(shared->captureCount==0 && navigationCalls==0);
  HookGet(HC_ACTION,1,reinterpret_cast<LPARAM>(&msg));HookGet(HC_ACTION,3,reinterpret_cast<LPARAM>(&msg));
  assert(shared->captureCount==2 && shared->captureEvents[0].removeFlags==1 && shared->captureEvents[1].removeFlags==3);
- assert(navigationCalls==1 && observeCalls==4);
+ assert(navigationCalls==1 && observeCalls==4 && retrievalCalls==2);
 }
 '''
         with tempfile.TemporaryDirectory() as temporary:

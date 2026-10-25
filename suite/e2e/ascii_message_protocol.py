@@ -47,6 +47,19 @@ class CaptureEvent(C.Structure):
     _fields_=[(name,C.c_uint32) for name in ('sequence','origin','message','pid','tid','callbackDepth','removeFlags','reserved')]
     _fields_ += [(name,C.c_uint64) for name in ('hwnd','engineCreationTime','focusHwnd','captureHwnd','counter','finishedCounter','frequency','nativeTick','wParam','lParam')]
 
+RETRIEVAL_VERSION=1
+RETRIEVAL_CAPACITY=3
+RETRIEVAL_FRAMES=16
+RETRIEVAL_MODULES={1:'mergedlo.dll',2:'vcllo.dll',3:'sal3.dll',4:'user32.dll',5:'win32u.dll',6:'ntdll.dll',7:'kernel32.dll',8:'kernelbase.dll',9:'combase.dll',10:'ole32.dll',11:'imm32.dll',12:'msctf.dll',13:'imkrtip.dll'}
+class RetrievalFrame(C.Structure):
+    _fields_=[('moduleId',C.c_uint32),('rva',C.c_uint32)]
+class RetrievalEvent(C.Structure):
+    _fields_=[(name,C.c_uint32) for name in ('sequence','captureSequence','bucket','message','removeFlags','pid','tid','flags')]
+    _fields_ += [(name,C.c_uint64) for name in ('hwnd','engineCreationTime','counter','finishedCounter','frequency','lParam')]
+    _fields_ += [(name,C.c_int32) for name in ('pointX','pointY','clientOriginX','clientOriginY')]
+    _fields_ += [(name,C.c_uint32) for name in ('originSucceeded','originError','stackRequested','frameCount','frameCapReached','unknownFrames','reserved0','reserved1')]
+    _fields_ += [('frames',RetrievalFrame*RETRIEVAL_FRAMES)]
+
 class State(C.Structure):
     _fields_ = [(name, C.c_uint32) for name in
         ('magic', 'version', 'stateSize', 'eventSize', 'capacity', 'pid', 'tid', 'controllerPid',
@@ -60,13 +73,16 @@ class State(C.Structure):
     _fields_ += [('captureVersion',C.c_uint32),('captureEnabled',C.c_uint32),('captureCount',C.c_int32),('captureOverflow',C.c_int32)]
     _fields_ += [(name,C.c_uint32) for name in ('captureRejected','captureExpired','captureReserved','capturePadding')]
     _fields_ += [('captureDeadline',C.c_uint64),('captureFrequency',C.c_uint64),('captureEvents',CaptureEvent * CAPTURE_CAPACITY)]
+    _fields_ += [(name,C.c_uint32) for name in ('retrievalVersion','retrievalClaimed','retrievalRejected','retrievalExpired')]
+    _fields_ += [('retrievalEvents',RetrievalEvent*RETRIEVAL_CAPACITY)]
 
 
 assert C.sizeof(Event) == 96 and State.events.offset == 456
 assert C.sizeof(QueueSample) == 328 and C.sizeof(Readiness) == 336 and State.readiness.offset == 120
 assert C.sizeof(TraceEvent) == 104 and State.traceVersion.offset == 456 + CAPACITY * 96
 assert State.captureVersion.offset == 407008 and C.sizeof(CaptureEvent) == 112
-assert C.sizeof(State) == 407008 + 48 + CAPTURE_CAPACITY * 112
+assert State.retrievalVersion.offset==421392 and C.sizeof(RetrievalEvent)==256
+assert C.sizeof(State)==422176
 
 
 def committed_events(raw, *, after):

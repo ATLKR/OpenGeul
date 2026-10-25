@@ -35,7 +35,8 @@ class AsciiMessageProtocolTests(unittest.TestCase):
         self.assertEqual(456, p.State.events.offset)
         self.assertEqual(456 + 4096 * 96, p.State.traceVersion.offset)
         self.assertEqual(407008,p.State.captureVersion.offset)
-        self.assertEqual(421392, ctypes.sizeof(p.State))
+        self.assertEqual(421392,p.State.retrievalVersion.offset)
+        self.assertEqual(422176, ctypes.sizeof(p.State))
         self.assertEqual(8, ctypes.alignment(p.State))
 
     def test_full_handle_filetime_and_signed_modifier_state_survive_decoding(self):

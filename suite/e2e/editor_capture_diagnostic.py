@@ -332,6 +332,8 @@ class EditorCaptureDiagnostic:
         watch.update(traceStatus=snapshot.get('status'),traceOverflow=snapshot.get('overflow'),
             traceRejected=snapshot.get('rejected'),traceExpired=snapshot.get('expired'),
             committedEvents=len(snapshot.get('events',[])),
+            retrievalStatus=snapshot.get('retrieval',{}).get('status','unavailable'),
+            retrievalRecords=len(snapshot.get('retrieval',{}).get('records',[])),
             eventsDefinitelyAfterReadiness=sum(row.get('counter',0)>boundary['counterAfter'] for row in snapshot.get('events',[])),
             terminalCopyCoverage=self.receipt['terminalCopyCoverage'],
             continuousFocusOrCaptureStateProved=False,coverage='bounded message transitions only; absence is not continuous-state proof')

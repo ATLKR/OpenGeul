@@ -44,6 +44,16 @@ struct CaptureEvent {
                   frequency, nativeTick, wParam, lParam;
 };
 
+constexpr std::uint32_t RetrievalVersion=1, RetrievalCapacity=3, RetrievalFrames=16;
+struct RetrievalFrame {std::uint32_t moduleId,rva;};
+struct RetrievalEvent {
+    std::uint32_t sequence,captureSequence,bucket,message,removeFlags,pid,tid,flags;
+    std::uint64_t hwnd,engineCreationTime,counter,finishedCounter,frequency,lParam;
+    std::int32_t pointX,pointY,clientOriginX,clientOriginY;
+    std::uint32_t originSucceeded,originError,stackRequested,frameCount,frameCapReached,unknownFrames,reserved0,reserved1;
+    RetrievalFrame frames[RetrievalFrames];
+};
+
 struct State {
     std::uint32_t magic, version, stateSize, eventSize, capacity, pid, tid, controllerPid;
     std::uint32_t startMessage, stopMessage, recording, ack;
@@ -62,6 +72,8 @@ struct State {
     std::uint32_t captureRejected,captureExpired,captureReserved,capturePadding;
     std::uint64_t captureDeadline,captureFrequency;
     CaptureEvent captureEvents[CaptureCapacity];
+    std::uint32_t retrievalVersion,retrievalClaimed,retrievalRejected,retrievalExpired;
+    RetrievalEvent retrievalEvents[RetrievalCapacity];
 };
 
 static_assert(sizeof(Event) == 96);
@@ -75,6 +87,8 @@ static_assert(sizeof(TraceEvent) == 104);
 static_assert(offsetof(State, traceVersion) == 456 + Capacity * sizeof(Event));
 static_assert(offsetof(State,captureVersion) == 407008);
 static_assert(sizeof(CaptureEvent) == 112);
-static_assert(sizeof(State) == 407008 + 48 + CaptureCapacity * sizeof(CaptureEvent));
+static_assert(offsetof(State,retrievalVersion)==421392);
+static_assert(sizeof(RetrievalEvent)==256);
+static_assert(sizeof(State)==422176);
 static_assert(alignof(State) == 8);
 }  // namespace OpenGeulAscii

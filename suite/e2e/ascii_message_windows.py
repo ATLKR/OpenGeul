@@ -11,7 +11,7 @@ from pathlib import Path
 import time
 import uuid
 
-from ascii_message_protocol import State, Event, QueueSample, Readiness, MAGIC, VERSION, CAPACITY, TraceEvent, TRACE_VERSION, TRACE_CAPACITY, CaptureEvent, CAPTURE_VERSION, CAPTURE_CAPACITY, CAPTURE_MESSAGES
+from ascii_message_protocol import State, Event, QueueSample, Readiness, MAGIC, VERSION, CAPACITY, TraceEvent, TRACE_VERSION, TRACE_CAPACITY, CaptureEvent, CAPTURE_VERSION, CAPTURE_CAPACITY, CAPTURE_MESSAGES, RetrievalEvent, RETRIEVAL_VERSION, RETRIEVAL_CAPACITY, RETRIEVAL_FRAMES, RETRIEVAL_MODULES
 from ascii_queue_readiness import MAX_QUERIES, retain_sample, require_initial_queue_sample
 from counted_editor_shortcuts import (CountedEditorShortcuts, NativeShortcutProbe,
     join_shortcut_generation, _same_image)
@@ -170,6 +170,7 @@ class MessageTransport:
         assert (self.state.traceVersion,self.state.traceEnabled,self.state.traceReserved)==(TRACE_VERSION,int(self.diagnostic_mode),0),'Navigation trace immutable header changed'
         assert (self.state.captureVersion,self.state.captureEnabled,self.state.captureReserved,self.state.capturePadding)==(CAPTURE_VERSION,int(self.capture_diagnostic_mode),0,0),'Capture trace immutable header changed'
         assert (self.state.captureDeadline,self.state.captureFrequency)==self.capture_budget,'Capture trace original budget changed'
+        assert self.state.retrievalVersion==RETRIEVAL_VERSION,'Retrieval trace immutable header changed'
         assert self.state.readinessReserved == 0, 'ASCII observer readiness reserved field changed'
         assert self._read('overflow') == self._read('status') == 0, 'ASCII observer native overflow/status failed'
         count = self._read('count')
@@ -230,7 +231,7 @@ class MessageTransport:
             eventSize=C.sizeof(Event), capacity=CAPACITY, pid=self.target['pid'], tid=self.target['tid'],
             controllerPid=self.controller_pid, startMessage=self.start_message, stopMessage=self.stop_message,
             readinessMessage=self.readiness_message,traceVersion=TRACE_VERSION,traceEnabled=int(self.diagnostic_mode),
-            captureVersion=CAPTURE_VERSION,captureEnabled=int(self.capture_diagnostic_mode),
+            captureVersion=CAPTURE_VERSION,captureEnabled=int(self.capture_diagnostic_mode),retrievalVersion=RETRIEVAL_VERSION,
             captureDeadline=self.capture_budget[0],captureFrequency=self.capture_budget[1],
             nonce=self.nonce, hwnd=self.target['hwnd'], engineCreationTime=self.creation, layout=self.target['layout']).items():
             setattr(self.state, key, value)
@@ -365,6 +366,57 @@ class MessageTransport:
             capacity=TRACE_CAPACITY,reservedCount=count,events=rows,semanticHandlerProved=False,
             handleLifetimeProved=False)
 
+    def _retrieval_trace(self, captures):
+        """Fixed local acquire-copy only; never consumes input or resolves symbols."""
+        claimed=self._read('retrievalClaimed');rejected=self._read('retrievalRejected');expired=self._read('retrievalExpired')
+        assert 0<=claimed<=7 and 0<=rejected<=7 and expired in (0,1),'Retrieval trace flags invalid'
+        records=[];pending=[]
+        for bucket in range(RETRIEVAL_CAPACITY):
+            if not claimed & (1<<bucket):continue
+            address=self.view+State.retrievalEvents.offset+bucket*C.sizeof(RetrievalEvent)
+            commit=C.cast(address,C.POINTER(C.c_uint32));sequence=int(self.dll.ReadWord(commit))
+            if not sequence:pending.append(bucket);continue
+            assert sequence==bucket+1,'Retrieval publication bucket changed'
+            row=RetrievalEvent.from_buffer_copy(C.string_at(address,C.sizeof(RetrievalEvent)))
+            assert int(self.dll.ReadWord(commit))==sequence and row.sequence==sequence,'Retrieval changed during copy'
+            assert row.bucket==bucket and not row.reserved0 and not row.reserved1 and 0<=row.flags<=15
+            assert 1<=row.captureSequence<=CAPTURE_CAPACITY,'Retrieval capture index exceeds bound'
+            if row.captureSequence>len(captures):
+                assert row.captureSequence<=self._read('captureCount'),'Retrieval lacks committed capture correlation'
+                pending.append(bucket);continue  # Newer than this copy's capture prefix; do not export it.
+            capture=captures[row.captureSequence-1]
+            assert (capture['sequence'],capture['origin'])==(row.captureSequence,1)
+            assert all(getattr(row,key)==capture[key] for key in ('message','removeFlags','pid','tid','hwnd','engineCreationTime','lParam','frequency')),'Retrieval capture identity changed'
+            assert row.message==(0x201 if bucket==0 else 0x202) and row.removeFlags in ((1,3) if bucket==0 else ((1,) if bucket==1 else (3,)))
+            assert capture['finishedCounter']<=row.counter<=row.finishedCounter<self.capture_budget[0]
+            assert row.frequency==self.capture_budget[1] and row.originSucceeded in (0,1)
+            assert bool(row.flags&1)==(not row.originSucceeded)
+            if row.originSucceeded:assert row.originError==0
+            else:assert row.clientOriginX==row.clientOriginY==0
+            assert row.stackRequested==int(bucket!=0) and 0<=row.frameCount<=RETRIEVAL_FRAMES
+            assert row.frameCapReached==int(row.frameCount==RETRIEVAL_FRAMES)
+            if not bucket:assert row.frameCount==row.unknownFrames==row.frameCapReached==0 and not row.flags&14
+            else:assert bool(row.flags&2)==(row.frameCount==0)
+            frames=[]
+            for index,frame in enumerate(row.frames):
+                assert frame.moduleId in (0,*RETRIEVAL_MODULES)
+                if not frame.moduleId:assert frame.rva==0,'Unknown retrieval frame must be redacted'
+                if index>=row.frameCount:assert frame.moduleId==frame.rva==0
+                else:frames.append(dict(moduleId=int(frame.moduleId),rva=int(frame.rva)))
+            assert row.unknownFrames==sum(frame['moduleId']==0 for frame in frames)
+            result={key:int(getattr(row,key)) for key,_ in RetrievalEvent._fields_ if key not in ('frames','reserved0','reserved1')}
+            result['frames']=frames;records.append(result)
+        final_claimed=self._read('retrievalClaimed')
+        rejected|=self._read('retrievalRejected');expired|=self._read('retrievalExpired')
+        assert 0<=final_claimed<=7 and final_claimed & claimed==claimed and 0<=rejected<=7 and expired in (0,1)
+        pending.extend(bucket for bucket in range(RETRIEVAL_CAPACITY) if final_claimed & (1<<bucket) and not claimed & (1<<bucket))
+        return dict(schemaVersion=RETRIEVAL_VERSION,status='rejected' if rejected else ('expired' if expired else ('partial' if pending or any(row['flags'] for row in records) else 'complete')),
+            claimedMask=final_claimed,pendingBuckets=pending,rejected=rejected,expired=bool(expired),records=records,
+            maxRecords=3,maxStacks=2,maxFrames=16,moduleMapVersion=1,acceptanceEligible=False,
+            coordinates='MSG.pt event screen position and separately sampled client origin in target DPI context; not atomic physical geometry',
+            consumingCallerProved=False,moduleLifetimeContinuityProved=False,handlerCompletionProved=False,
+            otherHooksMayModifyMessage=True,eventAttributionProved=False,unpublishedElapsedKnown=False,nativeCallLatencyBounded=False)
+
     def read_capture_trace(self, *, local_only=False):
         """Bounded local acquire-copy; post-failure mode never queries the target."""
         assert type(local_only) is bool and not self.closed and self.capture_diagnostic_mode
@@ -388,6 +440,7 @@ class MessageTransport:
             rows.append({key:int(getattr(row,key)) for key,_ in CaptureEvent._fields_ if key!='reserved'})
         overflow=self._read('captureOverflow');expired=self._read('captureExpired');rejected=self._read('captureRejected')
         assert overflow in (0,1) and expired in (0,1) and 0<=rejected<=15,'Capture trace flags invalid'
+        retrieval=self._retrieval_trace(rows)
         self._header()
         if not local_only:self.identity();self._budget()
         return dict(schemaVersion=CAPTURE_VERSION,status='rejected' if rejected else ('overflow' if overflow else ('partial' if len(rows)<count else 'complete')),
@@ -395,7 +448,8 @@ class MessageTransport:
             rejectedReasons=[name for bit,name in ((1,'identity-or-header'),(2,'reentrant-observation'),(4,'clock-query-or-configuration'),(8,'invalid-removal-flags')) if rejected & bit],
             deadlineCounter=self.capture_budget[0],counterFrequency=self.capture_budget[1],
             copyPhase='post-failure-local' if local_only else 'live',freshTargetIdentityVerified=not local_only,
-            handlerCompletionProved=False,handleLifetimeProved=False,acceptanceEligible=False)
+            handlerCompletionProved=False,handleLifetimeProved=False,acceptanceEligible=False,
+            retrieval=retrieval)
 
     def can_stop(self):
         return bool(self.hooks and self.view and self.start_message)
