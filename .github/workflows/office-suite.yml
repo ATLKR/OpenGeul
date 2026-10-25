@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: focus-diagnostic
+  OPENGEUL_SUITE_RUN_MODE: sal-offset-mapping
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -37,7 +37,7 @@ jobs:
       id: run-mode
       shell: pwsh
       run: |
-        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic')) {
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping')) {
           throw 'Unknown Suite run mode.'
         }
     - name: 정확한 소스 바이트 보존
@@ -93,14 +93,116 @@ jobs:
         $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
         if ($lock.architecture -cne $architecture -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite lock identity.' }
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - name: Admit static SAL mapping against exact owner-push source
+      id: sal-offset-admission
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping'"
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        . ./suite/scripts/prepare-native31.ps1
+        Assert-Native31Context '${{ matrix.architecture }}'
+        $proof = @'
+        import hashlib, os, pathlib, stat, subprocess, tempfile, time
+        deadline = time.monotonic() + 30
+        def remaining():
+            value = deadline - time.monotonic()
+            if value <= 0:
+                raise TimeoutError('Original static source-admission deadline expired')
+            return value
+        def git(*args):
+            remaining()
+            with tempfile.TemporaryFile() as output:
+                subprocess.run(['git', *args], stdout=output, stderr=subprocess.DEVNULL, check=True, timeout=remaining())
+                remaining()
+                assert output.tell() <= 1048576, 'Static source Git output exceeds bound'
+                output.seek(0)
+                result = output.read(1048577)
+                remaining()
+                return result
+        def regular_ancestors(path):
+            for part in (path, *path.parents):
+                remaining()
+                info = part.lstat()
+                assert not stat.S_ISLNK(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & 1024, 'Static source path is aliased'
+                remaining()
+            return path.stat()
+        assert git('rev-parse', 'HEAD').decode().strip() == os.environ['GITHUB_SHA'], 'Static analysis HEAD differs from event'
+        git('diff', '--cached', '--quiet', 'HEAD', '--')
+        regular_ancestors(pathlib.Path.cwd())
+        total = 0
+        for item in git('ls-tree', '-rz', '--full-tree', 'HEAD').split(b'\0'):
+            remaining()
+            if not item:
+                continue
+            metadata, name = item.split(b'\t', 1)
+            mode, kind, expected = metadata.split()
+            path = pathlib.Path(os.fsdecode(name))
+            if mode == b'160000':
+                assert kind == b'commit' and not path.is_symlink(), 'Invalid tracked gitlink'
+                if path.exists():
+                    regular_ancestors(path)
+                    assert path.is_dir() and next(path.iterdir(), None) is None, 'Static analysis requires uninitialized gitlinks'
+                remaining()
+                continue
+            info = regular_ancestors(path)
+            assert mode in (b'100644', b'100755') and kind == b'blob' and stat.S_ISREG(info.st_mode), 'Static analysis requires regular tracked files'
+            assert info.st_size <= 8388608, 'Static source file exceeds bound'
+            total += info.st_size
+            assert total <= 67108864, 'Static source bytes exceed bound'
+            digest = hashlib.sha1(b'blob ' + str(info.st_size).encode() + b'\0')
+            with path.open('rb') as source:
+                opened = os.fstat(source.fileno())
+                assert (opened.st_dev, opened.st_ino, opened.st_size) == (info.st_dev, info.st_ino, info.st_size), 'Static source changed before read'
+                seen = 0
+                while True:
+                    remaining()
+                    chunk = source.read(min(1048576, info.st_size - seen + 1))
+                    remaining()
+                    if not chunk:
+                        break
+                    seen += len(chunk)
+                    assert seen <= info.st_size, 'Static source grew during read'
+                    digest.update(chunk)
+                assert seen == info.st_size, 'Static source shrank during read'
+            after = regular_ancestors(path)
+            assert (after.st_dev, after.st_ino, after.st_size) == (info.st_dev, info.st_ino, info.st_size), 'Static source changed during read'
+            assert digest.hexdigest().encode() == expected, 'Static analysis tracked bytes differ from event'
+        remaining()
+        '@
+        $proof | python -
+        if ($LASTEXITCODE -ne 0) { throw 'Static SAL source admission failed.' }
     - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
-      if: matrix.architecture == 'arm64'
+      id: source-engine
+      if: "matrix.architecture == 'arm64' && (env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' || steps.sal-offset-admission.outcome == 'success')"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
       run: |
         ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath suite/config/runtime.arm64.lock.json -Output .work/source-engine-input
+    - name: Map observed SAL offset from locked ARM64 bytes (not acceptance)
+      id: sal-offset-mapping
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/map-sal-offset.py --archive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip --lock suite/config/runtime.arm64.lock.json --output .work/suite-sal-offset-mapping/receipt.json
+        if ($LASTEXITCODE -ne 0) { throw 'Static SAL mapping rejected its input.' }
+    - name: Retain only static SAL mapping receipt
+      id: sal-offset-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' && matrix.architecture == 'arm64' && steps.sal-offset-mapping.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-sal-offset-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-sal-offset-mapping/receipt.json
+        retention-days: 7
+        if-no-files-found: error
+    - name: Static SAL mapping cannot qualify a Suite package
+      id: sal-offset-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping'"
+      shell: pwsh
+      run: |
+        throw 'Static SAL mapping only: full Suite acceptance was not run; package delivery is prohibited.'
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping'"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -137,7 +239,7 @@ jobs:
         $ErrorActionPreference = 'Stop'
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
     - name: Suite native31 setup and control originals
-      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64'"
+      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}

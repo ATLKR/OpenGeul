@@ -213,3 +213,12 @@ The intentionally incomplete keyboard session and any primary failure are
 retained. Queue removal is not proof of handler execution. Separate
 `opengeul-suite-focus-diagnostic-<arch>-<run>-<attempt>` evidence cannot qualify
 acceptance or package delivery.
+
+`sal-offset-mapping` performs file-only analysis of the observed ARM64 SAL return
+offset. Both architectures retain native unit and shell checks. Exact owner-push,
+first-attempt, HEAD and tracked-byte admission precedes the existing authenticated
+ARM64 engine fetch. The bounded parser reads only the locked `program/sal3.dll`
+member as data; it does not launch Office or prepare a desktop/IME session.
+Only `.work/suite-sal-offset-mapping/receipt.json` is uploaded, never the engine
+archive or DLL. A deliberate terminal failure prevents package qualification.
+Existing GUI modes retain their preparation, privacy and acceptance gates.

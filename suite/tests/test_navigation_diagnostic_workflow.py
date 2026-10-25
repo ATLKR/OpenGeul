@@ -13,10 +13,10 @@ def condition(step):
 
 class NavigationDiagnosticWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_validation_reject_unknown_values(self):
-        self.assertIn("OPENGEUL_SUITE_RUN_MODE: focus-diagnostic",WORKFLOW.read_text())
+        self.assertIn("OPENGEUL_SUITE_RUN_MODE: sal-offset-mapping",WORKFLOW.read_text())
         step=next(s for s in workflow_steps() if field(s,'id')=='run-mode')
         code=run_code(step)
-        self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic')",code)
+        self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping')",code)
         self.assertIn("throw 'Unknown Suite run mode.'",code)
 
     def test_diagnostic_requires_every_original_prerequisite(self):
@@ -24,7 +24,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
         value=condition(step)
         self.assertEqual(value, "!cancelled() && "+DIAGNOSTIC+" && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'")
         prerequisites=('build','readiness','native31-privacy-prepare','fixtures')
-        for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','unknown',''):
+        for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','unknown',''):
             for failed in (None,*prerequisites):
                 expression=value.replace('!cancelled()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('&&','and')
                 for prerequisite in prerequisites:
@@ -49,7 +49,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                 self.assertTrue(value.endswith(')'),value)
                 self.assertIn(value[len(MODE+' && ('):-1],originals)
         delivery=condition(steps[-1])
-        for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','unknown',''):
+        for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','unknown',''):
             for success in (True,False):
                 for home in ('success','failure','skipped'):
                     expression=delivery.replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('success()',str(success)).replace('steps.home-routes.outcome',repr(home)).replace('&&','and')
@@ -76,7 +76,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                 prerequisites=('build','readiness','native31-privacy-prepare','fixtures')
                 expected="!cancelled() && "+mode+"".join(" && steps."+p+".outcome == 'success'" for p in prerequisites)
                 self.assertEqual(condition(step),expected)
-                for run_mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','unknown',''):
+                for run_mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','unknown',''):
                     for failed in (None,*prerequisites):
                         expression=condition(step).replace('!cancelled()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(run_mode)).replace('&&','and')
                         for p in prerequisites:
@@ -96,5 +96,5 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
 
     def test_shared_preparation_is_not_conditioned_on_diagnostic_mode(self):
         for step in workflow_steps():
-            if field(step,'id') in ('build','readiness','native31-privacy-prepare','fixtures'):
+            if field(step,'id') in ('readiness','native31-privacy-prepare','fixtures'):
                 self.assertNotIn('OPENGEUL_SUITE_RUN_MODE',condition(step) or '')
