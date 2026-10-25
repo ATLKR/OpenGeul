@@ -187,3 +187,14 @@ rows are inconclusive. Window-procedure return does not prove a particular
 application shortcut handler ran. A substantive corrective commit must select
 `acceptance` and pass every normal gate on both architectures before delivery.
 Do not use an unchanged rerun or an empty commit to evade first-attempt admission.
+
+`ime-mode-diagnostic` runs the original Calc IME case once per native architecture
+with `--diagnose-ime-mode calc`. Bounded read-only snapshots compare existing
+thread-local TSF compartments with IMM at the same owned message observations,
+under the original setup deadline. The experiment can provide evidence distinguishing
+a TSF mode reset from TSF/IMM disagreement; sequential reads are not an atomic
+snapshot and do not identify the changing caller. It never
+reopens mode, resends a key or creates a missing compartment. Separate
+`opengeul-suite-ime-mode-diagnostic-<arch>-<run>-<attempt>` evidence and deliberate
+nonacceptance failure prevent package qualification. Original acceptance gates
+and first-attempt admission remain mandatory.

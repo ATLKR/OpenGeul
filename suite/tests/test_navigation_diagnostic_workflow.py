@@ -13,10 +13,10 @@ def condition(step):
 
 class NavigationDiagnosticWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_validation_reject_unknown_values(self):
-        self.assertIn("OPENGEUL_SUITE_RUN_MODE: acceptance",WORKFLOW.read_text())
+        self.assertIn("OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic",WORKFLOW.read_text())
         step=next(s for s in workflow_steps() if field(s,'id')=='run-mode')
         code=run_code(step)
-        self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic')",code)
+        self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic')",code)
         self.assertIn("throw 'Unknown Suite run mode.'",code)
 
     def test_diagnostic_requires_every_original_prerequisite(self):
@@ -24,7 +24,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
         value=condition(step)
         self.assertEqual(value, "!cancelled() && "+DIAGNOSTIC+" && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'")
         prerequisites=('build','readiness','native31-privacy-prepare','fixtures')
-        for mode in ('acceptance','navigation-diagnostic','unknown',''):
+        for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','unknown',''):
             for failed in (None,*prerequisites):
                 expression=value.replace('!cancelled()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('&&','and')
                 for prerequisite in prerequisites:
@@ -49,7 +49,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                 self.assertTrue(value.endswith(')'),value)
                 self.assertIn(value[len(MODE+' && ('):-1],originals)
         delivery=condition(steps[-1])
-        for mode in ('acceptance','navigation-diagnostic','unknown',''):
+        for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','unknown',''):
             for success in (True,False):
                 for home in ('success','failure','skipped'):
                     expression=delivery.replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('success()',str(success)).replace('steps.home-routes.outcome',repr(home)).replace('&&','and')
@@ -66,6 +66,31 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
         self.assertIn("throw 'Navigation diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'",run_code(terminal))
         self.assertLess(steps.index(upload),steps.index(terminal))
         self.assertIn(MODE,condition(steps[-1]))
+
+    def test_calc_mode_experiment_keeps_prerequisites_and_cannot_qualify(self):
+        steps=workflow_steps()
+        step=next(s for s in steps if field(s,'id')=='ime-mode-diagnostic')
+        mode="env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic'"
+        prerequisites=('build','readiness','native31-privacy-prepare','fixtures')
+        expected="!cancelled() && "+mode+"".join(" && steps."+p+".outcome == 'success'" for p in prerequisites)
+        self.assertEqual(condition(step),expected)
+        for run_mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','unknown',''):
+            for failed in (None,*prerequisites):
+                expression=condition(step).replace('!cancelled()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(run_mode)).replace('&&','and')
+                for p in prerequisites:
+                    expression=expression.replace('steps.'+p+'.outcome',repr('failure' if failed==p else 'success'))
+                self.assertEqual(eval(expression,{'__builtins__':{}}),run_mode=='ime-mode-diagnostic' and failed is None)
+        self.assertIn('--output .work/suite-ime-mode-diagnostic --diagnose-ime-mode calc',run_code(step))
+        self.assertIn('if ($LASTEXITCODE -ne 0)',run_code(step))
+        upload=next(s for s in steps if field(s,'id')=='ime-mode-diagnostic-evidence')
+        terminal=next(s for s in steps if field(s,'id')=='ime-mode-not-acceptance')
+        self.assertEqual(condition(upload),'always() && '+mode)
+        self.assertEqual(condition(terminal),'always() && '+mode)
+        self.assertIn('path: .work/suite-ime-mode-diagnostic/',upload)
+        self.assertIn('opengeul-suite-ime-mode-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}',upload)
+        self.assertIn("throw 'IME mode diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'",run_code(terminal))
+        self.assertLess(steps.index(step),steps.index(upload))
+        self.assertLess(steps.index(upload),steps.index(terminal))
 
     def test_shared_preparation_is_not_conditioned_on_diagnostic_mode(self):
         for step in workflow_steps():

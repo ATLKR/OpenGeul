@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: acceptance
+  OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -37,7 +37,7 @@ jobs:
       id: run-mode
       shell: pwsh
       run: |
-        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic')) {
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic')) {
           throw 'Unknown Suite run mode.'
         }
     - name: 정확한 소스 바이트 보존
@@ -180,6 +180,31 @@ jobs:
       shell: pwsh
       run: |
         throw 'Navigation diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Targeted Calc TSF and IMM mode diagnostic (not acceptance)
+      id: ime-mode-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-ime-mode-diagnostic/worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-ime-mode-diagnostic --diagnose-ime-mode calc
+        if ($LASTEXITCODE -ne 0) { throw 'Targeted IME mode diagnostic failed.' }
+    - name: Preserve targeted IME mode evidence only
+      id: ime-mode-diagnostic-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-ime-mode-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-ime-mode-diagnostic/
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
+    - name: IME mode experiment deliberately cannot qualify Suite acceptance
+      id: ime-mode-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'IME mode diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
     - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기
       id: calc-save
       shell: pwsh

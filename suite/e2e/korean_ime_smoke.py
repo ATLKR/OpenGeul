@@ -327,6 +327,12 @@ class NativeDiagnosticEvent(ctypes.Structure):
                 ('himc', ctypes.c_uint64)]
 
 
+class NativeModeDiagnosticEvent(ctypes.Structure):
+    _fields_ = [('sequence',ctypes.c_uint32),('messageSequence',ctypes.c_uint32),
+                ('startedCounter',ctypes.c_uint64),('finishedCounter',ctypes.c_uint64),
+                ('mode',native_mode.NativeModeReceipt)]
+
+
 class NativeState(ctypes.Structure):
     _fields_ = [('magic', ctypes.c_uint32), ('version', ctypes.c_uint32),
                 ('pid', ctypes.c_uint32), ('tid', ctypes.c_uint32),
@@ -352,7 +358,10 @@ class NativeState(ctypes.Structure):
                 ('threadMode', native_mode.NativeModeReceipt),
                 ('commandRejection', native_mode.NativeCommandRejection), ('nativeAttemptedMask', ctypes.c_uint32),
                 ('diagnosticCount', ctypes.c_int32), ('diagnosticOverflow', ctypes.c_int32),
-                ('diagnostics', NativeDiagnosticEvent * 128)]
+                ('diagnostics', NativeDiagnosticEvent * 128),
+                ('modeDiagnosticVersion',ctypes.c_uint32),('modeDiagnosticEnabled',ctypes.c_uint32),
+                ('modeDiagnosticDeadline',ctypes.c_uint64),('modeDiagnosticFrequency',ctypes.c_uint64),
+                ('modeDiagnostics',NativeModeDiagnosticEvent * 128)]
 
 
 OBSERVER_SOURCE = r'''
@@ -366,6 +375,8 @@ OBSERVER_SOURCE = r'''
 #include "ime_command_admission.h"
 struct Event { uint32_t sequence,message,flags,pid,tid; uint64_t hwnd,layout;
     int32_t compositionBytes,resultBytes; uint32_t origin; WCHAR composition[256],result[256]; };
+struct ModeDiagnosticEvent { uint32_t sequence,messageSequence; uint64_t startedCounter,finishedCounter;
+    opengeul_ime::ModeReceipt mode; };
 struct DiagnosticEvent { uint32_t sequence,message,origin,pid,tid,commandAck;
     uint64_t hwnd,layout,wparam,lparam,focusHwnd,counter;
     uint32_t immContextPresent,immConversionSucceeded,immOpen,immConversion,immSentence; uint64_t himc; };
@@ -380,7 +391,9 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     int32_t previousTsfOpen,previousTsfConversion; uint32_t tsfCaptured,profileChangeAttempted;
     uint32_t immContextPresent,immConversionSucceeded,immOpen,immConversion,immSentence;
     opengeul_ime::ModeReceipt threadMode; opengeul_ime::CommandRejection commandRejection; uint32_t nativeAttemptedMask;
-    volatile LONG diagnosticCount,diagnosticOverflow; DiagnosticEvent diagnostics[128]; };
+    volatile LONG diagnosticCount,diagnosticOverflow; DiagnosticEvent diagnostics[128];
+    uint32_t modeDiagnosticVersion,modeDiagnosticEnabled; uint64_t modeDiagnosticDeadline,modeDiagnosticFrequency;
+    ModeDiagnosticEvent modeDiagnostics[128]; };
 static State* shared = nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
@@ -554,6 +567,26 @@ static void command(HWND hwnd, UINT sequence) {
     lease.Finish();
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&shared->ack,sequence);
 }
+// Optional TSF reads use only existing thread-local objects and the original setup budget.
+static bool modeDiagnosticReading=false;
+static void observe_mode_diagnostic(LONG index) {
+    if (!shared->modeDiagnosticEnabled) return;
+    if (index<0 || index>=128) return;
+    auto& row=shared->modeDiagnostics[index];
+    row.messageSequence=index+1;
+    row.mode=opengeul_ime::ModeReceipt{};
+    LARGE_INTEGER now={};if(QueryPerformanceCounter(&now)) row.startedCounter=uint64_t(now.QuadPart);
+    if (shared->modeDiagnosticVersion!=1 || shared->modeDiagnosticEnabled!=1) row.mode.status=-41;
+    else if (modeDiagnosticReading) row.mode.status=-40; // Reentrant getters are not recursively sampled.
+    else {
+        modeDiagnosticReading=true;
+        opengeul_ime::WindowsThreadMode api(row.mode,shared->modeDiagnosticDeadline,shared->modeDiagnosticFrequency);
+        opengeul_ime::CaptureThreadMode(api,row.mode);
+        modeDiagnosticReading=false;
+    }
+    now={};if(QueryPerformanceCounter(&now)) row.finishedCounter=uint64_t(now.QuadPart);
+    MemoryBarrier();InterlockedExchange((volatile LONG*)&row.sequence,index+1);
+}
 // Passive, bounded owned-target observations. Never mutate command receipts or IME mode.
 static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
     if (message!=WM_INPUTLANGCHANGE && message!=WM_IME_NOTIFY && message!=WM_KEYDOWN && message!=WM_CHAR
@@ -582,6 +615,7 @@ static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT o
         event->immConversion=conversion;event->immSentence=sentence;
         ImmReleaseContext(hwnd,context);
     }
+    observe_mode_diagnostic(index);
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&event->sequence,index+1);
 }
 static void observe(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
@@ -621,6 +655,18 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookCall(int code,WPARAM wp,LP
 extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPARAM lp) {
     if(code>=0 && wp==PM_REMOVE) { MSG* m=(MSG*)lp; observe(m->hwnd,m->message,m->wParam,m->lParam,2); }
     return CallNextHookEx(nullptr,code,wp,lp);
+}
+extern "C" __declspec(dllexport) unsigned int ReadModeDiagnostic(State* source,UINT index,ModeDiagnosticEvent* mode,DiagnosticEvent* message) {
+    if (!source || !mode || !message || index>=128 || source->magic!=0x4f47494d || source->version!=4
+        || source->modeDiagnosticVersion!=1 || source->modeDiagnosticEnabled!=1) return 0;
+    auto* modeSequence=(volatile LONG*)&source->modeDiagnostics[index].sequence;
+    auto* messageSequence=(volatile LONG*)&source->diagnostics[index].sequence;
+    if (InterlockedCompareExchange(modeSequence,0,0)!=LONG(index+1)
+        || InterlockedCompareExchange(messageSequence,0,0)!=LONG(index+1)) return 0;
+    *mode=source->modeDiagnostics[index];*message=source->diagnostics[index];
+    return InterlockedCompareExchange(modeSequence,0,0)==LONG(index+1)
+        && InterlockedCompareExchange(messageSequence,0,0)==LONG(index+1)
+        && mode->sequence==index+1 && message->sequence==index+1;
 }
 extern "C" __declspec(dllexport) unsigned int StateSize() { return sizeof(State); }
 extern "C" __declspec(dllexport) unsigned int PublishCommand(State* target,UINT sequence,uint64_t counter,uint64_t frequency) {
@@ -738,7 +784,8 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
 
 
 class CompositionObserver:
-    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None):
+    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None, diagnose_ime_mode=False):
+        assert type(diagnose_ime_mode) is bool
         remaining_setup(setup_deadline, 60)
         self.native_architecture = native_arch.validate_native_architecture(
             native_arch.observe_native_architecture(), architecture)
@@ -747,11 +794,19 @@ class CompositionObserver:
         self.expected_profile = dict(profile)
         self.tid = int(api.user.GetWindowThreadProcessId(focus, None))
         assert self.tid and api.pid(focus) == pid, 'Observer target is not the owned editor input thread'
+        self.diagnose_ime_mode=diagnose_ime_mode
+        if diagnose_ime_mode:
+            assert setup_deadline is not None,'Mode diagnostic requires the original setup deadline'
+            self.mode_diagnostic_budget=native_mode.counter_budget(setup_deadline,clock=time.monotonic)
         self.mapping_name = 'Local\\OpenGeulIme_' + uuid.uuid4().hex
         self.mapping = mmap.mmap(-1, ctypes.sizeof(NativeState), tagname=self.mapping_name)
         state = NativeState()
         state.magic, state.version, state.pid, state.tid = 0x4f47494d, 4, pid, self.tid
         state.targetHwnd, state.rootHwnd = focus, root
+        state.modeDiagnosticVersion=1
+        if diagnose_ime_mode:
+            state.modeDiagnosticDeadline,state.modeDiagnosticFrequency=self.mode_diagnostic_budget
+            state.modeDiagnosticEnabled=1
         self.mapping[:] = bytes(state)
         try:
             library = compile_observer(folder, self.mapping_name, profile,
@@ -763,6 +818,10 @@ class CompositionObserver:
         self.dll = ctypes.WinDLL(str(library), use_last_error=True)
         self.dll.StateSize.restype = ctypes.c_uint32
         assert self.dll.StateSize() == ctypes.sizeof(NativeState), 'Native observer memory layout differs from controller'
+        if diagnose_ime_mode:
+            self.dll.ReadModeDiagnostic.argtypes=[ctypes.POINTER(NativeState),ctypes.c_uint32,
+                ctypes.POINTER(NativeModeDiagnosticEvent),ctypes.POINTER(NativeDiagnosticEvent)]
+            self.dll.ReadModeDiagnostic.restype=ctypes.c_uint32
         self.dll.PublishCommand.argtypes = [ctypes.POINTER(NativeState), ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint64]
         self.dll.PublishCommand.restype = ctypes.c_uint32
         self.dll.ReadSnapshot.argtypes = [ctypes.POINTER(NativeState), ctypes.POINTER(NativeState),
@@ -951,6 +1010,38 @@ class CompositionObserver:
         return dict(schemaVersion=1, kind='passive-owned-ime-messages', status=status,
                     capacity=128, observedCount=int(state.diagnosticCount), events=rows)
 
+    def _read_mode_diagnostic(self,index):
+        mode=NativeModeDiagnosticEvent();message=NativeDiagnosticEvent()
+        view=NativeState.from_buffer(self.mapping)
+        try:committed=self.dll.ReadModeDiagnostic(ctypes.byref(view),index,ctypes.byref(mode),ctypes.byref(message))
+        finally:del view
+        return (mode,message) if committed==1 else None
+
+    def mode_diagnostics(self):
+        state=self.state()
+        if not getattr(self,'diagnose_ime_mode',False):return dict(status='disabled',acceptanceEligible=False)
+        assert state.modeDiagnosticVersion==1 and state.modeDiagnosticEnabled==1,'IME mode diagnostic header changed'
+        assert (int(state.modeDiagnosticDeadline),int(state.modeDiagnosticFrequency))==self.mode_diagnostic_budget,'Original IME mode diagnostic budget changed'
+        assert state.modeDiagnosticDeadline>0 and state.modeDiagnosticFrequency>0,'IME mode diagnostic budget missing'
+        assert 0<=state.diagnosticCount<=128,'IME mode diagnostic count invalid'
+        rows=[]
+        for index in range(state.diagnosticCount):
+            acquired=self._read_mode_diagnostic(index)
+            if acquired is None:break
+            row,event=acquired
+            assert event.sequence==row.sequence==index+1,'IME mode publication changed'
+            assert row.messageSequence==event.sequence,'IME mode diagnostic correlation changed'
+            assert (event.pid,event.tid,event.hwnd)==(self.pid,self.tid,self.focus),'Foreign IME mode diagnostic'
+            rows.append(dict(messageSequence=int(row.messageSequence),message=int(event.message),origin=int(event.origin),
+                commandAck=int(event.commandAck),startedCounter=int(row.startedCounter),finishedCounter=int(row.finishedCounter),
+                imm=dict(contextPresent=int(event.immContextPresent),open=int(event.immOpen),
+                    conversionSucceeded=int(event.immConversionSucceeded),conversion=int(event.immConversion),himc=int(event.himc)),
+                threadMode=native_mode.receipt_dict(row.mode)))
+        return dict(schemaVersion=1,kind='passive-owned-thread-mode-comparison',acceptanceEligible=False,
+            callerAttributionProved=False,status='overflow' if state.diagnosticOverflow else ('partial' if len(rows)!=state.diagnosticCount else 'complete'),
+            capacity=128,observedCount=int(state.diagnosticCount),deadlineCounter=int(state.modeDiagnosticDeadline),
+            counterFrequency=int(state.modeDiagnosticFrequency),events=rows)
+
     def close(self):
         errors = []
         for hook in reversed(getattr(self, 'hooks', [])):
@@ -997,6 +1088,9 @@ def physical_key(observer, token, record):
 
 
 def retain_ime_message_diagnostics(record, observer):
+    if getattr(observer,'diagnose_ime_mode',False) and 'imeModeDiagnostics' not in record:
+        try:record['imeModeDiagnostics']=observer.mode_diagnostics()
+        except Exception as exc:record['imeModeDiagnostics']=dict(status='unavailable',acceptanceEligible=False,error=(type(exc).__name__+': '+str(exc))[:240])
     if 'imeMessageDiagnostics' in record: return  # Preserve the pre-restoration snapshot.
     try:
         record['imeMessageDiagnostics'] = observer.diagnostics()
@@ -1087,11 +1181,12 @@ def retain_ime_focus_failure_diagnostics(record, process, keyboard):
         receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
     assert not diagnose_navigation or module == 'impress', 'Navigation experiment is scoped to Impress'
+    assert not diagnose_ime_mode or (module=='calc' and not diagnose_navigation),'IME mode experiment is scoped to one Calc case'
     name = 'ime-' + module
     folder = output / name
     folder.mkdir()
@@ -1105,6 +1200,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
               'file': str(source), 'success': False, 'imeVerified': False, 'stage': 'attach',
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
               'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}
+    if diagnose_ime_mode:record.update(kind='native-ime-mode-diagnostic',acceptanceEligible=False)
     observer = keyboard = retirement = primary = navigation_trace = None
     api = Windows()
     try:
@@ -1177,7 +1273,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                 require_current=lambda: keyboard.require_context_target('calcSetupContext'))
         record['stage'] = 'install-owned-thread-observer'
         observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'],
-            architecture=record['architecture'], setup_deadline=setup_deadline)
+            architecture=record['architecture'], setup_deadline=setup_deadline,
+            **({'diagnose_ime_mode':True} if diagnose_ime_mode else {}))
         record.update(nativeArchitecture=observer.native_architecture, targetArchitecture=observer.target_architecture)
         assert observer.tid == keyboard.tid, 'Native observer differs from retained keyboard editor thread'
         keyboard.setup_complete()
@@ -1258,6 +1355,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             afterSha256=hashlib.sha256(source.read_bytes()).hexdigest(),
             originalFixtureUnchanged=hashlib.sha256(original.read_bytes()).hexdigest() == before)
         assert record['originalFixtureUnchanged'], 'IME test altered the engine baseline fixture'
+        if diagnose_ime_mode:record.update(caseImeOraclesPassed=record.get('imeVerified') is True,imeVerified=False,acceptanceEligible=False)
         return record
     except Exception as exc:
         primary = exc
@@ -1303,6 +1401,7 @@ def main(argv=None):
     parser.add_argument('--readiness', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--diagnose-navigation', choices=('impress',))
+    parser.add_argument('--diagnose-ime-mode', choices=('calc',))
     parser.add_argument('--verify-one', choices=dict(INPUT_CASES))
     parser.add_argument('--file', type=Path)
     parser.add_argument('--reopen-output', type=Path)
@@ -1313,7 +1412,7 @@ def main(argv=None):
     assert isinstance(inventory, dict) and inventory.get('schemaVersion') == 1, 'Suite inventory identity is missing'
     architecture = native_arch.require_architecture(inventory.get('architecture'))
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
-    assert not (args.verify_one and args.diagnose_navigation), 'Reopen and navigation modes are mutually exclusive'
+    assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode))<=1,'Reopen and diagnostic modes are mutually exclusive'
     if args.verify_one:
         assert args.file and args.reopen_output, 'The owned reopen fixture and receipt are required'
         observed = reopen_one(suite, args.file.resolve(), args.verify_one)
@@ -1325,7 +1424,7 @@ def main(argv=None):
     fixtures, output = args.fixtures.resolve(), args.output.resolve()
     assert suite != output and suite not in output.parents and fixtures != output and fixtures not in output.parents, 'Evidence must be outside the payload and baseline fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
-    if args.diagnose_navigation:
+    if args.diagnose_navigation or args.diagnose_ime_mode:
         # Same source-bound owner-push/first-attempt admission as the native suite.
         import importlib.util
         spec = importlib.util.spec_from_file_location('navigation_ci_admission', Path(__file__).resolve().parents[2] / 'e2e/native31_suite_prepare.py')
@@ -1345,6 +1444,15 @@ def main(argv=None):
             acceptanceEligible=False, imeVerified=False, tests=results, runBinding=binding,
             architecture=architecture, expectedCaseCount=1)
         (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        return 0 if success else 1
+    if args.diagnose_ime_mode:
+        results=collect_cases([('ime-calc',lambda:case(suite,fixtures,output,readiness,'calc',
+            dict(INPUT_CASES)['calc'],prepared_library=prepared_library,diagnose_ime_mode=True))],output)
+        success=len(results)==1 and results[0].get('success') is True
+        report=dict(schemaVersion=1,kind='native-ime-mode-diagnostic',success=success,
+            acceptanceEligible=False,imeVerified=False,tests=results,runBinding=binding,
+            architecture=architecture,expectedCaseCount=1)
+        (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0 if success else 1
     results = collect_cases([('ime-' + module, lambda module=module, extension=extension:
         case(suite, fixtures, output, readiness, module, extension, prepared_library=prepared_library)) for module, extension in INPUT_CASES], output)

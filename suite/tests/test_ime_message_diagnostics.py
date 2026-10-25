@@ -121,7 +121,7 @@ int main(){
 '''
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); cpp = root/'diagnostics.cpp'; exe = root/('diagnostics.exe' if os.name == 'nt' else 'diagnostics')
-            cpp.write_text(prefix + declaration + assertions + state + producer + main)
+            cpp.write_text(prefix + declaration + assertions + state + '\nvoid observe_mode_diagnostic(LONG) {}\n' + producer + main)
             build = subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', str(cpp), '-o', str(exe)], capture_output=True, text=True, timeout=30)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=5)
