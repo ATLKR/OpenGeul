@@ -24,7 +24,7 @@ class ComWaitDiagnosticTests(unittest.TestCase):
             self.skipTest('PowerShell required for standalone C# compile/pure contracts')
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / 'check.ps1'
-            script.write_text("$ErrorActionPreference='Stop'\nAdd-Type -Path $env:COM_WAIT_SOURCE\n[ComWaitDiagnostic]::PureContractTests()\n'PURE_CONTRACTS_PASSED'\n")
+            script.write_text("$ErrorActionPreference='Stop'\nAdd-Type -Path $env:COM_WAIT_SOURCE\n[ComWaitDiagnostic]::PureContractTests()\n[ComWaitDiagnostic]::ArrivalContractTests()\n'PURE_CONTRACTS_PASSED'\n")
             result = subprocess.run([pwsh, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script)], env=dict(os.environ, COM_WAIT_SOURCE=str(SOURCE)), capture_output=True, text=True, timeout=45)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('PURE_CONTRACTS_PASSED', result.stdout)

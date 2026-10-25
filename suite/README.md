@@ -234,3 +234,9 @@ results do not reproduce physical Office input or establish a safe product fix.
 Only `.work/suite-com-wait-diagnostic/receipt.json` is uploaded. A deliberate
 terminal failure prohibits package qualification. All existing GUI-mode privacy,
 ownership, preparation and acceptance gates remain required.
+
+The prequeued stimulus in run 40162807902 was deferred by both COM arms on both
+architectures. The next fixed stimulus uses an owned sent-message rendezvous:
+its callback posts the single mouse-up inside the active wait, before ACK.
+Receipts explicitly identify this timing variant. It remains synthetic, uses
+the same deadlines and no physical input, and cannot qualify Office acceptance.

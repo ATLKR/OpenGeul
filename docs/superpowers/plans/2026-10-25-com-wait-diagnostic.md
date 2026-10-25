@@ -31,3 +31,11 @@ synthetic arm ran. The caller's Windows platform guard does not establish the
 delegate's platform context for analysis. Put the guard inside the delegate,
 without suppressing the analyzer. Seven focused local checks and independent
 review passed for this correction; the native build remains the required check.
+
+Run 40162807902 at 7793ee8693ef7ce859ea634f949fcacfdb20cab6 verified
+the correction: both native unit suites passed 2404 tests (36 skips), shell
+93/93, admission, fixture and receipt upload. Only intentional nonacceptance
+failed. Both COM arms deferred the prequeued posted message to the post-wait
+drain on both architectures; all control/ordering/cleanup checks passed.
+No suppression or broader-dispatch benefit was observed in this setup. The
+single further timing discriminator is specified in `2026-10-25-com-wait-arrival.md`.
