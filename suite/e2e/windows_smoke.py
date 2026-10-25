@@ -556,7 +556,11 @@ def capture_failure(output, name, record, exc):
     except Exception: pass
 
 
-def stop_owned_test_process(process, record):
+def stop_owned_test_process(process, record, diagnostic_lease=None):
+    if diagnostic_lease is not None:
+        from editor_capture_diagnostic import CohortEngineLease
+        assert isinstance(diagnostic_lease,CohortEngineLease), 'Owned focus cleanup requires its retained lease'
+        return diagnostic_lease.stop_owned_process(process,record)
     exit_code = process.poll()
     receipt = dict(shellPid=process.pid, forceRequested=False, shellExitCode=exit_code,
                    gracefulShutdownVerified=False, disposition='already-exited')

@@ -142,6 +142,20 @@ engine wait; never grant another five seconds, reopen a PID or request new right
 Absent or exhausted allowance keeps the original zero-wait behavior. Timeout,
 wait error or failed release must still prevent the next case.
 
+Static review identifies an additional teardown gap: `OwnedOfficeProcess` assigns
+the launcher to a private job, but deliberately has no kill-on-worker-exit policy.
+Its `close()` releases handles; `terminate()` explicitly terminates the job through
+normal worker cleanup. Forced shell teardown can bypass that cleanup. Therefore
+waiting alone is not a complete remedy for the diagnostic's forced-only path.
+Reuse the existing retained-identity, exact-PID taskkill pattern for this focus
+diagnostic only: one invocation targets the original live shell and original live
+engine after validating their retained identities. Include identity work within
+the existing 15-second command allowance, then share the existing five-second
+exit phase. Do not reopen PIDs, enumerate unrelated processes, request new access
+rights, change job policy or add observation/input time. Numeric-PID taskkill is
+not an atomic handle-based operation; preserve its errors and require retained
+exit evidence rather than claiming termination from command return alone.
+
 The same trace lacked a terminal QPC sample. Record local QPC brackets around the
 final local copy to distinguish native-clock cutoff coverage from a truncated or
 unknown interval. Do not wait longer to close a clock gap. A cutoff crossed only

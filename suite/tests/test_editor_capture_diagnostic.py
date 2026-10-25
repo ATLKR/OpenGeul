@@ -385,3 +385,114 @@ class CaptureDiagnosticTests(unittest.TestCase):
             self.assertFalse(coverage['finalPublicationCountProved']);self.assertFalse(coverage['remoteCallbackQuiescenceProved'])
             self.assertEqual(samples,['before','after'])
             self.assertEqual(probe.calls,['admit','start',('read',{'local_only':True}),'close'])
+    def test_owned_cleanup_targets_live_engine_even_after_shell_exit(self):
+        import windows_smoke as smoke
+        from editor_capture_diagnostic import CohortEngineLease
+        k=self.fixture();k.clock.now=10.;receipt=dict(admitted=True,originalEngine=dict(k.engine,handleValue=909))
+        k.record['focusCohortEngineCleanup']=receipt;k.record['shellPid']=k.process.pid
+        lease=CohortEngineLease(k,receipt);lease.handle=909
+        probe=NS(process_snapshot=lambda p:dict(k.shell,waitResult=0),engine_snapshot=lambda h:receipt['originalEngine'])
+        with patch('editor_capture_diagnostic.NativeShortcutProbe',return_value=probe), \
+                patch.object(k.process,'poll',return_value=1,create=True),patch.object(smoke.subprocess,'run') as run:
+            smoke.stop_owned_test_process(k.process,k.record,lease)
+        self.assertEqual(run.call_count,1)
+        self.assertEqual(run.call_args.args[0],['taskkill.exe','/PID',str(k.binding['officePid']),'/T','/F'])
+        self.assertEqual(run.call_args.kwargs['timeout'],15.)
+        self.assertEqual(k.record['testProcessCleanup']['exitWaitDeadline'],15.)
+    def owned_cleanup_fixture(self):
+        from editor_capture_diagnostic import CohortEngineLease
+        k=self.fixture();k.clock.now=10.;receipt=dict(admitted=True,originalEngine=dict(k.engine,handleValue=909))
+        k.record.update(focusCohortEngineCleanup=receipt,shellPid=k.process.pid,error='Original focus failure',success=False)
+        k.process.poll=lambda:1
+        lease=CohortEngineLease(k,receipt);lease.handle=909;released=[]
+        lease.probe=NS(kernel=NS(WaitForSingleObject=lambda h,ms:0),close_engine=lambda h:(released.append(h) or True))
+        probe=NS(process_snapshot=lambda p:dict(k.shell),engine_snapshot=lambda h:dict(receipt['originalEngine']),
+            open_engine=lambda *args:self.fail('cleanup must not open a new process'))
+        return k,lease,probe,released
+    def test_single_command_binds_both_original_targets_and_charges_identity_time(self):
+        import windows_smoke as smoke
+        k,lease,probe,released=self.owned_cleanup_fixture()
+        def shell(process):k.clock.now+=2.;return dict(k.shell)
+        def engine(handle):k.clock.now+=1.;return dict(lease.receipt['originalEngine'])
+        probe.process_snapshot=shell;probe.engine_snapshot=engine
+        with patch('editor_capture_diagnostic.NativeShortcutProbe',return_value=probe),patch.object(smoke.subprocess,'run') as run:
+            try:smoke.stop_owned_test_process(k.process,k.record,lease)
+            finally:lease.finish()
+        self.assertEqual(run.call_count,1)
+        self.assertEqual(run.call_args.args[0],['taskkill.exe','/PID',str(k.process.pid),'/PID',str(k.binding['officePid']),'/T','/F'])
+        self.assertEqual(run.call_args.kwargs['timeout'],12.)
+        self.assertEqual(k.record['testProcessCleanup']['exitWaitDeadline'],18.)
+        self.assertEqual(released,[909]);self.assertEqual(k.record['error'],'Original focus failure')
+        with self.assertRaisesRegex(AssertionError,'cannot be retried'):lease.stop_owned_process(k.process,k.record)
+    def test_cleanup_generation_mismatch_and_expired_validation_prevent_command(self):
+        import windows_smoke as smoke
+        for failure in ('engine','shell','expired'):
+            k,lease,probe,released=self.owned_cleanup_fixture()
+            if failure=='engine':probe.engine_snapshot=lambda h:dict(lease.receipt['originalEngine'],creationTime=99)
+            if failure=='shell':probe.process_snapshot=lambda p:dict(k.shell,image='other.exe')
+            if failure=='expired':probe.engine_snapshot=lambda h:(setattr(k.clock,'now',25.) or dict(lease.receipt['originalEngine']))
+            with patch('editor_capture_diagnostic.NativeShortcutProbe',return_value=probe),patch.object(smoke.subprocess,'run') as run:
+                try:smoke.stop_owned_test_process(k.process,k.record,lease)
+                finally:lease.finish()
+            run.assert_not_called();self.assertEqual(released,[909])
+            self.assertIn('cleanupError',k.record);self.assertEqual(k.record['error'],'Original focus failure')
+            self.assertNotIn('exitWaitDeadline',k.record['testProcessCleanup'])
+    def test_cleanup_command_timeout_and_target_exit_race_remain_failed_with_release(self):
+        import windows_smoke as smoke
+        from editor_capture_diagnostic import cohort_cleanup_confirmed
+        for error in (smoke.subprocess.TimeoutExpired('taskkill',15),smoke.subprocess.CalledProcessError(5,['taskkill.exe']),OSError('command unavailable')):
+            k,lease,probe,released=self.owned_cleanup_fixture()
+            with patch('editor_capture_diagnostic.NativeShortcutProbe',return_value=probe),patch.object(smoke.subprocess,'run',side_effect=error) as run:
+                try:smoke.stop_owned_test_process(k.process,k.record,lease)
+                finally:lease.finish()
+            self.assertEqual(run.call_count,1);self.assertEqual(released,[909])
+            self.assertEqual(k.record['error'],'Original focus failure');self.assertFalse(cohort_cleanup_confirmed(k.record))
+            self.assertNotIn('exitWaitDeadline',k.record['testProcessCleanup'])
+    def test_unadmitted_engine_never_becomes_cleanup_target(self):
+        import windows_smoke as smoke
+        k,lease,probe,released=self.owned_cleanup_fixture();lease.receipt['admitted']=False
+        k.process.poll=lambda:1
+        with patch('editor_capture_diagnostic.NativeShortcutProbe') as create,patch.object(smoke.subprocess,'run') as run:
+            try:smoke.stop_owned_test_process(k.process,k.record,lease)
+            finally:lease.finish()
+        create.assert_not_called();run.assert_not_called();self.assertEqual(released,[909])
+        self.assertFalse(lease.receipt['engineExitConfirmed']);self.assertIn('targetedCleanupUnavailable',lease.receipt)
+    def test_taskkill_128_requires_both_original_exit_proofs_before_race_classification(self):
+        import windows_smoke as smoke
+        from editor_capture_diagnostic import cohort_cleanup_confirmed
+        k,lease,probe,released=self.owned_cleanup_fixture();calls=[]
+        lease.probe.kernel.WaitForSingleObject=lambda h,ms:(calls.append((h,ms)) or 0)
+        with patch('editor_capture_diagnostic.NativeShortcutProbe',return_value=probe),patch.object(smoke.subprocess,'run',side_effect=smoke.subprocess.CalledProcessError(128,['taskkill.exe'])):
+            smoke.stop_owned_test_process(k.process,k.record,lease)
+            self.assertFalse(cohort_cleanup_confirmed(k.record))
+            lease.finish()
+        self.assertTrue(cohort_cleanup_confirmed(k.record))
+        self.assertEqual(k.record['testProcessCleanup']['commandExitCode'],128)
+        self.assertFalse(k.record['testProcessCleanup']['gracefulShutdownVerified'])
+        self.assertEqual(k.record['error'],'Original focus failure');self.assertEqual(released,[909])
+        self.assertEqual(calls,[(int(k.process._handle),0),(909,5000)])
+    def test_taskkill_128_does_not_waive_exit_deadline_release_or_prior_failure(self):
+        import windows_smoke as smoke
+        from editor_capture_diagnostic import cohort_cleanup_confirmed
+        for failure in ('shell-live','engine-live','engine-late','release','command-late','prior-cleanup'):
+            k,lease,probe,released=self.owned_cleanup_fixture()
+            if failure=='prior-cleanup':k.record['cleanupError']='Earlier cleanup failure'
+            if failure=='release':lease.probe.close_engine=lambda h:(released.append(h) or False)
+            def wait(handle,ms):
+                if handle==int(k.process._handle):return 258 if failure=='shell-live' else 0
+                if failure=='engine-late':k.clock.now=15.01
+                return 258 if failure=='engine-live' else 0
+            lease.probe.kernel.WaitForSingleObject=wait
+            def command(*args,**kwargs):
+                if failure=='command-late':k.clock.now=25.01
+                raise smoke.subprocess.CalledProcessError(128,args[0])
+            with patch('editor_capture_diagnostic.NativeShortcutProbe',return_value=probe),patch.object(smoke.subprocess,'run',side_effect=command) as run:
+                try:smoke.stop_owned_test_process(k.process,k.record,lease)
+                finally:lease.finish()
+            self.assertEqual(run.call_count,1);self.assertEqual(released,[909])
+            self.assertFalse(cohort_cleanup_confirmed(k.record),failure)
+            self.assertFalse(k.record['testProcessCleanup']['retainedExitRaceVerified'])
+            self.assertEqual(k.record['testProcessCleanup']['commandExitCode'],128)
+            self.assertEqual(k.record['testProcessCleanup']['commandError']['type'],'CalledProcessError')
+            self.assertEqual(k.record['error'],'Original focus failure')
+            if failure=='prior-cleanup':self.assertEqual(k.record['cleanupError'],'Earlier cleanup failure')

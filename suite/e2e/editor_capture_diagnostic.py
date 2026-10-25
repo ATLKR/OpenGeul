@@ -34,7 +34,7 @@ def validate_passive_scope(scope,binding,thread):
 class CohortEngineLease:
     """Join while admitted; share only the existing owned cleanup exit phase."""
     def __init__(self, keyboard, receipt):
-        self.keyboard=keyboard;self.receipt=receipt;self.handle=None;self.probe=None;self.closed=False
+        self.keyboard=keyboard;self.receipt=receipt;self.handle=None;self.probe=None;self.closed=False;self.cleanup_started=False
     def admit(self, probe, deadline):
         k=self.keyboard;self.probe=probe
         assert k.clock()<deadline
@@ -46,6 +46,84 @@ class CohortEngineLease:
         assert join_shortcut_generation(k.process,k.binding['parentHwnd'],k.binding['childHwnd'],snapshot)==k.shared_admission
         assert k.clock()<deadline
         self.receipt.update(admitted=True,originalEngine=snapshot,deadline=deadline)
+    def stop_owned_process(self, process, record):
+        """Mandatory diagnostic teardown, never an observation or input retry."""
+        import windows_smoke as smoke
+        k=self.keyboard
+        assert not self.cleanup_started, 'Diagnostic cleanup command cannot be retried'
+        self.cleanup_started=True
+        assert process is k.process and record is k.record
+        assert record.get('kind')=='native-focus-diagnostic' and record.get('acceptanceEligible') is False
+        assert record.get('focusCohortEngineCleanup') is self.receipt and not self.closed
+        if self.receipt.get('admitted') is not True:
+            # A partial admission never authorizes killing the unjoined engine.
+            self.receipt['targetedCleanupUnavailable']='engine generation was not admitted'
+            return smoke.stop_owned_test_process(process,record)
+        started=k.clock();deadline=started+15
+        receipt=dict(shellPid=process.pid,forceRequested=False,shellExitCode=None,
+            gracefulShutdownVerified=False,disposition='stop-unconfirmed',
+            kind='retained-focus-cohort-teardown',commandBudgetStartedAt=started,
+            commandBudgetDeadline=deadline,commandBudgetSeconds=15,targets=[])
+        record['testProcessCleanup']=receipt
+        def budget():
+            remaining=deadline-k.clock()
+            assert remaining>0, 'Original cleanup command allowance expired'
+            return remaining
+        def identity(row, original):
+            assert row.get('waitResult') in (0,258), 'Cleanup retained process wait failed'
+            assert {key:value for key,value in row.items() if key!='waitResult'}=={
+                key:value for key,value in original.items() if key!='waitResult'}, 'Cleanup retained process generation changed'
+        try:
+            budget()
+            assert type(self.handle) is int and self.handle>0 and record.get('shellPid')==process.pid
+            assert self.receipt['originalEngine']==dict(k.engine,handleValue=self.handle)
+            assert tuple(k.shell[key] for key in ('pid','handleValue','image','creationTime','waitResult'))==process.opengeul_activation_binding
+            # New query wrapper only: it reuses the original handles and opens no process.
+            probe=NativeShortcutProbe(deadline,k.clock)
+            budget();shell=probe.process_snapshot(process);budget();identity(shell,k.shell)
+            engine=probe.engine_snapshot(self.handle);budget();identity(engine,self.receipt['originalEngine'])
+            receipt.update(shellIdentity=shell,engineIdentity=engine)
+            targets=[row['pid'] for row in (shell,engine) if row['waitResult']==258]
+            assert len(targets)==len(set(targets)) and all(type(pid) is int and pid>0 for pid in targets)
+            receipt['targets']=targets
+            if targets:
+                command=['taskkill.exe']
+                for pid in targets:command.extend(['/PID',str(pid)])
+                command.extend(['/T','/F'])
+                receipt.update(forceRequested=True,commandStartedAt=k.clock())
+                remaining=budget();receipt['commandTimeoutSeconds']=remaining
+                try:
+                    smoke.subprocess.run(command,check=True,stdout=smoke.subprocess.DEVNULL,
+                        stderr=smoke.subprocess.DEVNULL,timeout=remaining)
+                    receipt['commandExitCode']=0
+                except smoke.subprocess.CalledProcessError as exc:
+                    receipt.update(commandExitCode=exc.returncode,
+                        commandError=dict(type=type(exc).__name__,message=str(exc)[:1024],command=command))
+                    if exc.returncode!=128:raise
+                    # A candidate only. No attribution to tree overlap or waiver of exit proof.
+                    receipt['retainedExitRaceCandidate']=True
+                receipt['commandReturnedAt']=k.clock();budget()
+                exit_started=k.clock()
+                receipt.update(exitWaitStartedAt=exit_started,exitWaitDeadline=exit_started+5,exitWaitBudgetSeconds=5)
+                code=process.poll()
+                if code is None:
+                    remaining=receipt['exitWaitDeadline']-k.clock()
+                    assert remaining>0, 'Shared cleanup exit allowance expired before shell wait'
+                    code=process.wait(timeout=remaining)
+                assert code is not None and k.clock()<=receipt['exitWaitDeadline'], 'Shell exit was not proved within shared cleanup allowance'
+                receipt.update(shellExitCode=code,disposition='forced-stop-returned')
+                if receipt.get('retainedExitRaceCandidate'):
+                    result=int(self.probe.kernel.WaitForSingleObject(int(process._handle),0))
+                    receipt.update(shellRetainedWaitResult=result,shellRetainedWaitReturnedAt=k.clock(),
+                        disposition='retained-target-exit-race-pending')
+                    assert result==0 and k.clock()<=receipt['exitWaitDeadline'], 'Original retained shell exit race is unconfirmed'
+            else:
+                receipt.update(shellExitCode=process.poll(),disposition='already-exited')
+        except BaseException as exc:
+            receipt['errorType']=type(exc).__name__
+            record.update(success=False,cleanupError=type(exc).__name__+': '+str(exc)[:1024])
+            # Preserve the primary case error; final lease release/exit proof still runs.
+
     def finish(self):
         if self.closed:return
         self.closed=True
@@ -71,12 +149,27 @@ class CohortEngineLease:
             if self.handle is not None:
                 try:self.receipt['handleReleased']=self.probe.close_engine(self.handle) is True
                 except BaseException as exc:self.receipt['releaseError']=type(exc).__name__+': '+str(exc)[:512]
+        record=self.keyboard.record;phase=record.get('testProcessCleanup',{})
+        if phase.get('retainedExitRaceCandidate'):
+            deadline=phase.get('exitWaitDeadline')
+            verified=(phase.get('commandExitCode')==128 and not record.get('cleanupError')
+                and deadline is not None and phase.get('shellExitCode') is not None
+                and phase.get('shellRetainedWaitResult')==0 and phase.get('shellRetainedWaitReturnedAt',float('inf'))<=deadline
+                and self.receipt.get('engineExitConfirmed') is True and self.receipt.get('waitReturnedAt',float('inf'))<=deadline
+                and self.receipt.get('handleReleased') is True and not self.receipt.get('error') and not self.receipt.get('releaseError'))
+            phase['retainedExitRaceVerified']=verified
+            if verified:phase['disposition']='retained-target-exit-race-verified'
+            else:
+                record['success']=False
+                record.setdefault('cleanupError','Taskkill exit 128 without both retained original exit proofs and handle release')
 
 
 def cohort_cleanup_confirmed(record):
     shell=record.get('testProcessCleanup',{});engine=record.get('focusCohortEngineCleanup',{})
     return (shell.get('shellExitCode') is not None and shell.get('disposition') in
-        ('already-exited','forced-stop-returned','exit-zero-after-taskkill-not-found')
+        ('already-exited','forced-stop-returned','exit-zero-after-taskkill-not-found','retained-target-exit-race-verified')
+        and (shell.get('disposition')!='retained-target-exit-race-verified' or
+             shell.get('commandExitCode')==128 and shell.get('retainedExitRaceVerified') is True)
         and not record.get('cleanupError') and engine.get('admitted') is True
         and engine.get('engineExitConfirmed') is True and engine.get('handleReleased') is True
         and not engine.get('error') and not engine.get('releaseError'))

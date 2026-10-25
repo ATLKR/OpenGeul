@@ -1418,7 +1418,9 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             except Exception as exc:
                 record.update(success=False, retirementCleanupError=type(exc).__name__ + ': ' + str(exc))
                 if primary is None: retirement_failure = exc
-        try: stop_owned_test_process(process, record)
+        try:
+            if focus_trace is not None:stop_owned_test_process(process,record,focus_trace.cohort_lease)
+            else:stop_owned_test_process(process,record)
         finally:
             if focus_trace is not None:
                 focus_trace.cohort_lease.finish()
