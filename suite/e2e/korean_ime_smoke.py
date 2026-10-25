@@ -1505,13 +1505,15 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             except Exception as exc:
                 record.update(success=False, keyboardCleanupError=type(exc).__name__ + ': ' + str(exc))
         retirement_failure = None
-        if retirement is not None:
+        failed_retirement_cleanup = retirement is not None and primary is not None and not retirement.close_attempted
+        if retirement is not None and not failed_retirement_cleanup:
             try: retirement.close(primary)
             except Exception as exc:
                 record.update(success=False, retirementCleanupError=type(exc).__name__ + ': ' + str(exc))
                 if primary is None: retirement_failure = exc
         try:
-            if focus_trace is not None:stop_owned_test_process(process,record,focus_trace.cohort_lease)
+            if failed_retirement_cleanup:retirement.cleanup_failed(primary)
+            elif focus_trace is not None:stop_owned_test_process(process,record,focus_trace.cohort_lease)
             else:stop_owned_test_process(process,record)
         finally:
             if focus_trace is not None:

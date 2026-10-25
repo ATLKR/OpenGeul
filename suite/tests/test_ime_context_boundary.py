@@ -149,11 +149,22 @@ int main(){
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); cpp = root / 'return.cpp'; exe = root / ('return.exe' if os.name == 'nt' else 'return')
             cpp.write_text(prefix + hook + main)
-            build = subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-D__declspec(x)=__attribute__((visibility("default")))', str(cpp), '-o', str(exe)], capture_output=True, text=True, timeout=30)
+            options = [compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                       '-U__declspec', '-D__declspec(x)=__attribute__((visibility("default")))']
+            build = subprocess.run(options + [str(cpp), '-o', str(exe)], capture_output=True, text=True, timeout=30)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=5)
             try: self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             finally: remove_completed_image(root, exe, run)
+            # Keep proving the source guard is necessary after normalizing the
+            # compiler's platform-specific predefined macro at the command line.
+            unguarded = root / 'unguarded.cpp'
+            unguarded.write_text(prefix.replace('#ifdef __declspec\n#undef __declspec\n#endif\n', '') + hook + main)
+            rejected = subprocess.run(options + [str(unguarded), '-o', str(root / 'rejected')],
+                                      capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('__declspec', rejected.stderr)
+            self.assertIn('redefined', rejected.stderr.lower())
 
     def test_optional_return_hook_failure_releases_previously_installed_hooks(self):
         observer, _ = self.observer()

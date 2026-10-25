@@ -14,6 +14,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import subprocess
 import time
 
 from native_cleanup_receipt import load_cleanup_receipt, validate_cleanup_receipt
@@ -324,6 +325,12 @@ class NativeRetirementProvider:
         # The lease checks its unchanged deadline immediately after retaining it.
         value=int(self.kernel.WaitForSingleObject(handle,0))
         return dict(api='WaitForSingleObject',handleValue=handle,timeoutMilliseconds=0,result=value,lastError=int(getattr(C,'get_last_error',lambda:0)()))
+    def wait_cleanup(self,handle,milliseconds):
+        # Mandatory teardown only; caller owns the existing shared exit deadline.
+        _need(_int(milliseconds,0,5000),'Invalid cleanup wait')
+        value=int(self.kernel.WaitForSingleObject(handle,milliseconds))
+        return dict(api='WaitForSingleObject',handleValue=handle,timeoutMilliseconds=milliseconds,
+                    result=value,lastError=int(getattr(C,'get_last_error',lambda:0)()))
     def exited(self,handle):
         pid=int(self._call(self.kernel.GetProcessId,handle));raw,creation=self._times(handle);code=C.c_uint32()
         ok=bool(self._call(self.kernel.GetExitCodeProcess,handle,C.byref(code)))
@@ -425,6 +432,78 @@ class _Lease:
         except BaseException as exc:
             self.proof['cleanupErrors'].append(_error(exc));self.proof['success']=False
             if primary is None:raise
+    def cleanup_failed(self, primary, *, run=None):
+        """Forced failure disposal, separate from successful retirement evidence."""
+        row=dict(kind='owned-ime-failure-teardown',gracefulShutdownVerified=False,
+                 engineExitConfirmed=False,handleReleased=False,targets=[])
+        self.record['imeFailureCleanup']=row
+        self.record['success']=False
+        try:
+            _need(primary is not None and not self.close_attempted and self.handle is not None,
+                  'Failure teardown requires an original open lease and primary failure')
+            _need(not getattr(self,'failure_cleanup_started',False),'Failure teardown cannot retry')
+            self.failure_cleanup_started=True
+            a=self.frozen
+            _need(type(a) is dict and self.proof.get('admission')==a
+                  and self.record.get('imeEngineRetirement') is self.proof,'Failure teardown admission changed')
+            _need(self.keyboard.process is self.shell and self.keyboard.record is self.record,
+                  'Failure teardown original objects changed')
+            _same_native(self.keyboard.binding,a['native'])
+            _need(self.shell.pid==a['originalShell']['pid'] and int(self.shell._handle)==a['originalShell']['handleValue']
+                  and self.handle==a['open']['handleValue'],'Failure teardown original handles changed')
+            started=_time(self.clock());deadline=started+15
+            row.update(commandBudgetStartedAt=started,commandBudgetDeadline=deadline,commandBudgetSeconds=15)
+            self.provider.set_deadline(deadline)
+            def budget():
+                left=deadline-_time(self.clock());_need(left>0,'Failure cleanup command deadline expired');return left
+            def identity(actual,original):
+                _need(type(actual) is dict and actual.get('waitResult') in (0,258)
+                      and all(actual.get(k)==original[k] for k in ('pid','handleValue','creationTime'))
+                      and _image(actual.get('image'))==_image(original['image']),
+                      'Failure cleanup retained identity changed')
+            budget();shell=self.provider.live(int(self.shell._handle));budget();identity(shell,a['originalShell'])
+            engine=self.provider.live(self.handle);budget();identity(engine,a['extraEngine'])
+            row.update(shellIdentity=shell,engineIdentity=engine)
+            targets=[v['pid'] for v in (shell,engine) if v['waitResult']==258]
+            _need(len(targets)==len(set(targets)),'Duplicate failure cleanup targets');row['targets']=targets
+            if targets:
+                command=['taskkill.exe']
+                for pid in targets:command.extend(['/PID',str(pid)])
+                command.extend(['/T','/F'])
+                remaining=budget();row.update(forceRequested=True,commandTimeoutSeconds=remaining)
+                (run or subprocess.run)(command,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=remaining)
+                row['commandExitCode']=0;row['commandReturnedAt']=_time(self.clock());budget()
+                exit_started=_time(self.clock());exit_deadline=exit_started+5
+                row.update(exitWaitStartedAt=exit_started,exitWaitDeadline=exit_deadline,exitWaitBudgetSeconds=5)
+                code=self.shell.poll()
+                if code is None:
+                    left=exit_deadline-_time(self.clock());_need(left>0,'Shared exit allowance exhausted')
+                    code=self.shell.wait(timeout=left)
+                row['shellExitCode']=code
+                _need(type(code) is int and _time(self.clock())<=exit_deadline,'Shell exit exceeded shared allowance')
+                milliseconds=max(0,min(5000,math.floor((exit_deadline-_time(self.clock()))*1000)))
+            else:
+                row.update(forceRequested=False,shellExitCode=self.shell.poll())
+                exit_deadline=None;milliseconds=0
+            wait=self.provider.wait_cleanup(self.handle,milliseconds);returned=_time(self.clock())
+            row.update(engineWait=wait,engineWaitReturnedAt=returned)
+            _need(type(wait) is dict and wait.get('api')=='WaitForSingleObject'
+                  and wait.get('handleValue')==self.handle and wait.get('timeoutMilliseconds')==milliseconds
+                  and type(wait.get('result')) is int and wait['result']==0
+                  and (exit_deadline is None or returned<=exit_deadline),'Original engine exit unconfirmed')
+            row['engineExitConfirmed']=True
+        except BaseException as exc:
+            row['error']=_error(exc)
+            if isinstance(exc,subprocess.CalledProcessError):row['commandExitCode']=exc.returncode
+            self.record.setdefault('cleanupError',_error(exc))
+        finally:
+            # Never replaces the original composition exception, including release failure.
+            self.close(primary)
+            row['handleReleased']=self.proof.get('close',{}).get('result') is True
+            if not row['handleReleased']:
+                row['releaseError']='Original engine handle release unconfirmed'
+                self.record.setdefault('cleanupError',row['releaseError'])
+
     def _archives(self):
         self.check();entries=[]
         for p in self.root.iterdir():

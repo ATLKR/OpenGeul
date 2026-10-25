@@ -167,11 +167,15 @@ class IMECasePhaseTests(unittest.TestCase):
             Path(command[-1]).write_text(json.dumps(observed));return NS(returncode=0,stdout=b'',stderr=b'')
         class Retirement:
             closed=False
+            close_attempted=False
             def close(inner,primary=None):
-                if not inner.closed:calls.append('retirement-close');inner.closed=True
+                if not inner.closed:calls.append('retirement-close');inner.closed=True;inner.close_attempted=True
+            def cleanup_failed(inner,primary):
+                self.assertFalse(inner.closed)
+                calls.append(('failure-teardown',primary));calls.append('final-stop');inner.close(primary)
             def verify_after_close_home(inner,**kw):
                 self.assertTrue(empty_retirement_failure);self.assertEqual(calls[-1],'home-close')
-                calls.append('first-retirement-wait');raise RuntimeError('original engine not signaled at first observation')
+                calls.append('first-retirement-wait');inner.close();raise RuntimeError('original engine not signaled at first observation')
         def admit_retirement(**kw):
             self.assertIs(kw['original_shell'],process)
             self.assertEqual(kw['setup_deadline'],records[0]['imeSetupBudget']['deadline'])
@@ -288,6 +292,14 @@ class IMECasePhaseTests(unittest.TestCase):
         self.assertEqual(calls.count(('command',2)),1);self.assertEqual(calls.count(('command',4)),1)
         self.assertFalse(any(isinstance(value,tuple) and value[0]=='physical' for value in calls))
         self.assertNotIn('CTRL_S',calls);self.assertIn('keyboard-close',calls)
+    def test_failed_composition_teardown_retains_handle_and_primary(self):
+        calls,record,result,error=self.run_case('impress',fail_mode=True)
+        failures=[v for v in calls if isinstance(v,tuple) and v[0]=='failure-teardown']
+        self.assertEqual(len(failures),1);self.assertIs(failures[0][1],error)
+        self.assertLess(calls.index('keyboard-close'),calls.index(failures[0]))
+        self.assertLess(calls.index('final-stop'),calls.index('retirement-close'))
+        self.assertEqual(calls.count('final-stop'),1);self.assertIsNone(result)
+        self.assertNotIn('independent-reopen',calls)
     def test_empty_origin_first_observation_failure_blocks_reopen_and_closes_before_force(self):
         calls,record,result,error=self.run_case('writer',empty_retirement_failure=True)
         self.assertIsInstance(error,RuntimeError);self.assertIn('first observation',str(error))

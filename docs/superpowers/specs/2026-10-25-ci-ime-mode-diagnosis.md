@@ -266,3 +266,28 @@ causal attribution even for a complete interval containing closure. No
 observed interval does not prove that TSF independently initiated closure.
 A repeated plain mode comparison, mode resend or deadline extension is not
 an acceptable substitute. Full native paired acceptance remains required.
+
+## Failed-case engine cleanup
+
+The failed ARM64 composition in run 40216984895 retained only retirement
+admission and CloseHandle, followed by forced shell exit. The failure path
+released both engine-proof handles before shell teardown, so shell exit could
+not prove the original engine exited. Keep the already admitted retirement
+handle until mandatory failure teardown and exit observation complete.
+
+Validate original retained shell and engine identities within the existing
+fifteen-second command allowance. Use one taskkill command for the live
+original targets; do not reopen a process, request new rights or retry. Share
+the existing five-second exit phase between shell and engine observations,
+then always release the retained handle. Preserve the identical primary
+exception and record cleanup errors separately. Nonzero command status, late
+waits, identity mismatch or unconfirmed exit remain failures. This forced
+cleanup receipt never establishes graceful retirement or IME acceptance.
+
+The context-interval run 40221302894 at `feed368` stopped in both native
+unit suites before GUI execution: the synthetic compiler fixture's command-line
+`-D__declspec(...)` collided with Windows' predefined macro before its source
+guard was processed. Normalize that fixture with `-U__declspec` immediately
+before its synthetic definition, retaining warnings-as-errors and a negative
+compile proving the source guard is necessary. This fixture repair is not an
+IME behavior correction, and that run provides no context-interval result.

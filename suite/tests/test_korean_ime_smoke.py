@@ -206,6 +206,7 @@ class KoreanImePolicyTests(unittest.TestCase):
                 original = root / ('OpenGeul-' + module + '.' + extension)
                 original.write_bytes(b'unchanged original fixture')
                 calls, sent = [], []
+                primary = ProbeDone()
                 user = SimpleNamespace(GetKeyboardLayout=lambda tid: 0x04090409,
                     GetAsyncKeyState=lambda key: 0, GetKeyState=lambda key: 0,
                     GetWindowThreadProcessId=lambda hwnd, pointer: 41,
@@ -221,7 +222,7 @@ class KoreanImePolicyTests(unittest.TestCase):
                 def command(value, **kw):
                     self.assertEqual(kw['setup_deadline'], saved_record[0]['imeSetupBudget']['deadline'])
                     calls.append(('activation', value))
-                    raise ProbeDone()
+                    raise primary
                 observer = SimpleNamespace(api=api, tid=41, activation_attempted=False, restoration_required=False, focus=51,
                     native_architecture={'processMachine': 0, 'nativeMachine': 0x8664,
                         'processArchitecture': 'x64', 'nativeArchitecture': 'x64'},
@@ -287,11 +288,21 @@ class KoreanImePolicyTests(unittest.TestCase):
                     self.assertEqual(kw['setup_deadline'],saved_record[0]['imeSetupBudget']['deadline'])
                     calls.append('observer-installed');return observer
                 retained_shell={'trueRetainedPopen':True}
+                class Retirement:
+                    close_attempted=False
+                    def close(inner,primary=None):
+                        self.assertFalse(inner.close_attempted)
+                        inner.close_attempted=True;calls.append('retirement-closed')
+                    def cleanup_failed(inner,error):
+                        self.assertIs(error,primary)
+                        self.assertFalse(inner.close_attempted)
+                        calls.append('retained-failure-teardown')
+                        inner.close(error)
                 def admit_retirement(**kw):
                     self.assertIs(kw['original_shell'],process)
                     self.assertEqual(kw['setup_deadline'],saved_record[0]['imeSetupBudget']['deadline'])
                     calls.append('retirement-admitted')
-                    return SimpleNamespace(close=lambda primary=None:calls.append('retirement-closed'))
+                    return Retirement()
                 with ExitStack() as stack:
                     activated=stack.enter_context(patch.object(ime,'activate_owned_suite',side_effect=lambda api,process,hwnd,record:api.require_foreground(hwnd)))
                     context=stack.enter_context(patch.object(ime,'observe_calc_setup',side_effect=calc_context))
@@ -316,12 +327,13 @@ class KoreanImePolicyTests(unittest.TestCase):
                         patch.object(ascii_input,'_observer',side_effect=AsciiObserverBoundary),
                         patch.object(ascii_input.time,'sleep'),patch.object(ime,'capture_failure'),patch.object(ime,'stop_owned_test_process')]:
                         stack.enter_context(patcher)
-                    with self.assertRaises(ProbeDone):
+                    with self.assertRaises(ProbeDone) as raised:
                         ime.case(root, root, root, self.readiness(), module, extension, prepared_library=prepared)
+                    self.assertIs(raised.exception,primary)
                 expected=['keyboard-admitted','owned-editor-click','counted-ctrl-f6','readiness-acknowledged',
                     ('counted-navigation',module),('physical',' ime-opengeul-'+module+':',.04)]
                 if module=='calc':expected.append('calc-context-cleaned-before-observer')
-                expected.extend(['observer-installed','us-setup-complete','retirement-admitted',('activation',1),'keyboard-closed','retirement-closed'])
+                expected.extend(['observer-installed','us-setup-complete','retirement-admitted',('activation',1),'keyboard-closed','retained-failure-teardown','retirement-closed'])
                 self.assertEqual(calls,expected)
                 self.assertEqual(semantic_calls,[('getter-cleaned','pre'),('ack','pre'),('getter-cleaned','post'),('ack','post')])
                 self.assertEqual(context.call_count,int(module=='calc'))
