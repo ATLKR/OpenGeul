@@ -33,7 +33,7 @@ def _inside(inner, outer):
     return outer[0] <= inner[0] < inner[2] <= outer[2] and outer[1] <= inner[1] < inner[3] <= outer[3]
 
 
-def _frame_identity(frame, hwnd, parent, child, shell_pid, office_pid):
+def _frame_window_identity(frame, hwnd, parent, child, shell_pid, office_pid):
     suite, host, editor = (frame[key] for key in ('suite', 'parent', 'editor'))
     assert frame['parentWithinSuite'] is True and frame['editorWithinParent'] is True, 'Owned editor hierarchy changed'
     assert (suite['hwnd'], host['hwnd'], editor['hwnd']) == (hwnd, parent, child)
@@ -42,10 +42,33 @@ def _frame_identity(frame, hwnd, parent, child, shell_pid, office_pid):
     assert all(row['rootHwnd'] == hwnd and row['visible'] is True and row['enabled'] is True
                and type(row['threadId']) is int and row['threadId'] > 0 for row in (suite, host, editor)), 'Owned editor window is unavailable'
     assert suite['threadId'] == host['threadId'], 'Owned host thread changed'
+    for row in (host, editor):
+        if 'sampleAfter' in row:
+            after=row['sampleAfter']
+            assert isinstance(after,dict) and set(after)==set(row)-{'sampleAfter'}, 'Invalid second native window sample'
+            metadata=lambda sample:{key:value for key,value in sample.items() if key not in ('rectangle','clientScreenRect','sampleAfter')}
+            assert metadata(row)==metadata(after), 'Owned editor identity changed during geometry sampling'
+    return tuple((row['hwnd'], row['pid'], row['threadId'], row['rootHwnd']) for row in (suite, host, editor))
+
+
+def _geometry_coherent(frame):
+    coherent=True
+    for key in ('parent','editor'):
+        row=frame[key];after=row.get('sampleAfter',row)
+        for name in ('rectangle','clientScreenRect'):
+            _rectangle(row[name]);_rectangle(after[name])
+            if row[name]!=after[name]:coherent=False
+    return coherent
+
+
+def _frame_identity(frame, hwnd, parent, child, shell_pid, office_pid):
+    identity=_frame_window_identity(frame,hwnd,parent,child,shell_pid,office_pid)
+    assert _geometry_coherent(frame), 'Owned editor native geometry sample is incoherent'
+    suite,host,editor=(frame[key] for key in ('suite','parent','editor'))
     assert _inside(host['clientScreenRect'], host['rectangle']), 'Owned host client geometry escaped its window'
     assert _inside(host['rectangle'], suite['rectangle']) and _inside(editor['rectangle'], host['clientScreenRect']), 'Owned editor geometry escaped its host'
     assert _inside(editor['clientScreenRect'], editor['rectangle']), 'Owned editor client geometry escaped its window'
-    return tuple((row['hwnd'], row['pid'], row['threadId'], row['rootHwnd']) for row in (suite, host, editor))
+    return identity
 
 
 def _hit_ready(hit, hwnd, child, office_pid, thread, point):
@@ -62,8 +85,8 @@ def _hit_ready(hit, hwnd, child, office_pid, thread, point):
 
 
 def _frame_metadata(frame):
-    geometry = {'suite': {'rectangle'}, 'parent': {'rectangle', 'clientScreenRect'},
-                'editor': {'rectangle', 'clientScreenRect'}}
+    geometry = {'suite': {'rectangle'}, 'parent': {'rectangle', 'clientScreenRect','sampleAfter'},
+                'editor': {'rectangle', 'clientScreenRect','sampleAfter'}}
     return {key: ({k: v for k, v in value.items() if k not in geometry[key]}
                   if key in geometry else value) for key, value in frame.items()}
 
@@ -81,12 +104,24 @@ def require_geometry_settlement(evidence, *, hwnd, parent, child, shell_pid, off
     assert type(ledger) is dict and set(ledger) == {'point','initialFrame','deadline','rows','pollCount','pendingCount','ready','settledFrame','readyAt'}
     initial, hit, point = evidence['qualifiedFrame'], evidence['qualifiedHit'], evidence['chosenPhysicalPoint']
     identity = _frame_identity(initial, hwnd, parent, child, shell_pid, office_pid)
+    samples=evidence['samplingCoherence']
+    assert set(samples)=={'deadline','rows'} and samples['deadline']==evidence['deadline']
+    assert type(samples['rows']) is list
+    previous_sample=evidence['startedAt']
+    for sample in samples['rows']:
+        assert set(sample)=={'startedAt','finishedAt','frame'}
+        assert all(type(sample[key]) in (int,float) and math.isfinite(sample[key]) for key in ('startedAt','finishedAt'))
+        assert previous_sample<=sample['startedAt']<=sample['finishedAt']<evidence['deadline']
+        previous_sample=sample['finishedAt'];frame=sample['frame']
+        assert _frame_window_identity(frame,hwnd,parent,child,shell_pid,office_pid)==identity
+        assert _frame_metadata(frame)==_frame_metadata(initial), 'Owned editor sampling metadata changed'
+        assert not _geometry_coherent(frame), 'Pending native sample has no measured geometry disagreement'
     rectangle = initial['editor']['clientScreenRect']
     assert point == [(rectangle[0]+rectangle[2])//2, (rectangle[1]+rectangle[3])//2]
     assert ledger['point'] == point and ledger['initialFrame'] == initial and ledger['deadline'] == evidence['deadline']
     assert ledger['ready'] is True and type(ledger['pollCount']) is int and type(ledger['pendingCount']) is int
     rows = ledger['rows']
-    assert type(rows) is list and 0 < len(rows) == ledger['pollCount'] and len(rows)+len(evidence['preflight']) <= MAX_PREFLIGHT_ROWS
+    assert type(rows) is list and 0 < len(rows) == ledger['pollCount'] and len(rows)+len(evidence['preflight'])+len(samples['rows']) <= MAX_PREFLIGHT_ROWS
     assert ledger['pendingCount'] == len(rows)-1
     previous = evidence['startedAt']
     for index, row in enumerate(rows):
@@ -153,7 +188,8 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
         assert 0 < seconds <= 10 and deadline == started + seconds
         assert started <= clock() < deadline, 'Owned editor callback entry deadline expired'
         evidence.update(startedAt=clock(), deadline=deadline, deadlineScope=DEADLINE_SCOPE,
-                        sharedFocusStartedAt=started, sharedDeadlineSeconds=seconds)
+                        sharedFocusStartedAt=started, sharedDeadlineSeconds=seconds,
+                        samplingCoherence=dict(deadline=deadline,rows=[]))
         output = Path(process.opengeul_evidence_output); suite = Path(process.opengeul_suite_root)
         assert output.is_absolute() and output.is_dir() and suite.is_absolute()
         for part in (output, *output.parents):
@@ -194,15 +230,29 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
         generations[key] = engine_generation; process.opengeul_editor_click_generations = generations
         evidence['originalEngine'] = engine
 
+        def history_size():
+            return (len(evidence['preflight'])+len(evidence.get('geometrySettlement',{}).get('rows',[]))
+                +len(evidence.get('samplingCoherence',{}).get('rows',[])))
+
         def observe(row=None, key=None):
-            budget(); assert probe.process_snapshot(process) == shell, 'Original Suite generation changed'
-            budget(); assert probe.engine_snapshot(handle) == engine, 'Owned engine generation changed'
-            budget(); frame = probe.editor_snapshot(hwnd, parent, child)
-            if row is not None: capture(row, key, frame)
-            assert _frame_identity(frame, hwnd, parent, child, process.pid, office_pid) == identity, 'Owned editor window identity changed'
-            budget(); assert probe.foreground() == hwnd, 'Owned editor foreground changed'
-            budget(); require_foreground(hwnd)
-            return frame
+            while True:
+                budget();sample_started=clock()
+                assert probe.process_snapshot(process) == shell, 'Original Suite generation changed'
+                budget(); assert probe.engine_snapshot(handle) == engine, 'Owned engine generation changed'
+                budget(); frame = probe.editor_snapshot(hwnd, parent, child)
+                if row is not None: capture(row, key, frame)
+                assert _frame_window_identity(frame, hwnd, parent, child, process.pid, office_pid) == identity, 'Owned editor window identity changed'
+                budget(); assert probe.foreground() == hwnd, 'Owned editor foreground changed'
+                budget(); require_foreground(hwnd)
+                if _geometry_coherent(frame):
+                    _frame_identity(frame,hwnd,parent,child,process.pid,office_pid)
+                    return frame
+                assert _frame_metadata(frame)==_frame_metadata(initial), 'Owned editor sampling metadata changed'
+                assert history_size()<MAX_PREFLIGHT_ROWS, 'Owned editor shared geometry history exceeded'
+                samples=evidence.setdefault('samplingCoherence',dict(deadline=deadline,rows=[]))
+                sample=dict(startedAt=sample_started,finishedAt=clock())
+                samples['rows'].append(sample);capture(sample,'frame',frame)
+                budget();pause(min(.05,max(0,deadline-clock())))
 
         while True:
             frame = observe(); rectangle = frame['editor']['clientScreenRect']
@@ -214,7 +264,7 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
                 originalImagesRevalidated=True,
                 geometry={key: frame[key]['rectangle'] for key in ('suite', 'parent', 'editor')},
                 editorClientScreenRect=rectangle)
-            assert len(evidence['preflight']) < MAX_PREFLIGHT_ROWS, 'Owned editor preflight history exceeded'
+            assert history_size() < MAX_PREFLIGHT_ROWS, 'Owned editor preflight history exceeded'
             evidence['preflight'].append(row)
             if _hit_ready(hit, hwnd, child, office_pid, identity[2][2], point): break
             budget(); pause(min(.05, max(0, deadline - clock())))
@@ -232,7 +282,7 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
         evidence['geometrySettlement'] = ledger
         while True:
             budget()
-            assert len(evidence['preflight'])+len(ledger['rows']) < MAX_PREFLIGHT_ROWS, 'Owned editor shared geometry history exceeded'
+            assert history_size() < MAX_PREFLIGHT_ROWS, 'Owned editor shared geometry history exceeded'
             row = dict(startedAt=clock()); ledger['rows'].append(row); ledger['pollCount'] += 1
             before = observe(row, 'beforeFrame')
             assert _frame_metadata(before) == _frame_metadata(frame), 'Owned editor non-geometry state changed'
@@ -324,7 +374,7 @@ class NativeEditorClickProbe(NativeActivationProbe):
         receipt['engineHandleReleased'] = bool(self.kernel.CloseHandle(handle))
         self._required(receipt['engineHandleReleased'], 'CloseHandle(owned editor)')
 
-    def _child_window(self, hwnd):
+    def _child_window_sample(self, hwnd):
         self._required(self._call(self.user.IsWindow, hwnd), 'IsWindow(owned editor)')
         pid = C.c_uint32(); thread = int(self._call(self.user.GetWindowThreadProcessId, hwnd, C.byref(pid)))
         self._required(thread, 'GetWindowThreadProcessId(owned editor)')
@@ -338,6 +388,14 @@ class NativeEditorClickProbe(NativeActivationProbe):
             visible=bool(self._call(self.user.IsWindowVisible, hwnd)), enabled=bool(self._call(self.user.IsWindowEnabled, hwnd)),
             rectangle=[rect.left, rect.top, rect.right, rect.bottom],
             clientScreenRect=[first.x, first.y, last.x, last.y])
+
+    def _child_window(self, hwnd):
+        # Independent getters can straddle a resize. Preserve both observations;
+        # only the caller with retained process identities may wait and reobserve.
+        before=self._child_window_sample(hwnd)
+        after=self._child_window_sample(hwnd)
+        if before!=after:before['sampleAfter']=after
+        return before
 
     def editor_snapshot(self, hwnd, parent, child):
         return dict(suite=self.window_snapshot(hwnd), parent=self._child_window(parent), editor=self._child_window(child),

@@ -115,6 +115,71 @@ class EditorClickPolicyTests(unittest.TestCase):
             probe=probe, clock=c, pause=c.sleep)
     def replay(self, result):
         return self.mod.require_geometry_settlement(result, hwnd=11, parent=22, child=33, shell_pid=77, office_pid=88)
+    def mixed_sample(self, probe, *, persistent=False, identity_change=False):
+        original=probe.editor_snapshot;seen=[]
+        def snapshot(*args):
+            frame=original(*args)
+            if probe.position is not None and (persistent or not seen):
+                row=frame['editor'];after=copy.deepcopy(row)
+                row['rectangle']=[9,56,1001,675]
+                row['sampleAfter']=after
+                if identity_change:after['pid']=999
+                seen.append(frame)
+            return frame
+        probe.editor_snapshot=snapshot
+        return seen
+    def test_measured_mixed_sample_reobserves_generations_without_extra_input(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder);seen=self.mixed_sample(probe)
+            result=self.run_click(p,c,probe,r)
+            self.assertTrue(result['ready']);self.assertEqual(len(seen),1)
+            self.assertEqual((probe.calls.count('move'),probe.calls.count('click')),(1,1))
+            rows=result['samplingCoherence']['rows'];self.assertEqual(len(rows),1)
+            self.assertLess(rows[0]['finishedAt'],result['deadline'])
+            self.replay(result)
+            frames=[i for i,call in enumerate(probe.calls) if call=='frame']
+            for index in frames[1:]:self.assertEqual(probe.calls[index-2:index],['shell','engine'])
+            for change in ('geometry','identity','deadline'):
+                bad=copy.deepcopy(result);row=bad['samplingCoherence']['rows'][0]
+                if change=='geometry':row['frame']['editor']['rectangle']=row['frame']['editor']['sampleAfter']['rectangle'][:]
+                elif change=='identity':row['frame']['editor']['sampleAfter']['pid']=999
+                else:row['finishedAt']=result['deadline']
+                with self.subTest(change=change),self.assertRaises(AssertionError):self.replay(bad)
+    def test_stable_invalid_or_identity_changed_sample_still_fails_without_click(self):
+        for changed in (False,True):
+            with self.subTest(identity=changed),tempfile.TemporaryDirectory() as folder:
+                p,c,probe,r=self.fixture(folder)
+                if changed:self.mixed_sample(probe,identity_change=True)
+                else:probe.after_move=lambda:probe.frame['editor']['rectangle'].__setitem__(0,9)
+                with self.assertRaises(AssertionError):self.run_click(p,c,probe,r)
+                self.assertNotIn('click',probe.calls)
+    def test_persistent_sampling_mismatch_uses_original_deadline_and_shared_bound(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder);self.mixed_sample(probe,persistent=True)
+            with self.assertRaisesRegex(AssertionError,'deadline'):self.run_click(p,c,probe,r)
+            result=r['editorClicks'][0]
+            self.assertEqual(result['deadline'],2.);self.assertNotIn('click',probe.calls)
+            self.assertLessEqual(len(result['samplingCoherence']['rows'])+len(result['preflight'])+len(result['geometrySettlement']['rows']),self.mod.MAX_PREFLIGHT_ROWS)
+            self.assertTrue(result['engineHandleReleased'])
+    def test_sampling_retry_rechecks_process_generation_and_starts_no_query_after_expiry(self):
+        for mode in ('engine','expired','history'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as folder:
+                p,c,probe,r=self.fixture(folder);seen=self.mixed_sample(probe,persistent=True)
+                frame_counts=[]
+                def pause(seconds):
+                    frame_counts.append(probe.calls.count('frame'))
+                    c.now+=seconds
+                    if mode=='engine':probe.engine['creationTime']+=1
+                    if mode=='expired':c.now=2.
+                c.sleep=pause
+                with patch.object(self.mod,'MAX_PREFLIGHT_ROWS',3 if mode=='history' else 102):
+                    with self.assertRaisesRegex(AssertionError,{'engine':'generation','expired':'deadline','history':'history'}[mode]):
+                        self.run_click(p,c,probe,r)
+                self.assertNotIn('click',probe.calls)
+                if mode in ('engine','expired'):
+                    self.assertEqual(probe.calls.count('frame'),frame_counts[0])
+                rows=r['editorClicks'][0]['samplingCoherence']['rows']
+                self.assertEqual(len(rows),1)
     def test_actual_shaped_late_geometry_settles_without_another_pointer_or_button(self):
         with tempfile.TemporaryDirectory() as folder:
             p,c,probe,r=self.fixture(folder)
@@ -375,6 +440,27 @@ class NativeEditorBoundaryTests(unittest.TestCase):
         self.assertEqual(self.kernel.OpenProcess.calls,[(0x00101000,False,88)])
         self.assertIs(self.kernel.OpenProcess.restype,ctypes.c_void_p)
         self.assertEqual(self.kernel.CloseHandle.argtypes,(ctypes.c_void_p,))
+    def test_native_getter_seam_retains_old_rect_new_client_new_rect(self):
+        old=[1,48,1009,683];new=[0,47,1024,698];rectangles=iter((old,new))
+        def rect(hwnd,pointer):
+            pointer._obj.left,pointer._obj.top,pointer._obj.right,pointer._obj.bottom=next(rectangles);return 1
+        def client(hwnd,pointer):
+            pointer._obj.left,pointer._obj.top,pointer._obj.right,pointer._obj.bottom=0,0,1024,651;return 1
+        def screen(hwnd,pointer):pointer._obj.y+=47;return 1
+        def owner(hwnd,pointer):pointer._obj.value=88;return 20
+        self.user.GetWindowRect.action=rect;self.user.GetClientRect.action=client
+        self.user.ClientToScreen.action=screen;self.user.GetWindowThreadProcessId.action=owner
+        self.user.GetAncestor.action=lambda hwnd,flag:11
+        value=self.probe._child_window(33)
+        self.assertEqual(value['rectangle'],old);self.assertEqual(value['clientScreenRect'],new)
+        self.assertEqual(value['sampleAfter']['rectangle'],new)
+        self.assertEqual(value['sampleAfter']['clientScreenRect'],new)
+    def test_native_getter_expiry_never_starts_next_geometry_query(self):
+        def rect(hwnd,pointer):self.clock.now=9.;return 1
+        self.user.GetWindowRect.action=rect
+        with self.assertRaisesRegex(AssertionError,'deadline'):self.probe._child_window(33)
+        self.assertEqual(len(self.user.GetWindowRect.calls),1)
+        self.assertEqual(self.user.GetClientRect.calls,[])
     def test_zero_engine_handle_fails_without_a_generation_claim(self):
         self.kernel.OpenProcess.action=lambda *args:0
         with self.assertRaises(OSError):self.probe.open_engine(88)

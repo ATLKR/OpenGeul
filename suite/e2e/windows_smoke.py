@@ -1329,7 +1329,7 @@ def document_case(suite, fixtures, output, module, extension, physical_input, *,
                 navigation={'writer':('CTRL_END',),'calc':('CTRL_HOME','F2','CTRL_END'),
                             'impress':('TAB','F2','CTRL_END')}[module]
                 for shortcut in navigation: shortcuts.press(shortcut)
-                focus = api.require_editor_focus(hwnd, child)
+                focus = shortcuts.pre_ascii_focus()
                 record['stage'] = 'type-marker'
                 typed=ascii_input.type_ascii(api, hwnd, child, marker, record, pause=0.04,deadline=shortcuts.deadline,
                     original_popen=process,native_binding=shortcuts.binding,prepared_library=prepared_library)

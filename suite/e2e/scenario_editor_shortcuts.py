@@ -340,6 +340,26 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
             if self.failed_error is None: self.failed_error = exc
             raise self.failed_error
 
+    def pre_ascii_focus(self):
+        """Observe the original ASCII-entry boundary under its retained budget.
+
+        A fresh owned capture may settle; no input is replayed and the final
+        strict focus comes from that same complete native scope observation.
+        """
+        try:
+            self._expected('ASCII')
+            assert 'preAsciiObservation' not in self.receipt, 'Pre-ASCII observation cannot repeat'
+            deadline=self.deadline
+            observed=self._capture_guard(True)
+            assert self.deadline==deadline, 'Pre-ASCII observation changed its original deadline'
+            self._budget()
+            self.receipt['preAsciiObservation']=observed
+            self.receipt['preAsciiDeadline']=deadline
+            return observed['scope']['focus']['hwnd']
+        except BaseException as exc:
+            if self.failed_error is None:self.failed_error=exc
+            raise self.failed_error
+
     def typed(self, evidence):
         try:
             self._expected('ASCII'); self._guard()

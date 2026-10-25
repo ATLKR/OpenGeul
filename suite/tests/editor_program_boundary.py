@@ -9,6 +9,7 @@ LABELS = {'CTRL_F6':'^{F6}', 'CTRL_HOME':'^{HOME}', 'F2':'{F2}', 'CTRL_END':'^{E
 
 class EditorProgramBoundary:
     def __init__(self, api, process, attachment, program, record, deadline, *, marker=None, inject=lambda key,**kw:None):
+        self.api=api
         self.deadline, self.record, self.inject = deadline, record, inject
         self.binding = dict(shellPid=process.pid,officePid=attachment['officePid'],
             suiteHwnd=attachment['hwnd'],parentHwnd=attachment['parent'],childHwnd=attachment['child'])
@@ -17,6 +18,8 @@ class EditorProgramBoundary:
     def __exit__(self, *args): return False
     def press(self, preset): self.inject(LABELS[preset],pause=.1)
     def editor_ready(self, evidence): pass
+    def pre_ascii_focus(self):
+        return self.api.require_editor_focus(self.binding['suiteHwnd'],self.binding['childHwnd'])
     def typed(self, evidence): pass
     def join_model(self, context, plan):
         if not isinstance(getattr(context, 'deadline', None), (int, float)):
