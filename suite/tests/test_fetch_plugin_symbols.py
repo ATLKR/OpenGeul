@@ -27,6 +27,7 @@ class SymbolFetchTests(unittest.TestCase):
             if mode=='wrong-source':artifact['workflow_run']['head_sha']='b'*40
             for name,value in (('lock',lock),('artifact',artifact)):(root/(name+'.json')).write_text(json.dumps(value))
             harness=f.HARNESS.replace('Invoke-SourceEngineFetch','Invoke-PluginSymbolFetch').replace('SourceLockPath=','SymbolLockPath=')
+            harness=harness.replace(". $Script\n", ". $Script -Output (Join-Path $Root 'output') -TimeoutSeconds 23\nif ($Output -cne (Join-Path $Root 'output') -or $TimeoutSeconds -ne 23) { throw 'Imported helper overwrote symbol command parameters.' }\n")
             (root/'harness.ps1').write_text(harness)
             env=dict(os.environ);env.pop('GITHUB_TOKEN',None);env['GH_TOKEN']=f.SECRET
             self.assertTrue(SCRIPT.exists(),'symbol artifact fetcher absent')

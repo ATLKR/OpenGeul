@@ -1,6 +1,7 @@
 param([string]$SymbolLockPath,[string]$Output,[ValidateRange(1,1200)][int]$TimeoutSeconds=1200)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'fetch-source-engine.ps1')
+# Dot-sourced param defaults must not replace this command's output or budget.
+. (Join-Path $PSScriptRoot 'fetch-source-engine.ps1') -Output $Output -TimeoutSeconds $TimeoutSeconds
 
 function Expand-PluginSymbols([string]$Archive,[string]$Output,$Lock,
                               [Threading.CancellationToken]$CancellationToken) {
