@@ -80,7 +80,12 @@ public static class ComWaitDiagnostic
                 long deadline = Stopwatch.GetTimestamp() + 5 * Stopwatch.Frequency; // Newly defined fixture budget, not an Office budget.
                 var thread = new Thread(() =>
                 {
-                    try { completion.SetResult(new NativeCase(branch, nonce, architecture, deadline).Run()); }
+                    try
+                    {
+                        // The escaped delegate needs its own platform guard for net8 analysis.
+                        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+                        completion.SetResult(new NativeCase(branch, nonce, architecture, deadline).Run());
+                    }
                     catch (Exception e) { completion.SetException(e); }
                 }) { IsBackground = true };
                 thread.SetApartmentState(ApartmentState.STA);
