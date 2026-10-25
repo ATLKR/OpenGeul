@@ -18,10 +18,10 @@ class Budget:
         return self.time
 
 class Runtime:
-    def __init__(self,path):self.path=path;self.calls=[];self.info={};self.answer={};self.fail_cleanup=False;self.on_query=None
+    def __init__(self,path):self.path=path;self.calls=[];self.info={};self.answer={};self.fail_cleanup=False;self.on_query=None;self.held_paths=[];self.released=[]
     def preflight_path(self,path):pass
-    def hold(self,path):self.calls.append('hold');return 123
-    def release(self,handle):self.calls.append('release');return True
+    def hold(self,path):self.calls.append('hold');self.held_paths.append(path);return 123+len(self.held_paths)
+    def release(self,handle):self.calls.append('release');self.released.append(handle);return True
     def initialize(self,path,options):self.calls.append('initialize');return True
     def load(self,path,base,size):self.calls.append('load');self.base=base;self.size=size;return base
     def module(self,base):
@@ -41,6 +41,7 @@ class ResolutionTests(unittest.TestCase):
     def setUp(self):
         self.assertTrue(SCRIPT.exists(),'bounded resolver missing')
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(self.tmp.name).resolve()/'vclplug_winlo.pdb';self.path.write_bytes(pdb())
+        self.dll_path=self.path.with_suffix('.dll');self.dll_path.write_bytes(dll())
         self.budget=Budget();self.runtime=Runtime(self.path)
         self.proof=dict(kind='matched-plugin-symbols',identityMatched=True,acceptance=False,sourceCommit='a'*40,
             matchedIdentity=dict(guid=str(GUID),age=2),files=dict(dll=dict(name='vclplug_winlo.dll',**self.m.retention.pin(dll())),pdb=dict(name='vclplug_winlo.pdb',**self.m.retention.pin(pdb()))))
@@ -54,7 +55,7 @@ class ResolutionTests(unittest.TestCase):
         result=self.m.qualify(dll(),self.path,self.proof,self.budget,runtime=self.runtime)
         self.assertTrue(result['qualification']['roundTripMatched'])
         self.assertFalse(result['runtimeCallerProved']);self.assertEqual(result['frames'],[])
-        self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
+        self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
         self.assertEqual(self.runtime.calls.count('fixed-name'),1)
         self.runtime.info={'type':7}
         result=self.m.qualify(dll(),self.path,self.proof,self.budget,runtime=self.runtime)
@@ -83,7 +84,7 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(len(reads),1)
     def test_known_function_callpc_and_mandatory_cleanup(self):
         r=self.run_resolve();self.assertEqual(r['frames'][0]['tag'],'mutex-acquire');self.assertEqual(r['frames'][0]['callRva'],0x1100)
-        self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release']);self.assertTrue(r['cleanupComplete']);self.assertFalse(r['runtimeCallerProved'])
+        self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release']);self.assertTrue(r['cleanupComplete']);self.assertFalse(r['runtimeCallerProved'])
         self.assertNotIn(str(self.path),json.dumps(r));self.assertNotIn('WinSal',json.dumps(r))
     def test_bad_hash_or_identity_never_starts_native(self):
         for key in ('dll','pdb'):
@@ -99,7 +100,58 @@ class ResolutionTests(unittest.TestCase):
     def test_wrong_loaded_pdb_never_queries_but_cleans(self):
         self.runtime.info={'guid':'ffffffff-ffff-ffff-ffff-ffffffffffff'}
         with self.assertRaises(self.m.ResolutionError):self.run_resolve()
-        self.assertFalse(any(isinstance(c,tuple) for c in self.runtime.calls));self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
+        self.assertFalse(any(isinstance(c,tuple) for c in self.runtime.calls));self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
+    def test_symbol_load_uses_held_verified_pe_without_relaxing_unmatched(self):
+        original=self.runtime.load
+        def load(path,base,size):
+            self.runtime.info={'unmatched':Path(path)!=self.dll_path}
+            return original(path,base,size)
+        self.runtime.load=load
+        result=self.run_resolve()
+        self.assertTrue(result['complete']);self.assertTrue(result['imageHeldDuringResolution'])
+        self.assertEqual(self.runtime.held_paths,[str(self.path),str(self.dll_path)])
+        self.assertCountEqual(self.runtime.released,[124,125])
+        self.runtime.load=original;self.runtime.info={'unmatched':True}
+        with self.assertRaises(self.m.ModuleIdentityError) as caught:self.run_resolve()
+        self.assertEqual(caught.exception.args,((32,3),))
+    def test_missing_or_wrong_sibling_image_never_reaches_native_loading(self):
+        self.dll_path.unlink()
+        with self.assertRaises(FileNotFoundError):self.run_resolve()
+        self.assertEqual(self.runtime.calls,[])
+        self.dll_path.write_bytes(dll()+b'changed')
+        with self.assertRaisesRegex(self.m.ResolutionError,'image-bytes-mismatch'):self.run_resolve()
+        self.assertEqual(self.runtime.calls,[])
+    def test_image_replacement_during_hold_rejected_and_both_handles_released(self):
+        original=self.runtime.hold
+        def hold(path):
+            handle=original(path)
+            if Path(path)==self.dll_path:self.dll_path.write_bytes(dll()+b'changed')
+            return handle
+        self.runtime.hold=hold
+        with self.assertRaisesRegex(self.m.ResolutionError,'image-changed-under-lock'):self.run_resolve()
+        self.assertNotIn('initialize',self.runtime.calls)
+        self.assertCountEqual(self.runtime.released,[124,125])
+    def test_expiry_after_image_hold_still_releases_both_handles(self):
+        original=self.runtime.hold
+        def hold(path):
+            handle=original(path)
+            if Path(path)==self.dll_path:self.budget.time=27.
+            return handle
+        self.runtime.hold=hold
+        with self.assertRaises(TimeoutError):self.run_resolve()
+        self.assertNotIn('initialize',self.runtime.calls)
+        self.assertCountEqual(self.runtime.released,[124,125])
+    def test_image_change_after_query_or_release_failure_never_passes(self):
+        self.runtime.on_query=lambda:self.dll_path.write_bytes(dll()+b'changed')
+        with self.assertRaisesRegex(self.m.ResolutionError,'image-changed'):self.run_resolve()
+        self.assertCountEqual(self.runtime.released,[124,125])
+        self.dll_path.write_bytes(dll());self.runtime=Runtime(self.path)
+        original=self.runtime.release
+        def release(handle):original(handle);return handle!=125
+        self.runtime.release=release
+        with self.assertRaises(self.m.ResolutionError) as caught:self.run_resolve()
+        self.assertEqual(caught.exception.resolutionReceipt['cleanupErrors'],[{'stage':'image-handle','errorType':'ResolutionError'}])
+        self.assertCountEqual(self.runtime.released,[124,125])
     def test_dia_symbols_require_the_same_exact_identity_as_pdb(self):
         self.runtime.info={'type':7}
         self.assertTrue(self.run_resolve()['complete'])
@@ -117,11 +169,11 @@ class ResolutionTests(unittest.TestCase):
         with self.assertRaises(self.m.ModuleIdentityError) as caught:self.run_resolve()
         self.assertEqual(caught.exception.args,((1|8|16|64,4),))
         self.assertNotIn('private',str(caught.exception))
-        self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
+        self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
     def test_original_expiry_no_second_query_and_cleanup(self):
         self.runtime.on_query=lambda:setattr(self.budget,'time',27.)
         with self.assertRaises(TimeoutError):self.run_resolve([0x1104,0x1108])
-        self.assertEqual(sum(isinstance(c,tuple) for c in self.runtime.calls),1);self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
+        self.assertEqual(sum(isinstance(c,tuple) for c in self.runtime.calls),1);self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
     def test_cleanup_failure_cannot_return_success(self):
         self.runtime.fail_cleanup=True
         with self.assertRaises(self.m.ResolutionError) as caught:self.run_resolve()
@@ -207,17 +259,18 @@ class ResolutionTests(unittest.TestCase):
         runtime.load_module=lambda *args:calls.append(('load',args)) or self.m.IMAGE_BASE
         self.assertEqual(runtime.hold(str(self.path)),123)
         self.assertEqual(calls[0][1],(str(self.path),0x80000000,1,None,3,0x80,None))
-        runtime.load(str(self.path),self.m.IMAGE_BASE,8192)
+        runtime.load(str(self.dll_path),self.m.IMAGE_BASE,8192)
         self.assertIsNone(calls[1][1][1])
+        self.assertEqual(calls[1][1][2],str(self.dll_path).encode('ascii'))
         self.assertTrue(runtime.release(123));self.assertEqual(calls[-1],('close',123))
     def test_initialize_failure_releases_without_unload_or_session_cleanup(self):
         self.runtime.initialize=lambda *args:False
         with self.assertRaisesRegex(self.m.ResolutionError,'symbol-initialize'):self.run_resolve()
-        self.assertEqual(self.runtime.calls,['hold','release'])
+        self.assertEqual(self.runtime.calls,['hold','hold','release','release'])
     def test_total_expiry_still_attempts_all_mandatory_releases(self):
         self.runtime.on_query=lambda:setattr(self.budget,'time',30.)
         with self.assertRaises(TimeoutError) as caught:self.run_resolve()
-        self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
+        self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
         self.assertFalse(caught.exception.resolutionReceipt['cleanupComplete'])
         self.assertEqual(caught.exception.resolutionReceipt['cleanupErrors'][-1]['stage'],'cleanup-budget')
 

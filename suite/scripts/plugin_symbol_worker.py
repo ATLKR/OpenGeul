@@ -26,6 +26,8 @@ pair-hash-mismatch pair-identity-mismatch pair-only-directory pdb-changed pdb-ch
 pdb-handle pdb-open receipt-size return-rva-bounds symbol-initialize symbol-load
 symbol-name-bound symbol-options system-directory unsupported-local-path-encoding
 verified-pair-required symbol-unload symbol-cleanup symbol-pdb-handle
+image-bytes-mismatch image-handle image-changed-under-lock image-changed
+symbol-image-handle symbol-file-open
 '''.split())+tuple(('SymbolError',code) for code in '''
 absolute-normal-path-required binary-bounds codeview-format codeview-name codeview-pdb-name
 codeview-pointer codeview-size configuration-changed copy-identity debug-directory debug-rva

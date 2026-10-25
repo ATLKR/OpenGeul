@@ -42,6 +42,17 @@ raw field output. Run40198528845 established composite metadata rejection but
 did not establish which field differed; SymDia compatibility is not yet a
 confirmed explanation of that native failure.
 
+Run40200068519 returned SymPdb (3) and mask32: only the combined PDB/DBG
+unmatched flag differed; exact path, GUID, age, base and size matched. This
+disproves backend-type rejection for that run. The next correction supplies
+the exact verified sibling PE file to SymLoadModuleEx for image/PDB correlation,
+instead of a PDB-only input. Both files are held with read-only sharing and
+checked before/after symbol queries. This is symbol metadata loading, never
+LoadLibrary or execution of the target DLL. Keep IGNORE_CVREC (ignore embedded
+path information), EXACT_SYMBOLS and all other existing options. Missing or
+changed image bytes fail before symbol loading; the unmatched guard remains.
+Whether missing PE correlation caused the native failure is still a hypothesis.
+
 Advance the development ARM64 runtime lock to the independently qualified new
 engine for this experiment. This is a separate integration decision after the
 source-build review; the symbol artifact alone did not change the runtime lock.

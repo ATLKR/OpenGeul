@@ -101,19 +101,27 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
     require(identity==retention.pdb_identity(pdb_bytes)==proof.get('matchedIdentity'),'pair-identity-mismatch');budget.now()
     pe=struct.unpack_from('<I',dll_bytes,60)[0];image_size=struct.unpack_from('<I',dll_bytes,pe+24+56)[0]
     require(type(rvas) is list and (len(rvas)==0 if qualification else 0<len(rvas)<=32) and all(type(r) is int and 4<=r<=image_size and r%4==0 for r in rvas),'return-rva-bounds')
+    image_path=_path(path.with_name('vclplug_winlo.dll'),budget)
+    require(retention.read_regular(image_path,retention.MAX_DLL,budget=budget)==dll_bytes,'image-bytes-mismatch');budget.now()
     receipt=dict(schemaVersion=1,kind='local-plugin-symbol-resolution',acceptance=False,runtimeCallerProved=False,functionAliasUniquenessProved=False,
                  identity=identity,dllSha256=retention.pin(dll_bytes)['sha256'],pdbSha256=retention.pin(pdb_bytes)['sha256'],
                  complete=False,cleanupComplete=False,frames=[],cleanupErrors=[],nativeCallsPreemptible=False)
-    initialized=False;loaded=0;held=None;primary=None
+    initialized=False;loaded=0;held=None;image_held=None;primary=None
     try:
         budget.now()
         budget.now();held=runtime.hold(str(path))
         require(type(held) is int and held>0,'pdb-handle');budget.now()
         require(retention.read_regular(path,retention.MAX_PDB,budget=budget)==pdb_bytes,'pdb-changed-under-lock');budget.now()
         receipt['pdbHeldDuringResolution']=True
+        image_held=runtime.hold(str(image_path))
+        require(type(image_held) is int and image_held>0,'image-handle');budget.now()
+        require(retention.read_regular(image_path,retention.MAX_DLL,budget=budget)==dll_bytes,'image-changed-under-lock');budget.now()
+        receipt['imageHeldDuringResolution']=True
         budget.now();initialized=runtime.initialize(str(path.parent),OPTIONS)
         require(initialized is True,'symbol-initialize');budget.now()
-        loaded=runtime.load(str(path),IMAGE_BASE,image_size)
+        # Supply the verified PE so DbgHelp can match its CodeView identity to
+        # the held PDB. This reads symbol metadata; it never executes the image.
+        loaded=runtime.load(str(image_path),IMAGE_BASE,image_size)
         require(loaded==IMAGE_BASE,'symbol-load');budget.now()
         info=runtime.module(IMAGE_BASE);budget.now()
         # DbgHelp documents both SymPdb and SymDia as loaded symbol backends.
@@ -140,6 +148,7 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
         for rva in rvas:
             budget.now();value=runtime.query(IMAGE_BASE+rva-4);budget.now()
             receipt['frames'].append(_frame(value,rva,image_size))
+        require(retention.read_regular(image_path,retention.MAX_DLL,budget=budget)==dll_bytes,'image-changed');budget.now()
         require(retention.read_regular(path,retention.MAX_PDB,budget=budget)==pdb_bytes,'pdb-changed');budget.now()
         receipt['complete']=True
     except BaseException as exc:
@@ -149,6 +158,7 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
         # Mandatory release is attempted even after expiry; no additional query.
         for label,action in (('unload',lambda:runtime.unload(loaded)) if loaded else ('unload',None),
                              ('cleanup',lambda:runtime.cleanup()) if initialized else ('cleanup',None),
+                             ('image-handle',lambda:runtime.release(image_held)) if image_held else ('image-handle',None),
                              ('pdb-handle',lambda:runtime.release(held)) if held else ('pdb-handle',None)):
             if action is None:continue
             try:require(action() is True,'symbol-'+label)
@@ -218,7 +228,7 @@ class NativeRuntime:
         self.budget.now();require(self.drive_type(str(Path(path).anchor))==3,'local-fixed-drive')
         self.budget.now()
         handle=self.open_file(path,0x80000000,1,None,3,0x80,None)
-        require(handle not in (None,0,C.c_void_p(-1).value),'pdb-open')
+        require(handle not in (None,0,C.c_void_p(-1).value),'symbol-file-open')
         # Transfer ownership before any subsequent deadline check.
         return int(handle)
     def release(self,handle):return bool(self.close_file(handle))
