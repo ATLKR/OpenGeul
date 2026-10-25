@@ -361,7 +361,8 @@ class NativeState(ctypes.Structure):
                 ('diagnostics', NativeDiagnosticEvent * 128),
                 ('modeDiagnosticVersion',ctypes.c_uint32),('modeDiagnosticEnabled',ctypes.c_uint32),
                 ('modeDiagnosticDeadline',ctypes.c_uint64),('modeDiagnosticFrequency',ctypes.c_uint64),
-                ('modeDiagnostics',NativeModeDiagnosticEvent * 128)]
+                ('modeDiagnostics',NativeModeDiagnosticEvent * 128),
+                ('contextBoundaryExpired',ctypes.c_int32),('contextBoundaryRejected',ctypes.c_int32)]
 
 
 OBSERVER_SOURCE = r'''
@@ -393,7 +394,8 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     opengeul_ime::ModeReceipt threadMode; opengeul_ime::CommandRejection commandRejection; uint32_t nativeAttemptedMask;
     volatile LONG diagnosticCount,diagnosticOverflow; DiagnosticEvent diagnostics[128];
     uint32_t modeDiagnosticVersion,modeDiagnosticEnabled; uint64_t modeDiagnosticDeadline,modeDiagnosticFrequency;
-    ModeDiagnosticEvent modeDiagnostics[128]; };
+    ModeDiagnosticEvent modeDiagnostics[128];
+    volatile LONG contextBoundaryExpired,contextBoundaryRejected; };
 static State* shared = nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
@@ -589,11 +591,32 @@ static void observe_mode_diagnostic(LONG index) {
 }
 // Passive, bounded owned-target observations. Never mutate command receipts or IME mode.
 static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
-    if (message!=WM_INPUTLANGCHANGE && message!=WM_IME_NOTIFY && message!=WM_KEYDOWN && message!=WM_CHAR
+    // Pinned core bf6ef266 vcl/inc/win/saldata.hxx: SAL_MSG_SETINPUTCONTEXT.
+    const bool contextBoundary=message==0x490;
+    if (contextBoundary) {
+        if(shared->modeDiagnosticVersion!=1 || shared->modeDiagnosticEnabled!=1 || (origin!=1 && origin!=3)) return;
+        if(uint64_t(UINT_PTR(hwnd))!=shared->targetHwnd || GetCurrentThreadId()!=shared->tid) return;
+    }
+    else if (message!=WM_INPUTLANGCHANGE && message!=WM_IME_NOTIFY && message!=WM_KEYDOWN && message!=WM_CHAR
         && message!=WM_IME_SETCONTEXT && message!=WM_SETFOCUS && message!=WM_KILLFOCUS) return;
+    const auto contextBudget=[&]() {
+        if(!contextBoundary) return true;
+        LARGE_INTEGER now={},frequency={};
+        if(!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&now)
+            || now.QuadPart<=0 || !shared->modeDiagnosticDeadline || !shared->modeDiagnosticFrequency
+            || uint64_t(frequency.QuadPart)!=shared->modeDiagnosticFrequency) {
+            InterlockedIncrement(&shared->contextBoundaryRejected);return false;
+        }
+        if(uint64_t(now.QuadPart)>=shared->modeDiagnosticDeadline) {
+            InterlockedIncrement(&shared->contextBoundaryExpired);return false;
+        }
+        return true;
+    };
+    if(!contextBudget()) return;
     DWORD pid=0; const auto tid=GetWindowThreadProcessId(hwnd,&pid);
     if (uint64_t(UINT_PTR(hwnd))!=shared->targetHwnd || pid!=shared->pid
         || tid!=shared->tid || GetCurrentThreadId()!=shared->tid) return;
+    if(!contextBudget()) return;
     // The producer is the one retained editor thread; saturated rows are never overwritten.
     if (shared->diagnosticCount>=128) { InterlockedExchange(&shared->diagnosticOverflow,1); return; }
     const LONG index=InterlockedIncrement(&shared->diagnosticCount)-1;
@@ -602,20 +625,28 @@ static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT o
     event->message=message;event->origin=origin;event->pid=pid;event->tid=tid;
     event->commandAck=shared->ack;event->hwnd=uint64_t(UINT_PTR(hwnd));
     event->layout=uint64_t(UINT_PTR(GetKeyboardLayout(0)));
-    event->wparam=uint64_t(wp);event->lparam=uint64_t(UINT_PTR(lp));
+    if(!contextBudget()) return;
+    // The private message carries an application pointer. Never read or retain it.
+    event->wparam=contextBoundary?0:uint64_t(wp);event->lparam=contextBoundary?0:uint64_t(UINT_PTR(lp));
     event->focusHwnd=uint64_t(UINT_PTR(GetFocus()));
+    if(!contextBudget()) return;
     LARGE_INTEGER counter={}; if (QueryPerformanceCounter(&counter)) event->counter=uint64_t(counter.QuadPart);
+    if(!contextBudget()) return;
     HIMC context=ImmGetContext(hwnd);
+    if(!contextBudget()) {if(context) ImmReleaseContext(hwnd,context);return;}
     // Opaque handle value only: equality is not a context lifetime/generation proof.
     event->himc=uint64_t(UINT_PTR(context));
     if (context) {
         event->immContextPresent=1;event->immOpen=ImmGetOpenStatus(context);
+        if(!contextBudget()) {ImmReleaseContext(hwnd,context);return;}
         DWORD conversion=0,sentence=0;
         event->immConversionSucceeded=ImmGetConversionStatus(context,&conversion,&sentence);
         event->immConversion=conversion;event->immSentence=sentence;
         ImmReleaseContext(hwnd,context);
     }
+    if(!contextBudget()) return;
     observe_mode_diagnostic(index);
+    if(!contextBudget()) return;
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&event->sequence,index+1);
 }
 static void observe(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
@@ -654,6 +685,13 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookCall(int code,WPARAM wp,LP
 }
 extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPARAM lp) {
     if(code>=0 && wp==PM_REMOVE) { MSG* m=(MSG*)lp; observe(m->hwnd,m->message,m->wParam,m->lParam,2); }
+    return CallNextHookEx(nullptr,code,wp,lp);
+}
+extern "C" __declspec(dllexport) LRESULT CALLBACK HookReturn(int code,WPARAM wp,LPARAM lp) {
+    if(code>=0 && lp) {
+        const auto* m=reinterpret_cast<const CWPRETSTRUCT*>(lp);
+        if(m->message==0x490 && connect()) observe_diagnostic(m->hwnd,m->message,0,0,3);
+    }
     return CallNextHookEx(nullptr,code,wp,lp);
 }
 extern "C" __declspec(dllexport) unsigned int ReadModeDiagnostic(State* source,UINT index,ModeDiagnosticEvent* mode,DiagnosticEvent* message) {
@@ -839,11 +877,16 @@ class CompositionObserver:
         self.command_attempts = set()
         self.activation_attempted = False
         self.original_tsf = self.original_context = None
+        self._install_hooks(setup_deadline)
+
+    def _install_hooks(self, setup_deadline):
         try:
-            for kind, name in ((4, 'HookCall'), (3, 'HookGet')):
+            program = ((4, 'HookCall'), (3, 'HookGet'))
+            if self.diagnose_ime_mode: program += ((12, 'HookReturn'),)
+            for kind, name in program:
                 remaining_setup(setup_deadline, 60)
                 address = ctypes.cast(getattr(self.dll, name), ctypes.c_void_p)
-                handle = api.user.SetWindowsHookExW(kind, address, self.dll._handle, self.tid)
+                handle = self.api.user.SetWindowsHookExW(kind, address, self.dll._handle, self.tid)
                 if not handle: raise ctypes.WinError(ctypes.get_last_error())
                 self.hooks.append(handle)
             remaining_setup(setup_deadline, 60)
@@ -1004,11 +1047,18 @@ class CompositionObserver:
             row = state.diagnostics[index]
             if row.sequence != index + 1: break  # An unpublished tail is not evidence.
             assert (row.pid, row.tid, row.hwnd) == (self.pid, self.tid, self.focus), 'Foreign passive message diagnostic'
-            assert row.message in (0x51, 0x282, 0x100, 0x102, 0x281, 7, 8) and row.origin in (1, 2), 'Unknown passive message diagnostic'
+            self._require_diagnostic_message(row)
             rows.append({name: int(getattr(row, name)) for name, _ in NativeDiagnosticEvent._fields_})
         status = 'overflow' if state.diagnosticOverflow else ('partial' if len(rows) != state.diagnosticCount else 'complete')
         return dict(schemaVersion=1, kind='passive-owned-ime-messages', status=status,
                     capacity=128, observedCount=int(state.diagnosticCount), events=rows)
+
+    def _require_diagnostic_message(self, row):
+        if row.message == 0x490:
+            assert getattr(self, 'diagnose_ime_mode', False) and row.origin in (1, 3), 'Unadmitted context boundary'
+            assert row.wparam == row.lparam == 0, 'Private context payload must be absent'
+        else:
+            assert row.message in (0x51, 0x282, 0x100, 0x102, 0x281, 7, 8) and row.origin in (1, 2), 'Unknown passive message diagnostic'
 
     def _read_mode_diagnostic(self,index):
         mode=NativeModeDiagnosticEvent();message=NativeDiagnosticEvent()
@@ -1032,15 +1082,20 @@ class CompositionObserver:
             assert event.sequence==row.sequence==index+1,'IME mode publication changed'
             assert row.messageSequence==event.sequence,'IME mode diagnostic correlation changed'
             assert (event.pid,event.tid,event.hwnd)==(self.pid,self.tid,self.focus),'Foreign IME mode diagnostic'
+            self._require_diagnostic_message(event)
             rows.append(dict(messageSequence=int(row.messageSequence),message=int(event.message),origin=int(event.origin),
-                commandAck=int(event.commandAck),startedCounter=int(row.startedCounter),finishedCounter=int(row.finishedCounter),
+                commandAck=int(event.commandAck),messageCounter=int(event.counter),
+                startedCounter=int(row.startedCounter),finishedCounter=int(row.finishedCounter),
                 imm=dict(contextPresent=int(event.immContextPresent),open=int(event.immOpen),
                     conversionSucceeded=int(event.immConversionSucceeded),conversion=int(event.immConversion),himc=int(event.himc)),
                 threadMode=native_mode.receipt_dict(row.mode)))
+        status='overflow' if state.diagnosticOverflow else ('partial' if len(rows)!=state.diagnosticCount else 'complete')
         return dict(schemaVersion=1,kind='passive-owned-thread-mode-comparison',acceptanceEligible=False,
-            callerAttributionProved=False,status='overflow' if state.diagnosticOverflow else ('partial' if len(rows)!=state.diagnosticCount else 'complete'),
+            callerAttributionProved=False,status=status,
             capacity=128,observedCount=int(state.diagnosticCount),deadlineCounter=int(state.modeDiagnosticDeadline),
-            counterFrequency=int(state.modeDiagnosticFrequency),events=rows)
+            counterFrequency=int(state.modeDiagnosticFrequency),events=rows,
+            contextBoundaries=context_boundaries(rows,status,int(state.modeDiagnosticDeadline),
+                int(state.contextBoundaryExpired),int(state.contextBoundaryRejected)))
 
     def close(self):
         errors = []
@@ -1051,6 +1106,41 @@ class CompositionObserver:
             self.mapping.close()
             self.mapping = None
         assert not errors, 'Owned editor observer hook cleanup failed: ' + ','.join(errors)
+
+
+def context_boundaries(rows, publication, deadline, expired, rejected):
+    """Pair only owned, payload-free handler boundaries; never assert causation."""
+    stack, pairs, orphans = [], [], []
+    def usable(row):
+        mode = row['threadMode']
+        return (0 < row['messageCounter'] <= row['startedCounter'] <= row['finishedCounter'] < deadline
+            and mode['status'] == mode['cleanupStatus'] == mode['variantClearHr'] == 0
+            and mode['beforeOpenHr'] == mode['beforeConversionHr'] == 0
+            and mode['beforeOpenType'] == mode['beforeConversionType'] == 3
+            and mode['referencesAcquired'] == mode['referencesReleased'] > 0
+            and mode['releaseCalls'] == 1 and mode['openSetCalls'] == mode['conversionSetCalls'] == 0
+            and row['imm']['contextPresent'] == row['imm']['conversionSucceeded'] == 1)
+    for row in rows:
+        if row['message'] != 0x490: continue
+        if row['origin'] == 1:
+            for entry in stack: entry['nested'] = True
+            stack.append(dict(row=row, nested=bool(stack)))
+        else:
+            if not stack:
+                orphans.append(row['messageSequence']); continue
+            entry = stack.pop()
+            pairs.append(dict(entrySequence=entry['row']['messageSequence'],
+                returnSequence=row['messageSequence'], nested=entry['nested'],
+                eligible=not entry['nested'] and usable(entry['row']) and usable(row)
+                    and entry['row']['finishedCounter'] <= row['messageCounter']))
+    complete = publication == 'complete' and not (expired or rejected or stack or orphans)
+    if not complete:
+        for pair in pairs: pair['eligible'] = False
+    status = ('complete' if complete and all(pair['eligible'] for pair in pairs) else 'inconclusive')
+    if not pairs and not stack and not orphans and complete: status = 'absent'
+    return dict(status=status, causalAttributionProved=False, pairs=pairs,
+        pendingEntries=[entry['row']['messageSequence'] for entry in stack], orphanReturns=orphans,
+        expired=expired, rejected=rejected, publication=publication)
 
 
 class KeyboardInput(ctypes.Structure):

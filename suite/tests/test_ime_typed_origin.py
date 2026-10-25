@@ -127,7 +127,9 @@ class TypedReceiptPolicyTests(unittest.TestCase):
     def test_original_native_state_prefix_and_semantic_version4_survive_diagnostics(self):
         self.assertEqual(ime.NativeState.diagnosticCount.offset,553720)
         self.assertEqual(ime.NativeState.modeDiagnosticVersion.offset,567040)
-        self.assertEqual(ctypes.sizeof(ime.NativeState),593688)
+        self.assertEqual(ctypes.sizeof(ime.NativeState),593696)
+        self.assertEqual(ime.NativeState.contextBoundaryExpired.offset,593688)
+        self.assertEqual(ime.NativeState.contextBoundaryRejected.offset,593692)
         self.assertIn('shared->version==4',ime.OBSERVER_SOURCE)
         self.assertIn('target->version!=4',ime.OBSERVER_SOURCE)
         self.assertIn('source->version!=4',ime.OBSERVER_SOURCE)

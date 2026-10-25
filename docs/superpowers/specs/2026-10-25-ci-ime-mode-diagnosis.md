@@ -226,3 +226,43 @@ but delivery and handling are unproved. Lifecycle's second append omitted
 M while its character message was observed removed from the queue. Neither
 observation authorizes repeated input, longer deadlines or weaker semantic
 assertions. Preserve these separate hypotheses for evidence-led diagnosis.
+
+## Mode result 40216984895 and owned context-handler interval
+
+At `6ff740408848e85825d67b2c6dfa09319d73a288`, x64 passed the actual
+Calc diagnostic: 50 complete correlated rows, with 41 typed post-ACK3
+observations showing TSF and IMM open/conversion 1/1. The deliberate
+nonacceptance guard remained active. ARM64 reached the original composition
+case and failed. Its verified artifact `12609082024` has SHA-256
+`4fc77877ce9005ebe22d97eaf6e21f964e7f5284253de1e425a2b331bf061311`.
+All twelve rows are complete and correlated. Rows 1–6 contain untyped or
+partial TSF values; rows 7–12 are valid typed observations. Both TSF and IMM
+show open zero in notifications before the observed first G keydown. This
+supports joint closure, not IMM-only divergence, but identifies no setter.
+ARM64's required engine retirement did not prove success; acknowledged
+restoration is not graceful retirement. No acceptance claim follows.
+
+Pinned core `bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1`,
+`vcl/win/window/salframe.cxx`, has no explicit ImmSetOpenStatus call. Its
+ImplSalFrameSetInputContext associates the default context or detaches it
+when text input is disabled. The frame handles this through
+SAL_MSG_SETINPUTCONTEXT, defined as WM_USER+144 in vcl/inc/win/saldata.hxx.
+The previous observer did not include this private message.
+
+The next finite question is whether the joint closure is observed across
+this exact owned handler interval. In the existing opt-in mode experiment,
+record only its entry and return using the original thread hook mechanism,
+original target identity and original QPC deadline. Do not dereference or
+retain either payload parameter. Install the return hook only in diagnostic
+mode; installation failure must release prior hooks and the mapping.
+Normal composition ABI fields, acceptance paths, input and mode writes stay
+unchanged. Append only bounded expiration/rejection counters.
+
+Pair same-owned-thread entries and returns in bounded LIFO order, using
+the published sequence as interval identity. Mark nested, pending, orphaned,
+expired, rejected, untyped, reentrant or partially published observations
+inconclusive. Sequential IMM/TSF readings and handler reentrancy prevent
+causal attribution even for a complete interval containing closure. No
+observed interval does not prove that TSF independently initiated closure.
+A repeated plain mode comparison, mode resend or deadline extension is not
+an acceptable substitute. Full native paired acceptance remains required.
