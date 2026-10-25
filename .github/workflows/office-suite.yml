@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: sal-offset-mapping
+  OPENGEUL_SUITE_RUN_MODE: com-wait-diagnostic
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -37,7 +37,7 @@ jobs:
       id: run-mode
       shell: pwsh
       run: |
-        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping')) {
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic')) {
           throw 'Unknown Suite run mode.'
         }
     - name: 정확한 소스 바이트 보존
@@ -60,6 +60,7 @@ jobs:
         python -m pip install Pillow==12.3.0
         if ($LASTEXITCODE -ne 0) { throw 'Pinned image verification tooling installation failed.' }
     - name: Suite 단위 검사와 Windows shell 빌드 검사
+      id: suite-unit-shell
       shell: pwsh
       run: |
         $beforeCapabilityExit = 1
@@ -93,9 +94,9 @@ jobs:
         $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
         if ($lock.architecture -cne $architecture -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite lock identity.' }
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-    - name: Admit static SAL mapping against exact owner-push source
+    - name: Admit isolated diagnostics against exact owner-push source
       id: sal-offset-admission
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic'"
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -173,7 +174,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Static SAL source admission failed.' }
     - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
       id: source-engine
-      if: "matrix.architecture == 'arm64' && (env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' || steps.sal-offset-admission.outcome == 'success')"
+      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && (env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' || steps.sal-offset-admission.outcome == 'success')"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
@@ -201,8 +202,32 @@ jobs:
       shell: pwsh
       run: |
         throw 'Static SAL mapping only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Isolated synthetic STA COM wait diagnostic (not acceptance)
+      id: com-wait-diagnostic
+      env:
+        OPENGEUL_COM_WAIT_ADMITTED_SHA: ${{ github.sha }}
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success'"
+      shell: pwsh
+      run: |
+        dotnet run --no-build --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release -- --com-wait-diagnostic --architecture '${{ matrix.architecture }}' --output .work/suite-com-wait-diagnostic/receipt.json
+        if ($LASTEXITCODE -ne 0) { throw 'Synthetic COM wait fixture failed; no product conclusion is valid.' }
+    - name: Retain only synthetic COM wait receipt
+      id: com-wait-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' && steps.com-wait-diagnostic.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-com-wait-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-com-wait-diagnostic/receipt.json
+        retention-days: 7
+        if-no-files-found: error
+    - name: Synthetic COM wait cannot qualify a Suite package
+      id: com-wait-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Synthetic COM wait only: physical Office input and full Suite acceptance were not run; package delivery is prohibited.'
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic'"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -239,7 +264,7 @@ jobs:
         $ErrorActionPreference = 'Stop'
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
     - name: Suite native31 setup and control originals
-      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping'"
+      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}

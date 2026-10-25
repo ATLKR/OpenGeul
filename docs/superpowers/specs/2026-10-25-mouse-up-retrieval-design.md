@@ -80,3 +80,26 @@ partial and expired records. Preserve old protocol prefix/normal input behavior.
 Run focused and full local tests, independent review, and only then one new
 first-attempt native diagnostic on both existing architectures. Keep preparation,
 privacy, ownership, input, cleanup and final acceptance gates unchanged.
+
+## Observed results and next discriminator
+
+Run 40157695775 at c34b238451e2a5fe34ddeafc9cf3bc49f1d86fca passed all
+three x64 cases and failed ARM64 cases 2 and 3 at the original capture deadline.
+Both failing mouse-ups have flags 3 and the same COMBASE/SAL retrieval path;
+the passing ARM64 up uses flags 1 and a mergedlo path. Published records are
+complete without overflow/rejection, but stacks have capped/unknown frames and
+ARM64 terminal clock coverage is truncated. All retained engines exited.
+
+The failed cases have stable event screen points and sampled origin [1,48] at
+down versus [0,47] at up. This supports a coordinate-conversion change, not
+atomic physical movement. A passing x64 case also has the client-coordinate
+delta, contradicting the claim that this delta alone causes capture failure.
+
+Run 40160669513 at 001cdd73e234000b94ea6320b54734ce440623a6 then mapped
+SAL return RVA 406484 to exact export `osl_waitCondition` using authenticated
+archive bytes, export and ARM64 unwind metadata. The candidate source function
+is confirmed; the actual caller, COM apartment/filter and missing handler
+delivery remain unresolved. The next bounded experiment is specified in
+`2026-10-25-com-wait-diagnostic.md`. It tests synthetic queue removal versus
+WndProc delivery rather than extending passive editor logs. Physical-input
+equivalence and safe product behavior correction remain separate requirements.

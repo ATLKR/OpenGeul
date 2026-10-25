@@ -37,4 +37,4 @@ Files: `.github/workflows/office-suite.yml`, focused workflow tests, `suite/READ
 - [x] Add regression checks for admission before fetch and unchanged existing mode gates.
 - [x] Add static mode, reuse existing context guard and exact source checks, run parser only on ARM64, retain only bounded metadata, prohibit qualification.
 - [x] Full local validation on frozen source and independent review: 2397 tests passed, 12 skipped, 269.691 seconds; 17 mapper and 35 workflow focused tests passed.
-- [ ] Run one first-attempt native static analysis and inspect its terminal receipt.
+- [x] Run one first-attempt native static analysis and inspect its terminal receipt: run 40160669513 at 001cdd73e234000b94ea6320b54734ce440623a6 identified exact export `osl_waitCondition`, range [406400,406556), return RVA 406484. Both native unit suites passed 2397 tests (36 skips), shell 92/92; only the intentional nonacceptance guard failed. Receipt hash and archive provenance independently verified.

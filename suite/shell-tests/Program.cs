@@ -3,6 +3,9 @@ using System.Drawing;
 using System.Text.Json;
 using OpenGeul.Office.Core;
 
+if (ComWaitDiagnostic.IsDiagnosticCommand(args))
+    return await ComWaitDiagnostic.RunAsync(args);
+
 if (args.Contains("--fake-worker"))
 {
     while (Console.ReadLine() is { } line)
@@ -660,6 +663,8 @@ Test("initial placement rejects an empty working area", () =>
     foreach (var area in new[] { new Rectangle(0, 0, 0, 720), new Rectangle(0, 0, 1024, 0) })
         Throws<ArgumentOutOfRangeException>(() => InitialWindowPlacement.Fit(new Rectangle(0, 0, 1044, 788), new Size(700, 500), area));
 });
+
+Test("synthetic COM wait pure contracts only", () => ComWaitDiagnostic.PureContractTests());
 
 var failures = 0;
 foreach (var (name, run) in tests)

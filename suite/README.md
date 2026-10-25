@@ -222,3 +222,15 @@ member as data; it does not launch Office or prepare a desktop/IME session.
 Only `.work/suite-sal-offset-mapping/receipt.json` is uploaded, never the engine
 archive or DLL. A deliberate terminal failure prevents package qualification.
 Existing GUI modes retain their preparation, privacy and acceptance gates.
+
+`com-wait-diagnostic` runs three isolated synthetic STA child processes from the
+native shell-test executable on each architecture: ordinary dispatch, the pinned
+COM wait flags, and a fixed broader-dispatch counterfactual. Native unit/shell
+checks and the same exact owner-push, first-attempt and tracked-source admission
+must pass first. This mode fetches no engine and does not build or launch Office,
+prepare the desktop/IME, use physical input, change foreground, or use capture.
+Each child posts one message to its own hidden window; these posted-message
+results do not reproduce physical Office input or establish a safe product fix.
+Only `.work/suite-com-wait-diagnostic/receipt.json` is uploaded. A deliberate
+terminal failure prohibits package qualification. All existing GUI-mode privacy,
+ownership, preparation and acceptance gates remain required.
