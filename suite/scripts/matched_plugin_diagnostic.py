@@ -103,7 +103,7 @@ def main(argv=None):
         if args.mode=='resolve':
             assert args.focus is not None
             # Local generated report only, with finite retained size.
-            path=worker.shared._absolute(args.focus)
+            path=worker.shared._absolute(args.focus.absolute())
             with path.open('rb') as stream:raw=stream.read(16*1024*1024+1)
             assert len(raw)<=16*1024*1024
             focus=json.loads(raw);assert focus['runBinding']==binding,'Trace belongs to another run'

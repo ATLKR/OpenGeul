@@ -135,3 +135,30 @@ The next first-attempt execution can either identify the failing prerequisite
 operation or proceed through the already-defined capture experiment. Preserve
 all prerequisite/ownership/privacy/deadline and nonacceptance gates. An unknown
 or nonreproduced receipt does not justify an identical rerun or speculative fix.
+
+## Completed cohort and next validation
+
+Run40208921923 at e946202 completed the three fresh ARM64 focus cases and all
+six engine fixtures. Retained archive12605263736 has SHA256
+278d9420e3bf4011b176ab38d5012d538922f2f7ee407bd189b716189c1e6184.
+The 6/16/16 published rows and retrieval records have no overflow, rejection,
+expiry or pending bucket. Local final copies cover the native cutoff, not
+callback quiescence; stacks hit the 16-frame cap with 1/4/4 unknown frames.
+The passing first case has flags3 COM/SAL retrieval and a bound plugin return
+RVA100364 inside the qualified acquisition range, while observed capture stays
+zero. This path alone is insufficient to establish the original stuck-capture
+cause. Observer effects remain possible; no product behavior repair is proved.
+
+Offline selection correctly returns not-reproduced. The native resolver failed
+before selection because its CLI passed a relative report path to an absolute
+path guard. Normalize the CLI path without resolving links, retain ancestor
+checks, and cover the real CLI consumer plus linked-parent rejection locally.
+Do not repeat this cohort unchanged or resolve passing traces as failed evidence.
+
+Restore normal acceptance mode for the first complete native pair validation
+with the integrated source-built engine. Keep every original semantic, timing,
+privacy, ownership, lifecycle and package gate. This run tests the milestone;
+it does not claim that prior intermittent failures were repaired. Review and
+run the complete local suite before the normal owner-branch push. New failures
+must be investigated from their retained evidence. No main merge or release
+publication is authorized by the mode change.
