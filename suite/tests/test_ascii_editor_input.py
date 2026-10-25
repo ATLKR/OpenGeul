@@ -70,6 +70,24 @@ class AsciiEditorInputTests(unittest.TestCase):
         self.observer_patch = patch.object(keyboard, '_observer', side_effect=AsciiObserverBoundary)
         self.observer_patch.start(); self.addCleanup(self.observer_patch.stop)
 
+    def test_preparation_wrapper_preserves_spent_budget_without_renewal(self):
+        import ascii_message_preparation as preparation
+        budget=SimpleNamespace(started=100.,deadline=130.,work_deadline=127.,
+            now=Mock(side_effect=AssertionError('spent-budget')))
+        with patch.object(preparation,'_Budget',side_effect=AssertionError('budget-renewed')) as renewed:
+            with self.assertRaisesRegex(AssertionError,'spent-budget'):
+                keyboard.prepare_observer(Path('/unused'),architecture='arm64',budget=budget)
+        renewed.assert_not_called();budget.now.assert_called_once_with()
+
+    def test_default_preparation_wrapper_creates_only_one_original_budget(self):
+        import ascii_message_preparation as preparation
+        budget=SimpleNamespace(started=100.,deadline=130.,work_deadline=127.,
+            now=Mock(side_effect=AssertionError('stop-before-native')))
+        with patch.object(preparation,'_Budget',return_value=budget) as created:
+            with self.assertRaisesRegex(AssertionError,'stop-before-native'):
+                keyboard.prepare_observer(Path('/unused'),architecture='arm64')
+        created.assert_called_once_with();budget.now.assert_called_once_with()
+
     def type_ascii(self, *args, **kwargs):
         kwargs.setdefault('original_popen', SimpleNamespace(pid=77))
         kwargs.setdefault('native_binding', dict(suiteHwnd=11, childHwnd=22))

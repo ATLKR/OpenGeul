@@ -133,10 +133,10 @@ def _release_inserted_prefix(user, events, inserted, action):
         cleanup['error'] = type(exc).__name__ + ': ' + str(exc)
 
 
-def prepare_observer(output_folder, *, architecture):
+def prepare_observer(output_folder, *, architecture, budget=None):
     """Prepare once outside every original editor phase; never a per-key retry."""
     from ascii_message_preparation import prepare_observer as prepare
-    return prepare(output_folder, architecture=architecture)
+    return prepare(output_folder, architecture=architecture, budget=budget)
 
 
 def _observer(*args, **kwargs):
