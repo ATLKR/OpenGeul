@@ -337,6 +337,15 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
       if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
+    - name: Preserve failed navigation prerequisite reports
+      id: navigation-fixture-failure-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic' && steps.fixtures.outcome == 'failure'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-navigation-fixture-failure-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-engine/engine-*.json
+        retention-days: 7
+        if-no-files-found: error
     - name: Observe one owned packaged reader console (not acceptance)
       id: reader-console-diagnostic
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success'"

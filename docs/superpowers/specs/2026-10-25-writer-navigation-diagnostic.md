@@ -24,9 +24,19 @@ This choice is the implementer's within the user's authorized CI investigation.
 
 Decision/stop: inspect complete publication, overflow/rejected/cleanup states and
 join Ctrl/End records to the original action and retained target. Queue removal
-without entry/return narrows investigation to pretranslation/interception but
-proves neither loss nor a particular consumer. Entry/return plus unchanged
-semantic cursor narrows investigation to internal VCL routing/state, not proof of
-Writer handler execution. Missing/partial/overflow/rejected trace, no reproduced
-failure, or failed prerequisite is inconclusive; no unchanged rerun. A green
-step is never paired acceptance. Classify once before any product correction.
+proves only that the owned queue observation occurred. The sent-message hooks do
+not guarantee observation of posted-message handler execution; absent entry/return
+rows cannot identify pretranslation, loss or a skipped handler. Explicit observed
+entry/return still does not prove Writer's semantic handler executed. Missing,
+partial, overflow or rejected trace, no reproduced failure, or failed prerequisite
+is inconclusive; no unchanged rerun. A green step is never paired acceptance.
+
+Control finding from run40237954954: x64 produced four complete queue-removal
+rows and no entry/return rows, yet its first semantic read was at body end. This
+invalidates using absent sent-message hooks to classify the failing path.
+Microsoft's hook overview distinguishes queued-message and sent-message hooks:
+https://learn.microsoft.com/en-us/windows/win32/winmsg/about-hooks
+ARM64 failed Writer/Calc engine fixture prerequisites before this observation.
+Diagnostic mode did not retain those generated exception reports; preserve only
+existing engine-*.json reports on future navigation prerequisite failures, without
+changing any gate or launching an unchanged rerun to collect broader logs.

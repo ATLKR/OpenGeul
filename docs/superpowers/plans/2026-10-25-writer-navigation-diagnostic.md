@@ -1,6 +1,6 @@
 # Writer navigation diagnostic implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Test original Writer Ctrl+End delivery with the existing bounded tracer.
 **Architecture:** Allow Writer in the existing navigation-only case and cleanup;
@@ -20,14 +20,21 @@ normal unsaved-session rejection; no ASCII/IME/save after diagnostic PRE.
 ### Task1: Reuse existing case for Writer
 Files: suite/e2e/korean_ime_smoke.py, suite/e2e/navigation_diagnostic.py;
 tests suite/tests/test_navigation_diagnostic.py, test_ime_case_phases.py.
-- [ ] Add Writer admission, real cleanup and success/failure phase regressions; run RED.
-- [ ] Allow only Writer/Impress in existing CLI/case/diagnostic stop; keep normal close unchanged.
-- [ ] Run focused regressions GREEN, including Impress and expired-deadline cases.
+- [x] Add Writer admission, real cleanup and success/failure phase regressions; run RED.
+- [x] Allow only Writer/Impress in existing CLI/case/diagnostic stop; keep normal close unchanged.
+- [x] Run focused regressions GREEN, including Impress and expired-deadline cases.
 
 ### Task2: Select one reviewed experiment
 Files: .github/workflows/office-suite.yml and existing fixed-mode workflow tests.
-- [ ] Change fixed mode to navigation-diagnostic and existing CLI target to writer;
+- [x] Change fixed mode to navigation-diagnostic and existing CLI target to writer;
       update exact target/mode contracts, retaining all prerequisite assertions.
-- [ ] Run relevant workflow and full local tests; independently review final diff.
-- [ ] Commit/push reviewed substantive change; monitor exact attempt1 to terminal.
-- [ ] Preserve/hash-check evidence, classify using spec stop conditions. No unchanged rerun.
+- [x] Run relevant workflow and full local tests; independently review final diff.
+- [x] Commit/push reviewed substantive change; monitor exact attempt1 to terminal.
+- [x] Preserve/hash-check evidence, classify using spec stop conditions. No unchanged rerun.
+
+Outcome: run40237954954/f3778a0 terminal. x64 complete queue-only trace and
+semantic success; ARM64 failed engine prerequisites before navigation. No
+unchanged rerun. Existing hooks cannot classify missing handler execution from
+absent sent-message rows. See updated spec and external evidence ledger. A local
+follow-up preserves generated prerequisite failure reports; it does not recover
+this run's missing exceptions or change engine behavior.
