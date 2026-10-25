@@ -13,10 +13,10 @@ def condition(step):
 
 class NavigationDiagnosticWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_validation_reject_unknown_values(self):
-        self.assertIn("OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic",WORKFLOW.read_text())
+        self.assertIn("OPENGEUL_SUITE_RUN_MODE: reader-console-diagnostic",WORKFLOW.read_text())
         step=next(s for s in workflow_steps() if field(s,'id')=='run-mode')
         code=run_code(step)
-        self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller')",code)
+        self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller', 'reader-console-diagnostic')",code)
         self.assertIn("throw 'Unknown Suite run mode.'",code)
 
     def test_diagnostic_requires_every_original_prerequisite(self):
@@ -98,7 +98,8 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                 self.assertLess(steps.index(step),steps.index(upload))
                 self.assertLess(steps.index(upload),steps.index(terminal))
 
-    def test_shared_preparation_is_not_conditioned_on_diagnostic_mode(self):
+    def test_only_console_probe_excludes_unused_ime_and_document_preparation(self):
         for step in workflow_steps():
             if field(step,'id') in ('readiness','native31-privacy-prepare','fixtures'):
-                self.assertNotIn('OPENGEUL_SUITE_RUN_MODE',condition(step) or '')
+                self.assertIn("reader-console-diagnostic",condition(step))
+                self.assertNotIn("== 'acceptance'",condition(step))

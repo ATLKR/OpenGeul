@@ -77,7 +77,10 @@ class SuitePreparationContracts(unittest.TestCase):
             return match.group(1)
         self.assertIn('suite-korean-readiness',setting(steps[index-1],'name'))
         self.assertEqual(field(steps[index+2],'id'),'fixtures');self.assertEqual(field(preparation,'timeout-minutes'),'3')
-        self.assertIn(self.m.BRANCH,field(preparation,'if'));self.assertNotIn('matrix.architecture',field(preparation,'if'))
+        original="!cancelled() && github.ref == '"+self.m.BRANCH+"' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success'"
+        bounded="(steps.readiness.outcome == 'success' || (env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success'))"
+        actual=field(preparation,'if').strip('"')
+        self.assertEqual(actual.replace(bounded,"steps.readiness.outcome == 'success'"),original)
         self.assertIn('always()',field(upload,'if'));self.assertIn(self.m.BRANCH,field(upload,'if'))
         self.assertEqual(setting(upload,'retention-days'),'7');self.assertEqual(setting(upload,'include-hidden-files'),'true')
         self.assertIn('suite-native31-setup-',paths(upload));self.assertIn('suite-native31-privacy-preparation-',paths(upload))

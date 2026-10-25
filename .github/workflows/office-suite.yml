@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic
+  OPENGEUL_SUITE_RUN_MODE: reader-console-diagnostic
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -37,7 +37,7 @@ jobs:
       id: run-mode
       shell: pwsh
       run: |
-        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller')) {
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller', 'reader-console-diagnostic')) {
           throw 'Unknown Suite run mode.'
         }
     - name: 정확한 소스 바이트 보존
@@ -96,7 +96,7 @@ jobs:
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Admit isolated diagnostics against exact owner-push source
       id: sal-offset-admission
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic'"
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -175,7 +175,7 @@ jobs:
 
     - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
       id: source-engine
-      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic') || steps.sal-offset-admission.outcome == 'success')"
+      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic') || steps.sal-offset-admission.outcome == 'success')"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
@@ -277,7 +277,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Native local symbols unavailable; no GUI experiment is admitted.' }
 
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && (matrix.architecture == 'x64' || steps.matched-symbol-qualification.outcome == 'success')))"
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && (matrix.architecture == 'x64' || steps.matched-symbol-qualification.outcome == 'success'))) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -295,9 +295,9 @@ jobs:
         ./suite/scripts/ensure-korean-ime.ps1 -Architecture '${{ matrix.architecture }}' -Output .work/suite-korean-readiness
         if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
       id: readiness
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
     - name: 한국어 입력 환경의 준비·실패 기록 즉시 보존
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-korean-readiness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -308,14 +308,14 @@ jobs:
         if-no-files-found: error
     - name: Suite native ARM64 privacy preparation
       id: native31-privacy-prepare
-      if: "!cancelled() && github.ref == 'refs/heads/work/opengeul-office-arm64' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success'"
+      if: "!cancelled() && github.ref == 'refs/heads/work/opengeul-office-arm64' && steps.build.outcome == 'success' && (steps.readiness.outcome == 'success' || (env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success'))"
       shell: pwsh
       timeout-minutes: 3
       run: |
         $ErrorActionPreference = 'Stop'
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
     - name: Suite native31 setup and control originals
-      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped')"
+      if: "(env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || matrix.architecture == 'arm64') && always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -332,7 +332,29 @@ jobs:
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
-      if: '!cancelled() && steps.build.outcome == ''success'''
+      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
+    - name: Observe one owned packaged reader console (not acceptance)
+      id: reader-console-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/e2e/reader_console_diagnostic.py --suite $env:SUITE_PACKAGE --output .work/suite-reader-console
+        if ($LASTEXITCODE -ne 0) { throw 'One owned reader console observation incomplete; no unchanged retry.' }
+    - name: Preserve only bounded numeric reader console receipt
+      id: reader-console-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.reader-console-diagnostic.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-reader-console-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-reader-console/receipt.json
+        retention-days: 7
+        if-no-files-found: error
+    - name: Reader console experiment deliberately cannot qualify acceptance
+      id: reader-console-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Reader console diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
     - name: Targeted Impress navigation diagnostic (not acceptance)
       id: navigation-diagnostic
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"

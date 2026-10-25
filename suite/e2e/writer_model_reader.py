@@ -1872,5 +1872,8 @@ def _helper(directory,*,explicit_model=False):
 
 
 if __name__=='__main__':
+    if len(sys.argv)==3 and sys.argv[1]=='--console-probe':
+        from reader_console_diagnostic import helper
+        raise SystemExit(helper(sys.argv[2]))
     assert len(sys.argv)==3 and sys.argv[1] in ('--helper','--model-helper')
     raise SystemExit(_helper(sys.argv[2],explicit_model=sys.argv[1]=='--model-helper'))
