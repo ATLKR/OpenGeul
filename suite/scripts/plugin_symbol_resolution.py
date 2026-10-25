@@ -22,7 +22,9 @@ IMAGE_BASE=0x10000000
 # Exact symbols; local explicit paths only; no deferred/public-only/anything fallback.
 OPTIONS=0x400|0x80|0x1000|0x20000|0x100|0x80000|0x2000000|0x200|0x2
 TAGS={'WinSalYieldMutex::doAcquire':'mutex-acquire','WinSalYieldMutex::doRelease':'mutex-release',
-      'ImplSalYieldMutexAcquireWithWait':'mutex-acquire-with-wait'}
+      'ImplSalYieldMutexAcquireWithWait':'mutex-acquire-with-wait',
+      'ImplSalFrameSetInputContext':'frame-input-context','WinSalFrame::SetInputContext':'frame-input-context-dispatch',
+      'SalFrameWndProc':'frame-window-procedure','ImplHandleKeyMsg':'frame-key-handler'}
 SERIAL=threading.Lock()
 
 

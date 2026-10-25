@@ -19,7 +19,7 @@ import time
 
 import native_suite_architecture as native_arch
 
-SOURCES = ('ascii_message_observer.cpp', 'ascii_message_protocol.h')
+SOURCES = ('ascii_message_observer.cpp', 'ascii_message_protocol.h', 'bounded_stack_windows.h', 'bounded_plugin_origin_windows.h')
 SOURCE_ROOT = Path(__file__).resolve().parent
 LIMIT, CLEANUP_RESERVE, QUERY_CAP = 30., 3., 4096
 

@@ -83,7 +83,7 @@ int main(){
 '''
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);cpp=root/'retrieval.cpp';exe=root/('retrieval.exe' if os.name=='nt' else 'retrieval')
-            cpp.write_text(prefix+producer+main)
+            cpp.write_text(prefix+'\n#include \"bounded_stack_windows.h\"\n'+producer+main)
             build=subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I',str(folder),str(cpp),'-o',str(exe)],capture_output=True,text=True,timeout=30)
             self.assertEqual(build.returncode,0,build.stdout+build.stderr)
             result=subprocess.run([str(exe)],capture_output=True,text=True,timeout=5)
@@ -138,6 +138,7 @@ int main(){
         import re
         source=(Path(__file__).resolve().parents[1]/'e2e/ascii_message_observer.cpp').read_text()
         producer=source[source.index('// Bounded retrieval metadata'):source.index('void observe(')]
+        producer += (Path(__file__).resolve().parents[1]/'e2e/bounded_stack_windows.h').read_text()
         self.assertEqual(re.findall(r'L"([a-z0-9_]+\.dll)"',producer),list(p.RETRIEVAL_MODULES.values())+["vclplug_winlo.dll"])
         for forbidden in ('LoadLibrary','FreeLibrary','GetModuleFileName','ReadProcessMemory','EnumProcessModules','SymFromAddr'):
             self.assertNotIn(forbidden,producer)

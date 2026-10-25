@@ -26,7 +26,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
         prerequisites=('build','readiness','native31-privacy-prepare','fixtures')
         for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','com-wait-diagnostic','mutex-function-mapping','unknown',''):
             for failed in (None,*prerequisites):
-                expression=value.replace('!cancelled()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('&&','and')
+                expression=value.replace('!cancelled()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('&&','and').replace('||','or')
                 for prerequisite in prerequisites:
                     expression=expression.replace('steps.'+prerequisite+'.outcome',repr('skipped' if failed==prerequisite else 'success'))
                 self.assertEqual(eval(expression,{'__builtins__':{}}),mode=='navigation-diagnostic' and failed is None)
@@ -52,7 +52,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
         for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','com-wait-diagnostic','mutex-function-mapping','unknown',''):
             for success in (True,False):
                 for home in ('success','failure','skipped'):
-                    expression=delivery.replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('success()',str(success)).replace('steps.home-routes.outcome',repr(home)).replace('&&','and')
+                    expression=delivery.replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('success()',str(success)).replace('steps.home-routes.outcome',repr(home)).replace('&&','and').replace('||','or')
                     self.assertEqual(eval(expression,{'__builtins__':{}}),mode=='acceptance' and success and home=='success')
 
     def test_evidence_is_separate_and_diagnostic_terminal_is_deliberate_failure(self):
@@ -75,10 +75,12 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                 mode="env.OPENGEUL_SUITE_RUN_MODE == '"+name+"-diagnostic'"
                 prerequisites=('build','readiness','native31-privacy-prepare','fixtures')
                 expected="!cancelled() && "+mode+"".join(" && steps."+p+".outcome == 'success'" for p in prerequisites)
+                if name=='ime-mode':
+                    expected+=" && (matrix.architecture == 'x64' || steps.matched-symbol-qualification.outcome == 'success')"
                 self.assertEqual(condition(step),expected)
                 for run_mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','com-wait-diagnostic','mutex-function-mapping','unknown',''):
                     for failed in (None,*prerequisites):
-                        expression=condition(step).replace('!cancelled()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(run_mode)).replace('&&','and')
+                        expression=condition(step).replace("matrix.architecture",repr('arm64')).replace("steps.matched-symbol-qualification.outcome",repr('success')).replace('!cancelled()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(run_mode)).replace('&&','and').replace('||','or')
                         for p in prerequisites:
                             expression=expression.replace('steps.'+p+'.outcome',repr('failure' if failed==p else 'success'))
                         self.assertEqual(eval(expression,{'__builtins__':{}}),run_mode==name+'-diagnostic' and failed is None)
@@ -88,7 +90,9 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                 terminal=next(s for s in steps if field(s,'id')==name+'-not-acceptance')
                 self.assertEqual(condition(upload),'always() && '+mode)
                 self.assertEqual(condition(terminal),'always() && '+mode)
-                self.assertIn('path: .work/suite-'+name+'-diagnostic/',upload)
+                if name=='ime-mode':
+                    self.assertIn('path: |\n          .work/suite-ime-mode-diagnostic/\n',upload)
+                else:self.assertIn('path: .work/suite-'+name+'-diagnostic/',upload)
                 self.assertIn('opengeul-suite-'+name+'-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}',upload)
                 self.assertIn("throw '"+title+" diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'",run_code(terminal))
                 self.assertLess(steps.index(step),steps.index(upload))

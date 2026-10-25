@@ -96,7 +96,7 @@ jobs:
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Admit isolated diagnostics against exact owner-push source
       id: sal-offset-admission
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic'"
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -172,14 +172,16 @@ jobs:
         '@
         $proof | python -
         if ($LASTEXITCODE -ne 0) { throw 'Static SAL source admission failed.' }
+
     - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
       id: source-engine
-      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller') || steps.sal-offset-admission.outcome == 'success')"
+      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic') || steps.sal-offset-admission.outcome == 'success')"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
       run: |
         ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath suite/config/runtime.arm64.lock.json -Output .work/source-engine-input
+
     - name: Map observed SAL offset from locked ARM64 bytes (not acceptance)
       id: sal-offset-mapping
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
@@ -259,21 +261,23 @@ jobs:
         throw 'Static mutex attribution only: full Suite acceptance was not run; package delivery is prohibited.'
     - name: Fetch exact matched ARM64 plugin symbols
       id: matched-symbol-inputs
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic') && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
       run: |
         ./suite/scripts/fetch-plugin-symbols.ps1 -SymbolLockPath suite/config/plugin-symbols.arm64.lock.json -Output .work/plugin-symbol-input
+
     - name: Qualify file-only system DbgHelp before GUI preparation
       id: matched-symbol-qualification
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.matched-symbol-inputs.outcome == 'success'"
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic') && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.matched-symbol-inputs.outcome == 'success'"
       shell: pwsh
       run: |
         python suite/scripts/matched_plugin_diagnostic.py --mode qualify --pair .work/plugin-symbol-input/pair --output .work/suite-matched-plugin/qualification.json
         if ($LASTEXITCODE -ne 0) { throw 'Native local symbols unavailable; no GUI experiment is admitted.' }
+
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success'))"
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && (matrix.architecture == 'x64' || steps.matched-symbol-qualification.outcome == 'success')))"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -282,6 +286,7 @@ jobs:
           ./suite/scripts/build-suite.ps1 -Architecture x64
         }
       id: build
+
     - name: 실제 한국어 IME와 네이티브 UI 검사 준비
       shell: pwsh
       run: |
@@ -355,20 +360,37 @@ jobs:
         throw 'Navigation diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
     - name: Targeted Calc TSF and IMM mode diagnostic (not acceptance)
       id: ime-mode-diagnostic
-      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && (matrix.architecture == 'x64' || steps.matched-symbol-qualification.outcome == 'success')"
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-ime-mode-diagnostic/worker-diagnostics
       shell: pwsh
       run: |
-        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-ime-mode-diagnostic --diagnose-ime-mode calc
+        $ErrorActionPreference = 'Stop'
+        $callerArgs = @('--capture-ime-caller')
+        if ('${{ matrix.architecture }}' -ceq 'arm64') {
+          $callerArgs += @('--matched-plugin-proof', (Resolve-Path .work/plugin-symbol-input/pair/receipt.json).Path)
+        }
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-ime-mode-diagnostic --diagnose-ime-mode calc @callerArgs
         if ($LASTEXITCODE -ne 0) { throw 'Targeted IME mode diagnostic failed.' }
+
+    - name: Resolve the one original IME-close delivery stack
+      id: ime-notification-resolution
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64' && steps.ime-mode-diagnostic.outcome != 'skipped' && steps.matched-symbol-qualification.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/matched_plugin_diagnostic.py --mode resolve --pair .work/plugin-symbol-input/pair --notification .work/suite-ime-mode-diagnostic/results.json --output .work/suite-ime-mode-diagnostic/notification-resolution.json
+        if ($LASTEXITCODE -ne 0) { throw 'Original IME-close caller remains unresolved; no retry is authorized by this diagnostic.' }
     - name: Preserve targeted IME mode evidence only
       id: ime-mode-diagnostic-evidence
       if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-ime-mode-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
-        path: .work/suite-ime-mode-diagnostic/
+        path: |
+          .work/suite-ime-mode-diagnostic/
+          .work/suite-matched-plugin/qualification.json
+          .work/plugin-symbol-input/plugin-symbol-download.json
+          .work/plugin-symbol-input/artifact-server-metadata.json
         include-hidden-files: true
         retention-days: 7
         if-no-files-found: error

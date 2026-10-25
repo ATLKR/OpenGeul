@@ -21,7 +21,7 @@ class MessageDiagnosticsTests(unittest.TestCase):
         if compiler is None: self.skipTest('Portable C++ compiler unavailable; Windows DLL ABI is checked at load')
         source = ime.OBSERVER_SOURCE
         declarations = source[source.index('struct Event {'):source.index('static State* shared')]
-        prefix = '#include <cstdint>\n#include <cstddef>\n#include "ime_thread_mode.h"\n#include "ime_command_admission.h"\nusing WCHAR=uint16_t;using LONG=int32_t;\n'
+        prefix = '#include <cstdint>\n#include <cstddef>\n#include "ime_thread_mode.h"\n#include "ime_command_admission.h"\n#include "ime_notification_caller.h"\nusing WCHAR=uint16_t;using LONG=int32_t;\n'
         checks = 'static_assert(sizeof(State)==' + str(ctypes.sizeof(ime.NativeState)) + ',"state ABI");\n'
         checks += '\n'.join('static_assert(offsetof(State,' + name + ')==' + str(getattr(ime.NativeState, name).offset) + ',"field ABI");' for name, _ in ime.NativeState._fields_)
         with tempfile.TemporaryDirectory() as temp:
@@ -87,6 +87,7 @@ void MemoryBarrier(){}
         state = r'''
 struct State {uint64_t targetHwnd=51;uint32_t pid=31,tid=41,ack=3,immOpen=1;
 uint32_t modeDiagnosticVersion=1,modeDiagnosticEnabled=0;uint64_t modeDiagnosticDeadline=2000,modeDiagnosticFrequency=1000;
+struct {unsigned enabled=0;} notificationConfig;struct {unsigned rejected=0;} notification;
 volatile LONG contextBoundaryExpired=0,contextBoundaryRejected=0;
 volatile LONG diagnosticCount=0,diagnosticOverflow=0;DiagnosticEvent diagnostics[128]={};};
 State instance;State* shared=&instance;
@@ -144,7 +145,7 @@ int main(){
 '''
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); cpp = root/'diagnostics.cpp'; exe = root/('diagnostics.exe' if os.name == 'nt' else 'diagnostics')
-            cpp.write_text(prefix + declaration + assertions + state + '\nvoid observe_mode_diagnostic(LONG) {}\n' + producer + main)
+            cpp.write_text(prefix + declaration + assertions + state + '\nvoid observe_mode_diagnostic(LONG) {}\nvoid capture_notification(LONG,bool) {}\n' + producer + main)
             build = subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', str(cpp), '-o', str(exe)], capture_output=True, text=True, timeout=30)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=5)

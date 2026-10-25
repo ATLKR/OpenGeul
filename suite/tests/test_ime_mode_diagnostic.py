@@ -60,7 +60,7 @@ class ModeDiagnosticTests(unittest.TestCase):
         if compiler is None:self.skipTest('Portable compiler unavailable; Windows native validation remains separate')
         source=ime.OBSERVER_SOURCE
         declarations=source[source.index('struct Event {'):source.index('static State* shared')]
-        producer=source[source.index('static bool modeDiagnosticReading='):source.index('// Passive, bounded owned-target observations.')]
+        producer=source[source.index('static bool modeDiagnosticReading='):source.index('static void capture_notification(')]
         acquire=source[source.index('extern "C" __declspec(dllexport) unsigned int ReadModeDiagnostic('):source.index('extern "C" __declspec(dllexport) unsigned int StateSize()')]
         prefix=HARNESS[:HARNESS.index('int main(')]+r'''
 #include <cassert>
@@ -118,7 +118,7 @@ int main(){
 '''
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);cpp=root/'mode.cpp';exe=root/('mode.exe' if os.name=='nt' else 'mode')
-            cpp.write_text(prefix+declarations+main)
+            cpp.write_text(prefix+'\n#include \"ime_notification_caller.h\"\n'+declarations+main)
             build=subprocess.run([compiler,'-std=c++17','-I',str(Path(ime.__file__).parent),str(cpp),'-o',str(exe)],capture_output=True,text=True,timeout=30)
             self.assertEqual(build.returncode,0,build.stdout+build.stderr)
             run=subprocess.run([str(exe)],capture_output=True,text=True,timeout=5)

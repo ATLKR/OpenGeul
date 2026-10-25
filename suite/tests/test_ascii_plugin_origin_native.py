@@ -103,7 +103,7 @@ int main(){auto module=reinterpret_cast<void*>(0x1000);
 '''
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);cpp=root/'origin.cpp';exe=root/('origin.exe' if os.name=='nt' else 'origin')
-            cpp.write_text(prefix+code+main)
+            cpp.write_text(prefix+'\n#include \"bounded_plugin_origin_windows.h\"\n'+code+main)
             built=subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I',str(folder),str(cpp),'-o',str(exe)],capture_output=True,text=True,timeout=30)
             self.assertEqual(built.returncode,0,built.stdout+built.stderr)
             result=subprocess.run([str(exe)],capture_output=True,text=True,timeout=5)

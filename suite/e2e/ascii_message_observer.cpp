@@ -3,6 +3,8 @@
 #include <cwchar>
 #include <cstring>
 #include "ascii_message_protocol.h"
+#include "bounded_stack_windows.h"
+#include "bounded_plugin_origin_windows.h"
 
 namespace {
 using OpenGeulAscii::Event;
@@ -290,58 +292,14 @@ void traceNavigation(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,std::uint32_t or
 // Bounded known-plugin file origin: private path never leaves the target mapping.
 bool retrievalClock(std::uint64_t&);
 std::uint32_t pluginOriginStatus(HMODULE module) {
-    const auto expected=shared->pluginBinding;
-    if(!module || expected.version!=1 || expected.enabled!=1 || expected.reserved
-       || !expected.pathLength || expected.pathLength>=OpenGeulAscii::PluginPathCapacity
-       || expected.path[expected.pathLength] || !expected.size || expected.size>32u*1024u*1024u
-       || std::memcmp(&expected,&pluginBindingSnapshot,sizeof(expected))!=0)return 2;
     std::uint64_t stamp=0;
-    const auto current=[&](){return retrievalClock(stamp);};
-    wchar_t path[OpenGeulAscii::PluginPathCapacity]{};
-    const auto samePath=[&](DWORD length) {
-        if(length!=expected.pathLength)return false;
-        for(std::uint32_t i=0;i<length;++i)if(path[i]!=expected.path[i])return false;
-        return path[length]==0;
-    };
-    if(!current())return 0;
-    auto length=GetModuleFileNameW(module,path,OpenGeulAscii::PluginPathCapacity);
-    if(!current())return 0;
-    if(!samePath(length))return 2;
-    if(!current())return 0;
-    HANDLE file=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
-    if(file==nullptr || file==INVALID_HANDLE_VALUE) {if(!current())return 0;return 3;}
-    const auto inspect=[&]() -> std::uint32_t {
-        if(!current())return 0;
-        FILE_ID_INFO info{};
-        if(!GetFileInformationByHandleEx(file,FileIdInfo,&info,sizeof(info)))return 3;
-        if(!current())return 0;
-        if(info.VolumeSerialNumber!=expected.volume || std::memcmp(info.FileId.Identifier,expected.fileId,16)!=0)return 2;
-        LARGE_INTEGER size{};
-        if(!current())return 0;
-        if(!GetFileSizeEx(file,&size))return 3;
-        if(!current())return 0;
-        return size.QuadPart>=0 && static_cast<std::uint64_t>(size.QuadPart)==expected.size ? 1u:2u;
-    };
-    auto status=inspect();
-    if(!current())status=0;
-    // Mandatory release even after expiry; no further attribution query is allowed.
-    const bool closed=CloseHandle(file)!=0;
-    if(!current())return 0;
-    if(!closed)return 4;
-    if(status!=1)return status;
-    if(!current())return 0;
-    const auto named=GetModuleHandleW(L"vclplug_winlo.dll");
-    if(!current())return 0;
-    if(named!=module)return 2;
-    if(!current())return 0;
-    length=GetModuleFileNameW(module,path,OpenGeulAscii::PluginPathCapacity);
-    if(!current())return 0;
-    return samePath(length)?1u:2u;
+    return opengeul_stack::PluginOrigin(module,shared->pluginBinding,pluginBindingSnapshot,
+        [&](){return retrievalClock(stamp);});
 }
 
 // Bounded retrieval metadata is independent of the already committed capture row.
 static bool retrievalReading=false;
-static const wchar_t* const retrievalModules[]={L"mergedlo.dll",L"vcllo.dll",L"sal3.dll",L"user32.dll",L"win32u.dll",L"ntdll.dll",L"kernel32.dll",L"kernelbase.dll",L"combase.dll",L"ole32.dll",L"imm32.dll",L"msctf.dll",L"imkrtip.dll",L"vclplug_winlo.dll"};
+
 bool retrievalClock(std::uint64_t& counter) {
     if(captureClock(counter))return true;
     if(load(&shared->captureExpired))publish(&shared->retrievalExpired,1);
@@ -384,53 +342,17 @@ void traceRetrieval(const MSG& message,WPARAM removalFlags,std::uint32_t capture
     if(row.originSucceeded){row.clientOriginX=origin.x;row.clientOriginY=origin.y;}
     if(bucket) {
         row.stackRequested=1;
-        void* addresses[OpenGeulAscii::RetrievalFrames]{};
-        struct Clear {void** p;~Clear(){for(std::uint32_t i=0;i<OpenGeulAscii::RetrievalFrames;++i)*reinterpret_cast<void* volatile*>(p+i)=nullptr;}} clear{addresses};
-        if(!retrievalClock(stamp))return;
-        const auto count=CaptureStackBackTrace(0,OpenGeulAscii::RetrievalFrames,addresses,nullptr);
-        if(!retrievalClock(stamp))return;
-        if(count>OpenGeulAscii::RetrievalFrames){publish(&shared->retrievalRejected,load(&shared->retrievalRejected)|1);return;}
-        row.frameCount=count;row.frameCapReached=count==OpenGeulAscii::RetrievalFrames?1:0;
-        if(!count)row.flags|=2;
-        HMODULE modules[sizeof(retrievalModules)/sizeof(*retrievalModules)]{};
-        for(std::size_t i=0;i<sizeof(modules)/sizeof(*modules);++i) {
-            if(i==13 && !shared->pluginBinding.enabled)continue;
-            if(!retrievalClock(stamp))return;
-            modules[i]=GetModuleHandleW(retrievalModules[i]);
-            if(!retrievalClock(stamp))return;
-        }
-        if(shared->pluginBinding.enabled) {
+        const auto clock=[&](){return retrievalClock(stamp);};
+        const auto qualify=[&](HMODULE module) -> std::uint32_t {
             pluginOrigin.captureSequence=captureSequence;pluginOrigin.bucket=bucket;
-            if(!retrievalClock(pluginOrigin.counter))return;
-            pluginOrigin.status=pluginOriginStatus(modules[13]);
-            if(!retrievalClock(pluginOrigin.finishedCounter))return;
-            if(!pluginOrigin.status)return;
-            if(pluginOrigin.status!=1)modules[13]=nullptr;
-        }
-        for(std::uint32_t i=0;i<count;++i) {
-            HMODULE module=nullptr,again=nullptr;
-            if(!retrievalClock(stamp))return;
-            const bool mapped=GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<const wchar_t*>(addresses[i]),&module)!=0;
-            if(!retrievalClock(stamp))return;
-            if(!mapped)row.flags|=4;
-            std::uint32_t id=0;
-            for(std::uint32_t j=0;j<sizeof(modules)/sizeof(*modules);++j)if(module && module==modules[j]){id=j+1;break;}
-            if(mapped && id) {
-                if(!retrievalClock(stamp))return;
-                const bool remapped=GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                    reinterpret_cast<const wchar_t*>(addresses[i]),&again)!=0;
-                if(!retrievalClock(stamp))return;
-                if(!remapped)row.flags|=4;
-                if(!retrievalClock(stamp))return;
-                const auto named=GetModuleHandleW(retrievalModules[id-1]);
-                if(!retrievalClock(stamp))return;
-                const auto address=reinterpret_cast<std::uintptr_t>(addresses[i]),base=reinterpret_cast<std::uintptr_t>(module);
-                if(remapped && again==module && named==module && address>=base && address-base<=0xffffffffu) {
-                    row.frames[i].moduleId=id;row.frames[i].rva=static_cast<std::uint32_t>(address-base);
-                } else row.flags|=8;
-            }
-            if(!row.frames[i].moduleId)++row.unknownFrames;
+            if(!retrievalClock(pluginOrigin.counter))return 0;
+            pluginOrigin.status=pluginOriginStatus(module);
+            if(!retrievalClock(pluginOrigin.finishedCounter))return 0;
+            return pluginOrigin.status;
+        };
+        if(!opengeul_stack::Capture(row,clock,qualify,shared->pluginBinding.enabled!=0)) {
+            if(row.flags&16)publish(&shared->retrievalRejected,load(&shared->retrievalRejected)|1);
+            return;
         }
     }
     if(!retrievalClock(row.finishedCounter))return;

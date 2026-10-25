@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import mmap
+import ime_notification_caller as notification
 import math
 import os
 from pathlib import Path
@@ -362,7 +363,8 @@ class NativeState(ctypes.Structure):
                 ('modeDiagnosticVersion',ctypes.c_uint32),('modeDiagnosticEnabled',ctypes.c_uint32),
                 ('modeDiagnosticDeadline',ctypes.c_uint64),('modeDiagnosticFrequency',ctypes.c_uint64),
                 ('modeDiagnostics',NativeModeDiagnosticEvent * 128),
-                ('contextBoundaryExpired',ctypes.c_int32),('contextBoundaryRejected',ctypes.c_int32)]
+                ('contextBoundaryExpired',ctypes.c_int32),('contextBoundaryRejected',ctypes.c_int32),
+                ('notificationConfig',notification.Config),('notification',notification.Record)]
 
 
 OBSERVER_SOURCE = r'''
@@ -374,6 +376,9 @@ OBSERVER_SOURCE = r'''
 #include "ime_thread_mode_windows.h"
 #include "ime_typed_origin.h"
 #include "ime_command_admission.h"
+#include "ime_notification_caller.h"
+#include "bounded_stack_windows.h"
+#include "bounded_plugin_origin_windows.h"
 struct Event { uint32_t sequence,message,flags,pid,tid; uint64_t hwnd,layout;
     int32_t compositionBytes,resultBytes; uint32_t origin; WCHAR composition[256],result[256]; };
 struct ModeDiagnosticEvent { uint32_t sequence,messageSequence; uint64_t startedCounter,finishedCounter;
@@ -395,7 +400,8 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     volatile LONG diagnosticCount,diagnosticOverflow; DiagnosticEvent diagnostics[128];
     uint32_t modeDiagnosticVersion,modeDiagnosticEnabled; uint64_t modeDiagnosticDeadline,modeDiagnosticFrequency;
     ModeDiagnosticEvent modeDiagnostics[128];
-    volatile LONG contextBoundaryExpired,contextBoundaryRejected; };
+    volatile LONG contextBoundaryExpired,contextBoundaryRejected;
+    opengeul_ime::NotificationConfig notificationConfig;opengeul_ime::NotificationRecord notification; };
 static State* shared = nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
@@ -403,11 +409,23 @@ static bool haveOldProfile = false;
 static bool initialized = false;
 static opengeul_ime::TypedPair originalTsf = {};
 static opengeul_ime::CommandAdmission commandAdmission = {};
+static opengeul_ime::NotificationConfig notificationAdmission{};
+static bool haveNotificationAdmission=false,notificationReading=false;
+static uint64_t notificationDeadline=0,notificationFrequency=0,notificationHwnd=0,notificationRoot=0;
+static uint32_t notificationPid=0,notificationTid=0;
 static bool connect() {
     if (!shared) {
         mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,L"__MAPPING__");
         if (!mapping) return false;
         shared=(State*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(State));
+        if(shared && shared->notificationConfig.enabled) {
+            notificationAdmission=shared->notificationConfig;
+            notificationDeadline=shared->modeDiagnosticDeadline;notificationFrequency=shared->modeDiagnosticFrequency;
+            notificationPid=shared->pid;notificationTid=shared->tid;notificationHwnd=shared->targetHwnd;notificationRoot=shared->rootHwnd;
+            haveNotificationAdmission=notificationAdmission.version==1 && notificationAdmission.enabled==1
+                && notificationAdmission.creationTime>0 && shared->modeDiagnosticEnabled==1 && shared->modeDiagnosticVersion==1;
+            if(!haveNotificationAdmission)shared->notification.rejected=1;
+        }
     }
     return shared && shared->magic==0x4f47494d && shared->version==4
         && shared->pid==GetCurrentProcessId() && shared->tid==GetCurrentThreadId();
@@ -456,6 +474,41 @@ static bool observe_imm(HWND hwnd) {
     shared->immConversion=conversion;shared->immSentence=sentence;
     ImmReleaseContext(hwnd,context);
     return shared->immConversionSucceeded!=0;
+}
+static bool notification_clock(uint64_t& stamp) {
+    auto& row=shared->notification;
+    if(!haveNotificationAdmission || std::memcmp(&notificationAdmission,&shared->notificationConfig,sizeof(notificationAdmission))
+        || shared->pid!=notificationPid || shared->tid!=notificationTid || shared->targetHwnd!=notificationHwnd || shared->rootHwnd!=notificationRoot
+        || shared->modeDiagnosticDeadline!=notificationDeadline || shared->modeDiagnosticFrequency!=notificationFrequency) {
+        row.rejected|=1;return false;
+    }
+    LARGE_INTEGER now={},frequency={};
+    if(!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&now) || now.QuadPart<=0
+        || !notificationDeadline || !notificationFrequency || uint64_t(frequency.QuadPart)!=notificationFrequency) {
+        row.rejected|=2;return false;
+    }
+    if(uint64_t(now.QuadPart)>=notificationDeadline){row.expired=1;return false;}
+    stamp=uint64_t(now.QuadPart);return true;
+}
+static bool notification_target() {
+    uint64_t stamp=0;if(!notification_clock(stamp))return false;
+    const auto hwnd=HWND(UINT_PTR(notificationHwnd));DWORD pid=0;
+    const auto tid=GetWindowThreadProcessId(hwnd,&pid);
+    if(!notification_clock(stamp))return false;
+    if(pid!=notificationPid || tid!=notificationTid || GetCurrentThreadId()!=notificationTid || GetCurrentProcessId()!=notificationPid) {
+        shared->notification.rejected|=4;return false;
+    }
+    if(!notification_clock(stamp))return false;
+    FILETIME created={},exited={},kernel={},user={};
+    const bool times=GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user)!=0;
+    if(!notification_clock(stamp))return false;
+    if(!times || ((uint64_t(created.dwHighDateTime)<<32)|created.dwLowDateTime)!=notificationAdmission.creationTime) {
+        shared->notification.rejected|=4;return false;
+    }
+    const auto root=GetAncestor(hwnd,GA_ROOT);
+    if(!notification_clock(stamp))return false;
+    if(uint64_t(UINT_PTR(root))!=notificationRoot){shared->notification.rejected|=4;return false;}
+    return true;
 }
 static void command(HWND hwnd, UINT sequence) {
     const auto publishedSequence=InterlockedCompareExchange((volatile LONG*)&shared->command,0,0);
@@ -567,6 +620,13 @@ static void command(HWND hwnd, UINT sequence) {
     if (!budget(limits)) failure(-20);
     // Per-command TSF references and the in-thread command lease are closed before ACK.
     lease.Finish();
+    if(sequence==3 && !shared->status && shared->notificationConfig.enabled) {
+        if(opengeul_ime::NotificationBaseline(shared->threadMode) && shared->immContextPresent==1
+            && shared->immConversionSucceeded==1 && shared->immOpen==1 && (shared->immConversion&1)==1
+            && notification_target() && notification_clock(shared->notification.baselineCounter)) {
+            MemoryBarrier();InterlockedExchange((volatile LONG*)&shared->notification.armed,1);
+        }
+    }
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&shared->ack,sequence);
 }
 // Optional TSF reads use only existing thread-local objects and the original setup budget.
@@ -589,8 +649,36 @@ static void observe_mode_diagnostic(LONG index) {
     now={};if(QueryPerformanceCounter(&now)) row.finishedCounter=uint64_t(now.QuadPart);
     MemoryBarrier();InterlockedExchange((volatile LONG*)&row.sequence,index+1);
 }
+static void capture_notification(LONG index,bool sentByCurrentThread) {
+    if(!shared->notificationConfig.enabled || index<0 || index>=128)return;
+    auto& stored=shared->notification;
+    if(notificationReading){stored.rejected|=8;return;}
+    if(!opengeul_ime::ClaimNotification(stored,shared->diagnostics[index],shared->modeDiagnostics[index],shared->command))return;
+    notificationReading=true;struct End {~End(){notificationReading=false;}} end;
+    if(!notification_target())return;
+    opengeul_ime::NotificationRecord row{};
+    row.armed=stored.armed;row.claimed=1;row.baselineCounter=stored.baselineCounter;
+    row.messageSequence=index+1;row.hookSentByCurrentThread=sentByCurrentThread?1:0;
+    if(!notification_clock(row.counter))return;
+    uint64_t stamp=0;
+    const auto clock=[&](){return notification_clock(stamp);};
+    const auto qualify=[&](HMODULE module) -> uint32_t {
+        if(!notification_clock(row.pluginStarted))return 0;
+        row.pluginStatus=opengeul_stack::PluginOrigin(module,shared->notificationConfig.plugin,
+            notificationAdmission.plugin,clock);
+        if(!notification_clock(row.pluginFinished))return 0;
+        return row.pluginStatus;
+    };
+    if(!opengeul_stack::Capture(row,clock,qualify,notificationAdmission.plugin.enabled!=0)) {
+        if(row.flags&16)stored.rejected|=16;
+        return;
+    }
+    if(!notification_target() || !notification_clock(row.finishedCounter))return;
+    row.rejected=stored.rejected;row.expired=stored.expired;
+    stored=row;MemoryBarrier();InterlockedExchange((volatile LONG*)&stored.sequence,1);
+}
 // Passive, bounded owned-target observations. Never mutate command receipts or IME mode.
-static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
+static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin,bool sentByCurrentThread=false) {
     // Pinned core bf6ef266 vcl/inc/win/saldata.hxx: SAL_MSG_SETINPUTCONTEXT.
     const bool contextBoundary=message==0x490;
     if (contextBoundary) {
@@ -617,6 +705,16 @@ static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT o
     if (uint64_t(UINT_PTR(hwnd))!=shared->targetHwnd || pid!=shared->pid
         || tid!=shared->tid || GetCurrentThreadId()!=shared->tid) return;
     if(!contextBudget()) return;
+    // IMM/TSF reads may dispatch an owned callback before this row publishes.
+    // Preserve message observations, but never attribute a nested stack as first-close.
+    static bool notificationObserving=false;
+    const bool previousObservation=notificationObserving;
+    if(shared->notificationConfig.enabled) {
+        if(notificationObserving) shared->notification.rejected|=8;
+        notificationObserving=true;
+    }
+    struct ObservationEnd {bool previous;bool& active;~ObservationEnd(){active=previous;}}
+        observationEnd{previousObservation,notificationObserving};
     // The producer is the one retained editor thread; saturated rows are never overwritten.
     if (shared->diagnosticCount>=128) { InterlockedExchange(&shared->diagnosticOverflow,1); return; }
     const LONG index=InterlockedIncrement(&shared->diagnosticCount)-1;
@@ -648,11 +746,12 @@ static void observe_diagnostic(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT o
     observe_mode_diagnostic(index);
     if(!contextBudget()) return;
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&event->sequence,index+1);
+    capture_notification(index,sentByCurrentThread);
 }
-static void observe(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
+static void observe(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin,bool sentByCurrentThread=false) {
     if (!connect()) return;
     if (message==0x8351) { command(hwnd,(UINT)wp); return; }
-    observe_diagnostic(hwnd,message,wp,lp,origin);
+    observe_diagnostic(hwnd,message,wp,lp,origin,sentByCurrentThread);
     if (message!=WM_IME_STARTCOMPOSITION && message!=WM_IME_ENDCOMPOSITION && message!=WM_IME_COMPOSITION) return;
     DWORD pid=0; if(GetWindowThreadProcessId(hwnd,&pid)!=shared->tid || pid!=shared->pid) return;
     LONG index=InterlockedIncrement(&shared->count)-1;
@@ -680,7 +779,7 @@ static void observe(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT origin) {
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&event->sequence,index+1);
 }
 extern "C" __declspec(dllexport) LRESULT CALLBACK HookCall(int code,WPARAM wp,LPARAM lp) {
-    if(code>=0) { CWPSTRUCT* m=(CWPSTRUCT*)lp; observe(m->hwnd,m->message,m->wParam,m->lParam,1); }
+    if(code>=0) { CWPSTRUCT* m=(CWPSTRUCT*)lp; observe(m->hwnd,m->message,m->wParam,m->lParam,1,wp!=0); }
     return CallNextHookEx(nullptr,code,wp,lp);
 }
 extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPARAM lp) {
@@ -705,6 +804,22 @@ extern "C" __declspec(dllexport) unsigned int ReadModeDiagnostic(State* source,U
     return InterlockedCompareExchange(modeSequence,0,0)==LONG(index+1)
         && InterlockedCompareExchange(messageSequence,0,0)==LONG(index+1)
         && mode->sequence==index+1 && message->sequence==index+1;
+}
+extern "C" __declspec(dllexport) unsigned int ReadNotification(State* source,opengeul_ime::NotificationConfig* config,opengeul_ime::NotificationRecord* result) {
+    if(!source || !config || !result || source->magic!=0x4f47494d || source->version!=4)return 0;
+    *config=source->notificationConfig;*result=opengeul_ime::NotificationRecord{};
+    const auto before=InterlockedCompareExchange((volatile LONG*)&source->notification.sequence,0,0);
+    if(before!=1) {
+        result->armed=InterlockedCompareExchange((volatile LONG*)&source->notification.armed,0,0);
+        result->claimed=InterlockedCompareExchange((volatile LONG*)&source->notification.claimed,0,0);
+        result->rejected=source->notification.rejected;result->expired=source->notification.expired;
+        if(result->armed)result->baselineCounter=source->notification.baselineCounter;
+        return 2; // No unpublished frame bytes leave the target mapping.
+    }
+    MemoryBarrier();*result=source->notification;MemoryBarrier();
+    const auto after=InterlockedCompareExchange((volatile LONG*)&source->notification.sequence,0,0);
+    if(before!=after || result->sequence!=1 || std::memcmp(config,&source->notificationConfig,sizeof(*config)))return 0;
+    return 1;
 }
 extern "C" __declspec(dllexport) unsigned int StateSize() { return sizeof(State); }
 extern "C" __declspec(dllexport) unsigned int PublishCommand(State* target,UINT sequence,uint64_t counter,uint64_t frequency) {
@@ -794,7 +909,8 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
     native_arch.require_architecture(architecture)
     remaining_setup(setup_deadline, 60, clock=clock)
     source, library = folder / 'ime-observer.cpp', folder / 'ime-observer.dll'
-    for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h', 'ime_typed_origin.h'):
+    for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h', 'ime_typed_origin.h',
+                 'ime_notification_caller.h','ascii_message_protocol.h','bounded_stack_windows.h','bounded_plugin_origin_windows.h'):
         (folder / name).write_bytes(Path(__file__).with_name(name).read_bytes())
     source.write_text(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
         .replace('__CLSID__', profile['providerClsid']).replace('__PROFILE__', profile['profileGuid']), encoding='utf-8')
@@ -822,7 +938,7 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
 
 
 class CompositionObserver:
-    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None, diagnose_ime_mode=False):
+    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None, diagnose_ime_mode=False, notification_binding=None):
         assert type(diagnose_ime_mode) is bool
         remaining_setup(setup_deadline, 60)
         self.native_architecture = native_arch.validate_native_architecture(
@@ -833,6 +949,18 @@ class CompositionObserver:
         self.tid = int(api.user.GetWindowThreadProcessId(focus, None))
         assert self.tid and api.pid(focus) == pid, 'Observer target is not the owned editor input thread'
         self.diagnose_ime_mode=diagnose_ime_mode
+        self.capture_ime_caller=notification_binding is not None
+        config=notification.Config(version=1)
+        from ascii_message_protocol import encode_plugin_binding
+        config.plugin=encode_plugin_binding(None)
+        if self.capture_ime_caller:
+            assert diagnose_ime_mode and type(notification_binding) is dict and set(notification_binding)=={'creationTime','plugin'}
+            created=notification_binding['creationTime']
+            assert type(created) is int and 0<created<2**64,'Original engine generation required'
+            config.enabled=1;config.creationTime=created
+            config.plugin=encode_plugin_binding(notification_binding['plugin'])
+            assert architecture=='arm64' if config.plugin.enabled else architecture=='x64','Matched ARM64 plugin admission required'
+        self.notification_config=bytes(config)
         if diagnose_ime_mode:
             assert setup_deadline is not None,'Mode diagnostic requires the original setup deadline'
             self.mode_diagnostic_budget=native_mode.counter_budget(setup_deadline,clock=time.monotonic)
@@ -841,6 +969,7 @@ class CompositionObserver:
         state = NativeState()
         state.magic, state.version, state.pid, state.tid = 0x4f47494d, 4, pid, self.tid
         state.targetHwnd, state.rootHwnd = focus, root
+        state.notificationConfig=config
         state.modeDiagnosticVersion=1
         if diagnose_ime_mode:
             state.modeDiagnosticDeadline,state.modeDiagnosticFrequency=self.mode_diagnostic_budget
@@ -1067,6 +1196,16 @@ class CompositionObserver:
         finally:del view
         return (mode,message) if committed==1 else None
 
+    def _read_notification(self):
+        config=notification.Config();row=notification.Record()
+        self.dll.ReadNotification.argtypes=[ctypes.POINTER(NativeState),ctypes.POINTER(notification.Config),ctypes.POINTER(notification.Record)]
+        self.dll.ReadNotification.restype=ctypes.c_uint
+        view=NativeState.from_buffer(self.mapping)
+        try:copied=self.dll.ReadNotification(ctypes.byref(view),ctypes.byref(config),ctypes.byref(row))
+        finally:del view
+        assert copied in (1,2),'Notification publication changed while acquiring'
+        return config,row
+
     def mode_diagnostics(self):
         state=self.state()
         if not getattr(self,'diagnose_ime_mode',False):return dict(status='disabled',acceptanceEligible=False)
@@ -1090,12 +1229,20 @@ class CompositionObserver:
                     conversionSucceeded=int(event.immConversionSucceeded),conversion=int(event.immConversion),himc=int(event.himc)),
                 threadMode=native_mode.receipt_dict(row.mode)))
         status='overflow' if state.diagnosticOverflow else ('partial' if len(rows)!=state.diagnosticCount else 'complete')
-        return dict(schemaVersion=1,kind='passive-owned-thread-mode-comparison',acceptanceEligible=False,
+        report=dict(schemaVersion=1,kind='passive-owned-thread-mode-comparison',acceptanceEligible=False,
             callerAttributionProved=False,status=status,
             capacity=128,observedCount=int(state.diagnosticCount),deadlineCounter=int(state.modeDiagnosticDeadline),
             counterFrequency=int(state.modeDiagnosticFrequency),events=rows,
             contextBoundaries=context_boundaries(rows,status,int(state.modeDiagnosticDeadline),
                 int(state.contextBoundaryExpired),int(state.contextBoundaryRejected)))
+
+        if getattr(self,'capture_ime_caller',False):
+            config,caller=self._read_notification()
+            command3=next((r for r in self.commands if r['command']==3),None)
+            report['notificationCaller']=notification.decode(config,caller,expected_config=self.notification_config,
+                messages=self.diagnostics(),modes=report,command3=command3,pid=self.pid,tid=self.tid,hwnd=self.focus,
+                deadline=int(state.modeDiagnosticDeadline),frequency=int(state.modeDiagnosticFrequency))
+        return report
 
     def close(self):
         errors = []
@@ -1271,13 +1418,14 @@ def retain_ime_focus_failure_diagnostics(record, process, keyboard):
         receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
     assert not diagnose_navigation or module == 'impress', 'Navigation experiment is scoped to Impress'
     assert not diagnose_ime_mode or (module=='calc' and not diagnose_navigation),'IME mode experiment is scoped to one Calc case'
-    assert plugin_origin is None or diagnose_focus,'Plugin binding is focus-only'
+    assert not capture_ime_caller or diagnose_ime_mode,'Caller capture requires mode diagnosis'
+    assert plugin_origin is None or diagnose_focus or capture_ime_caller,'Plugin binding requires scoped diagnosis'
     assert not diagnose_focus or (module=='calc' and not diagnose_navigation and not diagnose_ime_mode),'Focus experiment is scoped to Calc only'
     assert diagnostic_suffix in ('focus-01','focus-02','focus-03') if diagnose_focus else diagnostic_suffix is None,'Invalid focus diagnostic case suffix'
     name = 'ime-' + module
@@ -1387,7 +1535,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         record['stage'] = 'install-owned-thread-observer'
         observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'],
             architecture=record['architecture'], setup_deadline=setup_deadline,
-            **({'diagnose_ime_mode':True} if diagnose_ime_mode else {}))
+            **({'diagnose_ime_mode':True} if diagnose_ime_mode else {}),
+            **({'notification_binding':dict(creationTime=keyboard.binding['officeCreationTime'],plugin=plugin_origin)} if capture_ime_caller else {}))
         record.update(nativeArchitecture=observer.native_architecture, targetArchitecture=observer.target_architecture)
         assert observer.tid == keyboard.tid, 'Native observer differs from retained keyboard editor thread'
         keyboard.setup_complete()
@@ -1525,27 +1674,31 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         if retirement_failure is not None: raise retirement_failure
 
 
+def _open_plugin_proof(suite,proof_path,budget):
+    from plugin_file_origin import PluginFileLease,FileApi
+    import stat
+    proof_path=Path(proof_path)
+    assert proof_path.is_absolute() and not str(proof_path).startswith(('\\\\','//')),'Local proof required'
+    file_api=FileApi(budget);file_api.preflight(str(proof_path));budget.now()
+    for part in (*reversed(proof_path.parents),proof_path):
+        budget.now();info=part.lstat();budget.now()
+        assert not stat.S_ISLNK(info.st_mode) and not getattr(info,'st_file_attributes',0)&1024,'Linked proof rejected'
+    budget.now()
+    with proof_path.open('rb') as stream:
+        budget.now();raw=stream.read(65537);budget.now()
+    assert len(raw)<=65536,'Oversized plugin proof'
+    proof=json.loads(raw);budget.now()
+    return PluginFileLease(suite/'Office/program/vclplug_winlo.dll',proof,budget,runtime=file_api)
+
+
 def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_path=None):
     lease=None;cleanup_error=None;results=[];primary=None
     try:
         if proof_path is not None:
             from ascii_message_preparation import _Budget
-            from plugin_file_origin import PluginFileLease,FileApi
-            import stat
             budget=_Budget();budget.now()
             assert architecture=='arm64','Matched plugin binding requires native ARM64'
-            proof_path=Path(proof_path)
-            assert proof_path.is_absolute() and not str(proof_path).startswith(('\\\\','//')),'Local proof required'
-            file_api=FileApi(budget);file_api.preflight(str(proof_path));budget.now()
-            for part in (*reversed(proof_path.parents),proof_path):
-                budget.now();info=part.lstat();budget.now()
-                assert not stat.S_ISLNK(info.st_mode) and not getattr(info,'st_file_attributes',0)&1024,'Linked proof rejected'
-            budget.now()
-            with proof_path.open('rb') as stream:
-                budget.now();raw=stream.read(65537);budget.now()
-            assert len(raw)<=65536,'Oversized plugin proof'
-            proof=json.loads(raw);budget.now()
-            lease=PluginFileLease(suite/'Office/program/vclplug_winlo.dll',proof,budget,runtime=file_api)
+            lease=_open_plugin_proof(suite,proof_path,budget)
             prepared_library=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture,budget=budget)
         else:
             prepared_library=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture)
@@ -1584,6 +1737,44 @@ def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_
     return 0 if success else 1
 
 
+def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,capture_caller=False):
+    lease=None;primary=None;cleanup_error=None;results=[]
+    try:
+        assert not proof_path or (capture_caller and architecture=='arm64'),'Matched proof requires ARM64 caller diagnosis'
+        assert not capture_caller or architecture=='x64' or proof_path is not None,'ARM64 caller proof required'
+        if proof_path is not None:
+            from ascii_message_preparation import _Budget
+            budget=_Budget();budget.now();lease=_open_plugin_proof(suite,proof_path,budget)
+            prepared=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture,budget=budget)
+        else:prepared=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture)
+        extra={} if not capture_caller else dict(capture_ime_caller=True,plugin_origin=None if lease is None else lease.binding())
+        results=collect_cases([('ime-calc',lambda:case(suite,fixtures,output,readiness,'calc',dict(INPUT_CASES)['calc'],
+            prepared_library=prepared,diagnose_ime_mode=True,**extra))],output)
+    except BaseException as exc:
+        primary=exc;raise
+    finally:
+        if lease is not None:
+            try:lease.close()
+            except BaseException as exc:cleanup_error=type(exc).__name__
+            if primary is not None:
+                primary.pluginOriginReceipt=dict(lease.receipt)
+                if cleanup_error:primary.pluginOriginCleanupErrorType=cleanup_error
+                retained=dict(kind='matched-ime-preparation-failure',acceptanceEligible=False,
+                    errorType=type(primary).__name__,pluginFileOrigin=dict(lease.receipt))
+                if cleanup_error:retained['cleanupErrorType']=cleanup_error
+                try:
+                    with (output/'plugin-origin-failure.json').open('x',encoding='utf-8') as stream:json.dump(retained,stream,indent=2)
+                except BaseException as exc:primary.pluginOriginRetentionErrorType=type(exc).__name__
+    success=len(results)==1 and results[0].get('success') is True and cleanup_error is None
+    report=dict(schemaVersion=1,kind='native-ime-mode-diagnostic',success=success,acceptanceEligible=False,
+        imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=1,
+        notificationCallerEnabled=capture_caller)
+    if lease is not None:report['pluginFileOrigin']=dict(lease.receipt)
+    if cleanup_error:report['pluginFileOriginCleanupErrorType']=cleanup_error
+    (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+    return 0 if success else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite', type=Path, required=True)
@@ -1594,6 +1785,7 @@ def main(argv=None):
     parser.add_argument('--diagnose-ime-mode', choices=('calc',))
     parser.add_argument('--diagnose-focus', choices=('calc',))
     parser.add_argument('--matched-plugin-proof',type=Path)
+    parser.add_argument('--capture-ime-caller',action='store_true')
     parser.add_argument('--verify-one', choices=dict(INPUT_CASES))
     parser.add_argument('--file', type=Path)
     parser.add_argument('--reopen-output', type=Path)
@@ -1605,7 +1797,9 @@ def main(argv=None):
     architecture = native_arch.require_architecture(inventory.get('architecture'))
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
     assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus))<=1,'Reopen and diagnostic modes are mutually exclusive'
-    assert not args.matched_plugin_proof or (args.diagnose_focus=='calc' and architecture=='arm64'),'Matched binding is ARM64 focus-only'
+    assert not args.capture_ime_caller or args.diagnose_ime_mode=='calc','Caller capture requires Calc mode diagnosis'
+    assert not args.matched_plugin_proof or (architecture=='arm64' and (args.diagnose_focus=='calc' or args.capture_ime_caller)),'Matched binding requires scoped ARM64 diagnosis'
+    assert not args.capture_ime_caller or architecture=='x64' or args.matched_plugin_proof is not None,'ARM64 caller proof required'
     if args.verify_one:
         assert args.file and args.reopen_output, 'The owned reopen fixture and receipt are required'
         observed = reopen_one(suite, args.file.resolve(), args.verify_one)
@@ -1629,6 +1823,8 @@ def main(argv=None):
     readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
     if args.diagnose_focus:
         return run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof)
+    if args.diagnose_ime_mode:
+        return run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,capture_caller=args.capture_ime_caller)
     prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
     if args.diagnose_navigation:
         module = args.diagnose_navigation
@@ -1639,15 +1835,6 @@ def main(argv=None):
             acceptanceEligible=False, imeVerified=False, tests=results, runBinding=binding,
             architecture=architecture, expectedCaseCount=1)
         (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
-        return 0 if success else 1
-    if args.diagnose_ime_mode:
-        results=collect_cases([('ime-calc',lambda:case(suite,fixtures,output,readiness,'calc',
-            dict(INPUT_CASES)['calc'],prepared_library=prepared_library,diagnose_ime_mode=True))],output)
-        success=len(results)==1 and results[0].get('success') is True
-        report=dict(schemaVersion=1,kind='native-ime-mode-diagnostic',success=success,
-            acceptanceEligible=False,imeVerified=False,tests=results,runBinding=binding,
-            architecture=architecture,expectedCaseCount=1)
-        (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         return 0 if success else 1
     results = collect_cases([('ime-' + module, lambda module=module, extension=extension:
         case(suite, fixtures, output, readiness, module, extension, prepared_library=prepared_library)) for module, extension in INPUT_CASES], output)

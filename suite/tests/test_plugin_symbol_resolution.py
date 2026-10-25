@@ -304,3 +304,12 @@ class ResolutionTests(unittest.TestCase):
             with self.assertRaisesRegex(self.m.retention.SymbolError,'linked-path'):
                 self.run_resolve()
         self.assertEqual(lookups,[])
+
+class NotificationSymbolTagsTests(unittest.TestCase):
+    def test_only_fixed_pinned_notification_names_receive_closed_tags(self):
+        spec=importlib.util.spec_from_file_location('notification_symbols',SCRIPT);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+        for name,tag in {'ImplSalFrameSetInputContext':'frame-input-context','WinSalFrame::SetInputContext':'frame-input-context-dispatch',
+                         'SalFrameWndProc':'frame-window-procedure','ImplHandleKeyMsg':'frame-key-handler'}.items():
+            value={'name':name,'base':m.IMAGE_BASE,'address':m.IMAGE_BASE+0x1100,'size':16,'tag':5,'flags':0}
+            self.assertEqual(m._frame(value,0x1104,0x2000)['tag'],tag)
+            self.assertEqual(m._frame(dict(value,name=name+'Suffix'),0x1104,0x2000)['tag'],'unresolved')
