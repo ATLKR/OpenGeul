@@ -42,9 +42,9 @@ def _path_syntax(path):
     return path
 
 
-def _path(path):
+def _path(path,budget=None):
     path=_path_syntax(path)
-    retention.unlinked(path)
+    retention.unlinked(path,budget=budget)
     return path
 
 
@@ -67,7 +67,13 @@ def resolve(dll_bytes,pdb_path,verified_identity,return_rvas,budget,runtime=None
     finally:SERIAL.release()
 
 
-def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime):
+def qualify(dll_bytes,pdb_path,verified_identity,budget,runtime=None):
+    require(SERIAL.acquire(blocking=False),'concurrent-symbol-session')
+    try:return _resolve(dll_bytes,pdb_path,verified_identity,[],budget,runtime,qualification=True)
+    finally:SERIAL.release()
+
+
+def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
     budget.now()
     require(budget.deadline==budget.started+30 and budget.work_deadline==budget.deadline-3,'original-budget-required')
     require(type(dll_bytes) is bytes and 0<len(dll_bytes)<=retention.MAX_DLL and type(proof) is dict and proof.get('kind')=='matched-plugin-symbols' and
@@ -77,21 +83,21 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime):
     budget.now()
     if runtime is None:runtime=NativeRuntime(budget)
     runtime.preflight_path(str(path));budget.now()
-    path=_path(path)
+    path=_path(path,budget)
     entries=[]
     for entry in path.parent.iterdir():
         budget.now();entries.append(entry.name)
         require(len(entries)<=3 and entry.name in ('vclplug_winlo.pdb','vclplug_winlo.dll','receipt.json'),'pair-only-directory')
-        _path(entry)
+        _path(entry,budget)
         require(entry.is_file(),'pair-only-directory')
-    pdb_bytes=retention.read_regular(path,retention.MAX_PDB);budget.now()
+    pdb_bytes=retention.read_regular(path,retention.MAX_PDB,budget=budget);budget.now()
     for key,data,name in (('dll',dll_bytes,'vclplug_winlo.dll'),('pdb',pdb_bytes,'vclplug_winlo.pdb')):
         require(proof.get('files',{}).get(key)==dict(name=name,**retention.pin(data)),'pair-hash-mismatch')
         budget.now()
     identity=retention.pe_identity(dll_bytes)
     require(identity==retention.pdb_identity(pdb_bytes)==proof.get('matchedIdentity'),'pair-identity-mismatch');budget.now()
     pe=struct.unpack_from('<I',dll_bytes,60)[0];image_size=struct.unpack_from('<I',dll_bytes,pe+24+56)[0]
-    require(type(rvas) is list and 0<len(rvas)<=32 and all(type(r) is int and 4<=r<=image_size and r%4==0 for r in rvas),'return-rva-bounds')
+    require(type(rvas) is list and (len(rvas)==0 if qualification else 0<len(rvas)<=32) and all(type(r) is int and 4<=r<=image_size and r%4==0 for r in rvas),'return-rva-bounds')
     receipt=dict(schemaVersion=1,kind='local-plugin-symbol-resolution',acceptance=False,runtimeCallerProved=False,functionAliasUniquenessProved=False,
                  identity=identity,dllSha256=retention.pin(dll_bytes)['sha256'],pdbSha256=retention.pin(pdb_bytes)['sha256'],
                  complete=False,cleanupComplete=False,frames=[],cleanupErrors=[],nativeCallsPreemptible=False)
@@ -100,7 +106,7 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime):
         budget.now()
         budget.now();held=runtime.hold(str(path))
         require(type(held) is int and held>0,'pdb-handle');budget.now()
-        require(retention.read_regular(path,retention.MAX_PDB)==pdb_bytes,'pdb-changed-under-lock');budget.now()
+        require(retention.read_regular(path,retention.MAX_PDB,budget=budget)==pdb_bytes,'pdb-changed-under-lock');budget.now()
         receipt['pdbHeldDuringResolution']=True
         budget.now();initialized=runtime.initialize(str(path.parent),OPTIONS)
         require(initialized is True,'symbol-initialize');budget.now()
@@ -110,10 +116,19 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime):
         require(info.get('type')==3 and info.get('base')==IMAGE_BASE and info.get('size')==image_size and
                 info.get('guid')==identity['guid'] and info.get('age')==identity['age'] and info.get('unmatched') is False and
                 Path(info.get('path',''))==path,'loaded-symbol-identity')
+        if qualification:
+            budget.now();named=runtime.fixed_acquire();budget.now()
+            require(type(named) is dict and type(named.get('address')) is int,'fixed-symbol-unavailable')
+            rva=named['address']-IMAGE_BASE+4
+            require(rva%4==0 and _frame(named,rva,image_size)['tag']=='mutex-acquire','fixed-symbol-range')
+            budget.now();again=runtime.query(named['address']);budget.now()
+            require(again==named,'fixed-symbol-roundtrip')
+            receipt['qualification']=dict(roundTripMatched=True,tag='mutex-acquire',
+                functionRva=rva-4,functionSize=named['size'],functionAliasUniquenessProved=False)
         for rva in rvas:
             budget.now();value=runtime.query(IMAGE_BASE+rva-4);budget.now()
             receipt['frames'].append(_frame(value,rva,image_size))
-        require(retention.read_regular(path,retention.MAX_PDB)==pdb_bytes,'pdb-changed');budget.now()
+        require(retention.read_regular(path,retention.MAX_PDB,budget=budget)==pdb_bytes,'pdb-changed');budget.now()
         receipt['complete']=True
     except BaseException as exc:
         primary=exc;receipt['failureClass']=type(exc).__name__
@@ -168,7 +183,7 @@ class NativeRuntime:
         budget.now()
         buffer=C.create_unicode_buffer(32768);length=kernel.GetSystemDirectoryW(buffer,len(buffer))
         require(0<length<len(buffer),'system-directory');budget.now()
-        library=_path(Path(buffer.value)/'dbghelp.dll')
+        library=_path(Path(buffer.value)/'dbghelp.dll',budget)
         budget.now()
         self.dll=C.WinDLL(str(library),use_last_error=True,winmode=0x800)
         budget.now()
@@ -180,6 +195,7 @@ class NativeRuntime:
         self.load_module=bind('SymLoadModuleEx',[C.c_void_p,C.c_void_p,C.c_char_p,C.c_char_p,U64,U32,C.c_void_p,U32],U64)
         self.get_module=bind('SymGetModuleInfo64',[C.c_void_p,U64,C.POINTER(ModuleInfo)],BOOL)
         self.get_symbol=bind('SymFromAddr',[C.c_void_p,U64,C.POINTER(U64),C.POINTER(SymbolInfo)],BOOL)
+        self.get_named=bind('SymFromName',[C.c_void_p,C.c_char_p,C.POINTER(SymbolInfo)],BOOL)
         self.unload_module=bind('SymUnloadModule64',[C.c_void_p,U64],BOOL)
         self.clean=bind('SymCleanup',[C.c_void_p],BOOL)
     def preflight_path(self,path):
@@ -206,10 +222,15 @@ class NativeRuntime:
         return dict(type=int(info.SymType),base=int(info.BaseOfImage),size=int(info.ImageSize),
             path=info.LoadedPdbName.decode('ascii'),guid=str(uuid.UUID(bytes_le=bytes(info.PdbSig70))),age=int(info.PdbAge),
             unmatched=bool(info.PdbUnmatched or info.DbgUnmatched))
+    def fixed_acquire(self):
+        return self._symbol(lambda info:self.get_named(self.session,b'owned_plugin!WinSalYieldMutex::doAcquire',info))
     def query(self,address):
+        displacement=U64()
+        return self._symbol(lambda info:self.get_symbol(self.session,address,C.byref(displacement),info))
+    def _symbol(self,call):
         storage=C.create_string_buffer(C.sizeof(SymbolInfo)+1024);info=C.cast(storage,C.POINTER(SymbolInfo))
-        info.contents.SizeOfStruct=C.sizeof(SymbolInfo);info.contents.MaxNameLen=1024;displacement=U64()
-        if not self.get_symbol(self.session,address,C.byref(displacement),info):return None
+        info.contents.SizeOfStruct=C.sizeof(SymbolInfo);info.contents.MaxNameLen=1024
+        if not call(info):return None
         value=info.contents
         require(value.NameLen<1024,'symbol-name-bound')
         name=C.string_at(C.addressof(storage)+SymbolInfo.Name.offset,value.NameLen).decode('ascii',errors='strict')

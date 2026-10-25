@@ -53,6 +53,17 @@ struct RetrievalEvent {
     std::uint32_t originSucceeded,originError,stackRequested,frameCount,frameCapReached,unknownFrames,reserved0,reserved1;
     RetrievalFrame frames[RetrievalFrames];
 };
+constexpr std::uint32_t PluginModuleId=14,PluginPathCapacity=1024;
+struct PluginBinding {
+    std::uint32_t version,enabled,pathLength,reserved;
+    std::uint64_t volume,size;
+    std::uint8_t fileId[16];
+    std::uint16_t path[PluginPathCapacity];
+};
+struct PluginOriginSample {
+    std::uint32_t sequence,captureSequence,bucket,status;
+    std::uint64_t counter,finishedCounter;
+};
 
 struct State {
     std::uint32_t magic, version, stateSize, eventSize, capacity, pid, tid, controllerPid;
@@ -74,6 +85,8 @@ struct State {
     CaptureEvent captureEvents[CaptureCapacity];
     std::uint32_t retrievalVersion,retrievalClaimed,retrievalRejected,retrievalExpired;
     RetrievalEvent retrievalEvents[RetrievalCapacity];
+    PluginBinding pluginBinding;
+    PluginOriginSample pluginOrigins[RetrievalCapacity];
 };
 
 static_assert(sizeof(Event) == 96);
@@ -89,6 +102,7 @@ static_assert(offsetof(State,captureVersion) == 407008);
 static_assert(sizeof(CaptureEvent) == 112);
 static_assert(offsetof(State,retrievalVersion)==421392);
 static_assert(sizeof(RetrievalEvent)==256);
-static_assert(sizeof(State)==422176);
+static_assert(offsetof(State,pluginBinding)==422176 && sizeof(PluginBinding)==2096);
+static_assert(sizeof(PluginOriginSample)==32 && sizeof(State)==424368);
 static_assert(alignof(State) == 8);
 }  // namespace OpenGeulAscii

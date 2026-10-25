@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cwchar>
+#include <cstring>
 #include "ascii_message_protocol.h"
 
 namespace {
@@ -13,6 +14,7 @@ volatile LONG querying = 0;
 DWORD ownerThread = 0;
 bool stopped = true;
 bool releaseFailed = false;
+OpenGeulAscii::PluginBinding pluginBindingSnapshot{};
 static_assert(sizeof(LONG)==sizeof(std::int32_t));
 
 void publishSigned(std::int32_t* value,std::int32_t next) {
@@ -41,7 +43,7 @@ bool forgetView() {
         if(!CloseHandle(mapping)) { releaseFailed=true; return false; }
         mapping=nullptr;
     }
-    ownerThread=0;
+    ownerThread=0;pluginBindingSnapshot={};
     return true;
 }
 struct Callback {
@@ -68,6 +70,28 @@ bool header(const State* state) {
         && state->stateSize==sizeof(State) && state->eventSize==sizeof(Event)
         && state->capacity==OpenGeulAscii::Capacity;
 }
+bool pluginAdmission(const State* state) {
+    const auto& b=state->pluginBinding;
+    if(b.version!=1 || b.enabled>1 || b.reserved)return false;
+    const OpenGeulAscii::PluginOriginSample empty{};
+    for(const auto& sample:state->pluginOrigins)if(std::memcmp(&sample,&empty,sizeof(empty)))return false;
+    if(!b.enabled) {
+        OpenGeulAscii::PluginBinding disabled{};disabled.version=1;
+        return std::memcmp(&b,&disabled,sizeof(b))==0;
+    }
+    if(!state->captureEnabled || !b.size || b.size>32u*1024u*1024u || b.pathLength<4
+       || b.pathLength>=OpenGeulAscii::PluginPathCapacity || b.path[1]!=':' || b.path[2]!='\\'
+       || !((b.path[0]>='A' && b.path[0]<='Z') || (b.path[0]>='a' && b.path[0]<='z')))return false;
+    bool fileId=false;for(auto byte:b.fileId)fileId=fileId || byte!=0;
+    if(!fileId)return false;
+    for(std::uint32_t i=0;i<OpenGeulAscii::PluginPathCapacity;++i)
+        if(i<b.pathLength ? b.path[i]==0 : b.path[i]!=0)return false;
+    const char suffix[]="\\vclplug_winlo.dll";
+    if(b.pathLength<sizeof(suffix)-1)return false;
+    for(std::uint32_t i=0;i<sizeof(suffix)-1;++i)
+        if(b.path[b.pathLength-(sizeof(suffix)-1)+i]!=static_cast<unsigned char>(suffix[i]))return false;
+    return true;
+}
 void start(const CWPSTRUCT& message) {
     // Only this start callback may remain active. A reentrant start cannot
     // replace a view that an earlier callback on this thread might still use.
@@ -88,7 +112,7 @@ void start(const CWPSTRUCT& message) {
     const UINT startMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Start.v2");
     const UINT stopMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Stop.v2");
     const UINT readinessMessage=RegisterWindowMessageW(L"OpenGeul.AsciiObserver.Readiness.v2");
-    if(command!=1 || !header(shared) || shared->controllerPid!=message.wParam || shared->nonce!=nonce
+    if(command!=1 || !header(shared) || !pluginAdmission(shared) || shared->controllerPid!=message.wParam || shared->nonce!=nonce
        || shared->startMessage!=startMessage || shared->stopMessage!=stopMessage
        || shared->readinessMessage!=readinessMessage || shared->readinessReserved
        || shared->traceVersion!=OpenGeulAscii::TraceVersion || shared->traceEnabled>1
@@ -105,6 +129,7 @@ void start(const CWPSTRUCT& message) {
         publishSigned(&shared->status,-1);
         forgetView(); return;
     }
+    pluginBindingSnapshot=shared->pluginBinding;
     ownerThread=GetCurrentThreadId(); stopped=false;
     publishSigned(&shared->activeCallbacks,1);
     publish(&shared->recording,1);
@@ -262,9 +287,61 @@ void traceNavigation(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,std::uint32_t or
     event.layout=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)));
     publish(&event.sequence,index+1);
 }
+// Bounded known-plugin file origin: private path never leaves the target mapping.
+bool retrievalClock(std::uint64_t&);
+std::uint32_t pluginOriginStatus(HMODULE module) {
+    const auto expected=shared->pluginBinding;
+    if(!module || expected.version!=1 || expected.enabled!=1 || expected.reserved
+       || !expected.pathLength || expected.pathLength>=OpenGeulAscii::PluginPathCapacity
+       || expected.path[expected.pathLength] || !expected.size || expected.size>32u*1024u*1024u
+       || std::memcmp(&expected,&pluginBindingSnapshot,sizeof(expected))!=0)return 2;
+    std::uint64_t stamp=0;
+    const auto current=[&](){return retrievalClock(stamp);};
+    wchar_t path[OpenGeulAscii::PluginPathCapacity]{};
+    const auto samePath=[&](DWORD length) {
+        if(length!=expected.pathLength)return false;
+        for(std::uint32_t i=0;i<length;++i)if(path[i]!=expected.path[i])return false;
+        return path[length]==0;
+    };
+    if(!current())return 0;
+    auto length=GetModuleFileNameW(module,path,OpenGeulAscii::PluginPathCapacity);
+    if(!current())return 0;
+    if(!samePath(length))return 2;
+    if(!current())return 0;
+    HANDLE file=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==nullptr || file==INVALID_HANDLE_VALUE) {if(!current())return 0;return 3;}
+    const auto inspect=[&]() -> std::uint32_t {
+        if(!current())return 0;
+        FILE_ID_INFO info{};
+        if(!GetFileInformationByHandleEx(file,FileIdInfo,&info,sizeof(info)))return 3;
+        if(!current())return 0;
+        if(info.VolumeSerialNumber!=expected.volume || std::memcmp(info.FileId.Identifier,expected.fileId,16)!=0)return 2;
+        LARGE_INTEGER size{};
+        if(!current())return 0;
+        if(!GetFileSizeEx(file,&size))return 3;
+        if(!current())return 0;
+        return size.QuadPart>=0 && static_cast<std::uint64_t>(size.QuadPart)==expected.size ? 1u:2u;
+    };
+    auto status=inspect();
+    if(!current())status=0;
+    // Mandatory release even after expiry; no further attribution query is allowed.
+    const bool closed=CloseHandle(file)!=0;
+    if(!current())return 0;
+    if(!closed)return 4;
+    if(status!=1)return status;
+    if(!current())return 0;
+    const auto named=GetModuleHandleW(L"vclplug_winlo.dll");
+    if(!current())return 0;
+    if(named!=module)return 2;
+    if(!current())return 0;
+    length=GetModuleFileNameW(module,path,OpenGeulAscii::PluginPathCapacity);
+    if(!current())return 0;
+    return samePath(length)?1u:2u;
+}
+
 // Bounded retrieval metadata is independent of the already committed capture row.
 static bool retrievalReading=false;
-static const wchar_t* const retrievalModules[]={L"mergedlo.dll",L"vcllo.dll",L"sal3.dll",L"user32.dll",L"win32u.dll",L"ntdll.dll",L"kernel32.dll",L"kernelbase.dll",L"combase.dll",L"ole32.dll",L"imm32.dll",L"msctf.dll",L"imkrtip.dll"};
+static const wchar_t* const retrievalModules[]={L"mergedlo.dll",L"vcllo.dll",L"sal3.dll",L"user32.dll",L"win32u.dll",L"ntdll.dll",L"kernel32.dll",L"kernelbase.dll",L"combase.dll",L"ole32.dll",L"imm32.dll",L"msctf.dll",L"imkrtip.dll",L"vclplug_winlo.dll"};
 bool retrievalClock(std::uint64_t& counter) {
     if(captureClock(counter))return true;
     if(load(&shared->captureExpired))publish(&shared->retrievalExpired,1);
@@ -294,6 +371,7 @@ void traceRetrieval(const MSG& message,WPARAM removalFlags,std::uint32_t capture
     retrievalReading=true;struct Exit {~Exit(){retrievalReading=false;}} exit;
     publish(&shared->retrievalClaimed,load(&shared->retrievalClaimed)|bit);
     OpenGeulAscii::RetrievalEvent row{};
+    OpenGeulAscii::PluginOriginSample pluginOrigin{};
     row.captureSequence=captureSequence;row.bucket=bucket;row.message=message.message;row.removeFlags=static_cast<std::uint32_t>(removalFlags);
     row.pid=capture.pid;row.tid=capture.tid;row.hwnd=capture.hwnd;row.engineCreationTime=capture.engineCreationTime;
     row.counter=stamp;row.frequency=shared->captureFrequency;row.lParam=capture.lParam;
@@ -316,9 +394,18 @@ void traceRetrieval(const MSG& message,WPARAM removalFlags,std::uint32_t capture
         if(!count)row.flags|=2;
         HMODULE modules[sizeof(retrievalModules)/sizeof(*retrievalModules)]{};
         for(std::size_t i=0;i<sizeof(modules)/sizeof(*modules);++i) {
+            if(i==13 && !shared->pluginBinding.enabled)continue;
             if(!retrievalClock(stamp))return;
             modules[i]=GetModuleHandleW(retrievalModules[i]);
             if(!retrievalClock(stamp))return;
+        }
+        if(shared->pluginBinding.enabled) {
+            pluginOrigin.captureSequence=captureSequence;pluginOrigin.bucket=bucket;
+            if(!retrievalClock(pluginOrigin.counter))return;
+            pluginOrigin.status=pluginOriginStatus(modules[13]);
+            if(!retrievalClock(pluginOrigin.finishedCounter))return;
+            if(!pluginOrigin.status)return;
+            if(pluginOrigin.status!=1)modules[13]=nullptr;
         }
         for(std::uint32_t i=0;i<count;++i) {
             HMODULE module=nullptr,again=nullptr;
@@ -347,6 +434,10 @@ void traceRetrieval(const MSG& message,WPARAM removalFlags,std::uint32_t capture
         }
     }
     if(!retrievalClock(row.finishedCounter))return;
+    if(bucket && shared->pluginBinding.enabled) {
+        shared->pluginOrigins[bucket]=pluginOrigin;
+        publish(&shared->pluginOrigins[bucket].sequence,bucket+1);
+    }
     shared->retrievalEvents[bucket]=row;
     publish(&shared->retrievalEvents[bucket].sequence,bucket+1);
 }

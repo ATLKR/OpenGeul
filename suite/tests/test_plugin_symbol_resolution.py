@@ -45,6 +45,38 @@ class ResolutionTests(unittest.TestCase):
         self.proof=dict(kind='matched-plugin-symbols',identityMatched=True,acceptance=False,sourceCommit='a'*40,
             matchedIdentity=dict(guid=str(GUID),age=2),files=dict(dll=dict(name='vclplug_winlo.dll',**self.m.retention.pin(dll())),pdb=dict(name='vclplug_winlo.pdb',**self.m.retention.pin(pdb()))))
     def run_resolve(self,rvas=None):return self.m.resolve(dll(),self.path,self.proof,[0x1104] if rvas is None else rvas,self.budget,runtime=self.runtime)
+    def test_fixed_name_qualification_roundtrip_is_not_runtime_attribution(self):
+        def fixed():
+            self.runtime.calls.append('fixed-name')
+            return dict(name='WinSalYieldMutex::doAcquire',base=self.m.IMAGE_BASE,address=self.m.IMAGE_BASE+0x1100,size=16,tag=5,flags=0)
+        self.runtime.fixed_acquire=fixed
+        self.assertTrue(hasattr(self.m,'qualify'),'fixed native qualification missing')
+        result=self.m.qualify(dll(),self.path,self.proof,self.budget,runtime=self.runtime)
+        self.assertTrue(result['qualification']['roundTripMatched'])
+        self.assertFalse(result['runtimeCallerProved']);self.assertEqual(result['frames'],[])
+        self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
+        self.assertEqual(self.runtime.calls.count('fixed-name'),1)
+    def test_qualification_wrong_or_nearest_name_never_passes(self):
+        self.assertTrue(hasattr(self.m,'qualify'),'fixed native qualification missing')
+        good=dict(name='WinSalYieldMutex::doAcquire',base=self.m.IMAGE_BASE,address=self.m.IMAGE_BASE+0x1100,size=16,tag=5,flags=0)
+        for wrong in (None,dict(good,name='unknown'),dict(good,size=0),dict(good,address=0)):
+            self.runtime.fixed_acquire=lambda:wrong
+            with self.assertRaises(self.m.ResolutionError):self.m.qualify(dll(),self.path,self.proof,self.budget,runtime=self.runtime)
+        self.runtime.fixed_acquire=lambda:good;self.runtime.answer={'size':8}
+        with self.assertRaises(self.m.ResolutionError):self.m.qualify(dll(),self.path,self.proof,self.budget,runtime=self.runtime)
+    def test_read_budget_stops_between_pdb_chunks(self):
+        import io
+        reads=[]
+        class Stream(io.BytesIO):
+            def fileno(self):return 12
+            def read(inner,size=-1):
+                reads.append(size);value=super(Stream,inner).read(size);self.budget.time=27.;return value
+        stream=Stream(b'x'*(2*1024*1024));info=self.path.stat()
+        from types import SimpleNamespace
+        large=SimpleNamespace(**{key:getattr(info,key) for key in ('st_mode','st_dev','st_ino','st_mtime_ns','st_ctime_ns')},st_size=2*1024*1024)
+        with patch.object(Path,'open',return_value=stream),patch.object(Path,'stat',return_value=large),patch.object(os,'fstat',return_value=large):
+            with self.assertRaises(TimeoutError):self.m.retention.read_regular(self.path,3*1024*1024,budget=self.budget)
+        self.assertEqual(len(reads),1)
     def test_known_function_callpc_and_mandatory_cleanup(self):
         r=self.run_resolve();self.assertEqual(r['frames'][0]['tag'],'mutex-acquire');self.assertEqual(r['frames'][0]['callRva'],0x1100)
         self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release']);self.assertTrue(r['cleanupComplete']);self.assertFalse(r['runtimeCallerProved'])
@@ -107,7 +139,7 @@ class ResolutionTests(unittest.TestCase):
             def __call__(self,*args):return self.fn(*args)
         def directory(buffer,size):buffer.value=str(system);return len(str(system))
         kernel=SimpleNamespace(GetSystemDirectoryW=Function(directory),GetDriveTypeW=Function(lambda path:3),CreateFileW=Function(lambda *args:123),CloseHandle=Function(lambda handle:True))
-        names=('SymSetOptions','SymInitialize','SymLoadModuleEx','SymGetModuleInfo64','SymFromAddr','SymUnloadModule64','SymCleanup')
+        names=('SymSetOptions','SymInitialize','SymLoadModuleEx','SymGetModuleInfo64','SymFromAddr','SymFromName','SymUnloadModule64','SymCleanup')
         native=SimpleNamespace(**{n:Function(lambda *a:True) for n in names})
         native.SymSetOptions=Function(lambda mask:mask)
         native.SymInitialize=Function(lambda *a:calls.append(('initialize',a)) or True)

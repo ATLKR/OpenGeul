@@ -1181,12 +1181,13 @@ def retain_ime_focus_failure_diagnostics(record, process, keyboard):
         receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
     assert not diagnose_navigation or module == 'impress', 'Navigation experiment is scoped to Impress'
     assert not diagnose_ime_mode or (module=='calc' and not diagnose_navigation),'IME mode experiment is scoped to one Calc case'
+    assert plugin_origin is None or diagnose_focus,'Plugin binding is focus-only'
     assert not diagnose_focus or (module=='calc' and not diagnose_navigation and not diagnose_ime_mode),'Focus experiment is scoped to Calc only'
     assert diagnostic_suffix in ('focus-01','focus-02','focus-03') if diagnose_focus else diagnostic_suffix is None,'Invalid focus diagnostic case suffix'
     name = 'ime-' + module
@@ -1227,7 +1228,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             nonlocal focus_trace
             if diagnose_focus:
                 from editor_capture_diagnostic import EditorCaptureDiagnostic
-                focus_trace=EditorCaptureDiagnostic(keyboard,prepared_library,record['editorFocusReadiness']['deadline'])
+                focus_trace=EditorCaptureDiagnostic(keyboard,prepared_library,record['editorFocusReadiness']['deadline'],
+                    **({} if plugin_origin is None else dict(plugin_origin=plugin_origin)))
                 focus_trace.start()
             return click_owned_editor(api,process,hwnd,parent,child,office_pid,record)
         prepare_editor_focus(api, hwnd, child, process.pid, office_pid, record,
@@ -1431,6 +1433,65 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         if retirement_failure is not None: raise retirement_failure
 
 
+def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_path=None):
+    lease=None;cleanup_error=None;results=[];primary=None
+    try:
+        if proof_path is not None:
+            from ascii_message_preparation import _Budget
+            from plugin_file_origin import PluginFileLease,FileApi
+            import stat
+            budget=_Budget();budget.now()
+            assert architecture=='arm64','Matched plugin binding requires native ARM64'
+            proof_path=Path(proof_path)
+            assert proof_path.is_absolute() and not str(proof_path).startswith(('\\\\','//')),'Local proof required'
+            file_api=FileApi(budget);file_api.preflight(str(proof_path));budget.now()
+            for part in (*reversed(proof_path.parents),proof_path):
+                budget.now();info=part.lstat();budget.now()
+                assert not stat.S_ISLNK(info.st_mode) and not getattr(info,'st_file_attributes',0)&1024,'Linked proof rejected'
+            budget.now()
+            with proof_path.open('rb') as stream:
+                budget.now();raw=stream.read(65537);budget.now()
+            assert len(raw)<=65536,'Oversized plugin proof'
+            proof=json.loads(raw);budget.now()
+            lease=PluginFileLease(suite/'Office/program/vclplug_winlo.dll',proof,budget,runtime=file_api)
+            prepared_library=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture,budget=budget)
+        else:
+            prepared_library=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture)
+        private={} if lease is None else dict(plugin_origin=lease.binding())
+        for index in range(1,4):
+            suffix=f'focus-{index:02d}';name='ime-calc-'+suffix
+            rows=collect_cases([(name,lambda suffix=suffix:case(suite,fixtures,output,readiness,'calc',
+                dict(INPUT_CASES)['calc'],prepared_library=prepared_library,diagnose_focus=True,diagnostic_suffix=suffix,**private))],output)
+            results.extend(rows)
+            from editor_capture_diagnostic import cohort_cleanup_confirmed
+            if len(rows)!=1 or not cohort_cleanup_confirmed(rows[0]):break
+    except BaseException as exc:
+        primary=exc;raise
+    finally:
+        if lease is not None:
+            try:lease.close()
+            except BaseException as exc:cleanup_error=type(exc).__name__
+            if primary is not None:
+                primary.pluginOriginReceipt=dict(lease.receipt)
+                if cleanup_error:primary.pluginOriginCleanupErrorType=cleanup_error
+        if primary is not None and hasattr(primary,'pluginOriginReceipt'):
+            failure=dict(kind='matched-plugin-preparation-failure',acceptanceEligible=False,
+                errorType=type(primary).__name__,pluginFileOrigin=primary.pluginOriginReceipt)
+            if cleanup_error:failure['cleanupErrorType']=cleanup_error
+            try:
+                with (output/'plugin-origin-failure.json').open('x',encoding='utf-8') as stream:
+                    json.dump(failure,stream,indent=2,allow_nan=False)
+            except BaseException as retention:primary.pluginOriginRetentionErrorType=type(retention).__name__
+    success=len(results)==3 and all(row.get('success') is True for row in results) and cleanup_error is None
+    report=dict(schemaVersion=1,kind='native-focus-diagnostic',success=success,acceptanceEligible=False,
+        imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=3,
+        completedCaseCount=len(results),cohortPolicy='three fresh sequential cases; never retry input or overlap unconfirmed cleanup')
+    if lease is not None:report['pluginFileOrigin']=dict(lease.receipt)
+    if cleanup_error:report['pluginFileOriginCleanupErrorType']=cleanup_error
+    (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+    return 0 if success else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite', type=Path, required=True)
@@ -1440,6 +1501,7 @@ def main(argv=None):
     parser.add_argument('--diagnose-navigation', choices=('impress',))
     parser.add_argument('--diagnose-ime-mode', choices=('calc',))
     parser.add_argument('--diagnose-focus', choices=('calc',))
+    parser.add_argument('--matched-plugin-proof',type=Path)
     parser.add_argument('--verify-one', choices=dict(INPUT_CASES))
     parser.add_argument('--file', type=Path)
     parser.add_argument('--reopen-output', type=Path)
@@ -1451,6 +1513,7 @@ def main(argv=None):
     architecture = native_arch.require_architecture(inventory.get('architecture'))
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
     assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus))<=1,'Reopen and diagnostic modes are mutually exclusive'
+    assert not args.matched_plugin_proof or (args.diagnose_focus=='calc' and architecture=='arm64'),'Matched binding is ARM64 focus-only'
     if args.verify_one:
         assert args.file and args.reopen_output, 'The owned reopen fixture and receipt are required'
         observed = reopen_one(suite, args.file.resolve(), args.verify_one)
@@ -1472,22 +1535,9 @@ def main(argv=None):
         binding = validate_context(os.environ, read_event(), architecture, os.name)
     output.mkdir(parents=True, exist_ok=False)
     readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
-    prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
     if args.diagnose_focus:
-        results=[]
-        for index in range(1,4):
-            suffix=f'focus-{index:02d}';name='ime-calc-'+suffix
-            rows=collect_cases([(name,lambda suffix=suffix:case(suite,fixtures,output,readiness,'calc',
-                dict(INPUT_CASES)['calc'],prepared_library=prepared_library,diagnose_focus=True,diagnostic_suffix=suffix))],output)
-            results.extend(rows)
-            from editor_capture_diagnostic import cohort_cleanup_confirmed
-            if len(rows)!=1 or not cohort_cleanup_confirmed(rows[0]):break
-        success=len(results)==3 and all(row.get('success') is True for row in results)
-        report=dict(schemaVersion=1,kind='native-focus-diagnostic',success=success,acceptanceEligible=False,
-            imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=3,
-            completedCaseCount=len(results),cohortPolicy='three fresh sequential cases; never retry input or overlap unconfirmed cleanup')
-        (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
-        return 0 if success else 1
+        return run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof)
+    prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
     if args.diagnose_navigation:
         module = args.diagnose_navigation
         results = collect_cases([('ime-' + module, lambda: case(suite, fixtures, output, readiness,

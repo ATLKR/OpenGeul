@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "native-arm64-plugin-symbols",
+  "architecture": "arm64",
+  "sourceCommit": "e8b19f610d4bcc074bb002d132bca675e273116f",
+  "runId": 40171709989,
+  "runAttempt": 1,
+  "artifactId": 12597677100,
+  "artifactSize": 28235984,
+  "artifactSha256": "a74c60b51789433118ba250b46b8b14a8804a731338e87b6f704414acde0a0b1",
+  "files": {
+    "receipt.json": {
+      "bytes": 842,
+      "sha256": "012d68c078181a68268f0d9d511e6e393ed77b5bf45bb15766b9fd7762eb40c6"
+    },
+    "vclplug_winlo.dll": {
+      "bytes": 4342784,
+      "sha256": "ef44f1d8df4c439f4504a74317663df8d924afd9b1fda6c5f5b64f389f6464f5"
+    },
+    "vclplug_winlo.pdb": {
+      "bytes": 23891968,
+      "sha256": "47868f4399f4f6d6bfeddc2246841f03a12144fd85156db9c26ce2089a2c3a62"
+    }
+  },
+  "matchedIdentity": {
+    "age": 1,
+    "guid": "1888ca5e-ae59-4868-8b3d-f8b28367c979"
+  }
+}

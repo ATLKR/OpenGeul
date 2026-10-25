@@ -34,18 +34,19 @@ using LONG=int32_t;using UINT=uint32_t;using DWORD=uint32_t;using HWND=void*;usi
 struct POINT{int32_t x,y;};struct MSG{HWND hwnd;UINT message;WPARAM wParam;LPARAM lParam;DWORD time;POINT pt;};
 constexpr uint32_t GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS=4,GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT=2;
 OpenGeulAscii::State storage{};auto shared=&storage;bool stopped=false;uint32_t ownerThread=99;
-uint64_t ticks=10;int originCalls=0,stackCalls=0,moduleCalls=0,fromCalls=0;int expireAt=0;bool originOk=true,unstable=false,reenter=false;uint16_t stackCount=2;
+uint64_t ticks=10;int originCalls=0,stackCalls=0,moduleCalls=0,fromCalls=0;int bindingCalls=0;uint32_t bindingStatus=1;int expireAt=0;bool originOk=true,unstable=false,reenter=false;uint16_t stackCount=2;
 LONG load(const uint32_t*p){return *p;}void publish(uint32_t*p,LONG v){*p=v;}
 bool header(OpenGeulAscii::State*){return true;}
 bool captureClock(uint64_t&v){if(ticks>=100){shared->captureExpired=1;return false;}v=ticks;return true;}
 uint32_t GetCurrentThreadId(){return 99;}DWORD GetLastError(){return 5;}
 void traceRetrieval(const MSG&,WPARAM,uint32_t);
+uint32_t pluginOriginStatus(HMODULE m){++bindingCalls;assert(m==reinterpret_cast<void*>(0x7000));if(expireAt==5)ticks=100;return bindingStatus;}
 bool ClientToScreen(HWND,POINT*p){++originCalls;p->x=1;p->y=48;if(expireAt==1)ticks=100;
  if(reenter){MSG nested{reinterpret_cast<HWND>(22),0x201,1,123,0,{505,365}};traceRetrieval(nested,1,1);}return originOk;}
 uint16_t CaptureStackBackTrace(uint32_t,uint32_t count,void**p,uint32_t*){++stackCalls;assert(count==16);for(unsigned i=0;i<stackCount;++i)p[i]=reinterpret_cast<void*>(i==0?0x1010:0x7010);if(expireAt==2)ticks=100;return stackCount;}
-HMODULE GetModuleHandleW(const wchar_t*name){++moduleCalls;if(expireAt==3)ticks=100;return std::wcscmp(name,L"mergedlo.dll")==0?reinterpret_cast<void*>(0x1000):nullptr;}
+HMODULE GetModuleHandleW(const wchar_t*name){++moduleCalls;if(expireAt==3)ticks=100;return std::wcscmp(name,L"mergedlo.dll")==0?reinterpret_cast<void*>(0x1000):(std::wcscmp(name,L"vclplug_winlo.dll")==0?reinterpret_cast<void*>(0x7000):nullptr);}
 bool GetModuleHandleExW(uint32_t flags,const wchar_t*address,HMODULE*out){assert(flags==6);++fromCalls;if(expireAt==4)ticks=100;auto a=reinterpret_cast<uintptr_t>(address);*out=reinterpret_cast<void*>(a==0x1010?(unstable&&fromCalls%2==0?0x2000:0x1000):0x7000);return true;}
-void reset(){storage={};ticks=10;originCalls=stackCalls=moduleCalls=fromCalls=0;expireAt=0;originOk=true;unstable=reenter=false;stackCount=2;
+void reset(){storage={};ticks=10;originCalls=stackCalls=moduleCalls=fromCalls=0;expireAt=0;bindingCalls=0;bindingStatus=1;originOk=true;unstable=reenter=false;stackCount=2;
  shared->recording=1;shared->captureEnabled=1;shared->captureVersion=1;shared->retrievalVersion=1;
  shared->hwnd=22;shared->pid=88;shared->tid=99;shared->engineCreationTime=555;shared->captureDeadline=100;shared->captureFrequency=1000;}
 MSG seed(uint32_t sequence,UINT message,WPARAM flags){auto&r=shared->captureEvents[sequence-1];r.sequence=sequence;r.origin=1;r.message=message;r.removeFlags=flags;
@@ -58,6 +59,7 @@ int main(){
  assert(originCalls==1 && stackCalls==0 && shared->retrievalEvents[0].pointX==505 && shared->retrievalEvents[0].clientOriginY==48);
  auto up=seed(2,0x202,1);traceRetrieval(up,1,2);auto&r=shared->retrievalEvents[1];assert(r.sequence==2 && r.captureSequence==2 && r.frameCount==2);
  assert(r.frames[0].moduleId==1 && r.frames[0].rva==16 && r.frames[1].moduleId==0 && r.frames[1].rva==0 && r.unknownFrames==1);
+ assert(bindingCalls==0);
  auto up3=seed(3,0x202,3);traceRetrieval(up3,3,3);for(int i=0;i<20;++i)traceRetrieval(up3,3,3);
  assert(shared->retrievalClaimed==7 && stackCalls==2 && originCalls==3 && shared->captureCount==3);
  reset();up=seed(1,0x202,1);shared->captureEvents[0].wParam=0;traceRetrieval(up,1,1);assert(shared->retrievalRejected==1 && shared->retrievalClaimed==0 && originCalls==0 && stackCalls==0);
@@ -69,6 +71,13 @@ int main(){
  reset();down=seed(1,0x201,1);reenter=true;traceRetrieval(down,1,1);assert(shared->retrievalRejected&2);assert(originCalls==1);
  reset();up=seed(1,0x202,1);unstable=true;traceRetrieval(up,1,1);assert(shared->retrievalEvents[1].frames[0].moduleId==0 && shared->retrievalEvents[1].frames[0].rva==0);
  reset();up=seed(1,0x202,1);stackCount=16;traceRetrieval(up,1,1);assert(shared->retrievalEvents[1].frameCount==16 && shared->retrievalEvents[1].frameCapReached==1);
+ reset();shared->pluginBinding.enabled=1;up=seed(1,0x202,1);traceRetrieval(up,1,1);
+ assert(bindingCalls==1 && shared->retrievalEvents[1].frames[1].moduleId==14 && shared->retrievalEvents[1].frames[1].rva==16);
+ assert(shared->pluginOrigins[1].sequence==2 && shared->pluginOrigins[1].captureSequence==1 && shared->pluginOrigins[1].status==1);
+ reset();shared->pluginBinding.enabled=1;bindingStatus=2;up=seed(1,0x202,1);traceRetrieval(up,1,1);
+ assert(bindingCalls==1 && shared->retrievalEvents[1].frames[1].moduleId==0 && shared->pluginOrigins[1].status==2);
+ reset();shared->pluginBinding.enabled=1;expireAt=5;up=seed(1,0x202,1);traceRetrieval(up,1,1);
+ assert(bindingCalls==1 && shared->retrievalEvents[1].sequence==0 && shared->pluginOrigins[1].sequence==0 && shared->retrievalExpired);
  reset();down=seed(1,0x201,1);originOk=false;traceRetrieval(down,1,1);assert(shared->retrievalEvents[0].originSucceeded==0 && shared->retrievalEvents[0].originError==5);
 }
 '''
@@ -129,6 +138,6 @@ int main(){
         import re
         source=(Path(__file__).resolve().parents[1]/'e2e/ascii_message_observer.cpp').read_text()
         producer=source[source.index('// Bounded retrieval metadata'):source.index('void observe(')]
-        self.assertEqual(re.findall(r'L"([a-z0-9]+\.dll)"',producer),list(p.RETRIEVAL_MODULES.values()))
+        self.assertEqual(re.findall(r'L"([a-z0-9_]+\.dll)"',producer),list(p.RETRIEVAL_MODULES.values())+["vclplug_winlo.dll"])
         for forbidden in ('LoadLibrary','FreeLibrary','GetModuleFileName','ReadProcessMemory','EnumProcessModules','SymFromAddr'):
             self.assertNotIn(forbidden,producer)

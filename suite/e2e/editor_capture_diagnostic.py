@@ -180,9 +180,10 @@ class PassiveCaptureProbe:
     _session=NativeAsciiProbe._session
     close=NativeAsciiProbe.close
 
-    def __init__(self,keyboard,prepared,receipt,deadline):
+    def __init__(self,keyboard,prepared,receipt,deadline,*,plugin_origin=None):
         self.keyboard=keyboard;self.api=keyboard.api;self.process=keyboard.process
         self.binding=dict(keyboard.binding);self.prepared=prepared;self.receipt=receipt
+        self.plugin_origin=plugin_origin
         self.deadline=deadline;self.clock=keyboard.clock
         self.handle=self.probe=self.transport=self.dll=None;self.closed=False
     def _budget(self):assert self.clock()<self.deadline,'Original focus diagnostic deadline expired'
@@ -222,7 +223,7 @@ class PassiveCaptureProbe:
         self._budget();counter,frequency=counter_budget(self.deadline,clock=self.clock)
         self.transport=MessageTransport(self.probe.user,self.probe.kernel,self.dll,self.target,
             self.original_engine['creationTime'],self.receipt,self.deadline,self.clock,self._identity,
-            capture_diagnostic_mode=True,capture_deadline_counter=counter,capture_counter_frequency=frequency)
+            capture_diagnostic_mode=True,capture_deadline_counter=counter,capture_counter_frequency=frequency,plugin_origin=self.plugin_origin)
         self._budget()
     def _identity(self):
         self._budget();assert self.probe.process_snapshot(self.process)==self.original_shell
@@ -290,7 +291,7 @@ class PassiveCaptureProbe:
 
 
 class EditorCaptureDiagnostic:
-    def __init__(self,keyboard,prepared,deadline,*,probe=None):
+    def __init__(self,keyboard,prepared,deadline,*,probe=None,plugin_origin=None):
         record=keyboard.record;focus=record['editorFocusReadiness']
         assert record.get('kind')=='native-focus-diagnostic' and record.get('acceptanceEligible') is False
         assert keyboard.module=='calc' and keyboard.phase=='admitted' and not keyboard.finished and keyboard.failed is None
@@ -302,7 +303,7 @@ class EditorCaptureDiagnostic:
             snapshot=dict(status='unavailable',events=[]),cleanupErrors=[],expectedNative=dict(keyboard.binding))
         assert 'focusCaptureDiagnostic' not in record
         record['focusCaptureDiagnostic']=self.receipt
-        self.probe=probe or PassiveCaptureProbe(keyboard,prepared,self.receipt,deadline)
+        self.probe=probe or PassiveCaptureProbe(keyboard,prepared,self.receipt,deadline,plugin_origin=plugin_origin)
         cohort_receipt=dict(admitted=False,engineExitConfirmed=False,handleReleased=False)
         record['focusCohortEngineCleanup']=cohort_receipt
         self.cohort_lease=CohortEngineLease(keyboard,cohort_receipt)

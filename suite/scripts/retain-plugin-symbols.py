@@ -30,28 +30,33 @@ def require(ok,code):
     if not ok:raise SymbolError(code)
 
 
-def unlinked(path):
+def unlinked(path, *, budget=None):
     path=Path(path)
     require(path.is_absolute() and str(path)==os.path.abspath(path),'absolute-normal-path-required')
     # Reject an ancestor junction before looking up a child through it.
     for part in (*reversed(path.parents),path):
+        if budget is not None:budget.now()
         info=part.lstat()
+        if budget is not None:budget.now()
         require(not stat.S_ISLNK(info.st_mode) and not getattr(info,'st_file_attributes',0)&1024,'linked-path')
     return path
 
 
-def read_regular(path,limit):
-    path=unlinked(path);before=path.stat()
+def read_regular(path,limit, *, budget=None):
+    def check():
+        if budget is not None:budget.now()
+    path=unlinked(path,budget=budget);check();before=path.stat();check()
     require(stat.S_ISREG(before.st_mode) and 0<before.st_size<=limit,'regular-file-size')
+    check()
     with path.open('rb') as stream:
-        opened=os.fstat(stream.fileno())
+        check();opened=os.fstat(stream.fileno());check()
         chunks=[];total=0
         while True:
-            chunk=stream.read(min(1024*1024,limit+1-total))
+            check();chunk=stream.read(min(1024*1024,limit+1-total));check()
             if not chunk:break
             total+=len(chunk);require(total<=limit,'read-size');chunks.append(chunk)
-        after=os.fstat(stream.fileno())
-    final=unlinked(path).stat()
+        check();after=os.fstat(stream.fileno());check()
+    check();final=unlinked(path,budget=budget).stat();check()
     def identity(v,fields=STAT_FIELDS):return tuple(getattr(v,k) for k in fields)
     require(identity(before)==identity(final) and identity(opened)==identity(after),'file-changed')
     require(identity(before,STAT_FIELDS[:3])==identity(opened,STAT_FIELDS[:3]),'file-identity')

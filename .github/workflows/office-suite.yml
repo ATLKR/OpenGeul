@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: mutex-function-mapping
+  OPENGEUL_SUITE_RUN_MODE: matched-plugin-caller
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -37,7 +37,7 @@ jobs:
       id: run-mode
       shell: pwsh
       run: |
-        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping')) {
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller')) {
           throw 'Unknown Suite run mode.'
         }
     - name: 정확한 소스 바이트 보존
@@ -96,7 +96,7 @@ jobs:
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Admit isolated diagnostics against exact owner-push source
       id: sal-offset-admission
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller'"
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -174,7 +174,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Static SAL source admission failed.' }
     - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
       id: source-engine
-      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping') || steps.sal-offset-admission.outcome == 'success')"
+      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller') || steps.sal-offset-admission.outcome == 'success')"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
@@ -257,8 +257,23 @@ jobs:
       shell: pwsh
       run: |
         throw 'Static mutex attribution only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Fetch exact matched ARM64 plugin symbols
+      id: matched-symbol-inputs
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-plugin-symbols.ps1 -SymbolLockPath suite/config/plugin-symbols.arm64.lock.json -Output .work/plugin-symbol-input
+    - name: Qualify file-only system DbgHelp before GUI preparation
+      id: matched-symbol-qualification
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.matched-symbol-inputs.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/matched_plugin_diagnostic.py --mode qualify --pair .work/plugin-symbol-input/pair --output .work/suite-matched-plugin/qualification.json
+        if ($LASTEXITCODE -ne 0) { throw 'Native local symbols unavailable; no GUI experiment is admitted.' }
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success'))"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -295,7 +310,7 @@ jobs:
         $ErrorActionPreference = 'Stop'
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
     - name: Suite native31 setup and control originals
-      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping'"
+      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -388,6 +403,43 @@ jobs:
       shell: pwsh
       run: |
         throw 'Focus diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Observe one matched-plugin ARM64 capture cohort
+      id: matched-plugin-focus
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-focus-diagnostic/worker-diagnostics
+      shell: pwsh
+      run: |
+        $proof = (Resolve-Path .work/plugin-symbol-input/pair/receipt.json).Path
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-focus-diagnostic --diagnose-focus calc --matched-plugin-proof $proof
+        if ($LASTEXITCODE -ne 0) { throw 'Matched capture cohort failed; inspect bounded retained evidence.' }
+    - name: Resolve only the first eligible failed capture
+      id: matched-plugin-resolution
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64' && steps.matched-plugin-focus.outcome != 'skipped' && steps.matched-symbol-qualification.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/matched_plugin_diagnostic.py --mode resolve --pair .work/plugin-symbol-input/pair --focus .work/suite-focus-diagnostic/results.json --output .work/suite-matched-plugin/resolution.json
+        if ($LASTEXITCODE -ne 0) { throw 'Original capture caller remains inconclusive; no behavior fix is justified.' }
+    - name: Preserve bounded matched caller evidence
+      id: matched-plugin-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-matched-plugin-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-matched-plugin/
+          .work/suite-focus-diagnostic/
+          .work/plugin-symbol-input/plugin-symbol-download.json
+          .work/plugin-symbol-input/artifact-server-metadata.json
+        include-hidden-files: true
+        retention-days: 7
+        if-no-files-found: error
+    - name: Matched caller experiment cannot qualify Office delivery
+      id: matched-plugin-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller'"
+      shell: pwsh
+      run: |
+        throw 'Matched caller diagnostic only: paired native Office acceptance and package delivery remain unverified.'
     - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기
       id: calc-save
       shell: pwsh

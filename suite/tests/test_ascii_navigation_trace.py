@@ -52,7 +52,7 @@ class NavigationTraceTests(unittest.TestCase):
         if compiler is None:self.skipTest('Portable C++ compiler unavailable; native Windows validation remains separate')
         folder=Path(__file__).resolve().parents[1]/'e2e'
         source=(folder/'ascii_message_observer.cpp').read_text()
-        producer=source[source.index('void traceNavigation('):source.index('// Bounded retrieval metadata')]
+        producer=source[source.index('void traceNavigation('):source.index('// Bounded known-plugin file origin')]
         prefix=r'''#include "ascii_message_protocol.h"
 #include <cassert>
 #include <cstring>

@@ -265,3 +265,18 @@ call validates parsing before the production query. Only capped call classificat
 and relative offsets are retained; raw output and temporary DLLs are removed.
 All work shares the analysis deadline with its cleanup reserve. This diagnostic
 does not promote attribution to exact or authorize an offsets-only GUI run.
+
+`matched-plugin-caller` qualifies the exact retained ARM64 plugin/PDB pair with
+system DbgHelp before any GUI preparation. Only ARM64 runs the existing three
+fresh Calc focus cases; x64 retains unit/shell checks. A private held-file binding
+allows the bounded observer to report plugin-relative offsets without publishing
+paths or addresses. The original preparation, five-second observation, ownership,
+privacy and first-attempt owner-push gates remain unchanged.
+
+Offline resolution selects only the first actual owned-capture timeout and joins
+its admitted engine generation, plugin hash and RSDS identity to the verified
+symbol pair. Partial/rejected evidence, missing plugin frames, unresolved symbols
+and nonreproduction remain inconclusive; no later-case fallback or automatic
+rerun is allowed. Terminal QPC coverage and producer expiry remain separate.
+This mode cannot qualify a package: both architectures still need every normal
+`acceptance` gate on the final source before paired unpublished delivery.

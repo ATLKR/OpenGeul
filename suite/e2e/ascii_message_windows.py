@@ -13,6 +13,7 @@ import uuid
 
 from ascii_message_protocol import State, Event, QueueSample, Readiness, MAGIC, VERSION, CAPACITY, TraceEvent, TRACE_VERSION, TRACE_CAPACITY, CaptureEvent, CAPTURE_VERSION, CAPTURE_CAPACITY, CAPTURE_MESSAGES, RetrievalEvent, RETRIEVAL_VERSION, RETRIEVAL_CAPACITY, RETRIEVAL_FRAMES, RETRIEVAL_MODULES
 from ascii_queue_readiness import MAX_QUERIES, retain_sample, require_initial_queue_sample
+from ascii_message_protocol import PluginBinding, PluginOriginSample, PLUGIN_MODULE_ID, encode_plugin_binding
 from counted_editor_shortcuts import (CountedEditorShortcuts, NativeShortcutProbe,
     join_shortcut_generation, _same_image)
 
@@ -92,13 +93,17 @@ class MessageTransport:
     """One private mapping; optional diagnostic return hook stays on the owned thread."""
     def __init__(self, user, kernel, library, target, creation_time, receipt,
                  deadline, clock, identity, *, nonce=None, diagnostic_mode=False, capture_diagnostic_mode=False,
-                 capture_deadline_counter=0, capture_counter_frequency=0):
+                 capture_deadline_counter=0, capture_counter_frequency=0, plugin_origin=None):
         assert type(diagnostic_mode) is bool
         self.diagnostic_mode=diagnostic_mode
         assert type(capture_diagnostic_mode) is bool and not (diagnostic_mode and capture_diagnostic_mode)
         assert all(type(value) is int for value in (capture_deadline_counter,capture_counter_frequency))
         assert (0<capture_deadline_counter<2**63 and 0<capture_counter_frequency<2**63) if capture_diagnostic_mode else (capture_deadline_counter==capture_counter_frequency==0)
         self.capture_diagnostic_mode=capture_diagnostic_mode
+        assert plugin_origin is None or capture_diagnostic_mode, 'Plugin origin requires scoped capture mode'
+        plugin=encode_plugin_binding(plugin_origin)
+        self.plugin_origin_enabled=bool(plugin.enabled)
+        self.plugin_origin_bytes=bytes(plugin)
         self.capture_budget=(capture_deadline_counter,capture_counter_frequency)
         self.user, self.kernel, self.dll = user, kernel, library
         self.target, self.creation = dict(target), creation_time
@@ -171,6 +176,7 @@ class MessageTransport:
         assert (self.state.captureVersion,self.state.captureEnabled,self.state.captureReserved,self.state.capturePadding)==(CAPTURE_VERSION,int(self.capture_diagnostic_mode),0,0),'Capture trace immutable header changed'
         assert (self.state.captureDeadline,self.state.captureFrequency)==self.capture_budget,'Capture trace original budget changed'
         assert self.state.retrievalVersion==RETRIEVAL_VERSION,'Retrieval trace immutable header changed'
+        assert bytes(self.state.pluginBinding)==self.plugin_origin_bytes,'Plugin origin immutable header changed'
         assert self.state.readinessReserved == 0, 'ASCII observer readiness reserved field changed'
         assert self._read('overflow') == self._read('status') == 0, 'ASCII observer native overflow/status failed'
         count = self._read('count')
@@ -235,6 +241,7 @@ class MessageTransport:
             captureDeadline=self.capture_budget[0],captureFrequency=self.capture_budget[1],
             nonce=self.nonce, hwnd=self.target['hwnd'], engineCreationTime=self.creation, layout=self.target['layout']).items():
             setattr(self.state, key, value)
+        self.state.pluginBinding=PluginBinding.from_buffer_copy(self.plugin_origin_bytes)
         self._publish('command', 1)
         hook_specs=((4,'HookCall'),(3,'HookGet'))+(((12,'HookReturn'),) if self.diagnostic_mode or self.capture_diagnostic_mode else ())
         for kind, export in hook_specs:
@@ -397,22 +404,38 @@ class MessageTransport:
             assert row.frameCapReached==int(row.frameCount==RETRIEVAL_FRAMES)
             if not bucket:assert row.frameCount==row.unknownFrames==row.frameCapReached==0 and not row.flags&14
             else:assert bool(row.flags&2)==(row.frameCount==0)
+            plugin=None
+            if bucket and self.plugin_origin_enabled:
+                origin_address=self.view+State.pluginOrigins.offset+bucket*C.sizeof(PluginOriginSample)
+                origin_commit=C.cast(origin_address,C.POINTER(C.c_uint32))
+                origin_sequence=int(self.dll.ReadWord(origin_commit))
+                if not origin_sequence:pending.append(bucket);continue
+                origin=PluginOriginSample.from_buffer_copy(C.string_at(origin_address,C.sizeof(PluginOriginSample)))
+                assert origin_sequence==sequence==origin.sequence==int(self.dll.ReadWord(origin_commit)), 'Plugin origin publication changed'
+                assert origin.captureSequence==row.captureSequence and origin.bucket==bucket and origin.status in (1,2,3,4), 'Plugin origin correlation changed'
+                assert row.counter<=origin.counter<=origin.finishedCounter<=row.finishedCounter<self.capture_budget[0], 'Plugin origin deadline changed'
+                plugin={key:int(getattr(origin,key)) for key,_ in PluginOriginSample._fields_}
             frames=[]
             for index,frame in enumerate(row.frames):
-                assert frame.moduleId in (0,*RETRIEVAL_MODULES)
+                assert frame.moduleId in (0,*RETRIEVAL_MODULES,PLUGIN_MODULE_ID)
+                if frame.moduleId==PLUGIN_MODULE_ID:
+                    assert plugin is not None and plugin['status']==1, 'Unbound plugin frame'
                 if not frame.moduleId:assert frame.rva==0,'Unknown retrieval frame must be redacted'
                 if index>=row.frameCount:assert frame.moduleId==frame.rva==0
                 else:frames.append(dict(moduleId=int(frame.moduleId),rva=int(frame.rva)))
             assert row.unknownFrames==sum(frame['moduleId']==0 for frame in frames)
             result={key:int(getattr(row,key)) for key,_ in RetrievalEvent._fields_ if key not in ('frames','reserved0','reserved1')}
-            result['frames']=frames;records.append(result)
+            result['frames']=frames
+            if plugin is not None:result['pluginOrigin']=plugin
+            records.append(result)
         final_claimed=self._read('retrievalClaimed')
         rejected|=self._read('retrievalRejected');expired|=self._read('retrievalExpired')
         assert 0<=final_claimed<=7 and final_claimed & claimed==claimed and 0<=rejected<=7 and expired in (0,1)
         pending.extend(bucket for bucket in range(RETRIEVAL_CAPACITY) if final_claimed & (1<<bucket) and not claimed & (1<<bucket))
-        return dict(schemaVersion=RETRIEVAL_VERSION,status='rejected' if rejected else ('expired' if expired else ('partial' if pending or any(row['flags'] for row in records) else 'complete')),
+        incomplete=any(row['flags'] or row.get('pluginOrigin',{}).get('status',1)!=1 for row in records)
+        return dict(schemaVersion=RETRIEVAL_VERSION,status='rejected' if rejected else ('expired' if expired else ('partial' if pending or incomplete else 'complete')),
             claimedMask=final_claimed,pendingBuckets=pending,rejected=rejected,expired=bool(expired),records=records,
-            maxRecords=3,maxStacks=2,maxFrames=16,moduleMapVersion=1,acceptanceEligible=False,
+            maxRecords=3,maxStacks=2,maxFrames=16,moduleMapVersion=2 if self.plugin_origin_enabled else 1,acceptanceEligible=False,
             coordinates='MSG.pt event screen position and separately sampled client origin in target DPI context; not atomic physical geometry',
             consumingCallerProved=False,moduleLifetimeContinuityProved=False,handlerCompletionProved=False,
             otherHooksMayModifyMessage=True,eventAttributionProved=False,unpublishedElapsedKnown=False,nativeCallLatencyBounded=False)

@@ -13,10 +13,10 @@ def condition(step):
 
 class NavigationDiagnosticWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_validation_reject_unknown_values(self):
-        self.assertIn("OPENGEUL_SUITE_RUN_MODE: mutex-function-mapping",WORKFLOW.read_text())
+        self.assertIn("OPENGEUL_SUITE_RUN_MODE: matched-plugin-caller",WORKFLOW.read_text())
         step=next(s for s in workflow_steps() if field(s,'id')=='run-mode')
         code=run_code(step)
-        self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping')",code)
+        self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller')",code)
         self.assertIn("throw 'Unknown Suite run mode.'",code)
 
     def test_diagnostic_requires_every_original_prerequisite(self):

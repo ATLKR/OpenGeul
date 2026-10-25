@@ -276,8 +276,10 @@ def _write_json(path, value):
         os.fsync(stream.fileno())
 
 
-def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld'):
-    budget = _Budget()
+def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', budget=None):
+    budget = _Budget() if budget is None else budget
+    assert budget.deadline == budget.started + LIMIT and budget.work_deadline == budget.deadline - CLEANUP_RESERVE, 'Original preparation budget required'
+    budget.now()
     architecture = native_arch.require_architecture(architecture)
     assert compiler_mode in ('msvc', 'clang-lld'), 'Unknown observer compiler mode'
     folder = _absolute(output_folder)

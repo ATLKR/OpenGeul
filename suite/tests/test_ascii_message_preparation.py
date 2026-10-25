@@ -144,6 +144,21 @@ class PreparationTests(unittest.TestCase):
         self.assertIn('compiler.stderr', proof['outputs'])
         self.assertEqual(proof['stages'][0]['identity']['creationTime'], 134370233752663598)
 
+    def test_prelaunch_work_and_compile_share_original_budget(self):
+        budget=m._Budget();self.clock.value+=24
+        try:m.prepare_observer(self.output,architecture='x64',compiler_mode='msvc',budget=budget)
+        except TypeError:self.fail('Preparation cannot inherit the prelaunch budget')
+        self.assertEqual(self.proof()['startedAt'],100.)
+        self.assertEqual(self.proof()['deadline'],130.)
+
+    def test_expired_prelaunch_budget_never_starts_compiler(self):
+        budget=m._Budget();self.clock.value+=27
+        try:
+            with self.assertRaises(AssertionError):
+                m.prepare_observer(self.output,architecture='x64',compiler_mode='msvc',budget=budget)
+        except TypeError:self.fail('Preparation cannot inherit the prelaunch budget')
+        self.assertEqual(self.runtime.processes,[])
+
     def test_arm64_uses_arm64_environment_and_native_dll(self):
         self.native.update(nativeMachine=0xaa64, processArchitecture='arm64', nativeArchitecture='arm64')
         self.runtime.machine = 0xaa64

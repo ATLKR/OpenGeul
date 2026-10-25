@@ -51,6 +51,31 @@ RETRIEVAL_VERSION=1
 RETRIEVAL_CAPACITY=3
 RETRIEVAL_FRAMES=16
 RETRIEVAL_MODULES={1:'mergedlo.dll',2:'vcllo.dll',3:'sal3.dll',4:'user32.dll',5:'win32u.dll',6:'ntdll.dll',7:'kernel32.dll',8:'kernelbase.dll',9:'combase.dll',10:'ole32.dll',11:'imm32.dll',12:'msctf.dll',13:'imkrtip.dll'}
+PLUGIN_MODULE_ID=14
+PLUGIN_PATH_CAPACITY=1024
+class PluginBinding(C.Structure):
+    _fields_=[(name,C.c_uint32) for name in ('version','enabled','pathLength','reserved')]
+    _fields_ += [('volume',C.c_uint64),('size',C.c_uint64),('fileId',C.c_uint8*16),('path',C.c_uint16*PLUGIN_PATH_CAPACITY)]
+class PluginOriginSample(C.Structure):
+    _fields_=[(name,C.c_uint32) for name in ('sequence','captureSequence','bucket','status')]
+    _fields_ += [('counter',C.c_uint64),('finishedCounter',C.c_uint64)]
+
+def encode_plugin_binding(value):
+    result=PluginBinding(version=1)
+    if value is None:return result
+    assert type(value) is dict and set(value)=={'path','volume','size','fileId','architecture'}
+    path=value['path']
+    assert value['architecture']=='arm64' and type(path) is str and '\x00' not in path
+    assert len(path)>3 and path[0].isascii() and path[0].isalpha() and path[1:3]==':\\' and path.endswith('\\vclplug_winlo.dll')
+    raw=path.encode('utf-16-le');length=len(raw)//2
+    assert 0<length<PLUGIN_PATH_CAPACITY
+    assert type(value['volume']) is int and 0<=value['volume']<2**64
+    assert type(value['size']) is int and 0<value['size']<=32*1024*1024
+    assert type(value['fileId']) is bytes and len(value['fileId'])==16 and any(value['fileId'])
+    result.enabled=1;result.pathLength=length;result.volume=value['volume'];result.size=value['size']
+    result.fileId[:]=value['fileId']
+    for index in range(length):result.path[index]=int.from_bytes(raw[index*2:index*2+2],'little')
+    return result
 class RetrievalFrame(C.Structure):
     _fields_=[('moduleId',C.c_uint32),('rva',C.c_uint32)]
 class RetrievalEvent(C.Structure):
@@ -75,6 +100,7 @@ class State(C.Structure):
     _fields_ += [('captureDeadline',C.c_uint64),('captureFrequency',C.c_uint64),('captureEvents',CaptureEvent * CAPTURE_CAPACITY)]
     _fields_ += [(name,C.c_uint32) for name in ('retrievalVersion','retrievalClaimed','retrievalRejected','retrievalExpired')]
     _fields_ += [('retrievalEvents',RetrievalEvent*RETRIEVAL_CAPACITY)]
+    _fields_ += [('pluginBinding',PluginBinding),('pluginOrigins',PluginOriginSample*RETRIEVAL_CAPACITY)]
 
 
 assert C.sizeof(Event) == 96 and State.events.offset == 456
@@ -82,7 +108,8 @@ assert C.sizeof(QueueSample) == 328 and C.sizeof(Readiness) == 336 and State.rea
 assert C.sizeof(TraceEvent) == 104 and State.traceVersion.offset == 456 + CAPACITY * 96
 assert State.captureVersion.offset == 407008 and C.sizeof(CaptureEvent) == 112
 assert State.retrievalVersion.offset==421392 and C.sizeof(RetrievalEvent)==256
-assert C.sizeof(State)==422176
+assert State.pluginBinding.offset==422176 and C.sizeof(PluginBinding)==2096
+assert C.sizeof(PluginOriginSample)==32 and C.sizeof(State)==424368
 
 
 def committed_events(raw, *, after):
