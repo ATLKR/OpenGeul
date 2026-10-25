@@ -93,6 +93,11 @@ void start(const CWPSTRUCT& message) {
        || shared->readinessMessage!=readinessMessage || shared->readinessReserved
        || shared->traceVersion!=OpenGeulAscii::TraceVersion || shared->traceEnabled>1
        || shared->traceCount || shared->traceOverflow || shared->traceRejected || shared->traceReserved
+       || shared->captureVersion!=OpenGeulAscii::CaptureVersion || shared->captureEnabled>1
+       || shared->captureCount || shared->captureOverflow || shared->captureRejected || shared->captureExpired
+       || shared->captureReserved || shared->capturePadding
+       || (shared->captureEnabled ? (!shared->captureDeadline || !shared->captureFrequency || shared->traceEnabled)
+                                  : (shared->captureDeadline || shared->captureFrequency))
        || load(&shared->readiness.request) || load(&shared->readiness.ack)
        || !identity(shared,message.hwnd) || shared->count!=0 || shared->overflow || shared->status
        || shared->layout!=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)))) {
@@ -168,6 +173,62 @@ void queryReadiness(const CWPSTRUCT& message,UINT startMessage,UINT stopMessage,
     shared->readiness.sample=sample;
     publish(&shared->readiness.ack,static_cast<LONG>(request));  // Publish last.
 }
+// Source-pinned SAL messages: core bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1,
+// vcl/inc/win/saldata.hxx (WM_USER+140/+141); salframe.cxx handles Set/ReleaseCapture.
+static bool captureReading=false;
+bool captureClock(std::uint64_t& counter) {
+    LARGE_INTEGER now{},frequency{};
+    if(!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&now)
+       || frequency.QuadPart<=0 || std::uint64_t(frequency.QuadPart)!=shared->captureFrequency
+       || now.QuadPart<=0 || !shared->captureDeadline) {
+        publish(&shared->captureRejected,load(&shared->captureRejected)|4);return false;
+    }
+    if(std::uint64_t(now.QuadPart)>=shared->captureDeadline) {
+        publish(&shared->captureExpired,1);return false;
+    }
+    counter=std::uint64_t(now.QuadPart);return true;
+}
+void traceCapture(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,std::uint32_t origin,WPARAM removalFlags) {
+    if(!shared || stopped || !load(&shared->recording) || !load(&shared->captureEnabled)
+       || ownerThread!=GetCurrentThreadId())return;
+    if(message!=0x201 && message!=0x202 && message!=0x204 && message!=0x205
+       && message!=0x207 && message!=0x208 && message!=0x20b && message!=0x20c
+       && message!=WM_CAPTURECHANGED && message!=WM_SETFOCUS && message!=WM_KILLFOCUS
+       && message!=OpenGeulAscii::SalPostFocus && message!=OpenGeulAscii::SalCaptureMouse && message!=OpenGeulAscii::SalReleaseMouse)return;
+    if(std::uint64_t(reinterpret_cast<std::uintptr_t>(hwnd))!=shared->hwnd)return;
+    if((origin==1 && removalFlags!=1 && removalFlags!=3) || (origin!=1 && removalFlags!=0)) {
+        publish(&shared->captureRejected,load(&shared->captureRejected)|8);return;
+    }
+    if(captureReading){publish(&shared->captureRejected,load(&shared->captureRejected)|2);return;}
+    captureReading=true;
+    struct Exit {~Exit(){captureReading=false;}} exit;
+    OpenGeulAscii::CaptureEvent event{};
+    if(!captureClock(event.counter))return;
+    if(!header(shared) || shared->captureVersion!=OpenGeulAscii::CaptureVersion
+       || shared->captureReserved || shared->capturePadding || !identity(shared,hwnd)) {
+        publish(&shared->captureRejected,load(&shared->captureRejected)|1);return;
+    }
+    std::uint64_t current=0;if(!captureClock(current))return;
+    if(loadSigned(&shared->captureCount)>=static_cast<LONG>(OpenGeulAscii::CaptureCapacity)) {
+        publishSigned(&shared->captureOverflow,1);return;
+    }
+    event.origin=origin;event.removeFlags=static_cast<std::uint32_t>(removalFlags);event.message=message;event.pid=GetCurrentProcessId();event.tid=GetCurrentThreadId();
+    event.hwnd=shared->hwnd;event.engineCreationTime=shared->engineCreationTime;
+    event.callbackDepth=static_cast<std::uint32_t>(InterlockedCompareExchange(&active,0,0));
+    event.focusHwnd=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetFocus()));
+    if(!captureClock(current))return;
+    event.captureHwnd=std::uint64_t(reinterpret_cast<std::uintptr_t>(GetCapture()));
+    if(!captureClock(current))return;
+    event.nativeTick=GetTickCount64();event.frequency=shared->captureFrequency;
+    event.wParam=std::uint64_t(wp);event.lParam=std::uint64_t(lp);
+    if(!captureClock(event.finishedCounter))return;
+    const LONG index=incrementSigned(&shared->captureCount)-1;
+    if(index<0 || index>=static_cast<LONG>(OpenGeulAscii::CaptureCapacity)) {
+        publishSigned(&shared->captureOverflow,1);return;
+    }
+    shared->captureEvents[index]=event;
+    publish(&shared->captureEvents[index].sequence,index+1);
+}
 // Separate navigation diagnostics; no text, waits, dispatch or input mutation.
 void traceNavigation(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,std::uint32_t origin) {
     if(!shared || stopped || !load(&shared->recording) || !load(&shared->traceEnabled)
@@ -242,7 +303,8 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookCall(int code,WPARAM wp,LP
         if(startMessage && message.message==startMessage) start(message);
         else if(stopMessage && message.message==stopMessage) stop(message);
         else if(readinessMessage && message.message==readinessMessage) queryReadiness(message,startMessage,stopMessage,readinessMessage);
-        else traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,2);
+        else {traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,2);
+            traceCapture(message.hwnd,message.message,message.wParam,message.lParam,2,0);}
     }
     return CallNextHookEx(nullptr,code,wp,lp);
 }
@@ -252,6 +314,7 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPA
     if(code==HC_ACTION && lp) {
         const auto& message=*reinterpret_cast<const MSG*>(lp);
         if(wp==PM_REMOVE) traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,1);
+        if((wp & PM_REMOVE)!=0) traceCapture(message.hwnd,message.message,message.wParam,message.lParam,1,wp);
         observe(message,wp);
     }
     return CallNextHookEx(nullptr,code,wp,lp);
@@ -262,6 +325,7 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookReturn(int code,WPARAM wp,
     if(code==HC_ACTION && lp) {
         const auto& message=*reinterpret_cast<const CWPRETSTRUCT*>(lp);
         traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,3);
+        traceCapture(message.hwnd,message.message,message.wParam,message.lParam,3,0);
     }
     return CallNextHookEx(nullptr,code,wp,lp);
 }

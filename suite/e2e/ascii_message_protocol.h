@@ -32,6 +32,18 @@ struct TraceEvent {
     std::uint64_t hwnd, engineCreationTime, focusHwnd, captureHwnd, counter, frequency, nativeTick, lParam, layout;
 };
 
+constexpr std::uint32_t CaptureVersion = 1;
+constexpr std::uint32_t CaptureCapacity = 128;
+// LibreOffice core bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1 vcl/inc/win/saldata.hxx.
+constexpr std::uint32_t SalPostFocus = 0x400 + 133;
+constexpr std::uint32_t SalCaptureMouse = 0x400 + 140;
+constexpr std::uint32_t SalReleaseMouse = 0x400 + 141;
+struct CaptureEvent {
+    std::uint32_t sequence, origin, message, pid, tid, callbackDepth, removeFlags, reserved;
+    std::uint64_t hwnd, engineCreationTime, focusHwnd, captureHwnd, counter, finishedCounter,
+                  frequency, nativeTick, wParam, lParam;
+};
+
 struct State {
     std::uint32_t magic, version, stateSize, eventSize, capacity, pid, tid, controllerPid;
     std::uint32_t startMessage, stopMessage, recording, ack;
@@ -45,6 +57,11 @@ struct State {
     std::int32_t traceCount, traceOverflow;
     std::uint32_t traceRejected, traceReserved;
     TraceEvent traceEvents[TraceCapacity];
+    std::uint32_t captureVersion,captureEnabled;
+    std::int32_t captureCount,captureOverflow;
+    std::uint32_t captureRejected,captureExpired,captureReserved,capturePadding;
+    std::uint64_t captureDeadline,captureFrequency;
+    CaptureEvent captureEvents[CaptureCapacity];
 };
 
 static_assert(sizeof(Event) == 96);
@@ -56,6 +73,8 @@ static_assert(offsetof(State, readiness) == 120);
 static_assert(offsetof(State, events) == 456);
 static_assert(sizeof(TraceEvent) == 104);
 static_assert(offsetof(State, traceVersion) == 456 + Capacity * sizeof(Event));
-static_assert(sizeof(State) == 456 + Capacity * sizeof(Event) + 24 + TraceCapacity * sizeof(TraceEvent));
+static_assert(offsetof(State,captureVersion) == 407008);
+static_assert(sizeof(CaptureEvent) == 112);
+static_assert(sizeof(State) == 407008 + 48 + CaptureCapacity * sizeof(CaptureEvent));
 static_assert(alignof(State) == 8);
 }  // namespace OpenGeulAscii

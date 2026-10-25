@@ -11,7 +11,7 @@ from pathlib import Path
 import time
 import uuid
 
-from ascii_message_protocol import State, Event, QueueSample, Readiness, MAGIC, VERSION, CAPACITY, TraceEvent, TRACE_VERSION, TRACE_CAPACITY
+from ascii_message_protocol import State, Event, QueueSample, Readiness, MAGIC, VERSION, CAPACITY, TraceEvent, TRACE_VERSION, TRACE_CAPACITY, CaptureEvent, CAPTURE_VERSION, CAPTURE_CAPACITY, CAPTURE_MESSAGES
 from ascii_queue_readiness import MAX_QUERIES, retain_sample, require_initial_queue_sample
 from counted_editor_shortcuts import (CountedEditorShortcuts, NativeShortcutProbe,
     join_shortcut_generation, _same_image)
@@ -91,9 +91,15 @@ def _clear_error():
 class MessageTransport:
     """One private mapping; optional diagnostic return hook stays on the owned thread."""
     def __init__(self, user, kernel, library, target, creation_time, receipt,
-                 deadline, clock, identity, *, nonce=None, diagnostic_mode=False):
+                 deadline, clock, identity, *, nonce=None, diagnostic_mode=False, capture_diagnostic_mode=False,
+                 capture_deadline_counter=0, capture_counter_frequency=0):
         assert type(diagnostic_mode) is bool
         self.diagnostic_mode=diagnostic_mode
+        assert type(capture_diagnostic_mode) is bool and not (diagnostic_mode and capture_diagnostic_mode)
+        assert all(type(value) is int for value in (capture_deadline_counter,capture_counter_frequency))
+        assert (0<capture_deadline_counter<2**63 and 0<capture_counter_frequency<2**63) if capture_diagnostic_mode else (capture_deadline_counter==capture_counter_frequency==0)
+        self.capture_diagnostic_mode=capture_diagnostic_mode
+        self.capture_budget=(capture_deadline_counter,capture_counter_frequency)
         self.user, self.kernel, self.dll = user, kernel, library
         self.target, self.creation = dict(target), creation_time
         self.record, self.deadline, self.clock, self.identity = receipt, deadline, clock, identity
@@ -162,6 +168,8 @@ class MessageTransport:
             'controllerPid','nonce','startMessage','stopMessage','readinessMessage'))
         assert observed == expected, 'ASCII observer immutable target/header changed'
         assert (self.state.traceVersion,self.state.traceEnabled,self.state.traceReserved)==(TRACE_VERSION,int(self.diagnostic_mode),0),'Navigation trace immutable header changed'
+        assert (self.state.captureVersion,self.state.captureEnabled,self.state.captureReserved,self.state.capturePadding)==(CAPTURE_VERSION,int(self.capture_diagnostic_mode),0,0),'Capture trace immutable header changed'
+        assert (self.state.captureDeadline,self.state.captureFrequency)==self.capture_budget,'Capture trace original budget changed'
         assert self.state.readinessReserved == 0, 'ASCII observer readiness reserved field changed'
         assert self._read('overflow') == self._read('status') == 0, 'ASCII observer native overflow/status failed'
         count = self._read('count')
@@ -222,10 +230,12 @@ class MessageTransport:
             eventSize=C.sizeof(Event), capacity=CAPACITY, pid=self.target['pid'], tid=self.target['tid'],
             controllerPid=self.controller_pid, startMessage=self.start_message, stopMessage=self.stop_message,
             readinessMessage=self.readiness_message,traceVersion=TRACE_VERSION,traceEnabled=int(self.diagnostic_mode),
+            captureVersion=CAPTURE_VERSION,captureEnabled=int(self.capture_diagnostic_mode),
+            captureDeadline=self.capture_budget[0],captureFrequency=self.capture_budget[1],
             nonce=self.nonce, hwnd=self.target['hwnd'], engineCreationTime=self.creation, layout=self.target['layout']).items():
             setattr(self.state, key, value)
         self._publish('command', 1)
-        hook_specs=((4,'HookCall'),(3,'HookGet'))+(((12,'HookReturn'),) if self.diagnostic_mode else ())
+        hook_specs=((4,'HookCall'),(3,'HookGet'))+(((12,'HookReturn'),) if self.diagnostic_mode or self.capture_diagnostic_mode else ())
         for kind, export in hook_specs:
             self._budget(); self.identity(); self._budget()
             row = dict(kind=kind, threadId=self.target['tid'], attemptedAt=self.clock())
@@ -354,6 +364,38 @@ class MessageTransport:
         return dict(schemaVersion=TRACE_VERSION,status='overflow' if overflow else ('partial' if len(rows)<count else 'complete'),
             capacity=TRACE_CAPACITY,reservedCount=count,events=rows,semanticHandlerProved=False,
             handleLifetimeProved=False)
+
+    def read_capture_trace(self, *, local_only=False):
+        """Bounded local acquire-copy; post-failure mode never queries the target."""
+        assert type(local_only) is bool and not self.closed and self.capture_diagnostic_mode
+        if not local_only:self._budget();self.identity();self._budget()
+        self._header()
+        count=self._read('captureCount');assert 0<=count<=CAPTURE_CAPACITY,'Capture trace count exceeded'
+        rows=[]
+        for index in range(count):
+            if not local_only:self._budget()
+            address=self.view+State.captureEvents.offset+index*C.sizeof(CaptureEvent)
+            commit=C.cast(address,C.POINTER(C.c_uint32));sequence=int(self.dll.ReadWord(commit))
+            if not sequence:break
+            assert sequence==index+1,'Capture trace publication changed'
+            row=CaptureEvent.from_buffer_copy(C.string_at(address,C.sizeof(CaptureEvent)))
+            assert int(self.dll.ReadWord(commit))==sequence and row.sequence==sequence,'Capture trace changed during copy'
+            assert not row.reserved,'Capture trace row invalid'
+            assert row.removeFlags in ((1,3) if row.origin==1 else (0,)),'Capture trace removal flags invalid'
+            assert (row.pid,row.tid,row.hwnd,row.engineCreationTime)==(self.target['pid'],self.target['tid'],self.target['hwnd'],self.creation),'Capture trace identity changed'
+            assert row.origin in (1,2,3) and row.message in CAPTURE_MESSAGES,'Capture trace message outside scope'
+            assert 0<row.counter<=row.finishedCounter<self.capture_budget[0] and row.frequency==self.capture_budget[1],'Capture trace row exceeded original budget'
+            rows.append({key:int(getattr(row,key)) for key,_ in CaptureEvent._fields_ if key!='reserved'})
+        overflow=self._read('captureOverflow');expired=self._read('captureExpired');rejected=self._read('captureRejected')
+        assert overflow in (0,1) and expired in (0,1) and 0<=rejected<=15,'Capture trace flags invalid'
+        self._header()
+        if not local_only:self.identity();self._budget()
+        return dict(schemaVersion=CAPTURE_VERSION,status='rejected' if rejected else ('overflow' if overflow else ('partial' if len(rows)<count else 'complete')),
+            capacity=CAPTURE_CAPACITY,reservedCount=count,events=rows,overflow=bool(overflow),expired=bool(expired),rejected=rejected,
+            rejectedReasons=[name for bit,name in ((1,'identity-or-header'),(2,'reentrant-observation'),(4,'clock-query-or-configuration'),(8,'invalid-removal-flags')) if rejected & bit],
+            deadlineCounter=self.capture_budget[0],counterFrequency=self.capture_budget[1],
+            copyPhase='post-failure-local' if local_only else 'live',freshTargetIdentityVerified=not local_only,
+            handlerCompletionProved=False,handleLifetimeProved=False,acceptanceEligible=False)
 
     def can_stop(self):
         return bool(self.hooks and self.view and self.start_message)

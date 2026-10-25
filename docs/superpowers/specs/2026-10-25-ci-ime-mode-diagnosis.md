@@ -42,3 +42,46 @@ The same acceptance run also exposed persistent Impress capture followed by
 foreign Windows Terminal foreground, and a Writer lifecycle semantic mismatch.
 Those are separate unresolved observations, not waived by this experiment or by
 earlier successful runs.
+
+## Experiment 40145703918 at 3ed78f8
+
+The x64 original Calc case passed. Its 50 correlated mode rows were within the
+original deadline with balanced references. Two early reads were untyped; all
+41 rows after activation acknowledgment 3 showed typed TSF and IMM open/native
+mode 1/1. This establishes a passing control, not an ARM64 repair.
+
+ARM64 failed before installing the IME observer. One original click and Ctrl+F6
+completed, but capture stayed on the owned editor during 93 subsequent samples
+until the original five-second focus deadline expired. Foreground stayed owned.
+The intended ARM64 mode-reset hypothesis was therefore not tested. Repeating the
+unchanged mode experiment is not justified.
+
+## Next experiment: owned capture ordering
+
+Use an explicitly nonacceptance focus-only mode with three fresh, sequential
+Calc instances. Each retains its original one click, one Ctrl+F6, five-second
+entry deadline and ownership guards. No repeated input or capture release is
+allowed. Observe before the original click so the trace can distinguish:
+
+- Whether mouse-up removal from the owned queue is observed.
+- Capture acquired after mouse-up queue removal.
+- Capture still present without an observed release by the entry deadline.
+
+Queue removal does not prove handler execution. Missing, truncated or overflowed
+observations remain inconclusive. The diagnostic cannot establish the internal
+Office caller from a handle value or message alone.
+
+Reuse the prepared native observer with a separate bounded capture ring and
+passive admission to the original owned child. Keep normal ASCII admission and
+input guards unchanged. Native recording ends at the original QPC deadline.
+On an expected focus timeout, a bounded local shared-memory copy may retain
+already recorded evidence: no new target queries, control messages, inputs or
+deadline renewal. Mandatory unhook/handle cleanup still runs. Preserve the
+primary failure and label this post-failure evidence separately.
+
+Stop a successful diagnostic immediately after original focus readiness, before
+the normal keyboard session proceeds to navigation, semantic setup, IME or save.
+Retain its intentionally incomplete keyboard receipt and verify resource release.
+Each case has a unique owned output and process; the cohort is not an input retry.
+The same owner-push/first-attempt privacy prerequisites and deliberate terminal
+nonacceptance failure apply. Every full native acceptance gate remains required.

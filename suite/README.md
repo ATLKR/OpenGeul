@@ -198,3 +198,13 @@ reopens mode, resends a key or creates a missing compartment. Separate
 `opengeul-suite-ime-mode-diagnostic-<arch>-<run>-<attempt>` evidence and deliberate
 nonacceptance failure prevent package qualification. Original acceptance gates
 and first-attempt admission remain mandatory.
+
+`focus-diagnostic` runs three fresh Calc instances with `--diagnose-focus calc`
+to observe capture ordering around each original click and Ctrl+F6. Each case
+keeps its five-second focus-entry budget and stops before navigation or IME.
+Native recording is bounded by that original deadline; after a timeout only
+already-recorded local evidence is copied, with no further target query or input.
+The intentionally incomplete keyboard session and any primary failure are
+retained. Queue removal is not proof of handler execution. Separate
+`opengeul-suite-focus-diagnostic-<arch>-<run>-<attempt>` evidence cannot qualify
+acceptance or package delivery.

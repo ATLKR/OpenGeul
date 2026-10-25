@@ -1181,13 +1181,16 @@ def retain_ime_focus_failure_diagnostics(record, process, keyboard):
         receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
     assert not diagnose_navigation or module == 'impress', 'Navigation experiment is scoped to Impress'
     assert not diagnose_ime_mode or (module=='calc' and not diagnose_navigation),'IME mode experiment is scoped to one Calc case'
+    assert not diagnose_focus or (module=='calc' and not diagnose_navigation and not diagnose_ime_mode),'Focus experiment is scoped to Calc only'
+    assert diagnostic_suffix in ('focus-01','focus-02','focus-03') if diagnose_focus else diagnostic_suffix is None,'Invalid focus diagnostic case suffix'
     name = 'ime-' + module
+    if diagnose_focus:name+='-'+diagnostic_suffix
     folder = output / name
     folder.mkdir()
     original = require_engine_fixture(fixtures, module, extension)
@@ -1201,7 +1204,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
               'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}
     if diagnose_ime_mode:record.update(kind='native-ime-mode-diagnostic',acceptanceEligible=False)
-    observer = keyboard = retirement = primary = navigation_trace = None
+    if diagnose_focus:record.update(kind='native-focus-diagnostic',acceptanceEligible=False)
+    observer = keyboard = retirement = primary = navigation_trace = focus_trace = None
     api = Windows()
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
@@ -1219,10 +1223,31 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             module, record, setup_deadline)
         keyboard.start()
         record['stage'] = 'focus-editor'
+        def click():
+            nonlocal focus_trace
+            if diagnose_focus:
+                from editor_capture_diagnostic import EditorCaptureDiagnostic
+                focus_trace=EditorCaptureDiagnostic(keyboard,prepared_library,record['editorFocusReadiness']['deadline'])
+                focus_trace.start()
+            return click_owned_editor(api,process,hwnd,parent,child,office_pid,record)
         prepare_editor_focus(api, hwnd, child, process.pid, office_pid, record,
-            lambda: click_owned_editor(api, process, hwnd, parent, child, office_pid, record),
+            click,
             lambda: keyboard.focus_editor(record['editorFocusReadiness']['deadline']),
             seconds=remaining_setup(setup_deadline, 5))
+        if diagnose_focus:
+            from editor_capture_diagnostic import stop_focus_keyboard
+            from generated_calc_close import freeze_saved_calc_copy
+            from calc_save_smoke import read_cells
+            record['stage']='focus-diagnostic-cleanup'
+            assert focus_trace is not None,'Focus diagnostic observer was not started'
+            focus_trace.close();stop_focus_keyboard(keyboard)
+            proof=freeze_saved_calc_copy(suite,folder,source,before,read_cells(original_bytes))
+            close_document(api,process,hwnd,child,record,calc_close_proof=proof)
+            close_home(api,process,record)
+            assert original.read_bytes()==original_bytes,'Focus experiment altered baseline fixture'
+            record.update(success=True,stage='focus-diagnostic-complete',imeVerified=False,
+                acceptanceEligible=False,originalFixtureUnchanged=True)
+            return record
         keyboard.editor_ready(record['editorFocusReadiness'])
         if diagnose_navigation:
             from navigation_diagnostic import NavigationTrace
@@ -1359,12 +1384,20 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         return record
     except Exception as exc:
         primary = exc
+        if focus_trace is not None:focus_trace.close(primary)
         if navigation_trace is not None: navigation_trace.close(primary)
         if observer is not None: retain_ime_message_diagnostics(record, observer)
-        capture_failure(output, name, record, exc)
-        retain_ime_focus_failure_diagnostics(record, process, keyboard)
+        if diagnose_focus:
+            import traceback
+            record.update(success=False,error=type(exc).__name__+': '+str(exc),
+                traceback=''.join(traceback.format_exception(type(exc),exc,exc.__traceback__)),
+                failureScreenshotSkipped='focus-diagnostic-local-only-after-failure')
+        else:
+            capture_failure(output, name, record, exc)
+            retain_ime_focus_failure_diagnostics(record, process, keyboard)
         raise
     finally:
+        if focus_trace is not None:focus_trace.close(primary)
         if navigation_trace is not None: navigation_trace.close(primary)
         if observer is not None:
             retain_ime_message_diagnostics(record, observer)
@@ -1390,7 +1423,13 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                 record.update(success=False, retirementCleanupError=type(exc).__name__ + ': ' + str(exc))
                 if primary is None: retirement_failure = exc
         try: stop_owned_test_process(process, record)
-        finally: write_result(output, name, record)
+        finally:
+            if focus_trace is not None:
+                focus_trace.cohort_lease.finish()
+                from editor_capture_diagnostic import cohort_cleanup_confirmed
+                if not cohort_cleanup_confirmed(record):
+                    record.update(success=False,focusCohortStopped='Original shell/engine exit or retained handle release unconfirmed')
+            write_result(output, name, record)
         if retirement_failure is not None: raise retirement_failure
 
 
@@ -1402,6 +1441,7 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--diagnose-navigation', choices=('impress',))
     parser.add_argument('--diagnose-ime-mode', choices=('calc',))
+    parser.add_argument('--diagnose-focus', choices=('calc',))
     parser.add_argument('--verify-one', choices=dict(INPUT_CASES))
     parser.add_argument('--file', type=Path)
     parser.add_argument('--reopen-output', type=Path)
@@ -1412,7 +1452,7 @@ def main(argv=None):
     assert isinstance(inventory, dict) and inventory.get('schemaVersion') == 1, 'Suite inventory identity is missing'
     architecture = native_arch.require_architecture(inventory.get('architecture'))
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
-    assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode))<=1,'Reopen and diagnostic modes are mutually exclusive'
+    assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus))<=1,'Reopen and diagnostic modes are mutually exclusive'
     if args.verify_one:
         assert args.file and args.reopen_output, 'The owned reopen fixture and receipt are required'
         observed = reopen_one(suite, args.file.resolve(), args.verify_one)
@@ -1424,7 +1464,7 @@ def main(argv=None):
     fixtures, output = args.fixtures.resolve(), args.output.resolve()
     assert suite != output and suite not in output.parents and fixtures != output and fixtures not in output.parents, 'Evidence must be outside the payload and baseline fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
-    if args.diagnose_navigation or args.diagnose_ime_mode:
+    if args.diagnose_navigation or args.diagnose_ime_mode or args.diagnose_focus:
         # Same source-bound owner-push/first-attempt admission as the native suite.
         import importlib.util
         spec = importlib.util.spec_from_file_location('navigation_ci_admission', Path(__file__).resolve().parents[2] / 'e2e/native31_suite_prepare.py')
@@ -1435,6 +1475,21 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=False)
     readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
     prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
+    if args.diagnose_focus:
+        results=[]
+        for index in range(1,4):
+            suffix=f'focus-{index:02d}';name='ime-calc-'+suffix
+            rows=collect_cases([(name,lambda suffix=suffix:case(suite,fixtures,output,readiness,'calc',
+                dict(INPUT_CASES)['calc'],prepared_library=prepared_library,diagnose_focus=True,diagnostic_suffix=suffix))],output)
+            results.extend(rows)
+            from editor_capture_diagnostic import cohort_cleanup_confirmed
+            if len(rows)!=1 or not cohort_cleanup_confirmed(rows[0]):break
+        success=len(results)==3 and all(row.get('success') is True for row in results)
+        report=dict(schemaVersion=1,kind='native-focus-diagnostic',success=success,acceptanceEligible=False,
+            imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=3,
+            completedCaseCount=len(results),cohortPolicy='three fresh sequential cases; never retry input or overlap unconfirmed cleanup')
+        (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+        return 0 if success else 1
     if args.diagnose_navigation:
         module = args.diagnose_navigation
         results = collect_cases([('ime-' + module, lambda: case(suite, fixtures, output, readiness,

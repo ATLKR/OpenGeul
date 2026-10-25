@@ -36,6 +36,17 @@ class TraceEvent(C.Structure):
     _fields_ = [(name,C.c_uint32) for name in ('sequence','origin','message','vk','pid','tid','reserved','flags')]
     _fields_ += [(name,C.c_uint64) for name in ('hwnd','engineCreationTime','focusHwnd','captureHwnd','counter','frequency','nativeTick','lParam','layout')]
 
+CAPTURE_VERSION=1
+CAPTURE_CAPACITY=128
+SAL_POST_FOCUS=0x485
+SAL_CAPTURE_MOUSE=0x48c
+SAL_RELEASE_MOUSE=0x48d
+CAPTURE_MESSAGES=(0x201,0x202,0x204,0x205,0x207,0x208,0x20b,0x20c,0x215,7,8,0x485,0x48c,0x48d)
+
+class CaptureEvent(C.Structure):
+    _fields_=[(name,C.c_uint32) for name in ('sequence','origin','message','pid','tid','callbackDepth','removeFlags','reserved')]
+    _fields_ += [(name,C.c_uint64) for name in ('hwnd','engineCreationTime','focusHwnd','captureHwnd','counter','finishedCounter','frequency','nativeTick','wParam','lParam')]
+
 class State(C.Structure):
     _fields_ = [(name, C.c_uint32) for name in
         ('magic', 'version', 'stateSize', 'eventSize', 'capacity', 'pid', 'tid', 'controllerPid',
@@ -46,12 +57,16 @@ class State(C.Structure):
     _fields_ += [('readinessMessage', C.c_uint32), ('readinessReserved', C.c_uint32), ('readiness', Readiness)]
     _fields_ += [('events', Event * CAPACITY)]
     _fields_ += [('traceVersion',C.c_uint32),('traceEnabled',C.c_uint32),('traceCount',C.c_int32),('traceOverflow',C.c_int32),('traceRejected',C.c_uint32),('traceReserved',C.c_uint32),('traceEvents',TraceEvent * TRACE_CAPACITY)]
+    _fields_ += [('captureVersion',C.c_uint32),('captureEnabled',C.c_uint32),('captureCount',C.c_int32),('captureOverflow',C.c_int32)]
+    _fields_ += [(name,C.c_uint32) for name in ('captureRejected','captureExpired','captureReserved','capturePadding')]
+    _fields_ += [('captureDeadline',C.c_uint64),('captureFrequency',C.c_uint64),('captureEvents',CaptureEvent * CAPTURE_CAPACITY)]
 
 
 assert C.sizeof(Event) == 96 and State.events.offset == 456
 assert C.sizeof(QueueSample) == 328 and C.sizeof(Readiness) == 336 and State.readiness.offset == 120
 assert C.sizeof(TraceEvent) == 104 and State.traceVersion.offset == 456 + CAPACITY * 96
-assert C.sizeof(State) == 456 + CAPACITY * 96 + 24 + TRACE_CAPACITY * 104
+assert State.captureVersion.offset == 407008 and C.sizeof(CaptureEvent) == 112
+assert C.sizeof(State) == 407008 + 48 + CAPTURE_CAPACITY * 112
 
 
 def committed_events(raw, *, after):
