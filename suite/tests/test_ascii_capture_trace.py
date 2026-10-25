@@ -53,6 +53,10 @@ class CaptureTraceTests(unittest.TestCase):
 #include "ascii_message_protocol.h"
 #include <cassert>
 #include <cstring>
+// Exercise the Windows compiler's predefined ABI macro on portable hosts too.
+#ifndef __declspec
+#define __declspec(x) __attribute__((x))
+#endif
 using LONG=int32_t;using UINT=uint32_t;using HWND=void*;using WPARAM=uintptr_t;using LPARAM=intptr_t;
 constexpr UINT WM_CAPTURECHANGED=0x215,WM_SETFOCUS=7,WM_KILLFOCUS=8;
 struct LARGE_INTEGER {int64_t QuadPart;};
@@ -72,6 +76,8 @@ uint64_t GetTickCount64(){return 3;}
 '''
         hook=source[source.index('extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet('):source.index('extern "C" __declspec(dllexport) LRESULT CALLBACK HookReturn(')]
         hook_prefix=r'''
+// This portable fixture mocks the export ABI; production declarations stay intact.
+#undef __declspec
 #define __declspec(x)
 #define CALLBACK
 using LRESULT=intptr_t;
