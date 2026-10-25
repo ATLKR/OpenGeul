@@ -135,6 +135,90 @@ class EngineEvidenceTests(unittest.TestCase):
         self.assertIn('cleanupErrors', result)
         self.assertNotIn('sha256', result)
 
+    def test_failure_summary_preserves_load_failure_and_separate_cleanup_failure(self):
+        path = self.output / 'fixtures' / smoke.FILES['writer']
+        parent = self.fake_engine(path)
+        class Broken(parent):
+            def load(self, url):
+                raise RuntimeError('PRIVATE-DOCUMENT-CANARY')
+            def cleanup(self):
+                raise OSError('PRIVATE-PROFILE-CANARY')
+        with patch.object(smoke, 'Engine', Broken):
+            result = smoke.run_case(self.suite, self.output, 'writer', self.modules['writer'], True)
+        self.assertEqual(result.get('failureStage'), 'load-saved')
+        self.assertEqual(result['status'], 'failed')
+        rows = [result] + [dict(module=m, status='passed') for m in list(smoke.FILES)[1:]]
+        summary = smoke.failure_summary(rows)
+        row = summary['cases'][0]
+        self.assertEqual(row['failure'], dict(stage='load-saved', category='RuntimeError'))
+        self.assertEqual(row['finalizationFailures'], [dict(stage='engine-cleanup', category='OSError')])
+        self.assertFalse(summary['passed'])
+        encoded = json.dumps(summary)
+        for value in ('PRIVATE-', str(self.root), 'traceback', 'observed', 'fixture'):
+            self.assertNotIn(value, encoded)
+
+    def test_failure_summary_distinguishes_post_cleanup_hash_failure(self):
+        path = self.output / 'fixtures' / smoke.FILES['writer']
+        with patch.object(smoke, 'Engine', self.fake_engine(path, delete=True)), \
+                patch.object(smoke, 'observe', return_value=observations('writer')):
+            result = smoke.run_case(self.suite, self.output, 'writer', self.modules['writer'], True)
+        self.assertEqual(result.get('failureStage'), 'final-file-read')
+        self.assertEqual(result['status'], 'failed')
+
+    def test_failure_summary_cleanup_only_failure_is_not_a_content_failure(self):
+        path = self.output / 'fixtures' / smoke.FILES['writer']
+        with patch.object(smoke, 'Engine', self.fake_engine(path, cleanup_error=True)), \
+                patch.object(smoke, 'observe', return_value=observations('writer')):
+            result = smoke.run_case(self.suite, self.output, 'writer', self.modules['writer'], True)
+        self.assertIn('failureStage', result)
+        self.assertIsNone(result['failureStage'])
+        rows = [result] + [dict(module=m, status='passed') for m in list(smoke.FILES)[1:]]
+        row = smoke.failure_summary(rows)['cases'][0]
+        self.assertIsNone(row['failure'])
+        self.assertEqual(row['cleanupErrorCount'], 1)
+        self.assertEqual(row['status'], 'failed')
+
+    def test_failure_summary_all_success_preserves_six_modules(self):
+        self.assertTrue(callable(getattr(smoke, 'failure_summary', None)))
+        rows=[dict(module=m,status='passed',engineCleanup=successful_cleanup(self.suite)) for m in smoke.FILES]
+        summary=smoke.failure_summary(rows)
+        self.assertTrue(summary['passed'])
+        self.assertFalse(summary['acceptanceEligible'])
+        self.assertEqual([r['module'] for r in summary['cases']],list(smoke.FILES))
+        self.assertTrue(all(r['failure'] is None and r['cleanup']['gracefulQualified'] for r in summary['cases']))
+        with self.assertRaises(AssertionError):
+            smoke.failure_summary(rows[:-1])
+
+    def test_failure_summary_rejects_unknown_text_and_bounds_cleanup_rows(self):
+        rows = [dict(module=m, status='passed') for m in smoke.FILES]
+        rows[0].update(status='failed', failureStage='PRIVATE-STAGE',
+            error=dict(type='PRIVATE-CLASS', message='PRIVATE-MESSAGE'),
+            engineCleanup=dict(gracefulQualified='PRIVATE-BOOL', launcherExitCode=True,
+                errors=[dict(stage='PRIVATE-STAGE', type='PRIVATE-TYPE', message='PRIVATE')]*100))
+        self.assertTrue(callable(getattr(smoke, 'failure_summary', None)))
+        summary = smoke.failure_summary(rows)
+        self.assertNotIn('PRIVATE', json.dumps(summary))
+        self.assertEqual(summary['cases'][0]['failure'],dict(stage='unknown',category='unknown'))
+        self.assertLess(len(json.dumps(summary)), 10000)
+        self.assertTrue(summary['cases'][0]['cleanup']['errorsTruncated'])
+        self.assertIsNone(summary['cases'][0]['cleanup']['gracefulQualified'])
+        self.assertIsNone(summary['cases'][0]['cleanup']['launcherExitCode'])
+
+    def test_main_writes_only_closed_six_module_failure_summary(self):
+        self.baseline(smoke.FILES)
+        def run_case(suite, output, module, specification, verify_ui):
+            return dict(module=module, status='failed' if module=='writer' else 'passed',
+                failureStage='load-saved', error=dict(type='RuntimeError',message='PRIVATE'))
+        with patch.object(smoke, 'run_case', side_effect=run_case), redirect_stdout(io.StringIO()):
+            code=smoke.main(['--suite',str(self.suite),'--output',str(self.output),'--verify-ui'])
+        self.assertEqual(code,1)
+        path=self.output/'ui-engine-failure-summary.json'
+        self.assertTrue(path.is_file(), 'Failure receipt must survive the failed prerequisite')
+        summary=json.loads(path.read_text())
+        self.assertEqual([r['module'] for r in summary['cases']],list(smoke.FILES))
+        self.assertFalse(summary['passed'])
+        self.assertNotIn('PRIVATE',path.read_text())
+
     def baseline(self, modules):
         (self.output / 'engine-smoke.json').write_text(json.dumps(
             {'cases': [{'module': module, 'status': 'passed'} for module in modules]}), encoding='utf-8')

@@ -428,6 +428,7 @@ jobs:
         name: opengeul-suite-matched-plugin-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: |
           .work/suite-matched-plugin/
+          .work/suite-engine/engine-failure-summary.json
           .work/suite-focus-diagnostic/
           .work/plugin-symbol-input/plugin-symbol-download.json
           .work/plugin-symbol-input/artifact-server-metadata.json

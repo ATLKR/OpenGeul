@@ -115,3 +115,23 @@ Terminal-copy QPC coverage is reported as covered, truncated or unknown,
 separately from a producer callback's expiry flag. Unresolved symbols retain their
 receipt and produce an inconclusive outcome. A completed query is not a caller
 classification, and a recognized function is not proof of causal responsibility.
+
+## Prerequisite failure receipt repair
+
+Run40205963330 at349ba65 passed symbol qualification, Korean readiness and
+privacy admission, then failed Writer in the six-module engine fixture. The
+other five modules passed; the cohort correctly did not run. Only a failed
+status reached the logs because matched artifacts omitted the raw engine reports.
+The original Writer cause is unknown and cannot be recovered from that artifact.
+
+Retain one closed six-module engine-failure-summary.json in the existing matched
+artifact. Mark the existing operation stages without new engine calls or retries.
+Keep primary, finalization and cleanup-proof/file-read failures distinguishable.
+Export only fixed module/status/stage/error categories, bounded cleanup error
+categories and typed cleanup outcomes. Unknown categories remain unknown. Never
+upload the raw engine directory, document content, paths, traceback or messages.
+This repairs a locally reproduced retention gap; it is not a Writer behavior fix.
+The next first-attempt execution can either identify the failing prerequisite
+operation or proceed through the already-defined capture experiment. Preserve
+all prerequisite/ownership/privacy/deadline and nonacceptance gates. An unknown
+or nonreproduced receipt does not justify an identical rerun or speculative fix.

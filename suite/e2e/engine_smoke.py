@@ -428,7 +428,7 @@ def observe(module, document, diagnostics=None):
 
 def run_case(suite, output, module, specification, verify_ui=False):
     path = fixture_path(output, module, must_exist=verify_ui)
-    result = {'module': module, 'status': 'failed', 'fixture': str(path),
+    result = {'module': module, 'status': 'failed', 'fixture': str(path), 'failureStage': None, 'finalizationFailures': [],
               'expected': {'marker': marker(module)} if module in ('writer', 'calc', 'impress', 'draw') else {}}
     if module == 'calc':
         result['expected'].update(formula='=SUM(B1:C1)', value=42)
@@ -449,62 +449,126 @@ def run_case(suite, output, module, specification, verify_ui=False):
     document = None
     started = time.monotonic()
     try:
+        stage = 'engine-start'
         engine.start()
+        stage = 'desktop-lease'
         engine.acquire_fixture_lifetime()
         from fixture_desktop_lifetime import require_fixture_members
+        stage = 'owned-members'
         require_fixture_members(engine._capture_members('fixture-before-first-load'),
                                 engine.cleanup_evidence['expectedEngineImage'])
         if verify_ui:
+            stage = 'load-saved'
             document = engine.load(path.as_uri())
         else:
             if module == 'base':
                 # Direct service creation avoids the interactive database wizard.
+                stage = 'base-create'
                 document = engine.service('com.sun.star.sdb.OfficeDatabaseDocument')
+                stage = 'base-initialize'
                 document.initNew()
+                stage = 'base-configure'
                 document.DataSource.setPropertyValue('URL', 'sdbc:embedded:firebird')
+                stage = 'base-store-new'
                 engine.store_new(document, path, specification['filters']['odb'])
             else:
+                stage = 'load-factory'
                 document = engine.load(specification['factory'])
+            stage = 'populate'
             populate(engine, module, document)
+            stage = 'verify-generated'
             verify_content(module, observe(module, document, diagnostics) if diagnostics is not None else observe(module, document))
             if module == 'base':
+                stage = 'base-store'
                 document.store()
             else:
+                stage = 'store-new'
                 extension = path.suffix.lstrip('.')
                 engine.store_new(document, path, specification['filters'][extension])
+            stage = 'close-before-reopen'
             engine.close_document(document)
             document = None
+            stage = 'load-saved'
             document = engine.load(path.as_uri())
+        stage = 'observe-saved'
         observed = observe(module, document, diagnostics) if diagnostics is not None else observe(module, document)
+        stage = 'verify-saved'
         verify_content(module, observed, verify_ui)
         result.update(status='passed', observed=observed)
     except Exception as exc:
+        result['failureStage'] = stage
         result['error'] = {'type': type(exc).__name__, 'message': str(exc),
                            'traceback': traceback.format_exc()}
     finally:
         try:
             engine.close_document(document)
         except Exception as exc:
+            result['finalizationFailures'].append(dict(stage='final-document-close', type=type(exc).__name__))
             engine.cleanup_errors.append('generated document: ' + type(exc).__name__ + ': ' + str(exc))
         try: engine.cleanup()
-        except Exception as exc: engine.cleanup_errors.append('owned cleanup: ' + type(exc).__name__ + ': ' + str(exc))
+        except Exception as exc:
+            result['finalizationFailures'].append(dict(stage='engine-cleanup', type=type(exc).__name__))
+            engine.cleanup_errors.append('owned cleanup: ' + type(exc).__name__ + ': ' + str(exc))
         result['engineCleanup'] = getattr(engine, 'cleanup_evidence', None)
         if engine.cleanup_errors:
             result['cleanupErrors'] = engine.cleanup_errors
             result['status'] = 'failed'
         if result['status'] == 'passed':
             try:
+                stage = 'cleanup-proof'
                 validate_cleanup_evidence(result['engineCleanup'])
                 # Embedded Firebird persists its backup during disposal. Hash
                 # only after model close and the owned process has exited.
+                stage = 'final-file-read'
                 final_bytes = path.read_bytes()
                 result.update(sha256=hashlib.sha256(final_bytes).hexdigest(), bytes=len(final_bytes))
             except Exception as exc:
+                result['failureStage'] = stage
                 result['status'] = 'failed'
                 result['error'] = {'type': type(exc).__name__, 'message': str(exc),
                                    'traceback': traceback.format_exc()}
         result['elapsedSeconds'] = round(time.monotonic() - started, 3)
     return result
+
+
+# Closed metadata only: this receipt is safe to retain when full engine evidence
+# is deliberately excluded from a bounded diagnostic artifact.
+_FAILURE_STAGES = frozenset(('case-setup', 'engine-start', 'desktop-lease', 'owned-members',
+    'load-saved', 'base-create', 'base-initialize', 'base-configure', 'base-store-new',
+    'load-factory', 'populate', 'verify-generated', 'base-store', 'store-new',
+    'close-before-reopen', 'observe-saved', 'verify-saved', 'cleanup-proof', 'final-file-read',
+    'final-document-close', 'engine-cleanup', 'graceful engine exit', 'retain owned members',
+    'fixture desktop lifetime release', 'desktop termination', 'owned job exit',
+    'owned job recovery', 'private job handle close', 'private profile removal',
+    'private profile retained', 'retained member handle close', 'lifetime diagnostics',
+    'graceful exit proof'))
+_ERROR_CATEGORIES = frozenset(('AssertionError', 'RuntimeError', 'ValueError', 'TypeError',
+    'OSError', 'PermissionError', 'FileNotFoundError', 'FileExistsError', 'TimeoutError',
+    'AttributeError', 'KeyError', 'DisposedException', 'IOException', 'CloseVetoException',
+    'NoConnectException', 'IllegalArgumentException', 'DeploymentException'))
+
+
+def failure_summary(results):
+    assert [r['module'] for r in results] == list(FILES), 'Fixed six-module receipt required'
+    def error(stage, value):
+        return dict(stage=stage if stage in _FAILURE_STAGES else 'unknown',
+                    category=value.get('type') if value.get('type') in _ERROR_CATEGORIES else 'unknown')
+    cases = []
+    for result in results:
+        assert result['status'] in ('passed', 'failed')
+        cleanup = result.get('engineCleanup') or {}
+        errors = cleanup.get('errors') or []
+        flags = {name: cleanup.get(name) if type(cleanup.get(name)) is bool else None
+                 for name in ('gracefulQualified', 'forcedTermination', 'jobEmptyVerified')}
+        code = cleanup.get('launcherExitCode')
+        flags.update(launcherExitCode=code if type(code) is int and 0 <= code < 2**32 else None,
+                     errors=[error(e.get('stage'), e) for e in errors[:16]], errorsTruncated=len(errors)>16)
+        cases.append(dict(module=result['module'], status=result['status'],
+            failure=error(result.get('failureStage'), result['error']) if result.get('error') else None,
+            finalizationFailures=[error(e.get('stage'), e) for e in result.get('finalizationFailures', [])[:2]],
+            cleanupErrorCount=len(result.get('cleanupErrors', [])), cleanup=flags))
+    return dict(schemaVersion=1, kind='engine-failure-summary', acceptanceEligible=False,
+                passed=all(r['status']=='passed' for r in results), cases=cases)
 
 
 def write_json(path, value):
@@ -552,7 +616,7 @@ def main(argv=None):
             try:
                 result = run_case(suite, output, module, modules[module], args.verify_ui)
             except Exception as exc:
-                result = {'module': module, 'status': 'failed',
+                result = {'module': module, 'status': 'failed', 'failureStage': 'case-setup',
                           'error': {'type': type(exc).__name__, 'message': str(exc)}}
             results.append(result)
             write_json(output / (('ui-engine-' if args.verify_ui else 'engine-') + module + '.json'), result)
@@ -561,6 +625,8 @@ def main(argv=None):
                   'suite': str(suite), 'passed': all(case['status'] == 'passed' for case in results),
                   'guiVerified': False, 'cases': results}
         write_json(output / report_name, report)
+        summary_name = ('ui-' if args.verify_ui else '') + 'engine-failure-summary.json'
+        write_json(output / summary_name, failure_summary(results))
         return 0 if report['passed'] else 1
     except Exception as exc:
         print(type(exc).__name__ + ': ' + str(exc), file=sys.stderr, flush=True)

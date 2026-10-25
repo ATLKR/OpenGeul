@@ -4,6 +4,13 @@ from suite.tests.test_calc_matrix_workflow import workflow_steps,field,run_code,
 from suite.tests.test_navigation_diagnostic_workflow import condition
 
 class MatchedWorkflowTests(unittest.TestCase):
+    def test_failed_fixture_summary_is_retained_without_raw_engine_evidence(self):
+        step=next(s for s in workflow_steps() if field(s,'id')=='matched-plugin-evidence')
+        self.assertIn('always()',condition(step))
+        self.assertIn('.work/suite-engine/engine-failure-summary.json',step)
+        for raw in ('.work/suite-engine/\n','engine-smoke.json','engine-writer.json','fixtures/'):
+            self.assertNotIn(raw,step)
+
     def test_matched_build_requires_arm64_and_successful_qualification(self):
         from suite.tests.test_com_wait_workflow import evaluate
         steps={field(s,'id'):s for s in workflow_steps() if field(s,'id')}
