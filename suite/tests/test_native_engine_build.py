@@ -127,6 +127,59 @@ class NativeEngineBuildTests(unittest.TestCase):
         except (OSError,NotImplementedError): return
         self.rejected(f"New-BuildDirectories {quote(link/'new')} {quote(self.root/'another')}")
 
+    def test_mutex_symbols_are_opt_in_and_keep_release_configuration(self):
+        self.ps("""
+$normal=@(Get-ConfigureArguments); $diagnostic=@(Get-ConfigureArguments -MutexSymbols)
+if(@($normal|Where-Object {$_ -like '*symbols*'}).Count -ne 0) {throw 'Default symbols changed'}
+if(@($diagnostic|Where-Object {$_ -ceq '--enable-symbols=Library_vclplug_win'}).Count -ne 1) {throw 'Exact symbol filter missing'}
+$good=@{ENABLE_SYMBOLS_FOR='Library_vclplug_win';ENABLE_OPTIMIZED='TRUE';ENABLE_DEBUG='';ENABLE_DBGUTIL='';ENABLE_OPTIMIZED_DEBUG='';MSVC_USE_DEBUG_RUNTIME=''}
+Assert-MutexSymbolsConfiguration $good
+foreach($key in $good.Keys) {
+  $bad=$good.Clone(); $bad[$key]='wrong'; $rejected=$false
+  try { Assert-MutexSymbolsConfiguration $bad } catch { $rejected=$true }
+  if(-not $rejected){throw 'Configuration drift admitted'}
+  $bad=$good.Clone(); $bad.Remove($key); $rejected=$false
+  try { Assert-MutexSymbolsConfiguration $bad } catch { $rejected=$true }
+  if(-not $rejected){throw 'Missing configuration admitted'}
+}
+""")
+
+    def test_mutex_symbols_require_exact_first_owner_push(self):
+        self.ps("""
+$ref='refs/heads/work/opengeul-office-native-engine'; $sha='a'*40
+$context=@{GITHUB_ACTIONS='true';RUNNER_ENVIRONMENT='github-hosted';RUNNER_OS='Windows';RUNNER_ARCH='ARM64';GITHUB_REPOSITORY='ATLKR/OpenGeul';GITHUB_REPOSITORY_OWNER='ATLKR';GITHUB_EVENT_NAME='push';GITHUB_JOB='native-firebird-and-office';GITHUB_REF=$ref;GITHUB_WORKFLOW_REF=('ATLKR/OpenGeul/.github/workflows/office-native-engine.yml@'+$ref);GITHUB_RUN_ATTEMPT='1';GITHUB_ACTOR='ATLKR';GITHUB_ACTOR_ID='65988341';GITHUB_SHA=$sha;GITHUB_WORKFLOW_SHA=$sha;GITHUB_RUN_ID='123'}
+$event=@{repository=@{full_name='ATLKR/OpenGeul';private=$false;id=1405493151};sender=@{login='ATLKR';id=65988341;type='User'};ref=$ref;deleted=$false;after=$sha}
+Assert-MutexSymbolsOwnerPush $context $event
+foreach($key in $context.Keys){
+ $bad=$context.Clone();$bad[$key]='wrong';$rejected=$false
+ try{Assert-MutexSymbolsOwnerPush $bad $event}catch{$rejected=$true}
+ if(-not $rejected){throw 'Context drift admitted'}
+}
+foreach($key in @('ref','deleted','after','sender','repository')){
+ $bad=$event.Clone();$bad.Remove($key);$rejected=$false
+ try{Assert-MutexSymbolsOwnerPush $context $bad}catch{$rejected=$true}
+ if(-not $rejected){throw 'Incomplete event admitted'}
+}
+""")
+
+    def test_mutex_symbols_reject_ambient_build_overrides_without_disclosing_values(self):
+        self.ps("""
+Assert-MutexSymbolsOverrides @{}
+foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_symbols','debug','dbglevel','enable_optimized','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS','CL','_CL_','LINK','_LINK_')) {
+ $rejected=$false
+ try{Assert-MutexSymbolsOverrides @{$key='synthetic-private-value'}}catch{
+  $rejected=$true
+  if($_.Exception.Message.Contains('synthetic-private-value')){throw 'Override value leaked'}
+ }
+ if(-not $rejected){throw 'Ambient build override admitted'}
+}
+""")
+
+    def test_mutex_symbols_reject_nonfull_before_directory_creation(self):
+        work=self.root/'work';output=self.root/'output'
+        self.rejected(f"Invoke-NativeEngineBuild Firebird {quote(work)} {quote(output)} '' 4 -MutexSymbols")
+        self.assertFalse(work.exists());self.assertFalse(output.exists())
+
     def test_config_requires_native_firebird_not_just_successful_configure(self):
         config=self.root/'config_host.mk'
         good={'OS':'WNT','COM':'MSC','CPUNAME':'AARCH64','HOST_PLATFORM':'aarch64-pc-cygwin','BUILD_PLATFORM':'aarch64-pc-cygwin','WIN_HOST_ARCH':'arm64','WIN_BUILD_ARCH':'arm64','ENABLE_FIREBIRD_SDBC':'TRUE','SYSTEM_FIREBIRD':'','CROSS_COMPILING':'','BUILD_TYPE':'FIREBIRD ICU LIBATOMIC_OPS LIBTOMMATH','PKGFORMAT':'archive','ENABLE_ONLINE_UPDATE':'','ENABLE_ONLINE_UPDATE_MAR':'','ENABLE_BREAKPAD':''}

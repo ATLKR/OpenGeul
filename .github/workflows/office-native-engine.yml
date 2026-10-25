@@ -5,6 +5,8 @@ name: OpenGeul native ARM64 Office engine source build
     paths:
       - .github/workflows/office-native-engine.yml
       - suite/scripts/build-native-engine.ps1
+      - suite/scripts/retain-plugin-symbols.py
+      - suite/tests/test_plugin_symbols.py
       - suite/engine-build/**
       - suite/tests/test_firebird_arm64_port.py
       - suite/tests/test_native_python_host.py
@@ -56,6 +58,11 @@ jobs:
         with:
           python-version: '3.12'
           architecture: arm64
+      - name: Admit exact first owner push for diagnostic symbols
+        shell: pwsh
+        run: |
+          . ./suite/scripts/build-native-engine.ps1
+          Assert-MutexSymbolsEnvironment
       - name: Record actual native toolchain and redistributable layout
         shell: pwsh
         run: |
@@ -84,7 +91,7 @@ jobs:
       - name: Build and verify native Firebird before the full Office engine
         shell: pwsh
         run: |
-          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC
+          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC -MutexSymbols
           if (-not $?) { throw 'Native ARM64 Office source build or functional verification failed.' }
       - name: Retain original source build diagnostics
         if: always()
@@ -95,6 +102,7 @@ jobs:
             .work/native-engine-host-evidence/
             .work/native-engine-evidence/
             !.work/native-engine-evidence/*.zip
+            !.work/native-engine-evidence/plugin-symbols/**
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: error
@@ -105,6 +113,14 @@ jobs:
           path: |
             .work/native-engine-evidence/OpenGeul-Office-engine-arm64.zip
             .work/native-engine-evidence/source-build-receipt.json
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+      - name: Retain matched diagnostic plugin symbols separately
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-plugin-symbols-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .work/native-engine-evidence/plugin-symbols/
           retention-days: 7
           if-no-files-found: error
           compression-level: 0

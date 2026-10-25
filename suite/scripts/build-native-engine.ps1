@@ -6,7 +6,8 @@ param(
     [ValidateRange(1,64)][int]$Jobs=4,
     [string]$JdkHome='',
     [string]$AntHome='',
-    [string]$DeadlineUtc=''
+    [string]$DeadlineUtc='',
+    [switch]$MutexSymbols
 )
 $ErrorActionPreference='Stop'
 
@@ -627,11 +628,12 @@ function Get-AuthenticatedWindowsPkgconf([string]$DownloadDirectory,[string]$Evi
     return $result
 }
 
-function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='',[string]$PkgConfig='') {
+function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='',[string]$PkgConfig='',[switch]$MutexSymbols) {
     '--with-distro=LibreOfficeWinArm64','--build=aarch64-pc-cygwin','--host=aarch64-pc-cygwin',
     '--with-visual-studio=2026','--with-package-format=archive','--enable-firebird-sdbc','--enable-database-connectivity',
     '--disable-online-update','--disable-online-update-mar','--disable-breakpad',
     '--without-system-firebird','--without-system-libatomic_ops','--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'
+    if($MutexSymbols) {'--enable-symbols=Library_vclplug_win'}
     if($ExternalTar) {'--with-external-tar='+$ExternalTar}
     if($JdkHome) {'--with-jdk-home='+$JdkHome}
     if($AntHome) {'--with-ant-home='+$AntHome}
@@ -659,6 +661,44 @@ function Assert-GeneratedConfiguration([string]$Path) {
     if(-not $values.ContainsKey('CROSS_COMPILING') -or $values.CROSS_COMPILING -ne '' -or $values.SYSTEM_FIREBIRD -ne '') {throw 'Cross-compiling or system Firebird is forbidden.'}
     foreach($token in @('FIREBIRD','LIBATOMIC_OPS','LIBTOMMATH')) {if($values.BUILD_TYPE -notmatch ('(^|\s)'+$token+'(\s|$)')) {throw "Required internal build dependency is absent: $token"}}
     return $values
+}
+
+function Assert-MutexSymbolsOwnerPush([Collections.IDictionary]$Context, $Event) {
+    $ref='refs/heads/work/opengeul-office-native-engine'
+    $expected=@{GITHUB_ACTIONS='true';RUNNER_ENVIRONMENT='github-hosted';RUNNER_OS='Windows';RUNNER_ARCH='ARM64';GITHUB_REPOSITORY='ATLKR/OpenGeul';GITHUB_REPOSITORY_OWNER='ATLKR';GITHUB_EVENT_NAME='push';GITHUB_JOB='native-firebird-and-office';GITHUB_REF=$ref;GITHUB_WORKFLOW_REF=('ATLKR/OpenGeul/.github/workflows/office-native-engine.yml@'+$ref);GITHUB_RUN_ATTEMPT='1';GITHUB_ACTOR='ATLKR';GITHUB_ACTOR_ID='65988341'}
+    foreach($key in $expected.Keys) {if($Context[$key] -cne $expected[$key]) {throw "Plugin symbol owner-push context differs: $key"}}
+    $sha=$Context.GITHUB_SHA
+    if($sha -cnotmatch '^[0-9a-f]{40}$' -or $sha -ceq ('0'*40) -or $Context.GITHUB_WORKFLOW_SHA -cne $sha -or $Context.GITHUB_RUN_ID -cnotmatch '^[1-9][0-9]{0,19}$') {throw 'Plugin symbol source/run binding differs.'}
+    if($Event.repository.full_name -cne 'ATLKR/OpenGeul' -or $Event.repository.private -isnot [bool] -or $Event.repository.private -or ($Event.repository.id -isnot [int] -and $Event.repository.id -isnot [long]) -or $Event.repository.id -ne 1405493151 -or
+       $Event.sender.login -cne 'ATLKR' -or ($Event.sender.id -isnot [int] -and $Event.sender.id -isnot [long]) -or $Event.sender.id -ne 65988341 -or $Event.sender.type -cne 'User' -or
+       $Event.ref -cne $ref -or $Event.deleted -isnot [bool] -or $Event.deleted -or $Event.after -cne $sha) {throw 'Plugin symbol owner push event differs.'}
+}
+
+function Assert-MutexSymbolsOverrides([Collections.IDictionary]$Values) {
+    foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_symbols','debug','dbglevel','enable_optimized','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS','CL','_CL_','LINK','_LINK_')) {
+        if($Values[$key]) {throw "Ambient diagnostic build override is forbidden: $key"}
+    }
+}
+
+function Assert-MutexSymbolsEnvironment {
+    $overrides=@{}
+    foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_symbols','debug','dbglevel','enable_optimized','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS','CL','_CL_','LINK','_LINK_')) {$overrides[$key]=[Environment]::GetEnvironmentVariable($key)}
+    Assert-MutexSymbolsOverrides $overrides
+    $context=@{}
+    foreach($key in @('GITHUB_ACTIONS','RUNNER_ENVIRONMENT','RUNNER_OS','RUNNER_ARCH','GITHUB_REPOSITORY','GITHUB_REPOSITORY_OWNER','GITHUB_EVENT_NAME','GITHUB_JOB','GITHUB_REF','GITHUB_WORKFLOW_REF','GITHUB_RUN_ATTEMPT','GITHUB_ACTOR','GITHUB_ACTOR_ID','GITHUB_SHA','GITHUB_WORKFLOW_SHA','GITHUB_RUN_ID')) {$context[$key]=[Environment]::GetEnvironmentVariable($key)}
+    $path=$env:GITHUB_EVENT_PATH
+    if(-not $path -or -not [IO.Path]::IsPathFullyQualified($path)) {throw 'Plugin symbol event path is absent.'}
+    Assert-UnlinkedPath $path
+    $item=Get-Item -LiteralPath $path
+    if($item.PSIsContainer -or $item.Length -gt 262144) {throw 'Plugin symbol event exceeds its bound.'}
+    Assert-MutexSymbolsOwnerPush $context (Get-Content -LiteralPath $path -Raw|ConvertFrom-Json)
+}
+
+function Assert-MutexSymbolsConfiguration([Collections.IDictionary]$Values) {
+    $required=@{ENABLE_SYMBOLS_FOR='Library_vclplug_win';ENABLE_OPTIMIZED='TRUE';ENABLE_DEBUG='';ENABLE_DBGUTIL='';ENABLE_OPTIMIZED_DEBUG='';MSVC_USE_DEBUG_RUNTIME=''}
+    foreach($key in $required.Keys) {
+        if(-not $Values.Contains($key) -or $Values[$key] -cne $required[$key]) {throw "Diagnostic release-symbol configuration differs: $key"}
+    }
 }
 
 function Get-PinnedPythonTemplates {
@@ -1138,7 +1178,9 @@ function Save-ActualMddsHeaders([string]$SourceRoot,[string]$EvidenceDirectory,$
     return $record
 }
 
-function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='') {
+function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols) {
+    if($MutexSymbols -and $Phase -cne 'Full') {throw 'Plugin symbols require the full native source build.'}
+    if($MutexSymbols) {Assert-MutexSymbolsEnvironment}
     $paths=New-BuildDirectories $WorkDirectory $OutputDirectory
     $work=$paths.work;$evidence=$paths.output
     $source='';$manifest=$null
@@ -1214,7 +1256,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $python=(Get-Command python -ErrorAction Stop).Source
         $hookResult=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source,'--evidence-directory',$evidence) $repo (Join-Path $evidence 'source-hooks')
         $receipt.sourceHooks=Get-Content -LiteralPath $hookResult.stdout -Raw|ConvertFrom-Json
-        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt $unixPkgconf)
+        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt $unixPkgconf -MutexSymbols:$MutexSymbols)
         Copy-Item (Join-Path $source 'autogen.input') (Join-Path $evidence 'autogen.input')
         $configure=Join-Path $commands 'configure.sh'
         Write-BashScript $configure @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)",'./autogen.sh')
@@ -1223,6 +1265,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $config=Join-Path $source 'config_host.mk'
         Copy-Item $config (Join-Path $evidence 'config_host.mk')
         $receipt.configuration=Assert-GeneratedConfiguration $config
+        if($MutexSymbols) {Assert-MutexSymbolsConfiguration $receipt.configuration}
         if(Test-Path (Join-Path $source 'config.log')) {Copy-Item (Join-Path $source 'config.log') (Join-Path $evidence 'config.log')}
         # Fail before any expensive compilation if this configured VS install
         # cannot supply a signed native runtime at least as new as its tools.
@@ -1332,6 +1375,16 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.stage='verify-effective-runtime-build-identity';Assert-NativeBuildTimeRemaining
             $receipt.runtimeBuildIdentity.finalVerification=Assert-RuntimeBuildIdentity $instdir $pin $receipt.runtimeBuildIdentity
             Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
+            if($MutexSymbols) {
+                $receipt.stage='retain-matched-plugin-symbols';Assert-NativeBuildTimeRemaining
+                $symbolOutput=Join-Path $evidence 'plugin-symbols'
+                $symbols=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/scripts/retain-plugin-symbols.py'),'--source-root',$source,'--output',$symbolOutput,'--source-commit',$receipt.sourceCommit,'--config',$config) $repo (Join-Path $evidence 'plugin-symbol-retention')
+                $receipt.pluginSymbols=Get-Content -LiteralPath $symbols.stdout -Raw|ConvertFrom-Json
+                if($receipt.pluginSymbols.identityMatched -ne $true -or $receipt.pluginSymbols.acceptance -ne $false -or $receipt.pluginSymbols.sourceCommit -cne $receipt.sourceCommit) {throw 'Plugin symbol identity was not verified.'}
+                $stagedPlugin=Get-Item -LiteralPath (Join-Path $instdir 'program/vclplug_winlo.dll')
+                if($stagedPlugin.Length -ne $receipt.pluginSymbols.files.dll.bytes -or (Get-FileHash -LiteralPath $stagedPlugin.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.pluginSymbols.files.dll.sha256) {throw 'Installed plugin differs from the matched symbol binary.'}
+                Assert-NativeBuildTimeRemaining
+            }
             $receipt.stage='package-qualified-source-build';Assert-NativeBuildTimeRemaining
             $zip=Join-Path $evidence 'OpenGeul-Office-engine-arm64.zip'
             if(Test-Path $zip) {throw 'Engine artifact already exists.'}
@@ -1365,5 +1418,5 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
 }
 
 if($MyInvocation.InvocationName -ne '.') {
-    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc
+    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc -MutexSymbols:$MutexSymbols
 }
