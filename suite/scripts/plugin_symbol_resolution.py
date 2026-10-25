@@ -121,7 +121,7 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
         require(initialized is True,'symbol-initialize');budget.now()
         # Supply the verified PE so DbgHelp can match its CodeView identity to
         # the held PDB. This reads symbol metadata; it never executes the image.
-        loaded=runtime.load(str(image_path),IMAGE_BASE,image_size)
+        loaded=runtime.load(str(image_path),IMAGE_BASE,image_size,image_held)
         require(loaded==IMAGE_BASE,'symbol-load');budget.now()
         info=runtime.module(IMAGE_BASE);budget.now()
         # DbgHelp documents both SymPdb and SymDia as loaded symbol backends.
@@ -237,7 +237,9 @@ class NativeRuntime:
         self.budget.now();require(self.options(options)==options,'symbol-options')
         self.budget.now()
         return bool(self.init(self.session,path.encode('ascii'),False))
-    def load(self,path,base,size):return int(self.load_module(self.session,None,path.encode('ascii'),b'owned_plugin',base,size,None,0))
+    def load(self,path,base,size,image_handle):
+        require(type(image_handle) is int and 0<image_handle<C.c_void_p(-1).value,'image-handle')
+        return int(self.load_module(self.session,image_handle,path.encode('ascii'),b'owned_plugin',base,size,None,0))
     def module(self,base):
         info=ModuleInfo();info.SizeOfStruct=C.sizeof(info)
         require(self.get_module(self.session,base,C.byref(info)),'module-information')

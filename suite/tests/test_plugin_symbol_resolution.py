@@ -23,7 +23,7 @@ class Runtime:
     def hold(self,path):self.calls.append('hold');self.held_paths.append(path);return 123+len(self.held_paths)
     def release(self,handle):self.calls.append('release');self.released.append(handle);return True
     def initialize(self,path,options):self.calls.append('initialize');return True
-    def load(self,path,base,size):self.calls.append('load');self.base=base;self.size=size;return base
+    def load(self,path,base,size,image_handle=None):self.calls.append('load');self.base=base;self.size=size;self.loaded_file_handle=image_handle;return base
     def module(self,base):
         self.calls.append('module');return dict(dict(type=3,base=base,size=self.size,path=str(self.path),guid=str(GUID),age=2,unmatched=False),**self.info)
     def query(self,address):
@@ -103,13 +103,14 @@ class ResolutionTests(unittest.TestCase):
         self.assertFalse(any(isinstance(c,tuple) for c in self.runtime.calls));self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
     def test_symbol_load_uses_held_verified_pe_without_relaxing_unmatched(self):
         original=self.runtime.load
-        def load(path,base,size):
+        def load(path,base,size,image_handle=None):
             self.runtime.info={'unmatched':Path(path)!=self.dll_path}
-            return original(path,base,size)
+            return original(path,base,size,image_handle)
         self.runtime.load=load
         result=self.run_resolve()
         self.assertTrue(result['complete']);self.assertTrue(result['imageHeldDuringResolution'])
         self.assertEqual(self.runtime.held_paths,[str(self.path),str(self.dll_path)])
+        self.assertEqual(self.runtime.loaded_file_handle,125,'loader did not receive the held PE handle')
         self.assertCountEqual(self.runtime.released,[124,125])
         self.runtime.load=original;self.runtime.info={'unmatched':True}
         with self.assertRaises(self.m.ModuleIdentityError) as caught:self.run_resolve()
@@ -251,18 +252,23 @@ class ResolutionTests(unittest.TestCase):
         self.runtime.info={'age':3}
         with self.assertRaisesRegex(self.m.ResolutionError,'loaded-symbol-identity') as caught:self.run_resolve()
         self.assertFalse(caught.exception.resolutionReceipt['cleanupComplete'])
-    def test_native_hold_denies_write_delete_and_never_passes_pdb_handle_to_loader(self):
+    def test_native_hold_denies_write_delete_and_passes_only_image_handle_to_loader(self):
         runtime=object.__new__(self.m.NativeRuntime);runtime.budget=self.budget;runtime.session=1
         runtime.drive_type=lambda path:3;calls=[]
         runtime.open_file=lambda *args:calls.append(('open',args)) or 123
         runtime.close_file=lambda handle:calls.append(('close',handle)) or True
         runtime.load_module=lambda *args:calls.append(('load',args)) or self.m.IMAGE_BASE
-        self.assertEqual(runtime.hold(str(self.path)),123)
-        self.assertEqual(calls[0][1],(str(self.path),0x80000000,1,None,3,0x80,None))
-        runtime.load(str(self.dll_path),self.m.IMAGE_BASE,8192)
-        self.assertIsNone(calls[1][1][1])
+        self.assertEqual(runtime.hold(str(self.dll_path)),123)
+        self.assertEqual(calls[0][1],(str(self.dll_path),0x80000000,1,None,3,0x80,None))
+        runtime.load(str(self.dll_path),self.m.IMAGE_BASE,8192,123)
+        self.assertEqual(calls[1][1][1],123)
         self.assertEqual(calls[1][1][2],str(self.dll_path).encode('ascii'))
         self.assertTrue(runtime.release(123));self.assertEqual(calls[-1],('close',123))
+        for invalid in (None,0,-1,True,self.m.C.c_void_p(-1).value,2**64):
+            count=len(calls)
+            with self.assertRaisesRegex(self.m.ResolutionError,'image-handle'):
+                runtime.load(str(self.dll_path),self.m.IMAGE_BASE,8192,invalid)
+            self.assertEqual(len(calls),count)
     def test_initialize_failure_releases_without_unload_or_session_cleanup(self):
         self.runtime.initialize=lambda *args:False
         with self.assertRaisesRegex(self.m.ResolutionError,'symbol-initialize'):self.run_resolve()

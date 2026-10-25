@@ -53,6 +53,14 @@ path information), EXACT_SYMBOLS and all other existing options. Missing or
 changed image bytes fail before symbol loading; the unmatched guard remains.
 Whether missing PE correlation caused the native failure is still a hypothesis.
 
+Run40201927854 with the PE pathname returned SymNone (0), mask89: no loaded
+symbol type, GUID, age or PDB path. It did not qualify the adapter. The final
+bounded input correction passes the already-held PE handle as hFile as well as
+its exact ImageName. Never pass the PDB handle in that slot. No option, search
+scope or validation changes. The non-process session is documented as valid;
+it is not itself a proven cause. If this input still cannot qualify, stop this
+adapter experiment sequence and reassess the approach before another execution.
+
 Advance the development ARM64 runtime lock to the independently qualified new
 engine for this experiment. This is a separate integration decision after the
 source-build review; the symbol artifact alone did not change the runtime lock.
