@@ -415,7 +415,7 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet(int code,WPARAM wp,LPA
     Callback callback;
     if(code==HC_ACTION && lp) {
         const auto& message=*reinterpret_cast<const MSG*>(lp);
-        if(wp==PM_REMOVE) traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,1);
+        if((wp & PM_REMOVE)!=0) traceNavigation(message.hwnd,message.message,message.wParam,message.lParam,1);
         if((wp & PM_REMOVE)!=0) {
             const auto before=shared && load(&shared->captureEnabled)?loadSigned(&shared->captureCount):0;
             traceCapture(message.hwnd,message.message,message.wParam,message.lParam,1,wp);

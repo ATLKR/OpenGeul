@@ -56,6 +56,7 @@ class NavigationTraceTests(unittest.TestCase):
         prefix=r'''#include "ascii_message_protocol.h"
 #include <cassert>
 #include <cstring>
+#include <initializer_list>
 using LONG=int32_t;using UINT=uint32_t;using HWND=void*;using WPARAM=uintptr_t;using LPARAM=intptr_t;
 constexpr UINT WM_KEYDOWN=0x100,WM_KEYUP=0x101,WM_SYSKEYDOWN=0x104,WM_SYSKEYUP=0x105;
 constexpr UINT VK_TAB=9,VK_F2=0x71,VK_CONTROL=0x11,VK_F6=0x75,VK_END=0x23;
@@ -69,6 +70,23 @@ HWND GetFocus(){return reinterpret_cast<HWND>(22);}HWND GetCapture(){return null
 bool QueryPerformanceCounter(LARGE_INTEGER* v){v->QuadPart=123;return true;}
 bool QueryPerformanceFrequency(LARGE_INTEGER* v){v->QuadPart=1000;return true;}
 uint64_t GetTickCount64(){return 3;}void* GetKeyboardLayout(int){return reinterpret_cast<void*>(0x4090409);}
+'''
+        hook=source[source.index('extern "C" __declspec(dllexport) LRESULT CALLBACK HookGet('):source.index('extern "C" __declspec(dllexport) LRESULT CALLBACK HookReturn(')]
+        hook_prefix=r'''
+#ifdef __declspec
+#undef __declspec
+#endif
+#define __declspec(x)
+#define CALLBACK
+using LRESULT=intptr_t;
+constexpr int HC_ACTION=0;constexpr WPARAM PM_REMOVE=1;
+struct MSG {HWND hwnd;UINT message;WPARAM wParam;LPARAM lParam;};
+struct Callback {~Callback(){}};
+int observed=0,forwarded=0;
+void observe(const MSG&,WPARAM){++observed;}
+void traceCapture(HWND,UINT,WPARAM,LPARAM,uint32_t,WPARAM){}
+void traceRetrieval(const MSG&,WPARAM,uint32_t){}
+LRESULT CallNextHookEx(void*,int,WPARAM,LPARAM){++forwarded;return 17;}
 '''
         main=r'''
 int main(){
@@ -85,12 +103,24 @@ int main(){
  for(int i=0;i<200;++i)traceNavigation(hwnd,WM_KEYUP,VK_F2,0,1);
  assert(shared->traceCount==128 && shared->traceOverflow==1 && !memcmp(&first,&shared->traceEvents[0],sizeof(first)));
  assert(shared->count==0 && shared->armedEpoch==0 && shared->status==0);
+ shared->traceCount=0;shared->traceOverflow=0;
+ MSG message{hwnd,WM_KEYDOWN,VK_END,0};
+ for(WPARAM flags: {WPARAM(0),WPARAM(2)})
+   assert(HookGet(HC_ACTION,flags,reinterpret_cast<LPARAM>(&message))==17);
+ assert(shared->traceCount==0);
+ for(WPARAM flags: {WPARAM(1),WPARAM(3)})
+   assert(HookGet(HC_ACTION,flags,reinterpret_cast<LPARAM>(&message))==17);
+ assert(shared->traceCount==2 && shared->traceEvents[0].origin==1 && shared->traceEvents[1].origin==1);
+ assert(observed==4 && forwarded==4);
+ assert(HookGet(-1,3,reinterpret_cast<LPARAM>(&message))==17);
+ assert(HookGet(HC_ACTION,3,0)==17);
+ assert(shared->traceCount==2 && observed==4 && forwarded==6);
  shared->traceEnabled=0;shared->traceCount=0;traceNavigation(hwnd,WM_KEYDOWN,VK_F2,0,1);assert(shared->traceCount==0);
 }
 '''
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);cpp=root/'trace.cpp';exe=root/('trace.exe' if os.name=='nt' else 'trace')
-            cpp.write_text(prefix+producer+main)
+            cpp.write_text(prefix+producer+hook_prefix+hook+main)
             build=subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I',str(folder),str(cpp),'-o',str(exe)],capture_output=True,text=True,timeout=30)
             self.assertEqual(build.returncode,0,build.stdout+build.stderr)
             run=subprocess.run([str(exe)],capture_output=True,text=True,timeout=5)

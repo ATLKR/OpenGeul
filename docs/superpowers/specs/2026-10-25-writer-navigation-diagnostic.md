@@ -45,3 +45,21 @@ cleanup flags typed, and rows bounded. Successful or skipped fixtures do not
 trigger the shared upload; missing summary remains an explicit upload failure,
 with no raw-report fallback. Acceptance gates and per-mode prerequisites stay
 unchanged. No unchanged native rerun is authorized by this retention repair.
+
+### Removal-flag coverage correction after run40241619571
+
+At9f40e65, x64 inserted the original Ctrl+End once (4/4), but all49
+semantic observations retained bodyEndComparison1. Its complete zero-row trace
+cannot exclude retrieval: HookGet admitted only flags1, omitting flags3 despite
+the removal bit being present. Prior retained native evidence contains flags3.
+The correction admits the removal bit exactly as the existing capture observer
+does; flags0/2 remain excluded. No input, window scope, deadlines, protocol,
+privacy gate, or semantic acceptance changes. This repairs observation coverage,
+not Writer navigation or proof of which flags caused this failure.
+
+The next corrected first-attempt diagnostic asks whether a failing original
+Ctrl+End has owned queue-removal rows after closing this blind spot. Complete
+rows plus unchanged cursor narrow the failure beyond queue removal; zero rows
+remain insufficient to identify routing or a handler. Semantic success is
+nonreproduction, not a product fix. Partial/overflow/rejected evidence is
+inconclusive. Do not repeat unchanged or infer handler delivery from hook rows.

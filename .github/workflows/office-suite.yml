@@ -368,7 +368,7 @@ jobs:
       shell: pwsh
       run: |
         throw 'Reader console diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
-    - name: Targeted Impress navigation diagnostic (not acceptance)
+    - name: Targeted Writer navigation diagnostic (not acceptance)
       id: navigation-diagnostic
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
       env:

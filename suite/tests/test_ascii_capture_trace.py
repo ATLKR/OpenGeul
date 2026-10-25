@@ -120,7 +120,7 @@ int main(){
  assert(shared->captureCount==0 && navigationCalls==0);
  HookGet(HC_ACTION,1,reinterpret_cast<LPARAM>(&msg));HookGet(HC_ACTION,3,reinterpret_cast<LPARAM>(&msg));
  assert(shared->captureCount==2 && shared->captureEvents[0].removeFlags==1 && shared->captureEvents[1].removeFlags==3);
- assert(navigationCalls==1 && observeCalls==4 && retrievalCalls==2);
+ assert(navigationCalls==2 && observeCalls==4 && retrievalCalls==2);
 }
 '''
         with tempfile.TemporaryDirectory() as temporary:

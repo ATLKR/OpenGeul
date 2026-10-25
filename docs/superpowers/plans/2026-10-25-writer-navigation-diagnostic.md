@@ -38,3 +38,11 @@ unchanged rerun. Existing hooks cannot classify missing handler execution from
 absent sent-message rows. See updated spec and external evidence ledger. A local
 follow-up preserves generated prerequisite failure reports; it does not recover
 this run's missing exceptions or change engine behavior.
+
+### Follow-up: correct proven removal-flag blind spot
+- [x] Execute the real HookGet plus navigation producer in a portable regression;
+      reproduce missing flags3 row, retaining flags0/2 and forwarding checks.
+- [x] Admit PM_REMOVE as a bitmask; update the existing capture integration test
+      and correct the workflow's stale Impress display label to Writer.
+- [x] Independent review and full local validation of the correction.
+- [ ] Finish current run40241619571 before considering corrected native execution.
