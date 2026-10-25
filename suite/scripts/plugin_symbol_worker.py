@@ -13,6 +13,41 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
 import ascii_message_preparation as shared
 from plugin_file_origin import FileApi
 
+# A closed exit-code channel survives Job cleanup without exporting stderr,
+# exception messages, paths or symbol names. Parent and child use the same file.
+# The signature distinguishes these from ordinary cmd.exe launch failures.
+FAILURE_BASE=0x4f470000
+FAILURES=tuple(('ResolutionError',code) for code in '''
+ambient-symbol-path concurrent-symbol-session fixed-pdb-name fixed-symbol-range
+fixed-symbol-roundtrip fixed-symbol-unavailable loaded-symbol-identity local-fixed-drive
+local-path-required module-information native-windows-required original-budget-required
+pair-hash-mismatch pair-identity-mismatch pair-only-directory pdb-changed pdb-changed-under-lock
+pdb-handle pdb-open receipt-size return-rva-bounds symbol-initialize symbol-load
+symbol-name-bound symbol-options system-directory unsupported-local-path-encoding
+verified-pair-required symbol-unload symbol-cleanup symbol-pdb-handle
+'''.split())+tuple(('SymbolError',code) for code in '''
+absolute-normal-path-required binary-bounds codeview-format codeview-name codeview-pdb-name
+codeview-pointer codeview-size configuration-changed copy-identity debug-directory debug-rva
+dll-pdb-identity-mismatch file-changed file-identity fixed-config-path fresh-output-required
+linked-path managed-image msf-block msf-block-alias msf-directory-map-size msf-directory-shape
+msf-directory-size msf-file-size msf-layout msf-stream-count msf-stream-size msf7-header
+native-arm64-dll output-path pdb-info-size pdb-info-version pe-directories pe-headers
+pe-signature pe-size-or-magic pe32plus read-size receipt-size regular-file-size
+section-overlap section-range section-raw section-raw-overlap source-provenance
+symbol-identity unique-codeview-required
+'''.split())+tuple((category,'unclassified') for category in (
+    'AssertionError','OSError','PermissionError','FileNotFoundError','ImportError',
+    'ModuleNotFoundError','AttributeError','TypeError','ValueError','TimeoutError'))
+
+
+def failure_exit_code(error):
+    category=type(error).__name__
+    code=error.args[0] if len(error.args)==1 and type(error.args[0]) is str else None
+    for index,(known_category,known_code) in enumerate(FAILURES):
+        if category==known_category and (known_code=='unclassified' or code==known_code):
+            return FAILURE_BASE+index+1
+    return 1
+
 
 def inherited_budget(request):
     started,work,deadline=(request[k] for k in ('startedAt','workDeadline','deadline'))
@@ -46,6 +81,11 @@ def stages(rows):
         if sample:
             row['root']={k:sample['root'][k] for k in ('waitResult','exitCode')}
             row['activeProcesses']=sample['activeProcesses'];row['accountingSucceeded']=sample['querySucceeded']
+            observed=(stage.get('samples') or [sample])[-1]['root']
+            code=observed['exitCode']
+            if observed['waitResult']==0 and type(code) is int and FAILURE_BASE<code<=FAILURE_BASE+len(FAILURES):
+                category,reason=FAILURES[code-FAILURE_BASE-1]
+                row['childFailure']=dict(category=category,code=reason)
         result.append(row)
     return result
 
@@ -116,4 +156,4 @@ if __name__=='__main__':
     args=parser.parse_args()
     try:child(args.child)
     except BaseException as exc:
-        print(type(exc).__name__,file=sys.stderr);raise SystemExit(1)
+        raise SystemExit(failure_exit_code(exc))

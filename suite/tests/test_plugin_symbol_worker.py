@@ -1,7 +1,10 @@
 """Owned child watchdog retains parent deadlines and sanitized terminal evidence."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -55,6 +58,58 @@ class WorkerTests(unittest.TestCase):
         api=NS(preflight=lambda path:(_ for _ in ()).throw(ValueError('remote-drive')))
         with patch.object(self.m,'FileApi',return_value=api),patch.object(self.m.shared,'_absolute',side_effect=AssertionError('stat before local-drive admission')):
             with self.assertRaisesRegex(ValueError,'remote-drive'):self.m.run(self.root,mode='qualify')
+    def test_failed_child_preserves_closed_failure_code_after_cleanup(self):
+        # Previously every child error became exit 1 and its only detail was deleted.
+        self.assertTrue(hasattr(self.m,'failure_exit_code'),'child failure classification absent')
+        error=type('ResolutionError',(ValueError,),{})('symbol-load')
+        code=self.m.failure_exit_code(error)
+        runtime=self.runtime('nonzero');runtime.states=[[(0,0,code)]]
+        with self.assertRaises(AssertionError) as caught:self.m.run(self.root,mode='qualify',runtime=runtime)
+        receipt=caught.exception.symbolWorkerReceipt
+        self.assertFalse(receipt['success']);self.assertTrue(receipt['temporaryFilesRemoved'])
+        self.assertTrue(runtime.processes[0].closed)
+        self.assertEqual(receipt['stages'][0]['childFailure'],{'category':'ResolutionError','code':'symbol-load'})
+        self.assertNotIn(str(self.root),json.dumps(receipt))
+    def test_failure_classification_never_exports_exception_text(self):
+        self.assertTrue(hasattr(self.m,'failure_exit_code'),'child failure classification absent')
+        error=type('ResolutionError',(ValueError,),{})('private-path-or-symbol')
+        self.assertEqual(self.m.failure_exit_code(error),1)
+        self.assertEqual(self.m.failure_exit_code(type('private-type',(Exception,),{})('private-message')),1)
+        codes=[]
+        for category,code in self.m.FAILURES:
+            value=self.m.failure_exit_code(type(category,(Exception,),{})(code))
+            self.assertGreater(value,65535);self.assertLess(value,2**31);codes.append(value)
+        self.assertEqual(len(codes),len(set(codes)))
+        self.assertNotIn('private',json.dumps(self.m.stages([{'cleanupLastSample':{'root':{'waitResult':0,'exitCode':1},'activeProcesses':0,'querySucceeded':True}}])))
+    def test_isolated_child_exit_channel_has_no_stderr_or_stdout(self):
+        request=self.root/'request.json'
+        request.write_text(json.dumps(dict(startedAt=1,workDeadline=2,deadline=3)))
+        result=subprocess.run([sys.executable,'-I',str(SCRIPT),'--child',str(request)],
+            capture_output=True,timeout=10,cwd=self.root)
+        expected=self.m.failure_exit_code(AssertionError())
+        self.assertEqual(result.returncode,expected if os.name=='nt' else expected%256)
+        self.assertEqual(result.stdout,b'');self.assertEqual(result.stderr,b'')
+    @unittest.skipUnless(os.name=='nt','Windows cmd exit-code transport')
+    def test_generated_cmd_preserves_full_child_exit_code(self):
+        runtime=self.runtime('nonzero');original=runtime.start
+        expected=self.m.failure_exit_code(AssertionError())
+        def start(argv,folder):
+            request=json.loads((folder/'request.json').read_text())
+            request['workDeadline']-=1
+            (folder/'request.json').write_text(json.dumps(request))
+            result=subprocess.run(argv,cwd=folder,capture_output=True,timeout=10)
+            self.assertEqual(result.returncode,expected)
+            self.assertEqual(result.stdout,b'');self.assertEqual(result.stderr,b'')
+            self.assertEqual((folder/'stdout').read_bytes(),b'')
+            self.assertEqual((folder/'stderr').read_bytes(),b'')
+            request['workDeadline']+=1
+            (folder/'request.json').write_text(json.dumps(request))
+            runtime.states=[[(0,0,result.returncode)]]
+            return original(argv,folder)
+        runtime.start=start
+        with self.assertRaises(AssertionError) as caught:self.m.run(self.root,mode='qualify',runtime=runtime)
+        self.assertEqual(caught.exception.symbolWorkerReceipt['stages'][0]['childFailure'],
+            {'category':'AssertionError','code':'unclassified'})
     def test_inherited_budget_never_renews(self):
         self.clock.value=127.
         with self.assertRaises(AssertionError):self.m.inherited_budget(dict(startedAt=100.,workDeadline=127.,deadline=130.))
