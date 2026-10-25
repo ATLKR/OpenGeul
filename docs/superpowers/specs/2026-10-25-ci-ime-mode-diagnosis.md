@@ -56,7 +56,7 @@ until the original five-second focus deadline expired. Foreground stayed owned.
 The intended ARM64 mode-reset hypothesis was therefore not tested. Repeating the
 unchanged mode experiment is not justified.
 
-## Next experiment: owned capture ordering
+## Initial capture experiment: owned capture ordering
 
 Use an explicitly nonacceptance focus-only mode with three fresh, sequential
 Calc instances. Each retains its original one click, one Ctrl+F6, five-second
@@ -85,3 +85,55 @@ Retain its intentionally incomplete keyboard receipt and verify resource release
 Each case has a unique owned output and process; the cohort is not an input retry.
 The same owner-push/first-attempt privacy prerequisites and deliberate terminal
 nonacceptance failure apply. Every full native acceptance gate remains required.
+
+## Experiment 40149245104 at 4a0e81a
+
+Both architectures passed all three focus cases. The preceding run 40148534048
+stopped in unit tests because the portable extraction fixture redefined the
+Windows compiler's export macro. A six-line fixture-only correction reproduced
+and fixed that compilation failure without changing production declarations or
+warnings-as-errors. Both native lanes then passed 2,345 unit tests, with 36 skips.
+
+Verified x64 snapshots contain 16/3/3 rows and ARM64 snapshots contain 4/16/16.
+All six report complete publication at snapshot time, with matching reserved and
+published counts, no overflow, no rejected rows and no expiry. Exact original
+process generations, target identities, five-second deadlines and retained-engine
+exit checks match. This is focus-only evidence, not IME or delivery acceptance.
+
+The x64 second and third cases ended observation after mouse-down and focus
+messages, before any mouse-up row was retained. Other cases observed mouse-up
+removal and SAL capture/release cycles. Missing later rows in a stopped observer
+are censored observations, not evidence of lost input. ARM64 persistent capture
+did not reproduce. Hook installation and observations can perturb scheduling;
+nonreproduction does not establish a repair. The ARM64 TSF/IMM hypothesis remains
+untested.
+
+## Follow-up: remaining original focus window
+
+Test the specific hypothesis that capture or mouse-up processing can occur after
+the readiness sample. Keep the same three fresh cases and original input and
+five-second deadline. After readiness returns, mark a bracket from the same QPC
+clock as the native ring, including its committed boundary. This is a
+post-readiness marker, not the timestamp of the original readiness decision.
+Rows after its upper boundary are later than readiness; earlier or overlapping
+rows cannot be ordered against that decision from this marker alone.
+
+Immediately close the keyboard session using a separate strict diagnostic-stop
+contract while the independently admitted passive observer remains active. Do not
+relax the existing normal stop contract. Preserve original target generation,
+ownership and native architecture admission. No navigation, ASCII, IME, repeated
+input, mode mutation, capture release or new deadline is permitted.
+
+Retain passive observation only through the remainder of the original window.
+At expiry, copy bounded local evidence and release hooks/handles without new
+target queries or control messages. Preserve errors and publication quality;
+record early termination, partial publication, rejection and overflow explicitly.
+Do not send document/Home close input after the watch. Use the existing owned
+test-process teardown and retained engine exit check before another fresh case.
+Forced cleanup is not graceful shutdown or acceptance evidence.
+
+Later capture rows may demonstrate capture after readiness in this observed
+window. Later mouse-up rows may establish that the initial short trace ended too
+early. No later rows cannot prove handler completion, absence of every capture
+call, or resolution of the original failure. Full native acceptance remains
+required after an independently supported behavior correction.

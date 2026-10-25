@@ -201,9 +201,14 @@ and first-attempt admission remain mandatory.
 
 `focus-diagnostic` runs three fresh Calc instances with `--diagnose-focus calc`
 to observe capture ordering around each original click and Ctrl+F6. Each case
-keeps its five-second focus-entry budget and stops before navigation or IME.
-Native recording is bounded by that original deadline; after a timeout only
-already-recorded local evidence is copied, with no further target query or input.
+keeps its five-second focus-entry budget and stops keyboard input before
+navigation or IME. A QPC marker taken after readiness identifies later passive
+capture observations within the remainder of that same original budget; it does
+not timestamp the original readiness decision.
+Native recording is bounded by that original deadline; at expiry or after a
+failure only already-recorded local evidence is copied, with no further target
+query or input. Owned process teardown and retained engine exit are required
+before the next fresh case; forced cleanup is not graceful-shutdown evidence.
 The intentionally incomplete keyboard session and any primary failure are
 retained. Queue removal is not proof of handler execution. Separate
 `opengeul-suite-focus-diagnostic-<arch>-<run>-<attempt>` evidence cannot qualify

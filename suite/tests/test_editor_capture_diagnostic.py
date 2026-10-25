@@ -67,17 +67,18 @@ class CaptureDiagnosticTests(unittest.TestCase):
                 self.keyboard=keyboard;self.closed=False;events.append('construct')
                 self.cohort_lease=NS(finish=lambda:None)
             def start(self):events.append('trace-start')
+            def watch_remaining(self):events.append('passive-watch');self.close()
             def close(self,primary=None):
                 if not self.closed:events.append('trace-close');self.closed=True
         def case(*args,**kwargs):return original(*args,**kwargs,diagnose_focus=True,diagnostic_suffix='focus-01')
         with patch.object(phases.ime,'case',side_effect=case),patch.object(diagnostic,'EditorCaptureDiagnostic',Trace),patch.object(diagnostic,'cohort_cleanup_confirmed',return_value=True), \
-                patch.object(diagnostic,'stop_focus_keyboard',side_effect=lambda k:k.close(RuntimeError('focus stop'))), \
+                patch.object(diagnostic,'stop_focus_keyboard_before_passive_watch',side_effect=lambda k,t:k.close(RuntimeError('focus stop'))), \
                 patch('generated_calc_close.freeze_saved_calc_copy',return_value=object()), \
                 patch('calc_save_smoke.read_cells',return_value={}):
             owner=phases.IMECasePhaseTests();self.addCleanup(owner.doCleanups)
             calls,record,result,error=owner.run_case('calc')
         self.assertIsNone(error,repr(error));self.assertTrue(result['success'])
-        self.assertEqual(events,['construct','trace-start','trace-close'])
+        self.assertEqual(events,['construct','trace-start','passive-watch','trace-close'])
         self.assertEqual(calls.count('CTRL_F6'),1);self.assertNotIn('ready',calls)
         self.assertNotIn(('navigate','calc'),calls);self.assertNotIn('ascii-forward',calls)
         self.assertNotIn('CTRL_S',calls);self.assertNotIn(('command',1),calls)
@@ -227,3 +228,77 @@ class CaptureDiagnosticTests(unittest.TestCase):
         self.assertEqual(record['failureScreenshotSkipped'],'focus-diagnostic-local-only-after-failure')
         self.assertEqual(events,[('close','original focus failure'),'lease-finish'])
         self.assertNotIn('CTRL_F6',calls);self.assertNotIn('ready',calls)
+    def test_passive_remaining_watch_uses_original_deadline_and_only_local_copy(self):
+        from editor_capture_diagnostic import EditorCaptureDiagnostic
+        k=self.fixture();probe=self.probe();trace=EditorCaptureDiagnostic(k,{},6.,probe=probe)
+        trace.start();trace.receipt['readinessBoundary']=dict(counterAfter=20,counterBefore=10)
+        k.finished=True;k.record['focusKeyboardStop']=dict(kind='intentional-focus-stop-before-passive-watch')
+        def sleep(seconds):
+            self.assertGreater(seconds,0);self.assertLessEqual(seconds,6.-k.clock.now);k.clock.now+=seconds
+        trace.watch_remaining(sleep=sleep)
+        self.assertEqual(k.clock.now,6.);self.assertTrue(trace.receipt['passiveWatch']['originalDeadlineReached'])
+        self.assertEqual(probe.calls,['admit','start',('read',{'local_only':True}),'close'])
+        self.assertTrue(trace.closed)
+
+    def test_real_keyboard_stops_before_watch_without_releasing_observer_lease(self):
+        from editor_capture_diagnostic import stop_focus_keyboard_before_passive_watch
+        k=self.stopped_keyboard();receipt=k.record['focusCaptureDiagnostic'];receipt.pop('cleanup')
+        marker=dict(counterBefore=10,counterAfter=20)
+        trace=NS(keyboard=k,receipt=receipt,deadline=6.,closed=False,
+            probe=NS(readiness_boundary=lambda **kw:marker))
+        stop_focus_keyboard_before_passive_watch(k,trace,counter=lambda:10)
+        self.assertTrue(k.finished);self.assertFalse(k.receipt['success']);self.assertTrue(k.receipt['engineHandleReleased'])
+        self.assertEqual(k.record['focusKeyboardStop']['kind'],'intentional-focus-stop-before-passive-watch')
+        self.assertIs(receipt['readinessBoundary'],marker);self.assertNotIn('cleanup',receipt)
+    def test_passive_watch_copy_errors_fail_without_target_retry(self):
+        from editor_capture_diagnostic import EditorCaptureDiagnostic
+        k=self.fixture();probe=self.probe();trace=EditorCaptureDiagnostic(k,{},6.,probe=probe)
+        trace.start();trace.receipt['readinessBoundary']=dict(counterAfter=20,counterBefore=10)
+        k.finished=True;k.record['focusKeyboardStop']=dict(kind='intentional-focus-stop-before-passive-watch')
+        def read(**kw):
+            self.assertTrue(kw['local_only']);self.assertGreaterEqual(k.clock.now,6.);raise OSError('local-copy-error')
+        probe.read_capture_trace=read
+        with self.assertRaisesRegex(AssertionError,'snapshot or cleanup failed'):
+            trace.watch_remaining(sleep=lambda seconds:setattr(k.clock,'now',k.clock.now+seconds))
+        self.assertIn('local-copy-error',trace.receipt['snapshotError']);self.assertNotIn('stop',probe.calls)
+        self.assertIn('close',probe.calls)
+    def test_readiness_marker_uses_same_native_budget_and_committed_ring_index(self):
+        from editor_capture_diagnostic import PassiveCaptureProbe
+        k=self.stopped_keyboard();receipt={};probe=PassiveCaptureProbe(k,{},receipt,6.)
+        scope=copy.deepcopy(k.record['editorFocusReadiness']['snapshots'][-1]);scope['focus']=copy.deepcopy(scope['before']['editor'])
+        scope['capture']=dict(hwnd=0,isWindow=False,pid=0,threadId=0,rootHwnd=0)
+        receipt['lastPassiveScope']=scope;calls=[]
+        probe._identity=lambda:calls.append('identity');probe.handle=901
+        probe.probe=NS(engine_snapshot=lambda h:(calls.append(('lease',h)) or dict(k.engine,handleValue=h)))
+        probe.cohort_lease=NS(probe=probe.probe,handle=902,closed=False,receipt=dict(admitted=True,originalEngine=dict(k.engine,handleValue=902)))
+        probe.transport=NS(closed=False,capture_budget=(6000,1000),read_capture_trace=lambda **kw:(calls.append(('copy',kw)) or dict(events=[{}],reservedCount=2,status='partial')))
+        ticks=iter((1000,1020));marker=probe.readiness_boundary(counter=lambda:next(ticks))
+        self.assertEqual((marker['counterBefore'],marker['counterAfter'],marker['counterFrequency']),(1000,1020,1000))
+        self.assertEqual((marker['committedIndex'],marker['reservedIndex'],marker['ringStatus']),(1,2,'partial'))
+        self.assertFalse(marker['originalReadinessDecisionCounterKnown'])
+        self.assertEqual(calls,['identity',('lease',902),('copy',{'local_only':True})])
+        scope['capture']=copy.deepcopy(scope['before']['editor'])
+        with self.assertRaisesRegex(AssertionError,'strict original editor focus'):probe.readiness_boundary(counter=lambda:1000)
+    def test_watch_stop_rejects_closed_trace_and_keyboard_retention_failure(self):
+        from editor_capture_diagnostic import stop_focus_keyboard_before_passive_watch
+        for failure in ('closed','retention','deadline'):
+            k=self.stopped_keyboard();receipt=k.record['focusCaptureDiagnostic'];receipt.pop('cleanup')
+            trace=NS(keyboard=k,receipt=receipt,deadline=6.,closed=failure=='closed',probe=NS(readiness_boundary=lambda **kw:{}))
+            original=k._retain
+            def retain(label):
+                if failure=='retention':raise OSError('retention failed')
+                original(label)
+                if failure=='deadline':k.clock.now=6.
+            with patch.object(k,'_retain',side_effect=retain):
+                with self.assertRaises(AssertionError):stop_focus_keyboard_before_passive_watch(k,trace)
+            self.assertNotIn('focusKeyboardStop',k.record)
+    def test_watch_interruption_retains_primary_and_local_snapshot(self):
+        from editor_capture_diagnostic import EditorCaptureDiagnostic
+        k=self.fixture();probe=self.probe();trace=EditorCaptureDiagnostic(k,{},6.,probe=probe)
+        trace.start();trace.receipt['readinessBoundary']=dict(counterAfter=20,counterBefore=10)
+        k.finished=True;k.record['focusKeyboardStop']=dict(kind='intentional-focus-stop-before-passive-watch')
+        primary=RuntimeError('passive sleep interrupted')
+        def interrupted(seconds):raise primary
+        with self.assertRaises(RuntimeError) as caught:trace.watch_remaining(sleep=interrupted)
+        self.assertIs(caught.exception,primary);self.assertFalse(trace.receipt['passiveWatch']['originalDeadlineReached'])
+        self.assertEqual(probe.calls,['admit','start',('read',{'local_only':True}),'close'])

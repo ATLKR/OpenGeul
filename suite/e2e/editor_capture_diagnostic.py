@@ -1,5 +1,7 @@
 """Passive capture observation around one original focus-entry attempt only."""
 import ctypes as C
+import copy
+import time
 from ascii_message_windows import MessageTransport, NativeAsciiProbe
 from counted_editor_shortcuts import NativeShortcutProbe, join_shortcut_generation, US_LAYOUT
 from ascii_message_preparation import require_prepared_library
@@ -131,6 +133,36 @@ class PassiveCaptureProbe:
         for name,pid in (('controller',self.controller_pid),('shell',self.process.pid),('engine',self.binding['officePid'])):
             self._budget();assert self._session(pid)==self.sessions[name];self._budget()
         self._budget()
+    def readiness_boundary(self, *, counter=None):
+        from windows_smoke import _editor_focus_snapshot_ready
+        self._identity();b=self.binding
+        scope=copy.deepcopy(self.receipt['lastPassiveScope'])
+        assert _editor_focus_snapshot_ready(scope,b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'],self.keyboard.tid), 'Passive watch requires strict original editor focus without capture'
+        lease=self.cohort_lease
+        assert not self.closed and self.handle and self.transport and not self.transport.closed
+        assert lease.probe is self.probe and lease.handle and not lease.closed and lease.receipt.get('admitted') is True
+        self._budget();assert self.probe.engine_snapshot(lease.handle)==lease.receipt['originalEngine']
+        self._budget()
+        frequency=self.transport.capture_budget[1]
+        if counter is None:
+            kernel=self.probe.kernel
+            kernel.QueryPerformanceCounter.argtypes=(C.POINTER(C.c_int64),);kernel.QueryPerformanceCounter.restype=C.c_int32
+            kernel.QueryPerformanceFrequency.argtypes=(C.POINTER(C.c_int64),);kernel.QueryPerformanceFrequency.restype=C.c_int32
+            value=C.c_int64();assert kernel.QueryPerformanceFrequency(C.byref(value)) and value.value==frequency
+            def counter():
+                value=C.c_int64();assert kernel.QueryPerformanceCounter(C.byref(value));return value.value
+        self._budget();before=counter();self._budget()
+        snapshot=self.transport.read_capture_trace(local_only=True)
+        after=counter();self._budget()
+        assert type(before) is int and type(after) is int and 0<before<=after<self.transport.capture_budget[0]
+        return dict(counterBefore=before,counterAfter=after,counterFrequency=frequency,
+            nativeDeadlineCounter=self.transport.capture_budget[0],committedIndex=len(snapshot['events']),
+            reservedIndex=snapshot['reservedCount'],ringStatus=snapshot['status'],strictScope=scope,
+            markerPhase='post-readiness-before-keyboard-close',
+            originalReadinessElapsedSeconds=self.keyboard.record['editorFocusReadiness']['elapsedSeconds'],
+            originalReadinessDecisionCounterKnown=False,snapshotPhase='bounded-local-copy',
+            acceptanceEligible=False,historicalFocusContinuityProved=False)
+
     def start(self):self.transport.start()
     def read_capture_trace(self,*,local_only=False):
         if self.transport is None:return dict(status='unavailable',reason='transport-not-admitted',events=[])
@@ -160,6 +192,31 @@ class EditorCaptureDiagnostic:
     def start(self):
         try:self.probe.admit();self.probe.start()
         except BaseException as exc:self.close(exc);raise
+    def watch_remaining(self, *, sleep=time.sleep):
+        assert not self.closed and 'readinessBoundary' in self.receipt
+        assert self.keyboard.finished and self.keyboard.record['focusKeyboardStop']['kind']=='intentional-focus-stop-before-passive-watch'
+        started=self.clock();assert started<self.deadline
+        watch=dict(startedAt=started,deadline=self.deadline,remainingSeconds=self.deadline-started,
+            originalDeadlineReached=False,targetQueriesDuringWatch=0,inputAttempts=0,acceptanceEligible=False)
+        self.receipt['passiveWatch']=watch
+        try:
+            while True:
+                remaining=self.deadline-self.clock()
+                if remaining<=0:break
+                sleep(min(.05,remaining))
+            watch.update(finishedAt=self.clock(),originalDeadlineReached=True)
+        except BaseException as exc:
+            watch['error']=type(exc).__name__+': '+str(exc)[:512];self.close(exc);raise
+        self.close(FocusPassiveWatchComplete('Original passive observation budget ended'))
+        assert not self.receipt.get('snapshotError') and not self.receipt['cleanupErrors'],'Passive watch snapshot or cleanup failed'
+        snapshot=self.receipt['snapshot']
+        boundary=self.receipt['readinessBoundary']
+        watch.update(traceStatus=snapshot.get('status'),traceOverflow=snapshot.get('overflow'),
+            traceRejected=snapshot.get('rejected'),traceExpired=snapshot.get('expired'),
+            committedEvents=len(snapshot.get('events',[])),
+            eventsDefinitelyAfterReadiness=sum(row.get('counter',0)>boundary['counterAfter'] for row in snapshot.get('events',[])),
+            continuousFocusOrCaptureStateProved=False,coverage='bounded message transitions only; absence is not continuous-state proof')
+
     def close(self,primary=None):
         if self.closed:return
         self.closed=True;failure=None
@@ -206,4 +263,38 @@ def stop_focus_keyboard(keyboard):
     assert keyboard.receipt['error']==type(reason).__name__+': '+str(reason)
     assert keyboard.clock()<deadline,'Original focus diagnostic deadline expired during keyboard cleanup'
     r['focusKeyboardStop']=dict(kind='intentional-focus-diagnostic-stop',acceptanceEligible=False,
+        keyboardSessionSuccess=False,engineHandleReleased=True,deadline=deadline)
+
+
+class FocusPassiveWatchComplete(Exception):pass
+class FocusKeyboardWatchStop(Exception):pass
+
+
+def stop_focus_keyboard_before_passive_watch(keyboard, trace, *, counter=None):
+    """Close input ownership while independent passive observation remains admitted."""
+    from windows_smoke import require_editor_focus_readiness
+    r=keyboard.record;b=keyboard.binding;focus=r['editorFocusReadiness'];deadline=focus['deadline']
+    assert r.get('kind')=='native-focus-diagnostic' and r.get('acceptanceEligible') is False and r.get('imeVerified') is False
+    assert keyboard.module=='calc' and keyboard.phase=='awaiting-editor-readiness' and not keyboard.finished and keyboard.failed is None
+    require_editor_focus_readiness(focus,b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'])
+    assert r['imeKeyboardSession'] is keyboard.receipt and keyboard.handle
+    assert keyboard.receipt['success'] is False and not keyboard.receipt['engineHandleReleased']
+    assert not keyboard.receipt['cleanupErrors'] and not keyboard.receipt.get('retentionError')
+    action,=keyboard.receipt['actions']
+    assert action['shortcut']=='CTRL_F6' and action['inputCallAttempts']==1 and action['insertedInputs']==4
+    assert focus['startedAt']<=action['startedAt']<=action['finishedAt']<deadline
+    assert action['deadline']==keyboard.receipt['focusDeadline']==deadline
+    assert trace.keyboard is keyboard and trace.receipt is r['focusCaptureDiagnostic'] and trace.deadline==deadline
+    assert not trace.closed and not trace.receipt['cleanupErrors'] and not trace.receipt.get('snapshotError')
+    assert keyboard.clock()<deadline and not keyboard.semantic_pre and not keyboard.semantic_post and not r.get('asciiEditorInputs')
+    assert 'readinessBoundary' not in trace.receipt
+    trace.receipt['readinessBoundary']=trace.probe.readiness_boundary(counter=counter)
+    assert keyboard.clock()<deadline
+    reason=FocusKeyboardWatchStop('Input session ends before passive remainder of original focus budget')
+    keyboard.close(primary=reason)
+    assert keyboard.finished and keyboard.receipt['success'] is False and keyboard.receipt['engineHandleReleased'] is True
+    assert not keyboard.receipt['cleanupErrors'] and not keyboard.receipt.get('retentionError')
+    assert keyboard.receipt['error']==type(reason).__name__+': '+str(reason)
+    assert keyboard.clock()<deadline,'Original focus diagnostic deadline expired during keyboard cleanup'
+    r['focusKeyboardStop']=dict(kind='intentional-focus-stop-before-passive-watch',acceptanceEligible=False,
         keyboardSessionSuccess=False,engineHandleReleased=True,deadline=deadline)

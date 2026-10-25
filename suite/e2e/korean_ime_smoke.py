@@ -1235,15 +1235,11 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             lambda: keyboard.focus_editor(record['editorFocusReadiness']['deadline']),
             seconds=remaining_setup(setup_deadline, 5))
         if diagnose_focus:
-            from editor_capture_diagnostic import stop_focus_keyboard
-            from generated_calc_close import freeze_saved_calc_copy
-            from calc_save_smoke import read_cells
-            record['stage']='focus-diagnostic-cleanup'
+            from editor_capture_diagnostic import stop_focus_keyboard_before_passive_watch
+            record['stage']='focus-diagnostic-passive-watch'
             assert focus_trace is not None,'Focus diagnostic observer was not started'
-            focus_trace.close();stop_focus_keyboard(keyboard)
-            proof=freeze_saved_calc_copy(suite,folder,source,before,read_cells(original_bytes))
-            close_document(api,process,hwnd,child,record,calc_close_proof=proof)
-            close_home(api,process,record)
+            stop_focus_keyboard_before_passive_watch(keyboard,focus_trace)
+            focus_trace.watch_remaining()
             assert original.read_bytes()==original_bytes,'Focus experiment altered baseline fixture'
             record.update(success=True,stage='focus-diagnostic-complete',imeVerified=False,
                 acceptanceEligible=False,originalFixtureUnchanged=True)
