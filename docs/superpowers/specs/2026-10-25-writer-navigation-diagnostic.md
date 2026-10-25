@@ -38,5 +38,10 @@ Microsoft's hook overview distinguishes queued-message and sent-message hooks:
 https://learn.microsoft.com/en-us/windows/win32/winmsg/about-hooks
 ARM64 failed Writer/Calc engine fixture prerequisites before this observation.
 Diagnostic mode did not retain those generated exception reports; preserve only
-existing engine-*.json reports on future navigation prerequisite failures, without
-changing any gate or launching an unchanged rerun to collect broader logs.
+the existing closed engine-failure-summary.json on fixture failure across every
+validated diagnostic mode. Never retain engine-*.json, raw exception reports or
+fixture content through this shared step. Its stage/category values are closed,
+cleanup flags typed, and rows bounded. Successful or skipped fixtures do not
+trigger the shared upload; missing summary remains an explicit upload failure,
+with no raw-report fallback. Acceptance gates and per-mode prerequisites stay
+unchanged. No unchanged native rerun is authorized by this retention repair.

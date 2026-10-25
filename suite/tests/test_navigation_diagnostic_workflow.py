@@ -35,18 +35,6 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
         self.assertIn('if ($LASTEXITCODE -ne 0)',code)
         self.assertLess(next(i for i,s in enumerate(steps) if field(s,'id')=='fixtures'),steps.index(step))
 
-    def test_failed_fixture_reports_survive_skipped_navigation(self):
-        steps=workflow_steps();step=next(s for s in steps if field(s,'id')=='navigation-fixture-failure-evidence')
-        expression=condition(step)
-        self.assertEqual(expression,"always() && "+DIAGNOSTIC+" && steps.fixtures.outcome == 'failure'")
-        self.assertIn('path: .work/suite-engine/engine-*.json',step)
-        self.assertIn('if-no-files-found: error',step)
-        self.assertLess(next(i for i,s in enumerate(steps) if field(s,'id')=='fixtures'),steps.index(step))
-        for mode in ('acceptance','navigation-diagnostic','reader-console-diagnostic'):
-            for outcome in ('success','failure','skipped'):
-                value=expression.replace('always()','True').replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('steps.fixtures.outcome',repr(outcome)).replace('&&','and')
-                self.assertEqual(eval(value,{'__builtins__':{}}),mode=='navigation-diagnostic' and outcome=='failure')
-
     def test_all_acceptance_steps_keep_original_conditions_and_require_acceptance(self):
         steps=workflow_steps();start=next(i for i,s in enumerate(steps) if field(s,'id')=='calc-save')
         originals={"!cancelled() && steps.fixtures.outcome == 'success'",
