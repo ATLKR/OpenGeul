@@ -238,7 +238,7 @@ jobs:
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.mutex-layout-fixture.outcome == 'success'"
       shell: pwsh
       run: |
-        python suite/scripts/map-mutex-function.py --archive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip --lock suite/config/runtime.arm64.lock.json --fixture .work/suite-mutex-layout-fixture/mutex-layout-fixture.dll --output .work/suite-mutex-function-mapping/receipt.json
+        python suite/scripts/map-mutex-function.py --archive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip --lock suite/config/runtime.arm64.lock.json --fixture .work/suite-mutex-layout-fixture/mutex-layout-fixture.dll --output .work/suite-mutex-function-mapping/receipt.json --inspect-calls
         if ($LASTEXITCODE -ne 0) { throw 'Static mutex attribution rejected its inputs.' }
     - name: Retain only mutex attribution and compiler lifecycle receipts
       id: mutex-function-evidence

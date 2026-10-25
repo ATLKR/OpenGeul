@@ -21,12 +21,12 @@ protected:
 };
 
 static volatile std::uint32_t witness = 0;
-__declspec(noinline) static std::uint32_t observe(std::uint32_t count) {
+extern "C" __declspec(dllexport) __declspec(noinline) std::uint32_t OpenGeulFixtureObserve(std::uint32_t count) {
     witness = count;
     return witness;
 }
 void OpenGeulFixtureMutex::doAcquire(std::uint32_t count) {
-    const auto observed = observe(count);
+    const auto observed = OpenGeulFixtureObserve(count);
     value = observed; // Post-call side effect forbids a tail-call-only leaf witness.
 }
 

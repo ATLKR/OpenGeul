@@ -207,3 +207,78 @@ class MutexMappingTests(unittest.TestCase):
         for i in range(1,5):
             data=change(image(),0x2808+2*i,'H',0)
             self.assertEqual(self.m.map_mutex_pe(data,lambda:None)['status'],'inconclusive')
+
+    def test_call_inspection_exact_gate_and_original_reserved_budget(self):
+        result={'status':'inconclusive','reason':'unsupported-or-ambiguous-condition-call','functionRange':{'beginRva':100192,'endRvaExclusive':100292},'memberSha256':self.m.INSPECTION_MEMBER_SHA}
+        self.assertTrue(self.m.inspection_eligible(result))
+        for key,value in (('status','exact'),('reason','no-unique-condition-import'),('memberSha256','0'*64),('functionRange',{'beginRva':100196,'endRvaExclusive':100292})):
+            self.assertFalse(self.m.inspection_eligible(dict(result,**{key:value})))
+        values=iter([100,126,127,129,130]);budget=self.m.AnalysisBudget(lambda:next(values),reserve_cleanup=True)
+        self.assertEqual(budget.now(),126)
+        with self.assertRaisesRegex(self.m.MappingError,'analysis-deadline'):budget.now()
+        self.assertEqual(budget.now(cleanup=True),129)
+        with self.assertRaisesRegex(self.m.MappingError,'analysis-deadline'):budget.now(cleanup=True)
+    def test_explicit_inspection_does_not_run_driver_for_unpinned_member(self):
+        with tempfile.TemporaryDirectory() as d:
+            fp=Path(d)/'fixture.dll';fp.write_bytes(image(True));zp=Path(d)/'engine.zip'
+            with zipfile.ZipFile(zp,'w') as z:z.writestr('program/vclplug_winlo.dll',change(image(),0x1008,'I',0xd503201f))
+            lock={'architecture':'arm64','runtime':{'sourceCoreCommit':self.m.SOURCE_CORE_COMMIT,'size':zp.stat().st_size,'sha256':hashlib.sha256(zp.read_bytes()).hexdigest()}}
+            with mock.patch.object(self.m,'inspect_candidate_calls',side_effect=AssertionError('not eligible')):
+                r=self.m.analyze(zp,lock,fp,inspect_calls=True)
+            self.assertEqual(r['callInspection']['status'],'not-eligible');self.assertEqual(r['status'],'inconclusive')
+    def test_exact_eligible_fallback_receives_original_budget_without_promoting_attribution(self):
+        with tempfile.TemporaryDirectory() as d:
+            fp=Path(d)/'fixture.dll';fp.write_bytes(image(True));zp=Path(d)/'engine.zip'
+            data=change(image(),0x1008,'I',0xd503201f)
+            with zipfile.ZipFile(zp,'w') as z:z.writestr('program/vclplug_winlo.dll',data)
+            lock={'architecture':'arm64','runtime':{'sourceCoreCommit':self.m.SOURCE_CORE_COMMIT,'size':zp.stat().st_size,'sha256':hashlib.sha256(zp.read_bytes()).hexdigest()}}
+            real=self.m.map_mutex_pe;time=[100.];seen=[]
+            def mapped(raw,check,*,fixture=False):
+                value=real(raw,check,fixture=fixture)
+                if not fixture:value.update(functionRange={'beginRva':100192,'endRvaExclusive':100292})
+                return value
+            def inspect(raw,fixture,result,proof,budget):
+                seen.append(budget);self.assertEqual(raw,data)
+                self.assertEqual((budget.started,budget.work_deadline,budget.deadline),(100,127,130))
+                self.assertEqual(result['status'],'inconclusive')
+                return {'status':'classified','attributionProved':False}
+            with mock.patch.object(self.m,'INSPECTION_MEMBER_SHA',hashlib.sha256(data).hexdigest()),mock.patch.object(self.m,'map_mutex_pe',mapped),mock.patch.object(self.m,'inspect_candidate_calls',inspect):
+                r=self.m.analyze(zp,lock,fp,clock=lambda:time[0],inspect_calls=True)
+                self.assertEqual(len(seen),1);self.assertEqual(r['status'],'inconclusive');self.assertFalse(r['acceptance'])
+                # Default never invokes the native boundary even for identical eligible metadata.
+                r=self.m.analyze(zp,lock,fp,clock=lambda:time[0])
+                self.assertEqual(len(seen),1);self.assertNotIn('callInspection',r)
+    def test_helper_export_exact_filter_does_not_change_do_acquire_witness(self):
+        b=bytearray(image(True));struct.pack_into('<IIIII',b,0x2514-0xc00,2,2,0x2540,0x2550,0x2560)
+        struct.pack_into('<II',b,0x2540-0xc00,0x1000,0x1100);struct.pack_into('<II',b,0x2550-0xc00,0x2580,0x25c0);struct.pack_into('<HH',b,0x2560-0xc00,0,1)
+        name=b'OpenGeulFixtureObserve\0';b[0x25c0-0xc00:0x25c0-0xc00+len(name)]=name
+        pe=self.m.PE(bytes(b),lambda:None)
+        self.assertEqual(pe.exports(),[0x1000]);self.assertEqual(pe.exports('OpenGeulFixtureObserve'),[0x1100])
+        self.assertEqual(self.m.map_mutex_pe(bytes(b),lambda:None,fixture=True)['status'],'exact')
+    def test_rejected_native_lifecycle_receipt_survives_original_exception(self):
+        with tempfile.TemporaryDirectory() as d:
+            lock=Path(d)/'lock';lock.write_text('{}');out=Path(d)/'out'
+            error=RuntimeError('private tool path not public');error.callInspection={'success':False,'temporaryFilesRemoved':True,'stages':[{'stage':'fixture-disassembly','natural':False}]}
+            with mock.patch.object(self.m,'analyze',side_effect=error):
+                code=self.m.main(['--archive',d+'/archive','--lock',str(lock),'--fixture',d+'/fixture','--output',str(out),'--inspect-calls'])
+            self.assertEqual(code,1);r=json.loads(out.read_text())
+            self.assertEqual(r['callInspection'],error.callInspection);self.assertNotIn('private tool',out.read_text())
+
+    def test_safe_classifier_reason_survives_rejected_cli_with_lifecycle(self):
+        spec=importlib.util.spec_from_file_location('classifier_reason',SCRIPT.with_name('mutex_call_classification.py'))
+        classifier=importlib.util.module_from_spec(spec);spec.loader.exec_module(classifier)
+        try:
+            classifier.parse_and_classify('private/path malformed raw input',image_base=0x180000000,
+                function_range={'beginRva':0x1000,'endRvaExclusive':0x1004})
+        except classifier.ClassificationError as caught:error=caught
+        error.callInspection={'success':False,'temporaryFilesRemoved':True,'classificationReason':error.reason_code,
+                              'stages':[{'stage':'fixture-disassembly','natural':True,'handlesClosed':True}]}
+        with tempfile.TemporaryDirectory() as d:
+            lock=Path(d)/'lock';lock.write_text('{}');out=Path(d)/'out'
+            with mock.patch.object(self.m,'analyze',side_effect=error):
+                self.assertEqual(self.m.main(['--archive',d+'/archive','--lock',str(lock),'--fixture',d+'/fixture','--output',str(out),'--inspect-calls']),1)
+            receipt=json.loads(out.read_text())
+            self.assertEqual(receipt['callInspection']['classificationReason'],'unsupported-output-line')
+            self.assertTrue(receipt['callInspection']['temporaryFilesRemoved'])
+            self.assertTrue(receipt['callInspection']['stages'][0]['handlesClosed'])
+            for forbidden in ('private/path','malformed raw input',d):self.assertNotIn(forbidden,out.read_text())

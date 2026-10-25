@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -113,7 +114,7 @@ class PE:
             off += length
         return result
 
-    def exports(self):
+    def exports(self, expected_name=FIXTURE_EXPORT):
         addr, size = self.directories[0]
         if not size: return []
         require(size >= 40, 'export-directory'); off = self.rva(addr, size)
@@ -126,7 +127,7 @@ class PE:
             ordinal = self.word(oa+i*2, 'H'); require(ordinal < nf, 'export-ordinal')
             target = self.word(fa+ordinal*4)
             name = self.name(self.word(na+i*4))
-            if name == FIXTURE_EXPORT.encode() and not addr <= target < addr+size: result.append(target)
+            if name == expected_name.encode() and not addr <= target < addr+size: result.append(target)
         return result
 
     def condition_imports(self):
@@ -247,18 +248,65 @@ def _held_bytes(path, cap, check, *, expected_size=None):
     check(); return b''.join(chunks)
 
 
-def analyze(archive, lock, fixture, *, clock=time.monotonic):
+INSPECTION_MEMBER_SHA = '9b0f653038b84ac7c5292c9211c90aa21b86bad91a0a44fedce80e48d237fa73'
+
+
+class AnalysisBudget:
+    def __init__(self, clock, *, reserve_cleanup):
+        self.clock = clock
+        self.started = self.last = clock()
+        require(type(self.started) in (int, float) and math.isfinite(self.started), 'analysis-clock')
+        self.deadline = self.started + 30
+        self.work_deadline = self.deadline - (3 if reserve_cleanup else 0)
+
+    def now(self, *, cleanup=False):
+        now = self.clock()
+        require(type(now) in (int, float) and math.isfinite(now) and now >= self.last, 'analysis-clock')
+        self.last = now
+        require(now < (self.deadline if cleanup else self.work_deadline), 'analysis-deadline')
+        return now
+
+
+def inspection_eligible(result):
+    return (result.get('status') == 'inconclusive' and
+            result.get('reason') == 'unsupported-or-ambiguous-condition-call' and
+            result.get('memberSha256') == INSPECTION_MEMBER_SHA and
+            result.get('functionRange') == dict(beginRva=100192, endRvaExclusive=100292))
+
+
+def inspect_candidate_calls(data, fixture_data, result, proof, budget):
+    # The optional native tool is imported only after authentication and exact gate.
+    require(inspection_eligible(result), 'call-inspection-gate')
+    production_pe, fixture_pe = PE(data, budget.now), PE(fixture_data, budget.now)
+    exports = fixture_pe.exports('OpenGeulFixtureObserve')
+    require(len(exports) == 1, 'fixture-helper-export')
+    fixture_pe.rva(exports[0], 4, True)
+    imports = production_pe.condition_imports()
+    require(len(imports) == 1, 'call-inspection-import')
+    def module(name):
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name+'.py'))
+        value = importlib.util.module_from_spec(spec); spec.loader.exec_module(value); return value
+    classifier = module('mutex_call_classification')
+    driver = module('mutex_call_native')
+    budget.now()
+    return driver.inspect_calls(data, fixture_data, production_base=production_pe.base,
+        production_range=result['functionRange'], fixture_base=fixture_pe.base,
+        fixture_range=proof['functionRange'], fixture_target=exports[0], condition_iat=imports[0],
+        budget=budget, classify=classifier.parse_and_classify)
+
+
+def analyze(archive, lock, fixture, *, clock=time.monotonic, inspect_calls=False):
     identity = {}
     try:
-        return _analyze(archive, lock, fixture, clock=clock, identity=identity)
+        return _analyze(archive, lock, fixture, clock=clock, identity=identity, inspect_calls=inspect_calls)
     except Exception as exc:
         exc.mutex_identity = identity
         raise
 
 
-def _analyze(archive, lock, fixture, *, clock, identity):
-    deadline = clock()+30
-    def check(): require(clock() < deadline, 'analysis-deadline')
+def _analyze(archive, lock, fixture, *, clock, identity, inspect_calls):
+    budget = AnalysisBudget(clock, reserve_cleanup=inspect_calls)
+    check = budget.now
     fixture_data = _held_bytes(fixture, MAX_MEMBER, check)
     identity['fixtureSha256'] = hashlib.sha256(fixture_data).hexdigest(); check()
     proof = map_mutex_pe(fixture_data, check, fixture=True)
@@ -291,22 +339,31 @@ def _analyze(archive, lock, fixture, *, clock, identity):
                   sourceCoreCommit=SOURCE_CORE_COMMIT, slotProofPolicy='pinned-single-base-microsoft-arm64-v1',
                   archiveSha256=digest, archiveSize=size, member='program/vclplug_winlo.dll', memberSha256=hashlib.sha256(data).hexdigest(),
                   memberSize=len(data), fixtureSha256=hashlib.sha256(fixture_data).hexdigest(), fixture=proof, analysisBudgetSeconds=30)
+    if inspect_calls:
+        result['callInspection'] = (inspect_candidate_calls(data, fixture_data, result, proof, budget)
+                                    if inspection_eligible(result) else dict(status='not-eligible'))
     check(); require(len(json.dumps(result)) <= 8192, 'receipt-size'); return result
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('archive', 'lock', 'fixture', 'output'): p.add_argument('--'+name, required=True, type=Path)
+    p.add_argument('--inspect-calls', action='store_true')
     args = p.parse_args(argv)
     try:
         require(args.lock.stat().st_size <= 65536, 'lock-size')
-        result = analyze(args.archive, json.loads(args.lock.read_text(encoding='utf-8')), args.fixture); code = 0
+        result = analyze(args.archive, json.loads(args.lock.read_text(encoding='utf-8')), args.fixture, inspect_calls=args.inspect_calls); code = 0
     except Exception as exc:
         result = {'schemaVersion':1, 'kind':'static-mutex-function-mapping', 'acceptance':False, 'physicalInputReproduced':False,
                   'status':'rejected', 'failureClass':type(exc).__name__, 'reason':str(exc) if isinstance(exc, MappingError) else 'input-or-parser-failure'}
         sha = os.environ.get('GITHUB_SHA', '')
         result['sourceCommit'] = sha if re.fullmatch('[0-9a-f]{40}', sha) else None
         result.update(getattr(exc, 'mutex_identity', {}))
+        # Native boundary constructs this sanitized lifecycle projection, never raw output.
+        if hasattr(exc, 'callInspection'):
+            result['callInspection'] = exc.callInspection
+            if len(json.dumps(result)) > 8192:
+                result['callInspection'] = dict(status='receipt-size-rejected')
         code = 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, sort_keys=True, indent=2)+'\n', encoding='utf-8')

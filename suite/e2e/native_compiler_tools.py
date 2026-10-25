@@ -13,7 +13,8 @@ STAT_FIELDS = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
 
 
 def validate_tool_pin(value, architecture, name):
-    assert architecture in MACHINES and name in ('clang-cl.exe', 'lld-link.exe')
+    assert architecture in MACHINES and name in ('clang-cl.exe', 'lld-link.exe', 'dumpbin.exe')
+    assert name != 'dumpbin.exe' or architecture == 'arm64'
     assert type(value) is dict and set(value) == {'path', 'bytes', 'sha256', 'machine'}
     assert type(value['path']) is str and Path(value['path']).is_absolute() and Path(value['path']).name == name
     assert type(value['bytes']) is int and 0 < value['bytes'] <= MAX_TOOL_BYTES

@@ -256,3 +256,12 @@ Only the preparation and mapping `receipt.json` files are uploaded; DLLs, compil
 logs and the engine archive are excluded. Deliberate failure prevents package
 qualification. Exact attribution would enable a later caller test, not prove a
 mutex holder or a safe input-behavior correction.
+
+Run 40166893778 proved the native fixture slot and the locked plugin's candidate
+range [100192,100292), but its supported contiguous condition-call predicate was
+inconclusive. The explicit `--inspect-calls` diagnostic uses the existing native
+disassembler with `/NOPDB`, `/DISASM:NOBYTES` and that exact range. A known fixture
+call validates parsing before the production query. Only capped call classifications
+and relative offsets are retained; raw output and temporary DLLs are removed.
+All work shares the analysis deadline with its cleanup reserve. This diagnostic
+does not promote attribution to exact or authorize an offsets-only GUI run.

@@ -27,6 +27,7 @@ class MutexMappingWorkflowTests(unittest.TestCase):
         self.assertLess(workflow_steps().index(step('sal-offset-admission')),workflow_steps().index(compile_step))
         self.assertLess(workflow_steps().index(compile_step),workflow_steps().index(mapping))
         self.assertIn('--fixture .work/suite-mutex-layout-fixture/mutex-layout-fixture.dll',run_code(mapping))
+        self.assertIn('--inspect-calls',run_code(mapping))
 
     def test_static_mode_cannot_build_or_enter_office(self):
         self.assertFalse(evaluate(condition(step('build')),MODE))
