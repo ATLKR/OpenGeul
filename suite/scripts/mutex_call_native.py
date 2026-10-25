@@ -32,9 +32,15 @@ def _read(path, limit, budget, *, empty=False):
         raw=stream.read(limit+1)
         after=os.fstat(stream.fileno())
     budget.now()
-    fields=('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')
-    assert all(tuple(getattr(v,k) for k in fields)==tuple(getattr(before,k) for k in fields)
-               for v in (opened,after,path.stat())), 'Static inspection file changed'
+    final=path.stat()
+    budget.now()
+    def identity(value,fields=native_compiler_tools.STAT_FIELDS):
+        return tuple(getattr(value,key) for key in fields)
+    # Windows path and held-FD ctime can differ; compare each API to itself.
+    assert identity(opened)==identity(after), 'Static inspection held file changed'
+    assert identity(before)==identity(final), 'Static inspection path changed'
+    fields=('st_dev','st_ino','st_size')
+    assert identity(before,fields)==identity(opened,fields), 'Static inspection file identity differs'
     assert len(raw)==before.st_size and (empty or raw), 'Static inspection read rejected'
     return raw
 

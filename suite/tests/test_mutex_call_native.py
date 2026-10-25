@@ -7,6 +7,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_ascii_message_preparation import Clock, Runtime, pe
@@ -214,3 +215,42 @@ class NativeCallsTests(unittest.TestCase):
     def test_fixture_more_than25_rows_rejected_before_native_launch(self):
         with self.assertRaises(AssertionError):self.run_driver(fixture_size=104)
         self.assertEqual(self.runtime.processes,[])
+
+    def test_read_accepts_stable_windows_cross_api_ctime_difference(self):
+        original=self.m.os.fstat
+        def observed(fd):
+            value=original(fd)
+            fields={key:getattr(value,key) for key in self.m.native_compiler_tools.STAT_FIELDS}
+            fields['st_ctime_ns']+=123456700
+            return SimpleNamespace(**fields)
+        with patch.object(self.m.os,'fstat',side_effect=observed):
+            self.assertEqual(self.m._read(self.tool,4096,self.budget),self.tool.read_bytes())
+
+    def test_read_rejects_held_metadata_change_and_cross_api_identity_mismatch(self):
+        original=self.m.os.fstat
+        for field,changing in (('st_ctime_ns',True),('st_ino',False),('st_dev',False),('st_size',False)):
+            with self.subTest(field=field):
+                calls=[]
+                def observed(fd):
+                    value=original(fd);calls.append(fd)
+                    fields={key:getattr(value,key) for key in self.m.native_compiler_tools.STAT_FIELDS}
+                    if not changing or len(calls)==2:fields[field]+=1
+                    return SimpleNamespace(**fields)
+                with patch.object(self.m.os,'fstat',side_effect=observed):
+                    with self.assertRaises(AssertionError):self.m._read(self.tool,4096,self.budget)
+
+    def test_read_rejects_path_metadata_change(self):
+        original=Path.stat;original_fd=self.m.os.fstat;held=[]
+        def fd_observed(fd):
+            held.append(fd)
+            return original_fd(fd)
+        def observed(path,*args,**kwargs):
+            value=original(path,*args,**kwargs)
+            if path==self.tool and len(held)==2:
+                fields={key:getattr(value,key) for key in self.m.native_compiler_tools.STAT_FIELDS}
+                fields['st_ctime_ns']+=1
+                return SimpleNamespace(**fields)
+            return value
+        with patch.object(Path,'stat',observed), patch.object(self.m.os,'fstat',side_effect=fd_observed):
+            with self.assertRaisesRegex(AssertionError,'path changed'):
+                self.m._read(self.tool,4096,self.budget)
