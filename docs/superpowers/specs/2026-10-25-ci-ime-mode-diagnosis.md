@@ -169,3 +169,25 @@ window. Later mouse-up rows may establish that the initial short trace ended too
 early. No later rows cannot prove handler completion, absence of every capture
 call, or resolution of the original failure. Full native acceptance remains
 required after an independently supported behavior correction.
+
+## Preparation failure in 40151873961
+
+ARM64 stopped before the first focus case at the existing observer preparation
+work deadline. Discovery took 4.672 seconds; the interval from discovery exit
+to compiler launch took 14.531 seconds, leaving 7.765 seconds for compilation
+and subsequent validation. The compiler job was terminated and its handles
+released. No native focus or TSF/IMM conclusion follows from this failure.
+
+The prior successful ARM64 run 40149245104 used identical observer source and
+native compiler hashes and completed preparation in 6.750 seconds. Its discovery,
+inter-stage interval and compilation took 0.281, 2.329 and 3.609 seconds. Slowdown
+therefore spans multiple operations; the receipts do not isolate hashing, file
+I/O, scheduling or compiler work as the cause. Do not claim a deterministic
+preparation regression or remove validation based on this comparison.
+
+Compilation already precedes editor observation, but remains part of its own
+required 30-second preparation gate, including the three-second cleanup reserve.
+Moving compilation outside that gate or reusing an unqualified binary would
+conceal a prerequisite. Keep this gate unchanged. A fresh native check of the
+reviewed retained-engine cleanup correction tests that correction and the
+remaining-window experiment; it does not establish an ARM64 preparation repair.
