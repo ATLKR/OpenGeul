@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: com-wait-diagnostic
+  OPENGEUL_SUITE_RUN_MODE: mutex-function-mapping
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -37,7 +37,7 @@ jobs:
       id: run-mode
       shell: pwsh
       run: |
-        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic')) {
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping')) {
           throw 'Unknown Suite run mode.'
         }
     - name: 정확한 소스 바이트 보존
@@ -96,7 +96,7 @@ jobs:
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Admit isolated diagnostics against exact owner-push source
       id: sal-offset-admission
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping'"
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -174,7 +174,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Static SAL source admission failed.' }
     - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
       id: source-engine
-      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && (env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' || steps.sal-offset-admission.outcome == 'success')"
+      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping') || steps.sal-offset-admission.outcome == 'success')"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
@@ -226,8 +226,39 @@ jobs:
       shell: pwsh
       run: |
         throw 'Synthetic COM wait only: physical Office input and full Suite acceptance were not run; package delivery is prohibited.'
+    - name: Compile only native mutex layout fixture (never execute)
+      id: mutex-layout-fixture
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/prepare-mutex-fixture.py --architecture arm64 --output (Join-Path (Get-Location) '.work/suite-mutex-layout-fixture')
+        if ($LASTEXITCODE -ne 0) { throw 'Static mutex fixture preparation failed.' }
+    - name: Attribute private mutex function using authenticated static metadata
+      id: mutex-function-mapping
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.mutex-layout-fixture.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/map-mutex-function.py --archive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip --lock suite/config/runtime.arm64.lock.json --fixture .work/suite-mutex-layout-fixture/mutex-layout-fixture.dll --output .work/suite-mutex-function-mapping/receipt.json
+        if ($LASTEXITCODE -ne 0) { throw 'Static mutex attribution rejected its inputs.' }
+    - name: Retain only mutex attribution and compiler lifecycle receipts
+      id: mutex-function-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' && matrix.architecture == 'arm64' && steps.mutex-layout-fixture.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-mutex-function-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-mutex-layout-fixture/receipt.json
+          .work/suite-mutex-function-mapping/receipt.json
+        retention-days: 7
+        if-no-files-found: error
+    - name: Static mutex attribution cannot qualify a Suite package
+      id: mutex-function-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping'"
+      shell: pwsh
+      run: |
+        throw 'Static mutex attribution only: full Suite acceptance was not run; package delivery is prohibited.'
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping'"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -264,7 +295,7 @@ jobs:
         $ErrorActionPreference = 'Stop'
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
     - name: Suite native31 setup and control originals
-      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic'"
+      if: "always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -236,7 +236,23 @@ terminal failure prohibits package qualification. All existing GUI-mode privacy,
 ownership, preparation and acceptance gates remain required.
 
 The prequeued stimulus in run 40162807902 was deferred by both COM arms on both
-architectures. The next fixed stimulus uses an owned sent-message rendezvous:
+architectures. The later fixed stimulus uses an owned sent-message rendezvous:
 its callback posts the single mouse-up inside the active wait, before ACK.
 Receipts explicitly identify this timing variant. It remains synthetic, uses
 the same deadlines and no physical input, and cannot qualify Office acceptance.
+Run 40164740782 verified during-wait posting on both architectures: pinned flags
+8 deferred delivery, while flags 24 delivered during the wait. Neither reproduced
+the original physical mouse-up's flags-3 removal without release. No production
+dispatch change follows from this result.
+
+`mutex-function-mapping` tests a static attribution prerequisite. After the same
+owner/source admission and unchanged authenticated ARM64 fetch, it compiles but
+never executes a small native MSVC class-layout fixture. A bounded parser must
+verify the candidate vtable slot against the fixture's exact exported method
+before identifying the locked plugin's private mutex-acquire entry through RTTI,
+hierarchy, vtable, unwind and import-call evidence. Missing or ambiguous metadata
+remains inconclusive. This mode does not launch Office or alter its observer.
+Only the preparation and mapping `receipt.json` files are uploaded; DLLs, compiler
+logs and the engine archive are excluded. Deliberate failure prevents package
+qualification. Exact attribution would enable a later caller test, not prove a
+mutex holder or a safe input-behavior correction.

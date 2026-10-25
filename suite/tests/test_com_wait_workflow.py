@@ -4,7 +4,7 @@ from suite.tests.test_calc_matrix_workflow import workflow_steps, field, run_cod
 from suite.tests.test_navigation_diagnostic_workflow import condition
 
 COM = "env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic'"
-MODES=('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','com-wait-diagnostic','unknown','')
+MODES=('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','com-wait-diagnostic','mutex-function-mapping','unknown','')
 
 
 def step(name):
@@ -21,13 +21,13 @@ def evaluate(expression, mode, architecture='arm64', outcomes=None):
 
 class ComWaitWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_exact_admission_before_any_synthetic_child(self):
-        self.assertIn('OPENGEUL_SUITE_RUN_MODE: com-wait-diagnostic',WORKFLOW.read_text())
+        self.assertIn('OPENGEUL_SUITE_RUN_MODE: mutex-function-mapping',WORKFLOW.read_text())
         guard=step('sal-offset-admission');run=step('com-wait-diagnostic')
         self.assertLess(workflow_steps().index(guard),workflow_steps().index(run))
         self.assertIn("Assert-Native31Context '${{ matrix.architecture }}'",run_code(guard))
         self.assertIn("'ls-tree', '-rz', '--full-tree', 'HEAD'",run_code(guard))
         for mode in MODES:
-            self.assertEqual(evaluate(condition(guard),mode),mode in ('sal-offset-mapping','com-wait-diagnostic'))
+            self.assertEqual(evaluate(condition(guard),mode),mode in ('sal-offset-mapping','com-wait-diagnostic','mutex-function-mapping'))
 
     def test_unit_shell_and_admission_outcomes_required_on_both_architectures(self):
         units=step('suite-unit-shell');run=step('com-wait-diagnostic')
@@ -48,7 +48,7 @@ class ComWaitWorkflowTests(unittest.TestCase):
         for architecture in ('x64','arm64'):
             self.assertFalse(evaluate(condition(fetch),'com-wait-diagnostic',architecture,{'sal-offset-admission':'success'}))
         for mode in MODES:
-            self.assertEqual(evaluate(condition(build),mode),mode not in ('sal-offset-mapping','com-wait-diagnostic'))
+            self.assertEqual(evaluate(condition(build),mode),mode not in ('sal-offset-mapping','com-wait-diagnostic','mutex-function-mapping'))
         privacy_upload=next(s for s in workflow_steps() if 'Suite native31 setup and control originals' in s)
         self.assertIn("env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic'",condition(privacy_upload))
         for name in ('readiness','native31-privacy-prepare','fixtures'):
