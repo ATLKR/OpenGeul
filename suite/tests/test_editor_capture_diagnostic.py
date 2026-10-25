@@ -302,3 +302,86 @@ class CaptureDiagnosticTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as caught:trace.watch_remaining(sleep=interrupted)
         self.assertIs(caught.exception,primary);self.assertFalse(trace.receipt['passiveWatch']['originalDeadlineReached'])
         self.assertEqual(probe.calls,['admit','start',('read',{'local_only':True}),'close'])
+    def test_engine_exit_wait_shares_existing_shell_phase_without_reset(self):
+        import windows_smoke as smoke
+        from editor_capture_diagnostic import CohortEngineLease
+        k=self.fixture();calls=[];record=k.record;receipt={}
+        process=NS(pid=77,poll=lambda:None,wait=lambda timeout:(calls.append(('shell-wait',timeout)) or setattr(k.clock,'now',12.) or 1))
+        probe=NS(kernel=NS(WaitForSingleObject=lambda h,ms:(calls.append(('engine-wait',h,ms)) or setattr(k.clock,'now',13.) or 0)),close_engine=lambda h:True)
+        lease=CohortEngineLease(k,receipt);lease.handle=909;lease.probe=probe;receipt['admitted']=True
+        k.clock.now=10.
+        with patch.object(smoke.time,'monotonic',side_effect=k.clock),patch.object(smoke.subprocess,'run'):
+            smoke.stop_owned_test_process(process,record)
+        lease.finish()
+        self.assertEqual(calls,[('shell-wait',5),('engine-wait',909,3000)])
+        self.assertEqual(record['testProcessCleanup']['exitWaitDeadline'],15.)
+        self.assertTrue(receipt['engineExitConfirmed']);self.assertTrue(receipt['handleReleased'])
+    def test_terminal_copy_qpc_distinguishes_covered_truncated_and_unknown(self):
+        from editor_capture_diagnostic import EditorCaptureDiagnostic
+        for before,after,expected in ((6000,6010,'covered'),(5990,5995,'truncated'),(5990,6010,'unknown')):
+            k=self.fixture();probe=self.probe();ticks=iter((before,after))
+            probe.local_counter_sample=lambda:dict(counter=next(ticks),counterFrequency=1000,nativeDeadlineCounter=6000)
+            trace=EditorCaptureDiagnostic(k,{},6.,probe=probe);trace.start();k.clock.now=6.
+            trace.close(RuntimeError('original failure'))
+            self.assertEqual(trace.receipt['terminalCopyCoverage']['status'],expected)
+            self.assertEqual(probe.calls,['admit','start',('read',{'local_only':True}),'close'])
+    def test_shared_cleanup_timeout_exhaustion_late_return_and_release_failure(self):
+        from editor_capture_diagnostic import CohortEngineLease,cohort_cleanup_confirmed
+        for started,returned,result,release,expected_ms in ((12.,15.,258,True,3000),(16.,16.,258,True,0),(12.,15.01,0,True,3000),(12.,13.,0,False,3000)):
+            k=self.fixture();k.clock.now=started;receipt={'admitted':True};calls=[]
+            k.record['testProcessCleanup']=dict(shellExitCode=1,disposition='forced-stop-returned',
+                exitWaitStartedAt=10.,exitWaitDeadline=15.,exitWaitBudgetSeconds=5)
+            k.record['focusCohortEngineCleanup']=receipt
+            def wait(handle,ms):calls.append((handle,ms));k.clock.now=returned;return result
+            lease=CohortEngineLease(k,receipt);lease.handle=909
+            lease.probe=NS(kernel=NS(WaitForSingleObject=wait),close_engine=lambda handle:release)
+            lease.finish();self.assertEqual(calls,[(909,expected_ms)])
+            self.assertFalse(cohort_cleanup_confirmed(k.record))
+    def test_taskkill_failure_creates_no_engine_wait_budget_and_preserves_primary(self):
+        import windows_smoke as smoke
+        from editor_capture_diagnostic import CohortEngineLease
+        k=self.fixture();k.clock.now=10.;record=k.record;record.update(success=False,error='Original focus failure')
+        process=NS(pid=77,poll=lambda:None,wait=lambda **kw:self.fail('shell wait after failed taskkill'))
+        receipt={'admitted':True};calls=[];lease=CohortEngineLease(k,receipt);lease.handle=909
+        lease.probe=NS(kernel=NS(WaitForSingleObject=lambda h,ms:(calls.append(ms) or 258)),close_engine=lambda h:True)
+        with patch.object(smoke.subprocess,'run',side_effect=smoke.subprocess.TimeoutExpired('taskkill',15)):
+            smoke.stop_owned_test_process(process,record)
+        lease.finish();self.assertEqual(calls,[0]);self.assertTrue(receipt['handleReleased'])
+        self.assertNotIn('exitWaitDeadline',record['testProcessCleanup']);self.assertEqual(record['error'],'Original focus failure')
+        self.assertFalse(record['success'])
+    def test_retained_wait_exception_always_releases_without_masking_primary(self):
+        from editor_capture_diagnostic import CohortEngineLease
+        k=self.fixture();k.record['error']='Original failure';receipt={'admitted':True};calls=[]
+        def fail(*args):raise OSError('retained wait failed')
+        lease=CohortEngineLease(k,receipt);lease.handle=909
+        lease.probe=NS(kernel=NS(WaitForSingleObject=fail),close_engine=lambda h:(calls.append(h) or True))
+        lease.finish();self.assertEqual(calls,[909]);self.assertIn('retained wait failed',receipt['error'])
+        self.assertEqual(k.record['error'],'Original failure');self.assertFalse(receipt['engineExitConfirmed'])
+    def test_local_terminal_qpc_never_uses_target_or_expired_identity(self):
+        from editor_capture_diagnostic import PassiveCaptureProbe
+        from unittest.mock import Mock
+        k=self.fixture();k.clock.now=6.;probe=PassiveCaptureProbe(k,{}, {},6.);calls=[]
+        def query(pointer,value):calls.append(value);pointer._obj.value=value;return 1
+        probe.probe=NS(kernel=NS(QueryPerformanceFrequency=Mock(side_effect=lambda p:query(p,1000)),
+            QueryPerformanceCounter=Mock(side_effect=lambda p:query(p,6010))))
+        probe.transport=NS(capture_budget=(6000,1000))
+        probe._identity=lambda:self.fail('terminal target identity query')
+        probe._budget=lambda:self.fail('terminal budget renewal/query')
+        self.assertEqual(probe.local_counter_sample(),dict(counter=6010,counterFrequency=1000,nativeDeadlineCounter=6000))
+        self.assertEqual(calls,[1000,6010])
+    def test_terminal_counter_failure_preserves_primary_and_always_copies_and_closes(self):
+        from editor_capture_diagnostic import EditorCaptureDiagnostic
+        for failing_phase in ('before','after'):
+            k=self.fixture();probe=self.probe();samples=[]
+            def sample():
+                phase='before' if not samples else 'after';samples.append(phase)
+                if phase==failing_phase:raise OSError('local QPC failed '+phase)
+                return dict(counter=6010,counterFrequency=1000,nativeDeadlineCounter=6000)
+            probe.local_counter_sample=sample
+            trace=EditorCaptureDiagnostic(k,{},6.,probe=probe);trace.start();k.clock.now=6.
+            primary=RuntimeError('original focus failure');trace.close(primary)
+            coverage=trace.receipt['terminalCopyCoverage']
+            self.assertEqual(coverage['clockCoverage'],'unknown');self.assertEqual(coverage['errors'][0]['phase'],failing_phase)
+            self.assertFalse(coverage['finalPublicationCountProved']);self.assertFalse(coverage['remoteCallbackQuiescenceProved'])
+            self.assertEqual(samples,['before','after'])
+            self.assertEqual(probe.calls,['admit','start',('read',{'local_only':True}),'close'])

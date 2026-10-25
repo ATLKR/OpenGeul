@@ -132,6 +132,24 @@ Do not send document/Home close input after the watch. Use the existing owned
 test-process teardown and retained engine exit check before another fresh case.
 Forced cleanup is not graceful shutdown or acceptance evidence.
 
+The x64 case in run 40151873961 retained 17 valid published rows, all before its
+post-readiness marker, and reached the original Python deadline. It then stopped
+the cohort because the shell's forced teardown completed but the retained engine
+handle was not signaled at its single zero-wait check. This proves unconfirmed
+exit at that instant, not a permanent orphan. Share only the unused remainder of
+the existing five-second post-taskkill shell-exit allowance with one retained
+engine wait; never grant another five seconds, reopen a PID or request new rights.
+Absent or exhausted allowance keeps the original zero-wait behavior. Timeout,
+wait error or failed release must still prevent the next case.
+
+The same trace lacked a terminal QPC sample. Record local QPC brackets around the
+final local copy to distinguish native-clock cutoff coverage from a truncated or
+unknown interval. Do not wait longer to close a clock gap. A cutoff crossed only
+after the copy began does not prove coverage at its beginning. Clock coverage
+also does not prove final event counts: a callback may publish after its final
+valid clock check. Keep publication quality and callback-quiescence limitations
+explicit; missing events cannot establish handler completion.
+
 Later capture rows may demonstrate capture after readiness in this observed
 window. Later mouse-up rows may establish that the initial short trace ended too
 early. No later rows cannot prove handler completion, absence of every capture

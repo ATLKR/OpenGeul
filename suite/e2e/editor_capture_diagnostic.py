@@ -2,6 +2,7 @@
 import ctypes as C
 import copy
 import time
+import math
 from ascii_message_windows import MessageTransport, NativeAsciiProbe
 from counted_editor_shortcuts import NativeShortcutProbe, join_shortcut_generation, US_LAYOUT
 from ascii_message_preparation import require_prepared_library
@@ -31,7 +32,7 @@ def validate_passive_scope(scope,binding,thread):
 
 
 class CohortEngineLease:
-    """Join while admitted; one zero-wait exit observation after owned cleanup."""
+    """Join while admitted; share only the existing owned cleanup exit phase."""
     def __init__(self, keyboard, receipt):
         self.keyboard=keyboard;self.receipt=receipt;self.handle=None;self.probe=None;self.closed=False
     def admit(self, probe, deadline):
@@ -51,8 +52,20 @@ class CohortEngineLease:
         self.receipt.update(phase='after-owned-process-cleanup',waitMilliseconds=0,engineExitConfirmed=False,handleReleased=False)
         try:
             if self.handle is not None and self.receipt.get('admitted') is True:
-                result=int(self.probe.kernel.WaitForSingleObject(self.handle,0))
-                self.receipt.update(waitResult=result,engineExitConfirmed=result==0)
+                phase=self.keyboard.record.get('testProcessCleanup',{})
+                deadline=phase.get('exitWaitDeadline');started=self.keyboard.clock();milliseconds=0
+                if deadline is not None:
+                    phase_start=phase.get('exitWaitStartedAt')
+                    assert type(deadline) in (int,float) and math.isfinite(deadline)
+                    assert type(phase_start) in (int,float) and math.isfinite(phase_start)
+                    assert phase.get('exitWaitBudgetSeconds')==5 and deadline==phase_start+5 and started>=phase_start
+                    milliseconds=max(0,min(5000,math.floor((deadline-started)*1000)))
+                    self.receipt.update(sharedExitWaitDeadline=deadline,sharedExitWaitStartedAt=phase_start)
+                self.receipt.update(waitStartedAt=started,waitMilliseconds=milliseconds)
+                result=int(self.probe.kernel.WaitForSingleObject(self.handle,milliseconds))
+                returned=self.keyboard.clock();late=milliseconds>0 and returned>deadline
+                self.receipt.update(waitResult=result,waitReturnedAt=returned,positiveWaitReturnedLate=late,
+                    engineExitConfirmed=result==0 and not late)
         except BaseException as exc:self.receipt['error']=type(exc).__name__+': '+str(exc)[:512]
         finally:
             if self.handle is not None:
@@ -133,6 +146,18 @@ class PassiveCaptureProbe:
         for name,pid in (('controller',self.controller_pid),('shell',self.process.pid),('engine',self.binding['officePid'])):
             self._budget();assert self._session(pid)==self.sessions[name];self._budget()
         self._budget()
+    def local_counter_sample(self):
+        """Controller-local QPC only, including after the target observation budget."""
+        assert self.probe is not None and self.transport is not None
+        kernel=self.probe.kernel
+        kernel.QueryPerformanceCounter.argtypes=(C.POINTER(C.c_int64),);kernel.QueryPerformanceCounter.restype=C.c_int32
+        kernel.QueryPerformanceFrequency.argtypes=(C.POINTER(C.c_int64),);kernel.QueryPerformanceFrequency.restype=C.c_int32
+        frequency=C.c_int64();counter=C.c_int64()
+        assert kernel.QueryPerformanceFrequency(C.byref(frequency)), 'Local terminal QPC frequency unavailable'
+        assert kernel.QueryPerformanceCounter(C.byref(counter)), 'Local terminal QPC unavailable'
+        assert counter.value>0 and frequency.value==self.transport.capture_budget[1], 'Local terminal QPC configuration changed'
+        return dict(counter=counter.value,counterFrequency=frequency.value,nativeDeadlineCounter=self.transport.capture_budget[0])
+
     def readiness_boundary(self, *, counter=None):
         from windows_smoke import _editor_focus_snapshot_ready
         self._identity();b=self.binding
@@ -215,15 +240,41 @@ class EditorCaptureDiagnostic:
             traceRejected=snapshot.get('rejected'),traceExpired=snapshot.get('expired'),
             committedEvents=len(snapshot.get('events',[])),
             eventsDefinitelyAfterReadiness=sum(row.get('counter',0)>boundary['counterAfter'] for row in snapshot.get('events',[])),
+            terminalCopyCoverage=self.receipt['terminalCopyCoverage'],
             continuousFocusOrCaptureStateProved=False,coverage='bounded message transitions only; absence is not continuous-state proof')
+
+    def _terminal_sample(self, phase):
+        result=self.receipt.setdefault('terminalCopyCoverage',dict(status='unknown',clockCoverage='unknown',scope='native-cutoff-at-final-copy; not continuity or complete ring proof',
+            finalPublicationCountProved=False,remoteCallbackQuiescenceProved=False,errors=[]))
+        try:result[phase]=self.probe.local_counter_sample()
+        except BaseException as exc:result['errors'].append(dict(phase=phase,error=type(exc).__name__+': '+str(exc)[:512]))
+    def _terminal_coverage(self):
+        result=self.receipt['terminalCopyCoverage'];before=result.get('before');after=result.get('after')
+        if result['errors'] or not before or not after:return
+        try:
+            assert before['counterFrequency']==after['counterFrequency']>0
+            assert before['nativeDeadlineCounter']==after['nativeDeadlineCounter']>0
+            assert 0<before['counter']<=after['counter']
+            deadline=before['nativeDeadlineCounter']
+            result['status']=('covered' if before['counter']>=deadline else
+                              'truncated' if after['counter']<deadline else 'unknown')
+            result['reason']=('copy-started-at-or-after-native-cutoff' if result['status']=='covered' else
+                              'copy-finished-before-native-cutoff' if result['status']=='truncated' else 'copy-bracket-straddles-native-cutoff')
+            if self.receipt.get('snapshotError'):
+                result.update(status='unknown',reason='final-local-copy-failed')
+            result['clockCoverage']=result['status']
+        except BaseException as exc:result['errors'].append(dict(phase='comparison',error=type(exc).__name__+': '+str(exc)[:512]))
 
     def close(self,primary=None):
         if self.closed:return
         self.closed=True;failure=None
         late=self.clock()>=self.deadline
+        self._terminal_sample('before')
         try:self.receipt['snapshot']=self.probe.read_capture_trace(local_only=primary is not None or late)
         except BaseException as exc:
             failure=exc;self.receipt['snapshotError']=type(exc).__name__+': '+str(exc)[:512]
+        finally:
+            self._terminal_sample('after');self._terminal_coverage()
         try:
             if primary is None and self.clock()<self.deadline and self.probe.can_stop():self.probe.stop()
         except BaseException as exc:

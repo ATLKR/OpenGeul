@@ -569,6 +569,10 @@ def stop_owned_test_process(process, record):
         receipt.update(forceRequested=True, disposition='stop-unconfirmed')
         subprocess.run(['taskkill.exe', '/PID', str(process.pid), '/T', '/F'], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        # Retained diagnostic descendants may share only this existing exit phase.
+        exit_started=time.monotonic()
+        receipt.update(exitWaitStartedAt=exit_started,exitWaitDeadline=exit_started+5,
+                       exitWaitBudgetSeconds=5)
         receipt.update(shellExitCode=process.wait(timeout=5), disposition='forced-stop-returned')
     except Exception as exc:
         exit_code = process.poll()
