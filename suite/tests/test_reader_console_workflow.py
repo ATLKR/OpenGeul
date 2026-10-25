@@ -37,3 +37,12 @@ class ReaderConsoleWorkflowTests(unittest.TestCase):
         for mode in ('acceptance','ime-mode-diagnostic','reader-console-diagnostic'):
             for ready in ('success','failure','skipped'):
                 self.assertEqual(evaluate(privacy,mode,'arm64',{'build':'success','readiness':ready,'sal-offset-admission':'success'}),ready=='success' or mode=='reader-console-diagnostic')
+
+    def test_console_mode_installs_privacy_dependency_before_guard(self):
+        steps={field(s,'id'):s for s in workflow_steps() if field(s,'id')}
+        code=run_code(steps['native31-privacy-prepare'])
+        self.assertIn("if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic')",code)
+        self.assertIn('python -m pip install pywinauto==0.6.9',code)
+        self.assertLess(code.index('python -m pip install pywinauto==0.6.9'),code.index('./suite/scripts/prepare-native31.ps1'))
+        self.assertIn("if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }",code)
+        self.assertEqual(field(steps['native31-privacy-prepare'],'timeout-minutes'),'3')

@@ -313,6 +313,10 @@ jobs:
       timeout-minutes: 3
       run: |
         $ErrorActionPreference = 'Stop'
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic') {
+          python -m pip install pywinauto==0.6.9
+          if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
+        }
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
     - name: Suite native31 setup and control originals
       if: "(env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || matrix.architecture == 'arm64') && always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped')"
