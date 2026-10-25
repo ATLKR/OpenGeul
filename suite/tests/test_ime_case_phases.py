@@ -367,6 +367,18 @@ class IMECasePhaseTests(unittest.TestCase):
         self.assertFalse(record['acceptanceEligible']);self.assertFalse(record['success'])
         self.assertNotIn('ascii-forward',calls);self.assertNotIn('observer-installed',calls)
 
+    def test_writer_navigation_reuses_trace_and_stops_before_extra_input(self):
+        for fail in (None,'pre'):
+            calls,record,result,error=self.run_case('writer',diagnose_navigation=True,fail_semantic=fail)
+            self.assertEqual(error is None,fail is None,repr(error))
+            self.assertEqual(calls.count(('navigate','writer')),1)
+            self.assertLess(calls.index('ready'),calls.index('navigation-trace-start'))
+            self.assertLess(calls.index('navigation-trace-start'),calls.index(('navigate','writer')))
+            self.assertEqual(calls.count('navigation-trace-snapshot'),1)
+            self.assertFalse(record['acceptanceEligible'])
+            for value in ('ascii-forward','observer-installed','CTRL_S',('semantic-read','post')):self.assertNotIn(value,calls)
+            if fail:self.assertLess(calls.index('navigation-trace-snapshot'),calls.index('capture-failure'))
+
     def test_default_case_never_installs_navigation_trace(self):
         calls,record,result,error=self.run_case('impress')
         self.assertIsNone(error,repr(error));self.assertTrue(result['imeVerified'])

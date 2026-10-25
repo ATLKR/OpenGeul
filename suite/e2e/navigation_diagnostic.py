@@ -74,7 +74,7 @@ def stop_navigation_keyboard(keyboard):
     """
     record=keyboard.record;receipt=keyboard.receipt
     assert record.get('kind')=='native-navigation-diagnostic' and record.get('acceptanceEligible') is False and record.get('imeVerified') is False,'Keyboard disposal requires the nonacceptance navigation experiment'
-    assert keyboard.module=='impress' and keyboard.phase=='semantic-pre-ready','Diagnostic keyboard disposal requires Impress PRE readiness'
+    assert keyboard.module in ('writer','impress') and keyboard.phase=='semantic-pre-ready','Diagnostic keyboard disposal requires Writer or Impress PRE readiness'
     assert not keyboard.finished and keyboard.failed is None,'Diagnostic keyboard already ended or failed'
     assert record.get('imeKeyboardSession') is receipt and receipt.get('success') is False,'Diagnostic keyboard receipt changed'
     assert keyboard.semantic_pre is record.get('imeSemanticContext') and keyboard.semantic_pre.get('success') is True and keyboard.semantic_pre.get('phase')=='pre','Diagnostic PRE context changed'

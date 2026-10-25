@@ -13,7 +13,7 @@ def condition(step):
 
 class NavigationDiagnosticWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_validation_reject_unknown_values(self):
-        self.assertIn("OPENGEUL_SUITE_RUN_MODE: reader-console-diagnostic",WORKFLOW.read_text())
+        self.assertIn("OPENGEUL_SUITE_RUN_MODE: navigation-diagnostic",WORKFLOW.read_text())
         step=next(s for s in workflow_steps() if field(s,'id')=='run-mode')
         code=run_code(step)
         self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller', 'reader-console-diagnostic')",code)
@@ -31,7 +31,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                     expression=expression.replace('steps.'+prerequisite+'.outcome',repr('skipped' if failed==prerequisite else 'success'))
                 self.assertEqual(eval(expression,{'__builtins__':{}}),mode=='navigation-diagnostic' and failed is None)
         code=run_code(step)
-        self.assertIn('python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-navigation-diagnostic --diagnose-navigation impress',code)
+        self.assertIn('python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-navigation-diagnostic --diagnose-navigation writer',code)
         self.assertIn('if ($LASTEXITCODE -ne 0)',code)
         self.assertLess(next(i for i,s in enumerate(steps) if field(s,'id')=='fixtures'),steps.index(step))
 

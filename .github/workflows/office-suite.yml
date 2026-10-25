@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: reader-console-diagnostic
+  OPENGEUL_SUITE_RUN_MODE: navigation-diagnostic
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -366,7 +366,7 @@ jobs:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-navigation-diagnostic/worker-diagnostics
       shell: pwsh
       run: |
-        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-navigation-diagnostic --diagnose-navigation impress
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-navigation-diagnostic --diagnose-navigation writer
         if ($LASTEXITCODE -ne 0) { throw 'Targeted navigation diagnostic failed.' }
     - name: Preserve targeted navigation evidence only
       id: navigation-diagnostic-evidence

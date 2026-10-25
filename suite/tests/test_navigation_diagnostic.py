@@ -67,12 +67,12 @@ class NavigationAdmissionTests(unittest.TestCase):
 
 
 class NavigationKeyboardDisposalTests(unittest.TestCase):
-    def session(self):
+    def session(self,module="impress"):
         import tempfile
         import test_ime_keyboard_session as keyboard_tests
         owner=keyboard_tests.IMEKeyboardSessionTests();owner.setUp();self.addCleanup(owner.doCleanups)
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
-        session,*rest=owner.fixture(directory.name,module='impress')
+        session,*rest=owner.fixture(directory.name,module=module)
         session.start();session.focus_editor(6.);owner.ready(session);session.navigate();owner.semantic(session,'pre')
         record=session.record
         record.update(kind='native-navigation-diagnostic',acceptanceEligible=False,imeVerified=False,
@@ -92,6 +92,16 @@ class NavigationKeyboardDisposalTests(unittest.TestCase):
         persisted=json.loads((session.output/(session.stem+'-session-result.json')).read_text())
         self.assertFalse(persisted['success']);self.assertTrue(persisted['engineHandleReleased'])
         self.assertIn('NavigationDiagnosticStop',persisted['error'])
+    def test_writer_original_ctrl_end_then_nonacceptance_cleanup(self):
+        import navigation_diagnostic as diagnostic
+        session=self.session('writer')
+        self.assertEqual([a['shortcut'] for a in session.receipt['actions']],['CTRL_F6','CTRL_END'])
+        deadline=session.deadline
+        result=diagnostic.stop_navigation_keyboard(session)
+        self.assertTrue(result['engineHandleReleased'])
+        self.assertFalse(session.receipt['success'])
+        self.assertEqual(session.deadline,deadline)
+
     def test_normal_close_still_rejects_same_unsaved_session(self):
         session=self.session()
         with self.assertRaisesRegex(AssertionError,'incomplete'):session.close()

@@ -1422,7 +1422,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
-    assert not diagnose_navigation or module == 'impress', 'Navigation experiment is scoped to Impress'
+    assert not diagnose_navigation or module in ('writer','impress'), 'Navigation experiment is scoped to Writer or Impress'
     assert not diagnose_ime_mode or (module=='calc' and not diagnose_navigation),'IME mode experiment is scoped to one Calc case'
     assert not capture_ime_caller or diagnose_ime_mode,'Caller capture requires mode diagnosis'
     assert plugin_origin is None or diagnose_focus or capture_ime_caller,'Plugin binding requires scoped diagnosis'
@@ -1781,7 +1781,7 @@ def main(argv=None):
     parser.add_argument('--fixtures', type=Path)
     parser.add_argument('--readiness', type=Path)
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--diagnose-navigation', choices=('impress',))
+    parser.add_argument('--diagnose-navigation', choices=('writer','impress'))
     parser.add_argument('--diagnose-ime-mode', choices=('calc',))
     parser.add_argument('--diagnose-focus', choices=('calc',))
     parser.add_argument('--matched-plugin-proof',type=Path)
