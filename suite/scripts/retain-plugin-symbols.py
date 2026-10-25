@@ -33,7 +33,8 @@ def require(ok,code):
 def unlinked(path):
     path=Path(path)
     require(path.is_absolute() and str(path)==os.path.abspath(path),'absolute-normal-path-required')
-    for part in (path,*path.parents):
+    # Reject an ancestor junction before looking up a child through it.
+    for part in (*reversed(path.parents),path):
         info=part.lstat()
         require(not stat.S_ISLNK(info.st_mode) and not getattr(info,'st_file_attributes',0)&1024,'linked-path')
     return path

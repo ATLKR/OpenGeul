@@ -171,3 +171,16 @@ class PluginSymbolsTests(unittest.TestCase):
     def test_zero_source_commit_rejected_before_retention(self):
         with self.assertRaises(self.m.SymbolError):self.m.retain(self.source,self.output,'0'*40,self.config)
         self.assertFalse(self.output.exists())
+
+    def test_linked_parent_rejected_before_any_child_lookup(self):
+        original=Path.lstat;calls=[]
+        def observed(path,*args,**kwargs):
+            calls.append(path)
+            if path==self.dp:raise AssertionError('child accessed before linked parent rejection')
+            value=original(path,*args,**kwargs)
+            if path==self.dp.parent:return SimpleNamespace(st_mode=value.st_mode,st_file_attributes=1024)
+            return value
+        with patch.object(Path,'lstat',observed):
+            with self.assertRaisesRegex(self.m.SymbolError,'linked-path'):
+                self.m.read_regular(self.dp,4096)
+        self.assertNotIn(self.dp,calls)
