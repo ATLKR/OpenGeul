@@ -81,6 +81,17 @@ class WorkerTests(unittest.TestCase):
             self.assertGreater(value,65535);self.assertLess(value,2**31);codes.append(value)
         self.assertEqual(len(codes),len(set(codes)))
         self.assertNotIn('private',json.dumps(self.m.stages([{'cleanupLastSample':{'root':{'waitResult':0,'exitCode':1},'activeProcesses':0,'querySucceeded':True}}])))
+    def test_identity_mismatch_exit_channel_preserves_all_failed_predicates(self):
+        error_type=type('ModuleIdentityError',(ValueError,),{})
+        for value in ((1|8|16|64,7),(127,9)):
+            code=self.m.failure_exit_code(error_type(value))
+            self.assertNotEqual(code,1,'metadata mismatch discarded')
+            rows=self.m.stages([{'samples':[{'root':{'waitResult':0,'exitCode':code},'activeProcesses':0,'querySucceeded':True}]}])
+            failure=rows[0]['childFailure']
+            self.assertEqual(failure['mismatchMask'],value[0]);self.assertEqual(failure['symbolType'],value[1])
+            self.assertEqual(failure['category'],'ModuleIdentityError')
+        for bad in ((0,7),(128,7),(1,10),(True,7),(1,True),'private-text'):
+            self.assertEqual(self.m.failure_exit_code(error_type(bad)),1)
     def test_isolated_child_exit_channel_has_no_stderr_or_stdout(self):
         request=self.root/'request.json'
         request.write_text(json.dumps(dict(startedAt=1,workDeadline=2,deadline=3)))

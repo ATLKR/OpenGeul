@@ -56,6 +56,10 @@ class ResolutionTests(unittest.TestCase):
         self.assertFalse(result['runtimeCallerProved']);self.assertEqual(result['frames'],[])
         self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
         self.assertEqual(self.runtime.calls.count('fixed-name'),1)
+        self.runtime.info={'type':7}
+        result=self.m.qualify(dll(),self.path,self.proof,self.budget,runtime=self.runtime)
+        self.assertTrue(result['qualification']['roundTripMatched'])
+        self.assertFalse(result['runtimeCallerProved'])
     def test_qualification_wrong_or_nearest_name_never_passes(self):
         self.assertTrue(hasattr(self.m,'qualify'),'fixed native qualification missing')
         good=dict(name='WinSalYieldMutex::doAcquire',base=self.m.IMAGE_BASE,address=self.m.IMAGE_BASE+0x1100,size=16,tag=5,flags=0)
@@ -96,6 +100,24 @@ class ResolutionTests(unittest.TestCase):
         self.runtime.info={'guid':'ffffffff-ffff-ffff-ffff-ffffffffffff'}
         with self.assertRaises(self.m.ResolutionError):self.run_resolve()
         self.assertFalse(any(isinstance(c,tuple) for c in self.runtime.calls));self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
+    def test_dia_symbols_require_the_same_exact_identity_as_pdb(self):
+        self.runtime.info={'type':7}
+        self.assertTrue(self.run_resolve()['complete'])
+        for kind in (0,1,2,4,5,6,8,9):
+            self.runtime.info={'type':kind}
+            with self.assertRaises(self.m.ResolutionError):self.run_resolve()
+        for wrong in ({'type':4},{'type':5},{'type':7,'age':3},{'type':7,'guid':'wrong'},
+                      {'type':7,'base':0},{'type':7,'size':1},{'type':7,'unmatched':True},
+                      {'type':7,'path':str(self.path.with_name('other.pdb'))}):
+            self.runtime.info=wrong
+            with self.assertRaises(self.m.ResolutionError):self.run_resolve()
+    def test_metadata_rejection_preserves_only_finite_mismatch_bits(self):
+        self.assertTrue(hasattr(self.m,'ModuleIdentityError'),'individual identity mismatch evidence absent')
+        self.runtime.info={'type':4,'age':3,'guid':'private-guid','path':'private-path'}
+        with self.assertRaises(self.m.ModuleIdentityError) as caught:self.run_resolve()
+        self.assertEqual(caught.exception.args,((1|8|16|64,4),))
+        self.assertNotIn('private',str(caught.exception))
+        self.assertEqual(self.runtime.calls[-3:],['unload','cleanup','release'])
     def test_original_expiry_no_second_query_and_cleanup(self):
         self.runtime.on_query=lambda:setattr(self.budget,'time',27.)
         with self.assertRaises(TimeoutError):self.run_resolve([0x1104,0x1108])

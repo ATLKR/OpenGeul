@@ -17,6 +17,7 @@ from plugin_file_origin import FileApi
 # exception messages, paths or symbol names. Parent and child use the same file.
 # The signature distinguishes these from ordinary cmd.exe launch failures.
 FAILURE_BASE=0x4f470000
+IDENTITY_FAILURE_BASE=0x4f480000
 FAILURES=tuple(('ResolutionError',code) for code in '''
 ambient-symbol-path concurrent-symbol-session fixed-pdb-name fixed-symbol-range
 fixed-symbol-roundtrip fixed-symbol-unavailable loaded-symbol-identity local-fixed-drive
@@ -42,6 +43,12 @@ symbol-identity unique-codeview-required
 
 def failure_exit_code(error):
     category=type(error).__name__
+    if category=='ModuleIdentityError' and len(error.args)==1:
+        value=error.args[0]
+        if (type(value) is tuple and len(value)==2 and all(type(v) is int for v in value)
+                and 0<value[0]<128 and 0<=value[1]<=9):
+            return IDENTITY_FAILURE_BASE+(value[1]<<8)+value[0]
+        return 1
     code=error.args[0] if len(error.args)==1 and type(error.args[0]) is str else None
     for index,(known_category,known_code) in enumerate(FAILURES):
         if category==known_category and (known_code=='unclassified' or code==known_code):
@@ -86,6 +93,10 @@ def stages(rows):
             if observed['waitResult']==0 and type(code) is int and FAILURE_BASE<code<=FAILURE_BASE+len(FAILURES):
                 category,reason=FAILURES[code-FAILURE_BASE-1]
                 row['childFailure']=dict(category=category,code=reason)
+            elif observed['waitResult']==0 and type(code) is int and IDENTITY_FAILURE_BASE<code<IDENTITY_FAILURE_BASE+0xa00:
+                offset=code-IDENTITY_FAILURE_BASE;mask=offset&255
+                if 0<mask<128:
+                    row['childFailure']=dict(category='ModuleIdentityError',mismatchMask=mask,symbolType=offset>>8)
         result.append(row)
     return result
 

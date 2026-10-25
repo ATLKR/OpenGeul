@@ -32,6 +32,16 @@ three seconds reserved for cleanup; child deadlines inherit finite parent
 monotonic values. Startup, imports, reads and hashes consume that same deadline.
 Failure of qualification stops this experiment before editor execution.
 
+The loaded backend may be documented SymPdb (3) or SymDia (7); neither permits
+relaxing the exact loaded PDB path, GUID/age, base, image size or unmatched flags,
+and the fixed-function round trip remains mandatory. Other symbol types fail.
+An identity failure retains only a seven-bit mismatch mask (type, base, size,
+GUID, age, unmatched, path) and the bounded symbol type 0–8 (9 means unknown).
+This uses the existing child exit-code channel, no additional native query or
+raw field output. Run40198528845 established composite metadata rejection but
+did not establish which field differed; SymDia compatibility is not yet a
+confirmed explanation of that native failure.
+
 Advance the development ARM64 runtime lock to the independently qualified new
 engine for this experiment. This is a separate integration decision after the
 source-build review; the symbol artifact alone did not change the runtime lock.

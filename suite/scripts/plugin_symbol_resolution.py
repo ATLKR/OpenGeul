@@ -27,6 +27,9 @@ SERIAL=threading.Lock()
 
 
 class ResolutionError(ValueError):pass
+class ModuleIdentityError(ResolutionError):
+    # Bits: symbol type, base, size, GUID, age, unmatched flag, exact PDB path.
+    def __str__(self):return 'loaded-symbol-identity'
 
 def require(ok,code):
     if not ok:raise ResolutionError(code)
@@ -113,9 +116,18 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
         loaded=runtime.load(str(path),IMAGE_BASE,image_size)
         require(loaded==IMAGE_BASE,'symbol-load');budget.now()
         info=runtime.module(IMAGE_BASE);budget.now()
-        require(info.get('type')==3 and info.get('base')==IMAGE_BASE and info.get('size')==image_size and
-                info.get('guid')==identity['guid'] and info.get('age')==identity['age'] and info.get('unmatched') is False and
-                Path(info.get('path',''))==path,'loaded-symbol-identity')
+        # DbgHelp documents both SymPdb and SymDia as loaded symbol backends.
+        # Every exact identity predicate and the later function proof still apply.
+        checks=(info.get('type') in (3,7),info.get('base')==IMAGE_BASE,
+                info.get('size')==image_size,info.get('guid')==identity['guid'],
+                info.get('age')==identity['age'],info.get('unmatched') is False,
+                Path(info.get('path',''))==path)
+        mismatch=sum(1<<i for i,matched in enumerate(checks) if not matched)
+        if mismatch:
+            symbol_type=info.get('type')
+            # No actual identity/path value leaves the bounded child.
+            kind=symbol_type if type(symbol_type) is int and 0<=symbol_type<=8 else 9
+            raise ModuleIdentityError((mismatch,kind))
         if qualification:
             budget.now();named=runtime.fixed_acquire();budget.now()
             require(type(named) is dict and type(named.get('address')) is int,'fixed-symbol-unavailable')
