@@ -164,9 +164,13 @@ class NativeDriver:
             role=self.images.get(os.path.normcase(row['image']));assert role is not None
             roles.append(role)
             handle,identity=self.witnesses.members[row['pid']]
-            # The same retained handle must still attest the original generation.
-            current=self.witnesses.api.identity(handle);remaining(deadline)
-            assert current['creationTime']==identity['creationTime'] and current['image']==identity['image']
+            # The retained handle pins the original process object after exit.
+            # A terminated process need not support a fresh image-name query.
+            assert row['handleValue']==int(handle)
+            assert row['creationTime']==identity['creationTime'] and row['image']==identity['image']
+            if alive:
+                current=self.witnesses.api.identity(handle);remaining(deadline)
+                assert current['creationTime']==identity['creationTime'] and current['image']==identity['image']
             assert row['alive'] is alive and row['waitResult']==(258 if alive else 0)
             if not alive:assert row['exitCode']==0
             result[row['pid']]=dict(creationTime=row['creationTime'],role=role)

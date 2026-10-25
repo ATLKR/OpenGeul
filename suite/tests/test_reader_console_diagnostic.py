@@ -79,7 +79,7 @@ class NativeConsoleJoinTests(unittest.TestCase):
         import reader_console_diagnostic as m
         driver=object.__new__(m.NativeDriver);driver.images={'core':1}
         original=dict(image='core',creationTime=7,pid=1)
-        driver.witnesses=NS(retained_snapshot=lambda:[dict(original,alive=True,waitResult=258)],
+        driver.witnesses=NS(retained_snapshot=lambda:[dict(original,alive=True,waitResult=258,handleValue=99)],
             members={1:(99,original)},api=NS(identity=lambda handle:dict(image='core',creationTime=8)))
         with self.assertRaises(AssertionError):driver.members(m.time.monotonic()+1)
     def test_owned_console_observation_is_numeric_only(self):
@@ -97,3 +97,22 @@ class NativeConsoleJoinTests(unittest.TestCase):
         driver.witnesses=driver.process=None
         driver.console_file=NS(close=lambda:{'result':False,'lastError':6})
         with self.assertRaises(AssertionError):driver.close()
+
+    def test_retired_members_use_retained_handle_identity_and_zero_exit(self):
+        from types import SimpleNamespace as NS
+        from unittest.mock import Mock
+        import reader_console_diagnostic as m
+        original=dict(image='core',creationTime=7,pid=1)
+        for bad in (None,'handle','exit','alive'):
+            row=dict(original,alive=False,waitResult=0,exitCode=0,handleValue=99)
+            if bad=='handle':row['handleValue']=100
+            if bad=='exit':row['exitCode']=1
+            if bad=='alive':row.update(alive=True,waitResult=258)
+            driver=object.__new__(m.NativeDriver);driver.images={'core':1}
+            identity=Mock(side_effect=PermissionError('exited process image unavailable'))
+            driver.witnesses=NS(retained_snapshot=lambda:[row],members={1:(99,original)},api=NS(identity=identity))
+            driver.console_file=NS(recheck=lambda:None)
+            if bad:
+                with self.assertRaises(AssertionError):driver.members(m.time.monotonic()+1,alive=False)
+            else:self.assertEqual(driver.members(m.time.monotonic()+1,alive=False),{1:dict(creationTime=7,role=1)})
+            identity.assert_not_called()
