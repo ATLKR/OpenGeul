@@ -191,3 +191,38 @@ Moving compilation outside that gate or reusing an unqualified binary would
 conceal a prerequisite. Keep this gate unchanged. A fresh native check of the
 reviewed retained-engine cleanup correction tests that correction and the
 remaining-window experiment; it does not establish an ARM64 preparation repair.
+
+## Integrated-engine mode experiment after 40212924531
+
+Acceptance at `1238a1c9953d2dcd3db63823366c3a8d892c95b0` reached the
+original Calc composition gate on ARM64. Its retained IME artifact
+`12607765891` has SHA-256
+`a99c4f45eb63e27cc1b50c34db22770540f9bf66298b79609b10c334ae923960`.
+ACK3 and the first physical G keydown observed IMM open/native mode 1/1.
+About 212 milliseconds later, notifications observed open state zero, with
+the same numeric context handle and no recorded focus/context transition.
+No composition events were retained. Equal handles do not prove context
+lifetime; the current trace does not identify the writer or TSF state.
+
+The earlier mode experiment stopped at focus admission on the older engine.
+The integrated engine now reaches the relevant first-key boundary, justifying
+one use of the existing mode diagnostic on each native architecture, with
+x64 as a control. Wait for the current acceptance run to become terminal
+before pushing the diagnostic selection. Do not rebuild the pinned engine.
+
+The finite question is whether typed TSF open state also closes, or remains
+open while IMM closes. Joint closure supports a joint reset, not a caller.
+Disagreement supports divergence at sequential observations, not an atomic
+comparison. Missing, untyped, partial, overflowed or uncorrelated snapshots
+are inconclusive. Nonreproduction remains subject to observer effects.
+Keep the original one-case input, ownership, preparation and execution
+deadlines, restoration, privacy admission and deliberate nonacceptance exit.
+This experiment cannot qualify package delivery or repair Writer navigation
+or the independently observed lifecycle missing-character failure.
+
+Writer had forty successful semantic observations with a stable collapsed
+body cursor away from the body end. CTRL_END insertion was acknowledged,
+but delivery and handling are unproved. Lifecycle's second append omitted
+M while its character message was observed removed from the queue. Neither
+observation authorizes repeated input, longer deadlines or weaker semantic
+assertions. Preserve these separate hypotheses for evidence-led diagnosis.
