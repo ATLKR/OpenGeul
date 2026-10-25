@@ -301,18 +301,26 @@ function Confirm-FileIdentity([string]$Path,[long]$Size,[ValidateSet('SHA256','S
     return [ordered]@{path=$file.FullName;size=$file.Length;algorithm=$Algorithm;hash=$actual}
 }
 
+function Get-DownloadReceiptLocation([uri]$Uri) {
+    if(-not $Uri.IsAbsoluteUri -or $Uri.Scheme -cnotin @('https','http')) {throw 'Download receipt requires an absolute HTTP location.'}
+    $public=[UriBuilder]::new($Uri)
+    $public.UserName='';$public.Password='';$public.Query='';$public.Fragment=''
+    return $public.Uri.AbsoluteUri
+}
+
 function Get-AuthenticatedDownload([string]$Url,[string]$Destination,[long]$Size,[string]$Algorithm,[string]$Hash,[string]$ReceiptPath) {
     if(Test-Path -LiteralPath $Destination) {throw 'Download target already exists.'}
-    $receipt=[ordered]@{url=$Url;status='downloading';expectedSize=$Size;expectedHash=$Hash;algorithm=$Algorithm;path=$Destination}
+    $receipt=[ordered]@{url=(Get-DownloadReceiptLocation ([uri]$Url));status='downloading';expectedSize=$Size;expectedHash=$Hash;algorithm=$Algorithm;path=$Destination}
     Write-BuildJson $ReceiptPath $receipt
-    Write-Host "Downloading authenticated input: $Url"
+    Write-Host "Downloading authenticated input: $($receipt.url)"
     $client=[Net.Http.HttpClient]::new();$client.Timeout=[TimeSpan]::FromMinutes(30)
     $stream=$null;$file=$null;$response=$null;$cancel=[Threading.CancellationTokenSource]::new();$watch=[Diagnostics.Stopwatch]::StartNew()
     try {
         $cancel.CancelAfter((Get-NativeBuildRemaining 1800000))
         $response=$client.GetAsync($Url,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cancel.Token).GetAwaiter().GetResult()
+        $receipt.httpStatus=[int]$response.StatusCode
+        $receipt.finalUrl=Get-DownloadReceiptLocation $response.RequestMessage.RequestUri
         $response.EnsureSuccessStatusCode()|Out-Null
-        $receipt.finalUrl=$response.RequestMessage.RequestUri.AbsoluteUri
         $stream=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
         $file=[IO.File]::Open($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
         $buffer=[byte[]]::new(1048576);[long]$count=0;[long]$reported=0
@@ -327,7 +335,11 @@ function Get-AuthenticatedDownload([string]$Url,[string]$Destination,[long]$Size
         Assert-NativeBuildTimeRemaining
         $receipt.status='authenticated'
         Write-Host "Authenticated $count bytes: $([IO.Path]::GetFileName($Destination))"
-    } catch {$receipt.status='failed';$receipt.error=$_.Exception.Message;throw}
+    } catch {
+        $receipt.status='failed';$receipt.errorType=$_.Exception.GetType().FullName
+        $receipt.error='Authenticated download failed; consult HTTP status and authenticated input metadata.'
+        throw [IO.IOException]::new($receipt.error)
+    }
     finally {
         if($file){$file.Dispose()};if($stream){$stream.Dispose()};if($response){$response.Dispose()};$client.Dispose();$cancel.Dispose()
         $receipt.elapsedSeconds=$watch.Elapsed.TotalSeconds

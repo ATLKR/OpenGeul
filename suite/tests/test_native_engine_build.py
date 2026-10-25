@@ -127,6 +127,12 @@ class NativeEngineBuildTests(unittest.TestCase):
         except (OSError,NotImplementedError): return
         self.rejected(f"New-BuildDirectories {quote(link/'new')} {quote(self.root/'another')}")
 
+    def test_download_receipt_omits_redirect_capability_and_userinfo(self):
+        result=self.ps("Get-DownloadReceiptLocation ([uri]'https://synthetic:password@example.invalid/package.zip?sig=synthetic-capability#fragment')")
+        self.assertEqual('https://example.invalid/package.zip',result)
+        result=self.ps("Get-DownloadReceiptLocation ([uri]'https://example.invalid/package.zip')")
+        self.assertEqual('https://example.invalid/package.zip',result)
+
     def test_mutex_symbols_are_opt_in_and_keep_release_configuration(self):
         self.ps("""
 $normal=@(Get-ConfigureArguments); $diagnostic=@(Get-ConfigureArguments -MutexSymbols)
@@ -613,6 +619,38 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
         self.assertFalse(receipt['passed']);self.assertFalse(receipt['fullEngineQualified'])
         self.assertEqual('failed',receipt['status'])
         self.assertIn('Observed final shared build deadline',receipt['error'])
+
+    def test_authenticated_redirect_keeps_bytes_and_status_without_signed_query(self):
+        import hashlib
+        import http.server
+        import threading
+        observed=[]
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(handler):
+                observed.append(handler.path)
+                if handler.path=='/denied':
+                    handler.send_response(403,'synthetic-capability');handler.end_headers()
+                elif handler.path=='/start':
+                    handler.send_response(302);handler.send_header('Location','/payload?sig=synthetic-capability');handler.end_headers()
+                else:
+                    handler.send_response(200);handler.send_header('Content-Length','2');handler.end_headers();handler.wfile.write(b'ab')
+            def log_message(self,*args):pass
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        target=self.root/'payload';receipt=self.root/'receipt.json'
+        output=self.ps(f"Get-AuthenticatedDownload 'http://127.0.0.1:{server.server_port}/start' {quote(target)} 2 SHA256 {quote(hashlib.sha256(b'ab').hexdigest())} {quote(receipt)}|Out-Null")
+        raw=receipt.read_text();data=json.loads(raw)
+        self.assertEqual(['/start','/payload?sig=synthetic-capability'],observed)
+        self.assertEqual('authenticated',data['status']);self.assertEqual(200,data['httpStatus'])
+        self.assertEqual(f'http://127.0.0.1:{server.server_port}/payload',data['finalUrl'])
+        self.assertNotIn('synthetic-capability',raw+output);self.assertEqual(b'ab',target.read_bytes())
+        denied=self.root/'denied.json'
+        output=self.ps(f"try {{ Get-AuthenticatedDownload 'http://127.0.0.1:{server.server_port}/denied' {quote(self.root/'not-created')} 2 SHA256 {quote(hashlib.sha256(b'ab').hexdigest())} {quote(denied)}|Out-Null }} catch {{ $_.Exception.ToString() }}")
+        raw=denied.read_text();data=json.loads(raw)
+        self.assertEqual(403,data['httpStatus']);self.assertEqual('failed',data['status'])
+        self.assertIn('errorType',data);self.assertNotIn('synthetic-capability',raw+output)
+        self.assertFalse((self.root/'not-created').exists())
 
     def test_shared_deadline_cancels_stalled_authenticated_download_body(self):
         import hashlib
