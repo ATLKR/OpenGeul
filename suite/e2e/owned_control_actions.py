@@ -347,6 +347,13 @@ class GuiThreadInfo(C.Structure):
               ('capture',C.c_void_p),('menuOwner',C.c_void_p),('moveSize',C.c_void_p),('caret',C.c_void_p),('rectangle',Rect)]
 
 
+class NativeWindowClassUnavailable(AssertionError):
+    """A zero native class query; only post-input dialog retirement may recheck it."""
+    def __init__(self, hwnd):
+        self.hwnd=hwnd
+        super().__init__('Native window class query unavailable')
+
+
 class NativeControlProbe(NativeActivationProbe):
     def __init__(self,deadline,clock,**libraries):
         super().__init__(deadline,clock,**libraries)
@@ -381,7 +388,9 @@ class NativeControlProbe(NativeActivationProbe):
     def _window(self,hwnd):
         row=self.window_snapshot(hwnd);title=C.create_unicode_buffer(257);kind=C.create_unicode_buffer(257)
         count=int(self._call(self.user.GetWindowTextW,hwnd,title,len(title)));assert count<256, 'Window title exceeds retained bound'
-        size=int(self._call(self.user.GetClassNameW,hwnd,kind,len(kind)));assert 0<size<256
+        size=int(self._call(self.user.GetClassNameW,hwnd,kind,len(kind)))
+        if size==0:raise NativeWindowClassUnavailable(hwnd)
+        assert 0<size<256
         row.update(ownerHwnd=int(self._call(self.user.GetWindow,hwnd,4) or 0),title=title.value,className=kind.value)
         return row
     def _owner_chain(self,hwnd,document):
@@ -514,7 +523,17 @@ class NativeControlProbe(NativeActivationProbe):
                     original()
                     assert self.clock()<self.deadline, 'Owned dialog transition deadline expired'
                     result.update(accepted=True,transition='original-owned-dialog-destroyed');return result
-                row=self._call(self._window,dialog);result['lastLiveDialog']=row
+                try:row=self._call(self._window,dialog)
+                except NativeWindowClassUnavailable as exc:
+                    assert exc.hwnd==dialog, 'Class query failure belongs to another window'
+                    alive=bool(self._call(self.user.IsWindow,dialog));result['originalDialogAlive']=alive
+                    if alive:raise
+                    original()
+                    assert self.clock()<self.deadline, 'Owned dialog transition deadline expired'
+                    result.update(accepted=True,transition='original-owned-dialog-destroyed',
+                        dialogClassQueryDisappearance=True)
+                    return result
+                result['lastLiveDialog']=row
                 frozen=context['scope']
                 assert all(row[k]==frozen[k] for k in ('hwnd','pid','threadId','rootHwnd','ownerHwnd')) \
                     and row['hwnd']==dialog and row['pid']==process.pid and row['ownerHwnd']==document \

@@ -281,6 +281,20 @@ class SaveReplayTests(unittest.TestCase):
         self.readiness['saveMenuAction']=copy.deepcopy(self.action)
     def test_exact_menu_receipt_replays_without_claiming_keyboard_delivery(self):
         self.assertIs(self.module.require_save_menu_action(self.action,77,11,CAPTION,self.readiness),self.action)
+    def test_exact_constructed_five_second_budget_replays_at_native_timestamp(self):
+        import math
+        action=copy.deepcopy(self.action);started=4095.546
+        action.update(startedAt=started,engineAdmittedAt=started+.01,inputStartedAt=started+.02,
+            inputFinishedAt=started+.03,finishedAt=started+.05,deadline=started+5)
+        witness=action['after']['pickerReadiness'];witness['deadline']=action['deadline']
+        for key in ('firstObservation','lastObservation'):witness[key]['at']=started+.04
+        ready=copy.deepcopy(self.readiness);ready.update(startedAt=started+.06,finishedAt=started+.07)
+        ready['saveMenuAction']=copy.deepcopy(action)
+        self.assertGreater(action['deadline']-started,5)
+        self.assertIs(self.module.require_save_menu_action(action,77,11,CAPTION,ready),action)
+        action['deadline']=math.nextafter(started+5,math.inf);witness['deadline']=action['deadline']
+        ready['saveMenuAction']=copy.deepcopy(action)
+        with self.assertRaises(AssertionError):self.module.require_save_menu_action(action,77,11,CAPTION,ready)
     def test_boolean_counts_and_changed_picker_thread_or_ui_a_identity_cannot_replay(self):
         mutations={'count':lambda a:a.update(clickAttempts=True),'moves':lambda a:a.update(pointerMoveAttempts=2),'thread':lambda a:a['after']['foreground'].update(threadId=10),'disabled':lambda a:a['after']['foreground'].update(enabled=False),'uia-name':lambda a:a['after']['newPicker'].update(name='another picker')}
         for label,mutate in mutations.items():

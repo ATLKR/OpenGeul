@@ -144,7 +144,7 @@ def require_save_menu_action(action, shell_pid, document, caption, readiness):
     assert action['nativeInsertionCountVerified'] is True and action['atomicRecipientDeliveryProved'] is False
     assert action['startedAt'] <= action['engineAdmittedAt'] <= action['finishedAt'] < action['deadline']
     for key in ('startedAt','engineAdmittedAt','finishedAt','deadline'):_time(action[key])
-    assert 0 < action['deadline'] - action['startedAt'] <= 5
+    assert action['startedAt'] < action['deadline'] <= action['startedAt'] + 5
     assert action['engineHandleClosed'] is True and action['dpiScope']['verified'] is action['dpiScope']['restored'] is True
     original = action['originalProcess']; engine = action['originalEngine']; attachment = action['originalAttachment']
     for key in ('document','parent','child','officePid'):_integer(attachment[key])

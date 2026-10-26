@@ -283,6 +283,38 @@ class ControlPolicyTests(unittest.TestCase):
     def native_dialog_transition(self, probe, context, evidence=None):
         return probe.transition_snapshot(None,self.process,11,44,self.readiness['caption'],'SAVE_BUTTON',object(),
             context=context,evidence=evidence)
+    def disappearing_class_probe(self, states):
+        probe,context=self.native_dialog_probe(states)
+        original_window=probe._window
+        probe.window_snapshot=original_window
+        probe.user.GetWindowTextW=lambda hwnd,buffer,size:0
+        probe.user.GetClassNameW=lambda hwnd,buffer,size:0
+        probe._window=lambda hwnd:(original_window(hwnd) if hwnd==11
+            else self.policy.NativeControlProbe._window(probe,hwnd))
+        return probe,context
+    def test_dialog_destruction_between_liveness_and_class_read_is_revalidated(self):
+        probe,context=self.disappearing_class_probe([True,False]);evidence={}
+        value=self.native_dialog_transition(probe,context,evidence)
+        self.assertTrue(value['accepted']);self.assertEqual(value['transition'],'original-owned-dialog-destroyed')
+        self.assertTrue(value['dialogClassQueryDisappearance'])
+        self.assertFalse(value['originalDialogAlive'])
+    def test_class_query_failure_on_still_live_dialog_is_not_a_transition(self):
+        probe,context=self.disappearing_class_probe([True,True]);evidence={}
+        with self.assertRaises(AssertionError):self.native_dialog_transition(probe,context,evidence)
+        self.assertIsNot(evidence.get('accepted'),True)
+    def test_class_query_disappearance_still_requires_original_process_and_deadline(self):
+        for failure in ('process','deadline'):
+            with self.subTest(failure=failure):
+                self.clock.now=1.;probe,context=self.disappearing_class_probe([True,False]);evidence={};calls=[]
+                def identity(process):
+                    calls.append(1);value=copy.deepcopy(self.probe.identity)
+                    if len(calls)>1:
+                        if failure=='process':value['creationTime']+=1
+                        else:self.clock.now=probe.deadline
+                    return value
+                probe.process_snapshot=identity
+                with self.assertRaises(AssertionError):self.native_dialog_transition(probe,context,evidence)
+                self.assertIsNot(evidence.get('accepted'),True)
     def test_stale_child_uia_is_never_queried_while_native_dialog_destruction_is_pending(self):
         probe,context=self.native_dialog_probe([True,False]);error=None;value={}
         try:value=self.native_dialog_transition(probe,context)
