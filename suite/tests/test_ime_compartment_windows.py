@@ -18,6 +18,9 @@ class CompartmentAdapterTests(unittest.TestCase):
 #include <cstdint>
 #define STDMETHODCALLTYPE
 #define WINAPI
+#ifdef __uuidof
+#undef __uuidof
+#endif
 #define __uuidof(T) IID_##T
 using HRESULT=int32_t;using LONG=int32_t;using ULONG=uint32_t;using DWORD=uint32_t;
 using HMODULE=void*;using LPCWSTR=const wchar_t*;using GUID=int;using REFGUID=const GUID&;using REFIID=const GUID&;
@@ -49,6 +52,9 @@ int GetModuleHandleExW(DWORD,LPCWSTR,HMODULE*);
         code = r'''
 #include <cassert>
 #include <cstring>
+#ifndef __uuidof
+#define __uuidof(T) platform_uuidof(T)
+#endif
 #include "ime_compartment_windows.h"
 using namespace opengeul_ime;
 unsigned clears=0,pins=0;bool failClear=false;

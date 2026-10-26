@@ -19,6 +19,10 @@ class CompartmentPublicationTests(unittest.TestCase):
 #include <cstring>
 #include "ime_notification_caller.h"
 #include "ime_compartment_protocol.h"
+#ifndef __declspec
+#define __declspec(x) platform_declspec(x)
+#endif
+#undef __declspec
 #define __declspec(x)
 using LONG=int32_t;
 void MemoryBarrier(){}
