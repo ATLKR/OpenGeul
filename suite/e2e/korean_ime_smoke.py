@@ -14,6 +14,7 @@ import io
 import json
 import mmap
 import ime_notification_caller as notification
+import ime_compartment_protocol as compartment
 import math
 import os
 from pathlib import Path
@@ -364,7 +365,8 @@ class NativeState(ctypes.Structure):
                 ('modeDiagnosticDeadline',ctypes.c_uint64),('modeDiagnosticFrequency',ctypes.c_uint64),
                 ('modeDiagnostics',NativeModeDiagnosticEvent * 128),
                 ('contextBoundaryExpired',ctypes.c_int32),('contextBoundaryRejected',ctypes.c_int32),
-                ('notificationConfig',notification.Config),('notification',notification.Record)]
+                ('notificationConfig',notification.Config),('notification',notification.Record),
+                ('compartmentConfig',compartment.Config),('compartment',compartment.Record)]
 
 
 OBSERVER_SOURCE = r'''
@@ -377,6 +379,8 @@ OBSERVER_SOURCE = r'''
 #include "ime_typed_origin.h"
 #include "ime_command_admission.h"
 #include "ime_notification_caller.h"
+#include "ime_compartment_windows.h"
+#include <new>
 #include "bounded_stack_windows.h"
 #include "bounded_plugin_origin_windows.h"
 struct Event { uint32_t sequence,message,flags,pid,tid; uint64_t hwnd,layout;
@@ -401,7 +405,8 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     uint32_t modeDiagnosticVersion,modeDiagnosticEnabled; uint64_t modeDiagnosticDeadline,modeDiagnosticFrequency;
     ModeDiagnosticEvent modeDiagnostics[128];
     volatile LONG contextBoundaryExpired,contextBoundaryRejected;
-    opengeul_ime::NotificationConfig notificationConfig;opengeul_ime::NotificationRecord notification; };
+    opengeul_ime::NotificationConfig notificationConfig;opengeul_ime::NotificationRecord notification;
+    opengeul_ime::CompartmentConfig compartmentConfig;opengeul_ime::CompartmentRecord compartment; };
 static State* shared = nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
@@ -510,6 +515,105 @@ static bool notification_target() {
     if(uint64_t(UINT_PTR(root))!=notificationRoot){shared->notification.rejected|=4;return false;}
     return true;
 }
+// This optional sink lives in pinned module storage until the retained engine
+// exits. Only command3/command4 on the original editor may manage its COM refs.
+static opengeul_ime::CompartmentConfig compartmentAdmission{};
+static opengeul_ime::CommandBudget compartmentCommandBudget{};
+static bool compartmentCommandActive=false;
+static uint32_t compartment_load(uint32_t& value) {
+    return uint32_t(InterlockedCompareExchange((volatile LONG*)&value,0,0));
+}
+static bool compartment_identity(bool input) {
+    if(!haveNotificationAdmission || std::memcmp(&compartmentAdmission,&shared->compartmentConfig,sizeof(compartmentAdmission))
+        || std::memcmp(&notificationAdmission,&shared->notificationConfig,sizeof(notificationAdmission))
+        || shared->pid!=notificationPid || shared->tid!=notificationTid
+        || shared->targetHwnd!=notificationHwnd || shared->rootHwnd!=notificationRoot
+        || shared->modeDiagnosticDeadline!=notificationDeadline || shared->modeDiagnosticFrequency!=notificationFrequency
+        || GetCurrentProcessId()!=notificationPid || GetCurrentThreadId()!=notificationTid)return false;
+    FILETIME created{},exited{},kernel{},user{};
+    if(!GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user)
+        || ((uint64_t(created.dwHighDateTime)<<32)|created.dwLowDateTime)!=notificationAdmission.creationTime)return false;
+    return original_target(HWND(UINT_PTR(notificationHwnd)),input);
+}
+static bool compartment_clock(uint64_t& stamp) {
+    LARGE_INTEGER now{},frequency{};
+    if(!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&now)
+        || frequency.QuadPart<=0 || now.QuadPart<=0 || uint64_t(frequency.QuadPart)!=notificationFrequency
+        || !notificationDeadline)return false;
+    if(uint64_t(now.QuadPart)>=notificationDeadline) {shared->compartment.expired=1;return false;}
+    stamp=uint64_t(now.QuadPart);return true;
+}
+struct CompartmentHost {
+    bool SameCallbackThread() {return GetCurrentThreadId()==notificationTid && GetCurrentProcessId()==notificationPid;}
+    void RejectForeignCallback() noexcept {InterlockedExchange((volatile LONG*)&shared->compartment.foreignRejected,1);}
+    void RejectCallbackException() noexcept {InterlockedExchange((volatile LONG*)&shared->compartment.foreignRejected,1);}
+    bool CommandBoundary() {
+        return compartmentCommandActive && (commandAdmission.active==3 || commandAdmission.active==4)
+            && budget(compartmentCommandBudget) && compartment_identity(commandAdmission.active==3)
+            && budget(compartmentCommandBudget);
+    }
+    bool CallbackBoundary() {
+        auto& r=shared->compartment;uint64_t stamp=0;
+        return !compartment_load(r.foreignRejected) && !r.lease.rejected && !r.lease.disabled
+            && compartment_load(r.lease.armed)==1 && compartment_load(r.lease.activeCallbacks)==1
+            && shared->ack==3 && !commandAdmission.active && compartment_clock(stamp)
+            && compartment_identity(true) && compartment_clock(stamp);
+    }
+    bool ClaimCallback() {
+        auto& r=shared->compartment;uint64_t stamp=0;
+        if(!opengeul_ime::CompartmentNeedsBoundary(r.lease,compartment_load(r.lease.activeCallbacks)))return false;
+        if(shared->ack!=3 || commandAdmission.active || compartment_load(r.foreignRejected))
+            return opengeul_ime::RejectCompartment(r.lease,opengeul_ime::LeaseCallback);
+        if(!compartment_clock(stamp))return opengeul_ime::RejectCompartment(r.lease,opengeul_ime::LeaseBoundary);
+        const bool owned=compartment_identity(true);
+        const bool timely=compartment_clock(stamp);
+        return opengeul_ime::ClaimCompartment(r.lease,owned,timely,shared->ack,
+            commandAdmission.active!=0,compartment_load(r.lease.activeCallbacks));
+    }
+    void CaptureCallback() {
+        auto& r=shared->compartment;
+        if(!CallbackBoundary() || !compartment_clock(r.counter))return;
+        uint64_t stamp=0;
+        const auto clock=[&](){return CallbackBoundary() && compartment_clock(stamp);};
+        const auto qualify=[&](HMODULE module){
+            if(!compartment_clock(r.pluginStarted))return 0;
+            r.pluginStatus=opengeul_stack::PluginOrigin(module,shared->notificationConfig.plugin,
+                notificationAdmission.plugin,clock);
+            if(!compartment_clock(r.pluginFinished))return 0;
+            return int(r.pluginStatus);
+        };
+        if(!opengeul_stack::Capture(r,clock,qualify,true))return;
+        if(!CallbackBoundary() || !compartment_clock(r.finishedCounter))return;
+        r.pid=notificationPid;r.tid=notificationTid;r.hwnd=notificationHwnd;
+        r.creationTime=notificationAdmission.creationTime;
+        MemoryBarrier();InterlockedExchange((volatile LONG*)&r.sequence,1);
+    }
+};
+static CompartmentHost compartmentHost;
+using CompartmentSink=opengeul_ime::OwnedCompartmentSink<CompartmentHost>;
+alignas(CompartmentSink) static unsigned char compartmentStorage[sizeof(CompartmentSink)];
+static CompartmentSink* compartmentSink=nullptr;
+static bool compartment_install(const opengeul_ime::CommandBudget& limits) {
+    if(compartmentSink || !opengeul_ime::PairEmpty(originalTsf))return false;
+    compartmentAdmission=shared->compartmentConfig;
+    if(compartmentAdmission.version!=1 || compartmentAdmission.enabled!=1)return false;
+    shared->compartment=opengeul_ime::CompartmentRecord{};
+    compartmentCommandBudget=limits;compartmentCommandActive=true;
+    struct End {~End(){compartmentCommandActive=false;}} end;
+    compartmentSink=new(compartmentStorage) CompartmentSink(compartmentHost,shared->compartment.lease,shared->compartment.api);
+    try {
+        if(!opengeul_ime::InstallCompartment(*compartmentSink,shared->compartment.lease))return false;
+        return compartment_clock(shared->compartment.baselineCounter) && compartmentHost.CommandBoundary();
+    } catch(...) {shared->compartment.api.apiException=1;return opengeul_ime::RejectCompartment(shared->compartment.lease,opengeul_ime::LeaseBoundary);}
+}
+static bool compartment_disconnect(const opengeul_ime::CommandBudget& limits) {
+    if(!compartmentSink)return true; // command3 never installed a sink.
+    compartmentCommandBudget=limits;compartmentCommandActive=true;
+    struct End {~End(){compartmentCommandActive=false;}} end;
+    try {return opengeul_ime::DisconnectCompartment(*compartmentSink,shared->compartment.lease);}
+    catch(...) {shared->compartment.api.apiException=1;return opengeul_ime::RejectCompartment(shared->compartment.lease,opengeul_ime::LeaseBoundary);}
+}
+
 static void command(HWND hwnd, UINT sequence) {
     const auto publishedSequence=InterlockedCompareExchange((volatile LONG*)&shared->command,0,0);
     if (sequence<1 || sequence>4 || sequence!=UINT(publishedSequence) || shared->ack==sequence) return;
@@ -580,6 +684,7 @@ static void command(HWND hwnd, UINT sequence) {
             else if (!shared->immOpen || bool(shared->immConversion&IME_CMODE_NATIVE)!=(sequence==3)) failure(-41);
         }
     } else if (sequence==4 && !shared->status) {
+        if(compartmentSink && !compartment_disconnect(limits))failure(-48);
         if (!initialized || !haveOldProfile || !shared->tsfCaptured || !shared->profileChangeAttempted) failure(-42);
         if (!shared->status) {
             SetLastError(0);
@@ -618,21 +723,34 @@ static void command(HWND hwnd, UINT sequence) {
         mgr->Release();
     }
     if (!budget(limits)) failure(-20);
+    if(sequence==3 && !shared->status && shared->compartmentConfig.enabled) {
+        if(!opengeul_ime::NotificationBaseline(shared->threadMode) || !compartment_install(limits))failure(-48);
+    }
+    if(!budget(limits))failure(-20);
+    bool armCompartment=false;
+    if(sequence==3 && !shared->status && shared->compartmentConfig.enabled) {
+        uint64_t stamp=0;
+        armCompartment=compartment_identity(true) && compartment_clock(stamp) && budget(limits);
+        if(!armCompartment)failure(-48);
+    }
     // Per-command TSF references and the in-thread command lease are closed before ACK.
     lease.Finish();
-    if(sequence==3 && !shared->status && shared->notificationConfig.enabled) {
+    if(sequence==3 && !shared->status && shared->notificationConfig.enabled && !shared->compartmentConfig.enabled) {
         if(opengeul_ime::NotificationBaseline(shared->threadMode) && shared->immContextPresent==1
             && shared->immConversionSucceeded==1 && shared->immOpen==1 && (shared->immConversion&1)==1
             && notification_target() && notification_clock(shared->notification.baselineCounter)) {
             MemoryBarrier();InterlockedExchange((volatile LONG*)&shared->notification.armed,1);
         }
     }
+    // No native calls between arming and ACK: a same-thread callback cannot
+    // slip through a post-ACK identity getter while the sink is still unarmed.
+    if(armCompartment)opengeul_ime::ArmCompartment(shared->compartment.lease,true);
     MemoryBarrier(); InterlockedExchange((volatile LONG*)&shared->ack,sequence);
 }
 // Optional TSF reads use only existing thread-local objects and the original setup budget.
 static bool modeDiagnosticReading=false;
 static void observe_mode_diagnostic(LONG index) {
-    if (!shared->modeDiagnosticEnabled) return;
+    if (!shared->modeDiagnosticEnabled || shared->compartmentConfig.enabled) return;
     if (index<0 || index>=128) return;
     auto& row=shared->modeDiagnostics[index];
     row.messageSequence=index+1;
@@ -650,7 +768,7 @@ static void observe_mode_diagnostic(LONG index) {
     MemoryBarrier();InterlockedExchange((volatile LONG*)&row.sequence,index+1);
 }
 static void capture_notification(LONG index,bool sentByCurrentThread) {
-    if(!shared->notificationConfig.enabled || index<0 || index>=128)return;
+    if(!shared->notificationConfig.enabled || shared->compartmentConfig.enabled || index<0 || index>=128)return;
     auto& stored=shared->notification;
     if(notificationReading){stored.rejected|=8;return;}
     if(!opengeul_ime::ClaimNotification(stored,shared->diagnostics[index],shared->modeDiagnostics[index],shared->command))return;
@@ -822,6 +940,38 @@ extern "C" __declspec(dllexport) unsigned int ReadNotification(State* source,ope
     return 1;
 }
 extern "C" __declspec(dllexport) unsigned int StateSize() { return sizeof(State); }
+extern "C" __declspec(dllexport) unsigned int DisableCompartment(State* source) {
+    if(!source || source->magic!=0x4f47494d || source->version!=4)return 0;
+    InterlockedExchange((volatile LONG*)&source->compartment.lease.disabled,1);
+    InterlockedExchange((volatile LONG*)&source->compartment.lease.armed,0);
+    return 1;
+}
+extern "C" __declspec(dllexport) unsigned int ReadCompartment(State* source,
+    opengeul_ime::CompartmentConfig* config,opengeul_ime::NotificationConfig* binding,
+    opengeul_ime::CompartmentRecord* result) {
+    if(!source || !config || !binding || !result || source->magic!=0x4f47494d || source->version!=4)return 0;
+    *config=source->compartmentConfig;*binding=source->notificationConfig;
+    *result=opengeul_ime::CompartmentRecord{};
+    // Only completed command4 makes the mutable COM receipts readable. A hung
+    // command or live callback yields no frame bytes, never a guessed snapshot.
+    const auto settled=[&](){return InterlockedCompareExchange((volatile LONG*)&source->ack,0,0)==4
+        && InterlockedCompareExchange((volatile LONG*)&source->compartment.lease.disabled,0,0)==1
+        && InterlockedCompareExchange((volatile LONG*)&source->compartment.lease.activeCallbacks,0,0)==0;};
+    if(!settled())return 2;
+    const auto before=InterlockedCompareExchange((volatile LONG*)&source->compartment.sequence,0,0);
+    MemoryBarrier();*result=source->compartment;MemoryBarrier();
+    if(!settled() || before!=InterlockedCompareExchange((volatile LONG*)&source->compartment.sequence,0,0)
+        || std::memcmp(config,&source->compartmentConfig,sizeof(*config))
+        || std::memcmp(binding,&source->notificationConfig,sizeof(*binding))) {
+        *result=opengeul_ime::CompartmentRecord{};return 2;
+    }
+    if(before!=1) {
+        result->frameCount=result->frameCapReached=result->unknownFrames=0;
+        for(auto& frame:result->frames)frame={};
+    }
+    return before==1?1:2;
+}
+
 extern "C" __declspec(dllexport) unsigned int PublishCommand(State* target,UINT sequence,uint64_t counter,uint64_t frequency) {
     // This export runs in the controller's DLL copy. Do not connect to the hook
     // target, apply its PID/TID guard, or retain this transient mapping pointer.
@@ -910,7 +1060,7 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
     remaining_setup(setup_deadline, 60, clock=clock)
     source, library = folder / 'ime-observer.cpp', folder / 'ime-observer.dll'
     for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h', 'ime_typed_origin.h',
-                 'ime_notification_caller.h','ascii_message_protocol.h','bounded_stack_windows.h','bounded_plugin_origin_windows.h'):
+                 'ime_notification_caller.h','ime_compartment_protocol.h','ime_compartment_lease.h','ime_compartment_windows.h','ascii_message_protocol.h','bounded_stack_windows.h','bounded_plugin_origin_windows.h'):
         (folder / name).write_bytes(Path(__file__).with_name(name).read_bytes())
     source.write_text(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
         .replace('__CLSID__', profile['providerClsid']).replace('__PROFILE__', profile['profileGuid']), encoding='utf-8')
@@ -938,7 +1088,7 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
 
 
 class CompositionObserver:
-    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None, diagnose_ime_mode=False, notification_binding=None):
+    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None, diagnose_ime_mode=False, notification_binding=None, capture_ime_compartment=False):
         assert type(diagnose_ime_mode) is bool
         remaining_setup(setup_deadline, 60)
         self.native_architecture = native_arch.validate_native_architecture(
@@ -949,11 +1099,14 @@ class CompositionObserver:
         self.tid = int(api.user.GetWindowThreadProcessId(focus, None))
         assert self.tid and api.pid(focus) == pid, 'Observer target is not the owned editor input thread'
         self.diagnose_ime_mode=diagnose_ime_mode
-        self.capture_ime_caller=notification_binding is not None
+        self.capture_ime_compartment=capture_ime_compartment
+        self.capture_ime_caller=notification_binding is not None and not capture_ime_compartment
+        assert type(capture_ime_compartment) is bool
+        assert not capture_ime_compartment or (diagnose_ime_mode and architecture=='arm64' and notification_binding is not None)
         config=notification.Config(version=1)
         from ascii_message_protocol import encode_plugin_binding
         config.plugin=encode_plugin_binding(None)
-        if self.capture_ime_caller:
+        if notification_binding is not None:
             assert diagnose_ime_mode and type(notification_binding) is dict and set(notification_binding)=={'creationTime','plugin'}
             created=notification_binding['creationTime']
             assert type(created) is int and 0<created<2**64,'Original engine generation required'
@@ -970,6 +1123,8 @@ class CompositionObserver:
         state.magic, state.version, state.pid, state.tid = 0x4f47494d, 4, pid, self.tid
         state.targetHwnd, state.rootHwnd = focus, root
         state.notificationConfig=config
+        state.compartmentConfig=compartment.Config(version=1,enabled=int(capture_ime_compartment))
+        self.compartment_config=bytes(state.compartmentConfig)
         state.modeDiagnosticVersion=1
         if diagnose_ime_mode:
             state.modeDiagnosticDeadline,state.modeDiagnosticFrequency=self.mode_diagnostic_budget
@@ -1011,7 +1166,7 @@ class CompositionObserver:
     def _install_hooks(self, setup_deadline):
         try:
             program = ((4, 'HookCall'), (3, 'HookGet'))
-            if self.diagnose_ime_mode: program += ((12, 'HookReturn'),)
+            if self.diagnose_ime_mode and not getattr(self,'capture_ime_compartment',False): program += ((12, 'HookReturn'),)
             for kind, name in program:
                 remaining_setup(setup_deadline, 60)
                 address = ctypes.cast(getattr(self.dll, name), ctypes.c_void_p)
@@ -1209,6 +1364,7 @@ class CompositionObserver:
     def mode_diagnostics(self):
         state=self.state()
         if not getattr(self,'diagnose_ime_mode',False):return dict(status='disabled',acceptanceEligible=False)
+        if getattr(self,'capture_ime_compartment',False):return dict(status='disabled-for-compartment-callback',acceptanceEligible=False)
         assert state.modeDiagnosticVersion==1 and state.modeDiagnosticEnabled==1,'IME mode diagnostic header changed'
         assert (int(state.modeDiagnosticDeadline),int(state.modeDiagnosticFrequency))==self.mode_diagnostic_budget,'Original IME mode diagnostic budget changed'
         assert state.modeDiagnosticDeadline>0 and state.modeDiagnosticFrequency>0,'IME mode diagnostic budget missing'
@@ -1244,8 +1400,35 @@ class CompositionObserver:
                 deadline=int(state.modeDiagnosticDeadline),frequency=int(state.modeDiagnosticFrequency))
         return report
 
+    def compartment_diagnostics(self):
+        if not getattr(self, 'capture_ime_compartment', False):
+            return dict(status='disabled', acceptanceEligible=False)
+        config, binding, row = compartment.Config(), notification.Config(), compartment.Record()
+        self.dll.ReadCompartment.argtypes = [ctypes.POINTER(NativeState), ctypes.POINTER(compartment.Config),
+            ctypes.POINTER(notification.Config), ctypes.POINTER(compartment.Record)]
+        self.dll.ReadCompartment.restype = ctypes.c_uint
+        view = NativeState.from_buffer(self.mapping)
+        try: copied = self.dll.ReadCompartment(ctypes.byref(view), ctypes.byref(config), ctypes.byref(binding), ctypes.byref(row))
+        finally: del view
+        assert copied in (1, 2), 'Compartment snapshot invalid'
+        command3 = next((r for r in self.commands if r['command'] == 3), None)
+        if copied == 2 and not row.lease.installAttempts:
+            return dict(status='inconclusive', acceptanceEligible=False, cleanupStatus='unproved',
+                        callerAttributionProved=False, processRetirementVerified=False)
+        return compartment.decode(config, row, expected_config=self.compartment_config,
+            notification_config=binding, expected_notification=self.notification_config,
+            pid=self.pid, tid=self.tid, hwnd=self.focus, deadline=self.mode_diagnostic_budget[0],
+            frequency=self.mode_diagnostic_budget[1], command3=command3)
+
     def close(self):
         errors = []
+        if getattr(self, 'capture_ime_compartment', False) and getattr(self, 'mapping', None) is not None and hasattr(self, 'dll'):
+            self.dll.DisableCompartment.argtypes = [ctypes.POINTER(NativeState)]
+            self.dll.DisableCompartment.restype = ctypes.c_uint
+            view = NativeState.from_buffer(self.mapping)
+            try:
+                if self.dll.DisableCompartment(ctypes.byref(view)) != 1: errors.append('compartment-disable')
+            finally: del view
         for hook in reversed(getattr(self, 'hooks', [])):
             if not self.api.user.UnhookWindowsHookEx(hook): errors.append(str(ctypes.get_last_error()))
         self.hooks = []
@@ -1418,14 +1601,15 @@ def retain_ime_focus_failure_diagnostics(record, process, keyboard):
         receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
     assert not diagnose_navigation or module in ('writer','impress'), 'Navigation experiment is scoped to Writer or Impress'
-    assert not diagnose_ime_mode or (module=='calc' and not diagnose_navigation),'IME mode experiment is scoped to one Calc case'
+    assert not diagnose_ime_mode or (not diagnose_navigation and (module=='calc' or (module=='writer' and capture_ime_compartment))), 'IME mode experiment requires the selected bounded case'
     assert not capture_ime_caller or diagnose_ime_mode,'Caller capture requires mode diagnosis'
-    assert plugin_origin is None or diagnose_focus or capture_ime_caller,'Plugin binding requires scoped diagnosis'
+    assert not capture_ime_compartment or (diagnose_ime_mode and module=='writer' and readiness['nativeMachine']==0xaa64 and plugin_origin is not None and not capture_ime_caller),'Compartment callback requires one matched Writer case'
+    assert plugin_origin is None or diagnose_focus or capture_ime_caller or capture_ime_compartment,'Plugin binding requires scoped diagnosis'
     assert not diagnose_focus or (module=='calc' and not diagnose_navigation and not diagnose_ime_mode),'Focus experiment is scoped to Calc only'
     assert diagnostic_suffix in ('focus-01','focus-02','focus-03') if diagnose_focus else diagnostic_suffix is None,'Invalid focus diagnostic case suffix'
     name = 'ime-' + module
@@ -1536,7 +1720,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'],
             architecture=record['architecture'], setup_deadline=setup_deadline,
             **({'diagnose_ime_mode':True} if diagnose_ime_mode else {}),
-            **({'notification_binding':dict(creationTime=keyboard.binding['officeCreationTime'],plugin=plugin_origin)} if capture_ime_caller else {}))
+            **({'notification_binding':dict(creationTime=keyboard.binding['officeCreationTime'],plugin=plugin_origin)} if capture_ime_caller or capture_ime_compartment else {}),
+            **({'capture_ime_compartment':True} if capture_ime_compartment else {}))
         record.update(nativeArchitecture=observer.native_architecture, targetArchitecture=observer.target_architecture)
         assert observer.tid == keyboard.tid, 'Native observer differs from retained keyboard editor thread'
         keyboard.setup_complete()
@@ -1555,6 +1740,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         assert active['activeLanguage'] == 0x0412 and active['activeClsid'].lower() == profile['providerClsid'].lower() and active['activeProfile'].lower() == profile['profileGuid'].lower(), 'Focused editor TSF profile differs from the attested Microsoft IME'
         record['activeLayout'] = int(api.user.GetKeyboardLayout(observer.tid) or 0)
         record['activeProfile'] = active
+        if capture_ime_compartment:
+            assert active['tsfOrigin']=='empty', 'Compartment hypothesis requires the original empty TSF origin'
         observer.command(2, setup_deadline=setup_deadline)  # Existing context gate; actual composition proves editing.
         observer.command(3, setup_deadline=setup_deadline)
         remaining_setup(setup_deadline, 60)
@@ -1577,6 +1764,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         record['imeCommands'] = observer.commands
         record.update({key: record['restoration'][key] for key in
             ('profileHklRestored', 'immEqual', 'typedStateEqual', 'restorationDisposition')})
+        if capture_ime_compartment:
+            record['imeCompartmentDiagnostics'] = observer.compartment_diagnostics()
         observer.close()
         observer = None
         save_started = time.monotonic()
@@ -1647,6 +1836,10 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                 record.update(success=False, imeCleanupError=type(exc).__name__ + ': ' + str(exc))
             finally:
                 record['imeCommands'] = observer.commands
+                if capture_ime_compartment:
+                    try: record['imeCompartmentDiagnostics'] = observer.compartment_diagnostics()
+                    except Exception as exc:
+                        record['imeCompartmentDiagnostics'] = dict(status='unavailable',acceptanceEligible=False,errorType=type(exc).__name__)
                 try: observer.close()
                 except Exception as exc: record.update(success=False, hookCleanupError=str(exc))
         if keyboard is not None:
@@ -1737,18 +1930,21 @@ def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_
     return 0 if success else 1
 
 
-def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,capture_caller=False):
+def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,capture_caller=False,capture_compartment=False):
     lease=None;primary=None;cleanup_error=None;results=[]
     try:
-        assert not proof_path or (capture_caller and architecture=='arm64'),'Matched proof requires ARM64 caller diagnosis'
+        assert not proof_path or ((capture_caller or capture_compartment) and architecture=='arm64'),'Matched proof requires ARM64 caller diagnosis'
         assert not capture_caller or architecture=='x64' or proof_path is not None,'ARM64 caller proof required'
         if proof_path is not None:
             from ascii_message_preparation import _Budget
             budget=_Budget();budget.now();lease=_open_plugin_proof(suite,proof_path,budget)
             prepared=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture,budget=budget)
         else:prepared=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture)
-        extra={} if not capture_caller else dict(capture_ime_caller=True,plugin_origin=None if lease is None else lease.binding())
-        results=collect_cases([('ime-calc',lambda:case(suite,fixtures,output,readiness,'calc',dict(INPUT_CASES)['calc'],
+        assert not capture_compartment or (architecture=='arm64' and lease is not None and not capture_caller)
+        extra={} if not (capture_caller or capture_compartment) else dict(capture_ime_caller=capture_caller,
+            capture_ime_compartment=capture_compartment,plugin_origin=None if lease is None else lease.binding())
+        module='writer' if capture_compartment else 'calc'
+        results=collect_cases([('ime-'+module,lambda:case(suite,fixtures,output,readiness,module,dict(INPUT_CASES)[module],
             prepared_library=prepared,diagnose_ime_mode=True,**extra))],output)
     except BaseException as exc:
         primary=exc;raise
@@ -1768,7 +1964,7 @@ def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,pro
     success=len(results)==1 and results[0].get('success') is True and cleanup_error is None
     report=dict(schemaVersion=1,kind='native-ime-mode-diagnostic',success=success,acceptanceEligible=False,
         imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=1,
-        notificationCallerEnabled=capture_caller)
+        notificationCallerEnabled=capture_caller,compartmentCallbackEnabled=capture_compartment)
     if lease is not None:report['pluginFileOrigin']=dict(lease.receipt)
     if cleanup_error:report['pluginFileOriginCleanupErrorType']=cleanup_error
     (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -1782,10 +1978,11 @@ def main(argv=None):
     parser.add_argument('--readiness', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--diagnose-navigation', choices=('writer','impress'))
-    parser.add_argument('--diagnose-ime-mode', choices=('calc',))
+    parser.add_argument('--diagnose-ime-mode', choices=('calc','writer'))
     parser.add_argument('--diagnose-focus', choices=('calc',))
     parser.add_argument('--matched-plugin-proof',type=Path)
     parser.add_argument('--capture-ime-caller',action='store_true')
+    parser.add_argument('--capture-ime-compartment',action='store_true')
     parser.add_argument('--verify-one', choices=dict(INPUT_CASES))
     parser.add_argument('--file', type=Path)
     parser.add_argument('--reopen-output', type=Path)
@@ -1797,8 +1994,10 @@ def main(argv=None):
     architecture = native_arch.require_architecture(inventory.get('architecture'))
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
     assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus))<=1,'Reopen and diagnostic modes are mutually exclusive'
+    assert not args.capture_ime_compartment or (args.diagnose_ime_mode=='writer' and architecture=='arm64' and args.matched_plugin_proof and not args.capture_ime_caller), 'Compartment capture requires matched ARM64 Writer diagnosis'
+    assert args.diagnose_ime_mode!='writer' or args.capture_ime_compartment, 'Writer mode requires the bounded compartment diagnostic'
     assert not args.capture_ime_caller or args.diagnose_ime_mode=='calc','Caller capture requires Calc mode diagnosis'
-    assert not args.matched_plugin_proof or (architecture=='arm64' and (args.diagnose_focus=='calc' or args.capture_ime_caller)),'Matched binding requires scoped ARM64 diagnosis'
+    assert not args.matched_plugin_proof or (architecture=='arm64' and (args.diagnose_focus=='calc' or args.capture_ime_caller or args.capture_ime_compartment)),'Matched binding requires scoped ARM64 diagnosis'
     assert not args.capture_ime_caller or architecture=='x64' or args.matched_plugin_proof is not None,'ARM64 caller proof required'
     if args.verify_one:
         assert args.file and args.reopen_output, 'The owned reopen fixture and receipt are required'
@@ -1824,7 +2023,7 @@ def main(argv=None):
     if args.diagnose_focus:
         return run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof)
     if args.diagnose_ime_mode:
-        return run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,capture_caller=args.capture_ime_caller)
+        return run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,capture_caller=args.capture_ime_caller,capture_compartment=args.capture_ime_compartment)
     prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
     if args.diagnose_navigation:
         module = args.diagnose_navigation

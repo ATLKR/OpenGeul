@@ -78,18 +78,7 @@ def select(report):
     return result
 
 
-def select_notification(report):
-    from ime_notification_caller import clean,closed
-    assert report.get('kind')=='native-ime-mode-diagnostic' and report.get('architecture')=='arm64'
-    assert report.get('acceptanceEligible') is False and report.get('notificationCallerEnabled') is True
-    assert report.get('expectedCaseCount')==1 and len(report['tests'])==1
-    proof=report['pluginFileOrigin']
-    assert proof.get('verified') is True and proof.get('released') is True and not report.get('pluginFileOriginCleanupErrorType')
-    case=report['tests'][0];assert case.get('case')=='ime-calc' and case.get('kind')=='native-ime-mode-diagnostic'
-    result=dict(status='inconclusive-case',evidenceKind='ime-notification-delivery',rvas=[],runtimeCallerProved=False,acceptanceEligible=False)
-    if case.get('success') is True:
-        result['status']='not-reproduced';return result
-    if case.get('stage')!='physical-dubeolsik-composition':return result
+def require_failed_engine_retirement(report,case):
     session=case['imeKeyboardSession'];admission=case['imeEngineRetirement']['admission'];native=session['expectedNative']
     assert session.get('engineHandleReleased') is True and admission['native']==native
     binding=report['runBinding'];source=admission['runBinding']
@@ -108,6 +97,22 @@ def select_notification(report):
     assert 0<start<=cleanup['commandReturnedAt']<deadline==start+15
     assert cleanup['commandReturnedAt']<=cleanup['exitWaitStartedAt']<=cleanup['engineWaitReturnedAt']<=cleanup['exitWaitDeadline']==cleanup['exitWaitStartedAt']+5
     wait=cleanup['engineWait'];assert wait['api']=='WaitForSingleObject' and wait['handleValue']==engine['handleValue'] and wait['result']==0 and 0<=wait['timeoutMilliseconds']<=5000
+    return native,admission
+
+
+def select_notification(report):
+    from ime_notification_caller import clean,closed
+    assert report.get('kind')=='native-ime-mode-diagnostic' and report.get('architecture')=='arm64'
+    assert report.get('acceptanceEligible') is False and report.get('notificationCallerEnabled') is True
+    assert report.get('expectedCaseCount')==1 and len(report['tests'])==1
+    proof=report['pluginFileOrigin']
+    assert proof.get('verified') is True and proof.get('released') is True and not report.get('pluginFileOriginCleanupErrorType')
+    case=report['tests'][0];assert case.get('case')=='ime-calc' and case.get('kind')=='native-ime-mode-diagnostic'
+    result=dict(status='inconclusive-case',evidenceKind='ime-notification-delivery',rvas=[],runtimeCallerProved=False,acceptanceEligible=False)
+    if case.get('success') is True:
+        result['status']='not-reproduced';return result
+    if case.get('stage')!='physical-dubeolsik-composition':return result
+    native,admission=require_failed_engine_retirement(report,case)
     mode=case['imeModeDiagnostics'];messages=case['imeMessageDiagnostics'];caller=mode['notificationCaller']
     if caller['status']!='complete':
         result['status']='inconclusive-notification';return result
@@ -145,6 +150,71 @@ def select_notification(report):
     return result
 
 
+def select_compartment(report):
+    from ime_notification_caller import clean
+    assert report.get('kind')=='native-ime-mode-diagnostic' and report.get('architecture')=='arm64'
+    assert report.get('acceptanceEligible') is False and report.get('compartmentCallbackEnabled') is True
+    assert report.get('notificationCallerEnabled') is False and report.get('expectedCaseCount')==1 and len(report['tests'])==1
+    proof=report['pluginFileOrigin']
+    assert proof.get('verified') is True and proof.get('released') is True and not report.get('pluginFileOriginCleanupErrorType')
+    case=report['tests'][0]
+    assert case.get('case')=='ime-writer' and case.get('kind')=='native-ime-mode-diagnostic'
+    result=dict(status='inconclusive-case',evidenceKind='ime-compartment-callback',rvas=[],runtimeCallerProved=False,acceptanceEligible=False)
+    if case.get('success') is True:
+        result['status']='not-reproduced';return result
+    if case.get('stage')!='physical-dubeolsik-composition':return result
+    if (case.get('keyTokens')!=['g'] or case.get('scanCodeInputs')!=[
+            {'vk':0,'scan':34,'flags':8},{'vk':0,'scan':34,'flags':10}]
+            or case.get('inputMethod')!='SendInput-scancode' or case.get('unicodeInputUsed') is not False
+            or case.get('error')!='AssertionError: Native UI condition did not become true: False'):
+        return result
+    messages=case['imeMessageDiagnostics']
+    if messages.get('status')!='complete':
+        result['status']='inconclusive-messages';return result
+    native,admission=require_failed_engine_retirement(report,case)
+    assert case['activeProfile']['tsfOrigin']=='empty'
+    caller=case['imeCompartmentDiagnostics']
+    if caller['status']!='complete' or caller['cleanupStatus']!='unsubscribed':
+        result['status']='inconclusive-callback';return result
+    assert caller['callerAttributionProved'] is False and caller['acceptanceEligible'] is False and caller['processRetirementVerified'] is False
+    assert not caller['expired'] and not caller['rejected'] and not caller['foreignRejected'] and caller['claimed'] is True
+    assert caller['moduleMapVersion']==2 and caller['pluginStatus']==1
+    assert (caller['pid'],caller['engineCreationTime'])==(native['officePid'],native['officeCreationTime'])
+    assert caller['tid']==case['editorTid']==admission['editorTid'] and caller['hwnd']==case['keyboardFocusHwnd']==admission['focusHwnd']
+    command=next(r for r in case['imeCommands'] if r['command']==3);baseline=command['threadMode']
+    assert command['success'] is True and command['nativeAck']==3 and command['status']==0 and clean(baseline)
+    from korean_ime_smoke import require_mode_context
+    assert require_mode_context(command)[2:]==(native['officePid'],caller['tid'],caller['hwnd'],native['suiteHwnd'])
+    assert command['requestedBudget']=={'counter':command['modeDeadlineCounter'],'frequency':command['modeCounterFrequency']}
+    assert command['modeCounterFrequency']==caller['counterFrequency']
+    assert caller['baselineCounter']<command['modeDeadlineCounter']<=caller['deadlineCounter']
+    events=messages['events']
+    assert messages['capacity']==128 and 0<len(events)==messages['observedCount']<=128
+    for index,event in enumerate(events,1):
+        assert event['sequence']==index and (event['pid'],event['tid'],event['hwnd'])==(caller['pid'],caller['tid'],caller['hwnd'])
+    keys=[event for event in events if event['message']==0x100 and event['origin']==2 and event['commandAck']==3]
+    assert len(keys)==1
+    key=keys[0]
+    assert key['wparam']==71 and (key['lparam']>>16)&0xff==34 and key['focusHwnd']==caller['hwnd']
+    assert key['immContextPresent']==key['immConversionSucceeded']==key['immOpen']==1 and key['immConversion']&1
+    assert caller['baselineCounter']<=key['counter']<=caller['counter']
+    assert baseline['afterOpenHr']==baseline['afterConversionHr']==0 and baseline['afterOpenType']==baseline['afterConversionType']==3
+    assert baseline['afterOpen']==baseline['afterConversion']==1
+    assert caller['counterFrequency']>0
+    assert 0<caller['baselineCounter']<=caller['counter']<=caller['pluginStarted']<=caller['pluginFinished']<=caller['finishedCounter']<caller['deadlineCounter']
+    frames=caller['frames'];assert 0<len(frames)==caller['frameCount']<16 and caller['frameCapReached'] is False
+    assert caller['unknownFrames']==sum(f['moduleId']==0 for f in frames)
+    for frame in frames:
+        assert type(frame['moduleId']) is int and 0<=frame['moduleId']<=14 and type(frame['rva']) is int and 0<=frame['rva']<2**32
+        if frame['moduleId']==0:assert frame['rva']==0
+        if frame['moduleId']==14:assert frame['rva']>=4 and frame['rva']%4==0
+    rvas=[f['rva'] for f in frames if f['moduleId']==14]
+    if not rvas:
+        result['status']='inconclusive-no-product-frame';return result
+    result.update(status='selected',rvas=rvas,pluginIdentity=dict(dllSha256=proof['dllSha256'],identity=proof['matchedIdentity']))
+    return result
+
+
 def join_resolution(selection,worker):
     assert worker.get('success') is True
     resolved=worker['resolution'];identity=selection['pluginIdentity']
@@ -152,7 +222,7 @@ def join_resolution(selection,worker):
     frames=resolved['frames'];assert len(frames)==len(selection['rvas'])
     assert [f['returnRva'] for f in frames]==selection['rvas']
     tags=('mutex-acquire','mutex-release','mutex-acquire-with-wait','unresolved')
-    if selection.get('evidenceKind')=='ime-notification-delivery':
+    if selection.get('evidenceKind') in ('ime-notification-delivery','ime-compartment-callback'):
         tags+=('frame-input-context','frame-input-context-dispatch','frame-window-procedure','frame-key-handler')
     assert all(f['tag'] in tags for f in frames)
     return all(f['tag']!='unresolved' for f in frames)
@@ -161,7 +231,7 @@ def join_resolution(selection,worker):
 def main(argv=None):
     parser=argparse.ArgumentParser();parser.add_argument('--mode',choices=('qualify','resolve'),required=True)
     parser.add_argument('--pair',type=Path,required=True);inputs=parser.add_mutually_exclusive_group()
-    inputs.add_argument('--focus',type=Path);inputs.add_argument('--notification',type=Path);parser.add_argument('--output',type=Path,required=True)
+    inputs.add_argument('--focus',type=Path);inputs.add_argument('--notification',type=Path);inputs.add_argument('--compartment',type=Path);parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args(argv)
     assert os.name=='nt' and __debug__,'Native Windows with assertions required'
     spec=importlib.util.spec_from_file_location('matched_ci_admission',Path(__file__).resolve().parents[2]/'e2e/native31_suite_prepare.py')
@@ -172,17 +242,17 @@ def main(argv=None):
     try:
         rvas=None
         if args.mode=='resolve':
-            input_path=args.notification or args.focus
+            input_path=args.compartment or args.notification or args.focus
             assert input_path is not None
             # Local generated report only, with finite retained size.
             path=worker.shared._absolute(input_path.absolute())
             with path.open('rb') as stream:raw=stream.read(16*1024*1024+1)
             assert len(raw)<=16*1024*1024
             focus=json.loads(raw);assert focus['runBinding']==binding,'Trace belongs to another run'
-            report['selection']=(select_notification(focus) if args.notification else select(focus))
+            report['selection']=(select_compartment(focus) if args.compartment else select_notification(focus) if args.notification else select(focus))
             if report['selection']['status']!='selected':return 2
             rvas=report['selection']['rvas']
-        if args.mode=='qualify':assert args.focus is None and args.notification is None
+        if args.mode=='qualify':assert args.focus is None and args.notification is None and args.compartment is None
         report['worker']=worker.run(args.pair,mode=args.mode,rvas=rvas)
         if args.mode=='resolve' and not join_resolution(report['selection'],report['worker']):
             report['classification']='inconclusive-symbols';return 2

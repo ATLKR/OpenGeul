@@ -78,7 +78,7 @@ class SalOffsetWorkflowTests(unittest.TestCase):
     def test_only_static_mode_skips_build_and_missing_desktop_originals(self):
         steps=workflow_steps()
         build=next(s for s in steps if field(s,'id')=='build')
-        self.assertEqual(condition(build),"env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && (matrix.architecture == 'x64' || steps.matched-symbol-qualification.outcome == 'success'))) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))")
+        self.assertEqual(condition(build),"env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))")
         upload=next(s for s in steps if 'Suite native31 setup and control originals' in s)
         self.assertEqual(condition(upload),"(env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || matrix.architecture == 'arm64') && always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped')")
         units=next(s for s in steps if 'unittest discover' in run_code(s))
@@ -96,4 +96,4 @@ class SalOffsetWorkflowTests(unittest.TestCase):
         self.assertEqual(condition(terminal),'always() && '+STATIC)
         self.assertLess(steps.index(upload),steps.index(terminal))
         self.assertIn('package delivery is prohibited',run_code(terminal))
-        self.assertIn('OPENGEUL_SUITE_RUN_MODE: acceptance',WORKFLOW.read_text())
+        self.assertIn('OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic',WORKFLOW.read_text())

@@ -118,7 +118,7 @@ int main(){
 '''
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);cpp=root/'mode.cpp';exe=root/('mode.exe' if os.name=='nt' else 'mode')
-            cpp.write_text(prefix+'\n#include \"ime_notification_caller.h\"\n'+declarations+main)
+            cpp.write_text('#include "ime_compartment_protocol.h"\n'+prefix+'\n#include \"ime_notification_caller.h\"\n'+declarations+main)
             build=subprocess.run([compiler,'-std=c++17','-I',str(Path(ime.__file__).parent),str(cpp),'-o',str(exe)],capture_output=True,text=True,timeout=30)
             self.assertEqual(build.returncode,0,build.stdout+build.stderr)
             run=subprocess.run([str(exe)],capture_output=True,text=True,timeout=5)

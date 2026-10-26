@@ -16,6 +16,7 @@ class NotificationPolicyTests(unittest.TestCase):
         code=r'''
 #include <cassert>
 #include "ime_notification_caller.h"
+#include "ime_compartment_protocol.h"
 int main(){using namespace opengeul_ime;ModeReceipt r;
  assert(!NotificationBaseline(r));assert(!NotificationClosed(r));
  r.status=r.cleanupStatus=r.variantClearHr=0;r.releaseCalls=1;
@@ -153,6 +154,7 @@ class NotificationPublicationTests(unittest.TestCase):
 #include <cassert>
 #include <cstring>
 #include "ime_notification_caller.h"
+#include "ime_compartment_protocol.h"
 #ifdef __declspec
 #undef __declspec
 #endif
@@ -217,6 +219,7 @@ class NotificationProducerTests(unittest.TestCase):
 #include <cwchar>
 #include <cassert>
 #include "ime_notification_caller.h"
+#include "ime_compartment_protocol.h"
 #include "ime_command_admission.h"
 using WCHAR=uint16_t;using LONG=int32_t;using HMODULE=void*;
 constexpr unsigned GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS=4,GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT=2;
@@ -275,6 +278,7 @@ int main(){reset();capture_notification(0,true);assert(shared->notification.sequ
 #include <cwchar>
 #include <cassert>
 #include "ime_notification_caller.h"
+#include "ime_compartment_protocol.h"
 #include "ime_command_admission.h"
 using WCHAR=uint16_t;using LONG=int32_t;using DWORD=uint32_t;using HMODULE=void*;using HWND=void*;using HIMC=void*;using UINT=unsigned;using UINT_PTR=uintptr_t;using WPARAM=uintptr_t;using LPARAM=intptr_t;
 struct LARGE_INTEGER{int64_t QuadPart;};
@@ -308,7 +312,7 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     uint32_t modeDiagnosticVersion,modeDiagnosticEnabled; uint64_t modeDiagnosticDeadline,modeDiagnosticFrequency;
     ModeDiagnosticEvent modeDiagnostics[128];
     volatile LONG contextBoundaryExpired,contextBoundaryRejected;
-    opengeul_ime::NotificationConfig notificationConfig;opengeul_ime::NotificationRecord notification; };
+    opengeul_ime::NotificationConfig notificationConfig;opengeul_ime::CompartmentConfig compartmentConfig;opengeul_ime::NotificationRecord notification; };
 
 State storage{};State*shared=&storage;opengeul_ime::NotificationConfig notificationAdmission{};bool notificationReading=false;uint64_t tick=20;
 bool notification_clock(uint64_t&stamp){stamp=++tick;return true;}bool notification_target(){return true;}

@@ -21,7 +21,7 @@ class MessageDiagnosticsTests(unittest.TestCase):
         if compiler is None: self.skipTest('Portable C++ compiler unavailable; Windows DLL ABI is checked at load')
         source = ime.OBSERVER_SOURCE
         declarations = source[source.index('struct Event {'):source.index('static State* shared')]
-        prefix = '#include <cstdint>\n#include <cstddef>\n#include "ime_thread_mode.h"\n#include "ime_command_admission.h"\n#include "ime_notification_caller.h"\nusing WCHAR=uint16_t;using LONG=int32_t;\n'
+        prefix = '#include <cstdint>\n#include <cstddef>\n#include "ime_thread_mode.h"\n#include "ime_command_admission.h"\n#include "ime_notification_caller.h"\n#include "ime_compartment_protocol.h"\nusing WCHAR=uint16_t;using LONG=int32_t;\n'
         checks = 'static_assert(sizeof(State)==' + str(ctypes.sizeof(ime.NativeState)) + ',"state ABI");\n'
         checks += '\n'.join('static_assert(offsetof(State,' + name + ')==' + str(getattr(ime.NativeState, name).offset) + ',"field ABI");' for name, _ in ime.NativeState._fields_)
         with tempfile.TemporaryDirectory() as temp:

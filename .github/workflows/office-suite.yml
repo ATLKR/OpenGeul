@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: acceptance
+  OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -277,7 +277,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Native local symbols unavailable; no GUI experiment is admitted.' }
 
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && (matrix.architecture == 'x64' || steps.matched-symbol-qualification.outcome == 'success'))) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -393,27 +393,27 @@ jobs:
       shell: pwsh
       run: |
         throw 'Navigation diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
-    - name: Targeted Calc TSF and IMM mode diagnostic (not acceptance)
+    - name: One owned Writer compartment callback (not acceptance)
       id: ime-mode-diagnostic
-      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && (matrix.architecture == 'x64' || steps.matched-symbol-qualification.outcome == 'success')"
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success'"
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-ime-mode-diagnostic/worker-diagnostics
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $callerArgs = @('--capture-ime-caller')
+        $callerArgs = @('--capture-ime-compartment')
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
           $callerArgs += @('--matched-plugin-proof', (Resolve-Path .work/plugin-symbol-input/pair/receipt.json).Path)
         }
-        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-ime-mode-diagnostic --diagnose-ime-mode calc @callerArgs
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-ime-mode-diagnostic --diagnose-ime-mode writer @callerArgs
         if ($LASTEXITCODE -ne 0) { throw 'Targeted IME mode diagnostic failed.' }
 
-    - name: Resolve the one original IME-close delivery stack
+    - name: Resolve the one original compartment callback stack
       id: ime-notification-resolution
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64' && steps.ime-mode-diagnostic.outcome != 'skipped' && steps.matched-symbol-qualification.outcome == 'success'"
       shell: pwsh
       run: |
-        python suite/scripts/matched_plugin_diagnostic.py --mode resolve --pair .work/plugin-symbol-input/pair --notification .work/suite-ime-mode-diagnostic/results.json --output .work/suite-ime-mode-diagnostic/notification-resolution.json
+        python suite/scripts/matched_plugin_diagnostic.py --mode resolve --pair .work/plugin-symbol-input/pair --compartment .work/suite-ime-mode-diagnostic/results.json --output .work/suite-ime-mode-diagnostic/compartment-resolution.json
         if ($LASTEXITCODE -ne 0) { throw 'Original IME-close caller remains unresolved; no retry is authorized by this diagnostic.' }
     - name: Preserve targeted IME mode evidence only
       id: ime-mode-diagnostic-evidence
