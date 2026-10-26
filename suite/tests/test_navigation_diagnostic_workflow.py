@@ -13,7 +13,7 @@ def condition(step):
 
 class NavigationDiagnosticWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_validation_reject_unknown_values(self):
-        self.assertIn("OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic",WORKFLOW.read_text())
+        self.assertIn("OPENGEUL_SUITE_RUN_MODE: focus-diagnostic",WORKFLOW.read_text())
         step=next(s for s in workflow_steps() if field(s,'id')=='run-mode')
         code=run_code(step)
         self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller', 'reader-console-diagnostic')",code)
@@ -74,7 +74,7 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                 step=next(s for s in steps if field(s,'id')==name+'-diagnostic')
                 mode="env.OPENGEUL_SUITE_RUN_MODE == '"+name+"-diagnostic'"
                 prerequisites=('build','readiness','native31-privacy-prepare','fixtures')
-                expected="!cancelled() && "+mode+"".join(" && steps."+p+".outcome == 'success'" for p in prerequisites)
+                expected="!cancelled() && "+mode+(" && matrix.architecture == 'arm64'" if name=='focus' else "")+"".join(" && steps."+p+".outcome == 'success'" for p in prerequisites)
                 if name=='ime-mode':
                     expected+=" && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success'"
                 self.assertEqual(condition(step),expected)
@@ -84,11 +84,11 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                         for p in prerequisites:
                             expression=expression.replace('steps.'+p+'.outcome',repr('failure' if failed==p else 'success'))
                         self.assertEqual(eval(expression,{'__builtins__':{}}),run_mode==name+'-diagnostic' and failed is None)
-                self.assertIn('--output .work/suite-'+name+'-diagnostic --diagnose-'+flag+(' writer' if name=='ime-mode' else ' calc'),run_code(step))
+                self.assertIn('--output .work/suite-'+name+'-diagnostic --diagnose-'+flag+' writer',run_code(step))
                 self.assertIn('if ($LASTEXITCODE -ne 0)',run_code(step))
                 upload=next(s for s in steps if field(s,'id')==name+'-diagnostic-evidence')
                 terminal=next(s for s in steps if field(s,'id')==name+'-not-acceptance')
-                self.assertEqual(condition(upload),'always() && '+mode)
+                self.assertEqual(condition(upload),'always() && '+mode+(" && matrix.architecture == 'arm64'" if name=='focus' else ''))
                 self.assertEqual(condition(terminal),'always() && '+mode)
                 if name=='ime-mode':
                     self.assertIn('path: |\n          .work/suite-ime-mode-diagnostic/\n',upload)

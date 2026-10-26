@@ -8,11 +8,12 @@ import test_ime_keyboard_session as fixtures
 
 
 class CaptureDiagnosticTests(unittest.TestCase):
-    def fixture(self):
+    def fixture(self,module='calc'):
         owner=fixtures.IMEKeyboardSessionTests();owner.setUp();self.addCleanup(owner.doCleanups)
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
-        session,*_=owner.fixture(directory.name,module='calc');session.start()
+        session,*_=owner.fixture(directory.name,module=module);session.start()
         session.record.update(kind='native-focus-diagnostic',acceptanceEligible=False,imeVerified=False)
+        if module=='writer':session.record.update(case='ime-writer-focus-01',architecture='arm64',readiness={'nativeMachine':0xaa64})
         session.record['editorFocusReadiness']=dict(deadline=6.,startedAt=1.,deadlineSeconds=5.,
             deadlineScope='editor-setup-and-focus',ready=False,clickAttempts=1,clickCompleted=False)
         return session
@@ -31,6 +32,29 @@ class CaptureDiagnosticTests(unittest.TestCase):
         self.assertEqual(trace.receipt['snapshot']['events'],[{'sequence':1}])
         trace.close(primary);self.assertEqual(probe.calls.count('close'),1)
         self.assertFalse(trace.receipt['acceptanceEligible'])
+    def test_writer_controller_and_both_stops_use_same_original_scope(self):
+        from editor_capture_diagnostic import EditorCaptureDiagnostic,stop_focus_keyboard,stop_focus_keyboard_before_passive_watch
+        k=self.fixture('writer');probe=self.probe();trace=EditorCaptureDiagnostic(k,{},6.,probe=probe)
+        trace.start();k.clock.now=6.;trace.close(RuntimeError('original deadline'))
+        self.assertEqual(probe.calls,['admit','start',('read',{'local_only':True}),'close'])
+        k=self.stopped_keyboard('writer');stop_focus_keyboard(k)
+        self.assertTrue(k.finished);self.assertTrue(k.receipt['engineHandleReleased'])
+        k=self.stopped_keyboard('writer');receipt=k.record['focusCaptureDiagnostic'];receipt.pop('cleanup')
+        trace=NS(keyboard=k,receipt=receipt,deadline=6.,closed=False,
+            probe=NS(readiness_boundary=lambda **kw:dict(counterBefore=10,counterAfter=20)))
+        stop_focus_keyboard_before_passive_watch(k,trace,counter=lambda:10)
+        self.assertTrue(k.finished);self.assertTrue(k.receipt['engineHandleReleased'])
+        self.assertFalse(k.receipt['success']);self.assertNotIn('cleanup',receipt)
+
+    def test_writer_controller_rejects_wrong_case_architecture_and_plugin(self):
+        from editor_capture_diagnostic import EditorCaptureDiagnostic
+        for key,value in [('case','ime-writer-focus-02'),('architecture','x64'),('readiness',{'nativeMachine':0x8664}),('plugin',{})]:
+            with self.subTest(key=key):
+                k=self.fixture('writer');extra={}
+                if key=='plugin':extra['plugin_origin']=value
+                else:k.record[key]=value
+                with self.assertRaises(AssertionError):EditorCaptureDiagnostic(k,{},6.,probe=self.probe(),**extra)
+
     def test_copy_and_cleanup_errors_preserve_primary(self):
         from editor_capture_diagnostic import EditorCaptureDiagnostic
         keyboard=self.fixture();probe=self.probe();trace=EditorCaptureDiagnostic(keyboard,{},6.,probe=probe)
@@ -121,8 +145,8 @@ class CaptureDiagnosticTests(unittest.TestCase):
             k.clock.now=100.;lease.finish();self.assertEqual(calls,[0])
             self.assertFalse(cohort_cleanup_confirmed(dict(focusCohortEngineCleanup=receipt,
                 testProcessCleanup=dict(shellExitCode=0,disposition='already-exited'))))
-    def stopped_keyboard(self):
-        k=self.fixture();k.focus_editor(6.)
+    def stopped_keyboard(self,module='calc'):
+        k=self.fixture(module);k.focus_editor(6.)
         with patch.object(k,'editor_ready'):
             fixtures.IMEKeyboardSessionTests().ready(k)
         k.record['focusCaptureDiagnostic']=dict(deadline=6.,cleanupErrors=[],cleanup=dict(

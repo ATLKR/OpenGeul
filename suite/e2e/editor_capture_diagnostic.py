@@ -290,11 +290,21 @@ class PassiveCaptureProbe:
     def stop(self):self.transport.stop()
 
 
+def require_focus_module(keyboard):
+    r=keyboard.record
+    assert keyboard.module in ('calc','writer'), 'Unsupported focus diagnostic module'
+    if keyboard.module=='writer':
+        assert r.get('case')=='ime-writer-focus-01' and r.get('architecture')=='arm64'
+        assert r.get('readiness',{}).get('nativeMachine')==0xaa64, 'Writer ordering requires native ARM64'
+
+
 class EditorCaptureDiagnostic:
     def __init__(self,keyboard,prepared,deadline,*,probe=None,plugin_origin=None):
         record=keyboard.record;focus=record['editorFocusReadiness']
         assert record.get('kind')=='native-focus-diagnostic' and record.get('acceptanceEligible') is False
-        assert keyboard.module=='calc' and keyboard.phase=='admitted' and not keyboard.finished and keyboard.failed is None
+        require_focus_module(keyboard)
+        assert keyboard.module!='writer' or plugin_origin is None, 'Writer ordering has no matched plugin cohort'
+        assert keyboard.phase=='admitted' and not keyboard.finished and keyboard.failed is None
         assert deadline==focus['deadline'] and deadline==focus['startedAt']+focus['deadlineSeconds'] and 0<focus['deadlineSeconds']<=5
         assert focus['deadlineScope']=='editor-setup-and-focus' and focus['ready'] is False and focus['clickAttempts']==1 and focus['clickCompleted'] is False
         assert keyboard.clock()<deadline<=keyboard.setup_deadline
@@ -391,7 +401,8 @@ def stop_focus_keyboard(keyboard):
     from windows_smoke import require_editor_focus_readiness
     r=keyboard.record;b=keyboard.binding;focus=r['editorFocusReadiness'];deadline=focus['deadline']
     assert r.get('kind')=='native-focus-diagnostic' and r.get('acceptanceEligible') is False and r.get('imeVerified') is False
-    assert keyboard.module=='calc' and keyboard.phase=='awaiting-editor-readiness' and not keyboard.finished and keyboard.failed is None
+    require_focus_module(keyboard)
+    assert keyboard.phase=='awaiting-editor-readiness' and not keyboard.finished and keyboard.failed is None
     require_editor_focus_readiness(focus,b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'])
     assert r['imeKeyboardSession'] is keyboard.receipt and keyboard.handle
     assert keyboard.receipt['success'] is False and not keyboard.receipt['engineHandleReleased']
@@ -422,7 +433,8 @@ def stop_focus_keyboard_before_passive_watch(keyboard, trace, *, counter=None):
     from windows_smoke import require_editor_focus_readiness
     r=keyboard.record;b=keyboard.binding;focus=r['editorFocusReadiness'];deadline=focus['deadline']
     assert r.get('kind')=='native-focus-diagnostic' and r.get('acceptanceEligible') is False and r.get('imeVerified') is False
-    assert keyboard.module=='calc' and keyboard.phase=='awaiting-editor-readiness' and not keyboard.finished and keyboard.failed is None
+    require_focus_module(keyboard)
+    assert keyboard.phase=='awaiting-editor-readiness' and not keyboard.finished and keyboard.failed is None
     require_editor_focus_readiness(focus,b['suiteHwnd'],b['childHwnd'],b['shellPid'],b['officePid'])
     assert r['imeKeyboardSession'] is keyboard.receipt and keyboard.handle
     assert keyboard.receipt['success'] is False and not keyboard.receipt['engineHandleReleased']

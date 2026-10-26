@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic
+  OPENGEUL_SUITE_RUN_MODE: focus-diagnostic
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -96,7 +96,7 @@ jobs:
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Admit isolated diagnostics against exact owner-push source
       id: sal-offset-admission
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic'"
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -175,7 +175,7 @@ jobs:
 
     - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
       id: source-engine
-      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic') || steps.sal-offset-admission.outcome == 'success')"
+      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic') || steps.sal-offset-admission.outcome == 'success')"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
@@ -277,7 +277,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Native local symbols unavailable; no GUI experiment is admitted.' }
 
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -435,18 +435,18 @@ jobs:
       shell: pwsh
       run: |
         throw 'IME mode diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
-    - name: Targeted owned Calc capture ordering diagnostic (not acceptance)
+    - name: Targeted owned Writer repost ordering diagnostic (not acceptance)
       id: focus-diagnostic
-      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic' && matrix.architecture == 'arm64' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-focus-diagnostic/worker-diagnostics
       shell: pwsh
       run: |
-        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-focus-diagnostic --diagnose-focus calc
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-focus-diagnostic --diagnose-focus writer
         if ($LASTEXITCODE -ne 0) { throw 'Targeted focus diagnostic failed.' }
     - name: Preserve targeted capture ordering evidence only
       id: focus-diagnostic-evidence
-      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic'"
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic' && matrix.architecture == 'arm64'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-focus-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}

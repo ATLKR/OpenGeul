@@ -1610,7 +1610,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     assert not capture_ime_caller or diagnose_ime_mode,'Caller capture requires mode diagnosis'
     assert not capture_ime_compartment or (diagnose_ime_mode and module=='writer' and readiness['nativeMachine']==0xaa64 and plugin_origin is not None and not capture_ime_caller),'Compartment callback requires one matched Writer case'
     assert plugin_origin is None or diagnose_focus or capture_ime_caller or capture_ime_compartment,'Plugin binding requires scoped diagnosis'
-    assert not diagnose_focus or (module=='calc' and not diagnose_navigation and not diagnose_ime_mode),'Focus experiment is scoped to Calc only'
+    assert not diagnose_focus or (not diagnose_navigation and not diagnose_ime_mode and (module=='calc' or (module=='writer' and readiness['nativeMachine']==0xaa64 and diagnostic_suffix=='focus-01' and plugin_origin is None))), 'Focus experiment requires Calc or the single native ARM64 Writer ordering case'
     assert diagnostic_suffix in ('focus-01','focus-02','focus-03') if diagnose_focus else diagnostic_suffix is None,'Invalid focus diagnostic case suffix'
     name = 'ime-' + module
     if diagnose_focus:name+='-'+diagnostic_suffix
@@ -1884,7 +1884,10 @@ def _open_plugin_proof(suite,proof_path,budget):
     return PluginFileLease(suite/'Office/program/vclplug_winlo.dll',proof,budget,runtime=file_api)
 
 
-def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_path=None):
+def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,module='calc'):
+    assert module in ('calc','writer'), 'Unsupported focus module'
+    assert module!='writer' or (architecture=='arm64' and proof_path is None), 'Writer ordering is one unmatched native ARM64 case'
+    expected_count=1 if module=='writer' else 3
     lease=None;cleanup_error=None;results=[];primary=None
     try:
         if proof_path is not None:
@@ -1896,10 +1899,10 @@ def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_
         else:
             prepared_library=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture)
         private={} if lease is None else dict(plugin_origin=lease.binding())
-        for index in range(1,4):
-            suffix=f'focus-{index:02d}';name='ime-calc-'+suffix
-            rows=collect_cases([(name,lambda suffix=suffix:case(suite,fixtures,output,readiness,'calc',
-                dict(INPUT_CASES)['calc'],prepared_library=prepared_library,diagnose_focus=True,diagnostic_suffix=suffix,**private))],output)
+        for index in range(1,expected_count+1):
+            suffix=f'focus-{index:02d}';name='ime-'+module+'-'+suffix
+            rows=collect_cases([(name,lambda suffix=suffix:case(suite,fixtures,output,readiness,module,
+                dict(INPUT_CASES)[module],prepared_library=prepared_library,diagnose_focus=True,diagnostic_suffix=suffix,**private))],output)
             results.extend(rows)
             from editor_capture_diagnostic import cohort_cleanup_confirmed
             if len(rows)!=1 or not cohort_cleanup_confirmed(rows[0]):break
@@ -1920,10 +1923,10 @@ def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_
                 with (output/'plugin-origin-failure.json').open('x',encoding='utf-8') as stream:
                     json.dump(failure,stream,indent=2,allow_nan=False)
             except BaseException as retention:primary.pluginOriginRetentionErrorType=type(retention).__name__
-    success=len(results)==3 and all(row.get('success') is True for row in results) and cleanup_error is None
+    success=len(results)==expected_count and all(row.get('success') is True and cohort_cleanup_confirmed(row) for row in results) and cleanup_error is None
     report=dict(schemaVersion=1,kind='native-focus-diagnostic',success=success,acceptanceEligible=False,
-        imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=3,
-        completedCaseCount=len(results),cohortPolicy='three fresh sequential cases; never retry input or overlap unconfirmed cleanup')
+        imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=expected_count,
+        completedCaseCount=len(results),cohortPolicy=('one original Writer ordering case; no input retry' if module=='writer' else 'three fresh sequential cases; never retry input or overlap unconfirmed cleanup'))
     if lease is not None:report['pluginFileOrigin']=dict(lease.receipt)
     if cleanup_error:report['pluginFileOriginCleanupErrorType']=cleanup_error
     (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -1979,7 +1982,7 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--diagnose-navigation', choices=('writer','impress'))
     parser.add_argument('--diagnose-ime-mode', choices=('calc','writer'))
-    parser.add_argument('--diagnose-focus', choices=('calc',))
+    parser.add_argument('--diagnose-focus', choices=('calc','writer'))
     parser.add_argument('--matched-plugin-proof',type=Path)
     parser.add_argument('--capture-ime-caller',action='store_true')
     parser.add_argument('--capture-ime-compartment',action='store_true')
@@ -2021,7 +2024,7 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=False)
     readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
     if args.diagnose_focus:
-        return run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof)
+        return run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,module=args.diagnose_focus)
     if args.diagnose_ime_mode:
         return run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,capture_caller=args.capture_ime_caller,capture_compartment=args.capture_ime_compartment)
     prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
