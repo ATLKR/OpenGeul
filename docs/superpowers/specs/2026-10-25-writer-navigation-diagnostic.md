@@ -63,3 +63,16 @@ rows plus unchanged cursor narrow the failure beyond queue removal; zero rows
 remain insufficient to identify routing or a handler. Semantic success is
 nonreproduction, not a product fix. Partial/overflow/rejected evidence is
 inconclusive. Do not repeat unchanged or infer handler delivery from hook rows.
+
+### Terminal corrected experiment and qualification transition
+
+Run40244859920 at353fe9b completed with actual Writer diagnostics passing on both
+native architectures. Each retained trace is complete with four owned queue
+removals, capture0, no trace/cleanup errors, and bodyEndComparison0 on the first
+semantic read. These are passing controls, not a causal repair of intermittent
+navigation or IME failures. The bounded experiment ends; no unchanged rerun.
+
+Restore the existing acceptance mode to qualify the complete current package.
+All original IME, save/reopen, compatibility, Base, lifecycle, GUI, integrity and
+delivery gates remain required on the exact new commit. Diagnostic success and
+prior-commit x64 acceptance cannot substitute for that result.

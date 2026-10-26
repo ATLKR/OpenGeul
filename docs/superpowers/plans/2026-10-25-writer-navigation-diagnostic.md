@@ -45,4 +45,8 @@ this run's missing exceptions or change engine behavior.
 - [x] Admit PM_REMOVE as a bitmask; update the existing capture integration test
       and correct the workflow's stale Impress display label to Writer.
 - [x] Independent review and full local validation of the correction.
-- [ ] Finish current run40241619571 before considering corrected native execution.
+- [x] Finish current run40241619571 before considering corrected native execution.
+
+Corrected run40244859920/353fe9b: both actual diagnostics passed; no causal
+behavior fix established. Close experiment and restore existing full acceptance
+mode with unchanged gates, reviewed separately and checked by workflow tests.
