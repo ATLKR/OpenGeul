@@ -674,6 +674,54 @@ def verified_attachment(api, process, module):
     return hwnd, parent, child, office_pid
 
 
+def capture_native_archive_generation(api, process, attachment, *, probe=None):
+    """One metadata-only admission before input/close; synchronous calls cannot be interrupted."""
+    from counted_editor_shortcuts import NativeShortcutProbe, _same_image
+    assert set(attachment) == {'hwnd','parent','child','officePid'}, 'Exact original attachment is required'
+    assert all(type(value) is int and 0 < value < 2**64 for value in attachment.values())
+    hwnd, parent, child, office_pid = (attachment[key] for key in ('hwnd','parent','child','officePid'))
+    suite = Path(process.opengeul_suite_root)
+    assert suite.is_absolute() and type(process.pid) is int and 0 < process.pid < 2**32
+    assert office_pid < 2**32 and office_pid != process.pid and int(process._handle) > 0
+    assert isinstance(process.args,(list,tuple)) and _same_image(process.args[0],suite/'OpenGeul.Office.exe')
+    deadline = time.monotonic() + 5  # Metadata only; no input or save deadline is changed.
+    probe = probe if probe is not None else NativeShortcutProbe(deadline,time.monotonic)
+    def owned():
+        assert all(api.user.IsWindow(value) for value in (hwnd,parent,child)), 'Original attachment window closed'
+        assert (api.pid(hwnd),api.pid(parent),api.pid(child)) == (process.pid,process.pid,office_pid), 'Original attachment process changed'
+        assert api.user.GetAncestor(hwnd,2) == hwnd and api.user.IsChild(hwnd,parent) and api.user.IsChild(parent,child), 'Original attachment ownership changed'
+        assert (int(api.user.GetPropW(hwnd,'OpenGeul.Office.ParentHwnd') or 0),
+                int(api.user.GetPropW(hwnd,'OpenGeul.Office.ChildHwnd') or 0)) == (parent,child), 'Original attachment export changed'
+    owned()
+    shell = probe.process_snapshot(process)
+    assert (shell['pid'],shell['handleValue'],shell['waitResult']) == (process.pid,int(process._handle),258), 'Original shell HANDLE changed'
+    assert type(shell['creationTime']) is int and 0 < shell['creationTime'] < 2**64
+    assert _same_image(shell['image'],suite/'OpenGeul.Office.exe'), 'Original shell image changed'
+    handle = probe.open_engine(office_pid)
+    primary = None
+    try:
+        assert type(handle) is int and handle > 0, 'Archive metadata engine HANDLE is invalid'
+        engine = probe.engine_snapshot(handle)
+        assert (engine['pid'],engine['handleValue'],engine['waitResult']) == (office_pid,handle,258), 'Original archive engine HANDLE changed'
+        assert type(engine['creationTime']) is int and shell['creationTime'] <= engine['creationTime'] < 2**64, 'Original archive engine generation changed'
+        assert _same_image(engine['image'],suite/'Office/program/soffice.bin'), 'Original archive engine image changed'
+        assert probe.engine_snapshot(handle) == engine and probe.process_snapshot(process) == shell, 'Original archive process generation changed'
+        owned()
+        return {key:engine[key] for key in ('pid','creationTime','image')}
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        if type(handle) is int and handle > 0:
+            try:
+                assert probe.close_engine(handle) is True, 'Native archive generation HANDLE close failed'
+            except BaseException:
+                if primary is None: raise
+                primary.add_note('Native archive generation HANDLE close failed')
+        if primary is None:
+            assert time.monotonic() <= deadline, 'Archive metadata elapsed bound exceeded'
+
+
 def base_new_closed(api, process, hwnd, record):
     if not api.user.IsWindow(hwnd): return True
     if record.get('discardPromptHandled'): return False
@@ -1155,6 +1203,8 @@ def new_module(suite, output, module, *, fixtures=None):
               'discardPromptHandled': False, 'stage': 'attach', 'stderrLog': name + '-stderr.log'}
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
+        record['nativeArchiveGeneration'] = capture_native_archive_generation(api,process,
+            dict(hwnd=hwnd,parent=parent,child=child,officePid=office_pid))
         record['stage'] = 'prepare-window'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
@@ -1343,6 +1393,9 @@ def document_case(suite, fixtures, output, module, extension, physical_input, *,
     try:
         hwnd, parent, child, office_pid = verified_attachment(api, process, module)
         record.update(windowHwnd=hwnd, parentHwnd=parent, childHwnd=child, officePid=office_pid, title=api.title(hwnd))
+        if not physical_input:
+            record['nativeArchiveGeneration'] = capture_native_archive_generation(api,process,
+                dict(hwnd=hwnd,parent=parent,child=child,officePid=office_pid))
         record['stage'] = 'prepare-window'
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()

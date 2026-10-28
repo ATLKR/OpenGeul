@@ -11,8 +11,9 @@ CASE_TITLE = 'OpenGeul numeric case v1'
 TRACE_TITLE = 'OpenGeul Calc numeric trace v1'
 OPT_IN = 'OPENGEUL_SUITE_NUMERIC_NOTICE'
 TRACE_OPT_IN = 'OPENGEUL_SUITE_CALC_TRACE_NOTICE'
+# Extend numeric identifiers at the end so earlier run notices keep their meaning.
 SCOPES = {'calc-close':1,'home-routes':2,'korean-ime':3,'korean-ui':4,'writer-style':5,
-          'lifecycle':6,'native-first':7,'native-second':8,'calc-dispatch':9}
+          'lifecycle':6,'native-first':7,'native-second':8,'calc-dispatch':9,'native-integrity':10}
 MAX_CASE_BYTES, MAX_TRACE_BYTES, MAX_NOTICES = 2048, 32768, 8
 EXCEPTIONS = {kind: index for index, kind in enumerate((AssertionError, TimeoutError,
     PermissionError, FileNotFoundError, FileExistsError, OSError, ValueError, TypeError,
@@ -24,7 +25,7 @@ SOURCE_FILES = {name: index for index, name in enumerate((
     'ime_engine_retirement.py', 'scenario_editor_shortcuts.py', 'counted_editor_shortcuts.py',
     'owned_control_actions.py', 'owned_save_menu.py', 'native_window_evidence.py',
     'ime_calc_setup.py', 'native_accessibility.py', 'calc_dispatch_diagnostic.py',
-    'ime_semantic_context.py', 'calc_pending_input.py'), 1)}
+    'ime_semantic_context.py', 'calc_pending_input.py', 'native_archive_completeness.py'), 1)}
 _OWNED_FILES = {os.path.normcase(str(Path(__file__).with_name(name))): code for name, code in SOURCE_FILES.items()}
 MODULES = {name: index for index, name in enumerate(('writer','calc','impress','draw','math','base','hwp'), 1)}
 _FORMATS = ('writer-odt','writer-docx','writer-doc','writer-rtf','writer-txt','calc-ods',
@@ -40,7 +41,7 @@ _CASES = (('home', '') , *((name, name) for name in MODULES if name != 'hwp'),
     ('document-file-open','writer'),
     *((name,'writer') for name in ('dirty-writer-cancel-save','dirty-writer-discard',
       'new-writer-saveas-cancel','failed-saveas-retains-editor','home-two-documents-cancel','resize-minimize-restore')),
-    ('hwp-tile-hwpx-route','hwp'), ('lifecycle-summary',''))
+    ('hwp-tile-hwpx-route','hwp'), ('lifecycle-summary',''), ('native-integrity',''))
 CASES = {name: (index, MODULES.get(module, 0)) for index, (name,module) in enumerate(_CASES, 1)}
 _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fixture','launch','attach',
     'prepare-window','focus-editor','prepare-owned-native-focus','prepare-editor','physical-editor-input',
@@ -62,7 +63,8 @@ _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fix
     'await-owned-hwp-route','wait-real-saveas-error','close-home-with-two-documents',
     'hwpx-route-native-readiness','hwp-tile-native-readiness',
     *(f'await-new-{m}-attachment' for m in MODULES), *(f'close-owned-{m}' for m in MODULES),
-    *(f'verify-retained-{m}-exit' for m in MODULES), *(f'dirty-close-{c}' for c in ('save','discard','cancel')))
+    *(f'verify-retained-{m}-exit' for m in MODULES), *(f'dirty-close-{c}' for c in ('save','discard','cancel')),
+    'verify-native-archives')
 STAGES = {name:index for index,name in enumerate(_STAGES, 1)}
 
 # Each bit means that the source field was present and had the declared type.

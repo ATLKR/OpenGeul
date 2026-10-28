@@ -699,6 +699,8 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                 for name, replacement in (
                         ('launch_suite', launch), ('Windows', lambda: api),
                         ('verified_attachment', lambda *args: (11, 22, 33, 200)),
+                        ('capture_native_archive_generation', lambda *args: events.append('archive-generation') or
+                            dict(pid=200,creationTime=123,image='synthetic-packaged-engine')),
                         ('prepare_editor_focus', prepare_focus),
                         ('FirstAdmissionEditorSession', editor_program_factory(send_keys)),
                         ('wait_for', wait_for),
@@ -847,6 +849,8 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                 self.assertIsNone(run['error'])
                 self.assertNotIn('model-context', run['events'])
                 self.assertIsNone(run['snapshot'])
+                self.assertNotIn('nativeArchiveGeneration',run['record'])
+                self.assertNotIn('archive-generation',run['events'])
                 pieces = ['^{END}'] if module == 'writer' else ['{TAB}', '{F2}', '^{END}']
                 self.assertEqual([('keys', '^{F6}', 0.1), *[('keys', key, 0.1) for key in pieces], ('keys', '^s', 0.1)],
                     [event for event in run['events'] if isinstance(event, tuple) and event[0] == 'keys'])
@@ -859,6 +863,8 @@ class CalcDocumentOrchestrationTests(unittest.TestCase):
                 self.assertIsNone(run['error'])
                 self.assertNotIn('model-context', run['events'])
                 self.assertIsNone(run['snapshot'])
+                self.assertEqual(dict(pid=200,creationTime=123,image='synthetic-packaged-engine'),run['record']['nativeArchiveGeneration'])
+                self.assertLess(run['events'].index('archive-generation'),run['events'].index('maximize'))
                 self.assertFalse(any(isinstance(event, tuple) and event[0] in ('keys', 'type')
                                      for event in run['events']))
                 self.assertTrue(run['record']['success'])

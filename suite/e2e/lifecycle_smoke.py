@@ -774,8 +774,9 @@ class Case:
             native.stop_owned_test_process(self.process, self.record)
             native.write_result(self.output, self.name, self.record)
 
-    def attach(self, *, previous=()):
+    def attach(self, *, previous=(), retain_archive_generation=False):
         from pywinauto import Desktop
+        assert type(retain_archive_generation) is bool
         self.record['stage'] = 'attach'
         def next_document():
             candidate = self.api.attached(self.process)
@@ -791,7 +792,10 @@ class Case:
         office_pid = self.api.pid(child)
         assert office_pid and office_pid != self.process.pid and not self.api.windows(office_pid), 'Native editor must be embedded with no external Office window'
         assert 'OpenGeul Writer' in self.api.title(hwnd), 'Wrong native document module'
-        self.record.setdefault('attachments', []).append({'hwnd': hwnd, 'parent': parent, 'child': child, 'officePid': office_pid})
+        attachment = {'hwnd': hwnd, 'parent': parent, 'child': child, 'officePid': office_pid}
+        self.record.setdefault('attachments', []).append(attachment)
+        if retain_archive_generation:
+            attachment['nativeArchiveGeneration'] = native.capture_native_archive_generation(self.api,self.process,attachment)
         window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
         window.maximize()
         native.activate_owned_suite(self.api, self.process, hwnd, self.record)
@@ -1119,7 +1123,7 @@ def home_two_documents(case):
     native.activate_owned_suite(case.api, case.process, home, case.record)
     case.api.require_foreground(home)
     buttons[0].click_input()
-    first, _, child_first = case.attach()
+    first, _, child_first = case.attach(retain_archive_generation=True)
     # First document is clean; Home closes it before the later dirty document cancels.
     case.new_from_menu(first)
     second, _, child_second = case.attach(previous=(first,))

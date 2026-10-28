@@ -840,6 +840,9 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during the complete native validation.' }
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
     - name: 모든 네이티브 진단 보존·해시와 크래시 부재 확인
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '10'
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
       shell: python
       run: |
@@ -847,6 +850,14 @@ jobs:
         import hashlib, json, os, re, sys
         sys.path.insert(0, str(Path.cwd()))
         from suite.e2e.native_cleanup_receipt import MAX_RECEIPT_BYTES, load_cleanup_receipt, validate_cleanup_receipt
+        def native_integrity_failure(exc):
+            record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+            try:
+                from suite.e2e.numeric_notice import capture_failure_code
+                record['numericFailure'] = capture_failure_code(exc)
+            except Exception:
+                pass
+            return record
         def check_native_archives(root, expected_engine_image):
             assert root.is_dir() and not root.is_symlink(), 'Owned native diagnostics are missing'
             manifests = sorted(root.glob('*/manifest.json'))
@@ -897,7 +908,7 @@ jobs:
                 try:
                     record = check_native_archives(Path(root), expected_engine_image)
                 except Exception as exc:
-                    record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+                    record = native_integrity_failure(exc)
                 record['root'] = str(root)
                 records.append(record)
             evidence = []
@@ -905,7 +916,7 @@ jobs:
                 try:
                     record = check_evidence_crash_dumps(Path(root))
                 except Exception as exc:
-                    record = dict(success=False, errorType=type(exc).__name__, error=str(exc))
+                    record = native_integrity_failure(exc)
                 record['root'] = str(root)
                 evidence.append(record)
             success = bool(records) and bool(evidence) and all(record['success'] for record in records + evidence)
@@ -922,10 +933,28 @@ jobs:
                  '.work/suite-calc-close/calc-close-cancel/diagnostics')
         evidence_roots = ('.work/suite-calc-save', '.work/suite-calc-close')
         result = check_all_native_archives(roots, evidence_roots, Path(os.environ['SUITE_PACKAGE']).resolve() / 'Office/program/soffice.bin')
+        try:
+            from suite.e2e.native_archive_completeness import verify_native_archive_completeness
+            completeness = verify_native_archive_completeness(Path.cwd(), Path(os.environ['SUITE_PACKAGE']).resolve())
+        except Exception as exc:
+            completeness = native_integrity_failure(exc)
+        result['generationCompleteness'] = completeness
+        result['success'] = result['success'] and completeness['success']
+        for record in (*result['roots'], *result['evidenceRoots'], completeness):
+            if record.get('numericFailure') is not None:
+                result['numericFailure'] = record['numericFailure']
+                break
         result.update(sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'])
         Path('.work/suite-native-integrity.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
         print(json.dumps(result))
-        assert result['success'], 'At least one owned native diagnostics root failed integrity or graceful shutdown qualification'
+        if not result['success']:
+            try:
+                from suite.e2e.numeric_notice import emit_case_notice
+                emit_case_notice('native-integrity', dict(success=False, stage='verify-native-archives',
+                    **({'numericFailure': result['numericFailure']} if 'numericFailure' in result else {})))
+            except Exception:
+                pass
+        assert result['success'], 'At least one owned native diagnostics root failed integrity, original generation coverage or graceful shutdown qualification'
     - name: 원본 GUI·엔진·IME·반복 검증 기록 보존
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (always())"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -289,14 +289,14 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
             self.assertTrue(check(roots)['success'])
 
     def test_runner_temporary_python_script_imports_validator_from_checkout(self):
-        step = next(step for step in workflow_steps() if field(step, 'shell') == 'python')
-        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as runner:
-            self.archives(folder)
-            script = Path(runner) / 'workflow.py'
-            script.write_text(run_code(step))
-            completed = subprocess.run([sys.executable, str(script)], cwd=folder,
-                                       env=self.workflow_environment(), capture_output=True, text=True, timeout=20)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
+        from test_native_archive_completeness import NativeArchiveCompletenessTests
+        fixture = NativeArchiveCompletenessTests()
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        completed = fixture.workflow_process()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads((fixture.root / '.work/suite-native-integrity.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['generationCompleteness']['matchedGenerations'], len(fixture.expected))
 
     def test_actual_workflow_process_writes_failure_receipt_before_nonzero_exit(self):
         step = next(step for step in workflow_steps() if field(step, 'shell') == 'python')

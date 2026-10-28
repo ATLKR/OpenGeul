@@ -86,6 +86,34 @@ class NumericNoticeTests(unittest.TestCase):
         self.assertTrue(decoded['fieldPresenceMask'] & bit)
         self.assertEqual(decoded['observations']['shellExitCode'], 0)
 
+    def test_native_archive_failure_uses_closed_v1_notice_and_owned_source_location(self):
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE'] = '10'
+        namespace = {}
+        filename = str(SCRIPT.with_name('native_archive_completeness.py'))
+        try:
+            exec(compile("raise ValueError('SYNTHETIC-PRIVATE-INPUT C:/private/profile')", filename, 'exec'), namespace)
+        except ValueError as exc:
+            failure = self.n.capture_failure_code(exc)
+        self.assertTrue(self.emitter.emit_case_notice('native-integrity',
+            dict(success=False, stage='verify-native-archives', numericFailure=failure)))
+        decoded = self.decode(self.messages()[0], expected_scope=10)
+        self.assertEqual(decoded['fileCode'], 23)
+        self.assertEqual(decoded['line'], 1)
+        self.assertEqual(decoded['caseCode'], 58)
+        self.assertEqual(decoded['stageCode'], 93)
+        self.assertEqual(decoded['moduleCode'], 0)
+        self.assertEqual(len(decoded['observations']), 49)
+        self.assertNotIn('PRIVATE', self.stream.getvalue())
+        self.assertNotIn('C:/', self.stream.getvalue())
+        self.assertEqual(self.n.CASES['ime-calc'][0], 18)
+        self.assertEqual(self.n.SOURCE_FILES['calc_pending_input.py'], 22)
+
+    def test_native_archive_success_does_not_invent_failure_notice(self):
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE'] = '10'
+        self.assertFalse(self.emitter.emit_case_notice('native-integrity',
+            dict(success=True, stage='verify-native-archives', expectedGenerations=79)))
+        self.assertEqual(self.stream.getvalue(), '')
+
     def test_transitional_success_false_and_accepted_engine_exit_do_not_emit(self):
         record = dict(success=False, guiVerified=True, cleanClose=True,
                       stage='gui-complete', officeExitCode=1)
@@ -117,7 +145,7 @@ class NumericNoticeTests(unittest.TestCase):
     def test_disabled_unit_context_and_invalid_provenance_never_emit(self):
         for changes in ({'OPENGEUL_SUITE_NUMERIC_NOTICE': '0'}, {'GITHUB_SHA': 'PRIVATE'},
                         {'GITHUB_RUN_ATTEMPT': '2'}, {'GITHUB_WORKFLOW_SHA': 'b'*40},
-                        {'OPENGEUL_SUITE_NOTICE_SCOPE': ''}, {'OPENGEUL_SUITE_NOTICE_SCOPE': '10'}):
+                        {'OPENGEUL_SUITE_NOTICE_SCOPE': ''}, {'OPENGEUL_SUITE_NOTICE_SCOPE': '11'}):
             with self.subTest(changes=changes):
                 stream = io.StringIO()
                 emitter = self.n.NoticeEmitter(environ=self.env | changes, stream=stream)
@@ -255,13 +283,14 @@ class NumericNoticeTests(unittest.TestCase):
         bit = 1 << self.n.OBSERVATION_NAMES.index('saveAttempted')
         self.assertFalse(summary['fieldPresenceMask'] & bit)
 
-    def test_only_nine_product_steps_opt_in_and_unit_steps_never_do(self):
+    def test_only_ten_product_steps_opt_in_and_unit_steps_never_do(self):
         from suite.tests.test_calc_matrix_workflow import WORKFLOW, workflow_steps, field, run_code
         fragments = ('calc_close_probe.py --suite', 'home_routing_smoke.py --suite',
                      '--output .work/suite-korean-ime\n', 'korean_ui_smoke.py --suite',
                      'writer_style_smoke.py --suite', 'lifecycle_smoke.py --suite',
                      '--output .work/suite-native\n', '--output .work/suite-native-2\n',
-                     '--diagnose-calc-dispatch --expected-engine-source-commit')
+                     '--diagnose-calc-dispatch --expected-engine-source-commit',
+                     'verify_native_archive_completeness(')
         expected = [next(step for step in workflow_steps() if field(step,'run')=='|' and fragment in run_code(step))
                     for fragment in fragments]
         actual = [step for step in workflow_steps() if "OPENGEUL_SUITE_NUMERIC_NOTICE: '1'" in step]
@@ -269,7 +298,7 @@ class NumericNoticeTests(unittest.TestCase):
         for scope,step in enumerate(expected,1):
             self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '"+str(scope)+"'",step)
         traced = [step for step in workflow_steps() if 'OPENGEUL_SUITE_CALC_TRACE_NOTICE' in step]
-        self.assertEqual(traced,[expected[-1]])
+        self.assertEqual(traced,[expected[8]])
         self.assertIn("OPENGEUL_SUITE_CALC_TRACE_NOTICE: '1'",traced[0])
         self.assertNotIn('OPENGEUL_SUITE_NUMERIC_NOTICE', WORKFLOW.read_text().split('jobs:')[0])
         unit=next(step for step in workflow_steps() if field(step,'id')=='suite-unit-shell')
