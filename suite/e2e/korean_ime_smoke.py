@@ -1852,8 +1852,10 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         record['imeSetupBudget']['finishedAt'] = time.monotonic()
         assert record['imeSetupBudget']['finishedAt'] <= setup_deadline, 'Native IME setup exceeded its shared deadline'
         record['stage'] = 'physical-dubeolsik-composition'
-        for token, expected in zip(EXPECTED_KEYS[:-1], ('ㅎ', '하', '한', 'ㄱ', '그', '글', '그', '글')):
+        for ordinal, (token, expected) in enumerate(zip(EXPECTED_KEYS[:-1], ('ㅎ', '하', '한', 'ㄱ', '그', '글', '그', '글')), 1):
             after = len(observer.events())
+            record['imeCompositionOrdinal'] = ordinal
+            record['imeCompositionStartEventCount'] = after
             physical_key(observer, token, record)
             wait_for(lambda: observer.pending(expected, after), 10)
         if calc_dispatch_transport is None:

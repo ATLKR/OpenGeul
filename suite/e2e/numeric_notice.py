@@ -25,7 +25,8 @@ SOURCE_FILES = {name: index for index, name in enumerate((
     'ime_engine_retirement.py', 'scenario_editor_shortcuts.py', 'counted_editor_shortcuts.py',
     'owned_control_actions.py', 'owned_save_menu.py', 'native_window_evidence.py',
     'ime_calc_setup.py', 'native_accessibility.py', 'calc_dispatch_diagnostic.py',
-    'ime_semantic_context.py', 'calc_pending_input.py', 'native_archive_completeness.py'), 1)}
+    'ime_semantic_context.py', 'calc_pending_input.py', 'native_archive_completeness.py',
+    'capture_readiness.py', 'ascii_editor_input.py'), 1)}
 _OWNED_FILES = {os.path.normcase(str(Path(__file__).with_name(name))): code for name, code in SOURCE_FILES.items()}
 MODULES = {name: index for index, name in enumerate(('writer','calc','impress','draw','math','base','hwp'), 1)}
 _FORMATS = ('writer-odt','writer-docx','writer-doc','writer-rtf','writer-txt','calc-ods',
@@ -115,9 +116,15 @@ _FIELDS = (
     ('retirementCleanupErrorCount','count',(('imeEngineRetirement','cleanupErrors'),)),
 )
 OBSERVATION_NAMES = tuple(row[0] for row in _FIELDS)
+_FIELDS_V2 = _FIELDS + (
+    ('imeCompositionOrdinal','ordinal',(('imeCompositionOrdinal',),)),
+    ('imeCompositionStartEventCount','u32',(('imeCompositionStartEventCount',),)),
+)
+OBSERVATION_NAMES_V2 = tuple(row[0] for row in _FIELDS_V2)
 _COMMON = {'schemaVersion','kind','sourceCommit','runId','runAttempt','architecture','scopeCode','sequence','remainingBudget'}
 _CASE_KEYS = _COMMON | {'moduleCode','caseCode','stageCode','exceptionCode','fileCode','line',
                        'fieldPresenceMask','observations'}
+_CASE_KEYS_V2 = _CASE_KEYS | {'ownedFrames'}
 _FAILURE_KEYS = {'captured','exceptionCode','fileCode','line'}
 _TRACE_KEYS = _COMMON | {'diagnostic','oracleFlags','oraclePresenceMask'}
 
@@ -179,6 +186,26 @@ def capture_failure_code(exc):
     return result
 
 
+def capture_failure_frames(exc):
+    """Keep the deepest eight owned locations within the first 64 trace nodes."""
+    frames=[]
+    trace=exc.__traceback__ if isinstance(exc,BaseException) else None
+    for _ in range(64):
+        if trace is None: break
+        code=_OWNED_FILES.get(os.path.normcase(trace.tb_frame.f_code.co_filename))
+        if code and _integer(trace.tb_lineno,10_000_000,1): frames.append([code,trace.tb_lineno])
+        trace=trace.tb_next
+    return frames[-8:]
+
+
+def validate_failure_frames(value):
+    if (type(value) is not list or len(value)>8 or any(type(row) is not list or len(row)!=2
+            or type(row[0]) is not int or row[0] not in SOURCE_FILES.values()
+            or not _integer(row[1],10_000_000,1) for row in value)):
+        raise ValueError('Closed numeric owned frames required')
+    return [list(row) for row in value]
+
+
 def _failure(value):
     return (type(value) is dict and value.keys()==_FAILURE_KEYS and value['captured']==1
         and all(type(v) is int for v in value.values()) and value['exceptionCode'] in (0,*EXCEPTIONS.values())
@@ -228,25 +255,31 @@ def _project_case(name, record, context, *, require_failure):
         if require_failure and (record.get('success') is not False or not (_cleanup_failed(record) or aggregate_error)): return None
         failure = dict(exceptionCode=0,fileCode=0,line=0)
     case, module = CASES.get(primary_name,(0,0)) if type(primary_name) is str else (0,0)
+    try: frames=validate_failure_frames(record.get('numericFailureFrames'))
+    except ValueError: frames=[]
+    extended=bool(frames) or _integer(record.get('imeCompositionOrdinal'),8,1) or _integer(record.get('imeCompositionStartEventCount'))
+    fields=_FIELDS_V2 if extended else _FIELDS
     observed, mask = {}, 0
-    for index,(key,kind,paths) in enumerate(_FIELDS):
+    for index,(key,kind,paths) in enumerate(fields):
         values = []
         for path in paths:
             value = _get(record,path)
             if key=='shellCleanupExitCode' and _get(record,('calcDispatchShell','shellExitObserved')) is not True: value=None
             if kind=='count': value = len(value) if type(value) is list else None
             valid = (type(value) is bool if kind=='bool' else _integer(value,
-                1 if kind=='flag' else (2**64-1 if kind=='u64' else 0xffffffff),
-                1 if kind in ('pid','u64') else 0))
+                1 if kind=='flag' else (8 if kind=='ordinal' else (2**64-1 if kind=='u64' else 0xffffffff)),
+                1 if kind in ('pid','u64','ordinal') else 0))
             if valid:
                 values.append(int(value))
         present = bool(values) and len(set(values))==1
         observed[key] = values[0] if present else 0
         if present: mask |= 1 << index
-    return dict(schemaVersion=1,kind=1,**context,moduleCode=module,caseCode=case,
+    value=dict(schemaVersion=2 if extended else 1,kind=1,**context,moduleCode=module,caseCode=case,
         stageCode=STAGES.get(record.get('stage'),0) if type(record.get('stage')) is str else 0,
         **{key:failure[key] for key in ('exceptionCode','fileCode','line')},
         fieldPresenceMask=mask,observations=observed)
+    if extended: value['ownedFrames']=frames
+    return value
 
 
 def capture_calc_snapshot(record, *, environ=None):
@@ -284,11 +317,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     limit = {CASE_TITLE:MAX_CASE_BYTES,TRACE_TITLE:MAX_TRACE_BYTES}.get(title)
     if limit is None or type(message) is not str or len(message.encode('utf-8'))>limit: raise ValueError('Notice title/size rejected')
     value = json.loads(message,object_pairs_hook=_unique,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite notice')))
-    keys = _CASE_KEYS if title==CASE_TITLE else _TRACE_KEYS
+    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion']==2
+    keys = (_CASE_KEYS_V2 if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
     if type(value) is not dict or value.keys()!=keys: raise ValueError('Closed notice schema required')
-    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags'}:
+    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames'}:
         if not _integer(value[key],2**63-1): raise ValueError('Integer notice fields required')
-    if (value['schemaVersion']!=1 or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
+    if (value['schemaVersion'] not in ((1,2) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
             or not re.fullmatch('[0-9a-f]{40}',value['sourceCommit']) or value['sourceCommit']=='0'*40
             or value['sourceCommit']!=expected_source_commit or value['runId']!=expected_run_id or value['runId']<=0
             or value['runAttempt']!=expected_run_attempt or value['runAttempt']!=1
@@ -307,21 +341,25 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
         if value['diagnostic']['identity'] is None and (value['oraclePresenceMask'] or any(flags)):
             raise ValueError('Oracle lacks original native admission')
         return value
+    fields=_FIELDS_V2 if extended else _FIELDS
+    if extended: value['ownedFrames']=validate_failure_frames(value['ownedFrames'])
     if (value['moduleCode'] not in (0,*MODULES.values()) or value['caseCode'] not in tuple(row[0] for row in CASES.values())
             or value['stageCode'] not in (0,*STAGES.values()) or value['exceptionCode'] not in (0,*EXCEPTIONS.values())
             or value['fileCode'] not in (0,*SOURCE_FILES.values())
             or (value['line']!=0 if value['fileCode']==0 else not 1<=value['line']<=10_000_000)
-            or value['fieldPresenceMask'] >= 1<<len(_FIELDS)): raise ValueError('Notice identity/range differs')
+            or value['fieldPresenceMask'] >= 1<<len(fields)): raise ValueError('Notice identity/range differs')
     modules = {case:module for case,module in CASES.values()}
     if value['moduleCode']!=modules.get(value['caseCode'],0): raise ValueError('Notice module differs from its case')
     observations = value['observations']
-    if type(observations) is not dict or observations.keys()!=set(OBSERVATION_NAMES): raise ValueError('Closed notice observations required')
-    for index,(key,kind,_) in enumerate(_FIELDS):
-        maximum = 1 if kind in ('bool','flag') else (2**64-1 if kind=='u64' else 0xffffffff)
+    if type(observations) is not dict or observations.keys()!=set(row[0] for row in fields): raise ValueError('Closed notice observations required')
+    for index,(key,kind,_) in enumerate(fields):
+        maximum = 1 if kind in ('bool','flag') else (8 if kind=='ordinal' else (2**64-1 if kind=='u64' else 0xffffffff))
         if (not _integer(observations[key],maximum) or
-                (kind in ('pid','u64') and value['fieldPresenceMask'] & (1<<index) and observations[key]==0) or
+                (kind in ('pid','u64','ordinal') and value['fieldPresenceMask'] & (1<<index) and observations[key]==0) or
                 (not value['fieldPresenceMask'] & (1<<index) and observations[key]!=0)):
             raise ValueError('Notice observation type/presence differs')
+    if extended and not value['ownedFrames'] and not value['fieldPresenceMask'] & (3<<len(_FIELDS)):
+        raise ValueError('Extended case notice lacks observed frames or progress')
     return value
 
 

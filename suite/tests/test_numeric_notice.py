@@ -220,6 +220,7 @@ class NumericNoticeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'existing formatter'):
                 smoke.capture_failure(Path('/unused'), 'calc', record, FormatFailure())
             self.assertEqual(record['numericFailure']['captured'], 1)
+            self.assertEqual(record['numericFailureFrames'],[])
             primary = OSError('Synthetic existing result write failure')
             with patch.object(Path, 'write_text', side_effect=primary):
                 with self.assertRaises(OSError) as raised:
@@ -249,6 +250,9 @@ class NumericNoticeTests(unittest.TestCase):
         self.assertEqual(len(self.messages()), 2)
         trace = self.decode(self.messages()[1], title=self.n.TRACE_TITLE)
         self.assertEqual(trace['kind'], 2)
+        self.assertEqual(trace['schemaVersion'],1)
+        changed=dict(trace,schemaVersion=2)
+        with self.assertRaises(ValueError):self.decode(json.dumps(changed),title=self.n.TRACE_TITLE)
         self.assertIs(trace['diagnostic']['acceptanceEligible'], False)
         self.assertLessEqual(len(self.messages()[1].encode()), 32768)
         with self.assertRaises(ValueError):
@@ -455,6 +459,110 @@ class NumericNoticeTests(unittest.TestCase):
         for field in ('saveAttempted','saveReturned','savedMarkerObserved'):
             self.assertEqual(snapshot['observations'][field],0)
             self.assertFalse(snapshot['fieldPresenceMask'] & (1<<self.n.OBSERVATION_NAMES.index(field)))
+
+    def test_v2_preserves_owned_frames_and_only_typed_existing_composition_progress(self):
+        record=dict(numericFailure=self.failure(),numericFailureFrames=[[13,262],[24,80]],
+            imeCompositionOrdinal=3,imeCompositionStartEventCount=0,
+            expected='PRIVATE composition',events=[dict(text='PRIVATE')],traceback='PRIVATE path')
+        self.assertTrue(self.emitter.emit_case_notice('ime-impress',record))
+        value=self.decode(self.messages()[0])
+        self.assertEqual(value['schemaVersion'],2)
+        self.assertEqual(value['ownedFrames'],[[13,262],[24,80]])
+        self.assertEqual(len(self.n.OBSERVATION_NAMES),49)
+        self.assertEqual(len(value['observations']),51)
+        self.assertNotIn('PRIVATE',self.messages()[0])
+        for key,expected in (('imeCompositionOrdinal',3),('imeCompositionStartEventCount',0)):
+            self.assertEqual(value['observations'][key],expected)
+            self.assertTrue(value['fieldPresenceMask'] & (1<<self.n.OBSERVATION_NAMES_V2.index(key)))
+
+    def test_v1_compatibility_is_preserved_when_no_new_observations_exist(self):
+        self.emitter.emit_case_notice('writer',dict(numericFailure=self.failure()))
+        value=self.decode(self.messages()[0])
+        self.assertEqual(value['schemaVersion'],1)
+        self.assertNotIn('ownedFrames',value)
+        self.assertEqual(tuple(value['observations']),self.n.OBSERVATION_NAMES)
+        self.assertEqual(self.n.SOURCE_FILES['native_archive_completeness.py'],23)
+        self.assertEqual(self.n.SOURCE_FILES['capture_readiness.py'],24)
+        self.assertEqual(self.n.SOURCE_FILES['ascii_editor_input.py'],25)
+
+    def test_owned_frame_walk_is_bounded_and_keeps_deepest_eight_observed_frames(self):
+        self.assertTrue(callable(getattr(self.n,'capture_failure_frames',None)))
+        code=''.join('def f'+str(index)+'():\n '+('return f'+str(index+1)+'()' if index<69 else 'raise ValueError("PRIVATE")')+'\n' for index in range(70))+'f0()\n'
+        try:exec(compile(code,str(SCRIPT.with_name('windows_smoke.py')),'exec'),{})
+        except ValueError as exc:frames=self.n.capture_failure_frames(exc)
+        self.assertEqual(frames,[[1,line] for line in range(110,126,2)])
+        self.assertEqual(self.n.capture_failure_frames(None),[])
+        self.assertNotIn('PRIVATE',json.dumps(frames))
+
+    def test_capture_readiness_frame_is_appended_without_reading_exception_text(self):
+        class NoStringError(Exception):
+            def __str__(self):raise AssertionError('Exception text must not be read')
+        scope=dict(error=NoStringError())
+        exec(compile('def leaf():\n raise error\n',str(SCRIPT.with_name('capture_readiness.py')),'exec'),scope)
+        exec(compile('def caller():\n leaf()\n',str(SCRIPT.with_name('scenario_editor_shortcuts.py')),'exec'),scope)
+        try:scope['caller']()
+        except NoStringError as exc:frames=self.n.capture_failure_frames(exc)
+        self.assertEqual(frames,[[13,2],[24,2]])
+
+    def test_shared_hook_retains_actual_ascii_leaf_frames_before_existing_formatter(self):
+        import sys
+        sys.path.insert(0,str(SCRIPT.parent))
+        smoke=importlib.import_module('windows_smoke')
+        record={};owner=self
+        class ExistingFormatterFailure(Exception):
+            def __str__(self):
+                owner.assertEqual(record['numericFailureFrames'],[[13,2],[25,2]])
+                raise RuntimeError('Synthetic existing formatter failure')
+        scope=dict(error=ExistingFormatterFailure())
+        exec(compile('def leaf():\n raise error\n',str(SCRIPT.with_name('ascii_editor_input.py')),'exec'),scope)
+        exec(compile('def caller():\n leaf()\n',str(SCRIPT.with_name('scenario_editor_shortcuts.py')),'exec'),scope)
+        try:scope['caller']()
+        except ExistingFormatterFailure as exc:
+            with patch.dict(os.environ,self.env,clear=True),self.assertRaisesRegex(RuntimeError,'existing formatter'):
+                smoke.capture_failure(Path('/unused'),'writer',record,exc)
+        self.assertEqual(record['numericFailure']['fileCode'],25)
+
+    def test_invalid_new_source_fields_fall_back_to_the_original_v1_projection(self):
+        record=dict(numericFailure=self.failure(),numericFailureFrames=[dict(path='PRIVATE')],
+            imeCompositionOrdinal=True,imeCompositionStartEventCount=1.5)
+        self.emitter.emit_case_notice('ime-writer',record)
+        value=self.decode(self.messages()[0])
+        self.assertEqual(value['schemaVersion'],1)
+        self.assertEqual(len(value['observations']),49)
+        self.assertNotIn('PRIVATE',self.messages()[0])
+
+    def test_v2_receiver_rejects_frame_types_ranges_extra_fields_and_mixed_versions(self):
+        self.emitter.emit_case_notice('ime-calc',dict(numericFailure=self.failure(),
+            numericFailureFrames=[[24,80]],imeCompositionOrdinal=1,imeCompositionStartEventCount=4))
+        base=json.loads(self.messages()[0])
+        self.assertEqual(base['schemaVersion'],2)
+        changes=[{'schemaVersion':1},{'ownedFrames':[[24,1]]*9},{'ownedFrames':[[True,1]]},
+            {'ownedFrames':[[24,True]]},{'ownedFrames':[[0,0]]},{'ownedFrames':[[26,1]]},
+            {'ownedFrames':[[24,0]]},{'ownedFrames':[[24,10000001]]},{'ownedFrames':[dict(path='PRIVATE')]}]
+        for change in changes:
+            with self.subTest(change=change),self.assertRaises(ValueError):self.decode(json.dumps(base|change))
+        for key,wrong in (('imeCompositionOrdinal',True),('imeCompositionOrdinal',0),
+                          ('imeCompositionOrdinal',9),('imeCompositionStartEventCount','PRIVATE')):
+            value=copy.deepcopy(base);value['observations'][key]=wrong
+            with self.subTest(key=key,wrong=wrong),self.assertRaises(ValueError):self.decode(json.dumps(value))
+        value=copy.deepcopy(base);value['fieldPresenceMask'] &= ~(1<<self.n.OBSERVATION_NAMES_V2.index('imeCompositionOrdinal'))
+        with self.assertRaises(ValueError):self.decode(json.dumps(value))
+
+    def test_maximum_legal_v2_case_fits_the_existing_two_kibibyte_limit(self):
+        env=self.env|{'GITHUB_RUN_ID':str(2**63-1),'OPENGEUL_SUITE_NOTICE_SCOPE':'10'}
+        value=self.n.project_case_notice('native-integrity',dict(numericFailure=self.failure(),
+            numericFailureFrames=[[24,10000000]]*8,imeCompositionOrdinal=8,
+            imeCompositionStartEventCount=0xffffffff),environ=env)
+        self.assertEqual(value['schemaVersion'],2)
+        value.update(fileCode=24,line=10000000,exceptionCode=12,stageCode=max(self.n.STAGES.values()))
+        for key,kind,_ in self.n._FIELDS:
+            value['observations'][key]=1 if kind in ('bool','flag') else (2**64-1 if kind=='u64' else 0xffffffff)
+        value['fieldPresenceMask']=(1<<51)-1
+        stream=io.StringIO();emitter=self.n.NoticeEmitter(environ=env,stream=stream)
+        self.assertTrue(emitter._emit(self.n.CASE_TITLE,value,value['caseCode']))
+        message=stream.getvalue().strip().split('::',2)[2]
+        self.assertLessEqual(len(message.encode()),2048)
+        self.n.decode_notice(message,'a'*40,2**63-1,expected_scope=10)
 
 
 if __name__ == '__main__':
