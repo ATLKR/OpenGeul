@@ -131,19 +131,26 @@ def _get(record, path):
     return record
 
 
-def _context(environ):
-    expected = {OPT_IN:'1','GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':'ATLKR/OpenGeul',
+def public_context(environ=None):
+    environ = os.environ if environ is None else environ
+    expected = {'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':'ATLKR/OpenGeul',
         'GITHUB_JOB':'windows-suite','GITHUB_EVENT_NAME':'push','GITHUB_RUN_ATTEMPT':'1',
         'GITHUB_REF':'refs/heads/work/opengeul-office-arm64','GITHUB_ACTOR':'ATLKR','GITHUB_ACTOR_ID':'65988341'}
     if any(environ.get(key) != value for key,value in expected.items()): return None
     sha, run = environ.get('GITHUB_SHA'), environ.get('GITHUB_RUN_ID')
     arch = {'X64':0x8664,'ARM64':0xaa64}.get(environ.get('RUNNER_ARCH'))
-    scope = environ.get('OPENGEUL_SUITE_NOTICE_SCOPE')
     if (type(sha) is not str or not re.fullmatch('[0-9a-f]{40}',sha) or sha == '0'*40
             or environ.get('GITHUB_WORKFLOW_SHA') != sha or type(run) is not str
-            or not re.fullmatch('[1-9][0-9]{0,18}',run) or int(run)>2**63-1 or arch is None
-            or type(scope) is not str or scope not in tuple(str(n) for n in SCOPES.values())): return None
-    return dict(sourceCommit=sha,runId=int(run),runAttempt=1,architecture=arch,scopeCode=int(scope))
+            or not re.fullmatch('[1-9][0-9]{0,18}',run) or int(run)>2**63-1 or arch is None): return None
+    return dict(sourceCommit=sha,runId=int(run),runAttempt=1,architecture=arch)
+
+
+def _context(environ):
+    context = public_context(environ)
+    scope = environ.get('OPENGEUL_SUITE_NOTICE_SCOPE')
+    if (context is None or environ.get(OPT_IN)!='1' or type(scope) is not str
+            or scope not in tuple(str(n) for n in SCOPES.values())): return None
+    return dict(context,scopeCode=int(scope))
 
 
 def notices_enabled(environ=None):

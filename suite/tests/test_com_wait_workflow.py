@@ -32,7 +32,7 @@ class ComWaitWorkflowTests(unittest.TestCase):
     def test_unit_shell_and_admission_outcomes_required_on_both_architectures(self):
         units=step('suite-unit-shell');run=step('com-wait-diagnostic')
         self.assertIsNone(condition(units))
-        self.assertIn('unittest discover',run_code(units))
+        self.assertIn('python -m suite.scripts.run_unit_checks -s suite/tests -v',run_code(units))
         self.assertIn('dotnet run --project suite/shell-tests',run_code(units))
         self.assertLess(workflow_steps().index(units),workflow_steps().index(run))
         for architecture in ('x64','arm64'):

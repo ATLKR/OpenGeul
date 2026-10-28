@@ -61,6 +61,8 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Pinned image verification tooling installation failed.' }
     - name: Suite 단위 검사와 Windows shell 빌드 검사
       id: suite-unit-shell
+      env:
+        OPENGEUL_SUITE_UNIT_NOTICE: '1'
       shell: pwsh
       run: |
         $beforeCapabilityExit = 1
@@ -72,7 +74,7 @@ jobs:
         $unitFailure = $null
         $afterCapabilityExit = 1
         try {
-          python -m unittest discover -s suite/tests -v
+          python -m suite.scripts.run_unit_checks -s suite/tests -v
           $unitExit = $LASTEXITCODE
         } catch { $unitFailure = $_ }
         finally {

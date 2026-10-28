@@ -74,6 +74,16 @@ notices per controller. Telemetry failures preserve the original result and
 cleanup. Unit-test steps do not enable the opt-in. A failed annotation read
 stops that read boundary without another credential or anonymous fallback.
 
+The unit step uses a separate opt-in and emits one result summary only after
+ordinary unittest discovery finishes. Product notices stay disabled inside the
+unit process. Record standard run/error/failure/skip counts and at most eight
+actual failure locations, captured before error formatting. Public source-file
+IDs come from a sorted, bounded set of top-level Python source files and are
+bound to the exact source commit. Omit test names and parameter reprs. The
+collector does not inspect exception messages, traceback text, locals or skip
+reasons. Preserve standard
+unittest discovery, logs and exit codes, including an empty-run exit of five.
+
 GitHub documents the [notice command](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-a-notice-message)
 and [annotation read API](https://docs.github.com/en/rest/checks/runs#list-check-run-annotations).
 The existing credential passed a check-run metadata read; the first new notice

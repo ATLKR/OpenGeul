@@ -38,6 +38,12 @@ def unit_code():
     return textwrap.dedent(match[1])
 
 
+def unit_environment():
+    match = re.search(r'^      env:\n((?:        [A-Z0-9_]+:.*\n)+)', unit_step(), re.M)
+    return {} if match is None else {key.strip():value.strip().strip("'\"")
+        for key, value in (line.split(':', 1) for line in match[1].splitlines())}
+
+
 class Observations:
     def __init__(self):
         self.paths = []
@@ -235,10 +241,11 @@ class UnitCapabilityReceiptTests(unittest.TestCase):
 class UnitCapabilityWorkflowTests(unittest.TestCase):
     def test_receipts_bracket_only_the_existing_unit_process_and_reach_aggregate(self):
         code = unit_code()
+        command = 'python -m suite.scripts.run_unit_checks -s suite/tests -v'
         self.assertIn('unit-capability-receipt.py --phase before', code)
         self.assertIn('unit-capability-receipt.py --phase after', code)
-        self.assertLess(code.index('--phase before'), code.index('python -m unittest'))
-        self.assertLess(code.index('python -m unittest'), code.index('--phase after'))
+        self.assertLess(code.index('--phase before'), code.index(command))
+        self.assertLess(code.index(command), code.index('--phase after'))
         self.assertLess(code.index('--phase after'), code.index('dotnet run --project'))
         self.assertIn('finally', code)
         self.assertIn("if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }", code)
@@ -255,6 +262,34 @@ class UnitCapabilityWorkflowTests(unittest.TestCase):
         process = subprocess.run([sys.executable, '-S', '-B', '-c', isolated], cwd=ROOT,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
         self.assertEqual(process.returncode, 0, process.stdout)
+
+    @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell is required for the actual workflow command boundary')
+    def test_unit_runner_uses_step_optin_and_exact_module_arguments(self):
+        stub = r'''
+        $ErrorActionPreference = 'Stop'
+        function python {
+            if ($args[0] -eq '-m') {
+                if (($args -join ' ') -cne '-m suite.scripts.run_unit_checks -s suite/tests -v') { throw 'Unexpected unit runner route.' }
+                if ($env:OPENGEUL_SUITE_UNIT_NOTICE -cne '1' -or (Test-Path Env:OPENGEUL_SUITE_NUMERIC_NOTICE)) { throw 'Unexpected unit notice scope.' }
+                Add-Content $env:CAP_TEST_LOG 'unit-wrapper'
+            } else {
+                Add-Content $env:CAP_TEST_LOG $args[[Array]::IndexOf($args, '--phase') + 1]
+            }
+            $global:LASTEXITCODE = 0
+        }
+        function dotnet { Add-Content $env:CAP_TEST_LOG 'core'; $global:LASTEXITCODE = 0 }
+        '''
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); script = directory/'step.ps1'; log = directory/'calls.log'
+            script.write_text(textwrap.dedent(stub) + unit_code())
+            env = dict(os.environ, CAP_TEST_LOG=str(log), GH_TOKEN='synthetic-unit-fixture', GITHUB_TOKEN='synthetic-unit-fixture')
+            for name in ('OPENGEUL_SUITE_NUMERIC_NOTICE','OPENGEUL_SUITE_UNIT_NOTICE'):
+                env.pop(name, None)
+            env.update(unit_environment())
+            process = subprocess.run([shutil.which('pwsh'), '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script)],
+                                     env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(0, process.returncode, process.stdout + process.stderr)
+            self.assertEqual(['before','unit-wrapper','after','core'], log.read_text().splitlines())
 
     @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell is required for the actual workflow command boundary')
     def test_unit_failure_remains_primary_and_after_receipt_runs_before_core(self):

@@ -272,7 +272,9 @@ class NumericNoticeTests(unittest.TestCase):
         self.assertEqual(traced,[expected[-1]])
         self.assertIn("OPENGEUL_SUITE_CALC_TRACE_NOTICE: '1'",traced[0])
         self.assertNotIn('OPENGEUL_SUITE_NUMERIC_NOTICE', WORKFLOW.read_text().split('jobs:')[0])
-        self.assertFalse(any('OPENGEUL_SUITE_NUMERIC_NOTICE' in step for step in workflow_steps() if 'unittest discover' in step))
+        unit=next(step for step in workflow_steps() if field(step,'id')=='suite-unit-shell')
+        self.assertNotIn('OPENGEUL_SUITE_NUMERIC_NOTICE',unit)
+        self.assertIn('python -m suite.scripts.run_unit_checks -s suite/tests -v',run_code(unit))
 
     def test_maximum_closed_case_values_fit_the_wire_limit(self):
         value=self.n.project_case_notice('calc',dict(numericFailure=dict(captured=1,

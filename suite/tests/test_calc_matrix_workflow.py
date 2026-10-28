@@ -47,7 +47,7 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
     def test_pinned_image_tooling_is_installed_before_unit_discovery(self):
         steps = workflow_steps()
         unit_index = next(i for i, step in enumerate(steps)
-                          if 'python -m unittest discover -s suite/tests -v' in step)
+                          if field(step, 'id') == 'suite-unit-shell')
         image_steps = [(i, run_code(step)) for i, step in enumerate(steps)
                        if 'python -m pip install Pillow==12.3.0' in step]
         self.assertEqual(len(image_steps), 1)
