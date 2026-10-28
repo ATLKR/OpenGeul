@@ -74,7 +74,15 @@ def _target(value, purpose, document, pid, dialog, caption, readiness, *, operat
     _window(doc, document, pid, enabled=not bool(dialog))
     _window(scope, dialog or document, pid)
     assert gui['threadId'] == scope['threadId'] and type(gui['flags']) is int
-    assert gui['focusHwnd'] > 0, 'Owned input has no native focus'
+    initial_file_pointer = (purpose == 'FILE_MENU' and operation == 'pointer' and not dialog
+                            and value['foreground']['hwnd'] == document)
+    if initial_file_pointer and gui['focusHwnd'] == 0:
+        # A successful host-thread query may have no focus HWND. The measured
+        # File control and fresh physical hit remain this pointer's recipient.
+        assert all(type(gui[key]) is int and gui[key] == 0 for key in ('focusHwnd','focusPid','focusRootHwnd'))
+        assert all(value['foreground'][key] == doc[key] for key in ('hwnd','pid','threadId','rootHwnd')), 'File pointer foreground differs from original document'
+    else:
+        assert gui['focusHwnd'] > 0, 'Owned input has no native focus'
     assert control['pid'] == pid and control['runtimeId'] and all(type(v) is int for v in control['runtimeId'])
     assert control['visible'] is True and control['enabled'] is True
     assert _inside(control['rectangle'], scope['rectangle']), 'UIA control rectangle escaped owned scope'
@@ -83,11 +91,11 @@ def _target(value, purpose, document, pid, dialog, caption, readiness, *, operat
     assert ancestry[0]['runtimeId'] == control['runtimeId'] and ancestry[-1]['nativeHwnd'] == (dialog or document), 'Control ancestry names another original scope'
     if purpose == 'FILE_MENU':
         assert not dialog and control['controlType'] == 'MenuItem' and control['name'] == '파일'
-        if operation == 'pointer' and value['foreground']['hwnd'] == document:
+        if initial_file_pointer:
             # The initial File click acquires host focus from its embedded
             # editor. Its recipient is the separately matched physical UIA
             # control, not whichever editor currently owns keyboard focus.
-            assert gui['activeHwnd'] == document and gui['focusRootHwnd'] == document
+            assert gui['activeHwnd'] == document and gui['focusRootHwnd'] == (document if gui['focusHwnd'] else 0)
             assert gui['captureHwnd'] == 0, 'Unexpected capture before File control click'
         else:
             _menu_focus(value, document, pid)

@@ -462,6 +462,64 @@ class ControlPolicyTests(unittest.TestCase):
         self.probe.value['gui'].update(focusPid=88,focusHwnd=56)
         self.probe.value['focusAncestry']=[];self.probe.value['nativeFocusUnderMenu']=False
         self.assertTrue(self.click()['success'])
+    def null_native_focus(self):
+        probe=object.__new__(self.policy.NativeControlProbe);probe._call=lambda f,*a:f(*a)
+        def query(thread,pointer):
+            self.assertEqual(thread,9)
+            pointer._obj.active=11
+            return True  # Successful native query; the original host thread has no focus HWND.
+        probe.user=NS(GetGUIThreadInfo=query,
+            GetWindowThreadProcessId=lambda *a:(_ for _ in()).throw(AssertionError('Null focus cannot name a process')),
+            GetAncestor=lambda *a:(_ for _ in()).throw(AssertionError('Null focus cannot name a root')))
+        return probe.native_focus(9)
+    def test_file_pointer_uses_measured_recipient_when_successful_host_query_has_null_focus(self):
+        gui=self.null_native_focus()
+        self.assertEqual((gui['focusHwnd'],gui['focusPid'],gui['focusRootHwnd']),(0,0,0))
+        self.probe.value.update(gui=gui,focusAncestry=[],nativeFocusUnderMenu=False)
+        result=self.click()
+        self.assertTrue(result['success'])
+        self.assertEqual(self.probe.calls,['dpi-enter','move','click','dpi-restore'])
+        self.assertEqual((result['clickAttempts'],result['inputCallAttempts'],result['requestedInputs'],result['insertedInputs']),(1,1,2,2))
+        self.assertEqual(result['deadline'],6.)
+    def test_null_focus_does_not_admit_host_keyboard_or_popup_routes(self):
+        self.probe.value['gui']=self.null_native_focus()
+        with self.assertRaises(AssertionError):self.shortcut()
+        self.assertFalse(any(isinstance(call,tuple) and call[0]=='send' for call in self.probe.calls))
+        self.probe.calls.clear();self.record={}
+        self.probe.value['foreground'].update(hwnd=99,rootHwnd=99,ownerHwnd=11)
+        self.probe.value['foregroundOwnerChain']=[99,11]
+        self.probe.value['gui'].update(menuOwnerHwnd=11,flags=4)
+        with self.assertRaises(AssertionError):self.click()
+        self.assertNotIn('move',self.probe.calls);self.assertNotIn('click',self.probe.calls)
+    def test_null_focus_does_not_admit_owned_picker_button(self):
+        self.dialog();self.probe.value['gui'].update(focusHwnd=0,focusPid=0,focusRootHwnd=0)
+        with self.assertRaises(AssertionError):self.save()
+        self.assertNotIn('move',self.probe.calls);self.assertNotIn('click',self.probe.calls)
+    def test_null_file_pointer_rejects_mixed_boolean_or_negative_focus_metadata(self):
+        for focus,pid,root in ((None,0,0),(False,0,0),(0,False,0),(0,0,False),
+                               (0,77,0),(0,0,11),(0,0,99),(-1,0,0)):
+            with self.subTest(focus=focus,pid=pid,root=root):
+                self.probe.value['gui']=self.null_native_focus()
+                self.probe.value['gui'].update(focusHwnd=focus,focusPid=pid,focusRootHwnd=root)
+                self.probe.calls.clear();self.record={}
+                with self.assertRaises((AssertionError,TypeError)):self.click()
+                self.assertNotIn('move',self.probe.calls);self.assertNotIn('click',self.probe.calls)
+    def test_null_file_pointer_keeps_original_foreground_active_capture_and_hit_guards(self):
+        original=copy.deepcopy(self.probe.value);hit=copy.deepcopy(self.probe.hit)
+        mutations=(lambda:self.probe.value['foreground'].update(pid=88),
+            lambda:self.probe.value['foreground'].update(rootHwnd=99),
+            lambda:self.probe.value['foreground'].update(threadId=10),
+            lambda:self.probe.value['gui'].update(activeHwnd=99),
+            lambda:self.probe.value['gui'].update(captureHwnd=99),
+            lambda:self.probe.hit.update(uiaMatches=False),
+            lambda:self.probe.value['ancestry'][0].update(pid=88))
+        for mutation in mutations:
+            with self.subTest(mutation=mutations.index(mutation)):
+                self.probe.value=copy.deepcopy(original);self.probe.hit=copy.deepcopy(hit)
+                self.probe.value['gui']=self.null_native_focus();self.probe.calls.clear();self.record={}
+                mutation()
+                with self.assertRaises(AssertionError):self.click()
+                self.assertNotIn('move',self.probe.calls);self.assertNotIn('click',self.probe.calls)
     def test_exact_new_picker_does_not_requery_invalidated_original_file_wrapper(self):
         probe=object.__new__(self.policy.NativeControlProbe)
         probe.user=NS(IsWindow=lambda h:True);probe._call=lambda f,*a:f(*a)
