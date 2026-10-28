@@ -4,7 +4,9 @@ from contextlib import ExitStack, redirect_stdout
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -41,6 +43,87 @@ class NativeSmokeTests(unittest.TestCase):
             self.assertEqual(launched.call_args.args[0], command)
             self.assertEqual(process.wait(timeout=10), 0)
             self.assertEqual((output / 'calc-stderr.log').read_bytes(), b'worker traceback retained\n')
+
+    def test_suite_launch_uses_selected_child_directory_without_changing_parent_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            suite, foreign, output = root / 'Suite payload', root / 'Foreign folder 한글', root / 'evidence'
+            for path in (suite, foreign, output): path.mkdir()
+            script = suite / 'inspect launch.py'
+            script.write_text('import json, os, sys\n'
+                              'print(json.dumps({"cwd": os.getcwd(), "marker": os.environ["OPENGEUL_TEST_CWD"], '
+                              '"script": sys.argv[0]}), file=sys.stderr)\n', encoding='utf-8')
+            command = [str(Path(sys.executable).resolve()), str(script)]
+            original_command = tuple(command)
+            parent_cwd = Path.cwd()
+            with patch.dict(os.environ, {'OPENGEUL_TEST_CWD': 'parent'}):
+                environment = dict(os.environ, OPENGEUL_TEST_CWD='child-only')
+                for name, options, expected, child_environment, marker in (
+                        ('default', {}, suite, environment, 'child-only'),
+                        ('foreign', {'working_directory': foreign}, foreign, environment, 'child-only'),
+                        ('foreign-inherited', {'working_directory': foreign}, foreign, None, 'parent')):
+                    with self.subTest(name=name), patch.object(smoke, 'prepare_launch_pointer'):
+                        process = smoke.launch_suite(command, suite, output, name,
+                                                     environment=child_environment, **options)
+                        self.assertEqual(0, process.wait(timeout=10))
+                        self.assertEqual(original_command, tuple(process.args))
+                        observed = json.loads((output / (name + '-stderr.log')).read_text(encoding='utf-8'))
+                        self.assertEqual({'cwd': str(expected), 'marker': marker, 'script': str(script)}, observed)
+                        self.assertEqual(parent_cwd, Path.cwd())
+                        self.assertEqual('parent', os.environ['OPENGEUL_TEST_CWD'])
+                        self.assertEqual('child-only', environment['OPENGEUL_TEST_CWD'])
+
+    def test_explicit_launch_directory_rejects_nonlocal_aliases_and_suite_intersections_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            suite, foreign, output = root / 'suite', root / 'foreign', root / 'evidence'
+            for path in (suite, foreign, output, suite / 'nested'): path.mkdir()
+            ordinary_file = root / 'file'
+            ordinary_file.write_text('synthetic', encoding='utf-8')
+            linked = root / 'linked'
+            (foreign / 'child').mkdir()
+            linked.symlink_to(foreign, target_is_directory=True)
+            invalid = [Path('relative'), '//server/share', suite, suite / 'nested', root,
+                       root / 'missing', ordinary_file, linked, linked / 'child', foreign / '..' / 'foreign']
+            with patch.object(smoke, 'prepare_launch_pointer') as pointer, \
+                    patch.object(smoke.subprocess, 'Popen') as launched:
+                for path in invalid:
+                    with self.subTest(path=path), self.assertRaises((ValueError, OSError)):
+                        smoke.launch_suite([str(suite / 'OpenGeul.Office.exe')], suite, output,
+                                           'invalid', working_directory=path)
+            pointer.assert_not_called()
+            launched.assert_not_called()
+            self.assertEqual([], list(output.iterdir()))
+
+    def test_explicit_launch_directory_requires_absolute_executable_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            suite, foreign, output = root / 'suite', root / 'foreign', root / 'evidence'
+            for path in (suite, foreign, output): path.mkdir()
+            with patch.object(smoke, 'prepare_launch_pointer') as pointer, \
+                    patch.object(smoke.subprocess, 'Popen') as launched:
+                with self.assertRaisesRegex(ValueError, 'absolute executable'):
+                    smoke.launch_suite(['OpenGeul.Office.exe'], suite, output,
+                                       'relative-command', working_directory=foreign)
+            pointer.assert_not_called()
+            launched.assert_not_called()
+            self.assertEqual([], list(output.iterdir()))
+
+    def test_explicit_launch_directory_rejects_reparse_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            suite, foreign, output = root / 'suite', root / 'foreign' / 'cwd', root / 'evidence'
+            for path in (suite, foreign, output): path.mkdir(parents=True)
+            original = Path.lstat
+            def lstat(path, *args, **kwargs):
+                if path == foreign.parent:
+                    return SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_file_attributes=0x400)
+                return original(path, *args, **kwargs)
+            with patch.object(Path, 'lstat', lstat), patch.object(smoke.subprocess, 'Popen') as launched:
+                with self.assertRaisesRegex(ValueError, 'reparse'):
+                    smoke.launch_suite([str(suite / 'OpenGeul.Office.exe')], suite, output,
+                                       'reparse', working_directory=foreign)
+            launched.assert_not_called()
 
     def test_pointer_precondition_is_completed_once_before_suite_process_launch(self):
         calls = []

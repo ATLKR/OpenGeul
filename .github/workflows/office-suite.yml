@@ -285,6 +285,46 @@ jobs:
         } else {
           ./suite/scripts/build-suite.ps1 -Architecture x64
         }
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {
+          $ErrorActionPreference = 'Stop'
+          $suiteArchive = [System.IO.Path]::GetFullPath("$($env:SUITE_PACKAGE).zip")
+          $portableParent = Join-Path (Get-Location).Path '.work/suite-portable'
+          if (-not (Test-Path -LiteralPath $portableParent)) {
+            New-Item -ItemType Directory -Path $portableParent | Out-Null
+          }
+          $portableName = "$($env:GITHUB_RUN_ID)-${{ matrix.architecture }}-$($env:GITHUB_RUN_ATTEMPT) 휴대용 검증"
+          $portableRoot = Join-Path $portableParent $portableName
+          $portableReceipt = Join-Path $portableParent "$portableName.receipt.json"
+          python suite/scripts/portable-package-check.py --baseline $env:SUITE_PACKAGE --archive $suiteArchive --output $portableRoot --receipt $portableReceipt
+          if ($LASTEXITCODE -ne 0) { throw 'Portable final ZIP file check failed.' }
+          $receipt = Get-Content -LiteralPath $portableReceipt -Raw | ConvertFrom-Json
+          if ($receipt.schemaVersion -isnot [long] -or $receipt.schemaVersion -ne 1 -or
+              $receipt.kind -isnot [string] -or $receipt.kind -cne 'portable-package-file-check' -or
+              $receipt.sourceCommit -isnot [string] -or $receipt.sourceCommit -cne $env:GITHUB_SHA -or
+              $receipt.architecture -isnot [string] -or $receipt.architecture -cne '${{ matrix.architecture }}') {
+            throw 'Portable final ZIP receipt identity differs from this workflow.'
+          }
+          foreach ($flag in @('passed', 'archiveInventoryMatched', 'relocationVerified', 'sameVersionCoexistenceVerified', 'corruptionDetected', 'repairVerified')) {
+            if ($receipt.$flag -isnot [bool] -or $receipt.$flag -cne $true) { throw "Portable final ZIP receipt lacks $flag." }
+          }
+          foreach ($flag in @('updateVerified', 'guiVerified')) {
+            if ($receipt.$flag -isnot [bool] -or $receipt.$flag -cne $false) { throw "Portable file check cannot claim $flag." }
+          }
+          if ($receipt.existingHwpPreserved.passed -isnot [bool] -or $receipt.existingHwpPreserved.passed -cne $true) {
+            throw 'Portable final ZIP did not preserve existing HWP bytes.'
+          }
+          $expectedExtracted = Join-Path $portableRoot 'OpenGeul Office 설치 검증'
+          $expectedRepaired = Join-Path $portableRoot 'OpenGeul Office 복구 검증'
+          if ($receipt.extractedRoot -isnot [string] -or $receipt.extractedRoot -cne $expectedExtracted -or
+              $receipt.repairedRoot -isnot [string] -or $receipt.repairedRoot -cne $expectedRepaired) {
+            throw 'Portable final ZIP receipt roots differ from the owned extractions.'
+          }
+          $foreignCwd = Join-Path $portableRoot '외부 작업 폴더'
+          New-Item -ItemType Directory -Path $foreignCwd | Out-Null
+          "SUITE_ARCHIVE=$suiteArchive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SUITE_PACKAGE=$expectedRepaired" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SUITE_FOREIGN_CWD=$foreignCwd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        }
       id: build
 
     - name: 실제 한국어 IME와 네이티브 UI 검사 준비
@@ -673,7 +713,7 @@ jobs:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
-        python suite/e2e/startup_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-startup --attempts 40
+        python suite/e2e/startup_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --launch-cwd $env:SUITE_FOREIGN_CWD --output .work/suite-startup --attempts 40
         if ($LASTEXITCODE -ne 0) { throw 'At least one independent startup failed.' }
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: startup 원본 검증 기록 즉시 보존
@@ -825,6 +865,7 @@ jobs:
           .work/suite-native-integrity.json
           .work/suite-native31-privacy-preparation/
           .work/suite-unit-capabilities/
+          .work/suite-portable/
           .work/office-suite/msi.msi.log
           .work/suite-office-features/
           .work/e2e-fixtures/
@@ -839,7 +880,7 @@ jobs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-office-suite-${{ matrix.architecture }}-${{ github.run_id }}
-        path: ${{ env.SUITE_PACKAGE }}.zip
+        path: ${{ env.SUITE_ARCHIVE }}
         retention-days: 7
         if-no-files-found: error
         compression-level: 0

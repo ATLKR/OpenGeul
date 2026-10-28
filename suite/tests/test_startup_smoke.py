@@ -7,7 +7,9 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 
 SOURCE = Path(__file__).resolve().parents[1] / 'e2e' / 'startup_smoke.py'
@@ -46,6 +48,72 @@ class StartupSmokeTests(unittest.TestCase):
         for count in (0, 1, 19, 21, 41, True):
             with self.subTest(count=count), self.assertRaises(ValueError):
                 self.smoke.build_plan(count)
+
+    def test_foreign_launch_directory_cli_routes_each_of_the_same_forty_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            suite, fixtures, output, foreign = (root / name for name in
+                                                ('suite', 'fixtures', 'evidence', 'Foreign folder 한글'))
+            for path in (suite, fixtures, foreign): path.mkdir()
+            calls = []
+            def run(actual_suite, actual_fixtures, actual_output, attempt, *, launch_cwd=None):
+                calls.append((actual_suite, actual_fixtures, actual_output, dict(attempt), launch_cwd))
+                return dict(self.passing_record(attempt), launchCwd=str(launch_cwd),
+                            launchEnvironmentScope='inherited-process-environment')
+            argv = ['startup_smoke.py', '--suite', str(suite), '--fixtures', str(fixtures),
+                    '--output', str(output), '--attempts', '40', '--launch-cwd', str(foreign)]
+            with patch.object(sys, 'argv', argv), patch.object(self.smoke, 'os', SimpleNamespace(name='nt')), \
+                    patch.object(self.smoke, 'run_native_attempt', side_effect=run), redirect_stdout(io.StringIO()):
+                self.assertEqual(0, self.smoke.main())
+            self.assertEqual(40, len(calls))
+            self.assertEqual(list(range(1, 41)), [call[3]['attempt'] for call in calls])
+            self.assertEqual({('calc', 'existing'): 10, ('calc', 'new'): 10,
+                              ('writer', 'existing'): 10, ('writer', 'new'): 10},
+                             Counter((call[3]['module'], call[3]['mode']) for call in calls))
+            self.assertTrue(all(call[:3] == (suite, fixtures, output) and call[4] == foreign for call in calls))
+            saved = json.loads((output / 'results.json').read_text(encoding='utf-8'))
+            self.assertTrue(saved['success'])
+            self.assertEqual(40, len(list(output.glob('*-result.json'))))
+            self.assertTrue(all(item['launchCwd'] == str(foreign) and
+                                item['launchEnvironmentScope'] == 'inherited-process-environment'
+                                for item in saved['attempts']))
+
+    def test_startup_attempt_routes_selected_directory_and_records_launch_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            suite, fixtures, output, foreign = (root / name for name in
+                                                ('suite', 'fixtures', 'evidence', 'Foreign folder 한글'))
+            for path in (suite, fixtures, output, foreign): path.mkdir()
+            attempt = self.smoke.build_plan(40)[3]  # New Writer needs no fixture or Calc input.
+            for selected, expected in ((None, suite), (foreign, foreign)):
+                with self.subTest(selected=selected), \
+                        patch.object(self.smoke.native, 'launch_suite', side_effect=RuntimeError('synthetic launch stop')) as launched, \
+                        patch.dict(sys.modules, {'PIL': SimpleNamespace(ImageGrab=SimpleNamespace(
+                            grab=Mock(side_effect=RuntimeError('synthetic capture stop'))))}):
+                    record = self.smoke.run_native_attempt(suite, fixtures, output, attempt, launch_cwd=selected)
+                    self.assertEqual('launch', record['stage'])
+                    self.assertIn('synthetic launch stop', record['exception'])
+                    self.assertEqual(str(expected), record['launchCwd'])
+                    self.assertEqual('inherited-process-environment', record['launchEnvironmentScope'])
+                    self.assertEqual([str(suite / 'OpenGeul.Office.exe'), '--module', 'writer'],
+                                     launched.call_args.args[0])
+                    self.assertEqual(selected, launched.call_args.kwargs.get('working_directory'))
+
+    def test_launch_cwd_cli_rejects_payload_intersection_before_creating_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            suite, fixtures = root / 'suite', root / 'fixtures'
+            for path in (suite, fixtures): path.mkdir()
+            for selected in (suite, root, Path('relative')):
+                output = root / 'evidence'
+                argv = ['startup_smoke.py', '--suite', str(suite), '--fixtures', str(fixtures),
+                        '--output', str(output), '--attempts', '40', '--launch-cwd', str(selected)]
+                with self.subTest(selected=selected), patch.object(sys, 'argv', argv), \
+                        patch.object(self.smoke, 'os', SimpleNamespace(name='nt')), \
+                        patch.object(self.smoke, 'run_attempts') as runner:
+                    with self.assertRaises(ValueError): self.smoke.main()
+                    runner.assert_not_called()
+                    self.assertFalse(output.exists())
 
     def test_all_twenty_attempts_and_required_native_evidence_must_pass(self):
         plan = self.smoke.build_plan(20)

@@ -16,6 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import time
@@ -45,11 +46,32 @@ MODULE_LABELS = tuple('OpenGeul ' + name for name in ('HWP', 'Writer', 'Calc', '
 NEW_MODULES = tuple(module for module, _ in INPUT_CASES + ATTACH_CASES)
 
 
-def launch_suite(command, suite, output, name, *, environment=None):
+def launch_working_directory(suite, working_directory=None):
+    if working_directory is None:
+        return suite
+    directory = Path(working_directory)
+    if not directory.is_absolute() or str(directory).startswith(('\\\\', '//')) or '..' in directory.parts:
+        raise ValueError('Launch directory must be a local absolute path without traversal')
+    for part in (directory, *directory.parents):
+        info = part.lstat()
+        if not stat.S_ISDIR(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+            raise ValueError('Launch directory ancestors must be ordinary directories without links or reparse points')
+    if directory.resolve() != directory:
+        raise ValueError('Launch directory aliases are not accepted')
+    root = Path(suite).resolve()
+    if directory == root or root in directory.parents or directory in root.parents:
+        raise ValueError('Explicit launch directory must be outside and separate from the Suite payload')
+    return directory
+
+
+def launch_suite(command, suite, output, name, *, environment=None, working_directory=None):
+    cwd = launch_working_directory(suite, working_directory)
+    if working_directory is not None and (not command or not Path(command[0]).is_absolute()):
+        raise ValueError('Explicit launch directory requires an absolute executable command')
     prepare_launch_pointer(output, name)
     # Popen duplicates the file handle for the child; the parent's stream closes here.
     with (output / (name + '-stderr.log')).open('xb') as stderr:
-        process = subprocess.Popen(command, cwd=suite, shell=False, stderr=stderr, env=environment)
+        process = subprocess.Popen(command, cwd=cwd, shell=False, stderr=stderr, env=environment)
     process.opengeul_evidence_output, process.opengeul_evidence_case = output, name
     process.opengeul_suite_root = Path(suite).resolve()
     return process

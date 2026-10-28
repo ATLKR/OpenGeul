@@ -99,17 +99,20 @@ class EngineProcessWitness:
             self.handle = None
 
 
-def run_native_attempt(suite, fixtures, output, attempt):
+def run_native_attempt(suite, fixtures, output, attempt, *, launch_cwd=None):
     """Run one launch once. Cleanup cannot convert its original failure to success."""
     record = dict(attempt, success=False, stage='case-setup', steps=['case-setup'],
                   exception=None, traceback='', shellPid=None, windowHwnd=None, parentHwnd=None,
                   childHwnd=None, officePid=None, ownedWindows=[], cleanClose=False,
                   nativeParentVerified=False, noExternalOfficeWindow=False,
                   stderrLog=attempt['case'] + '-stderr.log', stderrCaptured=False,
-                  screenshot=None, screenshotCaptured=False, forcedCleanupRequired=False)
+                  screenshot=None, screenshotCaptured=False, forcedCleanupRequired=False,
+                  launchCwd=None, launchEnvironmentScope='inherited-process-environment')
     process = api = source = before = engine = None
     started = time.monotonic()
     try:
+        cwd = native.launch_working_directory(suite, launch_cwd)
+        record['launchCwd'] = str(Path(cwd).resolve())
         module, mode = attempt['module'], attempt['mode']
         command = native.new_document_command(suite, module)
         if mode == 'existing':
@@ -119,7 +122,8 @@ def run_native_attempt(suite, fixtures, output, attempt):
             record.update(file=source.name, beforeSha256=before)
             command += ['--file', str(source)]
         mark_stage(record, 'launch')
-        process = native.launch_suite(command, suite, output, attempt['case'])
+        process = native.launch_suite(command, suite, output, attempt['case'],
+                                      working_directory=cwd if launch_cwd is not None else None)
         record['shellPid'] = process.pid
         api = native.Windows()
         mark_stage(record, 'attach')
@@ -288,6 +292,8 @@ def main():
     parser.add_argument('--fixtures', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--attempts', type=int, choices=(20, 40), default=20)
+    parser.add_argument('--launch-cwd', type=Path,
+                        help='Existing local ordinary directory outside the payload; child process only, inherited environment')
     args = parser.parse_args()
     if os.name != 'nt': raise RuntimeError('Actual Windows GUI execution is required')
     if not __debug__: raise RuntimeError('Do not disable native GUI assertions with Python -O')
@@ -297,9 +303,11 @@ def main():
     assert suite != output and suite not in output.parents, 'Evidence must be outside the payload'
     assert fixtures != output and fixtures not in output.parents, 'Evidence must be outside generated fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
+    launch_cwd = native.launch_working_directory(suite, args.launch_cwd) if args.launch_cwd is not None else None
     output.mkdir(parents=True, exist_ok=False)
     plan = build_plan(args.attempts)
-    report = run_attempts(plan, lambda attempt: run_native_attempt(suite, fixtures, output, attempt), output, args.attempts)
+    report = run_attempts(plan, lambda attempt: run_native_attempt(suite, fixtures, output, attempt,
+                                                                 launch_cwd=launch_cwd), output, args.attempts)
     return 0 if report['success'] else 1
 
 

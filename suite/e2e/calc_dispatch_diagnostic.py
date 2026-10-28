@@ -203,9 +203,11 @@ def decode_artifact(value, expected_identity=None):
 class WindowsApi:
     """Windows bindings only; construction is deferred for injected portable tests."""
     def __init__(self, library):
+        from ascii_message_preparation import require_prepared_library
+        library_path=require_prepared_library(library)
         self.kernel=C.WinDLL('kernel32',use_last_error=True)
         self.user=C.WinDLL('user32',use_last_error=True)
-        self.library=C.WinDLL(str(library),use_last_error=True) if library is not None else None
+        self.library=C.WinDLL(str(library_path),use_last_error=True)
         H,B=C.c_void_p,C.c_int32
         signatures=(
             (self.kernel,'GetCurrentProcessId',(),U32),(self.kernel,'GetCurrentProcess',(),H),

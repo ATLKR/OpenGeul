@@ -8,14 +8,35 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
+from native_executable_cleanup import remove_completed_image
 
 
 MODULE = Path(__file__).resolve().parents[1] / 'e2e/calc_dispatch_diagnostic.py'
 
 
 class CalcDispatchTransportTests(unittest.TestCase):
+    def test_windows_api_loads_only_the_authenticated_prepared_library_path(self):
+        import ascii_message_preparation
+        descriptor={'schemaVersion':1,'kind':'prepared-ascii-message-observer','architecture':'arm64'}
+        library=Path('/synthetic-owned/ascii-message-observer.dll')
+        loaded=[]
+        def load(name, **kwargs):
+            loaded.append(name)
+            return MagicMock()
+        with patch.object(ascii_message_preparation,'require_prepared_library',return_value=library) as validate, \
+                patch.object(C,'WinDLL',side_effect=load,create=True):
+            self.d.WindowsApi(descriptor)
+        validate.assert_called_once_with(descriptor)
+        self.assertEqual(loaded,['kernel32','user32',str(library)])
+
+    def test_invalid_preparation_rejects_before_any_dll_load(self):
+        with patch.object(C,'WinDLL',return_value=MagicMock(),create=True) as load:
+            with self.assertRaises((AssertionError,ValueError)):
+                self.d.WindowsApi({'schemaVersion':0})
+        load.assert_not_called()
+
     def test_failed_mapping_acquisition_keeps_failed_handle_cleanup_visible(self):
         kernel = SimpleNamespace(CreateFileMappingW=lambda *args: 79,
             MapViewOfFile=lambda *args: None, CloseHandle=lambda handle: False)
@@ -296,10 +317,15 @@ class CalcDispatchTransportTests(unittest.TestCase):
         source+=';'.join('std::cout << '+entry+' << " "' for entry in entries)+';}'
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);src=root/'abi.cpp';src.write_text(source)
-            image=root/'abi'
+            image=root/('abi.exe' if os.name == 'nt' else 'abi')
             subprocess.run([compiler,'-std=c++17','-I',str(MODULE.parents[1]/'engine-build/calc-dispatch-diagnostic'),
                             str(src),'-o',str(image)],check=True,capture_output=True,timeout=30)
-            output=subprocess.check_output([str(image)],text=True,timeout=5)
+            completed=subprocess.run([str(image)],capture_output=True,text=True,timeout=5)
+            try:
+                self.assertEqual(completed.returncode,0,completed.stdout+completed.stderr)
+                output=completed.stdout
+            finally:
+                remove_completed_image(root,image,completed)
         self.assertEqual(tuple(map(int,output.split())),d.abi_layout())
 
 
