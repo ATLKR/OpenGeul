@@ -1227,6 +1227,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
     $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     $receipt=[ordered]@{schemaVersion=1;kind=$mode.kind;phase=$Phase;architecture='arm64';status='failed';passed=$false;fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false;startedUtc=[DateTime]::UtcNow.ToString('o');stage='native-host';firebirdSourcePortChecksExecuted=$false;libreOfficeCheckTargetExecuted=$false}
     $previousBudget=$script:NativeEngineBuildBudget
+    $buildFailure=$null
     try {
         $receipt.stage='build-time-budget'
         $script:NativeEngineBuildBudget=New-NativeBuildBudget $DeadlineUtc
@@ -1451,24 +1452,48 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.fullEngineQualified=$mode.fullEngineQualified
         $receipt.acceptanceEligible=$mode.acceptanceEligible
         $receipt.passed=$true;$receipt.stage='complete'
-    } catch {$receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.acceptanceEligible=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString();throw}
+    } catch {$buildFailure=$_;$receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.acceptanceEligible=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString();throw}
     finally {
-        if($source -and (Test-Path -LiteralPath $source)) {
-            if($manifest -and -not $receipt.mddsHeaders) {
-                try {$receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality}
-                catch {$receipt.mddsHeaderRetentionError=$_.Exception.ToString()}
+        $retention=[ordered]@{schemaVersion=1;status='complete';attemptedCopies=0;retainedCopies=0;errorCodes=@()}
+        try {
+            if($source -and (Test-Path -LiteralPath $source)) {
+                if($manifest -and -not $receipt.mddsHeaders) {
+                    try {$receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality}
+                    catch {$receipt.mddsHeaderRetentionError=$_.Exception.ToString()}
+                }
+                # Codes 1..4 identify these fixed diagnostics; 5 is retention setup.
+                $names=@('config_host.mk','config.log','autogen.input','workdir/UnpackedTarball/firebird/build.log')
+                for($index=0;$index -lt $names.Count;$index++) {
+                    $candidate=Join-Path $source $names[$index]
+                    if(Test-Path -LiteralPath $candidate) {
+                        $retention.attemptedCopies++
+                        try {
+                            $name=if($index -eq 3){'firebird-build.log'}else{$names[$index]}
+                            Copy-Item -LiteralPath $candidate -Destination (Join-Path $evidence $name) -Force
+                            $retention.retainedCopies++
+                        } catch {$retention.errorCodes+=($index+1)}
+                    }
+                }
             }
-            foreach($name in @('config_host.mk','config.log','autogen.input')) {
-                $candidate=Join-Path $source $name
-                if(Test-Path -LiteralPath $candidate) {Copy-Item -LiteralPath $candidate -Destination (Join-Path $evidence $name) -Force}
+        } catch {$retention.errorCodes+=5}
+        finally {
+            if($retention.errorCodes.Count) {
+                $retention.status='incomplete'
+                if(-not $buildFailure) {
+                    $receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.acceptanceEligible=$false;$receipt.status='failed'
+                    $receipt.stage='retain-build-diagnostics';$receipt.error='Native source build diagnostic retention failed.'
+                }
             }
-            $fbLog=Join-Path $source 'workdir/UnpackedTarball/firebird/build.log'
-            if(Test-Path -LiteralPath $fbLog) {Copy-Item -LiteralPath $fbLog -Destination (Join-Path $evidence 'firebird-build.log')}
+            $receipt.diagnosticRetention=$retention
+            $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
+            try {if($receipt.buildBudget) {$receipt.buildBudget.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}}
+            finally {
+                $script:NativeEngineBuildBudget=$previousBudget
+                try {Write-BuildJson (Join-Path $evidence $mode.receipt) $receipt}
+                catch {if(-not $buildFailure) {throw}}
+            }
         }
-        $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
-        if($receipt.buildBudget) {$receipt.buildBudget.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}
-        $script:NativeEngineBuildBudget=$previousBudget
-        Write-BuildJson (Join-Path $evidence $mode.receipt) $receipt
+        if($retention.errorCodes.Count -and -not $buildFailure) {throw 'Native source build diagnostic retention failed.'}
     }
 }
 
