@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "kind": "calc-save-dispatch-diagnostic-source",
+  "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
+  "target": "windows-arm64",
+  "acceptanceEligible": false,
+  "patch": {
+    "path": "source.patch",
+    "bytes": 2856,
+    "sha256": "43cad7201d1c08960fc54ad326a797961d0ff8bafccac200ea7417797cbb3055"
+  },
+  "sources": [
+    {
+      "path": "sc/source/ui/view/tabvwsha.cxx",
+      "before": {
+        "bytes": 76232,
+        "sha256": "bff1e750e6d778b0b8a5f13f69325a309fc7a1d6d95935d4b3579f9e497a0561"
+      },
+      "after": {
+        "bytes": 76615,
+        "sha256": "48bc40dc8e77e1bbb555620d6e6b41e808cb63d8569440b197276fc77db8bd3f"
+      }
+    },
+    {
+      "path": "sfx2/source/doc/objstor.cxx",
+      "before": {
+        "bytes": 158966,
+        "sha256": "383efdebc4548969c1b64ae899f09cbd8ae622461508861de8b5db5119d1fee5"
+      },
+      "after": {
+        "bytes": 159271,
+        "sha256": "b9682218d39b8394c7efa4847deff4935d34295d71a3b1617cf3c9b488cd465e"
+      }
+    }
+  ],
+  "payloads": [
+    {
+      "source": "windows_runtime.h",
+      "path": "include/opengeul_calc_dispatch/windows_runtime.h",
+      "bytes": 6733,
+      "sha256": "2646c5d3d9a226516921bca1b3bd0c79fbad1dede35942b790d8f6411983b054"
+    },
+    {
+      "source": "recorder.h",
+      "path": "include/opengeul_calc_dispatch/recorder.h",
+      "bytes": 5981,
+      "sha256": "36c313546c65571663b2e5b86621adddeb6d212e6f84acfb527530167c5b2c81"
+    },
+    {
+      "source": "wire.h",
+      "path": "include/opengeul_calc_dispatch/wire.h",
+      "bytes": 2116,
+      "sha256": "451361533527ea09a88d7a3feee6f5f6193b07fac85e60da126854f4474fea57"
+    }
+  ]
+}

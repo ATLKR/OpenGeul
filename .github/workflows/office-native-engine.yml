@@ -9,6 +9,9 @@ name: OpenGeul native ARM64 Office engine source build
       - suite/tests/test_plugin_symbols.py
       - suite/engine-build/**
       - suite/tests/test_firebird_arm64_port.py
+      - suite/tests/test_calc_dispatch_source.py
+      - suite/tests/test_calc_dispatch_native.py
+      - suite/tests/fixtures/calc_dispatch_recorder.cpp
       - suite/tests/test_native_python_host.py
       - suite/tests/test_native_atl_path.py
       - suite/tests/test_native_meson_path.py
@@ -32,6 +35,7 @@ jobs:
     env:
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
+      OPENGEUL_CALC_DISPATCH_BUILD: 'true'
     steps:
       - name: Reserve finalization and evidence time before checkout
         shell: pwsh
@@ -91,7 +95,7 @@ jobs:
       - name: Build and verify native Firebird before the full Office engine
         shell: pwsh
         run: |
-          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC -MutexSymbols
+          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC -MutexSymbols -CalcDispatchDiagnostic
           if (-not $?) { throw 'Native ARM64 Office source build or functional verification failed.' }
       - name: Retain original source build diagnostics
         if: always()
@@ -107,12 +111,24 @@ jobs:
           retention-days: 7
           if-no-files-found: error
       - name: Retain the qualified native engine input
+        if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: opengeul-native-arm64-engine-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             .work/native-engine-evidence/OpenGeul-Office-engine-arm64.zip
             .work/native-engine-evidence/source-build-receipt.json
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+      - name: Retain the isolated Calc dispatch diagnostic engine
+        if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-calc-dispatch-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/native-engine-evidence/OpenGeul-Office-engine-arm64-calc-dispatch.zip
+            .work/native-engine-evidence/calc-dispatch-source-build-receipt.json
           retention-days: 7
           if-no-files-found: error
           compression-level: 0

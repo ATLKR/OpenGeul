@@ -7,12 +7,36 @@ param(
     [string]$JdkHome='',
     [string]$AntHome='',
     [string]$DeadlineUtc='',
-    [switch]$MutexSymbols
+    [switch]$MutexSymbols,
+    [switch]$CalcDispatchDiagnostic
 )
 $ErrorActionPreference='Stop'
 
 function Write-BuildJson($Path,$Value) {
     $Value|ConvertTo-Json -Depth 30|Set-Content -LiteralPath $Path -Encoding utf8NoBOM
+}
+
+function Get-NativeEngineBuildMode([ValidateSet('Firebird','Full')][string]$Phase,[switch]$CalcDispatchDiagnostic) {
+    if($CalcDispatchDiagnostic) {
+        if($Phase -cne 'Full') {throw 'Calc dispatch diagnostics require the full native source build.'}
+        return [ordered]@{kind='native-office-engine-calc-dispatch-diagnostic';archive='OpenGeul-Office-engine-arm64-calc-dispatch.zip';
+            receipt='calc-dispatch-source-build-receipt.json';status='native-engine-calc-dispatch-diagnostic-built';fullEngineQualified=$false;acceptanceEligible=$false}
+    }
+    return [ordered]@{kind='native-office-engine-source-build';archive='OpenGeul-Office-engine-arm64.zip';receipt='source-build-receipt.json';
+        status=$(if($Phase -eq 'Full'){'native-engine-source-build-qualified'}else{'native-firebird-pe-built-full-engine-unqualified'});
+        fullEngineQualified=($Phase -eq 'Full');acceptanceEligible=($Phase -eq 'Full')}
+}
+
+function Write-CalcDispatchRuntimeMarker([string]$RuntimeRoot,[string]$SourceCommit,$SourceReceipt) {
+    if($SourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $SourceCommit -ceq ('0'*40) -or
+       $SourceReceipt.coreCommit -cne 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1' -or
+       $SourceReceipt.lockSha256 -cnotmatch '^[0-9a-f]{64}$' -or $SourceReceipt.acceptanceEligible -ne $false -or
+       $SourceReceipt.fullEngineQualified -ne $false) {throw 'Calc dispatch source receipt does not bind this runtime.'}
+    $path=Join-Path $RuntimeRoot 'program/opengeul-calc-dispatch-diagnostic.json'
+    $marker=[ordered]@{schemaVersion=1;kind='calc-save-dispatch-diagnostic';fullEngineQualified=$false;acceptanceEligible=$false;
+        sourceCommit=$SourceCommit;coreCommit=$SourceReceipt.coreCommit;sourceLockSha256=$SourceReceipt.lockSha256}
+    $raw=[Text.UTF8Encoding]::new($false).GetBytes(($marker|ConvertTo-Json -Compress))
+    Write-NewIdentityBytes $path $raw
 }
 
 function New-NativeBuildBudget([string]$DeadlineUtc='',[ValidateRange(0.000001,330)][double]$MaximumMinutes=330) {
@@ -1190,14 +1214,15 @@ function Save-ActualMddsHeaders([string]$SourceRoot,[string]$EvidenceDirectory,$
     return $record
 }
 
-function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols) {
+function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols,[switch]$CalcDispatchDiagnostic) {
+    $mode=Get-NativeEngineBuildMode $Phase -CalcDispatchDiagnostic:$CalcDispatchDiagnostic
     if($MutexSymbols -and $Phase -cne 'Full') {throw 'Plugin symbols require the full native source build.'}
     if($MutexSymbols) {Assert-MutexSymbolsEnvironment}
     $paths=New-BuildDirectories $WorkDirectory $OutputDirectory
     $work=$paths.work;$evidence=$paths.output
     $source='';$manifest=$null
     $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
-    $receipt=[ordered]@{schemaVersion=1;kind='native-office-engine-source-build';phase=$Phase;architecture='arm64';status='failed';passed=$false;fullEngineQualified=$false;guiVerified=$false;startedUtc=[DateTime]::UtcNow.ToString('o');stage='native-host';firebirdSourcePortChecksExecuted=$false;libreOfficeCheckTargetExecuted=$false}
+    $receipt=[ordered]@{schemaVersion=1;kind=$mode.kind;phase=$Phase;architecture='arm64';status='failed';passed=$false;fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false;startedUtc=[DateTime]::UtcNow.ToString('o');stage='native-host';firebirdSourcePortChecksExecuted=$false;libreOfficeCheckTargetExecuted=$false}
     $previousBudget=$script:NativeEngineBuildBudget
     try {
         $receipt.stage='build-time-budget'
@@ -1268,6 +1293,19 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $python=(Get-Command python -ErrorAction Stop).Source
         $hookResult=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source,'--evidence-directory',$evidence) $repo (Join-Path $evidence 'source-hooks')
         $receipt.sourceHooks=Get-Content -LiteralPath $hookResult.stdout -Raw|ConvertFrom-Json
+        if($CalcDispatchDiagnostic) {
+            $receipt.stage='install-authenticated-calc-dispatch-diagnostic';Assert-NativeBuildTimeRemaining
+            $diagnostic=Join-Path $repo 'suite/engine-build/calc-dispatch-diagnostic'
+            Copy-Item -LiteralPath (Join-Path $diagnostic 'source-lock.json') -Destination (Join-Path $evidence 'calc-dispatch-source-lock.json')
+            Copy-Item -LiteralPath (Join-Path $diagnostic 'source.patch') -Destination (Join-Path $evidence 'calc-dispatch-source.patch')
+            Invoke-LoggedCommand $python @('-m','unittest','suite.tests.test_calc_dispatch_source','-v') $repo (Join-Path $evidence 'calc-dispatch-source-tests') -EnvironmentOverrides @{OPENGEUL_CALC_DISPATCH_SOURCE_ROOT=$source}|Out-Null
+            $probe=Invoke-LoggedCommand $python @((Join-Path $diagnostic 'install.py'),'--source-root',$source,'--target','windows-arm64','--core-commit',$pin.coreCommit) $repo (Join-Path $evidence 'calc-dispatch-source-hooks')
+            $receipt.calcDispatchSourceHooks=Get-Content -LiteralPath $probe.stdout -Raw|ConvertFrom-Json
+            if($receipt.calcDispatchSourceHooks.passed -ne $true -or $receipt.calcDispatchSourceHooks.coreCommit -cne $pin.coreCommit -or
+               $receipt.calcDispatchSourceHooks.fullEngineQualified -ne $false -or $receipt.calcDispatchSourceHooks.acceptanceEligible -ne $false -or
+               $receipt.calcDispatchSourceHooks.lockSha256 -cne (Get-FileHash -LiteralPath (Join-Path $evidence 'calc-dispatch-source-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()) {throw 'Calc dispatch source hooks did not authenticate the diagnostic.'}
+            $receipt.sourceLockSha256=$receipt.calcDispatchSourceHooks.lockSha256
+        }
         Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt $unixPkgconf -MutexSymbols:$MutexSymbols)
         Copy-Item (Join-Path $source 'autogen.input') (Join-Path $evidence 'autogen.input')
         $configure=Join-Path $commands 'configure.sh'
@@ -1397,18 +1435,20 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 if($stagedPlugin.Length -ne $receipt.pluginSymbols.files.dll.bytes -or (Get-FileHash -LiteralPath $stagedPlugin.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.pluginSymbols.files.dll.sha256) {throw 'Installed plugin differs from the matched symbol binary.'}
                 Assert-NativeBuildTimeRemaining
             }
-            $receipt.stage='package-qualified-source-build';Assert-NativeBuildTimeRemaining
-            $zip=Join-Path $evidence 'OpenGeul-Office-engine-arm64.zip'
+            if($CalcDispatchDiagnostic) {Write-CalcDispatchRuntimeMarker $instdir $receipt.sourceCommit $receipt.calcDispatchSourceHooks}
+            $receipt.stage=if($CalcDispatchDiagnostic){'package-calc-dispatch-diagnostic'}else{'package-qualified-source-build'};Assert-NativeBuildTimeRemaining
+            $zip=Join-Path $evidence $mode.archive
             if(Test-Path $zip) {throw 'Engine artifact already exists.'}
             Write-NativeEngineArchive $instdir $zip $evidence
             $receipt.artifact=[ordered]@{path=$zip;size=(Get-Item $zip).Length;sha256=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()}
             Assert-NativeBuildTimeRemaining
         }
         Assert-NativeBuildTimeRemaining
-        $receipt.status=if($Phase -eq 'Full'){'native-engine-source-build-qualified'}else{'native-firebird-pe-built-full-engine-unqualified'}
-        $receipt.fullEngineQualified=($Phase -eq 'Full')
+        $receipt.status=$mode.status
+        $receipt.fullEngineQualified=$mode.fullEngineQualified
+        $receipt.acceptanceEligible=$mode.acceptanceEligible
         $receipt.passed=$true;$receipt.stage='complete'
-    } catch {$receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString();throw}
+    } catch {$receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.acceptanceEligible=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString();throw}
     finally {
         if($source -and (Test-Path -LiteralPath $source)) {
             if($manifest -and -not $receipt.mddsHeaders) {
@@ -1425,10 +1465,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
         if($receipt.buildBudget) {$receipt.buildBudget.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}
         $script:NativeEngineBuildBudget=$previousBudget
-        Write-BuildJson (Join-Path $evidence 'source-build-receipt.json') $receipt
+        Write-BuildJson (Join-Path $evidence $mode.receipt) $receipt
     }
 }
 
 if($MyInvocation.InvocationName -ne '.') {
-    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc -MutexSymbols:$MutexSymbols
+    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc -MutexSymbols:$MutexSymbols -CalcDispatchDiagnostic:$CalcDispatchDiagnostic
 }
