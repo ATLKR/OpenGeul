@@ -98,17 +98,26 @@ class NativeArchiveCompletenessTests(unittest.TestCase):
         path.write_text(json.dumps(data),encoding='utf-8')
 
     def archive(self,entry,index):
-        folder=self.root/entry['root']/format(index,'032x');folder.mkdir(parents=True)
+        from suite.worker.native_diagnostics import NativeDiagnostics
+        root=self.root/entry['root'];root.mkdir(parents=True,exist_ok=True)
+        profile=self.root/'profiles'/str(index);profile.mkdir(parents=True,exist_ok=True)
         proof=receipt();proof['launcherPid']=entry['shellPid']+100000;proof['expectedEngineImage']=self.image
         proof['launcherHandleValue']=proof['initialMembers'][0]['handleValue']
         for rows in (proof['initialMembers'],proof['finalMembers']):
             rows[0].update(pid=proof['launcherPid'],image=str(self.suite/'Office/program/soffice.exe'))
             rows[1].update(**entry['generation'])
-        raw=(json.dumps(proof)+'\n').encode()
-        (folder/'shutdown.json').write_bytes(raw)
-        self.write_json(folder/'manifest.json',dict(schemaVersion=1,kind='owned-office-native-diagnostics',
-            archiveComplete=True,launcherPid=proof['launcherPid'],files=[dict(path='shutdown.json',bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())]))
-        entry['folder']=folder
+        phase={'members':proof['initialMembers']}
+        witnesses=SimpleNamespace(snapshot=lambda:copy.deepcopy(phase['members']),close=lambda:None)
+        process=SimpleNamespace(pid=proof['launcherPid'],open_diagnostic_witnesses=lambda:witnesses)
+        diagnostics=NativeDiagnostics(root,profile,process)
+        diagnostics.record('before-owned-shutdown')
+        phase['members']=proof['finalMembers']
+        diagnostics.record('after-owned-shutdown')
+        diagnostics.archive_crash()
+        diagnostics.record_shutdown(proof)
+        diagnostics.close()
+        folder=diagnostics.directory
+        entry.update(folder=folder,diagnostics=diagnostics,shutdownProof=proof)
         return folder
 
     def implementation(self):
@@ -187,6 +196,50 @@ class NativeArchiveCompletenessTests(unittest.TestCase):
         self.write_json(path,data)
         with self.assertRaises((ValueError,AssertionError)):self.verify()
 
+    def test_event_stream_must_exist_and_be_manifest_hashed(self):
+        folder=self.expected[0]['folder'];events=folder/'events.jsonl'
+        if events.exists():events.unlink()
+        with self.assertRaises((ValueError,AssertionError,OSError)):self.verify()
+
+    def test_unlisted_event_stream_cannot_use_the_previous_journal_exemption(self):
+        folder=self.expected[0]['folder'];events=folder/'events.jsonl'
+        events.write_bytes(b'{"phase":"before-owned-shutdown"}\n')
+        manifest=json.loads((folder/'manifest.json').read_text())
+        manifest['files']=[row for row in manifest['files'] if row['path']!='events.jsonl']
+        self.write_json(folder/'manifest.json',manifest)
+        with self.assertRaises((ValueError,AssertionError)):self.verify()
+
+    def test_event_stream_hardlinked_after_seal_cannot_qualify(self):
+        events=self.expected[0]['folder']/'events.jsonl'
+        os.link(events,self.root/'hardlinked-event-stream')
+        with self.assertRaises((ValueError,AssertionError)):self.verify()
+
+    def test_mutated_or_truncated_sealed_event_bytes_cannot_qualify(self):
+        events=self.expected[0]['folder']/'events.jsonl';original=events.read_bytes()
+        for raw in (b'x'+original[1:],original[:len(original)//2],b''):
+            events.write_bytes(raw)
+            with self.subTest(bytes=len(raw)),self.assertRaises((ValueError,AssertionError,OSError)):self.verify()
+        events.write_bytes(original)
+        manifest=(self.expected[0]['folder']/'manifest.json').relative_to(self.root).as_posix()
+        proof=next(row for row in self.verify()['archives'] if row['manifest']==manifest)
+        self.assertEqual(proof['eventsSha256'],hashlib.sha256(original).hexdigest())
+        self.assertEqual(proof['eventsBytes'],len(original))
+
+    def test_real_producer_invalidates_retry_append_and_reseals_without_dropping_phases(self):
+        entry=self.expected[0];diagnostics=entry['diagnostics'];events=entry['folder']/'events.jsonl'
+        original=events.read_bytes()
+        diagnostics.record('before-owned-shutdown')
+        appended=events.read_bytes()
+        self.assertTrue(appended.startswith(original))
+        self.assertGreater(len(appended),len(original))
+        with self.assertRaises((ValueError,AssertionError)):self.verify()
+        diagnostics.record_shutdown(entry['shutdownProof'])
+        self.assertIs(self.verify()['success'],True)
+        self.assertEqual(events.read_bytes(),appended)
+        manifest=json.loads((entry['folder']/'manifest.json').read_text())
+        seal=next(row for row in manifest['files'] if row['path']=='events.jsonl')
+        self.assertEqual(seal,dict(path='events.jsonl',bytes=len(appended),sha256=hashlib.sha256(appended).hexdigest()))
+
     def test_original_zero_exit_and_manifest_hash_proofs_remain_mandatory(self):
         folder=self.expected[0]['folder'];shutdown=folder/'shutdown.json'
         original=shutdown.read_bytes()
@@ -195,7 +248,7 @@ class NativeArchiveCompletenessTests(unittest.TestCase):
         shutdown.write_bytes(original)
         data=json.loads(original);data['forcedTermination']=True
         raw=json.dumps(data).encode();shutdown.write_bytes(raw)
-        manifest=json.loads((folder/'manifest.json').read_text());manifest['files'][0].update(bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())
+        manifest=json.loads((folder/'manifest.json').read_text());next(row for row in manifest['files'] if row['path']=='shutdown.json').update(bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())
         self.write_json(folder/'manifest.json',manifest)
         with self.assertRaises((ValueError,AssertionError)):self.verify()
 

@@ -33,8 +33,10 @@ def _plain(path):
             raise ValueError('Linked original coverage path')
     return path.lstat()
 
-def _bytes(path, maximum):
+def _bytes(path, maximum, *, single_link=False):
     info = _plain(path)
+    if single_link and info.st_nlink != 1:
+        raise ValueError('Native event stream must have one owned file link')
     if not (stat.S_ISREG(info.st_mode) and 0 < info.st_size <= maximum):
         raise ValueError('Original coverage file exceeds its bound')
     with path.open('rb') as stream:
@@ -227,6 +229,8 @@ def _archived(workspace, roots, image):
                 raise ValueError('Native archive file list missing')
             seen = set()
             shutdown_raw = None
+            events_sha = None
+            events_bytes = None
             for item in files:
                 if not type(item) is dict:
                     raise ValueError('Invalid native archive member')
@@ -237,11 +241,16 @@ def _archived(workspace, roots, image):
                 if not (not part.is_absolute() and '..' not in part.parts and (part.as_posix() == name) and (name not in seen)):
                     raise ValueError('Aliased native archive member')
                 seen.add(name)
-                raw = _bytes(folder.joinpath(*part.parts), 16 * 1024 * 1024)
+                raw = _bytes(folder.joinpath(*part.parts), 16 * 1024 * 1024, single_link=name == 'events.jsonl')
                 if not (type(item.get('bytes')) is int and item['bytes'] == len(raw) and (type(item.get('sha256')) is str) and re.fullmatch('[0-9a-f]{64}', item['sha256']) and (hashlib.sha256(raw).hexdigest() == item['sha256'])):
                     raise ValueError('Native archive member hash differs')
                 if name == 'shutdown.json':
                     shutdown_raw = raw
+                elif name == 'events.jsonl':
+                    events_sha = item['sha256']
+                    events_bytes = len(raw)
+            if events_sha is None:
+                raise ValueError('Manifest-hashed native event stream missing')
             if not (shutdown_raw is not None and len(shutdown_raw) <= MAX_RECEIPT_BYTES):
                 raise ValueError('Native archive shutdown proof missing')
             actual = set()
@@ -257,7 +266,7 @@ def _archived(workspace, roots, image):
                     raise ValueError('Nonregular native archive member')
                 if not len(actual) <= 4096:
                     raise ValueError('Native archive member count exceeded')
-            if not seen | {'manifest.json'} <= actual <= seen | {'manifest.json', 'events.jsonl'}:
+            if actual != seen | {'manifest.json'}:
                 raise ValueError('Unlisted native archive member')
             cleanup = load_cleanup_receipt(shutdown_raw)
             validate_cleanup_receipt(cleanup, expected_engine_image=image, launcher_pid=manifest.get('launcherPid'))
@@ -265,7 +274,7 @@ def _archived(workspace, roots, image):
             if not len(engines) == 1:
                 raise ValueError('Native shutdown has ambiguous engine generation')
             engine = engines[0]
-            result.append(dict(root=relative, pid=engine['pid'], creationTime=engine['creationTime'], image=image, engineLauncherPid=manifest['launcherPid'], manifest=manifest_path.relative_to(workspace).as_posix(), manifestSha256=hashlib.sha256(manifest_raw).hexdigest(), shutdownSha256=hashlib.sha256(shutdown_raw).hexdigest()))
+            result.append(dict(root=relative, pid=engine['pid'], creationTime=engine['creationTime'], image=image, engineLauncherPid=manifest['launcherPid'], manifest=manifest_path.relative_to(workspace).as_posix(), manifestSha256=hashlib.sha256(manifest_raw).hexdigest(), shutdownSha256=hashlib.sha256(shutdown_raw).hexdigest(), eventsSha256=events_sha, eventsBytes=events_bytes))
     return result
 
 def verify_native_archive_completeness(workspace, suite):

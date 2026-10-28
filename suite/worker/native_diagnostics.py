@@ -8,6 +8,8 @@ import shutil
 import stat
 import uuid
 
+MAX_EVENTS_BYTES = 16 * 1024 * 1024
+
 
 def plain_path(path):
     path = Path(path)
@@ -39,6 +41,7 @@ class NativeDiagnostics:
         self.directory = root / uuid.uuid4().hex
         self.directory.mkdir(exist_ok=False)
         self.profile, self.process, self.witnesses = profile, process, None
+        self._events_sealed = self._event_write_failed = self._crash_complete = False
         self.manifest = {'schemaVersion': 1, 'kind': 'owned-office-native-diagnostics', 'ownedProfile': str(profile),
                          'workerPid': os.getpid(), 'launcherPid': getattr(process, 'pid', None),
                          'archiveComplete': False, 'files': []}
@@ -49,6 +52,19 @@ class NativeDiagnostics:
             json.dumps(self.manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
     def record(self, phase, metadata=None):
+        try:
+            if self._events_sealed:
+                self._invalidate_event_seal()
+            self._record_event(phase, metadata)
+        except Exception:
+            self._event_write_failed = True
+            try:
+                self._invalidate_event_seal()
+            except Exception:
+                pass
+            raise
+
+    def _record_event(self, phase, metadata):
         event = {'phase': phase, 'utc': datetime.now(timezone.utc).isoformat()}
         if metadata is not None:
             event['metadata'] = metadata
@@ -61,7 +77,46 @@ class NativeDiagnostics:
             event['processQueryError'] = {'type': type(exc).__name__, 'message': str(exc),
                                           'winerror': getattr(exc, 'winerror', None)}
         with (self.directory / 'events.jsonl').open('a', encoding='utf-8') as stream:
-            stream.write(json.dumps(event, ensure_ascii=False, allow_nan=False) + '\n')
+            line = json.dumps(event, ensure_ascii=False, allow_nan=False) + '\n'
+            if stream.write(line) != len(line):
+                raise ValueError('Owned diagnostic event append was incomplete')
+
+    def _invalidate_event_seal(self):
+        self.manifest['archiveComplete'] = False
+        self.manifest['files'] = [item for item in self.manifest['files'] if item['path'] != 'events.jsonl']
+        self._write_manifest()
+        self._events_sealed = False
+
+    def _event_descriptor(self):
+        if self._event_write_failed:
+            raise ValueError('Owned diagnostic event append failed before sealing')
+        try:
+            path = plain_path(self.directory / 'events.jsonl')
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= MAX_EVENTS_BYTES:
+                raise ValueError('Owned event stream type or size differs')
+            def identity(info):
+                return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_nlink
+            digest = hashlib.sha256()
+            count = 0; last = None
+            with path.open('rb') as stream:
+                if identity(os.fstat(stream.fileno())) != identity(before):
+                    raise ValueError('Owned event stream changed before sealing')
+                while True:
+                    block = stream.read(min(65536, MAX_EVENTS_BYTES + 1 - count))
+                    if not block:
+                        break
+                    count += len(block); last = block[-1]
+                    if count > MAX_EVENTS_BYTES:
+                        raise ValueError('Owned event stream exceeded its seal bound')
+                    digest.update(block)
+                after = os.fstat(stream.fileno())
+            if (count != before.st_size or last != 10 or identity(after) != identity(before)
+                    or identity(plain_path(path).lstat()) != identity(before)):
+                raise ValueError('Owned event stream changed or ended partially')
+            return dict(path='events.jsonl', bytes=count, sha256=digest.hexdigest())
+        except (OSError, ValueError) as exc:
+            raise ValueError('Owned diagnostic event stream could not be sealed') from exc
 
     def archive_crash(self):
         # Nothing outside this registered private profile/crash is eligible.
@@ -71,6 +126,7 @@ class NativeDiagnostics:
             self.manifest['crashDirectoryPresent'] = False
             self.manifest['archiveComplete'] = True
             self._write_manifest()
+            self._crash_complete = True
             return
         if not crash.is_dir() or crash.resolve().parent != self.profile:
             raise ValueError('Crash evidence escaped the owned private profile')
@@ -95,6 +151,7 @@ class NativeDiagnostics:
             archived.append({'path': relative.as_posix(), 'bytes': target.stat().st_size, 'sha256': digest})
         self.manifest.update(crashDirectoryPresent=True, archiveComplete=True, files=archived)
         self._write_manifest()
+        self._crash_complete = True
 
     def close(self):
         if self.witnesses is not None:
@@ -103,12 +160,17 @@ class NativeDiagnostics:
 
     def record_shutdown(self, record):
         """Bind the explicit final shutdown proof to this owned archive."""
+        self._invalidate_event_seal()
+        events = self._event_descriptor()
         target = plain_path(self.directory / 'shutdown.json')
         raw = (json.dumps(record, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode('utf-8')
         if len(raw) > 256 * 1024:
             raise ValueError('Owned shutdown receipt exceeded its finite limit')
         target.write_bytes(raw)
-        files = [item for item in self.manifest['files'] if item['path'] != 'shutdown.json']
+        files = [item for item in self.manifest['files'] if item['path'] not in ('shutdown.json', 'events.jsonl')]
         files.append(dict(path='shutdown.json', bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()))
+        files.append(events)
         self.manifest['files'] = files
+        self.manifest['archiveComplete'] = self._crash_complete
         self._write_manifest()
+        self._events_sealed = True
