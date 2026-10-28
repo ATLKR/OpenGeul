@@ -28,8 +28,10 @@ def _number(value): return type(value) in (int, float) and math.isfinite(value)
 
 class IMEKeyboardSession:
     def __init__(self, api, process, root, parent, child, pid, module, record,
-                 setup_deadline, *, probe=None, clock=time.monotonic):
+                 setup_deadline, *, probe=None, clock=time.monotonic, retain_evidence=True):
         assert module in SETUP and _number(setup_deadline)
+        assert type(retain_evidence) is bool, 'Keyboard evidence retention requires an explicit boolean'
+        self.retain_evidence = retain_evidence
         self.api, self.process, self.module, self.record = api, process, module, record
         self.clock, self.deadline, self.setup_deadline = clock, setup_deadline, setup_deadline
         assert clock() < setup_deadline <= clock() + 60, 'IME setup deadline exceeds its shared bound'
@@ -58,6 +60,7 @@ class IMEKeyboardSession:
     def _retain(self, phase):
         raw=(json.dumps(self.receipt,ensure_ascii=False,separators=(',', ':'),allow_nan=False)+'\n').encode()
         assert len(raw)<=MAX_RECEIPT_BYTES, 'IME shortcut receipt exceeds bound'
+        if not self.retain_evidence: return
         suffix=phase if phase in ('admission','session-result') else f'{len(self.receipt["actions"])-1:02d}-'+phase
         with (self.output/(self.stem+'-'+suffix+'.json')).open('xb') as stream:
             stream.write(raw);stream.flush();os.fsync(stream.fileno())

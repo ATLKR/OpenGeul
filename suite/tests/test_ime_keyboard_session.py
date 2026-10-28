@@ -22,7 +22,7 @@ else:
 
 class IMEKeyboardSessionTests(unittest.TestCase):
     def setUp(self): self.assertIsNotNone(keyboard, 'Missing first-admission IME keyboard session')
-    def fixture(self, directory, module='writer', *, setup_deadline=10.):
+    def fixture(self, directory, module='writer', *, setup_deadline=10., retain_evidence=True):
         p, b, api, clock, probe, record = fixtures.CountedEditorShortcutsTests().fixture(directory)
         record.update(module=module, windowHwnd=11, parentHwnd=12, childHwnd=22, officePid=88)
         original_scope=probe.scope_snapshot
@@ -44,8 +44,47 @@ class IMEKeyboardSessionTests(unittest.TestCase):
             return context
         replay=patch.object(semantic,'require_ime_semantic_context',side_effect=validate)
         replay.start();self.addCleanup(replay.stop)
-        session = keyboard.IMEKeyboardSession(api, p, 11, 12, 22, 88, module, record, setup_deadline, probe=probe, clock=clock)
+        session = keyboard.IMEKeyboardSession(api, p, 11, 12, 22, 88, module, record, setup_deadline,
+            probe=probe, clock=clock, retain_evidence=retain_evidence)
         return session, p, b, api, clock, probe, record
+
+    def test_explicit_no_retention_keeps_original_in_memory_receipt_through_success_and_failure(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
+                session,p,b,api,clock,probe,record = self.fixture(directory, retain_evidence=False)
+                def send(payload):
+                    self.assertEqual(bytes(payload).hex(), session.receipt['actions'][-1]['bufferHex'])
+                    return len(payload)
+                probe.send = send
+                if fail:
+                    session.start(); probe.keys_down = [0x11]
+                    with self.assertRaises(AssertionError): session.focus_editor(6.)
+                    session.close(RuntimeError('synthetic private input failure'))
+                else:
+                    self.setup(session); self.restore_save(session, record)
+                self.assertIs(record['imeKeyboardSession'], session.receipt)
+                self.assertEqual(not fail, session.receipt['success'])
+                self.assertIs(session.receipt['engineHandleReleased'], True)
+                self.assertEqual([], list(p.opengeul_evidence_output.glob('*-ime-keyboard-*.json')))
+                if not fail:
+                    self.assertEqual(['CTRL_F6','CTRL_END','CTRL_S'], [a['shortcut'] for a in session.receipt['actions']])
+
+    def test_retention_option_requires_an_actual_boolean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(AssertionError): self.fixture(directory, retain_evidence=0)
+
+    def test_no_retention_preserves_receipt_bound_before_native_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session,p,b,api,clock,probe,record = self.fixture(directory, retain_evidence=False)
+            try:
+                with patch.object(keyboard,'MAX_RECEIPT_BYTES',1):
+                    with self.assertRaisesRegex(AssertionError,'receipt exceeds bound'):
+                        session.start()
+            finally:
+                session.close(RuntimeError('synthetic admission slice complete'))
+            self.assertEqual([], probe.sent)
+            self.assertIs(session.receipt['engineHandleReleased'], True)
+            self.assertEqual([], list(p.opengeul_evidence_output.glob('*-ime-keyboard-*.json')))
     def setup(self, session):
         session.start(); session.focus_editor(6.); self.ready(session); self.navigate(session); self.prefix(session); session.setup_complete()
     def navigate(self, session):

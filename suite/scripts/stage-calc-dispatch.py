@@ -102,24 +102,25 @@ def _members(archive, proof):
     return entries
 
 
-def stage(*, baseline, archive, receipt, output, expected_source_commit,
+def stage(*, baseline, archive, receipt, output, expected_engine_source_commit, expected_suite_source_commit,
           expected_receipt_sha256, expected_archive_sha256):
     baseline = _local(baseline)
     inventory = payload._json(baseline/payload.INVENTORY)
     # Complete normal qualification is mandatory before opening diagnostic input.
     payload.verify_payload(baseline, inventory)
-    if (inventory['architecture'] != 'arm64'
-            or payload._json(baseline/'suite-provenance.json')['sourceCommit'] != expected_source_commit):
-        raise ValueError('Baseline source/architecture differs from trusted diagnostic source')
-    archive, receipt, proof = _diagnostic_inputs(archive, receipt, expected_source_commit,
+    if (not payload.COMMIT.fullmatch(expected_suite_source_commit or '') or inventory['architecture'] != 'arm64'
+            or payload._json(baseline/'suite-provenance.json')['sourceCommit'] != expected_suite_source_commit):
+        raise ValueError('Baseline source/architecture differs from trusted Suite source')
+    archive, receipt, proof = _diagnostic_inputs(archive, receipt, expected_engine_source_commit,
         expected_receipt_sha256, expected_archive_sha256)
     output = _local(output)
     if output.exists() or output == baseline or baseline in output.parents or output in baseline.parents:
         raise ValueError('A fresh diagnostic-only output outside the baseline is required')
     if any(output == item or output in item.parents for item in (archive, receipt)):
         raise ValueError('Diagnostic output must not contain its source inputs')
-    overlay = dict(schemaVersion=1, kind='calc-save-dispatch-diagnostic', architecture='arm64',
-        sourceCommit=expected_source_commit, sourceLockSha256=proof['sourceLockSha256'],
+    overlay = dict(schemaVersion=2, kind='calc-save-dispatch-diagnostic', architecture='arm64',
+        engineSourceCommit=expected_engine_source_commit, admittedSuiteSourceCommit=expected_suite_source_commit,
+        sourceLockSha256=proof['sourceLockSha256'],
         acceptanceEligible=False, fullEngineQualified=False, baselineMetadataOnly=True,
         inputs=dict(baselineInventorySha256=payload._hash(baseline/payload.INVENTORY),
             receiptSha256=expected_receipt_sha256, archiveSha256=expected_archive_sha256,
@@ -160,7 +161,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('baseline', 'archive', 'receipt', 'output'):
         parser.add_argument('--'+name, type=Path, required=True)
-    for name in ('expected-source-commit', 'expected-receipt-sha256', 'expected-archive-sha256'):
+    for name in ('expected-engine-source-commit', 'expected-suite-source-commit',
+                 'expected-receipt-sha256', 'expected-archive-sha256'):
         parser.add_argument('--'+name, required=True)
     result = stage(**vars(parser.parse_args(argv)))
     print(json.dumps(result, sort_keys=True))

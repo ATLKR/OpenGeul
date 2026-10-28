@@ -254,11 +254,14 @@ class WindowsApi:
         return counter.value,frequency.value
 
     def process_snapshot(self,handle):
-        pid=int(self.kernel.GetProcessId(handle));created=self._created(handle);code=U32()
-        if not pid or not self.kernel.GetExitCodeProcess(handle,C.byref(code)):
-            raise C.WinError(C.get_last_error())
+        pid=int(self.kernel.GetProcessId(handle))
+        if not pid:raise C.WinError(C.get_last_error())
+        created=self._created(handle)
         waited=int(self.kernel.WaitForSingleObject(handle,0))
         if waited not in (0,258):raise C.WinError(C.get_last_error())
+        code=U32()
+        if not self.kernel.GetExitCodeProcess(handle,C.byref(code)):
+            raise C.WinError(C.get_last_error())
         return dict(pid=pid,creationTime=created,waitResult=waited,exitCode=code.value)
 
     def window_binding(self,hwnd):

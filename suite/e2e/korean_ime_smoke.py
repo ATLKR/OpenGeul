@@ -1601,7 +1601,7 @@ def retain_ime_focus_failure_diagnostics(record, process, keyboard):
         receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def require_calc_dispatch_suite(suite, inventory):
+def require_calc_dispatch_suite(suite, inventory, *, expected_engine_source_commit):
     """Validate the consumer's byte inventory without claiming normal qualification."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from suite import payload
@@ -1610,19 +1610,21 @@ def require_calc_dispatch_suite(suite, inventory):
     assert inventory.get('files') == payload._scan(suite), 'Diagnostic Suite byte inventory changed'
     overlay = payload._json(suite/'calc-dispatch-diagnostic.json')
     native = payload._json(suite/'Office/program/opengeul-calc-dispatch-diagnostic.json')
-    for item in (overlay, native):
-        assert (type(item.get('schemaVersion')) is int and item['schemaVersion'] == 1
+    for item, version in ((overlay, 2), (native, 1)):
+        assert (type(item.get('schemaVersion')) is int and item['schemaVersion'] == version
             and item.get('kind') == 'calc-save-dispatch-diagnostic'
             and item.get('fullEngineQualified') is False and item.get('acceptanceEligible') is False
-            and payload.COMMIT.fullmatch(item.get('sourceCommit', ''))
             and payload._sha(item.get('sourceLockSha256'))), 'Unbound diagnostic runtime marker'
-    assert all(overlay[key] == native[key] for key in ('sourceCommit', 'sourceLockSha256')), 'Diagnostic runtime generation changed'
+    assert (payload.COMMIT.fullmatch(expected_engine_source_commit or '')
+        and overlay.get('engineSourceCommit') == native.get('sourceCommit') == expected_engine_source_commit), 'Diagnostic engine source differs from externally pinned engine source'
+    assert overlay['sourceLockSha256'] == native['sourceLockSha256'], 'Diagnostic runtime generation changed'
     assert overlay.get('architecture') == 'arm64' and overlay.get('baselineMetadataOnly') is True
     inputs = overlay.get('inputs', {})
     assert (set(inputs) == {'baselineInventorySha256','receiptSha256','archiveSha256','archiveBytes'}
         and all(payload._sha(inputs[key]) for key in ('baselineInventorySha256','receiptSha256','archiveSha256'))
         and type(inputs['archiveBytes']) is int and inputs['archiveBytes'] > 0), 'Diagnostic input digest joins missing'
-    assert payload._json(suite/'suite-provenance.json')['sourceCommit'] == overlay['sourceCommit'], 'Diagnostic source differs from baseline'
+    assert (payload.COMMIT.fullmatch(overlay.get('admittedSuiteSourceCommit', ''))
+        and payload._json(suite/'suite-provenance.json')['sourceCommit'] == overlay['admittedSuiteSourceCommit']), 'Diagnostic admitted Suite source differs from baseline'
     return overlay
 
 
@@ -1743,7 +1745,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         wait_for(lambda: api.user.GetAncestor(api.user.GetForegroundWindow(), 2) == hwnd,
             remaining_setup(setup_deadline, 10))
         keyboard = IMEKeyboardSession(api, process, hwnd, parent, child, office_pid,
-            module, record, setup_deadline)
+            module, record, setup_deadline,
+            **({} if calc_dispatch_transport is None else dict(retain_evidence=False)))
         keyboard.start()
         record['stage'] = 'focus-editor'
         def click():
@@ -1852,7 +1855,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             after = len(observer.events())
             physical_key(observer, token, record)
             wait_for(lambda: observer.pending(expected, after), 10)
-        window.capture_as_image().save(output / (name + '-composing.png'))
+        if calc_dispatch_transport is None:
+            window.capture_as_image().save(output / (name + '-composing.png'))
         record['stage'] = 'commit-native-composition'
         physical_key(observer, 'RIGHT', record)
         wait_for(lambda: any(row['result'] == '글' for row in observer.events()), 10)
@@ -1998,7 +2002,6 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             if local_errors or not record['calcDispatchLocalCleanup']['withinDeadline']: record['success'] = False
             numeric = calc_dispatch_report(record)
             (output/'calc-dispatch-diagnostic.json').write_text(json.dumps(numeric,indent=2,allow_nan=False),encoding='utf-8')
-            write_result(output, name, record)
         elif keyboard is not None:
             try: keyboard.close(primary)
             except Exception as exc:
@@ -2022,7 +2025,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                 from editor_capture_diagnostic import cohort_cleanup_confirmed
                 if not cohort_cleanup_confirmed(record):
                     record.update(success=False,focusCohortStopped='Original shell/engine exit or retained handle release unconfirmed')
-            write_result(output, name, record)
+            if not return_from_diagnostic_cleanup: write_result(output, name, record)
         if retirement_failure is not None: raise retirement_failure
 
 
@@ -2149,11 +2152,19 @@ def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architectur
     prepared = ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture)
     transport = DiagnosticTransport(library=prepared)
     try:
-        results = collect_cases([('ime-calc',lambda:case(suite,fixtures,output,readiness,
-            'calc','xlsx',prepared_library=prepared,calc_dispatch_transport=transport))],output)
+        try:
+            record = case(suite,fixtures,output,readiness,'calc','xlsx',
+                prepared_library=prepared,calc_dispatch_transport=transport)
+        except Exception:
+            # The ordinary collector persists exception text and the full case.
+            # Retain only the already projected diagnostic, including cleanup.
+            retained = output/'calc-dispatch-diagnostic.json'
+            report = json.loads(retained.read_text(encoding='utf-8')) if retained.is_file() else calc_dispatch_report({})
+        else:
+            report = calc_dispatch_report(record)
     finally:
         transport.close()
-    report = calc_dispatch_report(results[0] if len(results) == 1 else {})
+    report['runBinding'] = dict(binding)
     trace = report['diagnostic'] or {}
     analysis = trace.get('analysis') or {}
     cleanup = trace.get('cleanup') or {}
@@ -2180,6 +2191,7 @@ def main(argv=None):
     parser.add_argument('--diagnose-ime-mode', choices=('calc','writer'))
     parser.add_argument('--diagnose-focus', choices=('calc','writer'))
     parser.add_argument('--diagnose-calc-dispatch', action='store_true')
+    parser.add_argument('--expected-engine-source-commit')
     parser.add_argument('--matched-plugin-proof',type=Path)
     parser.add_argument('--capture-ime-caller',action='store_true')
     parser.add_argument('--capture-ime-compartment',action='store_true')
@@ -2195,8 +2207,11 @@ def main(argv=None):
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
     assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus,args.diagnose_calc_dispatch))<=1,'Reopen and diagnostic modes are mutually exclusive'
     if args.diagnose_calc_dispatch:
-        diagnostic_overlay = require_calc_dispatch_suite(suite, inventory)
+        assert args.expected_engine_source_commit, 'Externally pinned diagnostic engine source is required'
+        diagnostic_overlay = require_calc_dispatch_suite(suite, inventory,
+            expected_engine_source_commit=args.expected_engine_source_commit)
     else:
+        assert args.expected_engine_source_commit is None, 'Engine source pin requires explicit Calc dispatch mode'
         assert not any((suite/name).exists() for name in ('calc-dispatch-diagnostic.json',
             'Office/program/opengeul-calc-dispatch-diagnostic.json')), 'Diagnostic runtime requires explicit Calc dispatch mode'
     assert not args.capture_ime_compartment or (args.diagnose_ime_mode=='writer' and architecture=='arm64' and args.matched_plugin_proof and not args.capture_ime_caller), 'Compartment capture requires matched ARM64 Writer diagnosis'
@@ -2224,7 +2239,7 @@ def main(argv=None):
         validate_context, read_event = admission.validate_context, admission.read_event
         binding = validate_context(os.environ, read_event(), architecture, os.name)
         if args.diagnose_calc_dispatch:
-            assert diagnostic_overlay['sourceCommit'] == binding['sourceCommit'], 'Diagnostic engine differs from admitted CI source'
+            assert diagnostic_overlay['admittedSuiteSourceCommit'] == binding['sourceCommit'], 'Diagnostic Suite differs from admitted CI source'
     output.mkdir(parents=True, exist_ok=False)
     readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
     if args.diagnose_calc_dispatch:

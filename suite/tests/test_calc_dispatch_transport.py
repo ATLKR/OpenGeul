@@ -37,6 +37,45 @@ class CalcDispatchTransportTests(unittest.TestCase):
                 self.d.WindowsApi({'schemaVersion':0})
         load.assert_not_called()
 
+    def test_native_process_snapshot_observes_terminal_wait_before_exit_code(self):
+        calls=[];exited=False
+        def wait(handle, milliseconds):
+            nonlocal exited
+            calls.append('wait');exited=True
+            self.assertEqual(milliseconds,0)
+            return 0
+        def exit_code(handle, output):
+            calls.append('exit-code')
+            C.cast(output,C.POINTER(self.d.U32)).contents.value=7 if exited else 259
+            return 1
+        native=self.d.WindowsApi.__new__(self.d.WindowsApi)
+        native.kernel=SimpleNamespace(GetProcessId=lambda handle:22,
+            WaitForSingleObject=wait,GetExitCodeProcess=exit_code)
+        native._created=lambda handle:222
+        result=native.process_snapshot(77)
+        self.assertEqual(result,dict(pid=22,creationTime=222,waitResult=0,exitCode=7))
+        self.assertEqual(calls,['wait','exit-code'])
+
+    def test_native_process_snapshot_stops_at_failed_call_with_its_original_error(self):
+        for failed in ('pid','wait','exit-code'):
+            with self.subTest(failed=failed):
+                calls=[];error=[0]
+                def call(name,result):
+                    calls.append(name);error[0]=123 if name==failed else 0
+                    return 0xffffffff if name==failed=='wait' else (0 if name==failed else result)
+                native=self.d.WindowsApi.__new__(self.d.WindowsApi)
+                native.kernel=SimpleNamespace(GetProcessId=lambda handle:call('pid',22),
+                    WaitForSingleObject=lambda *args:call('wait',0),
+                    GetExitCodeProcess=lambda *args:call('exit-code',1))
+                native._created=lambda handle:call('created',222)
+                with patch.object(C,'get_last_error',lambda:error[0],create=True), \
+                        patch.object(C,'WinError',lambda code:OSError(code,'synthetic native failure'),create=True):
+                    with self.assertRaises(OSError) as raised:
+                        native.process_snapshot(77)
+                self.assertEqual(raised.exception.errno,123)
+                self.assertEqual(calls,{'pid':['pid'],'wait':['pid','created','wait'],
+                    'exit-code':['pid','created','wait','exit-code']}[failed])
+
     def test_failed_mapping_acquisition_keeps_failed_handle_cleanup_visible(self):
         kernel = SimpleNamespace(CreateFileMappingW=lambda *args: 79,
             MapViewOfFile=lambda *args: None, CloseHandle=lambda handle: False)

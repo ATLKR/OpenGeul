@@ -9,5 +9,5 @@
 - [x] Route the existing startup plan through an explicit foreign child working directory.
 - [x] Verify the actual workflow command with real file checks and synthetic packages; independently review it.
 - [x] Run the complete final local suite (2,773 tests, 14 skipped) and prepare the candidate commit.
-- [ ] Preserve the active Windows run, then submit the new final-code acceptance on both architectures.
+- [x] Preserve the active Windows run, then submit the new final-code acceptance on both architectures (`40674643947`, commit `b831457`).
 - [ ] Inspect the new Windows package, input, UI, persistence, lifecycle and integrity evidence before qualifying a release candidate.

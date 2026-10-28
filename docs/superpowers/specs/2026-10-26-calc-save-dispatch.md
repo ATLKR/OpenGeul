@@ -50,6 +50,18 @@ normal runtime lock to point at it. Ordinary packaging must reject it. No main
 merge, release, Store publication, customer deployment, new runner class,
 credentials, or permission changes are included.
 
+Pin the producer run, artifact ID, outer archive size and SHA-256 separately
+from the current Suite commit. Authenticate the outer archive before deriving
+its inner engine and receipt digests. The overlay records both the historical
+engine source and the admitted Suite source; neither replaces the other's
+provenance. Join the Suite source to the current CI event and Korean readiness.
+
+Retain only the numeric diagnostic reports and explicit provenance receipts.
+Calc diagnosis skips composing screenshots, raw case/exception reports and
+keyboard sidecars. The existing generated-fixture setup and model-reader IPC
+continue to verify the original behavior; they are outside the retained
+diagnostic artifact allowlist. Never supply user documents to this case.
+
 Interpret the numeric trace alongside the original input/save oracle and
 confirmed process-exit evidence. Validate native nesting, generation/deadline
 rejection, event publication, ABI, cleanup failures, and artifact isolation

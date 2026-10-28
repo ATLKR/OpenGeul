@@ -1,7 +1,10 @@
 """Synthetic artifact isolation and original one-save admission; no desktop claim."""
 import hashlib
 import importlib.util
+from contextlib import redirect_stdout
+import io
 import json
+import os
 from pathlib import Path
 import stat
 import sys
@@ -53,7 +56,7 @@ class ArtifactTests(unittest.TestCase):
         self.output = self.f.root.parent/'diagnostic'
         self.marker = dict(schemaVersion=1, kind='calc-save-dispatch-diagnostic',
             acceptanceEligible=False, fullEngineQualified=False,
-            sourceCommit='a'*40, sourceLockSha256='c'*64)
+            sourceCommit='b'*40, sourceLockSha256='c'*64)
         self.entries = {'program/soffice.bin': pe(0xaa64), 'program/soffice.exe': pe(0xaa64),
             'program/python.exe': pe(0xaa64),
             'program/opengeul-calc-dispatch-diagnostic.json': json.dumps(self.marker).encode()}
@@ -65,13 +68,13 @@ class ArtifactTests(unittest.TestCase):
         self.proof = dict(schemaVersion=1, kind='native-office-engine-calc-dispatch-diagnostic',
             architecture='arm64', status='native-engine-calc-dispatch-diagnostic-built',
             passed=True, fullEngineQualified=False, acceptanceEligible=False,
-            sourceCommit='a'*40, sourceLockSha256='c'*64,
+            sourceCommit='b'*40, sourceLockSha256='c'*64,
             artifact=dict(path=str(self.archive), size=self.archive.stat().st_size, sha256=sha(self.archive)))
         self.receipt.write_text(json.dumps(self.proof))
 
     def stage(self, **overrides):
         args = dict(baseline=self.f.root, archive=self.archive, receipt=self.receipt,
-            output=self.output, expected_source_commit='a'*40,
+            output=self.output, expected_engine_source_commit='b'*40, expected_suite_source_commit='a'*40,
             expected_receipt_sha256=sha(self.receipt), expected_archive_sha256=sha(self.archive))
         return self.m.stage(**{**args, **overrides})
 
@@ -84,13 +87,19 @@ class ArtifactTests(unittest.TestCase):
             if not name.startswith('Office/'):
                 self.assertEqual(before[name], payload._scan(self.output)[name])
         self.assertIs(result['acceptanceEligible'], False)
+        self.assertEqual(2, result['schemaVersion'])
+        self.assertEqual('b'*40, result['engineSourceCommit'])
+        self.assertEqual('a'*40, result['admittedSuiteSourceCommit'])
+        self.assertNotIn('sourceCommit', result)
+        self.assertEqual(self.marker, json.loads((self.output/'Office'/self.m.MARKER).read_bytes()))
         self.assertEqual(result['inputs']['baselineInventorySha256'], sha(self.f.root/payload.INVENTORY))
         fresh = json.loads((self.output/payload.INVENTORY).read_bytes())
         self.assertEqual(fresh['files'], payload._scan(self.output))
         self.assertEqual(fresh['architecture'], 'arm64')
         with self.assertRaisesRegex(ValueError, 'Diagnostic engine cannot qualify'):
             payload.verify_payload(self.output, fresh)
-        self.assertEqual(ime.require_calc_dispatch_suite(self.output, fresh), result)
+        self.assertEqual(ime.require_calc_dispatch_suite(self.output, fresh,
+            expected_engine_source_commit='b'*40), result)
 
     def test_complete_baseline_verification_precedes_any_diagnostic_input(self):
         self.f.write('worker/session.py', b'changed baseline')
@@ -100,7 +109,9 @@ class ArtifactTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_external_expected_source_and_both_digests_are_mandatory(self):
-        for key, value in (('expected_source_commit', 'b'*40),
+        for key, value in (('expected_engine_source_commit', 'd'*40),
+                           ('expected_suite_source_commit', 'b'*40),
+                           ('expected_engine_source_commit', ''), ('expected_suite_source_commit', ''),
                            ('expected_receipt_sha256', 'd'*64), ('expected_archive_sha256', 'e'*64)):
             with self.subTest(key=key), self.assertRaises(ValueError): self.stage(**{key:value})
         self.assertFalse(self.output.exists())
@@ -116,7 +127,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_marker_generation_must_join_authenticated_receipt(self):
-        self.marker['sourceCommit'] = 'b'*40
+        self.marker['sourceCommit'] = 'd'*40
         self.entries['program/opengeul-calc-dispatch-diagnostic.json'] = json.dumps(self.marker).encode()
         self.write_inputs()
         with self.assertRaises(ValueError): self.stage()
@@ -167,14 +178,90 @@ class ArtifactTests(unittest.TestCase):
                 ime.main(['--suite',str(self.output)])
             with self.assertRaisesRegex(AssertionError,'mutually exclusive'):
                 ime.main(['--suite',str(self.output),'--diagnose-calc-dispatch','--diagnose-ime-mode','calc'])
+            with self.assertRaisesRegex(AssertionError,'pinned.*engine source'):
+                ime.main(['--suite',str(self.output),'--diagnose-calc-dispatch'])
         fresh=json.loads((self.output/payload.INVENTORY).read_bytes());fresh['architecture']='x64'
         with self.assertRaisesRegex(AssertionError,'ARM64'):
-            ime.require_calc_dispatch_suite(self.output,fresh)
+            ime.require_calc_dispatch_suite(self.output,fresh,expected_engine_source_commit='b'*40)
+
+    def test_consumer_rejects_unpinned_or_tampered_source_joins_after_inventory_refresh(self):
+        self.stage()
+        original = (self.output/self.m.OVERLAY).read_bytes()
+        for changes, engine in (({}, 'd'*40), ({'engineSourceCommit':'d'*40}, 'd'*40),
+                                ({'admittedSuiteSourceCommit':'b'*40}, 'b'*40),
+                                ({'schemaVersion':1}, 'b'*40), ({'sourceLockSha256':'d'*64}, 'b'*40)):
+            with self.subTest(changes=changes, engine=engine):
+                overlay = json.loads(original); overlay.update(changes)
+                (self.output/self.m.OVERLAY).write_text(json.dumps(overlay))
+                fresh = dict(schemaVersion=1, architecture='arm64', files=payload._scan(self.output))
+                with self.assertRaises(AssertionError):
+                    ime.require_calc_dispatch_suite(self.output, fresh, expected_engine_source_commit=engine)
+        (self.output/self.m.OVERLAY).write_bytes(original)
+
+    def test_same_engine_and_suite_source_is_still_valid_when_both_are_pinned(self):
+        self.marker['sourceCommit'] = 'a'*40
+        self.entries[self.m.MARKER] = json.dumps(self.marker).encode()
+        self.write_inputs(); self.proof['sourceCommit'] = 'a'*40
+        self.receipt.write_text(json.dumps(self.proof))
+        result = self.stage(expected_engine_source_commit='a'*40)
+        self.assertEqual('a'*40, result['engineSourceCommit'])
+        self.assertEqual('a'*40, result['admittedSuiteSourceCommit'])
+
+    def test_staging_cli_requires_and_preserves_the_two_explicit_source_pins(self):
+        args = ['--baseline',str(self.f.root), '--archive',str(self.archive), '--receipt',str(self.receipt),
+                '--output',str(self.output), '--expected-engine-source-commit','b'*40,
+                '--expected-suite-source-commit','a'*40, '--expected-receipt-sha256',sha(self.receipt),
+                '--expected-archive-sha256',sha(self.archive)]
+        printed = io.StringIO()
+        with redirect_stdout(printed): self.assertEqual(0, self.m.main(args))
+        overlay = json.loads(printed.getvalue())
+        self.assertEqual('b'*40, overlay['engineSourceCommit'])
+        self.assertEqual('a'*40, overlay['admittedSuiteSourceCommit'])
+
+    def test_main_joins_consumer_ci_source_and_readiness_without_relabeling_engine(self):
+        from test_korean_ime_smoke import KoreanImePolicyTests
+        self.stage()
+        root = self.f.root.parent; fixtures = root/'fixtures'; fixtures.mkdir()
+        readiness = KoreanImePolicyTests().readiness()
+        readiness['nativeMachine'] = readiness['profile']['component']['machine'] = 0xaa64
+        readiness['source']['architecture'] = 'arm64'
+        branch = 'refs/heads/work/opengeul-office-arm64'
+        env = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='Windows',
+            RUNNER_ARCH='ARM64', GITHUB_REPOSITORY='ATLKR/OpenGeul', GITHUB_EVENT_NAME='push',
+            GITHUB_JOB='windows-suite', GITHUB_REF=branch, GITHUB_WORKFLOW_REF='ATLKR/OpenGeul/.github/workflows/office-suite.yml@'+branch,
+            GITHUB_SHA='a'*40, GITHUB_WORKFLOW_SHA='a'*40, GITHUB_RUN_ID='1', GITHUB_RUN_ATTEMPT='1',
+            GITHUB_ACTOR='ATLKR', GITHUB_ACTOR_ID='65988341')
+        for index, (ci_source, readiness_changes, engine, error) in enumerate((
+                ('a'*40, {}, 'b'*40, None), ('a'*40, {}, 'd'*40, 'engine source'),
+                ('d'*40, {}, 'b'*40, 'admitted CI source'),
+                ('a'*40, {'sourceCommit':'b'*40}, 'b'*40, 'readiness'),
+                ('a'*40, {'sourceRun':'2'}, 'b'*40, 'readiness'))):
+            output = root/('run-'+str(index)); event = root/'event.json'; ready = root/'readiness.json'
+            event.write_text(json.dumps(dict(repository=dict(full_name='ATLKR/OpenGeul', id=123, private=False),
+                sender=dict(login='ATLKR', id=65988341, type='User'), ref=branch, deleted=False, after=ci_source)))
+            actual_readiness = dict(readiness, source={**readiness['source'], **readiness_changes})
+            ready.write_text(json.dumps(actual_readiness))
+            actual_env = dict(env, GITHUB_SHA=ci_source, GITHUB_WORKFLOW_SHA=ci_source)
+            args = ['--suite',str(self.output), '--fixtures',str(fixtures), '--readiness',str(ready),
+                    '--output',str(output), '--diagnose-calc-dispatch', '--expected-engine-source-commit',engine]
+            with self.subTest(index=index), patch.object(ime,'os',SimpleNamespace(name='nt',environ=actual_env)), \
+                    patch.dict(os.environ, {'GITHUB_EVENT_PATH':str(event)}), \
+                    patch.object(ime.native_arch,'observe_native_architecture',return_value={}), \
+                    patch.object(ime.native_arch,'validate_native_architecture',return_value={}), \
+                    patch.object(ime,'run_calc_dispatch_diagnostic',return_value=0) as run:
+                if error is None:
+                    self.assertEqual(0, ime.main(args))
+                    self.assertEqual('a'*40, run.call_args.args[-1]['sourceCommit'])
+                    self.assertEqual(actual_readiness, run.call_args.args[3])
+                else:
+                    with self.assertRaisesRegex(AssertionError, error): ime.main(args)
+                    run.assert_not_called()
+                    if error != 'readiness': self.assertFalse(output.exists())
 
 
 class SaveIntegrationTests(unittest.TestCase):
     def _run_original_case(self, *, fail_marker=False, swallowed_close_failure=False,
-                           real_keyboard_close=False):
+                           real_keyboard_close=False, check_persistence=False):
         sys.path.insert(0,str(ROOT/'suite/tests'))
         from test_ime_case_phases import IMECasePhaseTests
         harness=IMECasePhaseTests(methodName='runTest');self.addCleanup(harness.doCleanups)
@@ -193,7 +280,21 @@ class SaveIntegrationTests(unittest.TestCase):
             readiness=args[3];readiness['nativeMachine']=0xaa64
             readiness['profile']['component']['machine']=0xaa64
             readiness['source']['architecture']='arm64'
-            return original_case(*args,**kw,calc_dispatch_transport=transport)
+            if not check_persistence:
+                return original_case(*args,**kw,calc_dispatch_transport=transport)
+            self.persisted_case_root = args[2]
+            self.composing_captures = []
+            window = sys.modules['pywinauto'].Desktop().window(handle=11).wrapper_object()
+            original_capture = window.capture_as_image
+            window.capture_as_image = lambda:self.composing_captures.append(True) or original_capture()
+            original_keyboard = ime.IMEKeyboardSession
+            def keyboard(*args, **kwargs):
+                result = original_keyboard(*args, **kwargs)
+                self.case_keyboard_retention = result.retain_evidence
+                return result
+            with patch.object(ime,'write_result',side_effect=windows_smoke.write_result), \
+                    patch.object(ime,'IMEKeyboardSession',side_effect=keyboard):
+                return original_case(*args,**kw,calc_dispatch_transport=transport)
         def save(active,keyboard,record,source):
             keyboard.handle=909;keyboard.process._handle=808
             keyboard.engine=dict(pid=31,handleValue=909,creationTime=2**55+100,image='original-engine.bin')
@@ -242,6 +343,21 @@ class SaveIntegrationTests(unittest.TestCase):
         self.assertNotIn('final-stop',phases);self.assertNotIn('independent-reopen',phases)
         self.assertIs(record['calcDispatchLocalCleanup']['withinDeadline'],True)
         self.assertIs(record['imeVerified'],False)
+
+    def test_calc_case_never_captures_screen_or_persists_raw_record_on_success_or_failure(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                phases,record,result,error,calls = self._run_original_case(fail_marker=fail, check_persistence=True)
+                self.assertEqual([], self.composing_captures)
+                self.assertIs(self.case_keyboard_retention, False)
+                if fail: self.assertRegex(str(error), 'synthetic marker deadline')
+                self.assertEqual(['calc-dispatch-diagnostic.json'],
+                                 sorted(path.name for path in self.persisted_case_root.glob('*.json')))
+                numeric = json.loads((self.persisted_case_root/'calc-dispatch-diagnostic.json').read_bytes())
+                self.assertEqual(record['calcDispatchOracle'], numeric['originalSaveOracle'])
+                self.assertEqual(record['calcDispatchLocalCleanup'], numeric['localCleanup'])
+                self.assertFalse(any(key in numeric for key in ('keyTokens','asciiPrefix','events','error','traceback')))
+                self.assertEqual(1, phases.count('CTRL_S'))
 
     def test_completed_save_can_close_inside_original_cleanup_reserve(self):
         phases,record,result,error,calls=self._run_original_case(real_keyboard_close=True)
@@ -358,6 +474,35 @@ class SaveIntegrationTests(unittest.TestCase):
             self.assertIs(report['acceptanceEligible'],False);self.assertIs(report['imeVerified'],False)
             self.assertNotIn('tests',report)
 
+    def test_diagnostic_runner_never_uses_raw_collector_even_when_case_raises(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as folder:
+                output = Path(folder); forbidden = 'SYNTHETIC-PRIVATE-INPUT'
+                record = dict(success=not fail, keyTokens=[forbidden], asciiPrefix=forbidden,
+                    events=[dict(result=forbidden)], traceback=forbidden,
+                    calcDispatchOracle=dict(saveAttempted=True,saveReturned=not fail,savedMarkerObserved=not fail),
+                    calcDispatchDiagnostic=dict(analysis=dict(processExitProved=1),cleanup=dict(controllerResourcesReleased=1,errors=[])),
+                    calcDispatchLocalCleanup=dict(errors=[],withinDeadline=True))
+                def case(*args, **kwargs):
+                    if fail:
+                        (output/'calc-dispatch-diagnostic.json').write_text(json.dumps(ime.calc_dispatch_report(record)))
+                        raise AssertionError(forbidden)
+                    return record
+                binding = dict(sourceCommit='a'*40,runId='1',runAttempt='1',architecture='arm64')
+                printed = io.StringIO()
+                with patch.object(ime.ascii_input,'prepare_observer',return_value='library'), \
+                        patch.object(ime,'case',side_effect=case), redirect_stdout(printed), \
+                        patch.dict(sys.modules, {'calc_dispatch_diagnostic':SimpleNamespace(
+                            DiagnosticTransport=lambda **kw:SimpleNamespace(close=lambda:None))}):
+                    self.assertEqual(1 if fail else 0,
+                        ime.run_calc_dispatch_diagnostic(Path('/suite'),Path('/fixtures'),output,{},'arm64',binding))
+                saved = json.loads((output/'results.json').read_bytes())
+                self.assertEqual(binding, saved['runBinding'])
+                self.assertEqual(record['calcDispatchOracle'], saved['originalSaveOracle'])
+                self.assertFalse((output/'ime-calc-result.json').exists())
+                self.assertNotIn(forbidden, printed.getvalue())
+                self.assertTrue(all(forbidden not in path.read_text() for path in output.glob('*.json')))
+
     def test_diagnostic_runner_rejects_failure_before_shortcut_returned(self):
         with tempfile.TemporaryDirectory() as folder:
             output=Path(folder)
@@ -372,6 +517,20 @@ class SaveIntegrationTests(unittest.TestCase):
                 code=ime.run_calc_dispatch_diagnostic(Path('/suite'),Path('/fixtures'),output,{},'arm64',{})
             self.assertEqual(code,1)
             self.assertIs(json.loads((output/'results.json').read_bytes())['success'],False)
+
+    def test_diagnostic_runner_early_failure_writes_only_inconclusive_numeric_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder); printed = io.StringIO()
+            with patch.object(ime.ascii_input,'prepare_observer',return_value='library'), \
+                    patch.object(ime,'case',side_effect=AssertionError('SYNTHETIC-PRIVATE-INPUT')), \
+                    redirect_stdout(printed), patch.dict(sys.modules, {'calc_dispatch_diagnostic':SimpleNamespace(
+                        DiagnosticTransport=lambda **kw:SimpleNamespace(close=lambda:None))}):
+                self.assertEqual(1, ime.run_calc_dispatch_diagnostic(Path('/suite'),Path('/fixtures'),output,{},'arm64',{}))
+            self.assertEqual(['results.json'], [path.name for path in output.iterdir()])
+            report = json.loads((output/'results.json').read_bytes())
+            self.assertEqual(dict(saveAttempted=False,saveReturned=False,savedMarkerObserved=False), report['originalSaveOracle'])
+            self.assertEqual(dict(errors=[5],withinDeadline=False), report['localCleanup'])
+            self.assertNotIn('SYNTHETIC-PRIVATE-INPUT', printed.getvalue()+(output/'results.json').read_text())
 
 
 if __name__ == '__main__': unittest.main()

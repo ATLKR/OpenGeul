@@ -41,7 +41,8 @@ class IMECasePhaseTests(unittest.TestCase):
         image=NS(save=lambda path:None);window=NS(maximize=lambda:None,capture_as_image=lambda:image)
         desktop=NS(window=lambda **kw:NS(wrapper_object=lambda:window))
         class Keyboard:
-            def __init__(inner,api,p,hwnd,parent,child,pid,kind,record,deadline):
+            def __init__(inner,api,p,hwnd,parent,child,pid,kind,record,deadline,*,retain_evidence=True):
+                inner.retain_evidence=retain_evidence
                 inner.api=api;inner.process=p;inner.tid=41;inner.focus=51;inner.record=record;inner.binding=binding;records.append(record)
                 record['imeKeyboardSession']={'expectedNative':dict(binding)}
             def start(inner):calls.append('admission')
