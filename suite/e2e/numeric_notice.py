@@ -11,6 +11,7 @@ CASE_TITLE = 'OpenGeul numeric case v1'
 TRACE_TITLE = 'OpenGeul Calc numeric trace v1'
 OPT_IN = 'OPENGEUL_SUITE_NUMERIC_NOTICE'
 TRACE_OPT_IN = 'OPENGEUL_SUITE_CALC_TRACE_NOTICE'
+FOREGROUND_OPT_IN = 'OPENGEUL_SUITE_FOREGROUND_NOTICE'
 # Extend numeric identifiers at the end so earlier run notices keep their meaning.
 SCOPES = {'calc-close':1,'home-routes':2,'korean-ime':3,'korean-ui':4,'writer-style':5,
           'lifecycle':6,'native-first':7,'native-second':8,'calc-dispatch':9,'native-integrity':10}
@@ -131,6 +132,7 @@ _CASE_KEYS = _COMMON | {'moduleCode','caseCode','stageCode','exceptionCode','fil
 _CASE_KEYS_V2 = _CASE_KEYS | {'ownedFrames'}
 _CASE_KEYS_V3 = _CASE_KEYS_V2 | {'startup'}
 _CASE_KEYS_V4 = _CASE_KEYS_V2 | {'focus'}
+_CASE_KEYS_V5 = _CASE_KEYS_V4 | {'foreground'}
 _FAILURE_KEYS = {'captured','exceptionCode','fileCode','line'}
 _TRACE_KEYS = _COMMON | {'diagnostic','oracleFlags','oraclePresenceMask'}
 _STARTUP_FAILURES = []  # At most 32 strong references prevent object-id reuse.
@@ -260,9 +262,10 @@ def _cleanup_failed(record):
 
 
 def project_case_notice(name, record, *, environ=None):
-    context = _context(os.environ if environ is None else environ)
+    environ = os.environ if environ is None else environ
+    context = _context(environ)
     if context is None or type(record) is not dict: return None
-    return _project_case(name,record,context,require_failure=True)
+    return _project_case(name,record,context,require_failure=True,environ=environ)
 
 
 def _valid_mode_summary(value):
@@ -340,7 +343,32 @@ def _focus_summary(record,context):
         return None
 
 
-def _project_case(name, record, context, *, require_failure):
+def _foreground_enabled(context,environ):
+    return (environ.get(FOREGROUND_OPT_IN)=='1' and context['architecture']==0xaa64
+        and context['scopeCode']==SCOPES['calc-dispatch'])
+
+
+def _foreground_summary(record,context,environ,focus):
+    if (focus is None or not _foreground_enabled(context,environ)
+            or record.get('kind')!='calc-save-dispatch-diagnostic' or record.get('module')!='calc'):return None
+    try:
+        if __package__:
+            from .foreground_summary import project
+        else:
+            from foreground_summary import project
+        return project(record)
+    except Exception:return None
+
+
+def _valid_foreground(value,focus):
+    if __package__:
+        from .foreground_summary import valid
+    else:
+        from foreground_summary import valid
+    return valid(value,focus)
+
+
+def _project_case(name, record, context, *, require_failure,environ=None):
     primary_name = record.get('case') if type(record.get('case')) is str and record['case'] in CASES else name
     if type(primary_name) is not str or primary_name not in CASES: return None
     aggregate_error = (primary_name=='lifecycle-summary' and
@@ -358,7 +386,8 @@ def _project_case(name, record, context, *, require_failure):
     mode=_mode_summary(record,context)
     startup=_startup_summary(record,context)
     focus=_focus_summary(record,context)
-    version=4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1))
+    foreground=_foreground_summary(record,context,os.environ if environ is None else environ,focus)
+    version=5 if foreground is not None else (4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1)))
     fields=_FIELDS_V3 if version==3 else (_FIELDS_V2 if version>=2 else _FIELDS)
     source=dict(record,_imeModeSummary=mode)
     observed, mask = {}, 0
@@ -382,16 +411,18 @@ def _project_case(name, record, context, *, require_failure):
         fieldPresenceMask=mask,observations=observed)
     if version>=2: value['ownedFrames']=frames
     if version==3: value['startup']=startup
-    if version==4: value['focus']=focus
+    if version>=4: value['focus']=focus
+    if version==5: value['foreground']=foreground
     return value
 
 
 def capture_calc_snapshot(record, *, environ=None):
-    context = _context(os.environ if environ is None else environ)
+    environ = os.environ if environ is None else environ
+    context = _context(environ)
     if (context is None or context['scopeCode']!=SCOPES['calc-dispatch'] or context['architecture']!=0xaa64
             or type(record) is not dict or record.get('kind')!='calc-save-dispatch-diagnostic'
             or record.get('module')!='calc'): return None
-    value = _project_case('ime-calc',record,context,require_failure=False)
+    value = _project_case('ime-calc',record,context,require_failure=False,environ=environ)
     if value is not None and _get(record,('calcDispatchDiagnostic','identity')) is None:
         for key in ('saveAttempted','saveReturned','savedMarkerObserved'):
             value['observations'][key]=0
@@ -421,12 +452,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     limit = {CASE_TITLE:MAX_CASE_BYTES,TRACE_TITLE:MAX_TRACE_BYTES}.get(title)
     if limit is None or type(message) is not str or len(message.encode('utf-8'))>limit: raise ValueError('Notice title/size rejected')
     value = json.loads(message,object_pairs_hook=_unique,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite notice')))
-    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4)
-    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
+    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5)
+    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
     if type(value) is not dict or value.keys()!=keys: raise ValueError('Closed notice schema required')
-    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus'}:
+    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground'}:
         if not _integer(value[key],2**63-1): raise ValueError('Integer notice fields required')
-    if (value['schemaVersion'] not in ((1,2,3,4) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
+    if (value['schemaVersion'] not in ((1,2,3,4,5) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
             or not re.fullmatch('[0-9a-f]{40}',value['sourceCommit']) or value['sourceCommit']=='0'*40
             or value['sourceCommit']!=expected_source_commit or value['runId']!=expected_run_id or value['runId']<=0
             or value['runAttempt']!=expected_run_attempt or value['runAttempt']!=1
@@ -470,10 +501,13 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
                 or (mode_mask and not _valid_mode_summary({key:observations[key] for key in _MODE_NAMES}))
                 or (not mode_mask and not value['startup'][0])):
             raise ValueError('Mode samples or observed startup tuple required')
-    if value['schemaVersion']==4 and (not _valid_focus(value['focus'])
+    if value['schemaVersion'] in (4,5) and (not _valid_focus(value['focus'])
             or not _focus_context(value['caseCode'],value['stageCode'],value)
             or (value['stageCode']==STAGES['focus-editor'])!=(value['focus'][3]==121)):
         raise ValueError('Bounded existing-focus context required')
+    if value['schemaVersion']==5 and (value['scopeCode']!=SCOPES['calc-dispatch'] or value['architecture']!=0xaa64
+            or value['caseCode']!=CASES['ime-calc'][0] or not _valid_foreground(value['foreground'],value['focus'])):
+        raise ValueError('Bounded existing-foreground Calc context required')
     return value
 
 
@@ -537,13 +571,15 @@ class NoticeEmitter:
                 adapted.update(officePid=trace['identity']['ownerPid'],officeCreationTime=trace['identity']['ownerCreated'])
                 if trace['state'] is not None: adapted['calcDispatchDiagnostic']=trace
                 if trace['exit']['observed']: adapted['processExitProved']=trace['analysis']['processExitProved']
-            value = _project_case('ime-calc',adapted,context,require_failure=False)
+            value = _project_case('ime-calc',adapted,context,require_failure=False,environ=environ)
             snapshot = report.get('numericCaseSnapshot')
             if snapshot is not None:
                 checked = dict(snapshot,sequence=1,remainingBudget=MAX_NOTICES-1)
                 checked = decode_notice(json.dumps(checked,separators=(',',':')),context['sourceCommit'],context['runId'],
                     expected_architecture=0xaa64,expected_scope=SCOPES['calc-dispatch'])
                 if checked['caseCode']!=CASES['ime-calc'][0]: return 0
+                if checked['schemaVersion']==5 and not _foreground_enabled(context,environ):
+                    checked.pop('foreground');checked['schemaVersion']=4
                 checked.pop('sequence'); checked.pop('remainingBudget')
                 # Only explicit source-case fields can describe local cleanup,
                 # exception location or stage. Final fallback defaults cannot.

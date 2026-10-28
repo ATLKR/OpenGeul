@@ -426,6 +426,7 @@ jobs:
         OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
         OPENGEUL_SUITE_NOTICE_SCOPE: '9'
         OPENGEUL_SUITE_CALC_TRACE_NOTICE: '1'
+        OPENGEUL_SUITE_FOREGROUND_NOTICE: '1'
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-calc-dispatch-worker-diagnostics
       shell: pwsh
       run: |

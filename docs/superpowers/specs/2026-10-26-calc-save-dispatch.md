@@ -108,6 +108,29 @@ projection must distinguish that unobserved context from a measured empty
 observation list, and join the failed shared guard to the original admitted
 processes and editor thread. Keep the same ownership and time-limit checks.
 
+Run 40765655839 at `6176ae673b0e405999437d14d93ce0da872661ba`
+passed both Windows unit/shell checks and all diagnostic prerequisites. Calc
+failed its first navigation admission after the original Ctrl+F6, before its
+navigation reader, Korean composition/save dispatch or transport admission.
+Its source-bound foreground vector is `[5,5,0,121,0]`: each surrounding
+snapshot contains a live foreign PID. This does not identify the window,
+establish equality of those PID values, or prove which action changed focus.
+Local resources and handles were released; there is no retained-engine-exit
+proof. The native trace and original save oracle remain unobserved.
+
+For one subsequent Calc diagnostic, explicitly opt in to a new closed case
+notice version. Project only finite class codes from the existing foreground
+`className` fields and equality of the existing positive PID values. Do not
+emit class strings, titles, paths, raw foreign PIDs or input. Unknown class
+strings map to a fixed unknown code; absent fields remain unobserved. PID
+value equality does not establish process identity or a shared generation.
+Reuse the current guard's existing ownership/generation/clock binding before
+projecting. Do not issue another window/process query, create a helper, add
+input or retry focus. Keep all earlier notice versions and the two-notice
+Calc budget, at most 2 KiB per case notice, unchanged. The opt-in applies
+only to the ARM64 Calc diagnostic scope, and numeric artifact isolation and
+all non-acceptance flags remain mandatory.
+
 Interpret the numeric trace alongside the original input/save oracle and
 confirmed process-exit evidence. Validate native nesting, generation/deadline
 rejection, event publication, ABI, cleanup failures, and artifact isolation
