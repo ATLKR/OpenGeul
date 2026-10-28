@@ -21,7 +21,7 @@ def evaluate(expression, mode, architecture='arm64', outcomes=None):
 
 class ComWaitWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_exact_admission_before_any_synthetic_child(self):
-        self.assertIn('OPENGEUL_SUITE_RUN_MODE: acceptance',WORKFLOW.read_text())
+        self.assertRegex(WORKFLOW.read_text(encoding='utf-8'), r'(?m)^  OPENGEUL_SUITE_RUN_MODE: (?:acceptance|calc-dispatch-diagnostic)$')
         guard=step('sal-offset-admission');run=step('com-wait-diagnostic')
         self.assertLess(workflow_steps().index(guard),workflow_steps().index(run))
         self.assertIn("Assert-Native31Context '${{ matrix.architecture }}'",run_code(guard))

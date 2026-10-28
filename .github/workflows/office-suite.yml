@@ -37,7 +37,7 @@ jobs:
       id: run-mode
       shell: pwsh
       run: |
-        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller', 'reader-console-diagnostic')) {
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller', 'reader-console-diagnostic', 'calc-dispatch-diagnostic')) {
           throw 'Unknown Suite run mode.'
         }
     - name: 정확한 소스 바이트 보존
@@ -96,7 +96,7 @@ jobs:
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Admit isolated diagnostics against exact owner-push source
       id: sal-offset-admission
-      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic'"
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic'"
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -175,7 +175,7 @@ jobs:
 
     - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
       id: source-engine
-      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic') || steps.sal-offset-admission.outcome == 'success')"
+      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic') || steps.sal-offset-admission.outcome == 'success') && (env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' || (steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success'))"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
@@ -277,7 +277,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Native local symbols unavailable; no GUI experiment is admitted.' }
 
     - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
-      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
       shell: pwsh
       run: |
         if ('${{ matrix.architecture }}' -ceq 'arm64') {
@@ -337,7 +337,7 @@ jobs:
       id: readiness
       if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
     - name: 한국어 입력 환경의 준비·실패 기록 즉시 보존
-      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
+      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-korean-readiness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -359,7 +359,7 @@ jobs:
         }
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
     - name: Suite native31 setup and control originals
-      if: "(env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || matrix.architecture == 'arm64') && always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped')"
+      if: "(env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || matrix.architecture == 'arm64') && always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped') && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -379,13 +379,75 @@ jobs:
       if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
     - name: Preserve bounded diagnostic prerequisite failure summary
       id: diagnostic-fixture-failure-evidence
-      if: "always() && steps.run-mode.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'acceptance' && steps.fixtures.outcome == 'failure'"
+      if: "always() && steps.run-mode.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'acceptance' && steps.fixtures.outcome == 'failure' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-diagnostic-fixture-failure-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-engine/engine-failure-summary.json
         retention-days: 7
         if-no-files-found: error
+    - name: Fetch and stage the locked ARM64 Calc dispatch diagnostic input
+      id: calc-dispatch-inputs
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $lockPath = 'suite/config/calc-dispatch.arm64.lock.json'
+        $inputRoot = Join-Path (Get-Location).Path '.work/suite-calc-dispatch-input'
+        ./suite/scripts/fetch-calc-dispatch.ps1 -DiagnosticLockPath $lockPath -Output $inputRoot
+        $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
+        $download = Get-Content -LiteralPath (Join-Path $inputRoot 'calc-dispatch-download.json') -Raw | ConvertFrom-Json
+        if ($download.schemaVersion -isnot [long] -or $download.schemaVersion -ne 1 -or
+            $download.kind -isnot [string] -or $download.kind -cne 'authenticated-calc-dispatch-download' -or
+            $download.passed -isnot [bool] -or $download.passed -cne $true) {
+          throw 'Calc dispatch input download did not authenticate.'
+        }
+        foreach ($key in @('sourceCommit','sourceLockSha256','coreCommit','artifactSha256')) {
+          if ($download.$key -isnot [string] -or $download.$key -cne $lock.$key) { throw 'Calc dispatch authenticated source differs from its lock.' }
+        }
+        foreach ($key in @('runId','runAttempt','artifactId','artifactSize')) {
+          if ($download.$key -isnot [long] -or $download.$key -ne $lock.$key) { throw 'Calc dispatch authenticated artifact differs from its lock.' }
+        }
+        foreach ($key in @('engineSha256','receiptSha256')) {
+          if ($download.$key -isnot [string] -or $download.$key -cnotmatch '^[0-9a-f]{64}$') { throw 'Calc dispatch authenticated inner digest is missing.' }
+        }
+        $diagnosticPackage = Join-Path (Get-Location).Path '.work/suite-calc-dispatch-package'
+        python suite/scripts/stage-calc-dispatch.py --baseline $env:SUITE_PACKAGE --archive (Join-Path $inputRoot 'OpenGeul-Office-engine-arm64-calc-dispatch.zip') --receipt (Join-Path $inputRoot 'calc-dispatch-source-build-receipt.json') --output $diagnosticPackage --expected-engine-source-commit $lock.sourceCommit --expected-suite-source-commit $env:GITHUB_SHA --expected-receipt-sha256 $download.receiptSha256 --expected-archive-sha256 $download.engineSha256
+        if ($LASTEXITCODE -ne 0) { throw 'Calc dispatch diagnostic overlay staging failed.' }
+        "SUITE_CALC_DISPATCH_PACKAGE=$diagnosticPackage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - name: Observe one original ARM64 Calc save dispatch (not acceptance)
+      id: calc-dispatch-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && steps.calc-dispatch-inputs.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-calc-dispatch-worker-diagnostics
+      shell: pwsh
+      run: |
+        $lock = Get-Content -LiteralPath 'suite/config/calc-dispatch.arm64.lock.json' -Raw | ConvertFrom-Json
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_CALC_DISPATCH_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-calc-dispatch --diagnose-calc-dispatch --expected-engine-source-commit $lock.sourceCommit
+        if ($LASTEXITCODE -ne 0) { throw 'One original Calc dispatch observation incomplete; no unchanged retry.' }
+    - name: Preserve only numeric Calc dispatch results and authenticated input bindings
+      id: calc-dispatch-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.calc-dispatch-inputs.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-calc-dispatch-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-calc-dispatch/results.json
+          .work/suite-calc-dispatch/calc-dispatch-diagnostic.json
+          .work/suite-calc-dispatch-input/artifact-server-metadata.json
+          .work/suite-calc-dispatch-input/calc-dispatch-download.json
+          .work/suite-calc-dispatch-package/calc-dispatch-diagnostic.json
+        retention-days: 7
+        if-no-files-found: error
+    - name: Calc dispatch experiment deliberately cannot qualify acceptance
+      id: calc-dispatch-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Calc dispatch diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
     - name: Observe one owned packaged reader console (not acceptance)
       id: reader-console-diagnostic
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success'"

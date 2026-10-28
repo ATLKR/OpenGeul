@@ -12,7 +12,7 @@ MODES = ('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic',
 
 class MutexMappingWorkflowTests(unittest.TestCase):
     def test_compile_and_mapping_require_native_source_admission(self):
-        self.assertIn('OPENGEUL_SUITE_RUN_MODE: acceptance', WORKFLOW.read_text())
+        self.assertRegex(WORKFLOW.read_text(encoding='utf-8'), r'(?m)^  OPENGEUL_SUITE_RUN_MODE: (?:acceptance|calc-dispatch-diagnostic)$')
         compile_step=step('mutex-layout-fixture'); mapping=step('mutex-function-mapping')
         for arch in ('x64','arm64'):
             for mode in MODES:

@@ -1,4 +1,4 @@
-"""The configured run selects paired full acceptance and keeps delivery fail closed."""
+"""Fixed modes keep paired full acceptance and isolated diagnosis separate."""
 import re
 import unittest
 
@@ -15,18 +15,18 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
         self.architectures = re.findall(r'^        - architecture: (\S+)$', source, re.M)
         self.outcomes = {field(s, 'id'): 'success' for s in self.steps if field(s, 'id')}
 
-    def selected(self, candidate, architecture, *, outcomes=None, success=True, cancelled=False):
+    def selected(self, candidate, architecture, *, outcomes=None, success=True, cancelled=False, mode='acceptance'):
         expression = (condition(candidate) or 'success()').replace('!cancelled()', repr(not cancelled))
         expression = expression.replace('always()', 'True').replace('success()', repr(success))
         expression = expression.replace('github.ref', repr('refs/heads/work/opengeul-office-arm64'))
-        return evaluate(expression, self.mode, architecture, self.outcomes | (outcomes or {}))
+        return evaluate(expression, mode, architecture, self.outcomes | (outcomes or {}))
 
     def command(self, fragment):
         matches = [s for s in self.steps if field(s, 'run') == '|' and fragment in run_code(s)]
         self.assertEqual(len(matches), 1, fragment)
         return matches[0]
 
-    def test_configured_mode_selects_full_gates_on_both_native_architectures(self):
+    def test_acceptance_mode_selects_full_gates_on_both_native_architectures(self):
         self.assertEqual(self.architectures, ['x64', 'arm64'])
         start = self.steps.index(step('calc-save'))
         gates = [step(name) for name in ('suite-unit-shell', 'build', 'readiness',
@@ -50,7 +50,7 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
                     self.assertTrue(self.selected(gate, architecture))
             self.assertEqual(self.selected(step('source-engine'), architecture), architecture == 'arm64')
 
-    def test_configured_mode_leaves_every_optional_diagnostic_unselected(self):
+    def test_acceptance_mode_leaves_every_optional_diagnostic_unselected(self):
         diagnostics = (
             'sal-offset-admission', 'sal-offset-mapping', 'sal-offset-evidence', 'sal-offset-not-acceptance',
             'com-wait-diagnostic', 'com-wait-evidence', 'com-wait-not-acceptance',
@@ -62,11 +62,24 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
             'diagnostic-not-acceptance', 'ime-mode-diagnostic', 'ime-notification-resolution',
             'ime-mode-diagnostic-evidence', 'ime-mode-not-acceptance', 'focus-diagnostic',
             'focus-diagnostic-evidence', 'focus-not-acceptance',
+            'calc-dispatch-inputs', 'calc-dispatch-diagnostic', 'calc-dispatch-evidence',
+            'calc-dispatch-not-acceptance',
         )
         for architecture in self.architectures:
             for name in diagnostics:
                 with self.subTest(architecture=architecture, diagnostic=name):
                     self.assertFalse(self.selected(step(name), architecture))
+
+    def test_configured_mode_selects_exactly_one_proven_route(self):
+        self.assertIn(self.mode, ('acceptance', 'calc-dispatch-diagnostic'))
+        for architecture in self.architectures:
+            for name in ('calc-dispatch-inputs', 'calc-dispatch-diagnostic', 'calc-dispatch-evidence'):
+                self.assertEqual(self.selected(step(name), architecture, mode=self.mode),
+                                 self.mode == 'calc-dispatch-diagnostic' and architecture == 'arm64')
+            self.assertEqual(self.selected(step('calc-dispatch-not-acceptance'), architecture, mode=self.mode),
+                             self.mode == 'calc-dispatch-diagnostic')
+            for gate in self.steps[self.steps.index(step('calc-save')):]:
+                self.assertEqual(self.selected(gate, architecture, mode=self.mode), self.mode == 'acceptance')
 
     def test_acceptance_prerequisites_and_package_handoff_still_fail_closed(self):
         ime = self.command('--output .work/suite-korean-ime\n')
