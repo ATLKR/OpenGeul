@@ -13,7 +13,7 @@ def condition(step):
 
 class NavigationDiagnosticWorkflowTests(unittest.TestCase):
     def test_fixed_mode_and_validation_reject_unknown_values(self):
-        self.assertRegex(WORKFLOW.read_text(encoding='utf-8'), r'(?m)^  OPENGEUL_SUITE_RUN_MODE: (?:acceptance|calc-dispatch-diagnostic)$')
+        self.assertRegex(WORKFLOW.read_text(encoding='utf-8'), r'(?m)^  OPENGEUL_SUITE_RUN_MODE: (?:acceptance|calc-dispatch-diagnostic|ime-mode-diagnostic)$')
         step=next(s for s in workflow_steps() if field(s,'id')=='run-mode')
         code=run_code(step)
         self.assertIn("-cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller', 'reader-console-diagnostic', 'calc-dispatch-diagnostic')",code)
@@ -88,10 +88,10 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
                 self.assertIn('if ($LASTEXITCODE -ne 0)',run_code(step))
                 upload=next(s for s in steps if field(s,'id')==name+'-diagnostic-evidence')
                 terminal=next(s for s in steps if field(s,'id')==name+'-not-acceptance')
-                self.assertEqual(condition(upload),'always() && '+mode+(" && matrix.architecture == 'arm64'" if name=='focus' else ''))
+                self.assertEqual(condition(upload),'always() && '+mode+" && matrix.architecture == 'arm64'")
                 self.assertEqual(condition(terminal),'always() && '+mode)
                 if name=='ime-mode':
-                    self.assertIn('path: |\n          .work/suite-ime-mode-diagnostic/\n',upload)
+                    self.assertIn('path: .work/suite-ime-mode-diagnostic/callback-numeric.json',upload)
                 else:self.assertIn('path: .work/suite-'+name+'-diagnostic/',upload)
                 self.assertIn('opengeul-suite-'+name+'-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}',upload)
                 self.assertIn("throw '"+title+" diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'",run_code(terminal))

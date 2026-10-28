@@ -33,7 +33,7 @@ class DiagnosticFixtureRetentionTests(unittest.TestCase):
                     if mode not in modes and admitted=='success':continue  # Unreachable after actual validator.
                     with self.subTest(mode=mode,admitted=admitted,outcome=outcome):
                         actual=evaluate(expression,mode,outcomes={'run-mode':admitted,'fixtures':outcome})
-                        self.assertEqual(actual,admitted=='success' and mode not in ('acceptance','calc-dispatch-diagnostic') and outcome=='failure')
+                        self.assertEqual(actual,admitted=='success' and mode not in ('acceptance','calc-dispatch-diagnostic','ime-mode-diagnostic') and outcome=='failure')
         # Unknown modes cannot reach the successful validation outcome.
         self.assertNotIn('unknown',modes);self.assertNotIn('',modes)
         self.assertIn("throw 'Unknown Suite run mode.'",run_code(steps['run-mode']))
@@ -56,7 +56,7 @@ class DiagnosticFixtureRetentionTests(unittest.TestCase):
                     self.assertFalse(fixtures,(mode,arch))
                 captured=evaluate(condition(steps['diagnostic-fixture-failure-evidence']).replace('always()','True'),mode,arch,
                     {'run-mode':'success','fixtures':'failure' if fixtures else 'skipped'})
-                self.assertEqual(captured,fixtures and mode not in ('acceptance','calc-dispatch-diagnostic'))
+                self.assertEqual(captured,fixtures and mode not in ('acceptance','calc-dispatch-diagnostic','ime-mode-diagnostic'))
         stage=steps['navigation-diagnostic']
         for prerequisite in ('build','readiness','native31-privacy-prepare','fixtures'):
             self.assertIn('steps.'+prerequisite+".outcome == 'success'",condition(stage))

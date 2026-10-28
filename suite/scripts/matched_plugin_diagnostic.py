@@ -228,6 +228,20 @@ def join_resolution(selection,worker):
     return all(f['tag']!='unresolved' for f in frames)
 
 
+def resolve_compartment_in_memory(report,pair,context,*,worker_run=None):
+    """Keep the original selector and file-only worker without a raw trace file."""
+    assert type(context) is dict and report['runBinding']==context, 'Trace belongs to another run'
+    selection=select_compartment(report)
+    if selection['status']!='selected':return selection,None
+    if worker_run is None:
+        spec=importlib.util.spec_from_file_location('compartment_symbol_worker',Path(__file__).with_name('plugin_symbol_worker.py'))
+        worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
+        worker_run=worker.run
+    resolution=worker_run(pair,mode='resolve',rvas=selection['rvas'])
+    assert join_resolution(selection,resolution), 'Original compartment symbols remain inconclusive'
+    return selection,resolution
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser();parser.add_argument('--mode',choices=('qualify','resolve'),required=True)
     parser.add_argument('--pair',type=Path,required=True);inputs=parser.add_mutually_exclusive_group()

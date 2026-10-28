@@ -1,5 +1,6 @@
 """Current reader exceptions retain optional numeric metadata across real file RPC."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -72,6 +73,56 @@ class NumericReaderFailureTests(unittest.TestCase):
             self.reader._require_reply(failed, 0, 'start')
         self.assertIs(failed, caught.exception.raw)
         self.assertEqual(failure, numeric_notice.capture_failure_code(caught.exception))
+
+    def test_actual_focused_view_leaf_survives_child_file_rpc_wrapper_and_final_notice(self):
+        import writer_style_smoke as style
+        from test_impress_focused_view import FocusedReaderTests,FocusWorld
+        import impress_focused_view as focus
+        fixture=FocusedReaderTests();world=FocusWorld();world.focus.focused=1
+        editing=fixture.reader(world)
+        env=environment()|{'OPENGEUL_SUITE_NOTICE_SCOPE':'3'}
+        try:
+            with patch.dict(os.environ,env,clear=True):
+                try:editing.read()
+                except AssertionError as exc:
+                    direct=numeric_notice.capture_failure_code(exc)
+                    self.assertEqual(direct['fileCode'],26)
+                    self.assertIn(direct['line'],{line for _,_,line in focus.FocusedViewReader._lookup.__code__.co_lines() if line})
+                    self.assertEqual(numeric_notice.capture_failure_frames(exc)[-1],[26,direct['line']])
+                else:self.fail('Malformed focus must retain its actual focused-view assertion')
+                with tempfile.TemporaryDirectory() as directory:
+                    output=Path(directory)
+                    self.reader._atomic_json(output/'configuration.json',dict(suite='/synthetic-suite',
+                        expected_service='com.sun.star.presentation.PresentationDocument',
+                        getter_contract='impress-focused-view-edit-context-v2'))
+                    self.reader._atomic_json(output/'request-000.json',dict(sequence=0,action='start'))
+                    self.reader._atomic_json(output/'request-001.json',dict(sequence=1,action='release'))
+                    anchor=type('Anchor',(),dict(profile=None,snapshot=lambda self:{},close=lambda self:[]))()
+                    with patch.object(style,'observe_packaged_python',return_value={}), \
+                         patch.object(style,'require_packaged_python',return_value={}), \
+                         patch.object(self.reader,'_native_anchor',return_value=anchor), \
+                         patch.object(self.reader,'_UnoReader',return_value=editing), \
+                         patch.object(self.reader,'_qpc',return_value=(1,1)):
+                        self.assertEqual(self.reader._helper(output,explicit_model=True),0)
+                    failed=self.reader._read_json(output/'reply-000.json')
+                    released=self.reader._read_json(output/'reply-001.json')
+                    self.assertIs(failed['ok'],False)
+                    self.assertIs(released['ok'],True)
+                    self.assertEqual(failed['error']['numericFailure'],direct)
+                    with self.assertRaises(self.reader.ReaderBackendError) as caught:
+                        self.reader._require_reply(failed,0,'start')
+                    retained=numeric_notice.capture_failure_code(caught.exception)
+                    self.assertEqual(retained,direct)
+                    stream=io.StringIO();emitter=numeric_notice.NoticeEmitter(environ=env,stream=stream)
+                    self.assertTrue(emitter.emit_case_notice('ime-impress',dict(success=False,
+                        stage='verify-pre-prefix-editing-context',numericFailure=retained)))
+                    message=stream.getvalue().strip().split('::',2)[2]
+                    self.assertLessEqual(len(message.encode()),2048)
+                    decoded=numeric_notice.decode_notice(message,'a'*40,123,expected_scope=3)
+                    self.assertEqual((decoded['schemaVersion'],decoded['fileCode'],decoded['line']),
+                        (1,26,direct['line']))
+                    self.assertEqual(world.now,1.)
+        finally:fixture.doCleanups()
 
     def test_disabled_or_invalid_context_adds_no_helper_metadata(self):
         for additions in ({}, {**environment(), 'GITHUB_RUN_ATTEMPT':'2'},

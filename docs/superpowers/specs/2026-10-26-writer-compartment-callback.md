@@ -54,6 +54,35 @@ retirement and all selected workflow prerequisites; obtain independent review;
 run frozen validation; only then one targeted native diagnostic. Existing full
 acceptance remains mandatory for a final corrective commit and paired delivery.
 
+## Numeric retention for a new execution
+
+Run 40743213587 at `15d4b351d9604607ac94c3a7662c208c4c1bfc7d`
+passed every x64 acceptance gate. ARM64 Writer and Calc failed their first
+composition. Their retained IMM summaries contain closed samples and end with
+open0/native1. Counts do not recover the complete sample order, current TSF
+values, full conversion mask or the code that changed the state. Earlier
+joint-close experiments are not measurements of this execution.
+
+Keep the original one-Writer case, sink lease, setters, input and deadlines.
+Transfer its final case record in memory after the original teardown. Run the
+existing strict first-key/callback/retirement selector unchanged, then the
+existing file-only symbol resolver once in the controller. Do not persist the
+full case, formatted traceback, keyboard sidecars or screenshots. The existing
+generated-fixture semantic-reader IPC remains outside the retention allowlist.
+
+Retain only a closed numeric callback report. Bind its public source/run to the
+first owner push and native ARM64, and keep absence distinct from measured zero.
+Allow bounded lease/API receipts, original generation and clock joins, coded
+failure locations, whitelisted module/RVA frames and pinned public DLL/PDB
+identity. Exclude key values, input text, message payloads, paths and arbitrary
+symbols. Callback publication and symbol resolution remain separate from setter
+attribution and process retirement; no diagnostic report qualifies acceptance.
+
+An explicit opt-in may publish one bounded numeric check notice, at most 32 KiB.
+Failure to project or publish must preserve the original case result and
+cleanup. The workflow uploads the numeric JSON only. It must not retain the
+private directory or replay previously denied artifact/log data through notices.
+
 Contracts: [OnChange](https://learn.microsoft.com/en-us/windows/win32/api/msctf/nf-msctf-itfcompartmenteventsink-onchange),
 [UnadviseSink](https://learn.microsoft.com/en-us/windows/win32/api/msctf/nf-msctf-itfsource-unadvisesink),
 [module pinning](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandleexa).

@@ -65,7 +65,7 @@ class CalcDispatchWorkflowTests(unittest.TestCase):
                                  architecture == 'arm64' and failed not in ('suite-unit-shell', 'sal-offset-admission'))
         self.assertTrue(selected(steps['sal-offset-admission'], MODE, 'arm64', outcomes))
         self.assertIn("Assert-Native31Context '${{ matrix.architecture }}'", run_code(steps['sal-offset-admission']))
-        self.assertRegex(WORKFLOW.read_text(encoding='utf-8'), r'(?m)^  OPENGEUL_SUITE_RUN_MODE: (?:acceptance|calc-dispatch-diagnostic)$')
+        self.assertRegex(WORKFLOW.read_text(encoding='utf-8'), r'(?m)^  OPENGEUL_SUITE_RUN_MODE: (?:acceptance|calc-dispatch-diagnostic|ime-mode-diagnostic)$')
         self.assertNotIn('SUITE_PACKAGE=', run_code(steps['calc-dispatch-inputs']))
 
     def test_every_upload_in_calc_mode_is_limited_to_the_selected_numeric_artifact(self):

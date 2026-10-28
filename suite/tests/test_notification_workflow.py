@@ -23,7 +23,7 @@ class NotificationWorkflowTests(unittest.TestCase):
                             allowed=status=='success' and architecture=='arm64' and qualified=='success'
                             self.assertEqual(evaluate(expression,'ime-mode-diagnostic',architecture,native),allowed)
 
-    def test_resolution_uses_original_case_and_is_retained_even_after_failure(self):
+    def test_original_controller_resolves_once_and_workflow_only_verifies_numeric_receipt(self):
         steps={field(s,'id'):s for s in workflow_steps() if field(s,'id')}
         self.assertIn('ime-notification-resolution',steps,'bounded notification resolution missing')
         diagnostic=run_code(steps['ime-mode-diagnostic'])
@@ -31,6 +31,21 @@ class NotificationWorkflowTests(unittest.TestCase):
         resolver=steps['ime-notification-resolution']
         self.assertIn('!cancelled()',condition(resolver));self.assertIn("steps.ime-mode-diagnostic.outcome != 'skipped'",condition(resolver))
         self.assertIn("steps.matched-symbol-qualification.outcome == 'success'",condition(resolver))
-        self.assertIn('--compartment .work/suite-ime-mode-diagnostic/results.json',run_code(resolver))
+        self.assertIn('ime_compartment_report.py --verify .work/suite-ime-mode-diagnostic/callback-numeric.json',run_code(resolver))
+        self.assertNotIn('matched_plugin_diagnostic.py',run_code(resolver))
+        self.assertIn("OPENGEUL_SUITE_IME_COMPARTMENT_NOTICE: '1'",steps['ime-mode-diagnostic'])
+        self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '3'",steps['ime-mode-diagnostic'])
+        artifact=steps['ime-mode-diagnostic-evidence']
+        self.assertIn('path: .work/suite-ime-mode-diagnostic/callback-numeric.json',artifact)
+        self.assertNotIn('path: |',artifact)
+        for forbidden in ('qualification.json','plugin-symbol-download.json','artifact-server-metadata.json','include-hidden-files'):
+            self.assertNotIn(forbidden,artifact)
         self.assertIn('always()',condition(steps['ime-mode-not-acceptance']))
         self.assertIn('throw ',run_code(steps['ime-mode-not-acceptance']))
+
+    def test_compartment_mode_excludes_raw_prerequisite_artifact_uploads(self):
+        names=('한국어 입력 환경의 준비·실패 기록 즉시 보존','Suite native31 setup and control originals',
+               'Preserve bounded diagnostic prerequisite failure summary')
+        for name in names:
+            step=next(s for s in workflow_steps() if name in s.splitlines()[0])
+            self.assertIn("env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'",condition(step))

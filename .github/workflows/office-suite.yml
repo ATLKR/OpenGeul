@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: acceptance
+  OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -339,7 +339,7 @@ jobs:
       id: readiness
       if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
     - name: 한국어 입력 환경의 준비·실패 기록 즉시 보존
-      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic'"
+      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-korean-readiness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -361,7 +361,7 @@ jobs:
         }
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
     - name: Suite native31 setup and control originals
-      if: "(env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || matrix.architecture == 'arm64') && always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped') && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic'"
+      if: "(env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || matrix.architecture == 'arm64') && always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped') && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -381,7 +381,7 @@ jobs:
       if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
     - name: Preserve bounded diagnostic prerequisite failure summary
       id: diagnostic-fixture-failure-evidence
-      if: "always() && steps.run-mode.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'acceptance' && steps.fixtures.outcome == 'failure' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic'"
+      if: "always() && steps.run-mode.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'acceptance' && steps.fixtures.outcome == 'failure' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-diagnostic-fixture-failure-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -505,6 +505,9 @@ jobs:
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success'"
       env:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-ime-mode-diagnostic/worker-diagnostics
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '3'
+        OPENGEUL_SUITE_IME_COMPARTMENT_NOTICE: '1'
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -515,25 +518,20 @@ jobs:
         python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-ime-mode-diagnostic --diagnose-ime-mode writer @callerArgs
         if ($LASTEXITCODE -ne 0) { throw 'Targeted IME mode diagnostic failed.' }
 
-    - name: Resolve the one original compartment callback stack
+    - name: Validate the one in-memory compartment resolution receipt
       id: ime-notification-resolution
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64' && steps.ime-mode-diagnostic.outcome != 'skipped' && steps.matched-symbol-qualification.outcome == 'success'"
       shell: pwsh
       run: |
-        python suite/scripts/matched_plugin_diagnostic.py --mode resolve --pair .work/plugin-symbol-input/pair --compartment .work/suite-ime-mode-diagnostic/results.json --output .work/suite-ime-mode-diagnostic/compartment-resolution.json
-        if ($LASTEXITCODE -ne 0) { throw 'Original IME-close caller remains unresolved; no retry is authorized by this diagnostic.' }
+        python suite/e2e/ime_compartment_report.py --verify .work/suite-ime-mode-diagnostic/callback-numeric.json --source-commit $env:GITHUB_SHA --run-id $env:GITHUB_RUN_ID --run-attempt 1 --architecture arm64
+        if ($LASTEXITCODE -ne 0) { throw 'The one compartment numeric receipt is incomplete or differs from this run.' }
     - name: Preserve targeted IME mode evidence only
       id: ime-mode-diagnostic-evidence
-      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic'"
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-ime-mode-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
-        path: |
-          .work/suite-ime-mode-diagnostic/
-          .work/suite-matched-plugin/qualification.json
-          .work/plugin-symbol-input/plugin-symbol-download.json
-          .work/plugin-symbol-input/artifact-server-metadata.json
-        include-hidden-files: true
+        path: .work/suite-ime-mode-diagnostic/callback-numeric.json
         retention-days: 7
         if-no-files-found: error
     - name: IME mode experiment deliberately cannot qualify Suite acceptance

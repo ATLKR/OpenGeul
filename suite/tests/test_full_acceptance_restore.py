@@ -71,13 +71,18 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
                     self.assertFalse(self.selected(step(name), architecture))
 
     def test_configured_mode_selects_exactly_one_proven_route(self):
-        self.assertIn(self.mode, ('acceptance', 'calc-dispatch-diagnostic'))
+        self.assertIn(self.mode, ('acceptance', 'calc-dispatch-diagnostic', 'ime-mode-diagnostic'))
         for architecture in self.architectures:
             for name in ('calc-dispatch-inputs', 'calc-dispatch-diagnostic', 'calc-dispatch-evidence'):
                 self.assertEqual(self.selected(step(name), architecture, mode=self.mode),
                                  self.mode == 'calc-dispatch-diagnostic' and architecture == 'arm64')
             self.assertEqual(self.selected(step('calc-dispatch-not-acceptance'), architecture, mode=self.mode),
                              self.mode == 'calc-dispatch-diagnostic')
+            for name in ('ime-mode-diagnostic', 'ime-notification-resolution', 'ime-mode-diagnostic-evidence'):
+                self.assertEqual(self.selected(step(name), architecture, mode=self.mode),
+                                 self.mode == 'ime-mode-diagnostic' and architecture == 'arm64')
+            self.assertEqual(self.selected(step('ime-mode-not-acceptance'), architecture, mode=self.mode),
+                             self.mode == 'ime-mode-diagnostic')
             for gate in self.steps[self.steps.index(step('calc-save')):]:
                 self.assertEqual(self.selected(gate, architecture, mode=self.mode), self.mode == 'acceptance')
 

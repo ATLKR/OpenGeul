@@ -26,7 +26,7 @@ SOURCE_FILES = {name: index for index, name in enumerate((
     'owned_control_actions.py', 'owned_save_menu.py', 'native_window_evidence.py',
     'ime_calc_setup.py', 'native_accessibility.py', 'calc_dispatch_diagnostic.py',
     'ime_semantic_context.py', 'calc_pending_input.py', 'native_archive_completeness.py',
-    'capture_readiness.py', 'ascii_editor_input.py'), 1)}
+    'capture_readiness.py', 'ascii_editor_input.py', 'impress_focused_view.py'), 1)}
 _OWNED_FILES = {os.path.normcase(str(Path(__file__).with_name(name))): code for name, code in SOURCE_FILES.items()}
 MODULES = {name: index for index, name in enumerate(('writer','calc','impress','draw','math','base','hwp'), 1)}
 _FORMATS = ('writer-odt','writer-docx','writer-doc','writer-rtf','writer-txt','calc-ods',

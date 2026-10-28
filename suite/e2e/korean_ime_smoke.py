@@ -1698,7 +1698,7 @@ def dispose_calc_dispatch_shell(process, original, deadline, *, engine=None, liv
     return receipt
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False, calc_dispatch_transport=None):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False, calc_dispatch_transport=None, compartment_sink=None):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
@@ -1706,6 +1706,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     assert not diagnose_ime_mode or (not diagnose_navigation and (module=='calc' or (module=='writer' and capture_ime_compartment))), 'IME mode experiment requires the selected bounded case'
     assert not capture_ime_caller or diagnose_ime_mode,'Caller capture requires mode diagnosis'
     assert not capture_ime_compartment or (diagnose_ime_mode and module=='writer' and readiness['nativeMachine']==0xaa64 and plugin_origin is not None and not capture_ime_caller),'Compartment callback requires one matched Writer case'
+    assert compartment_sink is None or (capture_ime_compartment and callable(compartment_sink)), 'Compartment sink requires its explicit single case'
     assert plugin_origin is None or diagnose_focus or capture_ime_caller or capture_ime_compartment,'Plugin binding requires scoped diagnosis'
     assert not diagnose_focus or (not diagnose_navigation and not diagnose_ime_mode and (module=='calc' or (module=='writer' and readiness['nativeMachine']==0xaa64 and diagnostic_suffix=='focus-01' and plugin_origin is None))), 'Focus experiment requires Calc or the single native ARM64 Writer ordering case'
     assert diagnostic_suffix in ('focus-01','focus-02','focus-03') if diagnose_focus else diagnostic_suffix is None,'Invalid focus diagnostic case suffix'
@@ -1747,7 +1748,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             remaining_setup(setup_deadline, 10))
         keyboard = IMEKeyboardSession(api, process, hwnd, parent, child, office_pid,
             module, record, setup_deadline,
-            **({} if calc_dispatch_transport is None else dict(retain_evidence=False)))
+            **({} if calc_dispatch_transport is None and not capture_ime_compartment else dict(retain_evidence=False)))
         keyboard.start()
         record['stage'] = 'focus-editor'
         def click():
@@ -1858,7 +1859,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             record['imeCompositionStartEventCount'] = after
             physical_key(observer, token, record)
             wait_for(lambda: observer.pending(expected, after), 10)
-        if calc_dispatch_transport is None:
+        if calc_dispatch_transport is None and not capture_ime_compartment:
             window.capture_as_image().save(output / (name + '-composing.png'))
         record['stage'] = 'commit-native-composition'
         physical_key(observer, 'RIGHT', record)
@@ -1891,7 +1892,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         wait_saved_ime_marker(source,module,save_deadline,record)
         wait_for(lambda: not api.title(hwnd).startswith('* '), remaining_setup(save_deadline, 10))
         record['savedText'] = package_text(source)
-        window.capture_as_image().save(output / (name + '-saved.png'))
+        if not capture_ime_compartment:
+            window.capture_as_image().save(output / (name + '-saved.png'))
         assert not api.windows(office_pid), api.external_window_message(office_pid, 'IME opened an external Office document window')
         calc_proof = None
         if module == 'calc':
@@ -1926,9 +1928,9 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         if focus_trace is not None:focus_trace.close(primary)
         if navigation_trace is not None: navigation_trace.close(primary)
         if observer is not None: retain_ime_message_diagnostics(record, observer)
-        if diagnose_focus or calc_dispatch_transport is not None:
+        if diagnose_focus or calc_dispatch_transport is not None or capture_ime_compartment:
             import traceback
-            if calc_dispatch_transport is not None:
+            if calc_dispatch_transport is not None or capture_ime_compartment:
                 try:
                     if numeric_notice.notices_enabled():
                         record.setdefault('numericFailure', numeric_notice.capture_failure_code(exc))
@@ -1937,6 +1939,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             record.update(success=False,error=type(exc).__name__+': '+str(exc),
                 traceback=''.join(traceback.format_exception(type(exc),exc,exc.__traceback__)),
                 failureScreenshotSkipped=('focus-diagnostic-local-only-after-failure' if diagnose_focus
+                    else 'compartment-diagnostic-in-memory-only' if capture_ime_compartment
                     else 'calc-dispatch-diagnostic-local-only-after-failure'))
         else:
             capture_failure(output, name, record, exc)
@@ -2034,7 +2037,12 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                 from editor_capture_diagnostic import cohort_cleanup_confirmed
                 if not cohort_cleanup_confirmed(record):
                     record.update(success=False,focusCohortStopped='Original shell/engine exit or retained handle release unconfirmed')
-            if not return_from_diagnostic_cleanup: write_result(output, name, record)
+            if not return_from_diagnostic_cleanup and not capture_ime_compartment: write_result(output, name, record)
+            if capture_ime_compartment and compartment_sink is not None:
+                try: compartment_sink(record)
+                except BaseException as exc:
+                    # The original case exception and completed cleanup remain primary.
+                    record.update(success=False,compartmentSinkErrorType=type(exc).__name__)
         if retirement_failure is not None: raise retirement_failure
 
 
@@ -2104,7 +2112,57 @@ def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_
     return 0 if success else 1
 
 
+def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path):
+    """One original Writer case; only a closed numeric projection is retained."""
+    from ascii_message_preparation import _Budget
+    import ime_compartment_report as publisher
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+    from suite.scripts.matched_plugin_diagnostic import resolve_compartment_in_memory
+    lease=None;primary=None;cleanup_error=None;results=[];selection=resolution=None
+    def retain(record):
+        assert not results and type(record) is dict, 'Compartment case sink cannot repeat'
+        results.append(record)
+    try:
+        assert architecture=='arm64' and proof_path is not None, 'Matched ARM64 Writer proof required'
+        budget=_Budget();budget.now();lease=_open_plugin_proof(suite,proof_path,budget)
+        prepared=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture,budget=budget)
+        case(suite,fixtures,output,readiness,'writer',dict(INPUT_CASES)['writer'],
+            prepared_library=prepared,diagnose_ime_mode=True,capture_ime_compartment=True,
+            plugin_origin=lease.binding(),compartment_sink=retain)
+    except BaseException as exc:
+        primary=exc
+    finally:
+        if lease is not None:
+            try:lease.close()
+            except BaseException as exc:cleanup_error=type(exc).__name__
+    success=len(results)==1 and results[0].get('success') is True and cleanup_error is None and primary is None
+    report=dict(schemaVersion=1,kind='native-ime-mode-diagnostic',success=success,acceptanceEligible=False,
+        imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=1,
+        notificationCallerEnabled=False,compartmentCallbackEnabled=True)
+    if lease is not None:report['pluginFileOrigin']=dict(lease.receipt)
+    if cleanup_error:report['pluginFileOriginCleanupErrorType']=cleanup_error
+    if primary is not None:report['preparationOrCaseErrorType']=type(primary).__name__
+    try:
+        selection,resolution=resolve_compartment_in_memory(report,proof_path.parent,binding)
+    except BaseException as exc:
+        report['resolutionErrorType']=type(exc).__name__
+        if primary is None and cleanup_error is None:primary=exc
+    try:
+        value=publisher.project(report,selection,resolution,context=numeric_notice.public_context(os.environ))
+        with (output/'callback-numeric.json').open('x',encoding='utf-8') as stream:
+            stream.write(publisher.encode_notice(value)+'\n')
+        publisher.emit_value(value)
+    except BaseException as exc:
+        if primary is None:primary=exc
+        else:primary.compartmentNumericRetentionErrorType=type(exc).__name__
+    if primary is not None:raise primary
+    return 0 if success else 1
+
+
 def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,capture_caller=False,capture_compartment=False):
+    if capture_compartment:
+        assert not capture_caller, 'Compartment callback excludes notification capture'
+        return run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path)
     lease=None;primary=None;cleanup_error=None;results=[]
     try:
         assert not proof_path or ((capture_caller or capture_compartment) and architecture=='arm64'),'Matched proof requires ARM64 caller diagnosis'

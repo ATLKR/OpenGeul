@@ -288,7 +288,7 @@ class NumericNoticeTests(unittest.TestCase):
         bit = 1 << self.n.OBSERVATION_NAMES.index('saveAttempted')
         self.assertFalse(summary['fieldPresenceMask'] & bit)
 
-    def test_only_ten_product_steps_opt_in_and_unit_steps_never_do(self):
+    def test_only_ten_product_steps_and_one_compartment_step_opt_in_and_unit_steps_never_do(self):
         from suite.tests.test_calc_matrix_workflow import WORKFLOW, workflow_steps, field, run_code
         fragments = ('calc_close_probe.py --suite', 'home_routing_smoke.py --suite',
                      '--output .work/suite-korean-ime\n', 'korean_ui_smoke.py --suite',
@@ -299,7 +299,9 @@ class NumericNoticeTests(unittest.TestCase):
         expected = [next(step for step in workflow_steps() if field(step,'run')=='|' and fragment in run_code(step))
                     for fragment in fragments]
         actual = [step for step in workflow_steps() if "OPENGEUL_SUITE_NUMERIC_NOTICE: '1'" in step]
-        self.assertEqual({step.splitlines()[0] for step in actual}, {step.splitlines()[0] for step in expected})
+        compartment=next(step for step in workflow_steps() if field(step,'id')=='ime-mode-diagnostic')
+        self.assertEqual({step.splitlines()[0] for step in actual}, {step.splitlines()[0] for step in (*expected,compartment)})
+        self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '3'",compartment)
         for scope,step in enumerate(expected,1):
             self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '"+str(scope)+"'",step)
         traced = [step for step in workflow_steps() if 'OPENGEUL_SUITE_CALC_TRACE_NOTICE' in step]
@@ -485,6 +487,7 @@ class NumericNoticeTests(unittest.TestCase):
         self.assertEqual(self.n.SOURCE_FILES['native_archive_completeness.py'],23)
         self.assertEqual(self.n.SOURCE_FILES['capture_readiness.py'],24)
         self.assertEqual(self.n.SOURCE_FILES['ascii_editor_input.py'],25)
+        self.assertEqual(self.n.SOURCE_FILES['impress_focused_view.py'],26)
 
     def test_owned_frame_walk_is_bounded_and_keeps_deepest_eight_observed_frames(self):
         self.assertTrue(callable(getattr(self.n,'capture_failure_frames',None)))
@@ -538,7 +541,7 @@ class NumericNoticeTests(unittest.TestCase):
         base=json.loads(self.messages()[0])
         self.assertEqual(base['schemaVersion'],2)
         changes=[{'schemaVersion':1},{'ownedFrames':[[24,1]]*9},{'ownedFrames':[[True,1]]},
-            {'ownedFrames':[[24,True]]},{'ownedFrames':[[0,0]]},{'ownedFrames':[[26,1]]},
+            {'ownedFrames':[[24,True]]},{'ownedFrames':[[0,0]]},{'ownedFrames':[[27,1]]},
             {'ownedFrames':[[24,0]]},{'ownedFrames':[[24,10000001]]},{'ownedFrames':[dict(path='PRIVATE')]}]
         for change in changes:
             with self.subTest(change=change),self.assertRaises(ValueError):self.decode(json.dumps(base|change))
