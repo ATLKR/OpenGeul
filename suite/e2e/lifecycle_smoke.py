@@ -1539,11 +1539,21 @@ def main(argv=None):
         if verification.returncode != 0 or uno.get('success') is not True:
             report.update(success=False, error='Independent packaged UNO lifecycle reopen failed; inspect packaged-uno-result.json and packaged-uno.log')
     except Exception as exc:
+        try:
+            from numeric_notice import capture_failure_code, notices_enabled
+            if notices_enabled(): report['numericFailure'] = capture_failure_code(exc)
+        except Exception:
+            pass
         report.update(success=False, error='Independent packaged UNO verification failed: ' + type(exc).__name__ + ': ' + str(exc))
     after = {path.name: digest(path) for path in fixtures.iterdir() if path.is_file()}
     report['baselineFixturesUnchanged'] = after == baseline_hashes
     if after != baseline_hashes:
         report.update(success=False, error='Lifecycle tests changed baseline fixture files')
+    try:
+        from numeric_notice import emit_case_notice
+        emit_case_notice('lifecycle-summary', report)
+    except Exception:
+        pass
     (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     print(f"Lifecycle cases: {report['passedCaseCount']}/{report['expectedCaseCount']} passed", flush=True)
     return 0 if report['success'] else 1

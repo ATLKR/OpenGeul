@@ -34,6 +34,7 @@ _ascii_spec = importlib.util.spec_from_file_location(
 ascii_input = importlib.util.module_from_spec(_ascii_spec)
 _ascii_spec.loader.exec_module(ascii_input)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import numeric_notice
 import calc_model_barrier
 from scenario_editor_shortcuts import FirstAdmissionEditorSession
 from owned_control_actions import click_owned_control, send_host_menu_shortcut, send_owned_dialog_escape
@@ -566,10 +567,24 @@ def wait_saved_marker(source, marker, before_sha256, deadline, record):
 
 
 def write_result(output, name, record):
-    (output / (name + '-result.json')).write_text(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    try:
+        (output / (name + '-result.json')).write_text(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    except Exception as exc:
+        try:
+            if numeric_notice.notices_enabled():
+                record.setdefault('numericFailure', numeric_notice.capture_failure_code(exc))
+        except Exception: pass
+        raise
+    finally:
+        try: numeric_notice.emit_case_notice(name, record)
+        except Exception: pass
 
 
 def capture_failure(output, name, record, exc):
+    try:
+        if numeric_notice.notices_enabled():
+            record.setdefault('numericFailure', numeric_notice.capture_failure_code(exc))
+    except Exception: pass
     record.update(success=False, error=type(exc).__name__ + ': ' + str(exc),
                   traceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     try:
@@ -1433,6 +1448,10 @@ def collect_cases(cases, output):
                     if not isinstance(record, dict): raise ValueError('Case record must be an object')
                 except Exception as read_error:
                     record = {'recordReadError': type(read_error).__name__ + ': ' + str(read_error)}
+            try:
+                if numeric_notice.notices_enabled():
+                    record.setdefault('numericFailure', numeric_notice.capture_failure_code(exc))
+            except Exception: pass
             record.update(success=False, caseException=type(exc).__name__ + ': ' + str(exc),
                           caseTraceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
             record.setdefault('error', record['caseException'])

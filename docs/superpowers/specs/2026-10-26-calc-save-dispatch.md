@@ -62,6 +62,23 @@ keyboard sidecars. The existing generated-fixture setup and model-reader IPC
 continue to verify the original behavior; they are outside the retained
 diagnostic artifact allowlist. Never supply user documents to this case.
 
+For new executions, an explicit product-step opt-in may also publish a closed
+numeric observation as a GitHub check annotation. This creates new telemetry;
+it never reads or republishes denied artifact or log data. Use static titles,
+validated public source/run provenance, numeric case/stage/exception and owned
+source-file IDs, line numbers, and selected existing observations. Presence bits
+distinguish missing values from measured zero. Do not include messages, paths,
+formatted tracebacks, keyboard data or document values. Limit case messages to
+2 KiB, validated Calc traces to 32 KiB, two changed case projections and eight
+notices per controller. Telemetry failures preserve the original result and
+cleanup. Unit-test steps do not enable the opt-in. A failed annotation read
+stops that read boundary without another credential or anonymous fallback.
+
+GitHub documents the [notice command](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-a-notice-message)
+and [annotation read API](https://docs.github.com/en/rest/checks/runs#list-check-run-annotations).
+The existing credential passed a check-run metadata read; the first new notice
+round trip still needs actual Windows verification.
+
 Interpret the numeric trace alongside the original input/save oracle and
 confirmed process-exit evidence. Validate native nesting, generation/deadline
 rejection, event publication, ABI, cleanup failures, and artifact isolation

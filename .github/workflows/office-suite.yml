@@ -421,6 +421,9 @@ jobs:
       id: calc-dispatch-diagnostic
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && steps.calc-dispatch-inputs.outcome == 'success'"
       env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '9'
+        OPENGEUL_SUITE_CALC_TRACE_NOTICE: '1'
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-calc-dispatch-worker-diagnostics
       shell: pwsh
       run: |
@@ -623,6 +626,9 @@ jobs:
         if-no-files-found: error
     - name: Enter 없이 실제 Calc Ctrl+W 저장·버림·취소 관측
       id: calc-close
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '1'
       shell: pwsh
       run: |
         python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close
@@ -661,6 +667,9 @@ jobs:
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
     - name: Home 타일·파일 열기·공통 문서 메뉴 25개 실제 입력
       id: home-routes
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '2'
       shell: pwsh
       run: |
         $package = (Resolve-Path $env:SUITE_PACKAGE).Path
@@ -705,6 +714,8 @@ jobs:
         if-no-files-found: error
     - name: 실제 한국어 조합·백스페이스·저장·재열기
       env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '3'
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
@@ -724,6 +735,8 @@ jobs:
         if-no-files-found: error
     - name: 한국어 탭 메뉴의 실제 접근성·화면 확인
       env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '4'
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
@@ -740,6 +753,8 @@ jobs:
         if-no-files-found: error
     - name: 실제 Writer 제목 1 단축키·저장·독립 재열기
       env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '5'
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
@@ -756,6 +771,8 @@ jobs:
         if-no-files-found: error
     - name: 저장·취소·실패·창 복원·HWP 실행 수명 검사
       env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '6'
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
@@ -792,6 +809,8 @@ jobs:
         if-no-files-found: error
     - name: 첫 번째 전체 Suite GUI·편집 후 의미 검증
       env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '7'
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
@@ -803,6 +822,8 @@ jobs:
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: 새 문서 집합으로 전체 UI·E2E를 두 번째 독립 실행
       env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '8'
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |

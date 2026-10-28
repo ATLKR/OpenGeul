@@ -34,6 +34,7 @@ import ime_thread_mode as native_mode
 from ime_keyboard_session import IMEKeyboardSession
 from ime_calc_setup import observe_calc_setup
 from ime_semantic_context import observe_ime_semantic_setup
+import numeric_notice
 
 EXPECTED_KEYS = list('gksrmf') + ['BACKSPACE', 'f', 'RIGHT']
 SCANS = dict(zip('qwertyuiopasdfghjklzxcvbnm',
@@ -1925,6 +1926,11 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         if observer is not None: retain_ime_message_diagnostics(record, observer)
         if diagnose_focus or calc_dispatch_transport is not None:
             import traceback
+            if calc_dispatch_transport is not None:
+                try:
+                    if numeric_notice.notices_enabled():
+                        record.setdefault('numericFailure', numeric_notice.capture_failure_code(exc))
+                except Exception: pass
             record.update(success=False,error=type(exc).__name__+': '+str(exc),
                 traceback=''.join(traceback.format_exception(type(exc),exc,exc.__traceback__)),
                 failureScreenshotSkipped=('focus-diagnostic-local-only-after-failure' if diagnose_focus
@@ -2139,11 +2145,20 @@ def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,pro
 def calc_dispatch_report(record):
     """Keep the diagnostic artifact separate from synthetic edit text/tracebacks."""
     trace = record.get('calcDispatchDiagnostic')
-    return dict(schemaVersion=1,kind='calc-save-dispatch-diagnostic',acceptanceEligible=False,
+    report = dict(schemaVersion=1,kind='calc-save-dispatch-diagnostic',acceptanceEligible=False,
         fullEngineQualified=False,imeVerified=False,expectedCaseCount=1,
         originalSaveOracle=record.get('calcDispatchOracle',dict(saveAttempted=False,saveReturned=False,savedMarkerObserved=False)),
         diagnostic=trace, shell=record.get('calcDispatchShell'),
         localCleanup=record.get('calcDispatchLocalCleanup',dict(errors=[5],withinDeadline=False)))
+    try:
+        if numeric_notice.notices_enabled():
+            report['numericOracleObserved'] = type(record.get('calcDispatchOracle')) is dict
+            snapshot = numeric_notice.capture_calc_snapshot(record)
+            if snapshot is not None: report['numericCaseSnapshot']=snapshot
+            if 'numericFailure' in record:
+                report['numericFailure'] = numeric_notice.validate_failure_code(record['numericFailure'])
+    except Exception: pass
+    return report
 
 
 def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architecture, binding):
@@ -2177,7 +2192,11 @@ def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architectur
         and not cleanup.get('errors') and not report['localCleanup']['errors']
         and report['localCleanup']['withinDeadline'])
     report['success'] = success
-    (output/'results.json').write_text(json.dumps(report,indent=2,allow_nan=False),encoding='utf-8')
+    try:
+        (output/'results.json').write_text(json.dumps(report,indent=2,allow_nan=False),encoding='utf-8')
+    finally:
+        try: numeric_notice.emit_calc_report(report)
+        except Exception: pass
     return 0 if success else 1
 
 

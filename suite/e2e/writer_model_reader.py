@@ -905,6 +905,15 @@ def require_model_reader_cleanup(cleanup,binding,deadline,*,expected_service,get
     return _require_physical_cleanup(cleanup,binding,deadline,contract=contract)
 
 
+def _numeric_failure_code(exc):
+    try:
+        from numeric_notice import notices_enabled, capture_failure_code, validate_failure_code
+        if notices_enabled(): return validate_failure_code(capture_failure_code(exc))
+    except BaseException:
+        pass  # Optional metadata must not replace the original reader failure.
+    return None
+
+
 class ReaderBackendError(AssertionError):
     def __init__(self,raw):
         self.raw=raw
@@ -1630,12 +1639,14 @@ class OwnedWriterReader:
     def _record_failure(self,exc):
         self.failed=True
         if self.first_error is None:
+            numeric_failure=_numeric_failure_code(exc)
             self.first_error=dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None),traceback=traceback.format_exc(),
                 attemptedObservation=self.attempted_observation,nativeSnapshot=getattr(self.anchor,'last_snapshot',getattr(exc,'native_snapshot',None)),
                 **_member_samples_receipt(self.member_state_samples),
                 **self._census_receipt(),jobCensusError=getattr(exc,'job_census',None),
                 nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None),systemConsoleDiagnostic=getattr(exc,'system_console_diagnostic',None),
                 systemConsoleClosure=getattr(exc,'system_console_closure',None),helperLaunch=self.helper_launch or getattr(exc,'helper_launch',None))
+            if numeric_failure is not None:self.first_error['numericFailure']=numeric_failure
             try:
                 if self.output.exists():_atomic_json(self.output/'failure.json',self.first_error)
             except BaseException as later:self.auxiliary_errors.append(dict(stage='retain-primary-error',type=type(later).__name__,message=str(later)))
@@ -1816,6 +1827,7 @@ def _helper(directory,*,explicit_model=False):
                         readCallCleanupSucceeded=True,readerStillRetained=True,operations=list(contract.operations))
                     reply.update(ok=True,observation=observation)
             except BaseException as exc:
+                numeric_failure=_numeric_failure_code(exc)
                 failed=True;reply['error']=dict(type=type(exc).__name__,message=str(exc),winerror=getattr(exc,'winerror',None),traceback=traceback.format_exc(),
                     attemptedObservation=observation,nativeSnapshot=getattr(anchor,'last_snapshot',getattr(exc,'native_snapshot',None)),
                     unoSnapshot=getattr(reader,'last_snapshot',getattr(exc,'uno_snapshot',None)),frameEnumeration=getattr(reader,'last_frames',getattr(exc,'frame_enumeration',None)),
@@ -1826,6 +1838,7 @@ def _helper(directory,*,explicit_model=False):
                     impressDiscoveryDiagnostic=getattr(exc,'impress_discovery_diagnostic',None),
                     impressFocusedViewDiagnostic=getattr(exc,'impress_focused_view_diagnostic',None),
                     observerProxiesReleased=getattr(exc,'observer_proxies_released',None),pythonIdentity=identity,nativeHandleClosures=getattr(exc,'native_handle_closures',None),profileDirectoryDiagnostic=getattr(exc,'profile_directory_diagnostic',None),profileDirectoryClosure=getattr(exc,'profile_directory_closure',None))
+                if numeric_failure is not None:reply['error']['numericFailure']=numeric_failure
                 selection_capture=getattr(reader,'calc_selection_capture',None)
                 if selection_capture:
                     # Returned count/address facts precede every assertion. Keep
