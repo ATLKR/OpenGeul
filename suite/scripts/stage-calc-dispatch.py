@@ -11,10 +11,12 @@ from pathlib import Path
 import shutil
 import stat
 import sys
+import tempfile
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from suite import payload
+from suite.runtime_branding import brand_runtime
 
 MARKER = 'program/opengeul-calc-dispatch-diagnostic.json'
 OVERLAY = 'calc-dispatch-diagnostic.json'
@@ -132,17 +134,19 @@ def stage(*, baseline, archive, receipt, output, expected_engine_source_commit, 
         # Mark the fresh copy before extracting any diagnostic executable, so
         # an interrupted extraction cannot become an ordinary package candidate.
         (output/OVERLAY).write_text(json.dumps(overlay, indent=2)+'\n', encoding='utf-8')
-        office = output/'Office'; office.mkdir()
-        for entry in entries:
-            target = office/entry.filename.rstrip('/')
-            if entry.is_dir(): target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zipped.open(entry) as source, target.open('xb') as destination:
-                    shutil.copyfileobj(source, destination, 1024*1024)
-                if target.stat().st_size != entry.file_size:
-                    raise ValueError('Diagnostic extracted member size changed')
-        shutil.copyfile(baseline/'Office/opengeul-branding.json', office/'opengeul-branding.json')
+        with tempfile.TemporaryDirectory(prefix='raw-runtime-', dir=output) as extracted:
+            raw = Path(extracted)
+            for entry in entries:
+                target = raw/entry.filename.rstrip('/')
+                if entry.is_dir(): target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zipped.open(entry) as source, target.open('xb') as destination:
+                        shutil.copyfileobj(source, destination, 1024*1024)
+                    if target.stat().st_size != entry.file_size:
+                        raise ValueError('Diagnostic extracted member size changed')
+            # Apply the ordinary package configuration and write this runtime's own receipt.
+            brand_runtime(raw, output/'Office', payload._json(baseline/'suite-product.json'))
     if (payload._hash(archive) != expected_archive_sha256
             or payload._hash(receipt) != expected_receipt_sha256):
         raise ValueError('Diagnostic source inputs changed during staging')

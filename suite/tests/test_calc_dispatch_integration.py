@@ -12,10 +12,12 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 import zipfile
 
 from suite import payload
-from suite.tests.test_payload import PayloadFixture, pe
+from suite.tests.test_payload import PayloadFixture, pe, canonical
+from suite.tests.test_branding import make_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'suite/e2e'))
@@ -41,6 +43,9 @@ class ArtifactTests(unittest.TestCase):
     def setUp(self):
         self.m = load_stage()
         self.f = PayloadFixture(); self.f.setUp(); self.addCleanup(self.f.doCleanups)
+        self.f.product = json.loads((ROOT/'suite/config/product.json').read_bytes())
+        self.f.product['version'] = self.f.provenance['version']
+        self.f.branding['manifestSha256'] = hashlib.sha256(canonical(self.f.product)).hexdigest()
         self.f.provenance['architecture'] = 'arm64'
         self.f.provenance['hwp'] = dict(sha256='4'*64, url='https://example.org/hwp.zip')
         for name in ('OpenGeul.Office.exe', 'Office/program/soffice.exe',
@@ -57,9 +62,26 @@ class ArtifactTests(unittest.TestCase):
         self.marker = dict(schemaVersion=1, kind='calc-save-dispatch-diagnostic',
             acceptanceEligible=False, fullEngineQualified=False,
             sourceCommit='b'*40, sourceLockSha256='c'*64)
-        self.entries = {'program/soffice.bin': pe(0xaa64), 'program/soffice.exe': pe(0xaa64),
-            'program/python.exe': pe(0xaa64),
-            'program/opengeul-calc-dispatch-diagnostic.json': json.dumps(self.marker).encode()}
+        # The established generated upstream fixture has Default toolbar mode;
+        # its locale registry excerpt is copied from the pinned installed runtime.
+        self.raw_runtime = self.f.root.parent/'raw-runtime'
+        make_runtime(self.raw_runtime)
+        registry = self.raw_runtime/'share/registry/main.xcd'
+        tree = ET.parse(registry)
+        namespace = '{http://openoffice.org/2001/registry}'
+        toolbar = next(node for node in tree.iter(namespace+'component-data')
+                       if node.get(namespace+'name')=='ToolbarMode')
+        # Complete the generated fixture with the existing global properties
+        # read by both canonical branding and the worker's mode admission.
+        for name in ('Writer','Calc','Impress','Draw'):
+            prop = ET.SubElement(toolbar,'prop',{namespace+'name':'Active'+name})
+            ET.SubElement(prop,'value').text = 'Default'
+        tree.write(registry,encoding='utf-8',xml_declaration=True)
+        for name in ('soffice.bin','soffice.exe','python.exe'):
+            (self.raw_runtime/'program'/name).write_bytes(pe(0xaa64))
+        (self.raw_runtime/self.m.MARKER).write_text(json.dumps(self.marker))
+        self.entries = {path.relative_to(self.raw_runtime).as_posix():path.read_bytes()
+                        for path in self.raw_runtime.rglob('*') if path.is_file()}
         self.write_inputs()
 
     def write_inputs(self):
@@ -100,6 +122,55 @@ class ArtifactTests(unittest.TestCase):
             payload.verify_payload(self.output, fresh)
         self.assertEqual(ime.require_calc_dispatch_suite(self.output, fresh,
             expected_engine_source_commit='b'*40), result)
+
+    def worker_style_contract(self, runtime):
+        from suite.tests.test_worker import bootstrap_services
+        import importlib
+        worker = importlib.import_module('native')
+        namespace = '{http://openoffice.org/2001/registry}'
+        component = next(node for node in ET.parse(runtime/'share/registry/main.xcd').iter(namespace+'component-data')
+                         if node.get(namespace+'package')=='org.openoffice.Office.UI' and node.get(namespace+'name')=='ToolbarMode')
+        class Configuration:
+            def __init__(self, node): self.node = node
+            def getByName(self, name):
+                return Configuration(next(node for node in self.node.findall('node') if node.get(namespace+'name')==name))
+            def getPropertyValue(self, name):
+                node = next(node for node in self.node.findall('prop') if node.get(namespace+'name')==name)
+                value = node.find('value').text
+                return {'true':True,'false':False}.get(value, value)
+        services, _, _, _ = bootstrap_services([])
+        services['com.sun.star.configuration.ConfigurationProvider'].createInstanceWithArguments = lambda *args:Configuration(component)
+        backend = worker.UnoBackend(runtime)
+        backend.uno = SimpleNamespace(createUnoStruct=lambda name:SimpleNamespace())
+        return backend._isolate_legacy_style_controls(services.__getitem__, self.f.product['modules']['calc'])
+
+    def test_diagnostic_runtime_applies_real_branding_before_actual_worker_style_gate(self):
+        from suite.tests import test_worker  # Establish the worker's existing import boundary.
+        from session import WorkerError
+        with self.assertRaises(WorkerError) as rejected:
+            self.worker_style_contract(self.raw_runtime)
+        self.assertEqual('ui_style_isolation_failed', rejected.exception.code)
+        baseline = payload._scan(self.f.root)
+        inputs = (self.archive.read_bytes(), self.receipt.read_bytes())
+        self.stage()
+        office = self.output/'Office'
+        mode = self.worker_style_contract(office)['mode']
+        self.assertEqual(dict(active='notebookbar.ui',globalActive='notebookbar.ui',
+                              tabbedCommandArg='notebookbar.ui',hasNotebookbar=True), mode)
+        self.assertEqual(baseline, payload._scan(self.f.root))
+        self.assertEqual(inputs, (self.archive.read_bytes(),self.receipt.read_bytes()))
+        self.assertFalse(any(path.name.startswith('raw-runtime-') for path in self.output.iterdir()))
+        for name in ('program/soffice.bin','program/soffice.exe','program/python.exe',self.m.MARKER,'LICENSE','NOTICE'):
+            self.assertEqual(self.entries[name], (office/name).read_bytes())
+        branding = json.loads((office/'opengeul-branding.json').read_bytes())
+        self.assertNotEqual(self.f.branding, branding)
+        self.assertEqual(self.f.read('runtime-branding.json'), (self.output/'runtime-branding.json').read_bytes())
+        originals = {name:hashlib.sha256(value).hexdigest() for name,value in self.entries.items()}
+        self.assertEqual(hashlib.sha256(canonical(originals)).hexdigest(), branding['inputTreeSha256'])
+        self.assertIn('share/registry/main.xcd',branding['modifiedFiles'])
+        for name, change in branding['modifiedFiles'].items():
+            self.assertEqual(originals.get(name),change['beforeSha256'])
+            self.assertEqual(sha(office/name),change['sha256'])
 
     def test_complete_baseline_verification_precedes_any_diagnostic_input(self):
         self.f.write('worker/session.py', b'changed baseline')
@@ -168,6 +239,20 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError,'synthetic interruption'): self.stage()
         self.assertIs(json.loads((self.output/'calc-dispatch-diagnostic.json').read_bytes())['acceptanceEligible'],False)
         self.assertEqual(payload._scan(self.f.root),self.inventory['files'])
+
+    def test_real_branding_failure_keeps_diagnostic_marker_and_cleans_only_fresh_runtime(self):
+        self.entries.pop('share/registry/localization.xcd')
+        self.write_inputs()
+        inputs = (self.archive.read_bytes(),self.receipt.read_bytes())
+        with self.assertRaisesRegex(ValueError,'Korean UI language'):
+            self.stage()
+        self.assertIs(json.loads((self.output/self.m.OVERLAY).read_bytes())['acceptanceEligible'],False)
+        self.assertEqual(payload._scan(self.f.root),self.inventory['files'])
+        self.assertEqual(inputs,(self.archive.read_bytes(),self.receipt.read_bytes()))
+        self.assertFalse((self.output/'Office').exists())
+        self.assertFalse(any(path.name.startswith('raw-runtime-') for path in self.output.iterdir()))
+        with self.assertRaisesRegex(ValueError,'Missing required Suite payload files'):
+            payload.verify_payload(self.output,payload._json(self.output/payload.INVENTORY))
 
     def test_cli_requires_explicit_dispatch_mode_and_rejects_mixed_modes(self):
         self.stage()
