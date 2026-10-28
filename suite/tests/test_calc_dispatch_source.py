@@ -207,6 +207,26 @@ class CalcDispatchSourceTests(unittest.TestCase):
 
 
 class CalcDispatchBuildTests(unittest.TestCase):
+    def test_source_gate_override_reaches_only_real_child_and_retains_guard(self):
+        source = self.root/"owned source's tree"
+        source.mkdir()
+        child = self.root/'source-child.py'
+        child.write_text("import os,pathlib,sys\nprint(pathlib.Path(os.environ['OPENGEUL_CALC_DISPATCH_SOURCE_ROOT']).samefile(sys.argv[1]))\n")
+        output = self.ps(f"""
+$before=[Environment]::GetEnvironmentVariable('OPENGEUL_CALC_DISPATCH_SOURCE_ROOT')
+$r=Invoke-LoggedCommand {quote(os.sys.executable)} @({quote(child)},{quote(source)}) {quote(self.root)} {quote(self.root/'gate')} -TimeoutMinutes 0.1 -EnvironmentOverrides @{{OPENGEUL_CALC_DISPATCH_SOURCE_ROOT={quote(source)}}}
+if([Environment]::GetEnvironmentVariable('OPENGEUL_CALC_DISPATCH_SOURCE_ROOT') -cne $before){{throw 'Controller environment changed'}}
+Get-Content -LiteralPath $r.stdout
+""")
+        self.assertEqual(output.splitlines()[-1], 'True')
+        receipt=json.loads((self.root/'gate.command.json').read_text())
+        self.assertEqual(set(receipt['environmentOverrideSha256']), {'OPENGEUL_CALC_DISPATCH_SOURCE_ROOT'})
+        self.assertTrue(receipt['passed'])
+        for key,value in (('OTHER','synthetic'),('OPENGEUL_CALC_DISPATCH_SOURCE_ROOT','relative'),
+                          ('OPENGEUL_CALC_DISPATCH_SOURCE_ROOT',str(child))):
+            prefix=self.root/('reject-'+key+('-file' if value==str(child) else ''))
+            self.ps(f"$rejected=$false;try{{Invoke-LoggedCommand {quote(os.sys.executable)} @('-c','pass') {quote(self.root)} {quote(prefix)} -EnvironmentOverrides @{{{key}={quote(value)}}}}}catch{{$rejected=$true}};if(-not $rejected){{throw 'Invalid child override admitted'}}")
+
     def setUp(self):
         self.assertTrue(Path(PWSH).is_file(), 'PowerShell boundary tests require the selected validation environment')
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup); self.root = Path(tmp.name).resolve()

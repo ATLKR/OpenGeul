@@ -415,12 +415,15 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         $info.UseShellExecute=$false;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
         foreach($argument in $Arguments) {$info.ArgumentList.Add($argument)}
         if($EnvironmentOverrides.Count) {
-            # Only these two explicitly selected loader values may differ.
-            # Retain their digests without dumping the inherited host PATH.
             $receipt.environmentOverrideSha256=[ordered]@{}
             foreach($name in $EnvironmentOverrides.Keys) {
-                if($name -cnotin @('PATH','FIREBIRD') -or $EnvironmentOverrides[$name] -isnot [string] -or $EnvironmentOverrides[$name].Contains([char]0)) {throw 'Unsupported child environment override.'}
+                if($name -cnotin @('PATH','FIREBIRD','OPENGEUL_CALC_DISPATCH_SOURCE_ROOT') -or $EnvironmentOverrides[$name] -isnot [string] -or $EnvironmentOverrides[$name].Contains([char]0)) {throw 'Unsupported child environment override.'}
                 $value=$EnvironmentOverrides[$name]
+                if($name -ceq 'OPENGEUL_CALC_DISPATCH_SOURCE_ROOT') {
+                    if(-not [IO.Path]::IsPathFullyQualified($value)) {throw 'Diagnostic source override requires an absolute owned directory.'}
+                    Assert-UnlinkedPath $value
+                    if(-not (Get-Item -LiteralPath $value -ErrorAction Stop).PSIsContainer) {throw 'Diagnostic source override requires an owned directory.'}
+                }
                 $info.Environment[$name]=$value
                 $receipt.environmentOverrideSha256[$name]=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($value))).ToLowerInvariant()
             }
