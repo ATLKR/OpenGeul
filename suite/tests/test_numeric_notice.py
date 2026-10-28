@@ -771,6 +771,139 @@ class NumericNoticeTests(unittest.TestCase):
         self.assertEqual(trace['schemaVersion'],1)
         self.assertNotIn('startup',trace)
 
+    def focus_record(self):
+        from suite.tests.test_focus_summary import admitted_record
+        value=admitted_record()
+        value.update(numericFailure=self.failure(),numericFailureFrames=[[21,816],[11,445],[1,389]],success=False)
+        return value
+
+    def test_v4_preserves_atomic_existing_guard_relations_and_progress_without_private_fields(self):
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='9'
+        record=self.focus_record();context=record['imeSemanticContext']
+        context.update(readerStartAttempted=True,observations=[dict(text='PRIVATE')],cleanup=dict(error='PRIVATE'))
+        record['imeKeyboardSession']['lastGuardObservation']['scope']['after']['foreground']=dict(
+            hwnd=123,isWindow=True,pid=999,threadId=99,rootHwnd=123,className='PRIVATE')
+        with patch('os.stat',side_effect=AssertionError('No filesystem observation')), \
+             patch('subprocess.run',side_effect=AssertionError('No process observation')), \
+             patch('time.monotonic',side_effect=AssertionError('No renewed budget')):
+            self.assertTrue(self.emitter.emit_case_notice('ime-calc',record))
+            value=self.decode(self.messages()[0])
+        self.assertEqual(value['schemaVersion'],4)
+        self.assertEqual(value['focus'],[2,5,2,1,1])
+        self.assertEqual(value['ownedFrames'],[[21,816],[11,445],[1,389]])
+        self.assertEqual(tuple(value['observations']),self.n.OBSERVATION_NAMES_V2)
+        self.assertNotIn('startup',value)
+        self.assertNotIn('PRIVATE',self.messages()[0])
+        self.assertNotIn('C:/',self.messages()[0])
+
+    def test_unbound_focus_source_or_capture_preserves_exact_prior_v2_unknown(self):
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='9'
+        for damage in ('source','run','arch','scope','missing','context','injected'):
+            record=self.focus_record();env=dict(self.env)
+            if damage=='source':record['readiness']['source']['sourceCommit']='b'*40
+            elif damage=='run':record['readiness']['source']['sourceRun']='124'
+            elif damage=='arch':record['readiness']['source']['architecture']='x64'
+            elif damage=='scope':env['OPENGEUL_SUITE_NOTICE_SCOPE']='6'
+            elif damage=='missing':record['imeKeyboardSession'].pop('lastGuardObservation')
+            elif damage=='context':record['imeSemanticContext']['expectedNative']['officeCreationTime']+=1
+            else:
+                record['imeKeyboardSession'].pop('lastGuardObservation')
+                record['focus']=[5,5,2,120,1]
+            value=self.n.project_case_notice('ime-calc',record,environ=env)
+            with self.subTest(damage=damage):
+                self.assertEqual(value['schemaVersion'],2)
+                self.assertEqual(tuple(value['observations']),self.n.OBSERVATION_NAMES_V2)
+                self.assertNotIn('focus',value)
+
+    def test_v4_receiver_is_closed_and_rejects_unknown_mixed_or_out_of_range_vectors(self):
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='9'
+        self.emitter.emit_case_notice('ime-calc',self.focus_record())
+        value=json.loads(self.messages()[0]);self.assertEqual(value['schemaVersion'],4)
+        invalids=([2,2,0,0], [2,2,0,0,0,0], [6,2,0,0,0], [True,2,0,0,0],
+                  [2,2,3,0,0], [2,2,0,121,0], [2,2,0,0,2], [2,2,0,-1,0],
+                  [2,2,0,'PRIVATE',0],dict(before=2,after=2))
+        for focus in invalids:
+            with self.subTest(focus=focus),self.assertRaises(ValueError):self.decode(json.dumps(value|dict(focus=focus)))
+        for change in (dict(schemaVersion=3),dict(startup=[0,0,0]),dict(scopeCode=10),
+                       dict(stageCode=self.n.STAGES['physical-dubeolsik-composition'])):
+            with self.subTest(change=change),self.assertRaises(ValueError):self.decode(json.dumps(value|change))
+        changed=copy.deepcopy(value);changed['observations']['imeModeSamples']=1
+        with self.assertRaises(ValueError):self.decode(json.dumps(changed))
+        for version in (1,2,3):
+            old=self.frozen_case_wire(version);old['focus']=[2,2,0,0,0]
+            with self.subTest(version=version),self.assertRaises(ValueError):self.decode(json.dumps(old))
+
+    def test_maximum_legal_v4_wire_fits_existing_two_kibibytes(self):
+        value=self.frozen_case_wire(2)
+        value.update(schemaVersion=4,runId=2**63-1,scopeCode=9,moduleCode=2,caseCode=18,
+            stageCode=self.n.STAGES['verify-post-prefix-editing-context'],exceptionCode=12,
+            fileCode=25,line=10000000,ownedFrames=[[25,10000000]]*8,
+            fieldPresenceMask=(1<<51)-1,focus=[5,5,2,120,1])
+        for key,kind,_ in self.n._FIELDS:
+            value['observations'][key]=1 if kind in ('bool','flag') else (2**64-1 if kind=='u64' else 0xffffffff)
+        value['observations'].update(imeCompositionOrdinal=8,imeCompositionStartEventCount=0xffffffff)
+        message=json.dumps(value,separators=(',',':'))
+        self.assertLessEqual(len(message.encode()),2048)
+        self.n.decode_notice(message,'a'*40,2**63-1,expected_scope=9)
+
+    def test_calc_snapshot_and_final_notice_preserve_v4_focus_after_original_cleanup(self):
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='9';self.env[self.n.TRACE_OPT_IN]='1'
+        record=self.focus_record();record['imeKeyboardSession'].update(engineHandleReleased=True,cleanupErrors=[])
+        record['calcDispatchLocalCleanup']=dict(errors=[],withinDeadline=True)
+        snapshot=self.n.capture_calc_snapshot(record,environ=self.env)
+        self.assertEqual(snapshot['schemaVersion'],4)
+        report=self.trace_report();report['numericCaseSnapshot']=snapshot
+        self.assertEqual(self.emitter.emit_calc_report(report),2)
+        value=self.decode(self.messages()[0]);trace=self.decode(self.messages()[1],title=self.n.TRACE_TITLE)
+        self.assertEqual(value['focus'],[2,2,0,0,0])
+        self.assertEqual(value['observations']['engineHandleReleased'],1)
+        self.assertEqual(trace['schemaVersion'],1)
+        self.assertNotIn('focus',trace)
+
+    def test_actual_calc_keyboard_and_semantic_guard_survive_close_and_final_numeric_roundtrip(self):
+        import test_ime_keyboard_session as keyboard_tests
+        import ime_semantic_context as semantic
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='9';self.env[self.n.TRACE_OPT_IN]='1'
+        fixtures=keyboard_tests.IMEKeyboardSessionTests()
+        with tempfile.TemporaryDirectory() as directory:
+            session,process,binding,api,clock,probe,record=fixtures.fixture(directory,module='calc')
+            try:
+                session.start();session.focus_editor(6.);fixtures.ready(session);fixtures.navigate(session)
+                record.update(case='ime-calc',kind='calc-save-dispatch-diagnostic',imePolicyVersion=4,
+                    architecture='arm64',shellPid=process.pid,editorTid=session.tid,
+                    stage='verify-pre-prefix-editing-context',imeSetupBudget=dict(startedAt=1.,deadline=10.),
+                    readiness=self.focus_record()['readiness'])
+                original_scope=probe.scope_snapshot
+                def foreign_scope(*args):
+                    value=original_scope(*args)
+                    value['after']['foreground']=dict(hwnd=123,isWindow=True,pid=999,
+                        threadId=99,rootHwnd=123,className='PRIVATE')
+                    return value
+                probe.scope_snapshot=foreign_scope
+                with self.assertRaisesRegex(AssertionError,'owned Suite foreground') as failed:
+                    semantic.observe_ime_semantic_setup(process.opengeul_suite_root,
+                        Path(directory)/'synthetic.xlsx',b'synthetic never-read fixture',record,10.,
+                        original_shell=dict(session.shell),expected_native=dict(session.binding),
+                        require_current=lambda:session.require_context_target('imeSemanticContext'),clock=clock)
+                primary=failed.exception
+                record['numericFailure']=self.n.capture_failure_code(primary)
+                # The real session/semantic producers, not a separately shaped
+                # fixture, provide all binding, guard, history and progress data.
+                self.assertEqual(self.n.capture_calc_snapshot(record,environ=self.env)['focus'],[2,5,0,0,0])
+                last_guard=record['imeKeyboardSession']['lastGuardObservation']
+                session.close(primary)
+                self.assertIs(record['imeKeyboardSession']['lastGuardObservation'],last_guard)
+                self.assertEqual(record['imeKeyboardSession']['expectedNative'],session.binding)
+                snapshot=self.n.capture_calc_snapshot(record,environ=self.env)
+                self.assertEqual(snapshot['focus'],[2,5,0,0,0])
+                report=self.trace_report();report['numericCaseSnapshot']=snapshot
+                self.assertEqual(self.emitter.emit_calc_report(report),2)
+                self.assertEqual(self.decode(self.messages()[0])['focus'],[2,5,0,0,0])
+                self.assertEqual(self.decode(self.messages()[0])['observations']['engineHandleReleased'],1)
+            finally:
+                session.close(RuntimeError('Synthetic bounded test disposal'))
+                fixtures.doCleanups()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -130,6 +130,7 @@ _CASE_KEYS = _COMMON | {'moduleCode','caseCode','stageCode','exceptionCode','fil
                        'fieldPresenceMask','observations'}
 _CASE_KEYS_V2 = _CASE_KEYS | {'ownedFrames'}
 _CASE_KEYS_V3 = _CASE_KEYS_V2 | {'startup'}
+_CASE_KEYS_V4 = _CASE_KEYS_V2 | {'focus'}
 _FAILURE_KEYS = {'captured','exceptionCode','fileCode','line'}
 _TRACE_KEYS = _COMMON | {'diagnostic','oracleFlags','oraclePresenceMask'}
 _STARTUP_FAILURES = []  # At most 32 strong references prevent object-id reuse.
@@ -309,6 +310,35 @@ def _mode_summary(record,context):
         return None
 
 
+def _valid_focus(value):
+    return (type(value) is list and len(value)==5 and
+        all(_integer(number,maximum) for number,maximum in zip(value,(5,5,2,120,1))))
+
+
+def _focus_context(case,stage,context):
+    return (stage in (STAGES['verify-pre-prefix-editing-context'],STAGES['verify-post-prefix-editing-context'])
+        and ((context['scopeCode']==SCOPES['korean-ime'] and case in tuple(CASES['ime-'+name][0] for name in ('writer','calc','impress')))
+            or (context['scopeCode']==SCOPES['calc-dispatch'] and context['architecture']==0xaa64 and case==CASES['ime-calc'][0])))
+
+
+def _focus_summary(record,context):
+    try:
+        case=CASES.get(record.get('case'),(0,0))[0]
+        if not _focus_context(case,STAGES.get(record.get('stage'),0),context):return None
+        source=_get(record,('readiness','source'))
+        expected=dict(sourceCommit=context['sourceCommit'],sourceRun=str(context['runId']),
+            runAttempt=str(context['runAttempt']),architecture={0x8664:'x64',0xaa64:'arm64'}[context['architecture']])
+        if type(source) is not dict or any(source.get(key)!=value for key,value in expected.items()):return None
+        if __package__:
+            from .focus_summary import project
+        else:
+            from focus_summary import project
+        value=project(record)
+        return list(value) if _valid_focus(value) else None
+    except Exception:
+        return None
+
+
 def _project_case(name, record, context, *, require_failure):
     primary_name = record.get('case') if type(record.get('case')) is str and record['case'] in CASES else name
     if type(primary_name) is not str or primary_name not in CASES: return None
@@ -326,8 +356,9 @@ def _project_case(name, record, context, *, require_failure):
     extended=bool(frames) or _integer(record.get('imeCompositionOrdinal'),8,1) or _integer(record.get('imeCompositionStartEventCount'))
     mode=_mode_summary(record,context)
     startup=_startup_summary(record,context)
-    version=3 if mode is not None or startup[0]>0 else (2 if extended else 1)
-    fields=_FIELDS_V3 if version==3 else (_FIELDS_V2 if extended else _FIELDS)
+    focus=_focus_summary(record,context)
+    version=4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1))
+    fields=_FIELDS_V3 if version==3 else (_FIELDS_V2 if version>=2 else _FIELDS)
     source=dict(record,_imeModeSummary=mode)
     observed, mask = {}, 0
     for index,(key,kind,paths) in enumerate(fields):
@@ -350,6 +381,7 @@ def _project_case(name, record, context, *, require_failure):
         fieldPresenceMask=mask,observations=observed)
     if version>=2: value['ownedFrames']=frames
     if version==3: value['startup']=startup
+    if version==4: value['focus']=focus
     return value
 
 
@@ -388,12 +420,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     limit = {CASE_TITLE:MAX_CASE_BYTES,TRACE_TITLE:MAX_TRACE_BYTES}.get(title)
     if limit is None or type(message) is not str or len(message.encode('utf-8'))>limit: raise ValueError('Notice title/size rejected')
     value = json.loads(message,object_pairs_hook=_unique,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite notice')))
-    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3)
-    keys = (_CASE_KEYS_V3 if extended and value['schemaVersion']==3 else (_CASE_KEYS_V2 if extended else _CASE_KEYS)) if title==CASE_TITLE else _TRACE_KEYS
+    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4)
+    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
     if type(value) is not dict or value.keys()!=keys: raise ValueError('Closed notice schema required')
-    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup'}:
+    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus'}:
         if not _integer(value[key],2**63-1): raise ValueError('Integer notice fields required')
-    if (value['schemaVersion'] not in ((1,2,3) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
+    if (value['schemaVersion'] not in ((1,2,3,4) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
             or not re.fullmatch('[0-9a-f]{40}',value['sourceCommit']) or value['sourceCommit']=='0'*40
             or value['sourceCommit']!=expected_source_commit or value['runId']!=expected_run_id or value['runId']<=0
             or value['runAttempt']!=expected_run_attempt or value['runAttempt']!=1
@@ -437,6 +469,9 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
                 or (mode_mask and not _valid_mode_summary({key:observations[key] for key in _MODE_NAMES}))
                 or (not mode_mask and not value['startup'][0])):
             raise ValueError('Mode samples or observed startup tuple required')
+    if value['schemaVersion']==4 and (not _valid_focus(value['focus'])
+            or not _focus_context(value['caseCode'],value['stageCode'],value)):
+        raise ValueError('Bounded existing-focus context required')
     return value
 
 

@@ -86,8 +86,19 @@ unittest discovery, logs and exit codes, including an empty-run exit of five.
 
 GitHub documents the [notice command](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-a-notice-message)
 and [annotation read API](https://docs.github.com/en/rest/checks/runs#list-check-run-annotations).
-The existing credential passed a check-run metadata read; the first new notice
-round trip still needs actual Windows verification.
+The existing credential verified the new notice round trip on Windows.
+Run 40724862643 at
+`b0e15e666a90e75ba60ec4f55ae4475c37dde1e9` produced closed unit, case and
+Calc-trace notices whose complete annotation counts matched the finished job.
+That run attached Calc but failed the existing foreground-ownership guard
+before save; it supplies no native save or retained-engine-exit proof.
+
+When such a guard fails, keep the original owned source-frame locations and a
+bounded numeric projection of its already captured before/after foreground
+ownership and semantic-reader progress. An attempted reader start is not a
+process-start proof; a returned observation or cleanup field is not evidence
+that the reader changed foreground. Do not query the target again or weaken
+the guard to obtain a later dispatch trace.
 
 Interpret the numeric trace alongside the original input/save oracle and
 confirmed process-exit evidence. Validate native nesting, generation/deadline

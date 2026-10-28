@@ -453,6 +453,19 @@ class SaveIntegrationTests(unittest.TestCase):
         self.assertGreater(receipt['finishedAt'], receipt['saveDeadline'])
         self.assertLess(receipt['finishedAt'], record['imeSaveBudget']['deadline'])
 
+    def test_original_calc_failure_keeps_owned_frames_without_input_or_extra_target_reads(self):
+        with patch.object(ime.numeric_notice, 'notices_enabled', return_value=True):
+            phases, record, result, error, calls = self._run_original_case(fail_marker=True)
+        self.assertIsInstance(error, AssertionError)
+        self.assertIsNone(result)
+        frames = record.get('numericFailureFrames')
+        self.assertIsInstance(frames, list)
+        self.assertTrue(frames)
+        self.assertEqual(frames, ime.numeric_notice.validate_failure_frames(frames))
+        self.assertIn(ime.numeric_notice.SOURCE_FILES['korean_ime_smoke.py'], [row[0] for row in frames])
+        self.assertEqual(phases.count('CTRL_S'), 1)
+        self.assertEqual(calls, ['child-env', 'arm', 'transport-close', 'dispose'])
+
     def test_original_oracle_failure_cannot_hide_swallowed_native_close_errors(self):
         phases,record,result,error,calls=self._run_original_case(fail_marker=True,swallowed_close_failure=True)
         self.assertRegex(str(error),'synthetic marker deadline')

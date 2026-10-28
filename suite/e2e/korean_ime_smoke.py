@@ -1932,6 +1932,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                 try:
                     if numeric_notice.notices_enabled():
                         record.setdefault('numericFailure', numeric_notice.capture_failure_code(exc))
+                        record.setdefault('numericFailureFrames', numeric_notice.capture_failure_frames(exc))
                 except Exception: pass
             record.update(success=False,error=type(exc).__name__+': '+str(exc),
                 traceback=''.join(traceback.format_exception(type(exc),exc,exc.__traceback__)),
