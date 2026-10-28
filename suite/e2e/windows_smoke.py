@@ -286,7 +286,14 @@ class Windows:
             owner = self.user.GetWindow(hwnd, 4)
             if not owner or not self.user.IsWindow(owner) or self.user.GetAncestor(owner, 2) != owner: continue
             if is_owned_startup_error(self.pid(hwnd), process.pid, self.pid(owner), caption, self.class_name(hwnd)):
-                raise AssertionError(f'Owned Suite startup-error dialog HWND {int(hwnd)} owner {int(owner)}; inspect case stderr log')
+                failure=AssertionError(f'Owned Suite startup-error dialog HWND {int(hwnd)} owner {int(owner)}; inspect case stderr log')
+                try:
+                    if numeric_notice.notices_enabled():
+                        import startup_diagnostics
+                        startup_diagnostics.attach(failure,startup_diagnostics.receive(self,process,hwnd,owner))
+                except Exception:
+                    pass
+                raise failure
         for hwnd in windows:
             parent = self.user.GetPropW(hwnd, 'OpenGeul.Office.ParentHwnd')
             child = self.user.GetPropW(hwnd, 'OpenGeul.Office.ChildHwnd')
@@ -585,6 +592,8 @@ def capture_failure(output, name, record, exc):
         if numeric_notice.notices_enabled():
             record.setdefault('numericFailure', numeric_notice.capture_failure_code(exc))
             record.setdefault('numericFailureFrames', numeric_notice.capture_failure_frames(exc))
+            startup=numeric_notice.captured_startup(record)
+            if startup[0]>0:record.setdefault('numericStartupDiagnostic',startup)
     except Exception: pass
     record.update(success=False, error=type(exc).__name__ + ': ' + str(exc),
                   traceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))

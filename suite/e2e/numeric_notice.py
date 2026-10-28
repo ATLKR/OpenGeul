@@ -121,12 +121,18 @@ _FIELDS_V2 = _FIELDS + (
     ('imeCompositionStartEventCount','u32',(('imeCompositionStartEventCount',),)),
 )
 OBSERVATION_NAMES_V2 = tuple(row[0] for row in _FIELDS_V2)
+_MODE_NAMES = ('imeModeSamples','imeModeClosed','imeModeAlpha','imeLastOpen','imeLastNative')
+_FIELDS_V3 = _FIELDS_V2 + tuple((name,'sample' if index<3 else 'flag',(('_imeModeSummary',name),))
+    for index,name in enumerate(_MODE_NAMES))
+OBSERVATION_NAMES_V3 = tuple(row[0] for row in _FIELDS_V3)
 _COMMON = {'schemaVersion','kind','sourceCommit','runId','runAttempt','architecture','scopeCode','sequence','remainingBudget'}
 _CASE_KEYS = _COMMON | {'moduleCode','caseCode','stageCode','exceptionCode','fileCode','line',
                        'fieldPresenceMask','observations'}
 _CASE_KEYS_V2 = _CASE_KEYS | {'ownedFrames'}
+_CASE_KEYS_V3 = _CASE_KEYS_V2 | {'startup'}
 _FAILURE_KEYS = {'captured','exceptionCode','fileCode','line'}
 _TRACE_KEYS = _COMMON | {'diagnostic','oracleFlags','oraclePresenceMask'}
+_STARTUP_FAILURES = []  # At most 32 strong references prevent object-id reuse.
 
 
 def _integer(value, maximum=0xffffffff, minimum=0):
@@ -169,20 +175,35 @@ def notices_enabled(environ=None):
 def capture_failure_code(exc):
     # The helper may have captured the original owned location before its IPC
     # wrapper was raised. No message, formatted traceback or proxy data is read.
+    result=None
     if isinstance(exc,BaseException):
         raw = vars(exc).get('raw')
         numeric = _get(raw,('error','numericFailure'))
         try:
-            return validate_failure_code(numeric)
+            result=validate_failure_code(numeric)
         except ValueError:
             pass
-    result = dict(captured=int(isinstance(exc,BaseException)),exceptionCode=EXCEPTIONS.get(type(exc),0),fileCode=0,line=0)
-    trace = exc.__traceback__ if isinstance(exc,BaseException) else None
-    for _ in range(64):
-        if trace is None: break
-        code = _OWNED_FILES.get(os.path.normcase(trace.tb_frame.f_code.co_filename))
-        if code and _integer(trace.tb_lineno,10_000_000,1): result.update(fileCode=code,line=trace.tb_lineno)
-        trace = trace.tb_next
+    if result is None:
+        result = dict(captured=int(isinstance(exc,BaseException)),exceptionCode=EXCEPTIONS.get(type(exc),0),fileCode=0,line=0)
+        trace = exc.__traceback__ if isinstance(exc,BaseException) else None
+        for _ in range(64):
+            if trace is None: break
+            code = _OWNED_FILES.get(os.path.normcase(trace.tb_frame.f_code.co_filename))
+            if code and _integer(trace.tb_lineno,10_000_000,1): result.update(fileCode=code,line=trace.tb_lineno)
+            trace = trace.tb_next
+    try:
+        context=_context(os.environ)
+        if context is not None:
+            for name in ('startup_diagnostics','suite.e2e.startup_diagnostics'):
+                module=sys.modules.get(name)
+                observed=module.project_exception(exc,environ=os.environ) if module is not None else None
+                if (type(observed) is dict and observed.keys()=={'shellPid','startup'}
+                        and _integer(observed['shellPid'],minimum=1) and _valid_startup(observed['startup'],observed=True)):
+                    _STARTUP_FAILURES.append((result,dict(context),observed['shellPid'],tuple(observed['startup'])))
+                    del _STARTUP_FAILURES[:-32]
+                    break
+    except Exception:
+        pass
     return result
 
 
@@ -243,6 +264,51 @@ def project_case_notice(name, record, *, environ=None):
     return _project_case(name,record,context,require_failure=True)
 
 
+def _valid_mode_summary(value):
+    return (type(value) is dict and value.keys()==set(_MODE_NAMES)
+        and _integer(value['imeModeSamples'],128,1)
+        and all(_integer(value[key],128) for key in ('imeModeClosed','imeModeAlpha'))
+        and value['imeModeClosed']+value['imeModeAlpha']<=value['imeModeSamples']
+        and all(_integer(value[key],1) for key in ('imeLastOpen','imeLastNative')))
+
+
+def _valid_startup(value,*,observed=False):
+    if type(value) is not list or len(value)!=3 or any(type(v) is not int for v in value):return False
+    if value==[0,0,0]:return not observed
+    phase,reason,native=value
+    return (phase in (1,2,3) and reason in (*range(28),*range(32,39))
+        and native in (0,2,3,5,8,14,32,87,126,127,193,216,740))
+
+
+def _startup_summary(record,context):
+    for failure,captured,pid,startup in reversed(_STARTUP_FAILURES):
+        if (record.get('numericFailure') is failure and context==captured
+                and type(record.get('shellPid')) is int and record['shellPid']==pid):return list(startup)
+    return [0,0,0]
+
+
+def captured_startup(record,*,environ=None):
+    """Retain only an actual private receipt associated with this failure object."""
+    context=_context(os.environ if environ is None else environ)
+    return _startup_summary(record,context) if context is not None and type(record) is dict else [0,0,0]
+
+
+def _mode_summary(record,context):
+    try:
+        source=_get(record,('readiness','source'))
+        expected=dict(sourceCommit=context['sourceCommit'],sourceRun=str(context['runId']),
+            runAttempt=str(context['runAttempt']),architecture={0x8664:'x64',0xaa64:'arm64'}[context['architecture']])
+        if type(source) is not dict or any(source.get(key)!=value for key,value in expected.items()): return None
+        if __package__:
+            from .ime_mode_summary import project
+        else:
+            from ime_mode_summary import project
+        value=project(record)
+        return dict(value) if _valid_mode_summary(value) else None
+    except Exception:
+        return None
+
+
 def _project_case(name, record, context, *, require_failure):
     primary_name = record.get('case') if type(record.get('case')) is str and record['case'] in CASES else name
     if type(primary_name) is not str or primary_name not in CASES: return None
@@ -258,27 +324,32 @@ def _project_case(name, record, context, *, require_failure):
     try: frames=validate_failure_frames(record.get('numericFailureFrames'))
     except ValueError: frames=[]
     extended=bool(frames) or _integer(record.get('imeCompositionOrdinal'),8,1) or _integer(record.get('imeCompositionStartEventCount'))
-    fields=_FIELDS_V2 if extended else _FIELDS
+    mode=_mode_summary(record,context)
+    startup=_startup_summary(record,context)
+    version=3 if mode is not None or startup[0]>0 else (2 if extended else 1)
+    fields=_FIELDS_V3 if version==3 else (_FIELDS_V2 if extended else _FIELDS)
+    source=dict(record,_imeModeSummary=mode)
     observed, mask = {}, 0
     for index,(key,kind,paths) in enumerate(fields):
         values = []
         for path in paths:
-            value = _get(record,path)
+            value = _get(source,path)
             if key=='shellCleanupExitCode' and _get(record,('calcDispatchShell','shellExitObserved')) is not True: value=None
             if kind=='count': value = len(value) if type(value) is list else None
             valid = (type(value) is bool if kind=='bool' else _integer(value,
-                1 if kind=='flag' else (8 if kind=='ordinal' else (2**64-1 if kind=='u64' else 0xffffffff)),
+                1 if kind=='flag' else (8 if kind=='ordinal' else (128 if kind=='sample' else (2**64-1 if kind=='u64' else 0xffffffff))),
                 1 if kind in ('pid','u64','ordinal') else 0))
             if valid:
                 values.append(int(value))
         present = bool(values) and len(set(values))==1
         observed[key] = values[0] if present else 0
         if present: mask |= 1 << index
-    value=dict(schemaVersion=2 if extended else 1,kind=1,**context,moduleCode=module,caseCode=case,
+    value=dict(schemaVersion=version,kind=1,**context,moduleCode=module,caseCode=case,
         stageCode=STAGES.get(record.get('stage'),0) if type(record.get('stage')) is str else 0,
         **{key:failure[key] for key in ('exceptionCode','fileCode','line')},
         fieldPresenceMask=mask,observations=observed)
-    if extended: value['ownedFrames']=frames
+    if version>=2: value['ownedFrames']=frames
+    if version==3: value['startup']=startup
     return value
 
 
@@ -317,12 +388,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     limit = {CASE_TITLE:MAX_CASE_BYTES,TRACE_TITLE:MAX_TRACE_BYTES}.get(title)
     if limit is None or type(message) is not str or len(message.encode('utf-8'))>limit: raise ValueError('Notice title/size rejected')
     value = json.loads(message,object_pairs_hook=_unique,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite notice')))
-    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion']==2
-    keys = (_CASE_KEYS_V2 if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
+    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3)
+    keys = (_CASE_KEYS_V3 if extended and value['schemaVersion']==3 else (_CASE_KEYS_V2 if extended else _CASE_KEYS)) if title==CASE_TITLE else _TRACE_KEYS
     if type(value) is not dict or value.keys()!=keys: raise ValueError('Closed notice schema required')
-    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames'}:
+    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup'}:
         if not _integer(value[key],2**63-1): raise ValueError('Integer notice fields required')
-    if (value['schemaVersion'] not in ((1,2) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
+    if (value['schemaVersion'] not in ((1,2,3) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
             or not re.fullmatch('[0-9a-f]{40}',value['sourceCommit']) or value['sourceCommit']=='0'*40
             or value['sourceCommit']!=expected_source_commit or value['runId']!=expected_run_id or value['runId']<=0
             or value['runAttempt']!=expected_run_attempt or value['runAttempt']!=1
@@ -341,7 +412,7 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
         if value['diagnostic']['identity'] is None and (value['oraclePresenceMask'] or any(flags)):
             raise ValueError('Oracle lacks original native admission')
         return value
-    fields=_FIELDS_V2 if extended else _FIELDS
+    fields=_FIELDS_V3 if value['schemaVersion']==3 else (_FIELDS_V2 if extended else _FIELDS)
     if extended: value['ownedFrames']=validate_failure_frames(value['ownedFrames'])
     if (value['moduleCode'] not in (0,*MODULES.values()) or value['caseCode'] not in tuple(row[0] for row in CASES.values())
             or value['stageCode'] not in (0,*STAGES.values()) or value['exceptionCode'] not in (0,*EXCEPTIONS.values())
@@ -353,13 +424,19 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     observations = value['observations']
     if type(observations) is not dict or observations.keys()!=set(row[0] for row in fields): raise ValueError('Closed notice observations required')
     for index,(key,kind,_) in enumerate(fields):
-        maximum = 1 if kind in ('bool','flag') else (8 if kind=='ordinal' else (2**64-1 if kind=='u64' else 0xffffffff))
+        maximum = 1 if kind in ('bool','flag') else (8 if kind=='ordinal' else (128 if kind=='sample' else (2**64-1 if kind=='u64' else 0xffffffff)))
         if (not _integer(observations[key],maximum) or
                 (kind in ('pid','u64','ordinal') and value['fieldPresenceMask'] & (1<<index) and observations[key]==0) or
                 (not value['fieldPresenceMask'] & (1<<index) and observations[key]!=0)):
             raise ValueError('Notice observation type/presence differs')
-    if extended and not value['ownedFrames'] and not value['fieldPresenceMask'] & (3<<len(_FIELDS)):
+    if value['schemaVersion']==2 and not value['ownedFrames'] and not value['fieldPresenceMask'] & (3<<len(_FIELDS)):
         raise ValueError('Extended case notice lacks observed frames or progress')
+    if value['schemaVersion']==3:
+        mode_mask=value['fieldPresenceMask'] & (31<<len(_FIELDS_V2))
+        if (not _valid_startup(value['startup']) or mode_mask not in (0,31<<len(_FIELDS_V2))
+                or (mode_mask and not _valid_mode_summary({key:observations[key] for key in _MODE_NAMES}))
+                or (not mode_mask and not value['startup'][0])):
+            raise ValueError('Mode samples or observed startup tuple required')
     return value
 
 

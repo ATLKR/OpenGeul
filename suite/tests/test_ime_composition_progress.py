@@ -11,7 +11,7 @@ import test_ime_case_phases as phase_tests
 
 
 class IMECompositionProgressTests(unittest.TestCase):
-    def original_case(self,module,*,fail_at=None,fail_semantic=None):
+    def original_case(self,module,*,fail_at=None,fail_semantic=None,retention=None):
         harness=phase_tests.IMECasePhaseTests();self.addCleanup(harness.doCleanups)
         original=ime.case;trace=[];physical_rows=[];pending_rows=[]
         def run(*args,**kwargs):
@@ -23,6 +23,18 @@ class IMECompositionProgressTests(unittest.TestCase):
                 def __init__(self,*args,**kwargs):
                     super().__init__(*args,**kwargs);current['record']=self.record
             class Observer(observer_boundary):
+                def diagnostics(self):
+                    if retention is None:return super().diagnostics()
+                    snapshot=dict(schemaVersion=1,kind='passive-owned-ime-messages',status='complete',
+                        capacity=128,observedCount=0,events=[])
+                    retention.setdefault('captures',[]).append((list(self.commands),snapshot))
+                    retention.setdefault('order',[]).append('snapshot')
+                    return snapshot
+                def command(self,command,**kwargs):
+                    if retention is not None and command==4:
+                        retention.setdefault('atRestore',[]).append(current['record'].get('imeMessageDiagnostics'))
+                        retention.setdefault('order',[]).append('restore')
+                    return super().command(command,**kwargs)
                 def events(self):
                     result=super().events()
                     if current['record'].get('stage')=='physical-dubeolsik-composition':
@@ -91,3 +103,19 @@ class IMECompositionProgressTests(unittest.TestCase):
         self.assertNotIn('imeCompositionOrdinal',record)
         self.assertNotIn('imeCompositionStartEventCount',record)
         self.assertEqual((trace,physical,pending),([],[],[]))
+
+    def test_original_success_and_pending_failure_retain_first_snapshot_before_restoration(self):
+        for fail_at in (None,4):
+            with self.subTest(fail_at=fail_at):
+                retention={}
+                calls,record,result,error,*_=self.original_case('writer',fail_at=fail_at,retention=retention)
+                if fail_at is None:self.assertIsNone(error,repr(error))
+                else:self.assertIsInstance(error,AssertionError)
+                self.assertEqual(retention['order'],['snapshot','restore'])
+                self.assertEqual(len(retention['captures']),1)
+                commands,snapshot=retention['captures'][0]
+                self.assertEqual([row['command'] for row in commands],[1,2,3])
+                self.assertEqual(len(retention['atRestore']),1)
+                self.assertIs(retention['atRestore'][0],snapshot)
+                self.assertIs(record['imeMessageDiagnostics'],snapshot)
+                self.assertEqual(calls.count(('command',4)),1)

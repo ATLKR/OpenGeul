@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 import unittest
 import tempfile
 from types import SimpleNamespace
@@ -563,6 +564,212 @@ class NumericNoticeTests(unittest.TestCase):
         message=stream.getvalue().strip().split('::',2)[2]
         self.assertLessEqual(len(message.encode()),2048)
         self.n.decode_notice(message,'a'*40,2**63-1,expected_scope=10)
+
+    def frozen_case_wire(self,version):
+        # Freeze the original wire names rather than deriving a compatibility
+        # fixture from whichever schema the implementation currently exports.
+        names=('shellPid,enginePid,officeCreationTime,shellCreationTime,shellExitCode,officeExitCode,'
+            'cleanupShellExitCode,cleanClose,forcedCleanup,forcedCleanupRequired,originalFixtureUnchanged,'
+            'originalCloseVerified,diskOutcomeVerified,packagedUnoVerified,promptVerified,officeExitedAfterCleanup,'
+            'engineHandleReleased,forceRequested,closeShortcutCount,choiceClickCount,saveAttempted,saveReturned,'
+            'savedMarkerObserved,dispatchEntered,dispatchReturned,dispatchOpen,dispatchComplete,processExitProved,'
+            'controllerResourcesReleased,withinDeadline,expectedCaseCount,completedCaseCount,passedCaseCount,'
+            'failedCaseCount,missingCaseCount,duplicateCaseCount,unexpectedCaseCount,baselineFixturesUnchanged,'
+            'packagedUnoExitCode,cleanupErrorCount,diagnosticRunnerPassed,shellExitObserved,shellHandleReleased,'
+            'shellDisposalError,shellCleanupExitCode,retirementClosed,localCleanupErrorCount,'
+            'keyboardCleanupErrorCount,retirementCleanupErrorCount').split(',')
+        value=dict(schemaVersion=version,kind=1,sourceCommit='a'*40,runId=123,runAttempt=1,
+            architecture=0xaa64,scopeCode=1,sequence=1,remainingBudget=7,moduleCode=1,caseCode=2,
+            stageCode=0,exceptionCode=1,fileCode=0,line=0,fieldPresenceMask=0,
+            observations=dict.fromkeys(names,0))
+        if version>=2:
+            value['ownedFrames']=[[13,262]]
+            value['observations'].update(imeCompositionOrdinal=0,imeCompositionStartEventCount=0)
+        if version==3:
+            value['startup']=[0,0,0]
+            value['observations'].update(imeModeSamples=4,imeModeClosed=1,imeModeAlpha=1,imeLastOpen=1,imeLastNative=1)
+            value['fieldPresenceMask']=31<<51
+        return value
+
+    def test_frozen_v1_and_v2_wire_fixtures_still_decode_exactly(self):
+        for version in (1,2):
+            value=self.frozen_case_wire(version)
+            with self.subTest(version=version):self.assertEqual(self.decode(json.dumps(value)),value)
+        self.assertEqual(tuple(self.frozen_case_wire(1)['observations']),self.n.OBSERVATION_NAMES)
+        self.assertEqual(tuple(self.frozen_case_wire(2)['observations']),self.n.OBSERVATION_NAMES_V2)
+
+    def test_v3_closed_wire_requires_all_five_sample_fields_and_preserves_older_keys(self):
+        value=self.frozen_case_wire(3)
+        self.assertEqual(self.decode(json.dumps(value)),value)
+        self.assertEqual(tuple(value['observations']),self.n.OBSERVATION_NAMES_V3)
+        message=json.dumps(value)
+        for malformed in ('{"schemaVersion":3,'+message[1:],message+' '*2049):
+            with self.assertRaises(ValueError):self.decode(malformed)
+        for change in ('partial','zero','overlap','bool','oversize','last','private','old-version'):
+            invalid=copy.deepcopy(value)
+            if change=='partial':invalid['fieldPresenceMask'] &= ~(1<<54)
+            elif change=='zero':invalid['observations']['imeModeSamples']=0
+            elif change=='overlap':invalid['observations'].update(imeModeClosed=4,imeModeAlpha=1)
+            elif change=='bool':invalid['observations']['imeModeSamples']=True
+            elif change=='oversize':invalid['observations']['imeModeSamples']=129
+            elif change=='last':invalid['observations']['imeLastOpen']=2
+            elif change=='private':invalid['observations']['modeText']='PRIVATE'
+            else:invalid['schemaVersion']=2
+            with self.subTest(change=change),self.assertRaises(ValueError):self.decode(json.dumps(invalid))
+
+    def admitted_mode_record(self):
+        import sys
+        sys.path.insert(0,str(SCRIPT.parent))
+        sys.path.insert(0,str(SCRIPT.parents[1]/'tests'))
+        from suite.tests.test_ime_mode_summary import admitted_record
+        value=admitted_record()
+        value.update(numericFailure=self.failure(),numericFailureFrames=[[4,1840]],success=False,
+            imeCompositionOrdinal=3,imeCompositionStartEventCount=8,architecture='arm64')
+        value['readiness']['nativeMachine']=0xaa64
+        value['readiness']['source'].update(sourceRun='123',architecture='arm64')
+        return value
+
+    def test_v3_producer_uses_real_admitted_sample_projection_without_exporting_raw_fields(self):
+        record=self.admitted_mode_record()
+        import ime_mode_summary
+        expected=ime_mode_summary.project(record)
+        self.assertEqual(expected,dict(imeModeSamples=4,imeModeClosed=1,imeModeAlpha=1,imeLastOpen=1,imeLastNative=1))
+        record.update(imeModeSummary=dict(imeModeSamples=128),private=dict(text='PRIVATE',wmChar='PRIVATE'))
+        self.assertTrue(self.emitter.emit_case_notice(record['case'],record))
+        value=self.decode(self.messages()[0])
+        self.assertEqual(value['schemaVersion'],3)
+        self.assertEqual({key:value['observations'][key] for key in expected},expected)
+        self.assertEqual(value['fieldPresenceMask'] & (31<<51),31<<51)
+        self.assertNotIn('PRIVATE',self.messages()[0])
+
+    def test_unadmitted_or_injected_mode_claims_preserve_exact_v2_unknown_projection(self):
+        record=dict(numericFailure=self.failure(),numericFailureFrames=[[4,1840]],
+            imeModeSummary=dict(imeModeSamples=128,imeModeClosed=0,imeModeAlpha=0,imeLastOpen=1,imeLastNative=1))
+        self.emitter.emit_case_notice('ime-writer',record)
+        value=self.decode(self.messages()[0])
+        self.assertEqual(value['schemaVersion'],2)
+        self.assertEqual(len(value['observations']),51)
+        for change in ('ack','generation','source-commit','source-run','source-architecture'):
+            record=self.admitted_mode_record()
+            if change=='ack':next(row for row in record['imeCommands'] if row['command']==3)['acknowledged']=False
+            elif change=='generation':record['imeKeyboardSession']['expectedNative']['officeCreationTime']+=1
+            elif change=='source-commit':record['readiness']['source']['sourceCommit']='b'*40
+            elif change=='source-run':record['readiness']['source']['sourceRun']='124'
+            else:
+                record['architecture']='x64';record['readiness']['nativeMachine']=0x8664
+                record['readiness']['source']['architecture']='x64'
+            value=self.n.project_case_notice(record['case'],record,environ=self.env)
+            with self.subTest(change=change):
+                self.assertEqual(value['schemaVersion'],2)
+                self.assertEqual(len(value['observations']),51)
+
+    def test_maximum_legal_v3_wire_fits_existing_two_kibibytes(self):
+        value=self.frozen_case_wire(3)
+        value.update(runId=2**63-1,scopeCode=10,moduleCode=0,caseCode=58,stageCode=93,
+            exceptionCode=12,fileCode=25,line=10000000,ownedFrames=[[25,10000000]]*8,
+            fieldPresenceMask=(1<<56)-1)
+        for key,kind,_ in self.n._FIELDS:
+            value['observations'][key]=1 if kind in ('bool','flag') else (2**64-1 if kind=='u64' else 0xffffffff)
+        value['observations'].update(imeCompositionOrdinal=8,imeCompositionStartEventCount=0xffffffff,
+            imeModeSamples=128,imeModeClosed=100,imeModeAlpha=28,imeLastOpen=1,imeLastNative=0)
+        value['startup']=[3,38,740]
+        message=json.dumps(value,separators=(',',':'))
+        self.assertLessEqual(len(message.encode()),2048)
+        self.n.decode_notice(message,'a'*40,2**63-1,expected_scope=10)
+
+    def startup_record(self):
+        import test_startup_diagnostics as startup_tests
+        exc=startup_tests.observed_exception(self.env)
+        with patch.dict(os.environ,self.env,clear=True):
+            code=self.n.capture_failure_code(exc)
+        return dict(shellPid=77,numericFailure=code),exc
+
+    def test_actual_startup_receipt_selects_v3_with_mode_fields_unknown(self):
+        record,exc=self.startup_record()
+        record['_imeModeSummary']=dict(imeModeSamples=128,imeModeClosed=100,imeModeAlpha=28,
+            imeLastOpen=1,imeLastNative=0)
+        self.assertTrue(self.emitter.emit_case_notice('ime-calc',record))
+        value=self.decode(self.messages()[0])
+        self.assertEqual(value['schemaVersion'],3)
+        self.assertEqual(value['startup'],[2,14,126])
+        self.assertEqual(value['fieldPresenceMask'] & (31<<51),0)
+        self.assertEqual([value['observations'][key] for key in self.n._MODE_NAMES],[0]*5)
+        self.assertEqual(value['ownedFrames'],[])
+        self.assertNotIn('PRIVATE',self.messages()[0])
+        self.assertNotIn('C:/',self.messages()[0])
+        self.assertEqual(str(exc),'SYNTHETIC PRIVATE startup C:/private/profile')
+
+    def test_v3_startup_closed_tuple_rejects_partial_unknown_bool_and_private_fields(self):
+        value=self.frozen_case_wire(3)
+        value['startup']=[0,0,0]
+        self.decode(json.dumps(value))
+        for startup in ([0,14,126],[4,14,126],[2,28,126],[2,14,1],[2,True,126],
+                [2,14,'private'],[2,14,126,0],dict(phase=2,reason=14,native=126)):
+            with self.subTest(startup=startup):
+                changed=copy.deepcopy(value);changed['startup']=startup
+                with self.assertRaises(ValueError):self.decode(json.dumps(changed))
+        for version in (1,2):
+            old=self.frozen_case_wire(version);old['startup']=[2,14,126]
+            with self.assertRaises(ValueError):self.decode(json.dumps(old))
+        for key in self.n._MODE_NAMES:value['observations'][key]=0
+        value['fieldPresenceMask'] &= ~(31<<51)
+        with self.assertRaises(ValueError):self.decode(json.dumps(value))
+        value['startup']=[2,0,0]
+        self.assertEqual(self.decode(json.dumps(value))['startup'],[2,0,0])
+
+    def test_injected_cloned_foreign_or_stale_startup_claims_stay_unknown(self):
+        record,exc=self.startup_record()
+        record['startup']=[3,38,740]
+        for change in ('raw-only','cloned-failure','wrong-pid','source-context','stale-exception'):
+            changed=dict(record);env=dict(self.env)
+            if change=='raw-only':changed['numericFailure']=self.failure()
+            elif change=='cloned-failure':changed['numericFailure']=dict(record['numericFailure'])
+            elif change=='wrong-pid':changed['shellPid']=78
+            elif change=='source-context':env['GITHUB_RUN_ID']='124'
+            else:
+                env['GITHUB_RUN_ID']='124'
+                with patch.dict(os.environ,env,clear=True):changed['numericFailure']=self.n.capture_failure_code(exc)
+            value=self.n.project_case_notice('ime-calc',changed,environ=env)
+            with self.subTest(change=change):
+                self.assertEqual(value['schemaVersion'],1)
+                self.assertNotIn('startup',value)
+
+    def test_startup_association_is_bounded_and_returned_tuple_cannot_mutate_evidence(self):
+        record,exc=self.startup_record()
+        projected=self.n.captured_startup(record,environ=self.env)
+        projected[1]=38
+        self.assertEqual(self.n.captured_startup(record,environ=self.env),[2,14,126])
+        for _ in range(32):last,_=self.startup_record()
+        self.assertEqual(len(self.n._STARTUP_FAILURES),32)
+        self.assertEqual(self.n.captured_startup(record,environ=self.env),[0,0,0])
+        self.assertEqual(self.n.captured_startup(last,environ=self.env),[2,14,126])
+
+    def test_shared_capture_retains_actual_startup_and_calc_snapshot_carries_it(self):
+        import windows_smoke as smoke
+        import numeric_notice as shared
+        import test_startup_diagnostics as startup_tests
+        exc=startup_tests.observed_exception(self.env)
+        record=dict(shellPid=77)
+        with tempfile.TemporaryDirectory() as output, patch.dict(os.environ,self.env,clear=True), \
+                patch.dict(sys.modules,{'PIL':SimpleNamespace(ImageGrab=SimpleNamespace(grab=lambda:(_ for _ in ()).throw(OSError('no screen'))))}):
+            smoke.capture_failure(Path(output),'ime-calc',record,exc)
+        value=shared.project_case_notice('ime-calc',record,environ=self.env)
+        self.assertEqual(value['startup'],[2,14,126])
+        self.assertEqual(record['numericStartupDiagnostic'],[2,14,126])
+        self.assertIn('PRIVATE',record['error'])  # Existing primary persistence is unchanged.
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='9'
+        self.env[self.n.TRACE_OPT_IN]='1'
+        record,exc=self.startup_record()
+        record['kind']='calc-save-dispatch-diagnostic'
+        record['module']='calc'
+        snapshot=self.n.capture_calc_snapshot(record,environ=self.env)
+        report=self.trace_report();report['numericCaseSnapshot']=snapshot
+        self.assertEqual(self.emitter.emit_calc_report(report),2)
+        case=self.decode(self.messages()[0])
+        self.assertEqual(case['startup'],[2,14,126])
+        trace=self.decode(self.messages()[1],title=self.n.TRACE_TITLE)
+        self.assertEqual(trace['schemaVersion'],1)
+        self.assertNotIn('startup',trace)
 
 
 if __name__ == '__main__':
