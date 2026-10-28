@@ -112,7 +112,7 @@ class CalcDispatchWorkflowBoundaryTests(unittest.TestCase):
         self.fixture = integration.ArtifactTests()
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.setUp()
-        self.checkout = Path(self.enterContext(tempfile.TemporaryDirectory())) / '검증 checkout'
+        self.checkout = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve(strict=True) / '검증 checkout'
         scripts = self.checkout / 'suite/scripts'; scripts.mkdir(parents=True)
         (self.checkout / '.work').mkdir()
         config = self.checkout / 'suite/config'; config.mkdir()
