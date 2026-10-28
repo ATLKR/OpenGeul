@@ -21,9 +21,9 @@ Stale process generations must reject before publication. Deadline expiry must n
 ## Tasks
 
 - [x] Recover accessible evidence, inventory CI, and distinguish original failures.
-- [ ] Write failing native recorder behavior tests, implement its wire and Windows adapter, and verify portable behavior.
-- [ ] Write failing source authentication and diagnostic build isolation checks, implement probes and explicit diagnostic build mode, and verify normal builds retain their contract.
-- [ ] Write failing controller/consumer ownership, ABI, deadline and cleanup checks, implement them, and connect to the original single IME save.
+- [x] Write failing native recorder behavior tests, implement its wire and Windows adapter, and verify portable behavior.
+- [x] Write failing source authentication and diagnostic build isolation checks, implement probes and explicit diagnostic build mode, and verify normal builds retain their contract.
+- [x] Write failing controller/consumer ownership, ABI, deadline and cleanup checks, implement them, and connect to the original single IME save.
 - [ ] Independently review all changes; run frozen local validation and privacy checks before committing and pushing.
 - [ ] Check remote run identities, compile once on the standard ARM64 runner, consume the diagnostic evidence, and correct proven causes.
 - [ ] Restore full acceptance and verify actual x64/ARM64 input, focus, accessibility, persistence, lifecycle, installer and diagnostic integrity gates on the final commit. Preserve unresolved failures as failures.

@@ -254,6 +254,7 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
                 samples['rows'].append(sample);capture(sample,'frame',frame)
                 budget();pause(min(.05,max(0,deadline-clock())))
 
+        qualified = False
         while True:
             frame = observe(); rectangle = frame['editor']['clientScreenRect']
             point = ((rectangle[0] + rectangle[2]) // 2, (rectangle[1] + rectangle[3]) // 2)
@@ -266,14 +267,16 @@ def click_editor_once(require_foreground, process, hwnd, parent, child, office_p
                 editorClientScreenRect=rectangle)
             assert history_size() < MAX_PREFLIGHT_ROWS, 'Owned editor preflight history exceeded'
             evidence['preflight'].append(row)
-            if _hit_ready(hit, hwnd, child, office_pid, identity[2][2], point): break
+            ready = _hit_ready(hit, hwnd, child, office_pid, identity[2][2], point)
+            assert ready or not qualified, 'Owned editor hit changed before pointer intent'
+            if ready:
+                qualified = True
+                actual = observe()
+                assert _frame_metadata(actual) == _frame_metadata(frame), 'Owned editor non-geometry state changed'
+                if actual == frame: break
             budget(); pause(min(.05, max(0, deadline - clock())))
         evidence['chosenPhysicalPoint'] = list(point); evidence['qualifiedHit'] = hit
         evidence['qualifiedFrame'] = frame
-        actual = observe()
-        if actual != frame:
-            evidence['geometryRejection'] = dict(phase='before-pointer-intent', expectedFrame=frame, observedFrame=actual)
-        assert actual == frame, 'Owned editor geometry changed before pointer intent'
         evidence['pointerMoveIntent'] = True; retain('pointer-intent')
         budget(); probe.move(point, evidence)
         assert evidence['pointerReadback'] == list(point), 'Physical editor pointer readback differs'

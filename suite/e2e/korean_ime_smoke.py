@@ -1601,7 +1601,101 @@ def retain_ime_focus_failure_diagnostics(record, process, keyboard):
         receipt.update(status='unavailable', error=(type(exc).__name__ + ': ' + message)[:160].encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False):
+def require_calc_dispatch_suite(suite, inventory):
+    """Validate the consumer's byte inventory without claiming normal qualification."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from suite import payload
+    assert (inventory.get('schemaVersion') == 1 and type(inventory['schemaVersion']) is int
+        and inventory.get('architecture') == 'arm64'), 'Calc dispatch requires the ARM64 diagnostic copy'
+    assert inventory.get('files') == payload._scan(suite), 'Diagnostic Suite byte inventory changed'
+    overlay = payload._json(suite/'calc-dispatch-diagnostic.json')
+    native = payload._json(suite/'Office/program/opengeul-calc-dispatch-diagnostic.json')
+    for item in (overlay, native):
+        assert (type(item.get('schemaVersion')) is int and item['schemaVersion'] == 1
+            and item.get('kind') == 'calc-save-dispatch-diagnostic'
+            and item.get('fullEngineQualified') is False and item.get('acceptanceEligible') is False
+            and payload.COMMIT.fullmatch(item.get('sourceCommit', ''))
+            and payload._sha(item.get('sourceLockSha256'))), 'Unbound diagnostic runtime marker'
+    assert all(overlay[key] == native[key] for key in ('sourceCommit', 'sourceLockSha256')), 'Diagnostic runtime generation changed'
+    assert overlay.get('architecture') == 'arm64' and overlay.get('baselineMetadataOnly') is True
+    inputs = overlay.get('inputs', {})
+    assert (set(inputs) == {'baselineInventorySha256','receiptSha256','archiveSha256','archiveBytes'}
+        and all(payload._sha(inputs[key]) for key in ('baselineInventorySha256','receiptSha256','archiveSha256'))
+        and type(inputs['archiveBytes']) is int and inputs['archiveBytes'] > 0), 'Diagnostic input digest joins missing'
+    assert payload._json(suite/'suite-provenance.json')['sourceCommit'] == overlay['sourceCommit'], 'Diagnostic source differs from baseline'
+    return overlay
+
+
+def save_with_calc_dispatch(transport, keyboard, record, source):
+    """Admit the original one physical save; reserve cleanup inside its budget."""
+    started = time.monotonic()
+    deadline = started + 30
+    record['imeSaveBudget'] = dict(startedAt=started, deadline=deadline)
+    oracle = record['calcDispatchOracle'] = dict(saveAttempted=False, saveReturned=False, savedMarkerObserved=False)
+    owner = dict(pid=keyboard.engine['pid'], creationTime=keyboard.engine['creationTime'],
+        tid=keyboard.tid, hwnd=keyboard.focus, handleValue=keyboard.handle)
+    transport.arm(owner, deadline, started, engine_handle=keyboard.handle)
+    assert transport.observation_deadline == deadline - 5, 'Diagnostic observation reserve changed'
+    keyboard.begin_save(record['restoration'], transport.observation_deadline)
+    record['stage'] = 'save-ctrl-s'
+    oracle['saveAttempted'] = True
+    keyboard.save()
+    oracle['saveReturned'] = True
+    wait_saved_ime_marker(source, 'calc', transport.observation_deadline, record)
+    oracle['savedMarkerObserved'] = True
+
+
+def dispose_calc_dispatch_shell(process, original, deadline, *, engine=None, live=None,
+                                run=subprocess.run, clock=time.monotonic):
+    """Dispose retained original generations within the remaining allowance."""
+    receipt = dict(shellPid=process.pid, shellHandleReleased=False, shellExitObserved=False,
+        killAttempted=False, exitCode=0, targets=[], error=0)
+    if process.pid != original['pid'] or int(process._handle) != original['handleValue']:
+        receipt['error'] = 2
+        return receipt
+    if clock() >= deadline:
+        receipt['error'] = 1
+        try:
+            process._handle.Close()
+            receipt['shellHandleReleased'] = True
+        except Exception: receipt['error'] = 4
+        return receipt
+    try:
+        if engine is not None:
+            assert live is not None
+            for expected in (original, engine):
+                observed = live(expected['handleValue'])
+                assert observed['waitResult'] in (0,258)
+                assert all(observed[key] == expected[key] for key in ('pid','creationTime','handleValue','image'))
+                if observed['waitResult'] == 258: receipt['targets'].append(expected['pid'])
+            assert len(set(receipt['targets'])) == len(receipt['targets'])
+            if receipt['targets']:
+                remaining = deadline - clock()
+                if remaining <= 0: raise TimeoutError()
+                command = ['taskkill.exe']
+                for pid in receipt['targets']: command.extend(['/PID',str(pid)])
+                command.extend(['/T','/F'])
+                receipt['killAttempted'] = True
+                run(command,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=remaining)
+        elif process.poll() is None:
+            receipt['killAttempted'] = True
+            process.kill()
+        remaining = deadline - clock()
+        if remaining <= 0: raise TimeoutError()
+        receipt['exitCode'] = process.wait(timeout=remaining)
+        receipt['shellExitObserved'] = True
+    except Exception:
+        receipt['error'] = 3
+    try:
+        process._handle.Close()
+        receipt['shellHandleReleased'] = True
+    except Exception:
+        receipt['error'] = 4
+    if clock() > deadline: receipt['error'] = 1
+    return receipt
+
+
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False, calc_dispatch_transport=None):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
@@ -1612,6 +1706,9 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     assert plugin_origin is None or diagnose_focus or capture_ime_caller or capture_ime_compartment,'Plugin binding requires scoped diagnosis'
     assert not diagnose_focus or (not diagnose_navigation and not diagnose_ime_mode and (module=='calc' or (module=='writer' and readiness['nativeMachine']==0xaa64 and diagnostic_suffix=='focus-01' and plugin_origin is None))), 'Focus experiment requires Calc or the single native ARM64 Writer ordering case'
     assert diagnostic_suffix in ('focus-01','focus-02','focus-03') if diagnose_focus else diagnostic_suffix is None,'Invalid focus diagnostic case suffix'
+    assert calc_dispatch_transport is None or (module == 'calc' and readiness['nativeMachine'] == 0xaa64
+        and not any((diagnose_navigation, diagnose_ime_mode, diagnose_focus, capture_ime_caller,
+            capture_ime_compartment, plugin_origin))), 'Calc dispatch requires one isolated ARM64 case'
     name = 'ime-' + module
     if diagnose_focus:name+='-'+diagnostic_suffix
     folder = output / name
@@ -1621,13 +1718,16 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     source = folder / original.name
     shutil.copyfile(original, source)
     before = hashlib.sha256(source.read_bytes()).hexdigest()
-    process = launch_suite([str(suite / 'OpenGeul.Office.exe'), '--module', module, '--file', str(source)], suite, output, name)
+    launch_started = time.monotonic()
+    launch_environment = {} if calc_dispatch_transport is None else dict(environment=calc_dispatch_transport.child_environment(os.environ))
+    process = launch_suite([str(suite / 'OpenGeul.Office.exe'), '--module', module, '--file', str(source)], suite, output, name, **launch_environment)
     record = {'module': module, 'case': name, 'imePolicyVersion': 4, 'kind': 'native-korean-ime', 'shellPid': process.pid,
               'file': str(source), 'success': False, 'imeVerified': False, 'stage': 'attach',
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
               'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}
     if diagnose_ime_mode:record.update(kind='native-ime-mode-diagnostic',acceptanceEligible=False)
     if diagnose_focus:record.update(kind='native-focus-diagnostic',acceptanceEligible=False)
+    if calc_dispatch_transport is not None:record.update(kind='calc-save-dispatch-diagnostic',acceptanceEligible=False)
     observer = keyboard = retirement = primary = navigation_trace = focus_trace = None
     api = Windows()
     try:
@@ -1768,6 +1868,12 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             record['imeCompartmentDiagnostics'] = observer.compartment_diagnostics()
         observer.close()
         observer = None
+        if calc_dispatch_transport is not None:
+            save_with_calc_dispatch(calc_dispatch_transport, keyboard, record, source)
+            record.update(success=True, stage='calc-dispatch-observation-complete', imeVerified=False,
+                acceptanceEligible=False, originalFixtureUnchanged=original.read_bytes() == original_bytes)
+            assert record['originalFixtureUnchanged'], 'Diagnostic case altered baseline fixture'
+            return record
         save_started = time.monotonic()
         save_deadline = save_started + 30
         record['imeSaveBudget'] = dict(startedAt=save_started, deadline=save_deadline)
@@ -1813,11 +1919,12 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         if focus_trace is not None:focus_trace.close(primary)
         if navigation_trace is not None: navigation_trace.close(primary)
         if observer is not None: retain_ime_message_diagnostics(record, observer)
-        if diagnose_focus:
+        if diagnose_focus or calc_dispatch_transport is not None:
             import traceback
             record.update(success=False,error=type(exc).__name__+': '+str(exc),
                 traceback=''.join(traceback.format_exception(type(exc),exc,exc.__traceback__)),
-                failureScreenshotSkipped='focus-diagnostic-local-only-after-failure')
+                failureScreenshotSkipped=('focus-diagnostic-local-only-after-failure' if diagnose_focus
+                    else 'calc-dispatch-diagnostic-local-only-after-failure'))
         else:
             capture_failure(output, name, record, exc)
             retain_ime_focus_failure_diagnostics(record, process, keyboard)
@@ -1842,19 +1949,71 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                         record['imeCompartmentDiagnostics'] = dict(status='unavailable',acceptanceEligible=False,errorType=type(exc).__name__)
                 try: observer.close()
                 except Exception as exc: record.update(success=False, hookCleanupError=str(exc))
-        if keyboard is not None:
+        if calc_dispatch_transport is not None:
+            # No standard failure teardown: its separate allowance would extend
+            # the admitted save. Restoration and hooks were removed before save.
+            deadline = record.get('imeSaveBudget', {}).get('deadline',
+                record.get('imeSetupBudget', {}).get('deadline', launch_started + 60))
+            local_errors = []
+            if retirement is not None:
+                retirement.deadline = deadline
+                try: retirement.close(primary)
+                except Exception: local_errors.append(2)
+            original_shell = keyboard.shell if keyboard is not None and keyboard.shell is not None else dict(pid=process.pid,handleValue=int(process._handle))
+            def dispose(original_deadline):
+                assert original_deadline == deadline, 'Original disposal deadline changed'
+                private = {}
+                if keyboard is not None and keyboard.engine is not None:
+                    keyboard.probe.deadline = deadline
+                    private = dict(engine=keyboard.engine,
+                        live=lambda handle:keyboard.probe.engine_snapshot(handle))
+                row = dispose_calc_dispatch_shell(process, original_shell, original_deadline, **private)
+                record['calcDispatchShell'] = row
+                assert row['error'] == 0, 'Original shell disposal incomplete'
+            try:
+                if 'imeSaveBudget' not in record: dispose(deadline)
+                diagnostic = calc_dispatch_transport.close(dispose=dispose)
+                # An already exited engine does not require transport disposal;
+                # the original shell HANDLE still belongs to this case.
+                if 'calcDispatchShell' not in record: dispose(deadline)
+                record['calcDispatchDiagnostic'] = diagnostic
+            except Exception:
+                local_errors.append(3)
+                try: record['calcDispatchDiagnostic'] = calc_dispatch_transport.close()
+                except Exception: local_errors.append(4)
+            if keyboard is not None:
+                keyboard.deadline = deadline
+                record['imeKeyboardSession']['cleanupDeadline'] = deadline
+                try: keyboard.close(primary)
+                except Exception: local_errors.append(1)
+                receipt = record.get('imeKeyboardSession', {})
+                if receipt.get('engineHandleReleased') is not True or receipt.get('cleanupErrors'):
+                    if 1 not in local_errors: local_errors.append(1)
+            if retirement is not None:
+                receipt = record.get('imeEngineRetirement', {})
+                if receipt.get('close', {}).get('result') is not True or receipt.get('cleanupErrors'):
+                    if 2 not in local_errors: local_errors.append(2)
+            record['calcDispatchLocalCleanup'] = dict(errors=local_errors,
+                withinDeadline=time.monotonic() <= deadline)
+            if local_errors or not record['calcDispatchLocalCleanup']['withinDeadline']: record['success'] = False
+            numeric = calc_dispatch_report(record)
+            (output/'calc-dispatch-diagnostic.json').write_text(json.dumps(numeric,indent=2,allow_nan=False),encoding='utf-8')
+            write_result(output, name, record)
+        elif keyboard is not None:
             try: keyboard.close(primary)
             except Exception as exc:
                 record.update(success=False, keyboardCleanupError=type(exc).__name__ + ': ' + str(exc))
+        return_from_diagnostic_cleanup = calc_dispatch_transport is not None
         retirement_failure = None
         failed_retirement_cleanup = retirement is not None and primary is not None and not retirement.close_attempted
-        if retirement is not None and not failed_retirement_cleanup:
+        if retirement is not None and not failed_retirement_cleanup and not return_from_diagnostic_cleanup:
             try: retirement.close(primary)
             except Exception as exc:
                 record.update(success=False, retirementCleanupError=type(exc).__name__ + ': ' + str(exc))
                 if primary is None: retirement_failure = exc
         try:
-            if failed_retirement_cleanup:retirement.cleanup_failed(primary)
+            if return_from_diagnostic_cleanup:pass
+            elif failed_retirement_cleanup:retirement.cleanup_failed(primary)
             elif focus_trace is not None:stop_owned_test_process(process,record,focus_trace.cohort_lease)
             else:stop_owned_test_process(process,record)
         finally:
@@ -1974,6 +2133,43 @@ def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,pro
     return 0 if success else 1
 
 
+def calc_dispatch_report(record):
+    """Keep the diagnostic artifact separate from synthetic edit text/tracebacks."""
+    trace = record.get('calcDispatchDiagnostic')
+    return dict(schemaVersion=1,kind='calc-save-dispatch-diagnostic',acceptanceEligible=False,
+        fullEngineQualified=False,imeVerified=False,expectedCaseCount=1,
+        originalSaveOracle=record.get('calcDispatchOracle',dict(saveAttempted=False,saveReturned=False,savedMarkerObserved=False)),
+        diagnostic=trace, shell=record.get('calcDispatchShell'),
+        localCleanup=record.get('calcDispatchLocalCleanup',dict(errors=[5],withinDeadline=False)))
+
+
+def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architecture, binding):
+    assert architecture == 'arm64', 'Calc dispatch diagnosis requires native ARM64'
+    from calc_dispatch_diagnostic import DiagnosticTransport
+    prepared = ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture)
+    transport = DiagnosticTransport(library=prepared)
+    try:
+        results = collect_cases([('ime-calc',lambda:case(suite,fixtures,output,readiness,
+            'calc','xlsx',prepared_library=prepared,calc_dispatch_transport=transport))],output)
+    finally:
+        transport.close()
+    report = calc_dispatch_report(results[0] if len(results) == 1 else {})
+    trace = report['diagnostic'] or {}
+    analysis = trace.get('analysis') or {}
+    cleanup = trace.get('cleanup') or {}
+    # Missing return events remain an observed incomplete trace, independently
+    # of the original durable-file oracle and retained generation's exit proof.
+    success = bool(report['originalSaveOracle']['saveAttempted']
+        and report['originalSaveOracle']['saveReturned']
+        and analysis.get('processExitProved') == 1
+        and cleanup.get('controllerResourcesReleased') == 1
+        and not cleanup.get('errors') and not report['localCleanup']['errors']
+        and report['localCleanup']['withinDeadline'])
+    report['success'] = success
+    (output/'results.json').write_text(json.dumps(report,indent=2,allow_nan=False),encoding='utf-8')
+    return 0 if success else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite', type=Path, required=True)
@@ -1983,6 +2179,7 @@ def main(argv=None):
     parser.add_argument('--diagnose-navigation', choices=('writer','impress'))
     parser.add_argument('--diagnose-ime-mode', choices=('calc','writer'))
     parser.add_argument('--diagnose-focus', choices=('calc','writer'))
+    parser.add_argument('--diagnose-calc-dispatch', action='store_true')
     parser.add_argument('--matched-plugin-proof',type=Path)
     parser.add_argument('--capture-ime-caller',action='store_true')
     parser.add_argument('--capture-ime-compartment',action='store_true')
@@ -1996,7 +2193,12 @@ def main(argv=None):
     assert isinstance(inventory, dict) and inventory.get('schemaVersion') == 1, 'Suite inventory identity is missing'
     architecture = native_arch.require_architecture(inventory.get('architecture'))
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
-    assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus))<=1,'Reopen and diagnostic modes are mutually exclusive'
+    assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus,args.diagnose_calc_dispatch))<=1,'Reopen and diagnostic modes are mutually exclusive'
+    if args.diagnose_calc_dispatch:
+        diagnostic_overlay = require_calc_dispatch_suite(suite, inventory)
+    else:
+        assert not any((suite/name).exists() for name in ('calc-dispatch-diagnostic.json',
+            'Office/program/opengeul-calc-dispatch-diagnostic.json')), 'Diagnostic runtime requires explicit Calc dispatch mode'
     assert not args.capture_ime_compartment or (args.diagnose_ime_mode=='writer' and architecture=='arm64' and args.matched_plugin_proof and not args.capture_ime_caller), 'Compartment capture requires matched ARM64 Writer diagnosis'
     assert args.diagnose_ime_mode!='writer' or args.capture_ime_compartment, 'Writer mode requires the bounded compartment diagnostic'
     assert not args.capture_ime_caller or args.diagnose_ime_mode=='calc','Caller capture requires Calc mode diagnosis'
@@ -2013,7 +2215,7 @@ def main(argv=None):
     fixtures, output = args.fixtures.resolve(), args.output.resolve()
     assert suite != output and suite not in output.parents and fixtures != output and fixtures not in output.parents, 'Evidence must be outside the payload and baseline fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
-    if args.diagnose_navigation or args.diagnose_ime_mode or args.diagnose_focus:
+    if args.diagnose_navigation or args.diagnose_ime_mode or args.diagnose_focus or args.diagnose_calc_dispatch:
         # Same source-bound owner-push/first-attempt admission as the native suite.
         import importlib.util
         spec = importlib.util.spec_from_file_location('navigation_ci_admission', Path(__file__).resolve().parents[2] / 'e2e/native31_suite_prepare.py')
@@ -2021,8 +2223,15 @@ def main(argv=None):
         spec.loader.exec_module(admission)
         validate_context, read_event = admission.validate_context, admission.read_event
         binding = validate_context(os.environ, read_event(), architecture, os.name)
+        if args.diagnose_calc_dispatch:
+            assert diagnostic_overlay['sourceCommit'] == binding['sourceCommit'], 'Diagnostic engine differs from admitted CI source'
     output.mkdir(parents=True, exist_ok=False)
     readiness = require_readiness(json.loads(args.readiness.read_text(encoding='utf-8-sig')), architecture=architecture)
+    if args.diagnose_calc_dispatch:
+        expected_readiness = {key:binding[key] for key in ('sourceCommit','runAttempt','architecture','repository','job')}
+        expected_readiness['sourceRun'] = binding['runId']
+        assert readiness['source'] == expected_readiness, 'Korean readiness differs from admitted CI run'
+        return run_calc_dispatch_diagnostic(suite,fixtures,output,readiness,architecture,binding)
     if args.diagnose_focus:
         return run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,module=args.diagnose_focus)
     if args.diagnose_ime_mode:

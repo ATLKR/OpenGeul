@@ -447,3 +447,11 @@ BOOL WINAPI DllMain(HINSTANCE,DWORD reason,LPVOID) {
     if(reason==DLL_PROCESS_DETACH) forgetView();  // No waits or UI/model calls.
     return TRUE;
 }
+
+// Generic IPC acquire for aligned 64-bit immutable numeric identity fields.
+// This export does not install an observer or alter any existing callback.
+extern "C" __declspec(dllexport) std::uint64_t ReadQuad(const std::uint64_t* word) {
+    static_assert(sizeof(LONG64)==sizeof(std::uint64_t));
+    return static_cast<std::uint64_t>(InterlockedCompareExchange64(
+        reinterpret_cast<volatile LONG64*>(const_cast<std::uint64_t*>(word)),0,0));
+}

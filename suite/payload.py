@@ -460,6 +460,9 @@ def _pe(path: Path, *, companion: dict | None = None, architecture: str = 'x64')
 
 
 def _validate(root: Path, files: dict, *, architecture: str):
+    if {'office/program/opengeul-calc-dispatch-diagnostic.json',
+            'calc-dispatch-diagnostic.json'} & {name.casefold() for name in files}:
+        raise ValueError('Diagnostic engine cannot qualify a distributable Suite payload')
     _metadata(root, files, architecture=architecture)
     companions = (COMPANION_PE_ADMISSIONS if architecture == 'x64'
                   else ARM64_COMPANION_PE_ADMISSIONS)

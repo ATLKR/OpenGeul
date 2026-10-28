@@ -369,29 +369,77 @@ class EditorClickPolicyTests(unittest.TestCase):
                 probe.after_move=race
                 with self.assertRaises(AssertionError):self.run_click(p,c,probe,r)
                 self.assertEqual(probe.calls.count('move'),1);self.assertNotIn('click',probe.calls)
-    def test_geometry_rejection_retains_the_actual_comparison_without_another_query(self):
-        for frame_number,phase in [(3,'before-pointer-intent')]:
-            with self.subTest(phase=phase),tempfile.TemporaryDirectory() as folder:
-                p,c,probe,r=self.fixture(folder);original=probe.editor_snapshot;frames=[]
-                def observe(*args):
+    def test_actual_shaped_resize_after_qualified_hit_requalifies_before_pointer_intent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p,c,probe,r=self.fixture(folder)
+            r['editorFocusReadiness'].update(deadline=6.,deadlineSeconds=5.)
+            old=[1,48,1009,683];new=[0,47,1024,698]
+            probe.frame['parent'].update(rectangle=new[:],clientScreenRect=new[:])
+            probe.frame['editor'].update(rectangle=old[:],clientScreenRect=old[:])
+            original=probe.editor_hit;hits=[]
+            def hit(*args):
+                value=original(*args);hits.append(value)
+                if len(hits)==1:probe.frame['editor'].update(rectangle=new[:],clientScreenRect=new[:])
+                return value
+            probe.editor_hit=hit
+            result=self.run_click(p,c,probe,r)
+            self.assertTrue(result['ready'])
+            self.assertEqual([row['point'] for row in result['preflight']],[[505,365],[512,372]])
+            self.assertEqual(result['preflight'][0]['editorClientScreenRect'],old)
+            self.assertEqual(result['preflight'][-1]['editorClientScreenRect'],new)
+            self.assertEqual(result['chosenPhysicalPoint'],[512,372])
+            self.assertEqual(result['qualifiedHit']['point'],[512,372])
+            self.assertEqual(result['qualifiedFrame']['editor']['clientScreenRect'],new)
+            self.assertEqual(result['geometrySettlement']['initialFrame'],result['qualifiedFrame'])
+            self.assertEqual(self.replay(result)['editor']['clientScreenRect'],new)
+            self.assertEqual((probe.calls.count('move'),probe.calls.count('click')),(1,1))
+            self.assertEqual(result['inputCallAttempts'],1)
+            self.assertEqual(probe.position,[512,372]);self.assertEqual(result['deadline'],6.)
+            self.assertEqual(result['sharedDeadlineSeconds'],5.)
+            self.assertTrue(result['engineHandleReleased']);self.assertTrue(result['dpiScope']['restored'])
+            intent,=Path(folder).glob('*-pointer-intent.json')
+            self.assertEqual(json.loads(intent.read_bytes())['qualifiedFrame'],result['qualifiedFrame'])
+            stale=copy.deepcopy(result)
+            stale['qualifiedFrame']['editor'].update(rectangle=old[:],clientScreenRect=old[:])
+            with self.assertRaises(AssertionError):self.replay(stale)
+    def test_persistent_pre_pointer_resize_has_zero_input_with_shared_deadline_and_history(self):
+        for cap in (102,3):
+            with self.subTest(cap=cap),tempfile.TemporaryDirectory() as folder:
+                p,c,probe,r=self.fixture(folder);original=probe.editor_hit
+                def hit(*args):
                     value=original(*args)
-                    if len(frames)+1==frame_number:value['editor']['clientScreenRect'][0]+=1
-                    frames.append(value);return value
-                probe.editor_snapshot=observe
-                with self.assertRaisesRegex(AssertionError,'geometry changed'):
-                    self.run_click(p,c,probe,r)
+                    probe.frame['editor']['clientScreenRect'][0]=9 if probe.frame['editor']['clientScreenRect'][0]==8 else 8
+                    return value
+                probe.editor_hit=hit
+                with patch.object(self.mod,'MAX_PREFLIGHT_ROWS',cap):
+                    with self.assertRaisesRegex(AssertionError,'deadline|history|preflight'):
+                        self.run_click(p,c,probe,r)
                 result=r['editorClicks'][0]
-                self.assertIn('geometryRejection',result,'Actual changed frame was discarded')
-                rejected=result['geometryRejection']
-                self.assertEqual(rejected['phase'],phase)
-                self.assertIs(rejected['observedFrame'],frames[-1])
-                self.assertEqual(rejected['expectedFrame']['editor']['clientScreenRect'][0],8)
-                self.assertEqual(rejected['observedFrame']['editor']['clientScreenRect'][0],9)
-                self.assertEqual(len(frames),frame_number)
-                self.assertEqual(probe.calls.count('move'),int(frame_number>3))
-                self.assertNotIn('click',probe.calls)
-                final,=Path(folder).glob('*-result.json')
-                self.assertEqual(json.loads(final.read_bytes())['geometryRejection'],rejected)
+                self.assertEqual(result['deadline'],2.);self.assertLessEqual(len(result['preflight']),cap)
+                self.assertNotIn('move',probe.calls);self.assertNotIn('click',probe.calls)
+                self.assertEqual((result['pointerMoveAttempts'],result['inputCallAttempts']),(0,0))
+                self.assertEqual(list(Path(folder).glob('*-pointer-intent.json')),[])
+                self.assertFalse(result['ready']);self.assertTrue(result['engineHandleReleased'])
+    def test_pre_pointer_geometry_requalification_rejects_changed_authority_or_occlusion(self):
+        for change in ('engine','shell','pid','thread','foreground','occlusion'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as folder:
+                p,c,probe,r=self.fixture(folder);original=probe.editor_hit;hits=[]
+                def hit(*args):
+                    value=original(*args);hits.append(value)
+                    if len(hits)==1:
+                        probe.frame['editor']['clientScreenRect'][0]=9
+                        if change=='engine':probe.engine['creationTime']+=1
+                        elif change=='shell':probe.shell['creationTime']+=1
+                        elif change=='pid':probe.frame['editor']['pid']+=1
+                        elif change=='thread':probe.frame['editor']['threadId']+=1
+                        elif change=='foreground':probe.foreground_root=99
+                        else:probe.occluded=1
+                    return value
+                probe.editor_hit=hit
+                with self.assertRaises(AssertionError):self.run_click(p,c,probe,r)
+                result=r['editorClicks'][0]
+                self.assertNotIn('move',probe.calls);self.assertNotIn('click',probe.calls)
+                self.assertTrue(result['engineHandleReleased']);self.assertFalse(result['ready'])
     def test_query_failures_restore_dpi_and_close_any_admitted_handle(self):
         for failure in ['shell','frame','engine-open','engine','hit','cursor']:
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as folder:

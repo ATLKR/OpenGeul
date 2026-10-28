@@ -20,7 +20,8 @@ from ascii_observer_boundary import AsciiObserverBoundary
 
 class IMECasePhaseTests(unittest.TestCase):
     def run_case(self, module, *, fail_context=False, fail_mode=False, fail_semantic=None, empty_retirement_failure=False,
-                 focus_failure=None, diagnostic_error=None, fail_navigation=False, diagnose_navigation=False):
+                 focus_failure=None, diagnostic_error=None, fail_navigation=False, diagnose_navigation=False,
+                 save_cleanup_reserve=0):
         directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
         root=Path(directory.name);calls=[];offset=[0.];clock=time.monotonic
         original=root/('OpenGeul-'+module+'.'+dict(ime.INPUT_CASES)[module]);original.write_bytes(b'unchanged fixture')
@@ -70,8 +71,8 @@ class IMECasePhaseTests(unittest.TestCase):
             def begin_save(inner,restoration,deadline):
                 ime.validate_restoration(restoration);ime.require_ime_save_disposition(inner.record,restoration)
                 self.assertEqual(restoration,inner.record['restoration']);self.assertTrue(inner.record['layoutRestored'])
-                self.assertEqual(deadline,inner.record['imeSaveBudget']['deadline'])
-                self.assertAlmostEqual(deadline-inner.record['imeSaveBudget']['startedAt'],30.)
+                self.assertEqual(deadline,inner.record['imeSaveBudget']['deadline']-save_cleanup_reserve)
+                self.assertAlmostEqual(deadline-inner.record['imeSaveBudget']['startedAt'],30.-save_cleanup_reserve)
                 calls.append('save-budget-started')
             def save(inner):
                 self.assertEqual(calls[-1],'save-budget-started')

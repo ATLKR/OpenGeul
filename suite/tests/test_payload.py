@@ -124,6 +124,15 @@ class PayloadFixture(unittest.TestCase):
 
 
 class PayloadTests(PayloadFixture):
+    def test_diagnostic_engine_markers_cannot_form_a_distributable_inventory(self):
+        for name in ('Office/program/opengeul-calc-dispatch-diagnostic.json',
+                     'calc-dispatch-diagnostic.json'):
+            with self.subTest(name=name):
+                self.write(name, b'{"acceptanceEligible":false}')
+                with self.assertRaisesRegex(ValueError, 'Diagnostic engine cannot qualify'):
+                    create_inventory(self.root)
+                (self.root/name).unlink()
+
     def test_complete_inventory_covers_native_managed_worker_and_legal_files(self):
         receipt = create_inventory(self.root)
         self.assertEqual(set(receipt), {'schemaVersion', 'architecture', 'files'})

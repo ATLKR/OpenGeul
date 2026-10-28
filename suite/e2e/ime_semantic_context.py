@@ -498,7 +498,8 @@ class EditingContextReader:
         value=dict(kind='actual-gui-editing-context',module=self.module,sourceTag=SOURCE,
             readOnly=True,targetStable=True,childHwnd=self.child_hwnd)
         if self.module=='writer':
-            assert self.call(self.model.getText)==self.body and self.call(self.controller.getViewCursor)==self.cursor
+            assert self.call(self.model.getText)==self.body
+            assert self.call(self.controller.getViewCursor)==self.cursor
             before=_text(self.call(self.body.getString))
             collapsed=self.call(self.cursor.isCollapsed);assert type(collapsed) is bool
             parent=self.call(self.cursor.getText);end=self.call(self.cursor.getEnd);body_end=self.call(self.body.getEnd)
@@ -506,7 +507,8 @@ class EditingContextReader:
             value.update(textBefore=before,textAfter=_text(self.call(self.body.getString)),cursorCollapsed=collapsed,
                 cursorTextIsBody=parent==self.body,bodyEndComparison=comparison,
                 writerBinding=dict(verified=True,bodyIdentity=self.identities['body'],cursorIdentity=self.identities['cursor']))
-            assert self.call(self.model.getText)==self.body and self.call(self.controller.getViewCursor)==self.cursor
+            assert self.call(self.model.getText)==self.body
+            assert self.call(self.controller.getViewCursor)==self.cursor
         elif self.module=='calc':value.update(self.calc.read_edit_context())
         elif self.getter_contract==IMPRESS_FOCUSED_GETTER:
             from impress_focused_view import FocusedViewReader

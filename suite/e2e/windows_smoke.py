@@ -45,11 +45,11 @@ MODULE_LABELS = tuple('OpenGeul ' + name for name in ('HWP', 'Writer', 'Calc', '
 NEW_MODULES = tuple(module for module, _ in INPUT_CASES + ATTACH_CASES)
 
 
-def launch_suite(command, suite, output, name):
+def launch_suite(command, suite, output, name, *, environment=None):
     prepare_launch_pointer(output, name)
     # Popen duplicates the file handle for the child; the parent's stream closes here.
     with (output / (name + '-stderr.log')).open('xb') as stderr:
-        process = subprocess.Popen(command, cwd=suite, shell=False, stderr=stderr)
+        process = subprocess.Popen(command, cwd=suite, shell=False, stderr=stderr, env=environment)
     process.opengeul_evidence_output, process.opengeul_evidence_case = output, name
     process.opengeul_suite_root = Path(suite).resolve()
     return process

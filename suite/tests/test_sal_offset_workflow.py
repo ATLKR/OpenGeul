@@ -96,4 +96,4 @@ class SalOffsetWorkflowTests(unittest.TestCase):
         self.assertEqual(condition(terminal),'always() && '+STATIC)
         self.assertLess(steps.index(upload),steps.index(terminal))
         self.assertIn('package delivery is prohibited',run_code(terminal))
-        self.assertIn('OPENGEUL_SUITE_RUN_MODE: focus-diagnostic',WORKFLOW.read_text())
+        self.assertIn('OPENGEUL_SUITE_RUN_MODE: acceptance',WORKFLOW.read_text())
