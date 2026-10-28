@@ -23,7 +23,7 @@ public sealed class WorkerClient : IAsyncDisposable
     private long nextId;
     private long nextCommandSequence;
     private int disposed;
-    private volatile Exception? terminalError;
+    private Exception? terminalError;
     public int ProcessId => process.Id;
     public string? DiagnosticTraceId { get; }
     public string Diagnostics { get { lock (diagnostics) return diagnostics.ToString(); } }
@@ -58,13 +58,16 @@ public sealed class WorkerClient : IAsyncDisposable
         catch (Exception) { /* Diagnostic token setup must not prevent worker startup. */ }
         try
         {
-            var process = Process.Start(start) ?? throw new SuiteException("문서 작업자를 시작할 수 없습니다.");
+            var process = Process.Start(start) ?? throw new SuiteException("문서 작업자를 시작할 수 없습니다.",
+                startupDiagnostic: new(StartupPhase.WorkerLaunch, StartupReason.ProcessStartFailed));
             process.StandardInput.AutoFlush = true;
             return new WorkerClient(process, timeout ?? TimeSpan.FromSeconds(60), diagnosticTraceId);
         }
         catch (Exception e) when (e is not SuiteException)
         {
-            throw new SuiteException("Office 문서 작업자를 시작하지 못했습니다. 패키지의 런타임을 확인해 주세요.", e);
+            throw new SuiteException("Office 문서 작업자를 시작하지 못했습니다. 패키지의 런타임을 확인해 주세요.", e,
+                new(StartupPhase.WorkerLaunch, StartupReason.ProcessStartFailed,
+                    StartupDiagnostic.FromException(e, StartupPhase.WorkerLaunch).NativeCode));
         }
     }
 
@@ -72,20 +75,21 @@ public sealed class WorkerClient : IAsyncDisposable
         long? diagnosticCommandSequence = null)
     {
         if (Volatile.Read(ref disposed) != 0) throw new SuiteException("문서 작업자가 이미 종료되었습니다.");
-        if (terminalError is not null) throw new SuiteException("문서 작업자와 연결이 끊어졌습니다. 문서 창을 유지합니다.", terminalError);
+        if (Volatile.Read(ref terminalError) is { } terminal) throw new SuiteException("문서 작업자와 연결이 끊어졌습니다. 문서 창을 유지합니다.", terminal);
         var id = Interlocked.Increment(ref nextId);
         var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         pending[id] = completion;
         var traceSave = command == "save";
         if (traceSave) TraceSave("request.begin", new { requestId = id, commandSequence = diagnosticCommandSequence });
+        CancellationTokenSource? deadline = null;
         try
         {
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopped.Token);
+            deadline = CancellationTokenSource.CreateLinkedTokenSource(stopped.Token);
             deadline.CancelAfter(requestTimeout ?? timeout);
             await writeLock.WaitAsync(deadline.Token);
             try
             {
-                if (terminalError is not null) throw new SuiteException("문서 작업자와 연결이 끊어졌습니다.", terminalError);
+                if (Volatile.Read(ref terminalError) is { } error) throw new SuiteException("문서 작업자와 연결이 끊어졌습니다.", error);
                 var line = JsonSerializer.Serialize(new { id, command, args });
                 await process.StandardInput.WriteLineAsync(line.AsMemory(), deadline.Token);
                 await process.StandardInput.FlushAsync(deadline.Token);
@@ -104,14 +108,23 @@ public sealed class WorkerClient : IAsyncDisposable
         catch (OperationCanceledException e)
         {
             if (traceSave) TraceSave("request.error", new { requestId = id, commandSequence = diagnosticCommandSequence, exceptionType = e.GetType().FullName });
-            throw new SuiteException("문서 작업자의 응답 시간이 초과되었습니다. 문서 창을 유지합니다. 잠시 후 다시 시도해 주세요.", e);
+            throw new SuiteException("문서 작업자의 응답 시간이 초과되었습니다. 문서 창을 유지합니다. 잠시 후 다시 시도해 주세요.", e,
+                new(StartupPhase.WorkerReply, StartupReason.RequestTimeout));
         }
         catch (Exception e)
         {
             if (traceSave) TraceSave("request.error", new { requestId = id, commandSequence = diagnosticCommandSequence, exceptionType = e.GetType().FullName });
-            throw new SuiteException("문서 작업자와 통신하지 못했습니다. 문서 창을 유지합니다.", e);
+            // A worker can exit after writing its fatal startup reply but before
+            // our first write. Drain the existing reader within this request's
+            // original deadline so a broken pipe cannot hide that typed cause.
+            try { if (deadline is not null && (e is IOException || readTask.IsCompleted)) await readTask.WaitAsync(deadline.Token); }
+            catch (Exception) { /* Keep the original communication failure primary. */ }
+            var cause = Volatile.Read(ref terminalError) ?? e;
+            throw new SuiteException("문서 작업자와 통신하지 못했습니다. 문서 창을 유지합니다.", cause,
+                (cause as SuiteException)?.StartupDiagnostic ?? new(StartupPhase.WorkerReply, StartupReason.WorkerCommunication,
+                    StartupDiagnostic.FromException(e, StartupPhase.WorkerReply).NativeCode));
         }
-        finally { pending.TryRemove(id, out _); }
+        finally { pending.TryRemove(id, out _); deadline?.Dispose(); }
     }
 
     private async Task ReadRepliesAsync()
@@ -120,7 +133,8 @@ public sealed class WorkerClient : IAsyncDisposable
         {
             while (await process.StandardOutput.ReadLineAsync(stopped.Token) is { } line)
             {
-                if (line.Length > 1048576) throw new SuiteException("작업자 응답이 너무 큽니다.");
+                if (line.Length > 1048576) throw new SuiteException("작업자 응답이 너무 큽니다.",
+                    startupDiagnostic: new(StartupPhase.WorkerReply, StartupReason.WorkerProtocol));
                 using var document = JsonDocument.Parse(line);
                 var root = document.RootElement;
                 if (root.TryGetProperty("event", out var eventName))
@@ -155,20 +169,38 @@ public sealed class WorkerClient : IAsyncDisposable
                     }
                     continue;
                 }
-                var id = root.GetProperty("id").GetInt64();
-                if (!pending.TryRemove(id, out var completion)) continue; // Late timed-out reply.
+                var replyId = root.GetProperty("id");
+                if (replyId.ValueKind == JsonValueKind.Null && root.GetProperty("ok").ValueKind == JsonValueKind.False)
+                {
+                    FailPending(WorkerFailure(root.GetProperty("error")));
+                    return;
+                }
+                var id = replyId.GetInt64();
+                if (!pending.ContainsKey(id)) continue; // Late timed-out reply; do not inspect its payload.
                 if (root.GetProperty("ok").GetBoolean())
-                    completion.TrySetResult(root.GetProperty("result").Clone());
+                {
+                    var result = root.GetProperty("result").Clone();
+                    if (pending.TryRemove(id, out var completion)) completion.TrySetResult(result);
+                }
                 else
                 {
-                    var error = root.GetProperty("error");
-                    var message = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("message", out var text) ? text.GetString() : error.ToString();
-                    completion.TrySetException(new SuiteException($"Office 문서 작업에 실패했습니다.\n{message}"));
+                    var error = WorkerFailure(root.GetProperty("error"));
+                    if (pending.TryRemove(id, out var completion)) completion.TrySetException(error);
                 }
             }
-            FailPending(new SuiteException("문서 작업자가 종료되어 연결이 끊어졌습니다."));
+            FailPending(new SuiteException("문서 작업자가 종료되어 연결이 끊어졌습니다.",
+                startupDiagnostic: new(StartupPhase.WorkerReply, StartupReason.WorkerDisconnected)));
         }
-        catch (Exception e) { FailPending(new SuiteException("문서 작업자의 응답을 읽지 못했습니다.", e)); }
+        catch (Exception e) { FailPending(new SuiteException("문서 작업자의 응답을 읽지 못했습니다.", e,
+            (e as SuiteException)?.StartupDiagnostic ?? new(StartupPhase.WorkerReply, StartupReason.WorkerProtocol))); }
+    }
+
+    private static SuiteException WorkerFailure(JsonElement error)
+    {
+        var message = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("message", out var text) ? text.GetString() : error.ToString();
+        var code = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var value)
+            && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        return new SuiteException($"Office 문서 작업에 실패했습니다.\n{message}", startupDiagnostic: StartupDiagnostic.FromWorkerCode(code));
     }
 
     private void TraceSave(string stage, object? details)
@@ -179,9 +211,9 @@ public sealed class WorkerClient : IAsyncDisposable
 
     private void FailPending(Exception error)
     {
-        terminalError = error;
+        var original = Interlocked.CompareExchange(ref terminalError, error, null) ?? error;
         foreach (var item in pending)
-            if (pending.TryRemove(item.Key, out var completion)) completion.TrySetException(error);
+            if (pending.TryRemove(item.Key, out var completion)) completion.TrySetException(original);
     }
 
     private async Task ReadDiagnosticsAsync()

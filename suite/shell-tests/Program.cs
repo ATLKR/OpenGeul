@@ -6,6 +6,25 @@ using OpenGeul.Office.Core;
 if (ComWaitDiagnostic.IsDiagnosticCommand(args))
     return await ComWaitDiagnostic.RunAsync(args);
 
+if (args.Contains("--fake-startup-worker"))
+{
+    var mode = args[^1];
+    if (mode == "pending-startup-error")
+    {
+        using var first = JsonDocument.Parse(Console.ReadLine()!);
+        using var second = JsonDocument.Parse(Console.ReadLine()!);
+        Console.Error.WriteLine($"request-ids:{first.RootElement.GetProperty("id").GetInt64()},{second.RootElement.GetProperty("id").GetInt64()}");
+        Console.Error.Flush();
+    }
+    Console.WriteLine(JsonSerializer.Serialize(new { id = (long?)null, ok = false,
+        error = new { code = mode == "pending-startup-error" ? "ui_style_isolation_failed" : "invalid_manifest",
+            message = "제품 설정을 읽을 수 없습니다." } }));
+    Console.Out.Flush();
+    if (mode == "startup-error-exit") return 1;
+    while (Console.ReadLine() is not null) { }
+    return 0;
+}
+
 if (args.Contains("--fake-worker"))
 {
     while (Console.ReadLine() is { } line)
@@ -30,8 +49,24 @@ if (args.Contains("--fake-worker"))
         }
         if (command == "error")
             Console.WriteLine(JsonSerializer.Serialize(new { id, ok = false, error = new { code = "save_failed", message = "저장 실패" } }));
+        else if (command == "unknown-error")
+            Console.WriteLine(JsonSerializer.Serialize(new { id, ok = false, error = new { code = "PRIVATE-UNKNOWN-CODE", message = "runtime_missing ui_style_isolation_failed" } }));
+        else if (command == "invalid-id")
+            Console.WriteLine(JsonSerializer.Serialize(new { id = "invalid", ok = false, error = new { code = "invalid_manifest", message = "제품 설정을 읽을 수 없습니다." } }));
+        else if (command == "null-success")
+            Console.WriteLine(JsonSerializer.Serialize(new { id = (long?)null, ok = true, result = new { } }));
+        else if (command == "invalid-ok")
+            Console.WriteLine(JsonSerializer.Serialize(new { id, ok = "false", error = new { code = "invalid_manifest", message = "제품 설정을 읽을 수 없습니다." } }));
+        else if (command == "missing-result")
+            Console.WriteLine(JsonSerializer.Serialize(new { id, ok = true }));
+        else if (command == "invalid-message")
+            Console.WriteLine(JsonSerializer.Serialize(new { id, ok = false, error = new { code = "invalid_manifest", message = new { arbitrary = "private" } } }));
         else
+        {
+            if (command == "late-error")
+                Console.WriteLine(JsonSerializer.Serialize(new { id = 99999, ok = false, error = new { code = "runtime_missing", message = "late reply" } }));
             Console.WriteLine(JsonSerializer.Serialize(new { id, ok = true, result = root.GetProperty("args").Clone() }));
+        }
     }
     return 0;
 }
@@ -40,6 +75,11 @@ var tests = new List<(string Name, Func<Task> Run)>();
 tests.AddRange(OwnedEditorFocusTests.Cases());
 tests.AddRange(OwnedDocumentMenuFocusTests.Cases());
 tests.AddRange(StandaloneSaveCloseIntentTests.Cases());
+tests.AddRange(StartupDiagnosticTests.Cases(mode => mode == "normal" ? StartWorker() : WorkerClient.Start(new ProcessStartInfo
+{
+    FileName = Environment.ProcessPath!,
+    ArgumentList = { typeof(TestSession).Assembly.Location, "--fake-startup-worker", mode }
+}, TimeSpan.FromSeconds(5))));
 void Test(string name, Action action) => tests.Add((name, () => { action(); return Task.CompletedTask; }));
 void AsyncTest(string name, Func<Task> action) => tests.Add((name, action));
 void Equal<T>(T expected, T actual)

@@ -106,12 +106,21 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         InitialWindowLayout.Apply(this);
     }
 
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        try { if (IsHandleCreated) NativeWindowProperties.RemoveStartupDiagnostic(Handle); }
+        catch (Exception) { /* Numeric diagnostics must not interfere with form disposal. */ }
+        base.OnHandleDestroyed(e);
+    }
+
     private async Task AttachAsync()
     {
         loading = true;
+        var startupPhase = StartupPhase.WorkerLaunch;
         try
         {
             worker = WorkerClient.Start(WorkerLaunch.Create(packageRoot));
+            startupPhase = StartupPhase.WorkerReply;
             worker.CommandReceived += OnWorkerCommand;
             var size = EditorSize();
             var request = new Dictionary<string, object>
@@ -121,10 +130,12 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             };
             if (path is not null) request["path"] = path;
             var result = await worker.SendAsync("attach", request, requestTimeout: TimeSpan.FromSeconds(120));
+            startupPhase = StartupPhase.ShellAttach;
             var childHwnd = result.GetProperty("childHwnd").GetInt64();
             var parentHwnd = result.GetProperty("parentHwnd").GetInt64();
             if (parentHwnd != editorPanel.Handle.ToInt64() || childHwnd == 0 || !NativeWindowProperties.IsChild(editorPanel.Handle, checked((nint)childHwnd)))
-                throw new SuiteException("문서 편집기를 OpenGeul 창 안에 연결하지 못했습니다. 패키지의 Windows 런타임을 확인해 주세요.");
+                throw new SuiteException("문서 편집기를 OpenGeul 창 안에 연결하지 못했습니다. 패키지의 Windows 런타임을 확인해 주세요.",
+                    startupDiagnostic: new(StartupPhase.ShellAttach, StartupReason.ShellAttachFailed));
             NativeWindowProperties.Set(Handle, editorPanel.Handle, checked((nint)childHwnd));
             editorFocus = new OwnedEditorFocus(new NativeOwnedEditorFocus(Handle, editorPanel.Handle, checked((nint)childHwnd)),
                 Path.Combine(packageRoot, "Office", "program", "soffice.bin"));
@@ -149,6 +160,12 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 Console.Error.Flush();
             }
             catch (IOException) { /* Missing diagnostic output must not prevent the error dialog. */ }
+            try
+            {
+                if (StartupDiagnostic.Enabled && IntPtr.Size == 8 && IsHandleCreated && !IsDisposed && !Disposing)
+                    NativeWindowProperties.SetStartupDiagnostic(Handle, StartupDiagnostic.FromException(e, startupPhase).Packed);
+            }
+            catch (Exception) { /* The original error and owned dialog remain primary. */ }
             Program.ShowError("문서를 열지 못했습니다. 원본 파일은 변경하지 않았습니다.\n" + e.Message, this);
         }
         finally { loading = false; }
@@ -556,7 +573,10 @@ internal static class NativeWindowProperties
     internal static void Set(nint form, nint parent, nint child)
     {
         if (!SetProp(form, ParentProperty, parent) || !SetProp(form, ChildProperty, child))
-            throw new SuiteException("내장 편집기 창 정보를 등록할 수 없습니다.");
+            throw new SuiteException("내장 편집기 창 정보를 등록할 수 없습니다.", startupDiagnostic:
+                new(StartupPhase.ShellAttach, StartupReason.ShellAttachFailed, StartupDiagnostic.KnownNativeCode(Marshal.GetLastWin32Error())));
     }
+    internal static void SetStartupDiagnostic(nint form, ulong value) => SetProp(form, StartupDiagnostic.PropertyName, checked((nint)value));
+    internal static void RemoveStartupDiagnostic(nint form) => RemoveProp(form, StartupDiagnostic.PropertyName);
     internal static void Remove(nint form) { RemoveProp(form, ParentProperty); RemoveProp(form, ChildProperty); }
 }

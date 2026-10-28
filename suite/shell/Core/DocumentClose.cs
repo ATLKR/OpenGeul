@@ -2,7 +2,10 @@ using System.Text.Json;
 
 namespace OpenGeul.Office.Core;
 
-public sealed class SuiteException(string message, Exception? inner = null) : Exception(message, inner);
+public sealed class SuiteException(string message, Exception? inner = null, StartupDiagnostic? startupDiagnostic = null) : Exception(message, inner)
+{
+    public StartupDiagnostic? StartupDiagnostic { get; } = startupDiagnostic ?? (inner as SuiteException)?.StartupDiagnostic;
+}
 public sealed record DocumentStatus(bool Modified, string Title);
 public enum CloseChoice { Save, Discard, Cancel }
 public sealed record CloseResult(bool Closed, string? Error = null, string? Warning = null);
