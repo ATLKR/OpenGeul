@@ -137,3 +137,33 @@ rejection, event publication, ABI, cleanup failures, and artifact isolation
 locally, independently review the change, then compile and run it on the
 existing Windows ARM64 runner. Product corrections need causal evidence and
 fresh full x64 and ARM64 acceptance on the final corrective commit.
+
+Run 40774909254 at `39f43753db153dfa8068471493bcbf05a83f23af`
+passed 2,999 real Windows unit tests on each architecture (38 skipped) and
+all Calc diagnostic prerequisites. Its initial navigation guard again failed
+before reader/input/save admission. The new vector `[2,2,1]` categorizes both
+foreign foreground snapshots as `CASCADIA_HOSTING_WINDOW_CLASS` and compares
+their PID values equal. This is not a process-generation or activation-cause
+witness. The native save trace, oracle and retained-engine exit remain unobserved.
+
+The pinned LibreOffice source `pyuno/zipcore/python.cxx` creates its core
+interpreter with `CREATE_UNICODE_ENVIRONMENT` only and a fresh STARTUPINFO.
+The shell currently starts that launcher with `CreateNoWindow`; the launcher
+does not forward that creation flag. Close this source-supported console gap
+by starting the exact packaged Python 3.13.15 core directly through the same
+WorkerClient. Match the launcher's process-local bootstrap environment and
+preserve structured arguments, UTF-8, original worker ownership and cleanup.
+Keep the packaged launcher and runtime manifest for existing tools. No focus,
+input, reader, engine binary or normal runtime lock changes are required.
+
+Before the original GUI scenario, execute a bounded Windows bootstrap probe
+through the actual WorkerLaunch/WorkerClient path. It may substitute only a
+constant synthetic Python program in the arguments. Verify native architecture,
+packaged interpreter and UNO origins, local UNO bootstrap, absent console and
+synthetic Korean UTF-8 roundtrip. Join its internal PID and creation-time reply
+to one retained query-only process HANDLE, observe that same generation's
+zero-code exit before client disposal, and release the HANDLE even on failure.
+Publish only fixed booleans/numeric summaries, without environment values or
+paths. This separate probe cannot prove original Calc engine retirement or
+the earlier Terminal association. Keep all original focus guards and one input
+attempt; a new Windows run must establish whether the original failure changes.

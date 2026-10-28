@@ -3,6 +3,9 @@ using System.Drawing;
 using System.Text.Json;
 using OpenGeul.Office.Core;
 
+if (args.Length > 0 && args[0] == "--worker-runtime-probe")
+    return await WorkerRuntimeDiagnostic.RunAsync(args);
+
 if (ComWaitDiagnostic.IsDiagnosticCommand(args))
     return await ComWaitDiagnostic.RunAsync(args);
 
@@ -168,7 +171,7 @@ Test("worker launch preserves inherited environment without exposing values", ()
     foreach (System.Collections.DictionaryEntry variable in Environment.GetEnvironmentVariables())
     {
         var name = (string)variable.Key;
-        if (new[] { "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONIOENCODING" }.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+        if (new[] { "PATH", "PYTHONHOME", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONIOENCODING" }.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
         Equal(true, start.Environment.TryGetValue(name, out var value) && value == (string?)variable.Value);
     }
 });
@@ -176,7 +179,7 @@ Test("worker launch keeps unicode paths in structured arguments and UTF-8 protoc
 {
     var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
     var start = WorkerLaunch.Create(root);
-    Equal(Path.Combine(root, "Office", "program", "python.exe"), start.FileName);
+    Equal(Path.Combine(root, "Office", "program", "python-core-3.13.15", "bin", "python.exe"), start.FileName);
     Equal(root, start.WorkingDirectory);
     Equal("", start.Arguments);
     Equal("-u", start.ArgumentList[0]);
@@ -185,6 +188,57 @@ Test("worker launch keeps unicode paths in structured arguments and UTF-8 protoc
     Equal(Path.Combine(root, "Office"), start.ArgumentList[3]);
     Equal("1", start.Environment["PYTHONDONTWRITEBYTECODE"]);
     Equal("utf-8", start.Environment["PYTHONIOENCODING"]);
+});
+Test("worker launch supplies packaged Python bootstrap only to the child", () =>
+{
+    var names = new[] { "UNO_PATH", "URE_BOOTSTRAP", "PYTHONHOME", "PYTHONPATH" };
+    var previous = names.ToDictionary(name => name, Environment.GetEnvironmentVariable);
+    try
+    {
+        foreach (var name in names) Environment.SetEnvironmentVariable(name, null);
+        var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & $raw");
+        var program = Path.Combine(root, "Office", "program");
+        var core = Path.Combine(program, "python-core-3.13.15");
+        var start = WorkerLaunch.Create(root);
+        Equal(program, start.Environment["UNO_PATH"]);
+        Equal("vnd.sun.star.pathname:" + Path.Combine(program, "fundamental.ini"), start.Environment["URE_BOOTSTRAP"]);
+        Equal(core, start.Environment["PYTHONHOME"]);
+        Equal(string.Join(Path.PathSeparator, program, Path.Combine(core, "lib"), Path.Combine(core, "lib", "site-packages")), start.Environment["PYTHONPATH"]);
+        foreach (var name in names) Equal(true, Environment.GetEnvironmentVariable(name) is null);
+    }
+    finally
+    {
+        foreach (var name in names) Environment.SetEnvironmentVariable(name, previous[name]);
+    }
+});
+Test("worker launch preserves inherited bootstrap and Python path suffix without expansion", () =>
+{
+    var names = new[] { "UNO_PATH", "URE_BOOTSTRAP", "PYTHONHOME", "PYTHONPATH" };
+    var previous = names.ToDictionary(name => name, Environment.GetEnvironmentVariable);
+    var inherited = new Dictionary<string, string>
+    {
+        ["UNO_PATH"] = Path.Combine(Path.GetTempPath(), "기존 UNO & $raw"),
+        ["URE_BOOTSTRAP"] = "vnd.sun.star.pathname:" + Path.Combine(Path.GetTempPath(), "기존 & $raw.ini"),
+        ["PYTHONHOME"] = Path.Combine(Path.GetTempPath(), "기존 Python & $raw"),
+        ["PYTHONPATH"] = Path.Combine(Path.GetTempPath(), "기존 모듈 & $raw")
+    };
+    try
+    {
+        foreach (var name in names) Environment.SetEnvironmentVariable(name, inherited[name]);
+        var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & $raw");
+        var program = Path.Combine(root, "Office", "program");
+        var core = Path.Combine(program, "python-core-3.13.15");
+        var start = WorkerLaunch.Create(root);
+        Equal(inherited["UNO_PATH"], start.Environment["UNO_PATH"]);
+        Equal(inherited["URE_BOOTSTRAP"], start.Environment["URE_BOOTSTRAP"]);
+        Equal(core, start.Environment["PYTHONHOME"]);
+        Equal(string.Join(Path.PathSeparator, program, Path.Combine(core, "lib"), Path.Combine(core, "lib", "site-packages"), inherited["PYTHONPATH"]), start.Environment["PYTHONPATH"]);
+        foreach (var name in names) Equal(true, Environment.GetEnvironmentVariable(name) == inherited[name]);
+    }
+    finally
+    {
+        foreach (var name in names) Environment.SetEnvironmentVariable(name, previous[name]);
+    }
 });
 Test("Base clean status preserves unverified connection readiness message", () =>
     Equal("저장됨 · 연결과 Java 사용 가능 여부가 확인되지 않았습니다.",

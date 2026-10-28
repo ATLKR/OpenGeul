@@ -21,11 +21,15 @@ class ReaderConsoleWorkflowTests(unittest.TestCase):
         upload=steps['reader-console-evidence'];self.assertIn('path: .work/suite-reader-console/receipt.json',upload)
         self.assertNotIn('path: .work/suite-reader-console/',upload.replace('path: .work/suite-reader-console/receipt.json',''))
         self.assertIn('always()',condition(upload));self.assertIn('throw ',run_code(steps['reader-console-not-acceptance']))
+        outcomes={'build':'success','worker-runtime':'success'}
         for mode in ('acceptance','ime-mode-diagnostic','focus-diagnostic','navigation-diagnostic'):
             for name in ('readiness','fixtures'):
                 exp=condition(steps[name]).replace('!cancelled()','True')
-                self.assertTrue(evaluate(exp,mode,'arm64',{'build':'success'}))
-                self.assertFalse(evaluate(exp,'reader-console-diagnostic','arm64',{'build':'success'}))
+                self.assertTrue(evaluate(exp,mode,'arm64',outcomes))
+                self.assertFalse(evaluate(exp,'reader-console-diagnostic','arm64',outcomes))
+                if name=='readiness':
+                    for status in ('failure','skipped'):
+                        self.assertFalse(evaluate(exp,mode,'arm64',outcomes|{'worker-runtime':status}))
     def test_probe_build_requires_exact_admission_and_privacy_never_skips(self):
         from itertools import product
         steps={field(s,'id'):s for s in workflow_steps() if field(s,'id')}

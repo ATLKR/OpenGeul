@@ -329,6 +329,15 @@ jobs:
         }
       id: build
 
+    - name: Verify native packaged worker bootstrap without a console
+      id: worker-runtime
+      if: "!cancelled() && steps.suite-unit-shell.outcome == 'success' && steps.build.outcome == 'success'"
+      shell: pwsh
+      run: |
+        $suiteRoot = [System.IO.Path]::GetFullPath($env:SUITE_PACKAGE)
+        dotnet run --no-build --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release -- --worker-runtime-probe --suite $suiteRoot --architecture '${{ matrix.architecture }}'
+        if ($LASTEXITCODE -ne 0) { throw 'Packaged worker bootstrap, console absence or original generation exit unverified.' }
+
     - name: 실제 한국어 IME와 네이티브 UI 검사 준비
       shell: pwsh
       run: |
@@ -337,7 +346,7 @@ jobs:
         ./suite/scripts/ensure-korean-ime.ps1 -Architecture '${{ matrix.architecture }}' -Output .work/suite-korean-readiness
         if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
       id: readiness
-      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
+      if: "!cancelled() && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
     - name: 한국어 입력 환경의 준비·실패 기록 즉시 보존
       if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -390,7 +399,7 @@ jobs:
         if-no-files-found: error
     - name: Fetch and stage the locked ARM64 Calc dispatch diagnostic input
       id: calc-dispatch-inputs
-      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
@@ -421,7 +430,7 @@ jobs:
         "SUITE_CALC_DISPATCH_PACKAGE=$diagnosticPackage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Observe one original ARM64 Calc save dispatch (not acceptance)
       id: calc-dispatch-diagnostic
-      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && steps.calc-dispatch-inputs.outcome == 'success'"
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && steps.calc-dispatch-inputs.outcome == 'success'"
       env:
         OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
         OPENGEUL_SUITE_NOTICE_SCOPE: '9'

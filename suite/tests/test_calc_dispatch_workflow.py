@@ -20,7 +20,7 @@ MODE = 'calc-dispatch-diagnostic'
 MODES = ('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic',
          'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping',
          'matched-plugin-caller', 'reader-console-diagnostic', MODE, 'unknown', '')
-GATES = ('suite-unit-shell', 'sal-offset-admission', 'source-engine', 'build',
+GATES = ('suite-unit-shell', 'sal-offset-admission', 'source-engine', 'build', 'worker-runtime',
          'readiness', 'native31-privacy-prepare', 'fixtures')
 ROOT = Path(__file__).resolve().parents[2]
 
