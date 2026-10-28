@@ -904,6 +904,65 @@ class NumericNoticeTests(unittest.TestCase):
                 session.close(RuntimeError('Synthetic bounded test disposal'))
                 fixtures.doCleanups()
 
+    def test_actual_initial_calc_target_guard_keeps_unknown_reader_after_cleanup_and_numeric_roundtrip(self):
+        import test_ime_keyboard_session as keyboard_tests
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='9';self.env[self.n.TRACE_OPT_IN]='1'
+        for navigation in (False,True):
+            self.stream=io.StringIO()
+            self.emitter=self.n.NoticeEmitter(environ=self.env,stream=self.stream)
+            fixtures=keyboard_tests.IMEKeyboardSessionTests()
+            with tempfile.TemporaryDirectory() as directory:
+                session,process,binding,api,clock,probe,record=fixtures.fixture(directory,module='calc')
+                try:
+                    session.start();session.focus_editor(6.);fixtures.ready(session)
+                    record.update(case='ime-calc',kind='calc-save-dispatch-diagnostic',imePolicyVersion=4,
+                        architecture='arm64',shellPid=process.pid,stage='focus-editor',
+                        imeSetupBudget=dict(startedAt=1.,deadline=10.),readiness=self.focus_record()['readiness'])
+                    self.assertNotIn('editorTid',record)
+                    original_scope=probe.scope_snapshot
+                    def foreign_scope(*args):
+                        value=original_scope(*args)
+                        value['after']['foreground']=dict(hwnd=123,isWindow=True,pid=999,
+                            threadId=99,rootHwnd=123,className='PRIVATE')
+                        return value
+                    probe.scope_snapshot=foreign_scope
+                    try:
+                        if navigation:fixtures.navigate(session)
+                        else:session.require_calc_navigation_initial_target()
+                        self.fail('Foreign foreground was admitted')
+                    except AssertionError as exc:
+                        primary=exc
+                        record['numericFailure']=self.n.capture_failure_code(exc)
+                        record['numericFailureFrames']=self.n.capture_failure_frames(exc)
+                    self.assertEqual('calcNavigationContext' in record,navigation)
+                    self.assertNotIn('imeSemanticContext',record)
+                    before=self.n.capture_calc_snapshot(record,environ=self.env)
+                    self.assertEqual(before['focus'],[2,5,0,121,0])
+                    last_guard=record['imeKeyboardSession']['lastGuardObservation']
+                    session.close(primary)
+                    self.assertIs(record['imeKeyboardSession']['lastGuardObservation'],last_guard)
+                    snapshot=self.n.capture_calc_snapshot(record,environ=self.env)
+                    self.assertEqual(snapshot['focus'],[2,5,0,121,0])
+                    report=self.trace_report();report['numericCaseSnapshot']=snapshot
+                    self.assertEqual(self.emitter.emit_calc_report(report),2)
+                    self.assertEqual(self.decode(self.messages()[0])['focus'],[2,5,0,121,0])
+                    self.assertEqual(self.decode(self.messages()[0])['observations']['engineHandleReleased'],1)
+                    self.assertEqual(self.decode(self.messages()[1],title=self.n.TRACE_TITLE)['schemaVersion'],1)
+                finally:
+                    session.close(RuntimeError('Synthetic bounded test disposal'))
+                    fixtures.doCleanups()
+
+    def test_setup_reader_sentinel_cannot_be_changed_to_a_known_empty_semantic_observation(self):
+        from suite.tests.test_focus_summary import initial_record
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='9'
+        record=initial_record()
+        self.assertTrue(self.emitter.emit_case_notice('ime-calc',record))
+        value=self.decode(self.messages()[0]);self.assertEqual(value['focus'],[2,2,0,121,0])
+        for focus in ([2,2,0,0,0],[2,2,0,120,0],[2,2,1,121,0],[2,2,0,121,1],[2,2,0,122,0]):
+            with self.subTest(focus=focus),self.assertRaises(ValueError):self.decode(json.dumps(value|dict(focus=focus)))
+        value['stageCode']=self.n.STAGES['verify-pre-prefix-editing-context']
+        with self.assertRaises(ValueError):self.decode(json.dumps(value))
+
 
 if __name__ == '__main__':
     unittest.main()

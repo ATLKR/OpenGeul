@@ -7,6 +7,10 @@ thread, 5 another live PID. They classify a snapshot; they do not identify what
 changed foreground or prove delivery. No vector means unknown, unlike a known
 empty returned-observation list. Start: 0 absent, 1 false, 2 true. Start attempted
 does not prove spawn; a cleanup dictionary does not prove cleanup completion.
+Count 121 is an unobserved semantic reader during a current setup-guard failure;
+it says nothing about any separate Calc navigation reader. Counts 0..120 retain
+their existing meaning. Numeric stack locations bind this early projection to
+the session's current guard, rather than an older successful admission snapshot.
 """
 from __future__ import annotations
 
@@ -67,6 +71,49 @@ def _relation(row,binding,threads):
     return 5
 
 
+def _guard_snapshot(value,keyboard,expected,thread=None,*,strict=True):
+    guard=_dict(value);scope=_dict(guard.get('scope'))
+    for role,pid,created in (('shell',expected['shellPid'],expected['shellCreationTime']),
+                             ('engine',expected['officePid'],expected['officeCreationTime'])):
+        handle=_process(keyboard.get('original'+role.title()),pid,created)
+        _process(guard.get(role),pid,created,handle)
+    threads={}
+    for edge in ('before','after'):
+        row=_dict(scope.get(edge));suite=_window(row.get('suite'));editor=_window(row.get('editor'))
+        if thread is None:thread=editor['threadId']
+        _need(suite['isWindow'] and suite['hwnd']==expected['suiteHwnd']
+              and suite['pid']==expected['shellPid'] and suite['rootHwnd']==expected['suiteHwnd']
+              and editor['isWindow'] and editor['hwnd']==expected['childHwnd']
+              and editor['pid']==expected['officePid'] and editor['rootHwnd']==expected['suiteHwnd']
+              and editor['threadId']==thread and row.get('editorWithinSuite') is True)
+        if not threads:threads={expected['shellPid']:suite['threadId'],expected['officePid']:thread}
+        _need(suite['threadId']==threads[expected['shellPid']])
+    queried=_int(guard.get('keyboardThreadId'),minimum=1)
+    _need(not strict or queried==thread)
+    return scope,threads
+
+
+def _current_guard_failure(record):
+    failure=_dict(record.get('numericFailure'));frames=record.get('numericFailureFrames')
+    _need(failure.keys()=={'captured','exceptionCode','fileCode','line'}
+          and _int(failure['captured'])==1 and _int(failure['exceptionCode'],12)>=1
+          and _int(failure['fileCode'])==1 and _int(failure['line'],10_000_000,1))
+    _need(type(frames) is list and 4<=len(frames)<=8)
+    for row in frames:
+        _need(type(row) is list and len(row)==2)
+        _int(row[0],25,1);_int(row[1],10_000_000,1)
+    _need(frames[-1]==[failure['fileCode'],failure['line']])
+    # Append-only source IDs: IME keyboard -> capture settlement -> IME
+    # validation -> Windows focus check. A direct Windows preparation failure
+    # lacks this current-validation chain even if an old guard remains stored.
+    needed=iter((11,24,11,1));expected=next(needed)
+    for code,_ in frames:
+        if code==expected:
+            expected=next(needed,None)
+            if expected is None:return
+    _need(False)
+
+
 def project(record):
     """Return one atomic existing-snapshot vector, or None for unbound data."""
     try:
@@ -94,6 +141,30 @@ def project(record):
         for key,field in (('shellPid','shellPid'),('officePid','officePid'),('windowHwnd','suiteHwnd'),
                           ('parentHwnd','parentHwnd'),('childHwnd','childHwnd')):
             _need(_int(record.get(key),_U32 if key.endswith('Pid') else _U64,1)==expected[field])
+        setup=_dict(record.get('imeSetupBudget'));deadline=_time(setup.get('deadline'))
+        setup_started=_time(setup.get('startedAt'))
+        _need(0<deadline-setup_started<=60. and deadline==_time(keyboard.get('setupDeadline')))
+        if record.get('stage')=='focus-editor':
+            _need('imeSemanticContext' not in record and 'imeSemanticContexts' not in record)
+            _current_guard_failure(record)
+            _need(setup_started<=_time(keyboard.get('startedAt'))<deadline)
+            _,admitted_threads=_guard_snapshot(keyboard.get('admissionSnapshot'),keyboard,expected,strict=False)
+            thread=admitted_threads[expected['officePid']]
+            _need('editorTid' not in record or _int(record['editorTid'],minimum=1)==thread)
+            if 'calcNavigationContext' in record:
+                navigation=_dict(record['calcNavigationContext'])
+                _need(module=='calc' and _int(navigation.get('schemaVersion'))==1
+                      and navigation.get('kind')=='ime-calc-pre-edit-navigation'
+                      and type(navigation.get('success')) is bool
+                      and _time(navigation.get('setupDeadline'))==deadline)
+                native=_dict(navigation.get('expectedNative'))
+                _need(all(_int(native.get(key),_U32 if key.endswith('Pid') else _U64,1)==value
+                          for key,value in expected.items()))
+                started=_time(navigation.get('startedAt'));reader_deadline=_time(navigation.get('readerDeadline'))
+                _need(setup_started<=started<reader_deadline==min(deadline,started+12.))
+            scope,threads=_guard_snapshot(keyboard.get('lastGuardObservation'),keyboard,expected,thread)
+            _need(threads==admitted_threads)
+            return [_relation(scope[edge]['foreground'],expected,threads) for edge in ('before','after')]+[0,121,0]
         thread=_int(record.get('editorTid'),minimum=1)
         context=_dict(record.get('imeSemanticContext'));phase=context.get('phase')
         _need(phase in ('pre','post') and record.get('stage')=='verify-'+phase+'-prefix-editing-context'
@@ -119,27 +190,11 @@ def project(record):
         current=_dict(context.get('expectedNative'))
         _need(all(_int(current.get(key),_U32 if key.endswith('Pid') else _U64,1)==value
                   for key,value in expected.items()))
-        setup=_dict(record.get('imeSetupBudget'));deadline=_time(setup.get('deadline'))
         started=_time(context.get('startedAt'));reader_deadline=_time(context.get('readerDeadline'))
-        _need(_time(setup.get('startedAt'))<=started<reader_deadline==min(deadline,started+12.)
+        _need(setup_started<=started<reader_deadline==min(deadline,started+12.)
               and deadline==_time(keyboard.get('setupDeadline'))==_time(context.get('setupDeadline'))
-              and 0<deadline-_time(setup.get('startedAt'))<=60.)
-        guard=_dict(keyboard.get('lastGuardObservation'));scope=_dict(guard.get('scope'))
-        _need(_int(guard.get('keyboardThreadId'),minimum=1)==thread)
-        for role,pid,created in (('shell',expected['shellPid'],expected['shellCreationTime']),
-                                 ('engine',expected['officePid'],expected['officeCreationTime'])):
-            handle=_process(keyboard.get('original'+role.title()),pid,created)
-            _process(guard.get(role),pid,created,handle)
-        threads={}
-        for edge in ('before','after'):
-            row=_dict(scope.get(edge));suite=_window(row.get('suite'));editor=_window(row.get('editor'))
-            _need(suite['isWindow'] and suite['hwnd']==expected['suiteHwnd']
-                  and suite['pid']==expected['shellPid'] and suite['rootHwnd']==expected['suiteHwnd']
-                  and editor['isWindow'] and editor['hwnd']==expected['childHwnd']
-                  and editor['pid']==expected['officePid'] and editor['rootHwnd']==expected['suiteHwnd']
-                  and editor['threadId']==thread and row.get('editorWithinSuite') is True)
-            if not threads:threads={expected['shellPid']:suite['threadId'],expected['officePid']:thread}
-            _need(suite['threadId']==threads[expected['shellPid']])
+              and 0<deadline-setup_started<=60.)
+        scope,threads=_guard_snapshot(keyboard.get('lastGuardObservation'),keyboard,expected,thread)
         observations=context.get('observations')
         _need(type(observations) is list and len(observations)<=120 and all(type(row) is dict for row in observations))
         attempted=context.get('readerStartAttempted')

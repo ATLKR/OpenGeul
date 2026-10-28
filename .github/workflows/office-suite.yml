@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Diagnostic mode is explicitly non-acceptance; delivery requires all normal gates.
-  OPENGEUL_SUITE_RUN_MODE: calc-dispatch-diagnostic
+  OPENGEUL_SUITE_RUN_MODE: acceptance
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'

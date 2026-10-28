@@ -32,6 +32,17 @@ def admitted_record():
         imeSemanticContext=context,imeSemanticContexts=[context])
 
 
+def initial_record():
+    record=admitted_record()
+    for key in ('imeSemanticContext','imeSemanticContexts','editorTid'):record.pop(key)
+    record['stage']='focus-editor'
+    record['numericFailure']=dict(captured=1,exceptionCode=1,fileCode=1,line=389)
+    record['numericFailureFrames']=[[11,309],[24,22],[11,183],[11,145],[1,389]]
+    keyboard=record['imeKeyboardSession'];keyboard['startedAt']=10.
+    keyboard['admissionSnapshot']=copy.deepcopy(keyboard['lastGuardObservation'])
+    return record
+
+
 def implementation():
     assert SCRIPT.is_file(),'Bounded existing-focus projection is required'
     spec=importlib.util.spec_from_file_location('focus_summary_under_test',SCRIPT)
@@ -40,6 +51,51 @@ def implementation():
 
 
 class FocusSummaryTests(unittest.TestCase):
+    def test_initial_guard_uses_admission_thread_and_marks_reader_unobserved(self):
+        record=initial_record()
+        self.assertEqual(implementation().project(record),[2,2,0,121,0])
+        self.assertNotIn('editorTid',record)
+        self.assertNotIn('imeSemanticContext',record)
+
+    def test_old_guard_cannot_be_attached_to_a_direct_preparation_failure(self):
+        for damage in ('no-frames','direct-windows','old-line','reordered','untyped','admission-missing',
+                'admission-thread','admission-generation','admission-handle','record-thread','old-context',
+                'old-history','navigation','deadline','started'):
+            record=initial_record();keyboard=record['imeKeyboardSession']
+            if damage=='no-frames':record.pop('numericFailureFrames')
+            elif damage=='direct-windows':record['numericFailureFrames']=[[1,420],[1,389]]
+            elif damage=='old-line':record['numericFailure']['line']=388
+            elif damage=='reordered':record['numericFailureFrames']=[[24,22],[11,183],[1,389]]
+            elif damage=='untyped':record['numericFailureFrames'][0][0]=True
+            elif damage=='admission-missing':keyboard.pop('admissionSnapshot')
+            elif damage=='admission-thread':keyboard['admissionSnapshot']['scope']['after']['editor']['threadId']+=1
+            elif damage=='admission-generation':keyboard['admissionSnapshot']['engine']['creationTime']+=1
+            elif damage=='admission-handle':keyboard['admissionSnapshot']['engine']['handleValue']+=1
+            elif damage=='record-thread':record['editorTid']=99
+            elif damage=='old-context':record['imeSemanticContext']={}
+            elif damage=='old-history':record['imeSemanticContexts']=[]
+            elif damage=='navigation':record['calcNavigationContext']={}
+            elif damage=='deadline':keyboard['setupDeadline']+=1
+            else:keyboard['startedAt']=71.
+            with self.subTest(damage=damage):self.assertIsNone(implementation().project(record))
+
+    def test_navigation_context_is_joined_without_claiming_its_reader_state(self):
+        record=initial_record()
+        record['calcNavigationContext']=dict(schemaVersion=1,kind='ime-calc-pre-edit-navigation',success=False,
+            startedAt=20.,setupDeadline=70.,readerDeadline=32.,
+            expectedNative=copy.deepcopy(record['imeKeyboardSession']['expectedNative']),
+            readerStartAttempted=True,initial=dict(private='PRIVATE'))
+        self.assertEqual(implementation().project(record),[2,2,0,121,0])
+        for damage in ('kind','generation','setup','reader-deadline','started','module'):
+            changed=copy.deepcopy(record);context=changed['calcNavigationContext']
+            if damage=='kind':context['kind']='unbound'
+            elif damage=='generation':context['expectedNative']['officeCreationTime']+=1
+            elif damage=='setup':context['setupDeadline']+=1
+            elif damage=='reader-deadline':context['readerDeadline']+=1
+            elif damage=='started':context['startedAt']=float('nan')
+            else:changed.update(module='writer',case='ime-writer',kind='native-korean-ime')
+            with self.subTest(damage=damage):self.assertIsNone(implementation().project(changed))
+
     def test_last_existing_guard_and_empty_reader_progress_are_observed_without_mutation(self):
         record=admitted_record();before=copy.deepcopy(record)
         self.assertEqual(implementation().project(record),[2,2,0,0,0])

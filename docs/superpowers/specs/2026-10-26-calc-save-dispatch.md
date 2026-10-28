@@ -92,6 +92,10 @@ Run 40724862643 at
 Calc-trace notices whose complete annotation counts matched the finished job.
 That run attached Calc but failed the existing foreground-ownership guard
 before save; it supplies no native save or retained-engine-exit proof.
+Run 40734133781 at `dfc633b09ec39f0e3d0f2736e9aad372e924548e` reproduced
+the same guard before the Calc navigation reader started. Both Windows unit
+and shell checks passed; the native save probes still did not execute. These
+results do not establish a model-reader cause for the foreground change.
 
 When such a guard fails, keep the original owned source-frame locations and a
 bounded numeric projection of its already captured before/after foreground
@@ -99,6 +103,10 @@ ownership and semantic-reader progress. An attempted reader start is not a
 process-start proof; a returned observation or cleanup field is not evidence
 that the reader changed foreground. Do not query the target again or weaken
 the guard to obtain a later dispatch trace.
+Initial setup can fail before a semantic-reader context exists. Its numeric
+projection must distinguish that unobserved context from a measured empty
+observation list, and join the failed shared guard to the original admitted
+processes and editor thread. Keep the same ownership and time-limit checks.
 
 Interpret the numeric trace alongside the original input/save oracle and
 confirmed process-exit evidence. Validate native nesting, generation/deadline

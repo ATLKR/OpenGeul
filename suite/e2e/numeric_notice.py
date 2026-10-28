@@ -312,11 +312,12 @@ def _mode_summary(record,context):
 
 def _valid_focus(value):
     return (type(value) is list and len(value)==5 and
-        all(_integer(number,maximum) for number,maximum in zip(value,(5,5,2,120,1))))
+        all(_integer(number,maximum) for number,maximum in zip(value,(5,5,2,121,1)))
+        and (value[3]!=121 or value[2]==value[4]==0))
 
 
 def _focus_context(case,stage,context):
-    return (stage in (STAGES['verify-pre-prefix-editing-context'],STAGES['verify-post-prefix-editing-context'])
+    return (stage in (STAGES['focus-editor'],STAGES['verify-pre-prefix-editing-context'],STAGES['verify-post-prefix-editing-context'])
         and ((context['scopeCode']==SCOPES['korean-ime'] and case in tuple(CASES['ime-'+name][0] for name in ('writer','calc','impress')))
             or (context['scopeCode']==SCOPES['calc-dispatch'] and context['architecture']==0xaa64 and case==CASES['ime-calc'][0])))
 
@@ -470,7 +471,8 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
                 or (not mode_mask and not value['startup'][0])):
             raise ValueError('Mode samples or observed startup tuple required')
     if value['schemaVersion']==4 and (not _valid_focus(value['focus'])
-            or not _focus_context(value['caseCode'],value['stageCode'],value)):
+            or not _focus_context(value['caseCode'],value['stageCode'],value)
+            or (value['stageCode']==STAGES['focus-editor'])!=(value['focus'][3]==121)):
         raise ValueError('Bounded existing-focus context required')
     return value
 
