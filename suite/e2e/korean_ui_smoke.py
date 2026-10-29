@@ -169,6 +169,7 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         record.update(success=True, cleanClose=True, stage='complete')
     except Exception as exc:
         native.capture_failure(output, case, record, exc)
+        accessible.attach_child_failure(record, exc)
     finally:
         if process is not None:
             record['forcedCleanupRequired'] = process.poll() is None

@@ -181,6 +181,13 @@ class CalcSaveSmokeTests(unittest.TestCase):
             rows=[]
             for index,part in enumerate([basic[0],*basic]):
                 row=observation(frame,self.base['a1Text'],1+index*.2,1.1+index*.2,False)
+                # Synthetic QPC samples bracket this request's selection proof;
+                # the existing monotonic samples and deadline stay unchanged.
+                started_ns=1_000_000_000+index*200_000_000
+                finished_ns=1_100_000_000+index*200_000_000
+                row.update(controllerQpc=dict(startedNs=started_ns,finishedNs=finished_ns),
+                    helperQpc=dict(startedTicks=started_ns+10_000_000,
+                        finishedTicks=finished_ns-10_000_000,frequency=1_000_000_000))
                 ui=copy.deepcopy(part['pendingInput']);ui['childHwnd']=frame.binding['childHwnd']
                 row.update(kind='existing-owned-calc-pending-input',operations=list(reader.CALC_PENDING_OPERATIONS),
                     calcSelection=copy.deepcopy(part['calcSelection']),pendingInput=ui)
@@ -193,6 +200,10 @@ class CalcSaveSmokeTests(unittest.TestCase):
                            lambda r:r[3]['pendingInput']['editor'].update(text=self.expected+'suffix'),
                            lambda r:r[3]['bindingAfter'].update(officeCreationTime=999),
                            lambda r:r[3].update(readStartedAt=.5),
+                           lambda r:r[3].pop('controllerQpc'),
+                           lambda r:r[3].pop('helperQpc'),
+                           lambda r:r[3].update(controllerQpc=copy.deepcopy(r[2]['controllerQpc'])),
+                           lambda r:r[3].update(helperQpc=copy.deepcopy(r[2]['helperQpc'])),
                            lambda r:program_observation(r[0],1),
                            lambda r:program_observation(r[1],0),
                            lambda r:r[2]['calcSelectionPhase'].update(requestSequence=1),

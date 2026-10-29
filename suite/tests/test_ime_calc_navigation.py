@@ -50,6 +50,13 @@ def navigation_fixture(directory, binding=None):
     def row(sequence, column, line):
         value = observation(frame, baseline['a1Text'], 1.1 + sequence * .3,
                             1.2 + sequence * .3, False)
+        # Independent integer QPC samples bracket this request's helper work.
+        # Keep the caller's original monotonic samples and deadline unchanged.
+        started_ns = 1_100_000_000 + sequence * 300_000_000
+        finished_ns = 1_200_000_000 + sequence * 300_000_000
+        value.update(controllerQpc=dict(startedNs=started_ns, finishedNs=finished_ns),
+            helperQpc=dict(startedTicks=started_ns + 10_000_000,
+                finishedTicks=finished_ns - 10_000_000, frequency=1_000_000_000))
         value['pendingInput'] = copy.deepcopy(absent)
         selected = Proxy(getRangeAddress=lambda: area(column, line))
         clock = lambda: (value['readStartedAt'] + value['readFinishedAt']) / 2
@@ -200,7 +207,9 @@ class CalcNavigationTests(unittest.TestCase):
         mutations = [lambda r: r['bindingBefore'].update(officeCreationTime=333),
             lambda r: r['bindingAfter'].update(documentUrl='file:///wrong.xlsx'),
             lambda r: r['nativeSnapshots']['helperAfter'].update(profileUrl='file:///C:/other'),
-            lambda r: r.update(a1Text='changed'), lambda r: r.update(isModified=True)]
+            lambda r: r.update(a1Text='changed'), lambda r: r.update(isModified=True),
+            lambda r: r.pop('controllerQpc'), lambda r: r.pop('helperQpc'),
+            lambda r: r['helperQpc'].update(startedTicks=1_110_000_000, finishedTicks=1_190_000_000)]
         for change in mutations:
             with self.subTest(change=change):
                 original = self.data.selected

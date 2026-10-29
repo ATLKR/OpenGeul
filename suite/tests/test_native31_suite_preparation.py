@@ -244,7 +244,7 @@ if ($global:LASTEXITCODE -ne 7) { throw 'Original native exit changed.' }
         line,value=self.numeric_notice()
         from suite.tests.test_numeric_notice import implementation
         codec=implementation();maximum=copy.deepcopy(value)
-        maximum.update(fieldPresenceMask=(1<<51)-1,fileCode=31,line=10000000,ownedFrames=[[31,10000000]]*8)
+        maximum.update(fieldPresenceMask=(1<<51)-1,fileCode=33,line=10000000,ownedFrames=[[33,10000000]]*8)
         for name,kind,_ in codec._FIELDS_V2:
             maximum['observations'][name]=1 if kind in ('bool','flag') else (8 if kind=='ordinal' else (2**64-1 if kind=='u64' else 2**32-1))
         max_line=line.split('::',2)[:2];max_line='::'.join(max_line)+'::'+json.dumps(maximum,separators=(',',':'))
@@ -260,7 +260,7 @@ if ($global:LASTEXITCODE -ne 7) { throw 'Original native exit changed.' }
         line,value=self.numeric_notice();prefix=line.split('::',2)[:2];prefix='::'.join(prefix)+'::'
         mutations=[]
         for update in ({'private':'PRIVATE_UNKNOWN'},{'sourceCommit':'b'*40},{'runId':124},{'runId':True},
-                       {'scopeCode':3},{'schemaVersion':2.0},{'exceptionCode':13},{'fileCode':32},{'line':10000001},
+                       {'scopeCode':3},{'schemaVersion':2.0},{'exceptionCode':13},{'fileCode':34},{'line':10000001},
                        {'ownedFrames':[]},{'ownedFrames':[[28,77]]*9},{'ownedFrames':[[28,78]]},{'fieldPresenceMask':1<<51}):
             mutations.append(value|update)
         for key,number,mask in (('cleanClose','PRIVATE_VALUE',0),('cleanClose',2,1<<7),

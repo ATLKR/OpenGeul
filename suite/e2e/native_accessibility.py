@@ -24,6 +24,69 @@ MODULE_SERVICES = {'writer': 'com.sun.star.text.TextDocument',
                    'calc': 'com.sun.star.sheet.SpreadsheetDocument',
                    'impress': 'com.sun.star.presentation.PresentationDocument',
                    'draw': 'com.sun.star.drawing.DrawingDocument'}
+_CHILD_FAILURE_KEYS = {'schemaVersion', 'officePid', 'officeCreationTime', 'childHwnd',
+                       'moduleCode', 'ownershipStage', 'failure', 'ownedFrames'}
+
+
+def _validate_child_failure(value, request):
+    """Validate only closed numbers; request paths and transport are never read."""
+    from numeric_notice import MODULES, SOURCE_FILES, validate_failure_code, validate_failure_frames
+    if type(value) is not dict or value.keys() != _CHILD_FAILURE_KEYS:
+        raise ValueError('Closed native child failure required')
+    for key, expected, maximum in (
+            ('schemaVersion', 1, 1), ('officePid', request['officePid'], 0xffffffff),
+            ('officeCreationTime', request['creationTime'], 2**64-1),
+            ('childHwnd', request['childHwnd'], 2**64-1),
+            ('moduleCode', MODULES[request['module']], 4)):
+        if (type(expected) is not int or type(value[key]) is not int
+                or not 1 <= value[key] <= maximum or value[key] != expected):
+            raise ValueError('Native child failure identity differs')
+    if type(value['ownershipStage']) is not int or value['ownershipStage'] not in (0, 1, 2):
+        raise ValueError('Unknown native child ownership stage')
+    failure = validate_failure_code(value['failure'])
+    frames = validate_failure_frames(value['ownedFrames'])
+    if (not frames or not failure['fileCode'] or frames[-1] != [failure['fileCode'], failure['line']]
+            or not any(row[0] == SOURCE_FILES['native_accessibility.py'] for row in frames)):
+        raise ValueError('Actual native child owned traceback required')
+    return dict(value, failure=failure, ownedFrames=frames)
+
+
+def _decode_child_failure(value, request):
+    try:
+        if type(value) is not str or not 0 < len(value.encode('utf-8')) <= 1024:
+            return None
+        def unique(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result: raise ValueError('Duplicate native child key')
+                result[key] = item
+            return result
+        return _validate_child_failure(json.loads(value, object_pairs_hook=unique), request)
+    except Exception:
+        return None  # Optional evidence never replaces the original failure.
+
+
+def attach_child_failure(record, exc):
+    """After the normal capture hook, use actual child frames in its one notice."""
+    try:
+        from numeric_notice import notices_enabled, validate_failure_code, validate_failure_frames
+        if (not notices_enabled() or type(record) is not dict or type(exc) is not AssertionError
+                or record.get('success') is not False
+                or record.get('stage') != 'capture-native-accessible-objects'
+                or record.get('case') != 'korean-ui-' + record['module']):
+            return False
+        child = _validate_child_failure(vars(exc).get('_opengeul_native_accessibility_failure'),
+            dict(officePid=record['officePid'], creationTime=record['officeCreationTime'],
+                 childHwnd=record['childHwnd'], module=record['module']))
+        controller = validate_failure_code(record.get('numericFailure'))
+        controller_frames = validate_failure_frames(record.get('numericFailureFrames'))
+        record.update(nativeAccessibilityControllerFailure=controller,
+                      nativeAccessibilityControllerFrames=controller_frames,
+                      nativeAccessibilityChildFailure=child,
+                      numericFailure=child['failure'], numericFailureFrames=child['ownedFrames'])
+        return True
+    except Exception:
+        return False
 
 
 def normalize_label(value):
@@ -158,15 +221,28 @@ def _command_line(process):
 def capture_bounded(suite, child, pid, creation_time, module, destination):
     expected_image = suite / 'Office/program/soffice.bin'
     api, retained = _owned_process(child, pid, creation_time, expected_image)
+    primary = child_failure = None
     try:
         pipe = private_pipe(_command_line(retained))
         request = dict(childHwnd=child, officePid=pid, creationTime=creation_time,
                        expectedImage=str(expected_image), module=module, pipe=pipe,
                        snapshot=str(destination))
         result = subprocess.run([str(suite/'Office/program/python.exe'), str(Path(__file__).resolve()), '--collect-live'],
-                                input=json.dumps(request), capture_output=True, text=True, encoding='utf-8',
+                                input=json.dumps(request), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, encoding='utf-8', errors='replace',
                                 timeout=45, shell=False)
-        assert result.returncode == 0, 'Owned native accessibility collector failed: ' + result.stderr
+        try:
+            assert result.returncode == 0, 'Owned native accessibility collector failed: '
+        except AssertionError as exc:
+            primary = exc
+            try:
+                # This is the same retained-generation/HWND join as success.
+                # A failed join only disqualifies optional child metadata.
+                assert not retained.exited(0) and api.user.IsWindow(child) and api.pid(child) == pid, 'Owned engine changed during accessibility collection'
+                child_failure = _decode_child_failure(result.stdout, request)
+            except Exception:
+                pass
+            raise
         assert not retained.exited(0) and api.user.IsWindow(child) and api.pid(child) == pid, 'Owned engine changed during accessibility collection'
         snapshot = json.loads(destination.read_text(encoding='utf-8'))
         snapshot['witness']['retainedProcessHandle'] = True
@@ -174,6 +250,8 @@ def capture_bounded(suite, child, pid, creation_time, module, destination):
         return snapshot
     finally:
         retained.close()
+        if primary is not None and child_failure is not None:
+            vars(primary)['_opengeul_native_accessibility_failure'] = child_failure
 
 
 def _rectangle(context):
@@ -339,10 +417,11 @@ def _native_notebookbar(context, frame, peer, diagnostic):
             binding.update(focusRestored=True, selectionUnchanged=True)
 
 
-def collect_live(request):
+def collect_live(request, diagnostic=None):
     import uno
     child, pid = request['childHwnd'], request['officePid']
     api, retained = _owned_process(child, pid, request['creationTime'], request['expectedImage'])
+    if diagnostic is not None: diagnostic['ownershipStage'] = 1
     try:
         assert re.fullmatch(r'OpenGeul_[0-9a-f]{32}', request['pipe']), 'Private accessibility transport is invalid'
         local = uno.getComponentContext()
@@ -365,6 +444,7 @@ def collect_live(request):
         assert controller is not None and controller.getFrame() == frame, 'Loaded native controller belongs to another frame'
         service = MODULE_SERVICES[request['module']]
         assert controller.getModel().supportsService(service), 'Loaded native frame belongs to another module'
+        if diagnostic is not None: diagnostic['ownershipStage'] = 2
         assert int(uno.getConstantByName(ROLE_NAMESPACE + '.PAGE_TAB')) == PAGE_TAB
         assert int(uno.getConstantByName(ROLE_NAMESPACE + '.PAGE_TAB_LIST')) == PAGE_TAB_LIST
         # Pinned public XVclWindowPeer test property returns the instantiated VCL
@@ -440,6 +520,32 @@ def collect_live(request):
         retained.close()
 
 
+def _collect_main(request):
+    diagnostic = dict(ownershipStage=0)
+    try:
+        collect_live(request, diagnostic)
+    except Exception as exc:
+        # All existing focus/listener/DPI/retained-handle finally blocks have
+        # already run. Never read text, traceback formatting or UNO properties.
+        try:
+            from numeric_notice import (MODULES, notices_enabled, capture_failure_code,
+                                        capture_failure_frames)
+            if notices_enabled():
+                value = _validate_child_failure(dict(schemaVersion=1,
+                    officePid=request['officePid'], officeCreationTime=request['creationTime'],
+                    childHwnd=request['childHwnd'], moduleCode=MODULES[request['module']],
+                    ownershipStage=diagnostic['ownershipStage'], failure=capture_failure_code(exc),
+                    ownedFrames=capture_failure_frames(exc)), request)
+                message = json.dumps(value, separators=(',', ':'), allow_nan=False)
+                if len(message.encode('utf-8'))+1 <= 1024:
+                    sys.stdout.write(message+'\n')
+                    sys.stdout.flush()
+        except Exception:
+            pass  # A partial/broken output is not retried and cannot hide failure.
+        return 1
+    return 0
+
+
 if __name__ == '__main__':
     assert os.name == 'nt' and __debug__ and sys.argv[1:] == ['--collect-live'], 'Actual Windows native collector execution is required'
-    collect_live(json.loads(sys.stdin.read(32768)))
+    raise SystemExit(_collect_main(json.loads(sys.stdin.read(32768))))

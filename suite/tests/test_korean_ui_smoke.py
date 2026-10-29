@@ -1,8 +1,15 @@
 import importlib.util
+from contextlib import ExitStack, redirect_stdout
 from copy import deepcopy
+import io
+import json
+import os
 from pathlib import Path
 import sys
+import tempfile
+from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 E2E = Path(__file__).resolve().parents[1] / 'e2e'
 sys.path.insert(0, str(E2E))
@@ -166,6 +173,293 @@ class PrivateNativeTransportTests(unittest.TestCase):
                      ['--invisible', valid.replace('a'*32, 'foreign')]):
             with self.subTest(args=args), self.assertRaises(AssertionError):
                 smoke.accessible.private_pipe(args)
+
+
+def numeric_environment():
+    return dict(OPENGEUL_SUITE_NUMERIC_NOTICE='1', OPENGEUL_SUITE_NOTICE_SCOPE='4',
+        GITHUB_ACTIONS='true', GITHUB_REPOSITORY='ATLKR/OpenGeul', GITHUB_JOB='windows-suite',
+        GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/work/opengeul-office-arm64',
+        GITHUB_ACTOR='ATLKR', GITHUB_ACTOR_ID='65988341', GITHUB_RUN_ID='123',
+        GITHUB_RUN_ATTEMPT='1', GITHUB_SHA='a'*40, GITHUB_WORKFLOW_SHA='a'*40, RUNNER_ARCH='ARM64')
+
+
+class NativeChildFailureTests(unittest.TestCase):
+    def request(self):
+        return dict(childHwnd=123, officePid=200, creationTime=300, module='writer',
+            expectedImage='synthetic/Office/program/soffice.bin', pipe='OpenGeul_'+'a'*32,
+            snapshot='synthetic-snapshot.json')
+
+    def payload(self):
+        return dict(schemaVersion=1, officePid=200, officeCreationTime=300, childHwnd=123,
+            moduleCode=1, ownershipStage=2,
+            failure=dict(captured=1, exceptionCode=7, fileCode=19, line=321),
+            ownedFrames=[[19, 445], [19, 321]])
+
+    def feature(self, name):
+        method = getattr(smoke.accessible, name, None)
+        self.assertTrue(callable(method), 'Same-child closed numeric failure forwarding is required: '+name)
+        return method
+
+    def capture(self, output, *, join='valid', close_error=None):
+        events, calls = [], []
+        class Result:
+            returncode = 1
+            stdout = output
+            @property
+            def stderr(self):
+                raise AssertionError('Raw stderr must not be read')
+        def exited(seconds):
+            events.append(('exited', seconds))
+            if join == 'error': raise OSError('synthetic join unavailable')
+            return join == 'exited'
+        def close():
+            events.append('close')
+            if close_error is not None: raise close_error
+        retained = NS(creation_time=300, exited=exited, close=close)
+        def is_window(hwnd):
+            events.append(('window', hwnd));return join != 'window'
+        def pid(hwnd):
+            events.append(('pid', hwnd));return 201 if join == 'pid' else 200
+        api = NS(user=NS(IsWindow=is_window), pid=pid)
+        def run(command, **kwargs):
+            calls.append((command, kwargs));return Result()
+        caught = None
+        with patch.object(smoke.accessible, '_owned_process', return_value=(api, retained)), \
+             patch.object(smoke.accessible, '_command_line', return_value=['--invisible',
+                 '--accept=pipe,name=OpenGeul_'+'a'*32+';urp;StarOffice.ServiceManager']), \
+             patch.object(smoke.accessible.subprocess, 'run', side_effect=run):
+            try:
+                smoke.accessible.capture_bounded(Path('/synthetic'), 123, 200, 300,
+                    'writer', Path('/synthetic-evidence.json'))
+            except BaseException as exc: caught = exc
+        return caught, events, calls
+
+    def test_nonzero_child_keeps_original_assertion_after_one_join_and_one_handle_close(self):
+        caught, events, calls = self.capture(json.dumps(self.payload()))
+        self.assertIs(type(caught), AssertionError)
+        self.assertEqual(str(caught), 'Owned native accessibility collector failed: ')
+        self.assertEqual(vars(caught).get('_opengeul_native_accessibility_failure'), self.payload())
+        self.assertEqual(events, [('exited', 0), ('window', 123), ('pid', 123), 'close'])
+        self.assertEqual(len(calls), 1)
+        command, options = calls[0]
+        self.assertEqual(command[0], '/synthetic/Office/program/python.exe')
+        self.assertEqual(command[2:], ['--collect-live'])
+        self.assertNotIn('capture_output', options)
+        self.assertEqual({key: options[key] for key in ('timeout', 'shell', 'stdout', 'stderr', 'text', 'encoding')},
+            dict(timeout=45, shell=False, stdout=-1, stderr=-3, text=True, encoding='utf-8'))
+        request = json.loads(options['input'])
+        self.assertEqual(set(request), {'childHwnd','officePid','creationTime','expectedImage','module','pipe','snapshot'})
+
+    def test_join_mismatch_or_error_discards_child_metadata_without_replacing_original_failure(self):
+        for join in ('exited', 'window', 'pid', 'error'):
+            with self.subTest(join=join):
+                caught, events, calls = self.capture(json.dumps(self.payload()), join=join)
+                self.assertIs(type(caught), AssertionError)
+                self.assertEqual(str(caught), 'Owned native accessibility collector failed: ')
+                self.assertNotIn('_opengeul_native_accessibility_failure', vars(caught))
+                self.assertEqual(events.count('close'), 1)
+                self.assertEqual(len(calls), 1)
+
+    def test_existing_handle_close_failure_keeps_its_original_priority(self):
+        error = OSError('synthetic original handle close failure')
+        caught, events, calls = self.capture(json.dumps(self.payload()), close_error=error)
+        self.assertIs(caught, error)
+        self.assertEqual(events[-1], 'close');self.assertEqual(len(calls), 1)
+        self.assertNotIn('_opengeul_native_accessibility_failure', vars(caught))
+
+    def test_decoder_drops_incomplete_noisy_unknown_or_foreign_records(self):
+        decode = self.feature('_decode_child_failure')
+        valid = self.payload()
+        self.assertEqual(decode(json.dumps(valid), self.request()), valid)
+        bad = [json.dumps(valid)[:-1], json.dumps(valid)+'\nPRIVATE', '', '[]',
+            json.dumps(valid).replace('"schemaVersion": 1', '"schemaVersion": 1, "schemaVersion": 1'),
+            ' '*1025, '\ud800',
+            json.dumps(valid|{'extra':'PRIVATE'}), json.dumps(valid|{'schemaVersion':True}),
+            json.dumps(valid|{'officePid':True}), json.dumps(valid|{'officePid':201}),
+            json.dumps(valid|{'officeCreationTime':301}), json.dumps(valid|{'childHwnd':124}),
+            json.dumps(valid|{'moduleCode':2}), json.dumps(valid|{'ownershipStage':3}),
+            json.dumps(valid|{'ownershipStage':True}), json.dumps(valid|{'ownedFrames':[]}),
+            json.dumps(valid|{'ownedFrames':[[19,320]]}), json.dumps(valid|{'ownedFrames':[[19,321]]*9}),
+            json.dumps(valid|{'ownedFrames':[[True,321]]}), json.dumps(valid|{'ownedFrames':[[999,321]]}),
+            json.dumps(valid|{'ownedFrames':[[19,0]]}), json.dumps(valid|{'ownedFrames':[[19,True]]}),
+            json.dumps(valid|{'failure':valid['failure']|{'fileCode':0,'line':0}}),
+            json.dumps(valid|{'failure':valid['failure']|{'line':float('nan')}}),
+            json.dumps(valid|{'failure':valid['failure']|{'captured':True}}),
+            json.dumps(valid|{'failure':valid['failure']|{'message':'PRIVATE'}}),
+            json.dumps(valid|{'failure':dict(captured=1,exceptionCode=1,fileCode=1,line=321),
+                'ownedFrames':[[1,321]]})]
+        for value in bad:
+            with self.subTest(index=bad.index(value)):
+                self.assertIsNone(decode(value, self.request()))
+                caught, _, calls = self.capture(value)
+                self.assertIs(type(caught), AssertionError)
+                self.assertNotIn('_opengeul_native_accessibility_failure', vars(caught))
+                self.assertEqual(len(calls), 1)
+
+    def test_success_keeps_existing_snapshot_join_and_does_not_read_child_output(self):
+        events = []
+        class Result:
+            returncode = 0
+            @property
+            def stdout(self): raise AssertionError('Successful child output is not diagnostic evidence')
+            @property
+            def stderr(self): raise AssertionError('Raw stderr must not be read')
+        retained = NS(exited=lambda seconds:events.append('join') or False,
+            close=lambda:events.append('close'))
+        api = NS(user=NS(IsWindow=lambda hwnd:True), pid=lambda hwnd:200)
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'snapshot.json'
+            destination.write_text('{"witness":{"retainedProcessHandle":false}}', encoding='utf-8')
+            with patch.object(smoke.accessible, '_owned_process', return_value=(api, retained)), \
+                 patch.object(smoke.accessible, '_command_line', return_value=['--invisible',
+                     '--accept=pipe,name=OpenGeul_'+'a'*32+';urp;StarOffice.ServiceManager']), \
+                 patch.object(smoke.accessible.subprocess, 'run', return_value=Result()):
+                value = smoke.accessible.capture_bounded(Path('/synthetic'),123,200,300,'writer',destination)
+            self.assertEqual(value, {'witness':{'retainedProcessHandle':True}})
+            self.assertEqual(json.loads(destination.read_text(encoding='utf-8')), value)
+        self.assertEqual(events, ['join','close'])
+
+    def test_echo_cannot_turn_boolean_request_identity_into_verified_integer_identity(self):
+        decode = self.feature('_decode_child_failure')
+        for request_key, wire_key in (('officePid','officePid'), ('creationTime','officeCreationTime'),
+                                      ('childHwnd','childHwnd')):
+            with self.subTest(field=request_key):
+                request = self.request();request[request_key] = True
+                value = self.payload();value[wire_key] = 1
+                self.assertIsNone(decode(json.dumps(value),request))
+
+    def test_invalid_utf8_child_output_drops_metadata_and_preserves_parent_assertion(self):
+        # Exercise the actual subprocess decoder; only the synthetic executable
+        # is substituted for Office at this external process boundary.
+        real_run = smoke.accessible.subprocess.run
+        calls, events = [], []
+        def run(command, **kwargs):
+            calls.append(command)
+            return real_run([sys.executable,'-c',
+                'import sys;sys.stdout.buffer.write(bytes([255]));sys.stderr.buffer.write(bytes([255]));sys.exit(1)'], **kwargs)
+        retained = NS(exited=lambda seconds:False, close=lambda:events.append('close'))
+        api = NS(user=NS(IsWindow=lambda hwnd:True), pid=lambda hwnd:200)
+        with patch.object(smoke.accessible, '_owned_process', return_value=(api,retained)), \
+             patch.object(smoke.accessible, '_command_line', return_value=['--invisible',
+                 '--accept=pipe,name=OpenGeul_'+'a'*32+';urp;StarOffice.ServiceManager']), \
+             patch.object(smoke.accessible.subprocess,'run',side_effect=run):
+            try: smoke.accessible.capture_bounded(Path('/synthetic'),123,200,300,'writer',Path('/unused'))
+            except BaseException as exc: caught = exc
+        self.assertIs(type(caught), AssertionError)
+        self.assertEqual(str(caught), 'Owned native accessibility collector failed: ')
+        self.assertNotIn('_opengeul_native_accessibility_failure', vars(caught))
+        self.assertEqual(len(calls), 1);self.assertEqual(events, ['close'])
+
+    def test_real_collector_reports_only_completed_ownership_stages_after_unwind(self):
+        collect_main = self.feature('_collect_main')
+        for stage in (0,1,2):
+            with self.subTest(stage=stage):
+                events = []
+                def fail(*args): raise ValueError('synthetic private text')
+                retained = NS(close=lambda:events.append('close'))
+                peer = NS(getWindowHandle=lambda *args:123)
+                frame = NS(getContainerWindow=lambda:peer)
+                controller = NS(getFrame=lambda:frame, getModel=lambda:NS(supportsService=lambda name:True))
+                frame.getController = lambda:controller
+                frames = NS(getCount=lambda:1, getByIndex=lambda index:frame)
+                remote = NS(ServiceManager=NS(createInstanceWithContext=lambda *args:NS(getFrames=lambda:frames)))
+                local = NS(ServiceManager=NS(createInstanceWithContext=lambda *args:NS(resolve=lambda value:remote)))
+                uno = NS(getComponentContext=fail if stage==1 else lambda:local, getConstantByName=fail)
+                def owned(*args):
+                    if stage==0: fail()
+                    return NS(), retained
+                stream = io.StringIO()
+                with patch.dict(os.environ,numeric_environment(),clear=True), \
+                     patch.dict(sys.modules,uno=uno), \
+                     patch.object(smoke.accessible,'_owned_process',side_effect=owned), redirect_stdout(stream):
+                    self.assertEqual(collect_main(self.request()), 1)
+                decoded = self.feature('_decode_child_failure')(stream.getvalue(),self.request())
+                self.assertIsNotNone(decoded)
+                self.assertEqual(decoded['ownershipStage'], stage)
+                self.assertEqual(events, [] if stage==0 else ['close'])
+
+    def test_child_retained_close_failure_stays_above_inner_failure(self):
+        collect_main = self.feature('_collect_main')
+        events = []
+        def fail(): raise ValueError('synthetic inner failure')
+        def close(): events.append('close');raise OSError('synthetic original cleanup failure')
+        stream = io.StringIO()
+        with patch.dict(os.environ,numeric_environment(),clear=True), \
+             patch.dict(sys.modules,uno=NS(getComponentContext=fail)), \
+             patch.object(smoke.accessible,'_owned_process',return_value=(NS(),NS(close=close))), redirect_stdout(stream):
+            self.assertEqual(collect_main(self.request()), 1)
+        decoded = self.feature('_decode_child_failure')(stream.getvalue(),self.request())
+        self.assertEqual(decoded['failure']['exceptionCode'], 6)
+        self.assertEqual(decoded['ownershipStage'], 1)
+        self.assertEqual(events, ['close'])
+
+    def test_child_emits_only_closed_numeric_actual_trace_after_all_existing_cleanup(self):
+        collect_main = self.feature('_collect_main')
+        events = []
+        class NoTextError(ValueError):
+            def __str__(self): raise AssertionError('Exception text must not be read')
+        scope = dict(error=NoTextError(), events=events)
+        exec(compile('def collect(request, diagnostic):\n diagnostic["ownershipStage"]=2\n try:\n  raise error\n finally:\n  events.append("cleanup")\n',
+            str(E2E/'native_accessibility.py'), 'exec'), scope)
+        class Stream(io.StringIO):
+            def write(self, value):
+                self_test.assertEqual(events, ['cleanup']);return super().write(value)
+        self_test = self;stream = Stream()
+        with patch.dict(os.environ, numeric_environment(), clear=True), \
+             patch.object(smoke.accessible, 'collect_live', side_effect=scope['collect']), \
+             patch.object(smoke.native.numeric_notice, 'emit_case_notice', side_effect=AssertionError('No child GHA notice')), \
+             redirect_stdout(stream):
+            result = collect_main(self.request())
+        self.assertEqual(result, 1)
+        self.assertLessEqual(len(stream.getvalue().encode('utf-8')), 1024)
+        decoded = self.feature('_decode_child_failure')(stream.getvalue(), self.request())
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded['ownershipStage'], 2)
+        self.assertEqual(decoded['failure']['exceptionCode'], 0)  # Unknown exact subclass stays unknown.
+        self.assertEqual(decoded['failure']['fileCode'], 19)
+        self.assertEqual(decoded['ownedFrames'][-1], [19, 4])
+        self.assertNotIn('PRIVATE', stream.getvalue());self.assertNotIn('::notice', stream.getvalue())
+
+    def test_child_optional_output_failure_never_retries_or_replaces_nonzero_result(self):
+        collect_main = self.feature('_collect_main')
+        class BrokenStream:
+            def __init__(self): self.writes = 0
+            def write(self, value): self.writes += 1;raise OSError('synthetic partial stdout')
+            def flush(self): raise AssertionError('Do not flush a failed write')
+        stream = BrokenStream()
+        with patch.dict(os.environ, numeric_environment(), clear=True), \
+             patch.object(smoke.accessible, 'collect_live', side_effect=ValueError()), redirect_stdout(stream):
+            self.assertEqual(collect_main(self.request()), 1)
+        self.assertEqual(stream.writes, 1)
+
+    def test_handoff_keeps_controller_audit_and_only_actual_child_frames_in_one_parent_notice(self):
+        handoff = self.feature('attach_child_failure')
+        import numeric_notice
+        caught, _, _ = self.capture(json.dumps(self.payload()))
+        record = dict(case='korean-ui-writer', module='writer', stage='capture-native-accessible-objects',
+            officePid=200, officeCreationTime=300, childHwnd=123)
+        stream = io.StringIO();emitter = numeric_notice.NoticeEmitter(environ=numeric_environment(), stream=stream)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, numeric_environment(), clear=True), \
+             patch.object(numeric_notice, '_EMITTER', emitter):
+            smoke.native.capture_failure(Path(directory), 'korean-ui-writer', record, caught)
+            original_code = deepcopy(record['numericFailure']);original_frames = deepcopy(record['numericFailureFrames'])
+            self.assertEqual(stream.getvalue(), '')
+            with patch.object(smoke.accessible.subprocess, 'run', side_effect=AssertionError('No second process')), \
+                 patch('time.monotonic', side_effect=AssertionError('No new deadline')), \
+                 patch('os.stat', side_effect=AssertionError('No new filesystem observation')):
+                self.assertTrue(handoff(record, caught))
+            self.assertEqual(record['nativeAccessibilityControllerFailure'], original_code)
+            self.assertEqual(record['nativeAccessibilityControllerFrames'], original_frames)
+            self.assertEqual(record['nativeAccessibilityChildFailure'], self.payload())
+            self.assertEqual(record['numericFailureFrames'], [[19,445],[19,321]])
+            smoke.native.write_result(Path(directory), 'korean-ui-writer', record)
+        notices = stream.getvalue().strip().splitlines()
+        self.assertEqual(len(notices), 1)
+        payload = notices[0].split('::', 2)[2]
+        decoded = numeric_notice.decode_notice(payload, 'a'*40, 123, expected_scope=4)
+        self.assertEqual(decoded['schemaVersion'], 2)
+        self.assertEqual(decoded['ownedFrames'], [[19,445],[19,321]])
+        self.assertEqual((decoded['exceptionCode'],decoded['fileCode'],decoded['line']), (7,19,321))
 
 
 if __name__ == '__main__':

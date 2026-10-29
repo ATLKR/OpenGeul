@@ -87,6 +87,42 @@ class NumericNoticeTests(unittest.TestCase):
         self.assertTrue(decoded['fieldPresenceMask'] & bit)
         self.assertEqual(decoded['observations']['shellExitCode'], 0)
 
+    def test_original_calc_save_write_result_emits_one_closed_failure_after_cleanup(self):
+        with patch.object(sys, 'path', [str(SCRIPT.parent), *sys.path]):
+            import windows_smoke as native
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE'] = '13'
+        filename = str(SCRIPT.with_name('calc_save_smoke.py'))
+        try:
+            exec(compile("raise AssertionError('SYNTHETIC-PRIVATE-INPUT C:/private/profile')", filename, 'exec'), {})
+        except AssertionError as exc:
+            record = dict(case='calc-active-cell-save', module='calc', success=False,
+                stage='physical-edit-without-enter', error='SYNTHETIC-PRIVATE-INPUT',
+                numericFailure=self.n.capture_failure_code(exc),
+                numericFailureFrames=self.n.capture_failure_frames(exc),
+                testProcessCleanup=dict(shellExitCode=1, forceRequested=True))
+        with tempfile.TemporaryDirectory() as temp, patch.object(native, 'numeric_notice', self.n), \
+                patch.object(self.n, '_EMITTER', self.emitter):
+            native.write_result(Path(temp), 'calc-active-cell-save', record)
+            self.assertTrue((Path(temp)/'calc-active-cell-save-result.json').is_file())
+        self.assertEqual(len(self.messages()), 1)
+        value = self.decode(self.messages()[0], expected_scope=13)
+        self.assertEqual((value['schemaVersion'], value['caseCode'], value['moduleCode'], value['fileCode']), (2,60,2,33))
+        self.assertGreater(value['stageCode'], 94)
+        self.assertEqual(value['ownedFrames'][-1], [33,1])
+        self.assertEqual(value['observations']['cleanupShellExitCode'], 1)
+        self.assertEqual(value['observations']['forceRequested'], 1)
+        self.assertNotIn('SYNTHETIC-PRIVATE-INPUT', self.stream.getvalue())
+        self.assertNotIn('C:/private', self.stream.getvalue())
+
+    def test_normal_calc_save_workflow_opts_into_original_single_notice_path(self):
+        from suite.tests.test_calc_matrix_workflow import workflow_steps, field, run_code
+        rows = [step for step in workflow_steps() if field(step, 'id') == 'calc-save']
+        self.assertEqual(len(rows), 1)
+        self.assertIn("        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'", rows[0])
+        self.assertIn("        OPENGEUL_SUITE_NOTICE_SCOPE: '13'", rows[0])
+        self.assertEqual(run_code(rows[0]).count('python suite/e2e/calc_save_smoke.py '), 1)
+        self.assertIn("env.OPENGEUL_SUITE_RUN_MODE == 'acceptance'", field(rows[0], 'if'))
+
     def test_native_archive_failure_uses_closed_v1_notice_and_owned_source_location(self):
         self.env['OPENGEUL_SUITE_NOTICE_SCOPE'] = '10'
         namespace = {}
@@ -301,9 +337,11 @@ class NumericNoticeTests(unittest.TestCase):
         actual = [step for step in workflow_steps() if "OPENGEUL_SUITE_NUMERIC_NOTICE: '1'" in step]
         compartment=next(step for step in workflow_steps() if field(step,'id')=='ime-mode-diagnostic')
         privacy=next(step for step in workflow_steps() if field(step,'id')=='native31-privacy-prepare')
-        self.assertEqual({step.splitlines()[0] for step in actual}, {step.splitlines()[0] for step in (*expected,compartment,privacy)})
+        calc_save=next(step for step in workflow_steps() if field(step,'id')=='calc-save')
+        self.assertEqual({step.splitlines()[0] for step in actual}, {step.splitlines()[0] for step in (*expected,compartment,privacy,calc_save)})
         self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '3'",compartment)
         self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '12'",privacy)
+        self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '13'",calc_save)
         for scope,step in enumerate(expected,1):
             self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '"+str(scope)+"'",step)
         traced = [step for step in workflow_steps() if 'OPENGEUL_SUITE_CALC_TRACE_NOTICE' in step]

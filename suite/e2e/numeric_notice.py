@@ -15,7 +15,7 @@ FOREGROUND_OPT_IN = 'OPENGEUL_SUITE_FOREGROUND_NOTICE'
 # Extend numeric identifiers at the end so earlier run notices keep their meaning.
 SCOPES = {'calc-close':1,'home-routes':2,'korean-ime':3,'korean-ui':4,'writer-style':5,
           'lifecycle':6,'native-first':7,'native-second':8,'calc-dispatch':9,'native-integrity':10,
-          'native31-privacy':12}
+          'native31-privacy':12,'calc-save':13}
 MAX_CASE_BYTES, MAX_TRACE_BYTES, MAX_NOTICES = 2048, 32768, 8
 EXCEPTIONS = {kind: index for index, kind in enumerate((AssertionError, TimeoutError,
     PermissionError, FileNotFoundError, FileExistsError, OSError, ValueError, TypeError,
@@ -30,7 +30,7 @@ SOURCE_FILES = {name: index for index, name in enumerate((
     'ime_semantic_context.py', 'calc_pending_input.py', 'native_archive_completeness.py',
     'capture_readiness.py', 'ascii_editor_input.py', 'impress_focused_view.py',
     'native31_desktop_control.py', 'native31_privacy_prepare.py', 'native31_suite_prepare.py',
-    'runner-ready.py', 'policy.py'), 1)}
+    'runner-ready.py', 'policy.py', 'native_cleanup_receipt.py', 'calc_save_smoke.py'), 1)}
 _ROOT_SOURCE_FILES = {'native31_desktop_control.py':'e2e/native31_desktop_control.py',
     'native31_privacy_prepare.py':'e2e/native31_privacy_prepare.py',
     'native31_suite_prepare.py':'e2e/native31_suite_prepare.py',
@@ -53,7 +53,8 @@ _CASES = (('home', '') , *((name, name) for name in MODULES if name != 'hwp'),
     ('document-file-open','writer'),
     *((name,'writer') for name in ('dirty-writer-cancel-save','dirty-writer-discard',
       'new-writer-saveas-cancel','failed-saveas-retains-editor','home-two-documents-cancel','resize-minimize-restore')),
-    ('hwp-tile-hwpx-route','hwp'), ('lifecycle-summary',''), ('native-integrity',''), ('native31-privacy',''))
+    ('hwp-tile-hwpx-route','hwp'), ('lifecycle-summary',''), ('native-integrity',''), ('native31-privacy',''),
+    ('calc-active-cell-save','calc'))
 CASES = {name: (index, MODULES.get(module, 0)) for index, (name,module) in enumerate(_CASES, 1)}
 _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fixture','launch','attach',
     'prepare-window','focus-editor','prepare-owned-native-focus','prepare-editor','physical-editor-input',
@@ -76,7 +77,9 @@ _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fix
     'hwpx-route-native-readiness','hwp-tile-native-readiness',
     *(f'await-new-{m}-attachment' for m in MODULES), *(f'close-owned-{m}' for m in MODULES),
     *(f'verify-retained-{m}-exit' for m in MODULES), *(f'dirty-close-{c}' for c in ('save','discard','cancel')),
-    'verify-native-archives', 'prepare-native31')
+    'verify-native-archives', 'prepare-native31', 'observe-clean-before-input',
+    'physical-edit-without-enter', 'single-physical-ctrl-s', 'wait-exact-durable-workbook',
+    'close-original-editor', 'independent-fresh-engine-reopen')
 STAGES = {name:index for index,name in enumerate(_STAGES, 1)}
 
 # Each bit means that the source field was present and had the declared type.
@@ -143,6 +146,7 @@ _CASE_KEYS_V2 = _CASE_KEYS | {'ownedFrames'}
 _CASE_KEYS_V3 = _CASE_KEYS_V2 | {'startup'}
 _CASE_KEYS_V4 = _CASE_KEYS_V2 | {'focus'}
 _CASE_KEYS_V5 = _CASE_KEYS_V4 | {'foreground'}
+_CASE_KEYS_V6 = _CASE_KEYS_V2 | {'capture'}
 _FAILURE_KEYS = {'captured','exceptionCode','fileCode','line'}
 _TRACE_KEYS = _COMMON | {'diagnostic','oracleFlags','oraclePresenceMask'}
 _STARTUP_FAILURES = []  # At most 32 strong references prevent object-id reuse.
@@ -378,6 +382,35 @@ def _valid_foreground(value,focus):
     return valid(value,focus)
 
 
+def _valid_capture(value):
+    return (type(value) is list and len(value)==5 and all(type(item) is int for item in value)
+        and value[0] in (7,15) and value[1]==1 and value[2] in (0,1) and 1<=value[3]<=5
+        and value[4] in (0,1) and (bool(value[0]&8) or value[4]==0))
+
+
+def _capture_context(case,stage,context):
+    return (context['scopeCode']==SCOPES['writer-style'] and case==CASES['writer-heading1'][0]
+        and stage==STAGES['physical-heading1-shortcut'])
+
+
+def _capture_summary(record,context):
+    value=record.get('numericCaptureSnapshot')
+    if (type(record.get('case')) is not str or type(record.get('stage')) is not str
+            or type(record.get('kind')) is not str or record['kind']!='native-writer-style'
+            or type(record.get('module')) is not str or record['module']!='writer'
+            or type(record.get('architecture')) is not str
+            or record.get('architecture')!={0x8664:'x64',0xaa64:'arm64'}[context['architecture']]
+            or not _capture_context(CASES.get(record.get('case'),(0,0))[0],STAGES.get(record.get('stage'),0),context)
+            or not _valid_capture(value)):return None
+    failure=record.get('numericFailure')
+    try:frames=validate_failure_frames(record.get('numericFailureFrames'))
+    except ValueError:return None
+    if (not _failure(failure) or failure['exceptionCode']!=1 or failure['fileCode']!=1 or not frames
+            or frames[-1]!=[failure['fileCode'],failure['line']]
+            or not any(row[0]==SOURCE_FILES['writer_style_smoke.py'] for row in frames[:-1])):return None
+    return list(value)
+
+
 def _project_case(name, record, context, *, require_failure,environ=None):
     primary_name = record.get('case') if type(record.get('case')) is str and record['case'] in CASES else name
     if type(primary_name) is not str or primary_name not in CASES: return None
@@ -397,7 +430,8 @@ def _project_case(name, record, context, *, require_failure,environ=None):
     startup=_startup_summary(record,context)
     focus=_focus_summary(record,context)
     foreground=_foreground_summary(record,context,os.environ if environ is None else environ,focus)
-    version=5 if foreground is not None else (4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1)))
+    capture=_capture_summary(record,context)
+    version=6 if capture is not None else (5 if foreground is not None else (4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1))))
     fields=_FIELDS_V3 if version==3 else (_FIELDS_V2 if version>=2 else _FIELDS)
     source=dict(record,_imeModeSummary=mode)
     observed, mask = {}, 0
@@ -421,8 +455,9 @@ def _project_case(name, record, context, *, require_failure,environ=None):
         fieldPresenceMask=mask,observations=observed)
     if version>=2: value['ownedFrames']=frames
     if version==3: value['startup']=startup
-    if version>=4: value['focus']=focus
+    if version in (4,5): value['focus']=focus
     if version==5: value['foreground']=foreground
+    if version==6: value['capture']=capture
     return value
 
 
@@ -462,12 +497,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     limit = {CASE_TITLE:MAX_CASE_BYTES,TRACE_TITLE:MAX_TRACE_BYTES}.get(title)
     if limit is None or type(message) is not str or len(message.encode('utf-8'))>limit: raise ValueError('Notice title/size rejected')
     value = json.loads(message,object_pairs_hook=_unique,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite notice')))
-    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5)
-    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
+    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5,6)
+    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5,6:_CASE_KEYS_V6}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
     if type(value) is not dict or value.keys()!=keys: raise ValueError('Closed notice schema required')
-    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground'}:
+    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground','capture'}:
         if not _integer(value[key],2**63-1): raise ValueError('Integer notice fields required')
-    if (value['schemaVersion'] not in ((1,2,3,4,5) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
+    if (value['schemaVersion'] not in ((1,2,3,4,5,6) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
             or not re.fullmatch('[0-9a-f]{40}',value['sourceCommit']) or value['sourceCommit']=='0'*40
             or value['sourceCommit']!=expected_source_commit or value['runId']!=expected_run_id or value['runId']<=0
             or value['runAttempt']!=expected_run_attempt or value['runAttempt']!=1
@@ -518,6 +553,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     if value['schemaVersion']==5 and (value['scopeCode']!=SCOPES['calc-dispatch'] or value['architecture']!=0xaa64
             or value['caseCode']!=CASES['ime-calc'][0] or not _valid_foreground(value['foreground'],value['focus'])):
         raise ValueError('Bounded existing-foreground Calc context required')
+    if value['schemaVersion']==6 and (not _valid_capture(value['capture'])
+            or not _capture_context(value['caseCode'],value['stageCode'],value)
+            or value['exceptionCode']!=1 or value['fileCode']!=1 or not value['ownedFrames']
+            or value['ownedFrames'][-1]!=[value['fileCode'],value['line']]
+            or not any(row[0]==SOURCE_FILES['writer_style_smoke.py'] for row in value['ownedFrames'][:-1])):
+        raise ValueError('Bounded original Writer capture rejection required')
     return value
 
 

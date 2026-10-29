@@ -235,6 +235,12 @@ def run_gui(suite, fixtures, output):
         record.update(guiVerified=True, cleanClose=True, stage='gui-complete')
     except Exception as exc:
         native.capture_failure(output, CASE, record, exc)
+        try:
+            from writer_capture_summary import project
+            captured = project(record, exc)
+            if captured is not None: record['numericCaptureSnapshot'] = captured
+        except Exception:
+            pass  # Supplemental projection cannot replace the original failure.
     finally:
         if process is not None:
             record['forcedCleanupRequired'] = process.poll() is None

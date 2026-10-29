@@ -617,6 +617,9 @@ jobs:
         throw 'Matched caller diagnostic only: paired native Office acceptance and package delivery remain unverified.'
     - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기
       id: calc-save
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '13'
       shell: pwsh
       run: |
         python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save
