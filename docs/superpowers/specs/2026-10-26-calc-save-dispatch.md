@@ -198,6 +198,28 @@ all original source/ownership/privacy guards, the one original close/pointer
 attempt, and the 120-second controller, 125-second containment and 15-second
 staging limits. A successful preparation remains a prerequisite for Calc.
 
+Run 40791429654 at `af55e795e2de38032d186c492ef04af970a01724`
+passed ARM64 unit/shell checks (3,018 tests, 38 skipped), package/bootstrap,
+IME readiness, privacy preparation and diagnostic input admission. The earlier
+privacy failure did not recur; its cause remains unknown. The original Calc
+case reached physical composition and the one Ctrl+S attempt, observed its saved
+marker, and preserved the baseline fixture. The stable native trace contains
+13 events with three balanced save invocations at maximum depth three,
+without rejection, overflow, expiry or open invocations. The owner identity
+joins the original case and its retained HANDLE exit inside the absolute
+30-second budget. The exit code is 1, consistent with the diagnostic's explicit
+forced teardown; it is not graceful exit 0 qualification. The diagnostic still
+declares `imeVerified=false` and `acceptanceEligible=false`, and does not provide
+the normal reopen or lifecycle acceptance proof.
+
+The same run's x64 unit check failed one subsecond shared-build-budget test.
+The corrected test consumes the original shared Stopwatch before later command
+attempts, requires rejection before process creation, and retains separate
+running-command forced-termination coverage. Production build deadlines are
+unchanged. Restore normal acceptance on both architectures for the next current
+source, including full IME/focus/accessibility, document reopen, portable-package
+checks and all 83 original engine generations' graceful shutdown gates.
+
 Final normal acceptance also needs the identity of the actual product ZIP.
 Immediately before its existing candidate upload, under the same successful
 normal-acceptance condition, recheck the current portable receipt's source,
