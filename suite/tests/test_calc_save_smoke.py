@@ -1,11 +1,15 @@
 """Portable negative E2E-oracle checks; no physical Windows input is claimed."""
 import copy
+import ast
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 # Existing shared test fixtures use top-level imports under discovery; include
 # their exact directory for explicit suite.tests.* invocation as well.
@@ -226,6 +230,85 @@ class CalcSaveSmokeTests(unittest.TestCase):
                 self.base,self.api.MARKER,{},12.,navigate=lambda keys:events.append(keys),
                 require_focus=refuse,type_marker=lambda:events.append('ascii'))
         self.assertEqual(events,[])
+
+
+class CalcSaveEntryFailureTests(unittest.TestCase):
+    def entry(self):
+        source=Path(__file__).resolve().parents[1]/'e2e/calc_save_smoke.py'
+        tree=ast.parse(source.read_text(encoding='utf-8'),filename=str(source))
+        self.assertIsInstance(tree.body[-1],ast.If)
+        return compile(ast.Module(body=[tree.body[-1]],type_ignores=[]),str(source),'exec')
+
+    def environment(self):
+        return dict(OPENGEUL_SUITE_NUMERIC_NOTICE='1',OPENGEUL_SUITE_NOTICE_SCOPE='13',
+            GITHUB_ACTIONS='true',GITHUB_REPOSITORY='ATLKR/OpenGeul',GITHUB_JOB='windows-suite',
+            GITHUB_EVENT_NAME='push',GITHUB_REF='refs/heads/work/opengeul-office-arm64',
+            GITHUB_ACTOR='ATLKR',GITHUB_ACTOR_ID='65988341',GITHUB_RUN_ID='123',
+            GITHUB_RUN_ATTEMPT='1',GITHUB_SHA='a'*40,GITHUB_WORKFLOW_SHA='a'*40,RUNNER_ARCH='ARM64')
+
+    def execute(self,entry,main):
+        exec(entry,dict(__name__='__main__',main=main,CASE='calc-active-cell-save'))
+
+    def test_uncaught_setup_emits_one_closed_scope13_notice_without_reading_exception_text(self):
+        import numeric_notice
+        class NoTextError(Exception):
+            def __str__(self): raise AssertionError('Do not format the original exception')
+            def __getattr__(self,name): raise AssertionError('Do not read exception properties')
+        primary=NoTextError();calls=[]
+        def main():calls.append('main');raise primary
+        entry=self.entry();stream=io.StringIO()
+        emitter=numeric_notice.NoticeEmitter(environ=self.environment(),stream=stream)
+        with patch.dict(os.environ,self.environment(),clear=True),patch.object(numeric_notice,'_EMITTER',emitter), \
+             patch('subprocess.run',side_effect=AssertionError('No new process')), \
+             patch('time.monotonic',side_effect=AssertionError('No new clock')), \
+             patch.object(Path,'read_text',side_effect=AssertionError('No new evidence read')):
+            with self.assertRaises(NoTextError) as caught:self.execute(entry,main)
+        self.assertIs(caught.exception,primary)
+        self.assertEqual(calls,['main'])
+        notices=stream.getvalue().strip().splitlines()
+        self.assertEqual(len(notices),1)
+        payload=notices[0].split('::',2)[2]
+        decoded=numeric_notice.decode_notice(payload,'a'*40,123,expected_scope=13)
+        self.assertEqual((decoded['schemaVersion'],decoded['caseCode'],decoded['moduleCode'],
+            decoded['stageCode'],decoded['exceptionCode'],decoded['fileCode']),(2,60,2,3,0,33))
+        self.assertEqual(decoded['ownedFrames'],[[33,decoded['line']]])
+        self.assertGreater(decoded['line'],0)
+        self.assertEqual(decoded['fieldPresenceMask'] & 15,0)  # No observed shell/engine identities.
+        for name in ('shellPid','enginePid','officeCreationTime','shellCreationTime'):
+            self.assertEqual(decoded['observations'][name],0)
+
+    def test_normal_main_return_zero_or_one_keeps_exit_code_without_an_additional_notice(self):
+        import numeric_notice
+        entry=self.entry()
+        for code in (0,1):
+            calls=[];stream=io.StringIO()
+            def main():calls.append('main');return code
+            emitter=numeric_notice.NoticeEmitter(environ=self.environment(),stream=stream)
+            with self.subTest(code=code),patch.dict(os.environ,self.environment(),clear=True), \
+                 patch.object(numeric_notice,'_EMITTER',emitter):
+                with self.assertRaises(SystemExit) as caught:self.execute(entry,main)
+                self.assertEqual(caught.exception.code,code)
+                self.assertEqual(stream.getvalue(),'');self.assertEqual(calls,['main'])
+
+    def test_metadata_baseexceptions_cannot_replace_the_original_uncaught_setup_exception(self):
+        import numeric_notice
+        entry=self.entry()
+        for method in ('capture_failure_code','capture_failure_frames','emit_case_notice'):
+            primary=RuntimeError('synthetic original setup failure');calls=[]
+            def main():calls.append('main');raise primary
+            with self.subTest(method=method),patch.dict(os.environ,self.environment(),clear=True), \
+                 patch.object(numeric_notice,method,side_effect=KeyboardInterrupt()):
+                with self.assertRaises(RuntimeError) as caught:self.execute(entry,main)
+                self.assertIs(caught.exception,primary);self.assertEqual(calls,['main'])
+
+    def test_disabled_context_keeps_original_exception_without_public_output(self):
+        import numeric_notice
+        entry=self.entry();primary=ValueError('synthetic setup failure');stream=io.StringIO()
+        def main():raise primary
+        with patch.dict(os.environ,{},clear=True),patch.object(numeric_notice,'_EMITTER',
+                numeric_notice.NoticeEmitter(environ={},stream=stream)):
+            with self.assertRaises(ValueError) as caught:self.execute(entry,main)
+        self.assertIs(caught.exception,primary);self.assertEqual(stream.getvalue(),'')
 
 
 if __name__=='__main__':unittest.main()

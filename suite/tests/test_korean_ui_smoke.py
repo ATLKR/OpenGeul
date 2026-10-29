@@ -461,6 +461,132 @@ class NativeChildFailureTests(unittest.TestCase):
         self.assertEqual(decoded['ownedFrames'], [[19,445],[19,321]])
         self.assertEqual((decoded['exceptionCode'],decoded['fileCode'],decoded['line']), (7,19,321))
 
+    def test_exact_loaded_uno_runtime_class_changes_only_unknown_exception_code(self):
+        classify = self.feature('_child_failure_code')
+        calls = []
+        class UnoRuntime(Exception):
+            __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+            @property
+            def Message(self): raise AssertionError('No exception Message getter')
+            @property
+            def Context(self): raise AssertionError('No exception Context getter')
+            def __str__(self): raise AssertionError('No exception text')
+        scope = dict(error=UnoRuntime())
+        exec(compile('def fail():\n raise error\n', str(E2E/'native_accessibility.py'), 'exec'), scope)
+        def get_class(name): calls.append(name);return UnoRuntime
+        try: scope['fail']()
+        except UnoRuntime as exc:
+            with patch.dict(sys.modules, uno=NS(getClass=get_class)), \
+                 patch.object(smoke.accessible.subprocess,'run',side_effect=AssertionError('No process query')), \
+                 patch('time.monotonic',side_effect=AssertionError('No clock query')):
+                failure = classify(exc)
+        self.assertEqual(failure, dict(captured=1,exceptionCode=13,fileCode=19,line=2))
+        self.assertEqual(calls, ['com.sun.star.uno.RuntimeException'])
+
+    def test_uno_subclasses_other_classes_and_existing_codes_do_not_trigger_class_lookup(self):
+        classify = self.feature('_child_failure_code')
+        class UnoRuntime(Exception): __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+        class Child(UnoRuntime): pass
+        class Disposed(UnoRuntime): __pyunostruct__ = 'com.sun.star.lang.DisposedException'
+        class Marker:
+            def __eq__(self, other): raise AssertionError('No dynamic marker comparison')
+        class TextMarker(str):
+            def __eq__(self, other): raise AssertionError('No string-subclass comparison')
+        class DynamicMarker(Exception): __pyunostruct__ = Marker()
+        class SubclassMarker(Exception): __pyunostruct__ = TextMarker('com.sun.star.uno.RuntimeException')
+        known = UnoRuntime()
+        known.raw = dict(error=dict(numericFailure=dict(captured=1,exceptionCode=7,fileCode=19,line=55)))
+        def forbidden(*args): self.fail('Unknown/subclass/known code cannot query the UNO class')
+        for exc, expected in ((Child(),0),(Disposed(),0),(DynamicMarker(),0),(SubclassMarker(),0),
+                              (Exception(),0),(RuntimeError(),9),(known,7)):
+            with self.subTest(kind=type(exc).__name__), patch.dict(sys.modules,uno=NS(getClass=forbidden)):
+                failure = classify(exc)
+                self.assertEqual(failure['exceptionCode'],expected)
+                if exc is known: self.assertEqual(failure,known.raw['error']['numericFailure'])
+
+    def test_missing_failed_or_nonidentical_loaded_uno_class_keeps_original_unknown_metadata(self):
+        classify = self.feature('_child_failure_code')
+        class UnoRuntime(Exception): __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+        class Other(Exception): pass
+        def broken(name): raise ImportError('synthetic optional class lookup failure')
+        for module in (None, NS(), NS(getClass=broken), NS(getClass=lambda name:Other)):
+            with self.subTest(module_kind=type(module).__name__), patch.dict(sys.modules,uno=module):
+                self.assertEqual(classify(UnoRuntime()),dict(captured=1,exceptionCode=0,fileCode=0,line=0))
+
+    def test_actual_child_runtime_family_survives_cleanup_and_one_existing_v2_parent_notice(self):
+        import numeric_notice
+        self.feature('_child_failure_code')
+        events = []
+        class UnoRuntime(Exception):
+            __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+            def __getattr__(self,name): raise AssertionError('No exception property getter')
+            def __str__(self): raise AssertionError('No exception text')
+        scope = dict(error=UnoRuntime(),events=events)
+        exec(compile('def collect(request,diagnostic):\n diagnostic["ownershipStage"]=2\n try:\n  raise error\n finally:\n  events.append("cleanup")\n',
+            str(E2E/'native_accessibility.py'),'exec'),scope)
+        def get_class(name):
+            self.assertEqual(events,['cleanup']);return UnoRuntime
+        child_stream = io.StringIO()
+        with patch.dict(os.environ,numeric_environment(),clear=True), \
+             patch.dict(sys.modules,uno=NS(getClass=get_class)), \
+             patch.object(smoke.accessible,'collect_live',side_effect=scope['collect']), redirect_stdout(child_stream):
+            self.assertEqual(smoke.accessible._collect_main(self.request()),1)
+        child = smoke.accessible._decode_child_failure(child_stream.getvalue(),self.request())
+        self.assertEqual(child['failure']['exceptionCode'],13)
+        self.assertEqual(child['ownedFrames'][-1],[19,4])
+        caught, events, calls = self.capture(child_stream.getvalue())
+        self.assertEqual(events[-1],'close');self.assertEqual(len(calls),1)
+        record = dict(case='korean-ui-writer',module='writer',stage='capture-native-accessible-objects',
+            officePid=200,officeCreationTime=300,childHwnd=123)
+        stream = io.StringIO();emitter = numeric_notice.NoticeEmitter(environ=numeric_environment(),stream=stream)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,numeric_environment(),clear=True), \
+             patch.object(numeric_notice,'_EMITTER',emitter):
+            smoke.native.capture_failure(Path(directory),'korean-ui-writer',record,caught)
+            self.assertTrue(smoke.accessible.attach_child_failure(record,caught))
+            smoke.native.write_result(Path(directory),'korean-ui-writer',record)
+        notices = stream.getvalue().strip().splitlines()
+        self.assertEqual(len(notices),1)
+        decoded = numeric_notice.decode_notice(notices[0].split('::',2)[2],'a'*40,123,expected_scope=4)
+        self.assertEqual((decoded['schemaVersion'],decoded['exceptionCode']),(2,13))
+        self.assertEqual(decoded['ownedFrames'],child['ownedFrames'])
+
+    def test_optional_class_lookup_baseexceptions_keep_primary_unknown_frames_and_retained_cleanup(self):
+        import numeric_notice
+        class UnoRuntime(Exception):
+            __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+            def __getattr__(self,name): raise AssertionError('No exception property getter')
+            def __str__(self): raise AssertionError('No exception text')
+        for secondary in (KeyboardInterrupt(),SystemExit(7)):
+            with self.subTest(secondary=type(secondary).__name__):
+                primary=UnoRuntime();events=[];captured=[];stream=io.StringIO()
+                def context():raise primary
+                def lookup(name):
+                    self.assertEqual(name,'com.sun.star.uno.RuntimeException')
+                    self.assertEqual(events,['retained-close'])
+                    raise secondary
+                original_capture=numeric_notice.capture_failure_code
+                def observe(exc):
+                    self.assertIs(exc,primary)
+                    value=original_capture(exc)
+                    captured.append((dict(value),numeric_notice.capture_failure_frames(exc)))
+                    return value
+                retained=NS(close=lambda:events.append('retained-close'))
+                with patch.dict(os.environ,numeric_environment(),clear=True), \
+                     patch.dict(sys.modules,uno=NS(getComponentContext=context,getClass=lookup)), \
+                     patch.object(smoke.accessible,'_owned_process',return_value=(NS(),retained)), \
+                     patch.object(numeric_notice,'capture_failure_code',side_effect=observe),redirect_stdout(stream):
+                    try:result=smoke.accessible._collect_main(self.request())
+                    except BaseException as escaped:
+                        self.fail('Optional class metadata escaped: '+type(escaped).__name__)
+                self.assertEqual(result,1)
+                self.assertEqual(events,['retained-close'])
+                self.assertEqual(len(captured),1)
+                decoded=smoke.accessible._decode_child_failure(stream.getvalue(),self.request())
+                self.assertIsNotNone(decoded)
+                self.assertEqual(decoded['failure'],captured[0][0])
+                self.assertEqual(decoded['failure']['exceptionCode'],0)
+                self.assertEqual(decoded['ownedFrames'],captured[0][1])
+
 
 if __name__ == '__main__':
     unittest.main()

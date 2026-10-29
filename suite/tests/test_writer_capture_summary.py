@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import numeric_notice as notice
+import capture_readiness as capture_gate
 import test_scenario_editor_shortcuts as scenarios
 
 
@@ -42,7 +43,7 @@ def environment():
 
 
 class WriterCaptureSummaryTests(unittest.TestCase):
-    def fixture(self, folder, *, capture=33, thread=44, producer=True):
+    def fixture(self, folder, *, capture=33, thread=44, producer=True, timeout=None,monotonic_step=0):
         f = scenarios.ScenarioEditorShortcutsTests.fixture(self, folder)
         process, binding, api, clock, probe, record, attachment = f
         from windows_smoke import Windows, prepare_editor_focus
@@ -62,7 +63,24 @@ class WriterCaptureSummaryTests(unittest.TestCase):
                 numericFailureFrames=notice.capture_failure_frames(exc))
             before_projection[:] = queries.calls
         def factory(*args):
-            return scenarios.scenario.FirstAdmissionEditorSession(*args, probe=probe, clock=clock)
+            session=scenarios.scenario.FirstAdmissionEditorSession(*args, probe=probe, clock=clock)
+            retain=session._retain;original_scope=probe.scope_snapshot
+            def retained(phase):
+                retain(phase)
+                if timeout and phase=='input-intent' and session.receipt['actions'][-1]['shortcut']=='CTRL_HOME':
+                    if timeout=='before':
+                        reads=[]
+                        def edge_clock():
+                            reads.append(1)
+                            if len(reads)>=2:clock.now=session.deadline
+                            return clock()
+                        session.clock=edge_clock
+                    else:
+                        def pending(api,binding):
+                            row=original_scope(api,binding);row['capture']=copy.deepcopy(row['parent']);return row
+                        probe.scope_snapshot=pending
+            session._retain=retained
+            return session
         proxy = NS(FirstAdmissionEditorSession=factory, prepare_editor_focus=prepare_editor_focus,
             click_owned_editor=lambda *args: None, capture_failure=capture_failure)
         tree = ast.parse((E2E / 'writer_style_smoke.py').read_text())
@@ -78,17 +96,123 @@ class WriterCaptureSummaryTests(unittest.TestCase):
             orelse=[], finalbody=[])], type_ignores=[]))
         scope = dict(native=proxy, api=api, process=process, hwnd=11, parent=12, child=22, pid=88,
             record=record, entry_deadline=6., time=NS(monotonic=clock), output=Path(folder), CASE='writer-heading1')
-        with mock.patch('time.monotonic', clock):
+        def sampled_clock():clock.now+=monotonic_step;return clock()
+        with mock.patch('time.monotonic', sampled_clock),mock.patch('time.sleep',side_effect=lambda seconds:setattr(clock,'now',clock.now+seconds)):
             exec(compile(module, str(E2E / 'writer_style_smoke.py'), 'exec'), scope)
         self.assertEqual(len(caught), 1)
-        self.assertTrue(hasattr(caught[0], 'opengeul_focus_rejection'), str(caught[0]))
+        self.assertTrue(hasattr(caught[0], 'opengeul_capture_invocation' if timeout else 'opengeul_focus_rejection'), str(caught[0]))
         self.assertEqual(queries.calls, before_projection, 'Supplemental projection made another native query')
-        self.assertEqual(len(queries.calls) - queries.calls.index('thread'), 3)
+        if not timeout:self.assertEqual(len(queries.calls) - queries.calls.index('thread'), 3)
+        else:self.assertNotIn('gui',queries.calls)
         self.assertEqual([a['shortcut'] for a in record['editorShortcutSessions'][-1]['actions']], ['CTRL_F6', 'CTRL_HOME'])
-        self.assertEqual([row[0] for row in probe.sent], [4, 4], 'Original input was repeated or CTRL_1 was sent')
+        self.assertEqual([row[0] for row in probe.sent], [4] if timeout else [4,4], 'Original input was repeated or CTRL_1 was sent')
         self.assertEqual(sum(call == ('close', 2**41) for call in probe.calls), 1)
         self.assertTrue(record['editorShortcutSessions'][-1]['engineHandleReleased'])
         return record, caught[0]
+
+    def test_actual_readiness_caller_and_callee_clock_samples_do_not_need_equal_deadlines(self):
+        with tempfile.TemporaryDirectory() as folder:
+            record,primary=self.fixture(folder,timeout='before',producer=False,monotonic_step=.00001)
+            readiness=record['editorFocusReadiness'];session=record['editorShortcutSessions'][0]
+            self.assertGreater(readiness['deadline'],session['entryDeadline'])
+            self.assertEqual(readiness['deadline'],readiness['startedAt']+readiness['deadlineSeconds'])
+            self.assertIsNotNone(summary.project_timeout(record,primary))
+
+    def test_original_writer_timeout_has_current_bound_v7_without_sending_home(self):
+        for mode,expected in (('before',[47,1,0,0,0,0,1]),('pending',[63,1,1,1,1,3,1])):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as folder:
+                record,primary=self.fixture(folder,timeout=mode)
+                self.assertEqual(record.get('numericCaptureGateSnapshot'),expected)
+                self.assertIs(primary.opengeul_capture_invocation,capture_gate.current_capture_invocation(record['editorShortcutSessions'][0]))
+                self.assertNotIn('numericCaptureSnapshot',record)
+                value=notice.project_case_notice('writer-heading1',record,environ=environment())
+                self.assertEqual(value['schemaVersion'],7)
+                self.assertEqual(value['captureGate'],expected)
+                stream=io.StringIO();emitter=notice.NoticeEmitter(environ=environment(),stream=stream)
+                self.assertTrue(emitter.emit_case_notice('writer-heading1',record))
+                self.assertEqual(len(stream.getvalue().splitlines()),1)
+                decoded=notice.decode_notice(stream.getvalue().split('::',2)[-1].strip(),'a'*40,123)
+                self.assertEqual(decoded['captureGate'],expected)
+
+    def test_timeout_projection_rejects_stale_primary_mutated_binding_and_unobserved_fields(self):
+        for mutate in (lambda r,p:capture_gate._diagnostic_start(r['editorShortcutSessions'][0],p.opengeul_capture_invocation['deadline']),
+            lambda r,p:r.update(officeCreationTime=r['officeCreationTime']+1),
+            lambda r,p:p.opengeul_capture_invocation.update(lastCheckedAt=float('nan')),
+            lambda r,p:p.opengeul_capture_invocation.update(lastCheckedAt=r['editorShortcutSessions'][0]['finishedAt']+1),
+            lambda r,p:r['editorShortcutSessions'][0]['actions'][-1].update(inputCallAttempts=1),
+            lambda r,p:r['editorShortcutSessions'][0]['actions'][-1].update(beforeInsertion={}),
+            lambda r,p:r['editorFocusReadiness'].update(kind='other-proof'),
+            lambda r,p:r['editorShortcutSessions'][0]['phases'][0]['proof'].update(focusHwnd=999),
+            lambda r,p:r['numericFailureFrames'].pop(),
+            lambda r,p:p.opengeul_capture_observation['engine'].update(creationTime=1),
+            lambda r,p:p.opengeul_capture_observation['keyboard'].update(keysDown=[17]),
+            lambda r,p:p.opengeul_capture_observation['focusKeyboard'].update(numLockOn=False)):
+            with tempfile.TemporaryDirectory() as folder:
+                record,primary=self.fixture(folder,timeout='pending',producer=False)
+                mutate(record,primary)
+                self.assertIsNone(summary.project_timeout(record,primary))
+
+    def test_cleanup_cannot_reuse_a_projection_after_current_slot_or_scope_changes(self):
+        for mutate in (lambda r:capture_gate._diagnostic_start(r['editorShortcutSessions'][0],0),
+            lambda r:capture_gate.current_capture_invocation(r['editorShortcutSessions'][0]).update(lastCheckedAt=float('inf')),
+            lambda r:r['editorShortcutSessions'][0]['lastGuardObservation']['engine'].update(creationTime=1)):
+            with tempfile.TemporaryDirectory() as folder:
+                record,_=self.fixture(folder,timeout='pending')
+                self.assertEqual(notice.project_case_notice('writer-heading1',record,environ=environment())['schemaVersion'],7)
+                mutate(record)
+                self.assertEqual(notice.project_case_notice('writer-heading1',record,environ=environment())['schemaVersion'],2)
+
+    def test_cleanup_cannot_coherently_mutate_vector_and_current_metadata(self):
+        with tempfile.TemporaryDirectory() as folder:
+            record,_=self.fixture(folder,timeout='pending')
+            record['numericCaptureGateSnapshot'][1]=5
+            capture_gate.current_capture_invocation(record['editorShortcutSessions'][0])['timeoutPhase']=5
+            self.assertEqual(notice.project_case_notice('writer-heading1',record,environ=environment())['schemaVersion'],2)
+
+    def test_v7_wire_is_closed_and_cannot_claim_observation_without_presence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            record,_=self.fixture(folder,timeout='pending')
+            stream=io.StringIO();notice.NoticeEmitter(environ=environment(),stream=stream).emit_case_notice('writer-heading1',record)
+            value=json.loads(stream.getvalue().split('::',2)[-1])
+            mutations=[lambda v:v.update(captureGate=[47,1,1,1,1,3,0]),
+                lambda v:v.update(captureGate=[63,2,1,1,0,3,0]),
+                lambda v:v.update(captureGate=[63,4,1,1,1,3,0]),
+                lambda v:v.update(captureGate=[63,5,1,1,0,3,0]),
+                lambda v:v.update(captureGate=[47,1,0,0,0,1,0]),
+                lambda v:v.update(captureGate=[63,1,True,1,1,3,0]),
+                lambda v:v.update(captureGate=[63,1,1,1,1,6,0]),
+                lambda v:v.update(caseCode=3,moduleCode=2),lambda v:v.update(fileCode=1),
+                lambda v:v.update(ownedFrames=v['ownedFrames'][1:]),lambda v:v.update(capture=[15,1,1,2,0])]
+            for mutate in mutations:
+                changed=copy.deepcopy(value);mutate(changed)
+                with self.subTest(mutate=mutate),self.assertRaises(ValueError):notice.decode_notice(json.dumps(changed),'a'*40,123)
+
+    def test_timeout_projection_ignores_private_values_and_rejects_foreign_getters(self):
+        class NoTouch:
+            touched=False
+            def __eq__(self,other):self.touched=True;raise AssertionError('Foreign equality ran')
+            def __bool__(self):self.touched=True;raise AssertionError('Foreign boolean ran')
+            def __str__(self):self.touched=True;raise AssertionError('Private value formatted')
+        with tempfile.TemporaryDirectory() as folder:
+            record,primary=self.fixture(folder,timeout='pending',producer=False)
+            opaque=NoTouch();primary.args=(opaque,)
+            record['privateDocument']=opaque
+            record['editorShortcutSessions'][0]['originalEngine']['image']=opaque
+            self.assertEqual(summary.project_timeout(record,primary),[63,1,1,1,1,3,1])
+            self.assertFalse(opaque.touched)
+            record['editorShortcutSessions'][0]['expectedProgram']=opaque
+            self.assertIsNone(summary.project_timeout(record,primary))
+            self.assertFalse(opaque.touched)
+
+    def test_timeout_exception_association_is_bounded_and_not_serialized_in_the_receipt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            record,primary=self.fixture(folder,timeout='before',producer=False)
+            for unused in range(33):self.assertIsNotNone(summary.project_timeout(record,primary))
+            self.assertEqual(len(summary._TIMEOUT_PROJECTIONS),32)
+            raw=json.dumps(record['editorShortcutSessions'][0])
+            self.assertNotIn('captureInvocation',raw)
+            self.assertNotIn('timeoutPhase',raw)
+            self.assertNotIn('lastCheckedAt',raw)
 
     def test_original_writer_handler_emits_bound_transition_without_repairing_failure(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -165,11 +289,19 @@ class WriterCaptureSummaryTests(unittest.TestCase):
 
     def test_secondary_projection_failure_keeps_original_failure_and_cleanup(self):
         def broken(*args): raise OSError('Supplemental projection unavailable')
-        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(sys.modules, {'writer_capture_summary': NS(project=broken)}):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(sys.modules, {'writer_capture_summary': NS(project=broken,project_timeout=broken)}):
             record, primary = self.fixture(folder)
             self.assertFalse(record['success'])
             self.assertIs(type(primary), AssertionError)
             self.assertNotIn('numericCaptureSnapshot', record)
+
+    def test_secondary_timeout_projection_base_exception_preserves_original_primary(self):
+        def broken(*args):raise KeyboardInterrupt('Synthetic supplemental failure')
+        with tempfile.TemporaryDirectory() as folder,mock.patch.dict(sys.modules,
+                {'writer_capture_summary':NS(project=lambda *args:None,project_timeout=broken)}):
+            record,primary=self.fixture(folder,timeout='before')
+            self.assertIs(type(primary),AssertionError)
+            self.assertNotIn('numericCaptureGateSnapshot',record)
 
     def test_notice_v6_is_one_closed_writer_case_and_preserves_legacy_v2(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -236,10 +236,12 @@ def run_gui(suite, fixtures, output):
     except Exception as exc:
         native.capture_failure(output, CASE, record, exc)
         try:
-            from writer_capture_summary import project
+            from writer_capture_summary import project, project_timeout
             captured = project(record, exc)
             if captured is not None: record['numericCaptureSnapshot'] = captured
-        except Exception:
+            gate = project_timeout(record, exc)
+            if gate is not None: record['numericCaptureGateSnapshot'] = gate
+        except BaseException:
             pass  # Supplemental projection cannot replace the original failure.
     finally:
         if process is not None:

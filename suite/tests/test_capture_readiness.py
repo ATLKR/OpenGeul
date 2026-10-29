@@ -3,6 +3,7 @@ import copy
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest import mock
 
 SOURCE = Path(__file__).resolve().parents[1] / 'e2e/capture_readiness.py'
 capture = None
@@ -82,6 +83,112 @@ class CaptureReadinessTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError,'deadline'):
             capture.settle_owned_capture(self.observe,self.validate,self.receipt,self.binding,2.,clock=clock,pause=self.pause)
         self.assertGreaterEqual(self.receipt['captureReadiness']['settledAt'],2.)
+
+    def test_current_invocation_binds_original_timeout_and_replaces_old_episode(self):
+        self.fixture([self.window()])
+        with self.assertRaises(AssertionError) as caught:self.settle(1.12)
+        current=capture.current_capture_invocation(self.receipt)
+        self.assertIsNotNone(current,'Current invocation diagnostic is absent')
+        self.assertIs(caught.exception.opengeul_capture_invocation,current)
+        self.assertEqual((current['timeoutPhase'],current['observationPresent'],
+            current['validationReturned'],current['ownedPositiveCapturePending']),(1,True,True,True))
+        self.assertIs(caught.exception.opengeul_capture_observation,self.receipt['lastGuardObservation'])
+        first=self.receipt['captureReadiness']['first'];started=self.receipt['captureReadiness']['startedAt']
+        self.now=3.
+        with self.assertRaises(AssertionError) as next_error:self.settle(3.)
+        new=capture.current_capture_invocation(self.receipt)
+        self.assertIsNot(new,current)
+        self.assertIs(next_error.exception.opengeul_capture_invocation,new)
+        self.assertEqual((new['timeoutPhase'],new['observationPresent'],new['validationReturned'],
+            new['ownedPositiveCapturePending']),(1,False,False,False))
+        self.assertIsNone(next_error.exception.opengeul_capture_observation)
+        self.assertIs(self.receipt['captureReadiness']['first'],first)
+        self.assertEqual(self.receipt['captureReadiness']['startedAt'],started)
+
+    def test_current_invocation_distinguishes_native_and_validation_expiry(self):
+        for phase in (2,3):
+            self.fixture([dict(hwnd=0)])
+            if phase==2:
+                original=self.observe
+                def late():row=original();self.now=2.;return row
+                self.observe=late
+            else:
+                original=self.validate
+                def late(row):original(row);self.now=2.
+                self.validate=late
+            with self.subTest(phase=phase),self.assertRaises(AssertionError) as caught:self.settle()
+            current=capture.current_capture_invocation(self.receipt)
+            self.assertIs(caught.exception.opengeul_capture_invocation,current)
+            self.assertEqual(current['timeoutPhase'],phase)
+            self.assertEqual(current['validationReturned'],phase==3)
+            self.assertFalse(current['ownedPositiveCapturePending'])
+
+    def test_next_observation_clears_previous_rows_validated_pending_flags(self):
+        self.fixture([self.window(),dict(hwnd=0)]);original=self.observe
+        def late_second():
+            row=original()
+            if self.reads==2:self.now=2.
+            return row
+        self.observe=late_second
+        with self.assertRaises(AssertionError) as caught:self.settle()
+        current=capture.current_capture_invocation(self.receipt)
+        self.assertEqual((current['timeoutPhase'],current['observationPresent'],current['validationReturned'],
+            current['ownedPositiveCapturePending']),(2,True,False,False))
+        self.assertEqual(caught.exception.opengeul_capture_observation['scope']['capture']['hwnd'],0)
+
+    def test_diagnostic_preserves_declared_clock_and_native_call_trace(self):
+        for outcome in ('zero','observe-error','validation-error'):
+            for operation in (capture.settle_owned_capture,):
+                trace=[];now=[1.];count=[0];receipt={};primary=AssertionError('original synthetic failure')
+                def clock():trace.append(('clock',now[0]));return now[0]
+                def observe():
+                    trace.append(('observe',));count[0]+=1
+                    if outcome=='observe-error':raise primary
+                    value=self.window() if outcome in ('pending','timeout') and count[0]<3 else dict(hwnd=0)
+                    return dict(scope=dict(capture=value,before=dict(suite=dict(threadId=45),editor=dict(threadId=44))))
+                def validate(row):
+                    trace.append(('validate',))
+                    if outcome=='validation-error':raise primary
+                def pause(seconds):trace.append(('pause',seconds));now[0]+=seconds
+                try:operation(observe,validate,receipt,dict(suiteHwnd=11,shellPid=77,officePid=88),
+                    1.02 if outcome=='timeout' else 2.,clock=clock,pause=pause)
+                except BaseException as exc:
+                    trace.append(('error',type(exc).__name__,str(exc)))
+                    if outcome.endswith('error'):self.assertIs(exc,primary)
+                kinds=[row[0] for row in trace]
+                expected={'zero':['clock','observe','clock','validate','clock','clock'],
+                    'observe-error':['clock','observe','error'],
+                    'validation-error':['clock','observe','clock','validate','error']}[outcome]
+                with self.subTest(outcome=outcome):self.assertEqual(kinds,expected)
+
+    def test_diagnostic_slot_failure_cannot_replace_original_result_or_failure(self):
+        class RejectRegistry(list):
+            def append(self,value):raise KeyboardInterrupt('Synthetic diagnostic failure')
+        self.fixture([dict(hwnd=0)])
+        with mock.patch.object(capture,'_CAPTURE_INVOCATIONS',RejectRegistry()):
+            self.assertEqual(self.settle()['scope']['capture']['hwnd'],0)
+            self.now=2.
+            with self.assertRaisesRegex(AssertionError,'^Owned capture readiness deadline expired$'):self.settle()
+
+    def test_diagnostic_update_failure_cannot_replace_original_result(self):
+        class RejectUpdate(dict):
+            def update(self,*args,**kwargs):raise KeyboardInterrupt('Synthetic metadata update failure')
+        def start(receipt,deadline):
+            current=RejectUpdate();capture._CAPTURE_INVOCATIONS.append((receipt,current));return current
+        self.fixture([dict(hwnd=0)])
+        with mock.patch.object(capture,'_diagnostic_start',start):
+            self.assertEqual(self.settle()['scope']['capture']['hwnd'],0)
+        self.assertEqual((self.reads,self.validations,self.pauses),(1,1,[]))
+
+    def test_invocation_association_is_bounded_and_adds_no_receipt_json_fields(self):
+        import json
+        self.fixture([dict(hwnd=0)])
+        for unused in range(33):self.settle()
+        self.assertEqual(len(capture._CAPTURE_INVOCATIONS),32)
+        self.assertNotIn('captureInvocation',self.receipt)
+        raw=json.dumps(self.receipt)
+        self.assertNotIn('lastCheckedAt',raw)
+        self.assertNotIn('timeoutPhase',raw)
 
 
 if __name__ == '__main__': unittest.main()

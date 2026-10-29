@@ -20,6 +20,7 @@ MAX_CASE_BYTES, MAX_TRACE_BYTES, MAX_NOTICES = 2048, 32768, 8
 EXCEPTIONS = {kind: index for index, kind in enumerate((AssertionError, TimeoutError,
     PermissionError, FileNotFoundError, FileExistsError, OSError, ValueError, TypeError,
     RuntimeError, KeyError, AttributeError, NotImplementedError), 1)}
+UNO_RUNTIME_EXCEPTION_CODE = 13  # Classified only by the existing UNO child; no UNO import here.
 SOURCE_FILES = {name: index for index, name in enumerate((
     'windows_smoke.py', 'calc_close_probe.py', 'home_routing_smoke.py', 'korean_ime_smoke.py',
     'korean_ui_smoke.py', 'writer_style_smoke.py', 'lifecycle_smoke.py', 'writer_model_reader.py',
@@ -147,6 +148,7 @@ _CASE_KEYS_V3 = _CASE_KEYS_V2 | {'startup'}
 _CASE_KEYS_V4 = _CASE_KEYS_V2 | {'focus'}
 _CASE_KEYS_V5 = _CASE_KEYS_V4 | {'foreground'}
 _CASE_KEYS_V6 = _CASE_KEYS_V2 | {'capture'}
+_CASE_KEYS_V7 = _CASE_KEYS_V2 | {'captureGate'}
 _FAILURE_KEYS = {'captured','exceptionCode','fileCode','line'}
 _TRACE_KEYS = _COMMON | {'diagnostic','oracleFlags','oraclePresenceMask'}
 _STARTUP_FAILURES = []  # At most 32 strong references prevent object-id reuse.
@@ -246,7 +248,7 @@ def validate_failure_frames(value):
 
 def _failure(value):
     return (type(value) is dict and value.keys()==_FAILURE_KEYS and value['captured']==1
-        and all(type(v) is int for v in value.values()) and value['exceptionCode'] in (0,*EXCEPTIONS.values())
+        and all(type(v) is int for v in value.values()) and value['exceptionCode'] in (0,*EXCEPTIONS.values(),UNO_RUNTIME_EXCEPTION_CODE)
         and value['fileCode'] in (0,*SOURCE_FILES.values()) and
         (value['line']==0 if value['fileCode']==0 else _integer(value['line'],10_000_000,1)))
 
@@ -411,6 +413,43 @@ def _capture_summary(record,context):
     return list(value)
 
 
+def _valid_capture_gate(value):
+    if (type(value) is not list or len(value)!=7 or any(type(item) is not int for item in value)
+            or value[0] not in (47,63) or value[1] not in (1,2,3,4,5)
+            or any(value[index] not in (0,1) for index in (2,3,4,6)) or not 0<=value[5]<=5):return False
+    mask,phase,observed,validated,pending,relation,finished=value
+    return (bool(mask&16)==bool(observed) and (observed or relation==validated==pending==0)
+        and (not validated or observed) and (not pending or validated)
+        and (phase==1 or observed) and (phase!=2 or not validated)
+        and (phase not in (3,4,5) or validated) and (phase!=4 or relation==0)
+        and (phase!=5 or pending) and (not pending or relation>0))
+
+
+def _capture_gate_summary(record,context):
+    value=record.get('numericCaptureGateSnapshot')
+    if (type(record.get('case')) is not str or type(record.get('stage')) is not str
+            or type(record.get('kind')) is not str or record['kind']!='native-writer-style'
+            or type(record.get('module')) is not str or record['module']!='writer'
+            or type(record.get('architecture')) is not str
+            or record['architecture']!={0x8664:'x64',0xaa64:'arm64'}[context['architecture']]
+            or not _capture_context(CASES.get(record['case'],(0,0))[0],STAGES.get(record['stage'],0),context)
+            or not _valid_capture_gate(value)):return None
+    failure=record.get('numericFailure')
+    try:frames=validate_failure_frames(record.get('numericFailureFrames'))
+    except ValueError:return None
+    if (not _failure(failure) or failure['exceptionCode']!=1 or failure['fileCode']!=24
+            or not frames or frames[-1]!=[24,failure['line']]
+            or [row[0] for row in frames]!=[6,13,13,13,13,13,24]):return None
+    try:
+        if __package__:
+            from .writer_capture_summary import bound_timeout
+        else:
+            from writer_capture_summary import bound_timeout
+        return bound_timeout(record)
+    except BaseException:
+        return None
+
+
 def _project_case(name, record, context, *, require_failure,environ=None):
     primary_name = record.get('case') if type(record.get('case')) is str and record['case'] in CASES else name
     if type(primary_name) is not str or primary_name not in CASES: return None
@@ -431,7 +470,8 @@ def _project_case(name, record, context, *, require_failure,environ=None):
     focus=_focus_summary(record,context)
     foreground=_foreground_summary(record,context,os.environ if environ is None else environ,focus)
     capture=_capture_summary(record,context)
-    version=6 if capture is not None else (5 if foreground is not None else (4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1))))
+    capture_gate=_capture_gate_summary(record,context)
+    version=7 if capture_gate is not None else (6 if capture is not None else (5 if foreground is not None else (4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1)))))
     fields=_FIELDS_V3 if version==3 else (_FIELDS_V2 if version>=2 else _FIELDS)
     source=dict(record,_imeModeSummary=mode)
     observed, mask = {}, 0
@@ -458,6 +498,7 @@ def _project_case(name, record, context, *, require_failure,environ=None):
     if version in (4,5): value['focus']=focus
     if version==5: value['foreground']=foreground
     if version==6: value['capture']=capture
+    if version==7: value['captureGate']=capture_gate
     return value
 
 
@@ -497,12 +538,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     limit = {CASE_TITLE:MAX_CASE_BYTES,TRACE_TITLE:MAX_TRACE_BYTES}.get(title)
     if limit is None or type(message) is not str or len(message.encode('utf-8'))>limit: raise ValueError('Notice title/size rejected')
     value = json.loads(message,object_pairs_hook=_unique,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite notice')))
-    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5,6)
-    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5,6:_CASE_KEYS_V6}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
+    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5,6,7)
+    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5,6:_CASE_KEYS_V6,7:_CASE_KEYS_V7}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
     if type(value) is not dict or value.keys()!=keys: raise ValueError('Closed notice schema required')
-    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground','capture'}:
+    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground','capture','captureGate'}:
         if not _integer(value[key],2**63-1): raise ValueError('Integer notice fields required')
-    if (value['schemaVersion'] not in ((1,2,3,4,5,6) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
+    if (value['schemaVersion'] not in ((1,2,3,4,5,6,7) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
             or not re.fullmatch('[0-9a-f]{40}',value['sourceCommit']) or value['sourceCommit']=='0'*40
             or value['sourceCommit']!=expected_source_commit or value['runId']!=expected_run_id or value['runId']<=0
             or value['runAttempt']!=expected_run_attempt or value['runAttempt']!=1
@@ -524,7 +565,7 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     fields=_FIELDS_V3 if value['schemaVersion']==3 else (_FIELDS_V2 if extended else _FIELDS)
     if extended: value['ownedFrames']=validate_failure_frames(value['ownedFrames'])
     if (value['moduleCode'] not in (0,*MODULES.values()) or value['caseCode'] not in tuple(row[0] for row in CASES.values())
-            or value['stageCode'] not in (0,*STAGES.values()) or value['exceptionCode'] not in (0,*EXCEPTIONS.values())
+            or value['stageCode'] not in (0,*STAGES.values()) or value['exceptionCode'] not in (0,*EXCEPTIONS.values(),UNO_RUNTIME_EXCEPTION_CODE)
             or value['fileCode'] not in (0,*SOURCE_FILES.values())
             or (value['line']!=0 if value['fileCode']==0 else not 1<=value['line']<=10_000_000)
             or value['fieldPresenceMask'] >= 1<<len(fields)): raise ValueError('Notice identity/range differs')
@@ -559,6 +600,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
             or value['ownedFrames'][-1]!=[value['fileCode'],value['line']]
             or not any(row[0]==SOURCE_FILES['writer_style_smoke.py'] for row in value['ownedFrames'][:-1])):
         raise ValueError('Bounded original Writer capture rejection required')
+    if value['schemaVersion']==7 and (not _valid_capture_gate(value['captureGate'])
+            or not _capture_context(value['caseCode'],value['stageCode'],value)
+            or value['exceptionCode']!=1 or value['fileCode']!=24 or not value['ownedFrames']
+            or value['ownedFrames'][-1]!=[24,value['line']]
+            or [row[0] for row in value['ownedFrames']]!=[6,13,13,13,13,13,24]):
+        raise ValueError('Bounded original Writer pre-insertion capture deadline required')
     return value
 
 

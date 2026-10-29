@@ -520,6 +520,27 @@ def collect_live(request, diagnostic=None):
         retained.close()
 
 
+def _child_failure_code(exc):
+    from numeric_notice import capture_failure_code
+    failure = capture_failure_code(exc)
+    if failure['exceptionCode'] != 0: return failure
+    try:
+        cls = type(exc)
+        marker = vars(cls).get('__pyunostruct__')
+        if type(marker) is str and marker == 'com.sun.star.uno.RuntimeException':
+            # A propagated PyUNO exception already populated exceptionMap before
+            # PyErr_SetObject (26.8.1.1 pyuno_except.cxx). Use its loaded class;
+            # do not import UNO, inspect instance fields or query the target.
+            uno = sys.modules.get('uno')
+            get_class = vars(uno).get('getClass') if uno is not None else None
+            if callable(get_class) and cls is get_class(marker):
+                from numeric_notice import UNO_RUNTIME_EXCEPTION_CODE
+                failure = dict(failure, exceptionCode=UNO_RUNTIME_EXCEPTION_CODE)
+    except BaseException:
+        pass  # Optional class metadata cannot replace the original failure.
+    return failure
+
+
 def _collect_main(request):
     diagnostic = dict(ownershipStage=0)
     try:
@@ -528,13 +549,12 @@ def _collect_main(request):
         # All existing focus/listener/DPI/retained-handle finally blocks have
         # already run. Never read text, traceback formatting or UNO properties.
         try:
-            from numeric_notice import (MODULES, notices_enabled, capture_failure_code,
-                                        capture_failure_frames)
+            from numeric_notice import MODULES, notices_enabled, capture_failure_frames
             if notices_enabled():
                 value = _validate_child_failure(dict(schemaVersion=1,
                     officePid=request['officePid'], officeCreationTime=request['creationTime'],
                     childHwnd=request['childHwnd'], moduleCode=MODULES[request['module']],
-                    ownershipStage=diagnostic['ownershipStage'], failure=capture_failure_code(exc),
+                    ownershipStage=diagnostic['ownershipStage'], failure=_child_failure_code(exc),
                     ownedFrames=capture_failure_frames(exc)), request)
                 message = json.dumps(value, separators=(',', ':'), allow_nan=False)
                 if len(message.encode('utf-8'))+1 <= 1024:

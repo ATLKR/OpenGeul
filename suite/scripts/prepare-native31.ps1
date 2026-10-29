@@ -127,7 +127,7 @@ function Write-Native31NumericNotice([byte[]]$Stdout) {
         if ($keys.Count) { return }
         $fixed = @{schemaVersion=2;kind=1;runId=$run;runAttempt=1;architecture=43620;scopeCode=12;sequence=1;remainingBudget=7;moduleCode=0;caseCode=59;stageCode=94}
         foreach ($key in $fixed.Keys) { if ($values[$key] -ne $fixed[$key]) { return } }
-        if ($values.exceptionCode -gt 12 -or $values.fileCode -lt 1 -or $values.fileCode -gt 33 -or
+        if ($values.exceptionCode -gt 13 -or $values.fileCode -lt 1 -or $values.fileCode -gt 33 -or
             $values.line -lt 1 -or $values.line -gt 10000000 -or $values.fieldPresenceMask -ge 2251799813685248) { return }
         $names = 'shellPid enginePid officeCreationTime shellCreationTime shellExitCode officeExitCode cleanupShellExitCode cleanClose forcedCleanup forcedCleanupRequired originalFixtureUnchanged originalCloseVerified diskOutcomeVerified packagedUnoVerified promptVerified officeExitedAfterCleanup engineHandleReleased forceRequested closeShortcutCount choiceClickCount saveAttempted saveReturned savedMarkerObserved dispatchEntered dispatchReturned dispatchOpen dispatchComplete processExitProved controllerResourcesReleased withinDeadline expectedCaseCount completedCaseCount passedCaseCount failedCaseCount missingCaseCount duplicateCaseCount unexpectedCaseCount baselineFixturesUnchanged packagedUnoExitCode cleanupErrorCount diagnosticRunnerPassed shellExitObserved shellHandleReleased shellDisposalError shellCleanupExitCode retirementClosed localCleanupErrorCount keyboardCleanupErrorCount retirementCleanupErrorCount imeCompositionOrdinal imeCompositionStartEventCount'.Split(' ')
         $flags = @(7,8,9,10,11,12,13,14,15,16,17,20,21,22,26,27,28,29,37,40,41,42,45)

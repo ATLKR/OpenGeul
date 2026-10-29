@@ -256,11 +256,21 @@ if ($global:LASTEXITCODE -ne 7) { throw 'Original native exit changed.' }
                 self.assertEqual(run.stdout.strip(),notice)
                 self.assertNotIn('PRIVATE_',run.stdout)
 
+    def test_numeric_stdout_exception_boundary_keeps_original_exit(self):
+        line,value=self.numeric_notice();prefix='::'.join(line.split('::',2)[:2])+'::'
+        with tempfile.TemporaryDirectory() as temp:
+            for exception_code in (12,13):
+                with self.subTest(exceptionCode=exception_code):
+                    notice=prefix+json.dumps(value|dict(exceptionCode=exception_code),separators=(',',':'))
+                    run=self.numeric_forward(Path(temp),notice.encode())
+                    self.assertEqual(run.returncode,0,run.stdout)
+                    self.assertEqual(run.stdout.strip(),notice)
+
     def test_numeric_stdout_unknown_keys_types_frames_and_mask_are_silent(self):
         line,value=self.numeric_notice();prefix=line.split('::',2)[:2];prefix='::'.join(prefix)+'::'
         mutations=[]
         for update in ({'private':'PRIVATE_UNKNOWN'},{'sourceCommit':'b'*40},{'runId':124},{'runId':True},
-                       {'scopeCode':3},{'schemaVersion':2.0},{'exceptionCode':13},{'fileCode':34},{'line':10000001},
+                       {'scopeCode':3},{'schemaVersion':2.0},{'exceptionCode':14},{'fileCode':34},{'line':10000001},
                        {'ownedFrames':[]},{'ownedFrames':[[28,77]]*9},{'ownedFrames':[[28,78]]},{'fieldPresenceMask':1<<51}):
             mutations.append(value|update)
         for key,number,mask in (('cleanClose','PRIVATE_VALUE',0),('cleanClose',2,1<<7),

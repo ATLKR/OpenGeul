@@ -35,6 +35,13 @@ def environment():
 
 
 class NumericNoticeTests(unittest.TestCase):
+    def test_uno_runtime_exception_code_is_append_only_without_importing_uno(self):
+        self.assertEqual(self.n.UNO_RUNTIME_EXCEPTION_CODE,13)
+        self.assertEqual(list(self.n.EXCEPTIONS.values()),list(range(1,13)))
+        failure=dict(captured=1,exceptionCode=13,fileCode=1,line=99)
+        self.assertEqual(self.n.validate_failure_code(failure),failure)
+        with self.assertRaises(ValueError):self.n.validate_failure_code(failure|{'exceptionCode':14})
+
     def setUp(self):
         self.n = implementation()
         self.stream = io.StringIO()

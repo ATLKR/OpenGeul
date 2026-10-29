@@ -501,4 +501,14 @@ def main():
     return 0 if report['success'] else 1
 
 
-if __name__=='__main__':raise SystemExit(main())
+if __name__=='__main__':
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        try:
+            from numeric_notice import emit_case_notice,capture_failure_code,capture_failure_frames
+            emit_case_notice(CASE,dict(case=CASE,success=False,stage='case-setup',
+                numericFailure=capture_failure_code(exc),numericFailureFrames=capture_failure_frames(exc)))
+        except BaseException:
+            pass  # Optional setup evidence cannot replace the original exception.
+        raise
