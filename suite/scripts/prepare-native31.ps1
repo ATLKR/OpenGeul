@@ -127,7 +127,7 @@ function Write-Native31NumericNotice([byte[]]$Stdout) {
         if ($keys.Count) { return }
         $fixed = @{schemaVersion=2;kind=1;runId=$run;runAttempt=1;architecture=43620;scopeCode=12;sequence=1;remainingBudget=7;moduleCode=0;caseCode=59;stageCode=94}
         foreach ($key in $fixed.Keys) { if ($values[$key] -ne $fixed[$key]) { return } }
-        if ($values.exceptionCode -gt 13 -or $values.fileCode -lt 1 -or $values.fileCode -gt 33 -or
+        if ($values.exceptionCode -gt 13 -or $values.fileCode -lt 1 -or $values.fileCode -gt 35 -or
             $values.line -lt 1 -or $values.line -gt 10000000 -or $values.fieldPresenceMask -ge 2251799813685248) { return }
         $names = 'shellPid enginePid officeCreationTime shellCreationTime shellExitCode officeExitCode cleanupShellExitCode cleanClose forcedCleanup forcedCleanupRequired originalFixtureUnchanged originalCloseVerified diskOutcomeVerified packagedUnoVerified promptVerified officeExitedAfterCleanup engineHandleReleased forceRequested closeShortcutCount choiceClickCount saveAttempted saveReturned savedMarkerObserved dispatchEntered dispatchReturned dispatchOpen dispatchComplete processExitProved controllerResourcesReleased withinDeadline expectedCaseCount completedCaseCount passedCaseCount failedCaseCount missingCaseCount duplicateCaseCount unexpectedCaseCount baselineFixturesUnchanged packagedUnoExitCode cleanupErrorCount diagnosticRunnerPassed shellExitObserved shellHandleReleased shellDisposalError shellCleanupExitCode retirementClosed localCleanupErrorCount keyboardCleanupErrorCount retirementCleanupErrorCount imeCompositionOrdinal imeCompositionStartEventCount'.Split(' ')
         $flags = @(7,8,9,10,11,12,13,14,15,16,17,20,21,22,26,27,28,29,37,40,41,42,45)
@@ -150,7 +150,7 @@ function Write-Native31NumericNotice([byte[]]$Stdout) {
             $pair = @($frame.EnumerateArray()); [UInt64]$file = 0; [UInt64]$line = 0
             if ($pair[0].ValueKind -ne [Text.Json.JsonValueKind]::Number -or $pair[1].ValueKind -ne [Text.Json.JsonValueKind]::Number -or
                 -not $pair[0].TryGetUInt64([ref]$file) -or -not $pair[1].TryGetUInt64([ref]$line) -or
-                $file -lt 1 -or $file -gt 33 -or $line -lt 1 -or $line -gt 10000000) { return }
+                $file -lt 1 -or $file -gt 35 -or $line -lt 1 -or $line -gt 10000000) { return }
         }
         if ($file -ne $values.fileCode -or $line -ne $values.line) { return }
         Write-Output ($prefix + $json)

@@ -31,7 +31,8 @@ SOURCE_FILES = {name: index for index, name in enumerate((
     'ime_semantic_context.py', 'calc_pending_input.py', 'native_archive_completeness.py',
     'capture_readiness.py', 'ascii_editor_input.py', 'impress_focused_view.py',
     'native31_desktop_control.py', 'native31_privacy_prepare.py', 'native31_suite_prepare.py',
-    'runner-ready.py', 'policy.py', 'native_cleanup_receipt.py', 'calc_save_smoke.py'), 1)}
+    'runner-ready.py', 'policy.py', 'native_cleanup_receipt.py', 'calc_save_smoke.py',
+    'editor_click_readiness.py', 'suite_window_activation.py'), 1)}
 _ROOT_SOURCE_FILES = {'native31_desktop_control.py':'e2e/native31_desktop_control.py',
     'native31_privacy_prepare.py':'e2e/native31_privacy_prepare.py',
     'native31_suite_prepare.py':'e2e/native31_suite_prepare.py',

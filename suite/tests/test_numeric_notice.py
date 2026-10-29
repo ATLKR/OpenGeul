@@ -35,6 +35,61 @@ def environment():
 
 
 class NumericNoticeTests(unittest.TestCase):
+    def test_click_helpers_append_ids_after_the_exact_original_33_files(self):
+        previous=('windows_smoke.py','calc_close_probe.py','home_routing_smoke.py','korean_ime_smoke.py',
+            'korean_ui_smoke.py','writer_style_smoke.py','lifecycle_smoke.py','writer_model_reader.py',
+            'writer_model_barrier.py','calc_model_barrier.py','ime_keyboard_session.py','ime_engine_retirement.py',
+            'scenario_editor_shortcuts.py','counted_editor_shortcuts.py','owned_control_actions.py','owned_save_menu.py',
+            'native_window_evidence.py','ime_calc_setup.py','native_accessibility.py','calc_dispatch_diagnostic.py',
+            'ime_semantic_context.py','calc_pending_input.py','native_archive_completeness.py','capture_readiness.py',
+            'ascii_editor_input.py','impress_focused_view.py','native31_desktop_control.py','native31_privacy_prepare.py',
+            'native31_suite_prepare.py','runner-ready.py','policy.py','native_cleanup_receipt.py','calc_save_smoke.py')
+        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[:33],tuple(zip(previous,range(1,34))))
+        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[33:],
+            (('editor_click_readiness.py',34),('suite_window_activation.py',35)))
+
+    def test_actual_click_helper_leaf_frames_keep_the_original_exception_and_native_calls(self):
+        import test_editor_click_readiness as clicktests
+        helper=clicktests.EditorClickPolicyTests();helper.setUp()
+        with tempfile.TemporaryDirectory() as folder:
+            process,clock,probe,record=helper.fixture(folder)
+            probe.frame['editor']['rectangle']=[0,0,0,0]
+            try:helper.run_click(process,clock,probe,record)
+            except AssertionError as primary:
+                before=primary.__traceback__,primary.args,list(probe.calls)
+                failure=self.n.capture_failure_code(primary);frames=self.n.capture_failure_frames(primary)
+                self.assertEqual(failure['fileCode'],34)
+                self.assertTrue(frames and all(row[0]==34 for row in frames))
+                self.assertEqual(frames[-1],[34,failure['line']])
+                self.assertIs(primary.__traceback__,before[0]);self.assertEqual(primary.args,before[1])
+                self.assertEqual(probe.calls,before[2])
+            else:self.fail('Original invalid geometry was accepted')
+        from suite_window_activation import NativeActivationProbe
+        try:NativeActivationProbe._required(0,'synthetic native boundary')
+        except OSError as primary:
+            original=primary.__traceback__,primary.args
+            failure=self.n.capture_failure_code(primary);frames=self.n.capture_failure_frames(primary)
+            self.assertEqual(failure['fileCode'],35)
+            self.assertEqual(frames,[[35,failure['line']]])
+            self.assertIs(primary.__traceback__,original[0]);self.assertEqual(primary.args,original[1])
+        else:self.fail('Original required-value failure was accepted')
+
+    def test_new_helper_foreign_basenames_and_source_36_are_rejected(self):
+        for name in ('editor_click_readiness.py','suite_window_activation.py'):
+            scope={}
+            exec(compile('def fail():\n raise AssertionError("synthetic")\n','/foreign/'+name,'exec'),scope)
+            try:scope['fail']()
+            except AssertionError as primary:
+                self.assertEqual(self.n.capture_failure_code(primary)['fileCode'],0)
+                self.assertEqual(self.n.capture_failure_frames(primary),[])
+        record=dict(numericFailure=dict(captured=1,exceptionCode=1,fileCode=35,line=376),
+            numericFailureFrames=[[1,88],[34,313],[35,376]])
+        self.assertTrue(self.emitter.emit_case_notice('impress',record))
+        value=self.decode(self.messages()[0])
+        self.assertEqual((value['schemaVersion'],value['fileCode'],value['ownedFrames'][-1]),(2,35,[35,376]))
+        for change in ({'fileCode':36},{'ownedFrames':[[36,376]]}):
+            with self.subTest(change=change),self.assertRaises(ValueError):self.decode(json.dumps(value|change))
+
     def test_uno_runtime_exception_code_is_append_only_without_importing_uno(self):
         self.assertEqual(self.n.UNO_RUNTIME_EXCEPTION_CODE,13)
         self.assertEqual(list(self.n.EXCEPTIONS.values()),list(range(1,13)))
