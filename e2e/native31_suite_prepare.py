@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BRANCH = 'refs/heads/work/opengeul-office-arm64'
 WORKFLOW = 'ATLKR/OpenGeul/.github/workflows/office-suite.yml@' + BRANCH
 ADDITIONAL_SOURCE_FILES = ('e2e/native31_suite_prepare.py', '.github/workflows/office-suite.yml',
-                           'suite/scripts/prepare-native31.ps1')
+                           'suite/scripts/prepare-native31.ps1', 'suite/e2e/numeric_notice.py')
 MAX_JSON = 256 * 1024
 
 
@@ -78,11 +78,82 @@ def control_binding(core):
     return core.ControlBinding(BRANCH, WORKFLOW, 'windows-suite', 'e2e/native31_suite_prepare.py', ADDITIONAL_SOURCE_FILES)
 
 
+def numeric_codec():
+    if os.environ.get('OPENGEUL_SUITE_NUMERIC_NOTICE') != '1' or os.environ.get('OPENGEUL_SUITE_NOTICE_SCOPE') != '12':
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location('native31_suite_numeric_notice', ROOT / 'suite/e2e/numeric_notice.py')
+        codec = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(codec)
+        return codec if codec.notices_enabled() else None
+    except Exception:
+        return None
+
+
+def numeric_failure_record(codec, failure, result=None):
+    if type(failure) is not dict:
+        return None
+    try:
+        code = codec.validate_failure_code(failure.get('numericFailure'))
+        frames = codec.validate_failure_frames(failure.get('numericFailureFrames'))
+        if not frames or frames[-1] != [code['fileCode'], code['line']]:
+            return None
+    except ValueError:
+        return None
+    record = dict(success=False, stage='prepare-native31', numericFailure=code, numericFailureFrames=frames)
+    if type(result) is dict:
+        for source, target in (('forced', 'forcedCleanup'), ('success', 'diagnosticRunnerPassed')):
+            if type(result.get(source)) is bool:
+                record[target] = result[source]
+    if type(failure.get('cleanupFailures')) is list:
+        record['cleanupErrors'] = failure['cleanupFailures']
+    return record
+
+
+def emit_failure_notice(core, codec, output):
+    """Read only the current controller's finalized receipt, after owned cleanup."""
+    try:
+        result, _ = core.legacy.bounded_object(plain_path(output / '99-result.json'))
+        if type(result) is not dict or result.get('success') is not False:
+            return
+        failures = [result.get('observerFailure', {}).get('failure') if type(result.get('observerFailure')) is dict else None,
+                    result.get('failure'), result.get('preparationFailure'), result.get('preparationReceiptFailure')]
+        for failure in failures:
+            record = numeric_failure_record(codec, failure, result)
+            if record is None:
+                continue
+            codec.NoticeEmitter().emit_case_notice('native31-privacy', record)
+            return  # One original failure; never retry emission or publish wrapper alternatives.
+    except Exception:
+        pass  # Numeric projection cannot change the original preparation outcome.
+
+
 def arm_entry(args, *, platform=None):
     validate_context(os.environ, read_event(), 'arm64', os.name if platform is None else platform)
     require(args.prepare_privacy, 'Suite action requires explicit preparation mode')
     core = load_control()
-    return (core.observer if args.observer else core.controller)(args, binding=control_binding(core))
+    action = core.observer if args.observer else core.controller
+    codec = numeric_codec()
+    if codec is None:
+        return action(args, binding=control_binding(core))
+    try:
+        with core.numeric_failure_capture(codec):
+            code = action(args, binding=control_binding(core))
+    except Exception as exc:
+        # The original action's finally blocks and capture scope have unwound.
+        # An early evidence failure may prevent 99-result from existing at all.
+        if not args.observer:
+            try:
+                record = numeric_failure_record(codec, dict(numericFailure=codec.capture_failure_code(exc),
+                    numericFailureFrames=codec.capture_failure_frames(exc)))
+                if record is not None:
+                    codec.NoticeEmitter().emit_case_notice('native31-privacy', record)
+            except Exception:
+                pass
+        raise
+    if not args.observer and code != 0:
+        emit_failure_notice(core, codec, args.output)
+    return code
 
 
 def x64_native_identity():

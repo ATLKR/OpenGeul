@@ -89,6 +89,10 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
     def test_acceptance_prerequisites_and_package_handoff_still_fail_closed(self):
         ime = self.command('--output .work/suite-korean-ime\n')
         integrity = self.command('def check_all_native_archives(')
+        evidence = [candidate for candidate in self.steps
+                    if 'name: opengeul-suite-evidence-${{ matrix.architecture }}-' in candidate]
+        self.assertEqual(len(evidence), 1)
+        proof = step('final-zip-proof')
         delivery = self.steps[-1]
         for architecture in self.architectures:
             for status in ('failure', 'skipped'):
@@ -97,8 +101,11 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
                     self.assertFalse(self.selected(ime, architecture, outcomes={prerequisite: status}))
                 for prerequisite in ('office-features', 'home-fixtures'):
                     self.assertFalse(self.selected(step('home-routes'), architecture, outcomes={prerequisite: status}))
-                self.assertFalse(self.selected(delivery, architecture, outcomes={'home-routes': status}))
-            self.assertFalse(self.selected(delivery, architecture, success=False))
+                for candidate in (proof, delivery):
+                    self.assertFalse(self.selected(candidate, architecture, outcomes={'home-routes': status}))
+            for candidate in (proof, delivery):
+                self.assertFalse(self.selected(candidate, architecture, success=False))
+                self.assertFalse(self.selected(candidate, architecture, success=False, cancelled=True))
             self.assertFalse(self.selected(ime, architecture, cancelled=True))
             self.assertTrue(self.selected(integrity, architecture, success=False))
-            self.assertTrue(self.selected(self.steps[-2], architecture, success=False, cancelled=True))
+            self.assertTrue(self.selected(evidence[0], architecture, success=False, cancelled=True))

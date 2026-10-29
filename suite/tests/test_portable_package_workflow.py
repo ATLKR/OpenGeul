@@ -1,4 +1,5 @@
 """Execute the acceptance build block with the real portable ZIP file check."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,10 +8,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 from suite import payload
 from suite.tests import test_portable_package_check as portable_tests
 from suite.tests.test_calc_matrix_workflow import field, run_code, workflow_steps
+from suite.tests.test_com_wait_workflow import evaluate
+from suite.tests.test_navigation_diagnostic_workflow import condition
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -125,6 +129,90 @@ class PortablePackageWorkflowTests(unittest.TestCase):
         self.assertIn('        path: ${{ env.SUITE_ARCHIVE }}\n', delivery)
         self.assertEqual(field(delivery, 'if'),
                          '"env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' && (success() && steps.home-routes.outcome == \'success\')"')
+
+
+@unittest.skipUnless(shutil.which('pwsh'), 'PowerShell is required for the real command boundary')
+class FinalZipProofWorkflowTests(unittest.TestCase):
+    PREFIX = '::notice title=OpenGeul portable ZIP proof::'
+
+    def proof_step(self):
+        proof = next((step for step in workflow_steps() if field(step, 'id') == 'final-zip-proof'), None)
+        self.assertIsNotNone(proof, 'Final product ZIP proof step is missing')
+        return proof
+
+    def execute_proof(self, *, change=None, mutate_zip=False, mode='acceptance', architecture='arm64'):
+        with tempfile.TemporaryDirectory(prefix='OpenGeul final ZIP 경계 ') as temporary:
+            root = Path(temporary)
+            archive = root / '최종 원본 & $payload.zip'
+            with zipfile.ZipFile(archive, 'w') as stream:
+                stream.writestr('synthetic.txt', 'synthetic payload only')
+            digest, length = hashlib.sha256(archive.read_bytes()).hexdigest(), archive.stat().st_size
+            receipt = dict(schemaVersion=1, kind='portable-package-file-check',
+                sourceCommit='a'*40, architecture=architecture, archivePath=str(archive),
+                archiveSha256=digest, passed=True, archiveInventoryMatched=True,
+                relocationVerified=True, sameVersionCoexistenceVerified=True,
+                corruptionDetected=True, repairVerified=True,
+                updateVerified=False, guiVerified=False, existingHwpPreserved=dict(passed=True))
+            receipt.update(change or {})
+            directory = root / '.work/suite-portable'; directory.mkdir(parents=True)
+            (directory / f'123-{architecture}-1 휴대용 검증.receipt.json').write_text(
+                json.dumps(receipt, ensure_ascii=False), encoding='utf-8')
+            if mutate_zip:
+                with archive.open('ab') as stream: stream.write(b'changed after the original check')
+            code = run_code(self.proof_step()).replace('${{ matrix.architecture }}', architecture)
+            script = root / 'boundary.ps1'; script.write_text(code, encoding='utf-8')
+            environment = dict(os.environ, OPENGEUL_SUITE_RUN_MODE=mode, GITHUB_SHA='a'*40,
+                GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1', SUITE_ARCHIVE=str(archive))
+            result = subprocess.run([shutil.which('pwsh'), '-NoLogo', '-NoProfile', '-NonInteractive',
+                '-File', str(script)], cwd=root, env=environment, capture_output=True,
+                text=True, encoding='utf-8', timeout=30)
+            return result, digest, length, str(root)
+
+    def test_valid_current_receipt_emits_only_bound_product_zip_fields(self):
+        for architecture in ('x64', 'arm64'):
+            with self.subTest(architecture=architecture):
+                result, digest, length, private_root = self.execute_proof(architecture=architecture)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stderr, '')
+                lines = result.stdout.splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertTrue(lines[0].startswith(self.PREFIX))
+                message = lines[0][len(self.PREFIX):]
+                self.assertLessEqual(len(message.encode('utf-8')), 1024)
+                self.assertEqual(json.loads(message), dict(schemaVersion=1, sourceCommit='a'*40,
+                    runId=123, runAttempt=1, architecture=architecture, sha256=digest, bytes=length))
+                self.assertNotIn(private_root, result.stdout)
+
+    def test_changed_zip_rejects_without_publishing_a_notice(self):
+        result, *_ = self.execute_proof(mutate_zip=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(self.PREFIX, result.stdout)
+
+    def test_wrong_source_path_architecture_or_incomplete_receipt_rejects(self):
+        for change in ({'sourceCommit': 'b'*40}, {'architecture': 'x64'}, {'archivePath': '/foreign.zip'},
+                       {'repairVerified': False}, {'passed': False}, {'guiVerified': True},
+                       {'kind': ['portable-package-file-check']}):
+            with self.subTest(change=tuple(change)):
+                result, *_ = self.execute_proof(change=change)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(self.PREFIX, result.stdout)
+
+    def test_diagnostic_mode_cannot_publish_product_zip_proof(self):
+        result, *_ = self.execute_proof(mode='calc-dispatch-diagnostic')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(self.PREFIX, result.stdout)
+
+    def test_workflow_matches_candidate_upload_condition_and_precedes_it(self):
+        steps = workflow_steps(); proof = self.proof_step(); delivery = steps[-1]
+        self.assertEqual(steps[-2], proof)
+        self.assertEqual(condition(proof), condition(delivery))
+        expression = condition(proof)
+        for mode in ('acceptance', 'calc-dispatch-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'unknown'):
+            for success in (False, True):
+                for home in ('success', 'failure', 'skipped'):
+                    with self.subTest(mode=mode, success=success, home=home):
+                        self.assertEqual(evaluate(expression.replace('success()', str(success)), mode,
+                            'arm64', {'home-routes': home}), mode == 'acceptance' and success and home == 'success')
 
 
 if __name__ == '__main__':

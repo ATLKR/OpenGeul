@@ -360,6 +360,9 @@ jobs:
     - name: Suite native ARM64 privacy preparation
       id: native31-privacy-prepare
       if: "!cancelled() && github.ref == 'refs/heads/work/opengeul-office-arm64' && steps.build.outcome == 'success' && (steps.readiness.outcome == 'success' || (env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success'))"
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '12'
       shell: pwsh
       timeout-minutes: 3
       run: |
@@ -997,6 +1000,57 @@ jobs:
         retention-days: 7
         if-no-files-found: warn
         compression-level: 6
+    - name: Verify final product ZIP identity after normal acceptance
+      id: final-zip-proof
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (success() && steps.home-routes.outcome == 'success')"
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $architecture = '${{ matrix.architecture }}'
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cne 'acceptance' -or $architecture -cnotin @('x64', 'arm64') -or
+            $env:GITHUB_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or $env:GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]{0,18}\z' -or
+            $env:GITHUB_RUN_ATTEMPT -cne '1') { throw 'Final portable proof requires its current normal source/run.' }
+        $runId = 0L
+        if (-not [long]::TryParse($env:GITHUB_RUN_ID, [ref]$runId) -or $runId -le 0) { throw 'Invalid source run.' }
+        $receiptPath = Join-Path '.work/suite-portable' "$runId-$architecture-1 휴대용 검증.receipt.json"
+        $receiptFile = Get-Item -LiteralPath $receiptPath
+        if ($receiptFile -isnot [System.IO.FileInfo] -or $receiptFile.Length -le 0 -or $receiptFile.Length -gt 16MB -or
+            ($receiptFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw 'Invalid portable receipt file.' }
+        $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+        if ($receipt.schemaVersion -isnot [long] -or $receipt.schemaVersion -ne 1 -or
+            $receipt.kind -isnot [string] -or $receipt.kind -cne 'portable-package-file-check' -or
+            $receipt.sourceCommit -isnot [string] -or $receipt.sourceCommit -cne $env:GITHUB_SHA -or
+            $receipt.architecture -isnot [string] -or $receipt.architecture -cne $architecture -or $receipt.archivePath -isnot [string] -or
+            $receipt.archiveSha256 -isnot [string] -or $receipt.archiveSha256 -cnotmatch '\A[a-f0-9]{64}\z') {
+            throw 'Portable receipt does not match this source.'
+        }
+        foreach ($flag in @('passed', 'archiveInventoryMatched', 'relocationVerified', 'sameVersionCoexistenceVerified', 'corruptionDetected', 'repairVerified')) {
+            if ($receipt.$flag -isnot [bool] -or $receipt.$flag -cne $true) { throw 'Portable file check is incomplete.' }
+        }
+        foreach ($flag in @('updateVerified', 'guiVerified')) {
+            if ($receipt.$flag -isnot [bool] -or $receipt.$flag -cne $false) { throw 'File check cannot qualify update or GUI.' }
+        }
+        if ($receipt.existingHwpPreserved.passed -isnot [bool] -or $receipt.existingHwpPreserved.passed -cne $true) {
+            throw 'Original HWP preservation is incomplete.'
+        }
+        $archivePath = [System.IO.Path]::GetFullPath($env:SUITE_ARCHIVE)
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($archivePath, [System.IO.Path]::GetFullPath($receipt.archivePath))) {
+            throw 'Final upload ZIP differs from the portable receipt.'
+        }
+        $archive = Get-Item -LiteralPath $archivePath
+        if ($archive -isnot [System.IO.FileInfo] -or ($archive.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw 'Final upload ZIP must be an ordinary file.'
+        }
+        $stream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $bytes = $stream.Length
+            if ($bytes -le 0 -or $bytes -gt 16GB) { throw 'Final ZIP exceeds its producer bound.' }
+            $sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant()
+            if ($stream.Length -ne $bytes -or $sha256 -cne $receipt.archiveSha256) { throw 'Final ZIP bytes changed.' }
+        } finally { $stream.Dispose() }
+        $proof = [ordered]@{schemaVersion=1; sourceCommit=$env:GITHUB_SHA; runId=$runId; runAttempt=1;
+            architecture=$architecture; sha256=$sha256; bytes=$bytes}
+        Write-Output ('::notice title=OpenGeul portable ZIP proof::' + ($proof | ConvertTo-Json -Compress))
     - name: 모든 검증을 통과한 Suite 개발 패키지 전달
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (success() && steps.home-routes.outcome == 'success')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

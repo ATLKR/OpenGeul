@@ -14,7 +14,8 @@ TRACE_OPT_IN = 'OPENGEUL_SUITE_CALC_TRACE_NOTICE'
 FOREGROUND_OPT_IN = 'OPENGEUL_SUITE_FOREGROUND_NOTICE'
 # Extend numeric identifiers at the end so earlier run notices keep their meaning.
 SCOPES = {'calc-close':1,'home-routes':2,'korean-ime':3,'korean-ui':4,'writer-style':5,
-          'lifecycle':6,'native-first':7,'native-second':8,'calc-dispatch':9,'native-integrity':10}
+          'lifecycle':6,'native-first':7,'native-second':8,'calc-dispatch':9,'native-integrity':10,
+          'native31-privacy':12}
 MAX_CASE_BYTES, MAX_TRACE_BYTES, MAX_NOTICES = 2048, 32768, 8
 EXCEPTIONS = {kind: index for index, kind in enumerate((AssertionError, TimeoutError,
     PermissionError, FileNotFoundError, FileExistsError, OSError, ValueError, TypeError,
@@ -27,8 +28,17 @@ SOURCE_FILES = {name: index for index, name in enumerate((
     'owned_control_actions.py', 'owned_save_menu.py', 'native_window_evidence.py',
     'ime_calc_setup.py', 'native_accessibility.py', 'calc_dispatch_diagnostic.py',
     'ime_semantic_context.py', 'calc_pending_input.py', 'native_archive_completeness.py',
-    'capture_readiness.py', 'ascii_editor_input.py', 'impress_focused_view.py'), 1)}
-_OWNED_FILES = {os.path.normcase(str(Path(__file__).with_name(name))): code for name, code in SOURCE_FILES.items()}
+    'capture_readiness.py', 'ascii_editor_input.py', 'impress_focused_view.py',
+    'native31_desktop_control.py', 'native31_privacy_prepare.py', 'native31_suite_prepare.py',
+    'runner-ready.py', 'policy.py'), 1)}
+_ROOT_SOURCE_FILES = {'native31_desktop_control.py':'e2e/native31_desktop_control.py',
+    'native31_privacy_prepare.py':'e2e/native31_privacy_prepare.py',
+    'native31_suite_prepare.py':'e2e/native31_suite_prepare.py',
+    'runner-ready.py':'e2e/runner-ready.py', 'policy.py':'ci/policy.py'}
+_OWNED_FILES = {os.path.normcase(str(Path(__file__).with_name(name))): code
+    for name, code in SOURCE_FILES.items() if name not in _ROOT_SOURCE_FILES}
+_OWNED_FILES.update({os.path.normcase(str(Path(__file__).resolve().parents[2] / relative)): SOURCE_FILES[name]
+    for name, relative in _ROOT_SOURCE_FILES.items()})
 MODULES = {name: index for index, name in enumerate(('writer','calc','impress','draw','math','base','hwp'), 1)}
 _FORMATS = ('writer-odt','writer-docx','writer-doc','writer-rtf','writer-txt','calc-ods',
     'calc-xlsx','calc-xls','calc-csv','impress-odp','impress-pptx','impress-ppt','draw-odg',
@@ -43,7 +53,7 @@ _CASES = (('home', '') , *((name, name) for name in MODULES if name != 'hwp'),
     ('document-file-open','writer'),
     *((name,'writer') for name in ('dirty-writer-cancel-save','dirty-writer-discard',
       'new-writer-saveas-cancel','failed-saveas-retains-editor','home-two-documents-cancel','resize-minimize-restore')),
-    ('hwp-tile-hwpx-route','hwp'), ('lifecycle-summary',''), ('native-integrity',''))
+    ('hwp-tile-hwpx-route','hwp'), ('lifecycle-summary',''), ('native-integrity',''), ('native31-privacy',''))
 CASES = {name: (index, MODULES.get(module, 0)) for index, (name,module) in enumerate(_CASES, 1)}
 _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fixture','launch','attach',
     'prepare-window','focus-editor','prepare-owned-native-focus','prepare-editor','physical-editor-input',
@@ -66,7 +76,7 @@ _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fix
     'hwpx-route-native-readiness','hwp-tile-native-readiness',
     *(f'await-new-{m}-attachment' for m in MODULES), *(f'close-owned-{m}' for m in MODULES),
     *(f'verify-retained-{m}-exit' for m in MODULES), *(f'dirty-close-{c}' for c in ('save','discard','cancel')),
-    'verify-native-archives')
+    'verify-native-archives', 'prepare-native31')
 STAGES = {name:index for index,name in enumerate(_STAGES, 1)}
 
 # Each bit means that the source field was present and had the declared type.

@@ -288,7 +288,7 @@ class NumericNoticeTests(unittest.TestCase):
         bit = 1 << self.n.OBSERVATION_NAMES.index('saveAttempted')
         self.assertFalse(summary['fieldPresenceMask'] & bit)
 
-    def test_only_ten_product_steps_and_one_compartment_step_opt_in_and_unit_steps_never_do(self):
+    def test_product_compartment_and_privacy_steps_opt_in_and_unit_steps_never_do(self):
         from suite.tests.test_calc_matrix_workflow import WORKFLOW, workflow_steps, field, run_code
         fragments = ('calc_close_probe.py --suite', 'home_routing_smoke.py --suite',
                      '--output .work/suite-korean-ime\n', 'korean_ui_smoke.py --suite',
@@ -300,8 +300,10 @@ class NumericNoticeTests(unittest.TestCase):
                     for fragment in fragments]
         actual = [step for step in workflow_steps() if "OPENGEUL_SUITE_NUMERIC_NOTICE: '1'" in step]
         compartment=next(step for step in workflow_steps() if field(step,'id')=='ime-mode-diagnostic')
-        self.assertEqual({step.splitlines()[0] for step in actual}, {step.splitlines()[0] for step in (*expected,compartment)})
+        privacy=next(step for step in workflow_steps() if field(step,'id')=='native31-privacy-prepare')
+        self.assertEqual({step.splitlines()[0] for step in actual}, {step.splitlines()[0] for step in (*expected,compartment,privacy)})
         self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '3'",compartment)
+        self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '12'",privacy)
         for scope,step in enumerate(expected,1):
             self.assertIn("OPENGEUL_SUITE_NOTICE_SCOPE: '"+str(scope)+"'",step)
         traced = [step for step in workflow_steps() if 'OPENGEUL_SUITE_CALC_TRACE_NOTICE' in step]
@@ -541,7 +543,7 @@ class NumericNoticeTests(unittest.TestCase):
         base=json.loads(self.messages()[0])
         self.assertEqual(base['schemaVersion'],2)
         changes=[{'schemaVersion':1},{'ownedFrames':[[24,1]]*9},{'ownedFrames':[[True,1]]},
-            {'ownedFrames':[[24,True]]},{'ownedFrames':[[0,0]]},{'ownedFrames':[[27,1]]},
+            {'ownedFrames':[[24,True]]},{'ownedFrames':[[0,0]]},{'ownedFrames':[[max(self.n.SOURCE_FILES.values())+1,1]]},
             {'ownedFrames':[[24,0]]},{'ownedFrames':[[24,10000001]]},{'ownedFrames':[dict(path='PRIVATE')]}]
         for change in changes:
             with self.subTest(change=change),self.assertRaises(ValueError):self.decode(json.dumps(base|change))

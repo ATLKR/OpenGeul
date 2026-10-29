@@ -167,3 +167,37 @@ Publish only fixed booleans/numeric summaries, without environment values or
 paths. This separate probe cannot prove original Calc engine retirement or
 the earlier Terminal association. Keep all original focus guards and one input
 attempt; a new Windows run must establish whether the original failure changes.
+
+Run 40782731241 at `13fbd5eb22684c4069d480b64ebde003b1e4e10a`
+passed both Windows unit/shell checks (2,999 tests, 38 skipped per architecture).
+The ARM64 package and native worker bootstrap probe passed, including console
+absence and same-generation normal exit. IME readiness and standalone engine
+fixtures passed. Privacy preparation failed before diagnostic input staging;
+the original Calc case, native dispatch and save oracle were not executed.
+The fresh job log retained only the outer entry failure. Its detailed child
+failure remained in local receipts, so the exact cause is unknown.
+
+For the next original preparation, opt in to one source-bound numeric CaseV2
+notice after the existing cleanup. Preserve actual owned traceback locations
+when the error is captured, prefer the original observer failure over a later
+controller wrapper, and retain unknown fields as unobserved. Use append-only
+source IDs and scope 12. The observer records locations without emitting;
+only the validated Suite controller emits once. A failure before the final
+receipt must preserve the same raised exception after supplemental reporting.
+The caller forwards only the bounded closed numeric payload, never other
+stdout, stderr, exception text, UIA data, titles, paths or screenshots. Keep
+all original source/ownership/privacy guards, the one original close/pointer
+attempt, and the 120-second controller, 125-second containment and 15-second
+staging limits. A successful preparation remains a prerequisite for Calc.
+
+Final normal acceptance also needs the identity of the actual product ZIP.
+Immediately before its existing candidate upload, under the same successful
+normal-acceptance condition, recheck the current portable receipt's source,
+architecture, file-check flags and archive path. Hash that same original ZIP
+again through one read-only stream, require its hash to match the pre-GUI
+portable receipt, and record its current byte length. Emit only the closed
+seven-field proof: schema version, source commit, run ID, run attempt,
+architecture, SHA-256 and bytes. The proof contains no paths or document data.
+It is independent of the GitHub outer artifact digest and cannot qualify a
+candidate without the same run's successful final job and uploaded artifact.
+Diagnostic modes must not emit this proof or deliver a candidate ZIP.

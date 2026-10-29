@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import io
 import hashlib
 import shutil
 import re
@@ -218,6 +219,75 @@ class PowerShellPreparationContracts(unittest.TestCase):
         return subprocess.run([self.pwsh,'-NoLogo','-NoProfile','-NonInteractive','-File',str(script)],
             cwd=folder,env={**os.environ,**(env or {})},stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=timeout)
 
+    def numeric_notice(self,sha='a'*40):
+        from suite.tests.test_numeric_notice import implementation,environment
+        codec=implementation();stream=io.StringIO()
+        env=environment()|dict(OPENGEUL_SUITE_NOTICE_SCOPE='12',GITHUB_SHA=sha,GITHUB_WORKFLOW_SHA=sha)
+        record=dict(success=False,stage='prepare-native31',numericFailure=dict(captured=1,exceptionCode=1,fileCode=28,line=77),
+                    numericFailureFrames=[[27,42],[28,77]])
+        self.assertTrue(codec.NoticeEmitter(environ=env,stream=stream).emit_case_notice('native31-privacy',record))
+        line=stream.getvalue().strip();value=json.loads(line.split('::',2)[2])
+        self.assertEqual((value['schemaVersion'],len(value),len(value['observations'])),(2,18,51))
+        return line,value
+
+    def numeric_forward(self,folder,raw,changes=None):
+        path=folder/'stdout.bin';path.write_bytes(raw)
+        code="""$global:LASTEXITCODE = 7
+Write-Native31NumericNotice ([IO.File]::ReadAllBytes($env:TEST_STDOUT))
+if ($global:LASTEXITCODE -ne 7) { throw 'Original native exit changed.' }
+"""
+        env=dict(TEST_STDOUT=str(path),OPENGEUL_SUITE_NUMERIC_NOTICE='1',OPENGEUL_SUITE_NOTICE_SCOPE='12',
+                 RUNNER_ARCH='ARM64',GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1')
+        return self.run_script(folder,code,env|(changes or {}))
+
+    def test_numeric_stdout_forward_is_exact_and_keeps_original_exit(self):
+        line,value=self.numeric_notice()
+        from suite.tests.test_numeric_notice import implementation
+        codec=implementation();maximum=copy.deepcopy(value)
+        maximum.update(fieldPresenceMask=(1<<51)-1,fileCode=31,line=10000000,ownedFrames=[[31,10000000]]*8)
+        for name,kind,_ in codec._FIELDS_V2:
+            maximum['observations'][name]=1 if kind in ('bool','flag') else (8 if kind=='ordinal' else (2**64-1 if kind=='u64' else 2**32-1))
+        max_line=line.split('::',2)[:2];max_line='::'.join(max_line)+'::'+json.dumps(maximum,separators=(',',':'))
+        codec.decode_notice(max_line.split('::',2)[2],'a'*40,123,expected_architecture=0xaa64,expected_scope=12)
+        with tempfile.TemporaryDirectory() as temp:
+            for notice in (line,max_line):
+                run=self.numeric_forward(Path(temp),('PRIVATE_OTHER_STDOUT\n'+notice+'\nPRIVATE_AFTER\n').encode())
+                self.assertEqual(run.returncode,0,run.stdout)
+                self.assertEqual(run.stdout.strip(),notice)
+                self.assertNotIn('PRIVATE_',run.stdout)
+
+    def test_numeric_stdout_unknown_keys_types_frames_and_mask_are_silent(self):
+        line,value=self.numeric_notice();prefix=line.split('::',2)[:2];prefix='::'.join(prefix)+'::'
+        mutations=[]
+        for update in ({'private':'PRIVATE_UNKNOWN'},{'sourceCommit':'b'*40},{'runId':124},{'runId':True},
+                       {'scopeCode':3},{'schemaVersion':2.0},{'exceptionCode':13},{'fileCode':32},{'line':10000001},
+                       {'ownedFrames':[]},{'ownedFrames':[[28,77]]*9},{'ownedFrames':[[28,78]]},{'fieldPresenceMask':1<<51}):
+            mutations.append(value|update)
+        for key,number,mask in (('cleanClose','PRIVATE_VALUE',0),('cleanClose',2,1<<7),
+                ('shellPid',1,0),('shellPid',0,1),('officeCreationTime',2**64,1<<2),
+                ('imeCompositionOrdinal',9,1<<49),('cleanupErrorCount',2**32,1<<39)):
+            bad=copy.deepcopy(value);bad['observations'][key]=number;bad['fieldPresenceMask']=mask;mutations.append(bad)
+        bad=copy.deepcopy(value);bad['observations']['PRIVATE_KEY']=bad['observations'].pop('shellPid');mutations.append(bad)
+        messages=[prefix+json.dumps(item,separators=(',',':')) for item in mutations]
+        messages += [prefix+json.dumps(value,separators=(',',':'))[:-1]+',"runId":123}',prefix+'PRIVATE_RAW',
+                     prefix+json.dumps(value,separators=(',',':'))+' '*2048]
+        with tempfile.TemporaryDirectory() as temp:
+            for message in messages:
+                with self.subTest(number=messages.index(message)):
+                    run=self.numeric_forward(Path(temp),message.encode())
+                    self.assertEqual(run.returncode,0,run.stdout);self.assertEqual(run.stdout,'')
+
+    def test_numeric_stdout_empty_multiple_oversize_and_wrong_context_are_silent(self):
+        line,_=self.numeric_notice()
+        with tempfile.TemporaryDirectory() as temp:
+            for raw in (b'',b'\xff',((line+'\n')*2).encode(),b'x'*8193):
+                run=self.numeric_forward(Path(temp),raw)
+                self.assertEqual(run.returncode,0,run.stdout);self.assertEqual(run.stdout,'')
+            for change in ({'OPENGEUL_SUITE_NUMERIC_NOTICE':'0'},{'OPENGEUL_SUITE_NOTICE_SCOPE':'3'},
+                           {'RUNNER_ARCH':'X64'},{'GITHUB_RUN_ATTEMPT':'2'},{'GITHUB_SHA':'0'*40},{'GITHUB_RUN_ID':'124'}):
+                run=self.numeric_forward(Path(temp),line.encode(),change)
+                self.assertEqual(run.returncode,0,run.stdout);self.assertEqual(run.stdout,'')
+
     def test_real_detached_source_excludes_generated_data_and_preserves_exact_blobs(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp);root,runner,sha,git=self.repository(folder)
@@ -231,7 +301,7 @@ Write-Native31Json $env:TEST_PROOF @{proof=$proof;commands=$state.Commands}
             proof=folder/'proof.json';run=self.run_script(folder,code,{'GITHUB_SHA':sha,'TEST_ROOT':str(root),'TEST_SOURCE':str(source),'TEST_SETUP':str(setup),'TEST_PROOF':str(proof)})
             self.assertEqual(run.returncode,0,run.stdout);record=json.loads(proof.read_text())
             self.assertEqual(record['proof']['action']['head'],sha);self.assertEqual(record['proof']['action']['tree'],git('rev-parse','HEAD^{tree}'))
-            self.assertEqual(len(record['commands']),41);self.assertLessEqual(len(record['commands']),64)
+            self.assertEqual(len(record['commands']),43);self.assertLessEqual(len(record['commands']),64)
             self.assertFalse((source/'.work').exists());self.assertFalse((source/'dist').exists());self.assertFalse(marker.exists())
             self.assertTrue((source/'.git').is_file());self.assertEqual(git('config','core.autocrlf'),'true')
             for name,item in record['proof']['files'].items():
@@ -322,7 +392,10 @@ Write-Native31Json $env:TEST_RECORD @{timedOut=$result.TimedOut;forced=$result.F
 
     def write_entry_stub(self,root):
         stub=root/'e2e/native31_suite_prepare.py'
-        stub.write_bytes("import json,os,sys\nfrom pathlib import Path\na=sys.argv;out=Path(a[a.index('--output')+1]);out.mkdir();(out/'99-result.json').write_text(json.dumps({'partial':'original','success':False}));Path(os.environ['TEST_INVOCATION']).write_text(json.dumps({'argv':a[1:],'cwd':os.getcwd()}));raise SystemExit(int(os.environ['TEST_ENTRY_EXIT']))\n".encode('utf-8'))
+        stub.write_bytes(("import json,os,sys\nfrom pathlib import Path\n"
+            "a=sys.argv;out=Path(a[a.index('--output')+1]);out.mkdir();(out/'99-result.json').write_text(json.dumps({'partial':'original','success':False}));Path(os.environ['TEST_INVOCATION']).write_text(json.dumps({'argv':a[1:],'cwd':os.getcwd()}))\n"
+            "if os.environ.get('TEST_ENTRY_NOTICE'):\n print('PRIVATE_OTHER_STDOUT');print(os.environ['TEST_ENTRY_NOTICE'],flush=True);print('PRIVATE_STDERR',file=sys.stderr)\n"
+            "raise SystemExit(int(os.environ['TEST_ENTRY_EXIT']))\n").encode('utf-8'))
         return stub
 
     def test_fixture_lf_bytes_match_git_under_windows_text_translation(self):
@@ -375,6 +448,10 @@ Get-Native31SourceProof $env:TEST_ROOT $env:GITHUB_SHA $state
                     'GITHUB_REF':self.m.BRANCH,'GITHUB_WORKFLOW_REF':self.m.WORKFLOW,'GITHUB_SHA':sha,'GITHUB_WORKFLOW_SHA':sha,
                     'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1','GITHUB_ACTOR':'ATLKR','GITHUB_ACTOR_ID':'65988341',
                     'GITHUB_EVENT_PATH':str(event),'GITHUB_WORKSPACE':str(root),'RUNNER_TEMP':str(runner)}
+                notice=None
+                if arch=='arm64' and exit_code:
+                    notice,_=self.numeric_notice(sha)
+                    env.update(OPENGEUL_SUITE_NUMERIC_NOTICE='1',OPENGEUL_SUITE_NOTICE_SCOPE='12',TEST_ENTRY_NOTICE=notice)
                 script=folder/'workflow.ps1';script.write_text("$ErrorActionPreference='Stop'\n"+run_code(step).replace('${{ matrix.architecture }}',arch))
                 run=subprocess.run([self.pwsh,'-NoLogo','-NoProfile','-NonInteractive','-File',str(script)],cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=45)
                 detail=f'arch={arch}, entryExit={exit_code}, stagingFailure={stage_failure}, callerExit={run.returncode}\n{run.stdout}'
@@ -384,6 +461,10 @@ Get-Native31SourceProof $env:TEST_ROOT $env:GITHUB_SHA $state
                     self.assertTrue(required.is_file(),f'Missing required fixture evidence {required}\n{detail}')
                 self.assertEqual(json.loads((output/'99-result.json').read_text())['partial'],'original',detail)
                 entry=json.loads((setup/'20-entry-exit.json').read_text());self.assertEqual(entry['exitCode'],exit_code,detail)
+                if notice:
+                    self.assertEqual([line for line in run.stdout.splitlines() if line.startswith('::notice ')],[notice])
+                    self.assertNotIn('PRIVATE_',run.stdout)
+                    self.assertIn('PRIVATE_OTHER_STDOUT',entry['stdout']);self.assertIn('PRIVATE_STDERR',entry['stderr'])
                 invocation=json.loads((folder/'invocation.json').read_text())
                 expected=runner/'suite-native31-source-arm64-123-1' if arch=='arm64' else root
                 self.assertTrue(Path(invocation['cwd']).samefile(expected),

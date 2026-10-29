@@ -6,6 +6,7 @@ Source/Store bindings and privacy classifier remain byte-for-byte unchanged.
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 import ctypes
 from ctypes import wintypes as W
 import hashlib
@@ -41,6 +42,7 @@ spec = importlib.util.spec_from_file_location('native31_legacy_classifier', ROOT
 legacy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(legacy)
 require = legacy.require
+_NUMERIC_FAILURE_CODEC = ContextVar('native31_suite_numeric_failure_codec', default=None)
 
 
 class ControlBinding(NamedTuple):
@@ -73,7 +75,24 @@ def error_record(exc):
     value = {'type': type(exc).__name__, 'message': str(exc)[:2048]}
     if hasattr(exc, 'details'): value['details'] = exc.details
     if hasattr(exc, 'cleanup_failures'): value['cleanupFailures'] = exc.cleanup_failures
+    codec = _NUMERIC_FAILURE_CODEC.get()
+    if codec is not None:
+        try:
+            value['numericFailure'] = codec.capture_failure_code(exc)
+            value['numericFailureFrames'] = codec.capture_failure_frames(exc)
+        except Exception:
+            pass  # Supplemental numeric evidence cannot replace the original failure.
     return value
+
+
+@contextmanager
+def numeric_failure_capture(codec):
+    """The validated Suite adapter enables only pure exception metadata capture."""
+    token = _NUMERIC_FAILURE_CODEC.set(codec)
+    try:
+        yield
+    finally:
+        _NUMERIC_FAILURE_CODEC.reset(token)
 
 
 def diagnostic_error(message, **details):
@@ -956,6 +975,8 @@ def child_environment(env):
              'GITHUB_RUN_ATTEMPT', 'GITHUB_ACTOR', 'GITHUB_ACTOR_ID', 'NATIVE31_PWSH')
     result = {name: env[name] for name in names if name in env}
     result.update(PYTHONUTF8='1', PYTHONDONTWRITEBYTECODE='1')
+    if _NUMERIC_FAILURE_CODEC.get() is not None:
+        result.update(OPENGEUL_SUITE_NUMERIC_NOTICE='1', OPENGEUL_SUITE_NOTICE_SCOPE='12')
     return result
 
 

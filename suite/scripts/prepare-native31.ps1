@@ -91,7 +91,71 @@ public static class Native31BoundedProcess {
 $Native31Critical = @('e2e/native31_desktop_control.py', 'e2e/runner-ready.py', 'ci/policy.py',
     '.github/workflows/office-native31-desktop-control.yml', 'e2e/native31_privacy_prepare.py',
     '.github/workflows/office-native31-privacy-prepare.yml', 'suite/e2e/native_window_evidence.py',
-    'e2e/native31_suite_prepare.py', '.github/workflows/office-suite.yml', 'suite/scripts/prepare-native31.ps1')
+    'e2e/native31_suite_prepare.py', '.github/workflows/office-suite.yml', 'suite/scripts/prepare-native31.ps1', 'suite/e2e/numeric_notice.py')
+
+function Write-Native31NumericNotice([byte[]]$Stdout) {
+    # This only forwards one closed existing V2 failure; it cannot qualify preparation.
+    $document = $null
+    try {
+        if ($env:OPENGEUL_SUITE_NUMERIC_NOTICE -cne '1' -or $env:OPENGEUL_SUITE_NOTICE_SCOPE -cne '12' -or
+            $env:RUNNER_ARCH -cne 'ARM64' -or $env:GITHUB_RUN_ATTEMPT -cne '1' -or
+            $env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_SHA -ceq ('0'*40) -or
+            $env:GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]{0,18}\z' -or -not $Stdout -or $Stdout.Length -gt 8192) { return }
+        [UInt64]$run = 0
+        if (-not [UInt64]::TryParse($env:GITHUB_RUN_ID,[ref]$run) -or $run -gt [Int64]::MaxValue) { return }
+        $prefix = '::notice title=OpenGeul numeric case v1::'
+        $text = [Text.UTF8Encoding]::new($false,$true).GetString($Stdout)
+        $lines = @($text -split '\r?\n' | Where-Object { $_.StartsWith($prefix,[StringComparison]::Ordinal) })
+        if ($lines.Count -ne 1) { return }
+        $json = $lines[0].Substring($prefix.Length)
+        if ([Text.Encoding]::UTF8.GetByteCount($json) -gt 2048) { return }
+        $document = [Text.Json.JsonDocument]::Parse($json); $root = $document.RootElement
+        if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) { return }
+        $keys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($name in 'schemaVersion kind sourceCommit runId runAttempt architecture scopeCode sequence remainingBudget moduleCode caseCode stageCode exceptionCode fileCode line fieldPresenceMask observations ownedFrames'.Split(' ')) { $null = $keys.Add($name) }
+        $values = @{}
+        foreach ($property in $root.EnumerateObject()) {
+            if (-not $keys.Remove($property.Name)) { return }
+            if ($property.Name -ceq 'sourceCommit') {
+                if ($property.Value.ValueKind -ne [Text.Json.JsonValueKind]::String -or $property.Value.GetString() -cne $env:GITHUB_SHA) { return }
+            } elseif ($property.Name -cnotin @('observations','ownedFrames')) {
+                [UInt64]$number = 0
+                if ($property.Value.ValueKind -ne [Text.Json.JsonValueKind]::Number -or -not $property.Value.TryGetUInt64([ref]$number)) { return }
+                $values[$property.Name] = $number
+            }
+        }
+        if ($keys.Count) { return }
+        $fixed = @{schemaVersion=2;kind=1;runId=$run;runAttempt=1;architecture=43620;scopeCode=12;sequence=1;remainingBudget=7;moduleCode=0;caseCode=59;stageCode=94}
+        foreach ($key in $fixed.Keys) { if ($values[$key] -ne $fixed[$key]) { return } }
+        if ($values.exceptionCode -gt 12 -or $values.fileCode -lt 1 -or $values.fileCode -gt 31 -or
+            $values.line -lt 1 -or $values.line -gt 10000000 -or $values.fieldPresenceMask -ge 2251799813685248) { return }
+        $names = 'shellPid enginePid officeCreationTime shellCreationTime shellExitCode officeExitCode cleanupShellExitCode cleanClose forcedCleanup forcedCleanupRequired originalFixtureUnchanged originalCloseVerified diskOutcomeVerified packagedUnoVerified promptVerified officeExitedAfterCleanup engineHandleReleased forceRequested closeShortcutCount choiceClickCount saveAttempted saveReturned savedMarkerObserved dispatchEntered dispatchReturned dispatchOpen dispatchComplete processExitProved controllerResourcesReleased withinDeadline expectedCaseCount completedCaseCount passedCaseCount failedCaseCount missingCaseCount duplicateCaseCount unexpectedCaseCount baselineFixturesUnchanged packagedUnoExitCode cleanupErrorCount diagnosticRunnerPassed shellExitObserved shellHandleReleased shellDisposalError shellCleanupExitCode retirementClosed localCleanupErrorCount keyboardCleanupErrorCount retirementCleanupErrorCount imeCompositionOrdinal imeCompositionStartEventCount'.Split(' ')
+        $flags = @(7,8,9,10,11,12,13,14,15,16,17,20,21,22,26,27,28,29,37,40,41,42,45)
+        $observations = $root.GetProperty('observations'); $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        if ($observations.ValueKind -ne [Text.Json.JsonValueKind]::Object) { return }
+        foreach ($property in $observations.EnumerateObject()) {
+            $index = [Array]::IndexOf($names,$property.Name); [UInt64]$number = 0
+            if ($index -lt 0 -or -not $seen.Add($property.Name) -or $property.Value.ValueKind -ne [Text.Json.JsonValueKind]::Number -or
+                -not $property.Value.TryGetUInt64([ref]$number)) { return }
+            $maximum = if ($index -in @(2,3)) { [UInt64]::MaxValue } elseif ($flags -contains $index) { 1 } elseif ($index -eq 49) { 8 } else { [UInt32]::MaxValue }
+            $present = ($values.fieldPresenceMask -band ([UInt64]1 -shl $index)) -ne 0
+            if ($number -gt $maximum -or (-not $present -and $number -ne 0) -or
+                ($present -and $index -in @(0,1,2,3,49) -and $number -eq 0)) { return }
+        }
+        if ($seen.Count -ne 51) { return }
+        $frames = $root.GetProperty('ownedFrames')
+        if ($frames.ValueKind -ne [Text.Json.JsonValueKind]::Array -or $frames.GetArrayLength() -lt 1 -or $frames.GetArrayLength() -gt 8) { return }
+        foreach ($frame in $frames.EnumerateArray()) {
+            if ($frame.ValueKind -ne [Text.Json.JsonValueKind]::Array -or $frame.GetArrayLength() -ne 2) { return }
+            $pair = @($frame.EnumerateArray()); [UInt64]$file = 0; [UInt64]$line = 0
+            if ($pair[0].ValueKind -ne [Text.Json.JsonValueKind]::Number -or $pair[1].ValueKind -ne [Text.Json.JsonValueKind]::Number -or
+                -not $pair[0].TryGetUInt64([ref]$file) -or -not $pair[1].TryGetUInt64([ref]$line) -or
+                $file -lt 1 -or $file -gt 31 -or $line -lt 1 -or $line -gt 10000000) { return }
+        }
+        if ($file -ne $values.fileCode -or $line -ne $values.line) { return }
+        Write-Output ($prefix + $json)
+    } catch { } finally { if ($document) { $document.Dispose() } }
+}
 
 function Assert-Native31([bool]$Value, [string]$Message) { if (-not $Value) { throw $Message } }
 function Get-Native31Hash([byte[]]$Bytes) { return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant() }
@@ -284,6 +348,7 @@ function Invoke-Native31Suite([string]$Arch, [string]$Root, [string]$Temp) {
         Write-Native31Json (Join-Path $setup '20-entry-exit.json') @{argv=$argv;executable=$python;cwd=$actionRoot;exitCode=$result.ExitCode;
             seconds=$result.Seconds;timedOut=$result.TimedOut;forced=$result.Forced;failure=$result.Failure;
             stdout=[Text.Encoding]::UTF8.GetString($result.Stdout);stderr=[Text.Encoding]::UTF8.GetString($result.Stderr)}
+        Write-Native31NumericNotice $result.Stdout
         Assert-Native31 ($result.ExitCode -eq 0 -and -not $result.TimedOut -and -not $result.Forced -and -not $result.Failure) 'Suite native31 preparation entry failed.'
     } catch {
         $primary = $_
