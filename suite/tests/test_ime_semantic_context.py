@@ -242,6 +242,7 @@ class SemanticGetterTests(unittest.TestCase):
                 reader=model_reader._UnoReader.__new__(model_reader._UnoReader)
                 reader.contract=model_reader._model_contract(self.api.SERVICES[module],self.api.GETTERS[module])
                 reader.config=dict(child_hwnd=456,readerDeadline=time.monotonic()+10.)
+                reader.clock=time.monotonic
                 reader.edit_context=reader.pending_input=None
                 snapshots=[]
                 reader.snapshot=lambda:snapshots.append(len(snapshots)) or dict(measured=len(snapshots))

@@ -150,7 +150,7 @@ class PendingFailureDiagnosticsTests(unittest.TestCase):
         anchor = NS(snapshot=lambda: {}, close=lambda: [], profile=NS(snapshot=lambda: {}))
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder)
-            (output / 'configuration.json').write_text(json.dumps(dict(suite=folder)))
+            (output / 'configuration.json').write_text(json.dumps(dict(suite=folder,readerClockKind=1)))
             for sequence, action in enumerate(('start', 'release')):
                 (output / f'request-{sequence:03d}.json').write_text(json.dumps(dict(sequence=sequence, action=action)))
             with patch.object(helper, '_native_anchor', return_value=anchor), \

@@ -11,6 +11,84 @@ from unittest.mock import patch
 SOURCE = Path(__file__).resolve().parents[1] / 'e2e/writer_model_reader.py'
 
 
+class ReaderClockDomainContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec=importlib.util.spec_from_file_location('reader_clock_domain_contract',SOURCE)
+        cls.api=importlib.util.module_from_spec(spec);spec.loader.exec_module(cls.api)
+
+    def test_controller_clock_tag_requires_actual_cpython312_tick_implementation(self):
+        from types import SimpleNamespace as NS
+        api=self.api
+        select=getattr(api,'_controller_reader_clock_kind',None)
+        self.assertTrue(callable(select),'Controller must bind its absolute deadline clock')
+        good=dict(clock_info=lambda name:NS(implementation='GetTickCount64()'),
+            version=(3,12,14),implementation='cpython')
+        self.assertEqual(select(api.time.monotonic,**good),1)
+        for change in (dict(version=(3,13,15)),dict(implementation='other'),
+                       dict(clock_info=lambda name:NS(implementation='QueryPerformanceCounter()'))):
+            with self.subTest(change=change),self.assertRaises(AssertionError):
+                select(api.time.monotonic,**dict(good,**change))
+        with self.assertRaises(AssertionError):select(lambda:100.,**good)
+
+    def test_helper_clock_kind_is_closed_and_tick_conversion_matches_cpython(self):
+        from types import SimpleNamespace as NS
+        api=self.api;select=getattr(api,'_helper_reader_budget_clock',None)
+        self.assertTrue(callable(select),'Helper must use the original clock domain')
+        calls=[];bindings=[]
+        class Tick:
+            def __call__(self):calls.append('tick');return 1_234_567
+        tick=Tick()
+        class Kernel:
+            @property
+            def GetTickCount64(self):bindings.append('bind');return tick
+        kernel=Kernel()
+        for kind in (None,True,False,0,2,'1',1.):
+            with self.subTest(kind=kind),self.assertRaises(AssertionError):select(kind,kernel=kernel)
+        self.assertEqual(calls,[]);self.assertEqual(bindings,[])
+        clock=select(1,kernel=kernel)
+        self.assertEqual(calls,[]);self.assertEqual(bindings,[])
+        self.assertEqual(clock(),float(1_234_567_000_000)/1_000_000_000)
+        self.assertEqual(tick.argtypes,[])
+        self.assertIs(tick.restype,api.ctypes.c_ulonglong)
+        self.assertEqual(clock(),float(1_234_567_000_000)/1_000_000_000)
+        self.assertEqual(calls,['tick','tick']);self.assertEqual(bindings,['bind'])
+
+    def test_failed_first_native_clock_binding_is_retained_without_retry(self):
+        bindings=[]
+        class Kernel:
+            @property
+            def GetTickCount64(self):
+                bindings.append('bind');raise OSError('original clock binding failure')
+        clock=self.api._helper_reader_budget_clock(1,kernel=Kernel())
+        self.assertEqual(bindings,[])
+        with self.assertRaisesRegex(OSError,'original clock binding failure'):clock()
+        with self.assertRaisesRegex(AssertionError,'binding failed'):clock()
+        self.assertEqual(bindings,['bind'])
+
+    def test_missing_or_invalid_helper_clock_tag_fails_before_any_native_query(self):
+        api=self.api
+        for kind in ('missing',None,True,0,2,'1'):
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as folder:
+                output=Path(folder);config=dict(readerDeadline=101.)
+                if kind!='missing':config['readerClockKind']=kind
+                api._atomic_json(output/'configuration.json',config)
+                api._atomic_json(output/'request-000.json',dict(sequence=0,action='release'))
+                with patch.object(api,'_native_anchor',side_effect=AssertionError('native access')) as native:
+                    with self.assertRaises((AssertionError,KeyError)):api._helper(output)
+                native.assert_not_called()
+
+    def test_unsupported_controller_clock_fails_before_output_or_native_state(self):
+        api=self.api
+        with tempfile.TemporaryDirectory() as folder:
+            output=Path(folder)/'uncreated'
+            reader=api.OwnedWriterReader(Path('C:/Suite'),output,shell_pid=77,expected_shell_creation=111,
+                suite_hwnd=11,parent_hwnd=12,child_hwnd=22,office_pid=88,expected_url='',clock=lambda:100.)
+            with patch.object(api,'_native_anchor',side_effect=AssertionError('native access')) as native:
+                with self.assertRaisesRegex(AssertionError,'controller monotonic'):reader.start(101.)
+            native.assert_not_called();self.assertFalse(output.exists())
+
+
 def profile_directory_fixture(profile_url='file:///C:/private-profile',handle=601,canonical_path=None):
     """Synthetic native DIRECTORY proof, not an inferred short-name expansion."""
     from pathlib import PureWindowsPath
@@ -666,6 +744,8 @@ class RuntimeBoundaryContracts(unittest.TestCase):
         def atomic(path,value):
             nonlocal active
             original(path,value)
+            if path.name=='configuration.json':
+                self.assertEqual((value['readerClockKind'],value['readerDeadline']),(1,12.))
             if path.name.startswith('request-'):
                 action=value['action'];reply=dict(sequence=value['sequence'],action=action,ok=True,readerPid=99)
                 if action=='release':
@@ -678,7 +758,8 @@ class RuntimeBoundaryContracts(unittest.TestCase):
         original=api._atomic_json
         native=SimpleNamespace(ProcessDiagnosticsApi=Diagnostics,OwnedOfficeProcess=Job)
         style=SimpleNamespace(require_packaged_python=lambda suite,observed:dict(observed=observed))
-        with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',lambda c:Anchor()), \
+        with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',lambda c,**kw:Anchor()), \
+             patch.object(api,'_controller_reader_clock_kind',return_value=1), \
              patch.object(api,'_worker_native',lambda:native),patch.object(api,'_SystemConsoleHost',Console),patch.object(api,'_launch_owned',lambda n,a,c:(Job(a,c),raw['helperLaunch'])),patch.object(api,'_atomic_json',atomic),patch.dict('sys.modules',{'writer_style_smoke':style}), \
              patch.object(api.time,'perf_counter_ns',side_effect=[900_000_000,1_100_000_000,1_900_000_000,2_100_000_000]) as perf:
             r=api.OwnedWriterReader(Path('C:/Suite'),Path(directory)/'fresh',shell_pid=77,expected_shell_creation=111,suite_hwnd=11,parent_hwnd=12,
@@ -927,9 +1008,10 @@ class ConstructorAndAncillaryEvidenceContracts(unittest.TestCase):
         anchor=SimpleNamespace(base={'privatePipe':'OpenGeul_'+'a'*32},last_snapshot={'owned':'native'},
             profile=SimpleNamespace(snapshot=lambda:profile_directory_fixture(handle=602)),
             close=lambda:[dict(kind='shell',handleValue=201,result=True),dict(kind='office',handleValue=202,result=True),dict(kind='profile-directory',handleValue=602,result=True)])
-        with tempfile.TemporaryDirectory() as directory,patch.dict('sys.modules',{'uno':uno,'writer_style_smoke':style}),patch.object(api,'_native_anchor',lambda config:anchor):
+        with tempfile.TemporaryDirectory() as directory,patch.dict('sys.modules',{'uno':uno,'writer_style_smoke':style}), \
+             patch.object(api,'_native_anchor',lambda config,**kw:anchor),patch.object(api,'_helper_reader_budget_clock',lambda kind:lambda:1.):
             output=Path(directory)
-            api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,expected_url='file:///C:/owned.docx'))
+            api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,readerClockKind=1,expected_url='file:///C:/owned.docx'))
             for sequence,action in enumerate(('start','read','release')):api._atomic_json(output/f'request-{sequence:03d}.json',dict(sequence=sequence,action=action))
             self.assertEqual(api._helper(output),0)
             error=api._read_json(output/'reply-000.json')['error']
@@ -1162,7 +1244,7 @@ class NativeProfileDirectoryContracts(unittest.TestCase):
         modules={'startup_smoke':SimpleNamespace(EngineProcessWitness=Witness),'windows_smoke':SimpleNamespace(Windows=lambda:windows)}
         with patch.dict('sys.modules',modules),patch.object(api,'_worker_native',lambda:native), \
              patch.object(native_accessibility,'_command_line',lambda process:list(arguments)), \
-             patch.object(api,'_NativeProfileDirectory',lambda url,deadline:real_profile(url,deadline,api=file_api)):
+             patch.object(api,'_NativeProfileDirectory',lambda url,deadline,**kw:real_profile(url,deadline,api=file_api,**kw)):
             anchor=api._native_anchor(config);first=anchor.snapshot();second=anchor.snapshot();closures=anchor.close()
         self.assertEqual(first['profileDirectory']['witness'],second['profileDirectory']['witness'])
         self.assertEqual(first['profileUrl'],short);self.assertEqual(first['profileDirectory']['witness']['canonicalPath'],profile['witness']['canonicalPath'])
@@ -1287,9 +1369,10 @@ class ExplicitOwnedModelContracts(unittest.TestCase):
         identity={'observed':{'boundary':'synthetic-seven-role-identity'}}
         style=SimpleNamespace(observe_packaged_python=lambda:identity['observed'],require_packaged_python=lambda suite,observed:identity)
         with tempfile.TemporaryDirectory() as directory,patch.dict('sys.modules',{'uno':uno,'writer_style_smoke':style}), \
-             patch.object(api,'_native_anchor',lambda config:anchor),patch.object(api,'_qpc',lambda:(100,1000)):
+             patch.object(api,'_native_anchor',lambda config,**kw:anchor),patch.object(api,'_qpc',lambda:(100,1000)), \
+             patch.object(api,'_helper_reader_budget_clock',lambda kind:lambda:1.):
             output=Path(directory)
-            api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,expected_url='file:///C:/owned.xlsx',**self.kwargs()))
+            api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,readerClockKind=1,expected_url='file:///C:/owned.xlsx',**self.kwargs()))
             for sequence,action in enumerate(('start','read','release')):
                 api._atomic_json(output/f'request-{sequence:03d}.json',dict(sequence=sequence,action=action))
             self.assertEqual(api._helper(output,explicit_model=True),0)
@@ -1310,12 +1393,14 @@ class ExplicitOwnedModelContracts(unittest.TestCase):
         identity={'observed':{}}
         style=SimpleNamespace(observe_packaged_python=lambda:{},require_packaged_python=lambda *args:identity)
         for config in (dict(expected_service=self.SERVICE),dict(expected_service=self.SERVICE,getter_contract='writer-body-v1')):
-            with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',side_effect=AssertionError('native access before contract rejection')):
-                output=Path(directory);api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',**config))
+            with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',side_effect=AssertionError('native access before contract rejection')), \
+                 patch.object(api,'_helper_reader_budget_clock',lambda kind:lambda:1.):
+                output=Path(directory);api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',readerClockKind=1,**config))
                 with self.assertRaises((AssertionError,KeyError)):api._helper(output,explicit_model=True)
         objects['model'].supportsService=lambda name:False
-        with tempfile.TemporaryDirectory() as directory,patch.dict('sys.modules',{'uno':uno,'writer_style_smoke':style}),patch.object(api,'_native_anchor',lambda config:anchor):
-            output=Path(directory);api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,expected_url='file:///C:/owned.xlsx',**self.kwargs()))
+        with tempfile.TemporaryDirectory() as directory,patch.dict('sys.modules',{'uno':uno,'writer_style_smoke':style}), \
+             patch.object(api,'_native_anchor',lambda config,**kw:anchor),patch.object(api,'_helper_reader_budget_clock',lambda kind:lambda:1.):
+            output=Path(directory);api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,readerClockKind=1,expected_url='file:///C:/owned.xlsx',**self.kwargs()))
             for sequence,action in enumerate(('start','release')):api._atomic_json(output/f'request-{sequence:03d}.json',dict(sequence=sequence,action=action))
             self.assertEqual(api._helper(output,explicit_model=True),0)
             self.assertFalse(api._read_json(output/'reply-000.json')['ok'])
@@ -1376,10 +1461,12 @@ class ExplicitOwnedModelContracts(unittest.TestCase):
             self.assertEqual(argv[2],'--model-helper');events.append('launch-private-job')
             config=api._read_json(Path(argv[3])/'configuration.json')
             self.assertEqual((config['expected_service'],config['getter_contract']),(self.SERVICE,self.GETTERS))
+            self.assertEqual((config['readerClockKind'],config['readerDeadline']),(1,12.))
             return Job(),raw['helperLaunch']
         native=SimpleNamespace(ProcessDiagnosticsApi=Diagnostics)
         style=SimpleNamespace(require_packaged_python=lambda suite,observed:dict(observed=observed))
-        with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',lambda config:Anchor()), \
+        with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',lambda config,**kw:Anchor()), \
+             patch.object(api,'_controller_reader_clock_kind',return_value=1), \
              patch.object(api,'_worker_native',lambda:native),patch.object(api,'_SystemConsoleHost',Console), \
              patch.object(api,'_launch_owned',launch),patch.object(api,'_atomic_json',atomic),patch.dict('sys.modules',{'writer_style_smoke':style}):
             reader=api.OwnedModelReader(Path('C:/Suite'),Path(directory)/'fresh',shell_pid=77,expected_shell_creation=111,
@@ -1420,8 +1507,8 @@ class CalcPendingGetterContracts(unittest.TestCase):
         selected=type(objects['controller'])('selection');selected.getRangeAddress=lambda:area;selected.getSpreadsheet=lambda:sheet
         objects['controller'].getSelection=lambda:selected
         class Pending:
-            def __init__(self,frame,child,*,deadline):
-                self.assert_frame=frame;self.assert_child=child;self.assert_deadline=deadline
+            def __init__(self,frame,child,*,deadline,clock):
+                self.assert_frame=frame;self.assert_child=child;self.assert_deadline=deadline;self.assert_clock=clock
             def read(self):events.append('pending-text');return {'actual':'getter-receipt'}
             def release(self):events.append('pending-proxies-release')
         contract=api._model_contract(api.CALC_MODEL_SERVICE,self.GETTERS)
@@ -1431,6 +1518,7 @@ class CalcPendingGetterContracts(unittest.TestCase):
                 NS(base={'privatePipe':'OpenGeul_'+'a'*32}),contract=contract)
             events.clear();value=reader.read()
             self.assertEqual(reader.pending_input.assert_deadline,100.0)
+            self.assertIs(reader.pending_input.assert_clock,reader.clock)
             reader.release()
         self.assertEqual(value['pendingInput'],{'actual':'getter-receipt'})
         self.assertEqual(value['calcSelection']['range'],dict(sheet=0,startColumn=0,startRow=0,endColumn=0,endRow=0))

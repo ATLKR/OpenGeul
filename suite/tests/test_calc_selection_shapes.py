@@ -33,9 +33,9 @@ class SelectionShapeTests(unittest.TestCase):
         self.selected=selected;self.child=child
         self.controller=Proxy(getSelection=lambda:self.calls.append('selection') or selected)
         return selected
-    def read(self):
+    def read(self,*,deadline_clock=None):
         return api.read_calc_selection(self.controller,deadline=10.,clock=lambda:self.now,
-            proxy_type=Proxy,capture=self.capture)
+            proxy_type=Proxy,capture=self.capture,deadline_clock=deadline_clock)
     def test_documented_container_reads_sole_range_with_proof(self):
         self.fixture()
         try:value=self.read()
@@ -46,6 +46,22 @@ class SelectionShapeTests(unittest.TestCase):
         self.assertEqual((proof['preCount'],proof['postCount'],proof['index']),(1,1,0))
         self.assertEqual(proof['readerDeadline'],10.);self.assertEqual(proof['address'],value['range'])
         self.assertEqual(self.capture,{})
+    def test_original_tick_budget_is_separate_from_qpc_witness_times(self):
+        self.fixture()
+        value=api.read_calc_selection(self.controller,deadline=101.,clock=lambda:200.,
+            deadline_clock=lambda:100.,proxy_type=Proxy,capture=self.capture)
+        proof=value['shapeWitness']
+        self.assertEqual(proof['readerDeadline'],101.)
+        self.assertEqual((proof['startedAt'],proof['finishedAt']),(200.,200.))
+        self.assertEqual(proof['budget'],dict(kind=1,startedAt=100.,finishedAt=100.))
+        self.assertEqual(proof['schemaVersion'],2)
+        api._require_calc_selection(value)
+    def test_expired_tick_budget_starts_no_getter_even_with_earlier_qpc(self):
+        self.fixture()
+        with self.assertRaises(TimeoutError):
+            api.read_calc_selection(self.controller,deadline=101.,clock=lambda:99.,
+                deadline_clock=lambda:101.,proxy_type=Proxy,capture=self.capture)
+        self.assertEqual(self.calls,[])
     def test_generic_container_keeps_a_valid_non_a1_rectangle(self):
         self.fixture(address=area(5,5));value=self.read()
         self.assertIs(api._require_calc_selection(value),value)
@@ -112,7 +128,9 @@ class SelectionShapeTests(unittest.TestCase):
         mutations=[lambda p:p.update(shape='anything'),lambda p:p.update(preCount=True),
             lambda p:p.update(postCount=2),lambda p:p.update(index=1),
             lambda p:p.update(interfaceNames=['com.sun.star.container.XIndexAccess']),
-            lambda p:p.update(controllerId=True),lambda p:p.update(finishedAt=11.),
+            lambda p:p.update(controllerId=True),lambda p:p['budget'].update(finishedAt=11.),
+            lambda p:p.update(schemaVersion=1),lambda p:p.pop('budget'),
+            lambda p:p['budget'].update(kind=True),lambda p:p['budget'].update(startedAt=2.),
             lambda p:p['address'].update(endRow=1),lambda p:p['calls'].reverse(),
             lambda p:p['calls'][2].update(returnedAt=.5),
             lambda p:p['rawAddress']['sheet'].update(type='bool')]
@@ -146,7 +164,7 @@ class SelectionShapeTests(unittest.TestCase):
             with self.subTest(mutate=mutate),self.assertRaises(AssertionError):
                 api._require_calc_selection_owner(changed,observation)
     def test_owned_qpc_read_survives_coarse_controller_monotonic_clock(self):
-        self.fixture();self.now=1.005;value=self.read();proof=value['shapeWitness']
+        self.fixture();self.now=1.005;value=self.read(deadline_clock=lambda:1.);proof=value['shapeWitness']
         observation=dict(readerProcess=dict(pid=proof['helperPid']),readStartedAt=1.,readFinishedAt=1.,
             controllerQpc=dict(startedNs=1_000_000_000,finishedNs=1_010_000_000),
             helperQpc=dict(startedTicks=1002,finishedTicks=1008,frequency=1000),
@@ -155,13 +173,14 @@ class SelectionShapeTests(unittest.TestCase):
                 proxyTypeName=proof['proxyTypeName'],proxyTypeModule=proof['proxyTypeModule']))))
         api._require_calc_selection_owner(value,observation)
     def test_clock_windows_reject_stale_cross_request_or_malformed_evidence(self):
-        self.fixture();self.now=1.005;value=self.read();proof=value['shapeWitness']
+        self.fixture();self.now=1.005;value=self.read(deadline_clock=lambda:1.);proof=value['shapeWitness']
         original=dict(readerProcess=dict(pid=proof['helperPid']),readStartedAt=1.,readFinishedAt=1.,
             controllerQpc=dict(startedNs=1_000_000_000,finishedNs=1_010_000_000),
             helperQpc=dict(startedTicks=1002,finishedTicks=1008,frequency=1000),
             unoSnapshots=dict(before=dict(proxyIdentity=dict(helperPid=proof['helperPid'],
                 retainedIds=dict(controller=proof['controllerId']),proxyTypeId=proof['proxyTypeId'],
                 proxyTypeName=proof['proxyTypeName'],proxyTypeModule=proof['proxyTypeModule']))))
+        api._require_calc_selection_owner(value,original)
         changes=(
             lambda row:row.pop('controllerQpc'),lambda row:row.pop('helperQpc'),
             lambda row:row.update(readStartedAt=2.,readFinishedAt=1.),
@@ -185,8 +204,17 @@ class SelectionShapeTests(unittest.TestCase):
             changed=copy.deepcopy(value);changed['shapeWitness'].update(startedAt=start,finishedAt=finish)
             with self.subTest(start=start,finish=finish),self.assertRaises(AssertionError):
                 api._require_calc_selection_owner(changed,original)
+        for budget in (dict(kind=True,startedAt=1.,finishedAt=1.),
+                       dict(kind=2,startedAt=1.,finishedAt=1.),
+                       dict(kind=1,startedAt=.999,finishedAt=1.),
+                       dict(kind=1,startedAt=1.,finishedAt=1.001),
+                       dict(kind=1,startedAt=1.001,finishedAt=1.),
+                       dict(kind=1,startedAt=1.,finishedAt=10.)):
+            changed=copy.deepcopy(value);changed['shapeWitness']['budget']=budget
+            with self.subTest(budget=budget),self.assertRaises(AssertionError):
+                api._require_calc_selection_owner(changed,original)
     def test_fractional_qpc_tick_uses_exact_cpython_nanosecond_conversion(self):
-        self.fixture();self.now=float(10**9//3)/10**9;value=self.read();proof=value['shapeWitness']
+        self.fixture();self.now=float(10**9//3)/10**9;value=self.read(deadline_clock=lambda:0.);proof=value['shapeWitness']
         observation=dict(readerProcess=dict(pid=proof['helperPid']),readStartedAt=0.,readFinishedAt=0.,
             controllerQpc=dict(startedNs=333_333_333,finishedNs=333_333_333),
             helperQpc=dict(startedTicks=1,finishedTicks=1,frequency=3),
@@ -196,7 +224,7 @@ class SelectionShapeTests(unittest.TestCase):
         api._require_calc_selection_owner(value,observation)
         changed=copy.deepcopy(value);changed['shapeWitness']['finishedAt']=self.now+0.000000001
         with self.assertRaises(AssertionError):api._require_calc_selection_owner(changed,observation)
-        self.now=1e-9;value=self.read()
+        self.now=1e-9;value=self.read(deadline_clock=lambda:0.)
         observation['controllerQpc']=dict(startedNs=1,finishedNs=1)
         observation['helperQpc']=dict(startedTicks=2,finishedTicks=3,frequency=2_000_000_000)
         api._require_calc_selection_owner(value,observation)
@@ -215,7 +243,7 @@ class SelectionShapeTests(unittest.TestCase):
     def test_deadline_reached_while_recording_intent_starts_no_getter(self):
         self.fixture();ticks=iter([1.,1.,10.])
         with self.assertRaises(TimeoutError):
-            api.read_calc_selection(self.controller,deadline=10.,clock=lambda:next(ticks,10.),
+            api.read_calc_selection(self.controller,deadline=10.,clock=lambda:1.,deadline_clock=lambda:next(ticks,10.),
                 proxy_type=Proxy,capture=self.capture)
         self.assertEqual(self.calls,[])
         self.assertIsNone(self.capture['shapeWitness']['calls'][0]['returnedAt'])

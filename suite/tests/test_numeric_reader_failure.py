@@ -33,7 +33,7 @@ class NumericReaderFailureTests(unittest.TestCase):
     def run_helper(self, additions):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
-            self.reader._atomic_json(output/'configuration.json', {})
+            self.reader._atomic_json(output/'configuration.json', dict(readerClockKind=1))
             self.reader._atomic_json(output/'request-000.json', dict(sequence=7, action='start'))
             self.reader._atomic_json(output/'request-001.json', dict(sequence=1, action='release'))
             child_environment = dict(os.environ)
@@ -93,6 +93,7 @@ class NumericReaderFailureTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     output=Path(directory)
                     self.reader._atomic_json(output/'configuration.json',dict(suite='/synthetic-suite',
+                        readerClockKind=1,
                         expected_service='com.sun.star.presentation.PresentationDocument',
                         getter_contract='impress-focused-view-edit-context-v2'))
                     self.reader._atomic_json(output/'request-000.json',dict(sequence=0,action='start'))
@@ -137,7 +138,8 @@ class NumericReaderFailureTests(unittest.TestCase):
             reader = self.reader.OwnedWriterReader(Path('/synthetic-suite'), output,
                 shell_pid=77, expected_shell_creation=111, suite_hwnd=11, parent_hwnd=12,
                 child_hwnd=22, office_pid=88, expected_url='', clock=lambda:1.)
-            with patch.object(self.reader, '_native_anchor') as anchor:
+            with patch.object(self.reader, '_native_anchor') as anchor, \
+                    patch.object(self.reader,'_controller_reader_clock_kind',return_value=1):
                 with self.assertRaises(FileExistsError) as caught: reader.start(12.)
                 anchor.assert_not_called()
             self.assertIs(type(caught.exception), FileExistsError)
@@ -158,7 +160,8 @@ class NumericReaderFailureTests(unittest.TestCase):
                 reader = self.reader.OwnedWriterReader(Path('/synthetic-suite'), Path(directory),
                     shell_pid=77, expected_shell_creation=111, suite_hwnd=11, parent_hwnd=12,
                     child_hwnd=22, office_pid=88, expected_url='', clock=lambda:1.)
-                with self.assertRaises(FileExistsError) as caught: reader.start(12.)
+                with patch.object(self.reader,'_controller_reader_clock_kind',return_value=1):
+                    with self.assertRaises(FileExistsError) as caught: reader.start(12.)
                 self.assertEqual(str(caught.exception), reader.first_error['message'])
                 self.assertNotIn('numericFailure', reader.first_error)
                 self.assertEqual(12., reader.deadline)

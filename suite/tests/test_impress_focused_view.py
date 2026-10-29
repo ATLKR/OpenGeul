@@ -243,7 +243,7 @@ class FocusedReaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory=Path(temporary)
             (directory/'configuration.json').write_text(json.dumps(dict(expected_service=SERVICE,
-                getter_contract=V2,suite=str(directory),readerDeadline=10.)))
+                getter_contract=V2,suite=str(directory),readerDeadline=10.,readerClockKind=1)))
             (directory/'request-000.json').write_text('{"sequence":0,"action":"start"}')
             class Reader:
                 def __init__(self,*args,**kwargs):pass
@@ -259,6 +259,7 @@ class FocusedReaderTests(unittest.TestCase):
                     events.append('publish');(directory/'request-001.json').write_text('{"sequence":1,"action":"release"}')
                 return result
             with patch.object(model_reader,'_UnoReader',Reader),patch.object(model_reader,'_native_anchor',return_value=anchor),\
+                 patch.object(model_reader,'_helper_reader_budget_clock',return_value=lambda:world.now),\
                  patch.object(model_reader,'_qpc',return_value=(1,1)),patch.object(model_reader,'_atomic_json',side_effect=publish),\
                  patch('writer_style_smoke.observe_packaged_python',return_value={}),\
                  patch('writer_style_smoke.require_packaged_python',return_value={}):
@@ -327,10 +328,11 @@ class FocusedContractTests(unittest.TestCase):
             def read(self):return dict(module='impress')
         reader=model_reader._UnoReader.__new__(model_reader._UnoReader)
         reader.contract=contract;reader.config=dict(child_hwnd=456,readerDeadline=10.)
+        reader.clock=lambda:1.
         reader.edit_context=None;reader.frame=reader.controller=object()
         reader.model=NS(isModified=lambda:False);reader.snapshot=lambda:dict(measured=True)
         with patch.object(semantic,'EditingContextReader',Context):reader.read()
-        self.assertEqual(captured,[dict(deadline=10.,getter_contract=V2)])
+        self.assertEqual(captured,[dict(deadline=10.,clock=reader.clock,getter_contract=V2)])
 
     def test_explicit_constructor_does_not_change_the_legacy_default_scope(self):
         world=World()

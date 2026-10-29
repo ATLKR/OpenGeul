@@ -28,6 +28,7 @@ MAX_BODY_BYTES = 1024 * 1024
 MAX_MEMBER_STATE_SAMPLES = 4096
 MAX_JOB_CENSUS_ANOMALIES = 32
 MAX_JOB_CENSUS_GROUPS = 8192
+READER_CLOCK_KIND = 1  # CPython 3.12 Windows monotonic: GetTickCount64.
 PROFILE_DIRECTORY_ACCESS = 0x80  # FILE_READ_ATTRIBUTES
 PROFILE_DIRECTORY_SHARE = 1 | 2 | 4  # FILE_SHARE_READ | WRITE | DELETE
 PROFILE_DIRECTORY_FLAGS = 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
@@ -131,25 +132,66 @@ def _calc_selection_attempt(capture):
     return json.loads(raw)
 
 
-def read_calc_selection(controller,*,deadline,capture=None,proxy_type=None,clock=None):
+def _controller_reader_clock_kind(clock,*,clock_info=time.get_clock_info,
+                                  version=sys.version_info,implementation=sys.implementation.name):
+    """Only the actual pinned controller clock may label a helper deadline."""
+    assert clock is time.monotonic, 'Reader deadline must use the controller monotonic clock'
+    assert implementation=='cpython' and version[:2]==(3,12), 'Reader controller must use CPython 3.12'
+    assert clock_info('monotonic').implementation=='GetTickCount64()', 'Reader controller clock implementation changed'
+    return READER_CLOCK_KIND
+
+
+def _helper_reader_budget_clock(kind,*,kernel=None):
+    assert type(kind) is int and kind==READER_CLOCK_KIND, 'Unsupported reader deadline clock kind'
+    library=kernel;ticks=None;binding_attempted=False
+    def clock():
+        nonlocal library,ticks,binding_attempted
+        if not binding_attempted:
+            # A malformed RPC can fail before any clock query. Keep its
+            # original error reply independent of native clock availability.
+            binding_attempted=True
+            library=library or ctypes.WinDLL('kernel32',use_last_error=True)
+            query=library.GetTickCount64;query.argtypes=[];query.restype=ctypes.c_ulonglong
+            ticks=query
+        assert ticks is not None, 'Reader budget clock binding failed; retry is forbidden'
+        milliseconds=int(ticks())
+        assert 0<=milliseconds<=0x7fffffffffffffff//1_000_000, 'Reader tick clock exceeded CPython time range'
+        ns=milliseconds*1_000_000
+        # CPython 3.12 multiplies milliseconds to integer ns before converting
+        # to seconds. Dividing ticks directly by 1000 can round differently.
+        return float(ns//1_000_000_000) if ns%1_000_000_000==0 else float(ns)/1_000_000_000
+    return clock
+
+
+def _require_calc_selection_budget(proof):
+    budget=proof.get('budget')
+    assert isinstance(budget,dict) and set(budget)=={'kind','startedAt','finishedAt'}
+    assert type(budget['kind']) is int and budget['kind']==READER_CLOCK_KIND
+    start=_finite(budget['startedAt']);finish=_finite(budget['finishedAt'])
+    assert start<=finish<_finite(proof['readerDeadline']), 'Calc selection exceeded its original tick-clock budget'
+    return start,finish
+
+
+def read_calc_selection(controller,*,deadline,capture=None,proxy_type=None,clock=None,deadline_clock=None):
     """Read one rectangle from the retained controller under its original budget.
 
     XSelectionSupplier permits an object or a collection. Only a missing scalar
     method lookup plus a positively reported sheet-range interface selects the
     indexed path; errors from an existing scalar getter are never caught here.
     """
-    clock=clock or time.monotonic;deadline=_finite(deadline)
+    clock=clock or time.monotonic;deadline_clock=deadline_clock or clock;deadline=_finite(deadline)
     proxy_type=proxy_type or type(controller)
     assert type(controller) is proxy_type,'Calc selection controller proxy type changed'
-    witness=dict(schemaVersion=1,kind='owned-calc-selection-shape',shape='addressable-range',
+    witness=dict(schemaVersion=2,kind='owned-calc-selection-shape',shape='addressable-range',
         complete=False,helperPid=os.getpid(),controllerId=id(controller),proxyTypeId=id(proxy_type),
         proxyTypeName=proxy_type.__name__,proxyTypeModule=proxy_type.__module__,selectedId=None,childId=None,
-        readerDeadline=deadline,startedAt=clock(),finishedAt=None,singularLookupMissing=False,
+        readerDeadline=deadline,startedAt=clock(),finishedAt=None,
+        budget=dict(kind=READER_CLOCK_KIND,startedAt=deadline_clock(),finishedAt=None),singularLookupMissing=False,
         interfaceNames=None,preCount=None,postCount=None,index=None,rawCounts=[],rawAddress={},address=None,calls=[])
     if capture is not None:
         capture.clear();capture.update(stage='getSelection',controller=controller,selected=None,shapeWitness=witness)
     def check():
-        if _finite(clock())>=deadline:raise TimeoutError('Original Calc selection reader deadline expired')
+        if _finite(deadline_clock())>=deadline:raise TimeoutError('Original Calc selection reader deadline expired')
     def call(name,getter,project):
         check();row=dict(getter=name,startedAt=clock(),returnedAt=None,result=None);witness['calls'].append(row)
         if capture is not None:capture['stage']=name
@@ -206,7 +248,7 @@ def read_calc_selection(controller,*,deadline,capture=None,proxy_type=None,clock
     # ScCellRangeObj::getSpreadsheet creates a fresh wrapper; proxy equality
     # with separately fetched Sheet0 is not sheet identity. getSelection is
     # bound to this already verified retained controller's own DocShell.
-    witness.update(complete=True,finishedAt=clock());check()
+    witness.update(complete=True,finishedAt=clock());witness['budget']['finishedAt']=deadline_clock();check()
     value=dict(readOnly=True,source='retained-controller.getSelection',range=witness['address'],shapeWitness=witness)
     _require_calc_selection(value)
     if capture is not None:capture.clear()
@@ -226,14 +268,14 @@ def _same_selection_fact(actual,expected):
 def _require_calc_selection_witness(value):
     proof=value['shapeWitness'];area=value['range']
     assert isinstance(proof,dict) and set(proof)=={'schemaVersion','kind','shape','complete','helperPid','controllerId',
-        'proxyTypeId','proxyTypeName','proxyTypeModule','selectedId','childId','readerDeadline','startedAt','finishedAt',
+        'proxyTypeId','proxyTypeName','proxyTypeModule','selectedId','childId','readerDeadline','startedAt','finishedAt','budget',
         'singularLookupMissing','interfaceNames','preCount','postCount','index','rawCounts','rawAddress','address','calls'}
-    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==1
+    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==2
     assert proof['kind']=='owned-calc-selection-shape' and proof['complete'] is True
     for key in ('helperPid','controllerId','proxyTypeId','selectedId'):_positive(proof[key])
     assert all(type(proof[k]) is str and 0<len(proof[k])<=256 for k in ('proxyTypeName','proxyTypeModule'))
-    start=_finite(proof['startedAt']);finish=_finite(proof['finishedAt']);deadline=_finite(proof['readerDeadline'])
-    assert start<=finish<deadline
+    start=_finite(proof['startedAt']);finish=_finite(proof['finishedAt']);assert start<=finish
+    _require_calc_selection_budget(proof)
     assert _same_selection_fact(proof['address'],area) and set(proof['rawAddress'])==set(area)
     raw={key:dict(type='int',value=n) for key,n in area.items()}
     assert _same_selection_fact(proof['rawAddress'],raw)
@@ -273,7 +315,9 @@ def _require_calc_selection_owner(selection,observation):
     assert proof['controllerId']==proxy['retainedIds']['controller']
     for name,key in (('proxyTypeId','proxyTypeId'),('proxyTypeName','proxyTypeName'),('proxyTypeModule','proxyTypeModule')):
         assert proof[name]==proxy[key],'Calc selection witness belongs to another PyUNO type'
-    assert _finite(observation['readStartedAt'])<=_finite(observation['readFinishedAt'])
+    budget_start,budget_finish=_require_calc_selection_budget(proof)
+    assert (_finite(observation['readStartedAt'])<=budget_start<=budget_finish
+        <=_finite(observation['readFinishedAt'])), 'Calc selection budget witness is outside its controller read'
     # Controller Python 3.12 monotonic uses GetTickCount64, while the pinned
     # helper Python 3.13 monotonic uses QPC. Join the same RPC using QPC only.
     controller=observation.get('controllerQpc');helper=observation.get('helperQpc')
@@ -328,18 +372,19 @@ def require_calc_pending_program_phase(observation,*,expected_action=None,expect
     return proof
 
 
-def read_calc_initial_selection(controller,*,deadline,capture=None,proxy_type=None,clock=None):
+def read_calc_initial_selection(controller,*,deadline,capture=None,proxy_type=None,clock=None,deadline_clock=None):
     """Measure initial ranges; this never qualifies a selection for later input."""
-    clock=clock or time.monotonic;deadline=_finite(deadline);proxy_type=proxy_type or type(controller)
+    clock=clock or time.monotonic;deadline_clock=deadline_clock or clock;deadline=_finite(deadline);proxy_type=proxy_type or type(controller)
     assert type(controller) is proxy_type, 'Initial Calc controller proxy type changed'
-    witness=dict(schemaVersion=1,kind='owned-calc-initial-selection-shape',shape='addressable-range',complete=False,
+    witness=dict(schemaVersion=2,kind='owned-calc-initial-selection-shape',shape='addressable-range',complete=False,
         helperPid=os.getpid(),controllerId=id(controller),proxyTypeId=id(proxy_type),proxyTypeName=proxy_type.__name__,
         proxyTypeModule=proxy_type.__module__,selectedId=None,readerDeadline=deadline,startedAt=clock(),finishedAt=None,
+        budget=dict(kind=READER_CLOCK_KIND,startedAt=deadline_clock(),finishedAt=None),
         singularLookupMissing=False,interfaceNames=None,preCount=None,postCount=None,rawCounts=[],entries=[],calls=[])
     if capture is not None:
         capture.clear();capture.update(stage='getSelection',controller=controller,selected=None,shapeWitness=witness)
     def check():
-        if _finite(clock())>=deadline:raise TimeoutError('Original Calc initial reader deadline expired')
+        if _finite(deadline_clock())>=deadline:raise TimeoutError('Original Calc initial reader deadline expired')
     def call(name,getter,project):
         check();row=dict(getter=name,startedAt=clock(),returnedAt=None,result=None);witness['calls'].append(row)
         if capture is not None:capture['stage']=name
@@ -395,7 +440,7 @@ def read_calc_initial_selection(controller,*,deadline,capture=None,proxy_type=No
     else:
         entry=dict(index=None,childId=None,rawAddress={},address=None);witness['entries'].append(entry)
         call('XCellRangeAddressable.getRangeAddress',getter,lambda v:address(v,entry))
-    witness.update(complete=True,finishedAt=clock());check()
+    witness.update(complete=True,finishedAt=clock());witness['budget']['finishedAt']=deadline_clock();check()
     value=dict(readOnly=True,source='retained-controller.getSelection',ranges=[e['address'] for e in witness['entries']],shapeWitness=witness)
     _require_calc_initial_selection(value)
     if capture is not None:capture.clear()
@@ -407,13 +452,14 @@ def _require_calc_initial_selection(value):
     assert value['readOnly'] is True and value['source']=='retained-controller.getSelection'
     proof=value['shapeWitness'];ranges=value['ranges']
     assert isinstance(proof,dict) and set(proof)=={'schemaVersion','kind','shape','complete','helperPid','controllerId',
-        'proxyTypeId','proxyTypeName','proxyTypeModule','selectedId','readerDeadline','startedAt','finishedAt',
+        'proxyTypeId','proxyTypeName','proxyTypeModule','selectedId','readerDeadline','startedAt','finishedAt','budget',
         'singularLookupMissing','interfaceNames','preCount','postCount','rawCounts','entries','calls'}
-    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==1
+    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==2
     assert proof['kind']=='owned-calc-initial-selection-shape' and proof['complete'] is True
     for key in ('helperPid','controllerId','proxyTypeId','selectedId'):_positive(proof[key])
     assert all(type(proof[k]) is str and 0<len(proof[k])<=256 for k in ('proxyTypeName','proxyTypeModule'))
-    start=_finite(proof['startedAt']);finish=_finite(proof['finishedAt']);assert start<=finish<_finite(proof['readerDeadline'])
+    start=_finite(proof['startedAt']);finish=_finite(proof['finishedAt']);assert start<=finish
+    _require_calc_selection_budget(proof)
     entries=proof['entries'];assert isinstance(entries,list) and 1<=len(entries)<=64
     assert isinstance(ranges,list) and _same_selection_fact(ranges,[e['address'] for e in entries])
     names=proof['interfaceNames'];expected=['XSelectionSupplier.getSelection'];results=[dict(proxyId=proof['selectedId'],typeId=proof['proxyTypeId'])]
@@ -985,9 +1031,10 @@ def _calc_selection_diagnostic_header(sequence,action,reader,capture,deadline,er
 class _SelectionDiagnosticStop(Exception):pass
 
 
-def _collect_calc_selection_diagnostic(directory,reader,anchor,capture,header,*,clock=time.monotonic):
+def _collect_calc_selection_diagnostic(directory,reader,anchor,capture,header,*,clock=time.monotonic,deadline_clock=None):
     """Post-failure observations only; never alters the primary reply or accepts a range."""
     state=json.loads(json.dumps(header,allow_nan=False));directory=Path(directory)
+    deadline_clock=deadline_clock or clock
     selected=capture.get('selected');records=0
     def emit():
         nonlocal records
@@ -997,7 +1044,7 @@ def _collect_calc_selection_diagnostic(directory,reader,anchor,capture,header,*,
         path=directory/f'selection-diagnostic-{header["sequence"]:03d}-{records:03d}.json';records+=1
         _atomic_json(path,state)
     def check():
-        if clock()>=_finite(state['readerDeadline']):raise _SelectionDiagnosticStop('deadline')
+        if deadline_clock()>=_finite(state['readerDeadline']):raise _SelectionDiagnosticStop('deadline')
         if (directory/f'request-{header["sequence"]+1:03d}.json').exists():
             state['pendingRequest']=True;raise _SelectionDiagnosticStop('pending-request')
     def guard(side):
@@ -1334,10 +1381,10 @@ def _launch_owned(native,argv,cwd):
 
 class _NativeAnchor:
     """Read-only handles retained once; PID recycling cannot replace them."""
-    def __init__(self,config):
+    def __init__(self,config,*,clock=time.monotonic):
         from startup_smoke import EngineProcessWitness
         from windows_smoke import Windows
-        self.config=config;self.processes={};self.profile=None;self.api=Windows();self.native=_worker_native();self.diagnostics=self.native.ProcessDiagnosticsApi()
+        self.config=config;self.clock=clock;self.processes={};self.profile=None;self.api=Windows();self.native=_worker_native();self.diagnostics=self.native.ProcessDiagnosticsApi()
         self.get_parent=self.native.bind(self.api.user,'GetParent',[W.HWND],W.HWND)
         try:
             expected_shell_creation=_positive(config['expected_shell_creation'])
@@ -1383,7 +1430,7 @@ class _NativeAnchor:
             exportedChildHwnd=int(self.api.user.GetPropW(self.config['suite_hwnd'],'OpenGeul.Office.ChildHwnd') or 0))
         raw.update(windows=windows,officeCommandLine=_command_line(self.processes['office']))
         raw['privatePipe']=_pipe(raw['officeCommandLine']);raw['profileUrl']=_profile(raw['officeCommandLine'])
-        if self.profile is None:self.profile=_NativeProfileDirectory(raw['profileUrl'],self.config['readerDeadline'])
+        if self.profile is None:self.profile=_NativeProfileDirectory(raw['profileUrl'],self.config['readerDeadline'],clock=self.clock)
         assert self.profile.profile_url==raw['profileUrl'], 'Original profile URI changed before native recheck'
         raw['profileDirectory']=self.profile.snapshot()
         if hasattr(self,'base'):_require_native(raw,self.base,str(self.config['suite']))
@@ -1402,7 +1449,7 @@ class _NativeAnchor:
         return result
 
 
-def _native_anchor(config):return _NativeAnchor(config)
+def _native_anchor(config,*,clock=time.monotonic):return _NativeAnchor(config,clock=clock)
 
 
 class _UnoReader:
@@ -1412,8 +1459,8 @@ class _UnoReader:
     wrapped UNO Any. Python id() identifies only our held local wrapper, scoped
     by the actual reader generation. Native UNO equality remains authoritative.
     """
-    def __init__(self,config,anchor,*,contract=_WRITER_CONTRACT):
-        self.config=config;self.contract=contract;self.diagnostic={'proxyTypes':{},'frameEnumeration':[]}
+    def __init__(self,config,anchor,*,contract=_WRITER_CONTRACT,clock=None):
+        self.config=config;self.clock=clock or time.monotonic;self.contract=contract;self.diagnostic={'proxyTypes':{},'frameEnumeration':[]}
         self.model=self.controller=self.frame=self.desktop=self.context=self.local_context=None
         self.retained={};self.pending_input=None;self.edit_context=None;self.calc_selection_capture=None
         try:
@@ -1486,7 +1533,7 @@ class _UnoReader:
             module=_EDIT_MODULES[self.contract]
             if self.edit_context is None:
                 self.edit_context=EditingContextReader(module,self.frame,self.controller,self.model,
-                    self.config['child_hwnd'],deadline=self.config['readerDeadline'],getter_contract=self.contract.getters)
+                    self.config['child_hwnd'],deadline=self.config['readerDeadline'],clock=self.clock,getter_contract=self.contract.getters)
             editing=self.edit_context.read()
             value=dict(editContext=editing,isModified=self.model.isModified())
             assert type(value['isModified']) is bool
@@ -1497,7 +1544,7 @@ class _UnoReader:
                     b1Value=sheet.getCellRangeByName('B1').getValue(),c1Value=sheet.getCellRangeByName('C1').getValue(),
                     d1Formula=sheet.getCellRangeByName('D1').getFormula(),d1Value=sheet.getCellRangeByName('D1').getValue(),
                     calcSelection=read_calc_selection(self.controller,deadline=self.config['readerDeadline'],
-                        proxy_type=self.proxy_type,capture=self.calc_selection_capture))
+                        proxy_type=self.proxy_type,capture=self.calc_selection_capture,deadline_clock=self.clock))
                 _require_calc_values(value)
             after=self.snapshot()
         elif self.contract in (_CALC_CONTRACT,_CALC_PENDING_CONTRACT,_CALC_PENDING_INITIAL_CONTRACT):
@@ -1507,14 +1554,14 @@ class _UnoReader:
                 from calc_pending_input import AccessiblePendingReader
                 if self.pending_input is None:
                     self.pending_input=AccessiblePendingReader(self.frame,self.config['child_hwnd'],
-                        deadline=self.config['readerDeadline'])
+                        deadline=self.config['readerDeadline'],clock=self.clock)
                 if phase is not None and phase['phase']=='initial':
                     selection=read_calc_initial_selection(self.controller,deadline=self.config['readerDeadline'],
-                        proxy_type=self.proxy_type,capture=self.calc_selection_capture)
+                        proxy_type=self.proxy_type,capture=self.calc_selection_capture,deadline_clock=self.clock)
                     pending=dict(calcInitialSelection=selection)
                 else:
                     pending=dict(calcSelection=read_calc_selection(self.controller,deadline=self.config['readerDeadline'],
-                        proxy_type=self.proxy_type,capture=self.calc_selection_capture))
+                        proxy_type=self.proxy_type,capture=self.calc_selection_capture,deadline_clock=self.clock))
                 pending['pendingInput']=self.pending_input.read()
                 if phase is not None:pending['calcSelectionPhase']=phase
             value=dict(sheetIndex=0,a1Text=sheet.getCellRangeByName('A1').getString(),
@@ -1635,9 +1682,10 @@ class OwnedWriterReader:
         self._remaining(deadline)
         assert not self.closed and not self.failed and self.process is None,'Reader cannot restart'
         try:
+            self.config['readerClockKind']=_controller_reader_clock_kind(self.clock)
             self.output.mkdir(parents=True,exist_ok=False)
             self.config['readerDeadline']=deadline
-            self.anchor=_native_anchor(self.config)
+            self.anchor=_native_anchor(self.config,clock=self.clock)
             self._remaining(deadline)
             helper_config=dict(self.config,expected_native_binding=dict(self.anchor.base),expected_office_command_line=self.anchor.snapshot()['officeCommandLine'])
             _atomic_json(self.output/'configuration.json',helper_config)
@@ -1800,6 +1848,7 @@ def _qpc():
 
 def _helper(directory,*,explicit_model=False):
     directory=Path(directory);config=_read_json(directory/'configuration.json')
+    budget_clock=_helper_reader_budget_clock(config.get('readerClockKind'))
     contract=_model_contract(config['expected_service'],config['getter_contract']) if explicit_model else _WRITER_CONTRACT
     anchor=reader=None;sequence=0;failed=False;identity=None
     try:
@@ -1825,8 +1874,8 @@ def _helper(directory,*,explicit_model=False):
                         assert reader is None and sequence==0
                         from writer_style_smoke import observe_packaged_python,require_packaged_python
                         identity=require_packaged_python(Path(config['suite']),observe_packaged_python())
-                        anchor=_native_anchor(config)
-                        reader=_UnoReader(config,anchor,contract=contract) if explicit_model else _UnoReader(config,anchor)
+                        anchor=_native_anchor(config,clock=budget_clock)
+                        reader=_UnoReader(config,anchor,contract=contract,clock=budget_clock) if explicit_model else _UnoReader(config,anchor,clock=budget_clock)
                     else:assert reader is not None
                     from writer_style_smoke import observe_packaged_python,require_packaged_python
                     identity=require_packaged_python(Path(config['suite']),observe_packaged_python())
@@ -1887,7 +1936,8 @@ def _helper(directory,*,explicit_model=False):
             if selection_capture is not None:
                 try:
                     if diagnostic is not None:
-                        _collect_calc_selection_diagnostic(directory,reader,anchor,selection_capture,diagnostic,clock=time.monotonic)
+                        _collect_calc_selection_diagnostic(directory,reader,anchor,selection_capture,diagnostic,
+                            clock=time.monotonic,deadline_clock=budget_clock)
                 except BaseException as later:
                     # The original failed reply is already immutable and visible.
                     try:_atomic_json(directory/f'selection-diagnostic-{sequence-1:03d}-unexpected.json',

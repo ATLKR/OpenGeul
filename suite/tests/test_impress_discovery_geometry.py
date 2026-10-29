@@ -200,7 +200,7 @@ class ImpressDiscoveryGeometryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory=Path(temporary)
             config=dict(expected_service=self.api.SERVICES['impress'],
-                getter_contract=self.api.GETTERS['impress'],suite=str(directory),readerDeadline=10.)
+                getter_contract=self.api.GETTERS['impress'],suite=str(directory),readerDeadline=10.,readerClockKind=1)
             (directory/'configuration.json').write_text(json.dumps(config))
             (directory/'request-000.json').write_text('{"sequence":0,"action":"start"}')
             class Reader:

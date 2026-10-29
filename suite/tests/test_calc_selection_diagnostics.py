@@ -76,6 +76,30 @@ class SelectionDiagnosticTests(unittest.TestCase):
         self.now=10.;state,selected,_,capture,_=self.collect()
         self.assertEqual(selected.calls,[]);self.assertEqual(state['reason'],'deadline')
         self.assertEqual(capture,{})
+    def test_diagnostic_uses_original_tick_budget_and_keeps_qpc_timestamps(self):
+        selected=Proxy();controller=object();capture=dict(selected=selected,controller=controller)
+        reader=NS(proxy_type=Proxy,controller=controller,snapshot=lambda:self.events.append('uno'))
+        anchor=NS(snapshot=lambda:self.events.append('native'))
+        header=api._calc_selection_diagnostic_header(0,'start',reader,capture,101.,
+            {'type':'AssertionError'},clock=lambda:200.)
+        state=api._collect_calc_selection_diagnostic(self.directory,reader,anchor,capture,header,
+            clock=lambda:200.,deadline_clock=lambda:100.)
+        self.assertEqual(state['status'],'complete')
+        self.assertEqual(state['readerDeadline'],101.)
+        self.assertEqual(state['startedAt'],200.)
+        self.assertTrue(selected.calls)
+        self.assertTrue(all(row['intentAt']==row['returnedAt']==200. for row in state['calls']))
+    def test_expired_tick_budget_starts_no_diagnostic_native_or_uno_getter(self):
+        selected=Proxy();controller=object();capture=dict(selected=selected,controller=controller)
+        reader=NS(proxy_type=Proxy,controller=controller,snapshot=lambda:self.events.append('uno'))
+        anchor=NS(snapshot=lambda:self.events.append('native'))
+        header=api._calc_selection_diagnostic_header(0,'start',reader,capture,101.,
+            {'type':'AssertionError'},clock=lambda:99.)
+        state=api._collect_calc_selection_diagnostic(self.directory,reader,anchor,capture,header,
+            clock=lambda:99.,deadline_clock=lambda:101.)
+        self.assertEqual(state['reason'],'deadline')
+        self.assertEqual(selected.calls,[]);self.assertEqual(self.events,[])
+        self.assertEqual(capture,{})
     def test_pending_release_after_a_getter_yields_before_the_next(self):
         selected=Proxy()
         def types():
@@ -244,7 +268,8 @@ class CaptureAndPublicationTests(unittest.TestCase):
         self.assertEqual(selected.calls,[])
     def helper(self,*,publication_failure=False,header_failure=False,captured_attempt=None,immediate_release=False):
         self.feature();temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup);directory=Path(temp.name)
-        config={'expected_service':api.CALC_MODEL_SERVICE,'getter_contract':api.CALC_PENDING_GETTER_CONTRACT,'suite':str(directory),'readerDeadline':10.}
+        config={'expected_service':api.CALC_MODEL_SERVICE,'getter_contract':api.CALC_PENDING_GETTER_CONTRACT,
+            'suite':str(directory),'readerDeadline':10.,'readerClockKind':1}
         (directory/'configuration.json').write_text(json.dumps(config));(directory/'request-000.json').write_text('{"sequence":0,"action":"start"}')
         mutable={'retained':['original']};events=[];holder={}
         class Reader:
@@ -267,6 +292,7 @@ class CaptureAndPublicationTests(unittest.TestCase):
             return result
         def diagnostic(path,reader,native,capture,header,**kwargs):
             events.append('diagnostic');frozen=json.loads((directory/'reply-000.json').read_bytes())
+            self.assertEqual(kwargs['deadline_clock'](),1.)
             mutable['retained'].append('MUTATED')
             holder['frozen']=frozen;holder['header']=header
             (directory/'request-001.json').write_text('{"sequence":1,"action":"release"}')
@@ -276,6 +302,7 @@ class CaptureAndPublicationTests(unittest.TestCase):
             if header_failure:raise RuntimeError('diagnostic header preparation failed')
             return header_builder(*args,**kwargs)
         with patch.object(api,'_UnoReader',Reader),patch.object(api,'_native_anchor',return_value=anchor),\
+             patch.object(api,'_helper_reader_budget_clock',return_value=lambda:1.),\
              patch.object(api,'_calc_selection_diagnostic_header',side_effect=header),\
              patch.object(api,'_qpc',return_value=(1,1)),patch.object(api,'_atomic_json',side_effect=publish),\
              patch.object(api,'_collect_calc_selection_diagnostic',side_effect=diagnostic),\

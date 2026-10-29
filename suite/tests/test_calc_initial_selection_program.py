@@ -81,6 +81,22 @@ class InitialSelectionProgramTests(unittest.TestCase):
             api.read_calc_selection(self.controller,deadline=10.,clock=lambda:self.now,proxy_type=Proxy)
         self.assertEqual(self.calls,['selection','types','count'])
 
+    def test_initial_proof_keeps_qpc_while_original_tick_budget_stays_fixed(self):
+        self.fixture()
+        value=api.read_calc_initial_selection(self.controller,deadline=101.,clock=lambda:200.,
+            deadline_clock=lambda:100.,proxy_type=Proxy,capture=self.capture)
+        proof=value['shapeWitness']
+        self.assertEqual(proof['readerDeadline'],101.)
+        self.assertEqual((proof['startedAt'],proof['finishedAt']),(200.,200.))
+        self.assertEqual(proof['budget'],dict(kind=1,startedAt=100.,finishedAt=100.))
+        self.assertEqual(proof['schemaVersion'],2)
+        api._require_calc_initial_selection(value)
+        self.fixture()
+        with self.assertRaises(TimeoutError):
+            api.read_calc_initial_selection(self.controller,deadline=101.,clock=lambda:99.,
+                deadline_clock=lambda:101.,proxy_type=Proxy,capture=self.capture)
+        self.assertEqual(self.calls,[])
+
     def test_initial_scalar_is_a_bounded_rectangle_without_an_a1_claim(self):
         self.fixture(scalar=True);value=self.read()
         self.assertEqual(self.calls,['selection','scalar'])
@@ -112,7 +128,9 @@ class InitialSelectionProgramTests(unittest.TestCase):
         self.assertIs(validate(value),value)
         for mutate in (lambda p:p['entries'].reverse(),lambda p:p.update(postCount=1),
                        lambda p:p['entries'][0]['rawAddress']['sheet'].update(value=False),
-                       lambda p:p['calls'].reverse(),lambda p:p.update(finishedAt=10.)):
+                       lambda p:p['calls'].reverse(),lambda p:p['budget'].update(finishedAt=10.),
+                       lambda p:p.update(schemaVersion=1),lambda p:p.pop('budget'),
+                       lambda p:p['budget'].update(kind=True)):
             changed=copy.deepcopy(value);mutate(changed['shapeWitness'])
             with self.subTest(mutate=mutate),self.assertRaises(AssertionError):validate(changed)
 
@@ -150,7 +168,7 @@ class InitialSelectionProgramTests(unittest.TestCase):
         self.assertTrue(callable(getattr(api,'read_calc_initial_selection',None)))
         self.fixture();ticks=iter([1.,1.,10.])
         with self.assertRaises(TimeoutError):
-            api.read_calc_initial_selection(self.controller,deadline=10.,clock=lambda:next(ticks,10.),
+            api.read_calc_initial_selection(self.controller,deadline=10.,clock=lambda:1.,deadline_clock=lambda:next(ticks,10.),
                 proxy_type=Proxy,capture=self.capture)
         self.assertEqual(self.calls,[])
         self.fixture(count=64);value=self.read()
@@ -199,12 +217,13 @@ class ProgramTransportTests(unittest.TestCase):
         for raw_sequence in (0,False):
             with self.subTest(raw_sequence=raw_sequence),tempfile.TemporaryDirectory() as directory, \
                  patch.dict(sys.modules,{'uno':uno,'writer_style_smoke':style}), \
-                 patch.object(api,'_native_anchor',lambda config:anchor),patch.object(api,'_qpc',lambda:(100,1000)), \
+                 patch.object(api,'_native_anchor',lambda config,**kw:anchor),patch.object(api,'_qpc',lambda:(100,1000)), \
+                 patch.object(api,'_helper_reader_budget_clock',lambda kind:lambda:1.), \
                  patch.object(api.time,'monotonic',lambda:1.), \
                  patch('calc_pending_input.AccessiblePendingReader',return_value=NS(read=lambda:{'measured':'pending-buffer'},release=lambda:None)):
                 output=Path(directory)
                 api._atomic_json(output/'configuration.json',dict(suite='C:/Suite',child_hwnd=22,expected_url='file:///C:/owned.xlsx',
-                    readerDeadline=10.,expected_service=api.CALC_MODEL_SERVICE,getter_contract=PROGRAM))
+                    readerDeadline=10.,readerClockKind=1,expected_service=api.CALC_MODEL_SERVICE,getter_contract=PROGRAM))
                 actions=('start','read','release') if type(raw_sequence) is int else ('start','release')
                 for seq,action in enumerate(actions):
                     api._atomic_json(output/f'request-{seq:03d}.json',dict(sequence=raw_sequence if seq==0 else seq,action=action))
