@@ -242,7 +242,7 @@ class NativeChildFailureTests(unittest.TestCase):
         self.assertEqual(events, [('exited', 0), ('window', 123), ('pid', 123), 'close'])
         self.assertEqual(len(calls), 1)
         command, options = calls[0]
-        self.assertEqual(command[0], '/synthetic/Office/program/python.exe')
+        self.assertEqual(command[0], str(Path('/synthetic')/'Office/program/python.exe'))
         self.assertEqual(command[2:], ['--collect-live'])
         self.assertNotIn('capture_output', options)
         self.assertEqual({key: options[key] for key in ('timeout', 'shell', 'stdout', 'stderr', 'text', 'encoding')},
