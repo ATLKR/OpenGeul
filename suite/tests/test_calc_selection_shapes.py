@@ -133,6 +133,8 @@ class SelectionShapeTests(unittest.TestCase):
     def test_owner_and_observation_time_are_independent_of_shape_validation(self):
         self.fixture();value=self.read();proof=value['shapeWitness']
         observation=dict(readerProcess=dict(pid=proof['helperPid']),readStartedAt=0.,readFinishedAt=2.,
+            controllerQpc=dict(startedNs=800_000_000,finishedNs=1_200_000_000),
+            helperQpc=dict(startedTicks=900,finishedTicks=1100,frequency=1000),
             unoSnapshots=dict(before=dict(proxyIdentity=dict(helperPid=proof['helperPid'],
                 retainedIds=dict(controller=proof['controllerId']),proxyTypeId=proof['proxyTypeId'],
                 proxyTypeName=proof['proxyTypeName'],proxyTypeModule=proof['proxyTypeModule']))))
@@ -143,6 +145,64 @@ class SelectionShapeTests(unittest.TestCase):
             changed=copy.deepcopy(value);mutate(changed['shapeWitness'])
             with self.subTest(mutate=mutate),self.assertRaises(AssertionError):
                 api._require_calc_selection_owner(changed,observation)
+    def test_owned_qpc_read_survives_coarse_controller_monotonic_clock(self):
+        self.fixture();self.now=1.005;value=self.read();proof=value['shapeWitness']
+        observation=dict(readerProcess=dict(pid=proof['helperPid']),readStartedAt=1.,readFinishedAt=1.,
+            controllerQpc=dict(startedNs=1_000_000_000,finishedNs=1_010_000_000),
+            helperQpc=dict(startedTicks=1002,finishedTicks=1008,frequency=1000),
+            unoSnapshots=dict(before=dict(proxyIdentity=dict(helperPid=proof['helperPid'],
+                retainedIds=dict(controller=proof['controllerId']),proxyTypeId=proof['proxyTypeId'],
+                proxyTypeName=proof['proxyTypeName'],proxyTypeModule=proof['proxyTypeModule']))))
+        api._require_calc_selection_owner(value,observation)
+    def test_clock_windows_reject_stale_cross_request_or_malformed_evidence(self):
+        self.fixture();self.now=1.005;value=self.read();proof=value['shapeWitness']
+        original=dict(readerProcess=dict(pid=proof['helperPid']),readStartedAt=1.,readFinishedAt=1.,
+            controllerQpc=dict(startedNs=1_000_000_000,finishedNs=1_010_000_000),
+            helperQpc=dict(startedTicks=1002,finishedTicks=1008,frequency=1000),
+            unoSnapshots=dict(before=dict(proxyIdentity=dict(helperPid=proof['helperPid'],
+                retainedIds=dict(controller=proof['controllerId']),proxyTypeId=proof['proxyTypeId'],
+                proxyTypeName=proof['proxyTypeName'],proxyTypeModule=proof['proxyTypeModule']))))
+        changes=(
+            lambda row:row.pop('controllerQpc'),lambda row:row.pop('helperQpc'),
+            lambda row:row.update(readStartedAt=2.,readFinishedAt=1.),
+            lambda row:row['controllerQpc'].update(startedNs=1_003_000_000),
+            lambda row:row['controllerQpc'].update(finishedNs=1_007_000_000),
+            lambda row:row['controllerQpc'].update(startedNs=2_000_000_000,finishedNs=2_010_000_000),
+            lambda row:row['controllerQpc'].update(startedNs=True),
+            lambda row:row['controllerQpc'].update(finishedNs=1_010_000_000.),
+            lambda row:row['controllerQpc'].update(finishedNs=2**63),
+            lambda row:row['helperQpc'].update(startedTicks=1009),
+            lambda row:row['helperQpc'].update(startedTicks=-1),
+            lambda row:row['helperQpc'].update(frequency=0),
+            lambda row:row['helperQpc'].update(frequency=True),
+            lambda row:row['helperQpc'].update(frequency=100),
+            lambda row:row['helperQpc'].update(extra=0))
+        for change in changes:
+            changed=copy.deepcopy(original);change(changed)
+            with self.subTest(change=change),self.assertRaises(AssertionError):
+                api._require_calc_selection_owner(value,changed)
+        for start,finish in ((1.001,1.005),(1.005,1.009),(1.006,1.005)):
+            changed=copy.deepcopy(value);changed['shapeWitness'].update(startedAt=start,finishedAt=finish)
+            with self.subTest(start=start,finish=finish),self.assertRaises(AssertionError):
+                api._require_calc_selection_owner(changed,original)
+    def test_fractional_qpc_tick_uses_exact_cpython_nanosecond_conversion(self):
+        self.fixture();self.now=float(10**9//3)/10**9;value=self.read();proof=value['shapeWitness']
+        observation=dict(readerProcess=dict(pid=proof['helperPid']),readStartedAt=0.,readFinishedAt=0.,
+            controllerQpc=dict(startedNs=333_333_333,finishedNs=333_333_333),
+            helperQpc=dict(startedTicks=1,finishedTicks=1,frequency=3),
+            unoSnapshots=dict(before=dict(proxyIdentity=dict(helperPid=proof['helperPid'],
+                retainedIds=dict(controller=proof['controllerId']),proxyTypeId=proof['proxyTypeId'],
+                proxyTypeName=proof['proxyTypeName'],proxyTypeModule=proof['proxyTypeModule']))))
+        api._require_calc_selection_owner(value,observation)
+        changed=copy.deepcopy(value);changed['shapeWitness']['finishedAt']=self.now+0.000000001
+        with self.assertRaises(AssertionError):api._require_calc_selection_owner(changed,observation)
+        self.now=1e-9;value=self.read()
+        observation['controllerQpc']=dict(startedNs=1,finishedNs=1)
+        observation['helperQpc']=dict(startedTicks=2,finishedTicks=3,frequency=2_000_000_000)
+        api._require_calc_selection_owner(value,observation)
+        # Both raw ticks floor to 1 ns; conversion must not hide reversed order.
+        observation['helperQpc'].update(startedTicks=3,finishedTicks=2)
+        with self.assertRaises(AssertionError):api._require_calc_selection_owner(value,observation)
     def test_container_getter_errors_are_preserved_without_retry(self):
         for method in ('getTypes','getCount','getByIndex'):
             with self.subTest(method=method):

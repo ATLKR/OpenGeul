@@ -273,7 +273,22 @@ def _require_calc_selection_owner(selection,observation):
     assert proof['controllerId']==proxy['retainedIds']['controller']
     for name,key in (('proxyTypeId','proxyTypeId'),('proxyTypeName','proxyTypeName'),('proxyTypeModule','proxyTypeModule')):
         assert proof[name]==proxy[key],'Calc selection witness belongs to another PyUNO type'
-    assert _finite(observation['readStartedAt'])<=proof['startedAt']<=proof['finishedAt']<=_finite(observation['readFinishedAt'])
+    assert _finite(observation['readStartedAt'])<=_finite(observation['readFinishedAt'])
+    # Controller Python 3.12 monotonic uses GetTickCount64, while the pinned
+    # helper Python 3.13 monotonic uses QPC. Join the same RPC using QPC only.
+    controller=observation.get('controllerQpc');helper=observation.get('helperQpc')
+    assert isinstance(controller,dict) and set(controller)=={'startedNs','finishedNs'}
+    assert isinstance(helper,dict) and set(helper)=={'startedTicks','finishedTicks','frequency'}
+    assert all(type(n) is int and 0<=n<=0x7fffffffffffffff for n in (*controller.values(),*helper.values()))
+    assert helper['frequency']>0
+    assert helper['startedTicks']<=helper['finishedTicks']
+    started_ns=helper['startedTicks']*1_000_000_000//helper['frequency']
+    finished_ns=helper['finishedTicks']*1_000_000_000//helper['frequency']
+    assert controller['startedNs']<=started_ns<=finished_ns<=controller['finishedNs']
+    def seconds(value):
+        # Match CPython PyTime_AsSecondsDouble without a tolerance or offset.
+        return float(value//1_000_000_000) if value%1_000_000_000==0 else float(value)/1_000_000_000
+    assert seconds(started_ns)<=_finite(proof['startedAt'])<=_finite(proof['finishedAt'])<=seconds(finished_ns)
 
 
 def _require_calc_selection(value):
@@ -1656,6 +1671,7 @@ class OwnedWriterReader:
 
     def _read(self,deadline,action):
         issued_sequence=self.sequence
+        qpc_started=time.perf_counter_ns()
         started=self.clock();before=self.anchor.snapshot();reply=self._rpc(action,deadline)
         from writer_style_smoke import require_packaged_python
         result=reply['observation'];self.attempted_observation=result
@@ -1671,6 +1687,7 @@ class OwnedWriterReader:
             systemConsoleHost=self.console.witness,systemConsoleHostRecheck=self.console.recheck())
         result['nativeSnapshots'].update(controllerBefore=before,controllerAfter=self.anchor.snapshot())
         result['readFinishedAt']=self.clock()
+        result['controllerQpc']=dict(startedNs=qpc_started,finishedNs=time.perf_counter_ns())
         derived=dict(self.anchor.base,**{k+'Identity':v for k,v in result['unoSnapshots']['before']['retained'].items()},documentUrl=self.config['expected_url'])
         if self.binding is None:self.binding=derived
         assert derived==self.binding,'Original Writer binding changed'

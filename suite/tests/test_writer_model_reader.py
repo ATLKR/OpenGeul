@@ -679,10 +679,15 @@ class RuntimeBoundaryContracts(unittest.TestCase):
         native=SimpleNamespace(ProcessDiagnosticsApi=Diagnostics,OwnedOfficeProcess=Job)
         style=SimpleNamespace(require_packaged_python=lambda suite,observed:dict(observed=observed))
         with tempfile.TemporaryDirectory() as directory,patch.object(api,'_native_anchor',lambda c:Anchor()), \
-             patch.object(api,'_worker_native',lambda:native),patch.object(api,'_SystemConsoleHost',Console),patch.object(api,'_launch_owned',lambda n,a,c:(Job(a,c),raw['helperLaunch'])),patch.object(api,'_atomic_json',atomic),patch.dict('sys.modules',{'writer_style_smoke':style}):
+             patch.object(api,'_worker_native',lambda:native),patch.object(api,'_SystemConsoleHost',Console),patch.object(api,'_launch_owned',lambda n,a,c:(Job(a,c),raw['helperLaunch'])),patch.object(api,'_atomic_json',atomic),patch.dict('sys.modules',{'writer_style_smoke':style}), \
+             patch.object(api.time,'perf_counter_ns',side_effect=[900_000_000,1_100_000_000,1_900_000_000,2_100_000_000]) as perf:
             r=api.OwnedWriterReader(Path('C:/Suite'),Path(directory)/'fresh',shell_pid=77,expected_shell_creation=111,suite_hwnd=11,parent_hwnd=12,
                 child_hwnd=22,office_pid=88,expected_url=binding['documentUrl'],clock=lambda:1.0)
             first=r.start(12.0);second=r.read(12.0);cleanup=r.close(12.0)
+            self.assertEqual(first['controllerQpc'],dict(startedNs=900_000_000,finishedNs=1_100_000_000))
+            self.assertEqual(second['controllerQpc'],dict(startedNs=1_900_000_000,finishedNs=2_100_000_000))
+            self.assertEqual((first['readStartedAt'],first['readFinishedAt'],second['readStartedAt'],second['readFinishedAt']),(1.,1.,1.,1.))
+            self.assertEqual(perf.call_count,4);self.assertEqual(r.deadline,12.0)
             self.assertEqual(first['bindingBefore'],second['bindingAfter']);self.assertTrue(cleanup['cleanupSucceeded'])
             self.assertNotIn('terminate-reader-job',events)
             self.assertLess(events.index('proxies-released'),events.index('native-release'))
