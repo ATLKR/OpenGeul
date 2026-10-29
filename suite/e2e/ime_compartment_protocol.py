@@ -41,7 +41,7 @@ class Record(C.Structure):
         'hwnd', 'creationTime', 'baselineCounter', 'counter', 'finishedCounter')]
     _fields_ += [('pluginStatus', C.c_uint32), ('reserved', C.c_uint32)]
     _fields_ += [('pluginStarted', C.c_uint64), ('pluginFinished', C.c_uint64)]
-    _fields_ += [('frames', RetrievalFrame * 16)]
+    _fields_ += [('frames', RetrievalFrame * 64)]
 
 
 def typed_read(read):
@@ -53,8 +53,8 @@ def decode(config, row, *, expected_config, notification_config,
            expected_notification, pid, tid, hwnd, deadline, frequency, command3):
     assert bytes(config) == expected_config, 'Compartment immutable admission changed'
     assert bytes(notification_config) == expected_notification, 'Compartment binding changed'
-    assert config.version == 1 and config.enabled in (0, 1)
-    result = dict(schemaVersion=1, kind='one-owned-ime-compartment-callback',
+    assert config.version == 2 and config.enabled in (0, 1)
+    result = dict(schemaVersion=2, frameCapacity=64, kind='one-owned-ime-compartment-callback',
                   status='disabled', callerAttributionProved=False,
                   acceptanceEligible=False, processRetirementVerified=False,
                   cleanupStatus='pending')
@@ -75,8 +75,8 @@ def decode(config, row, *, expected_config, notification_config,
         if name not in ('rejected', 'activeCallbacks'):
             assert value in (0, 1), 'Unbounded compartment attempt count'
     assert not lease.rejected & ~511 and row.sequence in (0, 1) and not row.reserved
-    assert row.frameCapReached in (0, 1) and 0 <= row.frameCount <= 16
-    assert row.frameCapReached == int(row.frameCount == 16)
+    assert row.frameCapReached in (0, 1) and 0 <= row.frameCount <= 64
+    assert row.frameCapReached == int(row.frameCount == 64)
     assert 0 <= api.referencesReleased <= api.referencesAcquired <= 5
     assert 0 <= api.enumerationCount <= 64
     # Fixed numeric receipts retain failed preparation/cleanup without COM

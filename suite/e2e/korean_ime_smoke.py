@@ -597,7 +597,7 @@ static CompartmentSink* compartmentSink=nullptr;
 static bool compartment_install(const opengeul_ime::CommandBudget& limits) {
     if(compartmentSink || !opengeul_ime::PairEmpty(originalTsf))return false;
     compartmentAdmission=shared->compartmentConfig;
-    if(compartmentAdmission.version!=1 || compartmentAdmission.enabled!=1)return false;
+    if(compartmentAdmission.version!=2 || compartmentAdmission.enabled!=1)return false;
     shared->compartment=opengeul_ime::CompartmentRecord{};
     compartmentCommandBudget=limits;compartmentCommandActive=true;
     struct End {~End(){compartmentCommandActive=false;}} end;
@@ -1124,7 +1124,7 @@ class CompositionObserver:
         state.magic, state.version, state.pid, state.tid = 0x4f47494d, 4, pid, self.tid
         state.targetHwnd, state.rootHwnd = focus, root
         state.notificationConfig=config
-        state.compartmentConfig=compartment.Config(version=1,enabled=int(capture_ime_compartment))
+        state.compartmentConfig=compartment.Config(version=2,enabled=int(capture_ime_compartment))
         self.compartment_config=bytes(state.compartmentConfig)
         state.modeDiagnosticVersion=1
         if diagnose_ime_mode:

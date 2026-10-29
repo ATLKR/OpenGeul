@@ -86,3 +86,50 @@ private directory or replay previously denied artifact/log data through notices.
 Contracts: [OnChange](https://learn.microsoft.com/en-us/windows/win32/api/msctf/nf-msctf-itfcompartmenteventsink-onchange),
 [UnadviseSink](https://learn.microsoft.com/en-us/windows/win32/api/msctf/nf-msctf-itfsource-unadvisesink),
 [module pinning](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandleexa).
+
+## Bounded follow-up after the first callback filled 16 frames
+
+Run `40820145615`, source `07e752f`, reproduced the original Writer first-input
+composition failure after the normal ARM64 prefix. Its first claimed callback
+read typed zero and unsubscribed with five references acquired/released and no
+active callback. The 16-frame buffer was full, so the existing decoder correctly
+kept it inconclusive. An unknown frame is not itself a completeness rejection.
+Plugin status1 verifies the separately loaded plugin's file origin; it does not
+establish a product frame or setter. No product frame in this capacity-limited
+sample proves no absence. The symbol worker did not run.
+
+The next observation raises only the compartment record to 64 frames. Config
+version2 and the controller/native StateSize check bind its 784-byte layout.
+The shared capture helper accepts only 16- or 64-slot row types; caller/ASCII
+records retain 16 slots. Capture the same first eligible callback once, with
+no skipped frames, extra callback, recapture or retry. A count of 64 remains
+inconclusive. Microsoft documents this count within the modern
+[CaptureStackBackTrace API limit](https://learn.microsoft.com/en-us/windows/win32/debug/capturestackbacktrace).
+
+Closed numeric schema2 retains the fixed 64-frame capacity and at most 63
+selected/resolved product RVAs. A separate fixed compartment resolution profile
+uses the existing file-only worker; ordinary resolution retains its 32-RVA
+limit. DLL/PDB identity, ordered RVA joins, whitelist tags, cleanup, watchdog and
+remaining budgets remain mandatory. Legacy closed schema1 keeps its original
+16-frame boundary. The public notice/JSON remains limited to 32 KiB.
+
+The old closed record did not expose command1's original typed state, and the
+selector returned for the capped callback before checking first-key IMM state
+and QPC order. Schema2 therefore projects the already retained command1 typed
+receipt and first-key open/native/owner/QPC values even for an unselected case.
+It adds no target getter and retains no key value, message payload or input text.
+Missing data stays distinct from measured zero. Selection still requires the
+original EMPTY state, original input signature, one owned first key with open1
+and native1 after ACK3, and that key before the first eligible callback's zero.
+
+Writer's callback deadline remains the QPC translation of its original 60-second
+setup budget. The observed baseline-to-deadline interval was 50.7941848 seconds;
+the callback began 0.3569066 seconds after baseline. Command3/4 retain their
+existing maximum-five-second budgets. Save/Calc-dispatch 30-second budgets and
+the file-only worker's 30-second budget are separate phases; this first-input
+failure never entered save. It is not evidence of a whole-case 30-second bound.
+
+No product engine binary or pinned normal engine/PDB input changes. This observer
+source change requires no additional native engine source build. Capped or
+otherwise incomplete evidence still ends the experiment without an unchanged
+rerun, and every report keeps caller attribution and acceptance false.

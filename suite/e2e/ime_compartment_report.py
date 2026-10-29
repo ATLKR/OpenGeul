@@ -52,6 +52,9 @@ _TOP_KEYS = _CONTEXT_KEYS | {'schemaVersion', 'kind', 'scopeCode', 'sequence',
     'remainingBudget', 'runtimeCallerProved', 'acceptanceEligible', 'statusCode',
     'reportSuccess', 'case', 'owner', 'callback', 'command3', 'retirement',
     'selection', 'resolution', 'provenance'}
+_ORIGIN_MODE_KEYS = ('status', 'cleanupStatus', 'variantClearHr', 'releaseCalls',
+    'referencesAcquired', 'referencesReleased', 'beforeOpenHr', 'beforeConversionHr',
+    'beforeOpenType', 'beforeConversionType', 'openSetCalls', 'conversionSetCalls')
 _attempted = False
 
 
@@ -157,7 +160,8 @@ def _project_callback(raw):
         # Actual finally failure producer. Do not access its exception name.
         _need(raw.get('status') == 'unavailable' and raw.get('acceptanceEligible') is False)
     else:
-        _need(raw.get('schemaVersion') == 1 and type(raw.get('schemaVersion')) is int)
+        _need(raw.get('schemaVersion') == 2 and type(raw.get('schemaVersion')) is int)
+        _need(type(raw.get('frameCapacity')) is int and raw['frameCapacity'] == 64)
         _need(raw.get('kind') == 'one-owned-ime-compartment-callback')
         _need(raw.get('status') != 'unavailable' and raw.get('cleanupStatus') != 'unproved')
         _need(all(raw.get(k) is False for k in
@@ -168,11 +172,12 @@ def _project_callback(raw):
         claimed=_optional(raw, 'claimed', _bool), rejected=_optional(raw, 'rejected', lambda v: _int(v, 511)),
         expired=_optional(raw, 'expired', _int), foreignRejected=_optional(raw, 'foreignRejected', _int),
         lease=None, api=None, identity=None, clock=None, frames=None,
-        frameCount=_optional(raw, 'frameCount', lambda v: _int(v, 16)),
+        frameCount=_optional(raw, 'frameCount', lambda v: _int(v, 64)),
         frameCapReached=_optional(raw, 'frameCapReached', _bool),
-        unknownFrames=_optional(raw, 'unknownFrames', lambda v: _int(v, 16)),
+        unknownFrames=_optional(raw, 'unknownFrames', lambda v: _int(v, 64)),
         moduleMapVersion=_optional(raw, 'moduleMapVersion', lambda v: type(v) is int and v == 2),
-        pluginStatus=_optional(raw, 'pluginStatus', _int))
+        pluginStatus=_optional(raw, 'pluginStatus', _int),
+        frameCapacity=_optional(raw, 'frameCapacity', lambda v: type(v) is int and v == 64))
     if lease is not None:
         _need(type(lease) is dict)
         result['lease'] = {key: lease.get(key) for key in _LEASE_KEYS}
@@ -190,7 +195,7 @@ def _project_callback(raw):
         result['clock'] = {key: raw.get(key) for key in _CLOCK_KEYS}
     frames = _get(raw, 'frames')
     if frames is not None:
-        _need(type(frames) is list and len(frames) <= 16)
+        _need(type(frames) is list and len(frames) <= 64)
         result['frames'] = []
         for frame in frames:
             _need(type(frame) is dict)
@@ -202,15 +207,18 @@ def _typed(read):
     return read['hr'] == read['clearHr'] == 0 and read['type'] == 3 and read['matched'] == read['attempts'] == 1
 
 
-def _validate_callback(value):
+def _validate_callback(value, *, version=1):
+    capacity = 16 if version == 1 else 64
     if value is None:
         return
     _object(value, ('statusCode', 'cleanupCode', 'claimed', 'rejected', 'expired', 'foreignRejected',
         'lease', 'api', 'identity', 'clock', 'frames', 'frameCount', 'frameCapReached',
-        'unknownFrames', 'moduleMapVersion', 'pluginStatus'))
+        'unknownFrames', 'moduleMapVersion', 'pluginStatus') + (() if version == 1 else ('frameCapacity',)))
+    if version == 2:
+        _need(value['frameCapacity'] is None or type(value['frameCapacity']) is int and value['frameCapacity'] == 64)
     for key, limit in (('statusCode', 4), ('cleanupCode', 3), ('rejected', 511),
                        ('expired', 0xffffffff), ('foreignRejected', 0xffffffff),
-                       ('frameCount', 16), ('unknownFrames', 16), ('pluginStatus', 0xffffffff)):
+                       ('frameCount', capacity), ('unknownFrames', capacity), ('pluginStatus', 0xffffffff)):
         _need(value[key] is None or _int(value[key], limit))
     for key in ('claimed', 'frameCapReached'):
         _need(value[key] is None or _bool(value[key]))
@@ -242,13 +250,15 @@ def _validate_callback(value):
     published = value['identity'] is not None
     _need(published == (clock is not None) == (frames is not None))
     if published:
+        if version == 2:
+            _need(type(value['frameCapacity']) is int and value['frameCapacity'] == 64)
         identity = value['identity']
         _need(all(identity[k] is not None for k in ('pid', 'creationTime', 'tid', 'hwnd')) and identity['suiteHwnd'] is None)
         _object(clock, _CLOCK_KEYS)
         _need(all(_int(clock[k], 2**64 - 1, 1) for k in _CLOCK_KEYS))
         _need(0 < clock['baselineCounter'] <= clock['counter'] <= clock['pluginStarted'] <=
             clock['pluginFinished'] <= clock['finishedCounter'] < clock['deadlineCounter'])
-        _need(type(frames) is list and len(frames) <= 16 and value['frameCount'] == len(frames))
+        _need(type(frames) is list and len(frames) <= capacity and value['frameCount'] == len(frames))
         for frame in frames:
             _object(frame, ('moduleId', 'rva'))
             _need(_int(frame['moduleId'], 14) and _int(frame['rva']))
@@ -257,7 +267,7 @@ def _validate_callback(value):
                 _need(value['pluginStatus'] == 1 and frame['rva'] >= 4 and frame['rva'] % 4 == 0)
         _need(value['claimed'] is True and value['moduleMapVersion'] == 2)
         _need(value['unknownFrames'] == sum(f['moduleId'] == 0 for f in frames))
-        _need(value['frameCapReached'] is (len(frames) == 16))
+        _need(value['frameCapReached'] is (len(frames) == capacity))
     else:
         _need(all(value[k] is None for k in ('frameCount', 'frameCapReached', 'unknownFrames', 'moduleMapVersion', 'pluginStatus')))
     source = (lease is not None and all(lease[k] == 1 for k in
@@ -277,7 +287,7 @@ def _validate_callback(value):
         _need(unsubscribed)
     if value['statusCode'] == 3:
         _need(published and not failed and (live or unsubscribed) and
-            _typed(api['baseline']) and _typed(api['callback']) and 0 < len(frames) < 16 and value['pluginStatus'] == 1)
+            _typed(api['baseline']) and _typed(api['callback']) and 0 < len(frames) < capacity and value['pluginStatus'] == 1)
     if value['statusCode'] == 2:
         _need(lease is not None and lease['claimed'] == 0 and not published)
 
@@ -408,7 +418,7 @@ def _project_selection(raw):
         return dict(statusCode=None, rvas=[])
     _need(type(raw) is dict and raw.get('runtimeCallerProved') is False and raw.get('acceptanceEligible') is False)
     _need(raw.get('evidenceKind') == 'ime-compartment-callback')
-    rvas = raw.get('rvas'); _need(type(rvas) is list and len(rvas) <= 15)
+    rvas = raw.get('rvas'); _need(type(rvas) is list and len(rvas) <= 63)
     return dict(statusCode=_enum(raw.get('status'), _SELECTION_STATUS), rvas=list(rvas))
 
 
@@ -418,6 +428,7 @@ def _project_resolution(raw):
     _need(type(raw) is dict and raw.get('schemaVersion') == 1 and type(raw.get('schemaVersion')) is int)
     _need(raw.get('kind') == 'owned-plugin-symbol-worker' and raw.get('mode') == 'resolve')
     _need(raw.get('runtimeCallerProved') is False and raw.get('acceptanceEligible') is False)
+    _need(type(raw.get('resolutionProfile')) is int and raw['resolutionProfile'] == 2)
     resolved = _get(raw, 'resolution')
     result = dict(workerSuccess=_optional(raw, 'success', _bool),
         temporaryFilesRemoved=_optional(raw, 'temporaryFilesRemoved', _bool),
@@ -425,6 +436,7 @@ def _project_resolution(raw):
     if resolved is None:
         return result
     _need(type(resolved) is dict and resolved.get('kind') == 'local-plugin-symbol-resolution')
+    _need(type(resolved.get('resolutionProfile')) is int and resolved['resolutionProfile'] == 2)
     _need(resolved.get('runtimeCallerProved') is False and resolved.get('acceptance') is False)
     _need(resolved.get('functionAliasUniquenessProved') is False and resolved.get('nativeCallsPreemptible') is False)
     result.update(complete=_optional(resolved, 'complete', _bool),
@@ -432,7 +444,7 @@ def _project_resolution(raw):
         dllSha256=_optional(resolved, 'dllSha256', _digest), pdbSha256=_optional(resolved, 'pdbSha256', _digest))
     frames = _get(resolved, 'frames')
     if frames is not None:
-        _need(type(frames) is list and len(frames) <= 15)
+        _need(type(frames) is list and len(frames) <= 63)
         result['frames'] = []
         for frame in frames:
             _need(type(frame) is dict)
@@ -442,7 +454,7 @@ def _project_resolution(raw):
     return result
 
 
-def _validate_resolution(value):
+def _validate_resolution(value, *, limit=15):
     if value is None:
         return
     _object(value, ('workerSuccess', 'temporaryFilesRemoved', 'complete', 'cleanupComplete',
@@ -453,7 +465,7 @@ def _validate_resolution(value):
         _need(value[key] is None or _digest(value[key]))
     frames = value['frames']
     if frames is not None:
-        _need(type(frames) is list and len(frames) <= 15)
+        _need(type(frames) is list and len(frames) <= limit)
         for frame in frames:
             _object(frame, ('returnRva', 'callRva', 'tagCode', 'functionRva', 'functionSize'))
             _need(_int(frame['returnRva'], minimum=4) and frame['returnRva'] % 4 == 0)
@@ -468,22 +480,110 @@ def _validate_resolution(value):
                 _need(frame['functionRva'] is None and frame['functionSize'] is None)
     if value['workerSuccess'] is True:
         _need(value['temporaryFilesRemoved'] is True and value['complete'] is True and value['cleanupComplete'] is True)
-        _need(frames is not None and 0 < len(frames) <= 15 and value['dllSha256'] is not None and value['pdbSha256'] is not None)
+        _need(frames is not None and 0 < len(frames) <= limit and value['dllSha256'] is not None and value['pdbSha256'] is not None)
+
+
+def _project_eligibility(case, selection):
+    """Project prior receipts only; never query the target or read key payloads."""
+    result = dict(inputSignatureVerified=_optional(selection, 'inputSignatureVerified', _bool),
+        command1=None, firstKey=None)
+    commands = _get(case, 'imeCommands')
+    if commands is not None:
+        _need(type(commands) is list and len(commands) <= 4)
+        original = [c for c in commands if type(c) is dict and type(c.get('nativeAck')) is int and c['nativeAck'] == 1]
+        _need(len(original) <= 1)
+        if original:
+            c = original[0]; mode = _get(c, 'threadMode'); native = _get(c, 'nativeContext')
+            _need(mode is None or type(mode) is dict)
+            result['command1'] = dict(success=_optional(c, 'success', _bool), nativeAck=1,
+                status=_optional(c, 'status', _signed), identity=None,
+                mode=None if mode is None else {k: mode.get(k) for k in _ORIGIN_MODE_KEYS})
+            if native is not None:
+                result['command1']['identity'] = dict(pid=_get(native, 'pid'), creationTime=None,
+                    tid=_get(native, 'tid'), hwnd=_get(native, 'targetHwnd'), suiteHwnd=_get(native, 'rootHwnd'))
+    messages = _get(case, 'imeMessageDiagnostics'); events = _get(messages, 'events')
+    if events is not None:
+        _need(type(events) is list and len(events) <= 128)
+        # These fixed numeric selectors match the existing first-key selector.
+        # wParam, lParam, tokens, text and message payloads are never read here.
+        keys = [e for e in events if type(e) is dict and e.get('message') == 0x100
+                and e.get('origin') == 2 and e.get('commandAck') == 3]
+        key = dict(count=len(keys), owned=None, contextPresent=None,
+            conversionSucceeded=None, open=None, native=None, counter=None)
+        if len(keys) == 1:
+            e = keys[0]; native = _get(_get(case, 'imeKeyboardSession'), 'expectedNative')
+            expected = (_get(native, 'officePid'), _get(case, 'editorTid'), _get(case, 'keyboardFocusHwnd'))
+            actual = (e.get('pid'), e.get('tid'), e.get('hwnd'))
+            key['owned'] = (all(type(v) is int and v > 0 for v in expected + actual)
+                and actual == expected and type(e.get('focusHwnd')) is int and e['focusHwnd'] == expected[2])
+            for target, source in (('contextPresent', 'immContextPresent'),
+                    ('conversionSucceeded', 'immConversionSucceeded'), ('open', 'immOpen')):
+                key[target] = _optional(e, source, lambda v: _int(v, 1))
+            conversion = _optional(e, 'immConversion', _int)
+            key['native'] = None if conversion is None else conversion & 1
+            key['counter'] = _optional(e, 'counter', lambda v: _int(v, 2**64 - 1, 1))
+        result['firstKey'] = key
+    return result
+
+
+def _validate_eligibility(value, report):
+    _object(value, ('inputSignatureVerified', 'command1', 'firstKey'))
+    _need(value['inputSignatureVerified'] is None or _bool(value['inputSignatureVerified']))
+    origin, key = value['command1'], value['firstKey']
+    if origin is not None:
+        _object(origin, ('success', 'nativeAck', 'status', 'identity', 'mode'))
+        _need(origin['success'] is None or _bool(origin['success']))
+        _need(type(origin['nativeAck']) is int and origin['nativeAck'] == 1)
+        _need(origin['status'] is None or _signed(origin['status']))
+        _validate_owner(origin['identity']); _join_owners(report['owner'], origin['identity'])
+        mode = origin['mode']
+        if mode is not None:
+            _object(mode, _ORIGIN_MODE_KEYS)
+            for k in _ORIGIN_MODE_KEYS:
+                _need(_signed(mode[k]) if k.endswith('Hr') or k in ('status', 'cleanupStatus') else _int(mode[k]))
+            _need(_int(mode['releaseCalls'], 1) and _int(mode['referencesAcquired'], 5)
+                and _int(mode['referencesReleased'], 5) and _int(mode['openSetCalls'], 1)
+                and _int(mode['conversionSetCalls'], 1))
+    if key is not None:
+        _object(key, ('count', 'owned', 'contextPresent', 'conversionSucceeded', 'open', 'native', 'counter'))
+        _need(_int(key['count'], 128))
+        _need(key['owned'] is None or _bool(key['owned']))
+        for k in ('contextPresent', 'conversionSucceeded', 'open', 'native'):
+            _need(key[k] is None or _int(key[k], 1))
+        _need(key['counter'] is None or _int(key['counter'], 2**64 - 1, 1))
+        if key['count'] != 1:
+            _need(all(key[k] is None for k in key if k != 'count'))
+    if report['selection']['statusCode'] == 6:
+        _need(value['inputSignatureVerified'] is True and origin is not None and key is not None)
+        _need(origin['success'] is True and origin['status'] == 0 and origin['identity'] is not None)
+        _need(all(origin['identity'][k] is not None for k in ('pid', 'tid', 'hwnd', 'suiteHwnd')))
+        mode = origin['mode']; _need(mode is not None)
+        expected = dict(status=0, cleanupStatus=0, variantClearHr=0, releaseCalls=1,
+            referencesAcquired=5, referencesReleased=5, beforeOpenHr=1,
+            beforeConversionHr=1, beforeOpenType=0, beforeConversionType=0,
+            openSetCalls=0, conversionSetCalls=0)
+        _need(mode == expected)
+        _need(key['count'] == 1 and key['owned'] is True and
+            key['contextPresent'] == key['conversionSucceeded'] == key['open'] == key['native'] == 1)
+        clock = _get(report['callback'], 'clock'); _need(clock is not None and key['counter'] is not None)
+        _need(clock['baselineCounter'] <= key['counter'] <= clock['counter'])
 
 
 def _validate(value):
-    _object(value, _TOP_KEYS)
+    _need(type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (1, 2))
+    version = value['schemaVersion']; limit = 15 if version == 1 else 63
+    _object(value, _TOP_KEYS | (set() if version == 1 else {'eligibility'}))
     _context({k: value[k] for k in _CONTEXT_KEYS})
-    for key, expected in (('schemaVersion', 1), ('kind', KIND), ('scopeCode', SCOPE), ('sequence', 1), ('remainingBudget', 0)):
+    for key, expected in (('schemaVersion', version), ('kind', KIND), ('scopeCode', SCOPE), ('sequence', 1), ('remainingBudget', 0)):
         _need(type(value[key]) is int and value[key] == expected)
     _need(value['runtimeCallerProved'] is value['acceptanceEligible'] is False)
     _need(value['reportSuccess'] is None or _bool(value['reportSuccess']))
     _need(_int(value['statusCode'], 3))
-    _validate_case(value['case']); _validate_owner(value['owner']); _validate_callback(value['callback'])
-    _validate_command(value['command3']); _validate_retirement(value['retirement']); _validate_resolution(value['resolution'])
+    _validate_case(value['case']); _validate_owner(value['owner']); _validate_callback(value['callback'], version=version)
+    _validate_command(value['command3']); _validate_retirement(value['retirement']); _validate_resolution(value['resolution'], limit=limit)
     selection = value['selection']; _object(selection, ('statusCode', 'rvas'))
     _need(selection['statusCode'] is None or _int(selection['statusCode'], 6, 1))
-    _need(type(selection['rvas']) is list and len(selection['rvas']) <= 15)
+    _need(type(selection['rvas']) is list and len(selection['rvas']) <= limit)
     _need(all(_int(r, minimum=4) and r % 4 == 0 for r in selection['rvas']))
     _need(selection['statusCode'] == 6 or not selection['rvas'])
     proof = value['provenance']; _object(proof, ('dllSha256', 'pdbSha256', 'fileOriginVerified', 'fileOriginReleased'))
@@ -505,6 +605,8 @@ def _validate(value):
             _need(resolved[key] is None or proof[key] is None or resolved[key] == proof[key])
         if resolved['frames'] is not None:
             _need(selection['statusCode'] == 6 and [f['returnRva'] for f in resolved['frames']] == selection['rvas'])
+    if version == 2:
+        _validate_eligibility(value['eligibility'], value)
     selected = selection['statusCode'] == 6
     if selected:
         _need(value['case'] is not None and value['case']['success'] is False and
@@ -554,12 +656,13 @@ def project(report, selection=None, resolution=None, *, context):
         # CodeView identity. Do not read names, GUIDs, profiles or input payloads.
         identity = _get(selection, 'pluginIdentity')
         _need(_get(identity, 'dllSha256') == provenance['dllSha256'])
-    value = dict(context, schemaVersion=1, kind=KIND, scopeCode=SCOPE, sequence=1,
+    value = dict(context, schemaVersion=2, kind=KIND, scopeCode=SCOPE, sequence=1,
         remainingBudget=0, runtimeCallerProved=False, acceptanceEligible=False,
         reportSuccess=_optional(report, 'success', _bool), statusCode=0,
         case=_project_case(case), owner=_owner(_get(_get(case, 'imeKeyboardSession'), 'expectedNative'), case),
         callback=callback, command3=_project_command(case), retirement=_project_retirement(case, context),
-        selection=selected, resolution=resolved, provenance=provenance)
+        selection=selected, resolution=resolved, provenance=provenance,
+        eligibility=_project_eligibility(case, selection))
     value['statusCode'] = 3 if selected['statusCode'] == 6 and resolved is not None and resolved['workerSuccess'] is True and resolved['frames'] is not None and all(f['tagCode'] not in (None, 1) for f in resolved['frames']) else (2 if selected['statusCode'] == 6 else (1 if callback is not None and callback['statusCode'] == 3 and callback['cleanupCode'] == 2 else 0))
     return _validate(value)
 

@@ -10,7 +10,7 @@ class CompartmentProtocolTests(unittest.TestCase):
         self.assertTrue((Path(__file__).resolve().parents[1] / 'e2e/ime_compartment_protocol.py').is_file())
         m = importlib.import_module('ime_compartment_protocol')
         import ime_notification_caller as notification
-        config = m.Config(version=1, enabled=1)
+        config = m.Config(version=2, enabled=1)
         binding = notification.Config(version=1, enabled=1, creationTime=555)
         binding.plugin.version = binding.plugin.enabled = 1
         r = m.Record(sequence=1, pid=31, tid=41, hwnd=51, creationTime=555,
@@ -39,7 +39,7 @@ class CompartmentProtocolTests(unittest.TestCase):
     def test_layout_complete_sample_and_no_setter_or_retirement_claim(self):
         m, c, r, kw = self.fixture()
         self.assertEqual((C.sizeof(m.Config), C.sizeof(m.Lease), C.sizeof(m.Read),
-                          C.sizeof(m.ApiReceipt), C.sizeof(m.Record)), (8, 60, 20, 108, 400))
+                          C.sizeof(m.ApiReceipt), C.sizeof(m.Record)), (8, 60, 20, 108, 784))
         out = m.decode(c, r, **kw)
         self.assertEqual(out['status'], 'complete')
         self.assertFalse(out['callerAttributionProved'])
@@ -49,7 +49,7 @@ class CompartmentProtocolTests(unittest.TestCase):
         self.assertEqual(out['frames'][1], {'moduleId': 0, 'rva': 0})
 
     def test_changed_target_config_addresses_or_clock_cannot_qualify(self):
-        for change in (lambda c,r,k:setattr(c,'version',2), lambda c,r,k:setattr(r,'pid',32),
+        for change in (lambda c,r,k:setattr(c,'version',1), lambda c,r,k:setattr(r,'pid',32),
                        lambda c,r,k:setattr(r,'creationTime',556), lambda c,r,k:setattr(r,'counter',101),
                        lambda c,r,k:setattr(r.frames[1],'rva',99),
                        lambda c,r,k:k['command3'].update(success=False)):
@@ -61,9 +61,22 @@ class CompartmentProtocolTests(unittest.TestCase):
                        lambda r:setattr(r,'expired',1), lambda r:setattr(r,'foreignRejected',1),
                        lambda r:setattr(r.api,'variantCleanupFailed',1),
                        lambda r:setattr(r.lease,'activeCallbacks',1),
-                       lambda r:(setattr(r,'frameCount',16),setattr(r,'frameCapReached',1),setattr(r,'unknownFrames',15))):
+                       lambda r:(setattr(r,'frameCount',64),setattr(r,'frameCapReached',1),setattr(r,'unknownFrames',63))):
             m,c,r,kw = self.fixture(); change(r)
             self.assertEqual(m.decode(c,r,**kw)['status'],'inconclusive')
+
+    def test_more_than_sixteen_frames_complete_but_sixty_four_remains_capped(self):
+        m,c,r,kw=self.fixture()
+        self.assertEqual(len(r.frames),64)
+        for count in (17,63,64):
+            r.frameCount=count;r.frameCapReached=int(count==64);r.unknownFrames=count-1
+            out=m.decode(c,r,**kw)
+            self.assertEqual(out['schemaVersion'],2)
+            self.assertEqual(out['frameCapacity'],64)
+            self.assertEqual(len(out['frames']),count)
+            self.assertEqual(out['status'],'inconclusive' if count==64 else 'complete')
+        r.frameCount=65
+        with self.assertRaises(AssertionError):m.decode(c,r,**kw)
 
     def test_no_callback_is_not_reproduction_and_unsubscribe_is_not_engine_exit(self):
         m,c,r,kw = self.fixture();r.sequence=r.lease.claimed=0

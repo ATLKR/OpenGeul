@@ -3,7 +3,7 @@
 #include "ime_thread_mode.h"
 #include "ascii_message_protocol.h"
 namespace opengeul_ime {
-struct CompartmentConfig {uint32_t version=1,enabled=0;};
+struct CompartmentConfig {uint32_t version=2,enabled=0;};
 struct CompartmentRead {
     int32_t hr=NotAttempted,clearHr=NotAttempted;
     uint32_t type=0,matched=0,attempts=0;
@@ -24,9 +24,9 @@ struct CompartmentRecord {
     uint64_t hwnd=0,creationTime=0,baselineCounter=0,counter=0,finishedCounter=0;
     uint32_t pluginStatus=0,reserved=0;
     uint64_t pluginStarted=0,pluginFinished=0;
-    OpenGeulAscii::RetrievalFrame frames[16]{};
+    OpenGeulAscii::RetrievalFrame frames[64]{};
 };
 static_assert(sizeof(CompartmentConfig)==8 && sizeof(CompartmentLeaseRecord)==60
     && sizeof(CompartmentRead)==20 && sizeof(CompartmentApiReceipt)==108
-    && sizeof(CompartmentRecord)==400);
+    && sizeof(CompartmentRecord)==784);
 }

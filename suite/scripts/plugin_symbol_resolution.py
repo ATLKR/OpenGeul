@@ -72,13 +72,20 @@ def resolve(dll_bytes,pdb_path,verified_identity,return_rvas,budget,runtime=None
     finally:SERIAL.release()
 
 
+def resolve_compartment(dll_bytes,pdb_path,verified_identity,return_rvas,budget,runtime=None):
+    require(SERIAL.acquire(blocking=False),'concurrent-symbol-session')
+    try:return _resolve(dll_bytes,pdb_path,verified_identity,return_rvas,budget,runtime,compartment=True)
+    finally:SERIAL.release()
+
+
 def qualify(dll_bytes,pdb_path,verified_identity,budget,runtime=None):
     require(SERIAL.acquire(blocking=False),'concurrent-symbol-session')
     try:return _resolve(dll_bytes,pdb_path,verified_identity,[],budget,runtime,qualification=True)
     finally:SERIAL.release()
 
 
-def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
+def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False,compartment=False):
+    require(type(compartment) is bool and not (compartment and qualification),'return-rva-bounds')
     budget.now()
     require(budget.deadline==budget.started+30 and budget.work_deadline==budget.deadline-3,'original-budget-required')
     require(type(dll_bytes) is bytes and 0<len(dll_bytes)<=retention.MAX_DLL and type(proof) is dict and proof.get('kind')=='matched-plugin-symbols' and
@@ -102,12 +109,13 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
     identity=retention.pe_identity(dll_bytes)
     require(identity==retention.pdb_identity(pdb_bytes)==proof.get('matchedIdentity'),'pair-identity-mismatch');budget.now()
     pe=struct.unpack_from('<I',dll_bytes,60)[0];image_size=struct.unpack_from('<I',dll_bytes,pe+24+56)[0]
-    require(type(rvas) is list and (len(rvas)==0 if qualification else 0<len(rvas)<=32) and all(type(r) is int and 4<=r<=image_size and r%4==0 for r in rvas),'return-rva-bounds')
+    require(type(rvas) is list and (len(rvas)==0 if qualification else 0<len(rvas)<=(64 if compartment else 32)) and all(type(r) is int and 4<=r<=image_size and r%4==0 for r in rvas),'return-rva-bounds')
     image_path=_path(path.with_name('vclplug_winlo.dll'),budget)
     require(retention.read_regular(image_path,retention.MAX_DLL,budget=budget)==dll_bytes,'image-bytes-mismatch');budget.now()
     receipt=dict(schemaVersion=1,kind='local-plugin-symbol-resolution',acceptance=False,runtimeCallerProved=False,functionAliasUniquenessProved=False,
                  identity=identity,dllSha256=retention.pin(dll_bytes)['sha256'],pdbSha256=retention.pin(pdb_bytes)['sha256'],
                  complete=False,cleanupComplete=False,frames=[],cleanupErrors=[],nativeCallsPreemptible=False)
+    if compartment:receipt['resolutionProfile']=2
     initialized=False;loaded=0;held=None;image_held=None;primary=None
     try:
         budget.now()
@@ -171,7 +179,7 @@ def _resolve(dll_bytes,pdb_path,proof,rvas,budget,runtime,qualification=False):
         if primary is not None:primary.resolutionReceipt=receipt
         elif not receipt['cleanupComplete']:
             error=ResolutionError('symbol-cleanup');error.resolutionReceipt=receipt;raise error
-    require(len(json.dumps(receipt))<=8192,'receipt-size')
+    require(len(json.dumps(receipt))<=(16384 if compartment else 8192),'receipt-size')
     return receipt
 
 

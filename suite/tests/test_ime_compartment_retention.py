@@ -174,7 +174,7 @@ class CompartmentRetentionTests(unittest.TestCase):
                 self.assertEqual(events.count('notice'),1);self.assertEqual(events.count('lease-close'),1)
                 self.assertEqual(len(seen),1)
 
-    def test_controller_original_selector_real_numeric_projection_and_resolution_roundtrip(self):
+    def controller_roundtrip(self, *, resolver_failure=False):
         from test_compartment_selection import CompartmentSelectionTests
         from test_ime_compartment_report import CompartmentReportTests,environment
         from test_ime_mode_receipts import ThreadModeReceiptTests
@@ -200,6 +200,7 @@ class CompartmentRetentionTests(unittest.TestCase):
         original=resolver.resolve_compartment_in_memory;calls=[]
         def resolved(report,pair,context):
             self.assertIs(report['tests'][0],record)
+            if resolver_failure:raise RuntimeError('SYNTHETIC PRIVATE worker failure')
             def file_worker(actual,*,mode,rvas):
                 calls.append((mode,rvas));return worker
             return original(report,pair,context,worker_run=file_worker)
@@ -208,6 +209,7 @@ class CompartmentRetentionTests(unittest.TestCase):
         proof=dict(identity,released=False)
         lease=NS(binding=lambda:dict(verified=True),receipt=proof,close=lambda:proof.update(released=True))
         with tempfile.TemporaryDirectory() as directory,patch.dict(ime.os.environ,env), \
+             patch.object(publisher,'_attempted',False), \
              patch.object(ime,'_open_plugin_proof',return_value=lease), \
              patch.object(ime.ascii_input,'prepare_observer',return_value=object()), \
              patch.object(ime,'case',side_effect=case), \
@@ -219,11 +221,23 @@ class CompartmentRetentionTests(unittest.TestCase):
             files=list(root.iterdir());self.assertEqual([p.name for p in files],['callback-numeric.json'])
             message=files[0].read_text()
             closed=publisher.decode_notice(message,'a'*40,7)
-            self.assertEqual(closed['statusCode'],3)
+            self.assertEqual(closed['statusCode'],1 if resolver_failure else 3)
             self.assertFalse(closed['runtimeCallerProved']);self.assertFalse(closed['acceptanceEligible'])
             self.assertNotIn('SYNTHETIC PRIVATE',message)
             self.assertEqual(stream.getvalue().count('::notice '),1)
-            self.assertEqual(calls,[('resolve',[100])])
+            self.assertEqual(calls,[] if resolver_failure else [('resolve',[100])])
+            self.assertTrue(proof['released'])
+            self.assertTrue(record['imeFailureCleanup']['engineExitConfirmed'])
+            self.assertEqual(closed['callback']['statusCode'],3)
+            if resolver_failure:
+                self.assertIsNone(closed['selection']['statusCode'])
+                self.assertIsNone(closed['resolution'])
+
+    def test_controller_original_selector_real_numeric_projection_and_resolution_roundtrip(self):
+        self.controller_roundtrip()
+
+    def test_resolver_failure_preserves_original_primary_cleanup_and_one_closed_receipt(self):
+        self.controller_roundtrip(resolver_failure=True)
 
 
 if __name__=='__main__':unittest.main()

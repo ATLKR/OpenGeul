@@ -159,7 +159,7 @@ def select_compartment(report):
     assert proof.get('verified') is True and proof.get('released') is True and not report.get('pluginFileOriginCleanupErrorType')
     case=report['tests'][0]
     assert case.get('case')=='ime-writer' and case.get('kind')=='native-ime-mode-diagnostic'
-    result=dict(status='inconclusive-case',evidenceKind='ime-compartment-callback',rvas=[],runtimeCallerProved=False,acceptanceEligible=False)
+    result=dict(status='inconclusive-case',evidenceKind='ime-compartment-callback',inputSignatureVerified=None,rvas=[],runtimeCallerProved=False,acceptanceEligible=False)
     if case.get('success') is True:
         result['status']='not-reproduced';return result
     if case.get('stage')!='physical-dubeolsik-composition':return result
@@ -167,7 +167,8 @@ def select_compartment(report):
             {'vk':0,'scan':34,'flags':8},{'vk':0,'scan':34,'flags':10}]
             or case.get('inputMethod')!='SendInput-scancode' or case.get('unicodeInputUsed') is not False
             or case.get('error')!='AssertionError: Native UI condition did not become true: False'):
-        return result
+        result['inputSignatureVerified']=False;return result
+    result['inputSignatureVerified']=True
     messages=case['imeMessageDiagnostics']
     if messages.get('status')!='complete':
         result['status']='inconclusive-messages';return result
@@ -202,7 +203,8 @@ def select_compartment(report):
     assert baseline['afterOpen']==baseline['afterConversion']==1
     assert caller['counterFrequency']>0
     assert 0<caller['baselineCounter']<=caller['counter']<=caller['pluginStarted']<=caller['pluginFinished']<=caller['finishedCounter']<caller['deadlineCounter']
-    frames=caller['frames'];assert 0<len(frames)==caller['frameCount']<16 and caller['frameCapReached'] is False
+    assert caller['schemaVersion']==2 and type(caller['schemaVersion']) is int and caller['frameCapacity']==64
+    frames=caller['frames'];assert 0<len(frames)==caller['frameCount']<64 and caller['frameCapReached'] is False
     assert caller['unknownFrames']==sum(f['moduleId']==0 for f in frames)
     for frame in frames:
         assert type(frame['moduleId']) is int and 0<=frame['moduleId']<=14 and type(frame['rva']) is int and 0<=frame['rva']<2**32
@@ -236,7 +238,7 @@ def resolve_compartment_in_memory(report,pair,context,*,worker_run=None):
     if worker_run is None:
         spec=importlib.util.spec_from_file_location('compartment_symbol_worker',Path(__file__).with_name('plugin_symbol_worker.py'))
         worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
-        worker_run=worker.run
+        worker_run=worker.run_compartment
     resolution=worker_run(pair,mode='resolve',rvas=selection['rvas'])
     assert join_resolution(selection,resolution), 'Original compartment symbols remain inconclusive'
     return selection,resolution
@@ -267,7 +269,8 @@ def main(argv=None):
             if report['selection']['status']!='selected':return 2
             rvas=report['selection']['rvas']
         if args.mode=='qualify':assert args.focus is None and args.notification is None and args.compartment is None
-        report['worker']=worker.run(args.pair,mode=args.mode,rvas=rvas)
+        execute=worker.run_compartment if args.compartment else worker.run
+        report['worker']=execute(args.pair,mode=args.mode,rvas=rvas)
         if args.mode=='resolve' and not join_resolution(report['selection'],report['worker']):
             report['classification']='inconclusive-symbols';return 2
         report['success']=True

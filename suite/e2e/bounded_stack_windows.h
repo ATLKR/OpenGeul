@@ -8,14 +8,15 @@ namespace opengeul_stack {
 static const wchar_t* const Modules[]={L"mergedlo.dll",L"vcllo.dll",L"sal3.dll",L"user32.dll",L"win32u.dll",L"ntdll.dll",L"kernel32.dll",L"kernelbase.dll",L"combase.dll",L"ole32.dll",L"imm32.dll",L"msctf.dll",L"imkrtip.dll",L"vclplug_winlo.dll"};
 template<class Row,class Clock,class Qualify>
 bool Capture(Row& row,Clock clock,Qualify qualify,bool pluginEnabled) {
-    static_assert(sizeof(row.frames)/sizeof(row.frames[0])==16);
-    void* addresses[16]{};
-    struct Clear {void** p;~Clear(){for(unsigned i=0;i<16;++i)*reinterpret_cast<void* volatile*>(p+i)=nullptr;}} clear{addresses};
+    constexpr auto capacity=sizeof(row.frames)/sizeof(row.frames[0]);
+    static_assert(capacity==16 || capacity==64);
+    void* addresses[capacity]{};
+    struct Clear {void** p;~Clear(){for(unsigned i=0;i<capacity;++i)*reinterpret_cast<void* volatile*>(p+i)=nullptr;}} clear{addresses};
     if(!clock())return false;
-    const auto count=CaptureStackBackTrace(0,16,addresses,nullptr);
+    const auto count=CaptureStackBackTrace(0,capacity,addresses,nullptr);
     if(!clock())return false;
-    if(count>16){row.flags|=16;return false;}
-    row.frameCount=count;row.frameCapReached=count==16?1:0;
+    if(count>capacity){row.flags|=16;return false;}
+    row.frameCount=count;row.frameCapReached=count==capacity?1:0;
     if(!count)row.flags|=2;
     HMODULE modules[14]{};
     for(unsigned i=0;i<14;++i) {

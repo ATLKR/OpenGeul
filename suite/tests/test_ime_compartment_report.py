@@ -50,6 +50,12 @@ class CompartmentReportTests(unittest.TestCase):
         command.update(nativeContext=dict(pid=31, tid=41, targetHwnd=51, rootHwnd=61),
             modeDeadlineCounter=90, modeCounterFrequency=10,
             requestedBudget=dict(counter=90, frequency=10))
+        origin = dict(success=True, nativeAck=1, status=0,
+            nativeContext=copy.deepcopy(command['nativeContext']), threadMode=dict(
+                status=0, cleanupStatus=0, variantClearHr=0, releaseCalls=1,
+                referencesAcquired=5, referencesReleased=5, beforeOpenHr=1,
+                beforeConversionHr=1, beforeOpenType=0, beforeConversionType=0,
+                openSetCalls=0, conversionSetCalls=0))
         binding = dict(sourceCommit=SHA, runId=str(CONTEXT['runId']), runAttempt='1',
             architecture='arm64', repository='ATLKR/OpenGeul',
             ref='refs/heads/work/opengeul-office-arm64',
@@ -63,7 +69,11 @@ class CompartmentReportTests(unittest.TestCase):
             stage='physical-dubeolsik-composition', editorTid=41, keyboardFocusHwnd=51,
             imeCompositionOrdinal=1, imeCompositionStartEventCount=0,
             numericFailure=dict(captured=1, exceptionCode=2, fileCode=4, line=123),
-            numericFailureFrames=[[4, 123]], imeCommands=[command],
+            numericFailureFrames=[[4, 123]], imeCommands=[command, origin],
+            imeMessageDiagnostics=dict(status='complete', capacity=128, observedCount=1,
+                events=[dict(message=0x100, origin=2, commandAck=3, pid=31, tid=41,
+                    hwnd=51, focusHwnd=51, counter=18, immContextPresent=1,
+                    immConversionSucceeded=1, immOpen=1, immConversion=1)]),
             imeCompartmentDiagnostics=caller,
             imeKeyboardSession=dict(expectedNative=native, engineHandleReleased=True),
             imeEngineRetirement=dict(admission=admission, success=False, close=dict(result=True)),
@@ -78,19 +88,45 @@ class CompartmentReportTests(unittest.TestCase):
             pluginFileOrigin=dict(verified=True, released=True, dllSha256='a' * 64,
                 matchedIdentity=dict(guid='01234567-89ab-cdef-0123-456789abcdef', age=1)))
         selection = dict(status='selected', evidenceKind='ime-compartment-callback',
+            inputSignatureVerified=True,
             rvas=[100], runtimeCallerProved=False, acceptanceEligible=False,
             pluginIdentity=dict(dllSha256='a' * 64,
                 identity=copy.deepcopy(report['pluginFileOrigin']['matchedIdentity'])))
         worker = dict(schemaVersion=1, kind='owned-plugin-symbol-worker', mode='resolve',
+            resolutionProfile=2,
             success=True, acceptanceEligible=False, runtimeCallerProved=False,
             temporaryFilesRemoved=True, resolution=dict(schemaVersion=1,
                 kind='local-plugin-symbol-resolution', complete=True, cleanupComplete=True,
+                resolutionProfile=2,
                 acceptance=False, runtimeCallerProved=False, functionAliasUniquenessProved=False,
                 nativeCallsPreemptible=False, dllSha256='a' * 64, pdbSha256='b' * 64,
                 identity=copy.deepcopy(selection['pluginIdentity']['identity']),
                 frames=[dict(returnRva=100, callRva=96, tag='frame-input-context',
                     functionRva=80, functionSize=32)]))
         return report, selection, worker
+
+    def test_schema_two_retains_typed_origin_and_first_key_without_payloads(self):
+        try:
+            value=self.m.project(*self.fixture(),context=CONTEXT)
+        except ValueError:
+            self.fail('The current schema2 native receipt must project with its typed eligibility')
+        self.assertEqual(value['schemaVersion'],2)
+        self.assertEqual(value['callback']['frameCapacity'],64)
+        eligibility=value['eligibility']
+        self.assertTrue(eligibility['inputSignatureVerified'])
+        self.assertEqual(eligibility['command1']['mode']['beforeOpenHr'],1)
+        self.assertEqual(eligibility['command1']['mode']['beforeOpenType'],0)
+        self.assertEqual(eligibility['firstKey'],dict(count=1,owned=True,contextPresent=1,
+            conversionSucceeded=1,open=1,native=1,counter=18))
+        self.roundtrip(value)
+
+    def test_schema_one_decoder_keeps_its_original_sixteen_frame_boundary(self):
+        value=self.m.project(*self.fixture(),context=CONTEXT)
+        value['schemaVersion']=1;value.pop('eligibility');value['callback'].pop('frameCapacity')
+        self.assertEqual(self.roundtrip(value),value)
+        value['callback'].update(frameCount=17,unknownFrames=16,frames=
+            [dict(moduleId=14,rva=100)]+[dict(moduleId=0,rva=0)]*16)
+        with self.assertRaises(ValueError):self.m.encode_notice(value)
 
     def roundtrip(self, value):
         message = self.m.encode_notice(value)
@@ -210,6 +246,7 @@ class CompartmentReportTests(unittest.TestCase):
         case = report['tests'][0]
         for key in ('keyTokens', 'scanCodeInputs', 'text', 'error', 'traceback', 'wparam', 'lparam', 'activeProfile'):
             case[key] = Poison()
+        case['imeMessageDiagnostics']['events'][0].update(wparam=Poison(),lparam=Poison(),text=Poison())
         case['imeCompartmentDiagnostics']['interpretation'] = Poison()
         case['imeKeyboardSession']['expectedNative']['expectedImage'] = Poison()
         case['imeFailureCleanup']['engineIdentity']['image'] = Poison()
@@ -249,6 +286,7 @@ class CompartmentReportTests(unittest.TestCase):
             lambda v:v['callback']['api'].update(managerHr=2**31),
             lambda v:v['callback']['lease'].update(claimed=True),
             lambda v:v['callback']['clock'].update(counter=True),
+            lambda v:v['callback'].update(frameCapacity=None),
             lambda v:v['callback']['identity'].update(creationTime=556),
             lambda v:v['callback']['frames'][1].update(rva=4),
             lambda v:v['callback']['frames'][0].update(rva=101),
@@ -271,13 +309,61 @@ class CompartmentReportTests(unittest.TestCase):
     def test_maximum_bounded_callback_and_frames(self):
         report, _, _ = self.fixture()
         callback = report['tests'][0]['imeCompartmentDiagnostics']
-        callback.update(status='inconclusive', frameCount=16, frameCapReached=True,
-            unknownFrames=15, frames=[dict(moduleId=14, rva=100)] + [dict(moduleId=0, rva=0)] * 15)
+        callback.update(status='inconclusive', frameCount=64, frameCapReached=True,
+            unknownFrames=63, frames=[dict(moduleId=14, rva=100)] + [dict(moduleId=0, rva=0)] * 63)
         report['tests'][0]['numericFailureFrames'] = [[4, 10_000_000]] * 8
         value = self.roundtrip(self.m.project(report, context=CONTEXT))
-        self.assertEqual(len(value['callback']['frames']), 16)
+        self.assertEqual(len(value['callback']['frames']), 64)
         callback['frames'].append(dict(moduleId=0, rva=0))
         with self.assertRaises(ValueError): self.m.project(report, context=CONTEXT)
+
+    def test_sixty_three_resolved_frames_fit_the_unchanged_public_byte_limit(self):
+        report, selection, worker=self.fixture()
+        rvas=[0xfffffffc-4*i for i in range(63)]
+        callback=report['tests'][0]['imeCompartmentDiagnostics']
+        callback.update(frameCount=63,frameCapReached=False,unknownFrames=0,
+            frames=[dict(moduleId=14,rva=r) for r in rvas])
+        selection['rvas']=rvas
+        worker['resolution']['frames']=[dict(returnRva=r,callRva=r-4,tag='frame-input-context',
+            functionRva=r-4,functionSize=4) for r in rvas]
+        value=self.roundtrip(self.m.project(report,selection,worker,context=CONTEXT))
+        self.assertEqual(len(value['resolution']['frames']),63)
+        self.assertLessEqual(len(self.m.encode_notice(value).encode()),32768)
+        self.assertEqual(value['selection']['rvas'],rvas)
+        callback.update(status='inconclusive',frameCount=64,frameCapReached=True,
+            frames=callback['frames']+[dict(moduleId=0,rva=0)],unknownFrames=1)
+        with self.assertRaises(ValueError):self.m.project(report,selection,worker,context=CONTEXT)
+
+    def test_selected_schema_two_requires_typed_origin_first_key_and_closed_profile(self):
+        changes=(
+            lambda r,s,w:r['tests'][0]['imeCommands'][1]['threadMode'].update(beforeOpenType=3),
+            lambda r,s,w:r['tests'][0]['imeCommands'][1]['threadMode'].update(openSetCalls=1),
+            lambda r,s,w:r['tests'][0]['imeMessageDiagnostics']['events'][0].update(immOpen=0),
+            lambda r,s,w:r['tests'][0]['imeMessageDiagnostics']['events'][0].update(counter=9),
+            lambda r,s,w:r['tests'][0]['imeMessageDiagnostics']['events'][0].update(counter=21),
+            lambda r,s,w:r['tests'][0]['imeMessageDiagnostics']['events'][0].update(hwnd=52),
+            lambda r,s,w:r['tests'][0]['imeMessageDiagnostics']['events'].append(
+                dict(r['tests'][0]['imeMessageDiagnostics']['events'][0])),
+            lambda r,s,w:s.update(inputSignatureVerified=False),
+            lambda r,s,w:w.update(resolutionProfile=1),
+            lambda r,s,w:w['resolution'].update(resolutionProfile=True),
+        )
+        for change in changes:
+            r,s,w=self.fixture();change(r,s,w)
+            with self.subTest(change=changes.index(change)),self.assertRaises(ValueError):
+                self.m.project(r,s,w,context=CONTEXT)
+
+    def test_unselected_eligibility_preserves_missing_and_measured_zero(self):
+        report,_,_=self.fixture()
+        case=report['tests'][0]
+        case['imeMessageDiagnostics']['events'][0]['immOpen']=0
+        value=self.roundtrip(self.m.project(report,context=CONTEXT))
+        self.assertEqual(value['eligibility']['firstKey']['open'],0)
+        case['imeCommands']=[];case.pop('imeMessageDiagnostics')
+        value=self.roundtrip(self.m.project(report,context=CONTEXT))
+        self.assertIsNone(value['eligibility']['command1'])
+        self.assertIsNone(value['eligibility']['firstKey'])
+        self.assertIsNone(value['eligibility']['inputSignatureVerified'])
 
     def test_emit_requires_exact_context_and_opt_in_and_attempts_only_once(self):
         report, selection, worker = self.fixture()

@@ -185,6 +185,69 @@ class ResolutionTests(unittest.TestCase):
         with patch.dict(os.environ,{'_NT_SYMBOL_PATH':'srv*private'}):
             with self.assertRaises(self.m.ResolutionError):self.run_resolve()
         self.assertEqual(self.runtime.calls,[])
+    def test_compartment_only_resolver_accepts33_to64_and_preserves_legacy32(self):
+        resolve=getattr(self.m,'resolve_compartment',None)
+        self.assertTrue(callable(resolve),'Compartment resolution needs a closed separate API')
+        with self.assertRaises(self.m.ResolutionError):self.run_resolve([0x1104]*33)
+        for count in (33,63,64):
+            rvas=[0x1104+(index%3)*4 for index in range(count)]
+            value=resolve(dll(),self.path,self.proof,rvas,self.budget,runtime=self.runtime)
+            self.assertEqual(value['resolutionProfile'],2)
+            self.assertEqual([row['returnRva'] for row in value['frames']],rvas)
+            self.assertTrue(value['complete'] and value['cleanupComplete'])
+            self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
+        for rvas in ([0x1104]*65,[True],[5],[]):
+            with self.subTest(rvas=rvas),self.assertRaises(self.m.ResolutionError):
+                resolve(dll(),self.path,self.proof,rvas,self.budget,runtime=self.runtime)
+        with self.assertRaises(TypeError):
+            resolve(dll(),self.path,self.proof,[0x1104],self.budget,runtime=self.runtime,max_frames=65)
+
+    def test_compartment64_worst_numeric_receipt_fits16k_and_legacy_stays8k(self):
+        import struct
+        resolve=getattr(self.m,'resolve_compartment',None)
+        self.assertTrue(callable(resolve))
+        image_size=0xfffff000;age=0xffffffff;data=bytearray(dll(age=age))
+        struct.pack_into('<I',data,0x98+56,image_size)
+        struct.pack_into('<I',data,0x188+8,image_size-0x1000)
+        data=bytes(data);self.dll_path.write_bytes(data)
+        pdb_bytes=pdb(age=age);self.path.write_bytes(pdb_bytes)
+        self.proof['files']['dll']=dict(name='vclplug_winlo.dll',**self.m.retention.pin(data))
+        self.proof['files']['pdb']=dict(name='vclplug_winlo.pdb',**self.m.retention.pin(pdb_bytes))
+        self.proof['matchedIdentity']=dict(guid=str(GUID),age=age);self.runtime.info={'age':age}
+        self.runtime.answer=dict(name='WinSalFrame::SetInputContext',
+            address=self.m.IMAGE_BASE+0x80000000,size=image_size-0x80000000)
+        rvas=[image_size-4-(index%3)*4 for index in range(64)]
+        value=resolve(data,self.path,self.proof,rvas,self.budget,runtime=self.runtime)
+        self.assertTrue(all(row['tag']=='frame-input-context-dispatch' for row in value['frames']))
+        self.max_compartment_receipt_bytes=len(json.dumps(value).encode())
+        self.assertGreater(self.max_compartment_receipt_bytes,8192)
+        self.assertLessEqual(self.max_compartment_receipt_bytes,16384)
+        legacy=self.m.resolve(data,self.path,self.proof,rvas[:32],self.budget,runtime=self.runtime)
+        self.assertNotIn('resolutionProfile',legacy)
+        self.assertLessEqual(len(json.dumps(legacy).encode()),8192)
+        self.assertNotIn(str(self.path),json.dumps(value))
+        for name in self.m.TAGS:self.assertNotIn(name,json.dumps(value))
+
+    def test_compartment_receipt_bound_and_original_deadline_identity_cleanup_remain_strict(self):
+        resolve=getattr(self.m,'resolve_compartment',None);self.assertTrue(callable(resolve))
+        original=json.dumps
+        for function,size,accepted in ((self.m.resolve,9000,False),(resolve,9000,True),(resolve,16385,False)):
+            with self.subTest(size=size,accepted=accepted),patch.object(self.m.json,'dumps',
+                    side_effect=lambda value,n=size:original(value).ljust(n)):
+                if accepted:function(dll(),self.path,self.proof,[0x1104],self.budget,runtime=self.runtime)
+                else:
+                    with self.assertRaisesRegex(self.m.ResolutionError,'receipt-size'):
+                        function(dll(),self.path,self.proof,[0x1104],self.budget,runtime=self.runtime)
+            self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
+        self.runtime.info={'age':3}
+        with self.assertRaises(self.m.ModuleIdentityError):
+            resolve(dll(),self.path,self.proof,[0x1104]*64,self.budget,runtime=self.runtime)
+        self.runtime.info={};self.runtime.calls=[]
+        self.runtime.on_query=lambda:setattr(self.budget,'time',27.)
+        with self.assertRaises(TimeoutError):
+            resolve(dll(),self.path,self.proof,[0x1104]*64,self.budget,runtime=self.runtime)
+        self.assertEqual(sum(isinstance(row,tuple) for row in self.runtime.calls),1)
+        self.assertEqual(self.runtime.calls[-4:],['unload','cleanup','release','release'])
     def test_search_directory_rejects_unrelated_files(self):
         (self.path.parent/'other.pdb').write_bytes(b'not eligible')
         with self.assertRaises(self.m.ResolutionError):self.run_resolve()

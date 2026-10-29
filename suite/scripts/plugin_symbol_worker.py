@@ -104,9 +104,19 @@ def stages(rows):
 
 
 def run(pair, *, mode, rvas=None, runtime=None):
+    return _run(pair,mode=mode,rvas=rvas,runtime=runtime,profile=1)
+
+
+def run_compartment(pair, *, mode='resolve', rvas=None, runtime=None):
+    assert mode=='resolve', 'Compartment symbol profile only resolves existing RVAs'
+    return _run(pair,mode=mode,rvas=rvas,runtime=runtime,profile=2)
+
+
+def _run(pair, *, mode, rvas, runtime, profile):
     budget=shared._Budget();budget.now()
     assert mode in ('qualify','resolve')
-    assert (rvas is None if mode=='qualify' else type(rvas) is list and 0<len(rvas)<=32 and all(type(v) is int and 4<=v<2**32 and v%4==0 for v in rvas))
+    assert type(profile) is int and profile in (1,2) and (profile==1 or mode=='resolve')
+    assert (rvas is None if mode=='qualify' else type(rvas) is list and 0<len(rvas)<=(64 if profile==2 else 32) and all(type(v) is int and 4<=v<2**32 and v%4==0 for v in rvas))
     shared.native_arch.validate_native_architecture(shared.native_arch.observe_native_architecture(),'arm64');budget.now()
     pair=Path(os.path.abspath(pair));assert not str(pair).startswith(('\\\\','//')),'Local symbol directory required'
     FileApi(budget).preflight(str(pair));budget.now()
@@ -114,9 +124,10 @@ def run(pair, *, mode, rvas=None, runtime=None):
     folder=Path(tempfile.mkdtemp(prefix='opengeul-plugin-symbol-')).resolve()
     receipt=dict(schemaVersion=1,kind='owned-plugin-symbol-worker',mode=mode,success=False,
         acceptanceEligible=False,runtimeCallerProved=False,temporaryFilesRemoved=False,stages=[])
+    if profile==2:receipt['resolutionProfile']=2
     internal={'stages':[]};primary=None
     try:
-        request=dict(mode=mode,pair=str(pair),rvas=rvas,startedAt=budget.started,
+        request=dict(mode=mode,resolutionProfile=profile,pair=str(pair),rvas=rvas,startedAt=budget.started,
             workDeadline=budget.work_deadline,deadline=budget.deadline)
         (folder/'request.json').write_text(json.dumps(request,allow_nan=False),encoding='utf-8');budget.now()
         script=folder/'compile.cmd'
@@ -126,6 +137,8 @@ def run(pair, *, mode, rvas=None, runtime=None):
         result=read_json(folder/'result.json',budget)
         assert result.get('kind')=='local-plugin-symbol-resolution' and result.get('complete') is True and result.get('cleanupComplete') is True
         assert result.get('acceptance') is False and result.get('runtimeCallerProved') is False
+        if profile==2:assert type(result.get('resolutionProfile')) is int and result['resolutionProfile']==2
+        else:assert 'resolutionProfile' not in result
         if mode=='qualify':assert result.get('qualification',{}).get('roundTripMatched') is True
         # Child writes the adapter's deliberately path/name-free closed receipt.
         receipt['resolution']=result;receipt.update(success=True,finishedAt=budget.now())
@@ -151,6 +164,8 @@ def child(request_path):
     assert 0<len(raw)<=65536
     request=json.loads(raw);budget=inherited_budget(request)
     assert request['mode'] in ('qualify','resolve')
+    profile=request.get('resolutionProfile')
+    assert type(profile) is int and profile in (1,2) and (profile==1 or request['mode']=='resolve')
     spec=importlib.util.spec_from_file_location('owned_plugin_resolution',Path(__file__).with_name('plugin_symbol_resolution.py'))
     adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter);budget.now()
     pair=adapter._path_syntax(request['pair']);runtime=adapter.NativeRuntime(budget)
@@ -158,6 +173,7 @@ def child(request_path):
     proof=json.loads(adapter.retention.read_regular(pair/'receipt.json',65536,budget=budget));budget.now()
     dll=adapter.retention.read_regular(pair/'vclplug_winlo.dll',adapter.retention.MAX_DLL,budget=budget)
     if request['mode']=='qualify':result=adapter.qualify(dll,pair/'vclplug_winlo.pdb',proof,budget,runtime=runtime)
+    elif profile==2:result=adapter.resolve_compartment(dll,pair/'vclplug_winlo.pdb',proof,request['rvas'],budget,runtime=runtime)
     else:result=adapter.resolve(dll,pair/'vclplug_winlo.pdb',proof,request['rvas'],budget,runtime=runtime)
     budget.now();raw=json.dumps(result,allow_nan=False).encode();assert len(raw)<=65536
     with Path(request_path).with_name('result.json').open('xb') as stream:stream.write(raw)
