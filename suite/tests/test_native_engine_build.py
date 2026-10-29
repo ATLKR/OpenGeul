@@ -573,18 +573,32 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
         self.assertIn('before timeout',(self.root/'running.stdout.log').read_text())
 
     def test_shared_build_budget_is_not_restarted_for_later_commands(self):
-        body=f"$script:NativeEngineBuildBudget=New-NativeBuildBudget -MaximumMinutes (1.0/60); "
-        for name,delay in (('first',.25),('second',3),('third',0)):
-            body+=f"try {{ Invoke-LoggedCommand {quote(os.sys.executable)} @('-c','import time;time.sleep({delay})') {quote(self.root)} {quote(self.root/name)}|Out-Null }} catch {{ }}; "
+        body="$script:NativeEngineBuildBudget=New-NativeBuildBudget -MaximumMinutes (5.0/60); "
+        body+="$originalBudget=$script:NativeEngineBuildBudget; $originalClock=$originalBudget.clock; $originalDeadline=$originalBudget.record.deadlineUtc; "
+        body+=f"Invoke-LoggedCommand {quote(os.sys.executable)} @('-c','pass') {quote(self.root)} {quote(self.root/'first')}|Out-Null; "
+        # Consume the original shared deadline between commands. Whether a later
+        # child would start before a subsecond deadline depends on host startup.
+        body+="while($originalClock.Elapsed.TotalMilliseconds -lt $originalBudget.record.timeoutMilliseconds){Start-Sleep -Milliseconds 10}; "
+        for name in ('second','third'):
+            body+=f"try {{ Invoke-LoggedCommand {quote(os.sys.executable)} @('-c','pass') {quote(self.root)} {quote(self.root/name)}|Out-Null }} catch {{ }}; "
+        body+="$state=[ordered]@{sameBudget=[Object]::ReferenceEquals($originalBudget,$script:NativeEngineBuildBudget); sameClock=[Object]::ReferenceEquals($originalClock,$script:NativeEngineBuildBudget.clock); sameDeadline=$originalDeadline -ceq $script:NativeEngineBuildBudget.record.deadlineUtc}; "
+        body+=f"Write-BuildJson {quote(self.root/'budget-state.json')} $state"
         self.ps(body)
         receipts=[json.loads((self.root/(name+'.command.json')).read_text()) for name in ('first','second','third')]
         self.assertTrue(receipts[0]['passed'])
-        self.assertFalse(receipts[1]['passed'])
-        self.assertTrue(receipts[1]['forcedTermination'])
-        self.assertLess(receipts[1]['effectiveTimeoutMilliseconds'],800)
-        self.assertFalse(receipts[2]['passed'])
-        self.assertNotIn('pid',receipts[2],'Expired build budget must reject before launch')
-        self.assertIn('shared build deadline',receipts[2]['error'])
+        self.assertEqual(0,receipts[0]['exitCode'])
+        self.assertTrue(receipts[0]['pipeDrainComplete'])
+        self.assertTrue(receipts[0]['directProcessDeathVerified'])
+        self.assertFalse(receipts[0]['forcedTermination'])
+        for receipt in receipts[1:]:
+            self.assertFalse(receipt['passed'])
+            self.assertFalse(receipt['forcedTermination'])
+            self.assertFalse(receipt['directProcessDeathVerified'])
+            self.assertNotIn('pid',receipt,'Expired build budget must reject before launch')
+            self.assertNotIn('effectiveTimeoutMilliseconds',receipt)
+            self.assertIn('shared build deadline',receipt['error'])
+        state=json.loads((self.root/'budget-state.json').read_text())
+        self.assertEqual(dict(sameBudget=True,sameClock=True,sameDeadline=True),state)
 
     def test_build_deadline_requires_utc_roundtrip_and_cannot_extend_local_maximum(self):
         self.ps("$budget=New-NativeBuildBudget -DeadlineUtc ([DateTime]::UtcNow.AddHours(10).ToString('o')); if($budget.record.timeoutMilliseconds -gt 330*60000){throw 'Extended local maximum'}")
