@@ -889,17 +889,23 @@ jobs:
             for manifest in manifests:
                 progress['stage'] = progress['prefix'] + '-archive-members' if progress['prefix'] is not None else 'verify-native-archives'
                 record = json.loads(manifest.read_text(encoding='utf-8'))
+                progress['stage'] = progress['prefix'] + '-archive-complete' if progress['prefix'] is not None else 'verify-native-archives'
                 assert record.get('schemaVersion') == 1 and record.get('archiveComplete') is True, 'Incomplete native archive: ' + str(manifest)
+                progress['stage'] = progress['prefix'] + '-archive-list' if progress['prefix'] is not None else 'verify-native-archives'
                 assert isinstance(record.get('files'), list), 'Native archive file list is missing'
                 seen = set()
                 for item in record['files']:
+                    progress['stage'] = progress['prefix'] + '-archive-path' if progress['prefix'] is not None else 'verify-native-archives'
                     name = item['path']
                     relative = PurePosixPath(name)
                     assert name and '\\' not in name and ':' not in name and not relative.is_absolute() and '..' not in relative.parts and relative.as_posix() == name and name not in seen, 'Unsafe or duplicate native archive member'
                     seen.add(name)
                     path = manifest.parent.joinpath(*relative.parts)
+                    progress['stage'] = progress['prefix'] + '-archive-location' if progress['prefix'] is not None else 'verify-native-archives'
                     assert path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve()), 'Native archive member is missing or escaped its profile'
+                    progress['stage'] = progress['prefix'] + '-archive-bytes' if progress['prefix'] is not None else 'verify-native-archives'
                     assert type(item['bytes']) is int and path.stat().st_size == item['bytes'], 'Native archive file size differs'
+                    progress['stage'] = progress['prefix'] + '-archive-hash' if progress['prefix'] is not None else 'verify-native-archives'
                     assert re.fullmatch('[a-f0-9]{64}', item['sha256']) and hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256'], 'Native archive file hash differs'
                     files += 1
                 # These five diagnostics roots are product UnoBackend archives.

@@ -32,11 +32,14 @@ SOURCE_FILES = {name: index for index, name in enumerate((
     'capture_readiness.py', 'ascii_editor_input.py', 'impress_focused_view.py',
     'native31_desktop_control.py', 'native31_privacy_prepare.py', 'native31_suite_prepare.py',
     'runner-ready.py', 'policy.py', 'native_cleanup_receipt.py', 'calc_save_smoke.py',
-    'editor_click_readiness.py', 'suite_window_activation.py'), 1)}
+    'editor_click_readiness.py', 'suite_window_activation.py',
+    'matched_plugin_diagnostic.py', 'plugin_symbol_worker.py'), 1)}
 _ROOT_SOURCE_FILES = {'native31_desktop_control.py':'e2e/native31_desktop_control.py',
     'native31_privacy_prepare.py':'e2e/native31_privacy_prepare.py',
     'native31_suite_prepare.py':'e2e/native31_suite_prepare.py',
-    'runner-ready.py':'e2e/runner-ready.py', 'policy.py':'ci/policy.py'}
+    'runner-ready.py':'e2e/runner-ready.py', 'policy.py':'ci/policy.py',
+    'matched_plugin_diagnostic.py':'suite/scripts/matched_plugin_diagnostic.py',
+    'plugin_symbol_worker.py':'suite/scripts/plugin_symbol_worker.py'}
 _OWNED_FILES = {os.path.normcase(str(Path(__file__).with_name(name))): code
     for name, code in SOURCE_FILES.items() if name not in _ROOT_SOURCE_FILES}
 _OWNED_FILES.update({os.path.normcase(str(Path(__file__).resolve().parents[2] / relative)): SOURCE_FILES[name]
@@ -91,7 +94,12 @@ _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fix
     'writer-os-owner', 'writer-os-abi', 'writer-os-root', 'writer-os-focus',
     'writer-os-document-role', 'writer-os-focus-state', 'writer-os-ia2',
     'writer-os-text', 'writer-os-parent', 'writer-os-cleanup', 'writer-os-complete',
-    'writer-os-protocol', 'writer-os-timeout')
+    'writer-os-protocol', 'writer-os-timeout',
+    *(f'native-integrity-{root}-{gate}'
+      for root in ('shared','calc-save','calc-close-save','calc-close-discard','calc-close-cancel')
+      for gate in ('archive-complete','archive-list','archive-path','archive-location',
+                   'archive-bytes','archive-hash')),
+    'ime-compartment-select', 'ime-compartment-worker', 'ime-compartment-join')
 STAGES = {name:index for index,name in enumerate(_STAGES, 1)}
 
 # Each bit means that the source field was present and had the declared type.

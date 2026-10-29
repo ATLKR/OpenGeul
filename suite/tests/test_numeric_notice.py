@@ -142,7 +142,7 @@ class NumericNoticeTests(unittest.TestCase):
             'f7314c9f8ca7d6a96b820dfb915ce9e7b404c9a8b9c954fa2e49dad4467ce887')
         stages = tuple(dict.fromkeys(writer.STAGES.values()))
         self.assertEqual(len(stages), 13)
-        self.assertEqual(tuple(self.n.STAGES.items())[130:],
+        self.assertEqual(tuple(self.n.STAGES.items())[130:143],
             tuple(zip(stages, range(131, 144))))
         for stage in stages:
             with self.subTest(stage=stage):
@@ -167,8 +167,31 @@ class NumericNoticeTests(unittest.TestCase):
             'ascii_editor_input.py','impress_focused_view.py','native31_desktop_control.py','native31_privacy_prepare.py',
             'native31_suite_prepare.py','runner-ready.py','policy.py','native_cleanup_receipt.py','calc_save_smoke.py')
         self.assertEqual(tuple(self.n.SOURCE_FILES.items())[:33],tuple(zip(previous,range(1,34))))
-        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[33:],
+        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[33:35],
             (('editor_click_readiness.py',34),('suite_window_activation.py',35)))
+
+    def test_resolution_stages_and_owned_sources_append_without_new_wire_fields(self):
+        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[35:],
+            (('matched_plugin_diagnostic.py',36),('plugin_symbol_worker.py',37)))
+        stages=('ime-compartment-select','ime-compartment-worker','ime-compartment-join')
+        self.assertEqual(tuple(self.n.STAGES.items())[-3:],tuple(zip(stages,range(174,177))))
+        for name in ('matched_plugin_diagnostic.py','plugin_symbol_worker.py'):
+            source=Path(__file__).resolve().parents[1]/'scripts'/name
+            scope={}
+            exec(compile('def fail():\n raise OSError("SYNTHETIC PRIVATE C:/private/input")\n',str(source),'exec'),scope)
+            try:scope['fail']()
+            except OSError as primary:
+                failure=self.n.capture_failure_code(primary);frames=self.n.capture_failure_frames(primary)
+            self.assertEqual(failure['fileCode'],self.n.SOURCE_FILES[name])
+            for stage in stages:
+                stream=io.StringIO()
+                emitter=self.n.NoticeEmitter(environ=self.env|{'OPENGEUL_SUITE_NOTICE_SCOPE':'3'},stream=stream)
+                self.assertTrue(emitter.emit_case_notice('ime-writer',dict(success=False,stage=stage,
+                    numericFailure=failure,numericFailureFrames=frames)))
+                notice=self.decode(stream.getvalue().strip().split('::',2)[2],expected_scope=3)
+                self.assertEqual((notice['schemaVersion'],notice['caseCode'],notice['stageCode'],notice['fileCode']),
+                    (2,17,self.n.STAGES[stage],self.n.SOURCE_FILES[name]))
+                self.assertNotIn('PRIVATE',stream.getvalue());self.assertNotIn('C:/',stream.getvalue())
 
     def test_actual_click_helper_leaf_frames_keep_the_original_exception_and_native_calls(self):
         import test_editor_click_readiness as clicktests
@@ -196,8 +219,9 @@ class NumericNoticeTests(unittest.TestCase):
             self.assertIs(primary.__traceback__,original[0]);self.assertEqual(primary.args,original[1])
         else:self.fail('Original required-value failure was accepted')
 
-    def test_new_helper_foreign_basenames_and_source_36_are_rejected(self):
-        for name in ('editor_click_readiness.py','suite_window_activation.py'):
+    def test_new_helper_foreign_basenames_and_unknown_sources_are_rejected(self):
+        for name in ('editor_click_readiness.py','suite_window_activation.py',
+                     'matched_plugin_diagnostic.py','plugin_symbol_worker.py'):
             scope={}
             exec(compile('def fail():\n raise AssertionError("synthetic")\n','/foreign/'+name,'exec'),scope)
             try:scope['fail']()
@@ -209,7 +233,7 @@ class NumericNoticeTests(unittest.TestCase):
         self.assertTrue(self.emitter.emit_case_notice('impress',record))
         value=self.decode(self.messages()[0])
         self.assertEqual((value['schemaVersion'],value['fileCode'],value['ownedFrames'][-1]),(2,35,[35,376]))
-        for change in ({'fileCode':36},{'ownedFrames':[[36,376]]}):
+        for change in ({'fileCode':38},{'ownedFrames':[[38,376]]}):
             with self.subTest(change=change),self.assertRaises(ValueError):self.decode(json.dumps(value|change))
 
     def test_uno_runtime_exception_code_is_append_only_without_importing_uno(self):

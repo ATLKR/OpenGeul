@@ -9,7 +9,7 @@ import sys
 import tempfile
 from types import SimpleNamespace as NS
 import unittest
-from contextlib import redirect_stdout
+from contextlib import nullcontext,redirect_stdout
 from unittest.mock import patch
 
 sys.path[:0]=[str(Path(__file__).resolve().parent),str(Path(__file__).resolve().parents[1]/'e2e')]
@@ -142,7 +142,7 @@ class CompartmentRetentionTests(unittest.TestCase):
                     k['compartment_sink'](record)
                     if failure=='case':raise primary
                     return record
-                def resolve(report,pair,actual):
+                def resolve(report,pair,actual,*,progress=None):
                     events.append('resolve');self.assertEqual(actual,binding)
                     if failure!='prepare':self.assertIs(report['tests'][0],record)
                     self.assertEqual(events.count('case'),int(failure!='prepare'))
@@ -182,7 +182,7 @@ class CompartmentRetentionTests(unittest.TestCase):
                 self.assertEqual(events.count('guard-notice'),int(failure!='prepare'))
                 self.assertEqual(len(seen),1)
 
-    def controller_roundtrip(self, *, resolver_failure=False):
+    def controller_roundtrip(self, *, resolver_failure=False,resolution_phase=None,notice_failure=False,notice_scope='3'):
         from test_compartment_selection import CompartmentSelectionTests
         from test_ime_compartment_report import CompartmentReportTests,environment
         from test_ime_mode_receipts import ThreadModeReceiptTests
@@ -194,6 +194,7 @@ class CompartmentRetentionTests(unittest.TestCase):
         raw['runBinding'].update(ref='refs/heads/work/opengeul-office-arm64',event='push',
             workflowRef='ATLKR/OpenGeul/.github/workflows/office-suite.yml@refs/heads/work/opengeul-office-arm64')
         record=raw['tests'][0];record['imeEngineRetirement']['close']=dict(result=True)
+        if resolution_phase=='select':record['imeFailureCleanup']['engineExitConfirmed']=False
         # The selector's smaller protocol fixture predates the setter's client
         # interface; this end-to-end fixture must carry the actual typed ABI.
         mode=ThreadModeReceiptTests().receipt(3)
@@ -205,23 +206,33 @@ class CompartmentRetentionTests(unittest.TestCase):
         record['traceback']='SYNTHETIC PRIVATE INPUT AND TRACEBACK'
         identity=raw['pluginFileOrigin'];worker['resolution'].update(dllSha256=identity['dllSha256'],identity=identity['matchedIdentity'])
         env=environment();env.update(GITHUB_SHA='a'*40,GITHUB_WORKFLOW_SHA='a'*40,GITHUB_RUN_ID='7')
+        if resolution_phase is not None:
+            env.update(OPENGEUL_SUITE_NUMERIC_NOTICE='1',OPENGEUL_SUITE_NOTICE_SCOPE=notice_scope)
+        emitter=ime.numeric_notice.NoticeEmitter(environ=env)
         original=resolver.resolve_compartment_in_memory;calls=[]
-        def resolved(report,pair,context):
+        def resolved(report,pair,context,*,progress=None):
             self.assertIs(report['tests'][0],record)
             if resolver_failure:raise RuntimeError('SYNTHETIC PRIVATE worker failure')
             def file_worker(actual,*,mode,rvas):
-                calls.append((mode,rvas));return worker
-            return original(report,pair,context,worker_run=file_worker)
+                calls.append((mode,list(rvas)))
+                if resolution_phase=='worker':raise OSError('SYNTHETIC PRIVATE worker failure')
+                if resolution_phase=='join':
+                    worker['resolution']['frames'][0]=dict(returnRva=100,callRva=96,tag='unresolved')
+                return worker
+            return original(report,pair,context,worker_run=file_worker,progress=progress)
         primary=AssertionError('Native UI condition did not become true: False')
         def case(*args,**kw):kw['compartment_sink'](record);raise primary
         proof=dict(identity,released=False)
         lease=NS(binding=lambda:dict(verified=True),receipt=proof,close=lambda:proof.update(released=True))
         with tempfile.TemporaryDirectory() as directory,patch.dict(ime.os.environ,env), \
+             patch.object(ime.numeric_notice,'_EMITTER',emitter), \
              patch.object(publisher,'_attempted',False), \
              patch.object(ime,'_open_plugin_proof',return_value=lease), \
              patch.object(ime.ascii_input,'prepare_observer',return_value=object()), \
              patch.object(ime,'case',side_effect=case), \
-             patch.object(resolver,'resolve_compartment_in_memory',side_effect=resolved),redirect_stdout(io.StringIO()) as stream:
+             patch.object(resolver,'resolve_compartment_in_memory',side_effect=resolved), \
+             (patch.object(ime.numeric_notice,'emit_case_notice',side_effect=RuntimeError('SYNTHETIC PRIVATE notice failure'))
+                if notice_failure else nullcontext()) as failed_notice,redirect_stdout(io.StringIO()) as stream:
             root=Path(directory)
             with self.assertRaises(AssertionError) as raised:
                 ime.run_mode_diagnostic(root,root,root,{},'arm64',raw['runBinding'],root/'pair/receipt.json',capture_compartment=True)
@@ -230,27 +241,72 @@ class CompartmentRetentionTests(unittest.TestCase):
             message=files[0].read_text()
             closed=publisher.decode_notice(message,'a'*40,7)
             self.assertEqual(json.loads(message)['schemaVersion'],2)
-            self.assertEqual(closed['statusCode'],1 if resolver_failure else 3)
+            expected_status=2 if resolution_phase in ('worker','join') else (1 if resolver_failure or resolution_phase=='select' else 3)
+            self.assertEqual(closed['statusCode'],expected_status)
             self.assertFalse(closed['runtimeCallerProved']);self.assertFalse(closed['acceptanceEligible'])
             self.assertNotIn('SYNTHETIC PRIVATE',message)
-            self.assertEqual(stream.getvalue().count('::notice '),1)
-            annotation=stream.getvalue().strip().split('::',2)[2]
+            lines=stream.getvalue().splitlines()
+            callbacks=[line for line in lines if line.startswith('::notice title='+publisher.TITLE+'::')]
+            failures=[line for line in lines if line.startswith('::notice title='+ime.numeric_notice.CASE_TITLE+'::')]
+            self.assertEqual(len(callbacks),1)
+            self.assertEqual(len(failures),int(resolution_phase is not None and not notice_failure and notice_scope=='3'))
+            self.assertEqual(len(lines),len(callbacks)+len(failures))
+            self.assertNotIn('SYNTHETIC PRIVATE',stream.getvalue())
+            annotation=callbacks[0].split('::',2)[2]
             self.assertLessEqual(len(annotation.encode('utf-8')),4096)
             self.assertEqual(json.loads(annotation)['schemaVersion'],3)
             self.assertEqual(publisher.decode_notice(annotation,'a'*40,7),closed)
-            self.assertEqual(calls,[] if resolver_failure else [('resolve',[100])])
+            self.assertEqual(calls,[] if resolver_failure or resolution_phase=='select' else [('resolve',[100])])
             self.assertTrue(proof['released'])
-            self.assertTrue(record['imeFailureCleanup']['engineExitConfirmed'])
+            self.assertEqual(record['imeFailureCleanup']['engineExitConfirmed'],resolution_phase!='select')
             self.assertEqual(closed['callback']['statusCode'],3)
-            if resolver_failure:
+            if resolver_failure or resolution_phase=='select':
                 self.assertIsNone(closed['selection']['statusCode'])
                 self.assertIsNone(closed['resolution'])
+            elif resolution_phase in ('worker','join'):
+                self.assertEqual(closed['selection']['statusCode'],6)
+                self.assertEqual(closed['selection']['rvas'],[100])
+                self.assertTrue(closed['eligibility']['inputSignatureVerified'])
+                if resolution_phase=='worker':
+                    self.assertIsNone(closed['resolution'],'An unvalidated partial worker must not enter kind4')
+                else:
+                    self.assertIsNotNone(closed['resolution'],'A fully joined unresolved worker must remain distinguishable')
+                    checked=closed['resolution']
+                    self.assertTrue(all(checked[k] is True for k in ('workerSuccess','complete','cleanupComplete','temporaryFilesRemoved')))
+                    self.assertEqual(checked['pdbSha256'],worker['resolution']['pdbSha256'])
+                    self.assertEqual(checked['frames'],[dict(returnRva=100,callRva=96,tagCode=1,
+                        functionRva=None,functionSize=None)])
+            if failures:
+                raw_failure=failures[0].split('::',2)[2]
+                self.assertLessEqual(len(raw_failure.encode('utf-8')),2048)
+                failure=ime.numeric_notice.decode_notice(raw_failure,'a'*40,7,expected_architecture=0xaa64,expected_scope=3)
+                self.assertEqual(failure['kind'],1)
+                self.assertEqual(failure['caseCode'],ime.numeric_notice.CASES['ime-writer'][0])
+                self.assertEqual(failure['stageCode'],ime.numeric_notice.STAGES['ime-compartment-'+resolution_phase])
+                self.assertEqual(failure['fileCode'],ime.numeric_notice.SOURCE_FILES['matched_plugin_diagnostic.py'])
+                self.assertEqual(failure['ownedFrames'][-1],[failure['fileCode'],failure['line']])
+                location=Path(resolver.__file__).read_text().splitlines()[failure['line']-1]
+                self.assertIn({'worker':'resolution=worker_run','join':'Original compartment symbols remain inconclusive',
+                    'select':"cleanup['engineExitConfirmed']"}[resolution_phase],location)
+                self.assertEqual(failure['exceptionCode'],ime.numeric_notice.EXCEPTIONS[OSError if resolution_phase=='worker' else AssertionError])
+                self.assertEqual((failure['sequence'],failure['remainingBudget']),(1,7))
+            if notice_failure:self.assertEqual(failed_notice.call_count,1)
 
     def test_controller_original_selector_real_numeric_projection_and_resolution_roundtrip(self):
         self.controller_roundtrip()
 
     def test_resolver_failure_preserves_original_primary_cleanup_and_one_closed_receipt(self):
         self.controller_roundtrip(resolver_failure=True)
+
+    def test_original_selector_worker_and_join_failures_keep_closed_phase_notices(self):
+        for phase in ('select','worker','join'):
+            with self.subTest(phase=phase):self.controller_roundtrip(resolution_phase=phase)
+
+    def test_optional_resolution_notice_failure_keeps_primary_and_kind4_receipt(self):
+        self.controller_roundtrip(resolution_phase='worker',notice_failure=True)
+
+    def test_resolution_notice_cannot_cross_original_ime_scope(self):
+        self.controller_roundtrip(resolution_phase='worker',notice_scope='4')
 
 
 if __name__=='__main__':unittest.main()

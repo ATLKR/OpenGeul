@@ -230,17 +230,25 @@ def join_resolution(selection,worker):
     return all(f['tag']!='unresolved' for f in frames)
 
 
-def resolve_compartment_in_memory(report,pair,context,*,worker_run=None):
+def resolve_compartment_in_memory(report,pair,context,*,worker_run=None,progress=None):
     """Keep the original selector and file-only worker without a raw trace file."""
+    if progress is not None:
+        assert type(progress) is dict, 'Closed resolution progress required'
+        progress.clear();progress['stage']='ime-compartment-select'
     assert type(context) is dict and report['runBinding']==context, 'Trace belongs to another run'
     selection=select_compartment(report)
+    if progress is not None:progress['selection']=selection
     if selection['status']!='selected':return selection,None
+    if progress is not None:progress['stage']='ime-compartment-worker'
     if worker_run is None:
         spec=importlib.util.spec_from_file_location('compartment_symbol_worker',Path(__file__).with_name('plugin_symbol_worker.py'))
         worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
         worker_run=worker.run_compartment
     resolution=worker_run(pair,mode='resolve',rvas=selection['rvas'])
-    assert join_resolution(selection,resolution), 'Original compartment symbols remain inconclusive'
+    if progress is not None:progress['stage']='ime-compartment-join'
+    joined=join_resolution(selection,resolution)
+    if progress is not None:progress['resolution']=resolution
+    assert joined, 'Original compartment symbols remain inconclusive'
     return selection,resolution
 
 

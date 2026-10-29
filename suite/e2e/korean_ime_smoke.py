@@ -2128,6 +2128,7 @@ def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,bind
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
     from suite.scripts.matched_plugin_diagnostic import resolve_compartment_in_memory
     lease=None;primary=None;cleanup_error=None;results=[];selection=resolution=None
+    resolution_progress={}
     def retain(record):
         assert not results and type(record) is dict, 'Compartment case sink cannot repeat'
         results.append(record)
@@ -2152,10 +2153,22 @@ def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,bind
     if cleanup_error:report['pluginFileOriginCleanupErrorType']=cleanup_error
     if primary is not None:report['preparationOrCaseErrorType']=type(primary).__name__
     try:
-        selection,resolution=resolve_compartment_in_memory(report,proof_path.parent,binding)
+        selection,resolution=resolve_compartment_in_memory(report,proof_path.parent,binding,
+            progress=resolution_progress)
     except BaseException as exc:
+        selection=resolution_progress.get('selection')
+        resolution=resolution_progress.get('resolution')
         report['resolutionErrorType']=type(exc).__name__
         if primary is None and cleanup_error is None:primary=exc
+        try:
+            if (numeric_notice.notices_enabled() and os.environ.get('OPENGEUL_SUITE_NOTICE_SCOPE')
+                    ==str(numeric_notice.SCOPES['korean-ime'])):
+                numeric_notice.emit_case_notice('ime-writer',dict(case='ime-writer',module='writer',
+                    success=False,stage=resolution_progress.get('stage','ime-compartment-select'),
+                    numericFailure=numeric_notice.capture_failure_code(exc),
+                    numericFailureFrames=numeric_notice.capture_failure_frames(exc)))
+        except BaseException:
+            pass
     try:
         value=publisher.project(report,selection,resolution,context=numeric_notice.public_context(os.environ))
         with (output/'callback-numeric.json').open('x',encoding='utf-8') as stream:

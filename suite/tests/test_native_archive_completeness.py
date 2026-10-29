@@ -308,7 +308,7 @@ class NativeArchiveCompletenessTests(unittest.TestCase):
         events=entry['folder']/'events.jsonl';raw=events.read_bytes()
         events.write_bytes(b'?' + raw[1:])
         process=self.workflow_process()
-        result=self.assert_integrity_notice(process,'native-integrity-calc-save-archive-members')
+        result=self.assert_integrity_notice(process,'native-integrity-calc-save-archive-hash')
         first=result['roots'][1]
         self.assertEqual(first['errorType'],'AssertionError')
         self.assertEqual(first['error'],'Native archive file hash differs')

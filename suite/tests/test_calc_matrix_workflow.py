@@ -179,9 +179,9 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
     def test_each_original_archive_root_keeps_its_failed_gate_stage(self):
         import numeric_notice
         check=self.verifier()
-        self.assertEqual(sum(name.startswith('native-integrity-') for name in numeric_notice.STAGES),30)
+        self.assertEqual(sum(name.startswith('native-integrity-') for name in numeric_notice.STAGES),60)
         prefixes=('shared','calc-save','calc-close-save','calc-close-discard','calc-close-cancel')
-        gates=('root-admission','manifest-discovery','path-crash-scan','archive-members','shutdown-proof')
+        gates=('root-admission','manifest-discovery','path-crash-scan','archive-bytes','shutdown-proof')
         for index,prefix in enumerate(prefixes):
             for gate in gates:
                 with self.subTest(root=prefix,gate=gate),tempfile.TemporaryDirectory() as folder:
@@ -189,7 +189,7 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
                     if gate=='root-admission':root.rename(Path(folder)/'omitted-root')
                     elif gate=='manifest-discovery':(archive/'manifest.json').unlink()
                     elif gate=='path-crash-scan':(root/'PRIVATE-DOCUMENT.mdmp').write_bytes(b'dump')
-                    elif gate=='archive-members':(archive/'report.txt').write_bytes(b'changed')
+                    elif gate=='archive-bytes':(archive/'report.txt').write_bytes(b'changed')
                     else:
                         proof=json.loads(FIXTURES.read_text())['forced']
                         self.write_shutdown(archive,proof,expected_engine(folder))
@@ -197,6 +197,30 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
                     self.assertIs(record['success'],False)
                     self.assertEqual(record.get('stage'),'native-integrity-'+prefix+'-'+gate)
                     self.assertIn(record['stage'],numeric_notice.STAGES)
+
+    def test_original_member_assertions_have_distinct_numeric_failure_stages(self):
+        import numeric_notice
+        check=self.verifier()
+        prefixes=('shared','calc-save','calc-close-save','calc-close-discard','calc-close-cancel')
+        gates=('archive-complete','archive-list','archive-path','archive-location',
+               'archive-bytes','archive-hash')
+        for index,prefix in enumerate(prefixes):
+            for gate in gates:
+                with self.subTest(root=prefix,gate=gate),tempfile.TemporaryDirectory() as folder:
+                    roots=self.archives(folder);archive=roots[index]/'owned-profile'
+                    manifest=archive/'manifest.json';record=json.loads(manifest.read_text())
+                    if gate=='archive-complete':record['archiveComplete']=False
+                    elif gate=='archive-list':record['files']=None
+                    elif gate=='archive-path':record['files'][0]['path']='../PRIVATE-DOCUMENT'
+                    elif gate=='archive-location':record['files'][0]['path']='PRIVATE-MISSING'
+                    elif gate=='archive-bytes':record['files'][0]['bytes']+=1
+                    else:record['files'][0]['sha256']='0'*64
+                    manifest.write_text(json.dumps(record),encoding='utf-8')
+                    result=check(roots)['roots'][index]
+                    self.assertIs(result['success'],False)
+                    self.assertEqual(result['errorType'],'AssertionError')
+                    self.assertEqual(result['stage'],'native-integrity-'+prefix+'-'+gate)
+                    self.assertIn(result['stage'],numeric_notice.STAGES)
 
     def test_each_original_evidence_root_keeps_its_failed_gate_stage(self):
         import numeric_notice
