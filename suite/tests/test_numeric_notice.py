@@ -35,6 +35,30 @@ def environment():
 
 
 class NumericNoticeTests(unittest.TestCase):
+    def test_writer_os_stages_preserve_original_ids_and_reach_closed_failure_notice(self):
+        import hashlib
+        from suite.e2e import writer_os_accessibility as writer
+        previous = list(self.n.STAGES.items())[:130]
+        self.assertEqual(hashlib.sha256(json.dumps(previous,
+            separators=(',', ':')).encode()).hexdigest(),
+            'f7314c9f8ca7d6a96b820dfb915ce9e7b404c9a8b9c954fa2e49dad4467ce887')
+        stages = tuple(dict.fromkeys(writer.STAGES.values()))
+        self.assertEqual(len(stages), 13)
+        self.assertEqual(tuple(self.n.STAGES.items())[130:],
+            tuple(zip(stages, range(131, 144))))
+        for stage in stages:
+            with self.subTest(stage=stage):
+                stream = io.StringIO()
+                emitter = self.n.NoticeEmitter(environ=self.env | {
+                    'OPENGEUL_SUITE_NOTICE_SCOPE': '4'}, stream=stream)
+                failure = dict(captured=1, exceptionCode=1, fileCode=5, line=199)
+                self.assertTrue(emitter.emit_case_notice('korean-ui-writer',
+                    dict(success=False, stage=stage, numericFailure=failure)))
+                message = stream.getvalue().strip().split('::', 2)[2]
+                value = self.decode(message, expected_scope=4)
+                self.assertEqual((value['stageCode'], value['fileCode']),
+                    (self.n.STAGES[stage], 5))
+
     def test_click_helpers_append_ids_after_the_exact_original_33_files(self):
         previous=('windows_smoke.py','calc_close_probe.py','home_routing_smoke.py','korean_ime_smoke.py',
             'korean_ui_smoke.py','writer_style_smoke.py','lifecycle_smoke.py','writer_model_reader.py',

@@ -1,15 +1,18 @@
 """Numeric projection must not inspect private input or extend callback evidence."""
 import copy
+import base64
 import ctypes
 import importlib.util
 import io
 import json
+import random
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import zlib
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'e2e/ime_compartment_report.py'
 SHA = '1' * 40
@@ -333,6 +336,143 @@ class CompartmentReportTests(unittest.TestCase):
         callback.update(status='inconclusive',frameCount=64,frameCapReached=True,
             frames=callback['frames']+[dict(moduleId=0,rva=0)],unknownFrames=1)
         with self.assertRaises(ValueError):self.m.project(report,selection,worker,context=CONTEXT)
+
+    def test_annotation_keeps_all_sixty_three_frames_within_transport_limit(self):
+        report, selection, worker = self.fixture()
+        rvas = [0xfffffffc - 4*i for i in range(63)]
+        report['tests'][0]['imeCompartmentDiagnostics'].update(frameCount=63,
+            frameCapReached=False, unknownFrames=0,
+            frames=[dict(moduleId=14, rva=r) for r in rvas])
+        selection['rvas'] = rvas
+        worker['resolution']['frames'] = [dict(returnRva=r, callRva=r-4,
+            tag='frame-input-context', functionRva=r-4, functionSize=4) for r in rvas]
+        value = self.m.project(report, selection, worker, context=CONTEXT)
+        original = copy.deepcopy(value)
+        # The full file stays schema2 and 32KiB; only the annotation carrier is
+        # constrained by the observed 4096-byte transport boundary.
+        self.assertGreater(len(self.m.encode_notice(value).encode()), 4096)
+        output = io.StringIO()
+        self.assertTrue(self.m.emit_value(value, environ=environment(), stream=output))
+        message = output.getvalue().strip().split('::', 2)[2]
+        self.assertLessEqual(len(message.encode('utf-8')), 4096)
+        self.assertEqual(self.m.decode_notice(message, SHA, CONTEXT['runId']), original)
+        self.assertEqual(value, original)
+
+    def test_carrier_roundtrips_random_sixty_three_frame_metadata(self):
+        rng = random.Random(7249)
+        value = self.m.project(*self.fixture(), context=CONTEXT)
+        maximum = 0
+        for trial in range(500):
+            changed = copy.deepcopy(value)
+            rvas = [rng.randrange(1, 2**30)*4 for unused in range(63)]
+            changed['callback'].update(frameCount=63, unknownFrames=0,
+                frames=[dict(moduleId=14, rva=r) for r in rvas])
+            changed['selection']['rvas'] = rvas
+            frames = []
+            for rva in rvas:
+                distance = min(rng.randrange(4096), rva-4) if trial % 2 else rng.randrange(rva-3)
+                start = rva-4-distance
+                size = min(distance+rng.randrange(1, 4096), 2**32-start) if trial % 2 else rng.randrange(distance+1, 2**32-start+1)
+                frames.append(dict(returnRva=rva, callRva=rva-4,
+                    tagCode=rng.randrange(2, 9), functionRva=start, functionSize=size))
+            changed['resolution']['frames'] = frames
+            for field in ('dllSha256', 'pdbSha256'):
+                digest = f'{rng.getrandbits(256):064x}'
+                changed['provenance'][field] = changed['resolution'][field] = digest
+            message = self.m.encode_carrier(changed)
+            maximum = max(maximum, len(message.encode()))
+            with self.subTest(trial=trial):
+                self.assertLessEqual(len(message.encode()), 4096)
+                self.assertEqual(self.m.decode_notice(message, SHA, CONTEXT['runId']), changed)
+        self.assertGreater(maximum, 3000)  # Exercise varied, poorly compressible metadata.
+
+    def test_carrier_hash_is_independent_of_dictionary_order_not_array_order(self):
+        value = self.m.project(*self.fixture(), context=CONTEXT)
+        def reverse(value):
+            if type(value) is dict:
+                return {k: reverse(v) for k, v in reversed(list(value.items()))}
+            if type(value) is list:
+                return [reverse(v) for v in value]
+            return value
+        self.assertEqual(self.m.encode_carrier(value), self.m.encode_carrier(reverse(value)))
+        changed = copy.deepcopy(value)
+        changed['callback']['frames'].reverse()
+        self.assertNotEqual(json.loads(self.m.encode_carrier(value))['modelSha256'],
+            json.loads(self.m.encode_carrier(changed))['modelSha256'])
+
+    def test_carrier_rejects_envelope_tampering_and_wrong_binding(self):
+        value = self.m.project(*self.fixture(), context=CONTEXT)
+        message = self.m.encode_carrier(value)
+        envelope = json.loads(message)
+        for field, item in (('private', 'synthetic'), ('codec', True), ('codec', 1),
+                ('schemaVersion', True), ('schemaVersion', 4), ('modelSha256', 'c'*64),
+                ('payload', envelope['payload']+'='), ('payload', ' '+envelope['payload']),
+                ('payload', 'é'), ('payload', '____')):
+            changed = dict(envelope); changed[field] = item
+            with self.subTest(field=field, item=item), self.assertRaises(ValueError):
+                self.m.decode_notice(json.dumps(changed), SHA, CONTEXT['runId'])
+        duplicate = message[:-1] + ',"codec":2}'
+        with self.assertRaises(ValueError): self.m.decode_notice(duplicate, SHA, CONTEXT['runId'])
+        for changed in (dict(expected_source_commit='2'*40), dict(expected_run_id=7),
+                dict(expected_run_attempt=2), dict(expected_architecture=0x8664)):
+            args = dict(expected_source_commit=SHA, expected_run_id=CONTEXT['runId']); args.update(changed)
+            with self.subTest(binding=changed), self.assertRaises(ValueError):
+                self.m.decode_notice(message, **args)
+        with self.assertRaises(ValueError):
+            self.m.decode_notice(message + ' '*4096, SHA, CONTEXT['runId'])
+
+    def test_carrier_rejects_unsafe_compression_noncanonical_and_malformed_models(self):
+        value = self.m.project(*self.fixture(), context=CONTEXT)
+        envelope = json.loads(self.m.encode_carrier(value))
+        compressed = base64.b64decode(envelope['payload'])
+        raw = zlib.decompress(compressed)
+        def reject(compressed):
+            changed = dict(envelope, payload=base64.b64encode(compressed).decode('ascii'))
+            with self.assertRaises(ValueError):
+                self.m.decode_notice(json.dumps(changed), SHA, CONTEXT['runId'])
+        for invalid in (compressed[:-1], compressed+b'x', compressed+compressed,
+                zlib.compress(b' '*32769), zlib.compress(b'\xff'), zlib.compress(b'[]'),
+                zlib.compress(b'['*1000+b']'*1000), zlib.compress(b'NaN')):
+            reject(invalid)
+        reject(zlib.compress(raw + b' '))
+        reject(zlib.compress(raw.replace(b'"schemaVersion":2', b'"schemaVersion":2,"schemaVersion":2')))
+        packed = json.loads(raw)
+        changes = (
+            lambda p: p.update(private=1),
+            lambda p: p['selection'].update(rvas=[100]),
+            lambda p: p['callback']['frames'][0].append(99),
+            lambda p: p['callback']['frames'][0].__setitem__(0, True),
+            lambda p: p['callback']['frames'][0].__setitem__(1, 101),
+            lambda p: p['resolution']['frames'].append([5, 80, 32]),
+            lambda p: p['resolution']['frames'][0].append(100),
+            lambda p: p['resolution']['frames'][0].__setitem__(0, 99),
+            lambda p: p['retirement'].update(handleReleased=False),
+            lambda p: p['eligibility']['firstKey'].update(open=0),
+        )
+        for change in changes:
+            changed = copy.deepcopy(packed); change(changed)
+            reject(zlib.compress(json.dumps(changed, sort_keys=True, separators=(',', ':')).encode('ascii')))
+
+    def test_oversized_carrier_is_suppressed_without_changing_primary_or_file(self):
+        from unittest import mock
+        value = self.m.project(*self.fixture(), context=CONTEXT)
+        original = copy.deepcopy(value)
+        # Force an incompressible but syntactically opaque transport. There is
+        # no partial write or shortened evidence when the pre-emit bound fails.
+        output = io.StringIO()
+        primary = RuntimeError('synthetic primary')
+        with mock.patch.object(self.m.zlib, 'compress', return_value=b'x'*4096):
+            with self.assertRaises(ValueError): self.m.encode_carrier(value)
+            with self.assertRaises(RuntimeError) as caught:
+                try:
+                    raise primary
+                finally:
+                    self.assertFalse(self.m.emit_value(value, environ=environment(), stream=output))
+        self.assertEqual(output.getvalue(), '')
+        self.assertFalse(self.m._attempted)
+        self.assertEqual(value, original)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(self.m.decode_notice(self.m.encode_notice(value), SHA, CONTEXT['runId']), original)
 
     def test_selected_schema_two_requires_typed_origin_first_key_and_closed_profile(self):
         changes=(

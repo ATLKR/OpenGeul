@@ -87,7 +87,11 @@ _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fix
       for gate in ('root-admission','manifest-discovery','path-crash-scan','archive-members','shutdown-proof')),
     *(f'native-integrity-evidence-{root}-{gate}' for root in ('calc-save','calc-close')
       for gate in ('root-admission','path-crash-scan')),
-    'native-integrity-generation-completeness')
+    'native-integrity-generation-completeness',
+    'writer-os-owner', 'writer-os-abi', 'writer-os-root', 'writer-os-focus',
+    'writer-os-document-role', 'writer-os-focus-state', 'writer-os-ia2',
+    'writer-os-text', 'writer-os-parent', 'writer-os-cleanup', 'writer-os-complete',
+    'writer-os-protocol', 'writer-os-timeout')
 STAGES = {name:index for index,name in enumerate(_STAGES, 1)}
 
 # Each bit means that the source field was present and had the declared type.

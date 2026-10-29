@@ -78,7 +78,8 @@ identity. Exclude key values, input text, message payloads, paths and arbitrary
 symbols. Callback publication and symbol resolution remain separate from setter
 attribution and process retirement; no diagnostic report qualifies acceptance.
 
-An explicit opt-in may publish one bounded numeric check notice, at most 32 KiB.
+An explicit opt-in may publish one bounded numeric check notice, at most 4096
+UTF-8 bytes. The full closed numeric JSON file remains limited to 32 KiB.
 Failure to project or publish must preserve the original case result and
 cleanup. The workflow uploads the numeric JSON only. It must not retain the
 private directory or replay previously denied artifact/log data through notices.
@@ -111,7 +112,27 @@ selected/resolved product RVAs. A separate fixed compartment resolution profile
 uses the existing file-only worker; ordinary resolution retains its 32-RVA
 limit. DLL/PDB identity, ordered RVA joins, whitelist tags, cleanup, watchdog and
 remaining budgets remain mandatory. Legacy closed schema1 keeps its original
-16-frame boundary. The public notice/JSON remains limited to 32 KiB.
+16-frame boundary. The full closed numeric JSON file remains limited to 32 KiB.
+
+The annotation uses carrier schema3, codec2, because a 63-frame full schema2
+JSON can exceed the observed 4096-byte annotation boundary. Its standard-library
+zlib/base64 payload contains the same numeric schema2 model with callback frame
+pairs and resolution triples. Only validator-enforced redundancy is omitted:
+selection RVAs are the ordered module14 callback RVAs, and each resolution's
+return RVA and call RVA are the corresponding selection RVA and that RVA minus
+four. Array order and duplicates remain intact. This changes no native capture,
+selection, target query, deadline, cleanup, or acceptance condition.
+
+The decoder bounds expansion to 32 KiB, rejects incomplete or extra compressed
+streams, duplicate keys and noncanonical payloads, reconstructs the full model,
+and applies its original closed validator and exact source/run/attempt/architecture
+binding. A SHA-256 of canonical full-model JSON binds the reconstructed fields;
+dictionary order is immaterial and array order remains material. This digest is
+an integrity check, not authentication. Legacy full schema1/2 decoding remains.
+Before emitting, the producer enforces the 4096-byte carrier limit. Excessive
+metadata suppresses the notice without shortening evidence or replacing the
+original result; the complete bounded file remains available. Synthetic fit and
+tamper tests do not establish actual Windows transport success.
 
 The old closed record did not expose command1's original typed state, and the
 selector returned for the capped callback before checking first-key IMM state

@@ -6,10 +6,13 @@ resolution proves its setter, a runtime caller, or release acceptance.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
 import sys
+import zlib
 
 if __package__:
     from . import numeric_notice
@@ -19,6 +22,7 @@ else:
 TITLE = 'OpenGeul IME compartment numeric v1'
 OPT_IN = 'OPENGEUL_SUITE_IME_COMPARTMENT_NOTICE'
 MAX_BYTES = 32768
+MAX_ANNOTATION_BYTES = 4096
 KIND, SCOPE = 4, 11
 _CALLBACK_STATUS = {'disabled': 0, 'inconclusive': 1, 'not-triggered': 2, 'complete': 3, 'unavailable': 4}
 _CLEANUP_STATUS = {'pending': 0, 'inconclusive': 1, 'unsubscribed': 2, 'unproved': 3}
@@ -682,6 +686,96 @@ def _pairs(pairs):
     return result
 
 
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('ascii')
+
+
+def _pack(value):
+    """Remove only equalities enforced by the unchanged closed model validator."""
+    result = dict(value)
+    callback = value['callback']
+    if callback is not None:
+        frames = callback['frames']
+        result['callback'] = dict(callback, frames=None if frames is None else
+            [[f['moduleId'], f['rva']] for f in frames])
+    result['selection'] = dict(statusCode=value['selection']['statusCode'])
+    resolution = value['resolution']
+    if resolution is not None:
+        frames = resolution['frames']
+        result['resolution'] = dict(resolution, frames=None if frames is None else
+            [[f['tagCode'], f['functionRva'], f['functionSize']] for f in frames])
+    return result
+
+
+def _unpack(value):
+    _object(value, _TOP_KEYS | {'eligibility'})
+    _need(type(value['schemaVersion']) is int and value['schemaVersion'] == 2)
+    result = dict(value)
+    callback = value['callback']
+    if callback is not None:
+        _need(type(callback) is dict and 'frames' in callback)
+        frames = callback['frames']
+        if frames is not None:
+            _need(type(frames) is list and len(frames) <= 64)
+            _need(all(type(f) is list and len(f) == 2 for f in frames))
+            frames = [dict(moduleId=f[0], rva=f[1]) for f in frames]
+        result['callback'] = dict(callback, frames=frames)
+    _object(value['selection'], ('statusCode',))
+    selected = value['selection']['statusCode'] == 6
+    if selected:
+        _need(callback is not None and result['callback']['frames'] is not None)
+    rvas = [f['rva'] for f in result['callback']['frames'] if f['moduleId'] == 14] if selected else []
+    result['selection'] = dict(statusCode=value['selection']['statusCode'], rvas=rvas)
+    resolution = value['resolution']
+    if resolution is not None:
+        _need(type(resolution) is dict and 'frames' in resolution)
+        frames = resolution['frames']
+        if frames is not None:
+            _need(type(frames) is list and len(frames) <= 63 and len(frames) == len(rvas))
+            _need(all(type(f) is list and len(f) == 3 for f in frames))
+            frames = [dict(returnRva=r, callRva=r-4, tagCode=f[0],
+                functionRva=f[1], functionSize=f[2]) for r, f in zip(rvas, frames)]
+        result['resolution'] = dict(resolution, frames=frames)
+    return result
+
+
+def encode_carrier(value):
+    """Bound the annotation before writing; files retain the full schema2 JSON."""
+    encode_notice(value)
+    _need(value['schemaVersion'] == 2)
+    packed = _canonical(_pack(value))
+    _need(len(packed) <= MAX_BYTES)
+    envelope = dict(schemaVersion=3, codec=2,
+        modelSha256=hashlib.sha256(_canonical(value)).hexdigest(),
+        payload=base64.b64encode(zlib.compress(packed, 9)).decode('ascii'))
+    message = _canonical(envelope).decode('ascii')
+    _need(len(message) <= MAX_ANNOTATION_BYTES)
+    return message
+
+
+def _decode_carrier(envelope, message):
+    _need(len(message.encode('utf-8')) <= MAX_ANNOTATION_BYTES)
+    _object(envelope, ('schemaVersion', 'codec', 'modelSha256', 'payload'))
+    _need(type(envelope['schemaVersion']) is int and envelope['schemaVersion'] == 3)
+    _need(type(envelope['codec']) is int and envelope['codec'] == 2)
+    _need(_digest(envelope['modelSha256']) and type(envelope['payload']) is str)
+    try:
+        compressed = base64.b64decode(envelope['payload'].encode('ascii'), validate=True)
+        _need(base64.b64encode(compressed).decode('ascii') == envelope['payload'])
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(compressed, MAX_BYTES + 1)
+        _need(len(raw) <= MAX_BYTES and inflater.eof and not inflater.unconsumed_tail and not inflater.unused_data)
+        packed = json.loads(raw.decode('ascii'), object_pairs_hook=_pairs,
+            parse_constant=lambda unused: (_ for _ in ()).throw(ValueError('Invalid numeric constant')))
+        value = _validate(_unpack(packed))
+        _need(_canonical(_pack(value)) == raw)
+        _need(len(_canonical(value)) <= MAX_BYTES)
+        _need(hashlib.sha256(_canonical(value)).hexdigest() == envelope['modelSha256'])
+        return value
+    except (TypeError, ValueError, RecursionError, zlib.error):
+        raise ValueError('Invalid closed compartment numeric receipt') from None
+
+
 def decode_notice(message, expected_source_commit, expected_run_id, *, expected_run_attempt=1, expected_architecture=0xaa64):
     _need(type(message) is str and len(message) <= MAX_BYTES and len(message.encode('utf-8')) <= MAX_BYTES)
     expected = _context(dict(sourceCommit=expected_source_commit, runId=expected_run_id,
@@ -691,6 +785,8 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, expected_
             parse_constant=lambda unused: (_ for _ in ()).throw(ValueError('Invalid numeric constant')))
     except (TypeError, ValueError, RecursionError):
         raise ValueError('Invalid closed compartment numeric receipt') from None
+    if type(value) is dict and value.get('schemaVersion') == 3:
+        value = _decode_carrier(value, message)
     _validate(value)
     _need(all(value[k] == v for k, v in expected.items()))
     return value
@@ -704,7 +800,7 @@ def emit_value(value, *, environ=None, stream=None):
         context = numeric_notice.public_context(env)
         if _attempted or env.get(OPT_IN) != '1' or context is None or context['architecture'] != 0xaa64:
             return False
-        message = encode_notice(value)
+        message = encode_carrier(value)
         decode_notice(message, context['sourceCommit'], context['runId'], expected_architecture=0xaa64)
         _attempted = True
         print('::notice title=' + TITLE + '::' + numeric_notice.escape_data(message), file=stream or sys.stdout, flush=True)

@@ -4,6 +4,7 @@ from copy import deepcopy
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -586,6 +587,195 @@ class NativeChildFailureTests(unittest.TestCase):
                 self.assertEqual(decoded['failure'],captured[0][0])
                 self.assertEqual(decoded['failure']['exceptionCode'],0)
                 self.assertEqual(decoded['ownedFrames'],captured[0][1])
+
+
+class WriterOsIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(hasattr(smoke, 'writer_access'), 'The Writer OS gate is not integrated')
+        self.request = dict(officePid=200, officeCreationTime=300, childHwnd=123,
+            expectedImage=str(Path('/synthetic')/'Office/program/soffice.bin'))
+        self.value = smoke.writer_access.failure(self.request)
+        self.value.update(verified=1, stageCode=12, rootRole=10, documentRole=15,
+            focusedRole=42, focusedState=4, focusVariantType=9, parentCount=2,
+            ia2Supported=1, textSupported=1, ownerBefore=1, ownerAfter=1, ownerReleased=1,
+            referencesAcquired=8,referencesReleased=8,variantsCreated=5,variantsCleared=5)
+
+    def receipt(self, stdout, code=0):
+        class NoStderr:
+            returncode = code
+            @property
+            def stderr(self):
+                raise AssertionError('Original stderr must not be read')
+        value = NoStderr()
+        value.stdout = stdout
+        return value
+
+    def test_writer_uses_one_original_child_budget_without_reading_stderr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'os.json'
+            def child(command, **kwargs):
+                destination.write_text('{"controlCount":1}', encoding='utf-8')
+                self.assertEqual(kwargs['timeout'], 45)
+                self.assertIs(kwargs['shell'], False)
+                self.assertEqual(kwargs['stdout'], subprocess.PIPE)
+                self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
+                self.assertNotIn('capture_output', kwargs)
+                self.assertNotIn('input',kwargs)
+                self.assertNotIn('stdin',kwargs)
+                self.assertEqual(command[-5:-1],['--writer-office-creation-time','300',
+                    '--writer-office-image',self.request['expectedImage']])
+                self.assertEqual(command[-1], '--writer-msaa')
+                return self.receipt('1\n'+json.dumps(self.value))
+            with patch.object(smoke.subprocess, 'run', side_effect=child) as execute:
+                value = smoke.capture_bounded(123,200,destination,writer_request=self.request)
+            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(value['writerOsAccessibility'], self.value)
+            self.assertEqual(destination.read_text(encoding='utf-8'), '{"controlCount":1}')
+
+    def test_other_module_keeps_its_original_command_and_snapshot_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'os.json'
+            destination.write_text('{"controlCount":1}',encoding='utf-8')
+            with patch.object(smoke.subprocess,'run',return_value=NS(returncode=0,stderr='')) as execute:
+                value = smoke.capture_bounded(123,200,destination)
+            self.assertEqual(value, {'controlCount':1})
+            self.assertEqual(execute.call_args.kwargs,
+                             dict(capture_output=True,text=True,timeout=45,shell=False))
+            self.assertNotIn('--writer-msaa',execute.call_args.args[0])
+
+    def test_new_probe_timeout_after_original_snapshot_checkpoint_is_held(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'os.json'
+            original = subprocess.TimeoutExpired(['synthetic'],45,output=b'1\r\n')
+            def child(*args,**kwargs):
+                destination.write_text('{"controlCount":1}',encoding='utf-8')
+                raise original
+            with patch.object(smoke.subprocess,'run',side_effect=child) as execute:
+                value=smoke.capture_bounded(123,200,destination,writer_request=self.request)
+            self.assertEqual(execute.call_count,1)
+            self.assertEqual(value['writerOsAccessibility']['verified'],0)
+            self.assertEqual(value['writerOsAccessibility']['stageCode'],14)
+
+    def test_original_os_timeout_before_checkpoint_preserves_the_same_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination=Path(directory)/'os.json'
+            destination.write_text('{"controlCount":1}',encoding='utf-8')
+            original=subprocess.TimeoutExpired(['synthetic'],45,output=b'')
+            with patch.object(smoke.subprocess,'run',side_effect=original):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    smoke.capture_bounded(123,200,destination,writer_request=self.request)
+            self.assertIs(caught.exception,original)
+
+    def test_nonzero_after_checkpoint_and_partial_noise_or_invalid_payload_are_held_failures(self):
+        for stdout,code in (('1\n',1),('1\n{',0),('1\nnoise',0),
+                            ('1\n'+json.dumps(dict(self.value,officePid=201)),0)):
+            with self.subTest(code=code,stdoutLength=len(stdout)),tempfile.TemporaryDirectory() as directory:
+                destination=Path(directory)/'os.json'
+                destination.write_text('{"controlCount":1}',encoding='utf-8')
+                with patch.object(smoke.subprocess,'run',return_value=self.receipt(stdout,code)):
+                    result=smoke.capture_bounded(123,200,destination,writer_request=self.request)
+                self.assertEqual(result['writerOsAccessibility']['verified'],0)
+                self.assertEqual(result['writerOsAccessibility']['stageCode'],13)
+
+    def test_actual_child_main_finishes_original_snapshot_before_the_numeric_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination=Path(directory)/'os.json'
+            args=NS(capture_child=123,office_pid=200,snapshot=destination,writer_msaa=True,
+                writer_office_creation_time=300,writer_office_image=self.request['expectedImage'])
+            def original(*args):
+                print('discarded-existing-diagnostic-output')
+                return dict(controlCount=1)
+            def observe(request):
+                self.assertEqual(json.loads(destination.read_text(encoding='utf-8')),dict(controlCount=1))
+                return self.value
+            stream,discard=io.StringIO(),io.StringIO()
+            with patch.object(smoke.argparse.ArgumentParser,'parse_args',return_value=args),\
+                 patch.object(smoke.os,'name','nt'),\
+                 patch.object(smoke,'capture_controls',side_effect=original),\
+                 patch.object(smoke.writer_access,'observe',side_effect=observe),\
+                 patch.object(smoke.sys,'stdin',NS(read=lambda *a:self.fail('New stdin read reached'))),\
+                 patch.object(smoke.sys,'stderr',discard),redirect_stdout(stream):
+                code=smoke.main()
+            self.assertEqual(code,0)
+            self.assertTrue(stream.getvalue().startswith('1\n'))
+            self.assertEqual(json.loads(stream.getvalue()[2:]),self.value)
+            self.assertNotIn('discarded',stream.getvalue())
+
+    def run_writer(self, *, vcl_failure=None, tab_failure=None, probe_only=False, held_result=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'fixture';source.write_bytes(b'original-fixture')
+            output=root/'output';output.mkdir();calls=[];errors=[]
+            process=NS(pid=77,poll=lambda:0)
+            engine=NS(creation_time=300,exited=lambda seconds:True,code=lambda:0,
+                      close=lambda:calls.append('engine-close'))
+            api=NS(require_foreground=lambda hwnd:None,user=NS(IsWindow=lambda hwnd:True),
+                   pid=lambda hwnd:200,windows=lambda pid:[])
+            wrapper=NS(maximize=lambda:None,capture_as_image=lambda:NS(save=lambda path:calls.append('screenshot')))
+            desktop=NS(window=lambda **kwargs:NS(wrapper_object=lambda:wrapper))
+            def vcl(*args):
+                calls.append('vcl')
+                if vcl_failure:raise vcl_failure
+                return dict(module='writer',nativeAccessibleContextCount=2)
+            def tabs(*args):
+                calls.append('tabs')
+                if tab_failure:raise tab_failure
+                return dict(koreanUiVerified=True,tabbedUiVerified=True)
+            def failure(output,case,record,exc):
+                errors.append(exc);record['success']=False
+            held=smoke.writer_access.failure(self.request,8) if held_result is None else held_result
+            with ExitStack() as stack:
+                for owner,name,value in ((smoke.native,'require_engine_fixture',lambda *a:source),
+                    (smoke.native,'launch_suite',lambda *a:process),(smoke.native,'Windows',lambda:api),
+                    (smoke.native,'verified_attachment',lambda *a:(11,12,123,200)),
+                    (smoke.startup,'EngineProcessWitness',lambda *a:engine),
+                    (smoke.native,'activate_owned_suite',lambda *a:None),
+                    (smoke,'prepare_korean_ui_focus',lambda *a:calls.append('entry')),
+                    (smoke,'capture_bounded',lambda *a,**kw:dict(controlCount=1,writerOsAccessibility=held)),
+                    (smoke.accessible,'capture_bounded',vcl),(smoke,'require_korean_tabs',tabs),
+                    (smoke.native,'capture_failure',failure),(smoke.native,'close_document',lambda *a:calls.append('close-document')),
+                    (smoke.native,'close_home',lambda *a:None),(smoke.native,'stop_owned_test_process',lambda *a:None),
+                    (smoke.native,'write_result',lambda *a:None)):
+                    stack.enter_context(patch.object(owner,name,side_effect=value))
+                stack.enter_context(patch.dict(sys.modules,pywinauto=NS(Desktop=lambda **kwargs:desktop)))
+                record=smoke.run_case(root,root,output,'writer',probe_only=probe_only)
+            return record,calls,errors
+
+    def test_original_vcl_collection_or_tab_failure_wins_over_the_held_msaa_failure(self):
+        for point in ('vcl_failure','tab_failure'):
+            primary=RuntimeError('original-primary')
+            record,calls,errors=self.run_writer(**{point:primary})
+            self.assertEqual(errors,[primary])
+            self.assertIn('writerOsAccessibility',record)
+            self.assertEqual(record['writerOsAccessibility']['stageCode'],8)
+            self.assertEqual(calls[-1],'engine-close')
+            self.assertNotIn('close-document',calls)
+
+    def test_writer_probe_failure_is_enforced_only_after_original_vcl_tabs_with_a_fixed_stage(self):
+        record,calls,errors=self.run_writer()
+        self.assertEqual(calls,['entry','screenshot','vcl','tabs','engine-close'])
+        self.assertEqual(len(errors),1)
+        self.assertIsInstance(errors[0],AssertionError)
+        self.assertEqual(record['stage'],'writer-os-text')
+        self.assertFalse(record['osScreenReaderExposureCertified'])
+        self.assertFalse(record.get('writerOsDocumentExposureVerified',False))
+
+    def test_probe_only_retains_unverified_observation_without_acceptance_claim(self):
+        record,calls,errors=self.run_writer(probe_only=True)
+        self.assertEqual(errors,[])
+        self.assertTrue(record['success'])
+        self.assertFalse(record.get('writerOsDocumentExposureVerified',False))
+        self.assertFalse(record['koreanUiVerified'])
+        self.assertNotIn('tabs',calls)
+
+    def test_invalid_probe_metadata_raises_in_the_original_parent_after_vcl_with_a_fixed_protocol_stage(self):
+        record,calls,errors=self.run_writer(held_result={'unknown':1})
+        self.assertEqual(calls,['entry','screenshot','vcl','tabs','engine-close'])
+        self.assertEqual(record['stage'],'writer-os-protocol')
+        self.assertEqual(len(errors),1)
+        self.assertIsInstance(errors[0],AssertionError)
+        trace=errors[0].__traceback__
+        while trace.tb_next is not None:trace=trace.tb_next
+        self.assertEqual(Path(trace.tb_frame.f_code.co_filename).name,'korean_ui_smoke.py')
 
 
 if __name__ == '__main__':

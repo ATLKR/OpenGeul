@@ -10,6 +10,7 @@ in its own bounded process so a provider cannot hold the Suite lifecycle open.
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ import time
 import startup_smoke as startup
 import windows_smoke as native
 import native_accessibility as accessible
+import writer_os_accessibility as writer_access
 
 MODULES = {'writer': 'docx', 'calc': 'xlsx', 'impress': 'pptx', 'draw': 'odg'}
 
@@ -72,12 +74,42 @@ def capture_controls(child, office_pid):
                 controlCount=len(controls), truncated=False, controls=controls)
 
 
-def capture_bounded(child, office_pid, destination):
+def _writer_checkpoint(stdout):
+    return (type(stdout) is str and stdout.startswith('1\n')
+            or type(stdout) is bytes and stdout.startswith((b'1\n', b'1\r\n')))
+
+
+def capture_bounded(child, office_pid, destination, *, writer_request=None):
     command = [sys.executable, str(Path(__file__).resolve()), '--capture-child', str(child),
                '--office-pid', str(office_pid), '--snapshot', str(destination)]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=45, shell=False)
-    assert result.returncode == 0, 'Native accessibility collector failed: ' + result.stderr
-    return json.loads(destination.read_text(encoding='utf-8'))
+    if writer_request is None:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=45, shell=False)
+        assert result.returncode == 0, 'Native accessibility collector failed: ' + result.stderr
+        return json.loads(destination.read_text(encoding='utf-8'))
+    # Same original child and watchdog. Its original UIA snapshot completes
+    # before the fixed numeric checkpoint; only later probe failures are held.
+    command.extend(['--writer-office-creation-time', str(writer_request['officeCreationTime']),
+                    '--writer-office-image', writer_request['expectedImage'], '--writer-msaa'])
+    timed_out = False
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding='utf-8', errors='replace', timeout=45, shell=False)
+    except subprocess.TimeoutExpired as exc:
+        if not _writer_checkpoint(exc.stdout):
+            raise
+        timed_out = True
+    if timed_out:
+        evidence = writer_access.failure(writer_request, 14)
+    else:
+        if result.returncode != 0:
+            assert _writer_checkpoint(result.stdout), 'Native accessibility collector failed: '
+            evidence = writer_access.failure(writer_request)
+        else:
+            evidence = (writer_access.decode(result.stdout[2:], writer_request)
+                        if _writer_checkpoint(result.stdout) else writer_access.failure(writer_request))
+    snapshot = json.loads(destination.read_text(encoding='utf-8'))
+    snapshot['writerOsAccessibility'] = evidence
+    return snapshot
 
 
 def prepare_korean_ui_focus(api,process,hwnd,parent,child,office_pid,module,record):
@@ -132,7 +164,14 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         record.update(screenshot=screenshot, screenshotCaptured=True)
         record['stage'] = 'capture-os-accessibility-diagnostic'
         os_name = case + '-os-accessibility.json'
-        os_snapshot = capture_bounded(child, office_pid, output / os_name)
+        if module == 'writer':
+            writer_request = dict(officePid=office_pid, officeCreationTime=engine.creation_time,
+                childHwnd=child, expectedImage=str(suite/'Office/program/soffice.bin'))
+            os_snapshot = capture_bounded(child, office_pid, output / os_name, writer_request=writer_request)
+            record['writerOsAccessibility'] = os_snapshot.get('writerOsAccessibility',
+                writer_access.failure(writer_request))
+        else:
+            os_snapshot = capture_bounded(child, office_pid, output / os_name)
         record.update(osAccessibilitySnapshot=os_name, osAccessibleControlCount=os_snapshot['controlCount'])
         record['stage'] = 'capture-native-accessible-objects'
         snapshot_name = case + '-accessibility.json'
@@ -148,6 +187,17 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         if not probe_only:
             record['stage'] = 'assert-korean-tabbed-ui'
             record.update(require_korean_tabs(snapshot, office_pid, child))
+            if module == 'writer':
+                # Preserve the original VCL collection/tab/focus failure as the
+                # primary error. Enforce this new, earlier observation afterward.
+                try:
+                    writer_evidence = writer_access.validate(record['writerOsAccessibility'], writer_request)
+                except Exception:
+                    writer_evidence = writer_access.failure(writer_request)
+                record['writerOsAccessibility'] = writer_evidence
+                record['stage'] = writer_access.failure_stage(writer_evidence)
+                assert writer_evidence['verified'] == 1, 'Owned Writer OS accessibility exposure was not verified'
+                record['writerOsDocumentExposureVerified'] = True
         record['stage'] = 'close-document'
         calc_proof = None
         if module == 'calc':
@@ -223,14 +273,31 @@ def main():
     parser.add_argument('--capture-child', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--office-pid', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--snapshot', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--writer-msaa', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--writer-office-creation-time', type=int, help=argparse.SUPPRESS)
+    parser.add_argument('--writer-office-image', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if os.name != 'nt' or not __debug__:
         raise RuntimeError('Actual Windows GUI execution with assertions enabled is required')
     if args.capture_child is not None:
         assert args.capture_child > 0 and args.office_pid and args.office_pid > 0 and args.snapshot
-        snapshot = capture_controls(args.capture_child, args.office_pid)
+        if args.writer_msaa:
+            # Existing rich UIA diagnostics are unchanged. Their incidental
+            # stdout is discarded by the parent's existing Writer child sink.
+            with redirect_stdout(sys.stderr):
+                snapshot = capture_controls(args.capture_child, args.office_pid)
+        else:
+            snapshot = capture_controls(args.capture_child, args.office_pid)
         with args.snapshot.open('x', encoding='utf-8') as stream:
             json.dump(snapshot, stream, ensure_ascii=False, indent=2, allow_nan=False)
+        if args.writer_msaa:
+            print('1', flush=True)  # Original UIA observation and file close succeeded.
+            request = dict(childHwnd=args.capture_child, officePid=args.office_pid,
+                officeCreationTime=args.writer_office_creation_time, expectedImage=args.writer_office_image)
+            value = writer_access.observe(request)
+            encoded = json.dumps(value, separators=(',', ':'), allow_nan=False)
+            assert len(encoded.encode('utf-8')) <= 4096, 'Closed Writer result exceeds bound'
+            print(encoded, flush=True)
         return 0
     assert args.suite and args.fixtures and args.output, '--suite, --fixtures and --output are required'
     for path in (args.suite, args.fixtures, args.output):
