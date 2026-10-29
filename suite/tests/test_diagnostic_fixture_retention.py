@@ -24,7 +24,7 @@ class DiagnosticFixtureRetentionTests(unittest.TestCase):
     def test_all_validated_modes_share_failure_only_exact_safe_artifact(self):
         modes,steps=configured_modes();stage=steps['diagnostic-fixture-failure-evidence']
         self.assertEqual(re.search(r'^        path: (.+)$',stage,re.M).group(1),'.work/suite-engine/engine-failure-summary.json')
-        self.assertEqual(re.search(r'^        retention-days: (.+)$',stage,re.M).group(1),'7')
+        self.assertEqual(re.search(r'^        retention-days: (.+)$',stage,re.M).group(1),'1')
         self.assertEqual(re.search(r'^        if-no-files-found: (.+)$',stage,re.M).group(1),'error')
         expression=condition(stage).replace('always()','True')
         for mode in (*modes,'unknown',''):

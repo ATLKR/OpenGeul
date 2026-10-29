@@ -198,7 +198,7 @@ jobs:
       with:
         name: opengeul-suite-sal-offset-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-sal-offset-mapping/receipt.json
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Static SAL mapping cannot qualify a Suite package
       id: sal-offset-not-acceptance
@@ -222,7 +222,7 @@ jobs:
       with:
         name: opengeul-suite-com-wait-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-com-wait-diagnostic/receipt.json
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Synthetic COM wait cannot qualify a Suite package
       id: com-wait-not-acceptance
@@ -253,7 +253,7 @@ jobs:
         path: |
           .work/suite-mutex-layout-fixture/receipt.json
           .work/suite-mutex-function-mapping/receipt.json
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Static mutex attribution cannot qualify a Suite package
       id: mutex-function-not-acceptance
@@ -355,7 +355,7 @@ jobs:
         path: |
           .work/suite-korean-readiness/
           !.work/suite-korean-readiness/fod-source/**/*.cab
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Suite native ARM64 privacy preparation
       id: native31-privacy-prepare
@@ -381,7 +381,7 @@ jobs:
           ${{ runner.temp }}/suite-native31-setup-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}/
           ${{ runner.temp }}/suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}/
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 실제 Office 엔진의 생성·편집·저장·재열기
       shell: pwsh
@@ -398,7 +398,7 @@ jobs:
       with:
         name: opengeul-diagnostic-fixture-failure-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-engine/engine-failure-summary.json
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Fetch and stage the locked ARM64 Calc dispatch diagnostic input
       id: calc-dispatch-inputs
@@ -458,7 +458,7 @@ jobs:
           .work/suite-calc-dispatch-input/artifact-server-metadata.json
           .work/suite-calc-dispatch-input/calc-dispatch-download.json
           .work/suite-calc-dispatch-package/calc-dispatch-diagnostic.json
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Calc dispatch experiment deliberately cannot qualify acceptance
       id: calc-dispatch-not-acceptance
@@ -480,7 +480,7 @@ jobs:
       with:
         name: opengeul-reader-console-arm64-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-reader-console/receipt.json
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Reader console experiment deliberately cannot qualify acceptance
       id: reader-console-not-acceptance
@@ -505,7 +505,7 @@ jobs:
         name: opengeul-suite-navigation-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-navigation-diagnostic/
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Diagnostic run deliberately cannot qualify Suite acceptance
       id: diagnostic-not-acceptance
@@ -545,7 +545,7 @@ jobs:
       with:
         name: opengeul-suite-ime-mode-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-ime-mode-diagnostic/callback-numeric.json
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: IME mode experiment deliberately cannot qualify Suite acceptance
       id: ime-mode-not-acceptance
@@ -570,7 +570,7 @@ jobs:
         name: opengeul-suite-focus-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-focus-diagnostic/
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Focus experiment deliberately cannot qualify Suite acceptance
       id: focus-not-acceptance
@@ -607,7 +607,7 @@ jobs:
           .work/plugin-symbol-input/plugin-symbol-download.json
           .work/plugin-symbol-input/artifact-server-metadata.json
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Matched caller experiment cannot qualify Office delivery
       id: matched-plugin-not-acceptance
@@ -635,7 +635,7 @@ jobs:
         name: opengeul-suite-calc-save-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-calc-save/
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: Enter 없이 실제 Calc Ctrl+W 저장·버림·취소 관측
       id: calc-close
@@ -660,7 +660,7 @@ jobs:
         name: opengeul-suite-calc-close-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-calc-close/
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 문서 형식 15개와 모듈 심화 기능 6개 의미 검증
       shell: pwsh
@@ -701,7 +701,7 @@ jobs:
           .work/e2e-fixtures/
           .work/suite-home-routing/
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 다섯 모듈 PDF의 실제 페이지·한국어 텍스트 검증
       shell: pwsh
@@ -723,7 +723,7 @@ jobs:
           .work/suite-office-features/
           .work/suite-pdf-export/
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 실제 한국어 조합·백스페이스·저장·재열기
       env:
@@ -744,7 +744,7 @@ jobs:
         path: |
           .work/suite-korean-ime/
           .work/suite-worker-diagnostics/
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 한국어 탭 메뉴의 실제 접근성·화면 확인
       env:
@@ -762,7 +762,7 @@ jobs:
       with:
         name: opengeul-suite-korean-ui-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-korean-ui/
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 실제 Writer 제목 1 단축키·저장·독립 재열기
       env:
@@ -780,7 +780,7 @@ jobs:
       with:
         name: opengeul-suite-writer-style-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-writer-style/
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 저장·취소·실패·창 복원·HWP 실행 수명 검사
       env:
@@ -798,7 +798,7 @@ jobs:
       with:
         name: opengeul-suite-lifecycle-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: .work/suite-lifecycle/
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 독립 문서 초기화와 종료 40회 모두 통과
       env:
@@ -818,7 +818,7 @@ jobs:
           .work/suite-startup/
           .work/suite-engine/
           .work/suite-worker-diagnostics/
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
     - name: 첫 번째 전체 Suite GUI·편집 후 의미 검증
       env:
@@ -997,7 +997,7 @@ jobs:
           .work/suite-home-routing/
           .work/suite-pdf-export/
           .work/source-engine-input/*.json
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: warn
         compression-level: 6
     - name: Verify final product ZIP identity after normal acceptance
@@ -1057,6 +1057,6 @@ jobs:
       with:
         name: opengeul-office-suite-${{ matrix.architecture }}-${{ github.run_id }}
         path: ${{ env.SUITE_ARCHIVE }}
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error
         compression-level: 0

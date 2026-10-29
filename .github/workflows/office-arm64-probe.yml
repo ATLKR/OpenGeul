@@ -12,6 +12,7 @@ permissions:
   contents: read
 jobs:
   native-arm64-probe:
+    if: github.event.repository.private == false
     runs-on: windows-11-arm
     timeout-minutes: 20
     env:
@@ -50,4 +51,4 @@ jobs:
             .work/arm64-probe/*.txt
             .work/arm64-probe/*.log
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1

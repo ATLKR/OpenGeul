@@ -53,7 +53,7 @@ def guarded(expression):
     return not quote and depth==0
 
 
-def audit(workflow):
+def audit(workflow, *, workflow_path=None):
     events=workflow.get('on', {})
     if isinstance(events,str):events=[events]
     if not isinstance(events,(dict,list)) or any(e not in ('push','pull_request','workflow_dispatch','schedule') for e in events):
@@ -68,7 +68,26 @@ def audit(workflow):
         if any(k in job for k in ('uses','snapshot','container','services')):
             raise ValueError(f'{name}: unreviewed reusable workflow, image or service')
         runner=job.get('runs-on')
-        if runner=='${{ matrix.os }}':
+        timeout_limit=120
+        # These existing Office jobs have separate, fixed native build envelopes.
+        # Unknown files/jobs keep the original runner grammar and time limit.
+        if workflow_path=='.github/workflows/office-suite.yml' and name=='windows-suite':
+            strategy=job.get('strategy')
+            expected={'include':[
+                {'architecture':'x64','runner':'windows-2025'},
+                {'architecture':'arm64','runner':'windows-11-arm'}]}
+            if (runner!='${{ matrix.runner }}' or not isinstance(strategy,dict)
+                    or strategy.get('matrix')!=expected):
+                raise ValueError(f'{name}: require the reviewed two-architecture Office matrix')
+            candidates=[row['runner'] for row in expected['include']]
+            timeout_limit=150
+        elif workflow_path=='.github/workflows/office-native-engine.yml' and name=='native-firebird-and-office':
+            strategy=job.get('strategy',{})
+            if runner!='windows-11-arm' or not isinstance(strategy,dict) or 'matrix' in strategy:
+                raise ValueError(f'{name}: require one fixed native ARM64 build job')
+            candidates=[runner]
+            timeout_limit=360
+        elif runner=='${{ matrix.os }}':
             matrix=job.get('strategy',{}).get('matrix',{})
             if not isinstance(matrix,dict) or set(matrix) != {'os'} or not isinstance(matrix['os'],list) or not matrix['os']:
                 raise ValueError(f'{name}: runner matrix must be explicit and static')
@@ -77,8 +96,8 @@ def audit(workflow):
         if any(not isinstance(r,str) or r not in RUNNERS for r in candidates):
             raise ValueError(f'{name}: standard free runner allowlist violated')
         timeout=job.get('timeout-minutes')
-        if not str(timeout).isdigit() or not 1<=int(timeout)<=120:
-            raise ValueError(f'{name}: require a bounded timeout (1..120 minutes)')
+        if not str(timeout).isdigit() or not 1<=int(timeout)<=timeout_limit:
+            raise ValueError(f'{name}: require a bounded timeout (1..{timeout_limit} minutes)')
         for step in job.get('steps',[]):
             if 'snapshot' in step or str(step.get('continue-on-error','false')).lower()!='false':
                 raise ValueError(f'{name}: custom images or suppressed failures are not permitted')
@@ -115,7 +134,7 @@ def main():
     parser.add_argument('--event',action='store_true');args=parser.parse_args()
     paths=sorted((args.root/'.github/workflows').glob('*.y*ml'))
     if not paths:raise ValueError('No workflows found')
-    for path in paths:audit(load_workflow(path))
+    for path in paths:audit(load_workflow(path),workflow_path=path.relative_to(args.root).as_posix())
     print(f'Checked {len(paths)} workflows: public + standard runners only; no caches/custom images/LFS.')
     if args.event:
         event=json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))

@@ -11,6 +11,7 @@ env:
   DOTNET_NOLOGO: '1'
 jobs:
   home-routes-x64:
+    if: github.event.repository.private == false
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -88,5 +89,5 @@ jobs:
           dist/**/suite-provenance.json
           dist/**/runtime-branding.json
         include-hidden-files: true
-        retention-days: 7
+        retention-days: 1
         if-no-files-found: error

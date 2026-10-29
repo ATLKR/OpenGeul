@@ -85,7 +85,7 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
                 self.assertIn('uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', evidence)
                 self.assertIn('path: .work/suite-' + name + '/', evidence)
                 self.assertIn('include-hidden-files: true', evidence)
-                self.assertIn('retention-days: 7', evidence)
+                self.assertIn('retention-days: 1', evidence)
                 self.assertIn('if-no-files-found: error', evidence)
                 self.assertIn('${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}', evidence)
         final = next(step for step in steps if field(step, 'if') == '"env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' && (always())"')

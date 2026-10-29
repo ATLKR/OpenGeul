@@ -30,6 +30,7 @@ permissions:
   contents: read
 jobs:
   native-firebird-and-office:
+    if: github.event.repository.private == false
     runs-on: windows-11-arm
     timeout-minutes: 360
     env:
@@ -108,7 +109,7 @@ jobs:
             !.work/native-engine-evidence/*.zip
             !.work/native-engine-evidence/plugin-symbols/**
           include-hidden-files: true
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
       - name: Retain the qualified native engine input
         if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD != 'true' }}
@@ -118,7 +119,7 @@ jobs:
           path: |
             .work/native-engine-evidence/OpenGeul-Office-engine-arm64.zip
             .work/native-engine-evidence/source-build-receipt.json
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
           compression-level: 0
       - name: Retain the isolated Calc dispatch diagnostic engine
@@ -129,7 +130,7 @@ jobs:
           path: |
             .work/native-engine-evidence/OpenGeul-Office-engine-arm64-calc-dispatch.zip
             .work/native-engine-evidence/calc-dispatch-source-build-receipt.json
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
           compression-level: 0
       - name: Retain matched diagnostic plugin symbols separately
@@ -137,6 +138,6 @@ jobs:
         with:
           name: opengeul-native-arm64-plugin-symbols-${{ github.run_id }}-${{ github.run_attempt }}
           path: .work/native-engine-evidence/plugin-symbols/
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
           compression-level: 0

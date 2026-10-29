@@ -83,7 +83,7 @@ class SuitePreparationContracts(unittest.TestCase):
         actual=field(preparation,'if').strip('"')
         self.assertEqual(actual.replace(bounded,"steps.readiness.outcome == 'success'"),original)
         self.assertIn('always()',field(upload,'if'));self.assertIn(self.m.BRANCH,field(upload,'if'))
-        self.assertEqual(setting(upload,'retention-days'),'7');self.assertEqual(setting(upload,'include-hidden-files'),'true')
+        self.assertEqual(setting(upload,'retention-days'),'1');self.assertEqual(setting(upload,'include-hidden-files'),'true')
         self.assertIn('suite-native31-setup-',paths(upload));self.assertIn('suite-native31-privacy-preparation-',paths(upload))
         aggregate=next(step for step in steps if (setting(step,'name') or '').startswith('opengeul-suite-evidence-'))
         self.assertIn('.work/suite-native31-privacy-preparation/',paths(aggregate))
