@@ -1954,12 +1954,18 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         if observer is not None:
             retain_ime_message_diagnostics(record, observer)
             try:
-                record['events'] = observer.events()
+                try:
+                    record['events'] = observer.events()
+                except Exception as exc:
+                    record.update(success=False, imeCleanupError=type(exc).__name__ + ': ' + str(exc))
+                # Evidence collection cannot suppress the original owned-thread
+                # restoration; its existing once-only command and guards remain.
                 if observer.restoration_required and api.user.IsWindow(observer.focus):
                     record['restoration'] = observer.command(4)
                     record['layoutRestored'] = observer.restored
             except Exception as exc:
-                record.update(success=False, imeCleanupError=type(exc).__name__ + ': ' + str(exc))
+                record.update(success=False, imeRestorationCleanupError=type(exc).__name__ + ': ' + str(exc))
+                record.setdefault('imeCleanupError', record['imeRestorationCleanupError'])
             finally:
                 record['imeCommands'] = observer.commands
                 if capture_ime_compartment:

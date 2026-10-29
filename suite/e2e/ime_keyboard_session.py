@@ -156,6 +156,11 @@ class IMEKeyboardSession:
         else:
             assert row['keyboardThreadId']==target['threadId']
         self._budget();self.api.require_foreground(b['suiteHwnd'])
+        if not keyboard['targetLayout']==keyboard['currentThreadLayout']==US_LAYOUT:
+            try:
+                from keyboard_layout_summary import remember
+                remember(self.record,1,1,keyboard,b,owner=self)
+            except Exception:pass
         assert keyboard['targetLayout']==keyboard['currentThreadLayout']==US_LAYOUT, 'IME shortcut requires exact original US layout'
         assert keyboard['keysDown']==[], 'IME shortcut requires neutral keys'
         locks=tuple(keyboard[key] for key in ('capsLockOn','scrollLockOn','numLockOn'))

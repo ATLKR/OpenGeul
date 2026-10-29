@@ -147,6 +147,8 @@ _FIELDS_V2 = _FIELDS + (
     ('imeCompositionStartEventCount','u32',(('imeCompositionStartEventCount',),)),
 )
 OBSERVATION_NAMES_V2 = tuple(row[0] for row in _FIELDS_V2)
+_FIELDS_V9 = _FIELDS_V2 + (('childHwnd','u64',(('childHwnd',),)),)
+OBSERVATION_NAMES_V9 = tuple(row[0] for row in _FIELDS_V9)
 _MODE_NAMES = ('imeModeSamples','imeModeClosed','imeModeAlpha','imeLastOpen','imeLastNative')
 _FIELDS_V3 = _FIELDS_V2 + tuple((name,'sample' if index<3 else 'flag',(('_imeModeSummary',name),))
     for index,name in enumerate(_MODE_NAMES))
@@ -161,6 +163,8 @@ _CASE_KEYS_V5 = _CASE_KEYS_V4 | {'foreground'}
 _CASE_KEYS_V6 = _CASE_KEYS_V2 | {'capture'}
 _CASE_KEYS_V7 = _CASE_KEYS_V2 | {'captureGate'}
 _CASE_KEYS_V8 = _CASE_KEYS_V2 | {'readerGuard'}
+_CASE_KEYS_V9 = _CASE_KEYS_V2 | {'writerOs'}
+_CASE_KEYS_V10 = _CASE_KEYS_V2 | {'keyboardLayout'}
 _FAILURE_KEYS = {'captured','exceptionCode','fileCode','line'}
 _TRACE_KEYS = _COMMON | {'diagnostic','oracleFlags','oraclePresenceMask'}
 _STARTUP_FAILURES = []  # At most 32 strong references prevent object-id reuse.
@@ -545,6 +549,107 @@ def emit_reader_guard_case(name, record):
         return False
 
 
+def _writer_os_site(case, module, stage, context, failure, frames, value):
+    try:
+        if __package__:
+            from .writer_os_summary import valid, STAGE_NAMES
+        else:
+            from writer_os_summary import valid, STAGE_NAMES
+        return (valid(value) and context['scopeCode'] == SCOPES['korean-ui']
+            and case == CASES['korean-ui-writer'][0] and module == MODULES['writer']
+            and stage == STAGES[STAGE_NAMES[value[1]]]
+            and failure.get('exceptionCode') == 1 and failure.get('fileCode') == 5
+            and frames == [[5, failure.get('line')]])
+    except BaseException:
+        return False
+
+
+def _writer_os_summary(name, record, context):
+    try:
+        if (name != 'korean-ui-writer' or record.get('case') != name
+                or ('architecture' in record and record['architecture'] !=
+                    {0x8664:'x64',0xaa64:'arm64'}[context['architecture']])):
+            return None
+        failure = validate_failure_code(record.get('numericFailure'))
+        frames = validate_failure_frames(record.get('numericFailureFrames'))
+        if __package__:
+            from .writer_os_summary import project
+        else:
+            from writer_os_summary import project
+        value = project(record)
+        # The original observation omits conflicting generations. Preserve its
+        # legacy notice when that existing ambiguity cannot bind this vector.
+        other_generation = _get(record,('imeKeyboardSession','expectedNative','officeCreationTime'))
+        if (_integer(other_generation,2**64-1,1)
+                and (value is None or other_generation != value[4])):
+            return None
+        return (value if _writer_os_site(CASES.get(name,(0,0))[0],
+            MODULES.get(record.get('module'),0), STAGES.get(record.get('stage'),0),
+            context, failure, frames, value) else None)
+    except BaseException:
+        return None
+
+
+def _keyboard_layout_site(case, module, context, failure, frames, value):
+    try:
+        if __package__:
+            from .keyboard_layout_summary import valid
+        else:
+            from keyboard_layout_summary import valid
+        if (not valid(value) or failure.get('exceptionCode') != 1 or len(frames) < 2
+                or frames[-1] != [failure.get('fileCode'),failure.get('line')]):
+            return False
+        scope=context['scopeCode']
+        if value[0] == 1:
+            allowed=(scope == SCOPES['korean-ime'] and case in
+                tuple(CASES['ime-'+name][0] for name in ('writer','calc','impress')))
+            allowed=allowed or (scope == SCOPES['calc-dispatch'] and
+                context['architecture'] == 0xaa64 and case == CASES['ime-calc'][0])
+            source,caller=11,4
+        else:
+            groups={SCOPES['korean-ui']:(5,tuple('korean-ui-'+name for name in ('writer','calc','impress','draw'))),
+                SCOPES['writer-style']:(6,('writer-heading1',)),
+                SCOPES['lifecycle']:(7,('dirty-writer-cancel-save','dirty-writer-discard',
+                    'new-writer-saveas-cancel','failed-saveas-retains-editor',
+                    'home-two-documents-cancel','resize-minimize-restore')),
+                SCOPES['native-first']:(1,('writer','calc','impress')),
+                SCOPES['native-second']:(1,('writer','calc','impress'))}
+            caller,names=groups.get(scope,(0,()))
+            allowed=case in tuple(CASES[name][0] for name in names)
+            source=13
+        modules={code:kind for code,kind in CASES.values()}
+        return (allowed and module == modules.get(case) and failure.get('fileCode') == source
+            and any(frame[0] == caller for frame in frames[:-1]))
+    except BaseException:
+        return False
+
+
+def _keyboard_layout_summary(name, record, context):
+    try:
+        if ('architecture' in record and record['architecture'] !=
+                {0x8664:'x64',0xaa64:'arm64'}[context['architecture']]):
+            return None
+        failure=validate_failure_code(record.get('numericFailure'))
+        frames=validate_failure_frames(record.get('numericFailureFrames'))
+        if __package__:
+            from .keyboard_layout_summary import project
+        else:
+            from keyboard_layout_summary import project
+        value=project(record)
+        case,module=CASES.get(name,(0,0))
+        if not _keyboard_layout_site(case,module,context,failure,frames,value):return None
+        # Preserve existing ambiguity handling before filling absent optional
+        # observations from this original retained guard's identity.
+        for key,slot in (('enginePid',2),('officeCreationTime',3)):
+            kind,paths=next((kind,paths) for field,kind,paths in _FIELDS_V2 if field == key)
+            maximum=2**64-1 if kind == 'u64' else 0xffffffff
+            if any(_integer(_get(record,path),maximum,1) and
+                    _get(record,path) != value[slot] for path in paths):return None
+        return value
+    except BaseException:
+        return None
+
+
 def _project_case(name, record, context, *, require_failure,environ=None):
     primary_name = record.get('case') if type(record.get('case')) is str and record['case'] in CASES else name
     if type(primary_name) is not str or primary_name not in CASES: return None
@@ -567,9 +672,15 @@ def _project_case(name, record, context, *, require_failure,environ=None):
     capture=_capture_summary(record,context)
     capture_gate=_capture_gate_summary(record,context)
     reader_guard=_reader_guard_summary(record,context)
+    writer_os=_writer_os_summary(name,record,context)
+    keyboard_layout=_keyboard_layout_summary(primary_name,record,context)
     version=8 if reader_guard is not None else (7 if capture_gate is not None else (6 if capture is not None else (5 if foreground is not None else (4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1))))))
-    fields=_FIELDS_V3 if version==3 else (_FIELDS_V2 if version>=2 else _FIELDS)
+    if writer_os is not None: version=9
+    if keyboard_layout is not None: version=10
+    fields=_FIELDS_V9 if version in (9,10) else (_FIELDS_V3 if version==3 else (_FIELDS_V2 if version>=2 else _FIELDS))
     source=dict(record,_imeModeSummary=mode)
+    if version==10:
+        source.update(officePid=keyboard_layout[2],officeCreationTime=keyboard_layout[3],childHwnd=keyboard_layout[4])
     observed, mask = {}, 0
     for index,(key,kind,paths) in enumerate(fields):
         values = []
@@ -596,6 +707,8 @@ def _project_case(name, record, context, *, require_failure,environ=None):
     if version==6: value['capture']=capture
     if version==7: value['captureGate']=capture_gate
     if version==8: value['readerGuard']=reader_guard
+    if version==9: value['writerOs']=writer_os
+    if version==10: value['keyboardLayout']=keyboard_layout
     return value
 
 
@@ -635,12 +748,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     limit = {CASE_TITLE:MAX_CASE_BYTES,TRACE_TITLE:MAX_TRACE_BYTES}.get(title)
     if limit is None or type(message) is not str or len(message.encode('utf-8'))>limit: raise ValueError('Notice title/size rejected')
     value = json.loads(message,object_pairs_hook=_unique,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite notice')))
-    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5,6,7,8)
-    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5,6:_CASE_KEYS_V6,7:_CASE_KEYS_V7,8:_CASE_KEYS_V8}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
+    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5,6,7,8,9,10)
+    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5,6:_CASE_KEYS_V6,7:_CASE_KEYS_V7,8:_CASE_KEYS_V8,9:_CASE_KEYS_V9,10:_CASE_KEYS_V10}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
     if type(value) is not dict or value.keys()!=keys: raise ValueError('Closed notice schema required')
-    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground','capture','captureGate','readerGuard'}:
+    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground','capture','captureGate','readerGuard','writerOs','keyboardLayout'}:
         if not _integer(value[key],2**63-1): raise ValueError('Integer notice fields required')
-    if (value['schemaVersion'] not in ((1,2,3,4,5,6,7,8) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
+    if (value['schemaVersion'] not in ((1,2,3,4,5,6,7,8,9,10) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
             or not re.fullmatch('[0-9a-f]{40}',value['sourceCommit']) or value['sourceCommit']=='0'*40
             or value['sourceCommit']!=expected_source_commit or value['runId']!=expected_run_id or value['runId']<=0
             or value['runAttempt']!=expected_run_attempt or value['runAttempt']!=1
@@ -659,7 +772,7 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
         if value['diagnostic']['identity'] is None and (value['oraclePresenceMask'] or any(flags)):
             raise ValueError('Oracle lacks original native admission')
         return value
-    fields=_FIELDS_V3 if value['schemaVersion']==3 else (_FIELDS_V2 if extended else _FIELDS)
+    fields=_FIELDS_V9 if value['schemaVersion'] in (9,10) else (_FIELDS_V3 if value['schemaVersion']==3 else (_FIELDS_V2 if extended else _FIELDS))
     if extended: value['ownedFrames']=validate_failure_frames(value['ownedFrames'])
     if (value['moduleCode'] not in (0,*MODULES.values()) or value['caseCode'] not in tuple(row[0] for row in CASES.values())
             or value['stageCode'] not in (0,*STAGES.values()) or value['exceptionCode'] not in (0,*EXCEPTIONS.values(),UNO_RUNTIME_EXCEPTION_CODE)
@@ -708,6 +821,22 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
                 value['stageCode'],value,value,value['ownedFrames'])
             or not _reader_guard_site(value['readerGuard'],value)):
         raise ValueError('Bounded original reader guard failure required')
+    if value['schemaVersion']==9:
+        if not _writer_os_site(value['caseCode'],value['moduleCode'],value['stageCode'],
+                value,value,value['ownedFrames'],value['writerOs']):
+            raise ValueError('Bounded original Writer OS failure required')
+        for key, slot in (('enginePid',3),('officeCreationTime',4),('childHwnd',5)):
+            if (not value['fieldPresenceMask'] & (1<<OBSERVATION_NAMES_V9.index(key))
+                    or observations[key] != value['writerOs'][slot]):
+                raise ValueError('Writer OS retained process identity differs')
+    if value['schemaVersion']==10:
+        if not _keyboard_layout_site(value['caseCode'],value['moduleCode'],value,
+                value,value['ownedFrames'],value['keyboardLayout']):
+            raise ValueError('Bounded original keyboard layout guard required')
+        for key,slot in (('enginePid',2),('officeCreationTime',3),('childHwnd',4)):
+            if (not value['fieldPresenceMask'] & (1<<OBSERVATION_NAMES_V9.index(key))
+                    or observations[key] != value['keyboardLayout'][slot]):
+                raise ValueError('Keyboard layout retained process identity differs')
     return value
 
 

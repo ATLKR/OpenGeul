@@ -1193,5 +1193,228 @@ class NumericNoticeTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.decode(json.dumps(value))
 
 
+class KeyboardLayoutNumericNoticeTests(unittest.TestCase):
+    def setUp(self):
+        imports=patch.object(sys,'path',[str(SCRIPT.parent),str(Path(__file__).parent),*sys.path])
+        imports.start();self.addCleanup(imports.stop)
+        self.n=implementation()
+
+    def fixture(self,*,origin=1,slot=1,name='ime-writer',scope=3,architecture='ARM64'):
+        from test_keyboard_layout_summary import KeyboardLayoutSummaryTests
+        import keyboard_layout_summary as helper
+        record,keyboard,binding=KeyboardLayoutSummaryTests().fixture()
+        source,caller=(11,4) if origin==1 else (13,{4:5,5:6,6:7,7:1,8:1}[scope])
+        record.update(case=name,module={1:'writer',2:'calc',3:'impress',4:'draw'}[
+            self.n.CASES[name][1]],success=False,stage='attach',
+            architecture={'ARM64':'arm64','X64':'x64'}[architecture],
+            numericFailure=dict(captured=1,exceptionCode=1,fileCode=source,line=159),
+            numericFailureFrames=[[caller,1752],[source,159]])
+        helper.remember(record,origin,slot,keyboard,binding)
+        self.assertIsNotNone(helper.project(record))
+        env=environment()|dict(OPENGEUL_SUITE_NOTICE_SCOPE=str(scope),RUNNER_ARCH=architecture)
+        return record,env
+
+    def emit(self,record,env):
+        stream=io.StringIO();emitter=self.n.NoticeEmitter(environ=env,stream=stream)
+        self.assertTrue(emitter.emit_case_notice(record['case'],record))
+        self.assertEqual(emitter.count,1)
+        message=stream.getvalue().strip().split('::',2)[2]
+        value=self.n.decode_notice(message,env['GITHUB_SHA'],int(env['GITHUB_RUN_ID']),
+            expected_scope=int(env['OPENGEUL_SUITE_NOTICE_SCOPE']),
+            expected_architecture={'ARM64':0xaa64,'X64':0x8664}[env['RUNNER_ARCH']])
+        return message,value
+
+    def test_actual_failed_guard_projection_reaches_closed_notice_on_both_architectures(self):
+        cases=[(1,1,'ime-writer',3),(1,1,'ime-calc',3),(1,1,'ime-impress',3),
+            (2,1,'korean-ui-writer',4),(2,2,'korean-ui-draw',4),(2,2,'writer-heading1',5),
+            (2,1,'dirty-writer-discard',6),(2,2,'writer',7),(2,1,'calc',8)]
+        for architecture in ('ARM64','X64'):
+            for origin,slot,name,scope in cases:
+                with self.subTest(architecture=architecture,name=name,slot=slot):
+                    record,env=self.fixture(origin=origin,slot=slot,name=name,scope=scope,
+                        architecture=architecture)
+                    record.update(privateDocument='PRIVATE INPUT',error='PRIVATE ERROR')
+                    message,value=self.emit(record,env)
+                    self.assertEqual(value['schemaVersion'],10)
+                    self.assertEqual(value['keyboardLayout'],
+                        [origin,slot,88,134370146624845933,22,0x04120412,0x04090409])
+                    self.assertEqual(value['observations']['enginePid'],88)
+                    self.assertEqual(value['observations']['childHwnd'],22)
+                    self.assertNotIn('PRIVATE',message)
+                    self.assertLessEqual(len(message.encode()),2048)
+
+    def test_decoder_rejects_layout_context_identity_boolean_and_raw_data(self):
+        record,env=self.fixture();_,value=self.emit(record,env)
+        self.assertEqual(value['schemaVersion'],10)
+        for change in (dict(scopeCode=1),dict(fileCode=13),dict(exceptionCode=9),
+                dict(ownedFrames=[[11,159]]),dict(raw='PRIVATE')):
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                self.n.decode_notice(json.dumps(value|change),'a'*40,123)
+        for slot,number in ((0,2),(1,2),(2,99),(3,99),(4,99),(5,True),(6,2**64)):
+            modified=copy.deepcopy(value);modified['keyboardLayout'][slot]=number
+            with self.subTest(slot=slot),self.assertRaises(ValueError):
+                self.n.decode_notice(json.dumps(modified),'a'*40,123)
+        modified=copy.deepcopy(value);modified['keyboardLayout'][5:]=[0x04090409]*2
+        with self.assertRaises(ValueError):self.n.decode_notice(json.dumps(modified),'a'*40,123)
+        for key in ('enginePid','officeCreationTime','childHwnd'):
+            modified=copy.deepcopy(value)
+            modified['fieldPresenceMask'] &= ~(1<<self.n.OBSERVATION_NAMES_V9.index(key))
+            modified['observations'][key]=0
+            with self.subTest(missing=key),self.assertRaises(ValueError):
+                self.n.decode_notice(json.dumps(modified),'a'*40,123)
+
+    def test_missing_outer_identity_uses_original_retained_guard_binding(self):
+        record,env=self.fixture(origin=2,name='writer-heading1',scope=5)
+        # Real lifecycle/scenario records may omit these optional top-level values.
+        import keyboard_layout_summary as helper
+        for key in ('officePid','officeCreationTime','childHwnd'):record.pop(key)
+        # Rebind a fresh measurement after removing optional outer fields.
+        from test_keyboard_layout_summary import KeyboardLayoutSummaryTests
+        _,keyboard,binding=KeyboardLayoutSummaryTests().fixture()
+        helper.remember(record,2,1,keyboard,binding)
+        _,value=self.emit(record,env)
+        self.assertEqual(value['schemaVersion'],10)
+        self.assertEqual(value['observations']['officeCreationTime'],binding['officeCreationTime'])
+
+    def test_invalid_optional_evidence_preserves_original_failure_notice(self):
+        record,env=self.fixture();record['_keyboardLayoutFailure']['officePid']=999
+        _,value=self.emit(record,env)
+        self.assertEqual(value['schemaVersion'],2)
+        record,env=self.fixture()
+        with patch('keyboard_layout_summary.project',side_effect=RuntimeError('PRIVATE')):
+            _,value=self.emit(record,env)
+        self.assertEqual(value['schemaVersion'],2)
+
+    def test_largest_legal_layout_message_fits_existing_transport(self):
+        record,env=self.fixture(origin=2,slot=2,name='writer-heading1',scope=5)
+        _,value=self.emit(record,env)
+        self.assertEqual(value['schemaVersion'],10)
+        value.update(runId=2**63-1,line=10_000_000,
+            ownedFrames=[[6,10_000_000]]+[[13,10_000_000]]*7,
+            keyboardLayout=[2,2,0xffffffff,2**64-1,2**64-1,2**64-1,2**64-1])
+        for key,kind,_ in self.n._FIELDS_V9:
+            value['observations'][key]=(1 if kind in ('bool','flag') else
+                8 if kind=='ordinal' else 2**64-1 if kind=='u64' else 0xffffffff)
+        value['fieldPresenceMask']=(1<<len(self.n._FIELDS_V9))-1
+        message=json.dumps(value,separators=(',',':'))
+        self.assertLessEqual(len(message.encode()),2048)
+        self.n.decode_notice(message,'a'*40,2**63-1,expected_scope=5)
+
+
+class WriterOsNumericNoticeTests(unittest.TestCase):
+    def setUp(self):
+        imports = patch.object(sys, 'path', [str(SCRIPT.parent),
+            str(Path(__file__).parent), *sys.path])
+        imports.start(); self.addCleanup(imports.stop)
+        self.n = implementation()
+        self.env = environment() | {'OPENGEUL_SUITE_NOTICE_SCOPE':'4'}
+
+    def emit(self, record, *, architecture='ARM64', name='korean-ui-writer'):
+        stream = io.StringIO()
+        env = self.env | {'RUNNER_ARCH':architecture}
+        emitter = self.n.NoticeEmitter(environ=env, stream=stream)
+        self.assertTrue(emitter.emit_case_notice(name, record))
+        self.assertEqual(emitter.count, 1)
+        message = stream.getvalue().strip().split('::',2)[2]
+        value = self.n.decode_notice(message, env['GITHUB_SHA'], int(env['GITHUB_RUN_ID']),
+            expected_architecture={'X64':0x8664,'ARM64':0xaa64}[architecture],
+            expected_scope=int(env['OPENGEUL_SUITE_NOTICE_SCOPE']))
+        return message, value
+
+    def test_actual_producer_to_decoder_retains_closed_writer_os_failure_on_both_architectures(self):
+        from test_writer_os_summary import failure_record, FIELDS
+        for architecture in ('X64','ARM64'):
+            record = failure_record()
+            record.update(error='PRIVATE DOCUMENT', input='PRIVATE INPUT')
+            record['writerOsAccessibility'].update(hresult=0x80004005, ownerReleased=1)
+            message, value = self.emit(record, architecture=architecture)
+            with self.subTest(architecture=architecture):
+                self.assertEqual(value['schemaVersion'],9)
+                self.assertEqual(value['writerOs'],
+                    [record['writerOsAccessibility'][key] for key in FIELDS])
+                self.assertEqual(value['observations']['childHwnd'],123)
+                self.assertNotIn('PRIVATE', message)
+                self.assertLessEqual(len(message.encode()),2048)
+
+    def test_original_case_notice_remains_available_for_bad_optional_projection(self):
+        from test_writer_os_summary import failure_record
+        for change in (dict(officePid=999), dict(officeCreationTime=999),
+                dict(childHwnd=999), dict(architecture='x64'),
+                dict(stage='writer-os-focus'), dict(module='calc'),
+                dict(numericFailureFrames=[[1,199]])):
+            record = failure_record() | change
+            _, value = self.emit(record)
+            with self.subTest(change=change):
+                self.assertEqual(value['schemaVersion'],2)
+                self.assertNotIn('writerOs',value)
+        record = failure_record()
+        record['writerOsAccessibility']['name'] = 'PRIVATE'
+        _, value = self.emit(record)
+        self.assertEqual(value['schemaVersion'],2)
+        with patch('writer_os_summary.project',side_effect=RuntimeError('PRIVATE')):
+            _, value = self.emit(failure_record())
+        self.assertEqual(value['schemaVersion'],2)
+
+    def test_decoder_rejects_wrong_case_stage_frames_owner_and_extra_raw_data(self):
+        from test_writer_os_summary import failure_record, FIELDS
+        _, value = self.emit(failure_record())
+        self.assertEqual(value['schemaVersion'],9)
+        for change in (dict(scopeCode=1), dict(caseCode=21), dict(moduleCode=2),
+                dict(stageCode=self.n.STAGES['writer-os-focus']), dict(exceptionCode=9),
+                dict(fileCode=1), dict(ownedFrames=[[5,198]]), dict(ownedFrames=[]),
+                dict(rawError='PRIVATE')):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.n.decode_notice(json.dumps(value | change),'a'*40,123)
+        for key in ('officePid','officeCreationTime','childHwnd'):
+            altered = copy.deepcopy(value)
+            altered['writerOs'][FIELDS.index(key)] += 1
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.n.decode_notice(json.dumps(altered),'a'*40,123)
+        for key in ('enginePid','officeCreationTime','childHwnd'):
+            altered = copy.deepcopy(value)
+            altered['fieldPresenceMask'] &= ~(1<<self.n.OBSERVATION_NAMES_V9.index(key))
+            altered['observations'][key] = 0
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                self.n.decode_notice(json.dumps(altered),'a'*40,123)
+
+    def test_conflicting_existing_generation_observation_falls_back_to_original_notice(self):
+        from test_writer_os_summary import failure_record
+        record = failure_record()
+        record['imeKeyboardSession'] = dict(expectedNative=dict(officeCreationTime=999))
+        _, value = self.emit(record)
+        self.assertEqual(value['schemaVersion'],2)
+        self.assertEqual(value['observations']['officeCreationTime'],0)
+        self.assertNotIn('writerOs',value)
+
+    def test_optional_summary_is_bound_to_original_parent_assertion_and_name(self):
+        from test_writer_os_summary import failure_record
+        for change in (dict(exceptionCode=9), dict(fileCode=1), dict(line=198)):
+            record = failure_record()
+            record['numericFailure'].update(change)
+            _, value = self.emit(record)
+            self.assertEqual(value['schemaVersion'],2)
+        _, value = self.emit(failure_record(), name='korean-ui-calc')
+        self.assertEqual(value['schemaVersion'],2)
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE'] = '1'
+        _, value = self.emit(failure_record())
+        self.assertEqual(value['schemaVersion'],2)
+
+    def test_largest_legal_writer_os_message_stays_within_original_limit(self):
+        from test_writer_os_summary import failure_record
+        record = failure_record(stage=14, maximum=True)
+        record['numericFailure']['line'] = 10_000_000
+        record['numericFailureFrames'] = [[5,10_000_000]]
+        self.env['GITHUB_RUN_ID'] = str(2**63-1)
+        message, value = self.emit(record)
+        self.assertEqual(value['schemaVersion'],9)
+        for key,kind,_ in self.n._FIELDS_V9:
+            value['observations'][key] = (1 if kind in ('bool','flag') else
+                8 if kind=='ordinal' else 2**64-1 if kind=='u64' else 0xffffffff)
+        value['fieldPresenceMask'] = (1<<len(self.n._FIELDS_V9))-1
+        message = json.dumps(value,separators=(',',':'))
+        self.assertLessEqual(len(message.encode()),2048)
+        self.n.decode_notice(message,'a'*40,2**63-1,expected_architecture=0xaa64)
+
+
 if __name__ == '__main__':
     unittest.main()

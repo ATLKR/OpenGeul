@@ -238,7 +238,12 @@ class FirstAdmissionEditorSession(CountedEditorShortcuts):
         if editor_required:
             assert scope['focusWithinEditor'] is True and focus['pid'] == b['officePid'], 'Strict editor readiness is required before navigation'
         self._budget(); self.api.require_foreground(b['suiteHwnd'])
-        for observed in (keyboard, focus_keyboard):
+        for slot, observed in enumerate((keyboard, focus_keyboard), 1):
+            if not observed['targetLayout'] == observed['currentThreadLayout'] == US_LAYOUT:
+                try:
+                    from keyboard_layout_summary import remember
+                    remember(self.record,2,slot,observed,b,owner=self)
+                except Exception:pass
             assert observed['targetLayout'] == observed['currentThreadLayout'] == US_LAYOUT, 'Shortcut requires exact English US layout'
             assert observed['keysDown'] == [], 'Shortcut requires neutral modifier and navigation keys'
             assert observed['capsLockOn'] is False and observed['scrollLockOn'] is False, 'Shortcut lock state is not neutral'

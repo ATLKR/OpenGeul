@@ -11,7 +11,8 @@ import test_ime_case_phases as phase_tests
 
 
 class IMECompositionProgressTests(unittest.TestCase):
-    def original_case(self,module,*,fail_at=None,fail_semantic=None,retention=None):
+    def original_case(self,module,*,fail_at=None,fail_semantic=None,retention=None,
+                      cleanup_event_error=None,restoration_error=None):
         harness=phase_tests.IMECasePhaseTests();self.addCleanup(harness.doCleanups)
         original=ime.case;trace=[];physical_rows=[];pending_rows=[]
         def run(*args,**kwargs):
@@ -22,6 +23,9 @@ class IMECompositionProgressTests(unittest.TestCase):
             class Keyboard(keyboard_boundary):
                 def __init__(self,*args,**kwargs):
                     super().__init__(*args,**kwargs);current['record']=self.record
+                def close(self,primary=None):
+                    if retention is not None:retention.setdefault('keyboardPrimaries',[]).append(primary)
+                    return super().close(primary)
             class Observer(observer_boundary):
                 def diagnostics(self):
                     if retention is None:return super().diagnostics()
@@ -34,8 +38,12 @@ class IMECompositionProgressTests(unittest.TestCase):
                     if retention is not None and command==4:
                         retention.setdefault('atRestore',[]).append(current['record'].get('imeMessageDiagnostics'))
                         retention.setdefault('order',[]).append('restore')
-                    return super().command(command,**kwargs)
+                    result=super().command(command,**kwargs)
+                    if command==4 and restoration_error is not None:raise restoration_error
+                    return result
                 def events(self):
+                    if getattr(self,'pending_failed',False) and cleanup_event_error is not None:
+                        raise cleanup_event_error
                     result=super().events()
                     if current['record'].get('stage')=='physical-dubeolsik-composition':
                         self.progress_event_reads=getattr(self,'progress_event_reads',0)+1
@@ -47,7 +55,9 @@ class IMECompositionProgressTests(unittest.TestCase):
                     record=current['record']
                     pending_rows.append((record.get('imeCompositionOrdinal'),record.get('imeCompositionStartEventCount'),after))
                     trace.append(('pending',len(pending_rows)))
-                    if len(pending_rows)==fail_at:return False
+                    if len(pending_rows)==fail_at:
+                        self.pending_failed=True
+                        return False
                     return super().pending(expected,after)
             def physical(observer,token,record):
                 if record.get('stage')=='physical-dubeolsik-composition':
@@ -119,3 +129,44 @@ class IMECompositionProgressTests(unittest.TestCase):
                 self.assertIs(retention['atRestore'][0],snapshot)
                 self.assertIs(record['imeMessageDiagnostics'],snapshot)
                 self.assertEqual(calls.count(('command',4)),1)
+
+    def test_final_event_snapshot_failure_does_not_skip_original_restore(self):
+        retention={}
+        snapshot_error=RuntimeError('synthetic final event snapshot failure')
+        calls,record,result,error,*_=self.original_case('writer',fail_at=1,retention=retention,
+            cleanup_event_error=snapshot_error)
+        self.assertIsInstance(error,AssertionError)
+        self.assertIsNone(result)
+        self.assertIs(retention['keyboardPrimaries'][0],error)
+        self.assertEqual(calls.count(('command',4)),1)
+        self.assertEqual(calls.count('observer-close'),1)
+        self.assertEqual(calls.count('keyboard-close'),1)
+        self.assertEqual(calls.count('retirement-close'),1)
+        self.assertTrue(record['layoutRestored'])
+        self.assertFalse(record['success'])
+        self.assertEqual(record['imeCleanupError'],'RuntimeError: '+str(snapshot_error))
+        self.assertNotIn('imeRestorationCleanupError',record)
+        self.assertNotIn('CTRL_S',calls)
+        self.assertEqual(calls.count(('physical',ime.EXPECTED_KEYS[0])),1)
+
+    def test_restore_failure_remains_once_and_separate_from_snapshot_error(self):
+        for snapshot_error in (None,RuntimeError('synthetic final event snapshot failure')):
+            with self.subTest(snapshot_failed=snapshot_error is not None):
+                retention={}
+                restore_error=ValueError('synthetic restoration receipt failure')
+                calls,record,result,error,*_=self.original_case('writer',fail_at=1,retention=retention,
+                    cleanup_event_error=snapshot_error,restoration_error=restore_error)
+                self.assertIsInstance(error,AssertionError)
+                self.assertIsNone(result)
+                self.assertIs(retention['keyboardPrimaries'][0],error)
+                self.assertEqual(calls.count(('command',4)),1)
+                self.assertEqual(calls.count('observer-close'),1)
+                self.assertEqual(calls.count('keyboard-close'),1)
+                self.assertEqual(calls.count('retirement-close'),1)
+                self.assertFalse(record['success'])
+                self.assertNotIn('layoutRestored',record)
+                self.assertTrue('imeRestorationCleanupError' in record,'Missing restoration error classification')
+                self.assertEqual(record['imeRestorationCleanupError'],'ValueError: '+str(restore_error))
+                first=snapshot_error if snapshot_error is not None else restore_error
+                self.assertEqual(record['imeCleanupError'],type(first).__name__+': '+str(first))
+                self.assertNotIn('CTRL_S',calls)
