@@ -243,11 +243,11 @@ _ACCESSIBLE_SLOTS = (
     'get_accHelp', 'get_accHelpTopic', 'get_accKeyboardShortcut', 'get_accFocus',
     'get_accSelection', 'get_accDefaultAction', 'accSelect', 'accLocation',
     'accNavigate', 'accHitTest', 'accDoDefaultAction', 'put_accName', 'put_accValue')
-_IIDS = dict(unknown='00000000-0000-0000-c000-000000000046',
-    accessible='618736e0-3c3d-11cf-810c-00aa00389b71',
-    service='6d5140c1-7436-11ce-8034-00aa006009fa',
-    ia2='e89f726e-c4f4-4c19-bb19-b647d7fa8478',
-    text='24fd2ffb-3aad-4a08-8335-a3ad89c0fb4b')
+_IIDS = dict(unknown='{00000000-0000-0000-c000-000000000046}',
+    accessible='{618736e0-3c3d-11cf-810c-00aa00389b71}',
+    service='{6d5140c1-7436-11ce-8034-00aa006009fa}',
+    ia2='{e89f726e-c4f4-4c19-bb19-b647d7fa8478}',
+    text='{24fd2ffb-3aad-4a08-8335-a3ad89c0fb4b}')
 
 
 def plain_variant(variant):

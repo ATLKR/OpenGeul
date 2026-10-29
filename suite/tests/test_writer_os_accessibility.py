@@ -642,5 +642,79 @@ class RawAbiTests(unittest.TestCase):
         self.assertEqual(C.sizeof(bindings.Variant),24)
 
 
+class DocumentedGuidInputTests(unittest.TestCase):
+    """Exercise the CLSIDFromString input boundary without Windows or a registry.
+
+    uuid.UUID accepts bare UUIDs, while the documented CLSIDFromString form has
+    braces. This strict boundary is synthetic; it does not execute that API.
+    """
+    def setUp(self):
+        self.fixture = RawFixture()
+        self.record = probe.failure(REQUEST)
+        self.owner = Owner(REQUEST)
+        self.inputs = []
+        supplied = self.inputs
+
+        class DocumentedGuid(Guid):
+            def __init__(self, value=None):
+                if value is not None:
+                    supplied.append(value)
+                    if (type(value) is not str or len(value) != 38
+                            or value[0] != '{' or value[-1] != '}'):
+                        raise OSError('Synthetic CLSIDFromString format boundary')
+                super().__init__(value)
+
+        self.fixture.bindings.Guid = DocumentedGuid
+
+    def backend(self):
+        value = probe.RawComBackend(lambda: None, self.record,
+            bindings=self.fixture.bindings)
+        self.addCleanup(value.close)
+        return value
+
+    def test_original_root_reaches_oleacc_with_documented_guid_input(self):
+        backend = self.backend()
+        try:
+            root = backend.root(REQUEST['childHwnd'])
+        except OSError:
+            self.fail('Original root GUID must satisfy CLSIDFromString input format')
+        self.assertEqual(root, self.fixture.nodes['root'])
+        self.assertEqual(self.fixture.calls, [('root',123,0xfffffffc)])
+
+    def test_canonical_identity_reaches_query_interface_with_documented_guid_input(self):
+        backend = self.backend()
+        try:
+            pointer = backend.identity(self.fixture.nodes['root'])
+        except OSError:
+            self.fail('Canonical IUnknown GUID must satisfy CLSIDFromString input format')
+        self.assertEqual(pointer, self.fixture.nodes['root'])
+        self.assertEqual(self.fixture.calls,
+            [('qi','root','00000000-0000-0000-c000-000000000046')])
+
+    def test_service_queries_preserve_both_original_interface_identities(self):
+        backend = self.backend()
+        try:
+            for interface in ('ia2','text'):
+                self.assertTrue(backend.support(self.fixture.nodes['leaf'],interface))
+        except OSError:
+            self.fail('Service and requested GUIDs must satisfy CLSIDFromString input format')
+        queries = [row for row in self.fixture.calls if row[0] == 'qs']
+        self.assertEqual(queries, [
+            ('qs','618736e0-3c3d-11cf-810c-00aa00389b71','e89f726e-c4f4-4c19-bb19-b647d7fa8478'),
+            ('qs','618736e0-3c3d-11cf-810c-00aa00389b71','24fd2ffb-3aad-4a08-8335-a3ad89c0fb4b')])
+
+    def test_existing_observer_passes_strict_guid_boundary_and_balances_cleanup(self):
+        value = probe.observe(REQUEST, owner_factory=lambda request: self.owner,
+            backend_factory=lambda guard, record: probe.RawComBackend(
+                guard,record,bindings=self.fixture.bindings))
+        self.assertEqual(value['verified'],1)
+        self.assertEqual(value['stageCode'],12)
+        self.assertEqual(value['referencesAcquired'],value['referencesReleased'])
+        self.assertEqual(value['variantsCreated'],value['variantsCleared'])
+        self.assertTrue(all(count == 0 for count in self.fixture.ledger.values()))
+        self.assertEqual(self.owner.closed,1)
+        self.assertEqual(self.fixture.text_reads,[])
+
+
 if __name__ == '__main__':
     unittest.main()
