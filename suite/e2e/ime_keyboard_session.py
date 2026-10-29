@@ -56,7 +56,9 @@ class IMEKeyboardSession:
         assert 'imeKeyboardSession' not in record, 'IME keyboard admission cannot repeat'
         record['imeKeyboardSession'] = self.receipt
 
-    def _budget(self): assert self.clock() < self.deadline, 'IME keyboard deadline expired'
+    def _budget(self):
+        checked_at = self.clock()
+        assert checked_at < self.deadline, 'IME keyboard deadline expired'
     def _retain(self, phase):
         raw=(json.dumps(self.receipt,ensure_ascii=False,separators=(',', ':'),allow_nan=False)+'\n').encode()
         assert len(raw)<=MAX_RECEIPT_BYTES, 'IME shortcut receipt exceeds bound'
@@ -444,6 +446,16 @@ class IMEKeyboardSession:
             self.deadline=deadline
             if self.native_probe:self.probe.deadline=deadline
             try:return self._guard(context_check=validate_context)
+            except BaseException as primary:
+                try:
+                    if __package__:
+                        from .reader_guard_summary import freeze_writer
+                    else:
+                        from reader_guard_summary import freeze_writer
+                    freeze_writer(self.record,primary,self,context)
+                except BaseException:
+                    pass
+                raise
             finally:
                 self.deadline=previous
                 if self.native_probe:self.probe.deadline=previous_probe

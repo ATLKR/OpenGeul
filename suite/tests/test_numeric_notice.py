@@ -35,6 +35,104 @@ def environment():
 
 
 class NumericNoticeTests(unittest.TestCase):
+    def reader_guard_notice(self):
+        record = dict(case='calc-close-cancel', module='calc', success=False,
+            stage='type-without-enter', numericFailure=dict(captured=1,
+                exceptionCode=1, fileCode=24, line=59),
+            numericFailureFrames=[[2,235],[14,239],[14,185],[14,227],[24,59]])
+        value = self.n.project_case_notice('calc-close-cancel', record, environ=self.env)
+        value.update(schemaVersion=8, sequence=1, remainingBudget=7,
+            readerGuard=[1,7183,1,0,0,0,0,0,0,0,0,0,-1,-1,-1,0,0,0,0,0])
+        return value
+
+    def test_closed_reader_guard_preserves_signed_first_check_expiry(self):
+        value = self.reader_guard_notice()
+        try:
+            result = self.decode(json.dumps(value), expected_scope=1)
+        except ValueError:
+            self.fail('Closed schema8 must retain an original reader guard expiry')
+        self.assertEqual(result, value)
+        self.assertEqual(result['readerGuard'][12:15], [-1,-1,-1])
+
+    def test_reader_guard_rejects_wrong_context_partial_frames_and_unknown_values(self):
+        value = self.reader_guard_notice()
+        changes = [dict(scopeCode=3), dict(caseCode=14), dict(stageCode=18),
+                   dict(fileCode=11), dict(exceptionCode=9), dict(ownedFrames=[[24,59]])]
+        for change in changes:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.decode(json.dumps(value | change))
+        for slot, replacement in ((0,2),(1,2**18),(2,True),(6,1),(12,-2**31-1)):
+            changed = copy.deepcopy(value); changed['readerGuard'][slot] = replacement
+            with self.subTest(slot=slot), self.assertRaises(ValueError):
+                self.decode(json.dumps(changed))
+
+    def test_reader_guard_writer_helper_timeout_uses_its_own_failure_site(self):
+        value=self.reader_guard_notice()
+        value.update(scopeCode=3,moduleCode=1,caseCode=17,stageCode=41,fileCode=24,
+            ownedFrames=[[11,448],[11,203],[24,59]],
+            readerGuard=[2,139247,1,0,0,0,0,0,0,0,0,0,-1,-1,-1,0,0,0,0,12000])
+        self.assertTrue(self.n._valid_reader_guard(value['readerGuard']))
+        try:result=self.decode(json.dumps(value),expected_scope=3)
+        except ValueError:self.fail('The same Writer reader guard must retain a helper timeout')
+        self.assertEqual(result,value)
+
+    def test_actual_calc_guard_failure_survives_capture_and_closed_case_roundtrip(self):
+        import test_reader_guard_summary as guard_checks
+        with patch.object(sys, 'path', [str(SCRIPT.parent), *sys.path]):
+            import windows_smoke as native
+        with tempfile.TemporaryDirectory() as directory:
+            record,primary,session,clock,probe=guard_checks.ReaderGuardSummaryTests().calc(directory)
+            source={}
+            exec(compile('def native_case(primary):\n raise primary\n',
+                str(SCRIPT.with_name('calc_close_probe.py')), 'exec'),source)
+            try:source['native_case'](primary)
+            except AssertionError as actual:
+                self.assertIs(actual,primary)
+                calls=list(probe.calls)
+                with patch.dict(os.environ,self.env), \
+                     patch('PIL.ImageGrab.grab',side_effect=OSError('No unit screenshot')):
+                    native.capture_failure(Path(directory),'calc-close-cancel',record,actual)
+            self.assertEqual(probe.calls,calls)
+            self.assertEqual(record['numericFailure']['fileCode'],24)
+            self.assertTrue(self.emitter.emit_case_notice('calc-close-cancel',record))
+            value=self.decode(self.messages()[0],expected_scope=1)
+            self.assertEqual(value['schemaVersion'],8)
+            self.assertEqual((value['readerGuard'][0],value['readerGuard'][2]),(1,1))
+            self.assertEqual(value['readerGuard'][3:6],[0,0,0])
+
+    def test_writer_in_memory_guard_notice_preserves_early_phase_without_raw_fields(self):
+        import test_reader_guard_summary as guard_checks
+        self.env['OPENGEUL_SUITE_NOTICE_SCOPE']='3'
+        with tempfile.TemporaryDirectory() as directory:
+            record,primary,session,context,clock,probe=guard_checks.ReaderGuardSummaryTests().writer(directory)
+            context.update(cleanup=dict(startedAt=14.,finishedAt=14.),finishedAt=14.)
+            record['private']='SYNTHETIC PRIVATE document bytes'
+            record['numericFailure']=self.n.capture_failure_code(primary)
+            record['numericFailureFrames']=self.n.capture_failure_frames(primary)
+            calls,now=list(probe.calls),clock.now
+            with patch.dict(os.environ,self.env),patch.object(self.n,'_EMITTER',self.emitter):
+                self.n.capture_reader_guard(record,primary)
+                self.assertFalse(self.n.emit_reader_guard_case('calc-close-cancel',record))
+                self.assertTrue(self.n.emit_reader_guard_case('ime-writer',record))
+                self.assertFalse(self.n.emit_reader_guard_case('ime-writer',dict(record)))
+                self.env['RUNNER_ARCH']='X64'
+                with patch.dict(os.environ,self.env):
+                    self.assertFalse(self.n.emit_reader_guard_case('ime-writer',record))
+            self.assertEqual(probe.calls,calls);self.assertEqual(clock.now,now)
+            self.assertEqual(len(self.messages()),1)
+            value=self.decode(self.messages()[0],expected_scope=3)
+            self.assertEqual(value['schemaVersion'],8)
+            self.assertEqual(value['readerGuard'][0],2)
+            self.assertEqual(value['readerGuard'][2:6],[0,1,0,0])
+            self.assertEqual(value['readerGuard'][10:12],[0,0])
+            self.assertNotIn('SYNTHETIC PRIVATE',self.stream.getvalue())
+            contradictory=copy.deepcopy(value)
+            contradictory['readerGuard'][2]=2
+            contradictory['readerGuard'][13]=contradictory['readerGuard'][14]=0
+            self.assertTrue(self.n._valid_reader_guard(contradictory['readerGuard']))
+            with self.assertRaises(ValueError):
+                self.decode(json.dumps(contradictory),expected_scope=3)
+
     def test_writer_os_stages_preserve_original_ids_and_reach_closed_failure_notice(self):
         import hashlib
         from suite.e2e import writer_os_accessibility as writer
@@ -122,6 +220,8 @@ class NumericNoticeTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.n.validate_failure_code(failure|{'exceptionCode':14})
 
     def setUp(self):
+        imports=patch.object(sys,'path',[str(SCRIPT.parent),*sys.path])
+        imports.start();self.addCleanup(imports.stop)
         self.n = implementation()
         self.stream = io.StringIO()
         self.env = environment()

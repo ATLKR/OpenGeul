@@ -368,6 +368,35 @@ class IMEKeyboardSessionTests(unittest.TestCase):
             s.require_context_target('imeSemanticContext')
             self.assertEqual(s.deadline,30.);self.assertEqual(probe.deadline,30.);self.assertEqual(len(probe.sent),2)
             s.close(RuntimeError('targeted reader guard ends before composition/save'))
+
+    def test_reader_failure_freezes_before_finally_without_replacing_primary(self):
+        for metadata_fails in (False, True):
+            with self.subTest(metadata_fails=metadata_fails), tempfile.TemporaryDirectory() as directory:
+                s,p,b,api,clock,probe,record=self.fixture(directory,setup_deadline=30.)
+                s.start();s.focus_editor(6.);self.ready(s);s.navigate()
+                s.native_probe=True;probe.deadline=30.
+                context=dict(kind='ime-semantic-editing-context',module='writer',phase='pre',
+                    expectedNative=dict(s.binding),startedAt=1.,readerDeadline=13.,
+                    setupDeadline=30.,success=False)
+                record['imeSemanticContext']=context
+                captured=[];original=keyboard.join_shortcut_generation
+                def expire(*args):
+                    value=original(*args);clock.now=13.;return value
+                def freeze(actual_record,primary,session,actual_context):
+                    captured.append((actual_record is record,primary,session is s,
+                        actual_context is context,'cleanup' in actual_context,session.deadline))
+                    if metadata_fails:raise RuntimeError('Optional projection failed')
+                with patch.dict(sys.modules,{'reader_guard_summary':SimpleNamespace(freeze_writer=freeze)}), \
+                     patch.object(keyboard,'join_shortcut_generation',side_effect=expire):
+                    with self.assertRaisesRegex(AssertionError,'IME keyboard deadline expired') as caught:
+                        s.require_context_target('imeSemanticContext')
+                context['cleanup']={'finishedAt':13.}
+                self.assertEqual(len(captured),1)
+                self.assertEqual(captured[0],(True,caught.exception,True,True,False,13.))
+                self.assertIs(s.failed,caught.exception)
+                self.assertEqual((s.deadline,probe.deadline),(30.,30.))
+                self.assertEqual(len(probe.sent),2)
+                s.close(caught.exception)
     def test_modules_emit_only_existing_exact_sequence_and_one_retained_engine(self):
         for module, sequence in [('writer', ['CTRL_F6','CTRL_END','CTRL_S']),
                                  ('calc', ['CTRL_F6','CTRL_HOME','F2','CTRL_END','ENTER','CTRL_S']),

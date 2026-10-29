@@ -1941,6 +1941,9 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                 failureScreenshotSkipped=('focus-diagnostic-local-only-after-failure' if diagnose_focus
                     else 'compartment-diagnostic-in-memory-only' if capture_ime_compartment
                     else 'calc-dispatch-diagnostic-local-only-after-failure'))
+            if capture_ime_compartment:
+                try: numeric_notice.capture_reader_guard(record, exc)
+                except BaseException: pass
         else:
             capture_failure(output, name, record, exc)
             retain_ime_focus_failure_diagnostics(record, process, keyboard)
@@ -2152,6 +2155,11 @@ def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,bind
         with (output/'callback-numeric.json').open('x',encoding='utf-8') as stream:
             stream.write(publisher.encode_notice(value)+'\n')
         publisher.emit_value(value)
+        try:
+            if len(results) == 1:
+                numeric_notice.emit_reader_guard_case('ime-writer', results[0])
+        except BaseException:
+            pass
     except BaseException as exc:
         if primary is None:primary=exc
         else:primary.compartmentNumericRetentionErrorType=type(exc).__name__

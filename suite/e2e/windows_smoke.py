@@ -597,6 +597,8 @@ def capture_failure(output, name, record, exc):
     except Exception: pass
     record.update(success=False, error=type(exc).__name__ + ': ' + str(exc),
                   traceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    try: numeric_notice.capture_reader_guard(record, exc)
+    except BaseException: pass
     try:
         from PIL import ImageGrab
         ImageGrab.grab().save(output / (name + '-failure.png'))

@@ -160,6 +160,7 @@ _CASE_KEYS_V4 = _CASE_KEYS_V2 | {'focus'}
 _CASE_KEYS_V5 = _CASE_KEYS_V4 | {'foreground'}
 _CASE_KEYS_V6 = _CASE_KEYS_V2 | {'capture'}
 _CASE_KEYS_V7 = _CASE_KEYS_V2 | {'captureGate'}
+_CASE_KEYS_V8 = _CASE_KEYS_V2 | {'readerGuard'}
 _FAILURE_KEYS = {'captured','exceptionCode','fileCode','line'}
 _TRACE_KEYS = _COMMON | {'diagnostic','oracleFlags','oraclePresenceMask'}
 _STARTUP_FAILURES = []  # At most 32 strong references prevent object-id reuse.
@@ -461,6 +462,89 @@ def _capture_gate_summary(record,context):
         return None
 
 
+def _reader_guard_context(case, stage, context, failure, frames):
+    if (not frames or failure.get('exceptionCode') != 1
+            or frames[-1] != [failure.get('fileCode'), failure.get('line')]):
+        return 0
+    sources = [row[0] for row in frames]
+    if (context['scopeCode'] == SCOPES['calc-close']
+            and case == CASES['calc-close-cancel'][0]
+            and stage == STAGES['type-without-enter'] and failure.get('fileCode') == 24
+            and 2 in sources[:-1] and 14 in sources[:-1]):
+        return 1
+    if (context['scopeCode'] == SCOPES['korean-ime'] and case == CASES['ime-writer'][0]
+            and stage == STAGES['verify-pre-prefix-editing-context']
+            and ((failure.get('fileCode') == 11 and 24 in sources[:-1])
+                 or (failure.get('fileCode') == 24 and 11 in sources[:-1]))):
+        return 2
+    return 0
+
+
+def _reader_guard_site(value, failure):
+    return ((failure.get('fileCode') == 11 and value[0] == 2 and value[2] == 0)
+            or (failure.get('fileCode') == 24 and 1 <= value[2] <= 5))
+
+
+def _valid_reader_guard(value):
+    try:
+        if __package__:
+            from .reader_guard_summary import valid
+        else:
+            from reader_guard_summary import valid
+        return valid(value)
+    except BaseException:
+        return False
+
+
+def _reader_guard_summary(record, context):
+    try:
+        failure = validate_failure_code(record.get('numericFailure'))
+        frames = validate_failure_frames(record.get('numericFailureFrames'))
+        code = _reader_guard_context(CASES.get(record.get('case'), (0,0))[0],
+            STAGES.get(record.get('stage'), 0), context, failure, frames)
+        if not code:
+            return None
+        if code == 2 and record.get('architecture') != {0x8664:'x64',0xaa64:'arm64'}[context['architecture']]:
+            return None
+        if __package__:
+            from .reader_guard_summary import project
+        else:
+            from reader_guard_summary import project
+        value = project(record)
+        return (value if _valid_reader_guard(value) and value[0] == code
+                and _reader_guard_site(value, failure) else None)
+    except BaseException:
+        return None
+
+
+def capture_reader_guard(record, primary):
+    """Optional projection cannot change the original failure or observe a target."""
+    try:
+        context = _context(os.environ)
+        if context is None or context['scopeCode'] not in (SCOPES['calc-close'], SCOPES['korean-ime']):
+            return
+        if __package__:
+            from .reader_guard_summary import bind
+        else:
+            from reader_guard_summary import bind
+        bind(record, primary)
+    except BaseException:
+        pass
+
+
+def emit_reader_guard_case(name, record):
+    """The in-memory Writer diagnostic may emit only its qualified guard failure."""
+    try:
+        context = _context(os.environ)
+        if (name != 'ime-writer' or context is None
+                or context['scopeCode'] != SCOPES['korean-ime']
+                or _reader_guard_summary(record, context) is None):
+            return False
+        return emit_case_notice(name, record)
+    except BaseException:
+        return False
+
+
 def _project_case(name, record, context, *, require_failure,environ=None):
     primary_name = record.get('case') if type(record.get('case')) is str and record['case'] in CASES else name
     if type(primary_name) is not str or primary_name not in CASES: return None
@@ -482,7 +566,8 @@ def _project_case(name, record, context, *, require_failure,environ=None):
     foreground=_foreground_summary(record,context,os.environ if environ is None else environ,focus)
     capture=_capture_summary(record,context)
     capture_gate=_capture_gate_summary(record,context)
-    version=7 if capture_gate is not None else (6 if capture is not None else (5 if foreground is not None else (4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1)))))
+    reader_guard=_reader_guard_summary(record,context)
+    version=8 if reader_guard is not None else (7 if capture_gate is not None else (6 if capture is not None else (5 if foreground is not None else (4 if focus is not None else (3 if mode is not None or startup[0]>0 else (2 if extended else 1))))))
     fields=_FIELDS_V3 if version==3 else (_FIELDS_V2 if version>=2 else _FIELDS)
     source=dict(record,_imeModeSummary=mode)
     observed, mask = {}, 0
@@ -510,6 +595,7 @@ def _project_case(name, record, context, *, require_failure,environ=None):
     if version==5: value['foreground']=foreground
     if version==6: value['capture']=capture
     if version==7: value['captureGate']=capture_gate
+    if version==8: value['readerGuard']=reader_guard
     return value
 
 
@@ -549,12 +635,12 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
     limit = {CASE_TITLE:MAX_CASE_BYTES,TRACE_TITLE:MAX_TRACE_BYTES}.get(title)
     if limit is None or type(message) is not str or len(message.encode('utf-8'))>limit: raise ValueError('Notice title/size rejected')
     value = json.loads(message,object_pairs_hook=_unique,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite notice')))
-    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5,6,7)
-    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5,6:_CASE_KEYS_V6,7:_CASE_KEYS_V7}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
+    extended=title==CASE_TITLE and type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3,4,5,6,7,8)
+    keys = ({2:_CASE_KEYS_V2,3:_CASE_KEYS_V3,4:_CASE_KEYS_V4,5:_CASE_KEYS_V5,6:_CASE_KEYS_V6,7:_CASE_KEYS_V7,8:_CASE_KEYS_V8}[value['schemaVersion']] if extended else _CASE_KEYS) if title==CASE_TITLE else _TRACE_KEYS
     if type(value) is not dict or value.keys()!=keys: raise ValueError('Closed notice schema required')
-    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground','capture','captureGate'}:
+    for key in value.keys()-{'sourceCommit','observations','diagnostic','oracleFlags','ownedFrames','startup','focus','foreground','capture','captureGate','readerGuard'}:
         if not _integer(value[key],2**63-1): raise ValueError('Integer notice fields required')
-    if (value['schemaVersion'] not in ((1,2,3,4,5,6,7) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
+    if (value['schemaVersion'] not in ((1,2,3,4,5,6,7,8) if title==CASE_TITLE else (1,)) or value['kind']!=(1 if title==CASE_TITLE else 2) or type(value['sourceCommit']) is not str
             or not re.fullmatch('[0-9a-f]{40}',value['sourceCommit']) or value['sourceCommit']=='0'*40
             or value['sourceCommit']!=expected_source_commit or value['runId']!=expected_run_id or value['runId']<=0
             or value['runAttempt']!=expected_run_attempt or value['runAttempt']!=1
@@ -617,6 +703,11 @@ def decode_notice(message, expected_source_commit, expected_run_id, *, title=CAS
             or value['ownedFrames'][-1]!=[24,value['line']]
             or [row[0] for row in value['ownedFrames']]!=[6,13,13,13,13,13,24]):
         raise ValueError('Bounded original Writer pre-insertion capture deadline required')
+    if value['schemaVersion']==8 and (not _valid_reader_guard(value['readerGuard'])
+            or value['readerGuard'][0] != _reader_guard_context(value['caseCode'],
+                value['stageCode'],value,value,value['ownedFrames'])
+            or not _reader_guard_site(value['readerGuard'],value)):
+        raise ValueError('Bounded original reader guard failure required')
     return value
 
 

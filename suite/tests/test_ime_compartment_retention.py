@@ -119,7 +119,7 @@ class CompartmentRetentionTests(unittest.TestCase):
 
     def test_single_controller_keeps_raw_case_in_memory_and_only_persists_closed_numeric_receipt(self):
         from suite.scripts import matched_plugin_diagnostic as resolution
-        for failure in ('none','case','prepare','release','resolve'):
+        for failure in ('none','case','prepare','release','resolve','guard-notice'):
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory:
                 root=Path(directory);events=[];seen=[];primary=RuntimeError('SYNTHETIC PRIVATE '+failure)
                 binding=dict(sourceCommit='a'*40,runId='7',runAttempt='1',architecture='arm64',
@@ -154,12 +154,19 @@ class CompartmentRetentionTests(unittest.TestCase):
                     return dict(schemaVersion=1,kind=4,scopeCode=11,sourceCommit=context['sourceCommit'],
                         runId=context['runId'],runAttempt=1,architecture=0xaa64,status=0)
                 publisher=NS(project=project,encode_notice=lambda value:json.dumps(value),emit_value=lambda value:events.append('notice') or True)
+                def guard_notice(name, actual):
+                    self.assertEqual(name,'ime-writer');self.assertIs(actual,record)
+                    self.assertEqual(json.loads((root/'callback-numeric.json').read_text())['kind'],4)
+                    events.append('guard-notice')
+                    if failure=='guard-notice':raise RuntimeError('Optional numeric publication failed')
+                    return False
                 with patch.dict(sys.modules,{'ime_compartment_report':publisher}), \
                      patch.object(ime,'_open_plugin_proof',return_value=lease), \
                      patch.object(ime.ascii_input,'prepare_observer',side_effect=prepare), \
                      patch.object(ime,'case',side_effect=one_case), \
                      patch.object(ime,'collect_cases',side_effect=AssertionError('No collector replay or sidecars')), \
                      patch.object(resolution,'resolve_compartment_in_memory',side_effect=resolve), \
+                     patch.object(ime.numeric_notice,'emit_reader_guard_case',side_effect=guard_notice), \
                      patch.object(ime.numeric_notice,'public_context',return_value=context):
                     if failure in ('case','prepare','resolve'):
                         with self.assertRaises(RuntimeError) as raised:
@@ -167,11 +174,12 @@ class CompartmentRetentionTests(unittest.TestCase):
                         self.assertIs(raised.exception,primary)
                     else:
                         code=ime.run_mode_diagnostic(root,root,root,{},'arm64',binding,root/'pair/receipt.json',capture_compartment=True)
-                        self.assertEqual(code,0 if failure=='none' else 1)
+                        self.assertEqual(code,0 if failure in ('none','guard-notice') else 1)
                 self.assertEqual([p.name for p in root.iterdir()],['callback-numeric.json'])
                 raw=(root/'callback-numeric.json').read_text()
                 self.assertNotIn('SYNTHETIC PRIVATE',raw);self.assertEqual(json.loads(raw)['kind'],4)
                 self.assertEqual(events.count('notice'),1);self.assertEqual(events.count('lease-close'),1)
+                self.assertEqual(events.count('guard-notice'),int(failure!='prepare'))
                 self.assertEqual(len(seen),1)
 
     def controller_roundtrip(self, *, resolver_failure=False):

@@ -308,7 +308,7 @@ HTTPS 진단 소스 `2452fa7b943595b5771d3e92a6de1506b7670d4b`과 검증된 앱 
 
 설치된 글꼴만 사용하는 정책과 공식 다운로드 도움말은 제품 보호 장치입니다. 사용자 PC의 모든 글꼴이 모든 의도한 용도에 허가됐다는 판정이 아닙니다. 글꼴 포함 권한과 네이티브 Skia 직접 PDF 경로는 별도 검토가 필요하며, 포괄적인 법적·호환성 보장은 하지 않습니다.
 
-## OpenGeul Office Suite의 별도 Windows x64 검증
+## OpenGeul Office Suite의 Windows 초기 기준선과 현재 수용 게이트
 
 Suite는 기존 HWP·Store 릴리스와 별도 소스·워크플로·portable ZIP을 사용합니다.
 초기 기준선 소스 `579511489f9def03dd8d894ef249fd8ed9c8fa10`의
@@ -316,23 +316,27 @@ Suite는 기존 HWP·Store 릴리스와 별도 소스·워크플로·portable ZI
 실제 엔진 6개, native GUI 13개, GUI 이후 내용 재열기 6개가 통과했습니다.
 이 초기 결과는 실제 한국어 IME 검증을 포함하지 않습니다.
 
-0.1.1 개발판의 `.github/workflows/office-suite.yml`은 다음 완료 기준을 적용합니다.
+현재 개발 브랜치의 `.github/workflows/office-suite.yml`은 Windows x64와 native ARM64에
+다음 완료 기준을 각각 적용합니다. 위 초기 x64 결과는 ARM64나 현재 소스의 통과 증거가 아닙니다.
+진단 전용 모드는 제품 수용이나 배포용 ZIP을 승인하지 않습니다.
 
 | 검증 | 실제 관측하는 내용 |
 |---|---|
 | 엔진 6개 | 문서 생성·편집·저장·재열기, 수식·도형·Firebird 데이터 보존 |
 | 한국어 IME 3개 | 서명된 Microsoft IME, 두벌식 물리 입력, 조합·백스페이스·확정·저장·UNO 재열기 |
-| 한국어 탭 UI 4개 | 소유 엔진의 실제 VCL 탭 객체·부모·인덱스·표시 영역과 HWND 소유 화면. OS UIA/MSAA 노출은 별도 진단 |
+| 한국어 탭 UI 4개 | 소유 엔진의 실제 VCL 탭 객체·부모·인덱스·표시 영역과 HWND 소유 화면. Writer는 원래 VCL 게이트 뒤에 소유 문서의 Windows MSAA/IA2 역할·포커스·텍스트 인터페이스 노출도 요구함. 텍스트 내용이나 caret·selection은 읽지 않으며 Narrator/NVDA 인증은 아님 |
 | 문서 수명 7개 | 저장·버리기·취소·저장 실패·경로·창 복원·HWP 실행 |
 | 초기화 40회 | 매번 새 문서 창·작업자·엔진, HWND 소유권과 엔진 종료 |
 | 전체 GUI 2회 | 각기 새 문서 집합의 13개 GUI와 이후 6개 문서 내용 재검증 |
-| 패키지 | 포함 소스·라이선스·브랜딩·아키텍처와 전체 파일 inventory 불변 |
+| 원래 엔진 종료 | 83개 세대의 원래 case·PID·생성시각·이미지를 연결하고 누락·중복·고아 증거를 거절. 강제 종료 없이 graceful·exit 0·자원 해제 요구 |
+| 패키지 | 포함 소스·라이선스·브랜딩·아키텍처와 전체 파일 inventory 불변. 새 경로 추출·동일 버전 공존·손상 탐지·새 복사본 복구·기존 HWP 바이트 보존, 최종 ZIP의 소스·실행·아키텍처·해시·크기 연결 |
 
 각 실행의 실제 통과 여부는 해당 소스 커밋에 연결된 Actions 결과와
-`opengeul-suite-evidence-<run>-<attempt>`의 원본 JSON·화면·로그를 기준으로 합니다.
+`opengeul-suite-evidence-<arch>-<run>-<attempt>`의 원본 JSON·화면·로그를 기준으로 합니다.
 실패를 재시도로 덮거나 한국어 Unicode 주입을 IME 통과로 바꾸지 않습니다.
 어떤 필수 단계든 실패하면 배포용 Suite ZIP 업로드는 수행하지 않습니다.
-ARM64·Store 인증·실제 프린터는 이 Windows x64 portable Suite 완료 기준에 포함하지 않습니다.
+Store 인증·실제 프린터·설치 프로그램 등록·제자리 업데이트·비정상 종료 후 문서 복구는
+이 portable Suite 검증으로 입증되지 않습니다. OS 인터페이스 노출도 스크린 리더의 실제 읽기 호환성을 보증하지 않습니다.
 
 ## 당시 정식 릴리스 전에 필요했던 수동 검증
 

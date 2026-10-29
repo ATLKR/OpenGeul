@@ -27,7 +27,10 @@ def _diagnostic_start(receipt, deadline):
 
 def _diagnostic_update(current, **values):
     try:
-        if current is not None: current.update(values)
+        if current is not None:
+            if 'lastCheckedAt' in values and 'firstCheckedAt' not in current:
+                current['firstCheckedAt'] = values['lastCheckedAt']
+            current.update(values)
     except BaseException:
         pass
 

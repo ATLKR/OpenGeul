@@ -12,8 +12,8 @@ concurrency:
   group: office-suite-${{ github.ref }}
   cancel-in-progress: true
 env:
-  # Replay the original ARM64 prefix before one Writer callback; never qualify delivery.
-  OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic
+  # Require paired native Windows acceptance before any deliverable qualification.
+  OPENGEUL_SUITE_RUN_MODE: acceptance
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
