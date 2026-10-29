@@ -4,7 +4,81 @@ from suite.tests.test_calc_matrix_workflow import workflow_steps,field,run_code
 from suite.tests.test_navigation_diagnostic_workflow import condition
 from suite.tests.test_com_wait_workflow import evaluate
 
+
+COMPARTMENT_STEPS = ('ime-mode-diagnostic', 'ime-notification-resolution',
+                     'ime-mode-diagnostic-evidence', 'ime-mode-not-acceptance')
+
+
+def sequenced_prefix_steps(steps):
+    """The original document operations before the first normal Writer case."""
+    by_id = {field(s, 'id'): s for s in steps if field(s, 'id')}
+    result = []
+    for name in ('calc-save', 'calc-close'):
+        original = by_id[name]
+        result.extend((original, steps[steps.index(original) + 1]))
+    result.extend(by_id[name] for name in ('office-features', 'home-fixtures', 'home-routes'))
+    result.append(next(s for s in steps if 'suite/e2e/pdf_export_smoke.py --produce' in s))
+    return result
+
+
 class NotificationWorkflowTests(unittest.TestCase):
+    def selected(self, candidate, mode, architecture, *, outcomes=None, success=True, cancelled=False):
+        defaults = {field(s, 'id'): 'success' for s in workflow_steps() if field(s, 'id')}
+        expression = condition(candidate).replace('!cancelled()', repr(not cancelled))
+        expression = expression.replace('always()', 'True').replace('success()', repr(success))
+        return evaluate(expression, mode, architecture, defaults | (outcomes or {}))
+
+    def test_one_writer_callback_follows_original_prefix_before_normal_ime(self):
+        steps = workflow_steps()
+        by_id = {field(s, 'id'): s for s in steps if field(s, 'id')}
+        normal = next(s for s in steps if '--output .work/suite-korean-ime\n' in s)
+        ordered = [by_id[name] for name in ('native31-privacy-prepare', 'fixtures')]
+        ordered += sequenced_prefix_steps(steps)
+        ordered += [by_id[name] for name in COMPARTMENT_STEPS] + [normal]
+        positions = [steps.index(s) for s in ordered]
+        self.assertEqual(positions, sorted(positions), 'Writer diagnosis must follow the original document prefix')
+        first = steps.index(by_id[COMPARTMENT_STEPS[0]])
+        self.assertEqual([field(s, 'id') for s in steps[first:first + 4]], list(COMPARTMENT_STEPS))
+        self.assertEqual(steps[first + 4], normal)
+        self.assertEqual(sum('--diagnose-ime-mode writer' in s for s in steps), 1)
+
+    def test_prefix_keeps_original_dependencies_after_earlier_failures_only_on_arm_diagnostic(self):
+        steps = workflow_steps()
+        prefix = sequenced_prefix_steps(steps)
+        dependencies = [('fixtures',)] * 4 + [('build',)] * 2 + [('office-features', 'home-fixtures'), ('build',)]
+        modes = ('acceptance', 'ime-mode-diagnostic', 'focus-diagnostic', 'navigation-diagnostic',
+                 'calc-dispatch-diagnostic', 'matched-plugin-caller', 'reader-console-diagnostic',
+                 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'unknown', '')
+        for architecture in ('x64', 'arm64'):
+            for mode in modes:
+                expected = mode == 'acceptance' or mode == 'ime-mode-diagnostic' and architecture == 'arm64'
+                for candidate, required in zip(prefix, dependencies):
+                    for failed in (None, *required):
+                        outcomes = {'calc-save': 'failure', 'calc-close': 'failure'}
+                        if failed is not None:
+                            outcomes[failed] = 'failure'
+                        with self.subTest(mode=mode, architecture=architecture, step=candidate.splitlines()[0], failed=failed):
+                            self.assertEqual(self.selected(candidate, mode, architecture, outcomes=outcomes,
+                                                           success=False), expected and failed is None)
+                            self.assertFalse(self.selected(candidate, mode, architecture, cancelled=True))
+        probe = next(s for s in steps if field(s, 'id') == 'ime-mode-diagnostic')
+        self.assertTrue(self.selected(probe, 'ime-mode-diagnostic', 'arm64', success=False,
+                                      outcomes={'calc-save': 'failure', 'calc-close': 'failure'}))
+
+    def test_sequenced_diagnostic_cannot_select_normal_suffix_or_raw_artifacts(self):
+        steps = workflow_steps()
+        allowed = sequenced_prefix_steps(steps)
+        allowed += [s for s in steps if field(s, 'id') in COMPARTMENT_STEPS]
+        start = steps.index(next(s for s in steps if field(s, 'id') == 'calc-save'))
+        for candidate in steps[start:]:
+            for architecture in ('x64', 'arm64'):
+                expected = (candidate in allowed and architecture == 'arm64'
+                            or field(candidate, 'id') == 'ime-mode-not-acceptance')
+                with self.subTest(step=candidate.splitlines()[0], architecture=architecture):
+                    self.assertEqual(self.selected(candidate, 'ime-mode-diagnostic', architecture), expected)
+                    if 'uses: actions/upload-artifact@' in candidate and expected:
+                        self.assertEqual(field(candidate, 'id'), 'ime-mode-diagnostic-evidence')
+
     def test_mode_build_and_symbols_require_original_admission(self):
         steps={field(s,'id'):s for s in workflow_steps() if field(s,'id')}
         self.assertTrue(evaluate(condition(steps['sal-offset-admission']),'ime-mode-diagnostic','arm64',{}))

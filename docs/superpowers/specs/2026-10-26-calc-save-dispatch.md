@@ -231,3 +231,49 @@ architecture, SHA-256 and bytes. The proof contains no paths or document data.
 It is independent of the GitHub outer artifact digest and cannot qualify a
 candidate without the same run's successful final job and uploaded artifact.
 Diagnostic modes must not emit this proof or deliver a candidate ZIP.
+
+### 2026-10-29 full Windows observation and next Writer probe
+
+Full normal run [40808491922](https://github.com/ATLKR/OpenGeul/actions/runs/40808491922)
+tested `26729cf791f0b83a2567838d6ffc597b0021b83e`. Both architectures completed
+3,044 unit tests with zero errors, zero failures and 38 skips, then passed their
+actual package builds and worker bootstrap gates. Neither final job qualified a
+candidate. x64 Writer and Calc IME cases passed; Impress failed during owned
+editor focus preparation. The Writer heading case failed before `CTRL_HOME`
+insertion at the original capture deadline, rather than the earlier raw query
+after that shortcut. Its missing V6 vector is therefore expected.
+
+ARM64 Writer, Calc and Impress each failed at the first physical composition
+wait with zero composition-start events and final open status zero. ARM Impress
+accessibility now reports the actual child frames through `getFocusWindow()`;
+the existing exception code zero does not identify its exact UNO class. The
+same run also failed ordinary Calc save/close and additional focus/lifetime
+gates. No general success, fixed focus cause or graceful 83-generation outcome
+is inferred from these partial passes.
+
+The next observation reuses the existing Writer compartment sink and normal
+locked runtime. Reproduce the portable repair/foreign-working-directory setup
+and original Calc, format, Home and PDF prefix before that single Writer probe.
+Preserve each original dependency and continue-after-failure condition: the
+observed prefix included failed Calc steps. Keep the original EMPTY-origin,
+first-G open-state, first post-ACK3 callback, ownership, QPC deadline, release
+and retained-exit conditions. It remains a diagnostic run with deliberate
+nonacceptance and no candidate ZIP or final product proof. Calc-specific sink
+expansion and an unchanged native-engine rebuild are unnecessary at this point.
+
+Independent source review also found that the controller's original absolute
+reader deadline still crossed from CPython 3.12 GetTickCount64 to the helper's
+QPC clock. The candidate uses an explicit numeric clock kind and the same
+GetTickCount64 budget clock in the helper without changing the deadline value.
+Selection timestamps and their fresh ownership proof remain QPC-based, with
+separate budget receipts. This structural correction is not yet the proven
+cause of the run's input or save failures.
+
+Additional failure observations preserve the original operations: uncaught
+Calc `main()` exceptions receive a numeric notice without changing their exit;
+an exact cached UNO RuntimeException class may use appended code 13; and V7
+distinguishes the current Writer capture-check phase using only existing clock
+reads and held state. It does not infer capture duration from the cumulative
+ledger. No messages, document contents, new input, focus actions, retries or
+extended budgets are added by these observations. These candidate changes still
+require fresh integrated and actual Windows verification.

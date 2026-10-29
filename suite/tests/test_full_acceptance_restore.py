@@ -5,6 +5,7 @@ import unittest
 from suite.tests.test_calc_matrix_workflow import WORKFLOW, workflow_steps, field, run_code
 from suite.tests.test_com_wait_workflow import evaluate, step
 from suite.tests.test_navigation_diagnostic_workflow import condition
+from suite.tests.test_notification_workflow import COMPARTMENT_STEPS, sequenced_prefix_steps
 
 
 class FullAcceptanceRestoreTests(unittest.TestCase):
@@ -31,7 +32,7 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
         start = self.steps.index(step('calc-save'))
         gates = [step(name) for name in ('suite-unit-shell', 'build', 'readiness',
                                         'native31-privacy-prepare', 'fixtures')]
-        gates += self.steps[start:]
+        gates += [s for s in self.steps[start:] if field(s, 'id') not in COMPARTMENT_STEPS]
         # Require the complete commands, so a targeted diagnostic cannot stand in
         # for the full IME, UI, document lifecycle, or either independent GUI run.
         for fragment in (
@@ -83,8 +84,13 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
                                  self.mode == 'ime-mode-diagnostic' and architecture == 'arm64')
             self.assertEqual(self.selected(step('ime-mode-not-acceptance'), architecture, mode=self.mode),
                              self.mode == 'ime-mode-diagnostic')
+            prefix = sequenced_prefix_steps(self.steps)
             for gate in self.steps[self.steps.index(step('calc-save')):]:
-                self.assertEqual(self.selected(gate, architecture, mode=self.mode), self.mode == 'acceptance')
+                if field(gate, 'id') in COMPARTMENT_STEPS:
+                    continue  # The dedicated assertions above cover the moved experiment.
+                expected = self.mode == 'acceptance' or (self.mode == 'ime-mode-diagnostic'
+                    and architecture == 'arm64' and gate in prefix)
+                self.assertEqual(self.selected(gate, architecture, mode=self.mode), expected)
 
     def test_acceptance_prerequisites_and_package_handoff_still_fail_closed(self):
         ime = self.command('--output .work/suite-korean-ime\n')

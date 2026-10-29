@@ -36,18 +36,23 @@ class NavigationDiagnosticWorkflowTests(unittest.TestCase):
         self.assertLess(next(i for i,s in enumerate(steps) if field(s,'id')=='fixtures'),steps.index(step))
 
     def test_all_acceptance_steps_keep_original_conditions_and_require_acceptance(self):
+        from suite.tests.test_notification_workflow import COMPARTMENT_STEPS, sequenced_prefix_steps
         steps=workflow_steps();start=next(i for i,s in enumerate(steps) if field(s,'id')=='calc-save')
+        prefix=sequenced_prefix_steps(steps)
+        prefix_mode="(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64'))"
         originals={"!cancelled() && steps.fixtures.outcome == 'success'",
             "!cancelled() && steps.build.outcome == 'success'",
             "!cancelled() && steps.office-features.outcome == 'success' && steps.home-fixtures.outcome == 'success'",
             "!cancelled() && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success'",
             'always()',"success() && steps.home-routes.outcome == 'success'"}
         for step in steps[start:]:
+            if field(step,'id') in COMPARTMENT_STEPS:continue
             with self.subTest(step=step.splitlines()[0]):
                 value=condition(step)
-                self.assertTrue(value.startswith(MODE+' && ('),value)
+                expected_mode=prefix_mode if step in prefix else MODE
+                self.assertTrue(value.startswith(expected_mode+' && ('),value)
                 self.assertTrue(value.endswith(')'),value)
-                self.assertIn(value[len(MODE+' && ('):-1],originals)
+                self.assertIn(value[len(expected_mode+' && ('):-1],originals)
         delivery=condition(steps[-1])
         for mode in ('acceptance','navigation-diagnostic','ime-mode-diagnostic','focus-diagnostic','sal-offset-mapping','com-wait-diagnostic','mutex-function-mapping','unknown',''):
             for success in (True,False):

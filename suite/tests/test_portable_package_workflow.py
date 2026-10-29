@@ -117,6 +117,37 @@ class PortablePackageWorkflowTests(unittest.TestCase):
         self.assertEqual(published, {})
         self.assertFalse((self.checkout / '.work/suite-portable').exists())
 
+    def test_sequenced_arm_writer_diagnostic_uses_the_same_repaired_payload_and_foreign_cwd(self):
+        self.fixture.provenance['architecture'] = 'arm64'
+        for path in self.fixture.root.rglob('*'):
+            if path.is_file() and (path.suffix in ('.exe', '.bin') or path.name == 'hostfxr.dll'):
+                self.fixture.write(path.relative_to(self.fixture.root), portable_tests.pe(0xaa64))
+        self.fixture.source_archive()
+        self.fixture.save_metadata()
+        self.fixture.inventory = payload.create_inventory(self.fixture.root, architecture='arm64')
+        self.fixture.write_json(payload.INVENTORY, self.fixture.inventory)
+        self.fixture.members = [(p.relative_to(self.fixture.root).as_posix(), p.read_bytes())
+                               for p in sorted(self.fixture.root.rglob('*')) if p.is_file()]
+        self.fixture.zip(self.fixture.members)
+        before = self.fixture.snapshot(self.fixture.root)
+        process, published, archive = self.execute_build(mode='ime-mode-diagnostic', architecture='arm64')
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertIn('SUITE_PACKAGE', published, 'Writer diagnosis skipped the original portable preparation')
+        repaired = Path(published['SUITE_PACKAGE'])
+        self.assertEqual(repaired.name, 'OpenGeul Office 복구 검증')
+        self.assertEqual(self.fixture.snapshot(repaired), before)
+        self.assertEqual(self.fixture.snapshot(self.fixture.root), before)
+        self.assertEqual(Path(published['SUITE_ARCHIVE']), archive)
+        foreign_cwd = Path(published['SUITE_FOREIGN_CWD'])
+        self.assertTrue(foreign_cwd.is_dir())
+        self.assertFalse(repaired.is_relative_to(foreign_cwd))
+
+    def test_x64_writer_diagnostic_cannot_promote_a_portable_payload(self):
+        process, published, _ = self.execute_build(mode='ime-mode-diagnostic')
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(published, {})
+        self.assertFalse((self.checkout / '.work/suite-portable').exists())
+
     def test_following_gates_keep_startup_count_evidence_and_original_zip_handoff(self):
         steps = workflow_steps()
         startup = next(step for step in steps if 'python suite/e2e/startup_smoke.py ' in step)

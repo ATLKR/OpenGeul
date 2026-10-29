@@ -25,6 +25,10 @@ ROOTS = ('.work/suite-worker-diagnostics', '.work/suite-calc-save/diagnostics',
          *('.work/suite-calc-close/calc-close-' + choice + '/diagnostics'
            for choice in ('save', 'discard', 'cancel')))
 READY = '"env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' && (!cancelled() && steps.fixtures.outcome == \'success\')"'
+SEQUENCED_READY = ('"(env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' || '
+                   '(env.OPENGEUL_SUITE_RUN_MODE == \'ime-mode-diagnostic\' && '
+                   'matrix.architecture == \'arm64\')) && '
+                   '(!cancelled() && steps.fixtures.outcome == \'success\')"')
 
 
 def workflow_steps():
@@ -69,7 +73,7 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
                 self.assertLess(fixture, probe_index)
                 self.assertLess(probe_index, old_gui)
                 probe = steps[probe_index]
-                self.assertEqual(field(probe, 'if'), READY)
+                self.assertEqual(field(probe, 'if'), SEQUENCED_READY)
                 code = run_code(probe)
                 self.assertIn('python suite/e2e/' + script + ' --suite $env:SUITE_PACKAGE', code)
                 self.assertIn('--fixtures .work/suite-engine/fixtures --output .work/suite-' + name, code)
@@ -78,7 +82,7 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
                 # a global worker root would not collect these native archives.
                 self.assertNotIn('OPENGEUL_SUITE_DIAGNOSTICS:', probe)
                 verify, evidence = steps[probe_index + 1:probe_index + 3]
-                self.assertEqual(field(verify, 'if'), READY, 'Package verification must also run after probe failure')
+                self.assertEqual(field(verify, 'if'), SEQUENCED_READY, 'Package verification must also run after probe failure')
                 self.assertIn('python suite/scripts/verify-suite.py $env:SUITE_PACKAGE', run_code(verify))
                 self.assertIn('if ($LASTEXITCODE -ne 0)', run_code(verify))
                 self.assertEqual(field(evidence, 'if'), READY, 'Evidence must survive probe/verification failure')
