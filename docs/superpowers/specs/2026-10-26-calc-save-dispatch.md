@@ -146,15 +146,23 @@ foreign foreground snapshots as `CASCADIA_HOSTING_WINDOW_CLASS` and compares
 their PID values equal. This is not a process-generation or activation-cause
 witness. The native save trace, oracle and retained-engine exit remain unobserved.
 
-The pinned LibreOffice source `pyuno/zipcore/python.cxx` creates its core
-interpreter with `CREATE_UNICODE_ENVIRONMENT` only and a fresh STARTUPINFO.
-The shell currently starts that launcher with `CreateNoWindow`; the launcher
-does not forward that creation flag. Close this source-supported console gap
-by starting the exact packaged Python 3.13.15 core directly through the same
-WorkerClient. Match the launcher's process-local bootstrap environment and
-preserve structured arguments, UTF-8, original worker ownership and cleanup.
-Keep the packaged launcher and runtime manifest for existing tools. No focus,
-input, reader, engine binary or normal runtime lock changes are required.
+The pinned LibreOffice console launcher `pyuno/zipcore/python.cxx` creates its
+core interpreter with `CREATE_UNICODE_ENVIRONMENT` only and a fresh STARTUPINFO.
+This does not establish a visible-console defect: a child can inherit its
+parent's windowless console without repeating `CREATE_NO_WINDOW`, and console
+inheritance is separate from ordinary handle inheritance. See the
+[CPython console inheritance discussion](https://github.com/python/cpython/issues/85785)
+and [Win32 inheritance documentation](https://learn.microsoft.com/en-us/windows/win32/procthread/inheritance).
+The earlier inference that these creation flags proved a console gap was too
+strong. The previous Terminal association and activation cause remain unknown.
+
+The direct-core WorkerLaunch path selects the exact packaged Python 3.13.15
+interpreter for explicit bootstrap and a same-PID retained query-HANDLE check.
+It matches the launcher's process-local bootstrap environment and preserves
+structured arguments, UTF-8, original worker ownership and cleanup. Its passing
+probe establishes the new path's behavior, without proving that the old launcher
+caused the foreground failure. Keep the packaged launcher and runtime manifest
+for existing tools, and keep the original focus and input guards.
 
 Before the original GUI scenario, execute a bounded Windows bootstrap probe
 through the actual WorkerLaunch/WorkerClient path. It may substitute only a
