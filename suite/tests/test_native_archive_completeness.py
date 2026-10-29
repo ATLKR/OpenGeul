@@ -286,6 +286,45 @@ class NativeArchiveCompletenessTests(unittest.TestCase):
         notice=numeric_notice.decode_notice(lines[0],'a'*40,123,expected_scope=10)
         self.assertEqual(notice['fileCode'],23)
         self.assertGreaterEqual(notice['line'],self.implementation().verify_native_archive_completeness.__code__.co_firstlineno)
+        self.assertEqual(notice['stageCode'],numeric_notice.STAGES['native-integrity-generation-completeness'])
+
+    def assert_integrity_notice(self,process,stage):
+        import numeric_notice
+        self.assertEqual(process.returncode,1)
+        prefix='::notice title='+numeric_notice.CASE_TITLE+'::'
+        lines=[line[len(prefix):] for line in process.stdout.splitlines() if line.startswith(prefix)]
+        self.assertEqual(len(lines),1)
+        notice=numeric_notice.decode_notice(lines[0],'a'*40,123,expected_scope=10)
+        self.assertEqual(notice['stageCode'],numeric_notice.STAGES[stage])
+        self.assertEqual((notice['schemaVersion'],notice['caseCode'],notice['exceptionCode'],
+            notice['fileCode'],notice['line'],notice['fieldPresenceMask']),(1,58,1,0,0,0))
+        self.assertNotIn('ownedFrames',notice)
+        self.assertTrue(all(value==0 for value in notice['observations'].values()))
+        self.assertNotIn('PRIVATE-DOCUMENT',lines[0]);self.assertNotIn(str(self.root),lines[0])
+        return json.loads((self.root/'.work/suite-native-integrity.json').read_text())
+
+    def test_actual_workflow_first_inline_failure_keeps_zero_leaf_before_later_owned_failure(self):
+        entry=next(row for row in self.expected if row['root']==CALC_SAVE)
+        events=entry['folder']/'events.jsonl';raw=events.read_bytes()
+        events.write_bytes(b'?' + raw[1:])
+        process=self.workflow_process()
+        result=self.assert_integrity_notice(process,'native-integrity-calc-save-archive-members')
+        first=result['roots'][1]
+        self.assertEqual(first['errorType'],'AssertionError')
+        self.assertEqual(first['error'],'Native archive file hash differs')
+        self.assertEqual(result['numericFailure'],first['numericFailure'])
+        self.assertEqual(result['generationCompleteness']['numericFailure']['fileCode'],23)
+        self.assertEqual(result['stage'],first['stage'])
+
+    def test_actual_workflow_crash_gate_does_not_publish_private_path_or_document_text(self):
+        private=self.root/CALC_SAVE/'PRIVATE-DOCUMENT-CONTENT.mdmp'
+        private.write_bytes(b'dump')
+        process=self.workflow_process()
+        result=self.assert_integrity_notice(process,'native-integrity-calc-save-path-crash-scan')
+        first=result['roots'][1]
+        self.assertEqual(first['errorType'],'AssertionError')
+        self.assertEqual(first['error'],'Native crash dump found: '+str(private.relative_to(self.root)))
+        self.assertEqual(result['numericFailure'],first['numericFailure'])
 
     def test_linked_or_oversized_original_reports_are_rejected(self):
         path=self.root/'.work/suite-native/results.json';original=path.read_bytes()

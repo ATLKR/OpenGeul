@@ -158,6 +158,87 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
         environment.pop('PYTHONPATH', None)
         return environment
 
+    def test_integrity_stage_metadata_preserves_original_assertions_and_filesystem_calls(self):
+        step=next(step for step in workflow_steps() if field(step,'shell')=='python')
+        tree=ast.parse(run_code(step))
+        # Original gate fingerprints, captured before adding stage assignments.
+        expected={
+            'check_native_archives':'5b5edf66a6284ce0f2f97a3d6b95f857647f107fcd76f432c5a28fb76a150f1d',
+            'check_evidence_crash_dumps':'62b000e99d1a63f2bdfd3e9abbd3b39361e4c3868f4600df17a75193672219b8'}
+        filesystem={'is_dir','is_symlink','glob','rglob','is_file','open','read','read_text',
+            'resolve','is_relative_to','stat','read_bytes'}
+        for node in tree.body:
+            if not isinstance(node,ast.FunctionDef) or node.name not in expected:continue
+            guards=[ast.dump(item,include_attributes=False) for item in ast.walk(node) if isinstance(item,ast.Assert)]
+            calls=[ast.dump(item,include_attributes=False) for item in sorted((item for item in ast.walk(node)
+                if isinstance(item,ast.Call) and isinstance(item.func,ast.Attribute) and item.func.attr in filesystem),
+                key=lambda item:(item.lineno,item.col_offset))]
+            digest=hashlib.sha256(json.dumps([guards,calls],separators=(',',':')).encode()).hexdigest()
+            self.assertEqual(digest,expected[node.name],node.name)
+
+    def test_each_original_archive_root_keeps_its_failed_gate_stage(self):
+        import numeric_notice
+        check=self.verifier()
+        self.assertEqual(sum(name.startswith('native-integrity-') for name in numeric_notice.STAGES),30)
+        prefixes=('shared','calc-save','calc-close-save','calc-close-discard','calc-close-cancel')
+        gates=('root-admission','manifest-discovery','path-crash-scan','archive-members','shutdown-proof')
+        for index,prefix in enumerate(prefixes):
+            for gate in gates:
+                with self.subTest(root=prefix,gate=gate),tempfile.TemporaryDirectory() as folder:
+                    roots=self.archives(folder);root=roots[index];archive=root/'owned-profile'
+                    if gate=='root-admission':root.rename(Path(folder)/'omitted-root')
+                    elif gate=='manifest-discovery':(archive/'manifest.json').unlink()
+                    elif gate=='path-crash-scan':(root/'PRIVATE-DOCUMENT.mdmp').write_bytes(b'dump')
+                    elif gate=='archive-members':(archive/'report.txt').write_bytes(b'changed')
+                    else:
+                        proof=json.loads(FIXTURES.read_text())['forced']
+                        self.write_shutdown(archive,proof,expected_engine(folder))
+                    record=check(roots)['roots'][index]
+                    self.assertIs(record['success'],False)
+                    self.assertEqual(record.get('stage'),'native-integrity-'+prefix+'-'+gate)
+                    self.assertIn(record['stage'],numeric_notice.STAGES)
+
+    def test_each_original_evidence_root_keeps_its_failed_gate_stage(self):
+        import numeric_notice
+        check=self.verifier()
+        for index,prefix in enumerate(('calc-save','calc-close')):
+            for gate in ('root-admission','path-crash-scan'):
+                with self.subTest(root=prefix,gate=gate),tempfile.TemporaryDirectory() as folder:
+                    roots=self.archives(folder)
+                    evidence=roots[1].parent if index==0 else roots[2].parents[1]
+                    if gate=='root-admission':evidence.rename(Path(folder)/'omitted-evidence')
+                    else:(evidence/'PRIVATE-DOCUMENT.mdmp').write_bytes(b'dump')
+                    record=check(roots)['evidenceRoots'][index]
+                    self.assertIs(record['success'],False)
+                    self.assertEqual(record.get('stage'),'native-integrity-evidence-'+prefix+'-'+gate)
+                    self.assertIn(record['stage'],numeric_notice.STAGES)
+
+    def test_additional_archive_and_evidence_roots_keep_original_checks_and_generic_stage(self):
+        import shutil
+        step=next(step for step in workflow_steps() if field(step,'shell')=='python')
+        tree=ast.parse(run_code(step))
+        definitions=ast.Module(body=[node for node in tree.body if isinstance(node,
+            (ast.Import,ast.ImportFrom,ast.FunctionDef))],type_ignores=[])
+        namespace={};exec(compile(definitions,str(WORKFLOW),'exec'),namespace)
+        with tempfile.TemporaryDirectory() as folder:
+            roots=self.archives(folder);extra=Path(folder)/'.work/extra-archive'
+            shutil.copytree(roots[0],extra);roots.append(extra)
+            extra_evidence=Path(folder)/'.work/extra-evidence';extra_evidence.mkdir()
+            evidence=[roots[1].parent,roots[2].parents[1],extra_evidence]
+            check=namespace['check_all_native_archives']
+            result=check(roots,evidence,expected_engine(folder))
+            self.assertIs(result['success'],True)
+            self.assertEqual((len(result['roots']),len(result['evidenceRoots']),result['completeArchives']),(6,3,6))
+            (extra/'owned-profile/manifest.json').unlink();extra_evidence.rmdir()
+            result=check(roots,evidence,expected_engine(folder))
+            self.assertIs(result['success'],False)
+            self.assertEqual((len(result['roots']),len(result['evidenceRoots'])),(6,3))
+            for record,message in ((result['roots'][-1],'No owned native diagnostic manifests were archived'),
+                                   (result['evidenceRoots'][-1],'Owned Calc evidence is missing')):
+                self.assertEqual(record['errorType'],'AssertionError')
+                self.assertEqual(record['error'],message)
+                self.assertEqual(record['stage'],'verify-native-archives')
+
     def test_authentic_archives_cover_original_and_all_four_calc_roots(self):
         check = self.verifier()
         with tempfile.TemporaryDirectory() as folder:

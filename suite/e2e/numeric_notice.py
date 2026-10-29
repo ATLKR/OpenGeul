@@ -81,7 +81,13 @@ _STAGES = ('setup','startup','case-setup','verify-fixture','verify-generated-fix
     *(f'verify-retained-{m}-exit' for m in MODULES), *(f'dirty-close-{c}' for c in ('save','discard','cancel')),
     'verify-native-archives', 'prepare-native31', 'observe-clean-before-input',
     'physical-edit-without-enter', 'single-physical-ctrl-s', 'wait-exact-durable-workbook',
-    'close-original-editor', 'independent-fresh-engine-reopen')
+    'close-original-editor', 'independent-fresh-engine-reopen',
+    *(f'native-integrity-{root}-{gate}'
+      for root in ('shared','calc-save','calc-close-save','calc-close-discard','calc-close-cancel')
+      for gate in ('root-admission','manifest-discovery','path-crash-scan','archive-members','shutdown-proof')),
+    *(f'native-integrity-evidence-{root}-{gate}' for root in ('calc-save','calc-close')
+      for gate in ('root-admission','path-crash-scan')),
+    'native-integrity-generation-completeness')
 STAGES = {name:index for index,name in enumerate(_STAGES, 1)}
 
 # Each bit means that the source field was present and had the declared type.
