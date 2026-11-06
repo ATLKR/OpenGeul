@@ -37,8 +37,9 @@ class Session:
     """External Windows boundary double, deliberately never native evidence."""
     actual_windows = False
 
-    def __init__(self, *, ready=True, fail=None, cleanup=True):
+    def __init__(self, *, ready=True, fail=None, cleanup=True, initial_error=None):
         self.readiness, self.fail, self.cleanup_result = ready, fail, cleanup
+        self.initial_error = initial_error
         self.calls = []
 
     def open(self, record):
@@ -54,9 +55,13 @@ class Session:
             raise AssertionError('synthetic menu recipient rejection')
         return dict(gesture=name, success=True, kind='owned-native-menu-inspection')
 
-    def screenshot(self, record):
-        self.calls.append('screenshot')
-        return 'synthetic-chrome.png'
+    def screenshot(self, record, *, initial=False):
+        self.calls.append('initial-screenshot' if initial else 'screenshot')
+        if initial and self.initial_error:
+            record['initialScreenshotErrorType'] = self.initial_error
+            return None
+        record['initialScreenshotScope' if initial else 'screenshotScope'] = 'owned-fresh-blank-form-top-240-pixels'
+        return record['case'] + ('-initial-chrome.png' if initial else '-chrome.png')
 
     def view_roundtrip(self, record):
         self.calls.append('view-roundtrip')
@@ -90,7 +95,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 session = Session()
                 record = self.run_case(session, module)
                 view = ['view-roundtrip'] if module in ('writer', 'calc') else []
-                self.assertEqual(session.calls, ['open', 'ready', 'open-escape',
+                self.assertEqual(session.calls, ['open', 'ready', 'initial-screenshot', 'open-escape',
                     'open-outside', 'keyboard-escape', 'open-escape',
                     *view, 'screenshot', 'finish', 'cleanup'])
                 self.assertTrue(record['success'])
@@ -111,12 +116,101 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 self.assertEqual(record['errorType'], 'AssertionError')
                 self.assertEqual(session.calls, ['open', 'ready', 'cleanup'])
 
+    def test_initial_chrome_precedes_a_first_gesture_failure_without_qualifying_success(self):
+        for error in (None, 'OSError'):
+            with self.subTest(initialError=error):
+                session = Session(fail='open-escape', initial_error=error)
+                record = self.run_case(session)
+                self.assertEqual(session.calls, ['open', 'ready', 'initial-screenshot', 'open-escape', 'cleanup'])
+                self.assertEqual(record['errorType'], 'AssertionError')
+                self.assertFalse(record['success']); self.assertFalse(record['scenarioCompleted'])
+                self.assertFalse(record['nativeMenuVerified']); self.assertFalse(record['viewPhysicalVerified'])
+                self.assertEqual(record['gestures'], [])
+                self.assertNotIn('screenshot', record)
+                if error:
+                    self.assertEqual(record['initialScreenshotErrorType'], 'OSError')
+                    self.assertNotIn('initialScreenshot', record)
+                else:
+                    self.assertEqual(record['initialScreenshot'], 'native-menu-writer-initial-chrome.png')
+                    self.assertEqual(record['initialScreenshotScope'], 'owned-fresh-blank-form-top-240-pixels')
+
+    def capture_session(self, height=600, *, capture_error=False, lose_owner=False):
+        from PIL import Image
+        from test_windows_attachment import native as windows, User32
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        session = self.smoke.WindowsSession(folder, folder, folder, 'writer')
+        session.hwnd, session.parent, session.child, session.office_pid = 11, 55, 56, 88
+        session.process = SimpleNamespace(pid=77, poll=lambda: None)
+        witnesses, captures = [], []
+        session.engine = SimpleNamespace(exited=lambda seconds: witnesses.append(seconds) or False)
+        session.api = object.__new__(windows.Windows); session.api.user = User32()
+        session.api.user.GetForegroundWindow = lambda: 11
+        def capture():
+            captures.append(11)
+            self.assertEqual(session.api.user.counts[('GetPropW', 11, 'OpenGeul.Office.ParentHwnd')], len(captures)*2-1)
+            if lose_owner: session.api.user.pids[55] = 99
+            if capture_error: raise OSError('Synthetic private capture detail must not be retained')
+            return Image.new('RGB', (640, height), 'white')
+        def desktop(*, backend):
+            self.assertEqual(backend, 'win32')
+            def window(*, handle):
+                self.assertEqual(handle, 11)
+                return SimpleNamespace(wrapper_object=lambda: SimpleNamespace(capture_as_image=capture))
+            return SimpleNamespace(window=window)
+        session.desktop = desktop
+        return session, captures, witnesses
+
+    def capture(self, session, record, *, initial):
+        try: return session.screenshot(record, initial=initial)
+        except TypeError:
+            self.fail('The real Windows screenshot adapter must support a distinct initial capture')
+
+    def test_actual_initial_and_final_chrome_are_guarded_cropped_and_never_overwritten(self):
+        from PIL import Image
+        for height in (120, 600):
+            with self.subTest(height=height):
+                session, captures, witnesses = self.capture_session(height)
+                record = dict(case='native-menu-writer')
+                initial = self.capture(session, record, initial=True)
+                final = self.capture(session, record, initial=False)
+                self.assertEqual(initial, 'native-menu-writer-initial-chrome.png')
+                self.assertEqual(final, 'native-menu-writer-chrome.png')
+                self.assertEqual(captures, [11,11]); self.assertEqual(witnesses, [0,0,0,0])
+                for name in (initial, final):
+                    with Image.open(session.output/name) as image:
+                        self.assertEqual(image.size, (640, min(height,240)))
+                before = {name:(session.output/name).read_bytes() for name in (initial,final)}
+                duplicate = dict(case='native-menu-writer')
+                self.assertIsNone(self.capture(session, duplicate, initial=True))
+                self.assertEqual(duplicate, dict(case='native-menu-writer', initialScreenshotErrorType='FileExistsError'))
+                with self.assertRaises(FileExistsError): self.capture(session, record, initial=False)
+                self.assertEqual({name:(session.output/name).read_bytes() for name in (initial,final)}, before)
+
+    def test_actual_capture_failure_is_content_free_and_keeps_both_owner_checks(self):
+        session, captures, witnesses = self.capture_session(capture_error=True)
+        record = dict(case='native-menu-writer')
+        self.assertIsNone(self.capture(session, record, initial=True))
+        self.assertEqual(record, dict(case='native-menu-writer', initialScreenshotErrorType='OSError'))
+        self.assertEqual(captures,[11]); self.assertEqual(witnesses,[0,0])
+        self.assertEqual(list(session.output.iterdir()), [])
+
+    def test_foreign_owner_is_fatal_before_or_after_capture_without_retaining_an_image(self):
+        for after in (False,True):
+            with self.subTest(afterCapture=after):
+                session, captures, witnesses = self.capture_session(lose_owner=after)
+                if not after: session.api.user.pids[55] = 99
+                record = dict(case='native-menu-writer')
+                with self.assertRaises(AssertionError): self.capture(session, record, initial=True)
+                self.assertEqual(captures, [11] if after else [])
+                self.assertEqual(record, dict(case='native-menu-writer'))
+                self.assertEqual(list(session.output.iterdir()), [])
+
     def test_failed_gesture_is_not_retried_and_later_input_is_not_sent(self):
         session = Session(fail='open-outside')
         record = self.run_case(session)
         self.assertFalse(record['success'])
         self.assertEqual(session.calls,
-            ['open', 'ready', 'open-escape', 'open-outside', 'cleanup'])
+            ['open', 'ready', 'initial-screenshot', 'open-escape', 'open-outside', 'cleanup'])
         self.assertEqual(len(record['gestures']), 1)
         self.assertEqual(record['errorType'], 'AssertionError')
 
@@ -197,7 +291,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
         self.assertFalse(record['success'])
         self.assertIs(record['viewRoundtripCompleted'], False)
         self.assertIs(record['viewPhysicalVerified'], False)
-        self.assertEqual(session.calls, ['open', 'ready', 'open-escape', 'open-outside',
+        self.assertEqual(session.calls, ['open', 'ready', 'initial-screenshot', 'open-escape', 'open-outside',
             'keyboard-escape', 'open-escape', 'view-roundtrip', 'cleanup'])
 
     def test_cli_cannot_select_a_subset_and_relabel_it_as_the_complete_matrix(self):
@@ -583,7 +677,8 @@ class NativeMenuSmokeTests(unittest.TestCase):
         session.open = lambda record: record.update(shellPid=77, windowHwnd=11, childHwnd=13,
             officePid=88, officeCreationTime=1001, nativeArchiveGeneration=dict(pid=88,
                 creationTime=1001, image=str(session.suite/'Office/program/soffice.bin')))
-        session.screenshot = lambda record: 'synthetic-blank-chrome.png'
+        session.screenshot = lambda record, *, initial=False: record['case'] + (
+            '-initial-chrome.png' if initial else '-chrome.png')
         session.cleanup = lambda record: True
         close = session.native.close_document
         def qualified(*args, **kwargs):

@@ -81,13 +81,30 @@ class WindowsSession:
                 int(self.api.user.GetPropW(self.hwnd, 'OpenGeul.Office.ChildHwnd') or 0)) == (self.parent, self.child)
         self.api.require_foreground(self.hwnd)
 
-    def screenshot(self, record):
+    def screenshot(self, record, *, initial=False):
+        assert type(initial) is bool and self.module in MODULES and record.get('case') == 'native-menu-' + self.module
         self._owned_blank()
-        image = self.desktop(backend='win32').window(handle=self.hwnd).wrapper_object().capture_as_image()
+        capture_error = None
+        try:
+            image = self.desktop(backend='win32').window(handle=self.hwnd).wrapper_object().capture_as_image()
+        except Exception as exc:
+            if not initial: raise
+            capture_error = type(exc).__name__
+        # Ownership failures remain primary even if the optional image failed.
         self._owned_blank()
-        name = record['case'] + '-chrome.png'
-        image.crop((0, 0, image.width, min(240, image.height))).save(self.output / name)
-        record['screenshotScope'] = 'owned-fresh-blank-form-top-240-pixels'
+        if capture_error is not None:
+            record['initialScreenshotErrorType'] = capture_error
+            return None
+        name = record['case'] + ('-initial-chrome.png' if initial else '-chrome.png')
+        try:
+            cropped = image.crop((0, 0, image.width, min(240, image.height)))
+            with (self.output / name).open('xb') as stream:
+                cropped.save(stream, format='PNG')
+        except Exception as exc:
+            if not initial: raise
+            record['initialScreenshotErrorType'] = type(exc).__name__
+            return None
+        record['initialScreenshotScope' if initial else 'screenshotScope'] = 'owned-fresh-blank-form-top-240-pixels'
         return name
 
     def _native_command(self, command, record):
@@ -351,6 +368,9 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
         session.open(record)
         record['stage'] = 'require-native-menu'
         assert session.ready() is True, 'The actual native menu surface is unavailable'
+        record['stage'] = 'capture-initial-owned-blank-chrome'
+        initial = session.screenshot(record, initial=True)
+        if initial is not None: record['initialScreenshot'] = initial
         for index, gesture in enumerate(GESTURES):
             record['stage'] = gesture
             result = session.gesture(gesture, record)

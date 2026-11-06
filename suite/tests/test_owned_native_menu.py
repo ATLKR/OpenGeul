@@ -1,5 +1,6 @@
 """Real native-menu policy at bounded synthetic Windows/UIA boundaries."""
 import copy
+import ctypes as C
 import importlib.util
 from pathlib import Path
 import sys
@@ -74,6 +75,161 @@ class Probe:
     def outside_click(self,binding,r):self.calls.append('outside');self.opened=False;r.update(requestedInputs=2,insertedInputs=2)
 
 
+class ChromeBoundary:
+    """Fresh synthetic COM wrappers; production UIA discovery stays real."""
+    def __init__(self,module,root,clock,mode=None):
+        self.module,self.clock,self.mode=module,clock,mode
+        self.native=Probe(root,clock);self.compares=[];self.wrapper_count=0;self.focus_phase=False;self.submenu_open=False
+        self.targets=('save','saveAs','open','close','new','new-hwp','home','exit','printPreview',
+            'saveAll','saveCopy','new-writer','new-calc','new-impress','new-draw','new-math','new-base')
+        class SafeArray(C.Structure):pass
+        safe_pointer=C.POINTER(SafeArray);safe_pointer._itemtype_=C.c_int
+        class Interface:pass
+        Interface._methods_=[NS(name='GetRuntimeId',restype=C.c_int32,
+            argtypes=(C.POINTER(safe_pointer),),paramflags=((10,'runtimeId'),),idlflags=(),doc=None)]
+        self.interface=Interface
+        boundary=self
+        class Node:
+            __com_interface__=Interface
+            def __init__(self,key):
+                self.key=key;boundary.wrapper_count+=1;self.wrapper=boundary.wrapper_count
+            @property
+            def CurrentControlType(self):return 50032 if self.key in ('peer','host') else 50010 if self.key=='bar' else 50011
+            @property
+            def CurrentName(self):
+                return {'file':'파일','edit':'편집','bar':'','peer':'','host':''}.get(self.key,module.LABELS[self.key][0] if self.key in module.LABELS else '')
+            @property
+            def CurrentProcessId(self):return 77 if self.key=='host' else 999 if mode=='foreignPID' and self.key=='file' else 88
+            @property
+            def CurrentNativeWindowHandle(self):return 56 if self.key=='peer' else 11 if self.key=='host' else 0
+            @property
+            def CurrentIsOffscreen(self):return False
+            @property
+            def CurrentIsEnabled(self):return self.key not in ('saveAll','saveCopy')
+            @property
+            def CurrentBoundingRectangle(self):
+                box=boundary.rectangle(self.key);return NS(left=box[0],top=box[1],right=box[2],bottom=box[3])
+            def GetRuntimeId(self):
+                if self.key in ('peer','host'):return [4,56 if self.key=='peer' else 11]
+                if mode=='NoneRuntime':return None
+                if mode=='malformedRuntime':return [True]
+                if mode=='late':boundary.clock.now=6.
+                if mode=='listRuntime':return []
+                return ()
+            def FindAll(self,scope,condition):return boundary.find(self.key,scope,condition)
+        self.Node=Node
+        client=NS(CompareElements=self.compare,ElementFromHandle=self.from_handle,
+            ElementFromPoint=self.from_point,GetFocusedElement=self.focused,
+            ControlViewWalker=NS(GetParentElement=self.parent),
+            CreatePropertyCondition=lambda key,value:(key,value),
+            CreateAndCondition=lambda a,b:('and',a,b))
+        probe=object.__new__(module.NativeMenuProbe)
+        probe.clock=clock;probe.deadline=clock()+5;probe.provider_client=None
+        probe._hresult_type=C.c_int32;probe.interop=dict(versionTuple=[1,4,17],versionObserved=True)
+        probe._identity_scope=None;probe._identity_refs={}
+        probe.uia=NS(iuia=client,tree_scope={'children':2,'descendants':4},build_condition=probe._condition)
+        class Point(C.Structure):_fields_=[('x',C.c_int32),('y',C.c_int32)]
+        probe._point_type=Point
+        probe.user=NS(WindowFromPhysicalPoint=lambda point:self.hit(point),
+            GetWindowThreadProcessId=self.window_pid,GetAncestor=lambda hwnd,flag:99 if hwnd==99 else 11,
+            IsChild=lambda parent,child:parent==56 and child==56,
+            GetWindow=lambda hwnd,flag:56 if hwnd==99 else 0,GetPropW=lambda hwnd,name:1,
+            GetAsyncKeyState=lambda key:0)
+        for method in ('process_snapshot','open_engine','engine_snapshot','close_engine','enter_dpi','restore_dpi',
+                       'move','editor_snapshot','outside_snapshot','outside_click'):
+            setattr(probe,method,getattr(self.native,method))
+        probe.click=self.click
+        probe._keyboard=lambda:NS(send=self.send,release=lambda payload:len(payload),keyboard_snapshot=lambda thread:
+            dict(targetLayout=0x04090409,currentThreadLayout=0x04090409,keysDown=[]))
+        probe.attachment_snapshot=lambda binding:dict(valid=True,windows={'child':{'threadId':9}})
+        probe.window_snapshot=self.window;probe.foreground=lambda:11
+        probe.native_focus=lambda thread:dict(threadId=9,focusPid=88,focusRootHwnd=11,
+            captureHwnd=0,menuOwnerHwnd=0,flags=0)
+        self.probe=probe
+
+    def rectangle(self,key):
+        if key=='file':return [20,20,80,40]
+        if key=='edit':return [90,20,150,40]
+        if key=='blank':return [90,60,150,80]
+        if key in ('peer','host','bar'):return [0,0,400,1000]
+        index=self.targets.index(key);return [20,60+30*index,80,80+30*index]
+
+    def find(self,key,scope,condition):
+        assert scope in (2,4)
+        if key=='peer':keys=(['bar','file'] if self.mode=='TopEditmissing' else ['bar','file','edit']) if scope==4 else ['bar']
+        elif key=='host':keys=[]
+        elif key=='bar':keys=['file'] if self.mode=='TopEditmissing' else ['file','edit']
+        elif key=='file':
+            keys=list(self.targets) if self.native.opened else []
+            if self.mode in ('nestedNew','unboundIntermediate'):
+                if not self.submenu_open:keys=[name for name in keys if name!='new-writer']
+                elif self.mode=='unboundIntermediate':keys.append('blank')
+        else:raise AssertionError('Unexpected synthetic UIA query')
+        def matches(node,query):
+            if query[0]=='and':return matches(node,query[1]) and matches(node,query[2])
+            assert query[0] in (30003,30005)
+            return (node.CurrentControlType if query[0]==30003 else node.CurrentName)==query[1]
+        nodes=[node for node in [self.Node(key) for key in keys] if matches(node,condition)]
+        return NS(Length=len(nodes),GetElement=lambda index:nodes[index])
+
+    def compare(self,left,right):
+        assert isinstance(left,self.Node) and isinstance(right,self.Node)
+        if self.mode=='alwaysTrue':result=True
+        elif self.mode=='NoneCompare':result=None
+        elif self.mode=='invalidCompare':result=2**32
+        elif self.mode=='freshFalse':result=left is right
+        elif self.mode=='focusbothTRUE' and self.focus_phase and {left.key,right.key}=={'file','bar'}:result=True
+        elif self.mode=='stale' and self.native.opened and left.key==right.key=='file':result=False
+        else:result=left.key==right.key
+        if self.mode=='integerCompare':result=2*int(result)
+        self.compares.append((left.key,right.key,result));return result
+
+    def from_handle(self,hwnd):
+        assert hwnd in (11,56)
+        return self.Node('host' if hwnd==11 else 'peer')
+
+    def from_point(self,point):
+        key=('edit' if point.x>=90 else 'file') if point.y<50 else self.targets[(point.y-70)//30]
+        if self.mode=='pointFalse':key='edit'
+        if self.mode=='wrongtarget' and key!='file':key='saveAs' if key=='save' else 'save'
+        return self.Node(key)
+
+    def focused(self):
+        self.focus_phase=True
+        return self.Node('file')
+
+    def send(self,payload):
+        events=tuple((item.payload.keyboard.wVk,item.payload.keyboard.wScan,item.payload.keyboard.dwFlags) for item in payload)
+        plans={((0,0x38,8),(0,0x21,8),(0,0x21,10),(0,0x38,10)):'ALT_F',
+            ((0,0x50,9),(0,0x50,11)):'DOWN',((0,0x01,8),(0,0x01,10)):'ESCAPE'}
+        assert events in plans, 'Unexpected native-menu keyboard payload'
+        shortcut=plans[events]
+        self.clock.now+=.01;self.native.calls.append(('key',shortcut));self.native.opened=shortcut!='ESCAPE'
+        return len(payload)
+
+    def click(self,receipt):
+        self.native.click(receipt)
+        if self.mode in ('nestedNew','unboundIntermediate') and receipt['target']=='new':
+            self.native.opened=True;self.submenu_open=True
+
+    def parent(self,node):
+        if self.mode in ('nestedNew','unboundIntermediate') and node.key=='new-writer':
+            return self.Node('new' if self.mode=='nestedNew' else 'blank')
+        key={'save':'file','file':'bar','edit':'bar','bar':'peer'}.get(node.key,'file' if node.key not in ('peer','host') else None)
+        return self.Node(key) if key else None
+
+    def hit(self,point):return 56 if point.y<50 else 99
+
+    def window_pid(self,hwnd,pointer):
+        pointer._obj.value=77 if hwnd==11 else 88
+        return 7 if hwnd==11 else 9
+
+    def window(self,hwnd):
+        assert hwnd in (11,56,99)
+        return dict(hwnd=hwnd,pid=77 if hwnd==11 else 88,rootHwnd=99 if hwnd==99 else 11,
+            threadId=7 if hwnd==11 else 9,visible=True,enabled=True)
+
+
 class OwnedNativeMenuTests(unittest.TestCase):
     def feature(self):
         self.assertTrue(SOURCE.is_file(),'A separate engine-owned native menu policy is required')
@@ -87,6 +243,141 @@ class OwnedNativeMenuTests(unittest.TestCase):
         api=NS(attachment=lambda h:(55,56,88),user=NS(GetPropW=lambda h,n:1))
         record=dict(windowHwnd=11,parentHwnd=55,childHwnd=56,officePid=88)
         return m,api,process,record,clock,probe
+
+    def real_chrome_fixture(self,mode=None):
+        m,a,p,r,c,_=self.fixture();boundary=ChromeBoundary(m,p.opengeul_suite_root,c,mode)
+        if mode=='generation':
+            p.opengeul_native_menu_generations={(11,55,56,88):(boundary.native.engine['image'],200)}
+            boundary.native.engine['creationTime']=201
+        if mode=='metadatawrong':boundary.interface._methods_[0].paramflags=((2,'runtimeId'),)
+        if mode=='metadataNone':boundary.interface._methods_=None
+        return m,a,p,r,c,boundary
+
+    def test_real_chrome_empty_runtime_ids_require_actual_differential_identity(self):
+        m,a,p,r,c,boundary=self.real_chrome_fixture()
+        with patch.object(m.time,'sleep',side_effect=c.pause):
+            value=m.click_native_menu_action(a,p,11,r,'save',probe=boundary.probe,clock=c)
+        self.assertIs(m.require_native_menu_action(value,77,11,'save'),value)
+        self.assertEqual([call for call in boundary.native.calls if isinstance(call,tuple) and call[0]=='click'],
+            [('click','file'),('click','save')])
+        self.assertIn(('close',9),boundary.native.calls)
+
+    def test_real_chrome_rejects_missing_or_nondifferential_identity_before_file_input(self):
+        for mode in ('alwaysTrue','NoneCompare','invalidCompare','freshFalse','foreignPID','generation','TopEditmissing',
+                     'metadatawrong','metadataNone','NoneRuntime','malformedRuntime','late','pointFalse'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,boundary=self.real_chrome_fixture(mode)
+                with patch.object(m.time,'sleep',side_effect=c.pause),self.assertRaises((AssertionError,TypeError)):
+                    m.click_native_menu_action(a,p,11,r,'save',probe=boundary.probe,clock=c)
+                self.assertEqual([call for call in boundary.native.calls if isinstance(call,tuple) and call[0] in ('click','key')],[])
+                self.assertIn(('close',9),boundary.native.calls)
+                self.assertTrue(r['nativeMenuActions'][-1]['engineHandleReleased'])
+
+    def test_real_chrome_normal_win32_zero_nonzero_comparison_results_are_accepted(self):
+        m,a,p,r,c,boundary=self.real_chrome_fixture('integerCompare')
+        with patch.object(m.time,'sleep',side_effect=c.pause):
+            value=m.click_native_menu_action(a,p,11,r,'save',probe=boundary.probe,clock=c)
+        self.assertEqual([call for call in boundary.native.calls if isinstance(call,tuple) and call[0]=='click'],
+            [('click','file'),('click','save')])
+        self.assertIs(m.require_native_menu_action(value,77,11,'save'),value)
+
+    def test_real_chrome_nested_new_accepts_only_the_previously_bound_new_ancestor(self):
+        for mode in ('nestedNew','unboundIntermediate'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,boundary=self.real_chrome_fixture(mode)
+                with patch.object(m.time,'sleep',side_effect=c.pause):
+                    if mode=='nestedNew':
+                        value=m.click_native_menu_action(a,p,11,r,'new-writer',probe=boundary.probe,clock=c)
+                        self.assertIs(m.require_native_menu_action(value,77,11,'new-writer'),value)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            m.click_native_menu_action(a,p,11,r,'new-writer',probe=boundary.probe,clock=c)
+                expected=[('click','file'),('click','new')]+([('click','new-writer')] if mode=='nestedNew' else [])
+                self.assertEqual([call for call in boundary.native.calls if isinstance(call,tuple) and call[0]=='click'],expected)
+                self.assertIn(('close',9),boundary.native.calls)
+
+    def test_real_chrome_disabled_commands_use_save_only_as_escape_recipient(self):
+        for gesture in ('disabled-saveAll','disabled-saveCopy'):
+            with self.subTest(gesture=gesture):
+                m,a,p,r,c,boundary=self.real_chrome_fixture()
+                with patch.object(m.time,'sleep',side_effect=c.pause):
+                    value=m.inspect_native_menu(a,p,11,r,gesture,probe=boundary.probe,clock=c)
+                self.assertIs(value['disabledObserved'],True);self.assertIs(value['focusReturned'],True)
+                self.assertEqual([call for call in boundary.native.calls if isinstance(call,tuple) and call[0] in ('click','key')],
+                    [('click','file'),('key','ESCAPE')])
+                self.assertIs(m.require_native_menu_action(value,77,11),value)
+
+    def test_real_chrome_wrong_target_stale_file_or_ambiguous_focus_stops_after_file(self):
+        for mode in ('wrongtarget','stale','focusbothTRUE'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,boundary=self.real_chrome_fixture(mode)
+                with patch.object(m.time,'sleep',side_effect=c.pause),self.assertRaises(AssertionError):
+                    if mode=='focusbothTRUE':m.inspect_native_menu(a,p,11,r,'open-escape',probe=boundary.probe,clock=c)
+                    else:m.click_native_menu_action(a,p,11,r,'save',probe=boundary.probe,clock=c)
+                self.assertEqual([call for call in boundary.native.calls if isinstance(call,tuple) and call[0] in ('click','key')],
+                    [('click','file')])
+                self.assertIn(('close',9),boundary.native.calls)
+
+    def test_real_chrome_each_command_uses_its_own_fresh_empty_runtime_target(self):
+        for command in ('open','saveAs','new-hwp','home','close'):
+            with self.subTest(command=command):
+                m,a,p,r,c,boundary=self.real_chrome_fixture('listRuntime')
+                with patch.object(m.time,'sleep',side_effect=c.pause):
+                    value=m.click_native_menu_action(a,p,11,r,command,probe=boundary.probe,clock=c)
+                self.assertEqual([call for call in boundary.native.calls if isinstance(call,tuple) and call[0]=='click'],
+                    [('click','file'),('click',command)])
+                self.assertIs(m.require_native_menu_action(value,77,11,command),value)
+
+    def test_real_chrome_keyboard_uses_actual_focused_ancestry_and_production_admission(self):
+        m,a,p,r,c,boundary=self.real_chrome_fixture()
+        self.assertIs(boundary.probe.keyboard.__func__,m.NativeMenuProbe.keyboard)
+        with patch.object(m.time,'sleep',side_effect=c.pause):
+            value=m.inspect_native_menu(a,p,11,r,'keyboard-escape',probe=boundary.probe,clock=c)
+        self.assertEqual([call for call in boundary.native.calls if isinstance(call,tuple) and call[0]=='key'],
+            [('key','ALT_F'),('key','DOWN'),('key','ESCAPE')])
+        self.assertIs(m.require_native_menu_action(value,77,11),value)
+
+    def test_real_chrome_pointer_replay_rejects_missing_cross_scope_or_alias_proof(self):
+        m,a,p,r,c,boundary=self.real_chrome_fixture()
+        with patch.object(m.time,'sleep',side_effect=c.pause):
+            original=m.click_native_menu_action(a,p,11,r,'save',probe=boundary.probe,clock=c)
+        comparison_count=len(boundary.compares)
+        for reason in ('missing-proof','scope','positive','alias','role','missing-runtime-observation',
+                       'missing-hit-proof','hit-scope','hit-replaced','hit-alias'):
+            with self.subTest(reason=reason):
+                value=copy.deepcopy(original);snapshot=value['pointers'][0]['snapshots'][0]
+                hit=value['pointers'][0]['hits'][0]
+                if reason=='missing-proof':snapshot.pop('identityProof')
+                elif reason=='scope':snapshot['identityProof']['scope']['officeCreationTime']+=1
+                elif reason=='positive':snapshot['identityProof']['positive']['file']=False
+                elif reason=='alias':snapshot['identityProof']['negative'][0][2]=True
+                elif reason=='role':snapshot['control']['identity']['role']='bar'
+                elif reason=='missing-runtime-observation':snapshot['control'].pop('runtimeObservation')
+                elif reason=='missing-hit-proof':hit.pop('identityProof')
+                elif reason=='hit-scope':hit['identityProof']['scope']['startedAt']+=.01
+                elif reason=='hit-replaced':hit['identityProof']['hitEqualsRetained']=False
+                else:hit['identityProof']['differentFrom']['bar']=True
+                with self.assertRaises((AssertionError,KeyError)):m.require_native_menu_action(value,77,11,'save')
+        self.assertEqual(len(boundary.compares),comparison_count,'Replay must not perform live UIA calls')
+
+    def test_real_chrome_keyboard_replay_rejects_missing_admission_or_ambiguous_focus(self):
+        m,a,p,r,c,boundary=self.real_chrome_fixture()
+        with patch.object(m.time,'sleep',side_effect=c.pause):
+            original=m.inspect_native_menu(a,p,11,r,'keyboard-escape',probe=boundary.probe,clock=c)
+        comparison_count=len(boundary.compares)
+        for reason in ('missing-admission','admission-scope','positive','alias','focus-both','focus-role','focus-path-role','focus-scope'):
+            with self.subTest(reason=reason):
+                value=copy.deepcopy(original);key=value['keys'][1]
+                if reason=='missing-admission':key.pop('identityAdmission')
+                elif reason=='admission-scope':key['identityAdmission']['scope']['operation']='open-escape'
+                elif reason=='positive':key['identityAdmission']['positive']['file']=False
+                elif reason=='alias':key['identityAdmission']['negative'][0][2]=True
+                elif reason=='focus-both':key['before']['focusIdentity']['barEquals']=True
+                elif reason=='focus-role':key['before']['focusIdentity']['role']='bar'
+                elif reason=='focus-path-role':key['before']['focusMenuPath'][-1]['identity']['role']='target:save'
+                else:key['before']['focusIdentity']['scope']['officeCreationTime']+=1
+                with self.assertRaises((AssertionError,KeyError)):m.require_native_menu_action(value,77,11)
+        self.assertEqual(len(boundary.compares),comparison_count,'Replay must not perform live UIA calls')
     def test_two_exact_clicks_keep_distinct_shell_engine_and_original_budget(self):
         m,a,p,r,c,probe=self.fixture();value=m.click_native_menu_action(a,p,11,r,'save',probe=probe,clock=c)
         self.assertTrue(value['success']);self.assertFalse(value['deliveryProved'])
@@ -132,7 +423,7 @@ class OwnedNativeMenuTests(unittest.TestCase):
             state.focus=host_focus if thread==7 else engine_focus
             state.capture=state.menuOwner=state.flags=0
             return 1
-        probe.clock=clock;probe.deadline=clock()+5;probe.provider_client=None
+        probe.clock=clock;probe.deadline=clock()+5;probe.provider_client=None;probe.interop={}
         probe.user=NS(IsWindow=lambda hwnd:hwnd in pids,GetWindowThreadProcessId=identity,
             GetAncestor=lambda hwnd,kind:11 if hwnd in pids else 0,
             GetPropW=lambda hwnd,name:55 if name.endswith('ParentHwnd') else 56,

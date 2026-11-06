@@ -33,6 +33,9 @@ COMMANDS=tuple(k for k in LABELS if k not in ('file','new','saveAll','saveCopy')
 GESTURES=('open-escape','open-outside','keyboard-escape','disabled-saveAll','disabled-saveCopy','core-commands')
 CORE_COMMANDS=('new-hwp','home','new','open','save','saveAs','close')
 KEY_COUNTS={'ALT_F':4,'DOWN':2,'ESCAPE':2}
+IDENTITY_METHOD='retained-uia-comparison'
+EDIT_CONTRAST=('편집','Edit')
+IDENTITY_ROLES=('file','bar','peer','contrast-edit')+tuple('target:'+name for name in LABELS if name!='file')
 
 
 class NativeMenuPending(AssertionError):pass
@@ -84,13 +87,101 @@ def _image(value):
     return path
 
 
+def _scope_targets(scope):
+    operation=scope['operation']
+    if scope['gesture']:
+        if operation=='core-commands':return {'file',*CORE_COMMANDS}
+        if operation.startswith('disabled-'):return {'file','save',operation[len('disabled-'):]}
+        return {'file','save'}
+    return {'file',operation}|({'new'} if operation.startswith('new-') and operation!='new-hwp' else set())
+
+
+def _target_role(target):return 'file' if target=='file' else 'target:'+target
+
+
+def _scope_anchor(scope,binding,shell_pid):
+    assert type(scope) is dict and set(scope)=={'version','binding','shellPid','shellCreationTime',
+        'officeCreationTime','startedAt','deadline','operation','gesture'}
+    assert type(scope['version']) is int and scope['version']==1 and scope['binding']==binding
+    assert type(scope['shellPid']) is int and scope['shellPid']==shell_pid
+    for key in ('shellCreationTime','officeCreationTime'):_int(scope[key])
+    assert scope['officeCreationTime']>=scope['shellCreationTime']
+    assert type(scope['gesture']) is bool and scope['operation'] in (GESTURES if scope['gesture'] else COMMANDS)
+    start,end=scope['startedAt'],scope['deadline']
+    assert all(type(n) in (int,float) and math.isfinite(n) for n in (start,end)) and start<end<=start+5
+    return (tuple(binding[k] for k in ('document','parent','child','officePid')),shell_pid,
+        scope['shellCreationTime'],scope['officeCreationTime'],start,end,scope['operation'],scope['gesture'])
+
+
+def _comparison_proof(proof,binding,shell_pid,target):
+    assert type(proof) is dict and set(proof)=={'scope','roles','positive','negative'}
+    scope=proof['scope'];anchor=_scope_anchor(scope,binding,shell_pid)
+    assert target in _scope_targets(scope)
+    roles=proof['roles'];assert type(roles) is list and 4<=len(roles)<=4+len(LABELS)
+    assert len(set(roles))==len(roles)
+    allowed={'file','bar','peer','contrast-edit'}|{_target_role(name) for name in _scope_targets(scope)}
+    assert set(roles)<=allowed and {'file','bar','peer','contrast-edit',_target_role(target)}<=set(roles)
+    assert type(proof['positive']) is dict and set(proof['positive'])==set(roles)
+    assert all(value is True for value in proof['positive'].values())
+    expected={(left,right) for i,left in enumerate(roles) for right in roles[i+1:]}
+    negative=proof['negative'];assert type(negative) is list and len(negative)==len(expected)
+    assert all(type(row) is list and len(row)==3 and row[2] is False for row in negative)
+    assert len({(row[0],row[1]) for row in negative})==len(negative)
+    assert {(row[0],row[1]) for row in negative}==expected
+    return anchor
+
+
+def _element_anchor(row,proof,binding,shell_pid):
+    runtime=row['runtimeId']
+    assert type(runtime) is list and len(runtime)<=64
+    assert all(type(n) is int and -(2**31)<=n<2**31 for n in runtime)
+    if runtime:
+        assert row.get('runtimeIdAvailable',True) is True
+        return ('runtime-id',tuple(runtime))
+    assert row.get('runtimeIdAvailable') is False and type(proof) is dict
+    identity=row['identity'];assert set(identity)=={'method','scope','role'} and identity['method']==IDENTITY_METHOD
+    assert identity['scope']==proof['scope'] and identity['role'] in proof['roles'] and identity['role']!='contrast-edit'
+    observation=row['runtimeObservation']
+    assert observation['rawTypeCode'] in (1,2) and observation['length']==0
+    assert observation['empty'] is observation['signed32Valid'] is observation['callSucceeded'] is True
+    assert observation['elementTypeCodes']==[] and observation['declaration']['verified'] is True
+    assert observation['versionObserved'] is True and type(observation['versionTuple']) is list and len(observation['versionTuple'])==3
+    assert all(type(n) is int and 0<=n<=65535 for n in observation['versionTuple'])
+    declaration=observation['declaration']
+    assert all(declaration[key] is True for key in ('interfaceKnown','methodUnique','hresultDeclared',
+        'singleOutArgument','outFlag','retvalFlag','exactFlags','safeArrayInt32'))
+    assert declaration['hresultValueObserved'] is declaration['safeArrayPointerObserved'] is declaration['safeArrayDimensionsObserved'] is False
+    return (IDENTITY_METHOD,_scope_anchor(proof['scope'],binding,shell_pid),identity['role'])
+
+
+def _hit_identity(hit,snapshot,target):
+    if 'identityProof' not in snapshot:return
+    proof=hit['identityProof'];scope=snapshot['identityProof']['scope'];role=_target_role(target)
+    assert proof['scope']==scope and proof['role']==role
+    assert proof['targetEqualsRetained'] is proof['hitEqualsRetained'] is True
+    different=proof['differentFrom']
+    assert type(different) is dict and set(different)==set(snapshot['identityProof']['roles'])-{role}
+    assert all(value is False for value in different.values())
+
+
 def _keyboard_recipient(snapshot,binding,shell_pid):
     _validate(snapshot,binding,shell_pid,'save')
     gui=snapshot['gui']
     if _menu_key_owner(gui,snapshot['popup'],binding['child']):return
     chain=snapshot.get('focusMenuPath',[])
     assert snapshot.get('focusMenuElementEquals') is True and 0<len(chain)<=32
-    assert all(row['pid']==binding['officePid'] and row['runtimeId'] for row in chain)
+    assert all(row['pid']==binding['officePid'] for row in chain)
+    if 'identityProof' in snapshot:
+        proof=snapshot['identityProof'];terminal=snapshot['focusIdentity']
+        anchors=[_element_anchor(row,proof,binding,shell_pid) for row in chain]
+        assert terminal['scope']==proof['scope'] and terminal['role'] in ('file','bar')
+        assert terminal['fileEquals'] is (terminal['role']=='file') and terminal['barEquals'] is (terminal['role']=='bar')
+        assert chain[-1]['controlType']==('MenuItem' if terminal['role']=='file' else 'MenuBar')
+        assert terminal['retainedEquals'] is True
+        index=snapshot['fileIndex'] if terminal['role']=='file' else snapshot['barIndex']
+        assert anchors[-1]==_element_anchor(snapshot['ancestry'][index],proof,binding,shell_pid), 'Keyboard focus differs from the retained native menu recipient'
+        return
+    assert all(row['runtimeId'] for row in chain)
     allowed=[snapshot['ancestry'][snapshot[k]]['runtimeId'] for k in ('fileIndex','barIndex')]
     assert chain[-1]['runtimeId'] in allowed and chain[-1]['controlType'] in ('MenuItem','MenuBar'), 'Native menu lacks its keyboard recipient'
 
@@ -109,12 +200,28 @@ def _validate(snapshot,binding,shell_pid,target,*,enabled=True):
     control=snapshot['control'];chain=snapshot['ancestry']
     assert 3<=len(chain)<=32 and all(r['pid']==binding['officePid'] for r in chain), 'Foreign native menu ancestry'
     assert control['pid']==binding['officePid'] and control['controlType']=='MenuItem'
-    assert control['visible'] is True and control['enabled'] is enabled and control['runtimeId']
+    assert control['visible'] is True and control['enabled'] is enabled
     assert chain[0]==control and snapshot['fileElementEquals'] is snapshot['peerElementEquals'] is True
     file,bar,peer=(snapshot[k] for k in ('fileIndex','barIndex','peerIndex'))
     assert all(type(i) is int for i in (file,bar,peer)) and 0<=file<bar<peer==len(chain)-1
     assert chain[bar]['controlType']=='MenuBar' and chain[peer]['nativeHwnd']==binding['child']
     assert chain[file]['controlType']=='MenuItem'
+    proof=snapshot.get('identityProof')
+    if proof is not None:
+        _comparison_proof(proof,binding,shell_pid,target)
+        assert snapshot['barElementEquals'] is True
+        assert (file==0) is (target=='file')
+        if not control['runtimeId']:assert control['identity']['role']==_target_role(target)
+    anchors=[_element_anchor(row,proof,binding,shell_pid) for row in chain]
+    for index,row in enumerate(chain):
+        if not row['runtimeId']:
+            role=row['identity']['role']
+            expected='file' if index==file else 'bar' if index==bar else _target_role(target) if index==0 else 'target:new'
+            assert role==expected
+            if index not in (0,file,bar):
+                assert role=='target:new' and target.startswith('new-') and target!='new-hwp', 'Only the previously retained New item may be an empty-ID intermediate ancestor'
+    assert chain[peer]['runtimeId'], 'Original UIA peer root still requires its runtime ID'
+    control_anchor=_element_anchor(control,proof,binding,shell_pid)
     rect=control['rectangle'];assert len(rect)==4 and all(type(x) is int for x in rect) and rect[0]<rect[2] and rect[1]<rect[3]
     popup=snapshot['popup']
     if target!='file':
@@ -128,8 +235,8 @@ def _validate(snapshot,binding,shell_pid,target,*,enabled=True):
     assert fg['pid']==(shell_pid if fg['hwnd']==binding['document'] else binding['officePid'])
     gui=snapshot['gui'];assert gui['threadId']>0 and gui['focusPid']==binding['officePid']
     assert gui['focusRootHwnd'] in allowed and gui['captureOwned'] is gui['menuOwnerOwned'] is True
-    return (tuple(control['runtimeId']),control['nativeHwnd'],tuple(rect),
-            tuple(chain[file]['runtimeId']),tuple(chain[bar]['runtimeId']),binding['child'],doc['threadId'],gui['threadId'])
+    return (control_anchor,control['nativeHwnd'],tuple(rect),
+            anchors[file],anchors[bar],binding['child'],doc['threadId'],gui['threadId'])
 
 
 def _editor(snapshot,binding,shell_pid):
@@ -184,7 +291,8 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
     def budget():assert clock()<deadline, 'Original native menu deadline expired'
     def retain():retain_native_menu_receipt(process,value)
     try:
-        budget();probe=probe or NativeMenuProbe(deadline,clock)
+        budget()
+        if probe is None:probe=NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}))
         assert native_menu_active(api,process,document), 'Native-only document menu is not ready'
         suite=Path(process.opengeul_suite_root).resolve()
         shell=probe.process_snapshot(process)
@@ -209,6 +317,10 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         assert len(prior)<128 or key in prior;prior[key]=identity;process.opengeul_native_menu_generations=prior
         value.update(binding=binding,originalProcess=shell,originalEngine=engine,engineHandleValue=handle,
             engineAdmissionBasis=home_basis if home_witness else 'existing-retained-witness' if witness else 'first-native-measurement')
+        begin_identity=getattr(probe,'begin_identity_scope',None)
+        if begin_identity:
+            value['elementIdentityScope']=begin_identity(binding,shell,engine,start,deadline,operation,gesture)
+            value['uiaInterop']=probe.interop
         probe.enter_dpi(value['dpiScope']);assert value['dpiScope']['verified'] is True
         def continuity():
             budget();assert probe.process_snapshot(process)==shell
@@ -225,6 +337,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                     budget();time.sleep(min(.01,max(0,deadline-clock())));continue
                 measured.update(stageCode=22,snapshot=row);value['observationStage']=22
                 _validate(row,binding,process.pid,target,enabled=enabled)
+                if 'identityProof' in row:assert row['identityProof']['scope']==value['elementIdentityScope']
                 measured['stageCode']=23;value['observationStage']=23
                 return row
         def editor(phase):
@@ -250,6 +363,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 hit=probe.point_snapshot(scope,point,probe.current_control);item['hits'].append(hit)
                 assert hit['point']==point and hit['pid']==pid and hit['rootHwnd']==scope
                 assert hit['withinControl'] is hit['uiaMatches'] is True, 'Native menu point is obstructed'
+                _hit_identity(hit,snap,target)
             check();retain();probe.move(point,item);assert item['pointerReadback']==point
             check();retain();continuity();probe.click(item);budget()
             assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
@@ -261,6 +375,9 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 before=observe('save');_keyboard_recipient(before,binding,process.pid);editor_before=None
             continuity();item=dict(shortcut=shortcut,before=before,editorBefore=editor_before);value['keys'].append(item);retain()
             probe.keyboard(binding,shortcut,item);budget()
+            if 'identityProof' in before:
+                _comparison_proof(item['identityAdmission'],binding,process.pid,'file' if shortcut=='ALT_F' else 'save')
+                assert item['identityAdmission']['scope']==value['elementIdentityScope']
             assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
             assert item['inputCallAttempts']==1 and item['requestedInputs']==item['insertedInputs']==KEY_COUNTS[shortcut]
         if gesture:editor(1)
@@ -345,6 +462,12 @@ def require_native_menu_action(value,shell_pid,document,command=None):
     assert shell_image.name.casefold()=='opengeul.office.exe'
     assert str(engine_image).casefold()==str(shell_image.parent/'Office'/'program'/'soffice.bin').casefold()
     operation=value['command']
+    expected_scope=dict(version=1,binding=binding,shellPid=shell_pid,shellCreationTime=shell['creationTime'],
+        officeCreationTime=engine['creationTime'],startedAt=value['startedAt'],deadline=value['deadline'],
+        operation=operation,gesture=value['gesture'])
+    def replay_scope(snapshot):
+        if 'identityProof' in snapshot:
+            assert value['elementIdentityScope']==snapshot['identityProof']['scope']==expected_scope
     assert type(value['gesture']) is bool
     if value['gesture']:
         assert operation in GESTURES and value['focusReturned'] is True
@@ -354,9 +477,11 @@ def require_native_menu_action(value,shell_pid,document,command=None):
         if operation=='core-commands':
             assert value['coreCommandsVerified'] is True and value['coreCommands']==list(CORE_COMMANDS)
             assert set(value['coreSnapshots'])==set(CORE_COMMANDS)
-            for target in CORE_COMMANDS:_validate(value['coreSnapshots'][target],binding,shell_pid,target)
+            for target in CORE_COMMANDS:
+                replay_scope(value['coreSnapshots'][target]);_validate(value['coreSnapshots'][target],binding,shell_pid,target)
         if operation.startswith('disabled-'):
             assert value['disabledObserved'] is True
+            replay_scope(value['disabledSnapshot'])
             _validate(value['disabledSnapshot'],value['binding'],shell_pid,operation[len('disabled-'):],enabled=False)
     else:
         assert operation in COMMANDS
@@ -364,9 +489,14 @@ def require_native_menu_action(value,shell_pid,document,command=None):
     assert [item['target'] for item in value['pointers']]==expected
     assert [item['shortcut'] for item in value['keys']]==keys
     for item in value['keys']:
+        replay_scope(item['before'])
         if item['shortcut']=='ALT_F':
             _validate(item['before'],binding,shell_pid,'file');_editor(item['editorBefore'],binding,shell_pid)
         else:_keyboard_recipient(item['before'],binding,shell_pid)
+        if 'identityProof' in item['before']:
+            target='file' if item['shortcut']=='ALT_F' else 'save'
+            _comparison_proof(item['identityAdmission'],binding,shell_pid,target)
+            assert item['identityAdmission']['scope']==expected_scope
         assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
         assert item['inputCallAttempts']==1 and item['requestedInputs']==item['insertedInputs']==KEY_COUNTS[item['shortcut']]
     for item in value['pointers']:
@@ -374,6 +504,7 @@ def require_native_menu_action(value,shell_pid,document,command=None):
             hit=item['nativeBefore'];assert (hit['hitHwnd'],hit['pid'],hit['rootHwnd'],hit['hitTest'])==(document,shell_pid,document,2)
             assert hit['point']==item['chosenPhysicalPoint'] and item['requestedInputs']==item['insertedInputs']==2
             continue
+        for snapshot in item['snapshots']:replay_scope(snapshot)
         anchors=[_validate(s,value['binding'],shell_pid,item['target']) for s in item['snapshots']]
         assert len(anchors)==3 and all(a==anchors[0] for a in anchors)
         assert len(item['hits'])==2 and all(h['point']==item['chosenPhysicalPoint'] and h['pid']==value['binding']['officePid'] and h['withinControl'] is h['uiaMatches'] is True for h in item['hits'])
@@ -381,6 +512,7 @@ def require_native_menu_action(value,shell_pid,document,command=None):
         rect=item['snapshots'][0]['control']['rectangle']
         assert item['chosenPhysicalPoint']==[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
         for hit,snapshot in zip(item['hits'],item['snapshots'][1:]):
+            _hit_identity(hit,snapshot,item['target'])
             assert hit['hitHwnd']>0 and hit['rootHwnd']==(snapshot['popup']['hwnd'] if snapshot['popup'] else document)
         assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
         assert item['inputCallAttempts']==1 and item['insertedInputs']==item['requestedInputs']==2
@@ -508,8 +640,10 @@ class NativeMenuProbe(NativeControlProbe):
     # CUIAutomation8 is the documented Windows 8+ IUIAutomation2 implementation.
     # A private client avoids changing pywinauto's shared UIA singleton settings.
     CLIENT='{e22ad333-b25f-460c-83d0-0581107395c9}'
-    def __init__(self,deadline,clock,**libraries):
+    def __init__(self,deadline,clock,*,interop=None,**libraries):
         self.provider_client=None
+        self.interop={} if interop is None else interop
+        self._identity_scope=None;self._identity_refs={};self._uses_comparison=False
         NativeActivationProbe.__init__(self,deadline,clock,**libraries)
         H,D,B=C.c_void_p,C.c_uint32,C.c_int32
         for name,args,result in [('GetWindow',(H,D),H),('GetWindowTextW',(H,C.c_wchar_p,B),B),
@@ -519,6 +653,11 @@ class NativeMenuProbe(NativeControlProbe):
         self.keyboard_probe=None
         try:
             import comtypes.client
+            self._hresult_type=comtypes.HRESULT
+            installed=getattr(comtypes,'__version__',None)
+            match=re.fullmatch(r'(\d+)\.(\d+)\.(\d+)',installed) if type(installed) is str else None
+            observed=[int(n) for n in match.groups()] if match else []
+            self.interop.update(versionTuple=observed,versionObserved=bool(match and all(n<=65535 for n in observed)))
             library=self._call(comtypes.client.GetModule,'UIAutomationCore.dll')
             interface=library.IUIAutomation2
             self.provider_client=self._call(lambda:comtypes.client.CreateObject(self.CLIENT,interface=interface))
@@ -528,6 +667,94 @@ class NativeMenuProbe(NativeControlProbe):
             self._point_type=library.tagPOINT
         except BaseException:
             self.close_provider();raise
+    def begin_identity_scope(self,binding,shell,engine,start,deadline,operation,gesture):
+        assert getattr(self,'_identity_scope',None) is None, 'A native identity scope cannot be replaced'
+        self._identity_scope=dict(version=1,binding=dict(binding),shellPid=shell['pid'],
+            shellCreationTime=shell['creationTime'],officeCreationTime=engine['creationTime'],
+            startedAt=start,deadline=deadline,operation=operation,gesture=gesture)
+        _scope_anchor(self._identity_scope,binding,shell['pid'])
+        self._identity_refs={};self._uses_comparison=False
+        return copy.deepcopy(self._identity_scope)
+    def _same(self,left,right):
+        observation=dict(callReturned=False,returnTypeCode=0,areSameObserved=False)
+        self.interop['lastComparison']=observation
+        raw=self._call(self.uia.iuia.CompareElements,left,right)
+        observation.update(callReturned=True,returnTypeCode=1 if type(raw) is bool else 2 if type(raw) is int else 3 if raw is None else 4)
+        assert type(raw) is bool or type(raw) is int and -(2**31)<=raw<2**31, 'Native UIA comparison returned an invalid BOOL'
+        observation.update(areSameObserved=True,areSame=bool(raw))
+        return bool(raw)
+    def _declaration(self,element):
+        result=dict(interfaceKnown=False,methodUnique=False,hresultDeclared=False,singleOutArgument=False,
+            outFlag=False,retvalFlag=False,exactFlags=False,safeArrayInt32=False,verified=False,
+            hresultValueObserved=False,safeArrayPointerObserved=False,safeArrayDimensionsObserved=False)
+        try:
+            interface=getattr(type(element),'__com_interface__',None)
+            result['interfaceKnown']=isinstance(interface,type)
+            methods=[spec for base in interface.__mro__ for spec in vars(base).get('_methods_',()) if spec.name=='GetRuntimeId'] if result['interfaceKnown'] else []
+            result['methodUnique']=len(methods)==1
+            if len(methods)==1:
+                spec=methods[0];result['hresultDeclared']=getattr(self,'_hresult_type',None) is not None and spec.restype is self._hresult_type
+                args,flags=spec.argtypes,spec.paramflags
+                result['singleOutArgument']=len(args)==len(flags)==1
+                if result['singleOutArgument']:
+                    bits=flags[0][0];result['outFlag']=type(bits) is int and bool(bits&2)
+                    result['retvalFlag']=type(bits) is int and bool(bits&8)
+                    result['exactFlags']=type(bits) is int and bits==10
+                    array=getattr(args[0],'_type_',None)
+                    result['safeArrayInt32']=(getattr(array,'_itemtype_',None) is C.c_int and
+                        C.sizeof(C.c_int)==4 and args[0] is C.POINTER(array))
+            result['verified']=all(result[key] is True for key in ('interfaceKnown','methodUnique','hresultDeclared',
+                'singleOutArgument','outFlag','retvalFlag','exactFlags','safeArrayInt32'))
+        except Exception:pass  # Unconfirmed metadata never authorizes the empty-ID channel.
+        return result
+    def _runtime(self,element):
+        interop=getattr(self,'interop',None)
+        if interop is None:self.interop=interop={}
+        observation=dict(versionTuple=copy.deepcopy(interop.get('versionTuple',[])),
+            versionObserved=interop.get('versionObserved') is True,declaration=self._declaration(element),
+            callSucceeded=False,rawTypeCode=0,length=None,elementTypeCodes=[],empty=False,signed32Valid=False)
+        interop['lastRuntimeObservation']=observation
+        raw=self._call(element.GetRuntimeId);observation['callSucceeded']=True
+        observation['rawTypeCode']=1 if type(raw) is list else 2 if type(raw) is tuple else 3 if raw is None else 4
+        if type(raw) in (list,tuple):
+            observation.update(length=len(raw),empty=len(raw)==0,
+                elementTypeCodes=[1 if type(n) is int else 2 if type(n) is bool else 3 if type(n) is float else 4 for n in raw[:64]],
+                signed32Valid=len(raw)<=64 and all(type(n) is int and -(2**31)<=n<2**31 for n in raw))
+        assert type(raw) in (list,tuple) and observation['signed32Valid'], 'Native runtime ID has an invalid marshalled shape'
+        return list(raw),copy.deepcopy(observation)
+    def _bind_ref(self,role,element):
+        refs=self._identity_refs
+        if role in refs:assert self._same(element,refs[role]), 'Retained native menu element changed'
+        else:refs[role]=element
+        return refs[role]
+    def _role(self,element):
+        rows=[];self.interop['lastRoleComparisons']=rows;matches=[]
+        for role,original in self._identity_refs.items():
+            same=self._same(element,original);rows.append(dict(roleCode=IDENTITY_ROLES.index(role)+1,areSame=same))
+            if same:matches.append(role)
+        assert len(matches)==1 and matches[0]!='contrast-edit', 'Native menu identity is unknown or ambiguous'
+        return matches[0]
+    def _fresh_base(self):
+        root=self._root(self._identity_scope['binding']['child'])
+        bar=self._discover_bar(root)
+        return dict(peer=root,bar=bar,file=self._find(bar,'file',scope='children'),
+            **{'contrast-edit':self._find_labels(bar,EDIT_CONTRAST,scope='children')})
+    def _fresh_proof(self,target):
+        assert self._identity_scope is not None and target in _scope_targets(self._identity_scope)
+        fresh=self._fresh_base()
+        if 'contrast-edit' not in self._identity_refs:
+            self._bind_ref('contrast-edit',fresh['contrast-edit']);fresh=self._fresh_base()
+        for role in self._identity_refs:
+            if role.startswith('target:'):fresh[role]=self._find(fresh['file'],role[len('target:'):])
+        assert set(fresh)==set(self._identity_refs)
+        for role,element in fresh.items():
+            assert self._call(lambda:element.CurrentProcessId)==self._identity_scope['binding']['officePid'], 'Fresh menu element belongs to another process'
+        positive={role:self._same(fresh[role],original) for role,original in self._identity_refs.items()}
+        roles=list(self._identity_refs)
+        negative=[[left,right,self._same(fresh[left],fresh[right])] for index,left in enumerate(roles) for right in roles[index+1:]]
+        proof=dict(scope=copy.deepcopy(self._identity_scope),roles=roles,positive=positive,negative=negative)
+        _comparison_proof(proof,self._identity_scope['binding'],self._identity_scope['shellPid'],target)
+        return proof
     def _provider_timeout(self):
         remaining=self.deadline-self.clock()
         # Connection and transaction timeouts can both be consumed by a request.
@@ -552,7 +779,7 @@ class NativeMenuProbe(NativeControlProbe):
         return value
     def close_provider(self):
         # Drop all owned element/client references. No shared client was changed.
-        for name in ('file_element','menu_bar_element','current_control','_retained','uia','provider_client'):
+        for name in ('file_element','menu_bar_element','peer_element','current_control','_retained','uia','provider_client','_identity_refs'):
             if hasattr(self,name):setattr(self,name,None)
         return True
     def _condition(self,*,control_type,name=None):
@@ -570,24 +797,41 @@ class NativeMenuProbe(NativeControlProbe):
         if hit:self._required(self._call(self.user.GetWindowThreadProcessId,hit,C.byref(pid)),'Physical native menu hit PID')
         target=control.element_info._element;handle=self._chrome(target)['nativeHwnd']
         actual=self._call(self.uia.iuia.ElementFromPoint,self._point_type(*point))
-        match=bool(self._call(self.uia.iuia.CompareElements,target,actual))
-        return dict(point=list(point),hitHwnd=hit,pid=int(pid.value),
+        match=self._same(target,actual)
+        result=dict(point=list(point),hitHwnd=hit,pid=int(pid.value),
             rootHwnd=int(self._call(self.user.GetAncestor,hit,2) or 0) if hit else 0,
             withinControl=bool(hit and (hit==handle or handle and self._call(self.user.IsChild,handle,hit) or not handle and match)),uiaMatches=match)
+        if getattr(self,'_uses_comparison',False):
+            role=_target_role(self._active_target);original=self._identity_refs[role]
+            result['identityProof']=dict(scope=copy.deepcopy(self._identity_scope),role=role,
+                targetEqualsRetained=self._same(target,original),hitEqualsRetained=self._same(actual,original),
+                differentFrom={key:self._same(actual,ref) for key,ref in self._identity_refs.items() if key!=role})
+            assert result['identityProof']['targetEqualsRetained'] is result['identityProof']['hitEqualsRetained'] is True
+            assert all(value is False for value in result['identityProof']['differentFrom'].values())
+        return result
     def _chrome(self,element):
         # Ancestor names can contain a document title; query identity only.
         def get(name):return self._call(lambda:getattr(element,name))
         handle=get('CurrentNativeWindowHandle')
         assert handle is None or type(handle) is int and -(2**31)<=handle<2**32
-        runtime=list(self._call(element.GetRuntimeId))
-        assert 0<len(runtime)<=64 and all(type(n) is int and -(2**31)<=n<2**31 for n in runtime)
+        runtime,observation=self._runtime(element)
+        identity=None
+        if not runtime:
+            assert getattr(self,'_identity_scope',None) is not None, 'Runtime-free identity is limited to the current native menu action'
+            assert observation['declaration']['verified'] is observation['versionObserved'] is True, 'Native runtime-ID declaration or version is unconfirmed'
+            role=self._role(element)
+            assert role in ('file','bar') or role.startswith('target:'), 'Only retained native menu roles may lack runtime IDs'
+            self._uses_comparison=True
+            identity=dict(method=IDENTITY_METHOD,scope=copy.deepcopy(self._identity_scope),role=role)
         box=get('CurrentBoundingRectangle');kind=int(get('CurrentControlType'))
-        return dict(runtimeId=runtime,pid=int(get('CurrentProcessId')),
+        result=dict(runtimeId=runtime,runtimeIdAvailable=bool(runtime),runtimeObservation=observation,pid=int(get('CurrentProcessId')),
             nativeHwnd=0 if handle is None else handle&0xffffffff,
             controlType={50000:'Button',50010:'MenuBar',50011:'MenuItem',50021:'ToolBar',50032:'Window'}.get(kind,str(kind)),
             visible=not bool(get('CurrentIsOffscreen')),enabled=bool(get('CurrentIsEnabled')),
             rectangle=[int(getattr(box,key)) for key in ('left','top','right','bottom')])
-    def _find(self,root,target,*,scope='descendants'):
+        if identity is not None:result['identity']=identity
+        return result
+    def _find_labels(self,root,labels,*,scope='descendants'):
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuItem'))
         found=self._call(root.FindAll,self.uia.tree_scope[scope],condition)
         count=int(self._call(lambda:found.Length));assert 0<=count<=512
@@ -597,11 +841,14 @@ class NativeMenuProbe(NativeControlProbe):
             if int(self._call(lambda:element.CurrentControlType))!=50011:continue
             if self._call(lambda:element.CurrentIsOffscreen):continue
             name=str(self._call(lambda:element.CurrentName));assert len(name)<=256
-            if _label(name) in LABELS[target]:matches.append(element)
+            if _label(name) in labels:matches.append(element)
         assert len(matches)<=1, 'Native chrome target is ambiguous'
         if not matches:raise NativeMenuPending('Native chrome target not visible yet')
         return matches[0]
-    def discover_file(self,root):
+    def _find(self,root,target,*,scope='descendants'):
+        assert target in LABELS
+        return self._find_labels(root,LABELS[target],scope=scope)
+    def _discover_bar(self,root):
         # Ask UIA for chrome only. Never materialize document paragraphs/cells.
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuBar'))
         found=self._call(root.FindAll,self.uia.tree_scope['descendants'],condition)
@@ -612,20 +859,35 @@ class NativeMenuProbe(NativeControlProbe):
             if not self._call(lambda:bar.CurrentIsOffscreen):bars.append(bar)
         assert len(bars)<=1, 'Native menubar is ambiguous'
         if not bars:raise NativeMenuPending('Native menubar not visible yet')
-        self.menu_bar_element=bars[0]
-        return self._find(bars[0],'file',scope='children')
+        return bars[0]
+    def discover_file(self,root):
+        self.menu_bar_element=self._discover_bar(root)
+        return self._find(self.menu_bar_element,'file',scope='children')
     def _focused_menu(self,chain,file_index,bar_index):
         result=[];cursor=self._call(self.uia.iuia.GetFocusedElement);matched=False
+        comparison=getattr(self,'_uses_comparison',False)
+        self._focus_identity=None
         allowed={tuple(chain[file_index]['runtimeId']),tuple(chain[bar_index]['runtimeId'])}
         for _ in range(32):
             if not cursor:break
-            runtime=list(self._call(cursor.GetRuntimeId))
-            kind=int(self._call(lambda:cursor.CurrentControlType))
-            result.append(dict(runtimeId=runtime,pid=int(self._call(lambda:cursor.CurrentProcessId)),controlType={50010:'MenuBar',50011:'MenuItem'}.get(kind,str(kind))))
-            if tuple(runtime) in allowed:
+            if comparison:
+                row=self._chrome(cursor);result.append(row)
+                file_same=self._same(cursor,self.file_element);bar_same=self._same(cursor,self.menu_bar_element)
+                assert not (file_same and bar_same), 'Focused native menu roles alias'
+                if file_same or bar_same:
+                    role='file' if file_same else 'bar'
+                    self._focus_identity=dict(scope=copy.deepcopy(self._identity_scope),role=role,
+                        fileEquals=file_same,barEquals=bar_same,retainedEquals=True)
+                    matched=True;break
+            else:
+                runtime,observation=self._runtime(cursor)
+                assert runtime, 'Unbound focus ancestors still require runtime IDs'
+                kind=int(self._call(lambda:cursor.CurrentControlType))
+                result.append(dict(runtimeId=runtime,pid=int(self._call(lambda:cursor.CurrentProcessId)),controlType={50010:'MenuBar',50011:'MenuItem'}.get(kind,str(kind))))
+            if not comparison and tuple(runtime) in allowed:
                 # Resolve runtime IDs back to the retained live menu objects.
                 for ancestor in (self.file_element,self.menu_bar_element):
-                    if self._call(self.uia.iuia.CompareElements,cursor,ancestor):matched=True
+                    if self._same(cursor,ancestor):matched=True
                 break
             cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
         return result,matched
@@ -639,19 +901,27 @@ class NativeMenuProbe(NativeControlProbe):
         return rows
     def snapshot(self,binding,target):
         doc=binding['document'];child=binding['child'];pid=binding['officePid']
+        self._active_target=target
         root=self._root(child)
         if not hasattr(self,'file_element'):self.file_element=self.discover_file(root)
+        if getattr(self,'_identity_scope',None) is not None:
+            for role,element in (('file',self.file_element),('bar',self.menu_bar_element),('peer',root)):
+                self._bind_ref(role,element)
         element=self.file_element if target=='file' else self._find(self.file_element,target)
+        if getattr(self,'_identity_scope',None) is not None:self._bind_ref(_target_role(target),element)
         self.current_control=type('NativeMenuControl',(),{'element_info':type('Info',(),{'_element':element})()})()
         chain=[];cursor=element;file_index=bar_index=None;file_equal=peer_equal=False
         for _ in range(32):
             row=self._chrome(cursor);chain.append(row);index=len(chain)-1
-            if self._call(self.uia.iuia.CompareElements,cursor,self.file_element):file_index=index;file_equal=True
-            if row['controlType']=='MenuBar' and file_index is not None and bar_index is None:bar_index=index
-            if self._call(self.uia.iuia.CompareElements,cursor,root):peer_equal=True;break
+            if self._same(cursor,self.file_element):file_index=index;file_equal=True
+            if row['controlType']=='MenuBar' and file_index is not None and bar_index is None:
+                if getattr(self,'_uses_comparison',False):assert self._same(cursor,self.menu_bar_element), 'Native menubar differs from the retained original'
+                bar_index=index
+            if self._same(cursor,root):peer_equal=True;break
             cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor);assert cursor
         else:raise AssertionError('Native menu ancestry exceeded bound')
         control=self._chrome(element);rect=control['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
+        proof=self._fresh_proof(target) if getattr(self,'_uses_comparison',False) else None
         popup=None
         if target!='file':
             hit=self.point_snapshot(doc,point,self.current_control);popup=self.window_snapshot(hit['rootHwnd'])
@@ -673,10 +943,13 @@ class NativeMenuProbe(NativeControlProbe):
             owner=self._call(lambda:bar.CurrentProcessId)
             visible=not self._call(lambda:bar.CurrentIsOffscreen)
             duplicates+=int(owner==document['pid'] and visible)
-        return dict(binding=dict(binding),attachmentValid=attachment['valid'],nativeReady=int(self._call(self.user.GetPropW,doc,READY_PROPERTY) or 0),
+        result=dict(binding=dict(binding),attachmentValid=attachment['valid'],nativeReady=int(self._call(self.user.GetPropW,doc,READY_PROPERTY) or 0),
             shellMenuCount=duplicates,document=document,control=control,ancestry=chain,fileIndex=file_index,
             barIndex=bar_index,peerIndex=len(chain)-1,fileElementEquals=file_equal,peerElementEquals=peer_equal,
             popup=popup,foreground=fg,gui=gui,focusMenuPath=focused,focusMenuElementEquals=matched)
+        if proof is not None:
+            result.update(identityProof=proof,barElementEquals=True,focusIdentity=getattr(self,'_focus_identity',None))
+        return result
     def view_snapshot(self,binding,module):
         assert module in ('writer','calc')
         root=self._root(binding['child']);doc=binding['document']
@@ -747,6 +1020,7 @@ class NativeMenuProbe(NativeControlProbe):
         assert not held, 'A native menu navigation key is already pressed'
         receipt['keyboardBefore']=dict(state,additionalMenuKeysDown=held)
         receipt.update(requestedInputs=len(events),inputCallAttempts=1,insertedInputs=None)
+        if getattr(self,'_uses_comparison',False):receipt['identityAdmission']=self._fresh_proof(self._active_target)
         inserted=self.send(input_buffer(events));receipt['insertedInputs']=inserted
         assert type(inserted) is int and 0<=inserted<=len(events), 'Unknown native menu inserted prefix'
         if inserted!=len(events):
