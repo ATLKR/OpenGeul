@@ -13,6 +13,7 @@ import argparse
 from contextlib import redirect_stdout
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -112,6 +113,39 @@ def capture_bounded(child, office_pid, destination, *, writer_request=None):
     return snapshot
 
 
+def capture_writer_msaa_after_native(request, deadline):
+    """One numeric-only observation within the original native reader budget."""
+    evidence = dict(schemaVersion=1, acceptanceEligible=False, attempted=False,
+        completedWithinBudget=False, timeoutSeconds=0,
+        result=writer_access.failure(request))
+    try:
+        command = [sys.executable, str(Path(__file__).resolve()), '--writer-msaa-only',
+            '--capture-child', str(request['childHwnd']), '--office-pid', str(request['officePid']),
+            '--writer-office-creation-time', str(request['officeCreationTime']),
+            '--writer-office-image', request['expectedImage']]
+        now = time.monotonic()
+        if type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline > now + 45:
+            return evidence
+        if deadline <= now:
+            evidence['result'] = writer_access.failure(request, 14)
+            return evidence
+        timeout = min(8., deadline - now)
+        evidence.update(attempted=True, timeoutSeconds=timeout)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding='utf-8', errors='replace', timeout=timeout, shell=False)
+        if result.returncode == 0:
+            evidence['result'] = writer_access.decode(result.stdout, request)
+        if time.monotonic() >= deadline:
+            evidence['result'] = writer_access.failure(request, 14)
+        else:
+            evidence['completedWithinBudget'] = True
+    except subprocess.TimeoutExpired:
+        evidence['result'] = writer_access.failure(request, 14)
+    except Exception:
+        evidence['result'] = writer_access.failure(request)  # Keep the original gate primary.
+    return evidence
+
+
 def prepare_korean_ui_focus(api,process,hwnd,parent,child,office_pid,module,record):
     """One closed entry program for the four native UI observation modules."""
     assert module in MODULES and record.get('module')==module, 'Unknown Korean UI focus module'
@@ -175,8 +209,11 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         record.update(osAccessibilitySnapshot=os_name, osAccessibleControlCount=os_snapshot['controlCount'])
         record['stage'] = 'capture-native-accessible-objects'
         snapshot_name = case + '-accessibility.json'
+        native_deadline = time.monotonic() + 45 if module == 'writer' else None
         snapshot = accessible.capture_bounded(suite, child, office_pid, engine.creation_time,
                                               module, output / snapshot_name)
+        if module == 'writer':
+            record['writerOsAccessibilityAfterNative'] = capture_writer_msaa_after_native(writer_request, native_deadline)
         assert api.user.IsWindow(child) and api.pid(child) == office_pid, 'Owned editor changed during accessibility capture'
         assert snapshot['module'] == module, 'Native accessible objects belong to another requested module'
         record.update(accessibilitySnapshot=snapshot_name,
@@ -274,11 +311,22 @@ def main():
     parser.add_argument('--office-pid', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--snapshot', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--writer-msaa', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--writer-msaa-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--writer-office-creation-time', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--writer-office-image', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if os.name != 'nt' or not __debug__:
         raise RuntimeError('Actual Windows GUI execution with assertions enabled is required')
+    if getattr(args, 'writer_msaa_only', False):
+        assert args.capture_child and args.office_pid and not args.snapshot and not args.writer_msaa
+        request = dict(childHwnd=args.capture_child, officePid=args.office_pid,
+            officeCreationTime=args.writer_office_creation_time, expectedImage=args.writer_office_image)
+        with redirect_stdout(sys.stderr):
+            value = writer_access.validate(writer_access.observe(request), request)
+        encoded = json.dumps(value, separators=(',', ':'), allow_nan=False)
+        assert len(encoded.encode('utf-8')) <= 4096, 'Closed Writer result exceeds bound'
+        print(encoded, flush=True)
+        return 0
     if args.capture_child is not None:
         assert args.capture_child > 0 and args.office_pid and args.office_pid > 0 and args.snapshot
         if args.writer_msaa:

@@ -701,10 +701,11 @@ class WriterOsIntegrationTests(unittest.TestCase):
             self.assertEqual(json.loads(stream.getvalue()[2:]),self.value)
             self.assertNotIn('discarded',stream.getvalue())
 
-    def run_writer(self, *, vcl_failure=None, tab_failure=None, probe_only=False, held_result=None):
+    def run_writer(self, *, vcl_failure=None, tab_failure=None, probe_only=False, held_result=None,
+                   native_seconds=0, late_error=None, module='writer'):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'fixture';source.write_bytes(b'original-fixture')
-            output=root/'output';output.mkdir();calls=[];errors=[]
+            output=root/'output';output.mkdir();calls=[];errors=[];clock=[100.]
             process=NS(pid=77,poll=lambda:0)
             engine=NS(creation_time=300,exited=lambda seconds:True,code=lambda:0,
                       close=lambda:calls.append('engine-close'))
@@ -714,8 +715,16 @@ class WriterOsIntegrationTests(unittest.TestCase):
             desktop=NS(window=lambda **kwargs:NS(wrapper_object=lambda:wrapper))
             def vcl(*args):
                 calls.append('vcl')
+                clock[0] += native_seconds
                 if vcl_failure:raise vcl_failure
-                return dict(module='writer',nativeAccessibleContextCount=2)
+                return dict(module=module,nativeAccessibleContextCount=2)
+            def secondary(command, **options):
+                calls.append('secondary')
+                self.assertIn('--writer-msaa-only',command)
+                self.assertNotIn('--snapshot',command)
+                self.assertLessEqual(options['timeout'], min(8.,145.-clock[0]))
+                if late_error is not None:raise late_error
+                return self.receipt(json.dumps(self.value))
             def tabs(*args):
                 calls.append('tabs')
                 if tab_failure:raise tab_failure
@@ -732,12 +741,13 @@ class WriterOsIntegrationTests(unittest.TestCase):
                     (smoke,'prepare_korean_ui_focus',lambda *a:calls.append('entry')),
                     (smoke,'capture_bounded',lambda *a,**kw:dict(controlCount=1,writerOsAccessibility=held)),
                     (smoke.accessible,'capture_bounded',vcl),(smoke,'require_korean_tabs',tabs),
+                    (smoke.subprocess,'run',secondary),(smoke.time,'monotonic',lambda:clock[0]),
                     (smoke.native,'capture_failure',failure),(smoke.native,'close_document',lambda *a:calls.append('close-document')),
                     (smoke.native,'close_home',lambda *a:None),(smoke.native,'stop_owned_test_process',lambda *a:None),
                     (smoke.native,'write_result',lambda *a:None)):
                     stack.enter_context(patch.object(owner,name,side_effect=value))
                 stack.enter_context(patch.dict(sys.modules,pywinauto=NS(Desktop=lambda **kwargs:desktop)))
-                record=smoke.run_case(root,root,output,'writer',probe_only=probe_only)
+                record=smoke.run_case(root,root,output,module,probe_only=probe_only)
             return record,calls,errors
 
     def test_original_vcl_collection_or_tab_failure_wins_over_the_held_msaa_failure(self):
@@ -752,7 +762,7 @@ class WriterOsIntegrationTests(unittest.TestCase):
 
     def test_writer_probe_failure_is_enforced_only_after_original_vcl_tabs_with_a_fixed_stage(self):
         record,calls,errors=self.run_writer()
-        self.assertEqual(calls,['entry','screenshot','vcl','tabs','engine-close'])
+        self.assertEqual(calls,['entry','screenshot','vcl','secondary','tabs','engine-close'])
         self.assertEqual(len(errors),1)
         self.assertIsInstance(errors[0],AssertionError)
         self.assertEqual(record['stage'],'writer-os-text')
@@ -769,13 +779,130 @@ class WriterOsIntegrationTests(unittest.TestCase):
 
     def test_invalid_probe_metadata_raises_in_the_original_parent_after_vcl_with_a_fixed_protocol_stage(self):
         record,calls,errors=self.run_writer(held_result={'unknown':1})
-        self.assertEqual(calls,['entry','screenshot','vcl','tabs','engine-close'])
+        self.assertEqual(calls,['entry','screenshot','vcl','secondary','tabs','engine-close'])
         self.assertEqual(record['stage'],'writer-os-protocol')
         self.assertEqual(len(errors),1)
         self.assertIsInstance(errors[0],AssertionError)
         trace=errors[0].__traceback__
         while trace.tb_next is not None:trace=trace.tb_next
         self.assertEqual(Path(trace.tb_frame.f_code.co_filename).name,'korean_ui_smoke.py')
+
+    def after_native(self, deadline, *, stdout=None, code=0, error=None, clock=None):
+        method=getattr(smoke,'capture_writer_msaa_after_native',None)
+        self.assertTrue(callable(method), 'A separate numeric-only post-native diagnostic is required')
+        def execute(*args,**kwargs):
+            if error is not None:raise error
+            return self.receipt(json.dumps(self.value) if stdout is None else stdout,code)
+        with patch.object(smoke.subprocess,'run',side_effect=execute) as run, \
+             patch.object(smoke.time,'monotonic',side_effect=clock or (lambda:100.)):
+            result=method(self.request,deadline)
+        return result,run
+
+    def test_late_probe_uses_only_remaining_native_budget_and_exact_original_owner(self):
+        for deadline,timeout in ((145.,8.),(103.,3.)):
+            with self.subTest(deadline=deadline):
+                result,run=self.after_native(deadline)
+                self.assertEqual(result['result'],self.value)
+                self.assertFalse(result['acceptanceEligible'])
+                self.assertTrue(result['attempted']);self.assertTrue(result['completedWithinBudget'])
+                self.assertEqual(result['timeoutSeconds'],timeout)
+                run.assert_called_once()
+                command=run.call_args.args[0];options=run.call_args.kwargs
+                self.assertEqual(command,[sys.executable,str(Path(smoke.__file__).resolve()),
+                    '--writer-msaa-only','--capture-child','123','--office-pid','200',
+                    '--writer-office-creation-time','300','--writer-office-image',self.request['expectedImage']])
+                self.assertEqual(options,dict(stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                    text=True,encoding='utf-8',errors='replace',timeout=timeout,shell=False))
+
+    def test_missing_invalid_or_expired_native_deadline_starts_no_child(self):
+        for deadline in (None,99.,100.,float('nan'),float('inf'),True,146.):
+            with self.subTest(deadline=deadline):
+                result,run=self.after_native(deadline)
+                run.assert_not_called()
+                self.assertFalse(result['attempted']);self.assertFalse(result['completedWithinBudget'])
+                self.assertEqual(result['result']['verified'],0)
+
+    def test_foreign_noisy_oversized_and_nonzero_late_results_are_diagnostic_failures(self):
+        for stdout,code in ((json.dumps(dict(self.value,officePid=201)),0),
+                            (json.dumps(dict(self.value,officeCreationTime=301)),0),
+                            (json.dumps(dict(self.value,childHwnd=124)),0),
+                            ('{',0),('PRIVATE',0),(' '*4097,0),(json.dumps(self.value),1)):
+            with self.subTest(code=code,length=len(stdout)):
+                result,run=self.after_native(145.,stdout=stdout,code=code)
+                run.assert_called_once()
+                self.assertFalse(result['acceptanceEligible'])
+                self.assertEqual(result['result'],smoke.writer_access.failure(self.request))
+
+    def test_late_timeout_and_parent_overrun_cannot_qualify_or_expose_child_output(self):
+        for options in (dict(error=subprocess.TimeoutExpired(['synthetic'],8,output=b'PRIVATE')),
+                        dict(clock=iter((100.,145.)).__next__),
+                        dict(clock=iter((100.,146.)).__next__)):
+            with self.subTest(mode=next(iter(options))):
+                result,run=self.after_native(145.,**options)
+                run.assert_called_once()
+                self.assertFalse(result['completedWithinBudget'])
+                self.assertEqual(result['result'],smoke.writer_access.failure(self.request,14))
+                self.assertNotIn('PRIVATE',json.dumps(result))
+
+    def test_failed_final_budget_check_discards_an_otherwise_valid_late_result(self):
+        result,run=self.after_native(145.,clock=[100.,OSError('PRIVATE')])
+        run.assert_called_once()
+        self.assertFalse(result['completedWithinBudget'])
+        self.assertEqual(result['result'],smoke.writer_access.failure(self.request))
+        self.assertNotIn('PRIVATE',json.dumps(result))
+
+    def test_late_success_does_not_change_the_original_writer_failure_or_stage(self):
+        record,calls,errors=self.run_writer()
+        self.assertEqual(record['stage'],'writer-os-text')
+        self.assertFalse(record['success']);self.assertEqual(len(errors),1)
+        self.assertIn('writerOsAccessibilityAfterNative',record)
+        late=record['writerOsAccessibilityAfterNative']
+        self.assertEqual(late['result']['verified'],1)
+        self.assertFalse(late['acceptanceEligible'])
+        self.assertEqual(record['writerOsAccessibility']['stageCode'],8)
+        self.assertEqual(calls,['entry','screenshot','vcl','secondary','tabs','engine-close'])
+
+    def test_late_timeout_cannot_hide_original_failure_and_vcl_failure_or_other_module_adds_no_child(self):
+        record,calls,errors=self.run_writer(late_error=subprocess.TimeoutExpired(['synthetic'],8))
+        self.assertEqual(record['stage'],'writer-os-text');self.assertEqual(len(errors),1)
+        self.assertIn('writerOsAccessibilityAfterNative',record)
+        self.assertEqual(record['writerOsAccessibilityAfterNative']['result']['stageCode'],14)
+        primary=RuntimeError('original-vcl')
+        record,calls,errors=self.run_writer(vcl_failure=primary)
+        self.assertEqual(errors,[primary]);self.assertNotIn('secondary',calls)
+        self.assertNotIn('writerOsAccessibilityAfterNative',record)
+        record,calls,errors=self.run_writer(module='impress')
+        self.assertEqual(errors,[]);self.assertTrue(record['success'])
+        self.assertNotIn('secondary',calls);self.assertNotIn('writerOsAccessibilityAfterNative',record)
+
+    def test_late_child_is_skipped_when_native_collection_consumes_the_original_45_seconds(self):
+        for seconds in (45.,46.):
+            with self.subTest(seconds=seconds):
+                record,calls,errors=self.run_writer(native_seconds=seconds)
+                self.assertNotIn('secondary',calls);self.assertEqual(len(errors),1)
+                self.assertEqual(record['stage'],'writer-os-text')
+                self.assertIn('writerOsAccessibilityAfterNative',record)
+                late=record['writerOsAccessibilityAfterNative']
+                self.assertFalse(late['attempted']);self.assertEqual(late['result']['verified'],0)
+
+    def test_msaa_only_cli_reads_no_uia_snapshot_stdin_or_native_focus(self):
+        stream=io.StringIO();seen=[]
+        def observe(request):seen.append(request);print('discarded-output');return self.value
+        args=['korean_ui_smoke.py','--writer-msaa-only','--capture-child','123','--office-pid','200',
+            '--writer-office-creation-time','300','--writer-office-image',self.request['expectedImage']]
+        with patch.object(smoke.sys,'argv',args),patch.object(smoke.os,'name','nt'), \
+             patch.object(smoke,'capture_controls',side_effect=AssertionError('No UIA tree')) as uia, \
+             patch.object(smoke.accessible,'capture_bounded',side_effect=AssertionError('No native focus')) as vcl, \
+             patch.object(smoke.Path,'open',side_effect=AssertionError('No snapshot read/write')) as files, \
+             patch.object(smoke.sys,'stdin',NS(read=lambda *a:self.fail('No stdin read'))), \
+             patch.object(smoke.sys,'stderr',io.StringIO()), \
+             patch.object(smoke.writer_access,'observe',side_effect=observe),redirect_stdout(stream):
+            try:code=smoke.main()
+            except SystemExit:self.fail('The numeric-only hidden CLI branch is required')
+            self.assertEqual(code,0)
+        self.assertEqual(seen,[self.request]);self.assertEqual(json.loads(stream.getvalue()),self.value)
+        self.assertLessEqual(len(stream.getvalue().encode('utf-8')),4096)
+        uia.assert_not_called();vcl.assert_not_called();files.assert_not_called()
 
 
 if __name__ == '__main__':
