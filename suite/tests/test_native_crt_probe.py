@@ -14,7 +14,9 @@ import struct
 import sys
 import tempfile
 import time
+import traceback
 import unittest
+from types import SimpleNamespace as NS
 from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -22,6 +24,26 @@ SOURCE=ROOT/'suite/scripts/probe-native-crt.ps1'
 PWSH=shutil.which('pwsh') or '/workspace/work/opengeul-improvements/work/ime-api-review/powershell/pwsh'
 
 def quote(value):return "'"+str(value).replace("'","''")+"'"
+
+
+def _serializer_environment():
+    # The offline compiler needs Windows/tool discovery, never service tokens.
+    names=('SystemRoot','WINDIR','SystemDrive','ComSpec','PATH','PATHEXT','TEMP','TMP',
+           'ProgramFiles','ProgramFiles(x86)','ProgramW6432','CommonProgramFiles',
+           'CommonProgramFiles(x86)','CommonProgramW6432','ProgramData','ALLUSERSPROFILE',
+           'USERPROFILE','LOCALAPPDATA','APPDATA','OS','NUMBER_OF_PROCESSORS',
+           'PROCESSOR_ARCHITECTURE','PROCESSOR_IDENTIFIER','PROCESSOR_LEVEL','PROCESSOR_REVISION')
+    return {name:value for name in names if (value:=os.environ.get(name)) is not None}
+
+
+def _serializer_capture(command, *, label, require_zero=False, **options):
+    assert label in ('owned-native-vs-discovery','owned-native-serializer-run',
+                     'owned-native-portable-compile','owned-native-portable-run')
+    try:result=subprocess.run(command,**options)
+    except subprocess.TimeoutExpired as primary:
+        raise subprocess.TimeoutExpired(label,primary.timeout) from None
+    if require_zero:assert result.returncode==0, label+' failed'
+    return result
 
 
 def _serializer_path(path, root=None, *, exists=True):
@@ -88,9 +110,9 @@ def _serializer_windows_plan():
     controller=_serializer_pe(image.value,native.value)
     arch=_serializer_arch(native.value,process.value,controller['machine'])
     installer=_serializer_path(Path(os.environ['ProgramFiles(x86)'])/'Microsoft Visual Studio/Installer/vswhere.exe')
-    result=subprocess.run([str(installer),'-latest','-products','*','-version','[17.0,19.0)','-format','json','-utf8'],
-                          capture_output=True,text=True,encoding='utf-8',errors='strict',timeout=15)
-    assert result.returncode==0, 'Native serializer VS discovery failed: '+result.stderr
+    result=_serializer_capture([str(installer),'-latest','-products','*','-version','[17.0,19.0)','-format','json','-utf8'],label='owned-native-vs-discovery',
+                          env=_serializer_environment(),capture_output=True,text=True,encoding='utf-8',errors='strict',timeout=15)
+    assert result.returncode==0, 'Native serializer VS discovery failed'
     instances=json.loads(result.stdout)
     assert isinstance(instances,list) and len(instances)==1, 'One installed VS17/18 native compiler is required'
     plan=_serializer_tools(instances[0],native.value)
@@ -100,33 +122,169 @@ def _serializer_windows_plan():
     return plan
 
 
+def _serializer_timeout_observation(root, phase, exe, obj):
+    value=dict(phaseCode=0,phaseReadStatus=0,objectState=0,executableState=0)
+    try:
+        checked=_serializer_path(phase,root)
+        assert checked.is_file()
+        with checked.open('rb') as stream:raw=stream.read(17)
+        rows=raw.splitlines()
+        assert len(raw)<=16 and raw.endswith(b'\n') and 1<=len(rows)<=4
+        assert rows==[str(n).encode('ascii') for n in range(1,len(rows)+1)]
+        value.update(phaseCode=len(rows),phaseReadStatus=1)
+    except FileNotFoundError:pass
+    except BaseException:value['phaseReadStatus']=2
+    for key,path in (('objectState',obj),('executableState',exe)):
+        try:value[key]=2 if _serializer_path(path,root).is_file() else 0
+        except FileNotFoundError:value[key]=1
+        except BaseException:pass
+    return value
+
+
+def _serializer_process_state(process):
+    value=dict(pid=process.pid,pollKnown=0,exited=0,exitCode=0,
+               waitResult=0xffffffff,handleMatchesPid=0)
+    try:
+        code=process.poll()
+        value.update(pollKnown=1,exited=int(code is not None),exitCode=code if code is not None else 0)
+        if os.name=='nt':
+            kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+            wait=kernel.WaitForSingleObject;wait.argtypes=[ctypes.c_void_p,ctypes.c_uint32];wait.restype=ctypes.c_uint32
+            pid=kernel.GetProcessId;pid.argtypes=[ctypes.c_void_p];pid.restype=ctypes.c_uint32
+            handle=int(process._handle)
+            value['handleMatchesPid']=int(pid(handle)==process.pid)
+            value['waitResult']=int(wait(handle,0))
+    except BaseException:pass
+    return value
+
+
+def _serializer_bounded_cleanup(process, deadline, *, kill):
+    value=dict(pending=0,killAttempted=0,directHandleClosed=0,
+               stdoutReaderAlive=0,stderrReaderAlive=0,stdoutClosed=0,stderrClosed=0)
+    if kill:
+        try:
+            owned=_serializer_process_state(process)
+            if owned['handleMatchesPid']==1 and owned['waitResult']==258 and owned['pollKnown']==1 and not owned['exited'] and time.monotonic()<deadline:
+                value['killAttempted']=1;process.kill()
+            elif owned['handleMatchesPid']!=1 or owned['waitResult']!=0:value['pending']=1
+        except BaseException:value['pending']=1
+    try:
+        remaining=deadline-time.monotonic()
+        if process.returncode is None and remaining>0:process.wait(timeout=remaining)
+    except BaseException:value['pending']=1
+    after=_serializer_process_state(process)
+    value['afterCleanup']=after
+    for name in ('stdout','stderr'):
+        thread=getattr(process,name+'_thread',None)
+        stream=getattr(process,name,None)
+        try:
+            remaining=deadline-time.monotonic()
+            if thread is not None and thread.is_alive() and remaining>0:thread.join(remaining)
+            alive=thread is not None and thread.is_alive()
+            value[name+'ReaderAlive']=int(alive)
+            if not alive and stream is not None:stream.close();value[name+'Closed']=1
+            elif alive:value['pending']=1
+        except BaseException:value['pending']=1
+    if after['handleMatchesPid']==1 and after['waitResult']==0:
+        try:
+            code=process.poll()
+            after.update(pollKnown=1,exited=int(code is not None),exitCode=code if code is not None else 0)
+            assert type(code) is int and code==process.returncode, 'Direct child exit code remains unobserved'
+            process._handle.Close();value['directHandleClosed']=1
+        except BaseException:value['pending']=1
+    else:value['pending']=1
+    return value
+
+
+def _serializer_compile_process(command_line, *, cwd, env, timeout, observe_phase):
+    assert timeout==60
+    deadline=time.monotonic()+timeout
+    # One second is reserved from, never added to, the original wait budget.
+    process=subprocess.Popen(command_line,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                             text=True,encoding='utf-8',errors='strict')
+    try:
+        remaining=deadline-time.monotonic()-1.
+        if remaining<=0:raise subprocess.TimeoutExpired(command_line,timeout)
+        stdout,stderr=process.communicate(timeout=remaining)
+    except subprocess.TimeoutExpired as primary:
+        state=dict(cleanupReserveMilliseconds=1000,beforeCleanup=_serializer_process_state(process))
+        try:state['phase']=observe_phase()
+        except BaseException:state['phase']=dict(phaseCode=0,phaseReadStatus=2,objectState=0,executableState=0)
+        try:state['cleanup']=_serializer_bounded_cleanup(process,deadline,kill=True)
+        except BaseException:state['cleanup']=dict(pending=1,cleanupObservationFailed=1)
+        try:primary._opengeul_serializer_timeout=state
+        except BaseException:pass
+        raise
+    except BaseException:
+        try:_serializer_bounded_cleanup(process,deadline,kill=True)
+        except BaseException:pass
+        raise
+    returncode=process.returncode
+    observation_failed=0
+    try:
+        pending=_serializer_bounded_cleanup(process,deadline,kill=False)['pending']
+        assert type(pending) is int and pending in (0,1)
+    except BaseException:pending=1;observation_failed=1
+    completion=dict(completedWithinBudget=int(time.monotonic()<deadline),
+                    cleanupPending=pending,cleanupObservationFailed=observation_failed)
+    result=subprocess.CompletedProcess(command_line,returncode,stdout,stderr)
+    result._opengeul_serializer_completion=completion
+    if returncode==0:
+        assert completion['completedWithinBudget']==1, 'Native serializer exceeded its original wait deadline'
+        assert completion['cleanupPending']==0, 'Native serializer process resources remain unproved'
+    return result
+
+
 def _compile_windows_serializer(root, source, plan):
     root=_serializer_path(root);source=_serializer_path(source,root)
     exe=_serializer_path(root/'serializer.exe',root,exists=False)
     obj=_serializer_path(root/'serializer.obj',root,exists=False)
     batch=_serializer_path(root/'compile-serializer.cmd',root,exists=False)
+    phase=_serializer_path(root/'serializer-compile.phase',root,exists=False)
     cl=_serializer_pe(plan['cl']['path'],plan['machine']);link=_serializer_pe(plan['link']['path'],plan['machine'])
     assert cl==plan['cl'] and link==plan['link'], 'Native tools changed before compile'
     dev=_serializer_path(plan['devcmd']);command=plan['commandProcessor']
     assert _serializer_pe(command['path'],plan['machine'])==command, 'Native command processor changed'
-    lines=['@echo off','chcp 65001 >nul','if errorlevel 1 exit /b %errorlevel%',
-           'call "'+str(dev)+'" -no_logo -arch='+plan['arch']+' -host_arch='+plan['arch'],
+    def mark(code):return ['set "OPENGEUL_SERIALIZER_RC=%errorlevel%"',
+                           'call :serializer_phase '+str(code)+' %OPENGEUL_SERIALIZER_RC%']
+    lines=['@echo off','chcp 65001 >nul','if errorlevel 1 exit /b %errorlevel%']+mark(1)+[
+           'call "'+str(dev)+'" -no_logo -arch='+plan['arch']+' -host_arch='+plan['arch']]+mark(2)+[
            'if errorlevel 1 exit /b %errorlevel%','chcp 65001 >nul','if errorlevel 1 exit /b %errorlevel%',
-           'set "CL="','set "_CL_="','set "PATH='+str(Path(link['path']).parent)+';%PATH%"',
+           'set "CL="','set "_CL_="','set "PATH='+str(Path(link['path']).parent)+';%PATH%"']+mark(3)+[
            '"'+cl['path']+'" /nologo /std:c++17 /EHsc /utf-8 /MT /W4 /WX /D_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING '+
-           '/Fe:"'+str(exe)+'" /Fo:"'+str(obj)+'" "'+str(source)+'" /link /MACHINE:'+plan['arch'].upper()+' /INCREMENTAL:NO',
-           'exit /b %errorlevel%']
+           '/Fe:"'+str(exe)+'" /Fo:"'+str(obj)+'" "'+str(source)+'" /link /MACHINE:'+plan['arch'].upper()+' /INCREMENTAL:NO']+mark(4)+[
+           'exit /b %errorlevel%',':serializer_phase','>>"'+str(phase)+'" echo %1','exit /b %2']
     batch.write_text('\r\n'.join(lines)+'\r\n',encoding='utf-8',newline='')
-    environment={k:v for k,v in os.environ.items() if k.upper() not in ('CL','_CL_')}
+    environment=_serializer_environment()
     # Both the command processor and batch are absolute, checked paths; the
     # double outer quotes are CMD /s /c syntax, not shell=True interpretation.
     command_line='"'+command['path']+'" /d /v:off /s /c ""'+str(batch)+'""'
     source_identity={'path':str(source),'size':source.stat().st_size,'sha256':hashlib.sha256(source.read_bytes()).hexdigest()}
-    result=subprocess.run(command_line,cwd=root,env=environment,capture_output=True,text=True,encoding='utf-8',errors='strict',timeout=60)
-    compile_receipt={'exitCode':result.returncode,'stdout':result.stdout,'stderr':result.stderr}
+    try:
+        result=_serializer_compile_process(command_line,cwd=root,env=environment,timeout=60,
+            observe_phase=lambda:_serializer_timeout_observation(root,phase,exe,obj))
+    except subprocess.TimeoutExpired as primary:
+        state={}
+        try:
+            state=vars(primary).get('_opengeul_serializer_timeout',{})
+            observation=state.get('phase') or _serializer_timeout_observation(root,phase,exe,obj)
+            print('native-serializer-timeout '+json.dumps(dict(schemaVersion=1,timeoutSeconds=60,
+                machine=plan['machine'],sourceSha256=source_identity['sha256'],compilerSha256=cl['sha256'],
+                linkerSha256=link['sha256'],commandProcessorSha256=command['sha256'],
+                testModuleSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                **observation,processObservation={key:state[key] for key in ('cleanupReserveMilliseconds','beforeCleanup','cleanup') if key in state}),
+                separators=(',',':')),flush=True)
+        except BaseException:pass
+        redacted=subprocess.TimeoutExpired('owned-native-serializer',60)
+        redacted._opengeul_serializer_timeout=state
+        raise redacted from None
+    compile_receipt={'exitCode':result.returncode,'stdoutBytes':len(result.stdout.encode('utf-8')),
+                     'stderrBytes':len(result.stderr.encode('utf-8'))}
+    if hasattr(result,'_opengeul_serializer_completion'):
+        compile_receipt['processCompletion']=result._opengeul_serializer_completion
     print('native-serializer-compile '+json.dumps({'toolchain':plan,'source':source_identity,
           'testModuleSha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'compile':compile_receipt},ensure_ascii=True),flush=True)
-    assert result.returncode==0, 'Native serializer compile failed exit '+str(result.returncode)+': '+result.stderr
+    assert result.returncode==0, 'Native serializer compile failed exit '+str(result.returncode)
     output=_serializer_pe(exe,plan['machine'])
     assert _serializer_pe(cl['path'],plan['machine'])==cl and _serializer_pe(link['path'],plan['machine'])==link, 'Native tools changed during compile'
     return exe,{'toolchain':plan,'source':source_identity,
@@ -134,14 +292,15 @@ def _compile_windows_serializer(root, source, plan):
 
 
 def _run_windows_serializer(executable, receipt):
-    result=subprocess.run([str(executable)],cwd=executable.parent,capture_output=True,text=True,encoding='utf-8',errors='strict',timeout=15)
-    # Delay the exit assertion until raw failed-run output is retained.
-    receipt['run']={'exitCode':result.returncode,'stdout':result.stdout,'stderr':result.stderr}
+    result=_serializer_capture([str(executable)],label='owned-native-serializer-run',cwd=executable.parent,env=_serializer_environment(),capture_output=True,text=True,encoding='utf-8',errors='strict',timeout=15)
+    # Retain exit/count metadata before the original execution assertion.
+    receipt['run']={'exitCode':result.returncode,'stdoutBytes':len(result.stdout.encode('utf-8')),
+                    'stderrBytes':len(result.stderr.encode('utf-8'))}
     print('native-serializer-run '+json.dumps({'output':receipt['output'],'run':receipt['run']},ensure_ascii=True),flush=True)
     after=_serializer_pe(executable,receipt['output']['machine'])
     assert after==receipt['output'], 'Serializer output changed during execution'
     receipt['outputAfterRun']=after
-    assert result.returncode==0, 'Native serializer run failed exit '+str(result.returncode)+': '+result.stderr
+    assert result.returncode==0, 'Native serializer run failed exit '+str(result.returncode)
     return result
 
 
@@ -424,20 +583,358 @@ int WideCharToMultiByte(unsigned,int,const wchar_t* w,int n,char* out,int,void*,
                                shimSha256=hashlib.sha256(shim.encode('utf-8')).hexdigest(),
                                testModuleSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
                 print('native-serializer-fixture '+json.dumps(receipt,ensure_ascii=True),flush=True)
-                self.assertEqual(0,result.returncode,result.stderr)
+                self.assertEqual(0,result.returncode,'Native serializer run failed')
             else:
                 executable=root/'serializer'
-                result=subprocess.run([shutil.which('c++'),'-std=c++17','-Wall','-Werror=multichar',str(local),'-o',str(executable)],capture_output=True,text=True)
-                self.assertEqual(0,result.returncode,result.stderr)
-                result=subprocess.run([str(executable)],capture_output=True,text=True,check=True)
+                result=_serializer_capture([shutil.which('c++'),'-std=c++17','-Wall','-Werror=multichar',str(local),'-o',str(executable)],label='owned-native-portable-compile',require_zero=True,env=_serializer_environment(),capture_output=True,text=True)
+                result=_serializer_capture([str(executable)],label='owned-native-portable-run',require_zero=True,env=_serializer_environment(),capture_output=True,text=True)
             self.assertEqual(path,json.loads(result.stdout))
 
 
 class NativeSerializerFixtureTests(unittest.TestCase):
     """Portable controls for the test-only native compiler boundary."""
+    def setUp(self):
+        environment=mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True)
+        environment.start();self.addCleanup(environment.stop)
+
     def helper(self, name):
         self.assertTrue(callable(globals().get(name)), 'Missing native serializer boundary: '+name)
         return globals()[name]
+
+    def compile_inputs(self):
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        root=Path(temporary.name).resolve(strict=True);instance,_=self.installation(root,0x8664)
+        plan=_serializer_tools(instance,0x8664)
+        plan['commandProcessor']=_serializer_pe(self.pe(root/'cmd.exe',0x8664),0x8664)
+        source=root/'serializer.cpp';source.write_text('int main(){}',encoding='utf-8')
+        return root,source,plan
+
+    def test_compile_timeout_redacts_outer_exception_and_prints_only_fixed_phase_and_hashes(self):
+        class Private:
+            def __str__(self):raise AssertionError('No private text conversion')
+            def __repr__(self):raise AssertionError('No private text representation')
+        for phase in (1,2,3,4):
+            with self.subTest(phase=phase):
+                root,source,plan=self.compile_inputs()
+                plan['privateUnrelatedValue']=Private()
+                original=subprocess.TimeoutExpired(Private(),60,output=Private(),stderr=Private())
+                def timeout(*args,**options):
+                    (root/'serializer-compile.phase').write_bytes(b''.join(str(n).encode()+b'\r\n' for n in range(1,phase+1)))
+                    (root/'serializer.obj').write_bytes(b'partial')
+                    if phase==4:self.pe(root/'serializer.exe',0x8664)
+                    raise original
+                with mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True), \
+                     mock.patch.object(sys.modules[__name__],'_serializer_compile_process',side_effect=timeout) as run,mock.patch('builtins.print') as logged:
+                    with self.assertRaises(subprocess.TimeoutExpired) as caught:_compile_windows_serializer(root,source,plan)
+                self.assertIsNot(caught.exception,original);self.assertEqual(run.call_count,1)
+                self.assertEqual(caught.exception.cmd,'owned-native-serializer')
+                self.assertEqual(caught.exception.timeout,60)
+                self.assertIsNone(caught.exception.stdout);self.assertIsNone(caught.exception.stderr)
+                rendered=''.join(traceback.format_exception(caught.exception))
+                self.assertNotIn(str(root),rendered)
+                self.assertNotIn('Private',repr(caught.exception))
+                self.assertEqual(run.call_args.kwargs['timeout'],60)
+                self.assertEqual(set(run.call_args.kwargs),{'cwd','env','timeout','observe_phase'})
+                self.assertEqual(logged.call_count,1,'The bounded timeout diagnostic is missing')
+                payload=logged.call_args.args[0];self.assertTrue(payload.startswith('native-serializer-timeout '))
+                value=json.loads(payload.split(' ',1)[1])
+                self.assertEqual(set(value),{'schemaVersion','timeoutSeconds','machine','phaseCode','phaseReadStatus',
+                    'objectState','executableState','sourceSha256','compilerSha256','linkerSha256','commandProcessorSha256','testModuleSha256','processObservation'})
+                self.assertEqual((value['phaseCode'],value['phaseReadStatus']),(phase,1))
+                self.assertEqual(value['objectState'],2)
+                self.assertEqual(value['executableState'],2 if phase==4 else 1)
+                self.assertEqual(value['sourceSha256'],hashlib.sha256(source.read_bytes()).hexdigest())
+                self.assertEqual(value['compilerSha256'],plan['cl']['sha256'])
+                self.assertEqual(value['linkerSha256'],plan['link']['sha256'])
+                self.assertNotIn(str(root),payload)
+                self.assertEqual(value['timeoutSeconds'],60)
+
+    def test_timeout_phase_read_is_bounded_ordered_and_rejects_links(self):
+        observe=self.helper('_serializer_timeout_observation')
+        root,_,_=self.compile_inputs();phase=root/'serializer-compile.phase'
+        exe,obj=root/'serializer.exe',root/'serializer.obj'
+        self.assertEqual(observe(root,phase,exe,obj),dict(phaseCode=0,phaseReadStatus=0,objectState=1,executableState=1))
+        for raw in (b'',b'1',b'2\n',b'1\n3\n',b'1\n2\n1\n',b'1\n2\n3\n4\n5\n',b'1\n'+b' '*64):
+            with self.subTest(length=len(raw)):
+                phase.write_bytes(raw);value=observe(root,phase,exe,obj)
+                self.assertEqual((value['phaseCode'],value['phaseReadStatus']),(0,2))
+        phase.write_bytes(b'1\n2\n3\n4\n')
+        self.assertEqual(observe(root,phase,exe,obj)['phaseCode'],4)
+        if os.name!='nt':
+            other=root/'other';other.write_bytes(b'1\n');phase.unlink();phase.symlink_to(other)
+            value=observe(root,phase,exe,obj)
+            self.assertEqual((value['phaseCode'],value['phaseReadStatus']),(0,2))
+
+    def test_optional_timeout_observation_or_output_errors_keep_the_same_timeout(self):
+        self.helper('_serializer_timeout_observation')
+        for observation_error,output_error in ((OSError('private'),None),(KeyboardInterrupt(),None),(None,OSError('private'))):
+            with self.subTest(observationError=type(observation_error).__name__,outputError=type(output_error).__name__):
+                root,source,plan=self.compile_inputs();original=subprocess.TimeoutExpired('private-command',60)
+                with mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True), \
+                     mock.patch.object(sys.modules[__name__],'_serializer_compile_process',side_effect=original) as run, \
+                     mock.patch.object(sys.modules[__name__],'_serializer_timeout_observation',side_effect=observation_error) as observed, \
+                     mock.patch('builtins.print',side_effect=output_error):
+                    if observation_error is None:observed.return_value=dict(phaseCode=0,phaseReadStatus=0,objectState=1,executableState=1)
+                    with self.assertRaises(subprocess.TimeoutExpired) as caught:_compile_windows_serializer(root,source,plan)
+                self.assertIsNot(caught.exception,original);self.assertEqual(run.call_count,1)
+                self.assertEqual(caught.exception.cmd,'owned-native-serializer')
+
+    def test_phase_markers_save_and_restore_external_command_errorlevels(self):
+        root,source,plan=self.compile_inputs()
+        with mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True), \
+             mock.patch.object(sys.modules[__name__],'_serializer_compile_process',return_value=subprocess.CompletedProcess([],2,'','')),mock.patch('builtins.print'):
+            with self.assertRaises(AssertionError):_compile_windows_serializer(root,source,plan)
+        lines=(root/'compile-serializer.cmd').read_text(encoding='utf-8').splitlines()
+        capture='set "OPENGEUL_SERIALIZER_RC=%errorlevel%"'
+        for code,anchor in ((2,'call "'+plan['devcmd']+'"'),(4,'"'+plan['cl']['path']+'"')):
+            index=next(i for i,line in enumerate(lines) if line.startswith(anchor))
+            self.assertEqual(lines[index+1:index+3],[capture,'call :serializer_phase '+str(code)+' %OPENGEUL_SERIALIZER_RC%'])
+        self.assertIn('call :serializer_phase 1 %OPENGEUL_SERIALIZER_RC%',lines)
+        self.assertIn('call :serializer_phase 3 %OPENGEUL_SERIALIZER_RC%',lines)
+        self.assertEqual(lines[-3:],[':serializer_phase','>>"'+str(root/'serializer-compile.phase')+'" echo %1','exit /b %2'])
+        self.assertEqual(lines[lines.index(':serializer_phase')-1],'exit /b %errorlevel%')
+
+    def test_existing_phase_file_is_not_overwritten_or_used_for_admission(self):
+        root,source,plan=self.compile_inputs();phase=root/'serializer-compile.phase';phase.write_bytes(b'1\n2\n3\n4\n')
+        with mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True), \
+             mock.patch.object(sys.modules[__name__],'_serializer_compile_process',return_value=subprocess.CompletedProcess([],2,'','')) as run,mock.patch('builtins.print'):
+            with self.assertRaises(AssertionError):_compile_windows_serializer(root,source,plan)
+        self.assertEqual(run.call_count,0);self.assertEqual(phase.read_bytes(),b'1\n2\n3\n4\n')
+
+    def bounded_compile(self, *, held_pipe=False, unproved_death=False, foreign_handle=False, expire_phase=False):
+        run=self.helper('_serializer_compile_process')
+        clock=type('Clock',(),{'now':0.,'__call__':lambda self:self.now})()
+        calls=[];original=subprocess.TimeoutExpired('synthetic-command',59.)
+        class Stream:
+            closed=False
+            def close(self):calls.append('stream-close');self.closed=True
+        class Thread:
+            alive=True
+            def is_alive(self):return self.alive
+            def join(self,timeout):
+                calls.append(('join',timeout));self_test.assertGreater(timeout,0)
+                self_test.assertLessEqual(timeout,60.-clock.now)
+                if held_pipe or unproved_death:clock.now+=timeout
+                else:self.alive=False
+        class Handle:
+            def Close(self):calls.append('handle-close')
+        class Process:
+            pid=77;returncode=None;_handle=Handle()
+            stdout=Stream();stderr=Stream();stdout_thread=Thread();stderr_thread=Thread()
+            def communicate(self,timeout):
+                calls.append(('communicate',timeout));clock.now+=timeout
+                if held_pipe:self.returncode=0
+                raise original
+            def poll(self):calls.append('poll');return self.returncode
+            def kill(self):calls.append('kill')
+            def wait(self,timeout):
+                calls.append(('wait',timeout));self_test.assertLessEqual(timeout,60.-clock.now)
+                if unproved_death:
+                    clock.now+=timeout;raise subprocess.TimeoutExpired('synthetic-cleanup',timeout)
+                self.returncode=0;return 0
+        self_test=self;process=Process()
+        def state(p):
+            calls.append('native-observe')
+            return dict(pid=77,pollKnown=1,exited=int(p.returncode is not None),exitCode=p.returncode or 0,
+                waitResult=0 if p.returncode is not None else 258,handleMatchesPid=int(not foreign_handle))
+        def phase():
+            if expire_phase:clock.now=60.
+            return dict(phaseCode=3,phaseReadStatus=1,objectState=1,executableState=1)
+        with mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True), \
+             mock.patch.object(subprocess,'Popen',return_value=process) as popen, \
+             mock.patch.object(sys.modules[__name__],'_serializer_process_state',side_effect=state), \
+             mock.patch.object(time,'monotonic',side_effect=clock):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                run('synthetic-command',cwd=Path('/synthetic'),env={'SYNTHETIC':'1'},timeout=60,
+                    observe_phase=phase)
+        self.assertIs(caught.exception,original);self.assertEqual(popen.call_count,1)
+        self.assertEqual([c for c in calls if isinstance(c,tuple) and c[0]=='communicate'],[('communicate',59.)])
+        self.assertLessEqual(clock.now,60.)
+        return process,original,calls
+
+    def test_compile_timeout_observes_retained_child_before_bounded_owned_cleanup(self):
+        process,error,calls=self.bounded_compile()
+        state=vars(error)['_opengeul_serializer_timeout']
+        self.assertLess(calls.index('native-observe'),calls.index('kill'))
+        self.assertEqual(state['beforeCleanup']['waitResult'],258)
+        self.assertEqual(state['cleanup']['pending'],0)
+        self.assertIn('handle-close',calls)
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def test_inherited_pipe_holder_is_pending_without_second_communicate_or_blocking_close(self):
+        process,error,calls=self.bounded_compile(held_pipe=True)
+        state=vars(error)['_opengeul_serializer_timeout']
+        self.assertEqual(state['beforeCleanup']['waitResult'],0)
+        self.assertEqual(state['cleanup']['pending'],1)
+        self.assertNotIn('kill',calls);self.assertNotIn('stream-close',calls)
+        self.assertIn('handle-close',calls)
+        self.assertFalse(process.stdout.closed or process.stderr.closed)
+
+    def test_unproved_direct_child_death_keeps_handle_pending_and_never_guesses_descendants(self):
+        process,error,calls=self.bounded_compile(unproved_death=True)
+        state=vars(error)['_opengeul_serializer_timeout']
+        self.assertEqual(state['cleanup']['pending'],1)
+        self.assertNotIn('handle-close',calls);self.assertNotIn('stream-close',calls)
+        self.assertEqual(calls.count('kill'),1)
+
+    def test_foreign_or_expired_cleanup_cannot_start_a_kill(self):
+        for options in (dict(foreign_handle=True,unproved_death=True),dict(expire_phase=True)):
+            with self.subTest(mode=next(iter(options))):
+                _,error,calls=self.bounded_compile(**options)
+                self.assertNotIn('kill',calls);self.assertNotIn('handle-close',calls)
+                self.assertEqual(vars(error)['_opengeul_serializer_timeout']['cleanup']['pending'],1)
+
+    def test_late_creation_communicate_or_cleanup_never_returns_a_success(self):
+        run=self.helper('_serializer_compile_process')
+        for late in ('creation','communicate','cleanup'):
+            with self.subTest(late=late):
+                clock=NS(now=0.)
+                def close():
+                    if late=='cleanup':clock.now=60.
+                process=NS(pid=77,returncode=0,_handle=NS(Close=lambda:None),
+                    stdout=NS(close=close),stderr=NS(close=close),poll=lambda:0)
+                def communicate(timeout):
+                    if late=='communicate':clock.now=60.
+                    return '',''
+                def create(*args,**kwargs):
+                    if late=='creation':clock.now=60.
+                    return process
+                process.communicate=communicate
+                state=dict(pid=77,pollKnown=1,exited=1,exitCode=0,waitResult=0,handleMatchesPid=1)
+                with mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True), \
+                     mock.patch.object(subprocess,'Popen',side_effect=create), \
+                     mock.patch.object(sys.modules[__name__],'_serializer_process_state',return_value=state), \
+                     mock.patch.object(time,'monotonic',side_effect=lambda:clock.now):
+                    with self.assertRaises((subprocess.TimeoutExpired,AssertionError)):
+                        run('synthetic-command',cwd=Path('/synthetic'),env={},timeout=60,observe_phase=lambda:{})
+
+    def test_nonzero_compile_preserves_exit_with_pending_failed_or_late_cleanup(self):
+        for mode in ('pending','cleanup-error','late'):
+            with self.subTest(mode=mode):
+                root,source,plan=self.compile_inputs();clock=NS(now=0.)
+                process=NS(returncode=2,communicate=mock.Mock(return_value=('synthetic stdout','synthetic stderr')))
+                def cleanup(*args,**options):
+                    if mode=='cleanup-error':raise OSError('synthetic cleanup failure')
+                    if mode=='late':clock.now=60.
+                    return dict(pending=int(mode=='pending'))
+                with mock.patch.object(subprocess,'Popen',return_value=process) as popen, \
+                     mock.patch.object(sys.modules[__name__],'_serializer_bounded_cleanup',side_effect=cleanup), \
+                     mock.patch.object(time,'monotonic',side_effect=lambda:clock.now),mock.patch('builtins.print') as logged:
+                    with self.assertRaises(AssertionError) as caught:_compile_windows_serializer(root,source,plan)
+                self.assertEqual(str(caught.exception),'Native serializer compile failed exit 2')
+                self.assertEqual(popen.call_count,1);self.assertEqual(logged.call_count,1)
+                evidence=json.loads(logged.call_args.args[0].split(' ',1)[1])['compile']
+                self.assertEqual(evidence['exitCode'],2)
+                self.assertEqual(evidence['processCompletion'],dict(completedWithinBudget=int(mode!='late'),
+                    cleanupPending=int(mode!='late'),cleanupObservationFailed=int(mode=='cleanup-error')))
+
+    def test_zero_exit_with_pending_cleanup_still_fails(self):
+        process=NS(returncode=0,communicate=mock.Mock(return_value=('','')))
+        with mock.patch.object(subprocess,'Popen',return_value=process), \
+             mock.patch.object(sys.modules[__name__],'_serializer_bounded_cleanup',return_value=dict(pending=1)), \
+             mock.patch.object(time,'monotonic',return_value=0.):
+            with self.assertRaisesRegex(AssertionError,'resources remain unproved'):
+                _serializer_compile_process('synthetic-command',cwd=Path('/synthetic'),env={},timeout=60,observe_phase=lambda:{})
+
+    def test_offline_serializer_environment_reads_only_the_nonsecret_allowlist(self):
+        environment=self.helper('_serializer_environment')
+        values={'SystemRoot':'synthetic-windows','PATH':'synthetic-tools','TEMP':'synthetic-temp',
+                'CREDENTIAL_TOKEN':'synthetic-secret','CL':'/unsafe','_CL_':'/unsafe'}
+        with mock.patch.dict(os.environ,values,clear=True):
+            result=environment()
+        self.assertEqual(result,{'SystemRoot':'synthetic-windows','PATH':'synthetic-tools','TEMP':'synthetic-temp'})
+
+    def test_cleanup_observation_failure_cannot_replace_the_inner_timeout(self):
+        self.helper('_serializer_compile_process')
+        with mock.patch.object(sys.modules[__name__],'_serializer_bounded_cleanup',side_effect=OSError('synthetic cleanup failure')):
+            try:self.bounded_compile()
+            except OSError:self.fail('Optional cleanup observation replaced the original timeout')
+
+    def test_native_child_snapshot_queries_only_the_retained_handle(self):
+        for native_pid,wait_result in ((77,258),(88,258),(77,0xffffffff)):
+            with self.subTest(pid=native_pid,wait=wait_result):
+                kernel=NS(GetProcessId=mock.Mock(return_value=native_pid),
+                          WaitForSingleObject=mock.Mock(return_value=wait_result))
+                process=NS(pid=77,_handle=9,poll=lambda:None)
+                with mock.patch.object(os,'name','nt'),mock.patch.object(ctypes,'WinDLL',return_value=kernel,create=True):
+                    value=_serializer_process_state(process)
+                self.assertEqual(value['handleMatchesPid'],int(native_pid==77))
+                self.assertEqual(value['waitResult'],wait_result)
+                self.assertEqual(kernel.GetProcessId.call_args.args,(9,))
+                self.assertEqual(kernel.WaitForSingleObject.call_args.args,(9,0))
+
+    def test_signaled_child_race_refreshes_cached_exit_before_handle_close(self):
+        cleanup=self.helper('_serializer_bounded_cleanup')
+        for refreshed_code in (0,None):
+            with self.subTest(exitCodeKnown=refreshed_code is not None):
+                calls=[]
+                process=NS(pid=77,returncode=None,stdout=None,stderr=None)
+                def poll():
+                    calls.append('poll');process.returncode=refreshed_code;return refreshed_code
+                def close():
+                    self.assertIsNotNone(process.returncode,'A still-uncached Popen must retain its HANDLE')
+                    calls.append('close')
+                process.poll=poll;process._handle=NS(Close=close)
+                # The native wait became signaled after this observation's
+                # poll returned None, while Popen's cached result stayed None.
+                observed=dict(pid=77,pollKnown=1,exited=0,exitCode=0,waitResult=0,handleMatchesPid=1)
+                with mock.patch.object(sys.modules[__name__],'_serializer_process_state',return_value=observed), \
+                     mock.patch.object(time,'monotonic',return_value=60.):
+                    value=cleanup(process,60.,kill=False)
+                self.assertEqual(calls,['poll','close'] if refreshed_code is not None else ['poll'])
+                self.assertEqual(value['directHandleClosed'],int(refreshed_code is not None))
+                self.assertEqual(value['pending'],int(refreshed_code is None))
+                self.assertEqual(value['afterCleanup']['exited'],int(refreshed_code is not None))
+
+    def test_serializer_capture_redacts_timeout_and_portable_nonzero_messages(self):
+        capture=self.helper('_serializer_capture')
+        class Private:
+            def __str__(self):raise AssertionError('No command or stderr conversion')
+            def __repr__(self):raise AssertionError('No command or stderr representation')
+        for label in ('owned-native-vs-discovery','owned-native-serializer-run',
+                      'owned-native-portable-compile','owned-native-portable-run'):
+            with self.subTest(label=label):
+                original=subprocess.TimeoutExpired(Private(),15,output=Private(),stderr=Private())
+                with mock.patch.object(subprocess,'run',side_effect=original) as run:
+                    with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                        capture(Private(),label=label,timeout=15)
+                self.assertEqual(run.call_count,1)
+                self.assertTrue(type(caught.exception.cmd) is str)
+                self.assertEqual(caught.exception.cmd,label);self.assertEqual(caught.exception.timeout,15)
+                self.assertIsNone(caught.exception.stdout);self.assertIsNone(caught.exception.stderr)
+                self.assertTrue(caught.exception.__suppress_context__)
+                self.assertNotIn('Private',repr(caught.exception))
+                self.assertNotIn('Private',''.join(traceback.format_exception(caught.exception)))
+        for label in ('owned-native-portable-compile','owned-native-portable-run'):
+            with self.subTest(label=label),mock.patch.object(subprocess,'run',return_value=NS(returncode=7,stderr=Private())) as run:
+                with self.assertRaises(AssertionError) as caught:capture(Private(),label=label,require_zero=True)
+                self.assertEqual(str(caught.exception),label+' failed')
+                self.assertNotIn('check',run.call_args.kwargs)
+
+    def test_real_serializer_vs_discovery_and_execution_use_redacted_timeout_boundary(self):
+        class Private:
+            def __str__(self):raise AssertionError('No raw timeout command conversion')
+            def __repr__(self):raise AssertionError('No raw timeout command representation')
+        root,_,_=self.compile_inputs();controller=self.pe(root/'controller.exe',0x8664)
+        installer=root/'Microsoft Visual Studio/Installer/vswhere.exe';installer.parent.mkdir(parents=True);installer.write_bytes(b'fixture')
+        def architecture(handle,process,native):
+            ctypes.cast(process,ctypes.POINTER(ctypes.c_uint16)).contents.value=0
+            ctypes.cast(native,ctypes.POINTER(ctypes.c_uint16)).contents.value=0x8664
+            return 1
+        def module_name(handle,buffer,size):buffer.value=str(controller);return len(str(controller))
+        kernel=NS(GetCurrentProcess=mock.Mock(return_value=1),IsWow64Process2=mock.Mock(side_effect=architecture),
+                  GetModuleFileNameW=mock.Mock(side_effect=module_name))
+        exe=self.pe(root/'serializer.exe',0x8664);receipt={'output':_serializer_pe(exe,0x8664)}
+        for label,call in (('owned-native-vs-discovery',_serializer_windows_plan),
+                           ('owned-native-serializer-run',lambda:_run_windows_serializer(exe,receipt))):
+            with self.subTest(label=label),mock.patch.dict(os.environ,{'ProgramFiles(x86)':str(root),'SystemRoot':str(root)},clear=True), \
+                 mock.patch.object(ctypes,'WinDLL',return_value=kernel,create=True), \
+                 mock.patch.object(subprocess,'run',side_effect=subprocess.TimeoutExpired(Private(),15,output=Private(),stderr=Private())) as run:
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:call()
+                self.assertEqual(run.call_count,1);self.assertTrue(type(caught.exception.cmd) is str)
+                self.assertEqual(caught.exception.cmd,label);self.assertEqual(caught.exception.timeout,15)
+                self.assertTrue(caught.exception.__suppress_context__)
+                self.assertNotIn('Private',''.join(traceback.format_exception(caught.exception)))
 
     def pe(self, path, machine):
         path.parent.mkdir(parents=True,exist_ok=True)
@@ -504,8 +1001,8 @@ class NativeSerializerFixtureTests(unittest.TestCase):
             plan=self.helper('_serializer_tools')(instance,0x8664)
             plan['commandProcessor']=self.helper('_serializer_pe')(self.pe(root/'cmd.exe',0x8664),0x8664)
             source=root/'serializer.cpp';source.write_text('int main(){}',encoding='utf-8')
-            environment=dict(os.environ);environment.update(CL='/unsafe',_CL_='/unsafe')
-            with mock.patch.dict(os.environ,environment,clear=True),mock.patch.object(subprocess,'run',return_value=subprocess.CompletedProcess([],2,'compile stdout','compile stderr')) as run,mock.patch('builtins.print') as logged:
+            environment=dict(SERIALIZER_TEST_ONLY='1',CL='/unsafe',_CL_='/unsafe')
+            with mock.patch.dict(os.environ,environment,clear=True),mock.patch.object(sys.modules[__name__],'_serializer_compile_process',return_value=subprocess.CompletedProcess([],2,'compile stdout','compile stderr')) as run,mock.patch('builtins.print') as logged:
                 with self.assertRaisesRegex(AssertionError,'compile.*2'):
                     compile_fixture(root,source,plan)
                 self.assertEqual(1,run.call_count)
@@ -549,7 +1046,7 @@ class NativeSerializerFixtureTests(unittest.TestCase):
             def compile_foreign(*args,**kwargs):
                 self.pe(root/'serializer.exe',0x8664)
                 return subprocess.CompletedProcess([],0,'','')
-            with mock.patch.object(subprocess,'run',side_effect=compile_foreign) as run:
+            with mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True), mock.patch.object(sys.modules[__name__],'_serializer_compile_process',side_effect=compile_foreign) as run:
                 with self.assertRaisesRegex(AssertionError,'machine'):compile_fixture(root,source,plan)
                 self.assertEqual(1,run.call_count)
 
