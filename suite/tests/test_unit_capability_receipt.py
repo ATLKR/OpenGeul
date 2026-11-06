@@ -248,7 +248,8 @@ class UnitCapabilityWorkflowTests(unittest.TestCase):
         self.assertLess(code.index(command), code.index('--phase after'))
         self.assertLess(code.index('--phase after'), code.index('dotnet run --project'))
         self.assertIn('finally', code)
-        self.assertIn("if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }", code)
+        self.assertIn('$shellExit = $LASTEXITCODE', code)
+        self.assertIn("if ($shellExit -ne 0) { throw 'Suite shell tests failed.' }", code)
         aggregate = next(block for block in re.split(r'^    - name: ', WORKFLOW.read_text(), flags=re.M)
                          if 'name: opengeul-suite-evidence-${{ matrix.architecture }}' in block)
         self.assertIn('.work/suite-unit-capabilities/', aggregate)
@@ -314,6 +315,7 @@ class UnitCapabilityWorkflowTests(unittest.TestCase):
         }
         '''
         cases = [(0, 0, 0, 0, ''), (7, 0, 9, 0, 'Suite unit tests failed.'),
+                 (7, 8, 9, 9, 'Suite unit tests failed.'),
                  (0, 8, 0, 0, 'Suite unit capability receipts failed.'),
                  (0, 0, 9, 0, 'Suite unit capability receipts failed.'),
                  (0, 0, 0, 9, 'Suite shell tests failed.')]
@@ -327,7 +329,7 @@ class UnitCapabilityWorkflowTests(unittest.TestCase):
                                          env=env, capture_output=True, text=True, timeout=15)
                 self.assertEqual(process.returncode == 0, not error, process.stdout + process.stderr)
                 if error: self.assertIn(error, process.stderr)
-                self.assertEqual(log.read_text().splitlines(), ['before', 'unit', 'after'] + ([] if unit else ['core']))
+                self.assertEqual(log.read_text().splitlines(), ['before', 'unit', 'after', 'core'])
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary); script = directory / 'step.ps1'; log = directory / 'calls.log'
             script.write_text(textwrap.dedent(stub) + unit_code())
@@ -338,7 +340,7 @@ class UnitCapabilityWorkflowTests(unittest.TestCase):
             self.assertNotEqual(process.returncode, 0)
             self.assertIn('PRIMARY_UNIT_LAUNCH', process.stderr)
             self.assertNotIn('AFTER_CAPTURE_FAILURE', process.stderr)
-            self.assertEqual(log.read_text().splitlines(), ['before', 'unit', 'after'])
+            self.assertEqual(log.read_text().splitlines(), ['before', 'unit', 'after', 'core'])
 
 
 if __name__ == '__main__':

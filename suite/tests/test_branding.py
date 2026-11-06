@@ -160,7 +160,7 @@ class BrandingTests(unittest.TestCase):
 
     def test_native_menubar_rejects_wrong_namespace_file_target_schema_and_duplicate_product_commands(self):
         path = self.source / MENUBAR_FILES[0]; original = path.read_bytes()
-        source = original.decode('utf-8')
+        source = path.read_text(encoding='utf-8')
         bad = [source.replace('http://openoffice.org/2001/menu', 'urn:wrong-menu'),
                source.replace('menu:id="menubar"', 'menu:id="toolbar"'),
                source.replace('menu:id=".uno:PickList"', 'menu:id=".uno:WrongTarget"'),
@@ -173,6 +173,7 @@ class BrandingTests(unittest.TestCase):
             bad.append(source.replace('<menu:menuitem menu:id=".uno:Bold"/>', item + item))
         for index, value in enumerate(bad):
             with self.subTest(malformed=index):
+                self.assertNotEqual(value, source, 'Malformed XML fixture must actually change on this platform')
                 destination = self.root / ('invalid-menu-' + str(index)); path.write_text(value, encoding='utf-8')
                 expected = tree_hashes(self.source)
                 try:

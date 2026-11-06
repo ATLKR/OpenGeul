@@ -5,6 +5,10 @@ namespace OpenGeul.Office.Core;
 public sealed class SuiteException(string message, Exception? inner = null, StartupDiagnostic? startupDiagnostic = null,
     string? workerCode = null) : Exception(message, inner)
 {
+    // Preserve the original public constructor for compiled/reflection callers.
+    public SuiteException(string message, Exception? inner, StartupDiagnostic? startupDiagnostic)
+        : this(message, inner, startupDiagnostic, null) { }
+
     public StartupDiagnostic? StartupDiagnostic { get; } = startupDiagnostic ?? (inner as SuiteException)?.StartupDiagnostic;
     public string? WorkerCode { get; } = workerCode ?? (inner as SuiteException)?.WorkerCode;
 }
