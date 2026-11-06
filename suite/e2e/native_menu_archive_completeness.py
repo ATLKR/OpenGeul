@@ -15,7 +15,7 @@ import sys
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from suite.e2e import native_archive_completeness as original
-from suite.e2e.native_menu_smoke import CORE_COMMANDS, MODULES, VIEW_MODULES, require_hwp_launcher_receipt
+from suite.e2e.native_menu_smoke import CORE_COMMANDS, MODULES, VIEW_MODULES, require_hwp_launcher_receipt, require_native_point_preflight
 
 REPORT = '.work/suite-native-menu/results.json'
 ROOT = '.work/suite-native-menu/worker-diagnostics'
@@ -82,6 +82,11 @@ def _expected(workspace, suite):
     report = original._json(raw)
     _require(type(report.get('schemaVersion')) is int and report['schemaVersion'] == 1
         and report.get('kind') == 'native-menu-gesture-matrix', 'Wrong original menu report')
+    _require(type(report.get('nativePointProfileVersion')) is int and report['nativePointProfileVersion']==1,
+        'Original native menu controller profile is missing')
+    try:require_native_point_preflight(report['nativePointPreflight'])
+    except (AssertionError,KeyError,TypeError,ValueError):
+        raise ValueError('Original native menu controller preflight did not pass') from None
     _require(all(report.get(key) is True for key in ('success', 'actualWindowsExecuted',
         'nativeMenuVerified', 'scenarioSuccess')), 'Original native menu report did not pass')
     _require(report.get('viewPhysicalVerified') is True

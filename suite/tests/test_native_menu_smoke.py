@@ -437,7 +437,15 @@ class NativeMenuSmokeTests(unittest.TestCase):
             self.assertEqual(backend,'win32')
             return SimpleNamespace(window=lambda *,handle:SimpleNamespace(wrapper_object=lambda:SimpleNamespace(maximize=maximize)))
         def activate(*args):events.append('activate')
-        with patch.object(self.smoke.os,'name','nt'), \
+        def await_ready(value,deadline):
+            self.assertIs(value,record)
+            self.assertEqual(deadline,160.)
+            self.assertEqual((session.hwnd,session.parent,session.child,session.office_pid),(11,55,56,88))
+            self.assertEqual([row['phaseCode'] for row in record['openingFocusObservations']],[1,2,3])
+            events.append(('await-ready',deadline))
+        with patch.object(self.smoke.time,'monotonic',return_value=10.), \
+             patch.object(session,'_await_native_menu_ready',side_effect=await_ready), \
+             patch.object(self.smoke.os,'name','nt'), \
              patch.dict(sys.modules,{'pywinauto':SimpleNamespace(Desktop=desktop)}), \
              patch.object(windows_smoke,'launch_suite',return_value=process), \
              patch.object(windows_smoke,'new_document_command',return_value=['synthetic-launch']), \
@@ -449,7 +457,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
              patch.object(api,'home',return_value=22), \
              patch.object(session,'_home_ready',return_value=True):
             session.open(record)
-        self.assertEqual(events,[('observe',1),'maximize',('observe',2),'activate',('observe',3)])
+        self.assertEqual(events,[('observe',1),'maximize',('observe',2),'activate',('observe',3),('await-ready',160.)])
         self.assertEqual(len(record['openingFocusObservations']),3)
         self.assertFalse(record.get('nativeMenuVerified',False))
 

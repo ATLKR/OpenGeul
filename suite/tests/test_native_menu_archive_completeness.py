@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import test_native_archive_completeness as old_archives
+from test_native_menu_point_cli import preflight
 
 SOURCE = Path(__file__).resolve().parents[1] / 'e2e/native_menu_archive_completeness.py'
 REPORT = '.work/suite-native-menu/results.json'
@@ -67,6 +68,7 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
             acceptanceEligible=False, expectedCaseCount=6, completedCaseCount=6,
             viewPhysicalVerified=True, viewPhysicalExpectedCaseCount=2, viewPhysicalVerifiedCaseCount=2,
             nativeHwpMenuLaunchExecuted=True, passedCaseCount=6, missingModules=[], failedModules=[], tests=rows)
+        self.report.update(nativePointProfileVersion=1,nativePointPreflight=preflight())
         self.save_report()
         for index, entry in enumerate(self.base.expected):
             self.base.archive(entry, index)
@@ -147,6 +149,12 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
         self.assertTrue(all(row['lastEventVerified'] for row in result['archives']))
         for forbidden in ('bodyText', 'keyTokens', 'processes', 'metadata'):
             self.assertNotIn(forbidden, json.dumps(result))
+
+    def test_success_report_requires_this_cli_native_thread_preflight(self):
+        original=copy.deepcopy(self.report)
+        for key in ('nativePointProfileVersion','nativePointPreflight'):
+            self.report=copy.deepcopy(original);self.report.pop(key);self.save_report()
+            with self.assertRaises(ValueError):self.verify()
 
     def test_legacy_success_report_without_physical_view_cases_is_rejected(self):
         for key in ('viewPhysicalVerified', 'viewPhysicalExpectedCaseCount',

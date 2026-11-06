@@ -161,6 +161,8 @@ def _element_anchor(row,proof,binding,shell_pid):
 
 
 def _hit_identity(hit,snapshot,target):
+    if hit.get('pointMethod')=='owned-popup-and-msaa-hit':
+        _require_provider_point(hit,snapshot,target);return
     if 'identityProof' not in snapshot:return
     proof=hit['identityProof'];scope=snapshot['identityProof']['scope'];role=_target_role(target)
     assert proof['scope']==scope and proof['role']==role
@@ -168,6 +170,67 @@ def _hit_identity(hit,snapshot,target):
     different=proof['differentFrom']
     assert type(different) is dict and set(different)==set(snapshot['identityProof']['roles'])-{role}
     assert all(value is False for value in different.values())
+
+
+def _require_point(hit,snapshot,target):
+    method=hit.get('pointMethod','global-uia')
+    assert method in ('global-uia','owned-popup-and-msaa-hit'), 'Unknown native point proof method'
+    if method=='global-uia':assert hit['withinControl'] is hit['uiaMatches'] is True, 'Native menu point is obstructed'
+    _hit_identity(hit,snapshot,target)
+
+
+def _require_provider_point(hit,snapshot,target):
+    """Replay a distinct local proof without turning the global FALSE to TRUE."""
+    assert target!='file' and 'identityProof' in snapshot
+    assert hit['uiaMatches'] is False
+    original=hit['identityProof'];scope=snapshot['identityProof']['scope'];role=_target_role(target)
+    assert original['scope']==scope and original['role']==role
+    assert original['targetEqualsRetained'] is True and original['hitEqualsRetained'] is False
+    roles=snapshot['identityProof']['roles'];negatives=[name for name in roles if name!=role]
+    assert set(original['differentFrom'])==set(negatives)
+    assert all(value is False for value in original['differentFrom'].values())
+    proof=hit['providerLocalProof'];assert proof['schemaVersion']==1
+    assert proof['method']=='owned-popup-and-msaa-hit' and proof['scope']==scope and proof['role']==role
+    assert proof['negativeRoles']==negatives+['global-point']
+    assert type(proof['sourceScopeId']) is int and proof['sourceScopeId']>0
+    creator=proof['creator'];_int(creator['threadId'])
+    assert creator['mta'] is creator['sameThread'] is True
+    provider=proof['provider'];assert type(provider) is dict and all(type(value) is int for value in provider.values())
+    assert provider['scopeId']==proof['sourceScopeId'] and provider['stageCode']==13
+    ones=('schemaVersion','diagnosticOnly','providerLocalOnly','nativeAttempted','nativeExit','threadClosed',
+        'processesClosed','localKnown','localMatch','workerCleanup','workerMta','comInitialized',
+        'comUninitialized','dpiEntered','dpiRestored','processBefore','processAfter','variantAttempted',
+        'variantCleared','childIdZero','fileRoundTrip','targetFreshPositive','targetRetainedPositive',
+        'physicalDpiVerified','threadIdentity','callbackIdentity','exitCodeObserved')
+    zeros=('acceptanceEligible','globalHitSubstituted','synthetic','workerException','pending',
+        'variantCleanupHresult','cleanupError','nativeExitCode')
+    assert all(provider[key]==1 for key in ones) and all(provider[key]==0 for key in zeros)
+    for key in ('controllerPid','threadId','threadBirth'):_int(provider[key])
+    assert provider['workerStage']==8 and provider['threadId']!=creator['threadId']
+    assert provider['controllerPid'] not in (scope['shellPid'],scope['binding']['officePid'])
+    assert provider['variantType']==9 and provider['referencesAcquired']==provider['referencesReleased']>=5
+    assert provider['negativeCount']==provider['negativeRejected']==len(negatives)+1
+    for name in ('pattern','child_id','accessible','from_accessible','hit_test','query','compare'):
+        assert provider[name+'Attempted']==provider[name+'Completed']>=1 and provider[name+'Hresult']==0
+    assert provider['compareCompleted']==len(negatives)+4 and provider['from_accessibleCompleted']==2
+    binding=scope['binding'];before=proof['before'];assert before==proof['after']
+    assert proof['sourceScope']==dict(scope_id=proof['sourceScopeId'],engine_pid=binding['officePid'],
+        engine_birth=scope['officeCreationTime'],shell_pid=scope['shellPid'],shell_birth=scope['shellCreationTime'],
+        parent_hwnd=binding['parent'],child_hwnd=binding['child'],x=hit['point'][0],y=hit['point'][1])
+    popup=snapshot['popup'];assert popup is not None
+    assert before['classCode']==1 and before['ownershipBefore'] is before['ownershipAfter'] is True
+    assert before['hwnd']==before['rootHwnd']==hit['hitHwnd']==hit['rootHwnd']==popup['hwnd']
+    assert before['pid']==hit['pid']==binding['officePid'] and before['threadId']==popup['threadId']
+    assert before['ownerChain']==popup['ownerChain'] and before['ownerChain'][-1] in (binding['child'],binding['document'])
+    assert before['style']&0x80000000 and not before['style']&0x40000000 and before['extendedStyle']&0x80
+    assert before['foreground'] in (binding['document'],popup['hwnd']) and before['point']==hit['point']
+    rect=before['rectangle'];target_rect=snapshot['control']['rectangle'];point=hit['point']
+    assert all(type(n) is int for n in (*rect,*target_rect,*point))
+    assert rect[0]<=target_rect[0]<=point[0]<target_rect[2]<=rect[2]
+    assert rect[1]<=target_rect[1]<=point[1]<target_rect[3]<=rect[3]
+    assert proof['globalPoint']==dict(kindCode=50033,pid=binding['officePid'],nativeHwnd=popup['hwnd'])
+    _comparison_proof(proof['fresh'],binding,scope['shellPid'],target)
+    assert proof['fresh']['scope']==scope
 
 
 def _keyboard_recipient(snapshot,binding,shell_pid,*,menu_scope=None):
@@ -287,6 +350,11 @@ def _validate(snapshot,binding,shell_pid,target,*,enabled=True,menu_scope=None):
     assert fg['pid']==(shell_pid if fg['hwnd']==binding['document'] else binding['officePid'])
     gui=snapshot['gui'];assert gui['threadId']>0 and gui['focusPid']==binding['officePid']
     assert gui['focusRootHwnd'] in allowed and gui['captureOwned'] is gui['menuOwnerOwned'] is True
+    if 'targetPointProof' in snapshot:
+        hit=snapshot['targetPointProof'];assert target!='file' and popup
+        assert hit['point']==[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
+        assert hit['pid']==binding['officePid'] and hit['rootHwnd']==popup['hwnd']
+        _require_point(hit,snapshot,target)
     return (control_anchor,control['nativeHwnd'],tuple(rect),
             anchors[file],anchors[bar],binding['child'],doc['threadId'],gui['threadId'])
 
@@ -379,7 +447,11 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
     def retain():retain_native_menu_receipt(process,value)
     try:
         budget()
-        if probe is None:probe=NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}))
+        profile=getattr(process,'opengeul_native_menu_point_profile',False) is True
+        if profile:
+            from native_menu_msaa_hit import pending_msaa_hit
+            assert pending_msaa_hit() is None, 'An original native provider callback is still unretired'
+        if probe is None:probe=NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}),native_point_profile=profile)
         assert native_menu_active(api,process,document), 'Native-only document menu is not ready'
         suite=Path(process.opengeul_suite_root).resolve()
         shell=probe.process_snapshot(process)
@@ -404,6 +476,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         assert len(prior)<128 or key in prior;prior[key]=identity;process.opengeul_native_menu_generations=prior
         value.update(binding=binding,originalProcess=shell,originalEngine=engine,engineHandleValue=handle,
             engineAdmissionBasis=home_basis if home_witness else 'existing-retained-witness' if witness else 'first-native-measurement')
+        if profile:probe._point_source=dict(shellHandle=int(process._handle),engineHandle=handle)
         begin_identity=getattr(probe,'begin_identity_scope',None)
         if begin_identity:
             value['elementIdentityScope']=begin_identity(binding,shell,engine,start,deadline,operation,gesture)
@@ -476,8 +549,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 scope=snap['popup']['hwnd'] if snap['popup'] else document
                 hit=probe.point_snapshot(scope,point,probe.current_control);item['hits'].append(hit)
                 assert hit['point']==point and hit['pid']==pid and hit['rootHwnd']==scope
-                assert hit['withinControl'] is hit['uiaMatches'] is True, 'Native menu point is obstructed'
-                _hit_identity(hit,snap,target)
+                _require_point(hit,snap,target)
             check();retain();probe.move(point,item);assert item['pointerReadback']==point
             check();retain();continuity();probe.click(item);budget()
             assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
@@ -630,12 +702,12 @@ def require_native_menu_action(value,shell_pid,document,command=None):
         for snapshot in item['snapshots']:replay_scope(snapshot)
         anchors=[_validate(s,value['binding'],shell_pid,item['target'],menu_scope=menu_scope) for s in item['snapshots']]
         assert len(anchors)==3 and all(a==anchors[0] for a in anchors)
-        assert len(item['hits'])==2 and all(h['point']==item['chosenPhysicalPoint'] and h['pid']==value['binding']['officePid'] and h['withinControl'] is h['uiaMatches'] is True for h in item['hits'])
+        assert len(item['hits'])==2 and all(h['point']==item['chosenPhysicalPoint'] and h['pid']==value['binding']['officePid'] for h in item['hits'])
         assert item['pointerReadback']==item['beforeClickCursorReadback']==item['chosenPhysicalPoint']
         rect=item['snapshots'][0]['control']['rectangle']
         assert item['chosenPhysicalPoint']==[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
         for hit,snapshot in zip(item['hits'],item['snapshots'][1:]):
-            _hit_identity(hit,snapshot,item['target'])
+            _require_point(hit,snapshot,item['target'])
             assert hit['hitHwnd']>0 and hit['rootHwnd']==(snapshot['popup']['hwnd'] if snapshot['popup'] else document)
         assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
         assert item['inputCallAttempts']==1 and item['insertedInputs']==item['requestedInputs']==2
@@ -769,7 +841,10 @@ class NativeMenuProbe(NativeControlProbe):
     # CUIAutomation8 is the documented Windows 8+ IUIAutomation2 implementation.
     # A private client avoids changing pywinauto's shared UIA singleton settings.
     CLIENT='{e22ad333-b25f-460c-83d0-0581107395c9}'
-    def __init__(self,deadline,clock,*,interop=None,**libraries):
+    def __init__(self,deadline,clock,*,interop=None,native_point_profile=False,**libraries):
+        assert type(native_point_profile) is bool
+        self._native_point_profile=self._physical_file_refresh=native_point_profile
+        self._provider_creator=None;self._msaa_lease=None
         self.provider_client=None
         self._uia=None;self._provider_started=self._provider_closed=False
         self.interop={} if interop is None else interop
@@ -802,8 +877,12 @@ class NativeMenuProbe(NativeControlProbe):
             self.interop.update(versionTuple=observed,versionObserved=bool(match and all(n<=65535 for n in observed)))
             library=self._call(comtypes.client.GetModule,'UIAutomationCore.dll')
             interface=library.IUIAutomation2
+            if self._native_point_profile:
+                self._uia_library=library
+                self._admit_provider_creator()
             self.provider_client=self._call(lambda:comtypes.client.CreateObject(self.CLIENT,interface=interface))
             self._provider_timeout()
+            if self._native_point_profile:self._require_provider_creator()
             self.uia=SimpleNamespace(iuia=self.provider_client,
                 tree_scope={'children':2,'descendants':4},build_condition=self._condition)
             self._point_type=library.tagPOINT
@@ -879,10 +958,83 @@ class NativeMenuProbe(NativeControlProbe):
         assert len(matches)==1 and matches[0]!='contrast-edit', 'Native menu identity is unknown or ambiguous'
         return matches[0]
     def _fresh_base(self):
+        if getattr(self,'_physical_file_refresh',False) and 'contrast-edit' in self._identity_refs:
+            return self._physical_base()
         root=self._root(self._identity_scope['binding']['child'])
         bar=self._discover_bar(root)
         return dict(peer=root,bar=bar,file=self._find(bar,'file',scope='children'),
             **{'contrast-edit':self._find_labels(bar,EDIT_CONTRAST,scope='children')})
+    def _physical_base(self):
+        """Refresh through an exposed File header, never retained-peer self proof.
+
+        Initial ElementFromHandle admission is still required. A global fresh
+        point must identify that retained File, and its live parents must reach
+        the original bar and peer. This is not a retry after a provider timeout.
+        """
+        from suite_window_activation import Point
+        binding=self._identity_scope['binding'];refs=self._identity_refs
+        assert {'file','bar','peer','contrast-edit'}<=set(refs)
+        observation=dict(method='physical-file-header-parent-walk',point=[],physicalHit={},
+            fileEqualsRetained=False,differentFrom={},ancestry=[],ownershipBefore=False,ownershipAfter=False)
+        self.interop['graphRefresh']=observation
+        context,continuity=self._menu_classification_context
+        assert context['binding']==binding and context['shellPid']==self._identity_scope['shellPid']
+        def owned():
+            continuity()
+            attachment=self.attachment_snapshot(binding);assert attachment['valid'] is True
+            child=self.window_snapshot(binding['child'])
+            assert (child['pid'],child['rootHwnd'])==(binding['officePid'],binding['document'])
+            assert child['visible'] is child['enabled'] is True
+            assert type(child['threadId']) is int and child['threadId']>0
+            assert attachment['windows']['child']['threadId']==child['threadId']
+            assert self.foreground()==binding['document'], 'Physical File header requires its original foreground document'
+            return child
+        before=owned();observation['ownershipBefore']=True
+        file_row=self._chrome(refs['file'])
+        assert file_row['pid']==binding['officePid'] and file_row['controlType']=='MenuItem'
+        assert file_row['visible'] is file_row['enabled'] is True
+        rect=file_row['rectangle'];assert len(rect)==4 and all(type(n) is int for n in rect)
+        assert rect[0]<rect[2] and rect[1]<rect[3]
+        point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2];observation['point']=point
+        hit=int(self._call(self.user.WindowFromPhysicalPoint,Point(*point)) or 0)
+        assert hit==binding['child'], 'The physical File header is covered'
+        pid=C.c_uint32();thread=self._call(self.user.GetWindowThreadProcessId,hit,C.byref(pid))
+        root=int(self._call(self.user.GetAncestor,hit,2) or 0)
+        observation['physicalHit']=dict(hwnd=hit,pid=int(pid.value),threadId=thread,rootHwnd=root)
+        assert (pid.value,thread,root)==(binding['officePid'],before['threadId'],binding['document'])
+        fresh_file=self._uia_call(4,self.uia.iuia.ElementFromPoint,self._point_type(*point))
+        observation['fileEqualsRetained']=self._same(fresh_file,refs['file'])
+        assert observation['fileEqualsRetained'] is True, 'Global File header identity changed'
+        for role,ref in refs.items():
+            if role=='file':continue
+            same=self._same(fresh_file,ref);observation['differentFrom'][role]=same
+            assert same is False, 'Global File header aliases another role'
+        cursor=fresh_file;fresh_bar=fresh_peer=None
+        for index in range(32):
+            kind=self._uia_call(9,lambda:cursor.CurrentControlType)
+            owner=self._uia_call(8,lambda:cursor.CurrentProcessId)
+            raw=self._uia_call(7,lambda:cursor.CurrentNativeWindowHandle)
+            assert type(kind) is type(owner) is int and owner==binding['officePid']
+            assert raw is None or type(raw) is int and -(2**31)<=raw<2**32
+            hwnd=0 if raw is None else raw&0xffffffff
+            observation['ancestry'].append(dict(kindCode=kind,pid=owner,nativeHwnd=hwnd))
+            if index==0:assert kind==50011
+            elif fresh_bar is None:
+                assert kind==50010 and self._same(cursor,refs['bar'])
+                fresh_bar=cursor
+            elif hwnd==binding['child']:
+                assert self._same(cursor,refs['peer']), 'Fresh File ancestry reached a different peer'
+                fresh_peer=cursor;break
+            else:
+                assert kind not in (50011,50010) and hwnd==0, 'Unexpected native File ancestry'
+            cursor=self._uia_call(6,self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
+            assert cursor, 'Fresh File ancestry is detached'
+        assert fresh_bar is not None and fresh_peer is not None, 'Fresh File ancestry exceeded its finite bound'
+        fresh=dict(file=fresh_file,bar=fresh_bar,peer=fresh_peer,
+            **{'contrast-edit':self._find_labels(fresh_bar,EDIT_CONTRAST,scope='children')})
+        assert owned()==before, 'Original File window generation changed'
+        observation['ownershipAfter']=True
+        return fresh
     def _fresh_proof(self,target):
         assert self._identity_scope is not None and target in _scope_targets(self._identity_scope)
         fresh=self._fresh_base()
@@ -968,11 +1120,25 @@ class NativeMenuProbe(NativeControlProbe):
         self.interop['primaryFailureFromApi']=getattr(self,'_last_call_exception',None) is exc
         self.interop['primaryFailure']=self._exception_numbers(exc)
     def close_provider(self):
+        if self._provider_pending():
+            self.interop['providerRetainedForPending']=True
+            return False  # The global capsule keeps this whole original probe.
         # Drop all owned element/client references. No shared client was changed.
         self._provider_closed=True
         for name in ('file_element','menu_bar_element','peer_element','current_control','_retained','uia','provider_client','_identity_refs','_menu_classification_context','_failure_point','_diagnostic_sink','_observed_call','_last_call_exception'):
             if hasattr(self,name):setattr(self,name,None)
         return True
+    def _provider_pending(self):
+        # Startup registers globally before returning the lease to this probe.
+        # A BaseException in that handoff must not permit COM calls or release.
+        try:
+            lease=getattr(self,'_msaa_lease',None)
+            if lease is not None and lease.pending is not False:return True
+            if getattr(self,'_native_point_profile',False):
+                from native_menu_msaa_hit import pending_msaa_hit
+                if pending_msaa_hit() is not None:return True
+            return False
+        except BaseException:return True
     def _condition(self,*,control_type,name=None):
         kinds={'MenuBar':50010,'MenuItem':50011,'Text':50020,'Button':50000,'ToolBar':50021}
         assert control_type in kinds and (name is None or type(name) is str and len(name)<=256)
@@ -984,6 +1150,112 @@ class NativeMenuProbe(NativeControlProbe):
     def _root(self,hwnd):
         self._ensure_provider()
         return self._uia_call(1,self.uia.iuia.ElementFromHandle,hwnd)
+    def _mta_snapshot(self):
+        ole=C.WinDLL('ole32');function=ole.CoGetApartmentType
+        function.argtypes,function.restype=(C.POINTER(C.c_int32),C.POINTER(C.c_int32)),C.c_int32
+        kind=C.c_int32(-1);qualifier=C.c_int32(-1)
+        hr=self._call(function,C.byref(kind),C.byref(qualifier))
+        thread=self.kernel.GetCurrentThreadId;thread.argtypes,thread.restype=(),C.c_uint32
+        return self._call(thread),hr==0 and kind.value==1
+    def _admit_provider_creator(self):
+        assert getattr(self,'_provider_creator',None) is None, 'The private client creator cannot change'
+        thread,mta=self._mta_snapshot()
+        assert type(thread) is int and thread>0 and mta is True, 'The private client must originate in this MTA'
+        self._provider_creator=dict(threadId=thread,mta=True)
+        self.interop['providerCreator']=dict(self._provider_creator)
+    def _require_provider_creator(self):
+        original=self._provider_creator;thread,mta=self._mta_snapshot()
+        assert original and original['mta'] is mta is True and original['threadId']==thread
+        return dict(original,sameThread=True)
+    def _begin_point_lease(self,file,target,negative,scope_id,point):
+        from native_menu_msaa_hit import SdkAbi,MsaaHitScope,MsaaHitSource,begin_msaa_hit
+        from comtypes import GUID,HRESULT
+        from comtypes.automation import VARIANT
+        library=self._uia_library;legacy=library.IUIAutomationLegacyIAccessiblePattern
+        method=next(item for item in vars(legacy)['_methods_'] if item.name=='GetIAccessible')
+        accessible=method.argtypes[0]._type_.__com_interface__
+        sdk=SdkAbi(client_interface=library.IUIAutomation,element_interface=library.IUIAutomationElement,
+            legacy_interface=legacy,accessible_interface=accessible,guid_type=GUID,hresult_type=HRESULT,
+            variant_type=VARIANT,function_factory=C.WINFUNCTYPE)
+        scope=self._identity_scope;binding=scope['binding'];role=_target_role(self._active_target)
+        source=MsaaHitSource(self.provider_client,file,target,self._identity_refs[role],tuple(negative),
+            self._point_source['shellHandle'],self._point_source['engineHandle'],keepalive=(self,))
+        request=MsaaHitScope(scope_id,binding['officePid'],scope['officeCreationTime'],scope['shellPid'],
+            scope['shellCreationTime'],binding['parent'],binding['child'],*point)
+        return begin_msaa_hit(source,request,sdk,self.deadline,native_enabled=True)
+    def _provider_local_point(self,point,target,actual):
+        from dataclasses import asdict
+        assert getattr(self,'_native_point_profile',False) is True and self._active_target!='file'
+        creator=self._require_provider_creator();scope=self._identity_scope;binding=scope['binding']
+        role=_target_role(self._active_target)
+        global_point=dict(kindCode=self._uia_call(9,lambda:actual.CurrentControlType),
+            pid=self._uia_call(8,lambda:actual.CurrentProcessId),nativeHwnd=self._uia_call(7,lambda:actual.CurrentNativeWindowHandle))
+        assert global_point['kindCode']==50033 and global_point['pid']==binding['officePid']
+        rectangle=self._chrome(target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
+        assert global_point['nativeHwnd']==before['hwnd']
+        roles=[key for key in self._identity_refs if key!=role]
+        negative=[self._identity_refs[key] for key in roles]+[actual]
+        sequence=getattr(self,'_point_sequence',0)+1;assert sequence<=32;self._point_sequence=sequence
+        lease=self._begin_point_lease(self.file_element,target,negative,sequence,point)
+        self._msaa_lease=lease
+        provider=lease.wait()
+        self.interop['providerLocalResult']=provider
+        assert not lease.pending, 'The native menu provider call is unretired'
+        assert provider['localKnown']==provider['localMatch']==1, 'The native menu provider point is unknown'
+        assert provider['nativeExit']==provider['threadClosed']==provider['processesClosed']==provider['workerCleanup']==1
+        assert provider['stageCode']==13 and self.clock()<self.deadline
+        assert self._require_provider_creator()==creator
+        after=self._popup_exposure(binding,point,rectangle);assert before==after
+        fresh=self._fresh_proof(self._active_target)
+        return dict(schemaVersion=1,method='owned-popup-and-msaa-hit',scope=copy.deepcopy(scope),role=role,
+            sourceScopeId=sequence,sourceScope=asdict(lease.scope),negativeRoles=roles+['global-point'],
+            provider=provider,before=before,after=after,fresh=fresh,creator=creator,globalPoint=global_point)
+    def _popup_exposure(self,binding,point,target_rect):
+        """The exact pinned VCL popup at a physical point, not target identity.
+
+        core bf6ef266 vcl/inc/win/saldata.hxx and win/window/salframe.cxx:
+        undecorated menu floaters use SALTMPSUBFRAME/WS_POPUP/TOOLWINDOW.
+        An unknown class is represented only by a failed fixed class code.
+        """
+        from suite_window_activation import Point
+        scope,continuity=self._menu_classification_context
+        assert scope['binding']==binding
+        continuity()
+        assert self.attachment_snapshot(binding)['valid'] is True
+        child=self.window_snapshot(binding['child'])
+        assert (child['pid'],child['rootHwnd'])==(binding['officePid'],binding['document'])
+        hit=int(self._call(self.user.WindowFromPhysicalPoint,Point(*point)) or 0)
+        assert hit and hit not in (binding['document'],binding['parent'],binding['child'])
+        popup=self.window_snapshot(hit)
+        assert (popup['pid'],popup['rootHwnd'],popup['threadId'])==(binding['officePid'],hit,child['threadId'])
+        assert popup['visible'] is popup['enabled'] is True
+        assert popup['iconic'] is False and popup['cloaked']==0
+        rect=popup['rectangle']
+        assert len(rect)==len(target_rect)==4 and all(type(n) is int for n in (*rect,*target_rect,*point))
+        assert rect[0]<=target_rect[0]<target_rect[2]<=rect[2]
+        assert rect[1]<=target_rect[1]<target_rect[3]<=rect[3]
+        assert target_rect[0]<=point[0]<target_rect[2] and target_rect[1]<=point[1]<target_rect[3]
+        name=C.create_unicode_buffer(64)
+        count=self._call(self.user.GetClassNameW,hit,name,len(name))
+        class_code=int(type(count) is int and 0<count<len(name) and name.value=='SALTMPSUBFRAME')
+        assert class_code==1, 'Physical menu popup class is unconfirmed'
+        function=self.user.GetWindowLongW
+        function.argtypes,function.restype=(C.c_void_p,C.c_int32),C.c_int32
+        style=self._call(function,hit,-16)&0xffffffff
+        extended=self._call(function,hit,-20)&0xffffffff
+        assert style&0x80000000 and not style&0x40000000 and extended&0x80
+        owners=self._owners(hit,binding)
+        assert 2<=len(owners)<=16 and owners[0]==hit and owners[-1] in (binding['child'],binding['document'])
+        foreground=self.foreground();assert foreground in (binding['document'],hit)
+        gui=self.native_focus(child['threadId'])
+        assert gui['focusPid']==binding['officePid'] and gui['focusRootHwnd'] in (binding['document'],hit)
+        assert gui['captureHwnd'] in (0,binding['child'],hit) and gui['menuOwnerHwnd'] in (0,binding['child'],hit)
+        continuity();assert self.attachment_snapshot(binding)['valid'] is True
+        assert self.window_snapshot(binding['child'])==child and self.window_snapshot(hit)==popup
+        assert self.foreground()==foreground
+        return dict(classCode=class_code,hwnd=hit,pid=popup['pid'],threadId=popup['threadId'],
+            rootHwnd=hit,style=style,extendedStyle=extended,rectangle=list(rect),point=list(point),
+            ownerChain=owners,foreground=foreground,ownershipBefore=True,ownershipAfter=True)
     def point_snapshot(self,scope,point,control):
         from suite_window_activation import Point
         observation=dict(targetCode=tuple(LABELS).index(self._active_target)+1,stageCode=1,
@@ -1023,7 +1295,12 @@ class NativeMenuProbe(NativeControlProbe):
                     proof['differentFrom'][key]=self._same(actual,ref)
                     observation['primary']['differentFrom'].append([IDENTITY_ROLES.index(key)+1,proof['differentFrom'][key]])
                 observation['stageCode']=9
-                assert result['identityProof']['targetEqualsRetained'] is result['identityProof']['hitEqualsRetained'] is True
+                if (getattr(self,'_native_point_profile',False) and self._active_target!='file' and
+                        match is False and proof['targetEqualsRetained'] is True and proof['hitEqualsRetained'] is False and
+                        all(value is False for value in proof['differentFrom'].values())):
+                    result['pointMethod']='owned-popup-and-msaa-hit'
+                    result['providerLocalProof']=self._provider_local_point(point,target,actual)
+                else:assert result['identityProof']['targetEqualsRetained'] is result['identityProof']['hitEqualsRetained'] is True
                 observation['stageCode']=10
                 assert all(value is False for value in result['identityProof']['differentFrom'].values())
             observation['stageCode']=11
@@ -1040,6 +1317,9 @@ class NativeMenuProbe(NativeControlProbe):
     def observe_failure_context(self,binding):
         if getattr(self,'_failure_context_recorded',False):return
         self._failure_context_recorded=True
+        if self._provider_pending():
+            self.interop['failureContext']=dict(providerPending=1,providerQueriesSuppressed=1)
+            return
         diagnostic=dict(guiStatus=0,pointStatus=0,parentQueries=0,nodes=[],
             ownershipPostStatus=0,ownershipPostVerified=False)
         self.interop['failureContext']=diagnostic
@@ -1310,12 +1590,16 @@ class NativeMenuProbe(NativeControlProbe):
     def snapshot(self,binding,target):
         doc=binding['document'];child=binding['child'];pid=binding['officePid']
         self._active_target=target
-        root=self._root(child)
+        physical=(getattr(self,'_physical_file_refresh',False) and hasattr(self,'file_element') and
+            'contrast-edit' in self._identity_refs)
+        fresh=self._physical_base() if physical else None
+        root=fresh['peer'] if fresh else self._root(child)
         if not hasattr(self,'file_element'):self.file_element=self.discover_file(root)
         if getattr(self,'_identity_scope',None) is not None:
             for role,element in (('file',self.file_element),('bar',self.menu_bar_element),('peer',root)):
                 self._bind_ref(role,element)
-        element=self.file_element if target=='file' else self._find(self.file_element,target)
+        query_file=fresh['file'] if fresh else self.file_element
+        element=query_file if target=='file' else self._find(query_file,target)
         if getattr(self,'_identity_scope',None) is not None:self._bind_ref(_target_role(target),element)
         self.current_control=type('NativeMenuControl',(),{'element_info':type('Info',(),{'_element':element})()})()
         chain=[];cursor=element;file_index=bar_index=None;file_equal=peer_equal=False
@@ -1330,10 +1614,11 @@ class NativeMenuProbe(NativeControlProbe):
         else:raise AssertionError('Native menu ancestry exceeded bound')
         control=self._chrome(element);rect=control['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
         proof=self._fresh_proof(target) if getattr(self,'_uses_comparison',False) else None
-        popup=None
+        popup=None;target_point=None
         if target!='file':
             hit=self.point_snapshot(doc,point,self.current_control);popup=self.window_snapshot(hit['rootHwnd'])
             popup['ownerChain']=self._owners(popup['hwnd'],binding)
+            if hit.get('pointMethod')=='owned-popup-and-msaa-hit':target_point=hit
         attachment=self.attachment_snapshot(binding);document=self.window_snapshot(doc)
         thread=attachment['windows']['child']['threadId'];gui=self.native_focus(thread)
         permitted={0,child}
@@ -1358,6 +1643,7 @@ class NativeMenuProbe(NativeControlProbe):
             popup=popup,foreground=fg,gui=gui,focusMenuPath=focused,focusMenuElementEquals=matched)
         if proof is not None:
             result.update(identityProof=proof,barElementEquals=True,focusIdentity=getattr(self,'_focus_identity',None))
+        if target_point is not None:result['targetPointProof']=target_point
         if duplicates:
             result['shellMenuObservation']=self._shell_menu_observation(duplicates,shell_samples,binding,document['pid'])
             result['shellMenuClassification']=self._classify_shell_menus(duplicates,shell_samples,binding,shell,self.menu_bar_element)

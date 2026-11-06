@@ -325,8 +325,10 @@ class WindowsSession:
         self.process = self.api = self.engine = None
         self.hwnd = self.parent = self.child = self.office_pid = 0
         self.home_hwnd = 0
+        self.native_point_profile = False
 
     def open(self, record):
+        entry_deadline = time.monotonic() + 150
         assert os.name == 'nt' and __debug__, 'Actual Windows GUI with assertions is required'
         import windows_smoke as native
         import startup_smoke as startup
@@ -335,6 +337,8 @@ class WindowsSession:
         self.native, self.menu, self.desktop = native, menu, Desktop
         self.process = native.launch_suite(native.new_document_command(self.suite, self.module),
             self.suite, self.output, record['case'])
+        if getattr(self,'native_point_profile',False):
+            self.process.opengeul_native_menu_point_profile = True
         self.api = native.Windows()
         self.hwnd, self.parent, self.child, self.office_pid = native.verified_attachment(
             self.api, self.process, self.module)
@@ -354,7 +358,108 @@ class WindowsSession:
         self._observe_open_focus(record, 2)
         native.activate_owned_suite(self.api, self.process, self.hwnd, record)
         self._observe_open_focus(record, 3)
+        self._await_native_menu_ready(record, entry_deadline)
         self.api.require_foreground(self.hwnd)
+
+    def _await_native_menu_ready(self, record, deadline, *, probe=None, clock=None, pause=None):
+        """Observe Ready1 on the original generation within startup's remainder.
+
+        This routing hint is neither editor focus nor native menu acceptance.
+        Synchronous calls cannot guarantee a hard wall bound; late readiness is
+        rejected. No activation, input, UIA client or replacement HWND is used.
+        """
+        from types import SimpleNamespace
+        from suite_window_activation import NativeActivationProbe
+        from counted_editor_shortcuts import _same_image
+        clock=clock or time.monotonic;pause=pause or time.sleep
+        started=clock()
+        result=dict(schemaVersion=1,acceptanceEligible=0,attempted=1,completed=0,
+            stageCode=1,samples=0,ownershipChecks=0,elapsedMs=0,remainingAtStartMs=0,
+            first={},last={})
+        record['stage']='await-native-menu-ready';record['nativeMenuReadiness']=result
+        def budget():
+            if clock()>=deadline:
+                result['stageCode']=5
+                raise AssertionError('Original native startup readiness deadline expired')
+        try:
+            assert type(deadline) in (int,float) and math.isfinite(deadline)
+            result['remainingAtStartMs']=max(0,int((deadline-started)*1000))
+            budget()
+            assert 0<deadline-started<=150, 'Invalid original startup readiness remainder'
+            probe=probe if probe is not None else NativeActivationProbe(deadline,clock)
+            original=(self.process.pid,int(self.process._handle),int(self.engine.handle),self.engine.creation_time,
+                self.hwnd,self.parent,self.child,self.office_pid)
+            assert original==self._opening_focus_identity, 'Original startup readiness binding changed'
+            assert len({self.hwnd,self.parent,self.child})==3
+            shell=record['windowActivations'][0]['originalProcess']
+            archive=record['nativeArchiveGeneration']
+            opening=record['openingFocusObservations'][-1]
+            assert opening['phaseCode']==3
+            assert shell['pid']==self.process.pid and shell['handleValue']==int(self.process._handle)
+            assert 0<shell['creationTime']<=self.engine.creation_time==archive['creationTime']
+            assert archive['pid']==self.office_pid!=self.process.pid
+            assert _same_image(shell['image'],self.suite/'OpenGeul.Office.exe')
+            assert _same_image(archive['image'],self.suite/'Office/program/soffice.bin')
+            window_identity=None
+            def owned():
+                nonlocal window_identity
+                result['stageCode']=2;budget()
+                assert original==(self.process.pid,int(self.process._handle),int(self.engine.handle),self.engine.creation_time,
+                    self.hwnd,self.parent,self.child,self.office_pid), 'Original startup readiness owner changed'
+                assert self.process.poll() is None and not self.engine.exited(0)
+                assert self.api.attachment(self.hwnd)==(self.parent,self.child,self.office_pid)
+                for process,pid,handle,birth,image in (
+                    (self.process,self.process.pid,original[1],shell['creationTime'],shell['image']),
+                    (SimpleNamespace(_handle=original[2]),self.office_pid,original[2],archive['creationTime'],archive['image'])):
+                    value=probe.process_snapshot(process);budget()
+                    assert (value['pid'],value['handleValue'],value['creationTime'],value['waitResult'])==(pid,handle,birth,258)
+                    assert _same_image(value['image'],image), 'Original startup readiness image changed'
+                windows=[]
+                for hwnd,pid in ((self.hwnd,self.process.pid),(self.parent,self.process.pid),(self.child,self.office_pid)):
+                    assert probe._call(probe.user.IsWindow,hwnd)
+                    observed_pid=ctypes.c_uint32()
+                    thread=int(probe._call(probe.user.GetWindowThreadProcessId,hwnd,ctypes.byref(observed_pid)))
+                    root=int(probe._call(probe.user.GetAncestor,hwnd,2) or 0)
+                    parent=int(probe._call(probe.user.GetAncestor,hwnd,1) or 0)
+                    assert observed_pid.value==pid and thread>0 and root==self.hwnd
+                    assert probe._call(probe.user.IsWindowVisible,hwnd) and probe._call(probe.user.IsWindowEnabled,hwnd)
+                    assert not probe._call(probe.user.IsIconic,hwnd)
+                    windows.append((hwnd,pid,thread,root,parent))
+                assert windows[0][2]==windows[1][2]
+                assert (windows[0][2],windows[2][2])==(opening['hostGui']['threadId'],opening['engineGui']['threadId'])
+                assert (windows[1][4],windows[2][4])==(self.hwnd,self.parent)
+                current=tuple(windows)
+                if window_identity is None:window_identity=current
+                assert current==window_identity, 'Original startup readiness HWND thread changed'
+                assert int(probe._call(probe.user.GetForegroundWindow) or 0)==self.hwnd
+                for thread in (windows[0][2],windows[2][2]):
+                    gui=self.api.query_gui_thread_info(thread);budget()
+                    assert int(gui.hwndActive or 0)==self.hwnd
+                    assert not (int(gui.flags)&0x1e) and not gui.hwndCapture and not gui.hwndMenuOwner
+                budget();result['ownershipChecks']+=1
+            while True:
+                budget()
+                if result['samples']>=3001:
+                    result['stageCode']=6
+                    raise AssertionError('Original native readiness sample bound exhausted')
+                owned();result['stageCode']=3
+                hint=probe._call(self.api.user.GetPropW,self.hwnd,'OpenGeul.Office.NativeMenuReady')
+                assert hint is None or type(hint) is int and hint in (0,1), 'Invalid native menu readiness hint'
+                row=dict(readyHint=int(hint or 0),elapsedMs=max(0,int((clock()-started)*1000)),
+                    remainingMs=max(0,int((deadline-clock())*1000)))
+                result['samples']+=1
+                if not result['first']:result['first']=dict(row)
+                result['last']=dict(row)
+                owned();budget()
+                if hint==1:
+                    result.update(completed=1,stageCode=4)
+                    return
+                pause(min(.05,max(0,deadline-clock())))
+        finally:
+            result['elapsedMs']=max(0,int((clock()-started)*1000))
+            if type(deadline) in (int,float) and math.isfinite(deadline) and clock()>=deadline:
+                complete=result['completed'];result.update(completed=0,stageCode=5)
+                if complete:raise AssertionError('Native readiness finalization exceeded startup deadline')
 
     def _observe_open_focus(self, record, phase):
         """Three passive numeric observations; a ready hint is not editor proof.
@@ -761,6 +866,7 @@ class WindowsSession:
 
     def cleanup(self, record):
         shell_done = True
+        callback_done = True
         engine_done = engine_released = self.process is None
         if self.process is not None:
             record['forcedCleanupRequired'] = self.process.poll() is None
@@ -771,6 +877,7 @@ class WindowsSession:
             record['shellExitCode'] = self.process.poll()
             shell_done = _confirmed_shell_cleanup(record,self.process.pid,record['shellExitCode'])
             record['shellCleanupConfirmed'] = shell_done
+        engine_exit_deadline = time.monotonic() + 5
         if self.engine is not None:
             try:
                 engine_done = self.engine.exited(5)
@@ -781,7 +888,19 @@ class WindowsSession:
                 record['engineHandleReleased'] = engine_released
                 if engine_released:
                     self.engine.handle = None
-        return bool(shell_done and engine_done and engine_released and not getattr(self,'hwp_unretired',False))
+        if getattr(self,'native_point_profile',False):
+            from native_menu_msaa_hit import pending_msaa_hit
+            lease = pending_msaa_hit()
+            if lease is not None:
+                callback_done = False
+                if engine_done:
+                    try:
+                        record['nativePointCleanup'] = lease.retire(engine_exit_deadline)
+                        callback_done = lease.pending is False
+                    except BaseException:
+                        record['nativePointCleanupErrorCode'] = 1
+                record['nativePointCallbackRetired'] = callback_done
+        return bool(shell_done and engine_done and engine_released and callback_done and not getattr(self,'hwp_unretired',False))
 
 
 def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession):
@@ -855,7 +974,23 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
     return record
 
 
-def run_modules(suite, fixtures, output, *, session_factory=WindowsSession):
+def require_native_point_preflight(value):
+    """Numeric native-thread lifetime proof; never a provider/menu success."""
+    assert type(value) is dict and all(type(number) is int for number in value.values())
+    ones=('schemaVersion','diagnosticOnly','providerLocalOnly','nativeBoundaryOnly','nativeBoundaryPassed',
+        'nativeAttempted','nativeExit','threadClosed','processesClosed','workerCleanup','workerMta',
+        'comInitialized','comUninitialized','dpiEntered','dpiRestored','physicalDpiVerified',
+        'threadIdentity','callbackIdentity','exitCodeObserved')
+    zeros=('acceptanceEligible','globalHitSubstituted','synthetic','scopeId','localKnown','localMatch',
+        'workerException','pending','nativeExitCode','referencesAcquired','referencesReleased',
+        'variantAttempted','cleanupError')
+    assert all(value[key]==1 for key in ones) and all(value[key]==0 for key in zeros)
+    assert value['stageCode']==13 and value['workerStage']==8
+    assert all(value[key]>0 for key in ('controllerPid','threadId','threadBirth'))
+
+
+def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, point_preflight=None):
+    if point_preflight is not None:require_native_point_preflight(point_preflight)
     records = []
     for module in MODULES:
         record = run_case(suite, fixtures, output, module, session_factory=session_factory)
@@ -885,6 +1020,8 @@ def run_modules(suite, fixtures, output, *, session_factory=WindowsSession):
         missingModules=[module for module in MODULES if module not in counts],
         failedModules=[row['module'] for row in records if not row['success']],
         externalAcceptanceGates=list(EXTERNAL_GATES), tests=records)
+    report.update(nativePointProfileVersion=1 if point_preflight is not None else 0,
+        nativePointPreflight=point_preflight)
     with (output / 'results.json').open('x', encoding='utf-8') as stream:
         json.dump(report, stream, ensure_ascii=False, allow_nan=False, indent=2)
     return report
@@ -895,6 +1032,50 @@ def argument_parser():
     for name in ('suite', 'fixtures', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
     return parser
+
+
+def _configure_native_point_profile():
+    # Preserve the original pywinauto apartment selection before importing
+    # comtypes ourselves. Never change sys.coinit_flags or an existing apartment.
+    import pywinauto
+    import comtypes
+    import native_menu_msaa_hit as helper
+    from native_menu_controller_fence import install
+    fence = install(helper.pending_msaa_hit, enabled=True)
+    helper.configure_native_launch(pending_fence=fence.finish)
+    return fence, helper
+
+
+def _run_point_profile(suite, fixtures, output, *, setup=None):
+    """Only this dedicated CLI opts in after installing its own exit fence."""
+    fence, helper = (setup or _configure_native_point_profile)()
+    stage = 1
+    def retain(name, value):
+        raw = (json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))+'\n').encode()
+        assert len(raw) <= 64*1024
+        with (output / name).open('xb') as stream:
+            stream.write(raw)
+    try:
+        boundary = helper.verify_native_thread_boundary(time.monotonic()+5)
+        retain('native-point-preflight.json', boundary)
+        if boundary.get('nativeBoundaryPassed') != 1:
+            return 1
+        require_native_point_preflight(boundary)
+        stage = 2
+        def factory(*args):
+            session = WindowsSession(*args)
+            session.native_point_profile = True
+            return session
+        return 0 if run_modules(suite, fixtures, output, session_factory=factory,point_preflight=boundary)['success'] else 1
+    except BaseException as exc:
+        code = 2 if isinstance(exc, KeyboardInterrupt) else 3 if isinstance(exc, SystemExit) else 1 if isinstance(exc, Exception) else 4
+        retain('native-point-controller-failure.json', dict(schemaVersion=1, success=False,
+            acceptanceEligible=False, stageCode=stage, exceptionCode=code))
+        raise
+    finally:
+        # run_modules closes case/results files. Emergency records above also
+        # close first. This own-controller fence never claims owned-app cleanup.
+        fence.finish()
 
 
 def main(argv=None):
@@ -910,7 +1091,7 @@ def main(argv=None):
     assert suite != output and suite not in output.parents
     assert fixtures != output and fixtures not in output.parents
     output.mkdir(parents=True, exist_ok=False)
-    return 0 if run_modules(suite, fixtures, output)['success'] else 1
+    return _run_point_profile(suite, fixtures, output)
 
 
 if __name__ == '__main__':
