@@ -6,6 +6,7 @@ import sys
 import tempfile
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
 SOURCE=Path(__file__).resolve().parents[1]/'e2e/owned_native_menu.py'
@@ -119,6 +120,133 @@ class OwnedNativeMenuTests(unittest.TestCase):
                 m,a,p,r,c,probe=self.fixture();value=m.inspect_native_menu(a,p,11,r,gesture,probe=probe,clock=c)
                 self.assertTrue(value['success']);self.assertTrue(value['focusReturned'])
                 self.assertEqual(value['deadline'],6.)
+    def real_editor_probe(self,m,clock,*,host_focus=0,engine_focus=57):
+        probe=object.__new__(m.NativeMenuProbe);queries=[]
+        pids={11:77,55:77,56:88,57:88};threads={11:7,55:7,56:9,57:9}
+        def identity(hwnd,pointer):
+            if pointer is not None:pointer._obj.value=pids.get(hwnd,0)
+            return threads.get(hwnd,0)
+        def gui(thread,pointer):
+            queries.append(thread);state=pointer._obj
+            state.active=11 if thread==7 else 56
+            state.focus=host_focus if thread==7 else engine_focus
+            state.capture=state.menuOwner=state.flags=0
+            return 1
+        probe.clock=clock;probe.deadline=clock()+5;probe.provider_client=None
+        probe.user=NS(IsWindow=lambda hwnd:hwnd in pids,GetWindowThreadProcessId=identity,
+            GetAncestor=lambda hwnd,kind:11 if hwnd in pids else 0,
+            GetPropW=lambda hwnd,name:55 if name.endswith('ParentHwnd') else 56,
+            IsChild=lambda parent,child:(parent,child) in ((11,55),(55,56),(56,57)),GetGUIThreadInfo=gui)
+        probe.foreground=lambda:11
+        probe.window_snapshot=lambda hwnd:dict(hwnd=11,pid=77,threadId=7,rootHwnd=11,
+            forbiddenTitle='SYNTHETIC PRIVATE body must not be observed')
+        return probe,queries
+    def numeric_leaves(self,value):
+        if isinstance(value,dict):
+            for child in value.values():self.numeric_leaves(child)
+        elif isinstance(value,list):
+            for child in value:self.numeric_leaves(child)
+        else:self.assertIs(type(value),int)
+    def test_real_editor_keeps_original_host_and_engine_gui_observations_without_repair(self):
+        m,a,p,r,c,stub=self.fixture();probe,queries=self.real_editor_probe(m,c)
+        binding=dict(document=11,parent=55,child=56,officePid=88)
+        default=probe.attachment_snapshot(binding)
+        self.assertEqual(set(default),{'binding','windows','exported','valid','focusUnderOriginalChild'})
+        self.assertEqual(queries,[7]);queries.clear()
+        value=probe.editor_snapshot(binding)
+        self.assertEqual(queries,[7,9], 'Observe each existing GUI thread exactly once')
+        self.assertEqual((value['hostGui']['focusHwnd'],value['engineGui']['focusHwnd']),(0,57))
+        self.assertIs(value['focusUnderOriginalChild'],False)
+        self.assertEqual(value['focusPid'],88)
+        self.assertEqual(value['attachmentWindows'],default['windows']);self.assertEqual(value['attachmentExports'],[55,56])
+        with self.assertRaises(AssertionError):m._editor(value,binding,77)
+        numbers=m._editor_numbers(value);self.numeric_leaves(numbers)
+        self.assertNotIn('SYNTHETIC PRIVATE',str(numbers))
+    def test_initial_real_editor_guard_records_stage_and_numeric_site_before_any_input(self):
+        import numeric_notice
+        m,a,p,r,c,stub=self.fixture();probe,queries=self.real_editor_probe(m,c)
+        for name in ('process_snapshot','open_engine','engine_snapshot','close_engine','enter_dpi','restore_dpi'):
+            setattr(probe,name,getattr(stub,name))
+        try:m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+        except AssertionError as caught:expected_failure=numeric_notice.capture_failure_code(caught)
+        else:self.fail('The unchanged mixed-thread focus guard must reject the host focus')
+        value=r['nativeMenuActions'][-1]
+        self.assertEqual((value['observationStage'],value['observationPhase']),(11,1))
+        observation,=value['editorObservations']
+        self.assertEqual((observation['stageCode'],observation['phaseCode']),(11,1))
+        self.assertEqual(observation['numbers']['hostGui']['focusHwnd'],0)
+        self.assertEqual(observation['numbers']['engineGui']['focusHwnd'],57)
+        self.numeric_leaves(observation['numbers']);self.assertEqual(queries,[7,9])
+        self.assertEqual(value['pointers'],[]);self.assertEqual(value['keys'],[])
+        self.assertTrue(value['engineHandleReleased']);self.assertTrue(value['dpiScope']['restored'])
+        self.assertEqual(value['numericFailure'],expected_failure)
+        self.assertEqual(value['numericFailure']['fileCode'],numeric_notice.SOURCE_FILES['owned_native_menu.py'])
+        self.assertGreater(value['numericFailure']['line'],0)
+        self.assertNotIn('SYNTHETIC PRIVATE',str(value))
+    def test_first_file_validation_failure_retains_original_snapshot_before_pointer_creation(self):
+        import numeric_notice
+        m,a,p,r,c,probe=self.fixture();probe.bad='foreign'
+        try:m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+        except AssertionError as caught:expected_failure=numeric_notice.capture_failure_code(caught)
+        else:self.fail('The original File recipient guard must reject the foreign PID')
+        value=r['nativeMenuActions'][-1];observation=value['menuObservation']
+        self.assertEqual((value['observationStage'],observation['stageCode']),(22,22))
+        self.assertEqual(observation['snapshot']['control']['pid'],999)
+        self.assertEqual(observation['targetCode'],1)
+        self.assertEqual(value['pointers'],[]);self.assertEqual(value['keys'],[])
+        self.assertFalse(any(isinstance(row,tuple) and row[0] in ('click','key') for row in probe.calls))
+        self.assertEqual(value['editorObservations'][0]['stageCode'],12)
+        self.assertEqual(value['numericFailure'],expected_failure)
+        self.assertEqual((value['numericFailure']['exceptionCode'],value['numericFailure']['fileCode']),(1,38))
+        self.assertGreater(value['numericFailure']['line'],0)
+        self.assertTrue(value['engineHandleReleased'])
+    def test_initial_before_alt_f_and_final_editor_phases_preserve_existing_inputs(self):
+        for fail_phase in (0,2,3):
+            with self.subTest(fail_phase=fail_phase):
+                m,a,p,r,c,probe=self.fixture();original=probe.editor_snapshot;seen=[]
+                def snapshot(binding):
+                    value=original(binding);seen.append(1)
+                    if len(seen)==fail_phase:value['focusPid']=999
+                    return value
+                probe.editor_snapshot=snapshot
+                if fail_phase:
+                    with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'keyboard-escape',probe=probe,clock=c)
+                    value=r['nativeMenuActions'][-1]
+                    self.assertEqual((value['observationStage'],value['observationPhase']),(11,fail_phase))
+                else:
+                    value=m.inspect_native_menu(a,p,11,r,'keyboard-escape',probe=probe,clock=c)
+                    self.assertEqual([row['stageCode'] for row in value['editorObservations']],[12,12,12])
+                self.assertEqual([row['phaseCode'] for row in value['editorObservations']],list(range(1,len(seen)+1)))
+                keys=[row for row in probe.calls if isinstance(row,tuple) and row[0]=='key']
+                self.assertEqual(keys,[] if fail_phase==2 else [('key','ALT_F'),('key','DOWN'),('key','ESCAPE')])
+                self.assertFalse(any(isinstance(row,tuple) and row[0]=='click' for row in probe.calls))
+                self.assertEqual(value['deadline'],6.)
+                for row in value['editorObservations']:self.numeric_leaves(row['numbers'])
+    def test_failure_diagnostics_cannot_replace_the_original_primary(self):
+        import numeric_notice
+        m,a,p,r,c,probe=self.fixture();primary=AssertionError('SYNTHETIC PRIVATE primary body')
+        def snapshot(binding):raise primary
+        probe.editor_snapshot=snapshot
+        with patch.object(numeric_notice,'capture_failure_code',side_effect=RuntimeError('SYNTHETIC PRIVATE diagnostics')):
+            with self.assertRaises(AssertionError) as raised:m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+        self.assertIs(raised.exception,primary);value=r['nativeMenuActions'][-1]
+        self.assertEqual(value['numericFailureCaptureFailed'],1)
+        self.assertEqual((value['observationStage'],value['observationPhase']),(10,1))
+        self.assertEqual(value['pointers'],[]);self.assertEqual(value['keys'],[])
+        self.assertTrue(value['engineHandleReleased']);self.assertTrue(value['dpiScope']['restored'])
+        self.assertNotIn('SYNTHETIC PRIVATE',str(value))
+        m,a,p,r,c,probe=self.fixture();probe.bad='editor-foreign';captured=[]
+        def diagnostic_error(primary):
+            captured.append(primary);raise RuntimeError('SYNTHETIC PRIVATE numeric diagnostic')
+        with patch.object(m,'_editor_numbers',side_effect=ValueError('SYNTHETIC PRIVATE projection')), \
+             patch.object(numeric_notice,'capture_failure_code',side_effect=diagnostic_error):
+            with self.assertRaises(AssertionError) as raised:m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+        self.assertIs(raised.exception,captured[0]);value=r['nativeMenuActions'][-1]
+        self.assertEqual(value['editorObservations'][0]['numbersCaptureFailed'],1)
+        self.assertEqual(value['numericFailureCaptureFailed'],1)
+        self.assertEqual((value['observationStage'],value['observationPhase']),(11,1))
+        self.assertEqual(value['pointers'],[]);self.assertEqual(value['keys'],[])
+        self.assertNotIn('SYNTHETIC PRIVATE',str(value))
     def test_failed_handle_release_cannot_mark_action_successful(self):
         m,a,p,r,c,probe=self.fixture();probe.bad='release'
         with self.assertRaises(AssertionError):m.click_native_menu_action(a,p,11,r,'save',probe=probe,clock=c)

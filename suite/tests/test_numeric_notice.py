@@ -171,7 +171,7 @@ class NumericNoticeTests(unittest.TestCase):
             (('editor_click_readiness.py',34),('suite_window_activation.py',35)))
 
     def test_resolution_stages_and_owned_sources_append_without_new_wire_fields(self):
-        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[35:],
+        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[35:37],
             (('matched_plugin_diagnostic.py',36),('plugin_symbol_worker.py',37)))
         stages=('ime-compartment-select','ime-compartment-worker','ime-compartment-join')
         self.assertEqual(tuple(self.n.STAGES.items())[-3:],tuple(zip(stages,range(174,177))))
@@ -192,6 +192,32 @@ class NumericNoticeTests(unittest.TestCase):
                 self.assertEqual((notice['schemaVersion'],notice['caseCode'],notice['stageCode'],notice['fileCode']),
                     (2,17,self.n.STAGES[stage],self.n.SOURCE_FILES[name]))
                 self.assertNotIn('PRIVATE',stream.getvalue());self.assertNotIn('C:/',stream.getvalue())
+
+    def test_native_menu_source_appends_one_id_and_captures_its_actual_guard_leaf(self):
+        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[37:],(('owned_native_menu.py',38),))
+        from owned_native_menu import _editor
+        try:_editor(dict(binding={},attachmentValid=True),dict(document=11),77)
+        except AssertionError as primary:
+            before=primary.__traceback__,primary.args
+            failure=self.n.capture_failure_code(primary);frames=self.n.capture_failure_frames(primary)
+            self.assertIs(primary.__traceback__,before[0]);self.assertEqual(primary.args,before[1])
+        else:self.fail('Original native menu binding guard was not exercised')
+        expected_line=_editor.__code__.co_firstlineno+1
+        self.assertEqual(failure,dict(captured=1,exceptionCode=1,fileCode=38,line=expected_line))
+        self.assertEqual(frames,[[38,expected_line]])
+
+    def test_native_menu_failure_capture_never_reads_exception_text(self):
+        class NoStringError(Exception):
+            def __str__(self):raise AssertionError('Exception text must not be read')
+        scope=dict(error=NoStringError('SYNTHETIC PRIVATE C:/private/input'))
+        exec(compile('def leaf():\n raise error\n',str(SCRIPT.with_name('owned_native_menu.py')),'exec'),scope)
+        try:scope['leaf']()
+        except NoStringError as primary:
+            failure=self.n.capture_failure_code(primary);frames=self.n.capture_failure_frames(primary)
+        self.assertEqual(failure,dict(captured=1,exceptionCode=0,fileCode=38,line=2))
+        self.assertEqual(frames,[[38,2]])
+        serialized=json.dumps(dict(failure=failure,frames=frames))
+        self.assertNotIn('PRIVATE',serialized);self.assertNotIn('C:/',serialized)
 
     def test_actual_click_helper_leaf_frames_keep_the_original_exception_and_native_calls(self):
         import test_editor_click_readiness as clicktests
@@ -221,7 +247,7 @@ class NumericNoticeTests(unittest.TestCase):
 
     def test_new_helper_foreign_basenames_and_unknown_sources_are_rejected(self):
         for name in ('editor_click_readiness.py','suite_window_activation.py',
-                     'matched_plugin_diagnostic.py','plugin_symbol_worker.py'):
+                     'matched_plugin_diagnostic.py','plugin_symbol_worker.py','owned_native_menu.py'):
             scope={}
             exec(compile('def fail():\n raise AssertionError("synthetic")\n','/foreign/'+name,'exec'),scope)
             try:scope['fail']()
@@ -233,7 +259,8 @@ class NumericNoticeTests(unittest.TestCase):
         self.assertTrue(self.emitter.emit_case_notice('impress',record))
         value=self.decode(self.messages()[0])
         self.assertEqual((value['schemaVersion'],value['fileCode'],value['ownedFrames'][-1]),(2,35,[35,376]))
-        for change in ({'fileCode':38},{'ownedFrames':[[38,376]]}):
+        unknown=max(self.n.SOURCE_FILES.values())+1
+        for change in ({'fileCode':unknown},{'ownedFrames':[[unknown,376]]}):
             with self.subTest(change=change),self.assertRaises(ValueError):self.decode(json.dumps(value|change))
 
     def test_uno_runtime_exception_code_is_append_only_without_importing_uno(self):

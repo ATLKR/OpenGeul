@@ -33,7 +33,7 @@ SOURCE_FILES = {name: index for index, name in enumerate((
     'native31_desktop_control.py', 'native31_privacy_prepare.py', 'native31_suite_prepare.py',
     'runner-ready.py', 'policy.py', 'native_cleanup_receipt.py', 'calc_save_smoke.py',
     'editor_click_readiness.py', 'suite_window_activation.py',
-    'matched_plugin_diagnostic.py', 'plugin_symbol_worker.py'), 1)}
+    'matched_plugin_diagnostic.py', 'plugin_symbol_worker.py', 'owned_native_menu.py'), 1)}
 _ROOT_SOURCE_FILES = {'native31_desktop_control.py':'e2e/native31_desktop_control.py',
     'native31_privacy_prepare.py':'e2e/native31_privacy_prepare.py',
     'native31_suite_prepare.py':'e2e/native31_suite_prepare.py',

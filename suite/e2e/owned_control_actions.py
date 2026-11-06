@@ -459,7 +459,8 @@ class NativeControlProbe(NativeActivationProbe):
         return dict(threadId=thread,activeHwnd=int(state.active or 0),focusHwnd=focus,focusPid=int(pid.value),
             focusRootHwnd=int(self._call(self.user.GetAncestor,focus,2) or 0) if focus else 0,
             captureHwnd=int(state.capture or 0),menuOwnerHwnd=int(state.menuOwner or 0),flags=int(state.flags))
-    def attachment_snapshot(self,binding):
+    def attachment_snapshot(self,binding,*,include_gui=False):
+        assert type(include_gui) is bool
         rows={}
         for role in ('document','parent','child'):
             hwnd=binding[role];self._required(self._call(self.user.IsWindow,hwnd),'Original attachment '+role)
@@ -471,8 +472,10 @@ class NativeControlProbe(NativeActivationProbe):
         valid=(rows['parent']['pid']==rows['document']['pid'] and rows['child']['pid']==binding['officePid']
             and all(row['threadId']>0 and row['rootHwnd']==doc for row in rows.values()) and exported==[parent,child]
             and bool(self._call(self.user.IsChild,doc,parent)) and bool(self._call(self.user.IsChild,parent,child)))
-        return dict(binding=dict(binding),windows=rows,exported=exported,valid=bool(valid),
+        value=dict(binding=dict(binding),windows=rows,exported=exported,valid=bool(valid),
             focusUnderOriginalChild=bool(focus and (focus==child or self._call(self.user.IsChild,child,focus))))
+        if include_gui:value['hostGui']=gui
+        return value
     def target_snapshot(self,api,document,control,dialog,purpose,*,operation='keyboard'):
         assert operation in ('pointer','keyboard'), 'Unsupported owned control snapshot operation'
         uia=self.uia;element=self._call(lambda:control.element_info._element)

@@ -140,6 +140,27 @@ def _editor(snapshot,binding,shell_pid):
     fg=snapshot['foreground'];assert (fg['hwnd'],fg['rootHwnd'],fg['pid'])==(binding['document'],binding['document'],shell_pid), 'Original editor is not the foreground recipient'
 
 
+def _editor_numbers(snapshot):
+    """Project already observed fixed native fields; no new query or raw text."""
+    def fields(value,names):
+        return {key:value[key] for key in names if type(value) is dict and
+            type(value.get(key)) is int and 0<=value[key]<2**64}
+    gui=('threadId','activeHwnd','focusHwnd','focusPid','focusRootHwnd','captureHwnd','menuOwnerHwnd','flags')
+    window=('hwnd','pid','threadId','rootHwnd')
+    attachment=dict(binding=fields(snapshot.get('binding'),('document','parent','child','officePid')),
+        windows={role:fields(snapshot.get('attachmentWindows',{}).get(role),window)
+            for role in ('document','parent','child')})
+    for source,target in (('attachmentValid','valid'),('focusUnderOriginalChild','focusUnderOriginalChild')):
+        if type(snapshot.get(source)) is bool:attachment[target]=int(snapshot[source])
+    exported=snapshot.get('attachmentExports')
+    if type(exported) is list and len(exported)==2 and all(type(n) is int and 0<=n<2**64 for n in exported):
+        attachment['exported']=list(exported)
+    state=fields(snapshot,('focusPid','focusRootHwnd','captureHwnd','menuOwnerHwnd'))
+    if type(snapshot.get('menuClosed')) is bool:state['menuClosed']=int(snapshot['menuClosed'])
+    return dict(hostGui=fields(snapshot.get('hostGui'),gui),engineGui=fields(snapshot.get('engineGui'),gui),
+        foreground=fields(snapshot.get('foreground'),window),attachment=attachment,editor=state)
+
+
 def retain_native_menu_receipt(process,value):
     raw=(json.dumps(value,ensure_ascii=False,allow_nan=False,separators=(',',':'))+'\n').encode()
     assert len(raw)<=CAP, 'Native menu receipt exceeded finite bound'
@@ -195,11 +216,28 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             assert api.attachment(document)==(parent,child,pid)
         def observe(target,*,enabled=True):
             while True:
+                measured=dict(stageCode=20,targetCode=tuple(LABELS).index(target)+1)
+                value.update(menuObservation=measured,observationStage=20,observationPhase=0)
                 continuity()
+                measured['stageCode']=21;value['observationStage']=21
                 try:row=probe.snapshot(binding,target)
                 except NativeMenuPending:
                     budget();time.sleep(min(.01,max(0,deadline-clock())));continue
-                _validate(row,binding,process.pid,target,enabled=enabled);return row
+                measured.update(stageCode=22,snapshot=row);value['observationStage']=22
+                _validate(row,binding,process.pid,target,enabled=enabled)
+                measured['stageCode']=23;value['observationStage']=23
+                return row
+        def editor(phase):
+            measured=dict(phaseCode=phase,stageCode=10)
+            value.setdefault('editorObservations',[]).append(measured)
+            value.update(observationStage=10,observationPhase=phase)
+            row=probe.editor_snapshot(binding)
+            measured['stageCode']=11;value['observationStage']=11
+            try:measured['numbers']=_editor_numbers(row)
+            except BaseException:measured['numbersCaptureFailed']=1
+            _editor(row,binding,process.pid)
+            measured['stageCode']=12;value['observationStage']=12
+            return row
         def pointer(target):
             row=observe(target);anchor=_validate(row,binding,process.pid,target)
             rect=row['control']['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
@@ -218,14 +256,14 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             assert item['inputCallAttempts']==1 and item['requestedInputs']==item['insertedInputs']==2
         def keyboard(shortcut):
             if shortcut=='ALT_F':
-                before=observe('file');editor=probe.editor_snapshot(binding);_editor(editor,binding,process.pid)
+                before=observe('file');editor_before=editor(2)
             else:
-                before=observe('save');_keyboard_recipient(before,binding,process.pid);editor=None
-            continuity();item=dict(shortcut=shortcut,before=before,editorBefore=editor);value['keys'].append(item);retain()
+                before=observe('save');_keyboard_recipient(before,binding,process.pid);editor_before=None
+            continuity();item=dict(shortcut=shortcut,before=before,editorBefore=editor_before);value['keys'].append(item);retain()
             probe.keyboard(binding,shortcut,item);budget()
             assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
             assert item['inputCallAttempts']==1 and item['requestedInputs']==item['insertedInputs']==KEY_COUNTS[shortcut]
-        if gesture:_editor(probe.editor_snapshot(binding),binding,process.pid)
+        if gesture:editor(1)
         if operation=='keyboard-escape':
             keyboard('ALT_F');observe('save');keyboard('DOWN');keyboard('ESCAPE')
         else:
@@ -247,11 +285,16 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 if operation.startswith('new-') and operation!='new-hwp':pointer('new')
                 pointer(operation)
         if gesture:
-            continuity();focus=probe.editor_snapshot(binding);_editor(focus,binding,process.pid)
+            continuity();focus=editor(3)
             value.update(focusReturned=True,focusAfter=focus)
         value['inputVerified']=True;budget()
     except BaseException as exc:
-        primary=exc;value['failureType']=type(exc).__name__;raise
+        primary=exc;value['failureType']=type(exc).__name__
+        try:
+            import numeric_notice
+            value['numericFailure']=numeric_notice.capture_failure_code(exc)
+        except BaseException:value['numericFailureCaptureFailed']=1
+        raise
     finally:
         errors=[]
         if handle is not None:
@@ -689,11 +732,12 @@ class NativeMenuProbe(NativeControlProbe):
             shellMenuCount=shell_bars,nativeMenuBarCount=native_bars,
             previewIndicatorCount=len(indicators),previewIndicator=indicators[0] if indicators else None)
     def editor_snapshot(self,binding):
-        attachment=self.attachment_snapshot(binding);thread=attachment['windows']['child']['threadId'];gui=self.native_focus(thread)
+        attachment=self.attachment_snapshot(binding,include_gui=True);thread=attachment['windows']['child']['threadId'];gui=self.native_focus(thread)
         return dict(binding=dict(binding),attachmentValid=attachment['valid'],focusPid=gui['focusPid'],
             foreground=self.window_snapshot(self.foreground()),
             focusRootHwnd=gui['focusRootHwnd'],focusUnderOriginalChild=attachment['focusUnderOriginalChild'],
-            captureHwnd=gui['captureHwnd'],menuOwnerHwnd=gui['menuOwnerHwnd'],menuClosed=not gui['captureHwnd'] and not gui['menuOwnerHwnd'])
+            captureHwnd=gui['captureHwnd'],menuOwnerHwnd=gui['menuOwnerHwnd'],menuClosed=not gui['captureHwnd'] and not gui['menuOwnerHwnd'],
+            hostGui=attachment['hostGui'],engineGui=gui,attachmentWindows=attachment['windows'],attachmentExports=attachment['exported'])
     def keyboard(self,binding,shortcut,receipt):
         from ascii_editor_input import input_buffer
         events=_menu_key_events(shortcut)
