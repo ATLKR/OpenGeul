@@ -162,13 +162,13 @@ public sealed class OwnedEditorFocus : IDisposable
                 if (!InitialFocusPending) return new(false, false, "initialAlreadyHandled", before, null, 0, 0);
                 try { ValidateIdentity(before); }
                 catch { initialFocusHandled = true; throw; }
+                if (before.Foreground != before.Form)
+                    throw new InvalidOperationException("Initial focus requires the exact foreground document");
                 if (OtherOwnedControlFocused(before))
                 {
                     initialFocusHandled = true;
                     return new(false, false, "initialSelectedControl", before, null, 0, 0);
                 }
-                if (before.Foreground != before.Form)
-                    throw new InvalidOperationException("Initial focus requires the exact foreground document");
             }
             Ready(before);
             if (EditorFocused(before))

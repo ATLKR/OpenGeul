@@ -130,6 +130,63 @@ internal static class OwnedEditorFocusTests
             Check(Pending(route), "Inactive initial request was consumed");
             Check(Initial(route, true).Verified && native.Sets == 1 && !Pending(route), "Later guarded activation did not finish the initial request");
         });
+        yield return Test("Foreign foreground keeps a stale owned control pending until one guarded activation", () =>
+        {
+            foreach (var available in new[] { false, true })
+            {
+                var native = new FocusNative(); using var route = new OwnedEditorFocus(native, "engine");
+                var safe = native.State; var selected = safe.Panel with { Hwnd = 13, ClassName = "EDIT" };
+                native.State = safe with { Focus = selected, EditorFocus = selected,
+                    Foreground = safe.Foreground with { Hwnd = 90, Pid = 9, ThreadId = 99, Root = 90 } };
+                for (var observation = 0; observation < 2; observation++)
+                {
+                    var result = Initial(route, available);
+                    Check(!result.Verified && !result.Attempted && result.Before is not null &&
+                        result.Reason == "initialPending" && Pending(route) && native.Sets == 0,
+                        "Background owned control observation consumed the initial request");
+                }
+                native.State = safe;
+                var callbacks = new List<Action>(); var reports = new List<EditorFocusResult>();
+                Check(Queue(route, callbacks.Add, () => true, reports.Add), "Later activation could not queue the pending request");
+                callbacks[0](); callbacks[0]();
+                Check(reports.Count == 1 && reports[0].Verified && native.Sets == 1 && !Pending(route),
+                    "Later activation was not a single verified initial handoff");
+                Check(!Initial(route, true).Attempted && native.Sets == 1, "Initial handoff repeated after activation");
+            }
+        });
+        yield return Test("Returning foreground to another selected owned control cancels without focus transfer", () =>
+        {
+            var native = new FocusNative(); using var route = new OwnedEditorFocus(native, "engine");
+            var safe = native.State; var selected = safe.Panel with { Hwnd = 13, ClassName = "EDIT" };
+            var activeSelection = safe with { Focus = selected, EditorFocus = selected };
+            native.State = activeSelection with { Foreground = safe.Foreground with { Hwnd = 90, Pid = 9 } };
+            Check(!Initial(route, false).Attempted && Pending(route) && native.Sets == 0,
+                "Background selected control consumed the pending request");
+            native.State = activeSelection;
+            var result = Initial(route, true);
+            Check(!result.Verified && !result.Attempted && !Pending(route) && native.Sets == 0,
+                "Active selected control did not cancel the automatic handoff");
+            native.State = safe;
+            Check(!Initial(route, true).Attempted && native.Sets == 0, "Host return overwrote the selected control");
+        });
+        yield return Test("Foreign foreground never preserves an invalid original attachment", () =>
+        {
+            foreach (var mutate in new Func<EditorFocusSnapshot, EditorFocusSnapshot>[] {
+                s => s with { Engine = s.Engine with { CreationTime = 201 } },
+                s => s with { Child = s.Child with { ThreadId = 99 } },
+                s => s with { RegisteredChild = 99 } })
+            {
+                var native = new FocusNative(); using var route = new OwnedEditorFocus(native, "engine");
+                var safe = native.State; var selected = safe.Panel with { Hwnd = 13, ClassName = "EDIT" };
+                native.State = mutate(safe with { Focus = selected, EditorFocus = selected,
+                    Foreground = safe.Foreground with { Hwnd = 90, Pid = 9 } });
+                var result = Initial(route, false);
+                Check(!result.Verified && !result.Attempted && !Pending(route) && native.Sets == 0,
+                    "Invalid attachment was preserved behind the foreground guard");
+                native.State = safe;
+                Check(!Initial(route, true).Attempted && native.Sets == 0, "Cancelled attachment was retried");
+            }
+        });
         yield return Test("Initial focus cancels replaced attachment or another selected control", () =>
         {
             var mutations = new Func<EditorFocusSnapshot, EditorFocusSnapshot>[] {
@@ -408,13 +465,13 @@ internal static class OwnedEditorFocusTests
             var result = route.Route(OwnedEditorFocus.CtrlF6, 10, true);
             Check(!result.Verified && !result.Attempted && native.Sets == 0 && native.Disposals == 1, "Manual focus used a disposed lease");
         });
-        yield return Test("An agreed owned control selection cancels even while transfer guards are blocked", () =>
+        yield return Test("An agreed control in the exact active document cancels while transfer guards are blocked", () =>
         {
             var blocks = new Func<EditorFocusSnapshot, EditorFocusSnapshot>[] {
                 s => s with { Capture = s.Focus }, s => s with { EditorCapture = s.EditorFocus },
                 s => s with { HostMenuOwner = s.Child.Hwnd }, s => s with { EditorMenuOwner = s.Child.Hwnd },
-                s => s with { Form = s.Form with { Enabled = false } },
-                s => s with { Foreground = s.Foreground with { Hwnd = 90, Pid = 9 } } };
+                s => s with { Form = s.Form with { Enabled = false },
+                    Foreground = s.Foreground with { Enabled = false } } };
             foreach (var block in blocks)
             {
                 var native = new FocusNative(); using var route = new OwnedEditorFocus(native, "engine");
