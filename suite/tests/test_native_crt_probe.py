@@ -594,8 +594,26 @@ int WideCharToMultiByte(unsigned,int,const wchar_t* w,int n,char* out,int,void*,
 class NativeSerializerFixtureTests(unittest.TestCase):
     """Portable controls for the test-only native compiler boundary."""
     def setUp(self):
-        environment=mock.patch.dict(os.environ,{'SERIALIZER_TEST_ONLY':'1'},clear=True)
+        environment=mock.patch.object(os,'environ',{'SERIALIZER_TEST_ONLY':'1'})
         environment.start();self.addCleanup(environment.stop)
+
+    def test_fixture_isolation_never_reads_original_mapping_and_restores_identity(self):
+        attempts=[]
+        class UnreadableEnvironment:
+            def forbidden(self,*args,**options):
+                attempts.append(1);raise AssertionError('Original environment access is forbidden')
+            copy=__iter__=__getitem__=keys=items=get=__contains__=__len__=__str__=__repr__=forbidden
+        original=os.environ;sentinel=UnreadableEnvironment()
+        with mock.patch.object(os,'environ',sentinel):
+            fixture=NativeSerializerFixtureTests()
+            try:
+                fixture.setUp()
+                self.assertTrue(type(os.environ) is dict)
+                self.assertEqual(os.environ.get('SERIALIZER_TEST_ONLY'),'1')
+                self.assertEqual(len(os.environ),1);self.assertEqual(len(attempts),0)
+            finally:fixture.doCleanups()
+            self.assertTrue(os.environ is sentinel)
+        self.assertTrue(os.environ is original);self.assertEqual(len(attempts),0)
 
     def helper(self, name):
         self.assertTrue(callable(globals().get(name)), 'Missing native serializer boundary: '+name)
