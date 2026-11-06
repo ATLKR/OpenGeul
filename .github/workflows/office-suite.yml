@@ -83,10 +83,16 @@ jobs:
             $afterCapabilityExit = $LASTEXITCODE
           } catch { Write-Host 'After unit capability receipt failed.' }
         }
+        $shellExit = 1
+        $shellFailure = $null
+        try {
+          dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+          $shellExit = $LASTEXITCODE
+        } catch { $shellFailure = $_ }
         if ($null -ne $unitFailure) { throw $unitFailure }
         if ($unitExit -ne 0) { throw 'Suite unit tests failed.' }
-        dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
-        if ($LASTEXITCODE -ne 0) { throw 'Suite shell tests failed.' }
+        if ($null -ne $shellFailure) { throw $shellFailure }
+        if ($shellExit -ne 0) { throw 'Suite shell tests failed.' }
         if ($beforeCapabilityExit -ne 0 -or $afterCapabilityExit -ne 0) { throw 'Suite unit capability receipts failed.' }
     - name: 고정 버전의 패키지 경로 선택
       shell: pwsh
@@ -409,12 +415,34 @@ jobs:
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance'"
       shell: pwsh
       run: |
+        $ErrorActionPreference = 'Stop'
+        if ('${{ steps.native-menu-ui.outcome }}' -ceq 'skipped') {
+          $architecture = '${{ matrix.architecture }}'
+          $runId = 0L
+          $runAttempt = 0
+          if ($env:GITHUB_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or
+              -not [long]::TryParse($env:GITHUB_RUN_ID, [ref]$runId) -or $runId -le 0 -or
+              -not [int]::TryParse($env:GITHUB_RUN_ATTEMPT, [ref]$runAttempt) -or $runAttempt -le 0 -or
+              $architecture -cnotin @('x64', 'arm64')) { throw 'Invalid native menu non-execution identity.' }
+          if (-not (Test-Path -LiteralPath '.work')) {
+            New-Item -ItemType Directory -Path '.work' | Out-Null
+          }
+          $work = Get-Item -LiteralPath '.work' -Force
+          if (-not $work.PSIsContainer -or ($work.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Native menu non-execution receipt requires an ordinary work directory.'
+          }
+          $receipt = [ordered]@{schemaVersion=1; kind='native-menu-not-executed'; success=$false;
+            acceptanceEligible=$false; nativeMenuExecuted=$false; prerequisiteCode=1;
+            sourceCommit=$env:GITHUB_SHA; runId=$runId; runAttempt=$runAttempt; architecture=$architecture}
+          $receipt | ConvertTo-Json -Compress | Out-File -LiteralPath '.work/suite-native-menu-archive-integrity.json' -NoClobber -Encoding utf8
+          throw 'Native menu UI not executed: prerequisites unavailable.'
+        }
         python suite/e2e/native_menu_archive_completeness.py --workspace . --suite "$env:SUITE_PACKAGE" --output .work/suite-native-menu-archive-integrity.json
         if ($LASTEXITCODE -ne 0) { throw 'Native menu original generation or graceful shutdown archive is incomplete.' }
         if ('${{ steps.native-menu-ui.outcome }}' -cne 'success') { throw 'Native menu UI verification did not pass.' }
     - name: native 메뉴 숫자 기록·빈 문서 상단 화면 별도 보존
       id: native-menu-evidence
-      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && steps.native-menu-ui.outcome != 'skipped'"
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (steps.native-menu-ui.outcome != 'skipped' || steps.native-menu-archive-integrity.outcome != 'skipped')"
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: opengeul-suite-native-menu-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}

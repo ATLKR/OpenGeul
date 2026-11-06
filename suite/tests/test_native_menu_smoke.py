@@ -217,8 +217,11 @@ class NativeMenuSmokeTests(unittest.TestCase):
         self.assertEqual(record['errorType'], 'AssertionError')
 
     def finish_session(self, module):
-        folder = self.enterContext(tempfile.TemporaryDirectory())
-        session = self.smoke.WindowsSession(Path('/suite'), Path('/fixtures'), Path(folder), module)
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        suite, fixtures, output = (folder / name for name in ('Suite 한글', 'fixtures', 'output'))
+        for path in (suite, fixtures, output):
+            path.mkdir()
+        session = self.smoke.WindowsSession(suite, fixtures, output, module)
         calls, live = [], {9, 11, 13}
         session.hwnd, session.parent, session.child, session.office_pid, session.home_hwnd = 11, 12, 13, 88, 9
         session.process = SimpleNamespace(pid=77, returncode=None)
@@ -263,6 +266,16 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 GetPropW=lambda h, name: (12 if name.endswith('ParentHwnd') else 13) if h == 11 else 0))
         session._cancel_calc_exit = lambda record, **kwargs: calls.append(('cancel-exit',)) or True
         return session, calls
+
+    def test_finish_fixture_roots_are_absolute_resolved_owned_siblings(self):
+        session, _ = self.finish_session('calc')
+        for path in (session.suite, session.fixtures, session.output):
+            self.assertTrue(path.is_absolute(), 'Real freeze boundary requires a drive-qualified absolute fixture')
+            self.assertEqual(path, path.resolve())
+            self.assertTrue(path.is_dir())
+            self.assertEqual(path.parent, session.output.parent,
+                'Suite, fixtures and output must belong to the same temporary test root')
+        self.assertEqual(len({session.suite, session.fixtures, session.output}), 3)
 
     def test_writer_home_command_closes_only_original_document_then_same_home_is_closed(self):
         session, calls = self.finish_session('writer'); record = {}

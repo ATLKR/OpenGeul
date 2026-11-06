@@ -5,7 +5,7 @@
 **Goal:** One native Office menu surface with required integration and explicit session failure.
 
 **Architecture:** Prepare the retained native frame's real menubar, including
-transient OpenGeul Home/New HWP entries. Remove the host File strip entirely;
+packaged native OpenGeul Home/New HWP entries. Remove the host File strip entirely;
 keep shell-owned document transactions behind native commands.
 
 **Tech Stack:** Python/PyUNO, C# .NET8 WinForms/Core, existing Windows E2E.
@@ -41,7 +41,7 @@ status independently. Native events add home/exit and exact new/hwp permission.
 - [x] Observe failing readiness, ownership, UI configuration, unsupported alias,
   routing and failure-after-edit tests against real worker/dispatcher code.
 - [x] Prepare the native menubar once, validate the actual frame/resource/File
-  command set and transient Home/HWP settings, then observe passively.
+  command set and branded Home/HWP defaults, then observe passively.
 - [x] Set four Tabbed HasMenubar flags; retain other modes and all formatting.
 - [x] Preserve close/save/Calc/Base transactions and run targeted tests/review.
 
@@ -79,3 +79,17 @@ related tests, office-suite.yml and suite/README.md.
   rerun affected checks after review fixes before a final authorized Windows run.
 - [ ] Report exact-source run outcomes/screenshots or the exact blocker, keeping
   old RC failures and unintegrated proposals out of new success claims.
+
+## Review follow-up after the first Windows run
+
+- Preserve baseline6a6695f and its actual Windows fixture failure separately.
+- Use absolute, owned temporary test roots on Windows.
+- Preserve C# execution and explicit menu-not-executed failure evidence even if
+  Python prerequisites fail; neither failure may qualify delivery.
+- Allow normal same-owned-frame controller changes and native display modes.
+  Keep foreign ownership, model, resource and dispatcher failures fatal.
+- Brand the six default menu XML resources so normal native wrapper recreation
+  retains Home/HWP without polling-time writes or lost native functionality.
+- Verify complete live menu observations across a bounded view/resource change;
+  do not turn a legitimately disposed old wrapper into a permanent failure.
+- Actual preview/full-screen round-trip UI behavior still needs Windows evidence.

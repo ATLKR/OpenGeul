@@ -15,6 +15,10 @@ OPEN = {'swriter': '.uno:OpenFromWriter', 'scalc': '.uno:OpenFromCalc',
         'smath': '.uno:Open', 'sdatabase': '.uno:Open'}
 
 
+class DisposedException(RuntimeError):
+    """Canonical exception double returned by the public UNO class lookup."""
+
+
 class Menu:
     def __init__(self, commands, *, popup=False):
         self.commands = list(commands)
@@ -30,22 +34,6 @@ class Menu:
     def getPopupMenu(self, item): return self.popups.get(item)
 
 
-class Settings:
-    def __init__(self, items): self.items = list(items)
-    def getCount(self): return len(self.items)
-    def getByIndex(self, index): return self.items[index]
-    def insertByIndex(self, index, item):
-        if len(item) == 2 and item[0] == '[]com.sun.star.beans.PropertyValue':
-            item = item[1]  # Simulate marshaling an explicitly typed PyUNO Any.
-        self.items.insert(index, item)
-
-
-def descriptor(command, nested=None):
-    props = [NS(Name='CommandURL', Value=command), NS(Name='Label', Value=command), NS(Name='Type', Value=0)]
-    if nested is not None: props.append(NS(Name='ItemDescriptorContainer', Value=nested))
-    return tuple(props)
-
-
 class NativeMenuTests(unittest.TestCase):
     def fixture(self, module='swriter', *, peer=None, frame=None, document=None):
         self.assertTrue((WORKER / 'native_menu.py').is_file(),
@@ -58,23 +46,17 @@ class NativeMenuTests(unittest.TestCase):
         document = NS() if document is None else document
         controller = NS()
         router = DispatchRouter(lambda *a: self.fail('Readiness must never dispatch a document action'))
-        file_menu = Menu(('.uno:AddDirect', OPEN[module], '.uno:Save', '.uno:SaveAs', '.uno:CloseDoc', '.uno:Quit'), popup=True)
+        file_menu = Menu(('vnd.opengeul.office:new-hwp', '.uno:StartModule', '.uno:AddDirect', OPEN[module],
+                          '.uno:Save', '.uno:SaveAs', '.uno:CloseDoc', '.uno:Quit'), popup=True)
         bar = Menu(('.uno:PickList', '.uno:EditMenu', '.uno:FormatMenu'))
         bar.popups[1] = file_menu
         element = NS(Frame=frame, ResourceURL='private:resource/menubar/menubar', Type=1,
                      getRealInterface=lambda: bar)
-        nested = Settings(descriptor(command) for command in file_menu.commands)
-        settings = Settings([descriptor('.uno:PickList', nested), descriptor('.uno:EditMenu'), descriptor('.uno:FormatMenu')])
-        element.getSettings = lambda writable: settings
-        element.persistent = True
-        element.getPropertyValue = lambda name: element.persistent
-        def property_value(name, value):
-            calls.append(('element-property', name, value)); element.persistent = value
-        element.setPropertyValue = property_value
-        def set_settings(value):
-            calls.append(('settings', value))
-            file_menu.commands = [next((p.Value for p in row if p.Name == 'CommandURL'), '') for row in nested.items]
-        element.setSettings = set_settings
+        def configuration_write(*args):
+            calls.append(('settings',))
+            self.fail('A native menu observer must not read/write configuration or transient settings')
+        element.getSettings = element.setSettings = configuration_write
+        element.getPropertyValue = element.setPropertyValue = configuration_write
         layout = NS(visible=True, shown=True, element=element)
         def show(name):
             calls.append(('show', name)); return layout.shown
@@ -93,11 +75,12 @@ class NativeMenuTests(unittest.TestCase):
         document.getCurrentController = lambda: controller
         backend = NS(frame=frame, peer=peer, document=document, interceptor=router,
                      module_factory='private:factory/' + module,
-                     uno=NS(createUnoStruct=lambda name: NS(), Any=lambda name, value: value))
+                     uno=NS(createUnoStruct=lambda name: NS(),
+                            getClass=lambda name: DisposedException if name == 'com.sun.star.lang.DisposedException' else None))
         guard = module_api.NativeMenuSurface(backend)
         return NS(guard=guard, backend=backend, frame=frame, peer=peer, document=document,
                   controller=controller, layout=layout, element=element, bar=bar,
-                  popup=file_menu, calls=calls, settings=settings, nested=nested)
+                  popup=file_menu, calls=calls)
 
     def test_each_real_module_file_command_set_prepares_without_dispatching(self):
         for module in OPEN:
@@ -113,15 +96,169 @@ class NativeMenuTests(unittest.TestCase):
         self.assertEqual('native_menu_unavailable', caught.exception.code)
         return caught.exception
 
+    def replacement_view(self, f):
+        controller = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+        bar = Menu(list(f.bar.commands))
+        bar.popups[1] = Menu(list(f.popup.commands), popup=True)
+        element = NS(Frame=f.frame, ResourceURL='private:resource/menubar/menubar', Type=1,
+                     getRealInterface=lambda: bar)
+        return controller, element
+
+    def replace_view(self, f, view):
+        controller, element = view
+        f.frame.getController = f.document.getCurrentController = lambda: controller
+        f.layout.element = element
+
+    def test_menu_wrapper_replacement_after_owner_sample_is_reobserved_once(self):
+        for outcome in ('null', 'disposed'):
+            with self.subTest(outcome=outcome):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend)); f.calls.clear()
+                replacement = self.replacement_view(f); reads = []
+                def old_menu():
+                    reads.append('old'); self.replace_view(f, replacement)
+                    if outcome == 'disposed': raise DisposedException('Synthetic old menu disposed')
+                    return None
+                f.element.getRealInterface = old_menu
+                self.assertTrue(f.guard.ready(f.backend))
+                self.assertEqual(reads, ['old'])
+                self.assertEqual(sum(row[0] == 'query' for row in f.calls), 8)
+                self.assertFalse(any(row[0] in ('show', 'settings') for row in f.calls))
+                self.assertIsNone(f.guard.failure)
+
+    def test_stable_unavailable_wrapper_is_not_retried(self):
+        for outcome in ('null', 'disposed'):
+            with self.subTest(outcome=outcome):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend)); reads = []
+                primary = DisposedException('Synthetic stable menu disposed')
+                def old_menu():
+                    reads.append('old')
+                    if outcome == 'disposed': raise primary
+                    return None
+                f.element.getRealInterface = old_menu
+                error = self.assertUnavailable(lambda: f.guard.ready(f.backend))
+                self.assertEqual(reads, ['old'])
+                if outcome == 'disposed': self.assertIs(error.__cause__, primary)
+
+    def test_unknown_transport_error_is_fatal_even_when_the_view_changes(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend)); reads = []
+        replacement = self.replacement_view(f); primary = RuntimeError('Synthetic unknown transport error')
+        def old_menu():
+            reads.append('old'); self.replace_view(f, replacement); raise primary
+        f.element.getRealInterface = old_menu
+        error = self.assertUnavailable(lambda: f.guard.ready(f.backend))
+        self.assertIs(error.__cause__, primary)
+        self.assertEqual(reads, ['old'])
+
+    def test_replaced_menu_epoch_cannot_hide_foreign_owners_resource_or_dispatch(self):
+        for changed in ('anchor', 'controller', 'resource', 'type', 'dispatch'):
+            with self.subTest(changed=changed):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+                replacement = self.replacement_view(f)
+                def old_menu():
+                    self.replace_view(f, replacement)
+                    if changed == 'anchor': f.backend.interceptor = object()
+                    elif changed == 'controller': replacement[0].getModel = lambda: object()
+                    elif changed == 'resource': replacement[1].Frame = object()
+                    elif changed == 'type': replacement[1].Type = 3
+                    else: f.frame.queryDispatch = lambda *args: NS(dispatch=lambda *args: None)
+                    return None
+                f.element.getRealInterface = old_menu
+                self.assertUnavailable(lambda: f.guard.ready(f.backend))
+
+    def test_second_menu_epoch_change_is_fatal_without_a_third_whole_read(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend)); reads = []
+        second, third = self.replacement_view(f), self.replacement_view(f)
+        def old_menu():
+            reads.append('first'); self.replace_view(f, second); return None
+        def second_menu():
+            reads.append('second'); self.replace_view(f, third); return None
+        f.element.getRealInterface = old_menu
+        second[1].getRealInterface = second_menu
+        third[1].getRealInterface = lambda: self.fail('A third whole menu read must never occur')
+        self.assertUnavailable(lambda: f.guard.ready(f.backend))
+        self.assertEqual(reads, ['first', 'second'])
+
+    def test_change_between_candidate_epoch_and_second_read_is_fatal(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend)); reads = []
+        second, third = self.replacement_view(f), self.replacement_view(f)
+        def old_menu():
+            self.replace_view(f, second); return None
+        def element(name):
+            reads.append('element')
+            if len(reads) == 2:
+                self.replace_view(f, third)
+                return second[1]
+            return f.layout.element
+        f.element.getRealInterface = old_menu
+        f.layout.getElement = element
+        third[1].getRealInterface = lambda: self.fail('A candidate epoch cannot be silently replaced')
+        self.assertUnavailable(lambda: f.guard.ready(f.backend))
+        self.assertEqual(len(reads), 2)
+
+    def test_second_observation_end_resource_lookup_cannot_hide_a_third_epoch(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend)); reads = []
+        second, third = self.replacement_view(f), self.replacement_view(f)
+        def old_menu():
+            self.replace_view(f, second); return None
+        def element(name):
+            reads.append('element')
+            if len(reads) == 4:
+                self.replace_view(f, third)
+                return second[1]
+            return f.layout.element
+        f.element.getRealInterface = old_menu
+        f.layout.getElement = element
+        third[1].getRealInterface = lambda: self.fail('A third whole menu observation must never occur')
+        self.assertUnavailable(lambda: f.guard.ready(f.backend))
+        self.assertEqual(len(reads), 4)
+
+    def test_completed_menu_read_with_changed_end_epoch_is_reobserved_once(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend)); f.calls.clear()
+        replacement = self.replacement_view(f); changed = []
+        original_query = f.frame.queryDispatch
+        def query(url, *args):
+            result = original_query(url, *args)
+            if url.Complete == '.uno:Quit' and not changed:
+                changed.append(True); self.replace_view(f, replacement)
+            return result
+        f.frame.queryDispatch = query
+        self.assertTrue(f.guard.ready(f.backend))
+        self.assertEqual(sum(row[0] == 'query' for row in f.calls), 16)
+        self.assertFalse(any(row[0] in ('show', 'settings') for row in f.calls))
+
+    def test_disposal_class_name_without_the_canonical_uno_type_is_not_recoverable(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+        replacement = self.replacement_view(f)
+        primary = type('DisposedException', (RuntimeError,), {})('Synthetic impostor exception')
+        def old_menu():
+            self.replace_view(f, replacement); raise primary
+        f.element.getRealInterface = old_menu
+        error = self.assertUnavailable(lambda: f.guard.ready(f.backend))
+        self.assertIs(error.__cause__, primary)
+
+    def test_disposal_of_fixed_frame_or_actual_dispatch_is_not_retried(self):
+        for stage in ('manager', 'dispatch'):
+            with self.subTest(stage=stage):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend)); reads = []
+                replacement = self.replacement_view(f); primary = DisposedException('Synthetic fixed owner failure')
+                def failure(*args):
+                    reads.append(stage); self.replace_view(f, replacement); raise primary
+                if stage == 'manager': f.frame.getPropertyValue = failure
+                else: f.frame.queryDispatch = failure
+                error = self.assertUnavailable(lambda: f.guard.ready(f.backend))
+                self.assertIs(error.__cause__, primary)
+                self.assertEqual(reads, [stage])
+
     def test_passive_loss_is_fatal_and_never_repeats_show_or_rebinds(self):
         f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
-        f.layout.visible = False
+        original = f.layout.element
+        f.layout.element = None
         failure = self.assertUnavailable(lambda: f.guard.ready(f.backend))
-        f.layout.visible = True
+        f.layout.element = original
         self.assertIs(failure, self.assertUnavailable(lambda: f.guard.ready(f.backend)))
         self.assertIs(failure, self.assertUnavailable(lambda: f.guard.prepare(f.backend)))
         self.assertEqual(sum(c[0] == 'show' for c in f.calls), 1)
-        self.assertEqual(sum(c[0] == 'settings' for c in f.calls), 1)
+        self.assertEqual(sum(c[0] == 'settings' for c in f.calls), 0)
 
     def test_failed_preparation_is_explicit_and_preserves_boundary_cause(self):
         for outcome in (False, None, 1):
@@ -136,24 +273,41 @@ class NativeMenuTests(unittest.TestCase):
         failure = self.assertUnavailable(lambda: f.guard.prepare(f.backend))
         self.assertIs(primary, failure.__cause__)
 
-    def test_product_commands_use_transient_settings_and_keep_native_items(self):
-        f = self.fixture(); original = list(f.nested.items)
+    def test_product_commands_are_prebranded_and_no_configuration_is_read_or_written(self):
+        f = self.fixture(); original = list(f.popup.commands)
         self.assertTrue(f.guard.prepare(f.backend))
-        self.assertFalse(f.element.persistent)
-        self.assertEqual(original, f.nested.items[2:])
+        self.assertTrue(f.guard.ready(f.backend))
+        self.assertEqual(original, f.popup.commands)
         self.assertEqual(['vnd.opengeul.office:new-hwp', '.uno:StartModule'], f.popup.commands[:2])
-        self.assertEqual(['새 HWP 문서', 'OpenGeul 시작 화면'],
-                         [next(p.Value for p in row if p.Name == 'Label') for row in f.nested.items[:2]])
-        self.assertLess(next(i for i,c in enumerate(f.calls) if c[0]=='element-property'),
-                        next(i for i,c in enumerate(f.calls) if c[0]=='settings'))
+        self.assertFalse(any(row[0] == 'settings' for row in f.calls))
 
-    def test_duplicate_product_command_or_nontransient_settings_fail(self):
-        for change in ('duplicate-home', 'duplicate-hwp', 'persistent'):
-            with self.subTest(change=change):
-                f = self.fixture()
-                if change == 'persistent': f.element.setPropertyValue = lambda *args: None
-                else: f.nested.items.append(descriptor('.uno:StartModule' if change=='duplicate-home' else 'vnd.opengeul.office:new-hwp'))
+    def test_each_required_file_command_must_be_unique(self):
+        for command in ('vnd.opengeul.office:new-hwp', '.uno:StartModule', '.uno:AddDirect',
+                        '.uno:OpenFromWriter', '.uno:Save', '.uno:SaveAs', '.uno:CloseDoc', '.uno:Quit'):
+            with self.subTest(command=command):
+                f = self.fixture(); f.popup.commands.append(command)
                 self.assertUnavailable(lambda: f.guard.prepare(f.backend))
+
+    def test_unbranded_initial_menu_is_not_repaired_by_the_observer(self):
+        f = self.fixture()
+        f.popup.commands = [command for command in f.popup.commands
+                            if command not in ('vnd.opengeul.office:new-hwp', '.uno:StartModule')]
+        self.assertUnavailable(lambda: f.guard.prepare(f.backend))
+        self.assertFalse(any(row[0] == 'settings' for row in f.calls))
+
+    def test_recreated_view_menu_inherits_branded_commands_without_poll_mutation(self):
+        for module in OPEN:
+            with self.subTest(module=module):
+                f = self.fixture(module); self.assertTrue(f.guard.prepare(f.backend))
+                replacement = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+                f.frame.getController = f.document.getCurrentController = lambda: replacement
+                bar = Menu(list(f.bar.commands))
+                bar.popups[1] = Menu(list(f.popup.commands), popup=True)
+                f.layout.element = NS(Frame=f.frame, ResourceURL='private:resource/menubar/menubar', Type=1,
+                                      getRealInterface=lambda: bar)
+                self.assertTrue(f.guard.ready(f.backend))
+                self.assertEqual(sum(row[0] == 'show' for row in f.calls), 1)
+                self.assertFalse(any(row[0] == 'settings' for row in f.calls))
 
     def test_foreign_backend_bindings_fail_before_querying_a_new_owner(self):
         for name in ('frame', 'peer', 'document', 'interceptor', 'module_factory'):
@@ -176,6 +330,147 @@ class NativeMenuTests(unittest.TestCase):
                 elif change == 'resource-url': f.element.ResourceURL = 'private:resource/menubar/foreign'
                 else: f.element.Type = 3
                 self.assertUnavailable(lambda: f.guard.prepare(f.backend))
+
+    def test_owned_preview_controller_replacement_and_return_keep_the_same_menu(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+        for _ in range(2):
+            controller = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+            f.frame.getController = f.document.getCurrentController = lambda: controller
+            self.assertTrue(f.guard.ready(f.backend))
+        self.assertIsNone(f.guard.failure)
+        self.assertEqual(sum(row[0] == 'show' for row in f.calls), 1)
+        self.assertEqual(sum(row[0] == 'settings' for row in f.calls), 0)
+
+    def test_one_controller_transition_between_getters_can_be_reobserved(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+        replacement = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+        samples = []
+        def controller():
+            value = f.controller if not samples else replacement
+            samples.append(value)
+            return value
+        f.frame.getController = controller
+        f.document.getCurrentController = lambda: replacement
+        self.assertTrue(f.guard.ready(f.backend))
+        self.assertLessEqual(len(samples), 6, 'Two whole menu observations must use a fixed finite owner read bound')
+        self.assertIsNone(f.guard.failure)
+
+    def test_disposed_old_controller_is_reobserved_only_after_the_frame_endpoint_changes(self):
+        for detached in ('frame', 'model', 'both'):
+            with self.subTest(detached=detached):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+                replacement = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+                samples = []
+                def controller():
+                    value = f.controller if not samples else replacement
+                    samples.append(value)
+                    return value
+                f.frame.getController = controller
+                f.document.getCurrentController = lambda: replacement
+                if detached in ('frame', 'both'): f.controller.getFrame = lambda: None
+                if detached in ('model', 'both'): f.controller.getModel = lambda: None
+                self.assertTrue(f.guard.ready(f.backend))
+                self.assertLessEqual(len(samples), 6)
+
+    def test_a_stable_detached_controller_is_not_an_owned_connection(self):
+        for part in ('frame', 'model'):
+            with self.subTest(part=part):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+                setattr(f.controller, 'getFrame' if part == 'frame' else 'getModel', lambda: None)
+                self.assertUnavailable(lambda: f.guard.ready(f.backend))
+
+    def test_repeated_controller_churn_fails_with_a_finite_read_bound(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+        samples = []
+        def controller():
+            value = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+            samples.append(value)
+            return value
+        f.frame.getController = controller
+        f.document.getCurrentController = lambda: samples[-1]
+        self.assertUnavailable(lambda: f.guard.ready(f.backend))
+        self.assertLessEqual(len(samples), 6)
+
+    def test_replacement_controller_cannot_move_to_a_foreign_frame_or_model(self):
+        for part in ('frame', 'model'):
+            with self.subTest(part=part):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+                replacement = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+                setattr(replacement, 'getFrame' if part == 'frame' else 'getModel', lambda: object())
+                f.frame.getController = f.document.getCurrentController = lambda: replacement
+                self.assertUnavailable(lambda: f.guard.ready(f.backend))
+
+    def test_controller_motion_never_excuses_a_foreign_nonnull_owner(self):
+        for part in ('frame', 'model'):
+            with self.subTest(part=part):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+                replacement = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+                samples = []
+                def controller():
+                    value = f.controller if not samples else replacement
+                    samples.append(value)
+                    return value
+                f.frame.getController = controller
+                f.document.getCurrentController = lambda: replacement
+                setattr(f.controller, 'getFrame' if part == 'frame' else 'getModel', lambda: object())
+                self.assertUnavailable(lambda: f.guard.ready(f.backend))
+                self.assertEqual(len(samples), 1)
+
+    def test_controller_getter_exception_is_primary_and_is_not_retried(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+        samples = []
+        def controller():
+            samples.append(f.controller)
+            return f.controller
+        f.frame.getController = controller
+        primary = RuntimeError('Synthetic controller bridge failure')
+        f.controller.getModel = lambda: (_ for _ in ()).throw(primary)
+        error = self.assertUnavailable(lambda: f.guard.ready(f.backend))
+        self.assertIs(error.__cause__, primary)
+        self.assertEqual(len(samples), 1)
+
+    def test_backend_anchor_change_inside_controller_sample_is_not_rebound(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+        def current():
+            f.backend.interceptor = object()
+            return f.controller
+        f.document.getCurrentController = current
+        self.assertUnavailable(lambda: f.guard.ready(f.backend))
+
+    def test_replacement_controller_does_not_hide_loss_of_product_menu_commands(self):
+        for command in ('.uno:StartModule', 'vnd.opengeul.office:new-hwp'):
+            with self.subTest(command=command):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+                replacement = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
+                f.frame.getController = f.document.getCurrentController = lambda: replacement
+                f.popup.commands.remove(command)
+                self.assertUnavailable(lambda: f.guard.ready(f.backend))
+
+    def test_fullscreen_and_user_visibility_toggles_leave_the_owned_menu_connected(self):
+        f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+        for visible in (False, True, False, True):
+            f.layout.visible = visible
+            self.assertTrue(f.guard.ready(f.backend))
+        self.assertIsNone(f.guard.failure)
+        self.assertEqual(sum(row[0] == 'show' for row in f.calls), 1)
+        self.assertEqual(sum(row[0] == 'settings' for row in f.calls), 0)
+
+    def test_initial_connection_requires_actual_visible_menu(self):
+        for visible in (False, None, 1):
+            with self.subTest(visible=visible):
+                f = self.fixture(); f.layout.visible = visible
+                self.assertUnavailable(lambda: f.guard.prepare(f.backend))
+
+    def test_hidden_menu_still_requires_real_resource_file_and_dispatch_ownership(self):
+        for changed in ('element', 'resource', 'file-disabled', 'dispatch'):
+            with self.subTest(changed=changed):
+                f = self.fixture(); self.assertTrue(f.guard.prepare(f.backend))
+                f.layout.visible = False
+                if changed == 'element': f.layout.element = None
+                elif changed == 'resource': f.element.Frame = object()
+                elif changed == 'file-disabled': f.bar.enabled = False
+                else: f.frame.queryDispatch = lambda *args: NS(dispatch=lambda *args: None)
+                self.assertUnavailable(lambda: f.guard.ready(f.backend))
 
     def test_missing_file_popup_or_core_command_is_not_ready(self):
         for change in ('missing-file', 'duplicate-file', 'no-popup', 'not-popup', 'disabled-file',
@@ -238,7 +533,7 @@ class NativeMenuTests(unittest.TestCase):
         backend.native_menu = f.guard
         self.assertTrue(f.guard.prepare(backend))
         self.assertTrue(backend.status()['nativeMenuReady'])
-        f.layout.visible = False
+        f.layout.element = None
         failure = self.assertUnavailable(backend.status)
         self.assertEqual({'modified': True, 'title': 'Document'}, backend.prepare_close())
         backend.save(None, None)

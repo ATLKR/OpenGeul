@@ -22,11 +22,17 @@ controller/model ownership, parent/child validation and retained process cleanup
 Set HasMenubar for the product's four default Tabbed modes during runtime
 branding; do not change Math/Base mode or an external LibreOffice profile.
 After preparation, status observes passively rather than resetting open menus.
+A normal native controller/view replacement is allowed only while the original
+frame, peer, document model and interceptor remain owned. Full Screen and user
+menu visibility changes do not themselves indicate lost integration.
 
-Use transient XUIElementSettings with Persistent=false when adding OpenGeul
-Home and New HWP actions to the existing native File configuration. Preserve
-all other native menu descriptors; do not directly insert unbound XMenu items,
-store document UI customization or copy formatting menus into host controls.
+Add OpenGeul Home and New HWP actions to the six packaged native File menu XML
+definitions during verified runtime branding. Preserve the original XML bytes,
+including prolog, DOCTYPE, comments and existing menu order. New native menu
+wrappers created by normal view transitions inherit the same default commands.
+The worker validates current live commands and dispatch ownership without
+writing frame settings, document UI storage or external user profiles. Do not
+copy formatting menus into host controls or insert unbound XMenu items.
 
 ## Commands and lifecycle
 

@@ -17,6 +17,11 @@ except ImportError:
     branding = None
 
 OOR = '{http://openoffice.org/2001/registry}'
+MENU = '{http://openoffice.org/2001/menu}'
+MENUBAR_FILES = tuple('share/config/soffice.cfg/modules/' + module + '/menubar/menubar.xml'
+                     for module in ('swriter', 'scalc', 'simpress', 'sdraw', 'smath', 'dbapp'))
+PRODUCT_MENU_ITEMS = (('.uno:StartModule', 'OpenGeul 시작 화면'),
+                      ('vnd.opengeul.office:new-hwp', '새 HWP 문서'))
 BUILD_ID = 'a' * 40
 SERVICES = {
     'writer': 'com.sun.star.text.TextDocument',
@@ -73,6 +78,27 @@ def make_runtime(root):
         '<interface><object class="GtkButton" id="writer_all"><property name="label" translatable="yes">'
         '_Writer Document</property></object><object class="GtkLabel" id="example"><property name="label" '
         'translatable="yes">%PRODUCTNAME Calc found an error.</property></object></interface>', encoding='utf-8')
+    for name in MENUBAR_FILES:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE menu:menubar PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "menubar.dtd">\n'
+            '<!-- Original copyright and license; 원본 구성은 그대로 보존. -->\n'
+            '<menu:menubar xmlns:menu="http://openoffice.org/2001/menu" menu:id="menubar">\n'
+            ' <menu:menu menu:id=".uno:PickList"><menu:menupopup>\n'
+            '  <!-- Original File descriptors -->\n'
+            '  <menu:menu menu:id=".uno:AddDirect"><menu:menupopup>'
+            '<menu:menuitem menu:id="private:factory/swriter"/></menu:menupopup></menu:menu>\n'
+            '  <menu:menuitem menu:id=".uno:Open"/>\n'
+            '  <menu:menuitem menu:id=".uno:Save" menu:label="원래 저장 항목"/>\n'
+            '  <menu:menuitem menu:id=".uno:SaveAs"/>\n'
+            '  <menu:menuitem menu:id=".uno:CloseDoc"/>\n'
+            '  <menu:menuitem menu:id=".uno:Quit"/>\n'
+            ' </menu:menupopup></menu:menu>\n'
+            ' <menu:menu menu:id=".uno:EditMenu"><menu:menupopup>'
+            '<menu:menuitem menu:id=".uno:Bold"/></menu:menupopup></menu:menu>\n'
+            '</menu:menubar>\n<!-- Original trailing license notice -->\n', encoding='utf-8')
     (root / 'program/intro.png').write_bytes(b'old splash')
     (root / 'program/intro-highres.png').write_bytes(b'old large splash')
     (root / 'program/shell/logo.svg').write_text('<svg>LibreOffice</svg>', encoding='utf-8')
@@ -91,6 +117,83 @@ class BrandingTests(unittest.TestCase):
         self.source = self.root / 'original'
         self.destination = self.root / 'Office'
         make_runtime(self.source)
+
+    def test_native_product_menu_group_survives_resource_reload_and_preserves_original_bytes(self):
+        before = tree_hashes(self.source)
+        receipt = branding.brand_runtime(self.source, self.destination, self.manifest)
+        for name in MENUBAR_FILES:
+            with self.subTest(resource=name):
+                original = (self.source / name).read_bytes()
+                branded = (self.destination / name).read_bytes()
+                old = ET.fromstring(original).find(MENU + 'menu/' + MENU + 'menupopup')
+                popup = ET.fromstring(branded).find(MENU + 'menu/' + MENU + 'menupopup')
+                self.assertEqual([(item.get(MENU + 'id'), item.get(MENU + 'label')) for item in popup[:2]],
+                                 list(PRODUCT_MENU_ITEMS))
+                self.assertEqual(popup[2].tag, MENU + 'menuseparator')
+                self.assertEqual([ET.tostring(item) for item in popup[3:]], [ET.tostring(item) for item in old])
+                added = len(branded) - len(original)
+                self.assertGreater(added, 0)
+                cut = next((index for index, pair in enumerate(zip(original, branded)) if pair[0] != pair[1]), len(original))
+                self.assertEqual(branded[:cut] + branded[cut + added:], original,
+                                 'Branding must make one insertion, retaining prolog, DOCTYPE, comments and native descriptors')
+                for command, label in PRODUCT_MENU_ITEMS:
+                    self.assertEqual(len([node for node in ET.fromstring(branded).iter()
+                                          if node.get(MENU + 'id') == command]), 1)
+                    self.assertIn(label.encode('utf-8'), branded)
+                self.assertEqual(receipt['modifiedFiles'][name],
+                    dict(beforeSha256=before[name], sha256=hashlib.sha256(branded).hexdigest()))
+                # A fresh parser models the default resource used by a new wrapper.
+                self.assertEqual([node.get(MENU + 'id') for node in ET.fromstring(branded).find(
+                    MENU + 'menu/' + MENU + 'menupopup')[:2]], [item[0] for item in PRODUCT_MENU_ITEMS])
+        self.assertEqual(before, tree_hashes(self.source))
+
+    def test_every_native_module_menubar_resource_is_required(self):
+        for index, name in enumerate(MENUBAR_FILES):
+            with self.subTest(resource=name):
+                path = self.source / name; original = path.read_bytes(); path.unlink()
+                expected = tree_hashes(self.source); destination = self.root / ('missing-menu-' + str(index))
+                try:
+                    with self.assertRaises(ValueError): branding.brand_runtime(self.source, destination, self.manifest)
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(expected, tree_hashes(self.source))
+                finally: path.write_bytes(original)
+
+    def test_native_menubar_rejects_wrong_namespace_file_target_schema_and_duplicate_product_commands(self):
+        path = self.source / MENUBAR_FILES[0]; original = path.read_bytes()
+        source = original.decode('utf-8')
+        bad = [source.replace('http://openoffice.org/2001/menu', 'urn:wrong-menu'),
+               source.replace('menu:id="menubar"', 'menu:id="toolbar"'),
+               source.replace('menu:id=".uno:PickList"', 'menu:id=".uno:WrongTarget"'),
+               source.replace('</menu:menubar>', '<menu:menu menu:id=".uno:PickList"><menu:menupopup><menu:menuitem menu:id=".uno:Save"/></menu:menupopup></menu:menu></menu:menubar>'),
+               source.replace('</menu:menupopup></menu:menu>\n <menu:menu', '</menu:menupopup><menu:menupopup/></menu:menu>\n <menu:menu'),
+               source.replace('<menu:menubar ', '<menu:toolbar ', 1).replace('</menu:menubar>', '</menu:toolbar>')]
+        for command, label in PRODUCT_MENU_ITEMS:
+            item = '<menu:menuitem menu:id="' + command + '" menu:label="' + label + '"/>'
+            bad.append(source.replace('<!-- Original File descriptors -->', item))
+            bad.append(source.replace('<menu:menuitem menu:id=".uno:Bold"/>', item + item))
+        for index, value in enumerate(bad):
+            with self.subTest(malformed=index):
+                destination = self.root / ('invalid-menu-' + str(index)); path.write_text(value, encoding='utf-8')
+                expected = tree_hashes(self.source)
+                try:
+                    with self.assertRaises(ValueError): branding.brand_runtime(self.source, destination, self.manifest)
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(expected, tree_hashes(self.source))
+                finally: path.write_bytes(original)
+
+    def test_native_menu_insertion_preserves_utf8_bom_crlf_and_processing_instructions(self):
+        path = self.source / MENUBAR_FILES[0]
+        original = b'\xef\xbb\xbf' + path.read_bytes().replace(b'\n', b'\r\n').replace(
+            b'<!-- Original File descriptors -->', '<?original-menu 유지?>'.encode('utf-8'))
+        path.write_bytes(original)
+        branding.brand_runtime(self.source, self.destination, self.manifest)
+        branded = (self.destination / MENUBAR_FILES[0]).read_bytes()
+        self.assertTrue(branded.startswith(b'\xef\xbb\xbf'))
+        added = len(branded) - len(original)
+        self.assertGreater(added, 0)
+        cut = next(index for index, pair in enumerate(zip(original, branded)) if pair[0] != pair[1])
+        self.assertEqual(branded[:cut] + branded[cut + added:], original)
+        self.assertIn(b'\r\n', branded)
 
     def test_manifest_routes_only_explicit_formats_and_preserves_filter_ids(self):
         self.assertEqual(self.manifest['schemaVersion'], 1)

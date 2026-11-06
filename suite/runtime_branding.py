@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 from xml.sax.saxutils import quoteattr
 from zipfile import ZipFile
 
@@ -38,6 +39,11 @@ NOTEBOOKBAR_CONTEXTS = {f'soffice.cfg/modules/{module}/ui/notebookbar.ui': conte
                         for module, context in (('swriter', 'TabbedWriter'), ('scalc', 'TabbedCalc'),
                                                 ('simpress', 'TabbedImpress'), ('sdraw', 'TabbedDraw'))}
 TABBED_APPLICATIONS = ('Writer', 'Calc', 'Impress', 'Draw')
+MENU_NAMESPACE = 'http://openoffice.org/2001/menu'
+MENUBAR_FILES = tuple('share/config/soffice.cfg/modules/' + module + '/menubar/menubar.xml'
+                     for module in ('swriter', 'scalc', 'simpress', 'sdraw', 'smath', 'dbapp'))
+PRODUCT_MENU_ITEMS = (('.uno:StartModule', 'OpenGeul 시작 화면'),
+                      ('vnd.opengeul.office:new-hwp', '새 HWP 문서'))
 KOREAN_TAB_LABELS = {
     'File': ('파일', ('FileLabel',)), 'Home': ('홈', ('HomeLabel',)),
     'Insert': ('삽입', ('InsertLabel',)), 'Layout': ('레이아웃', ('LayoutLabel',)),
@@ -344,6 +350,74 @@ def _brand_ui(runtime: Path, manifest: dict) -> None:
             _write_xml(path, tree)
 
 
+def _native_menu_bytes(raw: bytes) -> bytes:
+    """Insert one product group without reserializing upstream configuration."""
+    if not 0 < len(raw) <= 2 * 1024 * 1024:
+        raise ValueError('Native menu resource is empty or exceeds its bound')
+    namespace = '{' + MENU_NAMESPACE + '}'
+    try:
+        root = ET.fromstring(raw)
+        files = [node for node in root if node.tag == namespace + 'menu'
+                 and node.get(namespace + 'id') == '.uno:PickList']
+        if root.tag != namespace + 'menubar' or root.get(namespace + 'id') != 'menubar' or len(files) != 1:
+            raise ValueError('Expected exactly one native File menu')
+        popups = [node for node in files[0] if node.tag == namespace + 'menupopup']
+        if len(popups) != 1 or not len(popups[0]):
+            raise ValueError('Expected one populated native File popup')
+        product_commands = {command for command, label in PRODUCT_MENU_ITEMS}
+        if any(node.get(namespace + 'id') in product_commands for node in root.iter()):
+            raise ValueError('Native product menu commands already exist')
+        parser = expat.ParserCreate(namespace_separator=' ')
+        stack, positions = [], []
+        target = [(MENU_NAMESPACE + ' menubar', 'menubar'),
+                  (MENU_NAMESPACE + ' menu', '.uno:PickList'),
+                  (MENU_NAMESPACE + ' menupopup', None)]
+        def declaration(version, encoding, standalone):
+            if encoding is not None and encoding.lower().replace('-', '') != 'utf8':
+                raise ValueError('Native menu configuration must use UTF-8')
+        def start(name, attrs):
+            if stack == target and not positions:
+                positions.append(parser.CurrentByteIndex)
+            stack.append((name, attrs.get(MENU_NAMESPACE + ' id')))
+        parser.XmlDeclHandler = declaration
+        parser.StartElementHandler = start
+        parser.EndElementHandler = lambda name: stack.pop()
+        parser.Parse(raw, True)
+        if len(positions) != 1:
+            raise ValueError('Native File insertion point is unavailable')
+        position = positions[0]
+        line_start = raw.rfind(b'\n', 0, position) + 1
+        indent = raw[line_start:position]
+        if indent.strip():
+            indent = b''
+        newline = b'\r\n' if b'\r\n' in raw else b'\n'
+        rows = [('<menu:menuitem menu:id=' + quoteattr(command) + ' menu:label=' + quoteattr(label) + '/>').encode('utf-8')
+                for command, label in PRODUCT_MENU_ITEMS]
+        rows.append(b'<menu:menuseparator/>')
+        insertion = (newline + indent).join(rows) + newline + indent
+        branded = raw[:position] + insertion + raw[position:]
+        # The shipped menu prefix must resolve to the verified namespace at the
+        # insertion point. Never return malformed or differently bound markup.
+        result = ET.fromstring(branded)
+        popup = next(node for node in result if node.get(namespace + 'id') == '.uno:PickList').find(namespace + 'menupopup')
+        if popup is None or [(node.get(namespace + 'id'), node.get(namespace + 'label')) for node in popup[:2]] != list(PRODUCT_MENU_ITEMS):
+            raise ValueError('Branded native commands have the wrong namespace')
+        return branded
+    except (ET.ParseError, expat.ExpatError, UnicodeError) as exc:
+        raise ValueError('Invalid native menu XML') from exc
+
+
+def _brand_native_menus(runtime: Path) -> None:
+    updates = {}
+    for name in MENUBAR_FILES:
+        path = runtime / name
+        if not path.is_file():
+            raise ValueError('Required native module menu is missing: ' + name)
+        updates[path] = _native_menu_bytes(path.read_bytes())
+    for path, raw in updates.items():
+        path.write_bytes(raw)
+
+
 def _brand_images(runtime: Path) -> None:
     for name in BRAND_IMAGES:
         target = runtime / 'program' / (name if name.startswith('intro') else 'shell/' + name)
@@ -425,6 +499,7 @@ def brand_runtime(source: Path, destination: Path, manifest: dict) -> dict:
         _write_ini(destination / version_name, version)
         _brand_registry(destination, manifest)
         _brand_ui(destination, manifest)
+        _brand_native_menus(destination)
         _brand_images(destination)
         (destination / 'opengeul-product.json').write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
