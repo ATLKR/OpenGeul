@@ -226,7 +226,7 @@ def click_home_action(api,process,home,module,record):
 
 
 def require_open_dialog_readiness(proof,shell_pid,home,*,before_input=False):
-    """Raw native/UIA replay; Home remains the owner for document-menu callbacks."""
+    """Raw native/UIA replay for the exact invoking Home or document owner."""
     assert type(before_input) is bool and type(proof['schemaVersion']) is int and proof['schemaVersion']==1
     assert proof['kind']=='owned-open-dialog-readiness' and proof['caption']==OPEN_CAPTION
     assert proof['filenameAutomationId']==OPEN_FILENAME_ID
@@ -315,45 +315,95 @@ def _open_button_recheck(api,accessible,button,process,dialog,proof):
     return lifecycle.require_dialog_button_ancestry(api,accessible,button,process.pid,dialog)
 
 
+def _document_picker_binding(record,home,document,action=None):
+    assert record['case']=='document-file-open' and record['kind']=='shared-open'
+    assert type(home) is int and home==record['homeHwnd']
+    assert type(document) is int and document>0 and document!=home
+    frame=record['attachments'][0]
+    assert frame['module']=='writer' and frame['hwnd']==document
+    shell=record['originalShell'];live=_require_live_binding(frame['liveProcessBinding'])
+    from writer_model_barrier import require_original_shell
+    suite=PureWindowsPath(shell['nativeImage']).parent if PureWindowsPath(shell['nativeImage']).drive else Path(shell['nativeImage']).parent
+    require_original_shell(shell,dict(shellPid=record['shellPid'],shellCreationTime=shell['nativeCreation']['fileTime']),suite)
+    assert (live['pid'],live['creationTime'])==(frame['officePid'],frame['officeCreationTime'])
+    assert PureWindowsPath(live['nativeImage'])==PureWindowsPath(frame['officeImage'])==PureWindowsPath(str(suite/'Office/program/soffice.bin'))
+    binding=dict(documentHwnd=document,parentHwnd=frame['parent'],childHwnd=frame['child'],
+        shellPid=shell['pid'],shellCreationTime=shell['nativeCreation']['fileTime'],shellHandleValue=shell['handleValue'],
+        officePid=live['pid'],officeCreationTime=live['creationTime'],officeHandleValue=live['handleValue'])
+    assert all(type(value) is int and value>0 for value in binding.values())
+    assert len({home,document,frame['parent'],frame['child']})==4 and live['pid']!=shell['pid']
+    if action is not None:
+        from owned_native_menu import require_native_menu_action
+        require_native_menu_action(action,shell['pid'],document,'open')
+        assert action['binding']==dict(document=document,parent=frame['parent'],child=frame['child'],officePid=live['pid'])
+        measured=action['originalProcess'];engine=action['originalEngine']
+        assert (measured['pid'],measured['handleValue'],measured['creationTime'])==(shell['pid'],shell['handleValue'],shell['nativeCreation']['fileTime'])
+        assert PureWindowsPath(measured['image'])==PureWindowsPath(shell['nativeImage'])
+        assert (engine['pid'],engine['creationTime'])==(live['pid'],live['creationTime'])
+        assert PureWindowsPath(engine['image'])==PureWindowsPath(live['nativeImage'])
+    return binding
+
+
 def open_dialog_action(api,process,home,record,path=None,*,document=None):
     from pywinauto import Desktop
-    operation=dict(openButtonClicks=0,cancelEscapeCount=0,success=False)
+    owner=home if document is None else document
+    operation=dict(openButtonClicks=0,cancelEscapeCount=0,success=False,pickerOwnerHwnd=owner)
     record.setdefault('openDialogs',[]).append(operation)
+    def original_document():
+        assert process.poll() is None and process.pid==record['shellPid']
+        assert int(process._handle)==record['originalShell']['handleValue']
+        shell=record['originalShell']
+        activated=process.opengeul_activation_binding
+        assert type(activated) is tuple and len(activated)==5
+        assert activated[:2]+activated[3:]==(shell['pid'],shell['handleValue'],shell['nativeCreation']['fileTime'],258)
+        assert PureWindowsPath(activated[2])==PureWindowsPath(shell['nativeImage'])
+        assert _document_picker_binding(record,home,document)==operation['documentOwnerBinding']
+        assert record['attachments'][0].get('closed') is not True
+        assert api.user.IsWindow(home) and api.pid(home)==process.pid and api.user.GetAncestor(home,2)==home
+        assert api.attachment(document)==tuple(operation['documentOwnerBinding'][key] for key in ('parentHwnd','childHwnd','officePid'))
+    if document is not None:
+        # The existing shared-open plan has no document-menu Cancel operation.
+        assert path is not None, 'Document-menu Cancel is outside the fixed Home plan'
+        operation['documentOwnerBinding']=_document_picker_binding(record,home,document)
+        original_document()
     record['stage']='trigger-owned-open-dialog'
     if document is None:
         click_home_action(api,process,home,'open',record);trigger='home-button'
     else:
-        shell_menu_action(api,process,document,'열기…',record);trigger='document-menu'
+        action=shell_menu_action(api,process,document,'열기…',record);trigger='document-menu'
+        assert _document_picker_binding(record,home,document,action['nativeAction'])==operation['documentOwnerBinding']
     operation['openTrigger']=dict(kind=trigger,clicks=1)
     record['stage']='wait-owned-open-dialog-readiness'
-    dialog,window,filename,button=wait_open_dialog(api,process,home,operation)
-    proof=operation['openDialogReadiness'];require_open_dialog_readiness(proof,process.pid,home,before_input=True)
+    dialog,window,filename,button=wait_open_dialog(api,process,owner,operation)
+    proof=operation['openDialogReadiness'];require_open_dialog_readiness(proof,process.pid,owner,before_input=True)
     def owned():
         assert process.poll() is None
-        native.require_dialog_identity(api.pid(dialog),process.pid,api.user.GetWindow(dialog,4),home,api.title(dialog),OPEN_CAPTION,api.class_name(dialog))
+        if document is not None:original_document()
+        native.require_dialog_identity(api.pid(dialog),process.pid,api.user.GetWindow(dialog,4),owner,api.title(dialog),OPEN_CAPTION,api.class_name(dialog))
         api.require_foreground(dialog)
     owned();proof.update(action='cancel' if path is None else 'open',actionStartedAt=time.monotonic())
-    require_open_dialog_readiness(proof,process.pid,home)
+    require_open_dialog_readiness(proof,process.pid,owner)
     if path is None:
         record['stage']='send-owned-open-dialog-escape'
         operation['cancelEscapeCount']=1
-        native.send_owned_dialog_escape(api,process,home,filename,record,dialog=dialog,
+        native.send_owned_dialog_escape(api,process,owner,filename,record,dialog=dialog,
             caption=OPEN_CAPTION,readiness=proof)
     else:
         record['stage']='assign-owned-open-filename'
         path=Path(path);_unlinked(path);assert path.is_file()
         accessible=Desktop(backend='uia').window(handle=dialog).wrapper_object()
-        lifecycle.set_owned_picker_filename(api,process.pid,home,dialog,accessible,filename,str(path),operation,expected_title=OPEN_CAPTION)
+        lifecycle.set_owned_picker_filename(api,process.pid,owner,dialog,accessible,filename,str(path),operation,expected_title=OPEN_CAPTION)
         owned();operation['openButtonAncestry']=_open_button_recheck(api,accessible,button,process,dialog,proof)
         record['stage']='click-owned-open-button'
         operation['openButtonClicks']=1
-        native.click_owned_control(api,process,home,button,record,purpose='OPEN_BUTTON',
+        native.click_owned_control(api,process,owner,button,record,purpose='OPEN_BUTTON',
             dialog=dialog,caption=OPEN_CAPTION,readiness=proof)
     record['stage']='wait-owned-open-dialog-disappearance'
     if path is None:
         wait_cancelled_home(api,process,home,dialog,record,operation)
     else:
         native.wait_for(lambda:not api.user.IsWindow(dialog),seconds=20)
+        if document is not None:original_document()
     operation['success']=True
     return operation
 
@@ -587,7 +637,7 @@ class HomeCase:
         self.screenshot(attachment['hwnd'],module+'-attached')
         if module=='base' and source is None:
             native.save_new_base(self.api,self.process,attachment['hwnd'],self.folder,self.output,self.record)
-            native.require_base_save_dialog_readiness(self.record['baseSaveDialogReadiness'],self.process.pid,attachment['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-save-menu-pointer')
+            native.require_base_save_dialog_readiness(self.record['baseSaveDialogReadiness'],self.process.pid,attachment['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-native-menu-pointer')
         return frame
 
     def close_frame(self,frame,*,menu=False):
@@ -789,7 +839,12 @@ def require_case_result(record,suite):
             assert len(data)==descriptor['bytes'] and hashlib.sha256(data).hexdigest()==item['sha256']
         if module!='hwp':assert descriptor==load_feature_inputs(suite,Path(descriptor['featuresRoot']))[(module,extension)]
     for index,operation in enumerate(operations):
-        proof=operation['openDialogReadiness'];require_open_dialog_readiness(proof,pid,home)
+        owner=record['attachments'][0]['hwnd'] if spec['kind']=='shared-open' and index==1 else home
+        assert type(operation['pickerOwnerHwnd']) is int and operation['pickerOwnerHwnd']==owner
+        if owner!=home:
+            assert operation['documentOwnerBinding']==_document_picker_binding(record,home,owner,record['nativeDocumentMenuActions'][0]['nativeAction'])
+        else:assert 'documentOwnerBinding' not in operation
+        proof=operation['openDialogReadiness'];require_open_dialog_readiness(proof,pid,owner)
         assert proof['trigger']['kind']==('document-menu' if index==1 else 'home-button') and operation['success'] is True
         if spec['kind']=='cancel':
             assert proof['action']=='cancel' and operation['cancelEscapeCount']==1 and operation['openButtonClicks']==0
@@ -797,7 +852,7 @@ def require_case_result(record,suite):
             require_cancelled_home_readiness(operation['cancelOwnerReadiness'],pid,home,record['originalShell'],open_readiness=proof)
         else:
             assert proof['action']=='open' and operation['openButtonClicks']==1 and operation['cancelEscapeCount']==0
-            require_open_filename_receipt(operation,pid,home,copies[index]['path'])
+            require_open_filename_receipt(operation,pid,owner,copies[index]['path'])
             assert operation['openButtonAncestry'][-1]['nativeHandle']==proof['dialogHwnd']
     modules=[] if spec['kind']=='cancel' or spec.get('module')=='hwp' else ['writer','impress'] if spec['kind']=='shared-open' else [spec['module']]
     frames=record['attachments'];assert [row['module'] for row in frames]==modules

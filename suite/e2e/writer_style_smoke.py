@@ -100,22 +100,11 @@ def owned_saved_path(output, record):
 
 
 def click_suite_save(api, process, hwnd, record):
-    from pywinauto import Desktop
-    window = Desktop(backend='win32').window(handle=hwnd).wrapper_object()
     native.activate_owned_suite(api, process, hwnd, record)
     api.require_foreground(hwnd)
-    root = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
-    files = [item for item in root.descendants(control_type='MenuItem')
-             if item.element_info.name == '파일' and item.element_info.process_id == process.pid
-             and item.is_visible() and item.is_enabled()]
-    assert len(files) == 1, 'One exact shell-owned File menu is required'
-    files[0].click_input()
-    saves = native.wait_for(lambda: lifecycle.owned_menu_items(Desktop(backend='uia'), process.pid, '저장'), 10)
-    assert len(saves) == 1, 'One exact shell-owned Save menu item is required'
-    assert process.poll() is None and api.pid(hwnd) == process.pid, 'Owned Suite window changed before Save'
-    api.require_foreground(hwnd)
-    record['saveMenuRuntimeId'] = list(saves[0].element_info.runtime_id)
-    saves[0].click_input()
+    action = native.click_native_menu_action(api, process, hwnd, record, 'save')
+    native.require_native_menu_action(action, process.pid, hwnd, 'save')
+    record['saveMenuAction'] = native.detached_native_menu_action(action)
     record['savedViaOwnedSuiteMenu'] = True
 
 

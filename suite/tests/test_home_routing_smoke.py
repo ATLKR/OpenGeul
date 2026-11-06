@@ -271,6 +271,172 @@ class HomeRoutingContracts(unittest.TestCase):
                 self.assertEqual(len(record['openDialogs']),1)
                 self.assertEqual(cancel_waits,[44] if mode=='cancel' else [])
 
+    def test_actual_home_base_attach_replays_the_returned_native_save_trigger(self):
+        from types import SimpleNamespace as NS
+        from test_base_save_readiness import NativeBoundary
+        boundary=NativeBoundary([lambda b:[b.edit,b.save]])
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();folder=root/'fixtures';folder.mkdir();boundary.menu_root=root
+            boundary.target=folder/'New-OpenGeul-base.odb'
+            case=object.__new__(self.api.HomeCase);case.suite=root;case.output=root;case.folder=folder
+            case.api=boundary.api;case.process=boundary.process;case.frames=[];case.screenshot=lambda *args:None
+            case.record=dict(case='tile-base',kind='tile',module='base',attachments=[])
+            bound=NS(pid=88,creation=200,handle=888)
+            def freeze(original,executable,evidence):
+                evidence.update(pid=88,creationTime=200,handleValue=888,waitResult=258,
+                    nativeCreation=dict(fileTime=200),nativeImage=str(executable),expectedImage=str(executable))
+            with patch.dict(sys.modules,boundary.modules()), \
+                 patch.object(self.api,'new_attachment',return_value=dict(hwnd=11,parent=55,child=56,officePid=88)), \
+                 patch.object(self.api.lifecycle,'BoundHwpProcess',return_value=bound),patch.object(self.api,'freeze_live_process',side_effect=freeze), \
+                 patch.object(self.api.native.time,'monotonic',boundary.clock.monotonic),patch.object(self.api.native.time,'sleep',boundary.clock.sleep), \
+                 patch.object(self.api.native,'click_native_menu_action',side_effect=boundary.measured_native_menu), \
+                 patch.object(self.api.native,'click_owned_control',side_effect=boundary.measured_click), \
+                 patch.object(self.api.lifecycle,'set_owned_picker_filename',side_effect=boundary.assign_filename), \
+                 patch.object(self.api.native,'saved_base_evidence',return_value=dict(sha256='a'*64,bytes=19,connection='sdbc:embedded:firebird')):
+                frame=case.attach('base',None)
+            self.assertEqual(frame['hwnd'],11)
+            self.assertEqual(case.record['baseSaveDialogReadiness']['trigger'],'owned-native-menu-pointer')
+            self.assertTrue(case.record['baseSaveMenuAction']['success'])
+            self.assertEqual([name for name,*_ in boundary.calls].count('save-menu-click'),1)
+
+    def document_picker_fixture(self,root):
+        from test_base_save_readiness import NativeBoundary
+        from test_writer_model_barrier import original_shell_fixture
+        boundary=NativeBoundary([lambda b:[b.edit,b.save]]);boundary.menu_root=root
+        boundary.edit.CurrentAutomationId='1148'
+        old_title=boundary.api.title;boundary.api.title=lambda hwnd:self.api.OPEN_CAPTION if hwnd==44 else old_title(hwnd)
+        boundary.process._handle=8;boundary.process.opengeul_suite_root=root
+        boundary.process.opengeul_evidence_output=root;boundary.process.opengeul_evidence_case='document-file-open'
+        boundary.api.attachment=lambda hwnd:(55,56,88)
+        boundary.api.user.GetPropW=lambda hwnd,name:1
+        old_live=boundary.api.user.IsWindow;boundary.api.user.IsWindow=lambda hwnd:hwnd in (10,55,56) or old_live(hwnd)
+        old_root=boundary.api.user.GetAncestor;boundary.api.user.GetAncestor=lambda hwnd,flag:10 if hwnd==10 else old_root(hwnd,flag)
+        boundary.api.pid=lambda hwnd:88 if hwnd==56 else 77
+        shell=original_shell_fixture(dict(shellPid=77,shellCreationTime=100),root);shell['handleValue']=8
+        boundary.process.opengeul_activation_binding=(77,8,str(root/'OpenGeul.Office.exe'),100,258)
+        image=str(root/'Office/program/soffice.bin')
+        live=dict(kind='home-retained-live-process',pid=88,creationTime=200,handleValue=888,
+            getProcessIdResult=88,waitResult=258,nativeImage=image,expectedImage=image,
+            nativeImageLength=len(image.encode('utf-16-le'))//2,nativeCreation=dict(low=200,high=0,fileTime=200))
+        record=dict(case='document-file-open',kind='shared-open',module='writer',extension='docx',
+            homeHwnd=10,shellPid=77,originalShell=shell,attachments=[dict(hwnd=11,parent=55,child=56,
+                officePid=88,officeCreationTime=200,officeImage=image,module='writer',liveProcessBinding=live)])
+        return boundary,record
+
+    def run_document_picker(self,root,*,owner=11,home=10,document=11,mutate=None,path=True,native_image_case=False):
+        from test_owned_native_menu import Probe,Clock as MenuClock
+        from types import SimpleNamespace as NS
+        import owned_native_menu
+        boundary,record=self.document_picker_fixture(root)
+        if mutate:mutate(record)
+        if native_image_case:
+            pid,handle,image,creation,wait=boundary.process.opengeul_activation_binding
+            boundary.process.opengeul_activation_binding=(pid,handle,image.swapcase(),creation,wait)
+        target=root/'format-impress-pptx.pptx';target.write_bytes(b'owned generated fixture')
+        boundary.api.user.GetWindow=lambda hwnd,flag:owner if hwnd==44 else 0
+        original=owned_native_menu.click_native_menu_action;native_calls=[];owner_calls=[]
+        def menu(api,process,hwnd,record,command):
+            native_calls.append(command)
+            clock=MenuClock();clock.now=boundary.clock.value
+            try:return original(api,process,hwnd,record,command,probe=Probe(root,clock),clock=clock)
+            finally:boundary.clock.value=clock.now
+        def filename(*args,**kwargs):owner_calls.append(('filename',args[2]));boundary.assign_filename(*args,**kwargs)
+        def click(*args,**kwargs):
+            owner_calls.append(('open-button',args[2]));self.assertEqual(kwargs['readiness']['documentHwnd'],args[2]);boundary.closed=True
+        def home_click(*args):boundary.foreground=home
+        with patch.dict(sys.modules,boundary.modules()),patch.object(owned_native_menu,'click_native_menu_action',side_effect=menu), \
+             patch.object(self.api,'click_home_action',side_effect=home_click), \
+             patch.object(self.api.native,'activate_owned_suite',side_effect=lambda api,process,hwnd,record:api.require_foreground(hwnd)), \
+             patch.object(self.api.native.time,'monotonic',boundary.clock.monotonic),patch.object(self.api.native.time,'sleep',boundary.clock.sleep), \
+             patch.object(self.api.lifecycle,'set_owned_picker_filename',side_effect=filename), \
+             patch.object(self.api.lifecycle,'require_dialog_button_ancestry',return_value=[dict(nativeHandle=44)]), \
+             patch.object(self.api.native,'click_owned_control',side_effect=click):
+            try:self.api.open_dialog_action(boundary.api,boundary.process,home,record,target if path else None,document=document);error=None
+            except Exception as exc:error=exc
+        return record,boundary,native_calls,owner_calls,error
+
+    def test_document_menu_picker_uses_original_invoking_document_everywhere(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record,boundary,native_calls,owner_calls,error=self.run_document_picker(Path(directory).resolve())
+        self.assertIsNone(error,type(error).__name__ if error else None)
+        operation,=record['openDialogs']
+        self.assertEqual(record['homeHwnd'],10);self.assertEqual(operation['pickerOwnerHwnd'],11)
+        self.assertEqual(operation['openDialogReadiness']['documentHwnd'],11)
+        self.assertTrue(operation['success']);self.assertEqual(native_calls,['open'])
+        self.assertEqual(owner_calls,[('filename',11),('open-button',11)])
+        binding=operation['documentOwnerBinding']
+        self.assertEqual((binding['documentHwnd'],binding['officePid'],binding['officeCreationTime']),(11,88,200))
+
+    def test_document_picker_joins_raw_and_resolved_windows_image_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _,_,native_calls,owner_calls,error=self.run_document_picker(Path(directory).resolve(),native_image_case=True)
+        self.assertIsNone(error,type(error).__name__ if error else None)
+        self.assertEqual(native_calls,['open']);self.assertEqual(owner_calls,[('filename',11),('open-button',11)])
+
+    def test_document_menu_picker_rejects_foreign_home_other_document_and_generation_before_input(self):
+        for mode in ('foreign-home','other-document','shell-generation','shell-generation-consistent','shell-handle','engine-generation','document-cancel'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as directory:
+                def mutate(record):
+                    if mode=='shell-generation':record['originalShell']['nativeCreation']['fileTime']+=1
+                    elif mode=='shell-generation-consistent':
+                        record['originalShell']['nativeCreation']['fileTime']+=1;record['originalShell']['nativeCreation']['low']+=1
+                    elif mode=='shell-handle':record['originalShell']['handleValue']+=1
+                    elif mode=='engine-generation':record['attachments'][0]['officeCreationTime']+=1
+                _,boundary,native_calls,owner_calls,error=self.run_document_picker(Path(directory).resolve(),
+                    home=99 if mode=='foreign-home' else 10,document=30 if mode=='other-document' else 11,
+                    mutate=mutate,path=mode!='document-cancel')
+                self.assertIsInstance(error,AssertionError)
+                self.assertEqual(native_calls,[]);self.assertEqual(owner_calls,[])
+                self.assertEqual(boundary.calls,[])
+
+    def test_document_menu_picker_never_inputs_to_home_or_other_document_owned_dialog(self):
+        for owner in (10,30):
+            with self.subTest(owner=owner),tempfile.TemporaryDirectory() as directory:
+                record,boundary,native_calls,owner_calls,error=self.run_document_picker(Path(directory).resolve(),owner=owner)
+                self.assertIsInstance(error,AssertionError);self.assertEqual(native_calls,['open'])
+                self.assertEqual(owner_calls,[])
+                self.assertFalse(record['openDialogs'][0]['success'])
+
+    def test_shared_open_replay_derives_picker_owner_from_original_frame_and_generations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve()
+            record,_,_,_,error=self.run_document_picker(root)
+            self.assertIsNone(error)
+            first,_,_,_,error=self.run_document_picker(root,owner=10,document=None)
+            self.assertIsNone(error)
+            record['openDialogs'].insert(0,first['openDialogs'][0])
+            record.update(success=True,cleanClose=True,forcedCleanup=False,shellExitCode=0,keyboardInputVerified=False,
+                shellCommand=[str(root/'OpenGeul.Office.exe')],homeOnlyBeforeAction=[10],sourceCopies=[],
+                homeActions=[dict(homeHwnd=10,shellPid=77,home=dict(hwnd=10,rootHwnd=10,pid=77,isWindow=True,threadId=90),
+                    foreground=dict(hwnd=10,rootHwnd=10,pid=77,isWindow=True),clicks=1,success=True,rawElementEquals=True,
+                    candidates=[dict(name='파일 열기…',pid=77,runtimeId=[42,10],nativeHwnd=12,nativeRoot=10,nativeLive=True,enabled=True,visible=True)])])
+            inputs={}
+            for module,extension in (('writer','docx'),('impress','pptx')):
+                path=root/f'format-{module}-{extension}.{extension}';path.write_bytes(b'owned replay fixture')
+                digest=hashlib.sha256(path.read_bytes()).hexdigest()
+                descriptor=dict(module=module,extension=extension,source=str(path),featuresRoot=str(root),bytes=path.stat().st_size,sha256=digest)
+                inputs[(module,extension)]=descriptor
+                record['sourceCopies'].append(dict(path=str(path),sourceInput=descriptor,sha256=digest))
+            # Stop only after the real owner/readiness replay has admitted the
+            # second picker. Existing tests cover the later retained-exit gate.
+            class BothOwnersReplayed(Exception):pass
+            for mode in ('valid','reported-owner','reported-binding','dialog-owner','engine-generation','shell-handle','menu-engine'):
+                with self.subTest(mode=mode):
+                    value=copy.deepcopy(record);owners=[]
+                    if mode=='reported-owner':value['openDialogs'][1]['pickerOwnerHwnd']=10
+                    elif mode=='reported-binding':value['openDialogs'][1]['documentOwnerBinding']['documentHwnd']=30
+                    elif mode=='dialog-owner':value['openDialogs'][1]['openDialogReadiness']['documentHwnd']=10
+                    elif mode=='engine-generation':value['attachments'][0]['officeCreationTime']+=1
+                    elif mode=='shell-handle':value['originalShell']['handleValue']+=1
+                    elif mode=='menu-engine':value['nativeDocumentMenuActions'][0]['nativeAction']['originalEngine']['creationTime']+=1
+                    def filename(operation,pid,owner,expected):
+                        owners.append(owner)
+                        if len(owners)==2:raise BothOwnersReplayed()
+                    with patch.object(self.api,'load_feature_inputs',return_value=inputs), \
+                         patch.object(self.api,'require_open_filename_receipt',side_effect=filename):
+                        with self.assertRaises(BothOwnersReplayed if mode=='valid' else AssertionError):self.api.require_case_result(value,root)
+                    self.assertEqual(owners,[10,11] if mode=='valid' else [10])
+
     def test_actual_case_dispatch_uses_physical_home_routes_and_menu_close_once(self):
         from types import SimpleNamespace
         for spec in self.api.build_plan():

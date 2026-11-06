@@ -162,6 +162,74 @@ class WriterStyleEvidenceTests(unittest.TestCase):
                 smoke.owned_saved_path(self.folder, {'copiedFixture': name})
 
 
+class WriterStyleNativeSaveTests(unittest.TestCase):
+    def fixture(self):
+        from test_windows_attachment import native as windows, User32
+        from test_owned_native_menu import Clock, Probe
+        import owned_native_menu
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        suite = Path(temporary.name).resolve(); output = suite / 'evidence'; output.mkdir()
+        api = object.__new__(windows.Windows); api.user = User32()
+        api.user.GetForegroundWindow = lambda: 11
+        process = SimpleNamespace(pid=77, _handle=8, poll=lambda: None,
+            args=[str(suite / 'OpenGeul.Office.exe')], opengeul_suite_root=suite,
+            opengeul_evidence_output=output, opengeul_evidence_case='writer-heading1',
+            opengeul_editor_click_generations={(55,56,88):
+                (88, str(suite / 'Office/program/soffice.bin'), 200)})
+        record = dict(case='writer-heading1', module='writer', windowHwnd=11,
+            parentHwnd=55, childHwnd=56, officePid=88, officeCreationTime=200)
+        probe = Probe(suite, Clock()); probe.close_provider = lambda: True
+        # The unified document has no shell File strip. Keep this real failed
+        # legacy boundary available so the regression cannot become ImportError.
+        window = SimpleNamespace(descendants=lambda **kwargs: [])
+        desktop = lambda **kwargs: SimpleNamespace(window=lambda **options:
+            SimpleNamespace(wrapper_object=lambda: window))
+        self.enterContext(mock.patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=desktop)}))
+        self.enterContext(mock.patch.object(owned_native_menu, 'NativeMenuProbe', return_value=probe))
+        activation = self.enterContext(mock.patch.object(smoke.native, 'activate_owned_suite'))
+        return api, process, record, probe, activation
+
+    def test_style_save_uses_real_native_save_with_no_shell_file_strip(self):
+        api, process, record, probe, activation = self.fixture()
+        try:
+            smoke.click_suite_save(api, process, 11, record)
+        except AssertionError as error:
+            self.fail('Style Save must use the unified native menu rather than the removed shell strip: '
+                      + type(error).__name__)
+        activation.assert_called_once_with(api, process, 11, record)
+        action = record['saveMenuAction']
+        self.assertTrue(record['savedViaOwnedSuiteMenu'])
+        self.assertEqual(action['kind'], 'owned-native-menu-action')
+        self.assertEqual(action['command'], 'save')
+        self.assertEqual(action['binding'], dict(document=11,parent=55,child=56,officePid=88))
+        self.assertEqual(action, record['nativeMenuActions'][-1])
+        self.assertEqual([call for call in probe.calls if isinstance(call,tuple) and call[0] in ('click','key')],
+                         [('click','file'),('click','save')])
+        self.assertTrue(action['engineHandleReleased']); self.assertTrue(action['providerClientReleased'])
+        self.assertTrue(action['dpiScope']['restored'])
+        self.assertLess(action['finishedAt'], action['deadline'])
+        self.assertLessEqual(action['deadline'] - action['startedAt'], 5)
+
+    def test_style_save_rejects_reused_engine_before_any_native_input(self):
+        api, process, record, probe, activation = self.fixture()
+        probe.engine['creationTime'] = 201
+        with self.assertRaises(AssertionError): smoke.click_suite_save(api, process, 11, record)
+        self.assertNotIn('savedViaOwnedSuiteMenu', record); self.assertNotIn('saveMenuAction', record)
+        self.assertIn('nativeMenuActions', record)
+        self.assertTrue(record['nativeMenuActions'][-1]['engineHandleReleased'])
+        self.assertFalse(any(isinstance(call,tuple) and call[0] in ('click','key') for call in probe.calls))
+
+    def test_partial_native_style_save_never_retries_or_marks_save_delivery(self):
+        api, process, record, probe, activation = self.fixture(); probe.bad = 'partial'
+        with self.assertRaises(AssertionError): smoke.click_suite_save(api, process, 11, record)
+        self.assertNotIn('savedViaOwnedSuiteMenu', record); self.assertNotIn('saveMenuAction', record)
+        self.assertIn('nativeMenuActions', record)
+        self.assertEqual([call for call in probe.calls if isinstance(call,tuple) and call[0] in ('click','key')],
+                         [('click','file')])
+        self.assertFalse(record['nativeMenuActions'][-1]['success'])
+        self.assertTrue(record['nativeMenuActions'][-1]['engineHandleReleased'])
+
+
 class PackagedPythonIdentityTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
