@@ -143,6 +143,91 @@ class BrandingTests(unittest.TestCase):
             self.destination / 'share/registry/main.xcd', events=('start-ns',)))
         self.assertEqual(namespaces.get('xs'), 'http://www.w3.org/2001/XMLSchema')
 
+    def test_native_menubar_is_enabled_only_in_the_four_existing_tabbed_modes(self):
+        source_tree = ET.parse(self.source / 'share/registry/main.xcd')
+        applications = next(n for n in source_tree.iter('node') if n.get(OOR + 'name') == 'Applications')
+        preserved = {n.get(OOR + 'name'): ET.tostring(n) for n in applications.findall('node')
+                     if n.get(OOR + 'name') in ('Formula', 'Base')}
+        for application in applications.findall('node'):
+            if application.get(OOR + 'name') != 'Writer':
+                continue
+            modes = next(n for n in application.findall('node') if n.get(OOR + 'name') == 'Modes')
+            tabbed = next(n for n in modes.findall('node') if n.get(OOR + 'name') == 'Tabbed')
+            ET.SubElement(ET.SubElement(tabbed, 'prop', {OOR + 'name': 'HasMenubar'}), 'value').text = 'false'
+            compact = ET.SubElement(modes, 'node', {OOR + 'name': 'TabbedCompact'})
+            ET.SubElement(ET.SubElement(compact, 'prop', {OOR + 'name': 'HasMenubar'}), 'value').text = 'false'
+            preserved_compact = ET.tostring(compact)
+        source_tree.write(self.source / 'share/registry/main.xcd', encoding='utf-8', xml_declaration=True)
+        original = tree_hashes(self.source)
+        branding.brand_runtime(self.source, self.destination, self.manifest)
+        tree = ET.parse(self.destination / 'share/registry/main.xcd')
+        actual = next(n for n in tree.iter('node') if n.get(OOR + 'name') == 'Applications')
+        for application in actual.findall('node'):
+            name = application.get(OOR + 'name')
+            if name in preserved:
+                self.assertEqual(ET.tostring(application), preserved[name])
+                continue
+            modes = next(n for n in application.findall('node') if n.get(OOR + 'name') == 'Modes')
+            for mode in modes.findall('node'):
+                flag = next((p for p in mode.findall('prop') if p.get(OOR + 'name') == 'HasMenubar'), None)
+                if mode.get(OOR + 'name') == 'Tabbed':
+                    self.assertIsNotNone(flag, name + ' Tabbed menubar default is missing')
+                    self.assertEqual([v.text for v in flag.findall('value')], ['true'])
+                elif mode.get(OOR + 'name') == 'TabbedCompact':
+                    self.assertEqual(ET.tostring(mode), preserved_compact)
+                else:
+                    self.assertIsNone(flag, name + ' non-Tabbed mode changed')
+        self.assertEqual(tree_hashes(self.source), original)
+
+    def test_missing_or_unknown_tabbed_definitions_fail_without_creating_modes(self):
+        path = self.source / 'share/registry/main.xcd'
+        original = path.read_bytes()
+        number = 0
+        for name in ('Writer', 'Calc', 'Impress', 'Draw'):
+            for problem in ('application', 'modes', 'tabbed', 'command', 'notebookbar',
+                            'missing-command', 'missing-notebookbar'):
+                with self.subTest(module=name, problem=problem):
+                    number += 1
+                    tree = ET.ElementTree(ET.fromstring(original))
+                    applications = next(n for n in tree.iter('node') if n.get(OOR + 'name') == 'Applications')
+                    application = next(n for n in applications.findall('node') if n.get(OOR + 'name') == name)
+                    modes = next(n for n in application.findall('node') if n.get(OOR + 'name') == 'Modes')
+                    tabbed = next(n for n in modes.findall('node') if n.get(OOR + 'name') == 'Tabbed')
+                    if problem == 'application':
+                        applications.remove(application)
+                    elif problem == 'modes':
+                        application.remove(modes)
+                    elif problem == 'tabbed':
+                        modes.remove(tabbed)
+                    elif problem.startswith('missing-'):
+                        prop = 'CommandArg' if problem == 'missing-command' else 'HasNotebookbar'
+                        tabbed.remove(next(p for p in tabbed.findall('prop') if p.get(OOR + 'name') == prop))
+                    else:
+                        prop = 'CommandArg' if problem == 'command' else 'HasNotebookbar'
+                        value = next(p.find('value') for p in tabbed.findall('prop') if p.get(OOR + 'name') == prop)
+                        value.text = 'unrecognized.ui' if problem == 'command' else 'false'
+                    tree.write(path, encoding='utf-8', xml_declaration=True)
+                    expected_source = tree_hashes(self.source)
+                    destination = self.root / ('bad-mode-' + str(number))
+                    try:
+                        with self.assertRaisesRegex(ValueError, 'Tabbed'):
+                            branding.brand_runtime(self.source, destination, self.manifest)
+                        self.assertFalse(destination.exists())
+                        self.assertEqual(tree_hashes(self.source), expected_source)
+                    finally:
+                        path.write_bytes(original)
+
+    def test_label_only_registry_fragment_does_not_invent_a_tabbed_mode(self):
+        path = self.source / 'share/registry/mode-labels.xcu'
+        original = ('<oor:component-data xmlns:oor="http://openoffice.org/2001/registry" '
+                    'oor:package="org.openoffice.Office.UI" oor:name="ToolbarMode">'
+                    '<node oor:name="Applications"><node oor:name="Writer"><node oor:name="Modes">'
+                    '<node oor:name="Tabbed"><prop oor:name="Label"><value>Tabbed label preserved</value>'
+                    '</prop></node></node></node></node></oor:component-data>')
+        path.write_text(original, encoding='utf-8')
+        branding.brand_runtime(self.source, self.destination, self.manifest)
+        self.assertEqual((self.destination / path.relative_to(self.source)).read_text(encoding='utf-8'), original)
+
     def test_localized_display_labels_change_without_renaming_donation_or_internal_ids(self):
         path = self.source/'share/registry/res/registry_nl.xcd'
         path.parent.mkdir()

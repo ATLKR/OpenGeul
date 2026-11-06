@@ -76,11 +76,18 @@ class GeneratedCalcCloseTests(unittest.TestCase):
             function=self.api.close_generated_blank_calc if blank else self.api.close_saved_calc_copy
             function(self.windows,self.process,10,20,self.record,proof)
 
-    def blank_proof(self):
+    def blank_proof(self, *, native_menu=False, mutate=None):
         import lifecycle_smoke as lifecycle
         self.process.args=[str(self.suite/'OpenGeul.Office.exe'),'--module','calc']
         self.process._handle=77;self.process.opengeul_evidence_case='new-calc'
         self.record.update(kind='new-document',keyboardInputVerified=False,contentMutationVerified=False)
+        if native_menu:
+            self.process.opengeul_evidence_case='native-menu-calc'
+            self.record.update(kind='native-menu-gesture-case',case='native-menu-calc',
+                officePid=8,officeCreationTime=9007199254741008,
+                nativeArchiveGeneration=dict(pid=8,creationTime=9007199254741008,
+                    image=str(self.suite/'Office/program/soffice.bin')))
+        if mutate is not None:mutate(self.process,self.record)
         test=self
         class Bound:
             def __init__(self,pid,image):self.pid=pid;self.handle=pid;self.creation=9007199254741000+pid;self.kernel=None
@@ -100,6 +107,47 @@ class GeneratedCalcCloseTests(unittest.TestCase):
         self.assertEqual(9007199254741007,evidence['shellCreationTime'])
         self.assertEqual(9007199254741008,evidence['engineCreationTime'])
         self.assertIsNone(proof.shell.handle);self.assertIsNone(proof.engine.handle)
+
+    def test_native_menu_calc_freezes_and_closes_with_the_real_generated_blank_helper(self):
+        # Only Win32 HANDLE and UIA boundaries are synthetic. Neither freeze nor
+        # its command/case/generation verifier is replaced with a mock.
+        Desktop,_,_=self.boundary();proof=self.blank_proof(native_menu=True)
+        self.assertEqual(self.record['kind'],'native-menu-gesture-case')
+        self.assertEqual(proof.command,tuple(self.process.args))
+        self.invoke(proof,Desktop,blank=True)
+        self.assertEqual([(10,7)],self.closes);self.assertEqual(['discard'],self.clicks)
+        self.assertIsNone(proof.shell.handle);self.assertIsNone(proof.engine.handle)
+
+    def test_native_menu_blank_case_cannot_authorize_other_launches_or_generations(self):
+        for reason in ('kind','case','module','launch-case','file','attempt','mode','keyboard','mutation',
+                       'generation-extra','generation-pid','generation-created','generation-image',
+                       'office-pid','office-created'):
+            with self.subTest(reason=reason):
+                self.boundary()
+                def mutate(process,record):
+                    if reason=='kind':record['kind']='native-menu-other'
+                    elif reason=='case':record['case']='native-menu-writer'
+                    elif reason=='module':record['module']='writer'
+                    elif reason=='launch-case':process.opengeul_evidence_case='new-calc'
+                    elif reason=='file':process.args+=['--file',str(self.source)]
+                    elif reason in ('attempt','mode'):record[reason]=2 if reason=='attempt' else 'new'
+                    elif reason=='keyboard':record['keyboardInputVerified']=True
+                    elif reason=='mutation':record['contentMutationVerified']=True
+                    elif reason=='generation-extra':record['nativeArchiveGeneration']['other']=1
+                    elif reason=='generation-pid':record['nativeArchiveGeneration']['pid']=9
+                    elif reason=='generation-created':record['nativeArchiveGeneration']['creationTime']+=1
+                    elif reason=='generation-image':record['nativeArchiveGeneration']['image']=str(self.root/'foreign.bin')
+                    elif reason=='office-pid':record['officePid']=9
+                    else:record['officeCreationTime']+=1
+                with self.assertRaises(AssertionError):
+                    self.blank_proof(native_menu=True,mutate=mutate)
+                self.assertEqual([],self.closes);self.assertEqual([],self.clicks)
+
+    def test_native_menu_original_generation_change_after_freeze_stops_before_close(self):
+        Desktop,_,_=self.boundary();proof=self.blank_proof(native_menu=True)
+        self.record['nativeArchiveGeneration']['creationTime']+=1
+        with self.assertRaises(AssertionError):self.invoke(proof,Desktop,blank=True)
+        self.assertEqual([],self.closes);self.assertEqual([],self.clicks)
 
     def test_blank_wrong_file_launch_new_case_or_native_generation_never_discards(self):
         for reason in ('file','case','generation'):

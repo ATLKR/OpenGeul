@@ -82,16 +82,16 @@ internal sealed class HomeForm : Form
         InitialWindowLayout.Apply(this);
     }
 
-    internal void OpenFile()
+    internal void OpenFile(IWin32Window? owner = null)
     {
         if (closing) return;
         using var dialog = new OpenFileDialog { Title = "OpenGeul Office에서 문서 열기", Filter = manifest.OpenDialogFilter, CheckFileExists = true, Multiselect = false };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        try { OpenModule(manifest.Route(dialog.FileName).Id, dialog.FileName); }
-        catch (Exception e) { Program.ShowError(e.Message, this); }
+        if (dialog.ShowDialog(owner ?? this) != DialogResult.OK) return;
+        try { OpenModule(manifest.Route(dialog.FileName).Id, dialog.FileName, owner ?? this); }
+        catch (Exception e) { Program.ShowError(e.Message, owner ?? this); }
     }
 
-    internal void OpenModule(string id, string? path = null)
+    internal void OpenModule(string id, string? path = null, IWin32Window? errorOwner = null)
     {
         if (closing) return;
         try
@@ -111,14 +111,24 @@ internal sealed class HomeForm : Form
             }
             if (!File.Exists(Path.Combine(packageRoot, "Office", "program", "python.exe")) || !File.Exists(Path.Combine(packageRoot, "Office", "program", "soffice.exe")) || !File.Exists(Path.Combine(packageRoot, "worker", "office_worker.py")))
                 throw new SuiteException("Office 런타임 또는 문서 작업자가 없습니다. 완전한 OpenGeul Office 패키지를 사용해 주세요.");
-            var form = new OfficeDocumentForm(packageRoot, module, path, OpenFile, requested => OpenModule(requested));
+            OfficeDocumentForm? form = null;
+            form = new OfficeDocumentForm(packageRoot, module, path, OpenFile,
+                requested => OpenModule(requested, errorOwner: (IWin32Window?)form ?? this), ShowHome, Close);
             documents.Add(form);
             form.FormClosed += (_, _) => documents.Remove(form);
             // Home performs the asynchronous close sequence explicitly. A WinForms owner
             // would synchronously close its owned forms before that sequence can finish.
             form.Show();
         }
-        catch (Exception e) { Program.ShowError(e is SuiteException ? e.Message : "문서를 열 수 없습니다.\n" + e.Message, this); }
+        catch (Exception e) { Program.ShowError(e is SuiteException ? e.Message : "문서를 열 수 없습니다.\n" + e.Message, errorOwner ?? this); }
+    }
+
+    private void ShowHome()
+    {
+        if (closing || closeApproved || IsDisposed || Disposing) return;
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        Show();
+        Activate();
     }
 
     private async void OnHomeClosing(object? sender, FormClosingEventArgs e)

@@ -154,6 +154,7 @@ class UnoBackend:
         self.calc_save = None
         self.cleanup_evidence = None
         self._shutdown_witness = None
+        self.native_menu = None
 
     def _diagnose(self, phase):
         if self.diagnostics is None and not os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS'):
@@ -404,9 +405,12 @@ class UnoBackend:
             self.calc_save = CalcSaveTransaction(self, module['filters'], path, hwnd, child)
         self.peer.setVisible(True)
         self.frame.activate()
+        from native_menu import NativeMenuSurface
+        self.native_menu = NativeMenuSurface(self)
+        self.native_menu.prepare(self)
         return {'parentHwnd': hwnd, 'childHwnd': child}
 
-    def status(self):
+    def document_status(self):
         if self.process is not None and self.process.poll() is not None:
             raise WorkerError('engine_exited', 'Office 런타임이 종료되었습니다.')
         # Missing XModifiable is an error, never an assumption that the file is clean.
@@ -415,13 +419,20 @@ class UnoBackend:
             result['readiness'] = base_readiness(self.document, self.context)
         return result
 
+    def status(self):
+        state = self.document_status()
+        if self.native_menu is None:
+            raise WorkerError('native_menu_unavailable', 'Office 문서 메뉴에 연결할 수 없습니다. 문서를 안전하게 닫아 주세요.')
+        self.native_menu.ready(self)
+        return dict(state, nativeMenuReady=True)
+
     def prepare_close(self):
         if self.module_factory == 'private:factory/scalc':
             if self.calc_save is None:
                 raise WorkerError('close_failed', 'Calc 닫기 준비 경로를 확인하지 못했습니다.')
             from calc_close import prepare_calc_close
             return prepare_calc_close(self.calc_save)
-        return self.status()
+        return self.document_status()
 
     def resize(self, width, height):
         self.peer.setPosSize(0, 0, width, height, 15)
@@ -559,6 +570,7 @@ class UnoBackend:
                 except Exception as exc:
                     error('private job handle close', exc)
             self.context = self.document = self.desktop = self.frame = self.peer = self.interceptor = None
+            self.native_menu = None
             self.calc_save = None
         if dead and self.profile is not None:
             try:

@@ -849,29 +849,21 @@ class Case:
         native.wait_for(lambda: self.api.title(hwnd).startswith('* '), 12)
 
     def shell_command(self, hwnd, keys):
-        from pywinauto import Desktop
-        assert keys in ('','^s','^+s'), 'Unsupported original shell command'
-        self.record['stage']='focus-owned-shell-file-menu'
+        from owned_native_menu import click_native_menu_action,require_native_menu_action
+        assert keys in ('^s','^+s'), 'Unsupported document menu command'
+        self.record['stage']='click-owned-native-file-command'
         native.activate_owned_suite(self.api, self.process, hwnd, self.record)
         self.api.require_foreground(hwnd)
-        shell = Desktop(backend='uia').window(handle=hwnd).wrapper_object()
-        items = [item for item in shell.descendants(control_type='MenuItem') if item.element_info.name == '파일'
-                 and item.element_info.process_id == self.process.pid and item.is_visible() and item.is_enabled()]
-        assert len(items) == 1, 'Exact shell-owned File menu is required'
-        native.click_owned_control(self.api,self.process,hwnd,items[0],self.record,purpose='FILE_MENU')
-        if keys:
-            self.record['stage']='send-owned-shell-save-shortcut'
-            native.send_host_menu_shortcut(self.api,self.process,hwnd,items[0],self.record,
-                shortcut='CTRL_S' if keys=='^s' else 'CTRL_SHIFT_S',
-                caption='OpenGeul Writer — 다른 이름으로 저장')
+        command='save' if keys=='^s' else 'saveAs'
+        action=click_native_menu_action(self.api,self.process,hwnd,self.record,command)
+        return require_native_menu_action(action,self.process.pid,hwnd,command)
 
     def new_from_menu(self, hwnd):
-        from pywinauto import Desktop
-        self.shell_command(hwnd, '')
-        candidates = owned_menu_items(Desktop(backend='uia'), self.process.pid, '새 문서')
-        assert len(candidates) == 1, 'Exact owned shell New Document menu item must be unique'
+        from owned_native_menu import click_native_menu_action,require_native_menu_action
+        native.activate_owned_suite(self.api,self.process,hwnd,self.record)
         self.api.require_foreground(hwnd)
-        candidates[0].click_input()
+        action=click_native_menu_action(self.api,self.process,hwnd,self.record,'new-writer')
+        return require_native_menu_action(action,self.process.pid,hwnd,'new-writer')
 
     def dialog(self, owner, title, deadline=None):
         from pywinauto import Desktop

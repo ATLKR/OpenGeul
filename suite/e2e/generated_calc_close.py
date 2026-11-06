@@ -81,6 +81,10 @@ def _blank_command_and_case(suite,process,record):
     if record.get('kind')=='new-document':
         assert process.opengeul_evidence_case=='new-calc'
         assert record.get('keyboardInputVerified') is False and record.get('contentMutationVerified') is False
+    elif record.get('kind')=='native-menu-gesture-case':
+        assert record.get('case')==process.opengeul_evidence_case=='native-menu-calc'
+        assert 'attempt' not in record and 'mode' not in record
+        assert record.get('keyboardInputVerified') is False and record.get('contentMutationVerified') is False
     else:
         attempt=record.get('attempt')
         assert type(attempt) is int and 1<=attempt<=40 and attempt%4==2
@@ -115,6 +119,12 @@ def verify_generated_blank_calc(api,process,hwnd,child,record,proof):
     assert _blank_command_and_case(proof.suite,process,record)==proof.command
     assert process.poll() is None and proof.shell.live() and proof.engine.live()
     assert proof.engine_creation>=proof.shell_creation>0
+    if record.get('kind')=='native-menu-gesture-case':
+        generation=record.get('nativeArchiveGeneration')
+        assert type(generation) is dict and set(generation)=={'pid','creationTime','image'}
+        assert type(generation['pid']) is int and generation['pid']==record.get('officePid')==proof.engine.pid
+        assert type(generation['creationTime']) is int and generation['creationTime']==record.get('officeCreationTime')==proof.engine_creation
+        assert type(generation['image']) is str and Path(generation['image']).resolve()==proof.suite/'Office/program/soffice.bin'
     for bound,image,creation in ((proof.shell,proof.suite/'OpenGeul.Office.exe',proof.shell_creation),
                                  (proof.engine,proof.suite/'Office/program/soffice.bin',proof.engine_creation)):
         assert lifecycle.process_identity(bound.kernel,bound.handle)==(image.resolve(),creation), 'Blank native generation changed'

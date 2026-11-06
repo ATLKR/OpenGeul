@@ -77,6 +77,8 @@ if (args.Contains("--fake-worker"))
 var tests = new List<(string Name, Func<Task> Run)>();
 tests.AddRange(OwnedEditorFocusTests.Cases());
 tests.AddRange(OwnedDocumentMenuFocusTests.Cases());
+tests.AddRange(DocumentMenuSurfaceTests.Cases());
+tests.AddRange(WorkerMenuCommandTests.Cases());
 tests.AddRange(StandaloneSaveCloseIntentTests.Cases());
 tests.AddRange(StartupDiagnosticTests.Cases(mode => mode == "normal" ? StartWorker() : WorkerClient.Start(new ProcessStartInfo
 {

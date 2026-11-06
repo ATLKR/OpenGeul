@@ -16,44 +16,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 class CallerRedTests(unittest.TestCase):
-    def test_base_clicks_original_save_menu_once_without_keyboard_shortcut(self):
+    def test_base_clicks_native_file_save_without_legacy_keyboard_or_strip(self):
         import windows_smoke as native
         from test_base_save_readiness import NativeBoundary
-        b = NativeBoundary([lambda b: []])
-        calls = []
-        def legacy(*args, **kwargs): raise AssertionError('Opaque keyboard input reached')
-        modules = b.modules(); modules['pywinauto.keyboard'] = NS(send_keys=legacy)
-        def measured_click(*args, **kwargs): calls.append(('click', kwargs['purpose']))
-        def counted(*args, **kwargs): raise AssertionError('Base Save must use its measured menu item')
+        boundary=NativeBoundary([lambda b: []]);record={}
+        def legacy(*args,**kwargs):raise AssertionError('Legacy menu input reached')
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); (root/'fixtures').mkdir()
-            with patch.dict(sys.modules, modules), \
-                 patch.object(native, 'click_owned_control', measured_click, create=True), \
-                 patch.object(native, 'send_host_menu_shortcut', counted, create=True), \
-                 patch.object(native, '_wait_base_save_controls', side_effect=RuntimeError('STOP_AFTER_TRIGGER')):
-                try: native.save_new_base(b.api, b.process, 11, root/'fixtures', root, {})
-                except BaseException as exc: error = str(exc)
-        self.assertEqual(error, 'STOP_AFTER_TRIGGER', 'Base still uses opaque shortcut input')
-        self.assertEqual(calls, [('click', 'FILE_MENU'), ('click', 'SAVE_MENU')])
+            root=Path(directory);(root/'fixtures').mkdir()
+            boundary.menu_root=root;boundary.native_menu_ready=True
+            with patch.dict(sys.modules,boundary.modules()), \
+                 patch.object(native,'click_native_menu_action',side_effect=boundary.measured_native_menu), \
+                 patch.object(native,'click_owned_control',side_effect=legacy), \
+                 patch.object(native,'send_host_menu_shortcut',side_effect=legacy), \
+                 patch.object(native,'_wait_base_save_controls',side_effect=RuntimeError('STOP_AFTER_TRIGGER')):
+                with self.assertRaisesRegex(RuntimeError,'STOP_AFTER_TRIGGER'):
+                    native.save_new_base(boundary.api,boundary.process,11,root/'fixtures',root,record)
+        action=record['nativeMenuActions'][-1]
+        self.assertEqual(action['kind'],'owned-native-menu-action')
+        self.assertEqual([row['target'] for row in action['pointers']],['file','save'])
+        self.assertEqual(action['keys'],[])
 
-    def test_lifecycle_preserves_file_click_and_ctrl_shift_s_without_opaque_keyboard(self):
-        import lifecycle_smoke as life
-        menu = NS(element_info=NS(name='파일', process_id=77), is_visible=lambda: True,
-                  is_enabled=lambda: True, click_input=lambda: None)
-        window = NS(descendants=lambda **kw: [menu])
-        calls = []; process = NS(pid=77); api = NS(require_foreground=lambda hwnd: None)
-        case = NS(api=api, process=process, record={})
-        def legacy(*a, **k): raise AssertionError('Opaque keyboard input reached')
-        with patch.dict(sys.modules, {'pywinauto': NS(Desktop=lambda **kw:NS(window=lambda **kw:NS(wrapper_object=lambda:window))),
-                                      'pywinauto.keyboard': NS(send_keys=legacy)}), \
-             patch.object(life.native, 'activate_owned_suite'), \
-             patch.object(life.native, 'click_owned_control', side_effect=lambda *a,**k:calls.append(('click',k['purpose'])), create=True), \
-             patch.object(life.native, 'send_host_menu_shortcut', side_effect=lambda *a,**k:calls.append(('shortcut',k['shortcut'])), create=True):
-            error = None
-            try: life.Case.shell_command(case, 11, '^+s')
-            except BaseException as exc: error = str(exc)
-        self.assertIsNone(error, 'Lifecycle still uses opaque host shortcut')
-        self.assertEqual(calls, [('click', 'FILE_MENU'), ('shortcut', 'CTRL_SHIFT_S')])
+    def test_lifecycle_saveas_uses_native_item_without_host_shortcut(self):
+        from test_native_menu_routes import NativeMenuRouteTests
+        helper=NativeMenuRouteTests();helper.setUp();self.addCleanup(helper.doCleanups)
+        _,_,case,commands,legacy,_=helper.fixture()
+        case.shell_command(11,'^+s')
+        self.assertEqual(commands,['saveAs']);self.assertEqual(legacy,[])
+        action=case.record['nativeMenuActions'][-1]
+        self.assertEqual([row['target'] for row in action['pointers']],['file','saveAs'])
+        self.assertEqual(action['keys'],[])
 
     def test_exact_base_caption_uses_existing_native_filename_transaction(self):
         import lifecycle_smoke as life

@@ -376,16 +376,19 @@ class PreparationHookTests(unittest.TestCase):
             backend.prepare_close()
         prepare.assert_not_called()
 
-    def test_other_modules_prepare_by_readonly_status_only(self):
+    def test_other_modules_prepare_reads_dirty_state_without_the_failed_menu_gate(self):
         for factory in ('swriter','simpress','sdraw','smath','sdatabase'):
             with self.subTest(factory=factory):
                 backend = native.UnoBackend(Path('C:/Office'))
                 backend.module_factory = 'private:factory/' + factory
-                result = dict(modified=False, title=factory)
-                with patch.object(backend, 'status', return_value=result) as status, \
+                backend.document = NS(isModified=lambda: True, getTitle=lambda: factory)
+                with patch.object(backend, 'status', side_effect=native.WorkerError(
+                        'native_menu_unavailable', 'Synthetic unavailable menu')) as status, \
                         patch('calc_close.prepare_calc_close') as calc:
-                    self.assertIs(backend.prepare_close(), result)
-                    status.assert_called_once_with()
+                    result = backend.prepare_close()
+                    self.assertTrue(result['modified'])
+                    self.assertEqual(factory, result['title'])
+                    status.assert_not_called()
                     calc.assert_not_called()
 
     def test_explicit_prepare_rpc_preserves_new_base_save_as_guard_and_periodic_status_is_readonly(self):

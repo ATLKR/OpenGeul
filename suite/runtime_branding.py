@@ -37,6 +37,7 @@ BRAND_IMAGES = ('intro.png', 'intro-highres.png', 'logo.svg', 'logo_inverted.svg
 NOTEBOOKBAR_CONTEXTS = {f'soffice.cfg/modules/{module}/ui/notebookbar.ui': context
                         for module, context in (('swriter', 'TabbedWriter'), ('scalc', 'TabbedCalc'),
                                                 ('simpress', 'TabbedImpress'), ('sdraw', 'TabbedDraw'))}
+TABBED_APPLICATIONS = ('Writer', 'Calc', 'Impress', 'Draw')
 KOREAN_TAB_LABELS = {
     'File': ('파일', ('FileLabel',)), 'Home': ('홈', ('HomeLabel',)),
     'Insert': ('삽입', ('InsertLabel',)), 'Layout': ('레이아웃', ('LayoutLabel',)),
@@ -183,6 +184,7 @@ def _brand_registry_display_labels(root: ET.Element, manifest: dict) -> bool:
 def _brand_registry(runtime: Path, manifest: dict) -> None:
     product_found = False
     modules_found = set()
+    tabbed_found = set()
     korean_installed = False
     for path in sorted((runtime / 'share/registry').rglob('*')):
         if path.suffix not in ('.xcd', '.xcu'):
@@ -220,7 +222,7 @@ def _brand_registry(runtime: Path, manifest: dict) -> None:
         for component in _component(tree.getroot(), 'org.openoffice.Office.UI', 'ToolbarMode'):
             applications = _child(component, 'node', 'Applications')
             if applications is not None:
-                for name in ('Writer', 'Calc', 'Impress', 'Draw'):
+                for name in TABBED_APPLICATIONS:
                     application = _child(applications, 'node', name)
                     if application is not None:
                         # SfxNotebookBar::IsActive compares Active with CommandArg,
@@ -229,11 +231,34 @@ def _brand_registry(runtime: Path, manifest: dict) -> None:
                         # sfx2/source/notebookbar/SfxNotebookBar.cxx:269-287.
                         changed |= _value(application, 'Active', 'notebookbar.ui')
                         changed |= _value(component, 'Active' + name, 'notebookbar.ui')
+                        modes = _child(application, 'node', 'Modes')
+                        tabbed = _child(modes, 'node', 'Tabbed') if modes is not None else None
+                        if tabbed is not None:
+                            command = _child(tabbed, 'prop', 'CommandArg')
+                            notebookbar = _child(tabbed, 'prop', 'HasNotebookbar')
+                            for prop, expected in ((command, 'notebookbar.ui'), (notebookbar, 'true')):
+                                if prop is not None and [v.text for v in prop.findall('value')] != [expected]:
+                                    raise ValueError('Unrecognized native Tabbed mode: ' + name)
+                            complete = command is not None and notebookbar is not None
+                            if complete:
+                                tabbed_found.add(name)
+                            menubar = _child(tabbed, 'prop', 'HasMenubar')
+                            if complete and menubar is None:
+                                # ToolbarMode.xcs declares this bool with default false.
+                                # Add only the known property to a verified existing mode.
+                                menubar = ET.SubElement(tabbed, 'prop', {OOR + 'name': 'HasMenubar'})
+                            if menubar is not None:
+                                if not menubar.findall('value'):
+                                    ET.SubElement(menubar, 'value').text = 'true'
+                                    changed = True
+                                changed |= _value(tabbed, 'HasMenubar', 'true')
         changed |= _brand_registry_display_labels(tree.getroot(), manifest)
         if changed:
             _write_xml(path, tree)
     if not product_found or modules_found != MODULES - {'hwp'}:
         raise ValueError('Runtime product or six Office factory registrations were not recognized')
+    if tabbed_found != set(TABBED_APPLICATIONS):
+        raise ValueError('The four native Tabbed menu definitions were not recognized')
     if not korean_installed:
         raise ValueError('The Korean UI language must already be installed in the runtime')
     _write_korean_defaults(runtime)

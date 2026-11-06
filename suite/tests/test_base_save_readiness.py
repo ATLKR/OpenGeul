@@ -51,6 +51,7 @@ class NativeBoundary:
     def __init__(self, states):
         self.clock, self.states, self.calls = Clock(), list(states), []
         self.foreground, self.closed = 11, False
+        self.native_menu_ready=True
         self.process=SimpleNamespace(pid=77,poll=lambda:None)
         self.root = Element(44, 50032, 44)
         self.edit = Element(101, 50004, 101, '1001', self.root)
@@ -141,20 +142,38 @@ class NativeBoundary:
         record.setdefault('pickerFilenameInputs',[]).append(dict(method='Win32-Edit-EM_REPLACESEL',
             expected=str(target),before=before,after=self.current_value,success=True))
     def measured_click(self, api, process, document, control, record, **kwargs):
-        if kwargs['purpose']=='FILE_MENU':self.calls.append(('file-menu-click',self.clock.value))
-        elif kwargs['purpose']=='SAVE_MENU':
-            self.calls.append(('save-menu-click',self.clock.value))
-            from test_owned_save_menu import SaveMenuTests
-            fixture=SaveMenuTests('test_root_focused_visible_dropdown_clicks_exact_save_once_without_keyboard')
-            fixture.native_thread_id=90;fixture.setUp()
-            try:
-                action=copy.deepcopy(fixture.run_save())
-                record.setdefault('ownedControlActions',[]).extend(copy.deepcopy(fixture.record['ownedControlActions']))
-                return action
-            finally:fixture.doCleanups()
-        else:
-            assert kwargs['purpose']=='SAVE_BUTTON'
-            control.click_input()
+        assert kwargs['purpose']=='SAVE_BUTTON', 'The Base trigger must never use the legacy File strip'
+        control.click_input()
+    def measured_native_menu(self, api, process, document, record, command, **options):
+        """Run the actual native-menu policy, replacing only Windows/UIA calls."""
+        assert command=='save'
+        from test_owned_native_menu import Clock as MenuClock, Probe
+        from owned_native_menu import click_native_menu_action
+        boundary=self;clock=MenuClock();clock.now=self.clock.value
+        class MenuProbe(Probe):
+            def process_snapshot(self,original):
+                row=super().process_snapshot(original)
+                row['waitResult']=258 if original.poll() is None else 0
+                return row
+            def snapshot(self,binding,target):
+                row=super().snapshot(binding,target)
+                row['document']['threadId']=90
+                row['nativeReady']=1 if boundary.native_menu_ready else 0
+                return row
+            def click(self,receipt):
+                super().click(receipt)
+                boundary.calls.append(('file-menu-click' if receipt['target']=='file' else 'save-menu-click',clock.now))
+        process._handle=8;process.args=[str(self.menu_root/'OpenGeul.Office.exe')]
+        process.opengeul_suite_root=self.menu_root
+        process.opengeul_evidence_output=self.menu_root/'native-menu-evidence'
+        process.opengeul_evidence_output.mkdir(exist_ok=True)
+        process.opengeul_evidence_case='new-base'
+        api.attachment=lambda hwnd:(55,56,88)
+        api.user.GetPropW=lambda hwnd,name:1 if self.native_menu_ready else 0
+        try:
+            return click_native_menu_action(api,process,document,record,command,
+                probe=MenuProbe(self.menu_root,clock),clock=clock)
+        finally:self.clock.value=clock.now
     def counted_shortcut(self, *args, **kwargs):
         assert kwargs['shortcut']=='CTRL_S'
         self.send_keys('^s')
@@ -168,17 +187,26 @@ class NativeBoundary:
 
 
 class BaseSaveReadinessTests(unittest.TestCase):
+    def test_base_uses_native_menu_receipt_without_legacy_file_strip(self):
+        _,record,_,error=self.run_case([lambda b:[b.edit,b.save]])
+        self.assertIsNone(error,str(error))
+        self.assertEqual(record['baseSaveDialogReadiness']['trigger'],'owned-native-menu-pointer')
+        self.assertEqual(record['baseSaveMenuAction']['kind'],'owned-native-menu-action')
+        self.assertFalse(record.get('ownedControlActions'), 'Legacy File/Save proof cannot qualify the native menu')
+
     def run_case(self, states, *, mutate=None, clock_frozen=False):
         import lifecycle_smoke
         boundary=NativeBoundary(states)
         if mutate: mutate(boundary)
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);fixtures=root/'fixtures';fixtures.mkdir()
+            boundary.menu_root=root
             boundary.target=fixtures/'New-OpenGeul-base.odb';record={}
             with patch.dict(sys.modules,boundary.modules()), \
                  patch.object(smoke.time,'monotonic',side_effect=boundary.clock.monotonic), \
                  patch.object(smoke.time,'sleep',side_effect=(lambda seconds:None) if clock_frozen else boundary.clock.sleep), \
                  patch.object(smoke,'click_owned_control',side_effect=boundary.measured_click), \
+                 patch.object(smoke,'click_native_menu_action',side_effect=boundary.measured_native_menu,create=True), \
                  patch.object(smoke,'send_host_menu_shortcut',side_effect=boundary.counted_shortcut), \
                  patch.object(lifecycle_smoke,'set_owned_picker_filename',side_effect=boundary.assign_filename), \
                  patch.object(smoke,'saved_base_evidence',return_value={'sha256':'a'*64,'bytes':19,'connection':'sdbc:embedded:firebird'}):
@@ -186,10 +214,18 @@ class BaseSaveReadinessTests(unittest.TestCase):
                 except Exception as exc: result=None;error=exc
             return boundary,record,result,error
 
-    def no_filename_or_save_input(self,boundary):
+    def no_filename_or_save_input(self,boundary,*,menu_clicks=1):
         self.assertEqual([name for name,_ in boundary.calls if name in ('filename-click','select-filename','type-path','assign-filename','save-click')],[])
-        self.assertEqual(sum(name=='file-menu-click' for name,_ in boundary.calls),1)
-        self.assertEqual(sum(name=='save-menu-click' for name,_ in boundary.calls),1)
+        self.assertEqual(sum(name=='file-menu-click' for name,_ in boundary.calls),menu_clicks)
+        self.assertEqual(sum(name=='save-menu-click' for name,_ in boundary.calls),menu_clicks)
+
+    def test_unavailable_native_menu_never_uses_legacy_file_strip_or_picker(self):
+        def unavailable(boundary):boundary.native_menu_ready=False
+        boundary,record,_,error=self.run_case([lambda b:[b.edit,b.save]],mutate=unavailable)
+        self.assertIsNotNone(error)
+        self.assertIn('native',str(error).lower())
+        self.no_filename_or_save_input(boundary,menu_clicks=0)
+        self.assertEqual(boundary.query_count,0)
 
     def test_existing_dialog_pending_children_then_ready_uses_one_original_input_sequence(self):
         b,r,result,error=self.run_case([[],lambda b:[b.edit,b.save]])
@@ -201,22 +237,36 @@ class BaseSaveReadinessTests(unittest.TestCase):
         self.assertEqual([o['state'] for o in proof['observations']],['pending','ready'])
         self.assertEqual([n for n,_ in b.calls],['file-menu-click','save-menu-click','dialog-focus','filename-click','assign-filename','screenshot','save-click'])
         self.assertTrue(r['newBaseSaveMenuActionVerified']);self.assertFalse(r['saveShortcutViaOwnedMenu'])
-        self.assertEqual((proof.get('trigger'),proof['fileMenuClicks'],proof['saveShortcuts'],proof.get('saveMenuClicks')),('owned-save-menu-pointer',1,0,1),'Pointer readiness must not fabricate a keyboard shortcut')
+        self.assertEqual((proof.get('trigger'),proof['fileMenuClicks'],proof['saveShortcuts'],proof.get('saveMenuClicks')),('owned-native-menu-pointer',1,0,1),'Pointer readiness must not fabricate a keyboard shortcut')
         self.assertLessEqual(proof['finishedAt'],proof['deadline'])
-        smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+        smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
 
     def test_pointer_readiness_requires_caller_selected_dialect_and_legacy_stays_separate(self):
         _,record,_,error=self.run_case([lambda b:[b.edit,b.save]])
         self.assertIsNone(error,str(error));proof=record['baseSaveDialogReadiness']
-        smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+        smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
         with self.assertRaises(AssertionError):smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='legacy-shortcut')
         legacy=copy.deepcopy(proof);legacy.pop('trigger');legacy.pop('saveMenuClicks');legacy.pop('saveMenuAction');legacy['saveShortcuts']=1
         smoke.require_base_save_dialog_readiness(legacy,77,11,CAPTION,expected_trigger='legacy-shortcut')
-        with self.assertRaises((AssertionError,KeyError)):smoke.require_base_save_dialog_readiness(legacy,77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+        with self.assertRaises((AssertionError,KeyError)):smoke.require_base_save_dialog_readiness(legacy,77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
         for count in (True,False,0,2):
             with self.subTest(count=count):
                 changed=copy.deepcopy(proof);changed['saveMenuClicks']=count
-                with self.assertRaises(AssertionError):smoke.require_base_save_dialog_readiness(changed,77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+                with self.assertRaises(AssertionError):smoke.require_base_save_dialog_readiness(changed,77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
+
+    def test_historical_winforms_pointer_is_separate_from_native_menu_proof(self):
+        _,record,_,error=self.run_case([lambda b:[b.edit,b.save]])
+        self.assertIsNone(error,str(error))
+        from test_owned_save_menu import SaveMenuTests
+        fixture=SaveMenuTests('test_root_focused_visible_dropdown_clicks_exact_save_once_without_keyboard')
+        fixture.native_thread_id=90;fixture.setUp()
+        try:legacy_action=copy.deepcopy(fixture.run_save())
+        finally:fixture.doCleanups()
+        historical=copy.deepcopy(record['baseSaveDialogReadiness'])
+        historical.update(trigger='owned-save-menu-pointer',saveMenuAction=legacy_action)
+        smoke.require_base_save_dialog_readiness(historical,77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+        with self.assertRaises((AssertionError,KeyError)):
+            smoke.require_base_save_dialog_readiness(historical,77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
     def test_explicit_legacy_dialect_rejects_mixed_pointer_action_embedding(self):
         _,record,_,error=self.run_case([lambda b:[b.edit,b.save]])
         self.assertIsNone(error,str(error));mixed=copy.deepcopy(record['baseSaveDialogReadiness'])
@@ -235,9 +285,9 @@ class BaseSaveReadinessTests(unittest.TestCase):
             with self.subTest(label=label):
                 proof=copy.deepcopy(original);proof['saveMenuAction']=copy.deepcopy(record['baseSaveMenuAction'])
                 if label=='missing-action':proof.pop('saveMenuAction')
-                elif label=='hit':proof['saveMenuAction']['afterClickIntentHit']['pid']=999
-                elif label=='readback':proof['saveMenuAction']['pointerReadback']=[0,0]
-                elif label=='picker':proof['saveMenuAction']['after']['newPicker']['nativeHwnd']=999
+                elif label=='hit':proof['saveMenuAction']['pointers'][-1]['hits'][-1]['pid']=999
+                elif label=='readback':proof['saveMenuAction']['pointers'][-1]['pointerReadback']=[0,0]
+                elif label=='picker':proof['nativeAnchor']['dialog']['hwnd']=999
                 elif label=='oversize':proof['saveMenuAction']['unexpectedPayload']='x'*(128*1024)
                 elif label=='legacy':proof.pop('trigger');proof.pop('saveMenuClicks');proof.pop('saveMenuAction');proof['saveShortcuts']=1
                 elif label=='unknown':proof['trigger']='other'
@@ -250,9 +300,9 @@ class BaseSaveReadinessTests(unittest.TestCase):
         for label in ('embedding','raw-action','file-anchor'):
             with self.subTest(label=label):
                 changed=copy.deepcopy(record)
-                if label=='embedding':changed['baseSaveDialogReadiness']['saveMenuAction']['receiptStem']='another-action'
-                elif label=='raw-action':changed['ownedControlActions'][1]['receiptStem']='another-action'
-                else:changed['ownedControlActions'][0]['before']['control']['runtimeId']=[42,999]
+                if label=='embedding':changed['baseSaveDialogReadiness']['saveMenuAction']['startedAt']+=.001
+                elif label=='raw-action':changed['nativeMenuActions'][0]['startedAt']+=.001
+                else:changed['nativeMenuActions'][0]['pointers'][0]['snapshots'][0]['control']['runtimeId']=[42,999]
                 with self.assertRaises(AssertionError):smoke.require_base_save_menu_record(changed,77,11)
     def test_max_observation_synthetic_payload_keeps_existing_action_feature_home_caps(self):
         from home_routing_smoke import build_plan,write_home_aggregate
@@ -355,7 +405,7 @@ class BaseSaveReadinessTests(unittest.TestCase):
         def directui(b): b.edit.CurrentNativeWindowHandle=0;return [b.edit,b.save]
         b,r,_,error=self.run_case([directui])
         self.assertIsNone(error,str(error))
-        smoke.require_base_save_dialog_readiness(r['baseSaveDialogReadiness'],77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+        smoke.require_base_save_dialog_readiness(r['baseSaveDialogReadiness'],77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
         def foreign(b):
             b.edit.CurrentNativeWindowHandle=0;b.edit.parent=Element(999,50032,999,pid=999)
             return [b.edit,b.save]
@@ -377,12 +427,17 @@ class BaseSaveReadinessTests(unittest.TestCase):
         self.assertEqual(b.query_count,2)
 
     def test_initial_window_wait_consumes_the_same_original_deadline(self):
-        def late_window(b): b.api.windows=lambda pid:[44] if b.clock.value>=119.8 else []
+        def late_window(b):
+            started=[]
+            def windows(pid):
+                if not started:started.append(b.clock.value)
+                return [44] if b.clock.value>=started[0]+19.9 else []
+            b.api.windows=windows
         b,r,_,error=self.run_case([[],[],lambda b:[b.edit,b.save]],mutate=late_window)
         self.assertIsNotNone(error);self.no_filename_or_save_input(b)
         proof=r['baseSaveDialogReadiness']
-        self.assertEqual(proof['deadline'],120)
-        self.assertLessEqual(proof['finishedAt'],120.000001)
+        self.assertEqual(proof['deadline'],proof['startedAt']+20)
+        self.assertLessEqual(proof['finishedAt'],proof['deadline']+.000001)
         self.assertLessEqual(b.query_count,2)
 
     def test_ready_result_after_deadline_never_types_or_saves(self):
@@ -420,7 +475,7 @@ class BaseSaveReadinessTests(unittest.TestCase):
         for name,mutate in mutations.items():
             proof=copy.deepcopy(original);mutate(proof)
             with self.subTest(name=name),self.assertRaises((AssertionError,ValueError,TypeError,KeyError)):
-                smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+                smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
 
     def test_portable_replay_rejects_boolean_action_counts_and_changed_native_thread(self):
         _,record,_,error=self.run_case([lambda b:[b.edit,b.save]])
@@ -434,7 +489,7 @@ class BaseSaveReadinessTests(unittest.TestCase):
         }.items():
             proof=copy.deepcopy(original);mutate(proof)
             with self.subTest(name=name),self.assertRaises((AssertionError,ValueError,TypeError,KeyError)):
-                smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+                smoke.require_base_save_dialog_readiness(proof,77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
 
     def test_raw_candidate_counts_and_fatal_state_survive_failure(self):
         b,r,_,error=self.run_case([lambda b:[b.edit,b.save,Element(103,50004,103,'1001',b.root,enabled=False)]])
@@ -464,7 +519,7 @@ class BaseSaveReadinessTests(unittest.TestCase):
         self.assertEqual(sum(name=='dialog-focus' for name,_ in b.calls),0)
         def exited(b): b.process.poll=lambda:0
         b,r,_,error=self.run_case([lambda b:[b.edit,b.save]],mutate=exited)
-        self.assertIsNotNone(error);self.no_filename_or_save_input(b)
+        self.assertIsNotNone(error);self.no_filename_or_save_input(b,menu_clicks=0)
         self.assertEqual(b.query_count,0)
 
     def test_native_candidate_process_mismatch_and_replaced_bound_dialog_fail_closed(self):
@@ -517,8 +572,8 @@ class BaseSaveReadinessTests(unittest.TestCase):
         b,r,_,error=self.run_case([lambda b:[b.edit,b.save]],mutate=setup)
         self.assertIsNotNone(error,'UIA preparation received a fresh20s deadline')
         self.no_filename_or_save_input(b)
-        self.assertEqual(r['baseSaveDialogReadiness']['startedAt'],100)
-        self.assertEqual(r['baseSaveDialogReadiness']['deadline'],120)
+        self.assertEqual(r['baseSaveDialogReadiness']['startedAt'],r['baseSaveMenuAction']['finishedAt'])
+        self.assertEqual(r['baseSaveDialogReadiness']['deadline'],r['baseSaveDialogReadiness']['startedAt']+20)
         self.assertEqual(b.query_count,0)
 
     def test_actual_ctypes_null_uia_hwnd_retains_raw_none_and_owned_directui_ancestry(self):
@@ -531,7 +586,7 @@ class BaseSaveReadinessTests(unittest.TestCase):
         self.assertEqual(row['nativeHwnd'],0)
         self.assertIn('nativeHwndRaw',row)
         self.assertIsNone(row['nativeHwndRaw'])
-        smoke.require_base_save_dialog_readiness(r['baseSaveDialogReadiness'],77,11,CAPTION,expected_trigger='owned-save-menu-pointer')
+        smoke.require_base_save_dialog_readiness(r['baseSaveDialogReadiness'],77,11,CAPTION,expected_trigger='owned-native-menu-pointer')
 
     def test_only_successful_null_pointer_or_typed_integer_can_be_uia_hwnd(self):
         for invalid in (False,0.0,'0'):

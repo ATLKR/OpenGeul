@@ -8,12 +8,12 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 {
     private readonly string packageRoot;
     private readonly SuiteModule module;
-    private readonly Action open;
+    private readonly Action<IWin32Window> open;
     private readonly Action<string> create;
-    private readonly Panel editorPanel = new() { Dock = DockStyle.Fill, BackColor = Color.White, Name = "OfficeHostPanel", TabStop = true };
+    private readonly Action home;
+    private readonly Action exit;
+    private readonly Panel editorPanel = new() { Dock = DockStyle.Fill, BackColor = Color.White, Name = "OfficeHostPanel", TabStop = true, Enabled = false };
     private readonly ToolStripStatusLabel statusLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft, Name = "OfficeDocumentStatus" };
-    private readonly ToolStripMenuItem saveMenu = new("저장", null, null, Keys.Control | Keys.S);
-    private readonly ToolStripMenuItem saveAsMenu = new("다른 이름으로 저장…", null, null, Keys.Control | Keys.Shift | Keys.S);
     private readonly System.Windows.Forms.Timer resizeTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1500 };
     private readonly bool closeDiagnostics = CloseDiagnosticsEnabled();
@@ -21,6 +21,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly SaveDiagnosticsTrace editorFocusDiagnostics = new("suite.editorFocus");
     private readonly StandaloneSaveCloseIntent saveCloseIntent = new();
     private OwnedEditorFocus? editorFocus;
+    private DocumentMenuSurface? menuSurface;
     private nint editorFocusFormHwnd, editorFocusPanelHwnd;
     private readonly int uiThreadId = Environment.CurrentManagedThreadId;
     private int closeDiagnosticCount;
@@ -33,15 +34,22 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private bool closeApproved;
     private bool resizeBusy;
     private bool statusBusy;
+    private bool menuFailureReported;
+    private bool menuFailureQueued;
+    private Exception? pendingMenuFailure;
+    private WorkerClient? pendingMenuFailureWorker;
     private Size sentSize;
 
-    internal OfficeDocumentForm(string packageRoot, SuiteModule module, string? path, Action open, Action<string> create)
+    internal OfficeDocumentForm(string packageRoot, SuiteModule module, string? path,
+        Action<IWin32Window> open, Action<string> create, Action home, Action exit)
     {
         this.packageRoot = packageRoot;
         this.module = module;
         this.path = path;
         this.open = open;
         this.create = create;
+        this.home = home;
+        this.exit = exit;
         Text = $"{(path is null ? "새 문서" : Path.GetFileName(path))} — {module.DisplayName}";
         Name = "OpenGeulOfficeDocument";
         SuiteWindowIcon.Apply(this);
@@ -50,28 +58,12 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1250, 850);
         MinimumSize = new Size(700, 500);
-        var menu = new MenuStrip();
-        var file = new ToolStripMenuItem("파일");
-        file.DropDownOpening += (_, _) => FocusFileMenu(menu, file);
-        file.DropDownItems.Add(new ToolStripMenuItem("새 문서", null, (_, _) => create(module.Id)));
-        file.DropDownItems.Add(new ToolStripMenuItem("열기…", null, (_, _) => open()));
-        file.DropDownItems.Add(new ToolStripSeparator());
-        saveMenu.Click += async (_, _) => await SaveDocumentAsync(false);
-        saveAsMenu.Click += async (_, _) => await SaveDocumentAsync(true);
-        file.DropDownItems.Add(saveMenu);
-        file.DropDownItems.Add(saveAsMenu);
-        file.DropDownItems.Add(new ToolStripSeparator());
-        file.DropDownItems.Add(new ToolStripMenuItem("닫기", null, (_, _) => Close()));
-        menu.Items.Add(file);
-        MainMenuStrip = menu;
         var status = new StatusStrip { ShowItemToolTips = true };
         status.Items.Add(statusLabel);
         status.Items.Add(new ToolStripStatusLabel(module.DisplayName));
         Controls.Add(editorPanel);
         Controls.Add(status);
-        Controls.Add(menu);
         SetStatus("문서를 준비하고 있습니다…");
-        EnableSave(false);
         resizeTimer.Tick += async (_, _) => await ResizeEditorAsync();
         statusTimer.Tick += async (_, _) => await RefreshStatusAsync();
         editorPanel.ClientSizeChanged += (_, _) => QueueResize();
@@ -85,19 +77,6 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             statusTimer.Dispose();
             if (IsHandleCreated) NativeWindowProperties.Remove(Handle);
         };
-    }
-
-    private void FocusFileMenu(MenuStrip menu, ToolStripMenuItem file)
-    {
-        // Opening our menu must return keyboard focus from the embedded editor.
-        // Keep this tied to the genuine File opening event; never activate a window.
-        OwnedDocumentMenuFocus.OnOpening(Environment.CurrentManagedThreadId, uiThreadId,
-            () => new(attached, worker is not null, loading, busy, closing, closeApproved,
-                IsHandleCreated && !IsDisposed && !Disposing, Visible, Enabled, ActiveForm == this,
-                ReferenceEquals(MainMenuStrip, menu) && ReferenceEquals(menu.Parent, this) &&
-                    ReferenceEquals(menu.FindForm(), this) && ReferenceEquals(file.Owner, menu),
-                menu.IsHandleCreated && !menu.IsDisposed && !menu.Disposing,
-                menu.Visible, menu.Enabled, menu.CanFocus), menu.Focus);
     }
 
     protected override void OnLoad(EventArgs e)
@@ -136,19 +115,26 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             if (parentHwnd != editorPanel.Handle.ToInt64() || childHwnd == 0 || !NativeWindowProperties.IsChild(editorPanel.Handle, checked((nint)childHwnd)))
                 throw new SuiteException("문서 편집기를 OpenGeul 창 안에 연결하지 못했습니다. 패키지의 Windows 런타임을 확인해 주세요.",
                     startupDiagnostic: new(StartupPhase.ShellAttach, StartupReason.ShellAttachFailed));
+            menuSurface = new DocumentMenuSurface(module.Id, parentHwnd, childHwnd);
+            menuSurface.RequireReady(result);
             NativeWindowProperties.Set(Handle, editorPanel.Handle, checked((nint)childHwnd));
+            NativeWindowProperties.SetNativeMenuReady(Handle, false);
+            editorPanel.Enabled = true;
             editorFocus = new OwnedEditorFocus(new NativeOwnedEditorFocus(Handle, editorPanel.Handle, checked((nint)childHwnd)),
                 Path.Combine(packageRoot, "Office", "program", "soffice.bin"));
             editorFocusFormHwnd = Handle; editorFocusPanelHwnd = editorPanel.Handle;
             attached = true;
             sentSize = size;
             ApplyStatus(result);
-            EnableSave(true);
             statusTimer.Start();
             QueueResize();
+            NativeWindowProperties.SetNativeMenuReady(Handle, true);
         }
         catch (Exception e)
         {
+            editorPanel.Enabled = false;
+            attached = false;
+            if (IsHandleCreated) NativeWindowProperties.SetNativeMenuReady(Handle, false);
             SetStatus("문서를 열지 못했습니다.");
             var failedWorker = worker;
             await ReleaseWorkerAsync();
@@ -167,6 +153,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             }
             catch (Exception) { /* The original error and owned dialog remain primary. */ }
             Program.ShowError("문서를 열지 못했습니다. 원본 파일은 변경하지 않았습니다.\n" + e.Message, this);
+            closeApproved = true;
+            Close();
         }
         finally { loading = false; }
     }
@@ -195,11 +183,13 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 }
                 switch (command.Command)
                 {
-                    case "open": open(); break;
+                    case "open": open(this); break;
                     case "new": create(command.Module ?? module.Id); break;
                     case "save": await SaveDocumentAsync(false, command.DiagnosticSequence); break;
                     case "saveAs": await SaveDocumentAsync(true, command.DiagnosticSequence); break;
                     case "close": Close(); break;
+                    case "home": await DocumentMenuSurface.CloseAndShowHomeAsync(RequestCloseAsync, home); break;
+                    case "exit": exit(); break;
                 }
             });
         }
@@ -235,15 +225,65 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     private async Task RefreshStatusAsync()
     {
-        if (!attached || worker is null || closing || busy || statusBusy) return;
+        if (!attached || worker is null || closing || busy || statusBusy || menuFailureReported || pendingMenuFailure is not null) return;
         statusBusy = true;
+        var statusWorker = worker;
         try
         {
-            var result = await worker.SendAsync("status", new { });
-            if (attached && !IsDisposed) ApplyStatus(result);
+            var result = await statusWorker.SendAsync("status", new { });
+            if (attached && !IsDisposed && ReferenceEquals(worker, statusWorker))
+            {
+                if (menuSurface is null) throw new SuiteException("문서의 통합 메뉴 연결 정보를 확인할 수 없습니다.");
+                menuSurface.ObserveStatus(result, !closing && !busy, ApplyStatus);
+            }
         }
-        catch (Exception e) { statusTimer.Stop(); SetStatus("문서 상태를 확인할 수 없습니다. 문서 창을 유지합니다. " + e.Message); }
+        catch (Exception e)
+        {
+            if (attached && !IsDisposed && ReferenceEquals(worker, statusWorker))
+            {
+                statusTimer.Stop();
+                pendingMenuFailure ??= e;
+                pendingMenuFailureWorker ??= statusWorker;
+                QueueMenuFailure();
+            }
+        }
         finally { statusBusy = false; }
+    }
+
+    private void QueueMenuFailure()
+    {
+        if (Environment.CurrentManagedThreadId != uiThreadId) return;
+        if (menuFailureQueued || menuFailureReported || pendingMenuFailure is null ||
+            loading || busy || closing || closeApproved || !attached || IsDisposed || Disposing || !IsHandleCreated) return;
+        menuFailureQueued = true;
+        try
+        {
+            BeginInvoke(async () =>
+            {
+                menuFailureQueued = false;
+                if (loading || busy || closing || closeApproved || !attached || IsDisposed || Disposing || !IsHandleCreated) return;
+                var failure = pendingMenuFailure;
+                var sourceWorker = pendingMenuFailureWorker;
+                pendingMenuFailure = null; pendingMenuFailureWorker = null;
+                if (failure is not null && sourceWorker is not null && ReferenceEquals(worker, sourceWorker))
+                    await FailMenuSessionAsync(failure, sourceWorker);
+            });
+        }
+        catch (InvalidOperationException) { menuFailureQueued = false; }
+    }
+
+    private async Task FailMenuSessionAsync(Exception error, WorkerClient failedWorker)
+    {
+        if (Environment.CurrentManagedThreadId != uiThreadId) return;
+        if (menuFailureReported || IsDisposed || Disposing || !IsHandleCreated || !attached ||
+            closing || busy || !ReferenceEquals(worker, failedWorker)) return;
+        menuFailureReported = true;
+        statusTimer.Stop();
+        NativeWindowProperties.SetNativeMenuReady(Handle, false);
+        SetStatus("통합 메뉴 연결 오류 · 문서 세션을 종료해야 합니다.");
+        Program.ShowError("문서의 통합 메뉴 또는 작업자 연결을 확인할 수 없습니다. 이 문서 세션을 종료합니다.\n" + error.Message, this);
+        if (!IsDisposed && !Disposing && ReferenceEquals(worker, failedWorker) && !await RequestCloseAsync())
+            SetStatus("통합 메뉴 연결 오류 · 저장 또는 닫기가 취소되어 문서와 전용 프로필을 유지합니다.");
     }
 
     private void ApplyStatus(JsonElement result)
@@ -256,7 +296,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         if (result.TryGetProperty("readiness", out var readiness) && readiness.ValueKind == JsonValueKind.Object
             && readiness.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String)
             readinessMessage = message.GetString();
-        SetStatus(DocumentStatusText.Format(module.Id, modified, path is not null, readinessMessage));
+        var text = DocumentStatusText.Format(module.Id, modified, path is not null, readinessMessage);
+        SetStatus(menuFailureReported ? "통합 메뉴 연결 오류 · " + text : text);
     }
 
     private async Task<bool> SaveDocumentAsync(bool saveAs, long? commandSequence = null)
@@ -270,19 +311,22 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         }
         var saveWorker = worker;
         var saveHwnd = IsHandleCreated ? Handle : 0;
-        return await saveCloseIntent.RunAsync(saveWorker, closing,
-            () => SaveDocumentCoreAsync(saveAs, commandSequence, saveWorker),
-            () => worker,
-            () => Environment.CurrentManagedThreadId == uiThreadId && saveHwnd != 0 &&
-                !IsDisposed && !Disposing && IsHandleCreated && Handle == saveHwnd &&
-                attached && !loading && !busy && !closing && !closeApproved,
-            async () => { TraceClose("requestClose.deferredSave"); await RequestCloseAsync(); });
+        try
+        {
+            return await saveCloseIntent.RunAsync(saveWorker, closing,
+                () => SaveDocumentCoreAsync(saveAs, commandSequence, saveWorker),
+                () => worker,
+                () => Environment.CurrentManagedThreadId == uiThreadId && saveHwnd != 0 &&
+                    !IsDisposed && !Disposing && IsHandleCreated && Handle == saveHwnd &&
+                    attached && !loading && !busy && !closing && !closeApproved,
+                async () => { TraceClose("requestClose.deferredSave"); await RequestCloseAsync(); });
+        }
+        finally { QueueMenuFailure(); }
     }
 
     private async Task<bool> SaveDocumentCoreAsync(bool saveAs, long? commandSequence, WorkerClient saveWorker)
     {
         busy = true;
-        EnableSave(false);
         try
         {
             string? target = null, filter = null;
@@ -324,7 +368,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             Program.ShowError("문서를 저장하지 못했습니다. 문서 창을 유지합니다.\n" + e.Message, this);
             return false;
         }
-        finally { busy = false; EnableSave(attached && !closing); }
+        finally { busy = false; }
     }
 
     Task<DocumentStatus> IDocumentSession.StatusAsync() => ReadCloseStatusAsync("status", "status");
@@ -381,7 +425,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             return false;
         }
         closing = true;
-        resizeTimer.Stop(); statusTimer.Stop(); EnableSave(false);
+        resizeTimer.Stop(); statusTimer.Stop();
         try
         {
             if (attached)
@@ -408,7 +452,11 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         finally
         {
             closing = false;
-            if (!closeApproved && attached) { EnableSave(true); statusTimer.Start(); QueueResize(); }
+            if (!closeApproved && attached)
+            {
+                if (!menuFailureReported && pendingMenuFailure is null) statusTimer.Start();
+                QueueResize(); QueueMenuFailure();
+            }
             TraceClose("requestClose.finally");
         }
     }
@@ -456,6 +504,14 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if ((keyData == (Keys.Control | Keys.S) || keyData == (Keys.Control | Keys.Shift | Keys.S)) &&
+            (msg.HWnd == Handle || msg.HWnd == editorPanel.Handle) && attached && worker is not null &&
+            !loading && !busy && !closing && !closeApproved && !IsDisposed && !Disposing &&
+            Enabled && Visible && ActiveForm == this)
+        {
+            _ = SaveDocumentAsync(keyData == (Keys.Control | Keys.Shift | Keys.S));
+            return true;
+        }
         if ((keyData & Keys.KeyCode) == Keys.F6 && keyData != (Keys.Control | Keys.F6) && editorFocus is not null &&
             editorFocusFormHwnd != 0 && editorFocusPanelHwnd != 0 &&
             (msg.HWnd == editorFocusFormHwnd || msg.HWnd == editorFocusPanelHwnd))
@@ -543,6 +599,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     {
         saveCloseIntent.Invalidate();
         ReleaseEditorFocus();
+        pendingMenuFailure = null; pendingMenuFailureWorker = null;
+        menuSurface = null;
         var ownedWorker = worker;
         worker = null;
         if (ownedWorker is null) return;
@@ -557,13 +615,13 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         statusLabel.Text = text.Replace('\r', ' ').Replace('\n', ' ');
         statusLabel.ToolTipText = text;
     }
-    private void EnableSave(bool enabled) { saveMenu.Enabled = enabled; saveAsMenu.Enabled = enabled; }
 }
 
 internal static class NativeWindowProperties
 {
     internal const string ParentProperty = "OpenGeul.Office.ParentHwnd";
     internal const string ChildProperty = "OpenGeul.Office.ChildHwnd";
+    internal const string NativeMenuReadyProperty = "OpenGeul.Office.NativeMenuReady";
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsChild(nint parent, nint child);
     [DllImport("user32.dll", EntryPoint = "SetPropW", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
@@ -578,5 +636,14 @@ internal static class NativeWindowProperties
     }
     internal static void SetStartupDiagnostic(nint form, ulong value) => SetProp(form, StartupDiagnostic.PropertyName, checked((nint)value));
     internal static void RemoveStartupDiagnostic(nint form) => RemoveProp(form, StartupDiagnostic.PropertyName);
-    internal static void Remove(nint form) { RemoveProp(form, ParentProperty); RemoveProp(form, ChildProperty); }
+    internal static void SetNativeMenuReady(nint form, bool ready)
+    {
+        // A mode hint for native UI proof, never evidence that the menu was used.
+        try { _ = SetProp(form, NativeMenuReadyProperty, ready ? 1 : 0); }
+        catch (Exception) { /* Hint failure must not change document behavior. */ }
+    }
+    internal static void Remove(nint form)
+    {
+        RemoveProp(form, ParentProperty); RemoveProp(form, ChildProperty); RemoveProp(form, NativeMenuReadyProperty);
+    }
 }

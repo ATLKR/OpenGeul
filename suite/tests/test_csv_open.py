@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 SUITE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SUITE / 'worker'))
+sys.path.insert(0, str(SUITE / 'tests'))
 CSV_FILTER = 'Text - txt - csv (StarCalc)'
 
 
@@ -34,6 +35,11 @@ class CsvOpenTests(unittest.TestCase):
         frame = NS(initialize=lambda *a: None, setName=lambda *a: None,
                    registerDispatchProviderInterceptor=lambda *a: None,
                    activate=lambda: self.calls.append(('activate',)))
+        # Keep running real required menu preparation at fake public UNO
+        # boundaries; this CSV fixture does not establish Windows UI behavior.
+        from test_worker import native_menu_boundary
+        document = NS()
+        interceptor = native_menu_boundary(frame, peer, document, module['factory'].split('/')[-1])
 
         def load(url, target, flags, properties):
             props = {p.Name: p.Value for p in properties}
@@ -42,7 +48,7 @@ class CsvOpenTests(unittest.TestCase):
             # SfxObjectShell::HandleFilter requests options when absent. The
             # real abort-only handler must still reject any such request.
             if load_mode == 'csv-options' and props.get('FilterName') == CSV_FILTER and props.get('FilterOptions'):
-                return object()
+                return document
             if load_mode in ('csv-options', 'interaction'):
                 abort = NS(select=lambda: self.aborted.append(True))
                 approve = NS(select=lambda: self.approved.append(True))
@@ -50,7 +56,7 @@ class CsvOpenTests(unittest.TestCase):
                     NS(queryInterface=lambda kind: approve if kind == 'Approve' else None),
                     NS(queryInterface=lambda kind: abort if kind == 'Abort' else None))))
                 return None
-            return None if load_mode == 'none' else object()
+            return None if load_mode == 'none' else document
 
         services = {
             'com.sun.star.frame.Desktop': NS(
@@ -74,9 +80,10 @@ class CsvOpenTests(unittest.TestCase):
                 'uno': uno, 'unohelper': NS(Base=type('UnoBase', (), {})),
                 'com.sun.star.task': NS(XInteractionHandler=type('XInteractionHandler', (), {})),
             }))
-            stack.enter_context(patch.object(self.native, 'make_interceptor', return_value=object()))
+            stack.enter_context(patch.object(self.native, 'make_interceptor', return_value=interceptor))
             transaction = stack.enter_context(patch('calc_save.CalcSaveTransaction'))
             result = backend.attach(123, module, 640, 480, path)
+            self.assertTrue(backend.native_menu.ready(backend))
             if module['factory'] == 'private:factory/scalc':
                 transaction.assert_called_once_with(backend, module['filters'], path, 123, 456)
             else:

@@ -12,8 +12,8 @@ concurrency:
   group: office-suite-${{ github.ref }}
   cancel-in-progress: true
 env:
-  # Observe one original ARM64 Writer IME callback; this cannot qualify delivery.
-  OPENGEUL_SUITE_RUN_MODE: ime-mode-diagnostic
+  # Paired native menu verification and all original acceptance gates are required.
+  OPENGEUL_SUITE_RUN_MODE: acceptance
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -391,6 +391,45 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
       if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
+    - name: 여섯 모듈 native 메뉴·키보드·포커스 실제 검증
+      id: native-menu-ui
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && steps.suite-unit-shell.outcome == 'success' && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-native-menu/worker-diagnostics
+      shell: pwsh
+      timeout-minutes: 15
+      run: |
+        python suite/e2e/native_menu_smoke.py --suite "$env:SUITE_PACKAGE" --fixtures .work/suite-engine/fixtures --output .work/suite-native-menu
+        $menuExit = $LASTEXITCODE
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Native menu scenario changed the packaged payload.' }
+        if ($menuExit -ne 0) { throw 'Actual native menu, focus or owned shutdown verification failed.' }
+    - name: 별도 native 메뉴 원본 여섯 세대·종료 기록 검증
+      id: native-menu-archive-integrity
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance'"
+      shell: pwsh
+      run: |
+        python suite/e2e/native_menu_archive_completeness.py --workspace . --suite "$env:SUITE_PACKAGE" --output .work/suite-native-menu-archive-integrity.json
+        if ($LASTEXITCODE -ne 0) { throw 'Native menu original generation or graceful shutdown archive is incomplete.' }
+        if ('${{ steps.native-menu-ui.outcome }}' -cne 'success') { throw 'Native menu UI verification did not pass.' }
+    - name: native 메뉴 숫자 기록·빈 문서 상단 화면 별도 보존
+      id: native-menu-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && steps.native-menu-ui.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-native-menu-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-native-menu/results.json
+          .work/suite-native-menu/*-chrome.png
+          .work/suite-native-menu/worker-diagnostics/*/manifest.json
+          .work/suite-native-menu/worker-diagnostics/*/events.jsonl
+          .work/suite-native-menu/worker-diagnostics/*/shutdown.json
+          .work/suite-native-menu/worker-diagnostics/worker-save-*.jsonl
+          .work/suite-native-menu-archive-integrity.json
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
     - name: Preserve bounded diagnostic prerequisite failure summary
       id: diagnostic-fixture-failure-evidence
       if: "always() && steps.run-mode.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'acceptance' && steps.fixtures.outcome == 'failure' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'"

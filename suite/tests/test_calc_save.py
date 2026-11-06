@@ -108,20 +108,22 @@ class CalcSaveTests(unittest.TestCase):
             setPosSize=lambda *a:None,setVisible=lambda v:calls.append('visible'),getWindowHandle=lambda *a:456)
         frame=NS(initialize=lambda p:None,setName=lambda n:None,
             registerDispatchProviderInterceptor=lambda i:None,activate=lambda:calls.append('activate'))
+        from test_worker import native_menu_boundary
+        interceptor=native_menu_boundary(frame,peer,self.document,'scalc')
         desktop=NS(getFrames=lambda:NS(append=lambda f:None),loadComponentFromURL=lambda *a:self.document)
         services={'com.sun.star.frame.Desktop':desktop,'com.sun.star.frame.Frame':frame,
             'com.sun.star.awt.Toolkit':NS(createSystemChild=lambda *a:peer)}
         context=NS(ServiceManager=NS(createInstanceWithContext=lambda n,c:services[n]))
         windows=NS(validate_parent=lambda h:None,validate_child=lambda c,p:calls.append('validated'))
         backend=native.UnoBackend(self.folder,window_api=windows,uno_loader=lambda:NS(
-            Any=lambda *a:None,createUnoStruct=lambda n:NS()),connector=lambda *a:context)
+            Any=lambda kind,value:value,createUnoStruct=lambda n:NS()),connector=lambda *a:context)
         backend._start_runtime=lambda:None
         backend._isolate_legacy_style_controls=lambda *a:None;backend._bootstrap_ui=lambda *a:None
         module=dict(factory='private:factory/scalc',displayName='OpenGeul Calc',filters={'xlsx':self.filter})
         def capture(*args):
             calls.append('capture');self.assertIs(backend,args[0]);self.assertIs(self.document,backend.document)
             self.assertEqual((module['filters'],self.path,123,456),args[1:]);return value
-        with patch.object(native,'make_interceptor',return_value=object()), \
+        with patch.object(native,'make_interceptor',return_value=interceptor), \
                 patch.object(native,'make_interaction_handler',return_value=object()), \
                 patch.object(self.api,'CalcSaveTransaction',side_effect=capture):
             backend.attach(123,module,640,480,self.path)

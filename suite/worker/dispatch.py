@@ -4,12 +4,15 @@ from save_diagnostics import trace_native_dispatch
 
 FACTORY_MODULES = {factory: module for module, factory in FACTORIES.items()}
 
-COMMANDS = {'.uno:Open': 'open', '.uno:OpenUrl': 'open', '.uno:OpenRemote': 'open',
-            '.uno:NewDoc': 'new', '.uno:NewWindow': 'new', '.uno:Save': 'save',
-            '.uno:SaveAll': 'save', '.uno:SaveAs': 'saveAs', '.uno:SaveAsTemplate': 'saveAs',
-            '.uno:SaveACopy': 'saveAs', '.uno:SaveAsRemote': 'saveAs',
-            '.uno:CloseDoc': 'close', '.uno:CloseWin': 'close', '.uno:CloseFrame': 'close', '.uno:Quit': 'close',
-            '.uno:Exit': 'close'}
+COMMANDS = {'.uno:Open': 'open', '.uno:OpenUrl': 'open',
+            '.uno:OpenFromWriter': 'open', '.uno:OpenFromCalc': 'open',
+            '.uno:AddDirect': 'new', '.uno:NewDoc': 'new', '.uno:Save': 'save', '.uno:SaveAs': 'saveAs',
+            '.uno:CloseDoc': 'close', '.uno:CloseWin': 'close', '.uno:CloseFrame': 'close',
+            '.uno:Quit': 'exit', '.uno:Exit': 'exit', '.uno:StartModule': 'home'}
+DISABLED_COMMANDS = ('.uno:SaveAll', '.uno:SaveACopy', '.uno:SaveAsTemplate',
+                     '.uno:SaveAsRemote', '.uno:OpenRemote', '.uno:NewWindow')
+PRODUCT_PROTOCOL = 'vnd.opengeul.office:'
+HWP_NEW_URL = PRODUCT_PROTOCOL + 'new-hwp'
 
 
 class DispatchRouter:
@@ -21,7 +24,7 @@ class DispatchRouter:
 
     def queryDispatch(self, url, target, flags):
         name = url.Complete.split('?', 1)[0]
-        if name in COMMANDS or name.startswith(('private:factory/', 'file:')):
+        if name in COMMANDS or name in DISABLED_COMMANDS or name.startswith(('private:factory/', 'file:', PRODUCT_PROTOCOL)):
             return self
         if self.slave is not None and self.slave is not self:
             return self.slave.queryDispatch(url, target, flags)
@@ -32,6 +35,10 @@ class DispatchRouter:
 
     def dispatch(self, url, arguments):
         name = url.Complete.split('?', 1)[0]
+        if name.startswith(PRODUCT_PROTOCOL):
+            if url.Complete == HWP_NEW_URL:
+                self.on_command('new', 'hwp')
+            return
         if name.startswith('private:factory/'):
             target_module = FACTORY_MODULES.get(url.Complete)
             if target_module is not None:
@@ -46,11 +53,15 @@ class DispatchRouter:
             self.on_command(command)
 
     def addStatusListener(self, listener, url):
-        # Keep native buttons enabled. The shell owns the actual decision/action.
+        # The Suite owns supported actions and explicitly declines unsupported semantics.
         try:
             import uno
             event = uno.createUnoStruct('com.sun.star.frame.FeatureStateEvent')
-            event.Source, event.FeatureURL, event.IsEnabled = self, url, True
+            name = url.Complete.split('?', 1)[0]
+            enabled = name not in DISABLED_COMMANDS
+            if name.startswith(PRODUCT_PROTOCOL):
+                enabled = url.Complete == HWP_NEW_URL
+            event.Source, event.FeatureURL, event.IsEnabled = self, url, enabled
             listener.statusChanged(event)
         except Exception:
             pass
@@ -71,7 +82,7 @@ class DispatchRouter:
         self.master = provider
 
     def getInterceptedURLs(self):
-        return tuple(COMMANDS) + ('private:factory/*', 'file:*')
+        return tuple(COMMANDS) + DISABLED_COMMANDS + (HWP_NEW_URL, PRODUCT_PROTOCOL + '*', 'private:factory/*', 'file:*')
 
 
 def make_interceptor(on_command):

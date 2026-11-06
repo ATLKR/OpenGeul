@@ -142,7 +142,7 @@ public sealed class WorkerClient : IAsyncDisposable
                     if (eventName.GetString() == "command")
                     {
                         var command = root.GetProperty("command").GetString();
-                        if (command is "open" or "new" or "save" or "saveAs" or "close")
+                        if (command is "open" or "new" or "save" or "saveAs" or "close" or "home" or "exit")
                         {
                             var module = root.TryGetProperty("module", out var moduleValue) ? moduleValue.GetString() : null;
                             var handler = CommandReceived;
@@ -200,7 +200,8 @@ public sealed class WorkerClient : IAsyncDisposable
         var message = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("message", out var text) ? text.GetString() : error.ToString();
         var code = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var value)
             && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
-        return new SuiteException($"Office 문서 작업에 실패했습니다.\n{message}", startupDiagnostic: StartupDiagnostic.FromWorkerCode(code));
+        return new SuiteException($"Office 문서 작업에 실패했습니다.\n{message}",
+            startupDiagnostic: StartupDiagnostic.FromWorkerCode(code), workerCode: code);
     }
 
     private void TraceSave(string stage, object? details)

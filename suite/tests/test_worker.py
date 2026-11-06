@@ -93,6 +93,12 @@ def bootstrap_services(calls):
     return services, config, factory, element
 
 
+def native_menu_boundary(frame, peer, document, module='swriter'):
+    # Share the fake public UNO interfaces, while running the real menu guard.
+    return importlib.import_module('test_native_menu').NativeMenuTests().fixture(
+        module, frame=frame, peer=peer, document=document).backend.interceptor
+
+
 class FakeBackend:
     def __init__(self, runtime):
         self.modified = False
@@ -567,7 +573,7 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertIsNone(backend.process)
         self.assertIsNone(backend.profile)
 
-    def test_attach_registers_named_frame_and_loads_through_desktop(self):
+    def attach_boundary(self, *, child_error=None, menu_error=None):
         from types import SimpleNamespace
         calls = []
         peer = SimpleNamespace(setPosSize=lambda *a: calls.append(('resize', a)),
@@ -580,6 +586,9 @@ class NativeBoundaryTests(unittest.TestCase):
                                 registerDispatchProviderInterceptor=lambda i: calls.append(('interceptor', i)),
                                 activate=lambda: calls.append(('activate',)))
         document = SimpleNamespace(isModified=lambda: False, getTitle=lambda: 'Test')
+        interceptor = native_menu_boundary(frame, peer, document)
+        if menu_error is not None:
+            frame.getPropertyValue('LayoutManager').showElement = lambda name: (_ for _ in ()).throw(menu_error)
         desktop = SimpleNamespace(getFrames=lambda: SimpleNamespace(append=lambda f: calls.append(('append', f))),
                                   loadComponentFromURL=lambda *a: calls.append(('load', a)) or document)
         toolkit = SimpleNamespace(createSystemChild=lambda *a: calls.append(('child', a)) or peer)
@@ -590,11 +599,18 @@ class NativeBoundaryTests(unittest.TestCase):
         context = SimpleNamespace(ServiceManager=SimpleNamespace(createInstanceWithContext=lambda n, c: services[n]))
         uno = SimpleNamespace(Any=lambda t, value: (t, value), createUnoStruct=lambda name: SimpleNamespace())
         windows = SimpleNamespace(validate_parent=lambda hwnd: None, validate_child=lambda child, parent: calls.append(('validated', child, parent)))
+        if child_error is not None:
+            windows.validate_child = lambda *args: (_ for _ in ()).throw(child_error)
         backend = self.native.UnoBackend(self.root, window_api=windows, uno_loader=lambda: uno,
                                          connector=lambda *a: context)
         backend._start_runtime = lambda: None
-        with patch.object(self.native, 'make_interceptor', return_value=object()), patch.object(self.native, 'make_interaction_handler', return_value=object()):
+        self.last_attach_calls = calls
+        with patch.object(self.native, 'make_interceptor', return_value=interceptor), patch.object(self.native, 'make_interaction_handler', return_value=object()):
             handles = backend.attach(123, MODULES['writer'], 640, 480, None)
+        return handles, backend, context, calls, frame, config
+
+    def test_attach_registers_named_frame_and_loads_through_desktop(self):
+        handles, backend, context, calls, frame, config = self.attach_boundary()
         self.assertEqual({'parentHwnd': 123, 'childHwnd': 456}, handles)
         self.assertIs(context, backend.context)
         self.assertEqual(('hyper', 123), next(c[1][0] for c in calls if c[0] == 'child'))
@@ -619,6 +635,22 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertTrue(created[1].startswith('private:resource/toolbar/opengeul_bootstrap_'))
         self.assertIs(config, created[2]['ConfigurationSource'])
         self.assertIs(frame, created[2]['Frame'])
+
+    def test_original_child_ownership_error_precedes_menu_and_is_not_wrapped(self):
+        primary = self.native.WorkerError('invalid_hwnd', 'Synthetic child ownership failure')
+        with self.assertRaises(self.native.WorkerError) as caught:
+            self.attach_boundary(child_error=primary)
+        self.assertIs(primary, caught.exception)
+        self.assertNotIn(('visible', True), self.last_attach_calls)
+
+    def test_native_menu_connection_error_is_fatal_after_revealing_owned_peer(self):
+        primary = RuntimeError('Synthetic native menu unavailable')
+        with self.assertRaises(self.native.WorkerError) as caught:
+            self.attach_boundary(menu_error=primary)
+        self.assertEqual('native_menu_unavailable', caught.exception.code)
+        self.assertIs(primary, caught.exception.__cause__)
+        self.assertIn(('visible', True), self.last_attach_calls)
+        self.assertIn(('activate',), self.last_attach_calls)
 
     def test_native_save_failure_keeps_model_and_discard_close_veto_restores_dirty(self):
         from types import SimpleNamespace
@@ -670,11 +702,14 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertEqual(['saveAs'], events)
         self.assertIs(sentinel, router.queryDispatch(url('.uno:Bold'), '_self', 0))
         self.assertEqual('.uno:Bold', delegated[0][0].Complete)
-        for name, command in [('.uno:Quit', 'close'), ('.uno:Open', 'open'), ('.uno:NewWindow', 'new'),
-                              ('private:factory/scalc', 'new'), ('file:///C:/Other.docx', 'open'),
-                              ('.uno:SaveACopy', 'saveAs')]:
+        for name, command in [('.uno:Quit', 'exit'), ('.uno:Open', 'open'),
+                              ('private:factory/scalc', 'new'), ('file:///C:/Other.docx', 'open')]:
             router.queryDispatch(url(name), '_blank', 0).dispatch(url(name), ())
             self.assertEqual(command, events[-1])
+        before = list(events)
+        for name in ('.uno:NewWindow', '.uno:SaveACopy'):
+            router.queryDispatch(url(name), '_blank', 0).dispatch(url(name), ())
+        self.assertEqual(before, events)
         router.setSlaveDispatchProvider(router)
         self.assertIsNone(router.queryDispatch(url('.uno:Italic'), '_self', 0))
 
@@ -718,7 +753,7 @@ class NativeBoundaryTests(unittest.TestCase):
         backend.module_factory = 'private:factory/sdatabase'
         document.isModified = lambda: False
         document.getTitle = lambda: 'Database'
-        result = backend.status()
+        result = backend.document_status()
         self.assertEqual('unverified', result['readiness']['state'])
         self.assertEqual('Database', result['title'])
         self.assertFalse(result['readiness']['fullyVerified'])
@@ -821,14 +856,14 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertIn('드라이버 준비 상태를 확인하지 못했습니다', readiness['message'])
         self.assertNotIn(('forbidden_connection_or_jvm_start',), calls)
 
-    def test_base_backend_status_uses_the_attached_runtime_context_for_readiness(self):
+    def test_base_document_status_uses_the_attached_runtime_context_for_readiness(self):
         document, context, calls = self.base_probe_boundary('sdbc:embedded:firebird')
         document.isModified = lambda: False
         document.getTitle = lambda: 'Base'
         backend = self.native.UnoBackend(self.root)
         backend.document, backend.context = document, context
         backend.module_factory = 'private:factory/sdatabase'
-        self.assertTrue(backend.status()['readiness']['driverAvailable'])
+        self.assertTrue(backend.document_status()['readiness']['driverAvailable'])
         self.assertIn(('driver_url', 'sdbc:embedded:firebird'), calls)
 
     def test_base_missing_controller_does_not_turn_unknown_connection_into_disconnected(self):
@@ -875,8 +910,10 @@ class NativeAccessibleNameBoundaryTests(unittest.TestCase):
         frame = NS(initialize=lambda value: self.events.append(('initialize',)),
                    setName=lambda name: None, registerDispatchProviderInterceptor=lambda value: None,
                    activate=lambda: None)
+        document = NS()
+        interceptor = native_menu_boundary(frame, peer, document)
         desktop = NS(getFrames=lambda: NS(append=lambda frame: None),
-                     loadComponentFromURL=lambda *args: self.events.append(('load',)) or object())
+                     loadComponentFromURL=lambda *args: self.events.append(('load',)) or document)
         services = {'com.sun.star.frame.Desktop': desktop, 'com.sun.star.frame.Frame': frame,
                     'com.sun.star.awt.Toolkit': NS(createSystemChild=lambda *args: peer)}
         services.update(bootstrap_services(self.events)[0])
@@ -886,7 +923,7 @@ class NativeAccessibleNameBoundaryTests(unittest.TestCase):
         backend = self.native.UnoBackend(self.root, window_api=windows, uno_loader=lambda: uno,
                                          connector=lambda *args: context)
         backend._start_runtime = lambda: None
-        with patch.object(self.native, 'make_interceptor', return_value=object()), patch.object(
+        with patch.object(self.native, 'make_interceptor', return_value=interceptor), patch.object(
                 self.native, 'make_interaction_handler', return_value=object()):
             return backend.attach(123, MODULES['writer'], 640, 480, None)
 
@@ -1079,6 +1116,7 @@ class NewBaseBoundaryTests(unittest.TestCase):
                   getProperty=lambda name: self.module['displayName'])
         frame = NS(initialize=lambda p: None, setName=lambda name: self.calls.append(('frame', name)),
                    registerDispatchProviderInterceptor=lambda interceptor: None, activate=lambda: self.calls.append(('activate',)))
+        interceptor = native_menu_boundary(frame, peer, self.live, 'sdatabase')
         desktop = NS(getFrames=lambda: NS(append=lambda f: None),
                      loadComponentFromURL=lambda *args: self.calls.append(('load', args)) or self.live)
         services = {'com.sun.star.frame.Desktop': desktop, 'com.sun.star.awt.Toolkit': NS(createSystemChild=lambda *a: peer),
@@ -1092,7 +1130,7 @@ class NewBaseBoundaryTests(unittest.TestCase):
         self.backend = self.native.UnoBackend(self.root, window_api=windows, uno_loader=lambda: uno, connector=lambda *a: context)
         self.backend._start_runtime = lambda: setattr(self.backend, 'profile', NS(name=str(self.profile)))
         self.addCleanup(patch.stopall)
-        patch.object(self.native, 'make_interceptor', return_value=object()).start()
+        patch.object(self.native, 'make_interceptor', return_value=interceptor).start()
         self.interaction = object()
         patch.object(self.native, 'make_interaction_handler', return_value=self.interaction).start()
 

@@ -296,23 +296,16 @@ def new_attachment(api,process,module,previous,source):
 
 
 def shell_menu_action(api,process,document,label,record):
-    from pywinauto import Desktop
+    from owned_native_menu import click_native_menu_action,require_native_menu_action
     assert label in ('열기…','닫기')
-    evidence=dict(documentHwnd=document,shellPid=process.pid,label=label,fileClicks=0,actionClicks=0,success=False)
-    record.setdefault('shellMenuActions',[]).append(evidence)
+    evidence=dict(kind='owned-native-document-menu-route',documentHwnd=document,shellPid=process.pid,label=label,fileClicks=0,actionClicks=0,success=False)
+    record.setdefault('nativeDocumentMenuActions',[]).append(evidence)
     assert process.poll() is None and api.user.IsWindow(document) and api.pid(document)==process.pid
     native.activate_owned_suite(api,process,document,record);api.require_foreground(document)
-    shell=Desktop(backend='uia').window(handle=document).wrapper_object()
-    files=[item for item in shell.descendants(control_type='MenuItem') if item.element_info.name=='파일'
-        and item.element_info.process_id==process.pid and item.is_visible() and item.is_enabled()]
-    assert len(files)==1
-    evidence['fileRuntimeId']=list(files[0].element_info.runtime_id);assert evidence['fileRuntimeId']
-    evidence['fileClicks']=1;files[0].click_input();api.require_foreground(document)
-    choices=lifecycle.owned_menu_items(Desktop(backend='uia'),process.pid,label);assert len(choices)==1
-    choice,=choices;evidence['actionRuntimeId']=list(choice.element_info.runtime_id)
-    # The ToolStrip dropdown is a separate same-process window; native foreground
-    # must still belong to this exact retained document before the action.
-    api.require_foreground(document);evidence['actionClicks']=1;choice.click_input();evidence['success']=True
+    command='open' if label=='열기…' else 'close'
+    action=click_native_menu_action(api,process,document,record,command)
+    require_native_menu_action(action,process.pid,document,command)
+    evidence.update(fileClicks=1,actionClicks=1,nativeAction=action,success=True)
     return evidence
 
 
@@ -821,10 +814,14 @@ def require_case_result(record,suite):
         exit=close['exit'];assert (exit['pid'],exit['creationTime'])==(frame['officePid'],frame['officeCreationTime'])
         assert PureWindowsPath(exit['image'])==PureWindowsPath(str(expected_image))
         _require_exit_and_closure(exit,closures,frame['liveProcessBinding'])
-    menus=record.get('shellMenuActions',[])
+    assert not record.get('shellMenuActions'), 'Legacy WinForms menu evidence is not native menu proof'
+    menus=record.get('nativeDocumentMenuActions',[])
     assert [row['label'] for row in menus]==(['열기…','닫기'] if spec['kind']=='shared-open' else [])
     assert all(row['fileClicks']==row['actionClicks']==1 and row['success'] is True for row in menus)
     if menus:
+        from owned_native_menu import require_native_menu_action
+        assert all(row['kind']=='owned-native-document-menu-route' for row in menus)
+        for row in menus:require_native_menu_action(row['nativeAction'],pid,row['documentHwnd'],'open' if row['label']=='열기…' else 'close')
         assert [row['documentHwnd'] for row in menus]==[frames[0]['hwnd'],frames[1]['hwnd']]
     if spec.get('module')=='calc':
         from home_calc_close import require_calc_reader_context,_home_origin
@@ -838,7 +835,7 @@ def require_case_result(record,suite):
         if spec.get('extension')=='csv':require_csv_post_getter_screenshot(record)
     if spec['kind']=='tile' and spec['module']=='base':
         frame,=frames
-        native.require_base_save_dialog_readiness(record['baseSaveDialogReadiness'],pid,frame['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-save-menu-pointer')
+        native.require_base_save_dialog_readiness(record['baseSaveDialogReadiness'],pid,frame['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-native-menu-pointer')
         assert record['saveAsDialogVerified'] is True
         assert record['newBaseSaveMenuActionVerified'] is True and record.get('saveShortcutViaOwnedMenu') is False
         trigger=native.require_base_save_menu_record(record,pid,frame['hwnd'])

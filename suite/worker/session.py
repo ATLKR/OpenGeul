@@ -107,15 +107,21 @@ class DocumentSession:
         if hasattr(backend, 'set_command_handler'):
             def forward_command(command, target_module=None):
                 selected_module = module_id if target_module is None else target_module
-                if (selected_module not in self.modules or selected_module not in FACTORIES
+                hwp_new = command == 'new' and target_module == 'hwp' and 'hwp' in self.modules
+                if not hwp_new and (selected_module not in self.modules or selected_module not in FACTORIES
                         or self.modules[selected_module].get('factory') != FACTORIES[selected_module]):
                     return
                 self.event_sink({'event': 'command', 'command': command, 'module': selected_module})
             backend.set_command_handler(forward_command)
+        previous_state = self.state
         try:
             handles = backend.attach(hwnd, module, width, height, path)
             if not handles.get('childHwnd'):
                 raise WorkerError('attach_failed', '내장 편집기 창을 확인할 수 없습니다.')
+            self.backend, self.module, self.path = backend, module_id, path
+            self._cleanup_result = None
+            self.handles, self.state = handles, 'attached'
+            return self._status({})
         except Exception as exc:
             released = False
             try:
@@ -130,24 +136,24 @@ class DocumentSession:
                 self._cleanup_resources_released = False
                 self._cleanup_result = dict(cleanupVerified=False,
                     cleanupError='Office 시작 실패 뒤 작업자의 종료를 확인하지 못했습니다.')
+            else:
+                self.backend, self.module, self.path = None, None, None
+                self.handles, self.state = {}, previous_state
             if isinstance(exc, WorkerError):
                 raise
             raise WorkerError('attach_failed', 'Office 내장 편집기를 시작하지 못했습니다.') from exc
-        self.backend, self.module, self.path = backend, module_id, path
-        self._cleanup_result = None
-        self.handles, self.state = handles, 'attached'
-        return self._status({})
-
-    def _document_status(self):
-        state = dict(self.backend.status())
+    def _document_status(self, *, require_menu=False):
+        # Storage and close protection must remain usable after menu failure.
+        observe = self.backend.status if require_menu else getattr(self.backend, 'document_status', self.backend.status)
+        state = dict(observe())
         # New Base is backed by an owned temporary ODB. Its clean engine flag
         # does not mean the user has chosen a durable Save As destination.
         state['modified'] = bool(state['modified'] or (self.module == 'base' and self.path is None))
         return state
 
-    def _status(self, args):
+    def _status(self, args, *, require_menu=True):
         self._require_attached()
-        state = self._document_status()
+        state = self._document_status(require_menu=require_menu)
         return dict(state, module=self.module, path=str(self.path) if self.path else None, **self.handles)
 
     def _prepare_close(self, args):
@@ -181,7 +187,7 @@ class DocumentSession:
             raise WorkerError('save_failed', '문서를 저장하지 못했습니다. 문서를 열어 둡니다.') from exc
         if path is not None:
             self.path = path
-        return self._status({})
+        return self._status({}, require_menu=False)
 
     def _close(self, args):
         self._require_attached()

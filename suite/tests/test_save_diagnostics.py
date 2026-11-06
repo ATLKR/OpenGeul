@@ -121,17 +121,17 @@ class SaveDiagnosticsTests(unittest.TestCase):
         self.assertEqual({'requestId': 19, 'ok': False, 'errorCode': 'engine_error',
                           'exceptionType': 'ValueError'}, self.records()[-1]['details'])
 
-    def test_native_save_receipts_precede_unchanged_command_forwarding(self):
+    def test_supported_native_saves_keep_receipts_and_disabled_aliases_do_nothing(self):
         forwarded = []
         def receive(command):
             forwarded.append((command, self.records()[-1]))
         router = self.dispatch_module.DispatchRouter(receive)
-        for name in ('.uno:Save', '.uno:SaveAs', '.uno:SaveAll'):
+        for name in ('.uno:Save', '.uno:SaveAs', '.uno:SaveAll', '.uno:SaveACopy'):
             router.dispatch(SimpleNamespace(Complete=name + '?private native query'), ())
-        self.assertEqual(['save', 'saveAs', 'save'], [row[0] for row in forwarded])
+        self.assertEqual(['save', 'saveAs'], [row[0] for row in forwarded])
         records = self.records()
-        self.assertEqual([1, 2, 3], [r['details']['receiptSequence'] for r in records])
-        self.assertEqual(['.uno:Save', '.uno:SaveAs', '.uno:SaveAll'],
+        self.assertEqual([1, 2], [r['details']['receiptSequence'] for r in records])
+        self.assertEqual(['.uno:Save', '.uno:SaveAs'],
                          [r['details']['nativeCommand'] for r in records])
         self.assertTrue(all(r['event'] == 'suite.nativeDispatch' and r['stage'] == 'received'
                             and r['component'] == 'worker' for r in records))

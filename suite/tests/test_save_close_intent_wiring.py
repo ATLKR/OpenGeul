@@ -59,7 +59,8 @@ class SaveCloseIntentWiringTests(unittest.TestCase):
     def test_save_operation_clears_busy_before_policy_can_drain(self):
         body = method(self.source, 'private async Task<bool> SaveDocumentCoreAsync(')
         self.assertIn('await saveWorker.SendAsync("save", request', body)
-        self.assertIn('finally { busy = false; EnableSave(attached && !closing); }', body)
+        self.assertIn('finally { busy = false; }', body)
+        self.assertNotIn('EnableSave', body)
         self.assertNotIn('RequestCloseAsync', body)
         self.assertNotIn('saveCloseIntent.RequestClose', body)
 
