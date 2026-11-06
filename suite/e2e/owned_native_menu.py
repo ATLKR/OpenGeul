@@ -8,13 +8,19 @@ import copy
 import ctypes as C
 import json
 import math
+import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import time
 from types import SimpleNamespace
 
 from owned_control_actions import CAP, GuiThreadInfo, NativeControlProbe, _original_attachment
-from suite_window_activation import NativeActivationProbe
+from suite_window_activation import NativeActivationProbe, Rect
+
+
+class MenuBarInfo(C.Structure):
+    _fields_=[('cbSize',C.c_uint32),('rcBar',Rect),('hMenu',C.c_void_p),
+              ('hwndMenu',C.c_void_p),('flags',C.c_uint32)]
 
 READY_PROPERTY='OpenGeul.Office.NativeMenuReady'
 STATUS_PROPERTY='OpenGeul.Office.NativeMenuStatusV1'
@@ -164,8 +170,8 @@ def _hit_identity(hit,snapshot,target):
     assert all(value is False for value in different.values())
 
 
-def _keyboard_recipient(snapshot,binding,shell_pid):
-    _validate(snapshot,binding,shell_pid,'save')
+def _keyboard_recipient(snapshot,binding,shell_pid,*,menu_scope=None):
+    _validate(snapshot,binding,shell_pid,'save',menu_scope=menu_scope)
     gui=snapshot['gui']
     if _menu_key_owner(gui,snapshot['popup'],binding['child']):return
     chain=snapshot.get('focusMenuPath',[])
@@ -191,9 +197,55 @@ def _menu_key_owner(gui,popup,child):
         gui['menuOwnerHwnd'] in (child,popup['hwnd']) and type(gui.get('flags')) is int and gui['flags']&0x1c))
 
 
-def _validate(snapshot,binding,shell_pid,target,*,enabled=True):
+def _menu_scope(binding,shell,engine,start,deadline):
+    return dict(version=1,binding=dict(binding),shellPid=shell['pid'],shellCreationTime=shell['creationTime'],
+        officeCreationTime=engine['creationTime'],startedAt=start,deadline=deadline)
+
+
+def _require_shell_menus(snapshot,binding,shell_pid,scope=None):
+    count=snapshot['shellMenuCount'];assert type(count) is int and 0<=count<=64
+    if count==0:return
+    value=snapshot.get('shellMenuClassification',{})
+    assert type(scope) is dict and value.get('scope')==scope, 'Native menu not exclusive and ready'
+    seen=value['scope'];assert type(seen['version']) is int and seen['version']==1
+    for key in ('shellPid','shellCreationTime','officeCreationTime'):_int(seen[key])
+    assert all(type(n) is int and n>0 for n in seen['binding'].values())
+    assert all(type(seen[k]) in (int,float) and math.isfinite(seen[k]) for k in ('startedAt','deadline'))
+    assert scope['binding']==binding and scope['shellPid']==shell_pid and scope['version']==1
+    for key in ('shellCreationTime','officeCreationTime'):_int(scope[key])
+    assert scope['officeCreationTime']>=scope['shellCreationTime']
+    assert all(type(scope[k]) in (int,float) and math.isfinite(scope[k]) for k in ('startedAt','deadline'))
+    assert scope['startedAt']<scope['deadline']<=scope['startedAt']+5
+    assert all(type(value.get(k)) is int for k in ('totalCount','verifiedSystemCount','clientCount','unknownCount','errorCode'))
+    assert value['totalCount']==count and value['verifiedSystemCount']==count==1 and value['clientCount']==value['unknownCount']==value['errorCode']==0, 'Native menu not exclusive and ready'
+    proof,=value['proofs'];assert proof['before']==proof['after']
+    data=proof['before'];assert set(data)=={'menuRect','captionRect','captionState','menuHandle','submenuHwnd','menuFlags'}
+    for key in ('menuRect','captionRect'):
+        rect=data[key];assert type(rect) is list and len(rect)==4 and all(type(n) is int and -(2**31)<=n<2**31 for n in rect)
+        assert rect[0]<rect[2] and rect[1]<rect[3]
+    for key in ('menuHandle','submenuHwnd','menuFlags','captionState'):
+        assert type(data[key]) is int and 0<=data[key]<2**(32 if key in ('menuFlags','captionState') else 64)
+    assert data['menuHandle']>0 and not data['captionState']&0x18001
+    rect=data['menuRect'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
+    assert proof['point']==point and all(-(2**15)<=n<2**15 for n in point)
+    hit=proof['physicalHit'];assert hit['point']==point
+    assert (hit['hitHwnd'],hit['rootHwnd'],hit['pid'],hit['hitTest'])==(binding['document'],binding['document'],shell_pid,3)
+    _int(proof['harnessPid']);assert proof['harnessPid']!=shell_pid
+    flags=('pointBarEqualsCounted','freshPointBarEqualsRetained','engineBarDifferent','shellRootDifferent',
+        'rootStable','ownershipBefore','ownershipAfter','physicalDpiVerified')
+    assert all(proof.get(k) is True for k in flags)
+    chain=proof['ancestry'];assert type(chain) is list and 3<=len(chain)<=32
+    assert all(type(row) is list and len(row)==3 and all(type(n) is int for n in row) for row in chain)
+    assert all(row[1]==shell_pid and row[2] in (0,binding['document']) for row in chain)
+    bar=proof['barIndex'];assert type(bar) is int and 0<=bar<len(chain)
+    assert all(row[0] in (50000,50011) for row in chain[:bar])
+    assert [row[0] for row in chain[bar:]]==[50010,50037,50032] and chain[-1][2]==binding['document']
+
+
+def _validate(snapshot,binding,shell_pid,target,*,enabled=True,menu_scope=None):
     assert snapshot['binding']==binding and snapshot['attachmentValid'] is True
-    assert snapshot['nativeReady']==1 and snapshot['shellMenuCount']==0, 'Native menu not exclusive and ready'
+    assert snapshot['nativeReady']==1, 'Native menu not exclusive and ready'
+    _require_shell_menus(snapshot,binding,shell_pid,menu_scope)
     doc=snapshot['document'];assert (doc['hwnd'],doc['pid'],doc['rootHwnd'])==(binding['document'],shell_pid,binding['document'])
     _int(doc['threadId'])
     assert doc['visible'] is doc['enabled'] is True
@@ -361,6 +413,9 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             budget();assert probe.process_snapshot(process)==shell
             assert probe.engine_snapshot(handle)==engine, 'Original native engine changed during input admission'
             assert api.attachment(document)==(parent,child,pid)
+        menu_scope=_menu_scope(binding,shell,engine,start,deadline)
+        bind_menu=getattr(probe,'bind_menu_classification',None)
+        if bind_menu:bind_menu(menu_scope,continuity)
         def observe(target,*,enabled=True):
             while True:
                 measured=dict(stageCode=20,targetCode=tuple(LABELS).index(target)+1)
@@ -371,7 +426,9 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 except NativeMenuPending:
                     budget();time.sleep(min(.01,max(0,deadline-clock())));continue
                 measured.update(stageCode=22,snapshot=row);value['observationStage']=22
-                _validate(row,binding,process.pid,target,enabled=enabled)
+                _require_shell_menus(row,binding,process.pid,menu_scope)
+                continuity()
+                _validate(row,binding,process.pid,target,enabled=enabled,menu_scope=menu_scope)
                 if 'identityProof' in row:assert row['identityProof']['scope']==value['elementIdentityScope']
                 measured['stageCode']=23;value['observationStage']=23
                 return row
@@ -409,12 +466,12 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             measured['stageCode']=12;value['observationStage']=12
             return row
         def pointer(target):
-            row=observe(target);anchor=_validate(row,binding,process.pid,target)
+            row=observe(target);anchor=_validate(row,binding,process.pid,target,menu_scope=menu_scope)
             rect=row['control']['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
             item=dict(target=target,chosenPhysicalPoint=point,snapshots=[row],hits=[])
             value['pointers'].append(item)
             def check():
-                snap=observe(target);assert _validate(snap,binding,process.pid,target)==anchor
+                snap=observe(target);assert _validate(snap,binding,process.pid,target,menu_scope=menu_scope)==anchor
                 item['snapshots'].append(snap)
                 scope=snap['popup']['hwnd'] if snap['popup'] else document
                 hit=probe.point_snapshot(scope,point,probe.current_control);item['hits'].append(hit)
@@ -429,7 +486,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             if shortcut=='ALT_F':
                 before=observe('file');editor_before=editor(2)
             else:
-                before=observe('save');_keyboard_recipient(before,binding,process.pid);editor_before=None
+                before=observe('save');_keyboard_recipient(before,binding,process.pid,menu_scope=menu_scope);editor_before=None
             continuity();item=dict(shortcut=shortcut,before=before,editorBefore=editor_before);value['keys'].append(item);retain()
             probe.keyboard(binding,shortcut,item);budget()
             if 'identityProof' in before:
@@ -522,6 +579,7 @@ def require_native_menu_action(value,shell_pid,document,command=None):
     expected_scope=dict(version=1,binding=binding,shellPid=shell_pid,shellCreationTime=shell['creationTime'],
         officeCreationTime=engine['creationTime'],startedAt=value['startedAt'],deadline=value['deadline'],
         operation=operation,gesture=value['gesture'])
+    menu_scope=_menu_scope(binding,shell,engine,value['startedAt'],value['deadline'])
     def replay_scope(snapshot):
         if 'identityProof' in snapshot:
             assert value['elementIdentityScope']==snapshot['identityProof']['scope']==expected_scope
@@ -535,11 +593,11 @@ def require_native_menu_action(value,shell_pid,document,command=None):
             assert value['coreCommandsVerified'] is True and value['coreCommands']==list(CORE_COMMANDS)
             assert set(value['coreSnapshots'])==set(CORE_COMMANDS)
             for target in CORE_COMMANDS:
-                replay_scope(value['coreSnapshots'][target]);_validate(value['coreSnapshots'][target],binding,shell_pid,target)
+                replay_scope(value['coreSnapshots'][target]);_validate(value['coreSnapshots'][target],binding,shell_pid,target,menu_scope=menu_scope)
         if operation.startswith('disabled-'):
             assert value['disabledObserved'] is True
             replay_scope(value['disabledSnapshot'])
-            _validate(value['disabledSnapshot'],value['binding'],shell_pid,operation[len('disabled-'):],enabled=False)
+            _validate(value['disabledSnapshot'],value['binding'],shell_pid,operation[len('disabled-'):],enabled=False,menu_scope=menu_scope)
     else:
         assert operation in COMMANDS
         expected=['file']+(['new'] if operation.startswith('new-') and operation!='new-hwp' else [])+[operation];keys=[]
@@ -548,8 +606,8 @@ def require_native_menu_action(value,shell_pid,document,command=None):
     for item in value['keys']:
         replay_scope(item['before'])
         if item['shortcut']=='ALT_F':
-            _validate(item['before'],binding,shell_pid,'file');_editor(item['editorBefore'],binding,shell_pid)
-        else:_keyboard_recipient(item['before'],binding,shell_pid)
+            _validate(item['before'],binding,shell_pid,'file',menu_scope=menu_scope);_editor(item['editorBefore'],binding,shell_pid)
+        else:_keyboard_recipient(item['before'],binding,shell_pid,menu_scope=menu_scope)
         if 'identityProof' in item['before']:
             target='file' if item['shortcut']=='ALT_F' else 'save'
             _comparison_proof(item['identityAdmission'],binding,shell_pid,target)
@@ -562,7 +620,7 @@ def require_native_menu_action(value,shell_pid,document,command=None):
             assert hit['point']==item['chosenPhysicalPoint'] and item['requestedInputs']==item['insertedInputs']==2
             continue
         for snapshot in item['snapshots']:replay_scope(snapshot)
-        anchors=[_validate(s,value['binding'],shell_pid,item['target']) for s in item['snapshots']]
+        anchors=[_validate(s,value['binding'],shell_pid,item['target'],menu_scope=menu_scope) for s in item['snapshots']]
         assert len(anchors)==3 and all(a==anchors[0] for a in anchors)
         assert len(item['hits'])==2 and all(h['point']==item['chosenPhysicalPoint'] and h['pid']==value['binding']['officePid'] and h['withinControl'] is h['uiaMatches'] is True for h in item['hits'])
         assert item['pointerReadback']==item['beforeClickCursorReadback']==item['chosenPhysicalPoint']
@@ -625,11 +683,17 @@ def observe_native_view(api,process,document,record,*,module,preview,menu_visibl
             assert engine['waitResult']==258 and api.attachment(document)==(binding['parent'],binding['child'],binding['officePid'])
         continuity();value.update(originIndex=len(origins)-1,binding=binding,originalProcess=copy.deepcopy(shell),
             originalEngine=copy.deepcopy(old),engineHandleValue=handle)
+        menu_scope=_menu_scope(binding,shell,old,start,deadline)
+        bind_menu=getattr(probe,'bind_menu_classification',None)
+        if bind_menu:bind_menu(menu_scope,continuity)
         probe.enter_dpi(value['dpiScope']);assert value['dpiScope']['verified'] is True
         first=None;previous_status=None
         while True:
-            continuity();row=probe.view_snapshot(binding,module);budget()
-            assert row['binding']==binding and row['nativeReady']==1 and row['shellMenuCount']==0
+            continuity();row=probe.view_snapshot(binding,module)
+            _require_shell_menus(row,binding,process.pid,menu_scope);budget()
+            continuity()
+            assert row['binding']==binding and row['nativeReady']==1
+            _require_shell_menus(row,binding,process.pid,menu_scope)
             _editor(row['editor'],binding,process.pid)
             for name,pid,hwnd in (('peerRoot',binding['officePid'],binding['child']),('documentRoot',process.pid,document)):
                 identity=row[name]
@@ -705,6 +769,7 @@ class NativeMenuProbe(NativeControlProbe):
         H,D,B=C.c_void_p,C.c_uint32,C.c_int32
         for name,args,result in [('GetWindow',(H,D),H),('GetWindowTextW',(H,C.c_wchar_p,B),B),
             ('GetClassNameW',(H,C.c_wchar_p,B),B),('IsChild',(H,H),B),('GetPropW',(H,C.c_wchar_p),H),
+            ('GetMenuBarInfo',(H,B,B,C.POINTER(MenuBarInfo)),B),
             ('GetGUIThreadInfo',(D,C.POINTER(GuiThreadInfo)),B)]:
             function=getattr(self.user,name);function.argtypes,function.restype=args,result
         self.keyboard_probe=None
@@ -831,12 +896,14 @@ class NativeMenuProbe(NativeControlProbe):
     def _call(self,function,*args):
         assert self.clock()<self.deadline, 'Native menu query deadline expired'
         if getattr(self,'provider_client',None) is not None:self._provider_timeout()
+        if function is getattr(getattr(self,'user',None),'SendMessageTimeoutW',None):
+            assert type(args[5]) is int and 1<=args[5]<=int((self.deadline-self.clock())*1000), 'Owned hit-test wait exceeds remaining query budget'
         value=function(*args)
         assert self.clock()<self.deadline, 'Native menu query exceeded original deadline'
         return value
     def close_provider(self):
         # Drop all owned element/client references. No shared client was changed.
-        for name in ('file_element','menu_bar_element','peer_element','current_control','_retained','uia','provider_client','_identity_refs'):
+        for name in ('file_element','menu_bar_element','peer_element','current_control','_retained','uia','provider_client','_identity_refs','_menu_classification_context'):
             if hasattr(self,name):setattr(self,name,None)
         return True
     def _condition(self,*,control_type,name=None):
@@ -998,6 +1065,81 @@ class NativeMenuProbe(NativeControlProbe):
             if sample['errorCode']:
                 result['statusCode']=2;break
         return result
+    def bind_menu_classification(self,scope,continuity):
+        assert scope['deadline']==self.deadline and callable(continuity)
+        self._menu_classification_context=(copy.deepcopy(scope),continuity)
+    def _classify_shell_menus(self,count,samples,binding,shell,engine_bar):
+        result=dict(scope={},totalCount=count,verifiedSystemCount=0,clientCount=0,
+            unknownCount=count,errorCode=1,proofs=[])
+        try:
+            scope,continuity=self._menu_classification_context
+            assert scope['binding']==binding and scope['shellPid']==self._call(lambda:shell.CurrentProcessId)
+            result['scope']=copy.deepcopy(scope)
+            assert count==1 and len(samples)==1
+            result['errorCode']=2
+            assert engine_bar is not None
+            assert self._call(lambda:engine_bar.CurrentProcessId)==binding['officePid']
+            assert self._call(lambda:engine_bar.CurrentControlType)==50010
+            def ownership():
+                continuity();window=self.window_snapshot(binding['document']);attachment=self.attachment_snapshot(binding)
+                assert (window['hwnd'],window['pid'],window['rootHwnd'])==(binding['document'],scope['shellPid'],binding['document'])
+                assert window['visible'] is window['enabled'] is True and attachment['valid'] is True
+                assert scope['shellPid']!=os.getpid()
+            def metadata():
+                info=MenuBarInfo(cbSize=C.sizeof(MenuBarInfo));assert C.sizeof(MenuBarInfo)==48
+                returned=self._call(self.user.GetMenuBarInfo,binding['document'],-1,0,C.byref(info))
+                assert type(returned) is int and returned!=0
+                title=self.caption(binding['document'])
+                return dict(menuRect=[int(getattr(info.rcBar,k)) for k in ('left','top','right','bottom')],
+                    captionRect=title['rectangle'],captionState=title['state'],menuHandle=int(info.hMenu or 0),
+                    submenuHwnd=int(info.hwndMenu or 0),menuFlags=int(info.flags))
+            ownership();result['errorCode']=3
+            context=self._call(self.user.GetThreadDpiAwarenessContext)
+            dpi=self._call(self.user.AreDpiAwarenessContextsEqual,context,-4)
+            assert type(dpi) in (int,bool) and bool(dpi)
+            before=metadata();rect=before['menuRect'];assert rect[0]<rect[2] and rect[1]<rect[3]
+            assert before['menuHandle']>0 and not before['captionState']&0x18001
+            point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
+            assert all(-(2**15)<=n<2**15 for n in point)
+            result['errorCode']=4
+            assert (self.deadline-self.clock())*1000>=1
+            hit=NativeActivationProbe.point_snapshot(self,binding['document'],point)
+            assert (hit['hitHwnd'],hit['rootHwnd'],hit['pid'],hit['hitTest'])==(binding['document'],binding['document'],scope['shellPid'],3)
+            result['errorCode']=5
+            counted=samples[0][1]
+            def point_bar():
+                cursor=self._call(self.uia.iuia.ElementFromPoint,self._point_type(*point));chain=[];bar=None;bar_index=None
+                for _ in range(32):
+                    kind=self._call(lambda:cursor.CurrentControlType);pid=self._call(lambda:cursor.CurrentProcessId)
+                    raw=self._call(lambda:cursor.CurrentNativeWindowHandle)
+                    assert type(kind) is type(pid) is int and pid==scope['shellPid']
+                    assert raw is None or type(raw) is int and -(2**31)<=raw<2**32
+                    hwnd=0 if raw is None else raw&0xffffffff
+                    assert hwnd in (0,binding['document']) and kind in (50000,50011,50010,50037,50032)
+                    chain.append([kind,pid,hwnd])
+                    if kind==50010:assert bar is None;bar=cursor;bar_index=len(chain)-1
+                    if self._same(cursor,shell):
+                        assert kind==50032 and hwnd==binding['document'] and bar is not None
+                        assert [row[0] for row in chain[bar_index:]]==[50010,50037,50032]
+                        return bar,chain,bar_index
+                    cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor);assert cursor
+                raise AssertionError('Owned system point ancestry limit')
+            bar,chain,bar_index=point_bar()
+            assert self._same(bar,counted) and not self._same(bar,engine_bar) and not self._same(bar,shell)
+            fresh,_,_=point_bar();assert self._same(fresh,bar)
+            result['errorCode']=6
+            after=metadata();assert before==after
+            assert self._same(self._root(binding['document']),shell)
+            ownership()
+            proof=dict(before=before,after=after,point=point,physicalHit=hit,harnessPid=os.getpid(),
+                pointBarEqualsCounted=True,freshPointBarEqualsRetained=True,engineBarDifferent=True,shellRootDifferent=True,
+                rootStable=True,ownershipBefore=True,ownershipAfter=True,physicalDpiVerified=True,ancestry=chain,barIndex=bar_index)
+            result.update(verifiedSystemCount=1,unknownCount=0,errorCode=0,proofs=[proof])
+            _require_shell_menus(dict(shellMenuCount=count,shellMenuClassification=result),binding,scope['shellPid'],scope)
+        except BaseException:
+            if result['errorCode']==0:result['errorCode']=7
+            result.update(verifiedSystemCount=0,unknownCount=count,proofs=[])
+        return result
     def snapshot(self,binding,target):
         doc=binding['document'];child=binding['child'];pid=binding['officePid']
         self._active_target=target
@@ -1049,7 +1191,17 @@ class NativeMenuProbe(NativeControlProbe):
             popup=popup,foreground=fg,gui=gui,focusMenuPath=focused,focusMenuElementEquals=matched)
         if proof is not None:
             result.update(identityProof=proof,barElementEquals=True,focusIdentity=getattr(self,'_focus_identity',None))
-        if duplicates:result['shellMenuObservation']=self._shell_menu_observation(duplicates,shell_samples,binding,document['pid'])
+        if duplicates:
+            result['shellMenuObservation']=self._shell_menu_observation(duplicates,shell_samples,binding,document['pid'])
+            result['shellMenuClassification']=self._classify_shell_menus(duplicates,shell_samples,binding,shell,self.menu_bar_element)
+            if result['shellMenuClassification']['verifiedSystemCount']:
+                attachment=self.attachment_snapshot(binding);gui=self.native_focus(attachment['windows']['child']['threadId'])
+                gui.update(captureOwned=gui['captureHwnd'] in permitted,menuOwnerOwned=gui['menuOwnerHwnd'] in permitted)
+                focused,matched=(self._focused_menu(chain,file_index,bar_index) if target!='file' and not _menu_key_owner(gui,popup,child) and file_index is not None and bar_index is not None else ([],False))
+                result.update(attachmentValid=attachment['valid'],document=self.window_snapshot(doc),
+                    nativeReady=int(self._call(self.user.GetPropW,doc,READY_PROPERTY) or 0),
+                    foreground=self.window_snapshot(self.foreground()),gui=gui,focusMenuPath=focused,focusMenuElementEquals=matched)
+                if proof is not None:result['focusIdentity']=getattr(self,'_focus_identity',None) if matched else None
         return result
     def view_snapshot(self,binding,module):
         assert module in ('writer','calc')
@@ -1058,6 +1210,7 @@ class NativeMenuProbe(NativeControlProbe):
         assert (peer_identity['pid'],peer_identity['nativeHwnd'])==(binding['officePid'],binding['child']), 'Native view UIA root is outside the original peer'
         editor=self.editor_snapshot(binding)
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuBar'))
+        native_anchors=[]
         def menu_count(parent,pid):
             found=self._call(parent.FindAll,self.uia.tree_scope['descendants'],condition)
             count=int(self._call(lambda:found.Length));assert 0<=count<=8
@@ -1065,6 +1218,7 @@ class NativeMenuProbe(NativeControlProbe):
             for index in range(count):
                 element=self._call(found.GetElement,index)
                 assert int(self._call(lambda:element.CurrentProcessId))==pid
+                native_anchors.append(element)
                 visible+=int(not self._call(lambda:element.CurrentIsOffscreen))
             assert visible<=1
             return visible
@@ -1073,11 +1227,14 @@ class NativeMenuProbe(NativeControlProbe):
         assert (document_identity['pid'],document_identity['nativeHwnd'])==(self.window_snapshot(doc)['pid'],doc), 'Native view UIA host root changed'
         found=self._call(shell.FindAll,self.uia.tree_scope['descendants'],condition)
         count=int(self._call(lambda:found.Length));assert 0<=count<=64
-        shell_bars=0;shell_pid=self.window_snapshot(doc)['pid']
+        shell_bars=0;shell_samples=[];shell_pid=self.window_snapshot(doc)['pid']
         for index in range(count):
             bar=self._call(found.GetElement,index)
-            if self._call(lambda:bar.CurrentProcessId)==shell_pid:
-                shell_bars+=int(not self._call(lambda:bar.CurrentIsOffscreen))
+            owner=self._call(lambda:bar.CurrentProcessId)
+            if owner==shell_pid:
+                visible=not self._call(lambda:bar.CurrentIsOffscreen)
+                shell_bars+=int(visible)
+                if visible and len(shell_samples)<2:shell_samples.append((index,bar,owner))
         indicators=[];held=[]
         for label in ('미리보기 닫기','Close Preview'):
             condition=self._call(lambda:self.uia.build_condition(control_type='Button',name=label))
@@ -1100,11 +1257,18 @@ class NativeMenuProbe(NativeControlProbe):
                     toolbarAncestorVerified=True,ancestry=chain))
         assert len(indicators)<=1, 'Native preview indicator is ambiguous'
         self._retained=tuple(held)
-        return dict(binding=dict(binding),editor=editor,peerRoot=peer_identity,documentRoot=document_identity,
+        result=dict(binding=dict(binding),editor=editor,peerRoot=peer_identity,documentRoot=document_identity,
             nativeReady=int(self._call(self.user.GetPropW,doc,READY_PROPERTY) or 0),
             statusSequenceRaw=self._call(self.user.GetPropW,doc,STATUS_PROPERTY),
             shellMenuCount=shell_bars,nativeMenuBarCount=native_bars,
             previewIndicatorCount=len(indicators),previewIndicator=indicators[0] if indicators else None)
+        if shell_bars:
+            result['shellMenuClassification']=self._classify_shell_menus(shell_bars,shell_samples,binding,shell,native_anchors[0] if len(native_anchors)==1 else None)
+            if result['shellMenuClassification']['verifiedSystemCount']:
+                result.update(editor=self.editor_snapshot(binding),
+                    nativeReady=int(self._call(self.user.GetPropW,doc,READY_PROPERTY) or 0),
+                    statusSequenceRaw=self._call(self.user.GetPropW,doc,STATUS_PROPERTY))
+        return result
     def editor_snapshot(self,binding):
         attachment=self.attachment_snapshot(binding,include_gui=True);thread=attachment['windows']['child']['threadId'];gui=self.native_focus(thread)
         return dict(binding=dict(binding),attachmentValid=attachment['valid'],focusPid=gui['focusPid'],

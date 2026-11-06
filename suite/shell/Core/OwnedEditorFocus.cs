@@ -30,6 +30,9 @@ public sealed class OwnedEditorFocus : IDisposable
     private readonly EditorFocusSnapshot original;
     private bool disposed;
     private bool initialFocusHandled;
+    private bool initialFocusQueued;
+
+    public bool InitialFocusPending => !disposed && !initialFocusHandled;
 
     public OwnedEditorFocus(IOwnedEditorFocusNative native, string expectedEngineImage)
     {
@@ -47,7 +50,7 @@ public sealed class OwnedEditorFocus : IDisposable
         catch { native.Dispose(); throw; }
     }
 
-    private void Validate(EditorFocusSnapshot s)
+    private void ValidateIdentity(EditorFocusSnapshot s)
     {
         if (s.Shell != original.Shell || s.Engine != original.Engine || !s.Shell.Alive || !s.Engine.Alive)
             throw new InvalidOperationException("Embedded editor process generation changed");
@@ -55,7 +58,7 @@ public sealed class OwnedEditorFocus : IDisposable
         {
             if (value.Hwnd <= 0 || value.Hwnd != initial.Hwnd || value.Pid != pid || value.ThreadId == 0 ||
                 value.ThreadId != initial.ThreadId || value.Root != original.Form.Hwnd || value.Parent != initial.Parent ||
-                value.ClassName != initial.ClassName || !value.Exists || !value.Visible || !value.Enabled)
+                value.ClassName != initial.ClassName || !value.Exists)
                 throw new InvalidOperationException("Embedded editor window ownership or readiness changed");
         }
         Window(s.Form, original.Form, s.Shell.Pid); Window(s.Panel, original.Panel, s.Shell.Pid);
@@ -64,6 +67,13 @@ public sealed class OwnedEditorFocus : IDisposable
             s.Panel.Parent != s.Form.Hwnd || s.Child.Parent != s.Panel.Hwnd || s.Child.ClassName != "SALTMPSUBFRAME" ||
             !s.FormOwnsPanel || !s.PanelOwnsChild || s.RegisteredPanel != s.Panel.Hwnd || s.RegisteredChild != s.Child.Hwnd)
             throw new InvalidOperationException("Embedded editor attachment changed");
+    }
+
+    private void Validate(EditorFocusSnapshot s)
+    {
+        ValidateIdentity(s);
+        if (!s.Form.Visible || !s.Form.Enabled || !s.Panel.Visible || !s.Panel.Enabled || !s.Child.Visible || !s.Child.Enabled)
+            throw new InvalidOperationException("Embedded editor window ownership or readiness changed");
     }
 
     private void Ready(EditorFocusSnapshot s)
@@ -87,35 +97,103 @@ public sealed class OwnedEditorFocus : IDisposable
     {
         if (keyData != CtrlF6 || (messageHwnd != original.Form.Hwnd && messageHwnd != original.Panel.Hwnd))
             return new(false, false, "notApplicable", null, null, 0, 0);
-        return Handoff(available);
+        var result = Handoff(available);
+        if (result.Verified) initialFocusHandled = true;
+        return result;
     }
 
     public EditorFocusResult TryInitialFocus(bool available)
     {
-        if (initialFocusHandled) return new(false, false, "initialAlreadyHandled", null, null, 0, 0);
-        // Consume before observing or calling native code, including reentrant callbacks.
-        initialFocusHandled = true;
-        var result = Handoff(available);
-        return result.Verified || result.Reason == "notApplicable" ? result : result with
-        { Reason = result.Attempted ? "initialHandoffUnverified" : "initialContextRejected" };
+        if (!InitialFocusPending) return new(false, false, "initialAlreadyHandled", null, null, 0, 0);
+        var result = Handoff(available, initial: true);
+        return result.Verified ? result : result with
+        { Reason = InitialFocusPending ? "initialPending" : result.Attempted ? "initialHandoffUnverified" : "initialContextCancelled" };
     }
 
-    private EditorFocusResult Handoff(bool available)
+    public bool QueueInitialFocus(Action<Action> post, Func<bool> available, Action<EditorFocusResult> completed)
+    {
+        if (!InitialFocusPending || initialFocusQueued) return false;
+        initialFocusQueued = true;
+        try
+        {
+            post(() =>
+            {
+                try
+                {
+                    if (InitialFocusPending)
+                    {
+                        var ready = available();
+                        if (InitialFocusPending) completed(TryInitialFocus(ready));
+                    }
+                }
+                catch { initialFocusHandled = true; }
+                finally { initialFocusQueued = false; }
+            });
+            return true;
+        }
+        catch
+        {
+            // Scheduling may have enqueued before failing. Its stale callback must do nothing.
+            initialFocusHandled = true;
+            initialFocusQueued = false;
+            return false;
+        }
+    }
+
+    private static bool OtherOwnedControlFocused(EditorFocusSnapshot s) =>
+        s.GuiQueriesSucceeded && s.Focus == s.EditorFocus && s.FocusWithinEditor == s.EditorFocusWithinEditor &&
+        s.Focus.Exists && s.Focus.Hwnd > 0 && s.Focus.Pid == s.Shell.Pid &&
+        s.Focus.ThreadId == s.Form.ThreadId && s.Focus.Root == s.Form.Hwnd &&
+        s.Focus.Hwnd != s.Form.Hwnd && s.Focus.Hwnd != s.Panel.Hwnd;
+
+    private EditorFocusResult Handoff(bool available, bool initial = false)
     {
         EditorFocusSnapshot? before = null, after = null;
         var attempted = false; long previous = 0; var error = 0;
-        if (disposed || !available)
+        if (disposed || (!available && !initial))
             return new(false, false, "notApplicable", null, null, 0, 0);
         try
         {
-            before = native.Observe(); Ready(before);
-            if (EditorFocused(before)) return new(true, false, "alreadyFocused", before, null, 0, 0);
+            try { before = native.Observe(); }
+            catch { if (initial) initialFocusHandled = true; throw; }
+            if (disposed) throw new ObjectDisposedException(nameof(OwnedEditorFocus));
+            if (initial)
+            {
+                if (!InitialFocusPending) return new(false, false, "initialAlreadyHandled", before, null, 0, 0);
+                try { ValidateIdentity(before); }
+                catch { initialFocusHandled = true; throw; }
+                if (OtherOwnedControlFocused(before))
+                {
+                    initialFocusHandled = true;
+                    return new(false, false, "initialSelectedControl", before, null, 0, 0);
+                }
+                if (before.Foreground != before.Form)
+                    throw new InvalidOperationException("Initial focus requires the exact foreground document");
+            }
+            Ready(before);
+            if (EditorFocused(before))
+            {
+                if (initial) initialFocusHandled = true;
+                return new(true, false, "alreadyFocused", before, null, 0, 0);
+            }
             if (!before.Focus.Exists || before.Focus.Pid != before.Shell.Pid || before.Focus.ThreadId != before.Form.ThreadId ||
                 before.Focus.Root != before.Form.Hwnd || (before.Focus.Hwnd != before.Form.Hwnd && before.Focus.Hwnd != before.Panel.Hwnd))
                 throw new InvalidOperationException("Editor focus requires exact document form or host panel focus");
+            if (!available) return new(false, false, "notApplicable", before, null, 0, 0);
+            // Only an actual automatic native handoff consumes the pending attempt.
+            // Claim it before SetFocus so native reentrancy cannot cause a second attempt.
+            if (initial)
+            {
+                if (!InitialFocusPending) return new(false, false, "initialAlreadyHandled", before, null, 0, 0);
+                initialFocusHandled = true;
+            }
             attempted = true;
             (previous, error) = native.SetEditorFocus();
-            after = native.Observe(); Ready(after);
+            after = native.Observe();
+            if (disposed) throw new ObjectDisposedException(nameof(OwnedEditorFocus));
+            Ready(after);
+            if (initial && after.Foreground != after.Form)
+                throw new InvalidOperationException("Initial focus lost the exact foreground document");
             if (!EditorFocused(after)) throw new InvalidOperationException("Native editor focus handoff was not observed");
             return new(true, true, "editorFocused", before, after, previous, error);
         }
@@ -128,6 +206,6 @@ public sealed class OwnedEditorFocus : IDisposable
     public void Dispose()
     {
         if (disposed) return;
-        disposed = true; native.Dispose();
+        disposed = true; initialFocusHandled = true; native.Dispose();
     }
 }

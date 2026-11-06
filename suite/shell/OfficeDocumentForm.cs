@@ -86,6 +86,12 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         InitialWindowLayout.Apply(this);
     }
 
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+        QueueInitialEditorFocus();
+    }
+
     protected override void OnHandleDestroyed(EventArgs e)
     {
         try { if (IsHandleCreated) NativeWindowProperties.RemoveStartupDiagnostic(Handle); }
@@ -129,10 +135,11 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             ApplyStatus(result);
             statusTimer.Start();
             QueueResize();
-            // Complete the one initial handoff in this UI turn before publishing readiness.
-            // An inactive or modal document remains untouched; this is never retried on activation.
+            // Try in this UI turn. An inactive document keeps one pending initial request.
             loading = false;
+            var initialFocusOwner = editorFocus;
             TryInitialEditorFocus();
+            if (!ReferenceEquals(editorFocus, initialFocusOwner) || !attached || IsDisposed || Disposing || !IsHandleCreated) return;
             NativeWindowProperties.SetNativeMenuReady(Handle, true);
             PublishNativeMenuStatus(menuSurface);
         }
@@ -558,10 +565,24 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     private void TryInitialEditorFocus()
     {
-        if (editorFocus is null) return;
+        var owned = editorFocus;
+        if (owned is null) return;
         var available = EditorFocusAvailable();
-        var result = editorFocus.TryInitialFocus(available);
-        editorFocusDiagnostics.Write("initial", new { available, result }, worker?.ProcessId, worker?.DiagnosticTraceId);
+        var result = owned.TryInitialFocus(available);
+        editorFocusDiagnostics.Write("initial", new { available, pending = owned.InitialFocusPending, result }, worker?.ProcessId, worker?.DiagnosticTraceId);
+    }
+
+    private void QueueInitialEditorFocus()
+    {
+        var owned = editorFocus;
+        if (!attached || loading || owned is null || !owned.InitialFocusPending || IsDisposed || Disposing || !IsHandleCreated) return;
+        // Run after WinForms finishes activation and normal focus restoration. The retained
+        // owner coalesces callbacks and rechecks all native guards at execution time.
+        var queued = owned.QueueInitialFocus(callback => BeginInvoke(callback),
+            () => ReferenceEquals(editorFocus, owned) && EditorFocusAvailable(),
+            result => editorFocusDiagnostics.Write("initial.activation", new { pending = owned.InitialFocusPending, result },
+                worker?.ProcessId, worker?.DiagnosticTraceId));
+        editorFocusDiagnostics.Write("initial.queued", new { queued, pending = owned.InitialFocusPending }, worker?.ProcessId, worker?.DiagnosticTraceId);
     }
 
     private void ReleaseEditorFocus()

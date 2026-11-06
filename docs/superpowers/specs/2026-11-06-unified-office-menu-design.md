@@ -78,13 +78,19 @@ Escape, outside click, repeated opening and keyboard navigation must return to
 the original native editor naturally. No synthesized Ctrl+F6, foreign activation
 or weakened foreground/capture/engine-generation guard is allowed.
 
-After successful attachment, the UI thread clears loading and makes one explicit
-initial focus request before publishing native-menu readiness. Share the existing
+After successful attachment, the UI thread clears loading and checks a pending
+initial focus handoff before publishing native-menu readiness. Share the existing
 owned focus checks with the user Ctrl+F6 route without synthesizing that route.
 Only the original foreground document with agreeing Form/Panel focus, retained
 process/window identities and no menu, capture, modal or close activity may hand
-focus to its native child. Keep an already focused editor unchanged and leave
-other contexts untouched. Do not retry on activation, resize or status polling.
+focus to its native child. A foreign foreground leaves the handoff pending without
+changing focus. While pending, a document activation may queue one UI callback;
+the callback must recheck all conditions after WinForms focus restoration. Mark
+the handoff complete before its first native SetFocus call, including reentrant
+callbacks. An already focused editor completes it without input. A different
+owned control chosen by the user, changed attachment, disposal or successful
+explicit Ctrl+F6 ends the pending handoff. Never accumulate callbacks or retry
+from resize or status polling, and never activate a foreign or background window.
 
 The menu harness records numeric focus observations before and after its own
 maximize and after activation. At its first editor check, only the exact idle
@@ -123,6 +129,19 @@ with retained handles and restore DPI. Do not change pywinauto's shared client
 or treat a clock check after an unbounded provider call as a timeout mechanism.
 The documented provider timeout and post-call rejection are not a hard real-time
 operating-system scheduling guarantee.
+
+Keep the raw count of visible shell-owned UIA MenuBar nodes. A standard Windows
+system menu may be excluded from the client-menu admission decision only through
+live independent OS evidence: the original HWND's OBJID_SYSMENU geometry, an
+exact original-window physical hit with HTSYSMENU, and a fresh UIA point element
+that compares equal to the counted bar. Require distinct engine-bar and shell-root
+elements, bounded non-client ancestry and unchanged process/window/attachment
+identities before and after the observation. Record verified-system, client and
+unknown counts separately; a client or unknown bar still blocks input. Neither a
+caption ancestor, a label, an empty runtime ID nor a corrected count proves a
+system menu. Unsupported APIs, unavailable negative anchors or ambiguous/stale
+comparisons fail closed. These native queries keep the original action budget
+and post-call rejection; they add no hard real-time scheduling guarantee.
 
 Writer and Calc must each keep the original document through Print Preview on
 and off, then full screen on and off. Use the real native File command and one

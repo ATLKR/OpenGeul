@@ -253,8 +253,11 @@ class OwnedNativeMenuTests(unittest.TestCase):
         if mode=='metadataNone':boundary.interface._methods_=None
         return m,a,p,r,c,boundary
 
-    def shell_bar_fixture(self,*,count=1,depth=3,mode=None,owner=77,visible=True):
-        m,a,p,r,c,b=self.real_chrome_fixture();queries=[]
+    def shell_bar_fixture(self,*,count=1,depth=3,mode=None,owner=77,visible=True,base=None):
+        if base is None:m,a,p,r,c,b=self.real_chrome_fixture()
+        else:
+            m,a,p,r,c,_=base;b=ChromeBoundary(m,p.opengeul_suite_root,c)
+        queries=[]
         class ShellNode(b.Node):
             def __init__(self,index,level=0):
                 super().__init__('shell-'+str(index)+'-'+str(level));self.index,self.level=index,level
@@ -383,6 +386,187 @@ class OwnedNativeMenuTests(unittest.TestCase):
                 snapshot=value['pointers'][0]['snapshots'][0]
                 self.assertEqual(snapshot['shellMenuCount'],0)
                 self.assertFalse('shellMenuObservation' in snapshot)
+
+    def system_bar_fixture(self,mode=None,*,base=None):
+        m,a,p,r,c,b,queries=self.shell_bar_fixture(base=base);node=type(b.find('host',4,(30003,50010)).GetElement(0))
+        calls=[];system_point=(-10,-10) if mode=='negative-point' else (10,10)
+        find_point=b.probe.uia.iuia.ElementFromPoint;compare=b.probe.uia.iuia.CompareElements
+        hit=b.probe.user.WindowFromPhysicalPoint;parent=b.probe.uia.iuia.ControlViewWalker.GetParentElement
+        def point_value(point):return (point.x,point.y)
+        def from_point(point):
+            if point_value(point)==system_point:
+                calls.append('uia-point')
+                return b.Node('file') if mode=='foreign-point' else node(1 if mode=='fresh-false' and calls.count('uia-point')>1 else 0)
+            return find_point(point)
+        def canonical(item):
+            if isinstance(item,node):return 'host' if item.level==2 else ('title',item.index) if item.level==1 else ('system',item.index)
+            return item.key
+        def same(left,right):
+            if isinstance(left,node) or isinstance(right,node):
+                calls.append('compare')
+                if mode=='bad-compare':return None
+                if mode=='always-same':return True
+                return int(canonical(left)==canonical(right))
+            return compare(left,right)
+        def menu_info(hwnd,object_id,item,pointer):
+            self.assertEqual((hwnd,object_id,item),(11,-1,0));calls.append('menu-info')
+            info=pointer._obj;self.assertEqual(info.cbSize,48)
+            rect=(-20,-20,0,0) if mode=='negative-point' else (32768,0,32788,20) if mode=='overflow-point' else (0,0,20,20)
+            info.rcBar.left,info.rcBar.top,info.rcBar.right,info.rcBar.bottom=rect
+            info.hMenu=0 if mode=='no-menu' else 112 if mode=='stale-menu' and calls.count('menu-info')>1 else 111
+            info.hwndMenu=0;info.flags=0;return 1
+        def title_info(hwnd,pointer):
+            self.assertEqual(hwnd,11);calls.append('title-info');info=pointer._obj
+            self.assertEqual(info.cbSize,44)
+            info.rectangle.left,info.rectangle.top,info.rectangle.right,info.rectangle.bottom=(20,0,400,20)
+            if calls.count('title-info')>1:
+                if mode=='generation':b.native.engine['creationTime']=201
+                if mode=='focus-shift':b.probe.native_focus=lambda thread:dict(threadId=9,focusPid=77,focusRootHwnd=11,captureHwnd=0,menuOwnerHwnd=0,flags=0)
+            info.states[0]=0;return 1
+        def message(hwnd,msg,wparam,lparam,flags,milliseconds,pointer):
+            self.assertEqual((hwnd,msg,wparam,flags),(11,0x84,0,3))
+            self.assertTrue(1<=milliseconds<=200);calls.append('hit-test')
+            if mode=='timeout':return 0
+            pointer._obj.value=1 if mode=='client-hit' else 3;return 1
+        def ancestors(item):
+            if not isinstance(item,node):return parent(item)
+            if mode=='pane' and item.level==0:
+                return NS(CurrentControlType=50033,CurrentProcessId=77,CurrentNativeWindowHandle=55)
+            return node(0,1) if item.level==0 else b.Node('host') if item.level==1 else None
+        b.probe.user.GetMenuBarInfo=menu_info;b.probe.user.GetTitleBarInfo=title_info
+        b.probe.user.GetThreadDpiAwarenessContext=lambda:-4
+        b.probe.user.AreDpiAwarenessContextsEqual=lambda left,right:int(left==right)
+        b.probe.user.SendMessageTimeoutW=message
+        def physical(point):
+            if point_value(point)!=system_point:return hit(point)
+            if mode=='submillisecond':c.now=5.9995
+            return 55 if mode=='physical-foreign' else 11
+        b.probe.user.WindowFromPhysicalPoint=physical
+        b.probe.uia.iuia.ElementFromPoint=from_point;b.probe.uia.iuia.CompareElements=same
+        b.probe.uia.iuia.ControlViewWalker.GetParentElement=ancestors
+        if mode=='alternating-focus':
+            def focus():
+                calls.append('focused');return b.Node('file' if calls.count('focused')%2 else 'bar')
+            b.probe.uia.iuia.GetFocusedElement=focus
+        return m,a,p,r,c,b,calls
+
+    def test_independent_os_system_point_proof_keeps_raw_count_and_allows_only_that_bar(self):
+        m,a,p,r,c,b,calls=self.system_bar_fixture()
+        try:value=m.click_native_menu_action(a,p,11,r,'save',probe=b.probe,clock=c)
+        except AssertionError:self.fail('Complete independent OS system-menu proof must be classified')
+        self.assertTrue(value['success']);m.require_native_menu_action(value,77,11,'save')
+        for pointer in value['pointers']:
+            for snapshot in pointer['snapshots']:
+                self.assertEqual(snapshot['shellMenuCount'],1)
+                proof=snapshot['shellMenuClassification']
+                self.assertEqual((proof['verifiedSystemCount'],proof['clientCount'],proof['unknownCount']),(1,0,0))
+                self.assertTrue(proof['proofs'][0]['pointBarEqualsCounted'])
+        self.assertTrue('menu-info' in calls and 'hit-test' in calls and 'uia-point' in calls)
+
+    def test_os_system_point_failures_never_exclude_a_bar_or_send_native_input(self):
+        for mode in ('stale-menu','generation','no-menu','timeout','client-hit','foreign-point','fresh-false',
+                     'bad-compare','always-same','pane','physical-foreign','overflow-point','submillisecond'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,b,calls=self.system_bar_fixture(mode)
+                with self.assertRaises(AssertionError):m.click_native_menu_action(a,p,11,r,'save',probe=b.probe,clock=c)
+                action=r['nativeMenuActions'][0];self.assertEqual(action['pointers'],[]);self.assertEqual(action['keys'],[])
+                snapshot=action['menuObservation']['snapshot'];value=snapshot['shellMenuClassification']
+                self.assertEqual(snapshot['shellMenuCount'],1)
+                self.assertEqual((value['verifiedSystemCount'],value['unknownCount']),(0,1))
+                self.assertTrue(type(value['errorCode']) is int and 1<=value['errorCode']<=7)
+                self.assertEqual(value['proofs'],[])
+                if mode in ('overflow-point','submillisecond'):self.assertFalse('hit-test' in calls)
+                self.assertTrue(action['engineHandleReleased']);self.assertTrue(action['providerClientReleased'])
+
+    def test_os_system_point_negative_coordinates_roundtrip_without_caption_containment(self):
+        m,a,p,r,c,b,_=self.system_bar_fixture('negative-point')
+        value=m.click_native_menu_action(a,p,11,r,'save',probe=b.probe,clock=c)
+        self.assertTrue(value['success']);m.require_native_menu_action(value,77,11,'save')
+        proof=value['pointers'][0]['snapshots'][0]['shellMenuClassification']['proofs'][0]
+        self.assertEqual(proof['point'],[-10,-10]);self.assertEqual(proof['before']['captionRect'],[20,0,400,20])
+
+    def test_focus_change_during_os_classification_is_rechecked_before_input(self):
+        m,a,p,r,c,b,_=self.system_bar_fixture('focus-shift')
+        with self.assertRaises(AssertionError):m.click_native_menu_action(a,p,11,r,'save',probe=b.probe,clock=c)
+        action=r['nativeMenuActions'][0];self.assertEqual(action['pointers'],[])
+        snapshot=action['menuObservation']['snapshot']
+        self.assertEqual(snapshot['shellMenuClassification']['verifiedSystemCount'],1)
+        self.assertEqual(snapshot['gui']['focusPid'],77)
+
+    def test_os_system_point_replay_rejects_missing_wrong_scope_and_incomplete_live_proof(self):
+        m,a,p,r,c,b,_=self.system_bar_fixture();original=m.click_native_menu_action(a,p,11,r,'save',probe=b.probe,clock=c)
+        for mode in ('missing','scope','scope-bool','hit','metadata','alias','ancestor','unknown','typed-count','fresh'):
+            with self.subTest(mode=mode):
+                value=copy.deepcopy(original);snapshot=value['pointers'][0]['snapshots'][0]
+                if mode=='missing':snapshot.pop('shellMenuClassification')
+                else:
+                    row=snapshot['shellMenuClassification'];proof=row['proofs'][0]
+                    if mode=='scope':row['scope']['officeCreationTime']+=1
+                    elif mode=='scope-bool':row['scope']['version']=True
+                    elif mode=='hit':proof['physicalHit']['hitTest']=1
+                    elif mode=='metadata':proof['after']['menuHandle']+=1
+                    elif mode=='alias':proof['engineBarDifferent']=False
+                    elif mode=='ancestor':proof['ancestry'][1][0]=50033
+                    elif mode=='unknown':row['unknownCount']=1
+                    elif mode=='typed-count':row['verifiedSystemCount']=True
+                    elif mode=='fresh':proof['freshPointBarEqualsRetained']=False
+                with self.assertRaises((AssertionError,KeyError)):m.require_native_menu_action(value,77,11,'save')
+
+    def test_view_uses_its_fresh_scope_and_identical_os_point_rule(self):
+        m,a,p,r,c,b,_=self.system_bar_fixture()
+        origin=m.click_native_menu_action(a,p,11,r,'save',probe=b.probe,clock=c)
+        r.update(module='writer',officeCreationTime=200,nativeArchiveGeneration=dict(pid=88,creationTime=200,image=b.native.engine['image']))
+        m,a,p,r,c,b,_=self.system_bar_fixture(base=(m,a,p,r,c,b));c.now=2.;b.probe.deadline=7.;counter=[0]
+        def prop(hwnd,name):
+            if name==m.STATUS_PROPERTY:
+                counter[0]+=1;return (1<<56)|(counter[0]<<28)|counter[0]
+            return 1
+        b.probe.user.GetPropW=prop
+        value=m.observe_native_view(a,p,11,r,module='writer',preview=False,menu_visible=True,probe=b.probe,clock=c,pause=c.pause)
+        self.assertTrue(value['success']);self.assertTrue(value['statusRpcProved'])
+        scope=dict(version=1,binding=dict(document=11,parent=55,child=56,officePid=88),shellPid=77,
+            shellCreationTime=100,officeCreationTime=200,startedAt=2.,deadline=7.)
+        for sample in value['samples']:
+            row=sample['state'];self.assertEqual(row['shellMenuCount'],1)
+            self.assertEqual(row['shellMenuClassification']['scope'],scope)
+            m._require_shell_menus(row,scope['binding'],77,scope)
+            old=dict(scope,startedAt=origin['startedAt'],deadline=origin['deadline'])
+            with self.assertRaises(AssertionError):m._require_shell_menus(row,scope['binding'],77,old)
+
+    def test_fullscreen_without_engine_bar_anchor_stays_unknown(self):
+        m,a,p,r,c,b,_=self.system_bar_fixture();binding=dict(document=11,parent=55,child=56,officePid=88)
+        scope=dict(version=1,binding=binding,shellPid=77,shellCreationTime=100,officeCreationTime=200,startedAt=1.,deadline=6.)
+        b.probe.bind_menu_classification(scope,lambda:None);find=b.find
+        def hidden(key,tree,condition):
+            if key=='peer' and condition==(30003,50010):return NS(Length=0,GetElement=lambda index:None)
+            return find(key,tree,condition)
+        b.find=hidden
+        value=b.probe.view_snapshot(binding,'writer')
+        self.assertEqual(value['nativeMenuBarCount'],0);self.assertEqual(value['shellMenuCount'],1)
+        self.assertEqual(value['shellMenuClassification']['unknownCount'],1)
+        self.assertEqual(value['shellMenuClassification']['errorCode'],2)
+        with self.assertRaises(AssertionError):m._require_shell_menus(value,binding,77,scope)
+        self.assertFalse(any(isinstance(x,tuple) and x[0] in ('click','key') for x in b.native.calls))
+
+    def test_system_classification_refreshes_focus_identity_with_the_new_focus_chain(self):
+        m,a,p,r,c,b,_=self.system_bar_fixture('alternating-focus')
+        try:value=m.inspect_native_menu(a,p,11,r,'keyboard-escape',probe=b.probe,clock=c)
+        except AssertionError:self.fail('Refreshed menu focus identity must match its refreshed chain')
+        self.assertTrue(value['success']);m.require_native_menu_action(value,77,11)
+        for item in value['keys'][1:]:self.assertEqual(item['before']['focusIdentity']['role'],'bar')
+
+    def test_view_status_baseline_is_read_after_final_os_classification(self):
+        m,a,p,r,c,b,calls=self.system_bar_fixture();binding=dict(document=11,parent=55,child=56,officePid=88)
+        scope=dict(version=1,binding=binding,shellPid=77,shellCreationTime=100,officeCreationTime=200,startedAt=1.,deadline=6.)
+        b.probe.bind_menu_classification(scope,lambda:None)
+        def prop(hwnd,name):
+            if name==m.STATUS_PROPERTY:
+                number=2 if calls.count('title-info')>=2 else 1
+                return (1<<56)|(number<<28)|number
+            return 1
+        b.probe.user.GetPropW=prop
+        value=b.probe.view_snapshot(binding,'writer')
+        self.assertEqual(m.decode_status_sequence(value['statusSequenceRaw']),dict(version=1,started=2,completed=2))
 
     def test_real_chrome_empty_runtime_ids_require_actual_differential_identity(self):
         m,a,p,r,c,boundary=self.real_chrome_fixture()

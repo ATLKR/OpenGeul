@@ -61,10 +61,15 @@ shell-tests/DocumentMenuSurfaceTests.cs and Program registration.
   document Form ownership or fake keyboard focus restoration.
 - [x] Verify Core behavior on Windows x64/ARM64 (121/121 at68bc25a).
 - [x] Add an explicit guarded initial focus request after loading completes and
-  before native-menu readiness; keep it separate from user Ctrl+F6 and never
-  retry it on activation, resize or status polling.
-- [x] Verify the shared focus core's 18 local cases, including nine new cases;
+  before native-menu readiness; keep it separate from user Ctrl+F6.
+- [x] Verify the shared focus core's 32 local cases, including 14 additional
+  pending/activation/lifetime cases after the first 18-case implementation;
   keep native adapter compilation and host syntax checks separate from Windows UI.
+- [x] Preserve pending initial focus when the foreground belongs to another app.
+  Retry only from the pending document's activation, through one queued callback
+  with fresh ownership/focus checks. Complete before the first native focus call;
+  cancel on another owned control, changed attachment, disposal or successful
+  explicit Ctrl+F6. Do not retry from resize or status polling.
 - [ ] Verify Windows-targeted WinForms compilation and UI; report actual limits.
 
 ### Task3: Native UI and final integration
