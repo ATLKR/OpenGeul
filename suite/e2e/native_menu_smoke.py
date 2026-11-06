@@ -286,6 +286,36 @@ def require_hwp_launcher_receipt(value, writer, suite):
     return value
 
 
+def _confirmed_shell_cleanup(record, pid, observed_exit):
+    """Join the retained Popen observation to its producer's bounded cleanup."""
+    try:
+        receipt=record['testProcessCleanup']
+        assert type(receipt) is dict and type(pid) is int and pid>0 and type(observed_exit) is int
+        assert type(receipt['shellPid']) is int and receipt['shellPid']==pid
+        assert type(receipt['shellExitCode']) is int and receipt['shellExitCode']==observed_exit
+        assert type(receipt['forceRequested']) is bool and receipt['gracefulShutdownVerified'] is False
+        if not receipt['forceRequested']:return receipt['disposition']=='already-exited'
+        for key in ('commandBudgetStartedAt','commandBudgetDeadline','commandReturnedAt'):
+            assert type(receipt[key]) in (int,float) and math.isfinite(receipt[key])
+        assert type(receipt['commandBudgetSeconds']) is int and receipt['commandBudgetSeconds']==15
+        assert receipt['commandBudgetDeadline']==receipt['commandBudgetStartedAt']+15
+        assert receipt['commandBudgetStartedAt']<=receipt['commandReturnedAt']<=receipt['commandBudgetDeadline']
+        assert type(receipt['commandExitCode']) is int
+        if receipt['disposition']=='exit-zero-after-taskkill-not-found':
+            return (observed_exit==0 and receipt['commandExitCode']==128 and record.get('cleanupExitRaceVerified') is True
+                and type(record.get('cleanupProcessExitCode')) is int and record['cleanupProcessExitCode']==0)
+        assert receipt['disposition']=='forced-stop-returned' and receipt['commandExitCode'] in (0,128)
+        for key in ('exitWaitStartedAt','exitWaitDeadline','exitWaitReturnedAt'):
+            assert type(receipt[key]) in (int,float) and math.isfinite(receipt[key])
+        assert type(receipt['exitWaitStageCode']) is int and receipt['exitWaitStageCode']==2
+        assert type(receipt['exitWaitBudgetSeconds']) is int and receipt['exitWaitBudgetSeconds']==5
+        assert receipt['exitWaitStartedAt']==receipt['commandReturnedAt']
+        assert receipt['exitWaitDeadline']==receipt['exitWaitStartedAt']+5
+        assert receipt['exitWaitStartedAt']<=receipt['exitWaitReturnedAt']<=receipt['exitWaitDeadline']
+        return True
+    except (AssertionError,KeyError,TypeError,ValueError,OverflowError):return False
+
+
 class WindowsSession:
     """Real native boundaries; construction itself acquires no resources."""
     actual_windows = True
@@ -739,7 +769,8 @@ class WindowsSession:
             else:
                 self.native.stop_owned_test_process(self.process, record)
             record['shellExitCode'] = self.process.poll()
-            shell_done = record['shellExitCode'] is not None
+            shell_done = _confirmed_shell_cleanup(record,self.process.pid,record['shellExitCode'])
+            record['shellCleanupConfirmed'] = shell_done
         if self.engine is not None:
             try:
                 engine_done = self.engine.exited(5)

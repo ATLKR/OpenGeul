@@ -237,6 +237,50 @@ internal static class OwnedEditorFocusTests
             Check(native.Sets == 1 && reports.Count == 1 && reports[0].Verified && !Pending(route), "Callback did not recheck the actual execution state");
             Check(!Queue(route, callbacks.Add, () => true, reports.Add) && callbacks.Count == 1, "Completed initial focus queued again");
         });
+        yield return Test("App activation wakes one deferred initial request and coalesces with Activated", () =>
+        {
+            var native = new FocusNative(); using var route = new OwnedEditorFocus(native, "engine");
+            var safe = native.State;
+            native.State = safe with { Foreground = safe.Foreground with { Hwnd = 90, Pid = 9 } };
+            var initial = Initial(route, false);
+            Check(!initial.Attempted && Pending(route) && native.Sets == 0, "Inactive attach did not retain its request");
+            native.State = safe;
+            var callbacks = new List<Action>(); var reports = new List<EditorFocusResult>();
+            Check(Queue(route, callbacks.Add, () => true, reports.Add), "App activation did not wake the pending request");
+            Check(!Queue(route, callbacks.Add, () => true, reports.Add) && callbacks.Count == 1,
+                "App activation and Activated created duplicate work");
+            callbacks[0]();
+            Check(native.Sets == 1 && reports.Count == 1 && reports[0].Verified && !Pending(route),
+                "App activation did not complete one guarded initial handoff");
+            Check(!Queue(route, callbacks.Add, () => true, reports.Add) && native.Sets == 1,
+                "A completed app activation retried native focus");
+        });
+        yield return Test("The actual app activation entry fences the original owner and HWND after base processing", () =>
+        {
+            var source = FocusFormSource();
+            var body = FocusHostMethod(source, "protected override void WndProc(ref Message m)");
+            var processed = body.IndexOf("base.WndProc(ref m);", StringComparison.Ordinal);
+            Check(processed >= 0 && body.IndexOf("var appActivated = m.Msg == 0x001C && m.WParam != 0;", StringComparison.Ordinal) is var active && active >= 0 && active < processed,
+                "The original app activation message is not retained before base processing");
+            foreach (var capture in new[] { "var activationHwnd = m.HWnd;", "var initialFocusOwner = editorFocus;" })
+                Check(body.IndexOf(capture, StringComparison.Ordinal) is var at && at >= 0 && at < processed,
+                    "The original app activation owner or HWND is not retained");
+            var wake = body.IndexOf("if (appActivated", StringComparison.Ordinal);
+            var queue = body.IndexOf("QueueInitialEditorFocus();", StringComparison.Ordinal);
+            Check(wake > processed && queue > wake, "App activation queued focus before base processing");
+            var guard = body[wake..queue];
+            foreach (var condition in new[] { "initialFocusOwner is not null", "initialFocusOwner.InitialFocusPending",
+                "ReferenceEquals(editorFocus, initialFocusOwner)", "!IsDisposed", "!Disposing", "IsHandleCreated",
+                "activationHwnd == editorFocusFormHwnd", "activationHwnd == Handle" })
+                Check(guard.Contains(condition, StringComparison.Ordinal), "App activation lost an original owner/lifetime guard");
+            Check(guard.IndexOf("IsHandleCreated", StringComparison.Ordinal) < guard.IndexOf("activationHwnd == Handle", StringComparison.Ordinal),
+                "App activation may create a missing HWND");
+            Check(!body.Contains("LParam", StringComparison.Ordinal) && !body.Contains("SetFocus", StringComparison.Ordinal)
+                && !body.Contains("SetForegroundWindow", StringComparison.Ordinal), "App activation bypassed the existing queue or interpreted its thread ID");
+            var activated = FocusHostMethod(source, "protected override void OnActivated(EventArgs e)");
+            Check(activated.IndexOf("base.OnActivated(e);", StringComparison.Ordinal) < activated.IndexOf("QueueInitialEditorFocus();", StringComparison.Ordinal),
+                "The existing Activated entry changed ordering");
+        });
         yield return Test("Inactive callback stays pending without an automatic polling loop", () =>
         {
             var native = new FocusNative(); using var route = new OwnedEditorFocus(native, "engine");
@@ -382,6 +426,21 @@ internal static class OwnedEditorFocusTests
                 Check(!Initial(route, true).Attempted && native.Sets == 0, "Returning to the host overwrote the selected control");
             }
         });
+    }
+
+    private static string FocusFormSource([System.Runtime.CompilerServices.CallerFilePath] string path = "") =>
+        System.IO.File.ReadAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(path)!, "../shell/OfficeDocumentForm.cs"));
+
+    private static string FocusHostMethod(string source, string signature)
+    {
+        var begin = source.IndexOf('{', source.IndexOf(signature, StringComparison.Ordinal));
+        var depth = 1;
+        for (var end = begin + 1; end < source.Length; end++)
+        {
+            if (source[end] == '{') depth++;
+            if (source[end] == '}' && --depth == 0) return source[(begin + 1)..end];
+        }
+        throw new Exception("Actual focus host method did not end");
     }
 }
 

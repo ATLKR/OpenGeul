@@ -231,6 +231,142 @@ class ChromeBoundary:
 
 
 class OwnedNativeMenuTests(unittest.TestCase):
+    def lazy_provider_boundary(self, *, provider_error=None):
+        from types import ModuleType
+        m,a,p,r,c,b=self.real_chrome_fixture();calls=[]
+        class Function:
+            def __init__(self,name):self.name=name
+            def __call__(self,*args):calls.append(('win32',self.name));return 1
+        user=NS(**{name:Function(name) for name in (
+            'IsWindow','IsWindowVisible','IsWindowEnabled','IsIconic','GetAncestor','GetForegroundWindow',
+            'GetWindowThreadProcessId','GetWindowRect','GetTitleBarInfo','WindowFromPhysicalPoint',
+            'SetPhysicalCursorPos','GetPhysicalCursorPos','SetThreadDpiAwarenessContext',
+            'GetThreadDpiAwarenessContext','AreDpiAwarenessContextsEqual','SendMessageTimeoutW',
+            'GetAsyncKeyState','GetSystemMetrics','SendInput','GetWindow','GetWindowTextW',
+            'GetClassNameW','IsChild','GetPropW','GetMenuBarInfo','GetGUIThreadInfo')})
+        kernel=NS(**{name:Function(name) for name in ('GetProcessId','WaitForSingleObject','GetProcessTimes','QueryFullProcessImageNameW')})
+        dwm=NS(DwmGetWindowAttribute=Function('DwmGetWindowAttribute'))
+        class Provider:
+            def __setattr__(self,name,value):
+                if name in ('ConnectionTimeout','TransactionTimeout'):
+                    calls.append(('set',name,value))
+                    if provider_error is not None:raise provider_error
+                object.__setattr__(self,name,value)
+            def ElementFromHandle(self,hwnd):calls.append(('root',hwnd));return b.Node('peer')
+            def CompareElements(self,left,right):calls.append(('compare',));return left is right
+            def CreatePropertyCondition(self,key,value):calls.append(('condition',));return (key,value)
+        provider=Provider();expected_interface=type('IUIAutomation2',(),{})
+        module=ModuleType('comtypes');client=ModuleType('comtypes.client')
+        module.__version__='1.4.17';module.HRESULT=C.c_int32;module.client=client
+        def library(name):
+            self.assertEqual(name,'UIAutomationCore.dll');calls.append(('module',));return NS(IUIAutomation2=expected_interface,tagPOINT=b.probe._point_type)
+        def create(clsid,*,interface):
+            self.assertEqual(clsid,m.NativeMenuProbe.CLIENT);self.assertIs(interface,expected_interface)
+            calls.append(('create',));return provider
+        client.GetModule=library;client.CreateObject=create
+        context=patch.dict(sys.modules,{'comtypes':module,'comtypes.client':client})
+        return m,a,p,r,c,b,calls,(user,kernel,dwm),context
+
+    def test_constructor_and_initial_win32_failure_do_not_create_or_configure_uia(self):
+        m,a,p,r,c,b,calls,(user,kernel,dwm),context=self.lazy_provider_boundary()
+        primary=RuntimeError('synthetic original native GUI query failure')
+        def gui(*args):calls.append(('original-gui',));raise primary
+        user.GetGUIThreadInfo=gui
+        with context:
+            probe=m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm)
+            self.assertEqual(calls,[],'Win32-only construction must not create a UIA client')
+            with self.assertRaises(RuntimeError) as caught:probe._call(user.GetGUIThreadInfo,9,None)
+            self.assertIs(caught.exception,primary);self.assertEqual(calls,[('original-gui',)])
+            self.assertTrue(probe.close_provider())
+            self.assertEqual(calls,[('original-gui',)],'Cleanup must not initialize the unused provider')
+
+    def test_real_initial_editor_readiness_expires_without_initializing_uia_or_sending_input(self):
+        class COMError(Exception):hresult=-2147024809
+        m,a,p,r,c,b,calls,(user,kernel,dwm),context=self.lazy_provider_boundary(provider_error=COMError())
+        with context:
+            probe=m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm)
+            native,queries=self.real_editor_probe(m,c,host_focus=11,engine_focus=11)
+            probe.user=native.user;probe.foreground=native.foreground
+            probe.user.GetPropW=lambda hwnd,name:1 if name==m.READY_PROPERTY else 55 if name.endswith('ParentHwnd') else 56
+            probe.window_snapshot=lambda hwnd:dict(hwnd=11,pid=77,threadId=7,rootHwnd=11,visible=True,enabled=True)
+            for name in ('process_snapshot','open_engine','engine_snapshot','close_engine','enter_dpi','restore_dpi'):
+                setattr(probe,name,getattr(b.native,name))
+            with patch.object(m.time,'sleep',side_effect=c.pause),self.assertRaises(AssertionError):
+                m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+            value=r['nativeMenuActions'][-1];first,=value['editorObservations']
+            self.assertGreater(first['sampleCount'],1);self.assertLessEqual(first['sampleCount'],101)
+            self.assertEqual(value['deadline'],6.);self.assertGreaterEqual(c(),6.)
+            self.assertTrue(queries);self.assertEqual(calls,[])
+            self.assertEqual(value['pointers'],[]);self.assertEqual(value['keys'],[])
+            self.assertTrue(value['providerClientReleased']);self.assertTrue(value['engineHandleReleased'])
+
+    def test_first_actual_uia_query_creates_one_private_client_with_the_original_timeouts(self):
+        m,a,p,r,c,b,calls,(user,kernel,dwm),context=self.lazy_provider_boundary()
+        with context:
+            probe=m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm)
+            self.assertEqual(calls,[])
+            first=probe._root(56);c.now=2.;second=probe._root(56)
+            self.assertEqual((first.key,second.key),('peer','peer'))
+            self.assertEqual(sum(row[0]=='create' for row in calls),1)
+            self.assertEqual(sum(row[0]=='module' for row in calls),1)
+            self.assertEqual([row[2] for row in calls if row[0]=='set'],[1249,1249,1249,1249,999,999])
+            self.assertTrue(probe.provider_timeout_verified);self.assertTrue(probe.close_provider())
+            count=len(calls);self.assertIsNone(probe.uia);self.assertIsNone(probe.provider_client)
+            self.assertEqual(len(calls),count,'A closed provider cannot be recreated by observation')
+
+    def test_uiaccess_first_entries_initialize_without_changing_runtime_or_comparison_guards(self):
+        for operation in ('runtime','chrome','same','condition','find','bar'):
+            with self.subTest(operation=operation):
+                m,a,p,r,c,b,calls,(user,kernel,dwm),context=self.lazy_provider_boundary()
+                with context:
+                    probe=m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm)
+                    self.assertEqual(calls,[])
+                    node=b.Node('peer')
+                    if operation=='runtime':self.assertEqual(probe._runtime(node)[0],[4,56])
+                    elif operation=='chrome':self.assertEqual(probe._chrome(node)['pid'],88)
+                    elif operation=='same':self.assertTrue(probe._same(node,node))
+                    elif operation=='condition':self.assertEqual(probe._condition(control_type='MenuItem'),(30003,50011))
+                    elif operation=='find':self.assertEqual(probe._find(b.Node('bar'),'file',scope='children').key,'file')
+                    else:self.assertEqual(probe._discover_bar(node).key,'bar')
+                    self.assertEqual(sum(row[0]=='create' for row in calls),1)
+                    self.assertTrue(any(row[0]=='set' for row in calls));probe.close_provider()
+
+    def test_expired_first_uia_query_and_cleanup_never_create_a_client(self):
+        m,a,p,r,c,b,calls,(user,kernel,dwm),context=self.lazy_provider_boundary()
+        with context:
+            probe=m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm)
+            self.assertEqual(calls,[]);c.now=6.
+            with self.assertRaises(AssertionError):probe._root(56)
+            self.assertEqual(calls,[]);probe.close_provider();self.assertEqual(calls,[])
+
+    def test_first_uia_timeout_setter_failure_is_not_retried_or_hidden(self):
+        class COMError(Exception):hresult=-2147024809
+        primary=COMError()
+        m,a,p,r,c,b,calls,(user,kernel,dwm),context=self.lazy_provider_boundary(provider_error=primary)
+        with context:
+            probe=m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm)
+            self.assertEqual(calls,[])
+            self.assertEqual(probe._call(user.GetGUIThreadInfo,9,None),1)
+            with self.assertRaises(COMError) as caught:probe._root(56)
+            self.assertIs(caught.exception,primary);self.assertFalse(any(row[0]=='root' for row in calls))
+            before=len(calls)
+            with self.assertRaises(AssertionError):probe._root(56)
+            self.assertEqual(len(calls),before);self.assertTrue(probe.close_provider())
+
+    def test_slow_lazy_provider_preparation_consumes_original_deadline_before_any_uia_target(self):
+        for stage in ('GetModule','CreateObject'):
+            with self.subTest(stage=stage):
+                m,a,p,r,c,b,calls,(user,kernel,dwm),context=self.lazy_provider_boundary()
+                with context:
+                    probe=m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm)
+                    client=sys.modules['comtypes.client'];original=getattr(client,stage)
+                    def slow(*args,**kwargs):
+                        value=original(*args,**kwargs);c.now=6.;return value
+                    setattr(client,stage,slow)
+                    with self.assertRaises(AssertionError):probe._root(56)
+                    self.assertFalse(any(row[0] in ('set','root') for row in calls))
+                    self.assertIsNone(probe.provider_client);self.assertTrue(probe.close_provider())
+
     def feature(self):
         self.assertTrue(SOURCE.is_file(),'A separate engine-owned native menu policy is required')
         spec=importlib.util.spec_from_file_location('tested_owned_native_menu',SOURCE)

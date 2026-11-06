@@ -258,6 +258,112 @@ class NativeSmokeTests(unittest.TestCase):
         self.assertIn('CalledProcessError', record['cleanupError'])
         self.assertNotIn('cleanupExitRaceVerified', record)
 
+    def test_taskkill_not_found_waits_original_popen_once_inside_existing_exit_phase(self):
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code):
+                clock = SimpleNamespace(now=10.)
+                process = SimpleNamespace(pid=123, _handle=456)
+                record = dict(success=False, error='original UIA failure')
+                def poll():
+                    if process.poll.call_count == 2: clock.now = 12.5
+                    return None
+                def kill(argv, **options):
+                    self.assertEqual(argv, ['taskkill.exe', '/PID', '123', '/T', '/F'])
+                    self.assertEqual(options['timeout'], 15)
+                    clock.now = 12.
+                    raise smoke.subprocess.CalledProcessError(128, argv)
+                def wait(*, timeout):
+                    self.assertEqual(process._handle, 456)
+                    self.assertEqual(timeout, 4.5)
+                    clock.now = 16.
+                    return exit_code
+                process.poll = Mock(side_effect=poll);process.wait = Mock(side_effect=wait)
+                with patch.object(smoke.time, 'monotonic', side_effect=lambda:clock.now), \
+                        patch.object(smoke.subprocess, 'run', side_effect=kill) as command:
+                    smoke.stop_owned_test_process(process, record)
+                receipt = record['testProcessCleanup']
+                self.assertEqual(receipt['disposition'], 'forced-stop-returned')
+                self.assertEqual(receipt['shellExitCode'], exit_code)
+                self.assertEqual((receipt['commandBudgetStartedAt'],receipt['commandBudgetDeadline']), (10.,25.))
+                self.assertEqual((receipt['commandReturnedAt'],receipt['commandExitCode']), (12.,128))
+                self.assertEqual((receipt['exitWaitStartedAt'],receipt['exitWaitDeadline'],receipt['exitWaitBudgetSeconds']), (12.,17.,5))
+                self.assertEqual(receipt['exitWaitReturnedAt'], 16.)
+                self.assertEqual(receipt['exitWaitStageCode'], 2)
+                self.assertFalse(receipt['gracefulShutdownVerified'])
+                self.assertNotIn('cleanupExitRaceVerified',record);self.assertNotIn('cleanupError',record)
+                self.assertFalse(record['success']);self.assertEqual(record['error'],'original UIA failure')
+                command.assert_called_once();process.wait.assert_called_once();self.assertEqual(process.poll.call_count,2)
+
+    def test_taskkill_not_found_pending_wait_timeout_or_unconfirmed_result_never_qualifies(self):
+        for mode in ('timeout','late','missing','bool','command-late'):
+            with self.subTest(mode=mode):
+                clock=SimpleNamespace(now=10.)
+                process=SimpleNamespace(pid=123,_handle=456,poll=Mock(side_effect=[None,None]))
+                record=dict(success=False,error='original UIA failure')
+                class CommandFailure(smoke.subprocess.CalledProcessError):
+                    def __str__(self):raise AssertionError('Cleanup must not format the old command failure')
+                def kill(*args,**options):
+                    clock.now=26. if mode=='command-late' else 12.
+                    raise CommandFailure(128,['taskkill.exe'])
+                def wait(*,timeout):
+                    self.assertTrue(0<timeout<=5)
+                    if mode=='timeout':
+                        clock.now=17.;raise smoke.subprocess.TimeoutExpired('owned shell',timeout)
+                    clock.now=17.1 if mode=='late' else 13.
+                    return None if mode=='missing' else True if mode=='bool' else 0
+                process.wait=Mock(side_effect=wait)
+                with patch.object(smoke.time,'monotonic',side_effect=lambda:clock.now), \
+                        patch.object(smoke.subprocess,'run',side_effect=kill) as command:
+                    smoke.stop_owned_test_process(process,record)
+                receipt=record['testProcessCleanup']
+                self.assertEqual(receipt['disposition'],'stop-unconfirmed')
+                self.assertIsNone(receipt['shellExitCode'])
+                self.assertFalse(receipt['gracefulShutdownVerified']);self.assertFalse(record['success'])
+                self.assertNotIn('cleanupExitRaceVerified',record);self.assertIn('cleanupError',record)
+                self.assertEqual(record['error'],'original UIA failure');command.assert_called_once()
+                self.assertEqual(process.wait.call_count,0 if mode=='command-late' else 1)
+
+    def test_other_failed_command_or_already_nonzero_exit_does_not_start_recovery_wait(self):
+        for command_code,exit_code in ((128,7),(5,0),(5,None),(None,None)):
+            with self.subTest(command_code=command_code,exit_code=exit_code):
+                process=SimpleNamespace(pid=123,poll=Mock(side_effect=[None,exit_code]),wait=Mock())
+                record=dict(success=False,error='original UIA failure')
+                failure=(smoke.subprocess.TimeoutExpired('taskkill.exe',15) if command_code is None
+                    else smoke.subprocess.CalledProcessError(command_code,['taskkill.exe']))
+                with patch.object(smoke.subprocess,'run',side_effect=failure) as command:
+                    smoke.stop_owned_test_process(process,record)
+                process.wait.assert_not_called();command.assert_called_once()
+                self.assertEqual(record['testProcessCleanup']['disposition'],'stop-unconfirmed')
+                self.assertNotIn('cleanupExitRaceVerified',record)
+                self.assertFalse(record['success']);self.assertEqual(record['error'],'original UIA failure')
+
+    def test_native_menu_cleanup_can_confirm_forced_retained_exit_without_passing_the_case(self):
+        from native_menu_smoke import WindowsSession
+        calls=[]
+        class Process:
+            pid=123;_handle=456;returncode=None
+            def poll(self):return self.returncode
+            def wait(self,*,timeout):
+                self_handle=self._handle
+                self.assert_same_handle=self_handle==456
+                calls.append(('shell-wait',timeout));self.returncode=7;return 7
+        process=Process();session=object.__new__(WindowsSession)
+        session.process=process;session.native=smoke
+        session.engine=SimpleNamespace(handle=909,
+            exited=lambda seconds:(calls.append(('engine-wait',seconds)) or True),
+            close_handle=lambda handle:(calls.append(('engine-release',handle)) or True))
+        record=dict(success=False,error='original UIA failure')
+        failure=smoke.subprocess.CalledProcessError(128,['taskkill.exe'])
+        with patch.object(smoke.subprocess,'run',side_effect=failure) as command:
+            self.assertTrue(session.cleanup(record))
+        self.assertTrue(process.assert_same_handle);command.assert_called_once()
+        self.assertEqual([row[0] for row in calls],['shell-wait','engine-wait','engine-release'])
+        self.assertTrue(0<calls[0][1]<=5);self.assertEqual(calls[1:], [('engine-wait',5),('engine-release',909)])
+        self.assertEqual(record['shellExitCode'],7);self.assertTrue(record['engineHandleReleased'])
+        self.assertFalse(record['success']);self.assertEqual(record['error'],'original UIA failure')
+        self.assertEqual(record['testProcessCleanup']['disposition'],'forced-stop-returned')
+        self.assertFalse(record['testProcessCleanup']['gracefulShutdownVerified'])
+
     def test_owned_close_posts_once_and_refuses_foreign_or_child_windows(self):
         calls = []
         api = object.__new__(smoke.Windows)

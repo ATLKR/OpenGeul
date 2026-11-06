@@ -771,6 +771,7 @@ class NativeMenuProbe(NativeControlProbe):
     CLIENT='{e22ad333-b25f-460c-83d0-0581107395c9}'
     def __init__(self,deadline,clock,*,interop=None,**libraries):
         self.provider_client=None
+        self._uia=None;self._provider_started=self._provider_closed=False
         self.interop={} if interop is None else interop
         self._identity_scope=None;self._identity_refs={};self._uses_comparison=False
         NativeActivationProbe.__init__(self,deadline,clock,**libraries)
@@ -781,6 +782,17 @@ class NativeMenuProbe(NativeControlProbe):
             ('GetGUIThreadInfo',(D,C.POINTER(GuiThreadInfo)),B)]:
             function=getattr(self.user,name);function.argtypes,function.restype=args,result
         self.keyboard_probe=None
+    @property
+    def uia(self):
+        if not getattr(self,'_provider_closed',False):self._ensure_provider()
+        return getattr(self,'_uia',None)
+    @uia.setter
+    def uia(self,value):self._uia=value
+    def _ensure_provider(self):
+        if getattr(self,'_uia',None) is not None:return
+        assert not getattr(self,'_provider_started',False) and not getattr(self,'_provider_closed',False), 'Private native UIA initialization cannot repeat'
+        assert self.clock()<self.deadline, 'Native UIA initialization exceeded the original deadline'
+        self._provider_started=True
         try:
             import comtypes.client
             self._hresult_type=comtypes.HRESULT
@@ -839,6 +851,7 @@ class NativeMenuProbe(NativeControlProbe):
         except Exception:pass  # Unconfirmed metadata never authorizes the empty-ID channel.
         return result
     def _runtime(self,element):
+        self._ensure_provider()
         interop=getattr(self,'interop',None)
         if interop is None:self.interop=interop={}
         observation=dict(versionTuple=copy.deepcopy(interop.get('versionTuple',[])),
@@ -945,6 +958,7 @@ class NativeMenuProbe(NativeControlProbe):
         except BaseException:pass
         return result
     def _uia_call(self,code,function,*args):
+        self._ensure_provider()
         previous=getattr(self,'_observed_call',None);self._observed_call=self._call_record(code)
         try:return self._call(function,*args)
         finally:self._observed_call=previous
@@ -955,6 +969,7 @@ class NativeMenuProbe(NativeControlProbe):
         self.interop['primaryFailure']=self._exception_numbers(exc)
     def close_provider(self):
         # Drop all owned element/client references. No shared client was changed.
+        self._provider_closed=True
         for name in ('file_element','menu_bar_element','peer_element','current_control','_retained','uia','provider_client','_identity_refs','_menu_classification_context','_failure_point','_diagnostic_sink','_observed_call','_last_call_exception'):
             if hasattr(self,name):setattr(self,name,None)
         return True
@@ -966,7 +981,9 @@ class NativeMenuProbe(NativeControlProbe):
             label=self._uia_call(13,self.uia.iuia.CreatePropertyCondition,30005,name)
             condition=self._uia_call(14,self.uia.iuia.CreateAndCondition,condition,label)
         return condition
-    def _root(self,hwnd):return self._uia_call(1,self.uia.iuia.ElementFromHandle,hwnd)
+    def _root(self,hwnd):
+        self._ensure_provider()
+        return self._uia_call(1,self.uia.iuia.ElementFromHandle,hwnd)
     def point_snapshot(self,scope,point,control):
         from suite_window_activation import Point
         observation=dict(targetCode=tuple(LABELS).index(self._active_target)+1,stageCode=1,

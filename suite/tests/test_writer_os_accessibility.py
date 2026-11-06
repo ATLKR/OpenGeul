@@ -716,5 +716,159 @@ class DocumentedGuidInputTests(unittest.TestCase):
         self.assertEqual(self.fixture.text_reads,[])
 
 
+class RootCapabilityDiagnosticTests(unittest.TestCase):
+    """Later fresh-root observations never certify the earlier focused object."""
+    def setUp(self):
+        self.owner=Owner(REQUEST);self.fixture=RawFixture();self.backends=[]
+
+    def feature(self,name):
+        method=getattr(probe,name,None)
+        self.assertTrue(callable(method),'Separate numeric root diagnostic API is missing')
+        return method
+
+    def observe(self,change=None):
+        observer=self.feature('observe_root_diagnostic')
+        backend_type=self.feature('RootCapabilityBackend')
+        def backend(guard,record):
+            value=backend_type(guard,record,bindings=self.fixture.bindings)
+            if change:change(value)
+            self.backends.append(value)
+            return value
+        return observer(REQUEST,owner_factory=lambda request:self.owner,backend_factory=backend)
+
+    def test_success_is_closed_fresh_root_evidence_with_no_variant_or_focus_calls(self):
+        value=self.observe()
+        self.assertEqual((value['known'],value['bridgeReachable'],value['stageCode']),(1,1,8))
+        self.assertEqual((value['diagnosticOnly'],value['acceptanceEligible'],value['freshRootLater']),(1,0,1))
+        self.assertTrue(all(type(number) is int for number in value.values()))
+        self.assertEqual(value['referencesAcquired'],3);self.assertEqual(value['referencesReleased'],3)
+        self.assertEqual(value['ownerBefore'],value['ownerAfter']);self.assertEqual(value['ownerReleased'],1)
+        for name in ('root','service','ia2'):
+            self.assertEqual([value[name+field] for field in ('Attempted','Completed','NonNull','Hresult')],[1,1,1,0])
+        self.assertEqual([call[0] for call in self.fixture.calls],['root','qi','qs','release','release','release'])
+        self.assertEqual(self.fixture.clears,[]);self.assertEqual(self.fixture.text_reads,[])
+        self.assertTrue(all(count==0 for count in self.fixture.ledger.values()))
+
+    def test_documented_service_sid_and_ia2_iid_are_used_on_root_only(self):
+        self.observe()
+        self.assertEqual(self.fixture.calls[:3],[('root',123,0xfffffffc),
+            ('qi','root','6d5140c1-7436-11ce-8034-00aa006009fa'),
+            ('qs','618736e0-3c3d-11cf-810c-00aa00389b71','e89f726e-c4f4-4c19-bb19-b647d7fa8478')])
+
+    def test_root_failure_with_nonnull_is_unsigned_and_released(self):
+        self.fixture.root_hr=-2147467259
+        value=self.observe()
+        self.assertEqual((value['known'],value['stageCode'],value['rootHresult']),(0,3,0x80004005))
+        self.assertEqual((value['rootCompleted'],value['rootNonNull'],value['serviceAttempted']),(1,1,0))
+        self.assertEqual((value['referencesAcquired'],value['referencesReleased']),(1,1))
+        self.assertTrue(all(count==0 for count in self.fixture.ledger.values()))
+
+    def test_failed_qi_or_queryservice_nonnull_outptr_is_released_without_next_call(self):
+        for slot,prefix,stage,count in ((0,'service',4,2),(3,'ia2',5,3)):
+            with self.subTest(stage=stage):
+                self.setUp()
+                def change(value):
+                    original=value._invoke
+                    def invoke(pointer,current,*args):
+                        result=original(pointer,current,*args)
+                        return -2147467259 if current==slot else result
+                    value._invoke=invoke
+                value=self.observe(change)
+                self.assertEqual((value['known'],value['stageCode']),(0,stage))
+                self.assertEqual((value[prefix+'Hresult'],value[prefix+'NonNull']),(0x80004005,1))
+                self.assertEqual((value['referencesAcquired'],value['referencesReleased']),(count,count))
+                self.assertTrue(all(number==0 for number in self.fixture.ledger.values()))
+
+    def test_no_interface_and_s_ok_null_are_unknown_with_separate_completed_flags(self):
+        self.fixture.supported.remove('ia2');value=self.observe()
+        self.assertEqual((value['known'],value['ia2Hresult'],value['ia2NonNull']),(0,0x80004002,0))
+        self.assertEqual((value['ia2Attempted'],value['ia2Completed']),(1,1))
+        self.setUp();self.fixture.bindings.accessible=lambda *args:0
+        value=self.observe()
+        self.assertEqual((value['known'],value['rootHresult'],value['rootNonNull']),(0,0,0))
+        self.assertEqual((value['rootAttempted'],value['rootCompleted'],value['serviceAttempted']),(1,1,0))
+
+    def test_owner_failure_before_or_after_capabilities_never_qualifies(self):
+        self.owner.fail_at=1;value=self.observe()
+        self.assertEqual((value['known'],value['ownerBefore'],value['rootAttempted']),(0,0,0))
+        self.assertFalse(self.backends)
+        self.setUp();self.observe();last=self.owner.checks
+        self.setUp();self.owner.fail_at=last;value=self.observe()
+        self.assertEqual((value['known'],value['bridgeReachable'],value['ownerAfter']),(0,0,0))
+        self.assertEqual(value['referencesAcquired'],value['referencesReleased'])
+        self.assertEqual(self.owner.closed,1)
+
+    def test_owner_loss_between_calls_stops_before_the_next_native_operation(self):
+        self.owner.fail_at=3;value=self.observe()
+        self.assertEqual(value['known'],0)
+        self.assertEqual([call[0] for call in self.fixture.calls],['root','release'])
+        self.assertEqual(value['referencesAcquired'],value['referencesReleased'])
+
+    def test_cleanup_fault_releases_other_references_and_cannot_report_known(self):
+        def change(value):
+            original=value._invoke;failed=[]
+            def invoke(pointer,slot,*args):
+                if slot==2 and not failed:
+                    failed.append(True);raise RuntimeError('synthetic release failure')
+                return original(pointer,slot,*args)
+            value._invoke=invoke
+        result=self.observe(change)
+        self.assertEqual((result['known'],result['cleanupFailure'],result['stageCode']),(0,1,7))
+        self.assertEqual(result['referencesAcquired']-result['referencesReleased'],1)
+        self.assertEqual(self.owner.closed,1)
+
+    def test_native_exception_after_outptr_still_releases_without_inventing_hresult(self):
+        accessible=self.fixture.accessible
+        def partial(*args):
+            accessible(*args);raise RuntimeError('synthetic private native-call failure')
+        self.fixture.bindings.accessible=partial
+        value=self.observe()
+        self.assertEqual((value['known'],value['rootAttempted'],value['rootCompleted']),(0,1,0))
+        self.assertEqual((value['rootNonNull'],value['rootHresult']),(1,0))
+        self.assertEqual((value['referencesAcquired'],value['referencesReleased']),(1,1))
+        self.assertTrue(all(count==0 for count in self.fixture.ledger.values()))
+
+    def test_root_backend_initialization_loads_no_variant_or_oleaut_api(self):
+        backend_type=self.feature('RootCapabilityBackend');loads=[]
+        class ForbiddenVariant:
+            def __init__(self): raise AssertionError('Root diagnostic must not create a VARIANT')
+        def accessible(*args):return 0
+        def dll(name):
+            loads.append(name)
+            if name=='oleacc':return NS(AccessibleObjectFromWindow=accessible)
+            raise AssertionError('Root diagnostic must not load other COM APIs')
+        with patch.dict(sys.modules,{'comtypes':NS(GUID=Guid),'comtypes.automation':NS(VARIANT=ForbiddenVariant)}),\
+             patch.object(probe.os,'name','nt'),patch.object(probe.C,'c_long',C.c_int32),\
+             patch.object(probe.C,'WINFUNCTYPE',C.CFUNCTYPE,create=True),\
+             patch.object(probe.C,'WinDLL',side_effect=dll,create=True):
+            try: backend=backend_type(lambda:None,self.feature('root_diagnostic_failure')(REQUEST))
+            except Exception:self.fail('Root-only backend requested the original VARIANT ABI')
+            self.assertTrue(backend.close())
+        self.assertEqual(loads,['oleacc'])
+
+    def test_owner_close_failure_is_numeric_and_does_not_hide_query_failure(self):
+        self.fixture.root_hr=-2147467259
+        def close():
+            self.owner.closed+=1;raise probe.ProbeFailure(0x80070006)
+        self.owner.close=close
+        value=self.observe()
+        self.assertEqual((value['stageCode'],value['rootHresult']),(3,0x80004005))
+        self.assertEqual((value['known'],value['cleanupFailure'],value['cleanupHresult']),(0,1,0x80070006))
+
+    def test_protocol_rejects_extra_strings_bool_numbers_duplicate_keys_and_false_success(self):
+        good=self.observe();validate=self.feature('validate_root_diagnostic');decode=self.feature('decode_root_diagnostic')
+        self.assertEqual(validate(good,REQUEST),good)
+        for change in ({'body':'synthetic forbidden body'},{'known':True},{'acceptanceEligible':1},
+                {'officeCreationTime':301},{'referencesReleased':0},{'ia2NonNull':0}):
+            with self.subTest(field=next(iter(change))),self.assertRaises(ValueError):
+                validate(dict(good,**change),REQUEST)
+        encoded=json.dumps(good)
+        self.assertEqual(decode(encoded,REQUEST),good)
+        for raw in (encoded[:-1],encoded.replace('"known": 1','"known": 1,"known": 0'),
+                    encoded+' '*4096,'synthetic private failure'):
+            value=decode(raw,REQUEST)
+            self.assertEqual((value['known'],value['stageCode']),(0,13))
+
+
 if __name__ == '__main__':
     unittest.main()

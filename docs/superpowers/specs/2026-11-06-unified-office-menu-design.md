@@ -84,7 +84,8 @@ owned focus checks with the user Ctrl+F6 route without synthesizing that route.
 Only the original foreground document with agreeing Form/Panel focus, retained
 process/window identities and no menu, capture, modal or close activity may hand
 focus to its native child. A foreign foreground leaves the handoff pending without
-changing focus. While pending, a document activation may queue one UI callback;
+changing focus. While pending, document activation or the original form's
+WM_ACTIVATEAPP(true) may queue one UI callback after base message processing;
 the callback must recheck all conditions after WinForms focus restoration. Mark
 the handoff complete before its first native SetFocus call, including reentrant
 callbacks. An already focused editor completes it without input. A different
@@ -98,7 +99,17 @@ owned host may await natural focus inside the original five-second action
 deadline. Input still requires the original editor postcondition; foreign or
 changed ownership, modal/menu state and ambiguous focus fail immediately. Later
 editor checks keep their original immediate requirements. These observations
-and initial screenshots do not prove that the chrome is unobstructed.
+and initial screenshots do not prove that the chrome is unobstructed. Initial
+Win32 focus observation creates no UIA client; create the private client once
+at its first UIA use inside the same action deadline. Failed or closed clients
+cannot be initialized again.
+
+If taskkill returns 128 while the original retained shell is still pending,
+observe that same Popen inside the existing five-second exit phase. Preserve
+the original case failure and the forced-cleanup classification. Join the
+cleanup receipt's PID, exit code and completed deadline to the actual retained
+process observation; late or unconfirmed cleanup stops the cohort even if a
+later poll sees an exit. The existing engine exit phase remains separate.
 
 ## Validation and scope
 
@@ -181,3 +192,16 @@ allowlisted Writer edit-window type code and fresh equality result. Do not read
 that window's state/text or create accessible document objects for this optional
 diagnostic. Unknown types and query errors remain numeric observations and do
 not replace the independent OS accessibility gate or establish its failure cause.
+
+If the original Writer OS focus observation fails, a separate child may later
+query a fresh root through AccessibleObjectFromWindow, IServiceProvider and the
+documented IAccessible2 QueryService. Preserve both original MSAA observations
+before this optional diagnostic. Record only closed numeric outcomes, original
+HWND/process generation checks and reference cleanup; successful bridge access
+does not identify the earlier COM object, its DLL or a working focus cache.
+Keep the original 45-second budget and at most eight seconds for this child,
+including a cleanup reserve. Use a bounded file and timed process waits rather
+than pipe-reader joins. Late, unretired or cleanup-failed results remain unknown;
+retain at most one pending child/file pair and block further diagnostic launches.
+Synchronous OS calls cannot be forcibly preempted. This diagnostic never changes
+the original accessibility decision or qualifies acceptance.

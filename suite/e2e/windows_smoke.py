@@ -640,26 +640,53 @@ def stop_owned_test_process(process, record, diagnostic_lease=None):
                    gracefulShutdownVerified=False, disposition='already-exited')
     record['testProcessCleanup'] = receipt
     if exit_code is not None: return
+    command_started=time.monotonic()
+    receipt.update(commandBudgetStartedAt=command_started,commandBudgetDeadline=command_started+15,
+                   commandBudgetSeconds=15)
+    def wait_original_shell():
+        exit_started=receipt['commandReturnedAt']
+        assert exit_started<=receipt['commandBudgetDeadline'], 'Owned cleanup command exceeded its allowance'
+        receipt.update(exitWaitStartedAt=exit_started,exitWaitDeadline=exit_started+5,
+                       exitWaitBudgetSeconds=5,exitWaitStageCode=1)
+        remaining=receipt['exitWaitDeadline']-time.monotonic()
+        assert 0<remaining<=5, 'Original owned shell exit allowance expired'
+        try:code=process.wait(timeout=remaining)
+        finally:receipt['exitWaitReturnedAt']=time.monotonic()
+        assert type(code) is int and receipt['exitWaitReturnedAt']<=receipt['exitWaitDeadline'], 'Original owned shell exit is unconfirmed within its allowance'
+        receipt['exitWaitStageCode']=2
+        return code
     try:
         # Only this launched generated-fixture test and its descendants are eligible.
         # Retain intent before taskkill: a killed worker cannot finish its own
         # archive. This controller receipt never qualifies a graceful shutdown.
         receipt.update(forceRequested=True, disposition='stop-unconfirmed')
-        subprocess.run(['taskkill.exe', '/PID', str(process.pid), '/T', '/F'], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        try:
+            subprocess.run(['taskkill.exe', '/PID', str(process.pid), '/T', '/F'], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        finally:receipt['commandReturnedAt']=time.monotonic()
+        receipt['commandExitCode']=0
         # Retained diagnostic descendants may share only this existing exit phase.
-        exit_started=time.monotonic()
-        receipt.update(exitWaitStartedAt=exit_started,exitWaitDeadline=exit_started+5,
-                       exitWaitBudgetSeconds=5)
-        receipt.update(shellExitCode=process.wait(timeout=5), disposition='forced-stop-returned')
+        receipt.update(shellExitCode=wait_original_shell(), disposition='forced-stop-returned')
     except Exception as exc:
         exit_code = process.poll()
         receipt.update(shellExitCode=exit_code, errorType=type(exc).__name__)
+        if isinstance(exc, subprocess.CalledProcessError):receipt['commandExitCode']=exc.returncode
         if isinstance(exc, subprocess.CalledProcessError) and exc.returncode == 128 and exit_code == 0:
             # The owned shell completed normal shutdown between poll and taskkill.
             # Preserve any original case failure; this is only secondary cleanup evidence.
             record.update(cleanupExitRaceVerified=True, cleanupProcessExitCode=exit_code)
             receipt['disposition'] = 'exit-zero-after-taskkill-not-found'
+            return
+        if isinstance(exc, subprocess.CalledProcessError) and exc.returncode == 128 and exit_code is None:
+            try:
+                code=wait_original_shell()
+                receipt.update(shellExitCode=code,disposition='forced-stop-returned')
+                record['cleanupProcessExitCode']=code
+                return
+            except Exception as wait_error:
+                receipt.update(exitWaitStageCode=3,exitWaitErrorType=type(wait_error).__name__)
+            record.update(success=False,cleanupError='CalledProcessError: owned shell exit remains unconfirmed after return 128',
+                          cleanupProcessExitCode=None)
             return
         record.update(success=False, cleanupError=type(exc).__name__ + ': ' + str(exc),
                       cleanupProcessExitCode=exit_code,

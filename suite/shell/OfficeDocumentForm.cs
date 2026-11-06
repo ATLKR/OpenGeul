@@ -523,8 +523,15 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     protected override void WndProc(ref Message m)
     {
+        var appActivated = m.Msg == 0x001C && m.WParam != 0;
+        var activationHwnd = m.HWnd;
+        var initialFocusOwner = editorFocus;
         if (m.Msg == 0x0010) TraceClose("wmClose.received", new { messageHwnd = m.HWnd.ToInt64() });
         base.WndProc(ref m);
+        if (appActivated && initialFocusOwner is not null && initialFocusOwner.InitialFocusPending &&
+            ReferenceEquals(editorFocus, initialFocusOwner) && !IsDisposed && !Disposing && IsHandleCreated &&
+            activationHwnd == editorFocusFormHwnd && activationHwnd == Handle)
+            QueueInitialEditorFocus();
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)

@@ -562,12 +562,13 @@ class NativeMenuSmokeTests(unittest.TestCase):
         self.assertEqual(waits, [])
 
     def test_engine_handle_release_result_is_required_for_cleanup_confirmation(self):
+        import windows_smoke
         for released in (True, False):
             with self.subTest(released=released):
                 session = self.smoke.WindowsSession(Path('/suite'), Path('/fixtures'), Path('/output'), 'writer')
                 calls = []
-                session.process = SimpleNamespace(poll=lambda: 0)
-                session.native = SimpleNamespace(stop_owned_test_process=lambda *args: None)
+                session.process = SimpleNamespace(pid=77,poll=lambda: 0)
+                session.native = windows_smoke
                 session.engine = SimpleNamespace(handle=123, exited=lambda seconds: True,
                     close_handle=lambda handle: calls.append(handle) or released, close=lambda: None)
                 record = {}
@@ -577,10 +578,81 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 self.assertEqual(session.engine.handle, None if released else 123)
 
     def test_launched_process_without_retained_engine_witness_cannot_confirm_cleanup(self):
+        import windows_smoke
         session = self.smoke.WindowsSession(Path('/suite'), Path('/fixtures'), Path('/output'), 'writer')
-        session.process = SimpleNamespace(poll=lambda: 0)
-        session.native = SimpleNamespace(stop_owned_test_process=lambda *args: None)
+        session.process = SimpleNamespace(pid=77,poll=lambda: 0)
+        session.native = windows_smoke
         self.assertIs(session.cleanup({}), False)
+
+    def retained_cleanup_boundary(self, mode='confirmed', *, exit_code=7, mutate=None):
+        import windows_smoke
+        clock=SimpleNamespace(now=10.);calls=[]
+        class Process:
+            pid=77;_handle=456;returncode=exit_code if mode=='already-exited' else None
+            def poll(process):
+                if mode=='timeout-then-exit' and clock.now>=17.:process.returncode=exit_code
+                if mode=='immediate-zero' and calls:process.returncode=0
+                return process.returncode
+            def wait(process,*,timeout):
+                self.assertEqual(process._handle,456);self.assertTrue(0<timeout<=5)
+                calls.append(('shell-wait',timeout))
+                if mode=='timeout-then-exit':
+                    clock.now=17.;raise windows_smoke.subprocess.TimeoutExpired('owned shell',timeout)
+                clock.now=17.1 if mode=='late' else 16.
+                process.returncode=exit_code;return exit_code
+        process=Process();session=self.smoke.WindowsSession(Path('/suite'),Path('/fixtures'),Path('/output'),'writer')
+        session.process=process
+        session.engine=SimpleNamespace(handle=909,exited=lambda seconds:(calls.append(('engine-wait',seconds)) or True),
+            close_handle=lambda handle:(calls.append(('release',handle)) or True))
+        def stop(original,record):
+            self.assertIs(original,process);windows_smoke.stop_owned_test_process(original,record)
+            if mutate:mutate(record)
+        session.native=SimpleNamespace(stop_owned_test_process=stop)
+        def command(argv,**options):
+            self.assertEqual(argv,['taskkill.exe','/PID','77','/T','/F']);self.assertEqual(options['timeout'],15)
+            calls.append(('command',128));clock.now=12.
+            raise windows_smoke.subprocess.CalledProcessError(128,argv)
+        record=dict(success=False,errorType='COMError',error='original UIA failure')
+        with patch.object(windows_smoke.time,'monotonic',side_effect=lambda:clock.now), \
+                patch.object(windows_smoke.subprocess,'run',side_effect=command):
+            confirmed=session.cleanup(record)
+        return confirmed,record,calls
+
+    def test_cleanup_consumer_keeps_timeout_or_late_wait_unconfirmed_after_a_later_poll_exit(self):
+        for mode in ('timeout-then-exit','late'):
+            with self.subTest(mode=mode):
+                confirmed,record,calls=self.retained_cleanup_boundary(mode)
+                self.assertFalse(confirmed,'A later cached exit cannot replace an unconfirmed bounded wait')
+                self.assertEqual(record['shellExitCode'],7)
+                self.assertEqual(record['testProcessCleanup']['disposition'],'stop-unconfirmed')
+                self.assertFalse(record['shellCleanupConfirmed'])
+                self.assertFalse(record['success']);self.assertEqual(record['errorType'],'COMError')
+                self.assertEqual(sum(row[0]=='command' for row in calls),1)
+                self.assertTrue(record['engineHandleReleased'])
+
+    def test_cleanup_consumer_requires_the_original_shell_receipt_and_bounded_wait_proof(self):
+        mutations=[lambda r:r.pop('testProcessCleanup')]
+        for key,value in (('shellPid',78),('shellExitCode',0),('forceRequested',None),
+                          ('disposition','stop-unconfirmed'),('exitWaitStageCode',1),
+                          ('exitWaitDeadline',18.),('exitWaitReturnedAt',18.),
+                          ('commandExitCode',5),('gracefulShutdownVerified',True),
+                          ('commandBudgetSeconds',15.),('exitWaitBudgetSeconds',5.)):
+            mutations.append(lambda r,key=key,value=value:r['testProcessCleanup'].__setitem__(key,value))
+        for index,mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                confirmed,record,_=self.retained_cleanup_boundary(mutate=mutate)
+                self.assertFalse(confirmed,'Unbound or incomplete shell cleanup evidence must fail closed')
+                self.assertEqual(record['shellExitCode'],7);self.assertFalse(record['success'])
+
+    def test_cleanup_consumer_accepts_only_observed_forced_or_existing_exit_receipts_without_passing_case(self):
+        for mode,code in (('confirmed',0),('confirmed',7),('already-exited',0),('already-exited',7),('immediate-zero',0)):
+            with self.subTest(mode=mode,code=code):
+                confirmed,record,calls=self.retained_cleanup_boundary(mode,exit_code=code)
+                self.assertTrue(confirmed);self.assertTrue(record['shellCleanupConfirmed'])
+                self.assertFalse(record['success']);self.assertEqual(record['errorType'],'COMError')
+                self.assertFalse(record['testProcessCleanup']['gracefulShutdownVerified'])
+                self.assertEqual(sum(row[0]=='command' for row in calls),0 if mode=='already-exited' else 1)
+                if mode!='confirmed':self.assertFalse(any(row[0]=='shell-wait' for row in calls))
 
     def test_actual_helper_gesture_receipt_is_preserved_and_bound_to_its_command(self):
         session = self.smoke.WindowsSession(Path('/suite'), Path('/fixtures'), Path('/output'), 'writer')

@@ -103,6 +103,121 @@ def failure_stage(value):
         return STAGES[13]
 
 
+_ROOT_MAXIMA = dict(schemaVersion=1, diagnosticOnly=1, acceptanceEligible=0,
+    freshRootLater=1, known=1, bridgeReachable=1, stageCode=15,
+    officePid=0xffffffff, officeCreationTime=2**64-1, childHwnd=2**64-1,
+    ownerBefore=1, ownerAfter=1, ownerReleased=1, referencesAcquired=3,
+    referencesReleased=3, cleanupFailure=1, cleanupHresult=0xffffffff)
+for _operation in ('root', 'service', 'ia2'):
+    _ROOT_MAXIMA.update({_operation+suffix: maximum for suffix,maximum in (
+        ('Attempted',1),('Completed',1),('NonNull',1),('Hresult',0xffffffff))})
+
+
+def root_diagnostic_failure(request, stage=13):
+    _request(request)
+    result={key:0 for key in _ROOT_MAXIMA}
+    result.update(schemaVersion=1,diagnosticOnly=1,freshRootLater=1,stageCode=stage,
+        **{key:request[key] for key in ('officePid','officeCreationTime','childHwnd')})
+    return result
+
+
+def validate_root_diagnostic(value, request):
+    _request(request)
+    if type(value) is not dict or value.keys()!=_ROOT_MAXIMA.keys():
+        raise ValueError('Closed Writer root diagnostic required')
+    if any(type(value[key]) is not int or not 0<=value[key]<=maximum
+            for key,maximum in _ROOT_MAXIMA.items()):
+        raise ValueError('Invalid Writer root diagnostic number')
+    if (value['schemaVersion']!=1 or value['diagnosticOnly']!=1 or value['freshRootLater']!=1
+            or value['stageCode'] not in (1,2,3,4,5,6,7,8,13,14,15)
+            or any(value[key]!=request[key] for key in ('officePid','officeCreationTime','childHwnd'))
+            or value['referencesReleased']>value['referencesAcquired']):
+        raise ValueError('Writer root diagnostic identity or lifetime differs')
+    operations=('root','service','ia2')
+    for index,name in enumerate(operations):
+        if (value[name+'Completed']>value[name+'Attempted']
+                or value[name+'NonNull']>value[name+'Attempted']
+                or value[name+'Hresult'] and not value[name+'Completed']):
+            raise ValueError('Unobserved Writer root diagnostic call')
+        if index and value[name+'Attempted']:
+            previous=operations[index-1]
+            if not (value[previous+'Completed']==value[previous+'NonNull']==1
+                    and value[previous+'Hresult']==0):
+                raise ValueError('Writer root diagnostic call order differs')
+    if value['referencesAcquired']!=sum(value[name+'NonNull'] for name in operations):
+        raise ValueError('Writer root diagnostic reference count differs')
+    qualified=(value['stageCode']==8 and value['ownerBefore']==value['ownerAfter']==value['ownerReleased']==1
+        and value['referencesAcquired']==value['referencesReleased']==3
+        and value['cleanupFailure']==value['cleanupHresult']==0
+        and all(value[name+'Attempted']==value[name+'Completed']==value[name+'NonNull']==1
+            and value[name+'Hresult']==0 for name in operations))
+    if (value['known']!=value['bridgeReachable'] or bool(value['known'])!=bool(qualified)
+            or value['stageCode']==8 and not value['known']):
+        raise ValueError('Unqualified Writer root bridge observation')
+    return dict(value)
+
+
+def decode_root_diagnostic(stdout, request):
+    try:
+        if type(stdout) is not str or not 0<len(stdout.encode('utf-8'))<=4096:
+            return root_diagnostic_failure(request)
+        def unique(pairs):
+            result={}
+            for key,value in pairs:
+                if key in result: raise ValueError('Duplicate numeric key')
+                result[key]=value
+            return result
+        return validate_root_diagnostic(json.loads(stdout,object_pairs_hook=unique),request)
+    except Exception:
+        return root_diagnostic_failure(request)
+
+
+def observe_root_diagnostic(request, *, owner_factory=None, backend_factory=None):
+    """Later fresh root only; never identifies the earlier failed COM object.
+
+    The separate caller owns its remaining-budget watchdog. No role, focus,
+    ancestry, text, VARIANT, provider registration or input is requested here.
+    """
+    record=root_diagnostic_failure(request,1);owner=backend=None;primary=False
+    try:
+        owner=(owner_factory or WindowsOwner)(request)
+        owner.open();owner.check(full=True);record['ownerBefore']=1
+        record['stageCode']=2
+        def guard():
+            try: owner.check()
+            except BaseException:
+                record['stageCode']=1
+                raise
+        backend=(backend_factory or RootCapabilityBackend)(guard,record)
+        pointer=request['childHwnd']
+        for stage,name in ((3,'root'),(4,'service'),(5,'ia2')):
+            record['stageCode']=stage
+            pointer=backend.capability(name,pointer)
+            if record[name+'Hresult']!=0 or not pointer:
+                raise ProbeFailure(record[name+'Hresult'])
+        record['stageCode']=6
+        owner.check(full=True);record['ownerAfter']=1
+        record.update(stageCode=8,known=1,bridgeReachable=1)
+    except BaseException:
+        primary=True
+    finally:
+        if backend is not None:
+            try:
+                if not backend.close(): record['cleanupFailure']=1
+            except BaseException:
+                record['cleanupFailure']=1
+        if owner is not None:
+            try: record['ownerReleased']=int(owner.close() is True)
+            except BaseException as exc:
+                record['cleanupFailure']=1
+                if type(exc) is ProbeFailure and not record['cleanupHresult']:
+                    record['cleanupHresult']=exc.hresult
+        if record['cleanupFailure'] or not record['ownerReleased']:
+            record.update(known=0,bridgeReachable=0)
+            if not primary: record['stageCode']=7
+    return validate_root_diagnostic(record,request)
+
+
 def observe(request, *, owner_factory=None, backend_factory=None):
     """Hold every probe failure; the caller enforces it after the original VCL gate."""
     record = failure(request, 1)
@@ -423,3 +538,48 @@ class RawComBackend:
             except BaseException:
                 okay = False
         return okay
+
+
+class RootCapabilityBackend(RawComBackend):
+    """Same documented root/QI/QueryService ABI, with per-call numeric outcomes."""
+    def __init__(self, guard, record, *, bindings=None):
+        self.guard,self.record=guard,record
+        if bindings is None:
+            from types import SimpleNamespace
+            from comtypes import GUID
+            if (os.name!='nt' or C.sizeof(C.c_void_p)!=8
+                    or C.sizeof(GUID)!=16 or C.sizeof(C.c_long)!=4):
+                raise ValueError('Unsupported Windows root COM ABI')
+            accessible=C.WinDLL('oleacc').AccessibleObjectFromWindow
+            accessible.argtypes=(C.c_void_p,C.c_uint32,C.POINTER(GUID),C.POINTER(C.c_void_p))
+            accessible.restype=C.c_int32
+            bindings=SimpleNamespace(Guid=GUID,call_type=C.WINFUNCTYPE,accessible=accessible)
+        self.bindings=bindings;self.Guid=bindings.Guid
+        self.references,self.variants=[],[]  # The inherited close has no VARIANTs to clear.
+
+    def capability(self, operation, pointer):
+        if operation not in ('root','service','ia2'):
+            raise ValueError('Unknown root capability operation')
+        self.guard()
+        iid=self.Guid(_IIDS['accessible' if operation=='root' else operation])
+        sid=self.Guid(_IIDS['accessible']) if operation=='ia2' else None
+        output=C.c_void_p()
+        self.record[operation+'Attempted']=1
+        try:
+            if operation=='root':
+                hr=self.bindings.accessible(pointer,0xfffffffc,C.byref(iid),C.byref(output))
+            elif operation=='service':
+                hr=self._invoke(pointer,0,C.c_int32,
+                    (C.POINTER(self.Guid),C.POINTER(C.c_void_p)),C.byref(iid),C.byref(output))
+            else:
+                hr=self._invoke(pointer,3,C.c_int32,
+                    (C.POINTER(self.Guid),C.POINTER(self.Guid),C.POINTER(C.c_void_p)),
+                    C.byref(sid),C.byref(iid),C.byref(output))
+        finally:
+            self.record[operation+'NonNull']=int(bool(output.value))
+            if output.value:
+                self.references.append(output.value)
+                self.record['referencesAcquired']+=1
+        self.record[operation+'Hresult']=hr & 0xffffffff
+        self.record[operation+'Completed']=1
+        return output.value if hr==0 else 0

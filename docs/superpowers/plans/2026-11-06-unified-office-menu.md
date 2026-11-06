@@ -70,6 +70,10 @@ shell-tests/DocumentMenuSurfaceTests.cs and Program registration.
   with fresh ownership/focus checks. Complete before the first native focus call;
   cancel on another owned control, changed attachment, disposal or successful
   explicit Ctrl+F6. Do not retry from resize or status polling.
+- [x] Wake that same pending queue after the original form's positive
+  WM_ACTIVATEAPP base processing, preserving owner/HWND fences and coalescing.
+  Verify the 34 Core/source cases and 20 extracted-method synthetic cases;
+  actual Windows activation still needs separate proof.
 - [ ] Verify Windows-targeted WinForms compilation and UI; report actual limits.
 
 ### Task3: Native UI and final integration
@@ -123,3 +127,14 @@ related tests, office-suite.yml and suite/README.md.
   reports without this proof and suppress tree-force cleanup while HWP is unretired.
 - [ ] Execute the HWP launcher scenario on Windows. A visible main window is
   not a certified HWP Home UI or a newly created document.
+- [x] Add a separate failure-only Writer root IA2 capability diagnostic with
+  numeric ownership, HRESULT and reference cleanup evidence inside the original
+  time budget. Preserve the original OS focus observations and decisions.
+- [ ] Execute the root diagnostic on Windows. Fresh later bridge access cannot
+  establish the provider identity or focus-cache state of the earlier failure.
+- [x] Defer the private UIA client until its first use, preserving the original
+  timeout and identity checks. Keep initial Win32 readiness independent of UIA.
+- [x] Join the return128 retained-shell wait to the menu cohort's cleanup gate.
+  Preserve unknown/late outcomes and the separate engine exit phase.
+- [ ] Verify these startup, cleanup and diagnostic changes on Windows; local
+  regression results do not qualify the remaining native menu or OS focus gates.

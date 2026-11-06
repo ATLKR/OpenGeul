@@ -19,6 +19,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import startup_smoke as startup
@@ -27,6 +28,7 @@ import native_accessibility as accessible
 import writer_os_accessibility as writer_access
 
 MODULES = {'writer': 'docx', 'calc': 'xlsx', 'impress': 'pptx', 'draw': 'odg'}
+_ROOT_DIAGNOSTIC_PENDING = []  # At most one owned child/file pair; never serialized.
 
 
 def normalize_label(value):
@@ -146,6 +148,112 @@ def capture_writer_msaa_after_native(request, deadline):
     return evidence
 
 
+def capture_writer_root_diagnostic(request, deadline, *, enabled=True):
+    """Later fresh-root capabilities; never evidence about the primary object.
+
+    No pipe reader/communicate join can outlive the wait deadline. Synchronous
+    file/CreateProcess/kill calls themselves cannot be forcibly preempted; late
+    outcomes stay unknown. Unretired child/file pairs remain caller-reachable
+    in the bounded module registry and prevent another diagnostic launch.
+    """
+    evidence = dict(schemaVersion=1, diagnosticOnly=True, acceptanceEligible=False,
+        freshRootLater=True, attempted=False, completedWithinBudget=False, timeoutSeconds=0,
+        requestValid=False, cleanupConfirmed=True, retainedPending=False, launchOutcomeUnknown=False, result={})
+    child = output = None
+    exited = False
+    child_deadline = None
+    try:
+        evidence['result'] = writer_access.root_diagnostic_failure(request, 15)
+        evidence['requestValid'] = True
+        request = dict(request)
+        if type(enabled) is not bool:
+            evidence['result'] = writer_access.root_diagnostic_failure(request)
+            return evidence
+        if _ROOT_DIAGNOSTIC_PENDING:
+            evidence.update(cleanupConfirmed=False, retainedPending=True)
+            return evidence
+        if not enabled:
+            return evidence
+        now = time.monotonic()
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or deadline > now + 45 or deadline <= now):
+            return evidence
+        timeout = min(8., deadline - now)
+        child_deadline = now + timeout
+        reserve = min(.25, timeout / 4)
+        command = [sys.executable, str(Path(__file__).resolve()), '--writer-root-capabilities-only',
+            '--capture-child', str(request['childHwnd']), '--office-pid', str(request['officePid']),
+            '--writer-office-creation-time', str(request['officeCreationTime']),
+            '--writer-office-image', request['expectedImage']]
+        evidence['timeoutSeconds'] = timeout
+        output = tempfile.TemporaryFile('w+b')
+        if time.monotonic() >= child_deadline - reserve:
+            raise subprocess.TimeoutExpired(['writer-root-diagnostic'], timeout)
+        evidence.update(attempted=True, cleanupConfirmed=False,
+                        result=writer_access.root_diagnostic_failure(request))
+        child = subprocess.Popen(command, stdout=output, stderr=subprocess.DEVNULL, shell=False)
+        remaining = child_deadline - reserve - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(['writer-root-diagnostic'], timeout)
+        code = child.wait(timeout=remaining)
+        exited = True
+        if time.monotonic() >= child_deadline:
+            raise subprocess.TimeoutExpired(['writer-root-diagnostic'], timeout)
+        output.seek(0)
+        raw = output.read(4097)
+        if code == 0 and 0 < len(raw) <= 4096:
+            evidence['result'] = writer_access.decode_root_diagnostic(raw.decode('utf-8'), request)
+        if time.monotonic() >= child_deadline:
+            raise subprocess.TimeoutExpired(['writer-root-diagnostic'], timeout)
+        evidence['completedWithinBudget'] = True
+    except subprocess.TimeoutExpired:
+        if evidence['requestValid']:
+            evidence['result'] = writer_access.root_diagnostic_failure(request, 14)
+    except Exception:
+        if evidence['requestValid']:
+            evidence['result'] = writer_access.root_diagnostic_failure(request)
+    finally:
+        if child is not None and not exited:
+            try:
+                if time.monotonic() < child_deadline:
+                    child.kill()
+                remaining = child_deadline - time.monotonic()
+                if remaining > 0:
+                    child.wait(timeout=remaining)
+                    exited = True
+            except Exception:
+                pass  # No unbounded wait or process-disposal shortcut.
+        if output is not None:
+            if evidence['attempted'] and child is None:
+                # The constructor returned no process object: retain the sink,
+                # do not guess a PID, and do not claim the launch was retired.
+                _ROOT_DIAGNOSTIC_PENDING.append((None, output))
+                evidence.update(cleanupConfirmed=False, retainedPending=True, launchOutcomeUnknown=True)
+            elif child is not None and not exited:
+                _ROOT_DIAGNOSTIC_PENDING.append((child, output))
+                evidence.update(cleanupConfirmed=False, retainedPending=True)
+            else:
+                try:
+                    output.close()
+                    evidence['cleanupConfirmed'] = child is None or exited
+                except Exception:
+                    _ROOT_DIAGNOSTIC_PENDING.append((child, output))
+                    evidence.update(cleanupConfirmed=False, retainedPending=True)
+        if not evidence['cleanupConfirmed']:
+            evidence['completedWithinBudget'] = False
+            if evidence['requestValid']:
+                evidence['result'] = writer_access.root_diagnostic_failure(request, 14 if child is not None else 13)
+        if evidence['attempted'] and child_deadline is not None:
+            try:
+                if time.monotonic() >= child_deadline:
+                    evidence['completedWithinBudget'] = False
+                    evidence['result'] = writer_access.root_diagnostic_failure(request, 14)
+            except Exception:
+                evidence['completedWithinBudget'] = False
+                evidence['result'] = writer_access.root_diagnostic_failure(request)
+    return evidence
+
+
 def prepare_korean_ui_focus(api,process,hwnd,parent,child,office_pid,module,record):
     """One closed entry program for the four native UI observation modules."""
     assert module in MODULES and record.get('module')==module, 'Unknown Korean UI focus module'
@@ -214,6 +322,20 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
                                               module, output / snapshot_name)
         if module == 'writer':
             record['writerOsAccessibilityAfterNative'] = capture_writer_msaa_after_native(writer_request, native_deadline)
+            primary_verified = False
+            try:
+                primary_verified = writer_access.validate(record['writerOsAccessibility'], writer_request)['verified'] == 1
+            except Exception:
+                pass  # The original acceptance path still owns protocol failure.
+            try:
+                record['writerRootIa2Diagnostic'] = capture_writer_root_diagnostic(writer_request, native_deadline,
+                    enabled=not primary_verified)
+            except Exception:
+                # The optional reader may have failed at any point: make no
+                # launch/retirement claim and preserve the original gates.
+                record['writerRootIa2Diagnostic'] = dict(schemaVersion=1, diagnosticOnly=True,
+                    acceptanceEligible=False, freshRootLater=True, invocationFailed=True,
+                    attemptKnown=False, cleanupConfirmed=False, result={})
         assert api.user.IsWindow(child) and api.pid(child) == office_pid, 'Owned editor changed during accessibility capture'
         assert snapshot['module'] == module, 'Native accessible objects belong to another requested module'
         record.update(accessibilitySnapshot=snapshot_name,
@@ -312,11 +434,22 @@ def main():
     parser.add_argument('--snapshot', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--writer-msaa', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--writer-msaa-only', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--writer-root-capabilities-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--writer-office-creation-time', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--writer-office-image', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if os.name != 'nt' or not __debug__:
         raise RuntimeError('Actual Windows GUI execution with assertions enabled is required')
+    if getattr(args, 'writer_root_capabilities_only', False):
+        assert args.capture_child and args.office_pid and not args.snapshot and not args.writer_msaa and not args.writer_msaa_only
+        request = dict(childHwnd=args.capture_child, officePid=args.office_pid,
+            officeCreationTime=args.writer_office_creation_time, expectedImage=args.writer_office_image)
+        with redirect_stdout(sys.stderr):
+            value = writer_access.validate_root_diagnostic(writer_access.observe_root_diagnostic(request), request)
+        encoded = json.dumps(value, separators=(',', ':'), allow_nan=False)
+        assert len(encoded.encode('utf-8')) <= 4096, 'Closed Writer root diagnostic exceeds bound'
+        print(encoded, flush=True)
+        return 0
     if getattr(args, 'writer_msaa_only', False):
         assert args.capture_child and args.office_pid and not args.snapshot and not args.writer_msaa
         request = dict(childHwnd=args.capture_child, officePid=args.office_pid,
