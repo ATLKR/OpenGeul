@@ -316,16 +316,64 @@ $mode.receipt
         self.ps(f"$rejected=$false;try {{Write-CalcDispatchRuntimeMarker {quote(program.parent)} ('a'*40) @{{}}}} catch {{$rejected=$true}};if(-not $rejected){{throw 'Existing marker admitted'}}")
         self.assertEqual(original, marker.read_bytes())
 
-    def test_workflow_explicit_diagnostic_cannot_upload_as_qualified(self):
+    def workflow_step(self, name):
         text = (SOURCE.parents[2]/'.github/workflows/office-native-engine.yml').read_text()
-        build = text.split('      - name: Build and verify native Firebird before the full Office engine', 1)[1].split('      - name:', 1)[0]
-        self.assertIn('-CalcDispatchDiagnostic', build); self.assertIn('-MutexSymbols', build)
-        qualified = text.split('      - name: Retain the qualified native engine input', 1)[1].split('      - name:', 1)[0]
-        self.assertIn("if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD != 'true' }}", qualified)
-        self.assertIn('OPENGEUL_CALC_DISPATCH_BUILD:', text)
-        self.assertIn('OpenGeul-Office-engine-arm64-calc-dispatch.zip', text)
-        self.assertIn('calc-dispatch-source-build-receipt.json', text)
-        self.assertIn('Assert-MutexSymbolsEnvironment', text)
+        return text.split('      - name: '+name+'\n', 1)[1].split('      - name:', 1)[0]
+
+    def test_workflow_command_selects_full_normal_engine_with_symbols_and_original_deadline(self):
+        # Run the actual workflow command at its expensive driver boundary.
+        # The fixture receives its real arguments and calls the real mode selector.
+        import textwrap
+        build = self.workflow_step('Build and verify native Firebird before the full Office engine')
+        command = textwrap.dedent(build.split('        run: |\n', 1)[1])
+        driver = self.root/'suite/scripts/build-native-engine.ps1'
+        driver.parent.mkdir(parents=True)
+        driver.write_text('''param($Phase,$WorkDirectory,$OutputDirectory,$SourceLockPath,$DeadlineUtc,
+    [switch]$MutexSymbols,[switch]$CalcDispatchDiagnostic)
+[ordered]@{mode=(Get-NativeEngineBuildMode $Phase -CalcDispatchDiagnostic:$CalcDispatchDiagnostic);
+    phase=$Phase;mutexSymbols=[bool]$MutexSymbols;deadline=$DeadlineUtc;
+    work=$WorkDirectory;output=$OutputDirectory;sourceLock=$SourceLockPath}|ConvertTo-Json -Depth 5 -Compress
+''')
+        result = json.loads(self.ps(f"$env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC='2050-01-01T00:00:00Z'\n"
+                                    f"Push-Location {quote(self.root)}\ntry {{\n{command}\n}} finally {{Pop-Location}}"))
+        self.assertEqual('Full', result['phase'])
+        self.assertTrue(result['mutexSymbols'])
+        self.assertEqual('2050-01-01T00:00:00Z', result['deadline'])
+        self.assertEqual('.work/native-engine', result['work'])
+        self.assertEqual('.work/native-engine-evidence', result['output'])
+        self.assertEqual('suite/config/runtime.arm64.lock.json', result['sourceLock'])
+        self.assertEqual('native-office-engine-source-build', result['mode']['kind'])
+        self.assertEqual('OpenGeul-Office-engine-arm64.zip', result['mode']['archive'])
+        self.assertEqual('source-build-receipt.json', result['mode']['receipt'])
+        self.assertTrue(result['mode']['fullEngineQualified'])
+        self.assertTrue(result['mode']['acceptanceEligible'])
+
+    def test_workflow_uploads_normal_inputs_and_keeps_diagnostics_in_their_own_family(self):
+        import re
+        text = (SOURCE.parents[2]/'.github/workflows/office-native-engine.yml').read_text()
+        configured = re.findall(r"(?m)^      OPENGEUL_CALC_DISPATCH_BUILD: '([^']+)'$", text)
+        self.assertEqual(1, len(configured))
+        normal = self.workflow_step('Retain the qualified native engine input')
+        diagnostic = self.workflow_step('Retain the isolated Calc dispatch diagnostic engine')
+        def condition(step):
+            raw = re.findall(r'(?m)^        if: \$\{\{ (.+) \}\}$', step)
+            self.assertEqual(1, len(raw))
+            return raw[0].replace('env.OPENGEUL_CALC_DISPATCH_BUILD', '$env:OPENGEUL_CALC_DISPATCH_BUILD').replace('!=', '-cne').replace('==', '-ceq')
+        result = json.loads(self.ps(f"""
+$env:OPENGEUL_CALC_DISPATCH_BUILD={quote(configured[0])}
+$configuredNormal=[bool]({condition(normal)});$configuredDiagnostic=[bool]({condition(diagnostic)})
+$env:OPENGEUL_CALC_DISPATCH_BUILD='true'
+[ordered]@{{configuredNormal=$configuredNormal;configuredDiagnostic=$configuredDiagnostic;
+    explicitDiagnosticNormal=[bool]({condition(normal)});explicitDiagnostic=[bool]({condition(diagnostic)})}}|ConvertTo-Json -Compress
+"""))
+        self.assertEqual({'configuredNormal': True, 'configuredDiagnostic': False,
+                          'explicitDiagnosticNormal': False, 'explicitDiagnostic': True}, result)
+        def paths(step):
+            return re.findall(r'(?m)^            (\S+)\s*$', step)
+        self.assertEqual(['.work/native-engine-evidence/OpenGeul-Office-engine-arm64.zip',
+                          '.work/native-engine-evidence/source-build-receipt.json'], paths(normal))
+        self.assertEqual(['.work/native-engine-evidence/OpenGeul-Office-engine-arm64-calc-dispatch.zip',
+                          '.work/native-engine-evidence/calc-dispatch-source-build-receipt.json'], paths(diagnostic))
 
 
 if __name__ == '__main__': unittest.main()
