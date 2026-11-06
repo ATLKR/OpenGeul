@@ -652,6 +652,28 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
         self.assertIn('errorType',data);self.assertNotIn('synthetic-capability',raw+output)
         self.assertFalse((self.root/'not-created').exists())
 
+    def test_cygwin_bootstrap_requests_the_signature_verified_official_setup_checksum(self):
+        # Independent official sha512.sum, cross-checked against the detached
+        # signature dated 2026-11-01 and the install.html Cygwin RSA fingerprint.
+        expected = '9bbbd4de497842446af58af875590ace5d8fa3c557cd7e27328569dfa68e58213da1cc1a6fb7102d4f0f01be38e0b92c6fa74f61b6eb7351a0481ca4bd9e8781'
+        source = SOURCE.read_text()
+        start = source.index("        $setup=Join-Path $downloads 'setup-x86_64.exe'\n")
+        stop = source.index("        $manifestPath=", start)
+        # Execute the actual bootstrap selection, replacing only network I/O.
+        # No installer is executed and no unpinned download can reach a server.
+        result = json.loads(self.ps(f"""
+$downloads={quote(self.root)};$evidence={quote(self.root)};$receipt=@{{}}
+function Get-AuthenticatedDownload($Url,$Destination,$Size,$Algorithm,$Hash,$ReceiptPath) {{
+    return [ordered]@{{url=$Url;destination=$Destination;algorithm=$Algorithm;hash=$Hash}}
+}}
+{source[start:stop]}
+$receipt.cygwinSetup|ConvertTo-Json -Compress
+"""))
+        self.assertEqual('https://cygwin.com/setup-x86_64.exe', result['url'])
+        self.assertEqual(str(self.root/'setup-x86_64.exe'), result['destination'])
+        self.assertEqual('SHA512', result['algorithm'])
+        self.assertEqual(expected, result['hash'])
+
     def test_shared_deadline_cancels_stalled_authenticated_download_body(self):
         import hashlib
         import http.server

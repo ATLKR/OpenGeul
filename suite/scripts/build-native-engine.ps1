@@ -1255,7 +1255,8 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.extraSourceArchives+=@{pin=$extra;identity=$identity}
         }
         $setup=Join-Path $downloads 'setup-x86_64.exe'
-        $setupHash='6acea47c59781c9e7f544a18d53935d59df6e44d5d52ac95ee165671b8e388820455eebf30ccc7d254b00c3d0eb694269a0f8dc84b17944c1f355dac9c5aafcc'
+        # cygwin.com/sha512.sum; official detached signature dated 2026-11-01 verified.
+        $setupHash='9bbbd4de497842446af58af875590ace5d8fa3c557cd7e27328569dfa68e58213da1cc1a6fb7102d4f0f01be38e0b92c6fa74f61b6eb7351a0481ca4bd9e8781'
         $receipt.cygwinSetup=Get-AuthenticatedDownload 'https://cygwin.com/setup-x86_64.exe' $setup 0 SHA512 $setupHash (Join-Path $evidence 'cygwin-download.json')
         $manifestPath=Join-Path $repo 'suite/engine-build/source-build.json'
         $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
