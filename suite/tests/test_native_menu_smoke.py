@@ -1,5 +1,6 @@
 """Synthetic scenario boundaries; no actual Windows UI is exercised here."""
 import contextlib
+import copy
 import importlib.util
 import io
 from pathlib import Path
@@ -21,6 +22,15 @@ def load_smoke():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def status_sample(at, started, completed, *, target=True, preview=True, menu_visible=True):
+    """Synthetic numeric publisher evidence, never a Windows status RPC."""
+    return dict(observedAt=at, targetMatched=target,
+        state=dict(statusSequenceRaw=(1 << 56) | (started << 28) | completed,
+            nativeMenuBarCount=int(menu_visible if target else not menu_visible),
+            previewIndicatorCount=int(preview)),
+        statusSequence=dict(version=1, started=started, completed=completed))
 
 
 class Session:
@@ -319,18 +329,25 @@ class NativeMenuSmokeTests(unittest.TestCase):
             dpiScope=dict(verified=True, restored=True), focusReturned=True)
         original_command = session.menu.click_native_menu_action
         session.menu.click_native_menu_action = lambda *args: common | original_command(*args)
+        observation_index = [0]
         def observe(*args, **kwargs):
             self.assertEqual(args[:3], (session.api, session.process, session.hwnd))
             self.assertEqual(kwargs, dict(module=session.module, preview=kwargs['preview'],
                 menu_visible=kwargs['menu_visible'], hold_seconds=3, seconds=5))
             calls.append(('observe', kwargs['preview'], kwargs['menu_visible']))
+            baseline, start = 10 + 2 * observation_index[0], 4 * observation_index[0]
+            observation_index[0] += 1
             row = dict(schemaVersion=1, kind='owned-native-view-observation', success=True,
                 module=session.module, preview=kwargs['preview'], menuVisible=kwargs['menu_visible'],
-                holdSeconds=3, startedAt=0, deadline=5, finishedAt=3.1, observedSeconds=3.1,
-                samples=[{}, {}], binding=binding, originalProcess=shell, originalEngine=engine,
+                holdSeconds=3, startedAt=start, deadline=start+5, finishedAt=start+3.1, observedSeconds=(start+3.1)-start,
+                samples=[status_sample(start,baseline,baseline-1,preview=kwargs['preview'],menu_visible=kwargs['menu_visible']),
+                    status_sample(start+3.1,baseline+1,baseline+1,preview=kwargs['preview'],menu_visible=kwargs['menu_visible'])],
+                settledAt=start,statusSequenceVersion=1,firstTargetStartedSequence=baseline,lastTargetCompletedSequence=baseline+1,
+                binding=binding, originalProcess=shell, originalEngine=engine,
                 engineHandleReleased=True, providerClientReleased=True,
-                dpiScope=dict(verified=True, restored=True), statusRpcProved=False, inputCallAttempts=0)
-            return row | (bad_observation or {})
+                dpiScope=dict(verified=True, restored=True), statusRpcProved=True, inputCallAttempts=0)
+            change = bad_observation(row) if callable(bad_observation) else bad_observation
+            return row | (change or {})
         def inspect(*args):
             self.assertEqual(args[:3], (session.api, session.process, session.hwnd))
             calls.append(('inspect', args[-1]))
@@ -405,7 +422,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
             {'menuVisible': False}, {'holdSeconds': 2}, {'observedSeconds': 2.9},
             {'observedSeconds': 5}, {'observedSeconds': 4},
             {'samples': []}, {'samples': [{} for _ in range(65)]},
-            {'inputCallAttempts': True}, {'statusRpcProved': True}, {'finishedAt': 5},
+            {'inputCallAttempts': True}, {'statusRpcProved': False}, {'finishedAt': 5},
             {'engineHandleReleased': False}, {'providerClientReleased': False},
             {'dpiScope': {'verified': True, 'restored': False}},
             {'binding': dict(document=11, parent=12, child=99, officePid=88)})
@@ -416,6 +433,87 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     session.view_roundtrip(dict(module='writer', nativeArchiveGeneration=generation))
                 self.assertEqual(calls, [('menu', 'printPreview'), ('observe', True, True)])
+
+    def test_status_completion_requires_fresh_numeric_samples_after_the_final_target_baseline(self):
+        def samples(edit):
+            values = [status_sample(0,10,9), status_sample(3.1,11,11)]
+            edit(values)
+            return {'samples': values}
+        changes = [
+            {'statusSequenceVersion': None}, {'statusSequenceVersion': True},
+            {'firstTargetStartedSequence': None}, {'firstTargetStartedSequence': True},
+            {'firstTargetStartedSequence': -1}, {'firstTargetStartedSequence': 1 << 28},
+            {'lastTargetCompletedSequence': None}, {'lastTargetCompletedSequence': True},
+            {'lastTargetCompletedSequence': 10}, {'lastTargetCompletedSequence': 1 << 28},
+            {'firstTargetStartedSequence': 9}, {'lastTargetCompletedSequence': 12},
+            samples(lambda rows: rows[0].pop('statusSequence')),
+            samples(lambda rows: rows[0]['state'].pop('statusSequenceRaw')),
+            samples(lambda rows: rows[0]['state'].update(statusSequenceRaw=True)),
+            samples(lambda rows: rows[0]['state'].update(statusSequenceRaw=(2 << 56) | (10 << 28) | 9)),
+            samples(lambda rows: rows[0]['statusSequence'].update(version=True)),
+            samples(lambda rows: rows[0]['statusSequence'].update(started=10.0)),
+            samples(lambda rows: rows[0]['statusSequence'].update(completed=10)),
+            {'samples': [status_sample(0,10,9),status_sample(1,12,11),status_sample(3.1,11,11)]},
+            {'samples': [status_sample(0,10,9),status_sample(1,12,12),status_sample(3.1,12,11)]},
+            {'samples': [status_sample(0,10,10),status_sample(3.1,10,10)]},
+            {'samples': [status_sample(0,10,9),status_sample(3.1,11,10)]},
+            samples(lambda rows: rows[0].update(targetMatched=1)),
+            samples(lambda rows: rows[0].update(observedAt=True)),
+            samples(lambda rows: rows[0].update(observedAt=float('nan'))),
+            samples(lambda rows: rows[0].update(observedAt=-1)),
+            samples(lambda rows: rows[-1].update(observedAt=5)),
+            {'samples': [status_sample(0,10,9),status_sample(3.1,11,11,target=False)]},
+            {'samples': [status_sample(0,10,9),status_sample(1,11,11,target=False),
+                status_sample(1.1,11,11),status_sample(3.1,12,12)],'lastTargetCompletedSequence':12},
+            {'samples': [status_sample(0,10,9),status_sample(.5,11,11,target=False),
+                status_sample(1,11,11),status_sample(4,11,11)],'finishedAt':4,
+                'settledAt':1,'observedSeconds':3},
+            {'settledAt': True}, {'settledAt': .1},
+        ]
+        for index, change in enumerate(changes):
+            with self.subTest(index=index, change=change):
+                session, calls = self.finish_session('writer')
+                generation = self.view_boundaries(session, calls, bad_observation=change)
+                with self.assertRaises((AssertionError, KeyError)):
+                    session.view_roundtrip(dict(module='writer', nativeArchiveGeneration=generation))
+                self.assertEqual(calls, [('menu','printPreview'),('observe',True,True)])
+
+    def test_status_baseline_resets_after_settling_without_reusing_an_earlier_completion(self):
+        session, calls = self.finish_session('writer')
+        def settled(row):
+            at, baseline = row['startedAt'], row['firstTargetStartedSequence']
+            flags = dict(preview=row['preview'], menu_visible=row['menuVisible'])
+            return dict(samples=[status_sample(at,baseline-1,baseline-1,target=False,**flags),
+                status_sample(at+.1,baseline,baseline-1,**flags),
+                status_sample(at+3.1,baseline+1,baseline+1,**flags)], settledAt=at+.1,
+                observedSeconds=(at+3.1)-(at+.1))
+        generation = self.view_boundaries(session, calls, bad_observation=settled)
+        self.assertTrue(session.view_roundtrip(dict(module='writer',nativeArchiveGeneration=generation))['success'])
+
+    def test_status_samples_cannot_roll_back_or_replay_between_the_four_observations(self):
+        for reason in ('sequence','clock'):
+            session, calls = self.finish_session('writer')
+            prior = []
+            def replay(row):
+                if not prior:
+                    prior.append(copy.deepcopy(row)); return {}
+                if reason=='clock':
+                    shift=row['startedAt']
+                    changed=copy.deepcopy(row)
+                    for key in ('startedAt','deadline','finishedAt','settledAt'):changed[key]-=shift
+                    for sample in changed['samples']:sample['observedAt']-=shift
+                    return changed
+                changed=copy.deepcopy(prior[0])
+                changed.update(preview=row['preview'],menuVisible=row['menuVisible'])
+                for sample in changed['samples']:
+                    sample['state']['previewIndicatorCount']=int(row['preview'])
+                    sample['state']['nativeMenuBarCount']=int(row['menuVisible'])
+                return changed
+            generation=self.view_boundaries(session,calls,bad_observation=replay)
+            with self.subTest(reason=reason), self.assertRaises(AssertionError):
+                session.view_roundtrip(dict(module='writer',nativeArchiveGeneration=generation))
+            self.assertEqual(calls,[('menu','printPreview'),('observe',True,True),
+                ('menu','printPreview'),('observe',False,True)])
 
     def test_finish_fixture_roots_are_absolute_resolved_owned_siblings(self):
         session, _ = self.finish_session('calc')

@@ -17,6 +17,7 @@ from owned_control_actions import CAP, GuiThreadInfo, NativeControlProbe, _origi
 from suite_window_activation import NativeActivationProbe
 
 READY_PROPERTY='OpenGeul.Office.NativeMenuReady'
+STATUS_PROPERTY='OpenGeul.Office.NativeMenuStatusV1'
 LABELS={'file':('파일','File'),'save':('저장','Save'),
     'saveAs':('다른 이름으로 저장…','Save As…'),'open':('열기…','Open…'),
     'close':('닫기','Close'),'new':('새로 만들기','새 문서','New'),
@@ -35,6 +36,14 @@ KEY_COUNTS={'ALT_F':4,'DOWN':2,'ESCAPE':2}
 
 
 class NativeMenuPending(AssertionError):pass
+
+
+def decode_status_sequence(raw):
+    """Decode only the opt-in shell's positive, versioned numeric counters."""
+    assert type(raw) is int and 0<raw<1<<63 and raw>>56==1, 'Invalid native status sequence version'
+    mask=(1<<28)-1;started=(raw>>28)&mask;completed=raw&mask
+    assert completed<=started<=completed+1, 'Invalid native status sequence ordering'
+    return dict(version=1,started=started,completed=completed)
 
 
 def native_menu_active(api,process,document):
@@ -329,8 +338,8 @@ def observe_native_view(api,process,document,record,*,module,preview,menu_visibl
     """Read fixed chrome on the retained original frame; never dispatch or type.
 
     The target mode must survive continuously for three seconds after settling,
-    within the original deadline. This spans two nominal shell status periods;
-    it is not a claim that either asynchronous status RPC actually completed.
+    within the original deadline. A status request started after the first target
+    sample must also complete; finishing an earlier in-flight request cannot count.
     """
     assert module in ('writer','calc') and record.get('module')==module
     assert type(preview) is type(menu_visible) is bool
@@ -368,7 +377,7 @@ def observe_native_view(api,process,document,record,*,module,preview,menu_visibl
         continuity();value.update(originIndex=len(origins)-1,binding=binding,originalProcess=copy.deepcopy(shell),
             originalEngine=copy.deepcopy(old),engineHandleValue=handle)
         probe.enter_dpi(value['dpiScope']);assert value['dpiScope']['verified'] is True
-        first=None
+        first=None;previous_status=None
         while True:
             continuity();row=probe.view_snapshot(binding,module);budget()
             assert row['binding']==binding and row['nativeReady']==1 and row['shellMenuCount']==0
@@ -386,16 +395,28 @@ def observe_native_view(api,process,document,record,*,module,preview,menu_visibl
                 assert indicator['ancestryVerified'] is indicator['peerElementEquals'] is indicator['toolbarAncestorVerified'] is True
                 assert 0<len(indicator['runtimeId'])<=64
             else:assert row['previewIndicator'] is None
+            status=decode_status_sequence(row['statusSequenceRaw'])
+            if previous_status is not None:
+                assert all(status[key]>=previous_status[key] for key in ('started','completed')), 'Native status sequence rolled back'
+            previous_status=status
             now=clock();matched=bars==int(menu_visible) and count==int(preview)
-            first=(now if first is None else first) if matched else None
+            if matched:
+                if first is None:
+                    first=now;value['firstTargetStartedSequence']=status['started']
+                value['lastTargetCompletedSequence']=status['completed']
+                value['statusRpcProved']=status['completed']>value['firstTargetStartedSequence']
+            else:
+                first=None;value['statusRpcProved']=False
+                value.pop('firstTargetStartedSequence',None);value.pop('lastTargetCompletedSequence',None)
+            value['statusSequenceVersion']=status['version']
             assert len(value['samples'])<64, 'Native view observation sample bound exceeded'
-            value['samples'].append(dict(observedAt=now,targetMatched=matched,state=row))
+            value['samples'].append(dict(observedAt=now,targetMatched=matched,statusSequence=status,state=row))
             value['settledAt']=first
             value['observedSeconds']=now-first if first is not None else 0
-            if first is not None and now-first>=hold_seconds:break
+            if first is not None and now-first>=hold_seconds and value['statusRpcProved']:break
             remaining=deadline-clock();assert remaining>0
             delay=min(.1,remaining)
-            if first is not None:delay=min(delay,hold_seconds-(now-first))
+            if first is not None and now-first<hold_seconds:delay=min(delay,hold_seconds-(now-first))
             pause(delay)
             budget()
         continuity();value['readVerified']=True
@@ -647,6 +668,7 @@ class NativeMenuProbe(NativeControlProbe):
         self._retained=tuple(held)
         return dict(binding=dict(binding),editor=editor,peerRoot=peer_identity,documentRoot=document_identity,
             nativeReady=int(self._call(self.user.GetPropW,doc,READY_PROPERTY) or 0),
+            statusSequenceRaw=self._call(self.user.GetPropW,doc,STATUS_PROPERTY),
             shellMenuCount=shell_bars,nativeMenuBarCount=native_bars,
             previewIndicatorCount=len(indicators),previewIndicator=indicators[0] if indicators else None)
     def editor_snapshot(self,binding):

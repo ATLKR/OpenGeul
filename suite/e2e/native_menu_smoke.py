@@ -100,6 +100,7 @@ class WindowsSession:
     def view_roundtrip(self, record):
         """Keep the original blank document through measured native view changes."""
         from owned_fullscreen import toggle_native_fullscreen
+        from owned_native_menu import decode_status_sequence
         assert self.module in VIEW_MODULES
         self._owned_blank()
         assert self.ready() is True
@@ -107,6 +108,7 @@ class WindowsSession:
             previewActions=[], observations=[], fullscreenActions=[], coreCommands=[])
         record['nativeViewRoundtrip'] = value
         identity = None
+        previous_status = previous_observation_finish = None
         def checked(receipt, kind):
             nonlocal identity
             assert type(receipt) is dict and receipt.get('success') is True and receipt.get('kind') == kind
@@ -136,6 +138,7 @@ class WindowsSession:
             assert start <= finish < deadline <= start + 5
             return receipt
         def observe(preview, menu_visible):
+            nonlocal previous_status, previous_observation_finish
             receipt = checked(self.menu.observe_native_view(self.api, self.process, self.hwnd, record,
                 module=self.module, preview=preview, menu_visible=menu_visible, hold_seconds=3, seconds=5),
                 'owned-native-view-observation')
@@ -145,7 +148,40 @@ class WindowsSession:
             assert type(observed) in (int, float) and math.isfinite(observed) and 3 <= observed < 5
             assert observed <= receipt['finishedAt'] - receipt['startedAt'], 'Native view observation exceeds its actual elapsed time'
             assert type(receipt.get('samples')) is list and 2 <= len(receipt['samples']) <= 64
-            assert receipt.get('statusRpcProved') is False and type(receipt.get('inputCallAttempts')) is int and receipt['inputCallAttempts'] == 0
+            assert receipt.get('statusRpcProved') is True and type(receipt.get('inputCallAttempts')) is int and receipt['inputCallAttempts'] == 0
+            assert type(receipt.get('statusSequenceVersion')) is int and receipt['statusSequenceVersion'] == 1
+            baseline, completed = (receipt.get(key) for key in ('firstTargetStartedSequence','lastTargetCompletedSequence'))
+            assert all(type(item) is int and 0 <= item < (1 << 28) for item in (baseline,completed))
+            assert completed > baseline
+            assert previous_observation_finish is None or receipt['startedAt'] >= previous_observation_finish
+            first = first_started = last_at = None
+            sequence = previous_status
+            for sample in receipt['samples']:
+                assert type(sample) is dict and type(sample.get('state')) is dict
+                state, at = sample['state'], sample.get('observedAt')
+                assert type(at) in (int,float) and math.isfinite(at)
+                assert receipt['startedAt'] <= at <= receipt['finishedAt'] and at < receipt['deadline']
+                assert last_at is None or at >= last_at
+                last_at = at
+                decoded = decode_status_sequence(state['statusSequenceRaw'])
+                supplied = sample.get('statusSequence')
+                assert type(supplied) is dict and set(supplied) == {'version','started','completed'}
+                assert all(type(item) is int for item in supplied.values()) and supplied == decoded
+                assert sequence is None or all(decoded[key] >= sequence[key] for key in ('started','completed'))
+                sequence = decoded
+                assert all(type(state.get(key)) is int and state[key] in (0,1)
+                    for key in ('nativeMenuBarCount','previewIndicatorCount'))
+                matched = state['nativeMenuBarCount'] == int(menu_visible) and state['previewIndicatorCount'] == int(preview)
+                assert type(sample.get('targetMatched')) is bool and sample['targetMatched'] is matched
+                if not matched:
+                    first = first_started = None
+                elif first is None:
+                    first, first_started = at, decoded['started']
+            assert first is not None and last_at - first >= 3
+            assert type(receipt.get('settledAt')) in (int,float) and math.isfinite(receipt['settledAt'])
+            assert receipt['settledAt'] == first and observed == last_at - first
+            assert first_started == baseline and sequence['completed'] == completed
+            previous_status, previous_observation_finish = sequence, receipt['finishedAt']
             value['observations'].append(receipt)
         def core():
             receipt = checked(self.gesture('core-commands', record)['receipt'], 'owned-native-menu-action')

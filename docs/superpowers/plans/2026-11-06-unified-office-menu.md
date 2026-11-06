@@ -98,6 +98,8 @@ related tests, office-suite.yml and suite/README.md.
   checks, keeping old display-mode settling inside the original input budget.
 - [x] Require the new two-view-case plan in the independent archive consumer;
   preserve the original83-generation verifier and all process-exit guards.
+- [x] Connect each view hold to a completed status request started after its
+  first matching sample, using the existing diagnostics mode and numbers only.
 - [ ] Run those view cases on Windows after the final reviewed source is pushed.
 - [ ] Prove HWP launch/new-document/graceful-exit behavior without the existing
   shell tree-force cleanup; menu availability alone does not qualify it.

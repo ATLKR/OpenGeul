@@ -17,6 +17,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly System.Windows.Forms.Timer resizeTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1500 };
     private readonly bool closeDiagnostics = CloseDiagnosticsEnabled();
+    private readonly bool nativeMenuStatusDiagnostics = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OPENGEUL_SUITE_DIAGNOSTICS"));
     private readonly SaveDiagnosticsTrace saveDiagnostics = new("suite.documentSave");
     private readonly SaveDiagnosticsTrace editorFocusDiagnostics = new("suite.editorFocus");
     private readonly StandaloneSaveCloseIntent saveCloseIntent = new();
@@ -129,6 +130,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             statusTimer.Start();
             QueueResize();
             NativeWindowProperties.SetNativeMenuReady(Handle, true);
+            PublishNativeMenuStatus(menuSurface);
         }
         catch (Exception e)
         {
@@ -230,11 +232,15 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         var statusWorker = worker;
         try
         {
+            var statusSurface = menuSurface ?? throw new SuiteException("문서의 통합 메뉴 연결 정보를 확인할 수 없습니다.");
+            var statusToken = statusSurface.StartStatusRead();
+            PublishNativeMenuStatus(statusSurface);
             var result = await statusWorker.SendAsync("status", new { });
             if (attached && !IsDisposed && ReferenceEquals(worker, statusWorker))
             {
-                if (menuSurface is null) throw new SuiteException("문서의 통합 메뉴 연결 정보를 확인할 수 없습니다.");
-                menuSurface.ObserveStatus(result, !closing && !busy, ApplyStatus);
+                if (!ReferenceEquals(menuSurface, statusSurface)) throw new SuiteException("문서의 통합 메뉴 연결 정보가 변경됐습니다.");
+                statusSurface.ObserveStatus(result, statusToken, !closing && !busy, ApplyStatus,
+                    () => PublishNativeMenuStatus(statusSurface));
             }
         }
         catch (Exception e)
@@ -248,6 +254,14 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             }
         }
         finally { statusBusy = false; }
+    }
+
+    private void PublishNativeMenuStatus(DocumentMenuSurface surface)
+    {
+        if (!nativeMenuStatusDiagnostics || IntPtr.Size != 8 || !IsHandleCreated || IsDisposed || Disposing) return;
+        var form = Handle;
+        surface.PublishStatusNotice(value => NativeWindowProperties.SetNativeMenuStatus(form, value),
+            () => NativeWindowProperties.RemoveNativeMenuStatus(form));
     }
 
     private void QueueMenuFailure()
@@ -622,6 +636,7 @@ internal static class NativeWindowProperties
     internal const string ParentProperty = "OpenGeul.Office.ParentHwnd";
     internal const string ChildProperty = "OpenGeul.Office.ChildHwnd";
     internal const string NativeMenuReadyProperty = "OpenGeul.Office.NativeMenuReady";
+    internal const string NativeMenuStatusProperty = "OpenGeul.Office.NativeMenuStatusV1";
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsChild(nint parent, nint child);
     [DllImport("user32.dll", EntryPoint = "SetPropW", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
@@ -636,6 +651,8 @@ internal static class NativeWindowProperties
     }
     internal static void SetStartupDiagnostic(nint form, ulong value) => SetProp(form, StartupDiagnostic.PropertyName, checked((nint)value));
     internal static void RemoveStartupDiagnostic(nint form) => RemoveProp(form, StartupDiagnostic.PropertyName);
+    internal static bool SetNativeMenuStatus(nint form, ulong value) => SetProp(form, NativeMenuStatusProperty, checked((nint)value));
+    internal static void RemoveNativeMenuStatus(nint form) => RemoveProp(form, NativeMenuStatusProperty);
     internal static void SetNativeMenuReady(nint form, bool ready)
     {
         // A mode hint for native UI proof, never evidence that the menu was used.
@@ -645,5 +662,6 @@ internal static class NativeWindowProperties
     internal static void Remove(nint form)
     {
         RemoveProp(form, ParentProperty); RemoveProp(form, ChildProperty); RemoveProp(form, NativeMenuReadyProperty);
+        RemoveNativeMenuStatus(form);
     }
 }

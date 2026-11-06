@@ -96,9 +96,16 @@ counted native shortcut per transition. Observe fixed chrome without document
 content or additional input: allow the old display mode to settle inside the
 original five-second deadline, then require three continuous seconds in the
 requested mode. Ownership, generation, foreground, readiness and ambiguous UI
-fail immediately. This survival interval crosses nominal shell polling periods;
-it does not prove that a particular status RPC completed. After restoring the
-view, check Home/HWP and the core native File items and retain the existing
+fail immediately. The survival interval alone does not prove a completed status
+RPC. In the existing diagnostics mode, the owned shell exports one positive
+64-bit property containing version1 and two 28-bit started/completed sequences.
+Publish the start before the actual status request and completion only after its
+native-menu reply passes the original checks. Require a completion greater than
+the first matching view sample's started sequence, alongside the continuous
+three-second hold. This excludes an already in-flight request and adds no RPC
+or input. Missing, invalid, decreasing or failed-publication evidence cannot
+qualify the view. After restoring the view, check Home/HWP and the core native
+File items and retain the existing
 Home/save/cancel/close outcomes. The archive consumer must require both physical
 view cases rather than accepting an earlier six-menu-only success report.
 

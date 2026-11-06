@@ -49,7 +49,9 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
                     previewActions=[dict(kind='owned-native-menu-action', success=True,
                         command='printPreview', gesture=False) for _ in range(2)],
                     observations=[dict(kind='owned-native-view-observation', success=True,
-                        module=module, preview=preview, menuVisible=visible)
+                        module=module, preview=preview, menuVisible=visible,
+                        statusRpcProved=True, statusSequenceVersion=1,
+                        firstTargetStartedSequence=0, lastTargetCompletedSequence=1)
                         for preview, visible in ((True, True), (False, True), (False, False), (False, True))],
                     fullscreenActions=[dict(kind='owned-native-fullscreen-toggle', success=True,
                         module=module, focusReturned=True) for _ in range(2)],
@@ -109,6 +111,60 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
         self.save_report()
         with self.assertRaises(ValueError):
             self.verify()
+
+    def test_legacy_view_observations_without_completed_status_rpc_are_rejected(self):
+        original = copy.deepcopy(self.report)
+        for case in (0, 1):
+            for observation in range(4):
+                for value in (None, False):
+                    with self.subTest(case=case, observation=observation, value=value):
+                        self.report = copy.deepcopy(original)
+                        row = self.report['tests'][case]['nativeViewRoundtrip']['observations'][observation]
+                        if value is None: row.pop('statusRpcProved', None)
+                        else: row['statusRpcProved'] = value
+                        self.save_report()
+                        with self.assertRaises(ValueError): self.verify()
+
+    def test_status_rpc_summary_rejects_missing_wrong_type_or_out_of_range_values(self):
+        original = copy.deepcopy(self.report)
+        for key, values in (
+                ('statusRpcProved', (None, False, 1, 'true')),
+                ('statusSequenceVersion', (None, 0, 2, True, 1.0, '1')),
+                ('firstTargetStartedSequence', (None, -1, 1 << 28, False, True, 0.0, '0')),
+                ('lastTargetCompletedSequence', (None, -1, 1 << 28, False, True, 1.0, '1'))):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.report = copy.deepcopy(original)
+                    row = self.report['tests'][0]['nativeViewRoundtrip']['observations'][0]
+                    if value is None: row.pop(key)
+                    else: row[key] = value
+                    self.save_report()
+                    with self.assertRaises(ValueError): self.verify()
+
+    def test_status_rpc_completion_must_follow_the_first_target_started_sequence(self):
+        original = copy.deepcopy(self.report)
+        for case in (0, 1):
+            for started, completed in ((0, 0), (3, 2), ((1 << 28) - 1, (1 << 28) - 1)):
+                with self.subTest(case=case, started=started, completed=completed):
+                    self.report = copy.deepcopy(original)
+                    row = self.report['tests'][case]['nativeViewRoundtrip']['observations'][0]
+                    row.update(firstTargetStartedSequence=started, lastTargetCompletedSequence=completed)
+                    self.save_report()
+                    with self.assertRaises(ValueError): self.verify()
+
+    def test_status_rpc_summary_accepts_exact_28bit_bounds_without_rewriting_the_report(self):
+        original = copy.deepcopy(self.report)
+        for started, completed in ((0, 1), (0, (1 << 28) - 1), ((1 << 28) - 2, (1 << 28) - 1)):
+            with self.subTest(started=started, completed=completed):
+                self.report = copy.deepcopy(original)
+                for case in (0, 1):
+                    for row in self.report['tests'][case]['nativeViewRoundtrip']['observations']:
+                        row.update(firstTargetStartedSequence=started, lastTargetCompletedSequence=completed)
+                self.save_report(); before = (self.root / REPORT).read_bytes()
+                result = self.verify()
+                self.assertIs(result['success'], True)
+                self.assertEqual((self.root / REPORT).read_bytes(), before)
+                self.assertEqual(result['sourceReceipts'][0]['sha256'], hashlib.sha256(before).hexdigest())
 
     def test_view_report_flags_and_counts_cannot_qualify_missing_or_different_coverage(self):
         original = copy.deepcopy(self.report)

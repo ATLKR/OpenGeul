@@ -230,11 +230,13 @@ class OwnedNativeMenuTests(unittest.TestCase):
         m,a,p,r,c,probe=self.fixture()
         m.click_native_menu_action(a,p,11,r,'save',probe=probe,clock=c)
         r.update(module='writer',nativeArchiveGeneration={k:probe.engine[k] for k in ('pid','creationTime','image')},officeCreationTime=200)
+        view_start=c.now
         def snapshot(binding,module):
             c.now+=.001
             return dict(binding=dict(binding),editor=probe.editor_snapshot(binding),
                 peerRoot=dict(pid=88,nativeHwnd=56,runtimeId=[4,56]),documentRoot=dict(pid=77,nativeHwnd=11,runtimeId=[4,11]),
                 nativeReady=1,shellMenuCount=0,nativeMenuBarCount=1,previewIndicatorCount=1,
+                statusSequenceRaw=self.pack_status(int((c.now-view_start)/.5),int((c.now-view_start)/.5)),
                 previewIndicator=dict(pid=88,runtimeId=[8,4],controlType='Button',visible=True,enabled=True,
                     ancestryVerified=True,peerElementEquals=True,toolbarAncestorVerified=True))
         probe.view_snapshot=snapshot
@@ -248,7 +250,9 @@ class OwnedNativeMenuTests(unittest.TestCase):
         self.assertTrue(value['success']);self.assertGreaterEqual(value['observedSeconds'],3)
         self.assertLess(value['finishedAt'],value['deadline'])
         self.assertLessEqual(value['deadline']-value['startedAt'],5)
-        self.assertIs(value['statusRpcProved'],False);self.assertEqual(value['inputCallAttempts'],0)
+        self.assertIs(value['statusRpcProved'],True);self.assertEqual(value['inputCallAttempts'],0)
+        self.assertEqual(value['statusSequenceVersion'],1)
+        self.assertGreater(value['lastTargetCompletedSequence'],value['firstTargetStartedSequence'])
         self.assertTrue(value['engineHandleReleased']);self.assertTrue(value['dpiScope']['restored'])
         self.assertFalse(any(isinstance(x,tuple) and x[0] in ('click','key') for x in probe.calls))
 
@@ -272,6 +276,96 @@ class OwnedNativeMenuTests(unittest.TestCase):
                     m.observe_native_view(a,p,11,r,module='writer',preview=True,probe=probe,clock=c,pause=c.pause)
                 self.assertFalse(any(isinstance(x,tuple) and x[0] in ('click','key') for x in probe.calls))
                 self.assertIn(('close',9),probe.calls)
+
+    @staticmethod
+    def pack_status(started,completed):return (1<<56)|(started<<28)|completed
+
+    def test_status_codec_accepts_only_the_versioned_bounded_serial_sequences(self):
+        m=self.feature();decode=getattr(m,'decode_status_sequence',None)
+        self.assertTrue(callable(decode),'Status completion requires a strict shared numeric decoder')
+        limit=(1<<28)-1
+        for started,completed in ((0,0),(1,0),(1,1),(limit,limit-1),(limit,limit)):
+            with self.subTest(started=started,completed=completed):
+                self.assertEqual(decode(self.pack_status(started,completed)),dict(version=1,started=started,completed=completed))
+        for raw in (None,True,0,-1,1<<63,2<<56,1.,'1',
+                    self.pack_status(0,1),self.pack_status(3,1)):
+            with self.subTest(raw=raw):
+                with self.assertRaises(AssertionError):decode(raw)
+
+    def test_stale_or_only_pre_target_inflight_completion_never_proves_polling(self):
+        for inflight in (False,True):
+            with self.subTest(inflight=inflight):
+                m,a,p,r,c,probe=self.view_fixture();probe.calls=[];original=probe.view_snapshot;start=c.now
+                def snapshot(binding,module):
+                    row=original(binding,module)
+                    row['statusSequenceRaw']=self.pack_status(5,4 if inflight and c.now-start<.3 else 5)
+                    return row
+                probe.view_snapshot=snapshot
+                with self.assertRaises(AssertionError):
+                    m.observe_native_view(a,p,11,r,module='writer',preview=True,probe=probe,clock=c,pause=c.pause)
+                result=r['nativeViewObservations'][-1]
+                self.assertFalse(result['statusRpcProved']);self.assertFalse(result['success'])
+                self.assertEqual(result['firstTargetStartedSequence'],5)
+                self.assertEqual(result['deadline'],start+5);self.assertGreaterEqual(result['finishedAt']-start,4.9)
+                self.assertTrue(result['engineHandleReleased'])
+                self.assertFalse(any(isinstance(x,tuple) and x[0] in ('click','key') for x in probe.calls))
+
+    def test_post_target_request_must_finish_even_after_three_seconds_of_stable_mode(self):
+        m,a,p,r,c,probe=self.view_fixture();probe.calls=[];original=probe.view_snapshot;start=c.now
+        def snapshot(binding,module):
+            row=original(binding,module);elapsed=c.now-start
+            started=11 if elapsed>=3.4 else 10
+            completed=9 if elapsed<.2 else 10 if elapsed<3.6 else 11
+            row['statusSequenceRaw']=self.pack_status(started,completed)
+            return row
+        probe.view_snapshot=snapshot
+        result=m.observe_native_view(a,p,11,r,module='writer',preview=True,probe=probe,clock=c,pause=c.pause)
+        self.assertTrue(result['statusRpcProved']);self.assertEqual(result['statusSequenceVersion'],1)
+        self.assertEqual(result['firstTargetStartedSequence'],10);self.assertEqual(result['lastTargetCompletedSequence'],11)
+        self.assertGreaterEqual(result['finishedAt']-start,3.6);self.assertLess(result['finishedAt'],start+5)
+        for sample in result['samples']:
+            self.assertEqual(sample['statusSequence'],m.decode_status_sequence(sample['state']['statusSequenceRaw']))
+        self.assertFalse(any(isinstance(x,tuple) and x[0] in ('click','key') for x in probe.calls))
+
+    def test_mode_change_restarts_the_post_target_request_baseline(self):
+        for finish_new_request in (False,True):
+            with self.subTest(finish_new_request=finish_new_request):
+                m,a,p,r,c,probe=self.view_fixture();probe.calls=[];original=probe.view_snapshot;start=c.now
+                def snapshot(binding,module):
+                    row=original(binding,module);elapsed=c.now-start
+                    row=self.view_mode(row,not (.5<=elapsed<.8),True)
+                    count=0 if elapsed<.3 else 2 if finish_new_request and elapsed>=1.2 else 1
+                    row['statusSequenceRaw']=self.pack_status(count,count)
+                    return row
+                probe.view_snapshot=snapshot
+                if finish_new_request:
+                    result=m.observe_native_view(a,p,11,r,module='writer',preview=True,probe=probe,clock=c,pause=c.pause)
+                    self.assertTrue(result['statusRpcProved']);self.assertEqual(result['lastTargetCompletedSequence'],2)
+                else:
+                    with self.assertRaises(AssertionError):
+                        m.observe_native_view(a,p,11,r,module='writer',preview=True,probe=probe,clock=c,pause=c.pause)
+                    result=r['nativeViewObservations'][-1];self.assertFalse(result['success']);self.assertFalse(result['statusRpcProved'])
+                self.assertEqual(result['firstTargetStartedSequence'],1)
+                self.assertGreaterEqual(result['settledAt']-start,.8);self.assertEqual(result['deadline'],start+5)
+                self.assertFalse(any(isinstance(x,tuple) and x[0] in ('click','key') for x in probe.calls))
+
+    def test_malformed_or_rolled_back_status_is_fatal_before_more_polling(self):
+        cases=((None,), (True,), (0,), (2<<56,), (self.pack_status(3,1),),
+            (self.pack_status(5,4),self.pack_status(4,4)),
+            (self.pack_status(5,5),self.pack_status(5,4)))
+        for raws in cases:
+            with self.subTest(raws=raws):
+                m,a,p,r,c,probe=self.view_fixture();probe.calls=[];original=probe.view_snapshot;seen=[];start=c.now
+                def snapshot(binding,module):
+                    row=original(binding,module);row['statusSequenceRaw']=raws[len(seen)];seen.append(1)
+                    return self.view_mode(row,False,True)
+                probe.view_snapshot=snapshot
+                with self.assertRaises(AssertionError):
+                    m.observe_native_view(a,p,11,r,module='writer',preview=True,probe=probe,clock=c,pause=c.pause)
+                result=r['nativeViewObservations'][-1]
+                self.assertEqual(len(seen),len(raws));self.assertTrue(result['engineHandleReleased'])
+                self.assertEqual(result['deadline'],start+5)
+                self.assertFalse(any(isinstance(x,tuple) and x[0] in ('click','key') for x in probe.calls))
 
     @staticmethod
     def view_mode(row,preview,menu_visible):
@@ -394,11 +488,17 @@ class OwnedNativeMenuTests(unittest.TestCase):
         probe.uia=NS(tree_scope={'descendants':4},build_condition=lambda **kwargs:kwargs,
             iuia=NS(CompareElements=lambda a,b:a is b,ControlViewWalker=NS(GetParentElement=lambda element:element.parent)))
         probe.window_snapshot=lambda hwnd:dict(pid=77)
-        probe.user=NS(GetPropW=lambda *args:1)
+        properties=[]
+        def property_value(hwnd,name):
+            properties.append((hwnd,name));self.assertEqual(hwnd,11)
+            return self.pack_status(7,6) if name=='OpenGeul.Office.NativeMenuStatusV1' else 1
+        probe.user=NS(GetPropW=property_value)
         probe.editor_snapshot=lambda b:dict(binding=dict(b))
         value=probe.view_snapshot(binding,'writer')
         self.assertEqual(value['nativeMenuBarCount'],1);self.assertEqual(value['shellMenuCount'],0)
         self.assertEqual(value['previewIndicatorCount'],1)
+        self.assertEqual(value['statusSequenceRaw'],self.pack_status(7,6))
+        self.assertEqual(properties,[(11,m.READY_PROPERTY),(11,m.STATUS_PROPERTY)])
         self.assertTrue(value['previewIndicator']['toolbarAncestorVerified'])
         self.assertNotIn('name',str(value))
         # Zero visible items must still come from the original peer, rather

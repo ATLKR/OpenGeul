@@ -62,6 +62,13 @@ def _view_case(row, module):
             ((True, True), (False, True), (False, False), (False, True))):
         _require(item.get('module') == module and item.get('preview') is preview
             and item.get('menuVisible') is visible, 'Original native view observation order differs')
+        version = item.get('statusSequenceVersion')
+        started, completed = (item.get(key) for key in
+                              ('firstTargetStartedSequence', 'lastTargetCompletedSequence'))
+        _require(item.get('statusRpcProved') is True and type(version) is int and version == 1
+            and all(type(value) is int and 0 <= value < (1 << 28) for value in (started, completed))
+            and completed > started,
+            'Original native view observation lacks a later completed status RPC')
     _require(all(item.get('module') == module and item.get('focusReturned') is True
         for item in view['fullscreenActions']), 'Original native fullscreen plan differs')
     _require(all(item.get('command') == 'core-commands' and item.get('gesture') is True
