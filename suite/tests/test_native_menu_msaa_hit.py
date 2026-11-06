@@ -35,6 +35,82 @@ class WorkerGuid(Guid):
         super().__init__(value)
 
 
+def win32_guid_constructor(ole):
+    """Bind only CLSIDFromString on the caller's stdcall WinDLL library."""
+    class NativeGuid(C.Structure):
+        _fields_=[('Data1',C.c_uint32),('Data2',C.c_uint16),('Data3',C.c_uint16),('Data4',C.c_ubyte*8)]
+        def __init__(self,value):
+            super().__init__()
+            if type(value) is not str:raise ValueError('Native CLSID requires Unicode text')
+            result=parse(value,C.byref(self))
+            if type(result) is not int or result!=0:raise ValueError('Native CLSID parse failed')
+    parse=ole.CLSIDFromString
+    parse.argtypes,parse.restype=(C.c_wchar_p,C.POINTER(NativeGuid)),C.c_int32
+    return NativeGuid
+
+
+class Win32GuidFactoryTests(unittest.TestCase):
+    def setUp(self):
+        self.factory=globals().get('win32_guid_constructor')
+        self.assertTrue(callable(self.factory),'The dependency-free Win32 CLSID constructor is missing')
+        self.calls=[]
+        class Parser:
+            argtypes=restype=None
+            result=0
+            def __call__(parser,text,output):
+                self.calls.append(1)
+                if type(parser.result) is not int or parser.result!=0:return parser.result
+                value=WorkerGuid(text)
+                C.memmove(output,C.addressof(value),16)
+                return 0
+        self.parser=Parser()
+        self.guid=self.factory(NS(CLSIDFromString=self.parser))
+
+    def test_guid_layout_and_native_parser_declaration_are_exact(self):
+        self.assertEqual(C.sizeof(self.guid),16)
+        self.assertEqual(tuple(getattr(self.guid,name).offset for name in ('Data1','Data2','Data3','Data4')),(0,4,6,8))
+        self.assertTrue(self.parser.argtypes==(C.c_wchar_p,C.POINTER(self.guid)))
+        self.assertTrue(self.parser.restype is C.c_int32)
+        self.assertEqual(self.calls,[])
+
+    def test_both_worker_calls_use_the_same_dependency_free_constructor(self):
+        fixture=WorkerTests(methodName='runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        fixture.sdk.Guid=self.guid
+        result=fixture.run_worker()
+        self.assertEqual(result['localMatch'],1)
+        self.assertEqual((result['patternAttempted'],result['queryAttempted']),(1,1))
+        self.assertEqual(self.calls,[1,1]);self.assertEqual(result['cleanupError'],0)
+
+    def test_failed_or_non_hresult_result_rejects_without_rendering_argument(self):
+        value='{828055ad-355b-4435-86d5-3b51c14a9b1b}'
+        for result in (-2147467259,1,None,True,False):
+            self.parser.result=result
+            with self.subTest(code=type(result).__name__),self.assertRaises(ValueError):self.guid(value)
+
+    def test_non_unicode_argument_is_rejected_before_native_parser(self):
+        class Private:
+            def __str__(self):raise AssertionError('Argument text must not be read')
+            def __repr__(self):raise AssertionError('Argument representation must not be read')
+        with self.assertRaises(ValueError):self.guid(Private())
+        self.assertEqual(self.calls,[])
+
+    def test_windows_unit_body_uses_stdcall_loader_without_optional_comtypes(self):
+        loads=[];original_import=__import__
+        def load(name):
+            self.assertTrue(name=='ole32');loads.append(1)
+            return NS(CLSIDFromString=self.parser)
+        def bounded_import(name,*args,**kwargs):
+            if name=='comtypes' or name.startswith('comtypes.'):
+                raise AssertionError('Unit-stage CLSID test must not require optional comtypes')
+            return original_import(name,*args,**kwargs)
+        case=WindowsClsidParserTests(methodName='test_worker_constructs_both_guids_with_actual_win32_parser_without_provider_or_input')
+        self.addCleanup(case.doCleanups)
+        from unittest.mock import patch
+        with patch.object(C,'WinDLL',load,create=True),patch('builtins.__import__',bounded_import):
+            case.test_worker_constructs_both_guids_with_actual_win32_parser_without_provider_or_input()
+        self.assertEqual(loads,[1]);self.assertEqual(self.calls,[1,1])
+
+
 class Payload(C.Union):
     _fields_=[('VT_I4',C.c_int32),('c_void_p',C.c_void_p),('words',C.c_uint64*2)]
 
@@ -650,12 +726,11 @@ class WindowsMetadataTests(unittest.TestCase):
         self.assertEqual(abi.slots['hit_test'],24)
 
 
-@unittest.skipUnless(os.name=='nt','Actual Windows CLSID constructor only; no input')
-class WindowsGuidConstructionTests(unittest.TestCase):
-    def test_worker_constructs_both_actual_comtypes_guids_without_provider_or_input(self):
-        from comtypes import GUID
+@unittest.skipUnless(os.name=='nt','Actual Windows CLSIDFromString parser only; no input')
+class WindowsClsidParserTests(unittest.TestCase):
+    def test_worker_constructs_both_guids_with_actual_win32_parser_without_provider_or_input(self):
         fixture=WorkerTests(methodName='runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
-        fixture.sdk.Guid=GUID
+        fixture.sdk.Guid=win32_guid_constructor(C.WinDLL('ole32'))
         result=fixture.run_worker()
         self.assertEqual(result['localMatch'],1)
         self.assertEqual((result['patternAttempted'],result['queryAttempted']),(1,1))
