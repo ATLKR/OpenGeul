@@ -223,7 +223,7 @@ def run_local_hit(source,scope,sdk,platform):
         # popup exposure and UIA target guards remain the controller's separate
         # mandatory before/after observation; no success here substitutes them.
         record['processBefore']=1;record['workerStage']=3
-        pattern_iid=sdk.Guid(_IIDS['legacy'])
+        pattern_iid=sdk.Guid('{'+_IIDS['legacy']+'}')
         legacy=out('pattern',source.file,10018,C.byref(pattern_iid))
         child=C.c_int32(-1);call('child_id',legacy,C.byref(child))
         if child.value!=0:raise _Stop()
@@ -236,7 +236,7 @@ def run_local_hit(source,scope,sdk,platform):
         call('hit_test',accessible,scope.x,scope.y,C.byref(variant))
         record['variantType']=int(variant.vt)
         if variant.vt!=9 or not variant._.c_void_p:raise _Stop()
-        iid=sdk.Guid(_IIDS['accessible'])
+        iid=sdk.Guid('{'+_IIDS['accessible']+'}')
         hit_accessible=out('query',C.c_void_p(variant._.c_void_p),C.byref(iid))
         hit=out('from_accessible',source.client,hit_accessible,0)
         record['workerStage']=6

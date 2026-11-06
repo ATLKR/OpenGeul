@@ -26,6 +26,15 @@ class Guid(C.Structure):
         super().__init__();C.memmove(C.addressof(self),uuid.UUID(value).bytes_le,16)
 
 
+class WorkerGuid(Guid):
+    """Only the worker models comtypes' CLSIDFromString text boundary."""
+    def __init__(self,value):
+        if (type(value) is not str or len(value)!=38 or value[0]!='{' or value[-1]!='}'
+                or str(uuid.UUID(value))!=value[1:-1].lower()):
+            raise ValueError('Synthetic worker CLSID format rejected')
+        super().__init__(value)
+
+
 class Payload(C.Union):
     _fields_=[('VT_I4',C.c_int32),('c_void_p',C.c_void_p),('words',C.c_uint64*2)]
 
@@ -409,7 +418,7 @@ class FakePlatform:
 
 
 class FakeCalls:
-    Guid=Guid;Variant=Variant
+    Guid=WorkerGuid;Variant=Variant
     def __init__(self):
         self.releases=[];self.calls=[];self.fail={};self.child=0;self.variant_type=9
         self.wrong_file=False;self.wrong_target=False;self.negative_true=False
@@ -445,6 +454,18 @@ class WorkerTests(unittest.TestCase):
             retained_target=3,negative_refs=(4,5),shell_handle=20,engine_handle=21)
         self.scope=self.helper.MsaaHitScope(7,8,9,10,11,12,13,14,15)
     def run_worker(self):return self.helper.run_local_hit(self.source,self.scope,self.sdk,self.platform)
+
+    def test_worker_clsid_constructor_rejects_bare_uuid_that_metadata_fixture_accepts(self):
+        value=self.helper._IIDS['legacy']
+        self.assertEqual(C.sizeof(Guid(value)),16)
+        with self.assertRaises(ValueError):WorkerGuid(value)
+        self.assertEqual(C.sizeof(WorkerGuid('{'+value+'}')),16)
+
+    def test_both_worker_clsid_constructions_pass_the_strict_native_format_boundary(self):
+        result=self.run_worker()
+        self.assertEqual(result['localMatch'],1)
+        self.assertEqual((result['patternAttempted'],result['queryAttempted']),(1,1))
+        self.assertEqual(result['cleanupError'],0);self.assertEqual(result['workerCleanup'],1)
 
     def test_exact_file_roundtrip_target_positives_and_every_negative(self):
         result=self.run_worker()
@@ -627,6 +648,18 @@ class WindowsMetadataTests(unittest.TestCase):
             accessible_interface=accessible,guid_type=GUID,hresult_type=HRESULT,
             variant_type=VARIANT,function_factory=C.WINFUNCTYPE)
         self.assertEqual(abi.slots['hit_test'],24)
+
+
+@unittest.skipUnless(os.name=='nt','Actual Windows CLSID constructor only; no input')
+class WindowsGuidConstructionTests(unittest.TestCase):
+    def test_worker_constructs_both_actual_comtypes_guids_without_provider_or_input(self):
+        from comtypes import GUID
+        fixture=WorkerTests(methodName='runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        fixture.sdk.Guid=GUID
+        result=fixture.run_worker()
+        self.assertEqual(result['localMatch'],1)
+        self.assertEqual((result['patternAttempted'],result['queryAttempted']),(1,1))
+        self.assertEqual(result['cleanupError'],0);self.assertEqual(result['workerCleanup'],1)
 
 
 @unittest.skipUnless(os.name=='nt','Actual Windows native thread only')
