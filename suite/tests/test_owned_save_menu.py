@@ -133,6 +133,133 @@ class SaveMenuTests(unittest.TestCase):
         with self.assertRaises(AssertionError):self.run_save()
         self.assertNotIn('move',self.probe.calls);self.assertNotIn('click',self.probe.calls)
 
+class LifecycleWitnessTests(unittest.TestCase):
+    def fixture(self, *, archive=False, model=True):
+        import test_owned_native_menu as native_tests
+        import lifecycle_smoke as lifecycle
+        import counted_editor_shortcuts
+        import test_writer_model_reader as reader_tests
+        native=lifecycle.native
+        harness=native_tests.OwnedNativeMenuTests('test_real_chrome_empty_runtime_ids_require_actual_differential_identity')
+        self.addCleanup(harness.doCleanups)
+        module,api,process,_,clock,boundary=harness.real_chrome_fixture()
+        case=object.__new__(lifecycle.Case)
+        case.process=process;case.record=dict(kind='native-lifecycle',shellPid=process.pid)
+        case.api=NS(attached=lambda p:(11,55,56),pid=lambda h:88 if h==56 else 77,
+            windows=lambda pid:[],title=lambda h:'OpenGeul Writer',user=NS(
+                IsWindow=lambda h:True,GetAncestor=lambda h,flag:11,GetForegroundWindow=lambda:11,
+                IsChild=lambda parent,child:(parent,child) in ((11,55),(55,56)),
+                GetPropW=lambda h,key:55 if key.endswith('ParentHwnd') else 56))
+        archive_probe=NS(process_snapshot=lambda p:copy.deepcopy(boundary.native.shell),
+            open_engine=lambda pid:9,engine_snapshot=lambda h:dict(boundary.native.engine,handleValue=9),
+            close_engine=lambda h:True)
+        desktop=NS(window=lambda **kw:NS(wrapper_object=lambda:NS(maximize=lambda:None)))
+        with patch.dict(sys.modules,pywinauto=NS(Desktop=lambda **kw:desktop)), \
+             patch.object(native,'activate_owned_suite',return_value=None), \
+             patch.object(native.time,'monotonic',side_effect=clock), \
+             patch.object(counted_editor_shortcuts,'NativeShortcutProbe',return_value=archive_probe):
+            self.assertEqual(case.attach(retain_archive_generation=archive),(11,55,56))
+        record=case.record
+        self.assertEqual(set(record['attachments'][0]),
+            {'hwnd','parent','child','officePid'}|({'nativeArchiveGeneration'} if archive else set()))
+        binding=reader_tests.binding_fixture()
+        binding.update(suiteHwnd=11,parentHwnd=55,childHwnd=56,officePid=88,
+            officeCreationTime=200,expectedImage=boundary.native.engine['image'])
+        if model:record['writerModelCompletions']=[dict(beforeInput=dict(bindingBefore=binding))]
+        return module,api,process,record,clock,boundary,binding
+
+    def action(self, fixture):
+        module,api,process,record,clock,boundary,_=fixture
+        with patch.object(module.time,'sleep',side_effect=clock.pause):
+            return module.click_native_menu_action(api,process,11,record,'save',
+                probe=boundary.probe,clock=clock)
+
+    def assert_no_input(self, fixture):
+        with self.assertRaises((AssertionError,KeyError,TypeError)):self.action(fixture)
+        self.assertEqual([call for call in fixture[5].native.calls
+            if isinstance(call,tuple) and call[0] in ('click','key')],[])
+
+    def test_real_lifecycle_attachment_and_reader_binding_reach_native_menu_with_original_generation(self):
+        fixture=self.fixture();value=None;error=None
+        try:value=self.action(fixture)
+        except BaseException as exc:error=exc
+        self.assertIsNone(error,'Lifecycle reader generations must not require a fabricated Home witness')
+        self.assertTrue(value['success'])
+        self.assertEqual(value['engineAdmissionBasis'],'existing-lifecycle-retained-engine')
+        self.assertEqual(value['originalEngine']['creationTime'],200)
+        self.assertEqual([call for call in fixture[5].native.calls if isinstance(call,tuple) and call[0]=='click'],
+            [('click','file'),('click','save')])
+
+    def test_real_lifecycle_archive_admission_can_bind_the_first_blank_document(self):
+        fixture=self.fixture(archive=True,model=False);value=None;error=None
+        try:value=self.action(fixture)
+        except BaseException as exc:error=exc
+        self.assertIsNone(error,'Actual capture_native_archive_generation output must bind blank Lifecycle documents')
+        self.assertTrue(value['success'])
+        self.assertEqual(value['engineAdmissionBasis'],'existing-lifecycle-retained-engine')
+        self.assertEqual(fixture[3]['attachments'][0]['nativeArchiveGeneration'],
+            {key:fixture[5].native.engine[key] for key in ('pid','creationTime','image')})
+
+    def test_all_available_lifecycle_original_generations_must_agree(self):
+        fixture=self.fixture(archive=True)
+        fixture[3]['writerModelCompletions'].append(copy.deepcopy(fixture[3]['writerModelCompletions'][0]))
+        value=None;error=None
+        try:value=self.action(fixture)
+        except BaseException as exc:error=exc
+        self.assertIsNone(error,'Consistent original reader/archive generations must remain usable')
+        self.assertEqual(value['engineAdmissionBasis'],'existing-lifecycle-retained-engine')
+        for field,bad in (('pid',89),('creationTime',201),('image','/foreign/soffice.bin')):
+            with self.subTest(field=field):
+                fixture=self.fixture(archive=True);fixture[3]['attachments'][0]['nativeArchiveGeneration'][field]=bad
+                self.assert_no_input(fixture)
+
+    def test_lifecycle_missing_duplicate_foreign_or_malformed_original_metadata_has_zero_input(self):
+        mutations=[lambda r:r.pop('attachments'),lambda r:r['attachments'].clear(),
+            lambda r:r['attachments'].append(copy.deepcopy(r['attachments'][0])),
+            lambda r:r.pop('writerModelCompletions'),
+            lambda r:r['writerModelCompletions'][0]['beforeInput']['bindingBefore'].update(suiteHwnd=99)]
+        for field in ('parentHwnd','childHwnd','officePid','officeCreationTime','expectedImage'):
+            mutations.append(lambda r,key=field:r['writerModelCompletions'][0]['beforeInput']['bindingBefore'].pop(key))
+        for field,bad in (('parentHwnd',99),('childHwnd',99),('officePid',89),
+                          ('officePid',True),('officeCreationTime',True),('officeCreationTime',0),
+                          ('officeCreationTime',2**64),('expectedImage',''),('expectedImage',None)):
+            mutations.append(lambda r,key=field,value=bad:r['writerModelCompletions'][0]['beforeInput']['bindingBefore'].update({key:value}))
+        for change in mutations:
+            with self.subTest(index=mutations.index(change)):
+                fixture=self.fixture();change(fixture[3]);self.assert_no_input(fixture)
+        for field,bad in (('pid',True),('creationTime',0),('image','')):
+            with self.subTest(archiveField=field):
+                fixture=self.fixture(archive=True,model=False)
+                fixture[3]['attachments'][0]['nativeArchiveGeneration'][field]=bad
+                self.assert_no_input(fixture)
+
+    def test_current_engine_generation_must_still_match_the_original_lifecycle_witness(self):
+        fixture=self.fixture();fixture[5].native.engine['creationTime']=201
+        self.assert_no_input(fixture)
+        self.assertIn(('close',9),fixture[5].native.calls)
+
+    def test_lifecycle_witness_selection_is_pure_and_preserves_home_strict_checks(self):
+        witness=importlib.import_module('owned_save_menu').home_engine_witness
+        fixture=self.fixture(archive=True)
+        binding=dict(document=11,parent=55,child=56,officePid=88)
+        with patch.object(time,'monotonic',side_effect=AssertionError('No new deadline')), \
+             patch.object(old.importlib,'import_module',side_effect=AssertionError('No native query')):
+            value,basis=witness(fixture[3],11,binding)
+        self.assertEqual(value,dict(pid=88,image=fixture[6]['expectedImage'],creationTime=200))
+        self.assertEqual(basis,'existing-lifecycle-retained-engine')
+        home=dict(kind='tile',attachments=[dict(hwnd=11,parent=55,child=56,officePid=88,
+            officeCreationTime=200,officeImage=value['image'],liveProcessBinding=dict(pid=88,
+                creationTime=200,nativeCreation=dict(fileTime=200),nativeImage=value['image'],
+                expectedImage=value['image'],handleValue=9,waitResult=258))])
+        self.assertEqual(witness(home,11,binding),(value,'existing-home-retained-engine'))
+        for field in ('liveProcessBinding','officeCreationTime','officeImage'):
+            bad=copy.deepcopy(home);bad['attachments'][0].pop(field)
+            with self.subTest(homeField=field),self.assertRaises((AssertionError,KeyError)):witness(bad,11,binding)
+        for field,bad_value in (('handleValue',0),('waitResult',0),('creationTime',201)):
+            bad=copy.deepcopy(home);bad['attachments'][0]['liveProcessBinding'][field]=bad_value
+            with self.subTest(homeLiveField=field),self.assertRaises(AssertionError):witness(bad,11,binding)
+
+
 class SaveNativeTransitionTests(unittest.TestCase):
     def setUp(self):
         self.module=importlib.import_module('owned_save_menu');self.clock=old.Clock()

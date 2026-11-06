@@ -66,8 +66,45 @@ def file_click_anchor(record, document, original, started):
                 document=copy.deepcopy(before['document']))
 
 
+def _lifecycle_engine_witness(record, document, attachment, rows):
+    assert len(rows) == 1, 'Lifecycle requires one original document attachment'
+    row = rows[0]
+    _integer(document)
+    for key in ('document', 'parent', 'child', 'officePid'):_integer(attachment[key])
+    for key in ('hwnd', 'parent', 'child', 'officePid'):_integer(row[key])
+    assert attachment['document'] == row['hwnd'] == document
+    assert all(row[key] == attachment[key] for key in ('parent', 'child', 'officePid')), 'Original Lifecycle attachment changed'
+    candidates = []
+    def remember(pid, creation, image):
+        assert type(pid) is int and 0 < pid < 2**32 and pid == attachment['officePid']
+        assert type(creation) is int and 0 < creation < 2**64
+        assert type(image) is str and 0 < len(image) <= 32768 and '\0' not in image
+        candidate = dict(pid=pid, image=image, creationTime=creation)
+        if candidates:
+            first = candidates[0]
+            assert (pid, creation, image.casefold()) == (first['pid'], first['creationTime'], first['image'].casefold()), 'Original Lifecycle engine generations differ'
+        candidates.append(candidate)
+    for receipt in record.get('writerModelCompletions', []):
+        before = receipt.get('beforeInput')
+        if before is None:continue
+        model = before['bindingBefore']
+        _integer(model['suiteHwnd'])
+        if model['suiteHwnd'] != document:continue
+        for key in ('parentHwnd', 'childHwnd', 'officePid'):_integer(model[key])
+        assert (model['parentHwnd'], model['childHwnd'], model['officePid']) == (attachment['parent'], attachment['child'], attachment['officePid']), 'Lifecycle reader belongs to another attachment'
+        remember(model['officePid'], model['officeCreationTime'], model['expectedImage'])
+    if 'nativeArchiveGeneration' in row:
+        archive = row['nativeArchiveGeneration']
+        assert type(archive) is dict and set(archive) == {'pid', 'creationTime', 'image'}
+        remember(archive['pid'], archive['creationTime'], archive['image'])
+    assert candidates, 'Lifecycle lacks its original engine generation witness'
+    return candidates[0], 'existing-lifecycle-retained-engine'
+
+
 def home_engine_witness(record, document, attachment):
     rows = [row for row in record.get('attachments', []) if row['hwnd'] == document]
+    if record.get('kind') == 'native-lifecycle':
+        return _lifecycle_engine_witness(record, document, attachment, rows)
     if not rows:
         assert record.get('kind') != 'tile', 'Home Save lacks its original retained engine witness'
         return None, 'first-native-measurement'
