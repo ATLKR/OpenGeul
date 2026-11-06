@@ -34,6 +34,20 @@ class Menu:
     def getPopupMenu(self, item): return self.popups.get(item)
 
 
+def menu_element(frame, bar):
+    # Pinned MenuBarWrapper.getRealInterface returns MenuBarManager, which
+    # implements XSystemDependentMenuPeer, not the XMenu interface.
+    # Metadata are IDL attributes, not callable generated C++ accessors. The
+    # Type property descriptor says OUString, but its getter returns raw Int16.
+    element = NS(Frame=frame, ResourceURL='private:resource/menubar/menubar', Type=1,
+                 menu=lambda: bar, getRealInterface=lambda: NS(getMenuHandle=lambda *args: 0))
+    def read_property(name):
+        assert name in ('Frame', 'ResourceURL', 'Type', 'XMenuBar'), 'Only read-only native element properties may be observed'
+        return element.menu() if name == 'XMenuBar' else getattr(element, name)
+    element.getPropertyValue = read_property
+    return element
+
+
 class NativeMenuTests(unittest.TestCase):
     def fixture(self, module='swriter', *, peer=None, frame=None, document=None):
         self.assertTrue((WORKER / 'native_menu.py').is_file(),
@@ -50,13 +64,12 @@ class NativeMenuTests(unittest.TestCase):
                           '.uno:Save', '.uno:SaveAs', '.uno:CloseDoc', '.uno:Quit'), popup=True)
         bar = Menu(('.uno:PickList', '.uno:EditMenu', '.uno:FormatMenu'))
         bar.popups[1] = file_menu
-        element = NS(Frame=frame, ResourceURL='private:resource/menubar/menubar', Type=1,
-                     getRealInterface=lambda: bar)
+        element = menu_element(frame, bar)
         def configuration_write(*args):
             calls.append(('settings',))
             self.fail('A native menu observer must not read/write configuration or transient settings')
         element.getSettings = element.setSettings = configuration_write
-        element.getPropertyValue = element.setPropertyValue = configuration_write
+        element.setPropertyValue = configuration_write
         layout = NS(visible=True, shown=True, element=element)
         def show(name):
             calls.append(('show', name)); return layout.shown
@@ -91,6 +104,79 @@ class NativeMenuTests(unittest.TestCase):
                 self.assertEqual([c for c in f.calls if c[0] == 'show'],
                                  [('show', 'private:resource/menubar/menubar')])
 
+    def test_pinned_readonly_xmenubar_property_is_distinct_from_the_real_manager(self):
+        f = self.fixture()
+        manager = f.element.getRealInterface()
+        self.assertTrue(callable(manager.getMenuHandle))
+        self.assertFalse(hasattr(manager, 'isPopupMenu'))
+        self.assertIs(f.bar, f.element.getPropertyValue('XMenuBar'))
+        try:
+            ready = f.guard.prepare(f.backend)
+        except WorkerError as error:
+            self.fail('Native readiness must read the XMenuBar property instead of '
+                      'calling XMenu methods on its manager: ' + type(error.__cause__).__name__)
+        self.assertIs(ready, True)
+        self.assertEqual(f.popup.commands[:2], ['vnd.opengeul.office:new-hwp', '.uno:StartModule'])
+        self.assertFalse(any(row[0] == 'settings' for row in f.calls))
+
+    def test_idl_attribute_metadata_uses_property_values_without_cpp_only_methods(self):
+        f = self.fixture()
+        try:
+            ready = f.guard.prepare(f.backend)
+        except WorkerError as error:
+            self.fail('Native readiness must read raw XPropertySet values for IDL '
+                      'attributes instead of calling generated C++ getters: ' + type(error.__cause__).__name__)
+        self.assertIs(ready, True)
+
+    def test_native_menu_failure_records_one_closed_checkpoint_and_preserves_cause(self):
+        f = self.fixture(); phases = []
+        primary = RuntimeError('Synthetic document text and private path must not enter numeric phases')
+        def fail_menu(): raise primary
+        f.element.menu = fail_menu
+        f.backend._diagnose = phases.append
+        error = self.assertUnavailable(lambda: f.guard.prepare(f.backend))
+        self.assertIs(error.__cause__, primary)
+        self.assertEqual(phases, ['native-menu-check-06'])
+        self.assertIs(error, self.assertUnavailable(lambda: f.guard.ready(f.backend)))
+        self.assertIs(error, self.assertUnavailable(lambda: f.guard.prepare(f.backend)))
+        self.assertEqual(phases, ['native-menu-check-06'])
+
+    def test_checkpoint_diagnostic_failure_cannot_replace_the_original_menu_error(self):
+        f = self.fixture(); phases = []
+        primary = ValueError('Synthetic menu provider failure')
+        def fail_menu(): raise primary
+        def fail_diagnostic(phase):
+            phases.append(phase)
+            raise OSError('Synthetic optional recorder failure')
+        f.element.menu = fail_menu
+        f.backend._diagnose = fail_diagnostic
+        error = self.assertUnavailable(lambda: f.guard.prepare(f.backend))
+        self.assertIs(error.__cause__, primary)
+        self.assertEqual(phases, ['native-menu-check-06'])
+
+    def test_required_native_checks_emit_only_their_fixed_numeric_phase(self):
+        for boundary, expected in (
+                ('anchors', '01'), ('controller', '02'), ('disconnected', '02'), ('show', '03'),
+                ('visibility', '04'), ('element', '05'), ('menu', '06'),
+                ('menubar', '07'), ('popup', '08'), ('commands', '09'),
+                ('own-dispatch', '10'), ('frame-dispatch', '11')):
+            with self.subTest(boundary=boundary):
+                f = self.fixture(); phases = []; f.backend._diagnose = phases.append
+                if boundary == 'anchors': f.frame.getContainerWindow = lambda: object()
+                elif boundary == 'controller': f.controller.getModel = lambda: object()
+                elif boundary == 'disconnected': f.controller.getFrame = lambda: None
+                elif boundary == 'show': f.layout.shown = False
+                elif boundary == 'visibility': f.layout.visible = False
+                elif boundary == 'element': f.element.Type = 3
+                elif boundary == 'menu': f.element.menu = lambda: None
+                elif boundary == 'menubar': f.bar.popup = True
+                elif boundary == 'popup': f.bar.popups.clear()
+                elif boundary == 'commands': f.popup.commands.pop(0)
+                elif boundary == 'own-dispatch': f.backend.interceptor.queryDispatch = lambda *args: None
+                else: f.frame.queryDispatch = lambda *args: NS(dispatch=lambda *args: None)
+                self.assertUnavailable(lambda: f.guard.prepare(f.backend))
+                self.assertEqual(phases, ['native-menu-check-' + expected])
+
     def assertUnavailable(self, call):
         with self.assertRaises(WorkerError) as caught: call()
         self.assertEqual('native_menu_unavailable', caught.exception.code)
@@ -100,8 +186,7 @@ class NativeMenuTests(unittest.TestCase):
         controller = NS(getFrame=lambda: f.frame, getModel=lambda: f.document)
         bar = Menu(list(f.bar.commands))
         bar.popups[1] = Menu(list(f.popup.commands), popup=True)
-        element = NS(Frame=f.frame, ResourceURL='private:resource/menubar/menubar', Type=1,
-                     getRealInterface=lambda: bar)
+        element = menu_element(f.frame, bar)
         return controller, element
 
     def replace_view(self, f, view):
@@ -118,7 +203,7 @@ class NativeMenuTests(unittest.TestCase):
                     reads.append('old'); self.replace_view(f, replacement)
                     if outcome == 'disposed': raise DisposedException('Synthetic old menu disposed')
                     return None
-                f.element.getRealInterface = old_menu
+                f.element.menu = old_menu
                 self.assertTrue(f.guard.ready(f.backend))
                 self.assertEqual(reads, ['old'])
                 self.assertEqual(sum(row[0] == 'query' for row in f.calls), 8)
@@ -134,7 +219,7 @@ class NativeMenuTests(unittest.TestCase):
                     reads.append('old')
                     if outcome == 'disposed': raise primary
                     return None
-                f.element.getRealInterface = old_menu
+                f.element.menu = old_menu
                 error = self.assertUnavailable(lambda: f.guard.ready(f.backend))
                 self.assertEqual(reads, ['old'])
                 if outcome == 'disposed': self.assertIs(error.__cause__, primary)
@@ -144,7 +229,7 @@ class NativeMenuTests(unittest.TestCase):
         replacement = self.replacement_view(f); primary = RuntimeError('Synthetic unknown transport error')
         def old_menu():
             reads.append('old'); self.replace_view(f, replacement); raise primary
-        f.element.getRealInterface = old_menu
+        f.element.menu = old_menu
         error = self.assertUnavailable(lambda: f.guard.ready(f.backend))
         self.assertIs(error.__cause__, primary)
         self.assertEqual(reads, ['old'])
@@ -162,7 +247,7 @@ class NativeMenuTests(unittest.TestCase):
                     elif changed == 'type': replacement[1].Type = 3
                     else: f.frame.queryDispatch = lambda *args: NS(dispatch=lambda *args: None)
                     return None
-                f.element.getRealInterface = old_menu
+                f.element.menu = old_menu
                 self.assertUnavailable(lambda: f.guard.ready(f.backend))
 
     def test_second_menu_epoch_change_is_fatal_without_a_third_whole_read(self):
@@ -172,9 +257,9 @@ class NativeMenuTests(unittest.TestCase):
             reads.append('first'); self.replace_view(f, second); return None
         def second_menu():
             reads.append('second'); self.replace_view(f, third); return None
-        f.element.getRealInterface = old_menu
-        second[1].getRealInterface = second_menu
-        third[1].getRealInterface = lambda: self.fail('A third whole menu read must never occur')
+        f.element.menu = old_menu
+        second[1].menu = second_menu
+        third[1].menu = lambda: self.fail('A third whole menu read must never occur')
         self.assertUnavailable(lambda: f.guard.ready(f.backend))
         self.assertEqual(reads, ['first', 'second'])
 
@@ -189,9 +274,9 @@ class NativeMenuTests(unittest.TestCase):
                 self.replace_view(f, third)
                 return second[1]
             return f.layout.element
-        f.element.getRealInterface = old_menu
+        f.element.menu = old_menu
         f.layout.getElement = element
-        third[1].getRealInterface = lambda: self.fail('A candidate epoch cannot be silently replaced')
+        third[1].menu = lambda: self.fail('A candidate epoch cannot be silently replaced')
         self.assertUnavailable(lambda: f.guard.ready(f.backend))
         self.assertEqual(len(reads), 2)
 
@@ -206,9 +291,9 @@ class NativeMenuTests(unittest.TestCase):
                 self.replace_view(f, third)
                 return second[1]
             return f.layout.element
-        f.element.getRealInterface = old_menu
+        f.element.menu = old_menu
         f.layout.getElement = element
-        third[1].getRealInterface = lambda: self.fail('A third whole menu observation must never occur')
+        third[1].menu = lambda: self.fail('A third whole menu observation must never occur')
         self.assertUnavailable(lambda: f.guard.ready(f.backend))
         self.assertEqual(len(reads), 4)
 
@@ -232,7 +317,7 @@ class NativeMenuTests(unittest.TestCase):
         primary = type('DisposedException', (RuntimeError,), {})('Synthetic impostor exception')
         def old_menu():
             self.replace_view(f, replacement); raise primary
-        f.element.getRealInterface = old_menu
+        f.element.menu = old_menu
         error = self.assertUnavailable(lambda: f.guard.ready(f.backend))
         self.assertIs(error.__cause__, primary)
 
@@ -303,8 +388,7 @@ class NativeMenuTests(unittest.TestCase):
                 f.frame.getController = f.document.getCurrentController = lambda: replacement
                 bar = Menu(list(f.bar.commands))
                 bar.popups[1] = Menu(list(f.popup.commands), popup=True)
-                f.layout.element = NS(Frame=f.frame, ResourceURL='private:resource/menubar/menubar', Type=1,
-                                      getRealInterface=lambda: bar)
+                f.layout.element = menu_element(f.frame, bar)
                 self.assertTrue(f.guard.ready(f.backend))
                 self.assertEqual(sum(row[0] == 'show' for row in f.calls), 1)
                 self.assertFalse(any(row[0] == 'settings' for row in f.calls))

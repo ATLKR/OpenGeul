@@ -398,6 +398,7 @@ class UnoBackend:
         if self.document is None:
             self._diagnose('load-returned-none')
             raise WorkerError('open_failed', '문서를 열 수 없습니다. 파일 형식과 암호 여부를 확인해 주세요.')
+        self._diagnose('after-document-load')
         child = int(self.peer.getWindowHandle((), 1))
         self.window_api.validate_child(child, hwnd)
         if self.module_factory == 'private:factory/scalc':
@@ -405,9 +406,11 @@ class UnoBackend:
             self.calc_save = CalcSaveTransaction(self, module['filters'], path, hwnd, child)
         self.peer.setVisible(True)
         self.frame.activate()
+        self._diagnose('before-native-menu')
         from native_menu import NativeMenuSurface
         self.native_menu = NativeMenuSurface(self)
         self.native_menu.prepare(self)
+        self._diagnose('after-native-menu')
         return {'parentHwnd': hwnd, 'childHwnd': child}
 
     def document_status(self):

@@ -573,7 +573,8 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertIsNone(backend.process)
         self.assertIsNone(backend.profile)
 
-    def attach_boundary(self, *, child_error=None, menu_error=None):
+    def attach_boundary(self, *, child_error=None, menu_error=None,
+                        load_error=None, load_none=False, diagnostic_events=None):
         from types import SimpleNamespace
         calls = []
         peer = SimpleNamespace(setPosSize=lambda *a: calls.append(('resize', a)),
@@ -589,8 +590,13 @@ class NativeBoundaryTests(unittest.TestCase):
         interceptor = native_menu_boundary(frame, peer, document)
         if menu_error is not None:
             frame.getPropertyValue('LayoutManager').showElement = lambda name: (_ for _ in ()).throw(menu_error)
+        def load(*args):
+            calls.append(('load', args))
+            if load_error is not None:
+                raise load_error
+            return None if load_none else document
         desktop = SimpleNamespace(getFrames=lambda: SimpleNamespace(append=lambda f: calls.append(('append', f))),
-                                  loadComponentFromURL=lambda *a: calls.append(('load', a)) or document)
+                                  loadComponentFromURL=load)
         toolkit = SimpleNamespace(createSystemChild=lambda *a: calls.append(('child', a)) or peer)
         services = {'com.sun.star.awt.Toolkit': toolkit, 'com.sun.star.frame.Frame': frame,
                     'com.sun.star.frame.Desktop': desktop}
@@ -604,6 +610,11 @@ class NativeBoundaryTests(unittest.TestCase):
         backend = self.native.UnoBackend(self.root, window_api=windows, uno_loader=lambda: uno,
                                          connector=lambda *a: context)
         backend._start_runtime = lambda: None
+        if diagnostic_events is not None:
+            def record(phase, **kwargs):
+                diagnostic_events.append((phase, kwargs))
+                calls.append(('diagnostic', phase))
+            backend.diagnostics = SimpleNamespace(record=record)
         self.last_attach_calls = calls
         with patch.object(self.native, 'make_interceptor', return_value=interceptor), patch.object(self.native, 'make_interaction_handler', return_value=object()):
             handles = backend.attach(123, MODULES['writer'], 640, 480, None)
@@ -635,6 +646,61 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertTrue(created[1].startswith('private:resource/toolbar/opengeul_bootstrap_'))
         self.assertIs(config, created[2]['ConfigurationSource'])
         self.assertIs(frame, created[2]['Frame'])
+
+    def test_attach_diagnostic_markers_bracket_the_completed_document_and_menu(self):
+        events = []
+        handles, backend, context, calls, frame, config = self.attach_boundary(diagnostic_events=events)
+        self.assertEqual([
+            'before-ui-bootstrap', 'after-ui-bootstrap', 'before-load',
+            'after-document-load', 'before-native-menu', 'after-native-menu'],
+            [phase for phase, metadata in events])
+        self.assertLess(next(i for i, call in enumerate(calls) if call[0] == 'load'),
+                        calls.index(('diagnostic', 'after-document-load')))
+        self.assertLess(calls.index(('diagnostic', 'after-document-load')),
+                        calls.index(('validated', 456, 123)))
+        self.assertLess(calls.index(('activate',)), calls.index(('diagnostic', 'before-native-menu')))
+        self.assertLess(calls.index(('diagnostic', 'before-native-menu')),
+                        calls.index(('diagnostic', 'after-native-menu')))
+        self.assertTrue(backend.native_menu.shown)
+        markers = {'after-document-load', 'before-native-menu', 'after-native-menu'}
+        self.assertTrue(all(metadata == {} for phase, metadata in events if phase in markers))
+
+    def test_attach_failure_markers_do_not_claim_a_completed_native_menu(self):
+        for boundary in ('child', 'menu'):
+            with self.subTest(boundary=boundary):
+                events = []
+                primary = self.native.WorkerError('invalid_hwnd', 'Synthetic ownership failure') if boundary == 'child' else RuntimeError('Synthetic menu failure')
+                options = {'child_error' if boundary == 'child' else 'menu_error': primary}
+                with self.assertRaises(self.native.WorkerError) as caught:
+                    self.attach_boundary(diagnostic_events=events, **options)
+                if boundary == 'child':
+                    self.assertIs(caught.exception, primary)
+                else:
+                    self.assertEqual(caught.exception.code, 'native_menu_unavailable')
+                    self.assertIs(caught.exception.__cause__, primary)
+                markers = {'after-document-load', 'before-native-menu', 'after-native-menu'}
+                observed = [(phase, metadata) for phase, metadata in events if phase in markers]
+                expected = ['after-document-load'] + (['before-native-menu'] if boundary == 'menu' else [])
+                self.assertEqual(expected, [phase for phase, metadata in observed])
+                self.assertTrue(all(metadata == {} for phase, metadata in observed))
+
+    def test_attach_load_failures_never_report_a_completed_document(self):
+        for boundary in ('exception', 'none'):
+            with self.subTest(boundary=boundary):
+                events = []
+                primary = RuntimeError('Synthetic load failure')
+                options = {'load_error': primary} if boundary == 'exception' else {'load_none': True}
+                expected_error = RuntimeError if boundary == 'exception' else self.native.WorkerError
+                with self.assertRaises(expected_error) as caught:
+                    self.attach_boundary(diagnostic_events=events, **options)
+                if boundary == 'exception':
+                    self.assertIs(caught.exception, primary)
+                else:
+                    self.assertEqual(caught.exception.code, 'open_failed')
+                expected = 'load-exception' if boundary == 'exception' else 'load-returned-none'
+                self.assertEqual(expected, events[-1][0])
+                self.assertFalse(any(phase in {'after-document-load', 'before-native-menu', 'after-native-menu'}
+                                     for phase, metadata in events))
 
     def test_original_child_ownership_error_precedes_menu_and_is_not_wrapped(self):
         primary = self.native.WorkerError('invalid_hwnd', 'Synthetic child ownership failure')
