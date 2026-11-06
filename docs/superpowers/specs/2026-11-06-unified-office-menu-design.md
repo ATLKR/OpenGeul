@@ -26,7 +26,7 @@ A normal native controller/view replacement is allowed only while the original
 frame, peer, document model and interceptor remain owned. Full Screen and user
 menu visibility changes do not themselves indicate lost integration.
 
-Add OpenGeul Home and New HWP actions to the six packaged native File menu XML
+Add OpenGeul Home and HWP launcher actions to the six packaged native File menu XML
 definitions during verified runtime branding. Preserve the original XML bytes,
 including prolog, DOCTYPE, comments and existing menu order. New native menu
 wrappers created by normal view transitions inherit the same default commands.
@@ -38,8 +38,17 @@ copy formatting menus into host controls or insert unbound XMenu items.
 
 - Native New/Open/Save/Save As/Close use the existing shell transactions.
   Cover AddDirect, OpenFromWriter and OpenFromCalc from the actual six menus.
-- vnd.opengeul.office:new-hwp is an exact allowlisted action launching the
-  existing HWP editor. Do not add HWP to the six UNO document factories.
+- Display the HWP launcher as **OpenGeul 한글 시작**, distinct from Office Home's
+  **OpenGeul 시작 화면**. Keep the exact allowlisted URL
+  vnd.opengeul.office:new-hwp and the existing no-argument HWP launch for compatibility.
+  This starts the existing HWP app; it does not create a blank document directly.
+  A fresh instance of the pinned HWP app shows its own Home without a document
+  path and has no new-document CLI flag. Its existing-instance callback returns
+  for empty arguments without requesting a new document or window. See the
+  [pinned argument handling](https://github.com/golbin/hop/blob/34bd15c97e0851627cb7f055042c5340198aeb7f/apps/desktop/src-tauri/src/lib.rs#L51-L55)
+  and [HWP Home action](https://github.com/golbin/hop/blob/34bd15c97e0851627cb7f055042c5340198aeb7f/apps/studio-host/src/ui/home-screen.ts#L47-L83).
+  A user creates a document inside that app.
+  Do not add HWP to the six UNO document factories or alter the standalone engine.
 - StartModule returns to the existing Home only after the current document's
   normal asynchronous close succeeds. Cancellation keeps the document.
 - Quit/Exit request Home's existing sequential Office-document/application close,

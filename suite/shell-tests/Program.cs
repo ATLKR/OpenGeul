@@ -277,7 +277,7 @@ Test("HWP launch uses only fixed original executable and one structured document
     Equal(1, start.ArgumentList.Count);
     Equal(document, start.ArgumentList[0]);
 });
-Test("HWP new-document launch has no document argument", () =>
+Test("HWP launcher startup has no document argument", () =>
     Equal(0, HwpLaunch.Create(Path.Combine(Path.GetTempPath(), "OpenGeul"), null).ArgumentList.Count));
 Test("HWP launch preserves every inherited non-PATH environment entry", () =>
 {

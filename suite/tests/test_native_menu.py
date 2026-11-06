@@ -104,6 +104,31 @@ class NativeMenuTests(unittest.TestCase):
                 self.assertEqual([c for c in f.calls if c[0] == 'show'],
                                  [('show', 'private:resource/menubar/menubar')])
 
+    def test_branded_hwp_start_label_retains_the_exact_live_dispatch_contract(self):
+        import tempfile
+        import xml.etree.ElementTree as ET
+        import importlib.util
+        specification=importlib.util.spec_from_file_location('native_menu_branding_fixture',Path(__file__).with_name('test_branding.py'))
+        fixtures=importlib.util.module_from_spec(specification);specification.loader.exec_module(fixtures)
+        make_runtime,branding,MENU,MENUBAR_FILES=fixtures.make_runtime,fixtures.branding,fixtures.MENU,fixtures.MENUBAR_FILES
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);make_runtime(root)
+            raw=(root/MENUBAR_FILES[0]).read_bytes()
+            for module in OPEN:
+                with self.subTest(module=module):
+                    source=raw.replace(b'.uno:Open"',OPEN[module].encode()+b'"')
+                    branded=branding._native_menu_bytes(source)
+                    popup=ET.fromstring(branded).find(MENU+'menu/'+MENU+'menupopup')
+                    items={item.attrib[MENU+'id']:item.attrib.get(MENU+'label') for item in popup if MENU+'id' in item.attrib}
+                    self.assertEqual(items['vnd.opengeul.office:new-hwp'],'OpenGeul 한글 시작')
+                    self.assertEqual(items['.uno:StartModule'],'OpenGeul 시작 화면')
+                    f=self.fixture(module)
+                    f.popup.commands=[item.attrib[MENU+'id'] for item in popup if MENU+'id' in item.attrib]
+                    self.assertIs(f.guard.prepare(f.backend),True)
+                    self.assertIs(f.guard.ready(f.backend),True)
+                    self.assertTrue(any(call[0]=='query' and call[1]=='vnd.opengeul.office:new-hwp' for call in f.calls))
+                    self.assertFalse(any(call[0]=='settings' for call in f.calls))
+
     def test_pinned_readonly_xmenubar_property_is_distinct_from_the_real_manager(self):
         f = self.fixture()
         manager = f.element.getRealInterface()

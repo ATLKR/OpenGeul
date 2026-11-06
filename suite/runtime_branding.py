@@ -43,7 +43,7 @@ MENU_NAMESPACE = 'http://openoffice.org/2001/menu'
 MENUBAR_FILES = tuple('share/config/soffice.cfg/modules/' + module + '/menubar/menubar.xml'
                      for module in ('swriter', 'scalc', 'simpress', 'sdraw', 'smath', 'dbapp'))
 PRODUCT_MENU_ITEMS = (('.uno:StartModule', 'OpenGeul 시작 화면'),
-                      ('vnd.opengeul.office:new-hwp', '새 HWP 문서'))
+                      ('vnd.opengeul.office:new-hwp', 'OpenGeul 한글 시작'))
 KOREAN_TAB_LABELS = {
     'File': ('파일', ('FileLabel',)), 'Home': ('홈', ('HomeLabel',)),
     'Insert': ('삽입', ('InsertLabel',)), 'Layout': ('레이아웃', ('LayoutLabel',)),

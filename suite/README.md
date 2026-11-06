@@ -22,7 +22,8 @@ Writer/Calc/Impress/Draw는 Tabbed UI를 기본 설정합니다. Math/Base에는
 
 Office 문서에서는 native Office 메뉴바를 사용하며 별도 OpenGeul File strip은 없습니다.
 기존 Tabbed UI의 File 탭과 편집·서식 기능은 유지합니다. native 파일 메뉴의
-**새 HWP 문서**는 기존 HWP 편집기를 실행하고, **OpenGeul 시작 화면**은 현재 문서의
+**OpenGeul 한글 시작**은 기존 HWP 앱을 실행합니다. 이 메뉴는 빈 HWP 문서를 직접
+만들지 않으며, 새 문서는 HWP 앱의 시작 화면에서 만듭니다. **OpenGeul 시작 화면**은 현재 문서의
 정상 닫기가 확인된 뒤 시작 화면으로 이동합니다. **끝내기**는 시작 화면이 관리하는
 Office 문서를 차례로 닫으며 저장·취소 선택을 유지합니다. 별도 HWP 편집기 창은 이
 Office 저장·종료 관리에 포함되지 않습니다.

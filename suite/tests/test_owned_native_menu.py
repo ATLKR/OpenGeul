@@ -254,6 +254,19 @@ class OwnedNativeMenuTests(unittest.TestCase):
         for unknown in ('CTRL_F','ALT_F4','',None,True,[],{'scan':0x38}):
             with self.subTest(unknown=unknown):
                 with self.assertRaises(AssertionError):m._menu_release_events(unknown,1)
+
+    def test_hwp_launcher_chrome_is_distinct_from_office_home_and_new_document(self):
+        m=self.feature();probe=object.__new__(m.NativeMenuProbe)
+        probe._call=lambda function,*args:function(*args)
+        probe.uia=NS(tree_scope={'descendants':4},build_condition=lambda **kwargs:kwargs)
+        def root(labels):
+            elements=[NS(CurrentControlType=50011,CurrentName=label,CurrentIsOffscreen=False) for label in labels]
+            return NS(FindAll=lambda *args:NS(Length=len(elements),GetElement=lambda index:elements[index]))
+        menu=root(['OpenGeul 한글 시작','OpenGeul 시작 화면'])
+        self.assertEqual(probe._find(menu,'new-hwp').CurrentName,'OpenGeul 한글 시작')
+        self.assertEqual(probe._find(menu,'home').CurrentName,'OpenGeul 시작 화면')
+        for label in ('새 HWP 문서','OpenGeul 시작 화면','새 문서'):
+            with self.subTest(label=label),self.assertRaises(m.NativeMenuPending):probe._find(root([label]),'new-hwp')
     def test_print_preview_uses_the_same_two_physical_file_clicks_and_replays(self):
         m,a,p,r,c,probe=self.fixture()
         value=m.click_native_menu_action(a,p,11,r,'printPreview',probe=probe,clock=c)

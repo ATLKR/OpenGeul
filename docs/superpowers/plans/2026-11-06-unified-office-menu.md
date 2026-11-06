@@ -5,7 +5,7 @@
 **Goal:** One native Office menu surface with required integration and explicit session failure.
 
 **Architecture:** Prepare the retained native frame's real menubar, including
-packaged native OpenGeul Home/New HWP entries. Remove the host File strip entirely;
+packaged native OpenGeul Home/HWP launcher entries. Remove the host File strip entirely;
 keep shell-owned document transactions behind native commands.
 
 **Tech Stack:** Python/PyUNO, C# .NET8 WinForms/Core, existing Windows E2E.
@@ -101,5 +101,8 @@ related tests, office-suite.yml and suite/README.md.
 - [x] Connect each view hold to a completed status request started after its
   first matching sample, using the existing diagnostics mode and numbers only.
 - [ ] Run those view cases on Windows after the final reviewed source is pushed.
-- [ ] Prove HWP launch/new-document/graceful-exit behavior without the existing
+- [x] Label the existing HWP launcher **OpenGeul 한글 시작**, keeping its internal
+  new-hwp URL and no-argument launch. Direct blank-document creation is unsupported;
+  the pinned HWP app starts at its own Home and provides its own New action.
+- [ ] Prove HWP menu launch/readiness/graceful-exit behavior without the existing
   shell tree-force cleanup; menu availability alone does not qualify it.
