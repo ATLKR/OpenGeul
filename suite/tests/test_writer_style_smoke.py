@@ -1,6 +1,7 @@
 """Reject no-op style shortcuts and mismatched saved/reopened Writer evidence."""
 import copy
 import ctypes
+from functools import partial
 import hashlib
 import importlib.util
 import json
@@ -186,6 +187,8 @@ class WriterStyleNativeSaveTests(unittest.TestCase):
             SimpleNamespace(wrapper_object=lambda: window))
         self.enterContext(mock.patch.dict('sys.modules', {'pywinauto': SimpleNamespace(Desktop=desktop)}))
         self.enterContext(mock.patch.object(owned_native_menu, 'NativeMenuProbe', return_value=probe))
+        self.enterContext(mock.patch.object(smoke.native, 'click_native_menu_action',
+            partial(smoke.native.click_native_menu_action, clock=probe.clock)))
         activation = self.enterContext(mock.patch.object(smoke.native, 'activate_owned_suite'))
         return api, process, record, probe, activation
 
@@ -209,6 +212,28 @@ class WriterStyleNativeSaveTests(unittest.TestCase):
         self.assertTrue(action['dpiScope']['restored'])
         self.assertLess(action['finishedAt'], action['deadline'])
         self.assertLessEqual(action['deadline'] - action['startedAt'], 5)
+
+    def test_frozen_default_clock_cannot_replace_the_shared_native_probe_clock(self):
+        import owned_native_menu
+        api, process, record, probe, activation = self.fixture()
+        probe.clock.now = 0.
+        # Model a coarser real clock returning the same tick across this fast
+        # synthetic action. The actual native helper still requires progress.
+        with mock.patch.dict(owned_native_menu._run.__kwdefaults__, {'clock': lambda: 777.}):
+            try:
+                smoke.click_suite_save(api, process, 11, record)
+            except AssertionError as error:
+                self.fail('Native style fixture must pass the same clock as its leaf probe: '
+                          + type(error).__name__)
+        action = record['saveMenuAction']
+        self.assertTrue(action['success'])
+        self.assertEqual(action['startedAt'], 0.)
+        self.assertAlmostEqual(action['finishedAt'], .04, places=12)
+        self.assertEqual(action['finishedAt'], probe.clock())
+        self.assertEqual(action['deadline'], 5.)
+        self.assertLess(action['startedAt'], action['finishedAt'])
+        self.assertEqual([call for call in probe.calls if isinstance(call,tuple) and call[0] in ('click','key')],
+                         [('click','file'),('click','save')])
 
     def test_style_save_rejects_reused_engine_before_any_native_input(self):
         api, process, record, probe, activation = self.fixture()
