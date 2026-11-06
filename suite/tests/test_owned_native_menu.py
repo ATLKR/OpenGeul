@@ -253,6 +253,137 @@ class OwnedNativeMenuTests(unittest.TestCase):
         if mode=='metadataNone':boundary.interface._methods_=None
         return m,a,p,r,c,boundary
 
+    def shell_bar_fixture(self,*,count=1,depth=3,mode=None,owner=77,visible=True):
+        m,a,p,r,c,b=self.real_chrome_fixture();queries=[]
+        class ShellNode(b.Node):
+            def __init__(self,index,level=0):
+                super().__init__('shell-'+str(index)+'-'+str(level));self.index,self.level=index,level
+            def observed(self,key,value):
+                queries.append((self.index,self.level,key))
+                if mode=='late' and key=='nativeHwnd':c.now=6.
+                if mode=='property-error' and key=='kind':raise RuntimeError('SYNTHETIC PRIVATE body')
+                return value
+            @property
+            def CurrentProcessId(self):return self.observed('pid',owner)
+            @property
+            def CurrentIsOffscreen(self):return self.observed('offscreen',not visible)
+            @property
+            def CurrentControlType(self):
+                return self.observed('kind',50010 if self.level==0 else 50032 if self.level==depth-1 else 50037)
+            @property
+            def CurrentNativeWindowHandle(self):return self.observed('nativeHwnd',11 if self.level==depth-1 else 0)
+            @property
+            def CurrentName(self):raise AssertionError('Diagnosis read an unknown label')
+            @property
+            def CurrentAutomationId(self):raise AssertionError('Diagnosis read an unknown automation ID')
+            def GetRuntimeId(self):raise AssertionError('Diagnosis read an unrelated runtime ID')
+        nodes=[ShellNode(index) for index in range(count)]
+        original_find,original_parent,original_compare=b.find,b.parent,b.compare
+        def find(key,scope,condition):
+            if key!='host':return original_find(key,scope,condition)
+            self.assertEqual((scope,condition),(4,(30003,50010)))
+            return NS(Length=len(nodes),GetElement=lambda index:nodes[index])
+        def parent(node):
+            if not isinstance(node,ShellNode):return original_parent(node)
+            queries.append((node.index,node.level,'parent'))
+            if mode=='parent-error':raise RuntimeError('SYNTHETIC PRIVATE parent')
+            return ShellNode(node.index,node.level+1) if node.level+1<depth else None
+        def compare(left,right):
+            if not isinstance(left,ShellNode):return original_compare(left,right)
+            self.assertEqual(right.key,'bar');queries.append((left.index,left.level,'compare'))
+            if mode=='compare-error':raise RuntimeError('SYNTHETIC PRIVATE compare')
+            if mode=='compare-none':return None
+            if mode=='compare-float':return 0.
+            return 1 if mode=='engine-alias' else 0
+        b.find=find;b.probe.uia.iuia.ControlViewWalker.GetParentElement=parent
+        b.probe.uia.iuia.CompareElements=compare
+        if mode=='root-malformed':b.probe.user.GetAncestor=lambda hwnd,flag:True
+        return m,a,p,r,c,b,queries
+
+    def failed_shell_bar_action(self,**options):
+        m,a,p,r,c,b,queries=self.shell_bar_fixture(**options)
+        with self.assertRaisesRegex(AssertionError,'Native menu not exclusive and ready'):
+            m.click_native_menu_action(a,p,11,r,'save',probe=b.probe,clock=c)
+        action=r['nativeMenuActions'][0];snapshot=action['menuObservation']['snapshot']
+        self.assertEqual(action['pointers'],[]);self.assertEqual(action['keys'],[])
+        self.assertFalse(any(isinstance(x,tuple) and x[0] in ('click','key') for x in b.native.calls))
+        self.assertTrue(action['engineHandleReleased']);self.assertTrue(action['providerClientReleased'])
+        self.assertFalse(action['success'])
+        self.assertTrue('shellMenuObservation' in snapshot,'Counted shell bars need bounded numeric diagnosis')
+        return m,action,snapshot,queries
+
+    def test_counted_shell_bar_keeps_numeric_ancestry_without_admitting_native_input(self):
+        m,action,snapshot,queries=self.failed_shell_bar_action()
+        self.assertEqual(snapshot['shellMenuCount'],1)
+        value=snapshot['shellMenuObservation'];self.assertEqual(value['observedCount'],1)
+        self.assertEqual(value['statusCode'],1);self.assertFalse(value['truncated'])
+        sample,=value['samples'];self.assertEqual(sample['errorCode'],0)
+        self.assertIs(sample['sameAsEngineBar'],False)
+        self.assertEqual(sample['comparisonCode'],2)
+        self.assertEqual([row['controlType'] for row in sample['ancestors']],[50010,50037,50032])
+        self.assertEqual([row['hwndAnchorCode'] for row in sample['ancestors']],[0,0,1])
+        self.assertEqual([row['ownerRoleCode'] for row in sample['ancestors']],[1,1,1])
+        self.assertEqual(queries.count((0,0,'pid')),1);self.assertEqual(queries.count((0,0,'offscreen')),1)
+        def numeric(row):
+            if isinstance(row,dict):return all(numeric(v) for v in row.values())
+            if isinstance(row,list):return all(numeric(v) for v in row)
+            return type(row) in (int,bool)
+        self.assertTrue(numeric(value))
+        import json
+        raw=json.dumps(value).encode();self.assertLess(len(raw),128*1024)
+        self.assertNotIn(b'SYNTHETIC PRIVATE',raw)
+
+    def test_shell_diagnosis_caps_samples_without_changing_the_original_count(self):
+        _,_,snapshot,queries=self.failed_shell_bar_action(count=7)
+        value=snapshot['shellMenuObservation']
+        self.assertEqual(snapshot['shellMenuCount'],7);self.assertEqual(value['observedCount'],7)
+        self.assertEqual(value.get('sampleLimit'),2);self.assertEqual(value.get('ancestorLimit'),32)
+        self.assertEqual(len(value['samples']),2);self.assertTrue(value['truncated'])
+        self.assertEqual({index for index,_,key in queries if key=='compare'},{0,1})
+        self.assertEqual({index for index,_,key in queries if key=='pid'},set(range(7)))
+        self.assertFalse(any(index>=2 and key not in ('pid','offscreen') for index,_,key in queries))
+
+    def test_shell_diagnosis_bounds_parent_walk_and_keeps_unknown_identity_closed(self):
+        _,_,snapshot,queries=self.failed_shell_bar_action(depth=40)
+        value=snapshot['shellMenuObservation'];sample,=value['samples']
+        self.assertEqual(len(sample['ancestors']),32)
+        self.assertEqual((value['statusCode'],sample['stageCode'],sample['errorCode']),(2,6,5))
+        self.assertEqual(sum(key=='parent' for _,_,key in queries),32)
+
+    def test_shell_diagnosis_errors_keep_original_guard_and_never_guess_comparison(self):
+        cases=(('compare-error',1),('compare-none',1),('compare-float',1),
+               ('property-error',2),('root-malformed',3),('parent-error',4),('late',2))
+        for mode,code in cases:
+            with self.subTest(mode=mode):
+                _,action,snapshot,queries=self.failed_shell_bar_action(mode=mode)
+                value=snapshot['shellMenuObservation'];sample,=value['samples']
+                self.assertEqual(snapshot['shellMenuCount'],1)
+                self.assertEqual((value['statusCode'],sample['errorCode']),(2,code))
+                self.assertEqual(action['deadline'],action['startedAt']+5)
+                if code==1:
+                    self.assertEqual(sample['comparisonCode'],0)
+                    self.assertFalse('sameAsEngineBar' in sample)
+                if mode=='late':self.assertEqual(queries[-1],(0,0,'nativeHwnd'))
+                import json
+                self.assertNotIn('SYNTHETIC PRIVATE',json.dumps(value))
+
+    def test_engine_bar_alias_diagnosis_does_not_remove_the_counted_shell_bar(self):
+        _,_,snapshot,_=self.failed_shell_bar_action(mode='engine-alias')
+        sample,=snapshot['shellMenuObservation']['samples']
+        self.assertIs(sample['sameAsEngineBar'],True);self.assertEqual(sample['comparisonCode'],1)
+        self.assertEqual(snapshot['shellMenuCount'],1)
+
+    def test_noncounted_bars_get_no_additional_diagnostic_queries(self):
+        for owner,visible in ((88,True),(77,False)):
+            with self.subTest(owner=owner,visible=visible):
+                m,a,p,r,c,b,queries=self.shell_bar_fixture(owner=owner,visible=visible)
+                value=m.click_native_menu_action(a,p,11,r,'save',probe=b.probe,clock=c)
+                self.assertTrue(value['success']);m.require_native_menu_action(value,77,11,'save')
+                self.assertTrue(all(key in ('pid','offscreen') for _,_,key in queries))
+                snapshot=value['pointers'][0]['snapshots'][0]
+                self.assertEqual(snapshot['shellMenuCount'],0)
+                self.assertFalse('shellMenuObservation' in snapshot)
+
     def test_real_chrome_empty_runtime_ids_require_actual_differential_identity(self):
         m,a,p,r,c,boundary=self.real_chrome_fixture()
         with patch.object(m.time,'sleep',side_effect=c.pause):

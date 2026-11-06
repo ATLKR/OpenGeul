@@ -956,6 +956,48 @@ class NativeMenuProbe(NativeControlProbe):
             row=self.window_snapshot(hwnd);assert row['pid']==binding['officePid']
             hwnd=int(self._call(self.user.GetWindow,hwnd,4) or 0)
         return rows
+    def _shell_menu_observation(self,count,samples,binding,shell_pid):
+        # These are already-rejected visible shell bars, never admission hints.
+        result=dict(schemaVersion=1,observedCount=count,statusCode=1,
+            sampleLimit=2,ancestorLimit=32,truncated=count>len(samples),samples=[])
+        def anchor(hwnd):
+            return 0 if not hwnd else 1 if hwnd==binding['document'] else 2 if hwnd==binding['parent'] else 3 if hwnd==binding['child'] else 4
+        for index,bar,owner in samples:
+            sample=dict(index=index,stageCode=1,errorCode=0,comparisonCode=0,ancestors=[])
+            result['samples'].append(sample)
+            try:
+                same=self._same(bar,self.menu_bar_element)
+                sample.update(sameAsEngineBar=same,comparisonCode=1 if same else 2)
+                cursor=bar
+                for depth in range(32):
+                    sample['stageCode']=2
+                    pid=owner if depth==0 else self._call(lambda:cursor.CurrentProcessId)
+                    kind=self._call(lambda:cursor.CurrentControlType)
+                    raw=self._call(lambda:cursor.CurrentNativeWindowHandle)
+                    assert type(pid) is int and 0<pid<2**32
+                    assert type(kind) is int and 0<=kind<2**16
+                    assert raw is None or type(raw) is int and -(2**31)<=raw<2**32
+                    hwnd=0 if raw is None else raw&0xffffffff
+                    sample['stageCode']=3
+                    raw_root=self._call(self.user.GetAncestor,hwnd,2) if hwnd else None
+                    assert raw_root is None or type(raw_root) is int and 0<=raw_root<2**64
+                    root=raw_root or 0
+                    sample['ancestors'].append(dict(controlType=kind,ownerPid=pid,
+                        ownerRoleCode=1 if pid==shell_pid else 2 if pid==binding['officePid'] else 3,
+                        nativeHwnd=hwnd,hwndAnchorCode=anchor(hwnd),rootHwnd=root,rootAnchorCode=anchor(root)))
+                    if hwnd==binding['document']:
+                        sample['stageCode']=5;break
+                    sample['stageCode']=4
+                    cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
+                    if not cursor:
+                        sample['stageCode']=5;break
+                else:sample.update(stageCode=6,errorCode=5)
+            except BaseException:
+                # Fixed codes only; the original count failure remains primary.
+                sample['errorCode']=sample['stageCode']
+            if sample['errorCode']:
+                result['statusCode']=2;break
+        return result
     def snapshot(self,binding,target):
         doc=binding['document'];child=binding['child'];pid=binding['officePid']
         self._active_target=target
@@ -994,18 +1036,20 @@ class NativeMenuProbe(NativeControlProbe):
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuBar'))
         bars=self._call(shell.FindAll,self.uia.tree_scope['descendants'],condition)
         count=int(self._call(lambda:bars.Length));assert 0<=count<=64
-        duplicates=0
+        duplicates=0;shell_samples=[]
         for index in range(count):
             bar=self._call(bars.GetElement,index)
             owner=self._call(lambda:bar.CurrentProcessId)
             visible=not self._call(lambda:bar.CurrentIsOffscreen)
             duplicates+=int(owner==document['pid'] and visible)
+            if owner==document['pid'] and visible and len(shell_samples)<2:shell_samples.append((index,bar,owner))
         result=dict(binding=dict(binding),attachmentValid=attachment['valid'],nativeReady=int(self._call(self.user.GetPropW,doc,READY_PROPERTY) or 0),
             shellMenuCount=duplicates,document=document,control=control,ancestry=chain,fileIndex=file_index,
             barIndex=bar_index,peerIndex=len(chain)-1,fileElementEquals=file_equal,peerElementEquals=peer_equal,
             popup=popup,foreground=fg,gui=gui,focusMenuPath=focused,focusMenuElementEquals=matched)
         if proof is not None:
             result.update(identityProof=proof,barElementEquals=True,focusIdentity=getattr(self,'_focus_identity',None))
+        if duplicates:result['shellMenuObservation']=self._shell_menu_observation(duplicates,shell_samples,binding,document['pid'])
         return result
     def view_snapshot(self,binding,module):
         assert module in ('writer','calc')
