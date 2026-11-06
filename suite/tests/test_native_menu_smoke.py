@@ -1133,6 +1133,12 @@ class InitialFocusStderrTests(unittest.TestCase):
         self.assertTrue(callable(method),'Bounded numeric initial-focus trace capture is missing')
         return method(self.session,self.record)
 
+    def activation_observed(self, sequence=1, *, source=1, mask=0, receiver=11, owner_same=True, pending=True):
+        row=self.event('initial.activationObserved',sequence)
+        row['details']=dict(sourceCode=source,rejectBitmask=mask,pendingBefore=True,pending=pending,
+            originalFormHwnd=11,originalPanelHwnd=12,receivedHwnd=receiver,ownerSame=owner_same)
+        return row
+
     def assert_unknown(self, value):
         self.assertIs(value['known'],False)
         self.assertEqual(value['rows'],[])
@@ -1159,6 +1165,73 @@ class InitialFocusStderrTests(unittest.TestCase):
 
     def test_before_missing_queue_does_not_establish_a_new_context(self):
         self.write([self.event('initial.queued')]);self.assert_unknown(self.capture())
+
+    def test_activation_observed_before_initial_waits_for_original_snapshot_context(self):
+        self.write([self.activation_observed(),self.event(sequence=2)])
+        value=self.capture();self.assertTrue(value['known'])
+        row=value['rows'][0]
+        self.assertEqual(row['stageCode'],4);self.assertEqual(row['sourceCode'],1)
+        self.assertTrue(row['contextDeferred']);self.assertTrue(row['contextInherited'])
+        self.assertFalse(row['resultPresent']);self.assertFalse(row['attempted']);self.assertFalse(row['verified'])
+        self.assertTrue(value['eventCompletenessUnknown']);self.assertFalse(value['acceptanceEligible'])
+
+    def test_activation_observed_alone_never_synthesizes_an_initial_context(self):
+        self.write([self.activation_observed()]);self.assert_unknown(self.capture())
+        self.write([self.activation_observed(),self.event('initial.activation',2)])
+        self.assert_unknown(self.capture())
+
+    def test_activation_observed_supports_fixed_ingress_and_queue_reject_enums_only(self):
+        for source in (1,2,3,4,5):
+            self.write([self.event(),self.activation_observed(2,source=source,mask=2)])
+            value=self.capture();self.assertTrue(value['known'])
+            self.assertEqual(value['rows'][1]['rejectBitmask'],2)
+        for source,mask in ((0,0),(6,0),(1,512),(1,-1),(True,0),(1,True)):
+            self.write([self.event(),self.activation_observed(2,source=source,mask=mask)])
+            self.assert_unknown(self.capture())
+
+    def test_activation_owner_changed_and_wrong_receiver_remain_numeric_diagnostics(self):
+        self.write([self.event(),self.activation_observed(2,source=2,mask=128|8|256,
+            receiver=99,owner_same=False,pending=False)])
+        value=self.capture();self.assertTrue(value['known'])
+        row=value['rows'][1]
+        self.assertEqual(row['receivedHwnd'],99);self.assertFalse(row['ownerSame'])
+        self.assertFalse(row['pending']);self.assertFalse(row['verified'])
+
+    def test_activation_observed_binding_and_boolean_mask_disagreement_are_unknown(self):
+        changes=(lambda row:row['details'].update(originalFormHwnd=99),
+            lambda row:row['details'].update(originalPanelHwnd=99),
+            lambda row:row['details'].update(pendingBefore=False),
+            lambda row:row['details'].update(ownerSame=False),
+            lambda row:row['details'].update(pending=False),
+            lambda row:row['details'].update(receivedHwnd=99),
+            lambda row:row['details'].update(rejectBitmask=64),
+            lambda row:row['details'].update(text='synthetic forbidden field'))
+        for change in changes:
+            row=self.activation_observed(2);change(row)
+            self.write([self.event(),row]);self.assert_unknown(self.capture())
+
+    def test_activation_observed_joins_managed_to_initial_and_native_to_snapshot_separately(self):
+        first=self.event(sequence=2);first['managedThreadId']=101
+        observed=self.activation_observed();observed['managedThreadId']=101
+        self.write([observed,first]);value=self.capture();self.assertTrue(value['known'])
+        self.assertEqual(value['scope']['shellThreadId'],9)
+        self.assertEqual(value['rows'][0]['managedThreadId'],101)
+        observed['managedThreadId']=9
+        self.write([observed,first]);self.assert_unknown(self.capture())
+
+    def test_activation_observed_worker_trace_and_sequence_still_join_original_scope(self):
+        for key,value in (('processId',78),('workerProcessId',100),('traceId','b'*32),('sequence',1)):
+            row=self.activation_observed(2);row[key]=value
+            self.write([self.event(),row]);self.assert_unknown(self.capture())
+
+    def test_activation_observed_exports_only_closed_numbers_and_keeps_gap_unknown(self):
+        self.write([self.activation_observed(2),self.event(sequence=4)])
+        value=self.capture();self.assertTrue(value['known'])
+        self.assertTrue(value['gapObserved']);self.assertEqual(value['gapCount'],2)
+        self.assertTrue(value['eventCompletenessUnknown'])
+        exported=json.dumps(value)
+        for text in ('initial.activationObserved','suite.editorFocus',str(self.folder),'a'*32):
+            self.assertNotIn(text,exported)
 
     def test_foreign_or_recycled_snapshot_generations_are_not_admitted(self):
         for component,key in (('Shell','Pid'),('Shell','CreationTime'),('Engine','Pid'),('Engine','CreationTime'),

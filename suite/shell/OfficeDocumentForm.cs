@@ -88,7 +88,13 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     protected override void OnActivated(EventArgs e)
     {
+        var observedOwner = editorFocusDiagnostics.Enabled ? editorFocus : null;
+        var pendingBefore = observedOwner?.InitialFocusPending == true;
+        var observedForm = pendingBefore ? editorFocusFormHwnd : 0;
+        var observedPanel = pendingBefore ? editorFocusPanelHwnd : 0;
+        var receivedHwnd = pendingBefore && IsHandleCreated ? Handle : 0;
         base.OnActivated(e);
+        TraceInitialActivation(1, receivedHwnd, observedOwner, pendingBefore, observedForm, observedPanel);
         QueueInitialEditorFocus();
     }
 
@@ -526,8 +532,14 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         var appActivated = m.Msg == 0x001C && m.WParam != 0;
         var activationHwnd = m.HWnd;
         var initialFocusOwner = editorFocus;
+        var pendingBefore = editorFocusDiagnostics.Enabled && initialFocusOwner?.InitialFocusPending == true;
+        var observedForm = pendingBefore ? editorFocusFormHwnd : 0;
+        var observedPanel = pendingBefore ? editorFocusPanelHwnd : 0;
+        var activationSource = m.Msg == 0x001C ? (appActivated ? 2 : 5) : m.Msg == 0x0021 ? 3 : 0;
         if (m.Msg == 0x0010) TraceClose("wmClose.received", new { messageHwnd = m.HWnd.ToInt64() });
         base.WndProc(ref m);
+        if (activationSource != 0)
+            TraceInitialActivation(activationSource, activationHwnd, initialFocusOwner, pendingBefore, observedForm, observedPanel);
         if (appActivated && initialFocusOwner is not null && initialFocusOwner.InitialFocusPending &&
             ReferenceEquals(editorFocus, initialFocusOwner) && !IsDisposed && !Disposing && IsHandleCreated &&
             activationHwnd == editorFocusFormHwnd && activationHwnd == Handle)
@@ -582,6 +594,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private void QueueInitialEditorFocus()
     {
         var owned = editorFocus;
+        if (editorFocusDiagnostics.Enabled && owned?.InitialFocusPending == true)
+            TraceInitialActivation(4, editorFocusFormHwnd, owned, true, editorFocusFormHwnd, editorFocusPanelHwnd);
         if (!attached || loading || owned is null || !owned.InitialFocusPending || IsDisposed || Disposing || !IsHandleCreated) return;
         // Run after WinForms finishes activation and normal focus restoration. The retained
         // owner coalesces callbacks and rechecks all native guards at execution time.
@@ -590,6 +604,32 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             result => editorFocusDiagnostics.Write("initial.activation", new { pending = owned.InitialFocusPending, result },
                 worker?.ProcessId, worker?.DiagnosticTraceId));
         editorFocusDiagnostics.Write("initial.queued", new { queued, pending = owned.InitialFocusPending }, worker?.ProcessId, worker?.DiagnosticTraceId);
+    }
+
+    private void TraceInitialActivation(int sourceCode, nint receivedHwnd, OwnedEditorFocus? ownerBefore,
+        bool pendingBefore, nint originalFormHwnd, nint originalPanelHwnd)
+    {
+        if (!editorFocusDiagnostics.Enabled || !pendingBefore || ownerBefore is null) return;
+        try
+        {
+            // These rows observe ingress and existing queue guards only. A mouse
+            // activation observation never queues or transfers editor focus.
+            var currentWorker = worker;
+            if (currentWorker is null || !IsHandleCreated || originalFormHwnd == 0 || originalPanelHwnd == 0) return;
+            var currentOwner = editorFocus;
+            var pending = currentOwner?.InitialFocusPending == true;
+            var ownerSame = ReferenceEquals(currentOwner, ownerBefore);
+            var rejectBitmask = (!attached ? 1 : 0) | (loading ? 2 : 0) | (currentOwner is null ? 4 : 0) |
+                (!pending ? 8 : 0) | (IsDisposed ? 16 : 0) | (Disposing ? 32 : 0) | (!IsHandleCreated ? 64 : 0) |
+                (!ownerSame ? 128 : 0) | (receivedHwnd != originalFormHwnd ? 256 : 0);
+            editorFocusDiagnostics.Write("initial.activationObserved", new
+            {
+                sourceCode, rejectBitmask, pendingBefore, pending,
+                originalFormHwnd = originalFormHwnd.ToInt64(), originalPanelHwnd = originalPanelHwnd.ToInt64(),
+                receivedHwnd = receivedHwnd.ToInt64(), ownerSame
+            }, currentWorker.ProcessId, currentWorker.DiagnosticTraceId);
+        }
+        catch (Exception) { /* Numeric observations must not change activation or queue behavior. */ }
     }
 
     private void ReleaseEditorFocus()

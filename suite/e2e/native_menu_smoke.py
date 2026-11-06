@@ -121,8 +121,8 @@ def capture_initial_focus_trace(session, record):
             return value
         def invalid_constant(value): raise ValueError()
         prefix=b'{"event":"suite.editorFocus","component":"host",'
-        rows=[];sequence=0;gap_count=0;context=None;trace=None;worker=None
-        stage_codes={'initial':1,'initial.queued':2,'initial.activation':3}
+        rows=[];sequence=0;gap_count=0;context=None;trace=None;worker=None;initial_managed=None
+        stage_codes={'initial':1,'initial.queued':2,'initial.activation':3,'initial.activationObserved':4}
         reason_codes={'alreadyFocused':1,'editorFocused':2,'initialAlreadyHandled':3,
             'initialPending':4,'initialHandoffUnverified':5,'initialContextCancelled':6}
         window_keys='Hwnd Pid ThreadId Root Parent Exists Visible Enabled ClassName'
@@ -180,15 +180,32 @@ def capture_initial_focus_trace(session, record):
             trace,worker=value['traceId'],pid
             code=7
             stage=stage_codes[value['stage']];details=value['details']
-            expected='queued pending' if stage==2 else 'available pending result' if stage==1 else 'pending result'
+            expected=('sourceCode rejectBitmask pendingBefore pending originalFormHwnd originalPanelHwnd receivedHwnd ownerSame'
+                if stage==4 else 'queued pending' if stage==2 else 'available pending result' if stage==1 else 'pending result')
             keys(details,expected)
             row=dict(sequence=sequence,stageCode=stage,reasonCode=0,managedThreadId=managed,workerProcessId=pid,
                 pending=flag(details['pending']),availablePresent=stage==1,available=False,
-                queuePresent=stage==2,queued=False,resultPresent=stage!=2,attempted=False,verified=False,
+                queuePresent=stage==2,queued=False,resultPresent=stage in (1,3),attempted=False,verified=False,
                 beforePresent=False,before={},afterPresent=False,after={},previousFocus=0,nativeError=0,
                 contextInherited=False)
             if stage==1: row['available']=flag(details['available'])
-            if stage==2:
+            if stage==4:
+                source=integer(details['sourceCode'],5,1);mask=integer(details['rejectBitmask'],511)
+                pending_before=flag(details['pendingBefore']);owner_same=flag(details['ownerSame'])
+                observed_form=integer(details['originalFormHwnd'],minimum=1)
+                observed_panel=integer(details['originalPanelHwnd'],minimum=1)
+                receiver=integer(details['receivedHwnd'])
+                assert pending_before and (observed_form,observed_panel)==(form,panel)
+                assert not mask&64  # The producer omits rows without a retained live form handle.
+                assert bool(mask&128)==(not owner_same) and bool(mask&8)==(not row['pending'])
+                assert bool(mask&256)==(receiver!=form)
+                assert not mask&4 or not row['pending'] and not owner_same
+                if source in (1,4):assert receiver==form
+                row.update(sourceCode=source,rejectBitmask=mask,pendingBefore=pending_before,
+                    originalFormHwnd=observed_form,originalPanelHwnd=observed_panel,
+                    receivedHwnd=receiver,ownerSame=owner_same,contextDeferred=context is None,
+                    contextInherited=context is not None)
+            elif stage==2:
                 row['queued']=flag(details['queued']);assert context is not None
                 row['contextInherited']=True
             else:
@@ -204,6 +221,7 @@ def capture_initial_focus_trace(session, record):
                     before_context=attachment_identity(row['before'])
                     assert context is None or before_context==context
                     context=before_context
+                    if stage==1 and initial_managed is None:initial_managed=managed
                 else:
                     assert context is not None;row['contextInherited']=True
                 if row['afterPresent']:
@@ -214,6 +232,13 @@ def capture_initial_focus_trace(session, record):
         assert identity(path.lstat())==identity(before)
         code=6
         assert rows and context is not None
+        for row in rows:
+            if row['stageCode']==4:
+                code=9
+                # Managed IDs are joined only to the original rich initial row.
+                # Its validated CurrentThread separately binds the native TID.
+                assert initial_managed is not None and row['managedThreadId']==initial_managed
+                row['contextInherited']=True
         # Failed writes consume sequence numbers; the logger also has a silent
         # cap and no completion marker. No absent event proves non-execution.
         return dict(schemaVersion=1,attempted=True,known=True,acceptanceEligible=False,errorCode=0,
