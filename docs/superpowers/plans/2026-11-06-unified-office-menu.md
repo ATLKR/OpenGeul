@@ -60,6 +60,11 @@ shell-tests/DocumentMenuSurfaceTests.cs and Program registration.
 - [x] Connect document-owned Open and Home/Exit callbacks without introducing
   document Form ownership or fake keyboard focus restoration.
 - [x] Verify Core behavior on Windows x64/ARM64 (121/121 at68bc25a).
+- [x] Add an explicit guarded initial focus request after loading completes and
+  before native-menu readiness; keep it separate from user Ctrl+F6 and never
+  retry it on activation, resize or status polling.
+- [x] Verify the shared focus core's 18 local cases, including nine new cases;
+  keep native adapter compilation and host syntax checks separate from Windows UI.
 - [ ] Verify Windows-targeted WinForms compilation and UI; report actual limits.
 
 ### Task3: Native UI and final integration
@@ -100,6 +105,9 @@ related tests, office-suite.yml and suite/README.md.
   preserve the original83-generation verifier and all process-exit guards.
 - [x] Connect each view hold to a completed status request started after its
   first matching sample, using the existing diagnostics mode and numbers only.
+- [x] Record passive focus observations around harness maximize/activation and
+  await only the exact original idle host during the first editor check, inside
+  its unchanged five-second deadline. Preserve later focus checks and input plans.
 - [ ] Run those view cases on Windows after the final reviewed source is pushed.
 - [x] Label the existing HWP launcher **OpenGeul 한글 시작**, keeping its internal
   new-hwp URL and no-argument launch. Direct blank-document creation is unsupported;

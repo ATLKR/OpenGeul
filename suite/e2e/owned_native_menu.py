@@ -247,6 +247,37 @@ def _editor(snapshot,binding,shell_pid):
     fg=snapshot['foreground'];assert (fg['hwnd'],fg['rootHwnd'],fg['pid'])==(binding['document'],binding['document'],shell_pid), 'Original editor is not the foreground recipient'
 
 
+def _initial_host_focus_pending(row,binding,shell_pid):
+    """Only the exact, idle original host may await natural editor focus."""
+    assert row['binding']==binding and row['attachmentValid'] is True
+    assert row['nativeReady']==1 and type(row['nativeReady']) is int
+    assert row['attachmentExports']==[binding['parent'],binding['child']]
+    windows=row['attachmentWindows']
+    for role,pid in (('document',shell_pid),('parent',shell_pid),('child',binding['officePid'])):
+        value=windows[role]
+        assert (value['hwnd'],value['pid'],value['rootHwnd'])==(binding[role],pid,binding['document'])
+        assert type(value['threadId']) is int and value['threadId']>0
+    assert windows['document']['threadId']==windows['parent']['threadId']
+    doc=row['document']
+    assert all(doc[key]==windows['document'][key] for key in ('hwnd','pid','rootHwnd','threadId'))
+    assert doc['visible'] is True and doc['enabled'] is True
+    fg=row['foreground']
+    assert (fg['hwnd'],fg['rootHwnd'],fg['pid'])==(binding['document'],binding['document'],shell_pid)
+    host,engine=row['hostGui'],row['engineGui']
+    assert host['threadId']==windows['document']['threadId'] and engine['threadId']==windows['child']['threadId']
+    assert host['focusHwnd']==engine['focusHwnd'] and host['focusHwnd'] in (binding['document'],binding['parent'])
+    for gui in (host,engine):
+        assert all(type(gui[key]) is int and 0<=gui[key]<2**64 for key in (
+            'activeHwnd','focusHwnd','focusPid','focusRootHwnd','captureHwnd','menuOwnerHwnd','flags'))
+        assert gui['focusPid']==shell_pid and gui['focusRootHwnd']==binding['document']
+        assert gui['activeHwnd'] in (binding['document'],binding['parent'],binding['child'])
+        assert type(gui['flags']) is int and gui['flags']>=0 and gui['flags']&0x1e==0
+        assert gui['captureHwnd']==gui['menuOwnerHwnd']==0
+    assert row['focusPid']==shell_pid and row['focusRootHwnd']==binding['document']
+    assert row['focusUnderOriginalChild'] is False and row['menuClosed'] is True
+    assert row['captureHwnd']==row['menuOwnerHwnd']==0
+
+
 def _editor_numbers(snapshot):
     """Project already observed fixed native fields; no new query or raw text."""
     def fields(value,names):
@@ -264,6 +295,10 @@ def _editor_numbers(snapshot):
         attachment['exported']=list(exported)
     state=fields(snapshot,('focusPid','focusRootHwnd','captureHwnd','menuOwnerHwnd'))
     if type(snapshot.get('menuClosed')) is bool:state['menuClosed']=int(snapshot['menuClosed'])
+    if type(snapshot.get('nativeReady')) is int and 0<=snapshot['nativeReady']<2**64:state['nativeReady']=snapshot['nativeReady']
+    for source,target in (('visible','documentVisible'),('enabled','documentEnabled')):
+        flag=snapshot.get('document',{}).get(source)
+        if type(flag) is bool:state[target]=int(flag)
     return dict(hostGui=fields(snapshot.get('hostGui'),gui),engineGui=fields(snapshot.get('engineGui'),gui),
         foreground=fields(snapshot.get('foreground'),window),attachment=attachment,editor=state)
 
@@ -344,11 +379,33 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             measured=dict(phaseCode=phase,stageCode=10)
             value.setdefault('editorObservations',[]).append(measured)
             value.update(observationStage=10,observationPhase=phase)
-            row=probe.editor_snapshot(binding)
-            measured['stageCode']=11;value['observationStage']=11
-            try:measured['numbers']=_editor_numbers(row)
-            except BaseException:measured['numbersCaptureFailed']=1
-            _editor(row,binding,process.pid)
+            initial_windows=None
+            while True:
+                if phase==1:
+                    continuity()
+                    assert native_menu_active(api,process,document), 'Original native menu readiness changed'
+                    assert measured.get('sampleCount',0)<101, 'Initial editor focus observation exceeded finite bound'
+                row=probe.editor_snapshot(binding)
+                measured['stageCode']=11;value['observationStage']=11
+                measured['sampleCount']=measured.get('sampleCount',0)+1
+                try:
+                    measured['numbers']=_editor_numbers(row)
+                    if phase==1:measured.setdefault('firstNumbers',measured['numbers'])
+                except BaseException:measured['numbersCaptureFailed']=1
+                if initial_windows is not None:
+                    assert row['attachmentWindows']==initial_windows, 'Original editor threads changed during initial focus observation'
+                try:_editor(row,binding,process.pid)
+                except AssertionError:
+                    if phase!=1:raise
+                    pending=True
+                    try:_initial_host_focus_pending(row,binding,process.pid)
+                    except (AssertionError,KeyError,TypeError):pending=False
+                    if not pending:raise
+                    if initial_windows is None:initial_windows=copy.deepcopy(row['attachmentWindows'])
+                    budget();time.sleep(min(.05,max(0,deadline-clock())));budget()
+                    continue
+                if phase==1:continuity()
+                break
             measured['stageCode']=12;value['observationStage']=12
             return row
         def pointer(target):
@@ -1007,6 +1064,7 @@ class NativeMenuProbe(NativeControlProbe):
     def editor_snapshot(self,binding):
         attachment=self.attachment_snapshot(binding,include_gui=True);thread=attachment['windows']['child']['threadId'];gui=self.native_focus(thread)
         return dict(binding=dict(binding),attachmentValid=attachment['valid'],focusPid=gui['focusPid'],
+            document=self.window_snapshot(binding['document']),nativeReady=int(self._call(self.user.GetPropW,binding['document'],READY_PROPERTY) or 0),
             foreground=self.window_snapshot(self.foreground()),
             focusRootHwnd=gui['focusRootHwnd'],focusUnderOriginalChild=attachment['focusUnderOriginalChild'],
             captureHwnd=gui['captureHwnd'],menuOwnerHwnd=gui['menuOwnerHwnd'],menuClosed=not gui['captureHwnd'] and not gui['menuOwnerHwnd'],

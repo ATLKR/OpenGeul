@@ -78,6 +78,22 @@ Escape, outside click, repeated opening and keyboard navigation must return to
 the original native editor naturally. No synthesized Ctrl+F6, foreign activation
 or weakened foreground/capture/engine-generation guard is allowed.
 
+After successful attachment, the UI thread clears loading and makes one explicit
+initial focus request before publishing native-menu readiness. Share the existing
+owned focus checks with the user Ctrl+F6 route without synthesizing that route.
+Only the original foreground document with agreeing Form/Panel focus, retained
+process/window identities and no menu, capture, modal or close activity may hand
+focus to its native child. Keep an already focused editor unchanged and leave
+other contexts untouched. Do not retry on activation, resize or status polling.
+
+The menu harness records numeric focus observations before and after its own
+maximize and after activation. At its first editor check, only the exact idle
+owned host may await natural focus inside the original five-second action
+deadline. Input still requires the original editor postcondition; foreign or
+changed ownership, modal/menu state and ambiguous focus fail immediately. Later
+editor checks keep their original immediate requirements. These observations
+and initial screenshots do not prove that the chrome is unobstructed.
+
 ## Validation and scope
 
 Write behavioral tests before product changes, distinguishing executed Python
@@ -89,6 +105,15 @@ screenshots. Isolate six new menu-smoke generations from the existing83 gate and
 verify their original process lifetimes separately. Earlier RC failures remain
 separate from this change. No main merge, release/Store/customer distribution,
 paid runner, credential replacement/access expansion or stopped artifact retry.
+
+Standalone compiler prerequisites use a necessary nonsecret environment allowlist;
+mock boundaries use synthetic environments. Keep failure receipts to fixed
+stages and process/exit metadata, without environment maps, full commands or raw
+diagnostic streams. Observe retained direct-child state before cleanup. Compiler
+capture and cleanup waits share the original deadline with a cleanup reserve;
+incomplete reader or handle cleanup remains an explicit failure rather than
+qualification. This does not promise a hard real-time wall-clock bound on native
+process creation or operating-system scheduling.
 
 The new menu observer uses a private
 [CUIAutomation8 client](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/hh448746(v=vs.85)).

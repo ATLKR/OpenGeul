@@ -205,6 +205,99 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 self.assertEqual(record, dict(case='native-menu-writer'))
                 self.assertEqual(list(session.output.iterdir()), [])
 
+    def opening_focus_session(self):
+        from test_windows_attachment import native as windows, User32
+        class FocusUser(User32):
+            def __init__(self):
+                super().__init__();self.focus=11;self.on_query=None
+            def GetForegroundWindow(self):return 11
+            def GetGUIThreadInfo(self,thread,pointer):
+                self.call('GetGUIThreadInfo',thread)
+                if self.on_query:self.on_query()
+                value=pointer._obj;value.hwndActive=11;value.hwndFocus=self.focus
+                value.hwndCapture=value.hwndMenuOwner=value.flags=0
+                return 1
+        session=self.smoke.WindowsSession(Path('/suite'),Path('/fixtures'),Path('/output'),'writer')
+        session.hwnd,session.parent,session.child,session.office_pid=11,55,56,88
+        session.native=windows;session.api=object.__new__(windows.Windows);session.api.user=FocusUser()
+        session.process=SimpleNamespace(pid=77,_handle=8,poll=lambda:None)
+        session.engine=SimpleNamespace(handle=9,creation_time=200,exited=lambda seconds:False)
+        record=dict(nativeArchiveGeneration=dict(pid=88,creationTime=200,image='/suite/Office/program/soffice.bin'))
+        return session,record
+
+    def test_opening_focus_observation_uses_actual_windows_api_and_records_only_numbers(self):
+        session,record=self.opening_focus_session();user=session.api.user
+        user.properties[11,'OpenGeul.Office.NativeMenuReady']=0
+        observer=getattr(session,'_observe_open_focus',None)
+        self.assertTrue(callable(observer),'Initial host focus needs an actual read-only adapter')
+        observer(record,1)
+        user.properties[11,'OpenGeul.Office.NativeMenuReady']=1
+        observer(record,2);observer(record,3)
+        rows=record['openingFocusObservations']
+        self.assertEqual([row['phaseCode'] for row in rows],[1,2,3])
+        self.assertEqual([row['nativeReadyHint'] for row in rows],[0,1,1])
+        self.assertEqual([row['attachReadyObserved'] for row in rows],[0,1,1])
+        for row in rows:
+            self.assertEqual((row['hostGui']['focusHwnd'],row['engineGui']['focusHwnd']),(11,11))
+            self.assertEqual(row['foreground'],dict(hwnd=11,pid=77,rootHwnd=11))
+            def numeric(value):
+                if type(value) is dict:
+                    for child in value.values():numeric(child)
+                else:self.assertIs(type(value),int)
+            numeric(row)
+        self.assertEqual([call for call in user.calls if call[0]=='GetGUIThreadInfo'],
+            [('GetGUIThreadInfo',7),('GetGUIThreadInfo',9)]*3)
+        self.assertNotIn('GetWindowTextW',{call[0] for call in user.calls})
+        with self.assertRaises(AssertionError):observer(record,3)
+        self.assertEqual(len(rows),3)
+
+    def test_opening_focus_observation_rejects_owner_or_retained_handle_change_before_retention(self):
+        for change in ('before-parent','after-parent','engine-handle','shell-handle','engine-generation'):
+            with self.subTest(change=change):
+                session,record=self.opening_focus_session();user=session.api.user
+                observer=getattr(session,'_observe_open_focus',None)
+                self.assertTrue(callable(observer),'Initial ownership must be checked by the actual adapter')
+                if change=='before-parent':user.pids[55]=99
+                elif change=='after-parent':user.on_query=lambda:user.pids.update({55:99})
+                elif change=='engine-handle':user.on_query=lambda:setattr(session.engine,'handle',10)
+                elif change=='shell-handle':user.on_query=lambda:setattr(session.process,'_handle',10)
+                else:session.engine.creation_time=201
+                with self.assertRaises(AssertionError):observer(record,1)
+                self.assertNotIn('openingFocusObservations',record)
+                if change in ('before-parent','engine-generation'):
+                    self.assertFalse(any(call[0]=='GetGUIThreadInfo' for call in user.calls))
+
+    def test_actual_open_samples_focus_before_and_after_maximize_and_existing_activation(self):
+        import startup_smoke
+        import windows_smoke
+        import owned_native_menu
+        session,record=self.opening_focus_session();events=[];user=session.api.user
+        record['case']='native-menu-writer';api=session.api;process=session.process;engine=session.engine
+        observer=getattr(session,'_observe_open_focus',None)
+        self.assertTrue(callable(observer),'The real open path must emit the three numeric phases')
+        def sample(value,phase):events.append(('observe',phase));return observer(value,phase)
+        session._observe_open_focus=sample
+        def maximize():events.append('maximize')
+        def desktop(*,backend):
+            self.assertEqual(backend,'win32')
+            return SimpleNamespace(window=lambda *,handle:SimpleNamespace(wrapper_object=lambda:SimpleNamespace(maximize=maximize)))
+        def activate(*args):events.append('activate')
+        with patch.object(self.smoke.os,'name','nt'), \
+             patch.dict(sys.modules,{'pywinauto':SimpleNamespace(Desktop=desktop)}), \
+             patch.object(windows_smoke,'launch_suite',return_value=process), \
+             patch.object(windows_smoke,'new_document_command',return_value=['synthetic-launch']), \
+             patch.object(windows_smoke,'Windows',return_value=api), \
+             patch.object(windows_smoke,'verified_attachment',return_value=(11,55,56,88)), \
+             patch.object(windows_smoke,'capture_native_archive_generation',return_value=record['nativeArchiveGeneration']), \
+             patch.object(startup_smoke,'EngineProcessWitness',return_value=engine), \
+             patch.object(windows_smoke,'activate_owned_suite',side_effect=activate), \
+             patch.object(api,'home',return_value=22), \
+             patch.object(session,'_home_ready',return_value=True):
+            session.open(record)
+        self.assertEqual(events,[('observe',1),'maximize',('observe',2),'activate',('observe',3)])
+        self.assertEqual(len(record['openingFocusObservations']),3)
+        self.assertFalse(record.get('nativeMenuVerified',False))
+
     def test_failed_gesture_is_not_retried_and_later_input_is_not_sent(self):
         session = Session(fail='open-outside')
         record = self.run_case(session)

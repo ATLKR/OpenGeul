@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import ctypes
 import json
 import math
 import os
@@ -55,9 +56,58 @@ class WindowsSession:
         self.home_hwnd = int(self.api.home(self.process) or 0)
         self._home_ready()
         record['originalHomeHwnd'] = self.home_hwnd
+        self._observe_open_focus(record, 1)
         self.desktop(backend='win32').window(handle=self.hwnd).wrapper_object().maximize()
+        self._observe_open_focus(record, 2)
         native.activate_owned_suite(self.api, self.process, self.hwnd, record)
+        self._observe_open_focus(record, 3)
         self.api.require_foreground(self.hwnd)
+
+    def _observe_open_focus(self, record, phase):
+        """Three passive numeric observations; a ready hint is not editor proof.
+
+        In particular phase 1 with attachReadyObserved=0 cannot establish that
+        product attachment had completed before the harness maximized the form.
+        These fixed native queries introduce no wait, input, or COM client.
+        """
+        assert type(phase) is int and phase in (1, 2, 3)
+        rows = record.get('openingFocusObservations', [])
+        assert len(rows) == phase-1 and [row['phaseCode'] for row in rows] == list(range(1, phase))
+        def identity():
+            return (self.process.pid, int(self.process._handle), int(self.engine.handle), self.engine.creation_time,
+                self.hwnd, self.parent, self.child, self.office_pid)
+        current = identity()
+        original = getattr(self, '_opening_focus_identity', current)
+        def owned():
+            assert current == original == identity()
+            assert self.process.poll() is None and not self.engine.exited(0)
+            assert self.api.attachment(self.hwnd) == (self.parent, self.child, self.office_pid)
+            generation = record['nativeArchiveGeneration']
+            assert (generation['pid'], generation['creationTime']) == (self.office_pid, self.engine.creation_time)
+        owned()
+        self._opening_focus_identity = original
+        def window(hwnd):
+            hwnd = int(hwnd or 0)
+            return dict(hwnd=hwnd, pid=int(self.api.pid(hwnd)) if hwnd else 0,
+                rootHwnd=int(self.api.user.GetAncestor(hwnd, 2) or 0) if hwnd else 0)
+        def gui(hwnd):
+            thread = int(self.api.user.GetWindowThreadProcessId(hwnd, None))
+            assert thread > 0, 'Original focus observation thread is unavailable'
+            state = self.native.GuiThreadInfo(cbSize=ctypes.sizeof(self.native.GuiThreadInfo))
+            assert self.api.user.GetGUIThreadInfo(thread, ctypes.byref(state)), 'Original focus observation query failed'
+            focus = window(state.hwndFocus)
+            return dict(threadId=thread, activeHwnd=int(state.hwndActive or 0), focusHwnd=focus['hwnd'],
+                focusPid=focus['pid'], focusRootHwnd=focus['rootHwnd'], captureHwnd=int(state.hwndCapture or 0),
+                menuOwnerHwnd=int(state.hwndMenuOwner or 0), flags=int(state.flags))
+        host, engine = gui(self.hwnd), gui(self.child)
+        foreground = window(self.api.user.GetForegroundWindow())
+        hint = self.api.user.GetPropW(self.hwnd, 'OpenGeul.Office.NativeMenuReady')
+        assert hint is None or type(hint) is int and 0 <= hint < 2**64
+        row = dict(phaseCode=phase, nativeReadyHint=int(hint or 0), attachReadyObserved=int(hint == 1),
+            hostGui=host, engineGui=engine, foreground=foreground)
+        owned()
+        assert len(json.dumps(rows+[row], separators=(',', ':')).encode()) <= 128*1024
+        record.setdefault('openingFocusObservations', []).append(row)
 
     def ready(self):
         return self.menu.native_menu_active(self.api, self.process, self.hwnd) is True

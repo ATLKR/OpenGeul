@@ -411,6 +411,117 @@ class OwnedNativeMenuTests(unittest.TestCase):
                 m,a,p,r,c,probe=self.fixture();value=m.inspect_native_menu(a,p,11,r,gesture,probe=probe,clock=c)
                 self.assertTrue(value['success']);self.assertTrue(value['focusReturned'])
                 self.assertEqual(value['deadline'],6.)
+    def initial_focus_fixture(self):
+        m,a,p,r,c,probe=self.fixture()
+        original=probe.editor_snapshot
+        def snapshot(binding):
+            row=original(binding)
+            row.update(nativeReady=1,document=dict(hwnd=11,pid=77,rootHwnd=11,threadId=7,visible=True,enabled=True),
+                attachmentWindows={role:dict(hwnd=hwnd,pid=pid,threadId=thread,rootHwnd=11)
+                    for role,hwnd,pid,thread in (('document',11,77,7),('parent',55,77,7),('child',56,88,9))},
+                attachmentExports=[55,56])
+            gui=dict(activeHwnd=11,focusHwnd=57,focusPid=88,focusRootHwnd=11,captureHwnd=0,menuOwnerHwnd=0,flags=0)
+            row.update(hostGui=dict(gui,threadId=7),engineGui=dict(gui,threadId=9))
+            return row
+        probe.editor_snapshot=snapshot
+        return m,a,p,r,c,probe
+    def host_focus(self,row):
+        row.update(focusPid=77,focusUnderOriginalChild=False)
+        for name in ('hostGui','engineGui'):row[name].update(focusHwnd=11,focusPid=77)
+        return row
+    def test_initial_owned_host_focus_settles_without_input_and_keeps_original_deadline(self):
+        m,a,p,r,c,probe=self.initial_focus_fixture();original=probe.editor_snapshot;reads=[]
+        def snapshot(binding):
+            reads.append(c());row=original(binding)
+            if len(reads)<=2:return self.host_focus(row)
+            return row
+        probe.editor_snapshot=snapshot
+        with patch.object(m.time,'sleep',side_effect=c.pause):
+            value=m.inspect_native_menu(a,p,11,r,'keyboard-escape',probe=probe,clock=c)
+        first=value['editorObservations'][0]
+        self.assertEqual(first['sampleCount'],3)
+        self.assertEqual(first['firstNumbers']['engineGui']['focusHwnd'],11)
+        self.assertEqual(first['numbers']['engineGui']['focusHwnd'],57)
+        self.assertEqual(first['firstNumbers']['editor'].get('nativeReady'),1)
+        self.assertEqual(first['firstNumbers']['editor'].get('documentVisible'),1)
+        self.assertEqual(first['firstNumbers']['editor'].get('documentEnabled'),1)
+        self.assertEqual([row['phaseCode'] for row in value['editorObservations']],[1,2,3])
+        self.assertEqual(value['deadline'],6.);self.assertLess(value['finishedAt'],6.)
+        self.assertEqual([call for call in probe.calls if isinstance(call,tuple) and call[0] in ('click','key')],
+            [('key','ALT_F'),('key','DOWN'),('key','ESCAPE')])
+        self.assertIs(m.require_native_menu_action(value,77,11),value)
+    def test_persistent_initial_host_focus_expires_with_bounded_numeric_evidence_and_no_input(self):
+        m,a,p,r,c,probe=self.initial_focus_fixture();original=probe.editor_snapshot
+        probe.editor_snapshot=lambda binding:self.host_focus(original(binding))
+        with patch.object(m.time,'sleep',side_effect=c.pause),self.assertRaises(AssertionError):
+            m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+        value=r['nativeMenuActions'][-1];first,=value['editorObservations']
+        self.assertEqual(value['deadline'],6.);self.assertGreaterEqual(c(),6.)
+        self.assertGreater(first['sampleCount'],1);self.assertLessEqual(first['sampleCount'],101)
+        self.numeric_leaves(first['firstNumbers']);self.numeric_leaves(first['numbers'])
+        self.assertLess(len(__import__('json').dumps(value).encode()),128*1024)
+        self.assertEqual(value['pointers'],[]);self.assertEqual(value['keys'],[])
+        self.assertTrue(value['engineHandleReleased']);self.assertFalse(value['success'])
+    def test_initial_settle_rejects_foreign_unknown_modal_and_mismatched_focus_immediately(self):
+        changes=(lambda row:row['hostGui'].update(focusHwnd=55),
+            lambda row:row['hostGui'].update(focusHwnd=0),lambda row:row['engineGui'].update(focusPid=999),
+            lambda row:row['engineGui'].update(flags=4),lambda row:row['hostGui'].update(captureHwnd=55),
+            lambda row:row['engineGui'].update(menuOwnerHwnd=56),lambda row:row['document'].update(enabled=False),
+            lambda row:row['document'].update(visible=False),lambda row:row.update(nativeReady=0),
+            lambda row:row.pop('hostGui'),lambda row:row.update(attachmentValid=False),
+            lambda row:row.update(attachmentExports=[55,57]),lambda row:row['foreground'].update(hwnd=99),
+            lambda row:row['engineGui'].update(threadId=7))
+        for index,change in enumerate(changes):
+            with self.subTest(case=index):
+                m,a,p,r,c,probe=self.initial_focus_fixture();original=probe.editor_snapshot
+                def snapshot(binding):
+                    row=self.host_focus(original(binding));change(row);return row
+                probe.editor_snapshot=snapshot
+                with patch.object(m.time,'sleep',side_effect=c.pause),self.assertRaises(AssertionError):
+                    m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+                self.assertEqual(c(),1.)
+                self.assertEqual(r['nativeMenuActions'][-1]['pointers'],[])
+                self.assertEqual(r['nativeMenuActions'][-1]['keys'],[])
+    def test_initial_settle_rechecks_retained_generation_and_attachment_before_each_read(self):
+        for changed in ('shell','engine','attachment','thread'):
+            with self.subTest(changed=changed):
+                m,a,p,r,c,probe=self.initial_focus_fixture();original=probe.editor_snapshot;reads=[]
+                def snapshot(binding):
+                    reads.append(1);row=self.host_focus(original(binding))
+                    if changed=='thread' and len(reads)>1:row['attachmentWindows']['child']['threadId']=10
+                    return row
+                probe.editor_snapshot=snapshot
+                def pause(seconds):
+                    c.pause(seconds)
+                    if changed=='shell':probe.shell['creationTime']=101
+                    if changed=='engine':probe.engine['creationTime']=201
+                    if changed=='attachment':a.attachment=lambda hwnd:(55,57,88)
+                with patch.object(m.time,'sleep',side_effect=pause),self.assertRaises(AssertionError):
+                    m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+                self.assertLessEqual(len(reads),2)
+                self.assertEqual(r['nativeMenuActions'][-1]['pointers'],[])
+                self.assertEqual(r['nativeMenuActions'][-1]['keys'],[])
+    def test_later_editor_phases_never_settle_host_focus(self):
+        for phase in (2,3):
+            with self.subTest(phase=phase):
+                m,a,p,r,c,probe=self.initial_focus_fixture();original=probe.editor_snapshot;reads=[];pauses=[]
+                def snapshot(binding):
+                    reads.append(1);row=original(binding)
+                    return self.host_focus(row) if len(reads)==phase else row
+                probe.editor_snapshot=snapshot
+                with patch.object(m.time,'sleep',side_effect=lambda seconds:pauses.append(seconds)),self.assertRaises(AssertionError):
+                    m.inspect_native_menu(a,p,11,r,'keyboard-escape',probe=probe,clock=c)
+                self.assertEqual(pauses,[])
+                self.assertEqual(r['nativeMenuActions'][-1]['observationPhase'],phase)
+    def test_initial_settle_has_a_finite_query_count_even_if_the_clock_does_not_advance(self):
+        m,a,p,r,c,probe=self.initial_focus_fixture();original=probe.editor_snapshot
+        probe.editor_snapshot=lambda binding:self.host_focus(original(binding))
+        with patch.object(m.time,'sleep',return_value=None),self.assertRaises(AssertionError):
+            m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+        first,=r['nativeMenuActions'][-1]['editorObservations']
+        self.assertEqual(first['sampleCount'],101)
+        self.assertEqual(r['nativeMenuActions'][-1]['pointers'],[])
+        self.assertEqual(r['nativeMenuActions'][-1]['keys'],[])
     def real_editor_probe(self,m,clock,*,host_focus=0,engine_focus=57):
         probe=object.__new__(m.NativeMenuProbe);queries=[]
         pids={11:77,55:77,56:88,57:88};threads={11:7,55:7,56:9,57:9}
@@ -453,6 +564,29 @@ class OwnedNativeMenuTests(unittest.TestCase):
         with self.assertRaises(AssertionError):m._editor(value,binding,77)
         numbers=m._editor_numbers(value);self.numeric_leaves(numbers)
         self.assertNotIn('SYNTHETIC PRIVATE',str(numbers))
+    def test_actual_editor_snapshot_settles_agreed_host_focus_without_creating_an_input_path(self):
+        m,a,p,r,c,stub=self.fixture();probe,queries=self.real_editor_probe(m,c,host_focus=11,engine_focus=11)
+        original_gui=probe.user.GetGUIThreadInfo
+        def gui(thread,pointer):
+            result=original_gui(thread,pointer)
+            if c()>1:pointer._obj.focus=57
+            return result
+        probe.user.GetGUIThreadInfo=gui
+        probe.user.GetPropW=lambda hwnd,name:1 if name==m.READY_PROPERTY else 55 if name.endswith('ParentHwnd') else 56
+        probe.window_snapshot=lambda hwnd:dict(hwnd=11,pid=77,threadId=7,rootHwnd=11,visible=True,enabled=True)
+        for name in ('process_snapshot','open_engine','engine_snapshot','close_engine','enter_dpi','restore_dpi'):
+            setattr(probe,name,getattr(stub,name))
+        reached=AssertionError('Synthetic fixed menu boundary')
+        def menu_boundary(*args):raise reached
+        probe.snapshot=menu_boundary
+        with patch.object(m.time,'sleep',side_effect=c.pause),self.assertRaises(AssertionError) as caught:
+            m.inspect_native_menu(a,p,11,r,'open-escape',probe=probe,clock=c)
+        self.assertIs(caught.exception,reached)
+        first,=r['nativeMenuActions'][-1]['editorObservations']
+        self.assertEqual((first['stageCode'],first['sampleCount']),(12,2))
+        self.assertEqual(queries,[7,9,7,9])
+        self.assertEqual(r['nativeMenuActions'][-1]['pointers'],[])
+        self.assertEqual(r['nativeMenuActions'][-1]['keys'],[])
     def test_initial_real_editor_guard_records_stage_and_numeric_site_before_any_input(self):
         import numeric_notice
         m,a,p,r,c,stub=self.fixture();probe,queries=self.real_editor_probe(m,c)

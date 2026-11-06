@@ -8,7 +8,11 @@ public sealed record EditorFocusSnapshot(EditorFocusProcess Shell, EditorFocusPr
     EditorFocusWindow Foreground, EditorFocusWindow Focus, EditorFocusWindow EditorFocus,
     EditorFocusWindow Capture, EditorFocusWindow EditorCapture, uint CurrentThread,
     bool GuiQueriesSucceeded, uint GuiFlags, bool FormOwnsPanel, bool PanelOwnsChild,
-    bool FocusWithinEditor, bool EditorFocusWithinEditor, long RegisteredPanel, long RegisteredChild);
+    bool FocusWithinEditor, bool EditorFocusWithinEditor, long RegisteredPanel, long RegisteredChild)
+{
+    public long HostMenuOwner { get; init; }
+    public long EditorMenuOwner { get; init; }
+}
 public sealed record EditorFocusResult(bool Verified, bool Attempted, string Reason,
     EditorFocusSnapshot? Before, EditorFocusSnapshot? After, long PreviousFocus, int NativeError);
 
@@ -25,6 +29,7 @@ public sealed class OwnedEditorFocus : IDisposable
     private readonly IOwnedEditorFocusNative native;
     private readonly EditorFocusSnapshot original;
     private bool disposed;
+    private bool initialFocusHandled;
 
     public OwnedEditorFocus(IOwnedEditorFocusNative native, string expectedEngineImage)
     {
@@ -65,6 +70,7 @@ public sealed class OwnedEditorFocus : IDisposable
     {
         Validate(s);
         if (!s.GuiQueriesSucceeded || (s.GuiFlags & 0x1e) != 0 || s.Capture.Hwnd != 0 || s.EditorCapture.Hwnd != 0 ||
+            s.HostMenuOwner != 0 || s.EditorMenuOwner != 0 ||
             s.Foreground.Hwnd != s.Form.Hwnd || s.Foreground.Pid != s.Shell.Pid || !s.Foreground.Exists)
             throw new InvalidOperationException("Document is not the active capture-free editor host");
         if (s.Focus.Hwnd != s.EditorFocus.Hwnd || s.Focus.Pid != s.EditorFocus.Pid ||
@@ -79,9 +85,26 @@ public sealed class OwnedEditorFocus : IDisposable
 
     public EditorFocusResult Route(int keyData, long messageHwnd, bool available)
     {
+        if (keyData != CtrlF6 || (messageHwnd != original.Form.Hwnd && messageHwnd != original.Panel.Hwnd))
+            return new(false, false, "notApplicable", null, null, 0, 0);
+        return Handoff(available);
+    }
+
+    public EditorFocusResult TryInitialFocus(bool available)
+    {
+        if (initialFocusHandled) return new(false, false, "initialAlreadyHandled", null, null, 0, 0);
+        // Consume before observing or calling native code, including reentrant callbacks.
+        initialFocusHandled = true;
+        var result = Handoff(available);
+        return result.Verified || result.Reason == "notApplicable" ? result : result with
+        { Reason = result.Attempted ? "initialHandoffUnverified" : "initialContextRejected" };
+    }
+
+    private EditorFocusResult Handoff(bool available)
+    {
         EditorFocusSnapshot? before = null, after = null;
         var attempted = false; long previous = 0; var error = 0;
-        if (disposed || !available || keyData != CtrlF6 || (messageHwnd != original.Form.Hwnd && messageHwnd != original.Panel.Hwnd))
+        if (disposed || !available)
             return new(false, false, "notApplicable", null, null, 0, 0);
         try
         {
@@ -89,7 +112,7 @@ public sealed class OwnedEditorFocus : IDisposable
             if (EditorFocused(before)) return new(true, false, "alreadyFocused", before, null, 0, 0);
             if (!before.Focus.Exists || before.Focus.Pid != before.Shell.Pid || before.Focus.ThreadId != before.Form.ThreadId ||
                 before.Focus.Root != before.Form.Hwnd || (before.Focus.Hwnd != before.Form.Hwnd && before.Focus.Hwnd != before.Panel.Hwnd))
-                throw new InvalidOperationException("CtrlF6 requires exact document form or host panel focus");
+                throw new InvalidOperationException("Editor focus requires exact document form or host panel focus");
             attempted = true;
             (previous, error) = native.SetEditorFocus();
             after = native.Observe(); Ready(after);

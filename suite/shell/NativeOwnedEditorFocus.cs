@@ -64,7 +64,8 @@ internal sealed class NativeOwnedEditorFocus : IOwnedEditorFocusNative
             Window(hostGui.Focus), Window(editorGui.Focus), Window(hostGui.Capture), Window(editorGui.Capture), GetCurrentThreadId(),
             true, hostGui.Flags | editorGui.Flags, IsChild(form, panel), IsChild(panel, child),
             Inside(hostGui.Focus), Inside(editorGui.Focus), GetProp(form, NativeWindowProperties.ParentProperty).ToInt64(),
-            GetProp(form, NativeWindowProperties.ChildProperty).ToInt64());
+            GetProp(form, NativeWindowProperties.ChildProperty).ToInt64())
+        { HostMenuOwner = hostGui.MenuOwner.ToInt64(), EditorMenuOwner = editorGui.MenuOwner.ToInt64() };
     }
 
     public (long PreviousFocus, int Error) SetEditorFocus()

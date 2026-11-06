@@ -129,6 +129,10 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             ApplyStatus(result);
             statusTimer.Start();
             QueueResize();
+            // Complete the one initial handoff in this UI turn before publishing readiness.
+            // An inactive or modal document remains untouched; this is never retried on activation.
+            loading = false;
+            TryInitialEditorFocus();
             NativeWindowProperties.SetNativeMenuReady(Handle, true);
             PublishNativeMenuStatus(menuSurface);
         }
@@ -538,8 +542,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         if (keyData == (Keys.Control | Keys.F6) && editorFocus is not null &&
             (msg.HWnd == Handle || msg.HWnd == editorPanel.Handle))
         {
-            var available = attached && worker is not null && !loading && !busy && !closing && !closeApproved &&
-                !IsDisposed && !Disposing && Enabled && Visible && ActiveForm == this;
+            var available = EditorFocusAvailable();
             var result = editorFocus.Route((int)keyData, msg.HWnd.ToInt64(), available);
             editorFocusDiagnostics.Write("ctrlF6", new { keyData = (int)keyData, message = msg.Msg,
                 messageHwnd = msg.HWnd.ToInt64(), wParam = msg.WParam.ToInt64(), lParam = msg.LParam.ToInt64(), available, result },
@@ -547,6 +550,18 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             return true;
         }
         return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    private bool EditorFocusAvailable() => Environment.CurrentManagedThreadId == uiThreadId &&
+        attached && worker is not null && !loading && !busy && !closing && !closeApproved &&
+        !IsDisposed && !Disposing && IsHandleCreated && Enabled && Visible && !Modal && ActiveForm == this;
+
+    private void TryInitialEditorFocus()
+    {
+        if (editorFocus is null) return;
+        var available = EditorFocusAvailable();
+        var result = editorFocus.TryInitialFocus(available);
+        editorFocusDiagnostics.Write("initial", new { available, result }, worker?.ProcessId, worker?.DiagnosticTraceId);
     }
 
     private void ReleaseEditorFocus()
