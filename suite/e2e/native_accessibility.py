@@ -409,6 +409,31 @@ def _native_notebookbar(context, frame, peer, diagnostic):
         except Exception as exc:
             cleanup_errors.append('Focus restoration: ' + type(exc).__name__)
         evidence['cleanupErrors'] = cleanup_errors
+        # Optional diagnostic only: pinned XUIObject.getType returns a fixed
+        # widget class string without reading getState (which can contain text).
+        # Codes: type 1=Writer editor, 0=unknown; error 1=query, 2=shape,
+        # 3=post-query focus read. Never restore focus again or change a gate.
+        original_type = dict(attempted=False, completed=False, typeCode=0,
+                             errorCode=0, retainedFocusEqualsOriginal=False)
+        if (not cleanup_errors and evidence.get('focusRestored')
+                and evidence.get('selectionUnchanged')):
+            original_type['attempted'] = True
+            try:
+                widget_type = original.getType()
+                if type(widget_type) is not str:
+                    original_type['errorCode'] = 2
+                else:
+                    original_type['typeCode'] = int(widget_type == 'SwEditWinUIObject')
+                    original_type['completed'] = True
+            except Exception:
+                original_type['errorCode'] = 1
+            try:
+                original_type['retainedFocusEqualsOriginal'] = bool(ui.getFocusWindow().equals(original))
+            except Exception:
+                if not original_type['errorCode']:
+                    original_type['errorCode'] = 3
+                original_type['completed'] = False
+        evidence['originalFocusType'] = original_type
         diagnostic.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding='utf-8')
         assert not cleanup_errors, 'Native focus observer cleanup failed: ' + str(cleanup_errors)
         assert evidence.get('focusRestored'), 'Original native focus was not restored'

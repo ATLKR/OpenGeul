@@ -134,7 +134,7 @@ class ChromeBoundary:
             GetWindowThreadProcessId=self.window_pid,GetAncestor=lambda hwnd,flag:99 if hwnd==99 else 11,
             IsChild=lambda parent,child:parent==56 and child==56,
             GetWindow=lambda hwnd,flag:56 if hwnd==99 else 0,GetPropW=lambda hwnd,name:1,
-            GetAsyncKeyState=lambda key:0)
+            GetAsyncKeyState=lambda key:0,GetForegroundWindow=lambda:11)
         for method in ('process_snapshot','open_engine','engine_snapshot','close_engine','enter_dpi','restore_dpi',
                        'move','editor_snapshot','outside_snapshot','outside_click'):
             setattr(probe,method,getattr(self.native,method))
@@ -143,7 +143,7 @@ class ChromeBoundary:
             dict(targetLayout=0x04090409,currentThreadLayout=0x04090409,keysDown=[]))
         probe.attachment_snapshot=lambda binding:dict(valid=True,windows={'child':{'threadId':9}})
         probe.window_snapshot=self.window;probe.foreground=lambda:11
-        probe.native_focus=lambda thread:dict(threadId=9,focusPid=88,focusRootHwnd=11,
+        probe.native_focus=lambda thread:dict(threadId=9,activeHwnd=11,focusHwnd=56,focusPid=88,focusRootHwnd=11,
             captureHwnd=0,menuOwnerHwnd=0,flags=0)
         self.probe=probe
 
@@ -567,6 +567,330 @@ class OwnedNativeMenuTests(unittest.TestCase):
         b.probe.user.GetPropW=prop
         value=b.probe.view_snapshot(binding,'writer')
         self.assertEqual(m.decode_status_sequence(value['statusSequenceRaw']),dict(version=1,started=2,completed=2))
+
+    def test_failed_save_hit_retains_primary_booleans_and_numeric_owned_ancestry(self):
+        m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget')
+        original_name=b.Node.CurrentName.fget;original_runtime=b.Node.GetRuntimeId
+        def name(node):
+            self.assertFalse(isinstance(getattr(b.probe,'_diagnostic_sink',None),dict),'Diagnostic read a chrome or document name')
+            return original_name(node)
+        def runtime(node):
+            self.assertFalse(isinstance(getattr(b.probe,'_diagnostic_sink',None),dict),'Diagnostic read an unbound runtime ID')
+            return original_runtime(node)
+        b.Node.CurrentName=property(name);b.Node.GetRuntimeId=runtime
+        with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+        action=r['nativeMenuActions'][0];ui=action['uiaInterop']
+        self.assertTrue('pointObservation' in ui,'Failed Save hit needs its partial numeric context')
+        point=ui['pointObservation'];self.assertEqual(point['targetCode'],2)
+        self.assertIs(point['primary']['targetEqualsRetained'],True)
+        self.assertIs(point['primary']['hitEqualsRetained'],False)
+        self.assertTrue(point['failed']);self.assertEqual(point['target']['kindCode'],50011)
+        self.assertEqual(point['diagnostic']['nodes'][0]['kindCode'],50011)
+        self.assertLessEqual(len(point['diagnostic']['nodes']),8)
+        self.assertEqual(point['diagnostic']['guiStatus'],2)
+        self.assertEqual(point['diagnostic']['gui']['threadId'],9)
+        self.assertEqual(point['diagnostic']['foreground'],dict(hwnd=11,pid=77,rootHwnd=11))
+        self.assertEqual(action['pointers'][0]['insertedInputs'],2);self.assertEqual(action['keys'],[])
+        self.assertTrue(action['providerClientReleased']);self.assertTrue(action['engineHandleReleased'])
+
+    def test_root_com_failure_retains_numeric_hresult_without_exception_text(self):
+        m,a,p,r,c,b=self.real_chrome_fixture()
+        class COMError(Exception):
+            hresult=-2147467259
+            def __str__(self):raise AssertionError('Exception text must not be inspected')
+        primary=COMError()
+        def root(hwnd):raise primary
+        b.probe.uia.iuia.ElementFromHandle=root
+        with self.assertRaises(COMError) as caught:m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+        self.assertIs(caught.exception,primary)
+        ui=r['nativeMenuActions'][0]['uiaInterop']
+        self.assertTrue('primaryFailureCall' in ui,'Original COM API and HRESULT must survive cleanup')
+        call=ui['primaryFailureCall'];self.assertEqual(call['apiCode'],1)
+        self.assertTrue(call['calleeEntered']);self.assertFalse(call['callCompleted'])
+        self.assertTrue(call['hresultObserved']);self.assertEqual(call['hresult'],-2147467259)
+
+    def test_failed_save_point_preserves_existing_enabled_and_visible_metadata(self):
+        m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget');enabled=b.Node.CurrentIsEnabled.fget
+        b.Node.CurrentIsEnabled=property(lambda node:False if node.key=='save' else enabled(node))
+        with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+        target=r['nativeMenuActions'][0]['uiaInterop']['pointObservation']['target']
+        self.assertTrue('enabled' in target and 'visible' in target,'Already-read target availability must survive the point guard')
+        self.assertIs(target['enabled'],False);self.assertIs(target['visible'],True)
+
+    def test_diagnostic_error_cannot_overwrite_the_primary_identity_failure(self):
+        m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget');original=b.Node.CurrentProcessId.fget
+        class COMError(Exception):
+            hresult=-2147467259
+            def __str__(self):raise AssertionError('Exception text must not be inspected')
+        def pid(node):
+            if isinstance(getattr(b.probe,'_diagnostic_sink',None),dict) and node.key=='saveAs':raise COMError()
+            return original(node)
+        b.Node.CurrentProcessId=property(pid)
+        with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+        ui=r['nativeMenuActions'][0]['uiaInterop'];point=ui['pointObservation'];diag=point['diagnostic']
+        self.assertEqual(point['exceptionCode'],1);self.assertFalse(point['hresultObserved'])
+        self.assertFalse(ui['primaryFailureCall']['hresultObserved'])
+        self.assertTrue(ui['lastCall']==ui['primaryFailureCall'],'Diagnostic call replaced primary API context')
+        self.assertEqual(diag['pointStatus'],3);self.assertTrue(diag['pointError']['hresultObserved'])
+        self.assertEqual(diag['pointError']['hresult'],-2147467259)
+
+    def test_foreign_point_has_no_parent_walk_and_stale_parent_keeps_original_failure(self):
+        for mode in ('foreign','stale'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget');parents=[]
+                original=b.probe.uia.iuia.ControlViewWalker.GetParentElement
+                if mode=='foreign':
+                    class Foreign(b.Node):
+                        CurrentProcessId=property(lambda node:999)
+                        @property
+                        def CurrentControlType(node):
+                            self.assertFalse(isinstance(getattr(b.probe,'_diagnostic_sink',None),dict),'Foreign header read beyond PID')
+                            return 50020
+                    point=b.probe.uia.iuia.ElementFromPoint
+                    b.probe.uia.iuia.ElementFromPoint=lambda pos:Foreign('saveAs') if pos.y>=50 else point(pos)
+                def parent(node):
+                    if isinstance(getattr(b.probe,'_diagnostic_sink',None),dict):parents.append(node.key);raise RuntimeError('synthetic stale provider')
+                    return original(node)
+                b.probe.uia.iuia.ControlViewWalker.GetParentElement=parent
+                with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                diag=r['nativeMenuActions'][0]['uiaInterop']['pointObservation']['diagnostic']
+                self.assertEqual(diag['pointStatus'],5 if mode=='foreign' else 3)
+                self.assertEqual(diag['parentQueries'],0 if mode=='foreign' else 1)
+                self.assertEqual(len(parents),0 if mode=='foreign' else 1)
+
+    def test_near_or_exhausted_deadline_skips_all_new_failure_queries(self):
+        for moment in (5.98,6.):
+            with self.subTest(moment=moment):
+                m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget');compare=b.probe.uia.iuia.CompareElements
+                def same(left,right):
+                    value=compare(left,right)
+                    if left.key=='saveAs' and right.key=='edit':c.now=moment
+                    return value
+                b.probe.uia.iuia.CompareElements=same
+                with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                action=r['nativeMenuActions'][0];diag=action['uiaInterop']['failureContext']
+                self.assertEqual((diag['guiStatus'],diag['pointStatus']),(1,1))
+                self.assertEqual(diag['nodes'],[]);self.assertEqual(diag['parentQueries'],0)
+                self.assertEqual(action['keys'],[]);self.assertEqual(len(action['pointers']),1)
+
+    def test_failure_gui_admission_errors_block_all_additional_uia_queries(self):
+        for mode in ('continuity','child','attachment','gui'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget');queries=[]
+                bind=b.probe.bind_menu_classification;window=b.probe.window_snapshot
+                attachment=b.probe.attachment_snapshot;focus=b.probe.native_focus;uia_call=b.probe._uia_call
+                def diagnostic():return isinstance(getattr(b.probe,'_diagnostic_sink',None),dict)
+                def bind_scope(scope,continuity):
+                    def guarded():
+                        if diagnostic() and mode=='continuity':raise AssertionError('synthetic generation ended')
+                        return continuity()
+                    return bind(scope,guarded)
+                def owned_window(hwnd):
+                    row=window(hwnd)
+                    if diagnostic() and mode=='child':row['pid']=999
+                    return row
+                def attached(binding):
+                    if diagnostic() and mode=='attachment':return dict(valid=False)
+                    return attachment(binding)
+                def gui(thread):
+                    if diagnostic() and mode=='gui':raise RuntimeError('synthetic unavailable GUI state')
+                    return focus(thread)
+                def observed_call(code,*args):
+                    if diagnostic():queries.append(code)
+                    return uia_call(code,*args)
+                b.probe.bind_menu_classification=bind_scope;b.probe.window_snapshot=owned_window
+                b.probe.attachment_snapshot=attached;b.probe.native_focus=gui;b.probe._uia_call=observed_call
+                with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                action=r['nativeMenuActions'][0];ui=action['uiaInterop'];diag=ui['failureContext']
+                self.assertEqual((diag['guiStatus'],diag['pointStatus']),(3,7))
+                self.assertEqual(queries,[]);self.assertEqual((diag['parentQueries'],diag['nodes']),(0,[]))
+                self.assertEqual(ui['pointObservation']['exceptionCode'],1)
+                self.assertEqual(len(action['pointers']),1);self.assertEqual(action['keys'],[])
+
+    def test_failure_parent_walk_marks_post_ownership_loss_or_budget_unavailable(self):
+        for mode in ('continuity','attachment','budget','stable'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget');walked=[]
+                bind=b.probe.bind_menu_classification;attachment=b.probe.attachment_snapshot
+                parent=b.probe.uia.iuia.ControlViewWalker.GetParentElement
+                def bind_scope(scope,continuity):
+                    def guarded():
+                        if walked and mode=='continuity':raise AssertionError('synthetic generation ended during walk')
+                        return continuity()
+                    return bind(scope,guarded)
+                def attached(binding):
+                    if walked and mode=='attachment':return dict(valid=False)
+                    return attachment(binding)
+                def ancestors(node):
+                    value=parent(node)
+                    if isinstance(getattr(b.probe,'_diagnostic_sink',None),dict):
+                        walked.append(node.key)
+                        if mode=='budget':c.now=5.98
+                    return value
+                b.probe.bind_menu_classification=bind_scope;b.probe.attachment_snapshot=attached
+                b.probe.uia.iuia.ControlViewWalker.GetParentElement=ancestors
+                with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                action=r['nativeMenuActions'][0];ui=action['uiaInterop'];diag=ui['failureContext']
+                self.assertTrue(walked);self.assertEqual(diag['guiStatus'],2)
+                self.assertTrue('ownershipPostStatus' in diag,'Point context needs a final original-generation check')
+                self.assertEqual(diag['ownershipPostStatus'],2 if mode=='stable' else 1 if mode=='budget' else 3)
+                self.assertEqual(diag['ownershipPostVerified'],mode=='stable')
+                self.assertEqual(ui['pointObservation']['exceptionCode'],1)
+                self.assertTrue(ui['lastCall']==ui['primaryFailureCall'])
+                self.assertEqual(len(action['pointers']),1);self.assertEqual(action['keys'],[])
+
+    def test_provider_setup_failure_or_slow_setter_is_distinct_from_callee_entry(self):
+        for mode in ('error','slow'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,b=self.real_chrome_fixture();client=b.probe.uia.iuia
+                class COMError(Exception):
+                    hresult=-2147467259
+                    def __str__(self):raise AssertionError('Exception text must not be inspected')
+                class Provider:
+                    def __getattr__(self,name):return getattr(client,name)
+                    @property
+                    def ConnectionTimeout(self):return 1
+                    @ConnectionTimeout.setter
+                    def ConnectionTimeout(self,value):
+                        if mode=='error':raise COMError()
+                        c.now=6.
+                provider=Provider();b.probe.provider_client=provider;b.probe.uia.iuia=provider
+                with self.assertRaises(COMError if mode=='error' else AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                call=r['nativeMenuActions'][0]['uiaInterop']['primaryFailureCall']
+                self.assertEqual((call['apiCode'],call['phaseCode'],call['providerStep']),(1,1,1))
+                self.assertFalse(call['calleeEntered']);self.assertFalse(call['callCompleted'])
+                self.assertEqual(call['hresultObserved'],mode=='error')
+
+    def test_api_codes_distinguish_find_runtime_and_point_failures(self):
+        for code in (2,3,4):
+            with self.subTest(code=code):
+                m,a,p,r,c,b=self.real_chrome_fixture()
+                class COMError(Exception):
+                    hresult=-2147467259
+                    def __str__(self):raise AssertionError('Exception text must not be inspected')
+                primary=COMError()
+                def fail(*args):raise primary
+                if code==2:b.find=fail
+                elif code==3:b.Node.GetRuntimeId=fail
+                else:b.probe.uia.iuia.ElementFromPoint=fail
+                with self.assertRaises(COMError) as caught:m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                self.assertIs(caught.exception,primary)
+                call=r['nativeMenuActions'][0]['uiaInterop']['primaryFailureCall']
+                self.assertEqual(call['apiCode'],code);self.assertTrue(call['calleeEntered'])
+                self.assertEqual(call['phaseCode'],2)
+
+    def test_uncoded_native_provider_setup_failure_retains_last_call_before_propagation(self):
+        m,a,p,r,c,b=self.real_chrome_fixture()
+        class COMError(Exception):hresult=-2147467259
+        class Provider:
+            @property
+            def ConnectionTimeout(self):return 1
+            @ConnectionTimeout.setter
+            def ConnectionTimeout(self,value):raise COMError()
+        b.probe.provider_client=Provider()
+        with self.assertRaises(COMError):b.probe._call(lambda:None)
+        self.assertFalse('primaryFailureCall' in b.probe.interop,'An API error is not primary before it escapes the action')
+        call=b.probe.interop['lastCall']
+        self.assertEqual((call['apiCode'],call['phaseCode'],call['providerStep']),(0,1,1))
+        self.assertFalse(call['calleeEntered']);self.assertTrue(call['hresultObserved'])
+
+    def test_recovered_optional_shell_error_cannot_become_the_later_primary_failure(self):
+        for mode in ('root','point','guard'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,b,_=self.system_bar_fixture();optional=[];inside=[]
+                observe=b.probe._shell_menu_observation;compare=b.probe.uia.iuia.CompareElements
+                root=b.probe.uia.iuia.ElementFromHandle;point=b.probe.uia.iuia.ElementFromPoint
+                class COMError(Exception):
+                    def __init__(self,hresult):self.hresult=hresult
+                    def __str__(self):raise AssertionError('Exception text must not be inspected')
+                recovered=COMError(-2147467259);primary=COMError(-2147024891)
+                def observation(*args):
+                    inside.append(True)
+                    try:return observe(*args)
+                    finally:inside.pop()
+                def comparison(left,right):
+                    if inside and not optional:optional.append(True);raise recovered
+                    return compare(left,right)
+                def from_handle(hwnd):
+                    if mode=='root' and b.probe._active_target=='save':raise primary
+                    return root(hwnd)
+                def from_point(pos):
+                    if mode=='point' and b.probe._active_target=='save':raise primary
+                    return point(pos)
+                b.probe._shell_menu_observation=observation;b.probe.uia.iuia.CompareElements=comparison
+                b.probe.uia.iuia.ElementFromHandle=from_handle;b.probe.uia.iuia.ElementFromPoint=from_point
+                if mode=='guard':b.mode='wrongtarget'
+                with self.assertRaises(AssertionError if mode=='guard' else COMError) as caught:
+                    m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                action=r['nativeMenuActions'][0];ui=action['uiaInterop'];call=ui['primaryFailureCall']
+                self.assertEqual(optional,[True]);self.assertEqual(action['pointers'][0]['snapshots'][0]['shellMenuObservation']['statusCode'],2)
+                self.assertEqual(action['pointers'][0]['snapshots'][0]['shellMenuClassification']['verifiedSystemCount'],1)
+                self.assertEqual(call['apiCode'],1 if mode=='root' else 4 if mode=='point' else 5)
+                self.assertEqual(call['hresultObserved'],mode!='guard')
+                self.assertEqual(call['failed'],mode!='guard')
+                self.assertEqual(ui['primaryFailureFromApi'],mode!='guard')
+                if mode!='guard':self.assertEqual(call['hresult'],-2147024891);self.assertIs(caught.exception,primary)
+                self.assertEqual(len(action['pointers']),1);self.assertEqual(action['keys'],[])
+
+    def test_failure_diagnostic_setter_errors_do_not_replace_the_guard_context(self):
+        for mode in ('error','slow'):
+            with self.subTest(mode=mode):
+                m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget');client=b.probe.uia.iuia
+                class COMError(Exception):
+                    hresult=-2147467259
+                    def __str__(self):raise AssertionError('Exception text must not be inspected')
+                class Provider:
+                    connection=transaction=0
+                    def __getattr__(self,name):return getattr(client,name)
+                    @property
+                    def ConnectionTimeout(self):return self.connection
+                    @ConnectionTimeout.setter
+                    def ConnectionTimeout(self,value):
+                        if isinstance(getattr(b.probe,'_diagnostic_sink',None),dict):
+                            if mode=='error':raise COMError()
+                            c.now=6.
+                        self.connection=value
+                    @property
+                    def TransactionTimeout(self):return self.transaction
+                    @TransactionTimeout.setter
+                    def TransactionTimeout(self,value):self.transaction=value
+                provider=Provider();b.probe.provider_client=provider;b.probe.uia.iuia=provider
+                with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                ui=r['nativeMenuActions'][0]['uiaInterop'];diag=ui['failureContext']
+                self.assertFalse(ui['primaryFailureCall']['hresultObserved'])
+                self.assertEqual(ui['primaryFailureCall']['apiCode'],5)
+                self.assertEqual(diag['guiStatus'],3)
+                self.assertEqual((diag['lastCall']['phaseCode'],diag['lastCall']['providerStep']),(1,1))
+                self.assertFalse(diag['lastCall']['calleeEntered'])
+                self.assertTrue(ui['lastCall']==ui['primaryFailureCall'])
+
+    def test_failure_parent_cycle_stops_at_eight_without_changing_input_or_cap(self):
+        m,a,p,r,c,b=self.real_chrome_fixture('wrongtarget');parent=b.probe.uia.iuia.ControlViewWalker.GetParentElement
+        def cycle(node):
+            return b.Node('saveAs') if isinstance(getattr(b.probe,'_diagnostic_sink',None),dict) else parent(node)
+        b.probe.uia.iuia.ControlViewWalker.GetParentElement=cycle
+        with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+        action=r['nativeMenuActions'][0];diag=action['uiaInterop']['failureContext']
+        self.assertEqual((diag['pointStatus'],diag['parentQueries'],len(diag['nodes'])),(6,8,8))
+        self.assertEqual(len(action['pointers']),1);self.assertEqual(action['keys'],[])
+        self.assertLessEqual(len(__import__('json').dumps(action).encode()),m.CAP)
+
+    def test_missing_malformed_or_throwing_hresult_never_becomes_observed_zero(self):
+        for value in (None,True,1.5,2**40,'getter-error'):
+            with self.subTest(value=value):
+                m,a,p,r,c,b=self.real_chrome_fixture()
+                class COMError(Exception):
+                    @property
+                    def hresult(self):
+                        if value=='getter-error':raise RuntimeError('synthetic metadata failure')
+                        return value
+                    def __str__(self):raise AssertionError('Exception text must not be inspected')
+                primary=COMError()
+                def root(hwnd):raise primary
+                b.probe.uia.iuia.ElementFromHandle=root
+                with self.assertRaises(COMError) as caught:m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                self.assertIs(caught.exception,primary);call=r['nativeMenuActions'][0]['uiaInterop']['primaryFailureCall']
+                self.assertFalse(call['hresultObserved']);self.assertFalse('hresult' in call)
 
     def test_real_chrome_empty_runtime_ids_require_actual_differential_identity(self):
         m,a,p,r,c,boundary=self.real_chrome_fixture()

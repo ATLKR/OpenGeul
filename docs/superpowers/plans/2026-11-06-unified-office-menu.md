@@ -117,5 +117,9 @@ related tests, office-suite.yml and suite/README.md.
 - [x] Label the existing HWP launcher **OpenGeul 한글 시작**, keeping its internal
   new-hwp URL and no-argument launch. Direct blank-document creation is unsupported;
   the pinned HWP app starts at its own Home and provides its own New action.
-- [ ] Prove HWP menu launch/readiness/graceful-exit behavior without the existing
-  shell tree-force cleanup; menu availability alone does not qualify it.
+- [x] Add a physical native HWP launcher scenario and a shared runner/archive
+  validator. Require a fresh exact HWP process, retained live binding, visible
+  owned main window, one normal close and same-handle exit0/release. Reject old
+  reports without this proof and suppress tree-force cleanup while HWP is unretired.
+- [ ] Execute the HWP launcher scenario on Windows. A visible main window is
+  not a certified HWP Home UI or a newly created document.

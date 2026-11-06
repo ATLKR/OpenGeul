@@ -15,7 +15,7 @@ import sys
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from suite.e2e import native_archive_completeness as original
-from suite.e2e.native_menu_smoke import CORE_COMMANDS, MODULES, VIEW_MODULES
+from suite.e2e.native_menu_smoke import CORE_COMMANDS, MODULES, VIEW_MODULES, require_hwp_launcher_receipt
 
 REPORT = '.work/suite-native-menu/results.json'
 ROOT = '.work/suite-native-menu/worker-diagnostics'
@@ -89,6 +89,7 @@ def _expected(workspace, suite):
                 for key in ('viewPhysicalExpectedCaseCount', 'viewPhysicalVerifiedCaseCount')),
         'Original native view report coverage differs from the source plan')
     _require(report.get('acceptanceEligible') is False, 'Partial menu gate cannot qualify the complete Suite')
+    _require(report.get('nativeHwpMenuLaunchExecuted') is True, 'Original native HWP launcher was not verified')
     _require(all(type(report.get(key)) is int and report[key] == len(MODULES)
         for key in ('expectedCaseCount', 'completedCaseCount', 'passedCaseCount'))
         and report.get('missingModules') == [] and report.get('failedModules') == [],
@@ -118,6 +119,13 @@ def _expected(workspace, suite):
         _require(type(row.get('officeCreationTime')) is int
             and row['officeCreationTime'] == generation['creationTime'],
             'Original menu retained engine generation differs')
+        if module=='writer':
+            _require(row.get('nativeHwpMenuLaunchExecuted') is True and row.get('hwpLauncherCompleted') is True,
+                'Original Writer native HWP launcher case did not pass')
+            require_hwp_launcher_receipt(row.get('nativeHwpLauncher'),row,suite)
+        else:
+            _require(row.get('nativeHwpMenuLaunchExecuted') is False and row.get('hwpLauncherCompleted') is False
+                and 'nativeHwpLauncher' not in row, 'Unplanned native HWP launcher case')
         key = _key(generation)
         _require(key not in expected, 'Duplicate original native menu engine generation')
         expected[key] = dict(scope='suite-native-menu', case=row['case'], slot=0,

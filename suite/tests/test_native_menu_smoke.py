@@ -1,8 +1,11 @@
 """Synthetic scenario boundaries; no actual Windows UI is exercised here."""
 import contextlib
 import copy
+import ctypes
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -67,6 +70,10 @@ class Session:
         self.calls.append('view-roundtrip')
         return dict(kind='native-view-roundtrip', success=True, module=record['module'])
 
+    def hwp_launcher(self, record):
+        self.calls.append('hwp-launcher')
+        return dict(kind='owned-native-hwp-launcher', success=True)
+
     def finish(self, record):
         self.calls.append('finish')
         return True
@@ -87,6 +94,154 @@ class NativeMenuSmokeTests(unittest.TestCase):
         return self.smoke.run_case(Path('/synthetic/suite'), Path('/synthetic/fixtures'),
             Path('/synthetic/output'), module, session_factory=lambda *args: session)
 
+    def test_writer_requires_native_hwp_launcher_before_finish_without_certifying_synthetic_input(self):
+        session=Session();record=self.run_case(session)
+        self.assertIn('hwp-launcher',session.calls)
+        self.assertLess(session.calls.index('hwp-launcher'),session.calls.index('finish'))
+        self.assertTrue(record['hwpLauncherCompleted'])
+        self.assertFalse(record['nativeHwpMenuLaunchExecuted'])
+        session=Session();session.hwp_launcher=lambda record:dict(kind='owned-native-hwp-launcher',success=False)
+        record=self.run_case(session)
+        self.assertFalse(record['success']);self.assertNotIn('finish',session.calls)
+        self.assertEqual(record['stage'],'native-hwp-launcher')
+
+    def test_actual_adapter_rejects_hwp_success_flags_without_shared_receipt_proof(self):
+        boundary=Session();session=self.smoke.WindowsSession(Path('/synthetic/suite'),
+            Path('/synthetic/fixtures'),Path('/synthetic/output'),'writer')
+        for name in ('open','ready','gesture','screenshot','view_roundtrip','hwp_launcher','finish','cleanup'):
+            setattr(session,name,getattr(boundary,name))
+        record=self.smoke.run_case(session.suite,session.fixtures,session.output,'writer',session_factory=lambda *args:session)
+        self.assertFalse(record['success']);self.assertEqual(record['errorType'],'ValueError')
+        self.assertEqual(record['stage'],'native-hwp-launcher');self.assertNotIn('finish',boundary.calls)
+
+    def hwp_session(self, *, damage=None, pending=False, exit_code=0):
+        import lifecycle_smoke as lifecycle
+        folder=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        executable=folder/'HWP/OpenGeul.exe';executable.parent.mkdir();executable.write_bytes(b'synthetic')
+        session=self.smoke.WindowsSession(folder,folder,folder,'writer')
+        session.hwnd,session.parent,session.child,session.office_pid,session.home_hwnd=11,55,56,88,99
+        session.process=SimpleNamespace(pid=77,_handle=10,poll=lambda:None)
+        state=SimpleNamespace(live=True,launched=False);calls=[]
+        session.engine=SimpleNamespace(handle=30,exited=lambda seconds:False,close_handle=lambda handle:calls.append(('engine-release',handle)) or True)
+        class Function:
+            def __init__(self,call):self.call=call
+            def __call__(self,*args):return self.call(*args)
+        def image(handle,flags,buffer,size):
+            text=str(folder/'OpenGeul.Office.exe' if handle==10 else executable)
+            buffer.value=text;ctypes.cast(size,ctypes.POINTER(lifecycle.wintypes.DWORD)).contents.value=len(text)
+            return 1
+        def times(handle,created,*unused):
+            value=ctypes.cast(created,ctypes.POINTER(lifecycle.wintypes.FILETIME)).contents
+            value.dwLowDateTime=(101 if damage=='shell-generation' and state.launched else 100) if handle==10 else 300
+            value.dwHighDateTime=0
+            if handle==20 and not state.live:
+                exited=ctypes.cast(unused[0],ctypes.POINTER(lifecycle.wintypes.FILETIME)).contents
+                exited.dwLowDateTime=301;exited.dwHighDateTime=0
+            return 1
+        def code(handle,value):
+            ctypes.cast(value,ctypes.POINTER(lifecycle.wintypes.DWORD)).contents.value=259 if handle==10 else exit_code
+            return 1
+        def open_process(access,inherit,pid):
+            self.assertEqual((access,inherit,pid),(0x100000|0x1000,False,123));calls.append(('bind',pid));return 20
+        kernel=SimpleNamespace(GetProcessId=Function(lambda handle:77 if handle==10 else 123),
+            QueryFullProcessImageNameW=Function(image),GetProcessTimes=Function(times),GetExitCodeProcess=Function(code),
+            WaitForSingleObject=Function(lambda handle,timeout:258 if handle==10 or state.live else 0),
+            OpenProcess=Function(open_process),CloseHandle=Function(lambda handle:calls.append(('handle-release',handle)) or 1))
+        self.enterContext(patch.object(lifecycle,'hwp_kernel',return_value=kernel))
+        def census(pid,path,*,shell_creation,evidence):
+            self.assertEqual((pid,path,shell_creation),(77,executable,100))
+            matched=state.launched or damage=='existing'
+            created=150 if damage=='stale' else 300
+            match=dict(pid=123,parentPid=77,executable=str(executable),creationFileTime=created) if matched else None
+            if damage=='foreign' and matched:match['parentPid']=90
+            clock=400 if matched else 200
+            def stamp(value):return dict(low=value,high=0,fileTime=value)
+            candidate=dict(pid=123,parentPid=match['parentPid'],snapshotExeName='OpenGeul.exe',parentMatches=True,nameMatches=True,
+                queryAttempted=True,handleOpened=True,handleClosed=True,matched=True,nativeImage=str(executable),nativeImageLength=len(str(executable)),
+                image=str(executable),nativeCreation=stamp(created),creationFileTime=created,imageMatches=True,generationWithinSnapshot=True) if matched else None
+            candidates=[candidate] if matched else []
+            if damage=='unrelated':
+                candidates.insert(0,dict(pid=999,parentPid=90,snapshotExeName='OpenGeul.exe',parentMatches=False,nameMatches=True,
+                    queryAttempted=False,handleOpened=False,handleClosed=False,matched=False))
+            evidence.update(schemaVersion=1,kind='native-hwp-child-census',clockApi='GetSystemTimePreciseAsFileTime',shellPid=77,
+                shellCreationFileTime=100,expectedExecutable=str(executable),snapshotClock=stamp(clock),snapshotStartedFileTime=clock,
+                snapshotHandleCreated=True,snapshotClosed=True,enumerationComplete=True,candidates=candidates,match=match,success=True)
+            return match
+        self.enterContext(patch.object(lifecycle,'_hwp_child_process',side_effect=census))
+        from test_owned_native_menu import OwnedNativeMenuTests, Probe, Clock
+        menu=OwnedNativeMenuTests().feature();clock=Clock();probe=Probe(folder,clock)
+        probe.shell['handleValue']=10
+        session.process.opengeul_suite_root=folder
+        session.process.opengeul_evidence_output=folder
+        session.process.opengeul_evidence_case='native-menu-writer'
+        session.process.args=[str(folder/'OpenGeul.Office.exe')]
+        menu_api=SimpleNamespace(attachment=lambda document:(55,56,88),user=SimpleNamespace(GetPropW=lambda hwnd,name:1))
+        def command(name,record):
+            self.assertEqual(name,'new-hwp');calls.append(('menu',name))
+            result=menu.click_native_menu_action(menu_api,session.process,11,record,name,probe=probe,clock=clock)
+            state.launched=True;return result
+        session._native_command=command;session._owned_blank=lambda:calls.append(('writer-live',))
+        session._home_ready=lambda **options:True
+        def close(hwnd,pid):
+            self.assertEqual((hwnd,pid),(500,123));calls.append(('close',hwnd,pid))
+            if not pending:state.live=False
+        session.api=SimpleNamespace(windows=lambda pid:[500] if state.live else [],class_name=lambda hwnd:'Tauri Window',pid=lambda hwnd:123,
+            attachment=lambda document:(55,56,88),
+            request_close=close,require_foreground=lambda hwnd:None,
+            user=SimpleNamespace(IsWindow=lambda hwnd:state.live,IsWindowVisible=lambda hwnd:True,IsWindowEnabled=lambda hwnd:True,GetAncestor=lambda hwnd,flags:hwnd))
+        browser=SimpleNamespace(handle=501,class_name=lambda:'Chrome_RenderWidgetHostHWND')
+        session.desktop=lambda **options:SimpleNamespace(window=lambda **options:SimpleNamespace(wrapper_object=lambda:SimpleNamespace(descendants=lambda:[browser])))
+        def wait(function,seconds=0):
+            value=function()
+            if not value:raise AssertionError('Synthetic bounded observation incomplete')
+            return value
+        session.native=SimpleNamespace(wait_for=wait,activate_owned_suite=lambda *args:calls.append(('activate-writer',)),
+            stop_owned_test_process=lambda *args:calls.append(('forbidden-tree-cleanup',)))
+        return session,calls,state
+
+    def test_native_hwp_launcher_uses_real_retained_binding_exit_and_releases_only_its_handle(self):
+        for damage in (None,'unrelated'):
+            with self.subTest(damage=damage):
+                session,calls,_=self.hwp_session(damage=damage)
+                self.assertTrue(callable(getattr(session,'hwp_launcher',None)))
+                record=dict(module='writer',case='native-menu-writer',shellPid=77,windowHwnd=11,parentHwnd=55,childHwnd=56,
+                    officePid=88,officeCreationTime=200,originalHomeHwnd=99,
+                    nativeArchiveGeneration=dict(pid=88,creationTime=200,image=str(session.suite/'Office/program/soffice.bin')),
+                    windowActivations=[dict(suiteHwnd=11,originalProcess=dict(pid=77,handleValue=10,creationTime=100,
+                        image=str(session.suite/'OpenGeul.Office.exe'),waitResult=258))])
+                result=session.hwp_launcher(record)
+                self.assertIs(self.smoke.require_hwp_launcher_receipt(result,record,session.suite),result)
+                self.assertTrue(result['success']);self.assertEqual(result['kind'],'owned-native-hwp-launcher')
+                self.assertEqual(result['exit']['exitCode'],0)
+                self.assertEqual(result['liveBinding']['handleValue'],result['exit']['handleValue'])
+                self.assertTrue(result['handleReleased']);self.assertFalse(session.hwp_unretired)
+                self.assertEqual([row for row in calls if row[0] in ('menu','bind','close','handle-release')],
+                    [('menu','new-hwp'),('bind',123),('close',500,123),('handle-release',20)])
+
+    def test_hwp_existing_foreign_or_stale_generation_never_closes_a_process(self):
+        for damage in ('existing','foreign','stale','shell-generation'):
+            with self.subTest(damage=damage):
+                session,calls,_=self.hwp_session(damage=damage)
+                self.assertTrue(callable(getattr(session,'hwp_launcher',None)))
+                with self.assertRaises(AssertionError):session.hwp_launcher({})
+                self.assertFalse(any(row[0] in ('bind','close','handle-release') for row in calls))
+                if damage=='existing':self.assertFalse(any(row[0]=='menu' for row in calls))
+
+    def test_hwp_nonzero_exit_preserves_failure_and_releases_the_same_handle(self):
+        session,calls,_=self.hwp_session(exit_code=7);record={}
+        self.assertTrue(callable(getattr(session,'hwp_launcher',None)))
+        with self.assertRaises(AssertionError):session.hwp_launcher(record)
+        self.assertEqual(record['nativeHwpLauncher']['exit']['exitCode'],7)
+        self.assertFalse(record['nativeHwpLauncher']['success']);self.assertIn(('handle-release',20),calls)
+
+    def test_hwp_pending_normal_close_suppresses_shell_tree_cleanup_and_fails_the_gate(self):
+        session,calls,_=self.hwp_session(pending=True);record={}
+        self.assertTrue(callable(getattr(session,'hwp_launcher',None)))
+        with self.assertRaises(AssertionError):session.hwp_launcher(record)
+        self.assertTrue(session.hwp_unretired);self.assertIn(('handle-release',20),calls)
+        self.assertFalse(session.cleanup(record));self.assertTrue(record['shellCleanupSuppressedForHwp'])
+        self.assertFalse(any(row[0]=='forbidden-tree-cleanup' for row in calls))
+
     def test_fixed_six_modules_and_four_distinct_gestures_include_repeat_open(self):
         self.assertEqual(self.smoke.MODULES,
             ('writer', 'calc', 'impress', 'draw', 'math', 'base'))
@@ -97,7 +252,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 view = ['view-roundtrip'] if module in ('writer', 'calc') else []
                 self.assertEqual(session.calls, ['open', 'ready', 'initial-screenshot', 'open-escape',
                     'open-outside', 'keyboard-escape', 'open-escape',
-                    *view, 'screenshot', 'finish', 'cleanup'])
+                    *view, 'screenshot', *(['hwp-launcher'] if module=='writer' else []), 'finish', 'cleanup'])
                 self.assertTrue(record['success'])
                 self.assertTrue(record['scenarioCompleted'])
                 self.assertFalse(record['actualWindowsExecuted'])
@@ -845,3 +1000,184 @@ class NativeMenuSmokeTests(unittest.TestCase):
                         patch('owned_menu_cancel.cancel_native_menu_prompt', side_effect=cancel), \
                         self.assertRaises(AssertionError):
                     session._cancel_calc_exit({}, deadline=20)
+
+
+class InitialFocusStderrTests(unittest.TestCase):
+    """Synthetic C# serializer shapes; no native query, focus or real log reads."""
+    def setUp(self):
+        self.smoke = load_smoke()
+        self.folder = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.session = self.smoke.WindowsSession(self.folder/'suite', self.folder, self.folder, 'writer')
+        self.session.hwnd, self.session.parent, self.session.child, self.session.office_pid = 11, 12, 13, 88
+        self.session.process = SimpleNamespace(pid=77, _handle=777, opengeul_evidence_output=self.folder,
+            opengeul_evidence_case='native-menu-writer', opengeul_suite_root=self.folder/'suite')
+        self.session.engine = SimpleNamespace(handle=888, creation_time=200)
+        self.session._opening_focus_identity = (77,777,888,200,11,12,13,88)
+        self.record = dict(case='native-menu-writer',module='writer',shellPid=77,windowHwnd=11,
+            parentHwnd=12,childHwnd=13,officePid=88,officeCreationTime=200,
+            nativeArchiveGeneration=dict(pid=88,creationTime=200,
+                image=str(self.folder/'suite/Office/program/soffice.bin')),
+            windowActivations=[dict(suiteHwnd=11,shellPid=77,originalProcess=dict(pid=77,handleValue=777,creationTime=100,
+                image=str(self.folder/'suite/OpenGeul.Office.exe'),waitResult=258))],
+            openingFocusObservations=[dict(phaseCode=1,hostGui=dict(threadId=9),engineGui=dict(threadId=10))])
+        self.path = self.folder/'native-menu-writer-stderr.log'
+
+    def snapshot(self):
+        def window(hwnd, pid, thread, parent):
+            return dict(Hwnd=hwnd,Pid=pid,ThreadId=thread,Root=11 if hwnd else 0,Parent=parent,
+                Exists=bool(hwnd),Visible=bool(hwnd),Enabled=bool(hwnd),ClassName='synthetic class, never exported')
+        zero = window(0,0,0,0)
+        return dict(Shell=dict(Pid=77,CreationTime=100,Image=str(self.folder/'suite/OpenGeul.Office.exe'),Alive=True),
+            Engine=dict(Pid=88,CreationTime=200,Image=str(self.folder/'suite/Office/program/soffice.bin'),Alive=True),
+            Form=window(11,77,9,0),Panel=window(12,77,9,11),Child=window(13,88,10,12),
+            Foreground=window(11,77,9,0),Focus=window(11,77,9,0),EditorFocus=window(11,77,9,0),
+            Capture=dict(zero),EditorCapture=dict(zero),CurrentThread=9,GuiQueriesSucceeded=True,GuiFlags=0,
+            FormOwnsPanel=True,PanelOwnsChild=True,FocusWithinEditor=False,EditorFocusWithinEditor=False,
+            RegisteredPanel=12,RegisteredChild=13,HostMenuOwner=0,EditorMenuOwner=0)
+
+    def event(self, stage='initial', sequence=1, *, reason='initialPending', before=True):
+        result = dict(Verified=False,Attempted=False,Reason=reason,Before=self.snapshot() if before else None,
+            After=None,PreviousFocus=0,NativeError=0)
+        details = dict(available=False,pending=True,result=result) if stage=='initial' else (
+            dict(queued=True,pending=True) if stage=='initial.queued' else dict(pending=True,result=result))
+        return dict(event='suite.editorFocus',component='host',stage=stage,sequence=sequence,
+            utc='2026-11-06T00:00:00+00:00',processId=77,managedThreadId=1,
+            workerProcessId=99,traceId='a'*32,details=details)
+
+    def write(self, rows, *, suffix=b''):
+        self.path.write_bytes(b''.join((json.dumps(row,separators=(',',':'))+'\r\n').encode()
+            for row in rows)+suffix)
+
+    def capture(self):
+        method=getattr(self.smoke,'capture_initial_focus_trace',None)
+        self.assertTrue(callable(method),'Bounded numeric initial-focus trace capture is missing')
+        return method(self.session,self.record)
+
+    def assert_unknown(self, value):
+        self.assertIs(value['known'],False)
+        self.assertEqual(value['rows'],[])
+        self.assertIs(type(value['errorCode']),int)
+        self.assertGreater(value['errorCode'],0)
+
+    def test_pascal_case_snapshots_and_lower_case_envelope_are_numeric_only(self):
+        self.write([self.event(),self.event('initial.queued',2),self.event('initial.activation',3)])
+        value=self.capture()
+        self.assertTrue(value['known']);self.assertEqual(value['errorCode'],0)
+        self.assertEqual([row['stageCode'] for row in value['rows']],[1,2,3])
+        self.assertEqual(value['rows'][0]['reasonCode'],4)
+        self.assertFalse(value['rows'][0]['contextInherited'])
+        self.assertTrue(value['rows'][1]['contextInherited'])
+        self.assertEqual(value['rows'][0]['before']['Shell'],dict(Pid=77,CreationTime=100,Alive=True))
+        def numeric(item):
+            if type(item) is dict: return all(numeric(child) for child in item.values())
+            if type(item) is list: return all(numeric(child) for child in item)
+            return type(item) in (int,bool)
+        self.assertTrue(numeric(value),'Trace output must contain only fixed keys and numbers/booleans')
+        exported=json.dumps(value)
+        for forbidden in ('initialPending','suite.editorFocus','synthetic class',str(self.folder),'a'*32):
+            self.assertNotIn(forbidden,exported)
+
+    def test_before_missing_queue_does_not_establish_a_new_context(self):
+        self.write([self.event('initial.queued')]);self.assert_unknown(self.capture())
+
+    def test_foreign_or_recycled_snapshot_generations_are_not_admitted(self):
+        for component,key in (('Shell','Pid'),('Shell','CreationTime'),('Engine','Pid'),('Engine','CreationTime'),
+                              ('Form','Hwnd'),('Panel','Parent'),('Child','ThreadId')):
+            with self.subTest(component=component,key=key):
+                row=self.event();row['details']['result']['Before'][component][key]+=1
+                self.write([row]);self.assert_unknown(self.capture())
+
+    def test_after_snapshot_is_joined_to_the_same_original_binding(self):
+        row=self.event(reason='editorFocused');row['details']['result'].update(Verified=True,Attempted=True,After=self.snapshot())
+        self.write([row]);self.assertTrue(self.capture()['known'])
+        row['details']['result']['After']['Engine']['CreationTime']+=1
+        self.write([row]);self.assert_unknown(self.capture())
+
+    def test_queue_worker_trace_and_physical_sequence_cannot_change(self):
+        for key,change in (('workerProcessId',100),('traceId','b'*32),('processId',78),('sequence',1),('sequence',0)):
+            with self.subTest(key=key,change=change):
+                queue=self.event('initial.queued',2);queue[key]=change
+                self.write([self.event(),queue]);self.assert_unknown(self.capture())
+
+    def test_failed_csharp_writes_may_leave_gaps_in_increasing_sequences(self):
+        self.write([self.event(sequence=2),self.event('initial.queued',5)])
+        value=self.capture();self.assertTrue(value['known'])
+        self.assertEqual([row['sequence'] for row in value['rows']],[2,5])
+        self.assertTrue(value.get('gapObserved',False),'Dropped C# writes must stay explicit')
+        self.assertEqual(value['gapCount'],3)
+        self.assertTrue(value['eventCompletenessUnknown'])
+        self.assertFalse(value['acceptanceEligible'])
+
+    def test_snapshot_visibility_and_readiness_changes_do_not_change_its_identity(self):
+        first=self.event();later=self.event('initial.activation',2)
+        later['details']['result']['Before']['Panel']['Enabled']=False
+        later['details']['result']['Before']['Form']['Visible']=False
+        self.write([first,later]);value=self.capture();self.assertTrue(value['known'])
+        self.assertFalse(value['rows'][1]['before']['Panel']['Enabled'])
+
+    def test_append_during_parsing_returns_unknown_instead_of_a_partial_success(self):
+        self.write([self.event()]);decode=self.smoke.json.loads
+        def append(raw,**kwargs):
+            result=decode(raw,**kwargs)
+            with self.path.open('ab') as stream: stream.write(b'synthetic concurrent append\n')
+            return result
+        with patch.object(self.smoke.json,'loads',side_effect=append):
+            self.assert_unknown(self.capture())
+
+    def test_other_case_or_original_popen_handle_is_unknown(self):
+        self.write([self.event()])
+        self.session.process.opengeul_evidence_case='native-menu-calc';self.assert_unknown(self.capture())
+        self.session.process.opengeul_evidence_case='native-menu-writer'
+        self.session.process._handle=778;self.assert_unknown(self.capture())
+
+    def test_unknown_stage_reason_extra_field_and_noninteger_number_are_not_exported(self):
+        changes=(lambda row:row.update(stage='synthetic unknown stage'),
+            lambda row:row['details']['result'].update(Reason='synthetic unknown reason'),
+            lambda row:row.update(body='synthetic forbidden body'),
+            lambda row:row.update(sequence=True),
+            lambda row:row['details']['result']['Before'].update(GuiFlags=1.5))
+        for change in changes:
+            row=self.event();change(row);self.write([row]);self.assert_unknown(self.capture())
+
+    def test_partial_duplicate_json_and_nonfinite_numbers_are_unknown(self):
+        valid=json.dumps(self.event(),separators=(',',':')).encode()
+        for raw in (valid[:-1]+b'\n',valid,valid.replace(b'"sequence":1',b'"sequence":1,"sequence":1')+b'\n',
+                    valid.replace(b'"GuiFlags":0',b'"GuiFlags":NaN')+b'\n'):
+            self.path.write_bytes(raw);self.assert_unknown(self.capture())
+
+    def test_only_the_exact_serializer_prefix_is_parsed(self):
+        row=self.event();valid=json.dumps(row,separators=(',',':')).encode()+b'\n'
+        self.path.write_bytes(b'synthetic unstructured line\n '+valid)
+        self.assert_unknown(self.capture())
+        self.path.write_bytes(b'synthetic unstructured line\n'+valid)
+        self.assertTrue(self.capture()['known'])
+
+    def test_regular_file_without_hardlinks_symlinks_or_parent_alias_is_required(self):
+        self.write([self.event()]);other=self.folder/'synthetic-original.log';self.path.rename(other)
+        try: self.path.symlink_to(other)
+        except (OSError,NotImplementedError): self.skipTest('Filesystem symlinks unavailable')
+        self.assert_unknown(self.capture());self.path.unlink()
+        try: os.link(other,self.path)
+        except OSError: self.skipTest('Filesystem hardlinks unavailable')
+        self.assert_unknown(self.capture())
+
+    def test_size_line_row_and_budget_bounds_return_unknown(self):
+        self.path.write_bytes(b'x'*(2*1024*1024+1));self.assert_unknown(self.capture())
+        self.path.write_bytes(b'x'*(64*1024+1)+b'\n');self.assert_unknown(self.capture())
+        self.write([self.event(sequence=i+1) for i in range(129)]);self.assert_unknown(self.capture())
+        self.write([self.event()])
+        with patch.object(self.smoke.time,'monotonic',side_effect=[0.,2.]):
+            self.assert_unknown(self.capture())
+
+    def test_finally_captures_once_before_cleanup_without_replacing_primary_failure(self):
+        boundary=Session(fail='open-escape');calls=[]
+        def capture(session,record):
+            calls.append('capture');raise RuntimeError('synthetic private capture failure')
+        cleanup=boundary.cleanup
+        boundary.cleanup=lambda record:calls.append('cleanup') or cleanup(record)
+        with patch.object(self.smoke,'capture_initial_focus_trace',capture,create=True):
+            record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=lambda *args:boundary)
+        self.assertEqual(calls,['capture','cleanup'])
+        self.assertEqual(record['errorType'],'AssertionError');self.assertEqual(record['stage'],'open-escape')
+        self.assertTrue(record['cleanupConfirmed']);self.assertFalse(record['success'])
+        self.assert_unknown(record['initialFocusTrace'])

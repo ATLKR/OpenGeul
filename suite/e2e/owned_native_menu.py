@@ -522,9 +522,17 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
     except BaseException as exc:
         primary=exc;value['failureType']=type(exc).__name__
         try:
+            capture=getattr(probe,'capture_primary_failure',None)
+            if capture:capture(exc)
+        except BaseException:value['numericPrimaryCaptureFailed']=1
+        try:
             import numeric_notice
             value['numericFailure']=numeric_notice.capture_failure_code(exc)
         except BaseException:value['numericFailureCaptureFailed']=1
+        try:
+            observer=getattr(probe,'observe_failure_context',None)
+            if observer:observer(value.get('binding'))
+        except BaseException:value['numericContextCaptureFailed']=1
         raise
     finally:
         errors=[]
@@ -799,8 +807,9 @@ class NativeMenuProbe(NativeControlProbe):
         return copy.deepcopy(self._identity_scope)
     def _same(self,left,right):
         observation=dict(callReturned=False,returnTypeCode=0,areSameObserved=False)
-        self.interop['lastComparison']=observation
-        raw=self._call(self.uia.iuia.CompareElements,left,right)
+        sink=getattr(self,'_diagnostic_sink',None)
+        (sink if isinstance(sink,dict) else self.interop)['lastComparison']=observation
+        raw=self._uia_call(5,self.uia.iuia.CompareElements,left,right)
         observation.update(callReturned=True,returnTypeCode=1 if type(raw) is bool else 2 if type(raw) is int else 3 if raw is None else 4)
         assert type(raw) is bool or type(raw) is int and -(2**31)<=raw<2**31, 'Native UIA comparison returned an invalid BOOL'
         observation.update(areSameObserved=True,areSame=bool(raw))
@@ -836,7 +845,7 @@ class NativeMenuProbe(NativeControlProbe):
             versionObserved=interop.get('versionObserved') is True,declaration=self._declaration(element),
             callSucceeded=False,rawTypeCode=0,length=None,elementTypeCodes=[],empty=False,signed32Valid=False)
         interop['lastRuntimeObservation']=observation
-        raw=self._call(element.GetRuntimeId);observation['callSucceeded']=True
+        raw=self._uia_call(3,element.GetRuntimeId);observation['callSucceeded']=True
         observation['rawTypeCode']=1 if type(raw) is list else 2 if type(raw) is tuple else 3 if raw is None else 4
         if type(raw) in (list,tuple):
             observation.update(length=len(raw),empty=len(raw)==0,
@@ -883,10 +892,13 @@ class NativeMenuProbe(NativeControlProbe):
         # Reserve half the remaining time for readback, validation and cleanup.
         milliseconds=int((remaining*1000-1)//4)
         assert 1<=milliseconds<=1250, 'Native UIA provider query budget expired'
-        for name in ('ConnectionTimeout','TransactionTimeout'):
+        for index,name in enumerate(('ConnectionTimeout','TransactionTimeout')):
             assert self.clock()<self.deadline, 'Native UIA timeout setup deadline expired'
+            context=getattr(self,'_observed_call',None)
+            if isinstance(context,dict):context['providerStep']=index*2+1
             setattr(self.provider_client,name,milliseconds)
             assert self.clock()<self.deadline, 'Native UIA timeout setter exceeded deadline'
+            if isinstance(context,dict):context['providerStep']=index*2+2
             observed=getattr(self.provider_client,name)
             assert self.clock()<self.deadline, 'Native UIA timeout readback exceeded deadline'
             assert type(observed) is int and observed==milliseconds, 'Native UIA provider timeout was not accepted'
@@ -894,48 +906,186 @@ class NativeMenuProbe(NativeControlProbe):
             'Native UIA timeout setup exhausted the original query budget'
         self.provider_timeout_verified=True
     def _call(self,function,*args):
-        assert self.clock()<self.deadline, 'Native menu query deadline expired'
-        if getattr(self,'provider_client',None) is not None:self._provider_timeout()
-        if function is getattr(getattr(self,'user',None),'SendMessageTimeoutW',None):
-            assert type(args[5]) is int and 1<=args[5]<=int((self.deadline-self.clock())*1000), 'Owned hit-test wait exceeds remaining query budget'
-        value=function(*args)
-        assert self.clock()<self.deadline, 'Native menu query exceeded original deadline'
-        return value
+        previous=getattr(self,'_observed_call',None);sink=getattr(self,'_diagnostic_sink',None)
+        context=previous if isinstance(previous,dict) else self._call_record(0)
+        self._observed_call=context
+        try:
+            if not isinstance(sink,dict):self._last_call_exception=None
+            if context is not None:
+                try:(sink if isinstance(sink,dict) else self.interop)['lastCall']=context
+                except BaseException:pass
+            assert self.clock()<self.deadline, 'Native menu query deadline expired'
+            if context is not None:context['phaseCode']=1
+            if getattr(self,'provider_client',None) is not None:self._provider_timeout()
+            if function is getattr(getattr(self,'user',None),'SendMessageTimeoutW',None):
+                assert type(args[5]) is int and 1<=args[5]<=int((self.deadline-self.clock())*1000), 'Owned hit-test wait exceeds remaining query budget'
+            if context is not None:context.update(phaseCode=2,calleeEntered=True)
+            value=function(*args)
+            if context is not None:context.update(phaseCode=3,callCompleted=True)
+            assert self.clock()<self.deadline, 'Native menu query exceeded original deadline'
+            if context is not None:context['phaseCode']=4
+            return value
+        except BaseException as exc:
+            if context is not None:
+                context.update(failed=True,**self._exception_numbers(exc))
+            if not isinstance(sink,dict):self._last_call_exception=exc
+            raise
+        finally:self._observed_call=previous
+    def _call_record(self,code):
+        target=getattr(self,'_active_target',None)
+        return dict(apiCode=code,targetCode=tuple(LABELS).index(target)+1 if target in LABELS else 0,
+            phaseCode=0,providerStep=0,calleeEntered=False,callCompleted=False,failed=False,hresultObserved=False)
+    @staticmethod
+    def _exception_numbers(exc):
+        result=dict(exceptionCode=1 if isinstance(exc,AssertionError) else 2 if type(exc).__name__=='COMError' else 3,hresultObserved=False)
+        try:
+            value=getattr(exc,'hresult',None)
+            if type(value) is int and -(2**31)<=value<2**32:
+                result.update(hresultObserved=True,hresult=value if value<2**31 else value-2**32)
+        except BaseException:pass
+        return result
+    def _uia_call(self,code,function,*args):
+        previous=getattr(self,'_observed_call',None);self._observed_call=self._call_record(code)
+        try:return self._call(function,*args)
+        finally:self._observed_call=previous
+    def capture_primary_failure(self,exc):
+        # A caught optional query error is not the exception escaping this action.
+        self.interop['primaryFailureCall']=copy.deepcopy(self.interop.get('lastCall',{}))
+        self.interop['primaryFailureFromApi']=getattr(self,'_last_call_exception',None) is exc
+        self.interop['primaryFailure']=self._exception_numbers(exc)
     def close_provider(self):
         # Drop all owned element/client references. No shared client was changed.
-        for name in ('file_element','menu_bar_element','peer_element','current_control','_retained','uia','provider_client','_identity_refs','_menu_classification_context'):
+        for name in ('file_element','menu_bar_element','peer_element','current_control','_retained','uia','provider_client','_identity_refs','_menu_classification_context','_failure_point','_diagnostic_sink','_observed_call','_last_call_exception'):
             if hasattr(self,name):setattr(self,name,None)
         return True
     def _condition(self,*,control_type,name=None):
         kinds={'MenuBar':50010,'MenuItem':50011,'Text':50020,'Button':50000,'ToolBar':50021}
         assert control_type in kinds and (name is None or type(name) is str and len(name)<=256)
-        condition=self._call(self.uia.iuia.CreatePropertyCondition,30003,kinds[control_type])
+        condition=self._uia_call(13,self.uia.iuia.CreatePropertyCondition,30003,kinds[control_type])
         if name is not None:
-            label=self._call(self.uia.iuia.CreatePropertyCondition,30005,name)
-            condition=self._call(self.uia.iuia.CreateAndCondition,condition,label)
+            label=self._uia_call(13,self.uia.iuia.CreatePropertyCondition,30005,name)
+            condition=self._uia_call(14,self.uia.iuia.CreateAndCondition,condition,label)
         return condition
-    def _root(self,hwnd):return self._call(self.uia.iuia.ElementFromHandle,hwnd)
+    def _root(self,hwnd):return self._uia_call(1,self.uia.iuia.ElementFromHandle,hwnd)
     def point_snapshot(self,scope,point,control):
         from suite_window_activation import Point
-        hit=int(self._call(self.user.WindowFromPhysicalPoint,Point(*point)) or 0);pid=C.c_uint32()
-        if hit:self._required(self._call(self.user.GetWindowThreadProcessId,hit,C.byref(pid)),'Physical native menu hit PID')
-        target=control.element_info._element;handle=self._chrome(target)['nativeHwnd']
-        actual=self._call(self.uia.iuia.ElementFromPoint,self._point_type(*point))
-        match=self._same(target,actual)
-        result=dict(point=list(point),hitHwnd=hit,pid=int(pid.value),
-            rootHwnd=int(self._call(self.user.GetAncestor,hit,2) or 0) if hit else 0,
-            withinControl=bool(hit and (hit==handle or handle and self._call(self.user.IsChild,handle,hit) or not handle and match)),uiaMatches=match)
-        if getattr(self,'_uses_comparison',False):
-            role=_target_role(self._active_target);original=self._identity_refs[role]
-            result['identityProof']=dict(scope=copy.deepcopy(self._identity_scope),role=role,
-                targetEqualsRetained=self._same(target,original),hitEqualsRetained=self._same(actual,original),
-                differentFrom={key:self._same(actual,ref) for key,ref in self._identity_refs.items() if key!=role})
-            assert result['identityProof']['targetEqualsRetained'] is result['identityProof']['hitEqualsRetained'] is True
-            assert all(value is False for value in result['identityProof']['differentFrom'].values())
-        return result
+        observation=dict(targetCode=tuple(LABELS).index(self._active_target)+1,stageCode=1,
+            point=list(point),failed=False,primary={})
+        try:self.interop['pointObservation']=observation
+        except BaseException:pass
+        actual=target=original=None
+        try:
+            hit=int(self._call(self.user.WindowFromPhysicalPoint,Point(*point)) or 0);pid=C.c_uint32()
+            if hit:self._required(self._call(self.user.GetWindowThreadProcessId,hit,C.byref(pid)),'Physical native menu hit PID')
+            observation['stageCode']=2
+            target=control.element_info._element;row=self._chrome(target);handle=row['nativeHwnd']
+            kinds={'Button':50000,'MenuBar':50010,'MenuItem':50011,'ToolBar':50021,'Window':50032}
+            observation['target']=dict(kindCode=kinds.get(row['controlType'],0),pid=row['pid'],nativeHwnd=handle,
+                rectangle=list(row['rectangle']),enabled=row['enabled'],visible=row['visible'])
+            observation['stageCode']=3
+            actual=self._uia_call(4,self.uia.iuia.ElementFromPoint,self._point_type(*point))
+            observation['stageCode']=4
+            match=self._same(target,actual);observation['primary']['rawMatchesTarget']=match
+            observation['stageCode']=5
+            result=dict(point=list(point),hitHwnd=hit,pid=int(pid.value),
+                rootHwnd=int(self._call(self.user.GetAncestor,hit,2) or 0) if hit else 0,
+                withinControl=bool(hit and (hit==handle or handle and self._call(self.user.IsChild,handle,hit) or not handle and match)),uiaMatches=match)
+            observation.update(nativeHitHwnd=result['hitHwnd'],nativeHitPid=result['pid'],nativeRootHwnd=result['rootHwnd'])
+            if getattr(self,'_uses_comparison',False):
+                role=_target_role(self._active_target);original=self._identity_refs[role]
+                proof=dict(scope=copy.deepcopy(self._identity_scope),role=role,differentFrom={});result['identityProof']=proof
+                observation['stageCode']=6
+                proof['targetEqualsRetained']=self._same(target,original)
+                observation['primary']['targetEqualsRetained']=proof['targetEqualsRetained']
+                observation['stageCode']=7
+                proof['hitEqualsRetained']=self._same(actual,original)
+                observation['primary']['hitEqualsRetained']=proof['hitEqualsRetained']
+                observation['stageCode']=8;observation['primary']['differentFrom']=[]
+                for key,ref in self._identity_refs.items():
+                    if key==role:continue
+                    proof['differentFrom'][key]=self._same(actual,ref)
+                    observation['primary']['differentFrom'].append([IDENTITY_ROLES.index(key)+1,proof['differentFrom'][key]])
+                observation['stageCode']=9
+                assert result['identityProof']['targetEqualsRetained'] is result['identityProof']['hitEqualsRetained'] is True
+                observation['stageCode']=10
+                assert all(value is False for value in result['identityProof']['differentFrom'].values())
+            observation['stageCode']=11
+            return result
+        except BaseException as exc:
+            observation.update(failed=True,**self._exception_numbers(exc))
+            self._failure_point=(actual,original if original is not None else target)
+            try:
+                self.capture_primary_failure(exc)
+                observation['primaryCall']=copy.deepcopy(self.interop.get('primaryFailureCall',{}))
+                observation['primaryComparison']=copy.deepcopy(self.interop.get('lastComparison',{}))
+            except BaseException:pass
+            raise
+    def observe_failure_context(self,binding):
+        if getattr(self,'_failure_context_recorded',False):return
+        self._failure_context_recorded=True
+        diagnostic=dict(guiStatus=0,pointStatus=0,parentQueries=0,nodes=[],
+            ownershipPostStatus=0,ownershipPostVerified=False)
+        self.interop['failureContext']=diagnostic
+        point=self.interop.get('pointObservation')
+        if isinstance(point,dict) and point.get('failed') is True:point['diagnostic']=diagnostic
+        if self.deadline-self.clock()<=.05:
+            diagnostic.update(guiStatus=1,pointStatus=1);return
+        previous=getattr(self,'_diagnostic_sink',None);self._diagnostic_sink=diagnostic
+        def budget():assert self.deadline-self.clock()>.05, 'Failure observation reserve exhausted'
+        def ownership():
+            budget();scope,continuity=self._menu_classification_context
+            assert scope['binding']==binding;continuity()
+            child=self.window_snapshot(binding['child'])
+            assert (child['hwnd'],child['pid'],child['rootHwnd'])==(binding['child'],binding['officePid'],binding['document'])
+            _int(child['threadId']);assert self.attachment_snapshot(binding)['valid'] is True
+            return child
+        try:
+            try:
+                child=ownership()
+                budget();gui=self.native_focus(child['threadId'])
+                diagnostic['gui']={k:gui[k] for k in ('threadId','activeHwnd','focusHwnd','focusPid','focusRootHwnd','captureHwnd','menuOwnerHwnd','flags') if type(gui.get(k)) is int and 0<=gui[k]<2**64}
+                budget();foreground=int(self._call(self.user.GetForegroundWindow) or 0);pid=C.c_uint32()
+                if foreground:self._required(self._call(self.user.GetWindowThreadProcessId,foreground,C.byref(pid)),'Failure foreground PID')
+                diagnostic['foreground']=dict(hwnd=foreground,pid=int(pid.value),rootHwnd=int(self._call(self.user.GetAncestor,foreground,2) or 0) if foreground else 0)
+                ownership();diagnostic['guiStatus']=2
+            except BaseException as exc:
+                diagnostic.update(guiStatus=3,pointStatus=7,guiError=self._exception_numbers(exc));return
+            cursor,original=getattr(self,'_failure_point',(None,None))
+            if cursor is None or original is None:diagnostic['pointStatus']=4;return
+            try:
+                for _ in range(8):
+                    budget();row={};diagnostic['nodes'].append(row)
+                    pid=self._uia_call(8,lambda:cursor.CurrentProcessId);assert type(pid) is int and 0<pid<2**32;row['pid']=pid
+                    if pid!=binding['officePid']:diagnostic['pointStatus']=5;return
+                    budget();row['kindCode']=self._uia_call(9,lambda:cursor.CurrentControlType)
+                    budget();raw=self._uia_call(7,lambda:cursor.CurrentNativeWindowHandle)
+                    assert raw is None or type(raw) is int and -(2**31)<=raw<2**32
+                    row['nativeHwnd']=0 if raw is None else raw&0xffffffff
+                    budget();box=self._uia_call(10,lambda:cursor.CurrentBoundingRectangle)
+                    rectangle=[getattr(box,k) for k in ('left','top','right','bottom')]
+                    assert type(row['kindCode']) is int and 0<=row['kindCode']<2**16
+                    assert all(type(n) is int and -(2**31)<=n<2**31 for n in rectangle);row['rectangle']=rectangle
+                    budget();row['equalsRetainedTarget']=self._same(cursor,original)
+                    if row['equalsRetainedTarget']:diagnostic['pointStatus']=2;return
+                    budget();diagnostic['parentQueries']+=1
+                    cursor=self._uia_call(6,self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
+                    if not cursor:diagnostic['pointStatus']=2;return
+                diagnostic['pointStatus']=6
+            except BaseException as exc:diagnostic.update(pointStatus=3,pointError=self._exception_numbers(exc))
+            finally:
+                if self.deadline-self.clock()<=.05:diagnostic['ownershipPostStatus']=1
+                else:
+                    try:
+                        ownership();diagnostic.update(ownershipPostStatus=2,ownershipPostVerified=True)
+                    except BaseException as exc:
+                        diagnostic.update(ownershipPostStatus=3,ownershipPostError=self._exception_numbers(exc))
+        finally:self._diagnostic_sink=previous
     def _chrome(self,element):
         # Ancestor names can contain a document title; query identity only.
-        def get(name):return self._call(lambda:getattr(element,name))
+        def get(name):
+            codes={'CurrentNativeWindowHandle':7,'CurrentProcessId':8,'CurrentControlType':9,
+                'CurrentBoundingRectangle':10,'CurrentIsOffscreen':11,'CurrentIsEnabled':12}
+            return self._uia_call(codes[name],lambda:getattr(element,name))
         handle=get('CurrentNativeWindowHandle')
         assert handle is None or type(handle) is int and -(2**31)<=handle<2**32
         runtime,observation=self._runtime(element)
@@ -957,14 +1107,14 @@ class NativeMenuProbe(NativeControlProbe):
         return result
     def _find_labels(self,root,labels,*,scope='descendants'):
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuItem'))
-        found=self._call(root.FindAll,self.uia.tree_scope[scope],condition)
-        count=int(self._call(lambda:found.Length));assert 0<=count<=512
+        found=self._uia_call(2,root.FindAll,self.uia.tree_scope[scope],condition)
+        count=int(self._uia_call(17,lambda:found.Length));assert 0<=count<=512
         matches=[]
         for i in range(count):
-            element=self._call(found.GetElement,i)
-            if int(self._call(lambda:element.CurrentControlType))!=50011:continue
-            if self._call(lambda:element.CurrentIsOffscreen):continue
-            name=str(self._call(lambda:element.CurrentName));assert len(name)<=256
+            element=self._uia_call(18,found.GetElement,i)
+            if int(self._uia_call(9,lambda:element.CurrentControlType))!=50011:continue
+            if self._uia_call(11,lambda:element.CurrentIsOffscreen):continue
+            name=str(self._uia_call(16,lambda:element.CurrentName));assert len(name)<=256
             if _label(name) in labels:matches.append(element)
         assert len(matches)<=1, 'Native chrome target is ambiguous'
         if not matches:raise NativeMenuPending('Native chrome target not visible yet')
@@ -975,12 +1125,12 @@ class NativeMenuProbe(NativeControlProbe):
     def _discover_bar(self,root):
         # Ask UIA for chrome only. Never materialize document paragraphs/cells.
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuBar'))
-        found=self._call(root.FindAll,self.uia.tree_scope['descendants'],condition)
-        count=int(self._call(lambda:found.Length));assert 0<=count<=8
+        found=self._uia_call(2,root.FindAll,self.uia.tree_scope['descendants'],condition)
+        count=int(self._uia_call(17,lambda:found.Length));assert 0<=count<=8
         bars=[]
         for index in range(count):
-            bar=self._call(found.GetElement,index)
-            if not self._call(lambda:bar.CurrentIsOffscreen):bars.append(bar)
+            bar=self._uia_call(18,found.GetElement,index)
+            if not self._uia_call(11,lambda:bar.CurrentIsOffscreen):bars.append(bar)
         assert len(bars)<=1, 'Native menubar is ambiguous'
         if not bars:raise NativeMenuPending('Native menubar not visible yet')
         return bars[0]
@@ -988,7 +1138,7 @@ class NativeMenuProbe(NativeControlProbe):
         self.menu_bar_element=self._discover_bar(root)
         return self._find(self.menu_bar_element,'file',scope='children')
     def _focused_menu(self,chain,file_index,bar_index):
-        result=[];cursor=self._call(self.uia.iuia.GetFocusedElement);matched=False
+        result=[];cursor=self._uia_call(15,self.uia.iuia.GetFocusedElement);matched=False
         comparison=getattr(self,'_uses_comparison',False)
         self._focus_identity=None
         allowed={tuple(chain[file_index]['runtimeId']),tuple(chain[bar_index]['runtimeId'])}

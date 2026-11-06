@@ -167,3 +167,17 @@ command do not prove that HWP created a new document. A physical HWP launch test
 needs a new exact process generation, retained handles and graceful shutdown;
 it must not fall through to the Office shell's tree-force cleanup. Preserve the
 standalone HWP distribution and report unexecuted HWP outcomes explicitly.
+The runner and independent archive consumer share the same source-bound launcher
+proof. Join its native menu action to the original Writer/shell/Office generation,
+an empty pre-launch child census, the exact new HWP executable/creation time and
+one retained HANDLE through normal exit0 and release. Missing or boolean-only
+summaries cannot replace this proof. An unretired HWP process stops the cohort
+and suppresses shell tree cleanup; other modules are then unexecuted. This adds
+no Office engine generation and leaves the original83 gate unchanged.
+
+After the existing native accessibility diagnostic restores the retained VCL
+focus window and confirms selection preservation, it may record only an
+allowlisted Writer edit-window type code and fresh equality result. Do not read
+that window's state/text or create accessible document objects for this optional
+diagnostic. Unknown types and query errors remain numeric observations and do
+not replace the independent OS accessibility gate or establish its failure cause.

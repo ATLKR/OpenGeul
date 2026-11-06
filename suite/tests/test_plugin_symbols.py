@@ -49,6 +49,18 @@ class PluginSymbolsTests(unittest.TestCase):
         self.pp=self.source/'workdir/LinkTarget/Library/vclplug_winlo.pdb';self.pp.parent.mkdir(parents=True);self.pp.write_bytes(pdb())
         self.config=self.source/'config_host.mk';self.config.write_text('export ENABLE_SYMBOLS_FOR=Library_vclplug_win\n')
     def retain(self):return self.m.retain(self.source,self.output,'a'*40,self.config)
+    def test_pinned_symbol_producer_matches_qualified_runtime_first_attempt(self):
+        config=SCRIPT.parents[1]/'config'
+        runtime=json.loads((config/'runtime.arm64.lock.json').read_bytes())
+        symbols=json.loads((config/'plugin-symbols.arm64.lock.json').read_bytes())
+        build=runtime['runtime']['sourceBuild']
+        self.assertEqual(symbols['architecture'],runtime['architecture'])
+        self.assertEqual(symbols['sourceCommit'],build['sourceCommit'])
+        self.assertEqual(symbols['runId'],build['runId'])
+        # Normal source builds are admitted only on their first producer attempt;
+        # the runtime receipt hash externally binds that attempt's full proof.
+        self.assertIs(type(symbols['runAttempt']),int)
+        self.assertEqual(symbols['runAttempt'],1)
     def test_verified_pair_hashes_fixed_names_and_no_path_leak(self):
         r=self.retain()
         self.assertTrue(r['identityMatched']);self.assertFalse(r['symbolContentsValidated']);self.assertFalse(r['acceptance'])

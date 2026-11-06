@@ -2,28 +2,28 @@
   "schemaVersion": 1,
   "kind": "native-arm64-plugin-symbols",
   "architecture": "arm64",
-  "sourceCommit": "e8b19f610d4bcc074bb002d132bca675e273116f",
-  "runId": 40171709989,
+  "sourceCommit": "6714099caea00c800c900272574ae1c6b6144225",
+  "runId": 42203789086,
   "runAttempt": 1,
-  "artifactId": 12597677100,
+  "artifactId": 13514651574,
   "artifactSize": 28235984,
-  "artifactSha256": "a74c60b51789433118ba250b46b8b14a8804a731338e87b6f704414acde0a0b1",
+  "artifactSha256": "0a50464066693f8c0740631c908885c1ba889f31722369a5623dc588a4b6dea9",
   "files": {
     "receipt.json": {
       "bytes": 842,
-      "sha256": "012d68c078181a68268f0d9d511e6e393ed77b5bf45bb15766b9fd7762eb40c6"
+      "sha256": "ec57a68dd52baca023c6e2b6342be59181b5550f7b7105ebb88ff0205324a041"
     },
     "vclplug_winlo.dll": {
       "bytes": 4342784,
-      "sha256": "ef44f1d8df4c439f4504a74317663df8d924afd9b1fda6c5f5b64f389f6464f5"
+      "sha256": "0bab01563e9e68f35b56a405a10ad5b7c83e5a834f475173e9c4576b024316e6"
     },
     "vclplug_winlo.pdb": {
       "bytes": 23891968,
-      "sha256": "47868f4399f4f6d6bfeddc2246841f03a12144fd85156db9c26ce2089a2c3a62"
+      "sha256": "214ea77fb0de33d652cae94f481c0dc8dea9e6810066ce3590f0586d2168c984"
     }
   },
   "matchedIdentity": {
     "age": 1,
-    "guid": "1888ca5e-ae59-4868-8b3d-f8b28367c979"
+    "guid": "a2a7987b-80f5-4b4e-b11d-0f5acd2f9e17"
   }
 }

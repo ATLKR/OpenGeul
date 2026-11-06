@@ -42,7 +42,8 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
                 officeExitedAfterCleanup=True, officeExitCode=0, shellExitCode=0,
                 engineHandleReleased=True, officeCreationTime=row['nativeArchiveGeneration']['creationTime'])
             row.update(viewRoundtripCompleted=module in VIEW_MODULES,
-                       viewPhysicalVerified=module in VIEW_MODULES)
+                       viewPhysicalVerified=module in VIEW_MODULES,
+                       hwpLauncherCompleted=module=='writer', nativeHwpMenuLaunchExecuted=module=='writer')
             if module in VIEW_MODULES:
                 row['nativeViewRoundtrip'] = dict(kind='native-view-roundtrip', module=module,
                     success=True, originalHomeSurvived=True,
@@ -59,14 +60,60 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
                         command='core-commands', gesture=True, coreCommandsVerified=True,
                         coreCommands=list(CORE_COMMANDS), focusReturned=True) for _ in range(2)])
             rows.append(row)
+        rows[0]['originalHomeHwnd']=70000
+        rows[0]['nativeHwpLauncher']=self.hwp_receipt(rows[0])
         self.report = dict(schemaVersion=1, kind='native-menu-gesture-matrix', success=True,
             actualWindowsExecuted=True, nativeMenuVerified=True, scenarioSuccess=True,
             acceptanceEligible=False, expectedCaseCount=6, completedCaseCount=6,
             viewPhysicalVerified=True, viewPhysicalExpectedCaseCount=2, viewPhysicalVerifiedCaseCount=2,
-            passedCaseCount=6, missingModules=[], failedModules=[], tests=rows)
+            nativeHwpMenuLaunchExecuted=True, passedCaseCount=6, missingModules=[], failedModules=[], tests=rows)
         self.save_report()
         for index, entry in enumerate(self.base.expected):
             self.base.archive(entry, index)
+
+    def hwp_receipt(self,row):
+        from test_owned_native_menu import OwnedNativeMenuTests
+        helper=OwnedNativeMenuTests();self.addCleanup(helper.doCleanups)
+        menu,api,process,record,clock,probe=helper.fixture()
+        process.opengeul_suite_root=self.suite
+        probe.shell['image']=str(self.suite/'OpenGeul.Office.exe')
+        probe.engine['image']=str(self.suite/'Office/program/soffice.bin')
+        action=menu.click_native_menu_action(api,process,11,record,'new-hwp',probe=probe,clock=clock)
+        shell=row['windowActivations'][0]['originalProcess'];generation=row['nativeArchiveGeneration']
+        replacements={77:row['shellPid'],88:row['officePid'],11:row['windowHwnd'],55:row['parentHwnd'],
+            56:row['childHwnd'],99:row['windowHwnd']+10000,8:shell['handleValue'],100:shell['creationTime'],200:generation['creationTime']}
+        def remap(value):
+            if type(value) is int:return replacements.get(value,value)
+            if type(value) is list:return [remap(item) for item in value]
+            if type(value) is dict:return {key:remap(item) for key,item in value.items()}
+            return value
+        action=remap(action);menu.require_native_menu_action(action,row['shellPid'],row['windowHwnd'],'new-hwp')
+        def stamp(n):return dict(low=n,high=0,fileTime=n)
+        executable=str(self.suite/'HWP/OpenGeul.exe');born=200000+row['shellPid'];pid=500000+row['shellPid'];handle=600000+pid
+        new=dict(pid=pid,parentPid=row['shellPid'],executable=executable,creationFileTime=born)
+        original=dict(kind='retained-suite-popen-process',pid=shell['pid'],handleValue=shell['handleValue'],
+            nativeImage=shell['image'],nativeImageLength=len(shell['image']),nativeCreation=stamp(shell['creationTime']),waitResult=258,exitCode=259)
+        live=dict(kind='home-retained-live-process',pid=pid,creationTime=born,handleValue=handle,getProcessIdResult=pid,waitResult=258,
+            expectedImage=executable,nativeImage=executable,nativeImageLength=len(executable),nativeCreation=stamp(born))
+        def census(matched):
+            when=(300000 if matched else 150000)+row['shellPid']
+            candidate=dict(pid=pid,parentPid=row['shellPid'],snapshotExeName='OpenGeul.exe',parentMatches=True,nameMatches=True,
+                queryAttempted=True,handleOpened=True,handleClosed=True,matched=True,nativeImage=executable,nativeImageLength=len(executable),
+                image=executable,nativeCreation=stamp(born),creationFileTime=born,imageMatches=True,generationWithinSnapshot=True)
+            return dict(schemaVersion=1,kind='native-hwp-child-census',clockApi='GetSystemTimePreciseAsFileTime',shellPid=row['shellPid'],
+                shellCreationFileTime=shell['creationTime'],expectedExecutable=executable,snapshotClock=stamp(when),snapshotStartedFileTime=when,
+                snapshotHandleCreated=True,snapshotClosed=True,enumerationComplete=True,candidates=[candidate] if matched else [],
+                match=copy.deepcopy(new) if matched else None,success=True)
+        exit=dict(liveBinding=copy.deepcopy(live),pid=pid,creationTime=born,handleValue=handle,image=executable,
+            imageSource='retained-live-binding',waitResult=0,getProcessIdResult=pid,getProcessTimesResult=True,
+            processTimes={key:stamp(value) for key,value in [('creation',born),('exit',born+1),('kernel',0),('user',0)]},
+            getExitCodeProcessResult=True,exitCode=0)
+        return dict(kind='owned-native-hwp-launcher',success=True,launchKind='no-argument-launcher',noArgumentBasis='native-new-hwp-shell-route',
+            documentCreated=False,hwpApplicationHomeReady=False,originalOfficeHomeHwnd=row['originalHomeHwnd'],
+            originalOfficeHomeNativeAvailable=True,visibleOwnedMainWindow=True,windowHwnd=pid+1,windowPid=pid,windowRootHwnd=pid+1,
+            webviewHwnds=[pid+2],censuses=[census(False),census(True)],shellBindingChecks=7,closeRequests=1,
+            normalExitVerified=True,handleReleased=True,handleValue=handle,cleanupPending=False,originalShell=original,
+            menuAction=action,generation=new,liveBinding=live,exit=exit)
 
     def implementation(self):
         self.assertTrue(SOURCE.is_file(), 'The independent native menu archive join is missing')
@@ -111,6 +158,39 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
         self.save_report()
         with self.assertRaises(ValueError):
             self.verify()
+
+    def test_legacy_success_without_mandatory_hwp_evidence_is_rejected(self):
+        self.report.pop('nativeHwpMenuLaunchExecuted')
+        for row in self.report['tests']:
+            for key in ('nativeHwpMenuLaunchExecuted','hwpLauncherCompleted','nativeHwpLauncher'):row.pop(key,None)
+        self.save_report()
+        with self.assertRaises(ValueError):self.verify()
+
+    def test_hwp_success_booleans_without_receipt_are_rejected(self):
+        self.report['tests'][0].pop('nativeHwpLauncher');self.save_report()
+        with self.assertRaises(ValueError):self.verify()
+
+    def test_hwp_scope_generation_close_exit_and_menu_receipt_tampering_are_rejected(self):
+        mutations=[(('nativeHwpMenuLaunchExecuted',),False),(('hwpLauncherCompleted',),False),
+            (('nativeHwpLauncher','generation','executable'),'/foreign/OpenGeul.exe'),
+            (('nativeHwpLauncher','generation','pid'),999), (('nativeHwpLauncher','generation','creationFileTime'),1),
+            (('nativeHwpLauncher','censuses',0,'match'),{'pid':123}),
+            (('nativeHwpLauncher','liveBinding','handleValue'),999),
+            (('nativeHwpLauncher','exit','handleValue'),999), (('nativeHwpLauncher','exit','exitCode'),7),
+            (('nativeHwpLauncher','closeRequests'),0),(('nativeHwpLauncher','handleReleased'),False),
+            (('nativeHwpLauncher','cleanupPending'),True),(('nativeHwpLauncher','windowPid'),999),
+            (('nativeHwpLauncher','documentCreated'),True),(('nativeHwpLauncher','hwpApplicationHomeReady'),True),
+            (('nativeHwpLauncher','originalShell','handleValue'),999),
+            (('nativeHwpLauncher','menuAction','documentHwnd'),999),
+            (('nativeHwpLauncher','menuAction','originalEngine','creationTime'),999),
+            (('nativeHwpLauncher','menuAction','pointers'),[])]
+        original=copy.deepcopy(self.report)
+        for path,damage in mutations:
+            with self.subTest(path=path):
+                self.report=copy.deepcopy(original);target=self.report['tests'][0]
+                for key in path[:-1]:target=target[key]
+                target[path[-1]]=damage;self.save_report()
+                with self.assertRaises(ValueError):self.verify()
 
     def test_legacy_view_observations_without_completed_status_rpc_are_rejected(self):
         original = copy.deepcopy(self.report)
