@@ -279,6 +279,30 @@ class Windows:
         self.user.GetClassNameW(hwnd, name, len(name))
         return name.value
 
+    def attachment(self, document):
+        """Recheck fixed HWND exports without changing focus, UI, or the recipient."""
+        assert type(document) is int and 0 < document < 2**64, 'Attachment requires the original document HWND'
+        def read():
+            assert self.user.IsWindow(document) and self.user.GetAncestor(document, 2) == document, 'Attachment document is not a live root'
+            parent = self.user.GetPropW(document, 'OpenGeul.Office.ParentHwnd')
+            child = self.user.GetPropW(document, 'OpenGeul.Office.ChildHwnd')
+            assert all(type(value) is int and 0 < value < 2**64 for value in (parent, child)), 'Attachment exports are not positive HWNDs'
+            assert len({document, parent, child}) == 3, 'Attachment HWNDs must be distinct'
+            assert self.user.IsWindow(parent) and self.user.IsWindow(child), 'Attachment editor HWNDs are not live'
+            identities = []
+            for hwnd in (document, parent, child):
+                pid = wintypes.DWORD()
+                thread = self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                assert type(thread) is int and 0 < thread < 2**32 and 0 < pid.value < 2**32, 'Attachment native identity is not live'
+                identities.append((int(pid.value), thread))
+            assert identities[0][0] == identities[1][0] != identities[2][0], 'Attachment process ownership changed'
+            assert all(self.user.GetAncestor(hwnd, 2) == document for hwnd in (parent, child)), 'Attachment escaped the original document root'
+            assert self.user.IsChild(document, parent) and self.user.IsChild(parent, child), 'Attachment hierarchy changed'
+            return parent, child, identities[2][0], tuple(identities)
+        original = read()
+        assert read() == original, 'Attachment exports or native identities changed while reading'
+        return original[:3]
+
     def attached(self, process):
         windows = self.windows(process.pid)
         for hwnd in windows:

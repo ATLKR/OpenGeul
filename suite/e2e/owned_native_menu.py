@@ -38,6 +38,23 @@ KEY_COUNTS={'ALT_F':4,'DOWN':2,'ESCAPE':2}
 class NativeMenuPending(AssertionError):pass
 
 
+def _menu_key_events(shortcut):
+    plans={'ALT_F':((0x38,0),(0x21,0)),'DOWN':((0x50,1),),'ESCAPE':((0x01,0),)}
+    assert type(shortcut) is str and shortcut in plans, 'Unknown native menu shortcut'
+    keys=plans[shortcut]
+    return ([dict(vk=0,scan=scan,flags=8|extended) for scan,extended in keys]
+        +[dict(vk=0,scan=scan,flags=10|extended) for scan,extended in reversed(keys)])
+
+
+def _menu_release_events(shortcut,inserted):
+    # Admit only this local enum's fixed plan before using the shared pure leaf.
+    # The public counted-editor PRESETS allowlist remains unchanged.
+    from counted_editor_shortcuts import _owned_release
+    events=_menu_key_events(shortcut)
+    assert type(inserted) is int and 0<=inserted<=len(events), 'Unknown native menu inserted prefix'
+    return _owned_release(events,inserted)
+
+
 def decode_status_sequence(raw):
     """Decode only the opt-in shell's positive, versioned numeric counters."""
     assert type(raw) is int and 0<raw<1<<63 and raw>>56==1, 'Invalid native status sequence version'
@@ -679,19 +696,17 @@ class NativeMenuProbe(NativeControlProbe):
             captureHwnd=gui['captureHwnd'],menuOwnerHwnd=gui['menuOwnerHwnd'],menuClosed=not gui['captureHwnd'] and not gui['menuOwnerHwnd'])
     def keyboard(self,binding,shortcut,receipt):
         from ascii_editor_input import input_buffer
-        plans={'ALT_F':((0x38,0),(0x21,0)),'DOWN':((0x50,1),),'ESCAPE':((0x01,0),)}
-        assert shortcut in plans
+        events=_menu_key_events(shortcut)
         thread=self.attachment_snapshot(binding)['windows']['child']['threadId'];state=self.keyboard_snapshot(thread)
         assert state['targetLayout']==state['currentThreadLayout']==0x04090409 and not state['keysDown']
         held=[key for key in (1,2,4,5,6,0x46,0x28) if self._call(self.user.GetAsyncKeyState,key)&0x8000]
         assert not held, 'A native menu navigation key is already pressed'
         receipt['keyboardBefore']=dict(state,additionalMenuKeysDown=held)
-        keys=plans[shortcut];events=([dict(vk=0,scan=s,flags=8|x) for s,x in keys]+[dict(vk=0,scan=s,flags=10|x) for s,x in reversed(keys)])
         receipt.update(requestedInputs=len(events),inputCallAttempts=1,insertedInputs=None)
         inserted=self.send(input_buffer(events));receipt['insertedInputs']=inserted
+        assert type(inserted) is int and 0<=inserted<=len(events), 'Unknown native menu inserted prefix'
         if inserted!=len(events):
-            assert type(inserted) is int and 0<=inserted<len(events)
-            release=self.owned_release_events(events,inserted)
+            release=_menu_release_events(shortcut,inserted)
             if release:receipt['ownedReleaseInserted']=self.release(release)
         assert inserted==len(events), 'Native menu key input was partial'
     def outside_snapshot(self,binding):

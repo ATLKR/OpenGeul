@@ -197,6 +197,63 @@ class OwnedNativeMenuTests(unittest.TestCase):
                 probe.send=lambda payload:calls.append('send') or len(payload)
                 with self.assertRaises(AssertionError):probe.keyboard({},'ALT_F',{})
                 self.assertEqual(calls,[])
+    def real_menu_keyboard(self,inserted):
+        m=self.feature();probe=object.__new__(m.NativeMenuProbe);calls=[];clock=Clock()
+        def rows(payload):
+            return [dict(vk=item.payload.keyboard.wVk,scan=item.payload.keyboard.wScan,
+                flags=item.payload.keyboard.dwFlags) for item in payload]
+        def send(payload):calls.append(('send',rows(payload)));return inserted
+        def release(payload):calls.append(('release',rows(payload)));return len(payload)
+        backend=NS(send=send,release=release,keyboard_snapshot=lambda thread:
+            dict(targetLayout=0x04090409,currentThreadLayout=0x04090409,keysDown=[]))
+        probe.clock=clock;probe.deadline=clock()+5;probe.provider_client=None
+        probe._keyboard=lambda:backend
+        probe.user=NS(GetAsyncKeyState=lambda key:0)
+        probe.attachment_snapshot=lambda binding:dict(windows={'child':{'threadId':9}})
+        # Keep both inherited typed wrappers real: no fake release-plan admission.
+        self.assertIs(probe.send.__func__,m.NativeControlProbe.send)
+        self.assertIs(probe.release.__func__,m.NativeControlProbe.release)
+        self.assertIs(probe.owned_release_events.__func__,m.NativeControlProbe.owned_release_events)
+        return m,probe,calls
+    def test_real_menu_keyboard_releases_each_partial_fixed_prefix_through_common_wrapper(self):
+        cases=(('ALT_F',0,[]),('ALT_F',1,[(0x38,10)]),('ALT_F',2,[(0x21,10),(0x38,10)]),
+            ('ALT_F',3,[(0x38,10)]),('DOWN',0,[]),('DOWN',1,[(0x50,11)]),
+            ('ESCAPE',0,[]),('ESCAPE',1,[(0x01,10)]))
+        for shortcut,inserted,expected in cases:
+            with self.subTest(shortcut=shortcut,inserted=inserted):
+                m,probe,calls=self.real_menu_keyboard(inserted);receipt={}
+                with self.assertRaisesRegex(AssertionError,'Native menu key input was partial'):
+                    probe.keyboard({},shortcut,receipt)
+                self.assertEqual(receipt['inputCallAttempts'],1);self.assertEqual(receipt['insertedInputs'],inserted)
+                self.assertEqual(sum(name=='send' for name,row in calls),1)
+                released=[row for name,row in calls if name=='release']
+                self.assertEqual(released,[[dict(vk=0,scan=scan,flags=flags) for scan,flags in expected]] if expected else [])
+                self.assertEqual(receipt.get('ownedReleaseInserted',0),len(expected))
+                self.assertEqual(probe.deadline,probe.clock()+5)
+    def test_real_menu_keyboard_never_guesses_unknown_prefixes_or_retries(self):
+        for shortcut,size in (('ALT_F',4),('DOWN',2),('ESCAPE',2)):
+            for inserted in (None,True,-1,size+1,float(size),.5):
+                with self.subTest(shortcut=shortcut,inserted=inserted):
+                    m,probe,calls=self.real_menu_keyboard(inserted)
+                    with self.assertRaises(AssertionError):probe.keyboard({},shortcut,{})
+                    self.assertEqual([name for name,row in calls],['send'])
+            m,probe,calls=self.real_menu_keyboard(size);receipt={}
+            probe.keyboard({},shortcut,receipt)
+            self.assertEqual([name for name,row in calls],['send'])
+            self.assertEqual(receipt['insertedInputs'],size)
+    def test_local_menu_release_does_not_expand_the_shared_shortcut_allowlist(self):
+        from counted_editor_shortcuts import owned_release_events,shortcut_events
+        m=self.feature()
+        self.assertTrue(callable(getattr(m,'_menu_key_events',None)))
+        self.assertTrue(callable(getattr(m,'_menu_release_events',None)))
+        for shortcut in ('ALT_F','DOWN'):
+            with self.subTest(shortcut=shortcut):
+                with self.assertRaisesRegex(AssertionError,'Unknown shortcut scan plan'):
+                    owned_release_events(m._menu_key_events(shortcut),1)
+                with self.assertRaises(ValueError):shortcut_events(shortcut)
+        for unknown in ('CTRL_F','ALT_F4','',None,True,[],{'scan':0x38}):
+            with self.subTest(unknown=unknown):
+                with self.assertRaises(AssertionError):m._menu_release_events(unknown,1)
     def test_print_preview_uses_the_same_two_physical_file_clicks_and_replays(self):
         m,a,p,r,c,probe=self.fixture()
         value=m.click_native_menu_action(a,p,11,r,'printPreview',probe=probe,clock=c)
