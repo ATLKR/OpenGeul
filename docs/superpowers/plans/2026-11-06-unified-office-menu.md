@@ -59,7 +59,8 @@ shell-tests/DocumentMenuSurfaceTests.cs and Program registration.
   cancel-safe close for runtime loss, never discard to force termination.
 - [x] Connect document-owned Open and Home/Exit callbacks without introducing
   document Form ownership or fake keyboard focus restoration.
-- [ ] Verify Core behavior and Windows-targeted compilation; report actual limits.
+- [x] Verify Core behavior on Windows x64/ARM64 (121/121 at68bc25a).
+- [ ] Verify Windows-targeted WinForms compilation and UI; report actual limits.
 
 ### Task3: Native UI and final integration
 
@@ -93,3 +94,10 @@ related tests, office-suite.yml and suite/README.md.
 - Verify complete live menu observations across a bounded view/resource change;
   do not turn a legitimately disposed old wrapper into a permanent failure.
 - Actual preview/full-screen round-trip UI behavior still needs Windows evidence.
+- [x] Add source-bound physical Writer/Calc preview and full-screen round-trip
+  checks, keeping old display-mode settling inside the original input budget.
+- [x] Require the new two-view-case plan in the independent archive consumer;
+  preserve the original83-generation verifier and all process-exit guards.
+- [ ] Run those view cases on Windows after the final reviewed source is pushed.
+- [ ] Prove HWP launch/new-document/graceful-exit behavior without the existing
+  shell tree-force cleanup; menu availability alone does not qualify it.

@@ -20,6 +20,8 @@ SOURCE = Path(__file__).resolve().parents[1] / 'e2e/native_menu_archive_complete
 REPORT = '.work/suite-native-menu/results.json'
 ROOT = '.work/suite-native-menu/worker-diagnostics'
 MODULES = ('writer', 'calc', 'impress', 'draw', 'math', 'base')
+VIEW_MODULES = ('writer', 'calc')
+CORE_COMMANDS = ['new-hwp', 'home', 'new', 'open', 'save', 'saveAs', 'close']
 
 
 class NativeMenuArchiveCompletenessTests(unittest.TestCase):
@@ -39,10 +41,26 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
                 cleanClose=True, forcedCleanupRequired=False, officeExited=True,
                 officeExitedAfterCleanup=True, officeExitCode=0, shellExitCode=0,
                 engineHandleReleased=True, officeCreationTime=row['nativeArchiveGeneration']['creationTime'])
+            row.update(viewRoundtripCompleted=module in VIEW_MODULES,
+                       viewPhysicalVerified=module in VIEW_MODULES)
+            if module in VIEW_MODULES:
+                row['nativeViewRoundtrip'] = dict(kind='native-view-roundtrip', module=module,
+                    success=True, originalHomeSurvived=True,
+                    previewActions=[dict(kind='owned-native-menu-action', success=True,
+                        command='printPreview', gesture=False) for _ in range(2)],
+                    observations=[dict(kind='owned-native-view-observation', success=True,
+                        module=module, preview=preview, menuVisible=visible)
+                        for preview, visible in ((True, True), (False, True), (False, False), (False, True))],
+                    fullscreenActions=[dict(kind='owned-native-fullscreen-toggle', success=True,
+                        module=module, focusReturned=True) for _ in range(2)],
+                    coreCommands=[dict(kind='owned-native-menu-action', success=True,
+                        command='core-commands', gesture=True, coreCommandsVerified=True,
+                        coreCommands=list(CORE_COMMANDS), focusReturned=True) for _ in range(2)])
             rows.append(row)
         self.report = dict(schemaVersion=1, kind='native-menu-gesture-matrix', success=True,
             actualWindowsExecuted=True, nativeMenuVerified=True, scenarioSuccess=True,
             acceptanceEligible=False, expectedCaseCount=6, completedCaseCount=6,
+            viewPhysicalVerified=True, viewPhysicalExpectedCaseCount=2, viewPhysicalVerifiedCaseCount=2,
             passedCaseCount=6, missingModules=[], failedModules=[], tests=rows)
         self.save_report()
         for index, entry in enumerate(self.base.expected):
@@ -80,6 +98,109 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
         self.assertTrue(all(row['lastEventVerified'] for row in result['archives']))
         for forbidden in ('bodyText', 'keyTokens', 'processes', 'metadata'):
             self.assertNotIn(forbidden, json.dumps(result))
+
+    def test_legacy_success_report_without_physical_view_cases_is_rejected(self):
+        for key in ('viewPhysicalVerified', 'viewPhysicalExpectedCaseCount',
+                    'viewPhysicalVerifiedCaseCount'):
+            self.report.pop(key, None)
+        for row in self.report['tests']:
+            for key in ('viewRoundtripCompleted', 'viewPhysicalVerified', 'nativeViewRoundtrip'):
+                row.pop(key, None)
+        self.save_report()
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_view_report_flags_and_counts_cannot_qualify_missing_or_different_coverage(self):
+        original = copy.deepcopy(self.report)
+        for key, values in (
+                ('viewPhysicalVerified', (None, False, 1, 'true')),
+                ('viewPhysicalExpectedCaseCount', (None, 1, 3, True, 2.0, '2')),
+                ('viewPhysicalVerifiedCaseCount', (None, 1, 3, True, 2.0, '2'))):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.report = copy.deepcopy(original)
+                    if value is None: self.report.pop(key)
+                    else: self.report[key] = value
+                    self.save_report()
+                    with self.assertRaises(ValueError): self.verify()
+
+    def test_each_writer_and_calc_requires_its_actual_completed_view_roundtrip(self):
+        original = copy.deepcopy(self.report)
+        for index in (0, 1):
+            for key in ('viewRoundtripCompleted', 'viewPhysicalVerified'):
+                for value in (None, False, 1, 'true'):
+                    with self.subTest(module=VIEW_MODULES[index], key=key, value=value):
+                        self.report = copy.deepcopy(original)
+                        if value is None: self.report['tests'][index].pop(key)
+                        else: self.report['tests'][index][key] = value
+                        self.save_report()
+                        with self.assertRaises(ValueError): self.verify()
+
+    def test_other_modules_cannot_replace_or_mix_with_the_two_source_fixed_view_cases(self):
+        original = copy.deepcopy(self.report)
+        for index in range(2, 6):
+            for mixed in (False, True):
+                with self.subTest(module=MODULES[index], mixed=mixed):
+                    self.report = copy.deepcopy(original)
+                    target = self.report['tests'][index]
+                    target.update(viewRoundtripCompleted=True, viewPhysicalVerified=True,
+                                  nativeViewRoundtrip=copy.deepcopy(self.report['tests'][0]['nativeViewRoundtrip']))
+                    target['nativeViewRoundtrip']['module'] = MODULES[index]
+                    if mixed:
+                        self.report['tests'][0].update(viewRoundtripCompleted=False, viewPhysicalVerified=False)
+                        self.report['tests'][0].pop('nativeViewRoundtrip')
+                    self.save_report()
+                    with self.assertRaises(ValueError): self.verify()
+
+    def test_roundtrip_kind_module_success_and_home_must_match_the_original_case(self):
+        original = copy.deepcopy(self.report)
+        changes = (('kind', 'other'), ('module', 'calc'), ('success', False),
+                   ('success', 1), ('originalHomeSurvived', False), ('originalHomeSurvived', None))
+        for key, value in changes:
+            with self.subTest(key=key, value=value):
+                self.report = copy.deepcopy(original)
+                roundtrip = self.report['tests'][0]['nativeViewRoundtrip']
+                if value is None: roundtrip.pop(key)
+                else: roundtrip[key] = value
+                self.save_report()
+                with self.assertRaises(ValueError): self.verify()
+        for value in (None, [], True):
+            self.report = copy.deepcopy(original)
+            if value is None: self.report['tests'][0].pop('nativeViewRoundtrip')
+            else: self.report['tests'][0]['nativeViewRoundtrip'] = value
+            self.save_report()
+            with self.assertRaises(ValueError): self.verify()
+
+    def test_roundtrip_requires_each_current_source_plan_step_and_order(self):
+        original = copy.deepcopy(self.report)
+        for field in ('previewActions', 'observations', 'fullscreenActions', 'coreCommands'):
+            for mutation in ('missing', 'short', 'extra', 'failed', 'kind'):
+                with self.subTest(field=field, mutation=mutation):
+                    self.report = copy.deepcopy(original)
+                    roundtrip = self.report['tests'][0]['nativeViewRoundtrip']
+                    if mutation == 'missing': roundtrip.pop(field)
+                    elif mutation == 'short': roundtrip[field].pop()
+                    elif mutation == 'extra': roundtrip[field].append(copy.deepcopy(roundtrip[field][-1]))
+                    else: roundtrip[field][0]['success' if mutation == 'failed' else 'kind'] = False if mutation == 'failed' else 'other'
+                    self.save_report()
+                    with self.assertRaises(ValueError): self.verify()
+        for target, key, value in (
+                ('previewActions', 'command', 'save'), ('previewActions', 'gesture', True),
+                ('fullscreenActions', 'module', 'calc'), ('fullscreenActions', 'focusReturned', False),
+                ('observations', 'module', 'calc'), ('observations', 'preview', 1),
+                ('observations', 'menuVisible', False), ('coreCommands', 'command', 'save'),
+                ('coreCommands', 'gesture', False), ('coreCommands', 'coreCommandsVerified', False),
+                ('coreCommands', 'coreCommands', CORE_COMMANDS[:-1]), ('coreCommands', 'focusReturned', False)):
+            with self.subTest(field=target, key=key):
+                self.report = copy.deepcopy(original)
+                self.report['tests'][0]['nativeViewRoundtrip'][target][0][key] = value
+                self.save_report()
+                with self.assertRaises(ValueError): self.verify()
+        self.report = copy.deepcopy(original)
+        observations = self.report['tests'][0]['nativeViewRoundtrip']['observations']
+        observations[0], observations[1] = observations[1], observations[0]
+        self.save_report()
+        with self.assertRaises(ValueError): self.verify()
 
     def test_failed_or_synthetic_report_cannot_substitute_for_actual_six_case_source(self):
         original = copy.deepcopy(self.report)

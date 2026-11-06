@@ -15,7 +15,7 @@ import sys
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from suite.e2e import native_archive_completeness as original
-from suite.e2e.native_menu_smoke import MODULES
+from suite.e2e.native_menu_smoke import CORE_COMMANDS, MODULES, VIEW_MODULES
 
 REPORT = '.work/suite-native-menu/results.json'
 ROOT = '.work/suite-native-menu/worker-diagnostics'
@@ -31,6 +31,45 @@ def _key(row):
             original._image(row.get('image')))
 
 
+def _view_case(row, module):
+    expected = module in VIEW_MODULES
+    _require(row.get('viewRoundtripCompleted') is expected
+        and row.get('viewPhysicalVerified') is expected,
+        'Original native view case coverage differs from the source plan')
+    if not expected:
+        _require('nativeViewRoundtrip' not in row, 'Unplanned native view roundtrip')
+        return
+    view = row.get('nativeViewRoundtrip')
+    _require(type(view) is dict and view.get('kind') == 'native-view-roundtrip'
+        and view.get('module') == module and view.get('success') is True
+        and view.get('originalHomeSurvived') is True,
+        'Original native view roundtrip did not pass for this module')
+    # Join the producer's fixed plan, without duplicating its detailed UIA,
+    # keyboard, focus, timing or retained-handle receipt validators.
+    for field, kind, count in (
+            ('previewActions', 'owned-native-menu-action', 2),
+            ('observations', 'owned-native-view-observation', 4),
+            ('fullscreenActions', 'owned-native-fullscreen-toggle', 2),
+            ('coreCommands', 'owned-native-menu-action', 2)):
+        items = view.get(field)
+        _require(type(items) is list and len(items) == count
+            and all(type(item) is dict and item.get('kind') == kind
+                    and item.get('success') is True for item in items),
+            'Original native view steps are incomplete or changed')
+    _require(all(item.get('command') == 'printPreview' and item.get('gesture') is False
+        for item in view['previewActions']), 'Original native preview plan differs')
+    for item, (preview, visible) in zip(view['observations'],
+            ((True, True), (False, True), (False, False), (False, True))):
+        _require(item.get('module') == module and item.get('preview') is preview
+            and item.get('menuVisible') is visible, 'Original native view observation order differs')
+    _require(all(item.get('module') == module and item.get('focusReturned') is True
+        for item in view['fullscreenActions']), 'Original native fullscreen plan differs')
+    _require(all(item.get('command') == 'core-commands' and item.get('gesture') is True
+        and item.get('coreCommandsVerified') is True and item.get('focusReturned') is True
+        and item.get('coreCommands') == list(CORE_COMMANDS)
+        for item in view['coreCommands']), 'Original native core command plan differs')
+
+
 def _expected(workspace, suite):
     raw = original._bytes(workspace / REPORT, original.MAX_REPORT_BYTES)
     report = original._json(raw)
@@ -38,6 +77,10 @@ def _expected(workspace, suite):
         and report.get('kind') == 'native-menu-gesture-matrix', 'Wrong original menu report')
     _require(all(report.get(key) is True for key in ('success', 'actualWindowsExecuted',
         'nativeMenuVerified', 'scenarioSuccess')), 'Original native menu report did not pass')
+    _require(report.get('viewPhysicalVerified') is True
+        and all(type(report.get(key)) is int and report[key] == len(VIEW_MODULES)
+                for key in ('viewPhysicalExpectedCaseCount', 'viewPhysicalVerifiedCaseCount')),
+        'Original native view report coverage differs from the source plan')
     _require(report.get('acceptanceEligible') is False, 'Partial menu gate cannot qualify the complete Suite')
     _require(all(type(report.get(key)) is int and report[key] == len(MODULES)
         for key in ('expectedCaseCount', 'completedCaseCount', 'passedCaseCount'))
@@ -59,6 +102,7 @@ def _expected(workspace, suite):
             and all(type(row.get(key)) is int and row[key] == 0
                     for key in ('officeExitCode', 'shellExitCode')),
             'Original native menu case cleanup did not pass')
+        _view_case(row, module)
         attachment = original._attachment(row)
         for value in attachment.values():
             original._positive(value)

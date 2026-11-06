@@ -25,10 +25,12 @@ LABELS={'file':('파일','File'),'save':('저장','Save'),
     'new-math':('수식','Formula'),'new-base':('데이터베이스','Database'),
     'new-hwp':('새 HWP 문서',),'home':('OpenGeul 시작 화면',),
     'exit':('끝내기','종료','Exit','Quit'),
+    'printPreview':('인쇄 미리보기','Print Preview'),
     'saveAll':('모두 저장','모든 문서 저장','Save All'),
     'saveCopy':('복사본 저장…','복사본 저장','Save a Copy…','Save a Copy')}
 COMMANDS=tuple(k for k in LABELS if k not in ('file','new','saveAll','saveCopy'))
-GESTURES=('open-escape','open-outside','keyboard-escape','disabled-saveAll','disabled-saveCopy')
+GESTURES=('open-escape','open-outside','keyboard-escape','disabled-saveAll','disabled-saveCopy','core-commands')
+CORE_COMMANDS=('new-hwp','home','new','open','save','saveAs','close')
 KEY_COUNTS={'ALT_F':4,'DOWN':2,'ESCAPE':2}
 
 
@@ -203,7 +205,9 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         else:
             pointer('file')
             if gesture:
-                if operation.startswith('disabled-'):
+                if operation=='core-commands':
+                    value.update(coreCommands=list(CORE_COMMANDS),coreSnapshots={target:observe(target) for target in CORE_COMMANDS},coreCommandsVerified=True)
+                elif operation.startswith('disabled-'):
                     target=operation[len('disabled-'):]
                     value.update(disabledSnapshot=observe(target,enabled=False),disabledObserved=True)
                 else:observe('save')
@@ -278,6 +282,10 @@ def require_native_menu_action(value,shell_pid,document,command=None):
         _editor(value['focusAfter'],value['binding'],shell_pid)
         expected=[] if operation=='keyboard-escape' else ['file']+(['outside'] if operation=='open-outside' else [])
         keys=['ALT_F','DOWN','ESCAPE'] if operation=='keyboard-escape' else [] if operation=='open-outside' else ['ESCAPE']
+        if operation=='core-commands':
+            assert value['coreCommandsVerified'] is True and value['coreCommands']==list(CORE_COMMANDS)
+            assert set(value['coreSnapshots'])==set(CORE_COMMANDS)
+            for target in CORE_COMMANDS:_validate(value['coreSnapshots'][target],binding,shell_pid,target)
         if operation.startswith('disabled-'):
             assert value['disabledObserved'] is True
             _validate(value['disabledSnapshot'],value['binding'],shell_pid,operation[len('disabled-'):],enabled=False)
@@ -314,6 +322,105 @@ def detached_native_menu_action(value):
     raw=json.dumps(value,ensure_ascii=False,allow_nan=False,separators=(',',':'))
     assert len(raw.encode())<=CAP
     return json.loads(raw)
+
+
+def observe_native_view(api,process,document,record,*,module,preview,menu_visible=True,
+                        hold_seconds=3,seconds=5,probe=None,clock=time.monotonic,pause=time.sleep):
+    """Read fixed chrome on the retained original frame; never dispatch or type.
+
+    The target mode must survive continuously for three seconds after settling,
+    within the original deadline. This spans two nominal shell status periods;
+    it is not a claim that either asynchronous status RPC actually completed.
+    """
+    assert module in ('writer','calc') and record.get('module')==module
+    assert type(preview) is type(menu_visible) is bool
+    assert type(seconds) in (int,float) and math.isfinite(seconds) and 0<seconds<=5
+    assert type(hold_seconds) in (int,float) and math.isfinite(hold_seconds) and 3<=hold_seconds<seconds
+    start=clock();deadline=start+seconds
+    value=dict(schemaVersion=1,kind='owned-native-view-observation',module=module,preview=preview,
+        menuVisible=menu_visible,holdSeconds=hold_seconds,startedAt=start,deadline=deadline,success=False,
+        statusRpcProved=False,inputCallAttempts=0,samples=[],dpiScope={},engineHandleReleased=False)
+    record.setdefault('nativeViewObservations',[]).append(value)
+    handle=None;primary=None
+    def budget():assert clock()<deadline, 'Original native view observation deadline expired'
+    try:
+        budget();origins=record.get('nativeMenuActions',[])
+        assert type(origins) is list and 0<len(origins)<=128
+        origin=origins[-1];require_native_menu_action(origin,process.pid,document)
+        assert origin['finishedAt']<=start
+        binding=copy.deepcopy(origin['binding']);shell=origin['originalProcess'];old=origin['originalEngine']
+        suite=Path(process.opengeul_suite_root).resolve()
+        generation=record.get('nativeArchiveGeneration')
+        assert type(generation) is dict and set(generation)=={'pid','creationTime','image'}
+        assert generation['pid']==record['officePid']==binding['officePid']==old['pid']
+        assert type(generation['pid']) is int and type(generation['creationTime']) is int
+        assert generation['creationTime']==record['officeCreationTime']==old['creationTime']
+        assert Path(generation['image']).resolve()==Path(old['image']).resolve()==suite/'Office/program/soffice.bin'
+        assert shell['pid']==process.pid and shell['handleValue']==int(process._handle)
+        assert Path(shell['image']).resolve()==suite/'OpenGeul.Office.exe'
+        probe=probe or NativeMenuProbe(deadline,clock)
+        candidate=probe.open_engine(binding['officePid']);_int(candidate);handle=candidate
+        def continuity():
+            budget();assert process.poll() is None and probe.process_snapshot(process)==shell
+            engine=probe.engine_snapshot(handle)
+            assert all(engine[key]==old[key] for key in ('pid','creationTime','image','waitResult'))
+            assert engine['waitResult']==258 and api.attachment(document)==(binding['parent'],binding['child'],binding['officePid'])
+        continuity();value.update(originIndex=len(origins)-1,binding=binding,originalProcess=copy.deepcopy(shell),
+            originalEngine=copy.deepcopy(old),engineHandleValue=handle)
+        probe.enter_dpi(value['dpiScope']);assert value['dpiScope']['verified'] is True
+        first=None
+        while True:
+            continuity();row=probe.view_snapshot(binding,module);budget()
+            assert row['binding']==binding and row['nativeReady']==1 and row['shellMenuCount']==0
+            _editor(row['editor'],binding,process.pid)
+            for name,pid,hwnd in (('peerRoot',binding['officePid'],binding['child']),('documentRoot',process.pid,document)):
+                identity=row[name]
+                assert (identity['pid'],identity['nativeHwnd'])==(pid,hwnd)
+                assert type(identity['runtimeId']) is list and 0<len(identity['runtimeId'])<=64
+                assert all(type(n) is int and -(2**31)<=n<2**31 for n in identity['runtimeId'])
+            bars=row['nativeMenuBarCount'];assert type(bars) is int and 0<=bars<=1
+            count=row['previewIndicatorCount'];assert type(count) is int and 0<=count<=1
+            if count:
+                indicator=row['previewIndicator'];assert indicator['pid']==binding['officePid']
+                assert indicator['controlType']=='Button' and indicator['visible'] is indicator['enabled'] is True
+                assert indicator['ancestryVerified'] is indicator['peerElementEquals'] is indicator['toolbarAncestorVerified'] is True
+                assert 0<len(indicator['runtimeId'])<=64
+            else:assert row['previewIndicator'] is None
+            now=clock();matched=bars==int(menu_visible) and count==int(preview)
+            first=(now if first is None else first) if matched else None
+            assert len(value['samples'])<64, 'Native view observation sample bound exceeded'
+            value['samples'].append(dict(observedAt=now,targetMatched=matched,state=row))
+            value['settledAt']=first
+            value['observedSeconds']=now-first if first is not None else 0
+            if first is not None and now-first>=hold_seconds:break
+            remaining=deadline-clock();assert remaining>0
+            delay=min(.1,remaining)
+            if first is not None:delay=min(delay,hold_seconds-(now-first))
+            pause(delay)
+            budget()
+        continuity();value['readVerified']=True
+    except BaseException as exc:
+        primary=exc;value['failureType']=type(exc).__name__;raise
+    finally:
+        errors=[]
+        if handle is not None:
+            try:value['engineHandleReleased']=probe.close_engine(handle);assert value['engineHandleReleased'] is True
+            except BaseException as exc:errors.append(type(exc).__name__)
+        if value['dpiScope'].get('previousContext') is not None:
+            try:probe.restore_dpi(value['dpiScope']);assert value['dpiScope']['restored'] is True
+            except BaseException as exc:errors.append(type(exc).__name__)
+        close=getattr(probe,'close_provider',None)
+        if close:
+            try:value['providerClientReleased']=close();assert value['providerClientReleased'] is True
+            except BaseException as exc:errors.append(type(exc).__name__)
+        value.update(cleanupErrors=errors,finishedAt=clock())
+        value['success']=primary is None and not errors and value.get('readVerified') is True and value['finishedAt']<deadline
+        try:retain_native_menu_receipt(process,value)
+        except BaseException:
+            value['success']=False
+            if primary is None:raise
+        if primary is None:assert value['success'], 'Native view observation cleanup or original deadline failed'
+    return value
 
 
 class NativeMenuProbe(NativeControlProbe):
@@ -368,7 +475,7 @@ class NativeMenuProbe(NativeControlProbe):
             if hasattr(self,name):setattr(self,name,None)
         return True
     def _condition(self,*,control_type,name=None):
-        kinds={'MenuBar':50010,'MenuItem':50011,'Text':50020,'Button':50000}
+        kinds={'MenuBar':50010,'MenuItem':50011,'Text':50020,'Button':50000,'ToolBar':50021}
         assert control_type in kinds and (name is None or type(name) is str and len(name)<=256)
         condition=self._call(self.uia.iuia.CreatePropertyCondition,30003,kinds[control_type])
         if name is not None:
@@ -396,7 +503,7 @@ class NativeMenuProbe(NativeControlProbe):
         box=get('CurrentBoundingRectangle');kind=int(get('CurrentControlType'))
         return dict(runtimeId=runtime,pid=int(get('CurrentProcessId')),
             nativeHwnd=0 if handle is None else handle&0xffffffff,
-            controlType={50000:'Button',50010:'MenuBar',50011:'MenuItem',50032:'Window'}.get(kind,str(kind)),
+            controlType={50000:'Button',50010:'MenuBar',50011:'MenuItem',50021:'ToolBar',50032:'Window'}.get(kind,str(kind)),
             visible=not bool(get('CurrentIsOffscreen')),enabled=bool(get('CurrentIsEnabled')),
             rectangle=[int(getattr(box,key)) for key in ('left','top','right','bottom')])
     def _find(self,root,target,*,scope='descendants'):
@@ -489,6 +596,59 @@ class NativeMenuProbe(NativeControlProbe):
             shellMenuCount=duplicates,document=document,control=control,ancestry=chain,fileIndex=file_index,
             barIndex=bar_index,peerIndex=len(chain)-1,fileElementEquals=file_equal,peerElementEquals=peer_equal,
             popup=popup,foreground=fg,gui=gui,focusMenuPath=focused,focusMenuElementEquals=matched)
+    def view_snapshot(self,binding,module):
+        assert module in ('writer','calc')
+        root=self._root(binding['child']);doc=binding['document']
+        peer_identity=self._chrome(root)
+        assert (peer_identity['pid'],peer_identity['nativeHwnd'])==(binding['officePid'],binding['child']), 'Native view UIA root is outside the original peer'
+        editor=self.editor_snapshot(binding)
+        condition=self._call(lambda:self.uia.build_condition(control_type='MenuBar'))
+        def menu_count(parent,pid):
+            found=self._call(parent.FindAll,self.uia.tree_scope['descendants'],condition)
+            count=int(self._call(lambda:found.Length));assert 0<=count<=8
+            visible=0
+            for index in range(count):
+                element=self._call(found.GetElement,index)
+                assert int(self._call(lambda:element.CurrentProcessId))==pid
+                visible+=int(not self._call(lambda:element.CurrentIsOffscreen))
+            assert visible<=1
+            return visible
+        native_bars=menu_count(root,binding['officePid'])
+        shell=self._root(doc);document_identity=self._chrome(shell)
+        assert (document_identity['pid'],document_identity['nativeHwnd'])==(self.window_snapshot(doc)['pid'],doc), 'Native view UIA host root changed'
+        found=self._call(shell.FindAll,self.uia.tree_scope['descendants'],condition)
+        count=int(self._call(lambda:found.Length));assert 0<=count<=64
+        shell_bars=0;shell_pid=self.window_snapshot(doc)['pid']
+        for index in range(count):
+            bar=self._call(found.GetElement,index)
+            if self._call(lambda:bar.CurrentProcessId)==shell_pid:
+                shell_bars+=int(not self._call(lambda:bar.CurrentIsOffscreen))
+        indicators=[];held=[]
+        for label in ('미리보기 닫기','Close Preview'):
+            condition=self._call(lambda:self.uia.build_condition(control_type='Button',name=label))
+            found=self._call(root.FindAll,self.uia.tree_scope['descendants'],condition)
+            count=int(self._call(lambda:found.Length));assert 0<=count<=2
+            for index in range(count):
+                element=self._call(found.GetElement,index)
+                row=self._chrome(element)
+                if not row['visible']:continue
+                assert self._call(lambda:element.CurrentName)==label
+                chain=[];cursor=element;same=False
+                for _ in range(32):
+                    held.append(cursor);part=self._chrome(cursor);chain.append(part)
+                    assert part['pid']==binding['officePid']
+                    if self._call(self.uia.iuia.CompareElements,cursor,root):same=True;break
+                    cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor);assert cursor
+                assert same and chain[-1]['nativeHwnd']==binding['child']
+                assert chain[0]['controlType']=='Button' and any(part['controlType']=='ToolBar' for part in chain[1:-1])
+                indicators.append(dict(row,ancestryVerified=True,peerElementEquals=True,
+                    toolbarAncestorVerified=True,ancestry=chain))
+        assert len(indicators)<=1, 'Native preview indicator is ambiguous'
+        self._retained=tuple(held)
+        return dict(binding=dict(binding),editor=editor,peerRoot=peer_identity,documentRoot=document_identity,
+            nativeReady=int(self._call(self.user.GetPropW,doc,READY_PROPERTY) or 0),
+            shellMenuCount=shell_bars,nativeMenuBarCount=native_bars,
+            previewIndicatorCount=len(indicators),previewIndicator=indicators[0] if indicators else None)
     def editor_snapshot(self,binding):
         attachment=self.attachment_snapshot(binding);thread=attachment['windows']['child']['threadId'];gui=self.native_focus(thread)
         return dict(binding=dict(binding),attachmentValid=attachment['valid'],focusPid=gui['focusPid'],

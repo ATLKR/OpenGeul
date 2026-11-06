@@ -48,6 +48,10 @@ class Session:
         self.calls.append('screenshot')
         return 'synthetic-chrome.png'
 
+    def view_roundtrip(self, record):
+        self.calls.append('view-roundtrip')
+        return dict(kind='native-view-roundtrip', success=True, module=record['module'])
+
     def finish(self, record):
         self.calls.append('finish')
         return True
@@ -75,13 +79,16 @@ class NativeMenuSmokeTests(unittest.TestCase):
             with self.subTest(module=module):
                 session = Session()
                 record = self.run_case(session, module)
+                view = ['view-roundtrip'] if module in ('writer', 'calc') else []
                 self.assertEqual(session.calls, ['open', 'ready', 'open-escape',
                     'open-outside', 'keyboard-escape', 'open-escape',
-                    'screenshot', 'finish', 'cleanup'])
+                    *view, 'screenshot', 'finish', 'cleanup'])
                 self.assertTrue(record['success'])
                 self.assertTrue(record['scenarioCompleted'])
                 self.assertFalse(record['actualWindowsExecuted'])
                 self.assertFalse(record['nativeMenuVerified'])
+                self.assertIs(record.get('viewRoundtripCompleted'), module in ('writer', 'calc'))
+                self.assertIs(record.get('viewPhysicalVerified'), False)
                 self.assertEqual([r['gesture'] for r in record['gestures']],
                     list(self.smoke.GESTURES))
 
@@ -133,6 +140,9 @@ class NativeMenuSmokeTests(unittest.TestCase):
             self.assertFalse(report['success'])
             self.assertFalse(report['actualWindowsExecuted'])
             self.assertFalse(report['nativeMenuVerified'])
+            self.assertIs(report.get('viewPhysicalVerified'), False)
+            self.assertEqual(report.get('viewPhysicalExpectedCaseCount'), 2)
+            self.assertEqual(report.get('viewPhysicalVerifiedCaseCount'), 0)
             self.assertFalse(report['acceptanceEligible'])
             self.assertIs(report.get('nativeHwpMenuLaunchExecuted'), False)
             self.assertIs(report.get('disabledCommandsPhysicalVerified'), False)
@@ -152,6 +162,33 @@ class NativeMenuSmokeTests(unittest.TestCase):
         self.assertEqual(calls, ['writer'])
         self.assertFalse(report['success'])
         self.assertEqual(report['missingModules'], ['calc', 'impress', 'draw', 'math', 'base'])
+
+    def test_synthetic_session_cannot_claim_physical_views_by_claiming_windows(self):
+        class Impostor(Session):
+            actual_windows = True
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(self.smoke, 'os', SimpleNamespace(name='nt')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            report = self.smoke.run_modules(Path('/suite'), Path('/fixtures'), Path(folder),
+                session_factory=lambda *args: Impostor())
+        self.assertTrue(report['scenarioSuccess'])
+        self.assertFalse(report['success'])
+        self.assertIs(report['viewPhysicalVerified'], False)
+        self.assertEqual(report['viewPhysicalVerifiedCaseCount'], 0)
+        self.assertTrue(all(row['viewPhysicalVerified'] is False for row in report['tests']))
+
+    def test_failed_roundtrip_returns_to_cleanup_without_screenshot_or_finish_input(self):
+        session = Session()
+        def fail(record):
+            session.calls.append('view-roundtrip')
+            raise AssertionError('synthetic failed first view observation')
+        session.view_roundtrip = fail
+        record = self.run_case(session, 'calc')
+        self.assertFalse(record['success'])
+        self.assertIs(record['viewRoundtripCompleted'], False)
+        self.assertIs(record['viewPhysicalVerified'], False)
+        self.assertEqual(session.calls, ['open', 'ready', 'open-escape', 'open-outside',
+            'keyboard-escape', 'open-escape', 'view-roundtrip', 'cleanup'])
 
     def test_cli_cannot_select_a_subset_and_relabel_it_as_the_complete_matrix(self):
         parser = self.smoke.argument_parser()
@@ -233,7 +270,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
         session.engine = SimpleNamespace(exited=lambda seconds: 13 not in live, code=lambda: 0)
         def command(*args):
             name = args[-1]; calls.append(('menu', name))
-            if name != 'exit' or module != 'calc':
+            if name in ('home', 'close') or name == 'exit' and module != 'calc':
                 live.discard(11); live.discard(13)
             if name == 'exit' and module != 'calc':
                 live.discard(9); session.process.returncode = 0
@@ -266,6 +303,119 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 GetPropW=lambda h, name: (12 if name.endswith('ParentHwnd') else 13) if h == 11 else 0))
         session._cancel_calc_exit = lambda record, **kwargs: calls.append(('cancel-exit',)) or True
         return session, calls
+
+    def view_boundaries(self, session, calls, *, bad_observation=None, bad_fullscreen=None):
+        """Synthetic external input/provider boundaries around the real runner."""
+        shell = dict(pid=77, creationTime=1000, image=str(session.suite/'OpenGeul.Office.exe'),
+            handleValue=777, waitResult=258)
+        engine = dict(pid=88, creationTime=1001, image=str(session.suite/'Office/program/soffice.bin'),
+            handleValue=888, waitResult=258)
+        binding = dict(document=11, parent=12, child=13, officePid=88,
+            officeCreationTime=1001, expectedImage=engine['image'])
+        session.process._handle = 777
+        common = dict(schemaVersion=1, startedAt=0, deadline=5, finishedAt=1,
+            binding=binding, originalProcess=shell, originalEngine=engine,
+            engineHandleReleased=True, providerClientReleased=True,
+            dpiScope=dict(verified=True, restored=True), focusReturned=True)
+        original_command = session.menu.click_native_menu_action
+        session.menu.click_native_menu_action = lambda *args: common | original_command(*args)
+        def observe(*args, **kwargs):
+            self.assertEqual(args[:3], (session.api, session.process, session.hwnd))
+            self.assertEqual(kwargs, dict(module=session.module, preview=kwargs['preview'],
+                menu_visible=kwargs['menu_visible'], hold_seconds=3, seconds=5))
+            calls.append(('observe', kwargs['preview'], kwargs['menu_visible']))
+            row = dict(schemaVersion=1, kind='owned-native-view-observation', success=True,
+                module=session.module, preview=kwargs['preview'], menuVisible=kwargs['menu_visible'],
+                holdSeconds=3, startedAt=0, deadline=5, finishedAt=3.1, observedSeconds=3.1,
+                samples=[{}, {}], binding=binding, originalProcess=shell, originalEngine=engine,
+                engineHandleReleased=True, providerClientReleased=True,
+                dpiScope=dict(verified=True, restored=True), statusRpcProved=False, inputCallAttempts=0)
+            return row | (bad_observation or {})
+        def inspect(*args):
+            self.assertEqual(args[:3], (session.api, session.process, session.hwnd))
+            calls.append(('inspect', args[-1]))
+            return common | dict(kind='owned-native-menu-action', success=True, gesture=True,
+                command=args[-1], coreCommandsVerified=True, coreCommands=[
+                    'new-hwp', 'home', 'new', 'open', 'save', 'saveAs', 'close'],
+                coreSnapshots=[{} for _ in range(7)], focusReturned=True)
+        def toggle(*args, **kwargs):
+            self.assertEqual(args[:3], (session.api, session.process, session.hwnd))
+            self.assertEqual(kwargs, dict(module=session.module, seconds=5))
+            calls.append(('fullscreen',))
+            row = common | dict(schemaVersion=1, kind='owned-native-fullscreen-toggle', success=True,
+                module=session.module, inputCallAttempts=1, requestedInputs=6, insertedInputs=6,
+                startedAt=0, deadline=5, finishedAt=1, binding=binding,
+                originalProcess=shell, originalEngine=engine, engineHandleReleased=True,
+                providerClientReleased=True, dpiScope=dict(verified=True, restored=True))
+            return row | (bad_fullscreen or {})
+        session.menu.observe_native_view, session.menu.inspect_native_menu = observe, inspect
+        self.enterContext(patch.dict(sys.modules, {'owned_fullscreen': SimpleNamespace(
+            toggle_native_fullscreen=toggle)}))
+        return dict(pid=engine['pid'], creationTime=engine['creationTime'], image=engine['image'])
+
+    def test_real_session_view_roundtrip_keeps_original_recipient_and_exact_action_order(self):
+        for module in ('writer', 'calc'):
+            with self.subTest(module=module):
+                session, calls = self.finish_session(module)
+                generation = self.view_boundaries(session, calls)
+                function = getattr(session, 'view_roundtrip', None)
+                self.assertTrue(callable(function), 'The real WindowsSession view runner is missing')
+                record = dict(module=module, keyboardInputVerified=False, contentMutationVerified=False,
+                    nativeArchiveGeneration=generation)
+                result = function(record)
+                self.assertTrue(result['success'])
+                self.assertEqual((result['kind'], result['module']), ('native-view-roundtrip', module))
+                self.assertEqual(calls, [('menu', 'printPreview'), ('observe', True, True),
+                    ('menu', 'printPreview'), ('observe', False, True), ('inspect', 'core-commands'),
+                    ('fullscreen',), ('observe', False, False), ('fullscreen',),
+                    ('observe', False, True), ('inspect', 'core-commands')])
+                self.assertIs(record['keyboardInputVerified'], False)
+                self.assertIs(record['contentMutationVerified'], False)
+
+    def test_failed_view_observation_stops_before_another_preview_or_fullscreen_input(self):
+        session, calls = self.finish_session('writer')
+        generation = self.view_boundaries(session, calls, bad_observation={'success': False})
+        function = getattr(session, 'view_roundtrip', None)
+        self.assertTrue(callable(function), 'The real WindowsSession view runner is missing')
+        with self.assertRaises(AssertionError):
+            function(dict(module='writer', nativeArchiveGeneration=generation))
+        self.assertEqual(calls, [('menu', 'printPreview'), ('observe', True, True)])
+
+    def test_view_roundtrip_cannot_pass_after_original_home_disappears(self):
+        session, calls = self.finish_session('writer')
+        generation = self.view_boundaries(session, calls)
+        session.api.home = lambda process: None
+        with self.assertRaises(AssertionError):
+            session.view_roundtrip(dict(module='writer', nativeArchiveGeneration=generation))
+        self.assertEqual(calls[-1], ('inspect', 'core-commands'))
+
+    def test_partial_fullscreen_insertion_stops_without_a_retry_or_inverse_input(self):
+        session, calls = self.finish_session('calc')
+        generation = self.view_boundaries(session, calls, bad_fullscreen={'insertedInputs': 5})
+        function = getattr(session, 'view_roundtrip', None)
+        self.assertTrue(callable(function), 'The real WindowsSession view runner is missing')
+        with self.assertRaises(AssertionError):
+            function(dict(module='calc', nativeArchiveGeneration=generation))
+        self.assertEqual(calls, [('menu', 'printPreview'), ('observe', True, True),
+            ('menu', 'printPreview'), ('observe', False, True), ('inspect', 'core-commands'),
+            ('fullscreen',)])
+
+    def test_view_observation_rejects_wrong_state_generation_cleanup_or_budget_before_more_input(self):
+        changes = ({'kind': 'owned-native-menu-action'}, {'module': 'calc'}, {'preview': False},
+            {'menuVisible': False}, {'holdSeconds': 2}, {'observedSeconds': 2.9},
+            {'observedSeconds': 5}, {'observedSeconds': 4},
+            {'samples': []}, {'samples': [{} for _ in range(65)]},
+            {'inputCallAttempts': True}, {'statusRpcProved': True}, {'finishedAt': 5},
+            {'engineHandleReleased': False}, {'providerClientReleased': False},
+            {'dpiScope': {'verified': True, 'restored': False}},
+            {'binding': dict(document=11, parent=12, child=99, officePid=88)})
+        for change in changes:
+            with self.subTest(change=change):
+                session, calls = self.finish_session('writer')
+                generation = self.view_boundaries(session, calls, bad_observation=change)
+                with self.assertRaises(AssertionError):
+                    session.view_roundtrip(dict(module='writer', nativeArchiveGeneration=generation))
+                self.assertEqual(calls, [('menu', 'printPreview'), ('observe', True, True)])
 
     def test_finish_fixture_roots_are_absolute_resolved_owned_siblings(self):
         session, _ = self.finish_session('calc')
@@ -345,6 +495,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
             close(*args, **kwargs)
             proof.engine.close(); proof.shell.close()
         session.native.close_document = qualified
+        self.view_boundaries(session, calls)
         with patch.object(lifecycle, 'BoundHwpProcess', Bound), \
                 patch.object(lifecycle, 'process_identity', side_effect=identity):
             record = self.smoke.run_case(session.suite, session.fixtures, session.output, 'calc',

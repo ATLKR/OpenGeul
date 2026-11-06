@@ -89,3 +89,21 @@ with retained handles and restore DPI. Do not change pywinauto's shared client
 or treat a clock check after an unbounded provider call as a timeout mechanism.
 The documented provider timeout and post-call rejection are not a hard real-time
 operating-system scheduling guarantee.
+
+Writer and Calc must each keep the original document through Print Preview on
+and off, then full screen on and off. Use the real native File command and one
+counted native shortcut per transition. Observe fixed chrome without document
+content or additional input: allow the old display mode to settle inside the
+original five-second deadline, then require three continuous seconds in the
+requested mode. Ownership, generation, foreground, readiness and ambiguous UI
+fail immediately. This survival interval crosses nominal shell polling periods;
+it does not prove that a particular status RPC completed. After restoring the
+view, check Home/HWP and the core native File items and retain the existing
+Home/save/cancel/close outcomes. The archive consumer must require both physical
+view cases rather than accepting an earlier six-menu-only success report.
+
+The HWP entry reuses the shipped HWP launcher. Menu availability and its routed
+command do not prove that HWP created a new document. A physical HWP launch test
+needs a new exact process generation, retained handles and graceful shutdown;
+it must not fall through to the Office shell's tree-force cleanup. Preserve the
+standalone HWP distribution and report unexecuted HWP outcomes explicitly.

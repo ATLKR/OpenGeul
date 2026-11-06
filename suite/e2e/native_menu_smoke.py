@@ -9,12 +9,15 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import math
 import os
 from pathlib import Path
 import time
 
 MODULES = ('writer', 'calc', 'impress', 'draw', 'math', 'base')
 GESTURES = ('open-escape', 'open-outside', 'keyboard-escape', 'open-escape')
+VIEW_MODULES = ('writer', 'calc')
+CORE_COMMANDS = ('new-hwp', 'home', 'new', 'open', 'save', 'saveAs', 'close')
 EXTERNAL_GATES = ('save-and-reopen', 'save-as-cancel', 'close-cancel',
                   'module-transition', 'home-ownership', 'formatting')
 
@@ -93,6 +96,85 @@ class WindowsSession:
         assert result.get('kind') == 'owned-native-menu-action' and result.get('gesture') is False
         assert result.get('command') == command
         return result
+
+    def view_roundtrip(self, record):
+        """Keep the original blank document through measured native view changes."""
+        from owned_fullscreen import toggle_native_fullscreen
+        assert self.module in VIEW_MODULES
+        self._owned_blank()
+        assert self.ready() is True
+        value = dict(kind='native-view-roundtrip', module=self.module, success=False,
+            previewActions=[], observations=[], fullscreenActions=[], coreCommands=[])
+        record['nativeViewRoundtrip'] = value
+        identity = None
+        def checked(receipt, kind):
+            nonlocal identity
+            assert type(receipt) is dict and receipt.get('success') is True and receipt.get('kind') == kind
+            binding = receipt.get('binding')
+            expected = dict(document=self.hwnd, parent=self.parent, child=self.child, officePid=self.office_pid)
+            assert type(binding) is dict and all(type(binding.get(key)) is int and binding[key] == item
+                for key, item in expected.items()), 'Native view receipt belongs to another attachment'
+            shell, engine = receipt.get('originalProcess'), receipt.get('originalEngine')
+            assert type(shell) is dict and type(engine) is dict
+            assert (shell.get('pid'), shell.get('handleValue'), shell.get('waitResult')) == (
+                self.process.pid, int(self.process._handle), 258)
+            assert Path(shell['image']).resolve() == self.suite/'OpenGeul.Office.exe'
+            assert type(shell.get('creationTime')) is int and shell['creationTime'] > 0
+            generation = record['nativeArchiveGeneration']
+            assert all(type(engine.get(key)) is int and engine[key] == generation[key]
+                for key in ('pid', 'creationTime'))
+            assert engine['pid'] == self.office_pid and engine.get('waitResult') == 258
+            assert Path(engine['image']).resolve() == Path(generation['image']).resolve() == self.suite/'Office/program/soffice.bin'
+            current = (shell['creationTime'], engine['pid'], engine['creationTime'])
+            assert identity is None or current == identity, 'Native view changed the original process generations'
+            identity = current
+            assert receipt.get('engineHandleReleased') is True and receipt.get('providerClientReleased') is True
+            assert receipt.get('dpiScope', {}).get('verified') is True and receipt['dpiScope'].get('restored') is True
+            times = [receipt.get(key) for key in ('startedAt', 'deadline', 'finishedAt')]
+            assert all(type(item) in (int, float) and math.isfinite(item) for item in times)
+            start, deadline, finish = times
+            assert start <= finish < deadline <= start + 5
+            return receipt
+        def observe(preview, menu_visible):
+            receipt = checked(self.menu.observe_native_view(self.api, self.process, self.hwnd, record,
+                module=self.module, preview=preview, menu_visible=menu_visible, hold_seconds=3, seconds=5),
+                'owned-native-view-observation')
+            assert receipt.get('module') == self.module and receipt.get('preview') is preview
+            assert receipt.get('menuVisible') is menu_visible and receipt.get('holdSeconds') == 3
+            observed = receipt.get('observedSeconds')
+            assert type(observed) in (int, float) and math.isfinite(observed) and 3 <= observed < 5
+            assert observed <= receipt['finishedAt'] - receipt['startedAt'], 'Native view observation exceeds its actual elapsed time'
+            assert type(receipt.get('samples')) is list and 2 <= len(receipt['samples']) <= 64
+            assert receipt.get('statusRpcProved') is False and type(receipt.get('inputCallAttempts')) is int and receipt['inputCallAttempts'] == 0
+            value['observations'].append(receipt)
+        def core():
+            receipt = checked(self.gesture('core-commands', record)['receipt'], 'owned-native-menu-action')
+            assert receipt.get('coreCommandsVerified') is True and receipt.get('coreCommands') == list(CORE_COMMANDS)
+            assert receipt.get('focusReturned') is True
+            value['coreCommands'].append(receipt)
+        record['stage'] = 'print-preview-enter'
+        value['previewActions'].append(checked(self._native_command('printPreview', record), 'owned-native-menu-action'))
+        observe(True, True)
+        record['stage'] = 'print-preview-leave'
+        value['previewActions'].append(checked(self._native_command('printPreview', record), 'owned-native-menu-action'))
+        observe(False, True)
+        core()
+        for menu_visible in (False, True):
+            record['stage'] = 'fullscreen-enter' if not menu_visible else 'fullscreen-leave'
+            receipt = checked(toggle_native_fullscreen(self.api, self.process, self.hwnd, record,
+                module=self.module, seconds=5), 'owned-native-fullscreen-toggle')
+            assert receipt.get('module') == self.module and receipt.get('focusReturned') is True
+            assert all(type(receipt.get(key)) is int for key in ('inputCallAttempts', 'requestedInputs', 'insertedInputs'))
+            assert (receipt['inputCallAttempts'], receipt['requestedInputs'], receipt['insertedInputs']) == (1, 6, 6)
+            value['fullscreenActions'].append(receipt)
+            observe(False, menu_visible)
+        core()
+        self._owned_blank()
+        assert self.ready() is True
+        assert self._home_ready(active=False) is True
+        value['originalHomeSurvived'] = True
+        value['success'] = True
+        return value
 
     def _wait_original_closed(self):
         self.native.wait_for(lambda: not self.api.user.IsWindow(self.hwnd), seconds=20)
@@ -223,6 +305,7 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
         kind='native-menu-gesture-case', stage='open', gestures=[],
         keyboardInputVerified=False, contentMutationVerified=False,
         scenarioCompleted=False, actualWindowsExecuted=False,
+        viewRoundtripCompleted=False, viewPhysicalVerified=False,
         nativeMenuVerified=False, cleanupConfirmed=False, cleanClose=False)
     started = time.monotonic()
     session = None
@@ -238,6 +321,13 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
             assert type(result) is dict and result.get('success') is True
             assert result.get('gesture') == gesture
             record['gestures'].append(dict(index=index, gesture=gesture, receipt=result))
+        if module in VIEW_MODULES:
+            record['stage'] = 'native-view-roundtrip'
+            result = session.view_roundtrip(record)
+            assert type(result) is dict and result.get('success') is True
+            assert result.get('kind') == 'native-view-roundtrip' and result.get('module') == module
+            record['nativeViewRoundtrip'] = result
+            record['viewRoundtripCompleted'] = True
         record['stage'] = 'capture-owned-blank-chrome'
         record['screenshot'] = session.screenshot(record)
         record['stage'] = 'close-original-document-and-home'
@@ -254,6 +344,8 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
         if not record['cleanupConfirmed']:
             record['success'] = False
         record['nativeMenuVerified'] = record['success'] and record['actualWindowsExecuted']
+        record['viewPhysicalVerified'] = bool(record['nativeMenuVerified'] and record['viewRoundtripCompleted']
+            and type(session) is WindowsSession)
         if record['success']:
             record['stage'] = 'complete'
         record['elapsedSeconds'] = round(time.monotonic() - started, 3)
@@ -275,10 +367,15 @@ def run_modules(suite, fixtures, output, *, session_factory=WindowsSession):
     complete = tuple(row['module'] for row in records) == MODULES and all(n == 1 for n in counts.values())
     scenario_success = complete and all(row['success'] for row in records)
     native_verified = scenario_success and all(row['nativeMenuVerified'] for row in records)
-    report = dict(schemaVersion=1, kind='native-menu-gesture-matrix', success=native_verified,
+    view_records = [row for row in records if row['module'] in VIEW_MODULES]
+    views_verified = bool(native_verified and tuple(row['module'] for row in view_records) == VIEW_MODULES
+        and all(row['viewPhysicalVerified'] for row in view_records))
+    report = dict(schemaVersion=1, kind='native-menu-gesture-matrix', success=native_verified and views_verified,
         scenarioSuccess=scenario_success, actualWindowsExecuted=bool(records) and all(
             row['actualWindowsExecuted'] for row in records), nativeMenuVerified=native_verified,
         acceptanceEligible=False, expectedCaseCount=len(MODULES), completedCaseCount=len(records),
+        viewPhysicalVerified=views_verified, viewPhysicalExpectedCaseCount=len(VIEW_MODULES),
+        viewPhysicalVerifiedCaseCount=sum(row['viewPhysicalVerified'] for row in view_records),
         nativeHwpMenuLaunchExecuted=False, disabledCommandsPhysicalVerified=False,
         passedCaseCount=sum(row['success'] for row in records),
         missingModules=[module for module in MODULES if module not in counts],
