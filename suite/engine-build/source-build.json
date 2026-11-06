@@ -421,5 +421,56 @@
         "afterSha256": "58637ccbabc74afb3a84f27526a26b47ffdce1bfa2c814e5d369b84f2b2aca5c"
       }
     ]
+  },
+  "winAccFocusOrder": {
+    "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
+    "path": "winaccessibility/source/service/AccObjectWinManager.cxx",
+    "beforeBytes": 33670,
+    "sha256": "ab5ed31cac9b262461b1d7e45fbe4a5758fef852a0f51c08c0c6f8e25d1c9be0",
+    "afterBytes": 33670,
+    "afterSha256": "5e5f42a6b448c0d9c70a05bf762e86951565b5a96decaf050399f577dd38332b",
+    "patch": {
+      "filename": "winacc-focus-order.patch",
+      "size": 484,
+      "sha256": "968379ba427ac952c5c7df7f0c37ceabb495310acc224ee5380d51f523fb3ed7",
+      "strip": 1
+    },
+    "sources": [
+      {
+        "path": "winaccessibility/source/service/AccObjectWinManager.cxx",
+        "size": 33670,
+        "sha256": "ab5ed31cac9b262461b1d7e45fbe4a5758fef852a0f51c08c0c6f8e25d1c9be0",
+        "gitBlob": "364f51e19bbcb9f2990dd8ad3313338c20349031",
+        "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObjectWinManager.cxx"
+      },
+      {
+        "path": "winaccessibility/source/service/AccObject.cxx",
+        "size": 26374,
+        "sha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+        "gitBlob": "589af9b18f27d8a0291a39a3f3239476b55ec7e4",
+        "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObject.cxx"
+      },
+      {
+        "path": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+        "size": 90847,
+        "sha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad",
+        "gitBlob": "288f83904b5d37d1234a284759659b080e407d62",
+        "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/UAccCOM/MAccessible.cxx"
+      }
+    ],
+    "change": "Clear a different previous focus before publishing the new focus; one moved call only",
+    "scope": "Windows WinAcc common source; current native source workflow builds ARM64 only; x64 build unverified",
+    "sourceRegression": {
+      "exactExtractedMethods": 10,
+      "originalExpectedFailures": [
+        "siblings_A_to_B_returns_B",
+        "deep_common_root_returns_new_leaf"
+      ],
+      "candidateExpectedPassedCases": 10
+    },
+    "initialLazySeedingChanged": false,
+    "currentCiRootCauseConfirmed": false,
+    "nativeBuildVerified": false,
+    "guiVerified": false
   }
 }

@@ -433,7 +433,8 @@ class AtlSourceTests(unittest.TestCase):
                     if len(token)>1 and token[0] in "\"'" and token[-1]==token[0]]
         self.assertEqual([['/usr/bin/python3','-m','unittest',
             'suite.tests.test_firebird_arm64_port','suite.tests.test_native_python_host',
-            'suite.tests.test_native_atl_path','suite.tests.test_native_meson_path','-v']],
+            'suite.tests.test_native_atl_path','suite.tests.test_native_meson_path',
+            'suite.tests.test_winacc_focus_order','-v']],
             [shlex.split(token[1:-1]) for token in literals
              if token.startswith("'/usr/bin/python3 ")])
         self.assertEqual([

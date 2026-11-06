@@ -1185,7 +1185,7 @@ sys.exit(0 if record['passed'] else 1)
 }
 
 function Write-NativeSourceGate([string]$Path,[string]$RepoRoot,[string]$SourceRoot,[string]$FirebirdArchive,[string]$MddsArchive) {
-    Write-BashScript $Path @("set -euo pipefail","export PATH=/usr/local/bin:/usr/bin:/bin:`$PATH","cd $(Quote-Bash $RepoRoot)","export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1","export OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY=1","export OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY=1","export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE=$(Quote-Bash $FirebirdArchive)","export OPENGEUL_MDDS_SOURCE_ARCHIVE=$(Quote-Bash $MddsArchive)","export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES=$(Quote-Bash ($SourceRoot+'/external/firebird'))","export OPENGEUL_LIBREOFFICE_ATL_SOURCE=$(Quote-Bash $SourceRoot)","export OPENGEUL_LIBREOFFICE_MESON_SOURCE=$(Quote-Bash $SourceRoot)","export OPENGEUL_LIBREOFFICE_PYTHON_PATCHES=$(Quote-Bash ($SourceRoot+'/external/python3'))",'/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port suite.tests.test_native_python_host suite.tests.test_native_atl_path suite.tests.test_native_meson_path -v')
+    Write-BashScript $Path @("set -euo pipefail","export PATH=/usr/local/bin:/usr/bin:/bin:`$PATH","cd $(Quote-Bash $RepoRoot)","export OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1","export OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY=1","export OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY=1","export OPENGEUL_FIREBIRD_SOURCE_ARCHIVE=$(Quote-Bash $FirebirdArchive)","export OPENGEUL_MDDS_SOURCE_ARCHIVE=$(Quote-Bash $MddsArchive)","export OPENGEUL_LIBREOFFICE_FIREBIRD_PATCHES=$(Quote-Bash ($SourceRoot+'/external/firebird'))","export OPENGEUL_LIBREOFFICE_ATL_SOURCE=$(Quote-Bash $SourceRoot)","export OPENGEUL_LIBREOFFICE_MESON_SOURCE=$(Quote-Bash $SourceRoot)","export OPENGEUL_LIBREOFFICE_PYTHON_PATCHES=$(Quote-Bash ($SourceRoot+'/external/python3'))",'/usr/bin/python3 -m unittest suite.tests.test_firebird_arm64_port suite.tests.test_native_python_host suite.tests.test_native_atl_path suite.tests.test_native_meson_path suite.tests.test_winacc_focus_order -v')
 }
 
 function Save-ActualMddsHeaders([string]$SourceRoot,[string]$EvidenceDirectory,$Lock) {
@@ -1215,6 +1215,36 @@ function Save-ActualMddsHeaders([string]$SourceRoot,[string]$EvidenceDirectory,$
         $record.files+=,$item
     }
     return $record
+}
+
+function Assert-WinAccFocusSourcePatchReceipt($Proof,$Lock,[string]$CoreCommit,[string]$EvidenceDirectory) {
+    if($Proof.schemaVersion -is [bool] -or $Proof.schemaVersion -ne 1 -or $Proof.kind -cne 'winacc-focus-order-source-patch' -or
+       $Proof.passed -isnot [bool] -or $Proof.passed -ne $true -or $Proof.coreCommit -cne $CoreCommit -or $Lock.coreCommit -cne $CoreCommit -or
+       $Proof.path -cne $Lock.path -or $Proof.beforeSha256 -cne $Lock.sha256 -or $Proof.afterSha256 -cne $Lock.afterSha256 -or
+       $Proof.patchSha256 -cne $Lock.patch.sha256 -or $Proof.nativeBuildVerified -ne $false -or $Proof.guiVerified -ne $false -or
+       $Proof.currentCiRootCauseConfirmed -ne $false -or @($Proof.sourceFiles).Count -ne 3 -or @($Lock.sources).Count -ne 3) {
+        throw 'WinAcc source patch receipt differs from its authenticated source lock.'
+    }
+    foreach($pin in $Lock.sources) {
+        $files=@($Proof.sourceFiles|Where-Object {$_.path -ceq $pin.path})
+        $expectedAfter=if($pin.path -ceq $Lock.path){$Lock.afterSha256}else{$pin.sha256}
+        $expectedBytes=if($pin.path -ceq $Lock.path){$Lock.afterBytes}else{$pin.size}
+        if($files.Count -ne 1 -or $files[0].beforeSha256 -cne $pin.sha256 -or $files[0].afterSha256 -cne $expectedAfter -or
+           $files[0].beforeBytes -ne $pin.size -or $files[0].afterBytes -ne $expectedBytes) {throw 'WinAcc source dependency receipt differs.'}
+    }
+    foreach($item in @(
+        @{key='original';name='original-AccObjectWinManager.cxx';size=$Lock.beforeBytes;sha256=$Lock.sha256},
+        @{key='effective';name='effective-AccObjectWinManager.cxx';size=$Lock.afterBytes;sha256=$Lock.afterSha256},
+        @{key='patch';name=$Lock.patch.filename;size=$Lock.patch.size;sha256=$Lock.patch.sha256})) {
+        $path=[IO.Path]::GetFullPath((Join-Path $EvidenceDirectory $item.name))
+        if($Proof.evidence.($item.key) -cne $path) {throw 'WinAcc source evidence path differs.'}
+        Assert-UnlinkedPath $path
+        $file=Get-Item -LiteralPath $path -Force
+        if($file.PSIsContainer -or $file.Length -ne $item.size -or
+           (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $item.sha256) {
+            throw 'WinAcc retained source evidence differs from the source lock.'
+        }
+    }
 }
 
 function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols,[switch]$CalcDispatchDiagnostic) {
@@ -1297,6 +1327,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $python=(Get-Command python -ErrorAction Stop).Source
         $hookResult=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source,'--evidence-directory',$evidence) $repo (Join-Path $evidence 'source-hooks')
         $receipt.sourceHooks=Get-Content -LiteralPath $hookResult.stdout -Raw|ConvertFrom-Json
+        $receipt.stage='install-authenticated-winacc-focus-order';Assert-NativeBuildTimeRemaining
+        $focusHook=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/apply_winacc_focus_order.py'),'--libreoffice-source',$source,'--evidence-directory',$evidence,'--core-commit',$pin.coreCommit) $repo (Join-Path $evidence 'winacc-focus-order-source-hooks')
+        $receipt.winAccFocusOrderSourcePatch=Get-Content -LiteralPath $focusHook.stdout -Raw|ConvertFrom-Json
+        Assert-WinAccFocusSourcePatchReceipt $receipt.winAccFocusOrderSourcePatch $manifest.winAccFocusOrder $pin.coreCommit $evidence
         if($CalcDispatchDiagnostic) {
             $receipt.stage='install-authenticated-calc-dispatch-diagnostic';Assert-NativeBuildTimeRemaining
             $diagnostic=Join-Path $repo 'suite/engine-build/calc-dispatch-diagnostic'

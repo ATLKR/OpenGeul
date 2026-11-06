@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
+  "sources": [
+    {
+      "path": "winaccessibility/source/service/AccObjectWinManager.cxx",
+      "fixture": "AccObjectWinManager.cxx",
+      "bytes": 33670,
+      "sha256": "ab5ed31cac9b262461b1d7e45fbe4a5758fef852a0f51c08c0c6f8e25d1c9be0",
+      "gitBlob": "364f51e19bbcb9f2990dd8ad3313338c20349031",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObjectWinManager.cxx"
+    },
+    {
+      "path": "winaccessibility/source/service/AccObject.cxx",
+      "fixture": "AccObject.cxx",
+      "bytes": 26374,
+      "sha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+      "gitBlob": "589af9b18f27d8a0291a39a3f3239476b55ec7e4",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObject.cxx"
+    },
+    {
+      "path": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+      "fixture": "MAccessible.cxx",
+      "bytes": 90847,
+      "sha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad",
+      "gitBlob": "288f83904b5d37d1234a284759659b080e407d62",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/UAccCOM/MAccessible.cxx"
+    }
+  ],
+  "methods": [
+    {
+      "method": "AccObjectWinManager::UpdateAccFocus",
+      "source": "winaccessibility/source/service/AccObjectWinManager.cxx",
+      "sourceBlob": "364f51e19bbcb9f2990dd8ad3313338c20349031",
+      "sourceSha256": "ab5ed31cac9b262461b1d7e45fbe4a5758fef852a0f51c08c0c6f8e25d1c9be0",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObjectWinManager.cxx#L361",
+      "firstLine": 361,
+      "lastLine": 373,
+      "bodyBytes": 434,
+      "bodySha256": "7c1ec9812c341abf45f3ca5f24c32ad014746a2ab8dd33d9df3fe5a9ee30f8d0"
+    },
+    {
+      "method": "AccObject::setFocus",
+      "source": "winaccessibility/source/service/AccObject.cxx",
+      "sourceBlob": "589af9b18f27d8a0291a39a3f3239476b55ec7e4",
+      "sourceSha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObject.cxx#L764",
+      "firstLine": 764,
+      "lastLine": 770,
+      "bodyBytes": 142,
+      "bodySha256": "affcfdb334d0bab8e27dc8fd8515df652cc20f6d4ecdd96f927645f81ad081fa"
+    },
+    {
+      "method": "AccObject::unsetFocus",
+      "source": "winaccessibility/source/service/AccObject.cxx",
+      "sourceBlob": "589af9b18f27d8a0291a39a3f3239476b55ec7e4",
+      "sourceSha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObject.cxx#L777",
+      "firstLine": 777,
+      "lastLine": 781,
+      "bodyBytes": 126,
+      "bodySha256": "e0dc888547a6c11420ab70cf4c1bd149798f1bafcd354246113f29d4ee74a41f"
+    },
+    {
+      "method": "CMAccessible::Put_XAccFocus",
+      "source": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+      "sourceBlob": "288f83904b5d37d1234a284759659b080e407d62",
+      "sourceSha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/UAccCOM/MAccessible.cxx#L1186",
+      "firstLine": 1186,
+      "lastLine": 1213,
+      "bodyBytes": 791,
+      "bodySha256": "5e1c436911945b49280093153a423ca637d5687c82f68f04e34d78d8ae4e105c"
+    },
+    {
+      "method": "CMAccessible::get_accFocus",
+      "source": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+      "sourceBlob": "288f83904b5d37d1234a284759659b080e407d62",
+      "sourceSha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/UAccCOM/MAccessible.cxx#L802",
+      "firstLine": 802,
+      "lastLine": 834,
+      "bodyBytes": 943,
+      "bodySha256": "c4cf79ab21e66545245a13d049ac58778828cfd54f45c010631608e1441b7b3a"
+    },
+    {
+      "method": "AccObject::GetMSAAStateFromUNO",
+      "source": "winaccessibility/source/service/AccObject.cxx",
+      "sourceBlob": "589af9b18f27d8a0291a39a3f3239476b55ec7e4",
+      "sourceSha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObject.cxx#L467",
+      "firstLine": 467,
+      "lastLine": 539,
+      "bodyBytes": 2711,
+      "bodySha256": "0e26320a7ef80c62f0fc748eca0c2eeb9f0899b29714b55ca4dd31af358787ab"
+    },
+    {
+      "method": "AccObject::IncreaseState",
+      "source": "winaccessibility/source/service/AccObject.cxx",
+      "sourceBlob": "589af9b18f27d8a0291a39a3f3239476b55ec7e4",
+      "sourceSha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObject.cxx#L585",
+      "firstLine": 585,
+      "lastLine": 600,
+      "bodyBytes": 429,
+      "bodySha256": "c898619d7573ad5528d2be1aec4f31edf4dc5007c8f6f6fba744debe7692516f"
+    },
+    {
+      "method": "AccObject::DecreaseState",
+      "source": "winaccessibility/source/service/AccObject.cxx",
+      "sourceBlob": "589af9b18f27d8a0291a39a3f3239476b55ec7e4",
+      "sourceSha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/service/AccObject.cxx#L546",
+      "firstLine": 546,
+      "lastLine": 578,
+      "bodyBytes": 1072,
+      "bodySha256": "b0198f28297cdc3dd55c88330b68796d07afca9cf2f2c1313c53568435ddb87f"
+    },
+    {
+      "method": "CMAccessible::IncreaseState",
+      "source": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+      "sourceBlob": "288f83904b5d37d1234a284759659b080e407d62",
+      "sourceSha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/UAccCOM/MAccessible.cxx#L1117",
+      "firstLine": 1117,
+      "lastLine": 1123,
+      "bodyBytes": 169,
+      "bodySha256": "60010c9bc8ae222bdf0d67f0b3b75f378e6828b9546b581b512ee5e98162e123"
+    },
+    {
+      "method": "CMAccessible::DecreaseState",
+      "source": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+      "sourceBlob": "288f83904b5d37d1234a284759659b080e407d62",
+      "sourceSha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/winaccessibility/source/UAccCOM/MAccessible.cxx#L1104",
+      "firstLine": 1104,
+      "lastLine": 1110,
+      "bodyBytes": 172,
+      "bodySha256": "6110d973f18c46bf35d5d9052d2310c6736a93a4f23eb1fd18bbbedbad424b18"
+    }
+  ],
+  "files": [
+    {
+      "path": "harness.cpp",
+      "bytes": 7780,
+      "sha256": "5ff83a1235f30fa9341ae04ae32eaeae764fdc34a6e8195871e423b2966c8dae"
+    },
+    {
+      "path": "compile_constants.hpp",
+      "bytes": 3239,
+      "sha256": "47301e22c18db790f7459f11b4f12f49a6f44680b30e8cabf42d07d44f92763d"
+    }
+  ],
+  "scope": {
+    "actualWindows": false,
+    "nativeAbiVerified": false,
+    "currentSourceDriverArchitecture": "arm64",
+    "sourceCorrectionScope": "Windows WinAcc common source; x64 build remains unverified",
+    "currentCiRootCauseConfirmed": false,
+    "initialLazySeedingChanged": false,
+    "stubs": [
+      "object registry",
+      "parent fixture wiring",
+      "single-thread mutex boundary",
+      "VARIANT layout and reference counter",
+      "UNO context presence",
+      "unexercised role update",
+      "compile-only non-focus constants"
+    ],
+    "allUnoStateSymbolsSynthetic": true,
+    "nonFocusWindowsStateSymbolsSynthetic": true,
+    "onlyStateBranchExecuted": "FOCUSED"
+  }
+}

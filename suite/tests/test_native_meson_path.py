@@ -183,7 +183,7 @@ class MesonSourceTests(unittest.TestCase):
     def test_producer_requires_source_authentication_and_real_cygwin_replay_separately(self):
         driver=(ROOT/'suite/scripts/build-native-engine.ps1').read_text()
         for expected in ('export '+SOURCE_ENV+'=', 'export '+CYGWIN_FLAG+'=1',
-                         'suite.tests.test_native_meson_path -v'):
+                         'suite.tests.test_native_meson_path suite.tests.test_winacc_focus_order -v'):
             self.assertIn(expected, driver)
 
 

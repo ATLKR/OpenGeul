@@ -44,7 +44,8 @@ class NativeEngineBuildTests(unittest.TestCase):
         parsed = [shlex.split(line) for line in raw.splitlines()]
         self.assertEqual([['/usr/bin/python3', '-m', 'unittest',
             'suite.tests.test_firebird_arm64_port', 'suite.tests.test_native_python_host',
-            'suite.tests.test_native_atl_path', 'suite.tests.test_native_meson_path', '-v']],
+            'suite.tests.test_native_atl_path', 'suite.tests.test_native_meson_path',
+            'suite.tests.test_winacc_focus_order', '-v']],
             [argv for argv in parsed if argv and argv[0] == '/usr/bin/python3'])
         self.assertEqual([
             ['export', 'PATH=/usr/local/bin:/usr/bin:/bin:$PATH'],
@@ -76,6 +77,26 @@ class NativeEngineBuildTests(unittest.TestCase):
         self.assertEqual(1,len(methods))
         self.assertNotRegex(methods[0],r'\b(?:subprocess|PWSH|test_native_engine_build)\b')
         self.assertNotRegex(methods[0],r'(?m)^\s*(?:import|from)\s')
+
+    def test_winacc_source_patch_receipt_binds_all_sources_patch_and_retained_bytes(self):
+        from suite.tests.test_winacc_focus_order import WinAccFocusOrderTests,CORE
+        helper=WinAccFocusOrderTests();helper.setUp();self.addCleanup(helper.doCleanups)
+        proof=helper.install();pin=helper.pin()
+        proof_file=self.root/'winacc-proof.json';proof_file.write_text(json.dumps(proof))
+        pin_file=self.root/'winacc-pin.json';pin_file.write_text(json.dumps(pin))
+        load=f"$proof=Get-Content {quote(proof_file)} -Raw|ConvertFrom-Json; $pin=Get-Content {quote(pin_file)} -Raw|ConvertFrom-Json; "
+        call=f"Assert-WinAccFocusSourcePatchReceipt $proof $pin '{CORE}' {quote(helper.evidence)}"
+        self.ps(load+call)
+        for field,value in (('passed',False),('coreCommit','0'*40),('afterSha256','0'*64),
+                ('patchSha256','0'*64),('nativeBuildVerified',True),('guiVerified',True),
+                ('currentCiRootCauseConfirmed',True)):
+            changed=dict(proof,**{field:value});proof_file.write_text(json.dumps(changed))
+            self.rejected(load+call)
+        proof_file.write_text(json.dumps(proof))
+        self.rejected(load+"$proof.sourceFiles[1].beforeSha256='"+'0'*64+"'; "+call)
+        self.rejected(load+"$proof.sourceFiles=@($proof.sourceFiles[0],$proof.sourceFiles[0],$proof.sourceFiles[2]); "+call)
+        (helper.evidence/'effective-AccObjectWinManager.cxx').write_bytes(b'synthetic evidence drift')
+        self.rejected(load+call)
 
     def test_actual_mdds_header_retention_copies_owned_bytes_and_rejects_drift_or_links(self):
         import hashlib
