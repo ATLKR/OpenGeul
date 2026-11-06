@@ -169,7 +169,8 @@ def worker_record():
         comInitialized=0,comUninitialized=0,dpiEntered=0,dpiRestored=0,physicalDpiVerified=0,
         processBefore=0,processAfter=0,referencesAcquired=0,referencesReleased=0,
         variantAttempted=0,variantCleared=0,variantCleanupHresult=0,
-        variantType=0,childIdZero=0,fileRoundTrip=0,targetFreshPositive=0,
+        variantType=0,childIdZero=0,fileRoundTrip=0,firstCompareRawObserved=0,
+        firstCompareRawBits=0,firstCompareIsZeroOrOne=0,targetFreshPositive=0,
         targetRetainedPositive=0,negativeCount=0,negativeRejected=0,cleanupError=0)
     for name in _OPERATIONS:
         result.update({name+'Attempted':0,name+'Completed':0,name+'Hresult':0})
@@ -204,8 +205,14 @@ def run_local_hit(source,scope,sdk,platform):
     def same(first,second):
         equal=C.c_int32()
         call('compare',source.client,first,second,C.byref(equal))
-        if equal.value not in (0,1):raise _Stop()
-        return equal.value==1
+        raw=equal.value
+        # The first comparison is the File roundtrip below, never a later hit.
+        if record['compareCompleted']==1:
+            record.update(firstCompareRawObserved=1,firstCompareRawBits=raw&0xffffffff,
+                firstCompareIsZeroOrOne=int(raw in (0,1)))
+        # BOOL32 uses every nonzero encoding as TRUE; the field above records
+        # encoding only and never qualifies the comparison or its cleanup.
+        return bool(raw)
     try:
         record['workerStage']=1
         hr=platform.initialize()

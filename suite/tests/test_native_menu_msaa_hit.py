@@ -531,6 +531,94 @@ class WorkerTests(unittest.TestCase):
         self.scope=self.helper.MsaaHitScope(7,8,9,10,11,12,13,14,15)
     def run_worker(self):return self.helper.run_local_hit(self.source,self.scope,self.sdk,self.platform)
 
+    def test_first_file_compare_records_encoding_without_restricting_bool_truth(self):
+        fields=('firstCompareRawObserved','firstCompareRawBits','firstCompareIsZeroOrOne')
+        for raw in (0,1,-1,2,-2**31,2**31-1):
+            with self.subTest(raw=raw):
+                self.sdk=FakeCalls();self.platform=FakePlatform();original=self.sdk.call
+                def call(key,pointer,*args):
+                    result=original(key,pointer,*args)
+                    if key=='compare' and self.sdk.calls.count('compare')==1:args[2]._obj.value=raw
+                    return result
+                self.sdk.call=call;result=self.run_worker()
+                self.assertEqual(tuple(result.get(key) for key in fields),(1,raw&0xffffffff,int(raw in (0,1))))
+                self.assertEqual(self.sdk.calls[:5],['pattern','child_id','accessible','from_accessible','compare'])
+                self.assertEqual(result['localMatch'],int(raw!=0))
+                self.assertEqual(result['workerCleanup'],1);self.assertEqual(result['cleanupError'],0)
+                self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
+                if raw==0:
+                    self.assertEqual(result['compareAttempted'],1);self.assertEqual(result['hit_testAttempted'],0)
+                    self.assertEqual(result['referencesReleased'],3)
+
+    def test_first_file_compare_is_not_overwritten_by_later_target_or_negative_comparisons(self):
+        for wrong_target in (False,True):
+            self.sdk=FakeCalls();self.platform=FakePlatform();self.sdk.wrong_target=wrong_target
+            result=self.run_worker()
+            self.assertEqual(tuple(result.get(key) for key in
+                ('firstCompareRawObserved','firstCompareRawBits','firstCompareIsZeroOrOne')),(1,1,1))
+            self.assertGreater(result['compareCompleted'],1)
+            self.assertEqual(result['localMatch'],int(not wrong_target))
+            self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
+
+    def test_first_compare_hresult_failure_is_unobserved_even_when_output_was_written(self):
+        self.sdk.fail['compare']=-2147467259
+        result=self.run_worker()
+        self.assertEqual(tuple(result.get(key) for key in
+            ('firstCompareRawObserved','firstCompareRawBits','firstCompareIsZeroOrOne')),(0,0,0))
+        self.assertEqual((result['compareAttempted'],result['compareCompleted']),(1,1))
+        self.assertEqual(result['compareHresult'],0x80004005)
+        self.assertEqual(result['localMatch'],0);self.assertEqual(result['workerCleanup'],1)
+        self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
+
+    def test_failure_before_first_file_compare_leaves_all_three_fields_zero(self):
+        self.sdk.fail['pattern']=-2147467259
+        result=self.run_worker()
+        self.assertEqual(tuple(result.get(key) for key in
+            ('firstCompareRawObserved','firstCompareRawBits','firstCompareIsZeroOrOne')),(0,0,0))
+        self.assertEqual(result['compareAttempted'],0);self.assertEqual(result['localMatch'],0)
+        self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
+
+    def test_every_positive_comparison_accepts_all_nonzero_bool32_encodings(self):
+        for raw in (1,-1,2,-2**31,2**31-1):
+            with self.subTest(raw=raw):
+                self.sdk=FakeCalls();self.platform=FakePlatform();original=self.sdk.call
+                def call(key,pointer,*args):
+                    result=original(key,pointer,*args)
+                    if key=='compare' and args[1] in (1,2,3):args[2]._obj.value=raw
+                    return result
+                self.sdk.call=call;result=self.run_worker()
+                self.assertEqual(result['localMatch'],1)
+                self.assertEqual(result['targetFreshPositive'],1);self.assertEqual(result['targetRetainedPositive'],1)
+                self.assertEqual(result['negativeCount'],result['negativeRejected'])
+                self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
+                self.assertEqual(result['workerCleanup'],1)
+
+    def test_each_positive_zero_and_each_negative_nonzero_still_reject(self):
+        cases=[(ordinal,0) for ordinal in (1,2,3)]
+        cases += [(ordinal,raw) for ordinal in (4,5) for raw in (1,-1,2,-2**31,2**31-1)]
+        for ordinal,raw in cases:
+            with self.subTest(ordinal=ordinal,raw=raw):
+                self.sdk=FakeCalls();self.platform=FakePlatform();original=self.sdk.call
+                def call(key,pointer,*args):
+                    result=original(key,pointer,*args)
+                    if key=='compare' and self.sdk.calls.count('compare')==ordinal:args[2]._obj.value=raw
+                    return result
+                self.sdk.call=call;result=self.run_worker()
+                self.assertEqual(result['localMatch'],0);self.assertEqual(result['workerCleanup'],1)
+                self.assertEqual(result['compareCompleted'],ordinal)
+                self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
+
+    def test_nonzero_bool_true_does_not_hide_cleanup_failure(self):
+        self.sdk.release_throws=True;original=self.sdk.call
+        def call(key,pointer,*args):
+            result=original(key,pointer,*args)
+            if key=='compare' and args[1] in (1,2,3):args[2]._obj.value=-1
+            return result
+        self.sdk.call=call;result=self.run_worker()
+        self.assertEqual(result['workerStage'],7)
+        self.assertEqual(result['cleanupError'],1);self.assertEqual(result['workerCleanup'],0)
+        self.assertEqual(result['localKnown'],0);self.assertEqual(result['localMatch'],0)
+
     def test_worker_clsid_constructor_rejects_bare_uuid_that_metadata_fixture_accepts(self):
         value=self.helper._IIDS['legacy']
         self.assertEqual(C.sizeof(Guid(value)),16)
