@@ -220,7 +220,7 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
 
     def test_failure_receipt_and_config_logs_survive_native_host_rejection(self):
         work=self.root/'failed-work';output=self.root/'failed-evidence'
-        self.ps(f"function Get-NativeBuildHost {{ throw 'observed wrong actual host' }}; try {{ Invoke-NativeEngineBuild Full {quote(work)} {quote(output)} '' 4 }} catch {{ }}")
+        self.ps(f"function Assert-NativeEngineEnvironment {{param($Architecture)}}; function Get-NativeBuildHost {{ throw 'observed wrong actual host' }}; try {{ Invoke-NativeEngineBuild Full {quote(work)} {quote(output)} '' 4 }} catch {{ }}")
         receipt=json.loads((output/'source-build-receipt.json').read_text())
         self.assertFalse(receipt['passed'])
         self.assertFalse(receipt['fullEngineQualified'])
@@ -614,7 +614,7 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
 
     def test_expired_build_deadline_retains_failure_before_native_host_or_commands(self):
         output=self.root/'expired-evidence'
-        self.ps(f"function Get-NativeBuildHost {{ throw 'Native host must not run after deadline' }}; try {{ Invoke-NativeEngineBuild Full {quote(self.root/'expired-work')} {quote(output)} '' 4 -DeadlineUtc '2020-01-01T00:00:00.0000000Z' }} catch {{ }}")
+        self.ps(f"function Assert-NativeEngineEnvironment {{param($Architecture)}}; function Get-NativeBuildHost {{ throw 'Native host must not run after deadline' }}; try {{ Invoke-NativeEngineBuild Full {quote(self.root/'expired-work')} {quote(output)} '' 4 -DeadlineUtc '2020-01-01T00:00:00.0000000Z' }} catch {{ }}")
         receipt=json.loads((output/'source-build-receipt.json').read_text())
         self.assertFalse(receipt['passed']);self.assertFalse(receipt['fullEngineQualified'])
         self.assertEqual('build-time-budget',receipt['stage'])
@@ -828,6 +828,7 @@ $receipt.cygwinSetup|ConvertTo-Json -Compress
         repo=self.root/'bound-repo';repo.mkdir()
         driver=repo/'driver.ps1';driver.write_text('# committed driver\n')
         manifest=repo/'source-build.json';manifest.write_text('{"schemaVersion":1}\n')
+        policy=repo/'suite/engine-build/native-targets.json';policy.parent.mkdir(parents=True);policy.write_text('synthetic committed policy\n')
         def git(*arguments):
             result=subprocess.run(['git','-C',str(repo),*arguments],text=True,capture_output=True,timeout=5)
             self.assertEqual(0,result.returncode,result.stderr)
@@ -844,6 +845,11 @@ $receipt.cygwinSetup|ConvertTo-Json -Compress
         import hashlib
         self.assertEqual(hashlib.sha256(driver.read_bytes()).hexdigest(),data['driverSha256'])
         self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(),data['sourcePortManifestSha256'])
+        self.assertEqual(hashlib.sha256(policy.read_bytes()).hexdigest(),data['nativeTargetsSha256'])
+        policy.write_text('synthetic policy drift\n')
+        policy_dirty=self.root/'policy-dirty';policy_dirty.mkdir()
+        self.rejected(env+f"Get-SourceRunBinding {quote(repo)} {quote(driver)} {quote(manifest)} {quote(policy_dirty)}")
+        policy.write_text('synthetic committed policy\n')
         wrong=self.root/'wrong-run';wrong.mkdir()
         self.rejected(env.replace(head,'0'*40)+f"Get-SourceRunBinding {quote(repo)} {quote(driver)} {quote(manifest)} {quote(wrong)}")
         driver.write_text('# uncommitted changed driver\n')

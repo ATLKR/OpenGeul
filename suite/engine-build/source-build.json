@@ -472,5 +472,10 @@
     "currentCiRootCauseConfirmed": false,
     "nativeBuildVerified": false,
     "guiVerified": false
+  },
+  "nativeTargets": {
+    "filename": "native-targets.json",
+    "size": 1987,
+    "sha256": "c499f23d476fb9b88270871732f7c4d4102fb857ea92e1d5af287dc6d2655b56"
   }
 }

@@ -124,7 +124,7 @@ class NativeJavaPrerequisiteTests(unittest.TestCase):
     def test_driver_binds_installed_java_tools_before_large_source_downloads(self):
         jdk, ant = self.jdk(), self.ant()
         work, output = self.root/'owned-work', self.root/'evidence'
-        self.ps("function Get-NativeBuildHost { @{isWindows=$true;processMachine=0;nativeMachine=43620} }; "
+        self.ps("function Assert-NativeEngineEnvironment {param($Architecture)}; function Get-NativeBuildHost { @{isWindows=$true;processMachine=0;nativeMachine=43620} }; "
                 "function Get-SourceRunBinding { @{sourceCommit=('a'*40);sourceTree=('b'*40)} }; "
                 "function Get-AuthenticatedDownload { throw 'stopped before downloading actual sources' }; "
                 f"try {{Invoke-NativeEngineBuild Full {quote(work)} {quote(output)} '' 4 {quote(jdk)} {quote(ant)}}} catch {{}}")

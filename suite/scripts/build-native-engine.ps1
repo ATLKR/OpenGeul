@@ -8,12 +8,93 @@ param(
     [string]$AntHome='',
     [string]$DeadlineUtc='',
     [switch]$MutexSymbols,
-    [switch]$CalcDispatchDiagnostic
+    [switch]$CalcDispatchDiagnostic,
+    [ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64'
 )
 $ErrorActionPreference='Stop'
 
 function Write-BuildJson($Path,$Value) {
     $Value|ConvertTo-Json -Depth 30|Set-Content -LiteralPath $Path -Encoding utf8NoBOM
+}
+
+# Private byte/schema seam for synthetic tests. Production resolves only the fixed
+# tracked policy below; callers cannot select a policy path or inject a target map.
+function Assert-NativeTargetObject([System.Text.Json.JsonElement]$Element,[string[]]$Names) {
+    if($Element.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {throw 'Native target policy requires an object.'}
+    $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($property in $Element.EnumerateObject()) {
+        if($property.Name -cnotin $Names -or -not $seen.Add($property.Name)) {throw 'Native target policy has unknown or duplicate members.'}
+    }
+    if($seen.Count -ne $Names.Count) {throw 'Native target policy has missing members.'}
+}
+
+function ConvertFrom-NativeEngineTargetPolicy {
+    [CmdletBinding()]
+    param([byte[]]$Bytes,[Collections.IDictionary]$Pin,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64')
+    if($Pin.Count -ne 3 -or @($Pin.Keys|Where-Object {$_ -cnotin @('filename','size','sha256')}).Count -or
+       $Pin.filename -isnot [string] -or $Pin.filename -cne 'native-targets.json' -or
+       ($Pin.size -isnot [int] -and $Pin.size -isnot [long]) -or $Pin.size -le 0 -or $Pin.size -ne $Bytes.Length -or
+       $Pin.sha256 -isnot [string] -or $Pin.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant() -cne $Pin.sha256) {
+        throw 'Native target policy does not match its fixed manifest identity.'
+    }
+    $text=[Text.UTF8Encoding]::new($false,$true).GetString($Bytes)
+    $document=[System.Text.Json.JsonDocument]::Parse($text)
+    try {
+        Assert-NativeTargetObject $document.RootElement @('schemaVersion','targets')
+        $targets=$document.RootElement.GetProperty('targets')
+        Assert-NativeTargetObject $targets @('arm64','x64')
+        $strings=@('architecture','configureCpu','configureTriple','distro','compilerYear','toolset','compilerTools','sourceRecipe',
+            'runner','runnerArchitecture','workflow','ref','job','artifactPrefix','archive','crtRedistributionUrl')
+        $numbers=@('nativeMachine','productMachine','processMachine','proofVersion')
+        foreach($arch in @('arm64','x64')) {Assert-NativeTargetObject ($targets.GetProperty($arch)) ($strings+$numbers+@('requiredBuildTypes'))}
+    } finally {$document.Dispose()}
+    $policy=ConvertFrom-Json -InputObject $text -AsHashtable
+    if(($policy.schemaVersion -isnot [int] -and $policy.schemaVersion -isnot [long]) -or $policy.schemaVersion -ne 1) {throw 'Unsupported native target policy schema.'}
+    foreach($arch in @('arm64','x64')) {
+        $row=$policy.targets[$arch]
+        foreach($field in $strings) {
+            if($row[$field] -isnot [string] -or [string]::IsNullOrWhiteSpace($row[$field]) -or $row[$field] -match '[\x00-\x20]') {throw "Native target string field differs: $field"}
+        }
+        foreach($field in $numbers) {
+            if($row[$field] -isnot [int] -and $row[$field] -isnot [long]) {throw "Native target integer field differs: $field"}
+        }
+        $machine=if($arch -ceq 'arm64'){0xaa64}else{0x8664}
+        $compilerProfile=if($arch -ceq 'arm64'){'2026/v145'}else{'2022/v143'}
+        if($row.architecture -cne $arch -or $row.nativeMachine -ne $machine -or $row.productMachine -ne $machine -or $row.processMachine -ne 0 -or
+           $row.proofVersion -ne $(if($arch -ceq 'arm64'){1}else{2}) -or $row.runnerArchitecture -cne $arch.ToUpperInvariant() -or
+           $row.compilerTools -cne "Host$arch/$arch" -or ($row.compilerYear+'/'+$row.toolset) -cne $compilerProfile) {throw 'Native target architecture/compiler identity differs.'}
+        $cpu=if($arch -ceq 'arm64'){'AARCH64'}else{'X86_64'}
+        $distroSuffix=if($arch -ceq 'arm64'){'Arm64'}else{'64'}
+        $recipeSuffix=if($arch -ceq 'x64'){'-common'}else{''}
+        if($row.configureCpu -cne $cpu -or $row.configureTriple -cne ($cpu.ToLowerInvariant()+'-pc-cygwin') -or
+           $row.distro -cne ('LibreOfficeWin'+$distroSuffix) -or $row.sourceRecipe -cne ("windows-$arch$recipeSuffix-v"+$row.proofVersion)) {
+            throw 'Native target configure/source recipe architecture differs.'
+        }
+        $suffix=if($arch -ceq 'x64'){'-x64'}else{''}
+        if($row.workflow -cne ".github/workflows/office-native-engine$suffix.yml" -or $row.ref -cne "refs/heads/work/opengeul-office-native-engine$suffix" -or
+           $row.job -cne "native-firebird-and-office$suffix" -or $row.artifactPrefix -cne "opengeul-native-$arch-engine-" -or
+           $row.archive -cne "OpenGeul-Office-engine-$arch.zip" -or
+           $row.crtRedistributionUrl -cne "https://learn.microsoft.com/en-us/visualstudio/releases/$($row.compilerYear)/redistribution") {throw 'Native target workflow/artifact/terms identity differs.'}
+        if($row.requiredBuildTypes -isnot [array] -or $row.requiredBuildTypes.Count -lt 2) {throw 'Native target build types are missing.'}
+        $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach($value in $row.requiredBuildTypes) {
+            if($value -isnot [string] -or $value -cnotmatch '^[A-Z][A-Z0-9_]*$' -or -not $seen.Add($value)) {throw 'Native target build types differ.'}
+        }
+        if(-not $seen.Contains('FIREBIRD') -or -not $seen.Contains('LIBTOMMATH') -or $seen.Contains('LIBATOMIC_OPS') -ne ($arch -ceq 'arm64')) {throw 'Native target dependency identity differs.'}
+    }
+    return $policy.targets[$Architecture]
+}
+
+function Get-NativeEngineTarget {
+    [CmdletBinding()]
+    param([ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64')
+    $directory=Join-Path $PSScriptRoot '../engine-build'
+    $path=Join-Path $directory 'native-targets.json'
+    $manifestPath=Join-Path $directory 'source-build.json'
+    Assert-UnlinkedPath $path;Assert-UnlinkedPath $manifestPath
+    $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json -AsHashtable
+    return ConvertFrom-NativeEngineTargetPolicy ([IO.File]::ReadAllBytes($path)) $manifest.nativeTargets $Architecture
 }
 
 function Get-NativeEngineBuildMode([ValidateSet('Firebird','Full')][string]$Phase,[switch]$CalcDispatchDiagnostic) {
@@ -79,9 +160,10 @@ $ErrorActionPreference='Stop'
     Assert-NativeBuildTimeRemaining
 }
 
-function Assert-NativeBuildHost($Identity) {
-    if($Identity.isWindows -ne $true -or $Identity.processMachine -ne 0 -or $Identity.nativeMachine -ne 0xaa64) {
-        throw 'Native Windows ARM64 OS and an unemulated ARM64 PowerShell controller are required.'
+function Assert-NativeBuildHost($Identity,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    if($Identity.isWindows -ne $true -or $Identity.processMachine -ne $target.processMachine -or $Identity.nativeMachine -ne $target.nativeMachine) {
+        throw "Native Windows $Architecture OS and an unemulated $Architecture PowerShell controller are required."
     }
 }
 
@@ -296,7 +378,9 @@ function Get-SourceRunBinding([string]$RepoRoot,[string]$DriverPath,[string]$Man
     $tree=(Get-Content -LiteralPath $treeResult.stdout -Raw).Trim()
     if($head -cnotmatch '^[0-9a-f]{40}$' -or $tree -cnotmatch '^[0-9a-f]{40}$') {throw 'Actual Git source commit/tree identity is invalid.'}
     if($env:GITHUB_SHA -and $env:GITHUB_SHA -cne $head) {throw 'Actual Git HEAD differs from the GitHub workflow source SHA.'}
-    $paths=@([IO.Path]::GetRelativePath($RepoRoot,$DriverPath).Replace('\','/'),[IO.Path]::GetRelativePath($RepoRoot,$ManifestPath).Replace('\','/'))
+    $targetPath=Join-Path $RepoRoot 'suite/engine-build/native-targets.json'
+    Assert-UnlinkedPath $targetPath
+    $paths=@('suite/engine-build/native-targets.json',[IO.Path]::GetRelativePath($RepoRoot,$DriverPath).Replace('\','/'),[IO.Path]::GetRelativePath($RepoRoot,$ManifestPath).Replace('\','/'))
     foreach($path in $paths) {if($path.StartsWith('../') -or [IO.Path]::IsPathRooted($path)) {throw 'Source binding files must belong to this repository.'}}
     Invoke-LoggedCommand $git (@('ls-files','--error-unmatch','--')+$paths) $RepoRoot (Join-Path $LogDirectory 'source-tracked-files')|Out-Null
     Invoke-LoggedCommand $git @('diff','--quiet','HEAD','--') $RepoRoot (Join-Path $LogDirectory 'source-clean')|Out-Null
@@ -314,6 +398,7 @@ function Get-SourceRunBinding([string]$RepoRoot,[string]$DriverPath,[string]$Man
     if($env:GITHUB_ACTIONS -eq 'true' -and (-not $env:GITHUB_SHA -or $null -eq $run -or $null -eq $attempt)) {throw 'CI source receipt requires actual workflow SHA, run and attempt.'}
     return [ordered]@{sourceCommit=$head;sourceTree=$tree;sourceRun=$run;runAttempt=$attempt;
         sourcePortManifestSha256=(Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash.ToLowerInvariant();
+        nativeTargetsSha256=(Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash.ToLowerInvariant();
         driverSha256=(Get-FileHash -LiteralPath $DriverPath -Algorithm SHA256).Hash.ToLowerInvariant()}
 }
 
@@ -702,15 +787,20 @@ function Assert-GeneratedConfiguration([string]$Path) {
     return $values
 }
 
-function Assert-MutexSymbolsOwnerPush([Collections.IDictionary]$Context, $Event) {
-    $ref='refs/heads/work/opengeul-office-native-engine'
-    $expected=@{GITHUB_ACTIONS='true';RUNNER_ENVIRONMENT='github-hosted';RUNNER_OS='Windows';RUNNER_ARCH='ARM64';GITHUB_REPOSITORY='ATLKR/OpenGeul';GITHUB_REPOSITORY_OWNER='ATLKR';GITHUB_EVENT_NAME='push';GITHUB_JOB='native-firebird-and-office';GITHUB_REF=$ref;GITHUB_WORKFLOW_REF=('ATLKR/OpenGeul/.github/workflows/office-native-engine.yml@'+$ref);GITHUB_RUN_ATTEMPT='1';GITHUB_ACTOR='ATLKR';GITHUB_ACTOR_ID='65988341'}
-    foreach($key in $expected.Keys) {if($Context[$key] -cne $expected[$key]) {throw "Plugin symbol owner-push context differs: $key"}}
+function Assert-NativeEngineOwnerPush([Collections.IDictionary]$Context,$Event,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    $ref=$target.ref
+    $expected=@{GITHUB_ACTIONS='true';RUNNER_ENVIRONMENT='github-hosted';RUNNER_OS='Windows';RUNNER_ARCH=$target.runnerArchitecture;GITHUB_REPOSITORY='ATLKR/OpenGeul';GITHUB_REPOSITORY_OWNER='ATLKR';GITHUB_EVENT_NAME='push';GITHUB_JOB=$target.job;GITHUB_REF=$ref;GITHUB_WORKFLOW_REF=('ATLKR/OpenGeul/'+$target.workflow+'@'+$ref);GITHUB_RUN_ATTEMPT='1';GITHUB_ACTOR='ATLKR';GITHUB_ACTOR_ID='65988341'}
+    foreach($key in $expected.Keys) {if($Context[$key] -cne $expected[$key]) {throw "Native engine owner-push context differs: $key"}}
     $sha=$Context.GITHUB_SHA
-    if($sha -cnotmatch '^[0-9a-f]{40}$' -or $sha -ceq ('0'*40) -or $Context.GITHUB_WORKFLOW_SHA -cne $sha -or $Context.GITHUB_RUN_ID -cnotmatch '^[1-9][0-9]{0,19}$') {throw 'Plugin symbol source/run binding differs.'}
+    if($sha -cnotmatch '^[0-9a-f]{40}$' -or $sha -ceq ('0'*40) -or $Context.GITHUB_WORKFLOW_SHA -cne $sha -or $Context.GITHUB_RUN_ID -cnotmatch '^[1-9][0-9]{0,19}$') {throw 'Native engine source/run binding differs.'}
     if($Event.repository.full_name -cne 'ATLKR/OpenGeul' -or $Event.repository.private -isnot [bool] -or $Event.repository.private -or ($Event.repository.id -isnot [int] -and $Event.repository.id -isnot [long]) -or $Event.repository.id -ne 1405493151 -or
        $Event.sender.login -cne 'ATLKR' -or ($Event.sender.id -isnot [int] -and $Event.sender.id -isnot [long]) -or $Event.sender.id -ne 65988341 -or $Event.sender.type -cne 'User' -or
-       $Event.ref -cne $ref -or $Event.deleted -isnot [bool] -or $Event.deleted -or $Event.after -cne $sha) {throw 'Plugin symbol owner push event differs.'}
+       $Event.ref -cne $ref -or $Event.deleted -isnot [bool] -or $Event.deleted -or $Event.after -cne $sha) {throw 'Native engine owner push event differs.'}
+}
+
+function Assert-MutexSymbolsOwnerPush([Collections.IDictionary]$Context,$Event) {
+    Assert-NativeEngineOwnerPush $Context $Event 'arm64'
 }
 
 function Assert-MutexSymbolsOverrides([Collections.IDictionary]$Values) {
@@ -723,14 +813,18 @@ function Assert-MutexSymbolsEnvironment {
     $overrides=@{}
     foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_symbols','debug','dbglevel','enable_optimized','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS','CL','_CL_','LINK','_LINK_')) {$overrides[$key]=[Environment]::GetEnvironmentVariable($key)}
     Assert-MutexSymbolsOverrides $overrides
+    Assert-NativeEngineEnvironment 'arm64'
+}
+
+function Assert-NativeEngineEnvironment([ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $context=@{}
     foreach($key in @('GITHUB_ACTIONS','RUNNER_ENVIRONMENT','RUNNER_OS','RUNNER_ARCH','GITHUB_REPOSITORY','GITHUB_REPOSITORY_OWNER','GITHUB_EVENT_NAME','GITHUB_JOB','GITHUB_REF','GITHUB_WORKFLOW_REF','GITHUB_RUN_ATTEMPT','GITHUB_ACTOR','GITHUB_ACTOR_ID','GITHUB_SHA','GITHUB_WORKFLOW_SHA','GITHUB_RUN_ID')) {$context[$key]=[Environment]::GetEnvironmentVariable($key)}
     $path=$env:GITHUB_EVENT_PATH
-    if(-not $path -or -not [IO.Path]::IsPathFullyQualified($path)) {throw 'Plugin symbol event path is absent.'}
+    if(-not $path -or -not [IO.Path]::IsPathFullyQualified($path)) {throw 'Native engine owner-push event path is absent.'}
     Assert-UnlinkedPath $path
     $item=Get-Item -LiteralPath $path
-    if($item.PSIsContainer -or $item.Length -gt 262144) {throw 'Plugin symbol event exceeds its bound.'}
-    Assert-MutexSymbolsOwnerPush $context (Get-Content -LiteralPath $path -Raw|ConvertFrom-Json)
+    if($item.PSIsContainer -or $item.Length -gt 262144) {throw 'Native engine owner-push event exceeds its bound.'}
+    Assert-NativeEngineOwnerPush $context (Get-Content -LiteralPath $path -Raw|ConvertFrom-Json) $Architecture
 }
 
 function Assert-MutexSymbolsConfiguration([Collections.IDictionary]$Values) {
@@ -1247,7 +1341,11 @@ function Assert-WinAccFocusSourcePatchReceipt($Proof,$Lock,[string]$CoreCommit,[
     }
 }
 
-function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols,[switch]$CalcDispatchDiagnostic) {
+function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols,[switch]$CalcDispatchDiagnostic,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    Get-NativeEngineTarget $Architecture|Out-Null
+    if($Architecture -ceq 'x64' -and ($Phase -ine 'Full' -or $MutexSymbols -or $CalcDispatchDiagnostic)) {throw 'x64 supports normal Full only.'}
+    if($Phase -ieq 'Full' -and -not $CalcDispatchDiagnostic) {Assert-NativeEngineEnvironment $Architecture}
+    if($Architecture -ceq 'x64') {throw 'x64 lifecycle awaits Task 3; qualification is unavailable.'}
     $mode=Get-NativeEngineBuildMode $Phase -CalcDispatchDiagnostic:$CalcDispatchDiagnostic
     if($MutexSymbols -and $Phase -cne 'Full') {throw 'Plugin symbols require the full native source build.'}
     if($MutexSymbols) {Assert-MutexSymbolsEnvironment}
@@ -1508,5 +1606,5 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
 }
 
 if($MyInvocation.InvocationName -ne '.') {
-    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc -MutexSymbols:$MutexSymbols -CalcDispatchDiagnostic:$CalcDispatchDiagnostic
+    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc -MutexSymbols:$MutexSymbols -CalcDispatchDiagnostic:$CalcDispatchDiagnostic -Architecture $Architecture
 }
