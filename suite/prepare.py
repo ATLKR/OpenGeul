@@ -289,6 +289,65 @@ def _source_x64_prerequisites(proof: dict) -> None:
         raise ValueError('Native source receipt finished outside its original workflow deadline')
 
 
+def _source_x64_atl_pins(manifest: dict) -> list:
+    descriptor=manifest.get('windowsAtlNativePaths')
+    paths=('extensions/Library_so_activex.mk','embedserv/Library_emser.mk',
+        'extensions/Library_oleautobridge.mk','winaccessibility/Library_uacccom.mk',
+        'winaccessibility/Library_winaccessibility.mk','winaccessibility/WinResTarget_uacccom.mk')
+    if (type(descriptor) is not dict or set(descriptor)!={'condition','recipes'}
+            or descriptor['condition']!='WNT_X86_64_MSC && MAKE_HOST=%-cygwin'
+            or type(descriptor['recipes']) is not list or len(descriptor['recipes'])!=6):
+        raise ValueError('x64 ATL source plan descriptor differs')
+    originals={row['path']:row for row in
+        manifest['atlConsumerNativePaths']['recipes']+[manifest['atlNativePaths']['recipe']]}
+    for path,row in zip(paths,descriptor['recipes']):
+        if (type(row) is not dict or set(row)!={'path','size','sha256','afterSize','afterSha256'}
+                or row['path']!=path or path not in originals
+                or any(type(row[key]) is not int or not 0<row[key]<=1024*1024 for key in ('size','afterSize'))
+                or any(not _source_digest(row[key]) for key in ('sha256','afterSha256'))
+                or not _source_exact({key:row[key] for key in ('size','sha256')},
+                    {key:originals[path][key] for key in ('size','sha256')})):
+            raise ValueError('x64 ATL source plan pins or ordered ARM originals differ')
+    return descriptor['recipes']
+
+
+def _source_x64_atl_inputs(proof: dict) -> None:
+    value=proof.get('atlBuildInputs')
+    fields={'schemaVersion','kind','passed','compilerRoot','configuredInclude','configuredLibrary',
+        'includeRoot','libraryRoot','header','library','productPayload','fullEngineQualified','acceptanceEligible','guiVerified'}
+    if (type(value) is not dict or set(value)!=fields
+            or type(value['schemaVersion']) is not int or value['schemaVersion']!=1
+            or value['kind']!='native-x64-atl-prerequisite' or value['passed'] is not True
+            or any(value[key] is not False for key in ('productPayload','fullEngineQualified','acceptanceEligible','guiVerified'))):
+        raise ValueError('x64 ATL prerequisite is missing or grants an unsupported qualification')
+    def safe(path):
+        result=_source_windows_path(path);archive_path('/'.join(result.parts[1:]));return result
+    root=safe(value['compilerRoot'])
+    if (root!=safe(proof['nativePreflight']['compiler']['compilerRoot'])
+            or root!=safe(proof['configuredToolchain']['compilerRoot'])
+            or safe(value['includeRoot'])!=root/'atlmfc/include'
+            or safe(value['libraryRoot']) not in (root/'atlmfc/lib/x64',root/'atlmfc/lib/spectre/x64')):
+        raise ValueError('x64 ATL canonical roots differ from the selected compiler')
+    for field,key in (('configuredInclude','ATL_INCLUDE'),('configuredLibrary','ATL_LIB')):
+        alias=value[field]
+        if (type(alias) is not str or not alias.strip() or any(ord(char)<32 for char in alias)
+                or not _source_exact(alias,proof['configuration'].get(key))):
+            raise ValueError('x64 ATL configured alias differs from actual configuration')
+    generation={'volumeSerialNumber','fileIndexHigh','fileIndexLow','creationHigh','creationLow','writeHigh','writeLow'}
+    for field,parent,leaf in (('header','includeRoot','atlbase.h'),('library','libraryRoot','atls.lib')):
+        record=value[field]
+        if (type(record) is not dict or set(record)!={'path','size','sha256','generation'}
+                or type(record['size']) is not int or not 0<record['size']<=1024*1024*1024
+                or not _source_digest(record['sha256'])
+                or safe(record['path'])!=safe(value[parent])/leaf):
+            raise ValueError('x64 ATL selected header/library identity differs')
+        stamp=record['generation']
+        if (type(stamp) is not dict or set(stamp)!=generation
+                or any(type(number) is not int or not 0<=number<=0xffffffff for number in stamp.values())
+                or not (stamp['fileIndexHigh'] or stamp['fileIndexLow'])):
+            raise ValueError('x64 ATL selected file generation is incomplete')
+
+
 def _source_x64_plan(manifest: dict) -> dict:
     """Independently reconstruct the finite source plan from reviewed metadata."""
     def pin(value, after=None):
@@ -325,17 +384,20 @@ def _source_x64_plan(manifest: dict) -> dict:
     if (len(common) != 4 or common[1]['path'] != winacc['path']
             or common[1]['beforeSha256'] != winacc['sha256'] or common[1].get('beforeBytes') != winacc['beforeBytes']):
         raise ValueError('x64 WinAcc common source-plan identity differs')
+    atl=_source_x64_atl_pins(manifest)
     common[1]['afterBytes']=winacc['afterBytes'];common.extend((pin(loader),pin(zstd),pin(gpg)))
+    common.extend(pin(row) for row in atl)
     guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
     guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
     guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
-    guarded=[pin(source) for source in guarded if source['path'] not in (loader['path'],zstd['path'])]
+    moved={loader['path'],zstd['path'],*(row['path'] for row in atl)}
+    guarded=[pin(source) for source in guarded if source['path'] not in moved]
     payload=winacc['patch'];payload_pin=dict(filename=payload['filename'],sha256=payload['sha256'])
     if 'size' in payload:payload_pin['size']=payload['size']
     plan=dict(recipeId='windows-x64-common-v2',recipe=manifest['nativeSourceRecipes']['windows-x64-common-v2'],
         sources=common+guarded,armGuardedSources=guarded,sourceDependencies=[],payloads=[payload_pin])
     digest=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
-    if digest != '2a47c43202e16fd8e1774b3b747b97d57521b71dd706afb90da4427da4988044':
+    if digest != 'b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679':
         raise ValueError('x64 source plan differs from the reviewed canonical recipe')
     return plan
 
@@ -382,6 +444,30 @@ def _source_x64_gpg_evidence(value) -> None:
         raise ValueError('x64 GPG compiler-path evidence must share one producer directory descriptor')
 
 
+def _source_x64_atl_source(value,manifest,*,evidence_parent: PureWindowsPath) -> None:
+    fields=dict(schemaVersion=1,kind='windows-x64-native-atl-source-hooks',
+        condition='WNT_X86_64_MSC && MAKE_HOST=%-cygwin',nativeBuildVerified=False,
+        fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+    if (type(value) is not dict or set(value)!=set(fields)|{'recipes'}
+            or not _source_exact({key:value[key] for key in fields},fields)
+            or type(value['recipes']) is not list or len(value['recipes'])!=6):
+        raise ValueError('x64 ATL source hook group differs from the reviewed source-only contract')
+    seen=set()
+    for index,(pin,row) in enumerate(zip(_source_x64_atl_pins(manifest),value['recipes']),1):
+        expected=dict(path=pin['path'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],
+            beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'])
+        if (type(row) is not dict or set(row)!=set(expected)|{'evidence'}
+                or not _source_exact({key:row[key] for key in expected},expected)
+                or type(row['evidence']) is not dict or set(row['evidence'])!={'original','effective'}):
+            raise ValueError('x64 ATL source recipe pins or evidence differ')
+        for side in ('original','effective'):
+            path=_source_windows_path(row['evidence'][side]);archive_path('/'.join(path.parts[1:]))
+            name=side+'-x64-atl-'+format(index,'02d')+'-'+pin['path'].rsplit('/',1)[-1]
+            if path.name!=name or path.parent!=evidence_parent or not path.parent.name or path in seen:
+                raise ValueError('x64 ATL source evidence name, uniqueness or shared producer parent differs')
+            seen.add(path)
+
+
 def _source_x64_recipe(proof: dict) -> None:
     folder=Path(__file__).resolve().parent/'engine-build'
     raw=(folder/'source-build.json').read_bytes();manifest=json.loads(raw)
@@ -391,8 +477,8 @@ def _source_x64_recipe(proof: dict) -> None:
     expected=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
         recipeId='windows-x64-common-v2',policySha256=proof['nativeTargetsSha256'],
         manifestSha256=proof['sourcePortManifestSha256'],
-        recipeSha256='2a47c43202e16fd8e1774b3b747b97d57521b71dd706afb90da4427da4988044',
-        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder'],nativeBuildVerified=False,
+        recipeSha256='b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679',
+        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder'],nativeBuildVerified=False,
         fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
     expected['armGuardedSources']=[dict(path=item['path'],beforeSha256=item['beforeSha256'],sha256=item['beforeSha256'],unchanged=True)
                                   for item in plan['armGuardedSources']]
@@ -416,7 +502,7 @@ def _source_x64_recipe(proof: dict) -> None:
     if not _source_exact(patch.get('sourceFiles'), files):
         raise ValueError('x64 WinAcc unchanged dependency/patch identities differ')
     hooks=proof.get('sourceHooks');bootstrap=manifest['moduleBootstrap']
-    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','nativeBuildVerified','basePersistenceVerified'}
+    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','nativeBuildVerified','basePersistenceVerified'}
             or hooks.get('kind') != 'native-windows-common-source-hooks' or hooks.get('architecture') != 'x64'
             or hooks.get('nativeBuildVerified') is not False or hooks.get('basePersistenceVerified') is not False
             or not isinstance(hooks.get('moduleBootstrap'),dict)
@@ -448,6 +534,8 @@ def _source_x64_recipe(proof: dict) -> None:
             or not _source_exact({key:gpg[key] for key in fields},fields)):
         raise ValueError('x64 GPG compiler-path descriptor differs from the reviewed source-only hook')
     _source_x64_gpg_evidence(gpg['evidence'])
+    _source_x64_atl_source(hooks.get('atlNativePaths'),manifest,
+        evidence_parent=_source_windows_path(loader['evidence']['original']).parent)
 
 
 def _source_x64_retirement(base: dict) -> None:
@@ -571,6 +659,7 @@ def _source_build_x64(proof: dict, runtime: dict, target: dict) -> None:
     if _source_windows_path(proof['artifact'].get('path')).name != target['archive']:
         raise ValueError('x64 qualified archive name differs from its fixed target policy')
     _source_x64_preflight(proof)
+    _source_x64_atl_inputs(proof)
     _source_x64_prerequisites(proof)
     _source_x64_recipe(proof)
     _source_x64_retirement(proof['baseProof'])

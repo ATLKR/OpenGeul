@@ -20,7 +20,7 @@ VC_DLLS = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
            'vcruntime140_1.dll', 'vcruntime140_threads.dll')
 ARM_VC_DLLS = tuple(name for name in VC_DLLS if name != 'vcruntime140_1.dll')
 SOURCE_CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
-X64_RECIPE_SHA256 = '2a47c43202e16fd8e1774b3b747b97d57521b71dd706afb90da4427da4988044'
+X64_RECIPE_SHA256 = 'b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679'
 X64_ZSTD_PIN = dict(path='external/zstd/UnpackedTarball_zstd.mk',size=779,
     sha256='3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909',
     afterSize=1078,afterSha256='5edd0fe8a6048b6a0183557aa423ba44b047e7655f2235ac84c99791267101fc',
@@ -29,6 +29,39 @@ X64_GPG_PIN = dict(path='solenv/gbuild/platform/com_MSC_defs.mk',size=10340,
     sha256='c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14',
     afterSize=10480,afterSha256='f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b',
     condition='WNT_X86_64 && BUILD_PLATFORM=%cygwin')
+
+X64_ATL_PIN = {'condition': 'WNT_X86_64_MSC && MAKE_HOST=%-cygwin',
+ 'recipes': [{'path': 'extensions/Library_so_activex.mk',
+              'size': 1376,
+              'sha256': '7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c',
+              'afterSize': 2662,
+              'afterSha256': 'd18d632cd8b3c412f4a4db7355c4bd34611e8f52c9c7436e7887f32b64ca16bf'},
+             {'path': 'embedserv/Library_emser.mk',
+              'size': 1586,
+              'sha256': '00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef',
+              'afterSize': 3044,
+              'afterSha256': 'b28ffc6d984789ce4dece3e075de45d00f895303d58816490918ea37d4e340de'},
+             {'path': 'extensions/Library_oleautobridge.mk',
+              'size': 1639,
+              'sha256': '815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8',
+              'afterSize': 2988,
+              'afterSha256': 'ad7789e247b238f017166312bf7a7c5c16c75b8ef01dee2a6835db993a1f3633'},
+             {'path': 'winaccessibility/Library_uacccom.mk',
+              'size': 2200,
+              'sha256': 'd5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062',
+              'afterSize': 3408,
+              'afterSha256': 'd2b826ed5c44957ba7fe633b284877ffef03074f0d8a3b3d1466cc8b4ff8d37f'},
+             {'path': 'winaccessibility/Library_winaccessibility.mk',
+              'size': 2478,
+              'sha256': '0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4',
+              'afterSize': 3393,
+              'afterSha256': 'b0cc4d11e536fe8ac7351f19ee9ae5724918779062350163db9d0e4d804fe483'},
+             {'path': 'winaccessibility/WinResTarget_uacccom.mk',
+              'size': 803,
+              'sha256': '9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00',
+              'afterSize': 1718,
+              'afterSha256': '56894ac63dea26ace6629fbab6b7dcf04e640447b4a173045da2b7761fd265cb'}]}
+X64_ATL_RECIPE_SHA256 = 'b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679'
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -121,6 +154,20 @@ def pin_source_receipt(runtime, path, receipt):
     runtime['sourceBuild']['receiptSha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def x64_atl_inputs_fixture(compiler_root, variant='spectre'):
+    cygwin='/cygdrive/'+compiler_root[0].lower()+compiler_root[2:].replace('\\','/')
+    include=compiler_root+'\\atlmfc\\include'
+    library=compiler_root+'\\atlmfc\\lib\\'+('spectre\\' if variant=='spectre' else '')+'x64'
+    def file(path,index):
+        return dict(path=path,size=1024,sha256='9'*64,generation=dict(volumeSerialNumber=0,
+            fileIndexHigh=0,fileIndexLow=index,creationHigh=0,creationLow=1,writeHigh=0,writeLow=2))
+    return dict(schemaVersion=1,kind='native-x64-atl-prerequisite',passed=True,compilerRoot=compiler_root,
+        configuredInclude=cygwin+'/atlmfc/include',
+        configuredLibrary=cygwin+'/atlmfc/lib/'+('spectre/' if variant=='spectre' else '')+'x64',
+        includeRoot=include,libraryRoot=library,header=file(include+'\\atlbase.h',1),library=file(library+'\\atls.lib',2),
+        productPayload=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+
+
 def x64_source_build_fixture(root, *, runtime_templates=False):
     """Synthetic v2 unit evidence, never a qualified runtime lock or build result."""
     archive, runtime, receipt_path, proof = source_build_fixture(root)
@@ -162,6 +209,8 @@ def x64_source_build_fixture(root, *, runtime_templates=False):
                                   BUILD_PLATFORM='x86_64-pc-cygwin',BUILD_TYPE='FIREBIRD LIBTOMMATH',
                                   VCTOOLSET='v143',VCVER='17.0',COMPATH=compiler_root,
                                   WINDOWS_SDK_HOME=sdk_root,WINDOWS_SDK_VERSION=sdk_version)
+    proof['atlBuildInputs']=x64_atl_inputs_fixture(compiler_root)
+    proof['configuration'].update(ATL_INCLUDE=proof['atlBuildInputs']['configuredInclude'],ATL_LIB=proof['atlBuildInputs']['configuredLibrary'])
     proof['workflowBinding'] = dict(workflow='.github/workflows/office-native-engine-x64.yml',
         workflowRef='ATLKR/OpenGeul/.github/workflows/office-native-engine-x64.yml@refs/heads/work/opengeul-office-native-engine-x64',
         ref='refs/heads/work/opengeul-office-native-engine-x64',job='native-firebird-and-office-x64',
@@ -274,14 +323,21 @@ def x64_source_build_fixture(root, *, runtime_templates=False):
             original='C:\\evidence\\source-recipe\\original-x64-com_MSC_defs.mk',
             effective='C:\\evidence\\source-recipe\\effective-x64-com_MSC_defs.mk'),
         nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+    proof['sourceHooks']['atlNativePaths']=dict(schemaVersion=1,kind='windows-x64-native-atl-source-hooks',
+        condition=X64_ATL_PIN['condition'],nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False,
+        recipes=[dict(path=pin['path'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],
+            beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],evidence={side:
+                'C:\\evidence\\source-recipe\\'+side+'-x64-atl-'+format(index,'02d')+'-'+pin['path'].rsplit('/',1)[-1]
+                for side in ('original','effective')}) for index,pin in enumerate(X64_ATL_PIN['recipes'],1)])
     guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
     guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
     guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
-    guarded=[item for item in guarded if item['path'] not in (loader['path'],zstd['path'])]
+    moved={loader['path'],zstd['path'],*(row['path'] for row in X64_ATL_PIN['recipes'])}
+    guarded=[item for item in guarded if item['path'] not in moved]
     proof['sourceRecipeProof']=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
         recipeId='windows-x64-common-v2',policySha256=policy_sha,manifestSha256=manifest_sha,
         recipeSha256=X64_RECIPE_SHA256,
-        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder'],nativeBuildVerified=False,fullEngineQualified=False,
+        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder'],nativeBuildVerified=False,fullEngineQualified=False,
         acceptanceEligible=False,guiVerified=False,
         armGuardedSources=[dict(path=item['path'],beforeSha256=item['sha256'],sha256=item['sha256'],unchanged=True)
                            for item in guarded])
@@ -1289,14 +1345,14 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             lambda p:p['installedRuntimeStage']['receipt'].update(bytes=0)]
         self.reject_mutations(mutations)
 
-    def test_v2_firebird_loader_receipt_has_five_hooks_and_eleven_unchanged_guards(self):
+    def test_v2_firebird_loader_receipt_has_six_hooks_and_five_unchanged_guards(self):
         module=implementation()
         with tempfile.TemporaryDirectory() as folder:
             _,runtime,path,proof=x64_source_build_fixture(Path(folder))
             observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
             recipe=observed['sourceRecipeProof'];loader=observed['sourceHooks']['firebirdLoaderPath']
-            self.assertEqual(recipe['hookOrder'],['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder'])
-            self.assertEqual(len(recipe['armGuardedSources']),11)
+            self.assertEqual(recipe['hookOrder'],['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder'])
+            self.assertEqual(len(recipe['armGuardedSources']),5)
             self.assertNotIn(loader['path'],[row['path'] for row in recipe['armGuardedSources']])
             self.assertEqual((loader['beforeBytes'],loader['afterBytes']),(4655,4802))
 
@@ -1313,16 +1369,18 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             recipe['armGuardedSources'].insert(2,dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True))
             pin=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())['zstdSourceLinks']
             recipe['armGuardedSources'].insert(3,dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True))
+            recipe['armGuardedSources'].extend(dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True) for pin in X64_ATL_PIN['recipes'])
+            proof['sourceHooks'].pop('atlNativePaths')
             self.assertEqual(len(recipe['armGuardedSources']),13)
             pin_source_receipt(runtime,path,proof)
             with self.assertRaises(ValueError):module.validate_source_build_receipt(runtime,path,architecture='x64')
 
-    def test_v2_zstd_receipt_remains_source_only_in_the_five_hook_contract(self):
+    def test_v2_zstd_receipt_remains_source_only_in_the_six_hook_contract(self):
         module=implementation()
         with tempfile.TemporaryDirectory() as folder:
             _,runtime,path,proof=x64_source_build_fixture(Path(folder))
             try:observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
-            except ValueError:self.fail('The reviewed five-hook receipt with zstd was rejected')
+            except ValueError:self.fail('The reviewed six-hook receipt with zstd was rejected')
             hook=observed['sourceHooks']['zstdSourceLinks']
             self.assertEqual((hook['beforeBytes'],hook['afterBytes']),(779,1078))
             self.assertEqual(hook['kind'],'windows-zstd-source-links-source-hook')
@@ -1331,15 +1389,15 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             for key in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
                 self.assertIs(hook[key],False)
 
-    def test_v2_zstd_plan_accepts_the_reviewed_independent_five_hook_metadata(self):
+    def test_v2_zstd_plan_accepts_the_reviewed_independent_six_hook_metadata(self):
         module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         manifest['windowsZstdSourceLinks']=copy.deepcopy(X64_ZSTD_PIN)
         manifest['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
         try:plan=module._source_x64_plan(manifest)
-        except ValueError:self.fail('The reviewed five-hook source plan with zstd was rejected')
-        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),7)
-        self.assertEqual(len(plan['armGuardedSources']),11)
+        except ValueError:self.fail('The reviewed six-hook source plan with zstd was rejected')
+        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),13)
+        self.assertEqual(len(plan['armGuardedSources']),5)
         self.assertEqual(plan['sources'][5]['path'],X64_ZSTD_PIN['path'])
         canonical=json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
         self.assertEqual(hashlib.sha256(canonical).hexdigest(),X64_RECIPE_SHA256)
@@ -1388,7 +1446,7 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
         module=implementation();original=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         original['windowsZstdSourceLinks']=copy.deepcopy(X64_ZSTD_PIN)
         original['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
         values={'condition':'WNT_AMD64','path':'external/zstd/ExternalProject_zstd.mk',
             'size':True,'afterSize':'1078','sha256':'0'*64,'afterSha256':'0'*64,'extra':True}
         for key,value in values.items():
@@ -1396,19 +1454,19 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
                 manifest=copy.deepcopy(original);manifest['windowsZstdSourceLinks'][key]=value
                 with self.assertRaises(ValueError):module._source_x64_plan(manifest)
 
-    def test_v2_gpg_receipt_requires_the_five_hook_source_only_contract(self):
+    def test_v2_gpg_receipt_requires_the_six_hook_source_only_contract(self):
         module=implementation()
         with tempfile.TemporaryDirectory() as folder:
             _,runtime,path,proof=x64_source_build_fixture(Path(folder))
             try:observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
-            except ValueError:self.fail('The reviewed five-hook GPG source receipt was rejected')
+            except ValueError:self.fail('The reviewed six-hook GPG source receipt was rejected')
             hook=observed['sourceHooks']['gpgBuildCompilerPath']
             self.assertEqual(set(hook),{'schemaVersion','kind','path','condition','beforeBytes','afterBytes',
                 'beforeSha256','afterSha256','evidence','nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'})
             self.assertEqual((hook['beforeBytes'],hook['afterBytes']),(10340,10480))
             self.assertEqual(hook['condition'],X64_GPG_PIN['condition'])
             self.assertEqual(observed['sourceRecipeProof']['hookOrder'],[
-                'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder'])
+                'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder'])
             for name in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
                 self.assertIs(hook[name],False)
 
@@ -1416,10 +1474,10 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
         module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         manifest['windowsGpgBuildCompilerPath']=copy.deepcopy(X64_GPG_PIN)
         manifest['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
         try:plan=module._source_x64_plan(manifest)
-        except ValueError:self.fail('The reviewed five-hook independent GPG source plan was rejected')
-        self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(18,11))
+        except ValueError:self.fail('The reviewed six-hook independent GPG source plan was rejected')
+        self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(18,5))
         self.assertEqual(plan['sources'][6]['path'],X64_GPG_PIN['path'])
         canonical=json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
         self.assertEqual(hashlib.sha256(canonical).hexdigest(),X64_RECIPE_SHA256)
@@ -1464,7 +1522,7 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
         module=implementation();original=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         original['windowsGpgBuildCompilerPath']=copy.deepcopy(X64_GPG_PIN)
         original['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
         for key,value in {'condition':'WNT_X86_64','path':'solenv/gbuild/platform/other.mk',
                 'size':True,'afterSize':'10480','sha256':'0'*64,'afterSha256':'0'*64,'extra':True}.items():
             with self.subTest(key=key):
@@ -1514,8 +1572,8 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
     def test_v2_loader_source_plan_is_independently_reconstructed_from_fixed_metadata(self):
         module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         plan=module._source_x64_plan(manifest)
-        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),7)
-        self.assertEqual(len(plan['armGuardedSources']),11)
+        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),13)
+        self.assertEqual(len(plan['armGuardedSources']),5)
         self.assertEqual(plan['sources'][4]['path'],'external/firebird/ExternalProject_firebird.mk')
         canonical=json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
         self.assertEqual(hashlib.sha256(canonical).hexdigest(),X64_RECIPE_SHA256)
@@ -1671,6 +1729,171 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
                     sourceDirectory='C:\\VS\\VC\\Redist\\MSVC\\'+directory+'\\x64\\Microsoft.VC143.CRT')
                 pin_source_receipt(runtime,path,proof)
                 module.validate_source_build_receipt(runtime,path,architecture='x64')
+
+    def test_v2_atl_plan_accepts_fixed_six_hooks_and_thirteen_common_inputs(self):
+        module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
+        manifest['windowsAtlNativePaths']=copy.deepcopy(X64_ATL_PIN)
+        manifest['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
+        try:plan=module._source_x64_plan(manifest)
+        except ValueError:self.fail('The reviewed six-hook ATL source plan was rejected')
+        self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(18,5))
+        self.assertEqual([row['path'] for row in plan['sources'][7:13]],[row['path'] for row in X64_ATL_PIN['recipes']])
+        self.assertEqual(hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest(),X64_ATL_RECIPE_SHA256)
+
+    def test_v2_atl_public_receipt_joins_all_source_pins_and_native_inputs(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+            try:observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
+            except ValueError:self.fail('The complete reviewed ATL source/native receipt was rejected')
+            self.assertEqual(len(observed['sourceHooks']['atlNativePaths']['recipes']),6)
+            self.assertEqual(len(observed['sourceRecipeProof']['armGuardedSources']),5)
+            self.assertEqual(set(observed['atlBuildInputs']),{'schemaVersion','kind','passed','compilerRoot',
+                'configuredInclude','configuredLibrary','includeRoot','libraryRoot','header','library',
+                'productPayload','fullEngineQualified','acceptanceEligible','guiVerified'})
+            for key in ('productPayload','fullEngineQualified','acceptanceEligible','guiVerified'):
+                self.assertIs(observed['atlBuildInputs'][key],False)
+
+    def test_v2_atl_inputs_accept_only_observed_regular_or_spectre_selected_roots(self):
+        module=implementation();check=getattr(module,'_source_x64_atl_inputs',None)
+        self.assertTrue(callable(check),'Strict native ATL prerequisite replay is missing')
+        root='C:\\VS\\VC\\Tools\\MSVC\\14.44.35207'
+        for variant in ('regular','spectre'):
+            with self.subTest(variant=variant):
+                atl=x64_atl_inputs_fixture(root,variant)
+                proof=dict(atlBuildInputs=atl,nativePreflight=dict(compiler=dict(compilerRoot=root)),
+                    configuredToolchain=dict(compilerRoot=root),configuration=dict(
+                        ATL_INCLUDE=atl['configuredInclude'],ATL_LIB=atl['configuredLibrary']))
+                check(proof)
+
+    def test_v2_atl_source_group_is_closed_typed_and_never_qualifies_engine_or_gui(self):
+        mutations=[lambda p:p['sourceHooks'].pop('atlNativePaths'),
+            lambda p:p['sourceHooks']['atlNativePaths'].update(extra=False),
+            lambda p:p['sourceHooks']['atlNativePaths'].update(schemaVersion=True),
+            lambda p:p['sourceHooks']['atlNativePaths'].update(kind='other'),
+            lambda p:p['sourceHooks']['atlNativePaths'].update(condition='WNT_AARCH64')]
+        for flag in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
+            for value in (True,0,None):
+                mutations.append(lambda p,flag=flag,value=value:p['sourceHooks']['atlNativePaths'].update({flag:value}))
+        self.reject_mutations(mutations)
+
+    def test_v2_atl_source_recipes_require_all_six_ordered_exact_pins(self):
+        def recipes(p):return p['sourceHooks']['atlNativePaths']['recipes']
+        mutations=[lambda p:recipes(p).pop(),lambda p:recipes(p).append(copy.deepcopy(recipes(p)[0])),
+            lambda p:recipes(p).reverse(),lambda p:recipes(p)[0].update(extra=0)]
+        for index in range(6):
+            for field,value in (('path','winaccessibility/other.mk'),('beforeBytes',True),('afterBytes',0),
+                                ('beforeSha256','0'*64),('afterSha256','0'*64)):
+                mutations.append(lambda p,index=index,field=field,value=value:recipes(p)[index].update({field:value}))
+        self.reject_mutations(mutations)
+
+    def test_v2_atl_all_twelve_evidence_descriptors_join_the_loader_parent_and_fixed_names(self):
+        def evidence(p):return p['sourceHooks']['atlNativePaths']['recipes'][0]['evidence']
+        original='original-x64-atl-01-Library_so_activex.mk';effective='effective-x64-atl-01-Library_so_activex.mk'
+        variants=[{},dict(original=original,effective='C:\\evidence\\'+effective),
+            dict(original='C:\\'+original,effective='C:\\'+effective),
+            dict(original='C:\\evidence:alternate\\'+original,effective='C:\\evidence:alternate\\'+effective),
+            dict(original='C:\\evidence\\..\\source-recipe\\'+original,effective='C:\\evidence\\source-recipe\\'+effective),
+            dict(original='\\\\host\\share\\'+original,effective='\\\\host\\share\\'+effective),
+            dict(original='C:\\evidence\\source-recipe\\'+effective,effective='C:\\evidence\\source-recipe\\'+original),
+            dict(original='C:\\evidence\\source-recipe\\'+original,effective='D:\\other\\'+effective),
+            dict(original='C:\\evidence\\source-recipe\\'+original,effective='C:\\evidence\\source-recipe\\'+effective,extra=0)]
+        mutations=[lambda p,value=value:p['sourceHooks']['atlNativePaths']['recipes'][0].update(evidence=value) for value in variants]
+        for index in range(6):
+            for side in ('original','effective'):
+                mutations.append(lambda p,index=index,side=side:p['sourceHooks']['atlNativePaths']['recipes'][index]['evidence'].update({side:'C:\\evidence\\source-recipe\\wrong.mk'}))
+        def moved_together(p):
+            for row in p['sourceHooks']['atlNativePaths']['recipes']:
+                row['evidence']={side:'D:\\other\\'+PureWindowsPath(value).name for side,value in row['evidence'].items()}
+        mutations.append(moved_together)
+        self.reject_mutations(mutations)
+
+    def test_v2_atl_manifest_descriptor_order_paths_types_and_pin_drift_are_rejected(self):
+        module=implementation();original=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
+        mutations=[lambda m:m.pop('windowsAtlNativePaths'),lambda m:m['windowsAtlNativePaths'].update(extra=0),
+            lambda m:m['windowsAtlNativePaths'].update(condition='WNT_AMD64'),
+            lambda m:m['windowsAtlNativePaths']['recipes'].pop(),lambda m:m['windowsAtlNativePaths']['recipes'].reverse()]
+        for field,value in (('path','other.mk'),('size',True),('afterSize',2**20+1),('sha256','0'*64),('afterSha256','0'*64),('extra',0)):
+            mutations.append(lambda m,field=field,value=value:m['windowsAtlNativePaths']['recipes'][0].update({field:value}))
+        for index,mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                manifest=copy.deepcopy(original);mutate(manifest)
+                with self.assertRaises(ValueError):module._source_x64_plan(manifest)
+
+    def test_v2_atl_prerequisite_is_closed_typed_and_cannot_claim_product_or_gui_authority(self):
+        mutations=[lambda p:p.pop('atlBuildInputs'),lambda p:p['atlBuildInputs'].update(extra=0),
+            lambda p:p['atlBuildInputs'].update(schemaVersion=True),lambda p:p['atlBuildInputs'].update(kind='other'),
+            lambda p:p['atlBuildInputs'].update(passed=1)]
+        for field in ('schemaVersion','kind','compilerRoot','configuredInclude','configuredLibrary','includeRoot','libraryRoot','header','library'):
+            mutations.append(lambda p,field=field:p['atlBuildInputs'].pop(field))
+        for flag in ('productPayload','fullEngineQualified','acceptanceEligible','guiVerified'):
+            for value in (True,0,None):mutations.append(lambda p,flag=flag,value=value:p['atlBuildInputs'].update({flag:value}))
+        self.reject_mutations(mutations)
+
+    def test_v2_atl_canonical_roots_file_roles_and_configured_aliases_cannot_drift(self):
+        changes={'compilerRoot':'C:\\other','includeRoot':'C:\\other\\include',
+            'libraryRoot':'C:\\VS\\VC\\Tools\\MSVC\\14.44.35207\\atlmfc\\lib\\arm64',
+            'configuredInclude':'/cygdrive/c/other','configuredLibrary':'/cygdrive/c/other'}
+        mutations=[lambda p,key=key,value=value:p['atlBuildInputs'].update({key:value}) for key,value in changes.items()]
+        mutations += [lambda p:p['configuration'].update(ATL_INCLUDE='changed'),lambda p:p['configuration'].update(ATL_LIB='changed'),
+            lambda p:p['atlBuildInputs']['header'].update(path=p['atlBuildInputs']['library']['path']),
+            lambda p:p['atlBuildInputs']['library'].update(path=p['atlBuildInputs']['header']['path'])]
+        for field in ('configuredInclude','configuredLibrary'):
+            for value in ('',' ',True,[],'bad\nline'):
+                mutations.append(lambda p,field=field,value=value:(p['atlBuildInputs'].update({field:value}),p['configuration'].update({'ATL_INCLUDE' if field=='configuredInclude' else 'ATL_LIB':value})))
+        for field in ('compilerRoot','includeRoot','libraryRoot'):
+            for value in ('relative','\\\\host\\share\\path','C:\\..\\path','C:\\path:stream'):
+                mutations.append(lambda p,field=field,value=value:p['atlBuildInputs'].update({field:value}))
+        self.reject_mutations(mutations)
+
+    def test_v2_atl_header_library_identities_require_exact_fields_bounds_and_safe_native_paths(self):
+        mutations=[]
+        for leaf in ('header','library'):
+            for field in ('path','size','sha256','generation'):
+                mutations.append(lambda p,leaf=leaf,field=field:p['atlBuildInputs'][leaf].pop(field))
+            for field,value in (('extra',False),('size',True),('size',0),('size',2**30+1),('sha256','A'*64),
+                                ('sha256','0'*63),('path','relative'),('path','C:\\file:stream'),('path','C:\\..\\file')):
+                mutations.append(lambda p,leaf=leaf,field=field,value=value:p['atlBuildInputs'][leaf].update({field:value}))
+        self.reject_mutations(mutations)
+
+    def test_v2_atl_generations_require_seven_uint32_fields_and_nonzero_file_index(self):
+        fields=('volumeSerialNumber','fileIndexHigh','fileIndexLow','creationHigh','creationLow','writeHigh','writeLow')
+        mutations=[]
+        for leaf in ('header','library'):
+            for field in fields:
+                mutations.append(lambda p,leaf=leaf,field=field:p['atlBuildInputs'][leaf]['generation'].pop(field))
+                for value in (True,-1,2**32,1.0):
+                    mutations.append(lambda p,leaf=leaf,field=field,value=value:p['atlBuildInputs'][leaf]['generation'].update({field:value}))
+            mutations.append(lambda p,leaf=leaf:p['atlBuildInputs'][leaf]['generation'].update(extra=0))
+            mutations.append(lambda p,leaf=leaf:p['atlBuildInputs'][leaf]['generation'].update(fileIndexHigh=0,fileIndexLow=0))
+        self.reject_mutations(mutations)
+
+    def test_v2_atl_regular_spectre_short_and_posix_aliases_keep_observed_canonical_inputs(self):
+        module=implementation()
+        for variant in ('regular','spectre'):
+            for alias in ('posix','short'):
+                with self.subTest(variant=variant,alias=alias),tempfile.TemporaryDirectory() as folder:
+                    _,runtime,path,proof=x64_source_build_fixture(Path(folder));root=proof['nativePreflight']['compiler']['compilerRoot']
+                    atl=x64_atl_inputs_fixture(root,variant)
+                    if alias=='short':
+                        atl['configuredInclude']='C:\\VS\\VC\\Tools\\MSVC\\1444~1\\ATLMFC\\INCLUDE'
+                        atl['configuredLibrary']='C:\\VS\\VC\\Tools\\MSVC\\1444~1\\ATLMFC\\LIB\\'+('SPECTRE\\' if variant=='spectre' else '')+'X64'
+                    atl['header']['size']=2**30;atl['library']['size']=1
+                    atl['header']['generation'].update({key:0xffffffff for key in atl['header']['generation']})
+                    atl['library']['generation'].update(fileIndexHigh=1,fileIndexLow=0,volumeSerialNumber=0)
+                    proof['atlBuildInputs']=atl;proof['configuration'].update(ATL_INCLUDE=atl['configuredInclude'],ATL_LIB=atl['configuredLibrary'])
+                    pin_source_receipt(runtime,path,proof)
+                    observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
+                    self.assertEqual(observed['atlBuildInputs'],atl)
+
+    def test_v2_prior_five_hook_gpg_receipt_cannot_claim_current_atl_source_manifest(self):
+        def old(p):
+            p['sourceHooks'].pop('atlNativePaths');recipe=p['sourceRecipeProof']
+            recipe['hookOrder'].remove('atlNativePaths')
+            recipe['recipeSha256']='2a47c43202e16fd8e1774b3b747b97d57521b71dd706afb90da4427da4988044'
+            recipe['armGuardedSources'].extend(dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True) for pin in X64_ATL_PIN['recipes'])
+        self.reject_mutations([old])
 
     def reject_mutations(self,mutations):
         module=implementation()
