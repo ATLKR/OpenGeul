@@ -22,6 +22,9 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly SaveDiagnosticsTrace editorFocusDiagnostics = new("suite.editorFocus");
     private readonly SaveDiagnosticsTrace initialFocusFlowDiagnostics = new("suite.initialEditorFocusFlow");
     private int initialFocusObservationCount;
+    private InitialFocusCounters? initialFocusCounters;
+    private readonly int[] initialFocusPreOwnerCounts = new int[3];
+    private int initialFocusPreOwnerOverflow, initialFocusOwnerGeneration;
     private readonly StandaloneSaveCloseIntent saveCloseIntent = new();
     private OwnedEditorFocus? editorFocus;
     private DocumentMenuSurface? menuSurface;
@@ -90,6 +93,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     protected override void OnActivated(EventArgs e)
     {
+        CountInitialFocusIngress(0);
         var observedOwner = editorFocusDiagnostics.Enabled ? editorFocus : null;
         var pendingBefore = observedOwner?.InitialFocusPending == true;
         var observedForm = pendingBefore ? editorFocusFormHwnd : 0;
@@ -140,6 +144,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             editorFocus = new OwnedEditorFocus(new NativeOwnedEditorFocus(Handle, editorPanel.Handle, checked((nint)childHwnd)),
                 Path.Combine(packageRoot, "Office", "program", "soffice.bin"));
             editorFocusFormHwnd = Handle; editorFocusPanelHwnd = editorPanel.Handle;
+            StartInitialFocusCounters(editorFocus, childHwnd);
             attached = true;
             sentSize = size;
             ApplyStatus(result);
@@ -534,6 +539,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     protected override void WndProc(ref Message m)
     {
         var appActivated = m.Msg == 0x001C && m.WParam != 0;
+        if (m.Msg == 0x001C) CountInitialFocusIngress(appActivated ? 1 : 2);
         var activationHwnd = m.HWnd;
         var initialFocusOwner = editorFocus;
         var pendingBefore = editorFocusDiagnostics.Enabled && initialFocusOwner?.InitialFocusPending == true;
@@ -584,7 +590,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
-    private bool EditorFocusAvailable(InitialFocusFlow? flow = null)
+    private bool EditorFocusAvailable(InitialFocusFlow? flow = null, InitialFocusCounters? counters = null, int sourceCode = 0)
     {
         flow?.Begin(3);
         WriteInitialFocusFlow(flow, 6);
@@ -599,6 +605,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 InitialFocusGate(flow, 12, Visible) && InitialFocusGate(flow, 13, !Modal) &&
                 InitialFocusGate(flow, 14, ActiveForm == this);
             flow?.Complete();
+            ObserveInitialFocusAvailability(counters, flow, available, sourceCode);
             return available;
         }
         finally { WriteInitialFocusFlow(flow, 7); }
@@ -608,12 +615,16 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     {
         var owned = editorFocus;
         if (owned is null) return;
+        var counters = InitialFocusCountersFor(owned);
         var flow = CreateInitialFocusFlow(0, false, false);
         WriteInitialFocusFlow(flow, 1);
-        var available = EditorFocusAvailable(flow);
+        var available = EditorFocusAvailable(flow, counters, 0);
         var result = owned.TryInitialFocus(available);
         var pending = owned.InitialFocusPending;
-        editorFocusDiagnostics.Write("initial", new { available, pending, result }, worker?.ProcessId, worker?.DiagnosticTraceId);
+        ObserveInitialFocusResult(counters, result, pending);
+        var focusWorkerPid = worker?.ProcessId; var focusTraceId = worker?.DiagnosticTraceId;
+        if (counters is not null) { counters.WorkerPid = focusWorkerPid; counters.TraceId = focusTraceId; }
+        editorFocusDiagnostics.Write("initial", new { available, pending, result }, focusWorkerPid, focusTraceId);
         flow?.Pending(pending);
         WriteInitialFocusFlow(flow, 12);
     }
@@ -621,6 +632,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private void QueueInitialEditorFocus()
     {
         var owned = editorFocus;
+        var counters = InitialFocusCountersFor(owned);
+        counters?.Count(6);
         var pendingBefore = editorFocusDiagnostics.Enabled && owned?.InitialFocusPending == true;
         if (pendingBefore)
             TraceInitialActivation(4, editorFocusFormHwnd, owned, true, editorFocusFormHwnd, editorFocusPanelHwnd);
@@ -633,33 +646,46 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             InitialFocusQueueGate(flow, 7, !IsHandleCreated))
         {
             flow?.Complete(); WriteInitialFocusFlow(flow, 2);
+            counters?.Count(7);
             return;
         }
         flow?.Complete(); WriteInitialFocusFlow(flow, 2);
         // Run after WinForms finishes activation and normal focus restoration. The retained
         // owner coalesces callbacks and rechecks all native guards at execution time.
+        counters?.Count(8);
         var queued = owned!.QueueInitialFocus(callback =>
             {
                 WriteInitialFocusFlow(flow, 3);
+                counters?.Count(11);
                 BeginInvoke((Action)(() =>
                 {
+                    counters?.Count(13);
                     flow?.ForgetPending();
                     WriteInitialFocusFlow(flow, 5);
                     try { callback(); }
-                    finally { WriteInitialFocusFlow(flow, 10); }
+                    finally
+                    {
+                        WriteInitialFocusFlow(flow, 10);
+                        counters?.Count(14);
+                        if (counters?.Retired == 1) WriteInitialFocusFinal(counters);
+                    }
                 }));
+                counters?.Count(12);
                 WriteInitialFocusFlow(flow, 4);
             },
-            () => ObserveInitialFocusOwner(flow, ReferenceEquals(editorFocus, owned)) && EditorFocusAvailable(flow),
+            () => ObserveInitialFocusOwner(flow, ReferenceEquals(editorFocus, owned)) && EditorFocusAvailable(flow, counters, 4),
             result =>
             {
                 WriteInitialFocusFlow(flow, 8);
                 var callbackPending = owned!.InitialFocusPending;
+                ObserveInitialFocusResult(counters, result, callbackPending);
                 editorFocusDiagnostics.Write("initial.activation", new { pending = callbackPending, result }, worker?.ProcessId, worker?.DiagnosticTraceId);
                 flow?.Pending(callbackPending);
                 WriteInitialFocusFlow(flow, 9);
             });
+        counters?.Count(queued ? 9 : 10);
         var pending = owned!.InitialFocusPending;
+        counters?.ObservePending(pending);
         editorFocusDiagnostics.Write("initial.queued", new { queued, pending }, worker?.ProcessId, worker?.DiagnosticTraceId);
         flow?.Pending(pending); flow?.QueueReturn(queued);
         WriteInitialFocusFlow(flow, 11);
@@ -761,9 +787,169 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         catch (Exception) { /* Numeric observations must not change activation or queue behavior. */ }
     }
 
+    // Diagnostic-only retained owner context. Every update is bounded and must
+    // leave the original focus/availability/queue decision untouched.
+    private sealed class InitialFocusCounters(OwnedEditorFocus owner, int generation, long form, long panel,
+        long child, int managedThread)
+    {
+        internal readonly OwnedEditorFocus Owner = owner;
+        internal readonly int Generation = generation, ManagedThread = managedThread;
+        internal readonly long Form = form, Panel = panel, Child = child;
+        internal int? WorkerPid;
+        internal string? TraceId;
+        internal readonly int[] Counts = new int[16];
+        internal int OverflowMask, SnapshotRevision, IdentityKnown, OwnerChanged, Retired, DisposeReturned, UpdateFailed;
+        internal int ShellPid, OfficePid, PendingKnown, PendingValue, AvailabilityKnown, AvailabilityValue, MaskKnown;
+        internal int AvailabilitySource, EvaluatedMask, TrueMask, FirstReject, EvaluationComplete;
+        internal long ShellBirth, OfficeBirth;
+        internal uint ShellThread, EditorThread;
+
+        internal void Count(int index)
+        {
+            try
+            {
+                if (Counts[index] < 65535) Counts[index]++;
+                else OverflowMask |= 1 << index;
+            }
+            catch (Exception) { UpdateFailed = 1; }
+        }
+
+        internal void ObservePending(bool pending)
+        {
+            PendingKnown = 1; PendingValue = pending ? 1 : 0;
+        }
+
+        internal void ObserveResult(EditorFocusResult result, bool pending)
+        {
+            try
+            {
+                ObservePending(pending);
+                var before = result.Before;
+                if (before is null) return;
+                if (before.Form.Hwnd != Form || before.Panel.Hwnd != Panel || before.Child.Hwnd != Child ||
+                    before.Shell.Pid <= 0 || before.Engine.Pid <= 0 || before.Shell.Pid == before.Engine.Pid ||
+                    before.Shell.CreationTime <= 0 || before.Engine.CreationTime < before.Shell.CreationTime ||
+                    before.Form.ThreadId == 0 || before.Child.ThreadId == 0)
+                { OwnerChanged = 1; return; }
+                if (IdentityKnown == 1 && (ShellPid != before.Shell.Pid || OfficePid != before.Engine.Pid ||
+                    ShellBirth != before.Shell.CreationTime || OfficeBirth != before.Engine.CreationTime ||
+                    ShellThread != before.Form.ThreadId || EditorThread != before.Child.ThreadId))
+                { OwnerChanged = 1; return; }
+                ShellPid = before.Shell.Pid; OfficePid = before.Engine.Pid;
+                ShellBirth = before.Shell.CreationTime; OfficeBirth = before.Engine.CreationTime;
+                ShellThread = before.Form.ThreadId; EditorThread = before.Child.ThreadId;
+                IdentityKnown = 1;
+            }
+            catch (Exception) { UpdateFailed = 1; }
+        }
+    }
+
+    private InitialFocusCounters? InitialFocusCountersFor(OwnedEditorFocus? owner)
+    {
+        var counters = initialFocusCounters;
+        return counters is not null && ReferenceEquals(counters.Owner, owner) ? counters : null;
+    }
+
+    private void StartInitialFocusCounters(OwnedEditorFocus owner, long child)
+    {
+        try
+        {
+            if (!initialFocusFlowDiagnostics.Enabled) return;
+            if (initialFocusCounters is not null) initialFocusCounters.OwnerChanged = 1;
+            initialFocusCounters = null;
+            if (initialFocusOwnerGeneration >= 128) return;
+            var counters = new InitialFocusCounters(owner, ++initialFocusOwnerGeneration,
+                editorFocusFormHwnd.ToInt64(), editorFocusPanelHwnd.ToInt64(), child,
+                uiThreadId);
+            Array.Copy(initialFocusPreOwnerCounts, counters.Counts, 3);
+            counters.OverflowMask = initialFocusPreOwnerOverflow;
+            initialFocusCounters = counters;
+        }
+        catch (Exception) { /* Missing context remains unknown; no focus decision changes. */ }
+    }
+
+    private void CountInitialFocusIngress(int index)
+    {
+        try
+        {
+            if (!initialFocusFlowDiagnostics.Enabled) return;
+            var counters = InitialFocusCountersFor(editorFocus);
+            if (counters is not null) counters.Count(index + 3);
+            else if (initialFocusPreOwnerCounts[index] < 65535) initialFocusPreOwnerCounts[index]++;
+            else initialFocusPreOwnerOverflow |= 1 << index;
+        }
+        catch (Exception) { if (initialFocusCounters is not null) initialFocusCounters.UpdateFailed = 1; }
+    }
+
+    private void ObserveInitialFocusAvailability(InitialFocusCounters? counters, InitialFocusFlow? flow, bool available, int source)
+    {
+        if (counters is null) return;
+        try
+        {
+            counters.Count(15); counters.AvailabilityKnown = 1; counters.AvailabilityValue = available ? 1 : 0;
+            counters.AvailabilitySource = source;
+            counters.MaskKnown = flow is not null && flow.Group == 3 && flow.EvaluationComplete ? 1 : 0;
+            counters.EvaluatedMask = counters.MaskKnown == 1 ? flow!.EvaluatedMask : 0;
+            counters.TrueMask = counters.MaskKnown == 1 ? flow!.TrueMask : 0;
+            counters.FirstReject = counters.MaskKnown == 1 ? flow!.FirstRejectId : 0;
+            counters.EvaluationComplete = counters.MaskKnown;
+        }
+        catch (Exception) { counters.UpdateFailed = 1; }
+    }
+
+    private void ObserveInitialFocusResult(InitialFocusCounters? counters, EditorFocusResult result, bool pending)
+    {
+        if (counters is null) return;
+        if (!ReferenceEquals(editorFocus, counters.Owner)) counters.OwnerChanged = 1;
+        counters.ObserveResult(result, pending);
+    }
+
+    private void WriteInitialFocusFinal(InitialFocusCounters? counters)
+    {
+        if (counters is null) return;
+        try
+        {
+            if (counters.SnapshotRevision < 65535) counters.SnapshotRevision++;
+            else counters.OverflowMask |= 1 << 16;
+            var count = counters.Counts;
+            initialFocusFlowDiagnostics.Write("final", new
+            {
+                schemaVersion = 2, ownerGeneration = counters.Generation, identityKnown = counters.IdentityKnown,
+                ownerChanged = counters.OwnerChanged, retired = counters.Retired, disposeReturned = counters.DisposeReturned,
+                updateFailed = counters.UpdateFailed, cap = 65535, overflowMask = counters.OverflowMask,
+                snapshotRevision = counters.SnapshotRevision,
+                shellPid = counters.ShellPid, shellCreationTime = counters.ShellBirth,
+                officePid = counters.OfficePid, officeCreationTime = counters.OfficeBirth,
+                originalFormHwnd = counters.Form, originalPanelHwnd = counters.Panel, originalChildHwnd = counters.Child,
+                shellThreadId = counters.ShellThread, editorThreadId = counters.EditorThread, managedThreadId = counters.ManagedThread,
+                preOwnerActivated = count[0], preOwnerAppActive = count[1], preOwnerAppInactive = count[2],
+                activatedCount = count[3], appActiveCount = count[4], appInactiveCount = count[5],
+                queueEntryCount = count[6], queueGuardCount = count[7], coreQueueCount = count[8],
+                coreQueueTrueCount = count[9], coreQueueFalseCount = count[10],
+                postAttemptCount = count[11], postReturnCount = count[12], callbackEntryCount = count[13], callbackExitCount = count[14],
+                availabilityCount = count[15], pendingKnown = counters.PendingKnown, pending = counters.PendingValue,
+                availabilityKnown = counters.AvailabilityKnown, availabilityValue = counters.AvailabilityValue,
+                availabilityMaskKnown = counters.MaskKnown, availabilitySourceCode = counters.AvailabilitySource,
+                evaluatedMask = counters.EvaluatedMask, trueMask = counters.TrueMask, firstRejectId = counters.FirstReject,
+                evaluationComplete = counters.EvaluationComplete,
+                postUncertain = count[11] == count[12] ? 0 : 1, callbackOutstanding = count[11] == count[14] ? 0 : 1
+            }, counters.WorkerPid, counters.TraceId);
+        }
+        catch (Exception) { counters.UpdateFailed = 1; }
+    }
+
     private void ReleaseEditorFocus()
     {
-        var owned = editorFocus; editorFocus = null; editorFocusFormHwnd = editorFocusPanelHwnd = 0; owned?.Dispose();
+        var owned = editorFocus;
+        var counters = InitialFocusCountersFor(owned);
+        editorFocus = null; editorFocusFormHwnd = editorFocusPanelHwnd = 0;
+        if (counters is not null) counters.Retired = 1;
+        try
+        {
+            owned?.Dispose();
+            if (counters is not null) counters.DisposeReturned = 1;
+        }
+        finally { WriteInitialFocusFinal(counters); }
     }
 
     protected override void Dispose(bool disposing)
