@@ -1154,9 +1154,15 @@ class NativeMenuProbe(NativeControlProbe):
         ole=C.WinDLL('ole32');function=ole.CoGetApartmentType
         function.argtypes,function.restype=(C.POINTER(C.c_int32),C.POINTER(C.c_int32)),C.c_int32
         kind=C.c_int32(-1);qualifier=C.c_int32(-1)
-        hr=self._call(function,C.byref(kind),C.byref(qualifier))
+        # The creator guard must not configure or query the COM client it guards.
+        assert self.clock()<self.deadline, 'Native menu query deadline expired'
+        hr=function(C.byref(kind),C.byref(qualifier))
+        assert self.clock()<self.deadline, 'Native menu query exceeded original deadline'
         thread=self.kernel.GetCurrentThreadId;thread.argtypes,thread.restype=(),C.c_uint32
-        return self._call(thread),hr==0 and kind.value==1
+        assert self.clock()<self.deadline, 'Native menu query deadline expired'
+        thread_id=thread()
+        assert self.clock()<self.deadline, 'Native menu query exceeded original deadline'
+        return thread_id,hr==0 and kind.value==1
     def _admit_provider_creator(self):
         assert getattr(self,'_provider_creator',None) is None, 'The private client creator cannot change'
         thread,mta=self._mta_snapshot()

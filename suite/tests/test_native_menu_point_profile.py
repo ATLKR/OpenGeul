@@ -1,5 +1,6 @@
 """Opt-in point profile lifetime boundaries; native calls remain synthetic."""
 import copy
+import ctypes as C
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
@@ -110,6 +111,64 @@ class NativeMenuPointProfileTests(unittest.TestCase):
             probe.observe_failure_context(binding)
             self.assertEqual(probe.interop['failureContext'],dict(providerPending=1,providerQueriesSuppressed=1))
             self.assertFalse(probe.close_provider());self.assertIs(probe._uia,original)
+
+
+class NativeApartmentGuardTests(unittest.TestCase):
+    def native_probe(self,*,thread_id=123,kind=1,hresult=0,clock_values=()):
+        module=boundaries.OwnedNativeMenuTests(methodName='runTest').feature()
+        native_calls=[];provider_calls=[];values=iter(clock_values)
+        class Provider:
+            def __setattr__(self,name,value):
+                provider_calls.append(('set',name));object.__setattr__(self,name,value)
+            def __getattribute__(self,name):
+                provider_calls.append(('get',name));return object.__getattribute__(self,name)
+        def apartment(kind_out,qualifier_out):
+            native_calls.append('apartment')
+            C.cast(kind_out,C.POINTER(C.c_int32))[0]=kind
+            C.cast(qualifier_out,C.POINTER(C.c_int32))[0]=0
+            return hresult
+        def thread():native_calls.append('thread');return thread_id
+        probe=object.__new__(module.NativeMenuProbe)
+        probe.clock=lambda:next(values,1.);probe.deadline=6.;probe.interop={}
+        probe.provider_client=Provider();probe.kernel=NS(GetCurrentThreadId=thread)
+        probe._provider_creator=dict(threadId=123,mta=True)
+        context=patch.object(module.C,'WinDLL',return_value=NS(CoGetApartmentType=apartment),create=True)
+        return probe,native_calls,provider_calls,apartment,thread,context
+
+    def test_wrong_thread_or_sta_is_rejected_without_touching_provider(self):
+        for thread_id,kind in ((124,1),(123,0)):
+            with self.subTest(thread_id=thread_id,kind=kind):
+                probe,native,provider,apartment,thread,context=self.native_probe(thread_id=thread_id,kind=kind)
+                with context,self.assertRaises(AssertionError):probe._require_provider_creator()
+                self.assertEqual(native,['apartment','thread'])
+                self.assertEqual(provider,[],'The native creator guard must precede all provider access')
+                self.assertEqual(probe._provider_creator,dict(threadId=123,mta=True))
+
+    def test_matching_mta_preserves_typed_native_result_without_provider_access(self):
+        probe,native,provider,apartment,thread,context=self.native_probe()
+        with context:result=probe._require_provider_creator()
+        self.assertEqual(result,dict(threadId=123,mta=True,sameThread=True))
+        self.assertEqual(native,['apartment','thread']);self.assertEqual(provider,[])
+        self.assertEqual(apartment.argtypes,(C.POINTER(C.c_int32),C.POINTER(C.c_int32)))
+        self.assertIs(apartment.restype,C.c_int32)
+        self.assertEqual(thread.argtypes,());self.assertIs(thread.restype,C.c_uint32)
+
+    def test_original_deadline_bounds_both_native_calls_without_provider_access(self):
+        cases=(((6.,),[],'deadline expired'),
+            ((1.,6.),['apartment'],'exceeded original deadline'),
+            ((1.,1.,6.),['apartment'],'deadline expired'),
+            ((1.,1.,1.,6.),['apartment','thread'],'exceeded original deadline'))
+        for values,expected,message in cases:
+            with self.subTest(clock_values=values):
+                probe,native,provider,apartment,thread,context=self.native_probe(clock_values=values)
+                with context,self.assertRaisesRegex(AssertionError,message):probe._mta_snapshot()
+                self.assertEqual(native,expected);self.assertEqual(provider,[])
+
+    def test_failed_apartment_hresult_remains_unavailable_without_provider_access(self):
+        probe,native,provider,apartment,thread,context=self.native_probe(hresult=-2147467259)
+        with context:result=probe._mta_snapshot()
+        self.assertEqual(result,(123,False))
+        self.assertEqual(native,['apartment','thread']);self.assertEqual(provider,[])
 
 
 if __name__=='__main__':unittest.main()
