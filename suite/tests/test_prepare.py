@@ -20,7 +20,7 @@ VC_DLLS = ('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
            'vcruntime140_1.dll', 'vcruntime140_threads.dll')
 ARM_VC_DLLS = tuple(name for name in VC_DLLS if name != 'vcruntime140_1.dll')
 SOURCE_CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
-X64_RECIPE_SHA256 = 'b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679'
+X64_RECIPE_SHA256 = 'cc8aa7c7aed29a5a8708e2aa860b7573a176419e71c05893e60045e8c27a55c6'
 X64_ZSTD_PIN = dict(path='external/zstd/UnpackedTarball_zstd.mk',size=779,
     sha256='3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909',
     afterSize=1078,afterSha256='5edd0fe8a6048b6a0183557aa423ba44b047e7655f2235ac84c99791267101fc',
@@ -61,7 +61,11 @@ X64_ATL_PIN = {'condition': 'WNT_X86_64_MSC && MAKE_HOST=%-cygwin',
               'sha256': '9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00',
               'afterSize': 1718,
               'afterSha256': '56894ac63dea26ace6629fbab6b7dcf04e640447b4a173045da2b7761fd265cb'}]}
-X64_ATL_RECIPE_SHA256 = 'b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679'
+X64_ATL_RECIPE_SHA256 = X64_RECIPE_SHA256
+X64_HARFBUZZ_PIN = dict(path='external/harfbuzz/ExternalProject_harfbuzz.mk',size=3074,
+    sha256='2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50',
+    afterSize=5920,afterSha256='5bd3e604b5b253b064a62899efc7231c16c415f5533503e1fcbb1c8b00d68327',
+    condition='WNT_X86_64_MSC_WNT && MAKE_HOST=%-cygwin')
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -204,7 +208,7 @@ def x64_source_build_fixture(root, *, runtime_templates=False):
                  artifact=dict(path='C:\\evidence\\OpenGeul-Office-engine-x64.zip',size=runtime['size'],sha256=runtime['sha256']),
                  host=dict(native,isWindows=True,controllerPid=1),
                  configurationSha256='6'*64,configureArgumentsSha256='7'*64,
-                 sourceRecipeChecksExecuted=True)
+                 sourceRecipeChecksExecuted=True,harfbuzzNativeMesonReplayChecksExecuted=True)
     proof['configuration'].update(CPUNAME='X86_64',HOST_PLATFORM='x86_64-pc-cygwin',
                                   BUILD_PLATFORM='x86_64-pc-cygwin',BUILD_TYPE='FIREBIRD LIBTOMMATH',
                                   VCTOOLSET='v143',VCVER='17.0',COMPATH=compiler_root,
@@ -329,15 +333,21 @@ def x64_source_build_fixture(root, *, runtime_templates=False):
             beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],evidence={side:
                 'C:\\evidence\\source-recipe\\'+side+'-x64-atl-'+format(index,'02d')+'-'+pin['path'].rsplit('/',1)[-1]
                 for side in ('original','effective')}) for index,pin in enumerate(X64_ATL_PIN['recipes'],1)])
+    harfbuzz=X64_HARFBUZZ_PIN
+    proof['sourceHooks']['harfbuzzNativeMesonPaths']=dict(schemaVersion=1,
+        kind='windows-x64-harfbuzz-native-meson-source-hook',path=harfbuzz['path'],condition=harfbuzz['condition'],
+        beforeBytes=harfbuzz['size'],afterBytes=harfbuzz['afterSize'],beforeSha256=harfbuzz['sha256'],afterSha256=harfbuzz['afterSha256'],
+        evidence={side:'C:\\evidence\\source-recipe\\'+side+'-x64-ExternalProject_harfbuzz.mk' for side in ('original','effective')},
+        nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
     guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
     guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
     guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
-    moved={loader['path'],zstd['path'],*(row['path'] for row in X64_ATL_PIN['recipes'])}
+    moved={loader['path'],zstd['path'],X64_HARFBUZZ_PIN['path'],*(row['path'] for row in X64_ATL_PIN['recipes'])}
     guarded=[item for item in guarded if item['path'] not in moved]
     proof['sourceRecipeProof']=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
         recipeId='windows-x64-common-v2',policySha256=policy_sha,manifestSha256=manifest_sha,
         recipeSha256=X64_RECIPE_SHA256,
-        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder'],nativeBuildVerified=False,fullEngineQualified=False,
+        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder'],nativeBuildVerified=False,fullEngineQualified=False,
         acceptanceEligible=False,guiVerified=False,
         armGuardedSources=[dict(path=item['path'],beforeSha256=item['sha256'],sha256=item['sha256'],unchanged=True)
                            for item in guarded])
@@ -1345,14 +1355,14 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             lambda p:p['installedRuntimeStage']['receipt'].update(bytes=0)]
         self.reject_mutations(mutations)
 
-    def test_v2_firebird_loader_receipt_has_six_hooks_and_five_unchanged_guards(self):
+    def test_v2_firebird_loader_receipt_has_seven_hooks_and_four_unchanged_guards(self):
         module=implementation()
         with tempfile.TemporaryDirectory() as folder:
             _,runtime,path,proof=x64_source_build_fixture(Path(folder))
             observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
             recipe=observed['sourceRecipeProof'];loader=observed['sourceHooks']['firebirdLoaderPath']
-            self.assertEqual(recipe['hookOrder'],['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder'])
-            self.assertEqual(len(recipe['armGuardedSources']),5)
+            self.assertEqual(recipe['hookOrder'],['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder'])
+            self.assertEqual(len(recipe['armGuardedSources']),4)
             self.assertNotIn(loader['path'],[row['path'] for row in recipe['armGuardedSources']])
             self.assertEqual((loader['beforeBytes'],loader['afterBytes']),(4655,4802))
 
@@ -1371,16 +1381,19 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             recipe['armGuardedSources'].insert(3,dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True))
             recipe['armGuardedSources'].extend(dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True) for pin in X64_ATL_PIN['recipes'])
             proof['sourceHooks'].pop('atlNativePaths')
+            pin=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())['harfbuzzNativeMesonPaths']['recipe']
+            recipe['armGuardedSources'].append(dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True))
+            proof['sourceHooks'].pop('harfbuzzNativeMesonPaths')
             self.assertEqual(len(recipe['armGuardedSources']),13)
             pin_source_receipt(runtime,path,proof)
             with self.assertRaises(ValueError):module.validate_source_build_receipt(runtime,path,architecture='x64')
 
-    def test_v2_zstd_receipt_remains_source_only_in_the_six_hook_contract(self):
+    def test_v2_zstd_receipt_remains_source_only_in_the_seven_hook_contract(self):
         module=implementation()
         with tempfile.TemporaryDirectory() as folder:
             _,runtime,path,proof=x64_source_build_fixture(Path(folder))
             try:observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
-            except ValueError:self.fail('The reviewed six-hook receipt with zstd was rejected')
+            except ValueError:self.fail('The reviewed seven-hook receipt with zstd was rejected')
             hook=observed['sourceHooks']['zstdSourceLinks']
             self.assertEqual((hook['beforeBytes'],hook['afterBytes']),(779,1078))
             self.assertEqual(hook['kind'],'windows-zstd-source-links-source-hook')
@@ -1389,15 +1402,15 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             for key in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
                 self.assertIs(hook[key],False)
 
-    def test_v2_zstd_plan_accepts_the_reviewed_independent_six_hook_metadata(self):
+    def test_v2_zstd_plan_accepts_the_reviewed_independent_seven_hook_metadata(self):
         module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         manifest['windowsZstdSourceLinks']=copy.deepcopy(X64_ZSTD_PIN)
         manifest['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder']
         try:plan=module._source_x64_plan(manifest)
-        except ValueError:self.fail('The reviewed six-hook source plan with zstd was rejected')
-        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),13)
-        self.assertEqual(len(plan['armGuardedSources']),5)
+        except ValueError:self.fail('The reviewed seven-hook source plan with zstd was rejected')
+        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),14)
+        self.assertEqual(len(plan['armGuardedSources']),4)
         self.assertEqual(plan['sources'][5]['path'],X64_ZSTD_PIN['path'])
         canonical=json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
         self.assertEqual(hashlib.sha256(canonical).hexdigest(),X64_RECIPE_SHA256)
@@ -1446,7 +1459,7 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
         module=implementation();original=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         original['windowsZstdSourceLinks']=copy.deepcopy(X64_ZSTD_PIN)
         original['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder']
         values={'condition':'WNT_AMD64','path':'external/zstd/ExternalProject_zstd.mk',
             'size':True,'afterSize':'1078','sha256':'0'*64,'afterSha256':'0'*64,'extra':True}
         for key,value in values.items():
@@ -1454,19 +1467,19 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
                 manifest=copy.deepcopy(original);manifest['windowsZstdSourceLinks'][key]=value
                 with self.assertRaises(ValueError):module._source_x64_plan(manifest)
 
-    def test_v2_gpg_receipt_requires_the_six_hook_source_only_contract(self):
+    def test_v2_gpg_receipt_requires_the_seven_hook_source_only_contract(self):
         module=implementation()
         with tempfile.TemporaryDirectory() as folder:
             _,runtime,path,proof=x64_source_build_fixture(Path(folder))
             try:observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
-            except ValueError:self.fail('The reviewed six-hook GPG source receipt was rejected')
+            except ValueError:self.fail('The reviewed seven-hook GPG source receipt was rejected')
             hook=observed['sourceHooks']['gpgBuildCompilerPath']
             self.assertEqual(set(hook),{'schemaVersion','kind','path','condition','beforeBytes','afterBytes',
                 'beforeSha256','afterSha256','evidence','nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'})
             self.assertEqual((hook['beforeBytes'],hook['afterBytes']),(10340,10480))
             self.assertEqual(hook['condition'],X64_GPG_PIN['condition'])
             self.assertEqual(observed['sourceRecipeProof']['hookOrder'],[
-                'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder'])
+                'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder'])
             for name in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
                 self.assertIs(hook[name],False)
 
@@ -1474,10 +1487,10 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
         module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         manifest['windowsGpgBuildCompilerPath']=copy.deepcopy(X64_GPG_PIN)
         manifest['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder']
         try:plan=module._source_x64_plan(manifest)
-        except ValueError:self.fail('The reviewed six-hook independent GPG source plan was rejected')
-        self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(18,5))
+        except ValueError:self.fail('The reviewed seven-hook independent GPG source plan was rejected')
+        self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(18,4))
         self.assertEqual(plan['sources'][6]['path'],X64_GPG_PIN['path'])
         canonical=json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
         self.assertEqual(hashlib.sha256(canonical).hexdigest(),X64_RECIPE_SHA256)
@@ -1522,7 +1535,7 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
         module=implementation();original=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         original['windowsGpgBuildCompilerPath']=copy.deepcopy(X64_GPG_PIN)
         original['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder']
         for key,value in {'condition':'WNT_X86_64','path':'solenv/gbuild/platform/other.mk',
                 'size':True,'afterSize':'10480','sha256':'0'*64,'afterSha256':'0'*64,'extra':True}.items():
             with self.subTest(key=key):
@@ -1572,8 +1585,8 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
     def test_v2_loader_source_plan_is_independently_reconstructed_from_fixed_metadata(self):
         module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         plan=module._source_x64_plan(manifest)
-        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),13)
-        self.assertEqual(len(plan['armGuardedSources']),5)
+        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),14)
+        self.assertEqual(len(plan['armGuardedSources']),4)
         self.assertEqual(plan['sources'][4]['path'],'external/firebird/ExternalProject_firebird.mk')
         canonical=json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
         self.assertEqual(hashlib.sha256(canonical).hexdigest(),X64_RECIPE_SHA256)
@@ -1730,14 +1743,14 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
                 pin_source_receipt(runtime,path,proof)
                 module.validate_source_build_receipt(runtime,path,architecture='x64')
 
-    def test_v2_atl_plan_accepts_fixed_six_hooks_and_thirteen_common_inputs(self):
+    def test_v2_atl_plan_accepts_fixed_seven_hooks_and_fourteen_common_inputs(self):
         module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
         manifest['windowsAtlNativePaths']=copy.deepcopy(X64_ATL_PIN)
         manifest['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
-            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder']
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder']
         try:plan=module._source_x64_plan(manifest)
-        except ValueError:self.fail('The reviewed six-hook ATL source plan was rejected')
-        self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(18,5))
+        except ValueError:self.fail('The reviewed seven-hook ATL source plan was rejected')
+        self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(18,4))
         self.assertEqual([row['path'] for row in plan['sources'][7:13]],[row['path'] for row in X64_ATL_PIN['recipes']])
         self.assertEqual(hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest(),X64_ATL_RECIPE_SHA256)
 
@@ -1748,7 +1761,7 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             try:observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
             except ValueError:self.fail('The complete reviewed ATL source/native receipt was rejected')
             self.assertEqual(len(observed['sourceHooks']['atlNativePaths']['recipes']),6)
-            self.assertEqual(len(observed['sourceRecipeProof']['armGuardedSources']),5)
+            self.assertEqual(len(observed['sourceRecipeProof']['armGuardedSources']),4)
             self.assertEqual(set(observed['atlBuildInputs']),{'schemaVersion','kind','passed','compilerRoot',
                 'configuredInclude','configuredLibrary','includeRoot','libraryRoot','header','library',
                 'productPayload','fullEngineQualified','acceptanceEligible','guiVerified'})
@@ -1889,16 +1902,133 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
 
     def test_v2_prior_five_hook_gpg_receipt_cannot_claim_current_atl_source_manifest(self):
         def old(p):
-            p['sourceHooks'].pop('atlNativePaths');recipe=p['sourceRecipeProof']
+            p['sourceHooks'].pop('atlNativePaths');p['sourceHooks'].pop('harfbuzzNativeMesonPaths');recipe=p['sourceRecipeProof']
+            recipe['hookOrder'].remove('harfbuzzNativeMesonPaths')
             recipe['hookOrder'].remove('atlNativePaths')
             recipe['recipeSha256']='2a47c43202e16fd8e1774b3b747b97d57521b71dd706afb90da4427da4988044'
             recipe['armGuardedSources'].extend(dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True) for pin in X64_ATL_PIN['recipes'])
+            pin=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())['harfbuzzNativeMesonPaths']['recipe']
+            recipe['armGuardedSources'].append(dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True))
         self.reject_mutations([old])
+
+    def test_v2_harfbuzz_plan_requires_seven_hooks_and_four_unchanged_guards(self):
+        module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
+        manifest['windowsHarfbuzzNativeMesonPaths']=copy.deepcopy(X64_HARFBUZZ_PIN)
+        manifest['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath',
+            'atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder']
+        try:plan=module._source_x64_plan(manifest)
+        except ValueError:self.fail('The reviewed x64 HarfBuzz source plan was rejected')
+        self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(18,4))
+        self.assertEqual(plan['sources'][13],dict(path=X64_HARFBUZZ_PIN['path'],beforeBytes=3074,afterBytes=5920,
+            beforeSha256=X64_HARFBUZZ_PIN['sha256'],afterSha256=X64_HARFBUZZ_PIN['afterSha256']))
+        self.assertEqual(hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest(),X64_RECIPE_SHA256)
+
+    def test_v2_harfbuzz_source_leaf_requires_the_actual_closed_producer_shape(self):
+        module=implementation();check=getattr(module,'_source_x64_harfbuzz_source',None)
+        self.assertTrue(callable(check),'Strict x64 HarfBuzz source receipt replay is missing')
+        manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
+        manifest['windowsHarfbuzzNativeMesonPaths']=copy.deepcopy(X64_HARFBUZZ_PIN)
+        pin=X64_HARFBUZZ_PIN
+        value=dict(schemaVersion=1,kind='windows-x64-harfbuzz-native-meson-source-hook',
+            path=pin['path'],condition=pin['condition'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],
+            beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],nativeBuildVerified=False,
+            fullEngineQualified=False,acceptanceEligible=False,guiVerified=False,
+            evidence={side:'C:\\evidence\\source-recipe\\'+side+'-x64-ExternalProject_harfbuzz.mk' for side in ('original','effective')})
+        check(value,manifest,evidence_parent=PureWindowsPath('C:/evidence/source-recipe'))
+
+    def test_v2_harfbuzz_public_full_receipt_keeps_source_leaf_and_qualification_separate(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+            observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
+            hook=observed['sourceHooks']['harfbuzzNativeMesonPaths']
+            self.assertEqual(set(hook),{'schemaVersion','kind','path','condition','beforeBytes','afterBytes',
+                'beforeSha256','afterSha256','evidence','nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'})
+            self.assertEqual((hook['beforeBytes'],hook['afterBytes']),(3074,5920))
+            self.assertEqual(hook['condition'],X64_HARFBUZZ_PIN['condition'])
+            self.assertEqual(observed['sourceRecipeProof']['hookOrder'][-3:],
+                ['atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder'])
+            self.assertIs(observed['harfbuzzNativeMesonReplayChecksExecuted'],True)
+            self.assertNotIn(hook['path'],[row['path'] for row in observed['sourceRecipeProof']['armGuardedSources']])
+            for flag in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
+                self.assertIs(hook[flag],False)
+
+    def test_v2_harfbuzz_manifest_is_closed_and_pinned_to_the_unchanged_arm_original(self):
+        module=implementation();baseline=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
+        baseline['windowsHarfbuzzNativeMesonPaths']=copy.deepcopy(X64_HARFBUZZ_PIN)
+        baseline['nativeSourceRecipes']['windows-x64-common-v2']['hooks']=[
+            'moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath',
+            'atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder']
+        module._source_x64_plan(baseline)
+        mutations=[lambda m:m.pop('windowsHarfbuzzNativeMesonPaths')]
+        for key,value in (('path','external/harfbuzz/other.mk'),('condition','WNT_AARCH64_MSC_WNT'),
+                          ('size',True),('afterSize',1.5),('afterSize',2**20+1),('sha256','0'*64),
+                          ('afterSha256','0'*64),('extra',False)):
+            mutations.append(lambda m,key=key,value=value:m['windowsHarfbuzzNativeMesonPaths'].update({key:value}))
+        def forged_original(m):
+            m['harfbuzzNativeMesonPaths']['recipe']['sha256']='0'*64
+            m['windowsHarfbuzzNativeMesonPaths']['sha256']='0'*64
+        mutations.append(forged_original)
+        for index,mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                changed=copy.deepcopy(baseline);mutate(changed)
+                with self.assertRaises(ValueError):module._source_x64_plan(changed)
+
+    def test_v2_harfbuzz_pristine_source_replay_must_be_present_and_exactly_true(self):
+        mutations=[lambda p:p.pop('harfbuzzNativeMesonReplayChecksExecuted')]
+        mutations += [lambda p,value=value:p.update(harfbuzzNativeMesonReplayChecksExecuted=value)
+            for value in (False,0,1,None,'true',[])]
+        self.reject_mutations(mutations)
+
+    def test_v2_harfbuzz_leaf_requires_closed_fields_exact_types_and_false_flags(self):
+        def hook(p):return p['sourceHooks']['harfbuzzNativeMesonPaths']
+        mutations=[lambda p:p['sourceHooks'].pop('harfbuzzNativeMesonPaths'),lambda p:hook(p).update(extra=False)]
+        for field in ('schemaVersion','kind','path','condition','beforeBytes','afterBytes','beforeSha256','afterSha256','evidence'):
+            mutations.append(lambda p,field=field:hook(p).pop(field))
+        for field,value in (('schemaVersion',True),('kind',['windows-x64-harfbuzz-native-meson-source-hook']),
+                            ('path','external/harfbuzz/other.mk'),('condition','WNT_X86_64'),
+                            ('beforeBytes','3074'),('afterBytes',True),('beforeSha256','0'*64),('afterSha256','0'*64)):
+            mutations.append(lambda p,field=field,value=value:hook(p).update({field:value}))
+        for flag in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
+            for value in (True,0,None):mutations.append(lambda p,flag=flag,value=value:hook(p).update({flag:value}))
+        self.reject_mutations(mutations)
+
+    def test_v2_harfbuzz_evidence_requires_fixed_pair_under_the_loader_parent(self):
+        original='original-x64-ExternalProject_harfbuzz.mk';effective='effective-x64-ExternalProject_harfbuzz.mk'
+        variants=[None,{},dict(original=original,effective='C:\\evidence\\'+effective),
+            dict(original='C:\\'+original,effective='C:\\'+effective),
+            dict(original='C:\\evidence:stream\\'+original,effective='C:\\evidence:stream\\'+effective),
+            dict(original='C:\\evidence\\..\\source-recipe\\'+original,effective='C:\\evidence\\source-recipe\\'+effective),
+            dict(original='\\\\host\\share\\'+original,effective='\\\\host\\share\\'+effective),
+            dict(original='C:\\evidence\\source-recipe\\'+effective,effective='C:\\evidence\\source-recipe\\'+original),
+            dict(original='C:\\evidence\\source-recipe\\'+original,effective='D:\\other\\'+effective),
+            dict(original='D:\\other\\'+original,effective='D:\\other\\'+effective),
+            dict(original='C:\\evidence\\source-recipe\\'+original,effective='C:\\evidence\\source-recipe\\'+effective,extra=False)]
+        self.reject_mutations([lambda p,value=value:p['sourceHooks']['harfbuzzNativeMesonPaths'].update(evidence=value) for value in variants])
+
+    def test_v2_prior_six_hook_atl_recipe_cannot_claim_current_harfbuzz_manifest(self):
+        def old(p):
+            p['sourceHooks'].pop('harfbuzzNativeMesonPaths');recipe=p['sourceRecipeProof']
+            recipe['hookOrder'].remove('harfbuzzNativeMesonPaths')
+            recipe['recipeSha256']='b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679'
+            pin=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())['harfbuzzNativeMesonPaths']['recipe']
+            recipe['armGuardedSources'].append(dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True))
+        self.reject_mutations([old])
+
+    def test_v2_harfbuzz_plan_and_receipt_cannot_relabel_order_or_guarded_source(self):
+        mutations=[lambda p:p['sourceRecipeProof']['hookOrder'].reverse(),
+            lambda p:p['sourceRecipeProof'].update(recipeSha256='b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679'),
+            lambda p:p['sourceRecipeProof']['armGuardedSources'].append(dict(path=X64_HARFBUZZ_PIN['path'],
+                beforeSha256=X64_HARFBUZZ_PIN['sha256'],sha256=X64_HARFBUZZ_PIN['sha256'],unchanged=True)),
+            lambda p:p['sourceRecipeProof']['armGuardedSources'][0].update(path=X64_HARFBUZZ_PIN['path'])]
+        self.reject_mutations(mutations)
 
     def reject_mutations(self,mutations):
         module=implementation()
         with tempfile.TemporaryDirectory() as folder:
             _,runtime,path,original=x64_source_build_fixture(Path(folder))
+            module.validate_source_build_receipt(runtime,path,architecture='x64')
             for index,mutate in enumerate(mutations):
                 with self.subTest(mutation=index):
                     proof=copy.deepcopy(original);mutate(proof);pin_source_receipt(runtime,path,proof)

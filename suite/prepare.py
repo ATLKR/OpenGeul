@@ -348,6 +348,19 @@ def _source_x64_atl_inputs(proof: dict) -> None:
             raise ValueError('x64 ATL selected file generation is incomplete')
 
 
+def _source_x64_harfbuzz_pin(manifest: dict) -> dict:
+    pin=manifest.get('windowsHarfbuzzNativeMesonPaths')
+    if (type(pin) is not dict or set(pin)!={'path','size','sha256','afterSize','afterSha256','condition'}
+            or pin['path']!='external/harfbuzz/ExternalProject_harfbuzz.mk'
+            or pin['condition']!='WNT_X86_64_MSC_WNT && MAKE_HOST=%-cygwin'
+            or any(type(pin[key]) is not int or not 0<pin[key]<=1024*1024 for key in ('size','afterSize'))
+            or any(not _source_digest(pin[key]) for key in ('sha256','afterSha256'))
+            or not _source_exact({key:pin[key] for key in ('path','size','sha256')},
+                {key:manifest['harfbuzzNativeMesonPaths']['recipe'][key] for key in ('path','size','sha256')})):
+        raise ValueError('x64 HarfBuzz source plan pin, profile or ARM original differs')
+    return pin
+
+
 def _source_x64_plan(manifest: dict) -> dict:
     """Independently reconstruct the finite source plan from reviewed metadata."""
     def pin(value, after=None):
@@ -387,17 +400,18 @@ def _source_x64_plan(manifest: dict) -> dict:
     atl=_source_x64_atl_pins(manifest)
     common[1]['afterBytes']=winacc['afterBytes'];common.extend((pin(loader),pin(zstd),pin(gpg)))
     common.extend(pin(row) for row in atl)
+    harfbuzz=_source_x64_harfbuzz_pin(manifest);common.append(pin(harfbuzz))
     guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
     guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
     guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
-    moved={loader['path'],zstd['path'],*(row['path'] for row in atl)}
+    moved={loader['path'],zstd['path'],harfbuzz['path'],*(row['path'] for row in atl)}
     guarded=[pin(source) for source in guarded if source['path'] not in moved]
     payload=winacc['patch'];payload_pin=dict(filename=payload['filename'],sha256=payload['sha256'])
     if 'size' in payload:payload_pin['size']=payload['size']
     plan=dict(recipeId='windows-x64-common-v2',recipe=manifest['nativeSourceRecipes']['windows-x64-common-v2'],
         sources=common+guarded,armGuardedSources=guarded,sourceDependencies=[],payloads=[payload_pin])
     digest=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
-    if digest != 'b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679':
+    if digest != 'cc8aa7c7aed29a5a8708e2aa860b7573a176419e71c05893e60045e8c27a55c6':
         raise ValueError('x64 source plan differs from the reviewed canonical recipe')
     return plan
 
@@ -468,6 +482,23 @@ def _source_x64_atl_source(value,manifest,*,evidence_parent: PureWindowsPath) ->
             seen.add(path)
 
 
+def _source_x64_harfbuzz_source(value,manifest,*,evidence_parent: PureWindowsPath) -> None:
+    pin=_source_x64_harfbuzz_pin(manifest)
+    fields=dict(schemaVersion=1,kind='windows-x64-harfbuzz-native-meson-source-hook',
+        path=pin['path'],condition=pin['condition'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],
+        beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],nativeBuildVerified=False,
+        fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+    if (type(value) is not dict or set(value)!=set(fields)|{'evidence'}
+            or not _source_exact({key:value[key] for key in fields},fields)
+            or type(value['evidence']) is not dict or set(value['evidence'])!={'original','effective'}):
+        raise ValueError('x64 HarfBuzz source receipt differs from the reviewed source-only hook')
+    for side in ('original','effective'):
+        path=_source_windows_path(value['evidence'][side]);archive_path('/'.join(path.parts[1:]))
+        if (path.name!=side+'-x64-ExternalProject_harfbuzz.mk'
+                or path.parent!=evidence_parent or not path.parent.name):
+            raise ValueError('x64 HarfBuzz evidence basename or shared loader parent differs')
+
+
 def _source_x64_recipe(proof: dict) -> None:
     folder=Path(__file__).resolve().parent/'engine-build'
     raw=(folder/'source-build.json').read_bytes();manifest=json.loads(raw)
@@ -477,8 +508,8 @@ def _source_x64_recipe(proof: dict) -> None:
     expected=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
         recipeId='windows-x64-common-v2',policySha256=proof['nativeTargetsSha256'],
         manifestSha256=proof['sourcePortManifestSha256'],
-        recipeSha256='b442705e34c75a1bc2a8b573dda31a9374ec4dc877f8c55785d202c578fd4679',
-        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder'],nativeBuildVerified=False,
+        recipeSha256='cc8aa7c7aed29a5a8708e2aa860b7573a176419e71c05893e60045e8c27a55c6',
+        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder'],nativeBuildVerified=False,
         fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
     expected['armGuardedSources']=[dict(path=item['path'],beforeSha256=item['beforeSha256'],sha256=item['beforeSha256'],unchanged=True)
                                   for item in plan['armGuardedSources']]
@@ -502,7 +533,7 @@ def _source_x64_recipe(proof: dict) -> None:
     if not _source_exact(patch.get('sourceFiles'), files):
         raise ValueError('x64 WinAcc unchanged dependency/patch identities differ')
     hooks=proof.get('sourceHooks');bootstrap=manifest['moduleBootstrap']
-    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','nativeBuildVerified','basePersistenceVerified'}
+    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','nativeBuildVerified','basePersistenceVerified'}
             or hooks.get('kind') != 'native-windows-common-source-hooks' or hooks.get('architecture') != 'x64'
             or hooks.get('nativeBuildVerified') is not False or hooks.get('basePersistenceVerified') is not False
             or not isinstance(hooks.get('moduleBootstrap'),dict)
@@ -535,6 +566,8 @@ def _source_x64_recipe(proof: dict) -> None:
         raise ValueError('x64 GPG compiler-path descriptor differs from the reviewed source-only hook')
     _source_x64_gpg_evidence(gpg['evidence'])
     _source_x64_atl_source(hooks.get('atlNativePaths'),manifest,
+        evidence_parent=_source_windows_path(loader['evidence']['original']).parent)
+    _source_x64_harfbuzz_source(hooks.get('harfbuzzNativeMesonPaths'),manifest,
         evidence_parent=_source_windows_path(loader['evidence']['original']).parent)
 
 
@@ -653,7 +686,8 @@ def _source_build_x64(proof: dict, runtime: dict, target: dict) -> None:
             or not _source_positive(proof.get('host',{}).get('controllerPid'))
             or proof.get('nativeTargetsSha256') != 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
             or not _source_digest(proof.get('configurationSha256')) or not _source_digest(proof.get('configureArgumentsSha256'))
-            or proof.get('sourceRecipeChecksExecuted') is not True or binding != expected
+            or proof.get('sourceRecipeChecksExecuted') is not True
+            or proof.get('harfbuzzNativeMesonReplayChecksExecuted') is not True or binding != expected
             or not isinstance(binding,dict) or any(type(binding[key]) is not type(value) for key,value in expected.items())):
         raise ValueError('x64 v2 qualification/source/workflow binding is incomplete')
     if _source_windows_path(proof['artifact'].get('path')).name != target['archive']:
