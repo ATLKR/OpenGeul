@@ -36,7 +36,7 @@ Commands use each checkout's existing Python 3.12 validation environment and
 PowerShell. Portable passes are not Windows qualification. Record exact
 interpreter, platform, counts and skips.
 Each task ends in a focused reviewable commit only after its RED/GREEN evidence;
-do not bulk-copy between checkouts. Dependencies are 1 → 2 → 3 → 4 → 5.
+do not bulk-copy between checkouts. Dependencies are 1 → 2 → 3; Task 4 may run while Task 5 builds the reviewed producer. Task 5 input adoption and Suite execution require Task 4 completion.
 
 ---
 
@@ -94,7 +94,7 @@ do not bulk-copy between checkouts. Dependencies are 1 → 2 → 3 → 4 → 5.
 **Interfaces:** each actual run consumes a reviewed committed producer head and fixed workflow/ref. Adoption consumes authenticated complete successful-run metadata, exact outer/inner ZIP and receipt hashes, actual v2 proof and native runtime replay. Source proof always records `guiVerified=false`; separately retained Suite evidence owns GUI qualification.
 
 - [ ] **RED/pre-submit:** check existing runs and exact heads once; attach any newly observed defect to a failing focused contract test before correcting it. Confirm completed recipe inventory, native-preflight-before-download order, no active duplicate and no secret-bearing new diff/artifacts.
-- [ ] Review/push the producer-only implementation on `work/opengeul-office-native-engine-x64`; use only its fixed existing `windows-2025` workflow. Capture native preflight and, if successful, the same-budget x64 Full/native Base/retirement result. Missing tools or time exhaustion is a failed/unqualified run, not authority to install, extend time or weaken proof.
+- [ ] After Task 3 review, while Task 4 consumer work proceeds independently, review/push the producer-only implementation on `work/opengeul-office-native-engine-x64`; use only its fixed existing `windows-2025` workflow. Capture native preflight and, if successful, the same-budget x64 Full/native Base/retirement result. Missing tools or time exhaustion is a failed/unqualified run, not authority to install, extend time or weaken proof.
 - [ ] Verify completed/success whole-run metadata and all bytes/provenance independently; only then review the real x64 lock change. Run exact fixture/replay tests from Task 4 before committing that pin. Keep old ARM input unchanged.
 - [ ] Run the standard actual x64 Suite on that exact input/head: native menu actions and Escape/outside-click, repeats/transitions, preview/fullscreen return, save/cancel/close/focus, accessibility, Korean input/save/reopen, lifetime and applicable package/install/update/repair gates. Preserve raw evidence/screenshots/process retirement and separate every skipped/failed gate. Fix failures through focused RED/GREEN regressions and evidence-based reruns; no RC claim until required gates pass.
 - [ ] After a separate review permits promotion of the shared driver to the established ARM producer branch, run a distinct actual ARM Full, then verify its real output and ARM Suite before any new ARM adoption. Never cite the original 2921 run as validation of the refactor. Review final exact input/head/gate inventory; commit only genuine adopted pins, with release/deployment still excluded.
