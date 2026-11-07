@@ -1327,5 +1327,554 @@ class NewBaseSessionGuardTests(unittest.TestCase):
         self.assertEqual(b'existing database', path.read_bytes())
 
 
+class _SharedCacheSdkFunction:
+    def __init__(self, callback): self.callback = callback
+    def __call__(self, *args): return self.callback(*args)
+
+
+class _SharedCacheSdk:
+    """Populate the actual fixed SDK buffer; these are synthetic identities."""
+    def __init__(self, info):
+        self.volume = info.st_dev
+        self.file_id = info.st_ino.to_bytes(16, 'little')
+        self.query_result, self.file_type, self.borrowed_result = 1, 1, 700
+        self.queries, self.borrowed_fds = [], []
+        self.GetFileType = _SharedCacheSdkFunction(lambda handle: self.file_type)
+        self.GetFileInformationByHandleEx = _SharedCacheSdkFunction(self.query)
+
+    def borrowed(self, fd):
+        self.borrowed_fds.append(fd)
+        return self.borrowed_result
+
+    def query(self, handle, kind, output, size):
+        self.queries.append((kind, size))
+        if not self.query_result:
+            return self.query_result
+        if kind != 18 or size != 24:
+            raise AssertionError('Unexpected fixed file information ABI')
+        output._obj.VolumeSerialNumber = self.volume
+        output._obj.FileId[:] = self.file_id
+        return 1
+
+
+class PrivateSharedCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.native = importlib.import_module('native')
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.payload = self.root / 'payload'
+        self.runtime = self.payload / 'Office'
+        self.program = self.runtime / 'program'
+        self.program.mkdir(parents=True)
+        for name in ('soffice.exe', 'python.exe'):
+            (self.program / name).write_bytes(b'synthetic runtime boundary')
+        self.cache = self.runtime / 'share/uno_packages/cache'
+        self.calls = []
+
+    def backend(self):
+        from types import SimpleNamespace
+        backend = self.native.UnoBackend(self.runtime,
+            process_factory=lambda argv, cwd: self.calls.append((argv, cwd)) or
+                SimpleNamespace(poll=lambda: None))
+        self.addCleanup(lambda: backend.profile.cleanup() if backend.profile is not None else None)
+        return backend
+
+    def populate(self):
+        # Preserve the whole activation layout, including markers and other caches.
+        files = {'uno_packages/item.tmp_/sample.oxt/META-INF/manifest.xml': b'synthetic manifest',
+                 'uno_packages/item.tmp': b'synthetic marker',
+                 'registry/cache.bin': bytes(range(32))}
+        for relative, content in files.items():
+            path = self.cache / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        (self.cache / 'uno_packages/empty').mkdir()
+        return files
+
+    def private_cache(self, backend):
+        from urllib.parse import urlsplit
+        from urllib.request import url2pathname
+        arguments = self.calls[-1][0]
+        values = [arg.split('=', 1)[1] for arg in arguments
+                  if arg.startswith('-env:UNO_SHARED_PACKAGES_CACHE=')]
+        self.assertEqual(1, len(values), 'Exactly one private shared-cache override is required')
+        parsed = urlsplit(values[0])
+        self.assertEqual('file', parsed.scheme)
+        self.assertEqual('', parsed.netloc)
+        result = Path(url2pathname(parsed.path))
+        self.assertIn(Path(backend.profile.name), result.parents)
+        return result
+
+    def epoch(self):
+        import time
+        e2e = str(WORKER.parent / 'e2e')
+        with patch.object(sys, 'path', [e2e, *sys.path]):
+            selection = importlib.import_module('native_menu_source_selection')
+        return selection._payload_epoch(self.payload, time.monotonic() + 5)
+
+    def test_preserves_nonempty_cache_bytes_mtimes_and_source_epoch(self):
+        import os
+        files = self.populate()
+        for index, path in enumerate([self.cache, *sorted(self.cache.rglob('*'))]):
+            os.utime(path, ns=(1700000000000000000 + index * 1000000000,) * 2)
+        before = self.epoch()
+        backend = self.backend()
+        backend._start_runtime()
+        private = self.private_cache(backend)
+        for relative, content in files.items():
+            self.assertEqual(content, (private / relative).read_bytes())
+        for path in (self.cache, *self.cache.rglob('*')):
+            clone = private / path.relative_to(self.cache)
+            self.assertEqual(path.stat().st_mtime_ns, clone.stat().st_mtime_ns)
+        self.assertTrue((private / 'uno_packages/empty').is_dir())
+        (private / 'stamp.sys').write_bytes(b'1')
+        (private / 'stamp.sys').unlink()
+        self.assertEqual(before, self.epoch())
+
+    def test_absent_cache_preserves_original_launch_arguments(self):
+        backend = self.backend()
+        backend._start_runtime()
+        private = self.private_cache(backend)
+        self.assertEqual([], list(private.iterdir()))
+        self.assertFalse(self.cache.exists())
+        argv, cwd = self.calls[0]
+        actual = [arg for arg in argv if not arg.startswith('-env:UNO_SHARED_PACKAGES_CACHE=')]
+        self.assertEqual([str(self.program / 'soffice.exe'), '--invisible', '--nologo',
+            '--nodefault', '--norestore', '--nofirststartwizard',
+            '-env:UserInstallation=' + Path(backend.profile.name).as_uri(),
+            '--accept=pipe,name=' + backend.pipe + ';urp;StarOffice.ServiceManager'], actual)
+        self.assertEqual(self.program, cwd)
+
+    def test_parallel_profiles_isolate_copied_payload_and_stamp(self):
+        files = self.populate()
+        before = self.epoch()
+        first, second = self.backend(), self.backend()
+        first._start_runtime()
+        private_first = self.private_cache(first)
+        second._start_runtime()
+        private_second = self.private_cache(second)
+        self.assertNotEqual(private_first, private_second)
+        relative = next(iter(files))
+        (private_first / relative).write_bytes(b'session-local mutation')
+        (private_first / 'stamp.sys').write_bytes(b'1')
+        self.assertEqual(files[relative], (private_second / relative).read_bytes())
+        self.assertFalse((private_second / 'stamp.sys').exists())
+        self.assertEqual(before, self.epoch())
+
+    def test_unsafe_source_types_never_launch(self):
+        import stat
+        from types import SimpleNamespace
+        self.populate()
+        original = Path.lstat
+        fields = ('st_mode', 'st_dev', 'st_ino', 'st_nlink', 'st_size',
+                  'st_mtime_ns', 'st_ctime_ns', 'st_atime_ns')
+        for kind in ('symlink', 'reparse', 'nonregular', 'hardlink', 'ancestor-reparse'):
+            with self.subTest(kind=kind):
+                unsafe = self.runtime / 'share' if kind == 'ancestor-reparse' else self.cache / 'registry/cache.bin'
+                def lstat(path, *args, **kwargs):
+                    info = original(path, *args, **kwargs)
+                    if path != unsafe:
+                        return info
+                    changed = {field: getattr(info, field) for field in fields}
+                    if kind == 'symlink': changed['st_mode'] = stat.S_IFLNK | 0o777
+                    if kind == 'nonregular': changed['st_mode'] = stat.S_IFIFO | 0o600
+                    if kind == 'hardlink': changed['st_nlink'] = 2
+                    changed['st_file_attributes'] = 0x400 if 'reparse' in kind else 0
+                    return SimpleNamespace(**changed)
+                backend = self.backend()
+                with patch.object(Path, 'lstat', lstat):
+                    with self.assertRaises(self.native.WorkerError) as error:
+                        backend._start_runtime()
+                self.assertEqual('runtime_cache_failed', error.exception.code)
+                self.assertEqual([], self.calls)
+
+    def test_unreadable_source_is_not_treated_as_an_absent_cache(self):
+        self.populate()
+        original = Path.lstat
+        def lstat(path, *args, **kwargs):
+            if path == self.cache:
+                raise PermissionError('synthetic access refusal')
+            return original(path, *args, **kwargs)
+        backend = self.backend()
+        with patch.object(Path, 'lstat', lstat):
+            with self.assertRaises(self.native.WorkerError) as error:
+                backend._start_runtime()
+        self.assertEqual('runtime_cache_failed', error.exception.code)
+        self.assertEqual([], self.calls)
+
+    def test_partial_copy_failure_remains_owned_by_existing_cleanup(self):
+        self.populate()
+        before = self.epoch()
+        original = Path.open
+        class PartialWriter:
+            def __init__(self, stream): self.stream = stream
+            def __enter__(self): return self
+            def __exit__(self, *args): self.stream.close()
+            def write(self, block):
+                self.stream.write(block[:1])
+                raise OSError('synthetic partial copy refusal')
+        def open_file(path, mode='r', *args, **kwargs):
+            stream = original(path, mode, *args, **kwargs)
+            return PartialWriter(stream) if mode == 'xb' else stream
+        backend = self.backend()
+        with patch.object(Path, 'open', open_file):
+            with self.assertRaises(self.native.WorkerError) as error:
+                backend._start_runtime()
+        self.assertEqual('runtime_cache_failed', error.exception.code)
+        self.assertEqual([], self.calls)
+        profile = Path(backend.profile.name)
+        self.assertTrue(profile.is_dir())
+        self.assertTrue(any(path.is_file() for path in profile.rglob('*')))
+        self.assertEqual(before, self.epoch())
+        with redirect_stderr(io.StringIO()):
+            proof = backend.cleanup()
+        self.assertTrue(proof['resourcesReleased'])
+        self.assertIsNone(backend.profile)
+        self.assertFalse(profile.exists())
+        self.assertEqual(before, self.epoch())
+
+    def test_readonly_source_copy_can_be_removed_without_changing_source(self):
+        import stat
+        self.populate()
+        source = self.cache / 'registry/cache.bin'
+        source.chmod(stat.S_IREAD)
+        self.addCleanup(lambda: source.chmod(stat.S_IREAD | stat.S_IWRITE))
+        before = self.epoch()
+        backend = self.backend()
+        backend._start_runtime()
+        private = self.private_cache(backend)
+        self.assertEqual(source.read_bytes(), (private / 'registry/cache.bin').read_bytes())
+        profile = Path(backend.profile.name)
+        backend.profile.cleanup()
+        backend.profile = None
+        self.assertFalse(profile.exists())
+        self.assertEqual(before, self.epoch())
+
+    def test_source_drift_during_copy_refuses_process_creation(self):
+        self.populate()
+        source = self.cache / 'registry/cache.bin'
+        original = Path.open
+        class DriftingWriter:
+            def __init__(self, stream): self.stream = stream
+            def __enter__(self): return self
+            def __exit__(self, *args): self.stream.close()
+            def write(self, block):
+                result = self.stream.write(block)
+                source.write_bytes(b'synthetic external drift')
+                return result
+        def open_file(path, mode='r', *args, **kwargs):
+            stream = original(path, mode, *args, **kwargs)
+            if mode == 'xb' and path.name == 'cache.bin':
+                return DriftingWriter(stream)
+            return stream
+        backend = self.backend()
+        with patch.object(Path, 'open', open_file):
+            with self.assertRaises(self.native.WorkerError) as error:
+                backend._start_runtime()
+        self.assertEqual('runtime_cache_failed', error.exception.code)
+        self.assertEqual([], self.calls)
+
+    def test_growing_file_reads_only_original_size_plus_one_before_refusing(self):
+        import os
+        self.cache.mkdir(parents=True)
+        source = self.cache / 'growing.bin'
+        source.write_bytes(b'x' * (65536 + 17))
+        original = os.fdopen
+        requests = []
+        class GrowingReader:
+            def __init__(self, stream): self.stream = stream
+            def __enter__(self): return self
+            def __exit__(self, *args): self.stream.close()
+            def fileno(self): return self.stream.fileno()
+            def read(self, size):
+                requests.append(size)
+                block = self.stream.read(size)
+                if len(requests) == 1:
+                    with source.open('ab') as writer:
+                        writer.write(b'y' * 4096)
+                return block
+        def fdopen(*args, **kwargs):
+            return GrowingReader(original(*args, **kwargs))
+        backend = self.backend()
+        with patch.object(self.native.os, 'fdopen', fdopen):
+            with self.assertRaises(self.native.WorkerError) as error:
+                backend._start_runtime()
+        self.assertEqual('runtime_cache_failed', error.exception.code)
+        self.assertEqual([65536, 17, 1], requests)
+        self.assertEqual([], self.calls)
+
+    def test_replaced_file_handle_is_rejected_before_reading_content(self):
+        import os
+        self.populate()
+        source = self.cache / 'registry/cache.bin'
+        replacement = self.root / 'replacement.bin'
+        replacement.write_bytes(b'synthetic different identity')
+        original_open, original_fdopen = os.open, os.fdopen
+        reads = []
+        class ObservedReader:
+            def __init__(self, stream): self.stream = stream
+            def __enter__(self): return self
+            def __exit__(self, *args): self.stream.close()
+            def fileno(self): return self.stream.fileno()
+            def read(self, size):
+                reads.append(size)
+                return self.stream.read(size)
+        def open_file(path, flags, *args, **kwargs):
+            return original_open(replacement if path == source else path, flags, *args, **kwargs)
+        def fdopen(descriptor, *args, **kwargs):
+            stream = original_fdopen(descriptor, *args, **kwargs)
+            return ObservedReader(stream) if os.fstat(descriptor).st_ino == replacement.stat().st_ino else stream
+        backend = self.backend()
+        with patch.object(self.native.os, 'open', open_file), patch.object(self.native.os, 'fdopen', fdopen):
+            with self.assertRaises(self.native.WorkerError) as error:
+                backend._start_runtime()
+        self.assertEqual('runtime_cache_failed', error.exception.code)
+        self.assertEqual([], reads)
+        self.assertEqual([], self.calls)
+
+    def windows_files(self, sdk):
+        return patch.object(self.native, '_shared_cache_windows_files', create=True,
+            side_effect=lambda: self.native._WindowsSharedCacheFiles(
+                _kernel=sdk, _get_osfhandle=sdk.borrowed))
+
+    def test_windows_same_full_native_id_allows_distinct_stat_projections(self):
+        import ctypes as C
+        import os
+        import stat
+        from types import SimpleNamespace
+        self.cache.mkdir(parents=True)
+        source = self.cache / 'payload.exe'
+        source.write_bytes(b'synthetic payload')
+        sdk = _SharedCacheSdk(source.stat())
+        sdk.volume += 1 << 40
+        sdk.file_id = (source.stat().st_ino + (1 << 96)).to_bytes(16, 'little')
+        original_path, original_fd = Path.lstat, os.fstat
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size',
+                  'st_mtime_ns', 'st_ctime_ns', 'st_atime_ns')
+        def path_info(path, *args, **kwargs):
+            info = original_path(path, *args, **kwargs)
+            if path != source: return info
+            values = {key: getattr(info, key) for key in fields}
+            values.update(st_dev=sdk.volume, st_ino=int.from_bytes(sdk.file_id, 'little'))
+            return SimpleNamespace(**values)
+        def fd_info(fd):
+            info = original_fd(fd)
+            values = {key: getattr(info, key) for key in fields}
+            values.update(st_mode=info.st_mode ^ stat.S_IXUSR, st_ctime_ns=info.st_ctime_ns + 1)
+            return SimpleNamespace(**values)
+        backend = self.backend()
+        failed = False
+        with self.windows_files(sdk), patch.object(Path, 'lstat', path_info), patch.object(os, 'fstat', fd_info):
+            try:
+                backend._start_runtime()
+            except self.native.WorkerError:
+                failed = True
+        self.assertFalse(failed, 'Windows path/fd projections require a native file-ID join')
+        self.assertEqual(b'synthetic payload', (self.private_cache(backend) / 'payload.exe').read_bytes())
+        self.assertEqual([(18, 24), (18, 24)], sdk.queries)
+        self.assertEqual([C.c_void_p, C.c_int32, C.c_void_p, C.c_uint32],
+                         sdk.GetFileInformationByHandleEx.argtypes)
+        self.assertIs(C.c_int32, sdk.GetFileInformationByHandleEx.restype)
+        self.assertEqual([C.c_void_p], sdk.GetFileType.argtypes)
+        self.assertIs(C.c_uint32, sdk.GetFileType.restype)
+        self.assertTrue(sdk.borrowed_fds)
+        for fd in sdk.borrowed_fds:
+            with self.assertRaises(OSError): original_fd(fd)
+
+    def test_windows_native_id_and_sdk_failures_refuse_launch(self):
+        import os
+        from types import SimpleNamespace
+        self.cache.mkdir(parents=True)
+        source = self.cache / 'payload.bin'
+        source.write_bytes(b'synthetic payload')
+        original_fd, original_path = os.fstat, Path.lstat
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size',
+                  'st_mtime_ns', 'st_ctime_ns', 'st_atime_ns')
+        for kind in ('high-file-id', 'high-volume', 'query-failed', 'non-disk', 'invalid-handle',
+                     'fd-ctime-drift', 'path-ctime-drift'):
+            with self.subTest(kind=kind):
+                sdk = _SharedCacheSdk(source.stat())
+                if kind == 'high-file-id':
+                    sdk.file_id = (source.stat().st_ino + (1 << 96)).to_bytes(16, 'little')
+                if kind == 'high-volume': sdk.volume += 1 << 40
+                if kind == 'query-failed': sdk.query_result = 0
+                if kind == 'non-disk': sdk.file_type = 2
+                if kind == 'invalid-handle': sdk.borrowed_result = -1
+                fd_calls, path_calls = [], []
+                def fd_info(fd):
+                    info = original_fd(fd)
+                    fd_calls.append(True)
+                    if kind != 'fd-ctime-drift' or len(fd_calls) < 2: return info
+                    values = {key: getattr(info, key) for key in fields}
+                    values['st_ctime_ns'] += 1
+                    return SimpleNamespace(**values)
+                def path_info(path, *args, **kwargs):
+                    info = original_path(path, *args, **kwargs)
+                    if path != source: return info
+                    path_calls.append(True)
+                    if kind != 'path-ctime-drift' or len(path_calls) < 3: return info
+                    values = {key: getattr(info, key) for key in fields}
+                    values['st_ctime_ns'] += 1
+                    return SimpleNamespace(**values)
+                backend = self.backend()
+                with self.windows_files(sdk), patch.object(os, 'fstat', fd_info), patch.object(Path, 'lstat', path_info):
+                    with self.assertRaises(self.native.WorkerError) as error:
+                        backend._start_runtime()
+                self.assertEqual('runtime_cache_failed', error.exception.code)
+                self.assertEqual([], self.calls)
+                for fd in sdk.borrowed_fds:
+                    with self.assertRaises(OSError): original_fd(fd)
+
+    def test_copy_rejects_both_source_destination_overlap_directions_before_writing(self):
+        self.populate()
+        for direction in ('destination-under-source', 'source-under-destination'):
+            with self.subTest(direction=direction):
+                profile = self.native.PrivateProfile()
+                profile.cleanup()
+                if direction == 'destination-under-source':
+                    profile.name = str(self.cache / 'profile')
+                    runtime = self.runtime
+                else:
+                    profile.name = str(self.root / 'profile')
+                    runtime = Path(profile.name) / 'shared-packages-cache/Office'
+                    (runtime / 'program').mkdir(parents=True)
+                    for name in ('soffice.exe', 'python.exe'):
+                        (runtime / 'program' / name).write_bytes(b'synthetic runtime')
+                    (runtime / 'share/uno_packages/cache').mkdir(parents=True)
+                Path(profile.name).mkdir(parents=True, exist_ok=True)
+                backend = self.native.UnoBackend(runtime,
+                    process_factory=lambda *args: self.calls.append(True))
+                self.addCleanup(lambda backend=backend: backend.profile.cleanup()
+                    if backend.profile is not None else None)
+                creations = []
+                def stop_copy(path, *args, **kwargs):
+                    creations.append(True)
+                    raise OSError('Stop an unsafe synthetic self-copy')
+                with patch.object(self.native, 'PrivateProfile', return_value=profile), patch.object(Path, 'mkdir', stop_copy):
+                    with self.assertRaises(self.native.WorkerError) as error:
+                        backend._start_runtime()
+                self.assertEqual('runtime_cache_failed', error.exception.code)
+                self.assertEqual([], creations, 'Overlap must be rejected before copying')
+                self.assertEqual([], self.calls)
+
+    def test_copy_refuses_an_existing_destination_including_dangling_link(self):
+        import stat
+        from types import SimpleNamespace
+        original = Path.lstat
+        for kind in ('directory', 'file', 'dangling-link'):
+            with self.subTest(kind=kind):
+                profile = self.native.PrivateProfile()
+                destination = Path(profile.name) / 'shared-packages-cache'
+                if kind == 'directory': destination.mkdir()
+                if kind == 'file': destination.write_bytes(b'synthetic preexisting data')
+                def lstat(path, *args, **kwargs):
+                    if path == destination and kind == 'dangling-link':
+                        return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+                    return original(path, *args, **kwargs)
+                backend = self.backend()
+                with patch.object(self.native, 'PrivateProfile', return_value=profile), patch.object(Path, 'lstat', lstat):
+                    with self.assertRaises(self.native.WorkerError) as error:
+                        backend._start_runtime()
+                self.assertEqual('runtime_cache_failed', error.exception.code)
+                self.assertEqual([], self.calls)
+
+    def test_first_missing_path_must_still_be_absent_before_launch(self):
+        import stat
+        from types import SimpleNamespace
+        original = Path.lstat
+        missing = self.runtime / 'share'
+        for kind in ('directory', 'file', 'link', 'unreadable'):
+            with self.subTest(kind=kind):
+                observed = []
+                def lstat(path, *args, **kwargs):
+                    if path != missing: return original(path, *args, **kwargs)
+                    observed.append(True)
+                    if len(observed) == 1: raise FileNotFoundError('Synthetic first absence')
+                    if kind == 'unreadable': raise PermissionError('Synthetic later refusal')
+                    mode = {'directory': stat.S_IFDIR, 'file': stat.S_IFREG, 'link': stat.S_IFLNK}[kind]
+                    return SimpleNamespace(st_mode=mode)
+                backend = self.backend()
+                with patch.object(Path, 'lstat', lstat):
+                    with self.assertRaises(self.native.WorkerError) as error:
+                        backend._start_runtime()
+                self.assertEqual('runtime_cache_failed', error.exception.code)
+                self.assertEqual(2, len(observed))
+                self.assertEqual([], self.calls)
+
+    def test_absence_is_rechecked_after_creating_private_destination(self):
+        original_mkdir = Path.mkdir
+        profile = self.native.PrivateProfile()
+        destination = Path(profile.name) / 'shared-packages-cache'
+        missing = self.runtime / 'share'
+        def mkdir(path, *args, **kwargs):
+            result = original_mkdir(path, *args, **kwargs)
+            if path == destination:
+                original_mkdir(missing)
+            return result
+        backend = self.backend()
+        with patch.object(self.native, 'PrivateProfile', return_value=profile), patch.object(Path, 'mkdir', mkdir):
+            with self.assertRaises(self.native.WorkerError) as error:
+                backend._start_runtime()
+        self.assertEqual('runtime_cache_failed', error.exception.code)
+        self.assertTrue(destination.is_dir())
+        self.assertEqual([], self.calls)
+
+    def test_parent_components_are_rejected_before_normalization(self):
+        self.populate()
+        for kind in ('runtime', 'profile'):
+            with self.subTest(kind=kind):
+                profile = self.native.PrivateProfile()
+                if kind == 'runtime':
+                    (self.runtime / 'alias').mkdir()
+                    runtime = self.runtime / 'alias/..'
+                else:
+                    (Path(profile.name) / 'alias').mkdir()
+                    profile.name = str(Path(profile.name) / 'alias/..')
+                    runtime = self.runtime
+                backend = self.native.UnoBackend(runtime,
+                    process_factory=lambda *args: self.calls.append(True))
+                # Normalize only this synthetic cleanup target, never the source path.
+                cleanup = Path(profile.name).parent.parent if kind == 'profile' else Path(profile.name)
+                self.addCleanup(lambda cleanup=cleanup: self.native.shutil.rmtree(cleanup))
+                creations = []
+                def stop_copy(path, *args, **kwargs):
+                    creations.append(True)
+                    raise OSError('Stop a synthetic normalized alias copy')
+                with patch.object(self.native, 'PrivateProfile', return_value=profile), patch.object(Path, 'mkdir', stop_copy):
+                    with self.assertRaises(self.native.WorkerError) as error:
+                        backend._start_runtime()
+                self.assertEqual('runtime_cache_failed', error.exception.code)
+                self.assertEqual([], creations)
+                self.assertEqual([], self.calls)
+
+    def test_source_root_physical_alias_of_destination_ancestor_refuses_copy(self):
+        from types import SimpleNamespace
+        self.populate()
+        profile = self.native.PrivateProfile()
+        original_lstat = Path.lstat
+        profile_identity = Path(profile.name).lstat()
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size',
+                  'st_mtime_ns', 'st_ctime_ns', 'st_atime_ns')
+        def lstat(path, *args, **kwargs):
+            info = original_lstat(path, *args, **kwargs)
+            if path != self.cache: return info
+            values = {key: getattr(info, key) for key in fields}
+            values.update(st_dev=profile_identity.st_dev, st_ino=profile_identity.st_ino)
+            return SimpleNamespace(**values)
+        creations = []
+        def stop_copy(path, *args, **kwargs):
+            creations.append(True)
+            raise OSError('Stop a synthetic physical self-copy')
+        backend = self.backend()
+        with patch.object(self.native, 'PrivateProfile', return_value=profile), \
+                patch.object(Path, 'lstat', lstat), patch.object(Path, 'mkdir', stop_copy):
+            with self.assertRaises(self.native.WorkerError) as error:
+                backend._start_runtime()
+        self.assertEqual('runtime_cache_failed', error.exception.code)
+        self.assertEqual([], creations)
+        self.assertEqual([], self.calls)
+
+
 if __name__ == '__main__':
     unittest.main()

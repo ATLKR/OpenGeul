@@ -1,10 +1,12 @@
 """Actual GUI UNO embedding. No headless or external-window fallback exists."""
+import ctypes as C
 import importlib
 import json
 import ntpath
 import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 import sys
 import time
@@ -30,10 +32,169 @@ TABBED_MODULES = {
 }
 
 
+class _SharedCacheFileId(C.Structure):
+    _fields_ = [('VolumeSerialNumber', C.c_uint64), ('FileId', C.c_ubyte * 16)]
+
+
+class _WindowsSharedCacheFiles:
+    """Join a path stat to its actual reader using a borrowed Win32 HANDLE."""
+    def __init__(self, *, _kernel=None, _get_osfhandle=None):
+        if _kernel is None:
+            _kernel = C.WinDLL('kernel32', use_last_error=True)
+        if _get_osfhandle is None:
+            import msvcrt
+            _get_osfhandle = msvcrt.get_osfhandle
+        self.kernel, self.get_osfhandle = _kernel, _get_osfhandle
+        self.kernel.GetFileType.argtypes, self.kernel.GetFileType.restype = [C.c_void_p], C.c_uint32
+        query = self.kernel.GetFileInformationByHandleEx
+        query.argtypes, query.restype = [C.c_void_p, C.c_int32, C.c_void_p, C.c_uint32], C.c_int32
+        if sys.byteorder != 'little' or C.sizeof(_SharedCacheFileId) != 24:
+            raise ValueError('Shared cache native file ABI is unsupported')
+
+    def identity(self, fd):
+        # Python owns the FD and its HANDLE. Never CloseHandle this borrowed value.
+        handle = self.get_osfhandle(fd)
+        if (type(handle) is not int
+                or C.c_void_p(handle).value in (None, C.c_void_p(-1).value)):
+            raise ValueError('Shared cache reader handle is unavailable')
+        kind = self.kernel.GetFileType(handle)
+        if type(kind) is not int or kind != 1:  # FILE_TYPE_DISK
+            raise ValueError('Shared cache reader is not a disk file')
+        value = _SharedCacheFileId()
+        result = self.kernel.GetFileInformationByHandleEx(handle, 18, C.byref(value), C.sizeof(value))
+        if type(result) is not int or result == 0 or not any(value.FileId):
+            raise ValueError('Shared cache native file identity is unavailable')
+        return value.VolumeSerialNumber, int.from_bytes(bytes(value.FileId), 'little')
+
+
+def _shared_cache_windows_files():
+    return _WindowsSharedCacheFiles() if os.name == 'nt' else None
+
+
 class PrivateProfile:
     """Explicit cleanup only: losing stdin must never delete a live office profile."""
     def __init__(self):
         self.name = tempfile.mkdtemp(prefix='OpenGeul-office-')
+
+    def copy_shared_cache(self, runtime):
+        """Keep shared extension payloads while redirecting startup writes here."""
+        runtime, profile = Path(runtime), Path(self.name)
+
+        def ordinary(path):
+            info = path.lstat()
+            if (stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400
+                    or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                    or stat.S_ISREG(info.st_mode) and info.st_nlink != 1):
+                raise ValueError('Shared cache contains a linked or nonregular entry')
+            return info
+
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+        try:
+            if '..' in runtime.parts or '..' in profile.parts:
+                raise ValueError('Shared cache paths contain a parent component')
+            source = Path(os.path.abspath(runtime / 'share/uno_packages/cache'))
+            destination = Path(os.path.abspath(profile / 'shared-packages-cache'))
+            if (source == destination or source in destination.parents
+                    or destination in source.parents):
+                raise ValueError('Shared cache source and destination overlap')
+            destination_ancestors = set()
+            for parent in reversed(destination.parents):
+                info = ordinary(parent)
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ValueError('Private cache ancestor is not a directory')
+                destination_ancestors.add((info.st_dev, info.st_ino))
+            try:
+                destination.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError('Private cache destination is not fresh')
+            ancestors = []
+            missing = None
+            for path in (*reversed(source.parents), source):
+                try:
+                    info = ordinary(path)
+                except FileNotFoundError:
+                    # Only confirmed absence is empty; access/type failures abort.
+                    missing = path
+                    break
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ValueError('Shared cache ancestor is not a directory')
+                if path == source and (info.st_dev, info.st_ino) in destination_ancestors:
+                    raise ValueError('Shared cache source physically contains its destination')
+                ancestors.append((path, identity(info)[:3]))
+            else:
+                windows_files = _shared_cache_windows_files()
+                observed, directories = [], []
+                pending = [(source, destination)]
+                while pending:
+                    parent, target = pending.pop()
+                    before = ordinary(parent)
+                    if not stat.S_ISDIR(before.st_mode):
+                        raise ValueError('Shared cache directory changed type')
+                    observed.append((parent, identity(before)))
+                    target.mkdir()
+                    directories.append((target, before))
+                    for entry in parent.iterdir():
+                        info = ordinary(entry)
+                        copied = target / entry.name
+                        if stat.S_ISDIR(info.st_mode):
+                            pending.append((entry, copied))
+                            continue
+                        expected = identity(info)
+                        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+                        with os.fdopen(os.open(entry, flags), 'rb', buffering=0) as reader:
+                            fd_info = os.fstat(reader.fileno())
+                            opened = identity(fd_info)
+                            if windows_files is None:
+                                if opened != expected:
+                                    raise ValueError('Shared cache opened file identity differs')
+                            else:
+                                native_id = windows_files.identity(reader.fileno())
+                                if native_id != (info.st_dev, info.st_ino) or fd_info.st_size != info.st_size:
+                                    raise ValueError('Shared cache native reader differs from its path')
+                            if identity(ordinary(entry)) != expected:
+                                raise ValueError('Shared cache file changed before copying')
+                            with copied.open('xb') as writer:
+                                remaining = info.st_size
+                                while remaining:
+                                    block = reader.read(min(65536, remaining))
+                                    if not block or writer.write(block) != len(block):
+                                        raise OSError('Shared cache copy was incomplete')
+                                    remaining -= len(block)
+                                if reader.read(1):
+                                    raise ValueError('Shared cache file grew while copying')
+                            if identity(os.fstat(reader.fileno())) != opened:
+                                raise ValueError('Shared cache file changed while copying')
+                            if windows_files is not None and windows_files.identity(reader.fileno()) != native_id:
+                                raise ValueError('Shared cache native reader changed while copying')
+                        observed.append((entry, expected))
+                        # Preserve timestamps, without copying readonly attributes/ACLs
+                        # into a session-owned tree that the original cleanup removes.
+                        os.utime(copied, ns=(info.st_atime_ns, info.st_mtime_ns))
+                for path, expected in observed:
+                    if identity(ordinary(path)) != expected:
+                        raise ValueError('Shared cache changed while copying')
+                for path, info in reversed(directories):
+                    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+            for path, expected in ancestors:
+                if identity(ordinary(path))[:3] != expected:
+                    raise ValueError('Shared cache ancestor changed while copying')
+            if missing is not None:
+                destination.mkdir()
+                try:
+                    missing.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ValueError('Shared cache absence changed before launch')
+            return destination
+        except (OSError, ValueError):
+            raise WorkerError('runtime_cache_failed',
+                '공유 확장 캐시를 사설 Office 프로필에 보존하지 못했습니다.') from None
 
     def cleanup(self):
         shutil.rmtree(self.name)
@@ -201,8 +362,10 @@ class UnoBackend:
         if not all((program / name).is_file() for name in ('soffice.exe', 'python.exe')):
             raise WorkerError('runtime_missing', '포함된 Windows Office 런타임을 찾을 수 없습니다.')
         self.profile = PrivateProfile()
+        shared_cache = self.profile.copy_shared_cache(self.runtime)
         argv = [str(program / 'soffice.exe'), '--invisible', '--nologo', '--nodefault', '--norestore',
                 '--nofirststartwizard', '-env:UserInstallation=' + Path(self.profile.name).as_uri(),
+                '-env:UNO_SHARED_PACKAGES_CACHE=' + shared_cache.as_uri(),
                 '--accept=pipe,name=' + self.pipe + ';urp;StarOffice.ServiceManager']
         if self.process_factory is None:
             from native_windows import OwnedOfficeProcess
