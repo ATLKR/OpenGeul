@@ -477,7 +477,7 @@
   "nativeTargets": {
     "filename": "native-targets.json",
     "size": 1987,
-    "sha256": "c499f23d476fb9b88270871732f7c4d4102fb857ea92e1d5af287dc6d2655b56"
+    "sha256": "ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc"
   },
   "nativeSourceRecipes": {
     "windows-arm64-v1": {

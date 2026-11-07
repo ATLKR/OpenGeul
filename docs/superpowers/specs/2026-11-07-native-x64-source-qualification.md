@@ -37,7 +37,7 @@ acceptance inputs. The initial x64 mode supports normal Full only, without symbo
 | `suite/engine-build/source-build.json` | Existing source/patch pins plus the policy digest and exact reviewed recipe membership/before-and-after hashes. Existing ARM patch outputs remain pinned. |
 | `suite/engine-build/apply_native_source.py` (new) | `apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict`; CLI accepts the same finite architecture and two filesystem paths. Reads only the fixed tracked manifests. Applies an authenticated exact recipe; unknown/unclassified hooks fail closed. |
 | `suite/scripts/build-native-engine.ps1` | One lifecycle: admission, native preflight, source acquisition/recipe, configure, compile, stage, PE/CRT/import checks, native Base proof, cleanup and archive/receipt. Target-sensitive helpers accept explicit finite `Architecture`, never arbitrary caller maps. |
-| `.github/workflows/office-native-engine-x64.yml` (new) | Fixed x64 job `native-firebird-and-office-x64`, runner `windows-2025`, producer branch `work/opengeul-office-native-engine-x64`; invokes the shared driver with explicit `x64`. |
+| `.github/workflows/office-native-engine-x64.yml` (new) | Fixed x64 job `native-firebird-and-office-x64`, runner `windows-2022`, producer branch `work/opengeul-office-native-engine-x64`; invokes the shared driver with explicit `x64`. |
 | `.github/workflows/office-native-engine.yml` | Established ARM workflow/ref/runner stay unchanged during initial producer-only rollout. Later reviewed shared-driver ARM validation uses a separate Full run. |
 | `suite/crt.py` and existing producer `Get-CrtNames` | Preserve the existing exact nine/eight-file families and their conformance test; reuse existing PE/import primitives. Add no new filename list. |
 | `suite/scripts/fetch-source-engine.ps1` | Select fixed trusted policy from independently selected lock architecture; authenticate the whole producer run, artifact and exact two-member archive. |
@@ -80,6 +80,20 @@ inventory is insufficient. Missing the fixed profile stops with bounded,
 secret-free evidence; no alternative SDK or compiler is selected automatically.
 Pinned tooling exceptions (for example authenticated helper executables) retain
 their existing exact roles/hashes, not a wholesale replacement of PE constants.
+
+The x64 workflow explicitly uses the standard `windows-2022` runner. Its
+[official image inventory](https://raw.githubusercontent.com/actions/runner-images/main/images/windows/Windows2022-Readme.md)
+(version `20261101.353.1`, checked 2026-11-07) lists VS2022, native C++ components
+and JDK21. This is a host choice, not proof of installed capability: the same
+fixed VS2022/v143 preflight must pass on the actual allocated runner. The first
+`windows-2025` run passed its 25 Windows unit checks but returned zero instances
+from the filtered VS2022/native-component query and stopped before compilation
+or source acquisition. This does not establish that all VS2022 installations
+were absent; the
+[Windows 2025 inventory](https://raw.githubusercontent.com/actions/runner-images/main/images/windows/Windows2025-Readme.md)
+also lists VS2022. Zero or ambiguous filtered selections retain a read-only
+unfiltered instance diagnostic under the same deadline and still fail closed.
+There is no automatic runner/profile fallback or tool installation.
 
 The reviewed source-policy inventory approves exactly `moduleBootstrap` then
 `winAccFocusOrder` for x64. Both are common exact-hash corrections whose

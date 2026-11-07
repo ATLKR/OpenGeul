@@ -1,4 +1,6 @@
 """Fixed independent native source workflows; portable policy, not Windows proof."""
+import hashlib
+import json
 from pathlib import Path
 import unittest
 import yaml
@@ -7,6 +9,20 @@ ROOT=Path(__file__).resolve().parents[2]
 
 
 class NativeSourceWorkflowTests(unittest.TestCase):
+    def test_workflow_runners_match_authenticated_finite_target_policy(self):
+        from suite.tests.test_native_source_recipe import load
+        engine=ROOT/'suite/engine-build'
+        raw=(engine/'native-targets.json').read_bytes()
+        manifest=json.loads((engine/'source-build.json').read_bytes())
+        self.assertEqual({'filename':'native-targets.json','size':len(raw),
+                          'sha256':hashlib.sha256(raw).hexdigest()},manifest['nativeTargets'])
+        dispatcher=load('apply_native_source')
+        for architecture,row in json.loads(raw)['targets'].items():
+            with self.subTest(architecture=architecture):
+                dispatcher._select_plan(manifest,raw,architecture)
+                workflow=yaml.safe_load((ROOT/row['workflow']).read_text())
+                self.assertEqual(row['runner'],workflow['jobs'][row['job']]['runs-on'])
+
     def test_owner_then_isolated_units_then_native_preflight_and_downloads(self):
         steps=self.workflow('x64')['jobs']['native-firebird-and-office-x64']['steps']
         owner=next(i for i,step in enumerate(steps) if 'Assert-NativeEngineEnvironment x64' in step.get('run',''))
@@ -29,7 +45,7 @@ class NativeSourceWorkflowTests(unittest.TestCase):
         value=self.workflow('x64');job=value['jobs']['native-firebird-and-office-x64']
         self.assertEqual({'contents':'read'},value['permissions'])
         self.assertEqual(['work/opengeul-office-native-engine-x64'],value['on']['push']['branches'])
-        self.assertEqual('windows-2025',job['runs-on']);self.assertEqual(360,job['timeout-minutes'])
+        self.assertEqual('windows-2022',job['runs-on']);self.assertEqual(360,job['timeout-minutes'])
         self.assertIn('AddMinutes(330)',job['steps'][0]['run'])
         setup=next(step for step in job['steps'] if step.get('uses','').startswith('actions/setup-python@'))
         self.assertEqual({'python-version':'3.12','architecture':'x64'},setup['with'])

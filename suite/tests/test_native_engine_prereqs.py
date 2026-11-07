@@ -22,6 +22,79 @@ def import_library(machine):
 
 
 class NativeJavaPrerequisiteTests(unittest.TestCase):
+    def vs_selection_failure(self, count, diagnostic='success'):
+        case=self.root/(str(count)+'-'+diagnostic);case.mkdir()
+        vswhere=case/'Microsoft Visual Studio/Installer/vswhere.exe'
+        vswhere.parent.mkdir(parents=True);vswhere.write_bytes(b'synthetic vswhere seam')
+        instance=dict(installationPath=str(case/'VS'),installationVersion='17.14.1',
+                      isComplete=True,isLaunchable=True,isPrerelease=False)
+        filtered=case/'filtered.json';filtered.write_text(json.dumps([instance]*count))
+        unfiltered=case/'installed.json';unfiltered.write_text(json.dumps([instance]))
+        evidence=case/'evidence';calls=case/'calls.json'
+        body=f"""
+${{env:ProgramFiles(x86)}}={quote(case)}
+function Assert-NativeEngineEnvironment {{param($Architecture)}}
+function Get-NativeBuildHost {{param($Architecture) @{{isWindows=$true;processMachine=0;nativeMachine=34404}}}}
+function Get-SourceRunBinding {{@{{sourceCommit=('a'*40);sourceTree=('b'*40)}}}}
+function Resolve-NativeJdk {{@{{home='synthetic'}}}}
+function Resolve-Ant {{@{{home='synthetic'}}}}
+function Get-NativeCompilerPlan {{throw 'COMPILER MUST NOT RUN'}}
+function Get-AuthenticatedDownload {{throw 'DOWNLOAD MUST NOT RUN'}}
+$script:queries=[Collections.Generic.List[object]]::new();$script:diagnosticChildStarted=$false
+function Invoke-LoggedCommand($FilePath,$Arguments,$WorkingDirectory,$LogPrefix,[switch]$NativeEnvironment,[double]$TimeoutMinutes=350) {{
+ if(-not $NativeEnvironment -or $FilePath -cne {quote(vswhere)}){{throw 'Unexpected native query'}}
+ if($script:queries.Count -eq 0) {{
+  $script:queryBudget=$script:NativeEngineBuildBudget;$script:queryRemaining=Get-NativeBuildRemaining
+  $script:queries.Add(@{{arguments=@($Arguments);prefix=[IO.Path]::GetFileName($LogPrefix)}})
+  if('{diagnostic}' -ceq 'expired'){{$script:queryBudget.clock=[pscustomobject]@{{Elapsed=[pscustomobject]@{{TotalMilliseconds=($script:queryBudget.record.timeoutMilliseconds+1);TotalSeconds=20000}}}}}}
+  return @{{stdout={quote(filtered)};exitCode=0;passed=$true}}
+ }}
+ if(-not [object]::ReferenceEquals($script:queryBudget,$script:NativeEngineBuildBudget) -or (Get-NativeBuildRemaining) -gt $script:queryRemaining){{throw 'Diagnostic reset original budget'}}
+ $script:diagnosticChildStarted=$true
+ $script:queries.Add(@{{arguments=@($Arguments);prefix=[IO.Path]::GetFileName($LogPrefix);timeoutMinutes=$TimeoutMinutes}})
+ if('{diagnostic}' -ceq 'failure'){{throw 'Synthetic diagnostic query failure'}}
+ return @{{stdout={quote(unfiltered)};exitCode=0;passed=$true}}
+}}
+$failed=$false
+try {{Invoke-NativeEngineBuild Full {quote(case/'work')} {quote(evidence)} '' 4 -Architecture x64}}
+catch {{if($_.Exception.Message -notmatch 'Exactly one complete installed release VS2022 native profile'){{throw}};$failed=$true}}
+if(-not $failed){{throw 'Invalid profile produced success'}}
+Write-BuildJson {quote(calls)} @{{queries=@($script:queries);diagnosticChildStarted=$script:diagnosticChildStarted}}
+"""
+        self.ps(body)
+        receipt=json.loads((evidence/'source-build-receipt.json').read_text())
+        for field in ('passed','fullEngineQualified','acceptanceEligible','guiVerified'):
+            self.assertIs(False,receipt[field])
+        self.assertEqual('native-toolchain-preflight',receipt['stage'])
+        self.assertFalse(list(evidence.glob('*.zip')))
+        observed=json.loads(calls.read_text())
+        self.assertEqual(['-products','*','-version','[17,18)','-requires',
+            'Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-format','json','-utf8'],observed['queries'][0]['arguments'])
+        proof=json.loads((evidence/'native-vs-installed-diagnostic.json').read_text())
+        self.assertTrue(proof['diagnosticOnly']);self.assertFalse(proof['selectedForBuild'])
+        self.assertEqual(count,proof['filteredInstanceCount'])
+        return observed,proof
+
+    def test_x64_missing_or_ambiguous_vs_retains_diagnostics_without_selecting_them(self):
+        for count in (0,2):
+            with self.subTest(count=count):
+                observed,proof=self.vs_selection_failure(count)
+                self.assertTrue(proof['queryPassed']);self.assertTrue(observed['diagnosticChildStarted'])
+                self.assertEqual(2,len(observed['queries']))
+                self.assertEqual(['-all','-prerelease','-products','*','-format','json','-utf8'],observed['queries'][1]['arguments'])
+                self.assertEqual('native-vs-installed',observed['queries'][1]['prefix'])
+                self.assertEqual(1,observed['queries'][1]['timeoutMinutes'])
+
+    def test_x64_failed_vs_diagnostic_preserves_original_profile_rejection(self):
+        observed,proof=self.vs_selection_failure(0,'failure')
+        self.assertFalse(proof['queryPassed']);self.assertTrue(observed['diagnosticChildStarted'])
+        self.assertIn('errorType',proof)
+
+    def test_x64_vs_diagnostic_expiry_cannot_reset_budget_or_start_child(self):
+        observed,proof=self.vs_selection_failure(0,'expired')
+        self.assertFalse(proof['queryPassed']);self.assertFalse(observed['diagnosticChildStarted'])
+        self.assertEqual(1,len(observed['queries']))
+
     def test_x64_compiler_profile_requires_exact_native_cl_link_and_lib(self):
         root=self.root/'VS';compiler=root/'VC/Tools/MSVC/14.44.35207';tools=compiler/'bin/Hostx64/x64';tools.mkdir(parents=True)
         for name in ('cl','link','lib'): (tools/(name+'.exe')).write_bytes(pe(0x8664))

@@ -16,7 +16,7 @@ import stat
 
 HERE = Path(__file__).resolve().parent
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
-POLICY_SHA256 = 'c499f23d476fb9b88270871732f7c4d4102fb857ea92e1d5af287dc6d2655b56'
+POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
            'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'winAccFocusOrder'])}
 ARM_PATHS = ('configure.ac', 'external/firebird/UnpackedTarball_firebird.mk',

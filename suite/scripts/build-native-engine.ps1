@@ -710,6 +710,16 @@ function Invoke-NativeX64Preflight([string]$WorkingDirectory,[string]$EvidenceDi
     $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe';Assert-UnlinkedPath $vswhere
     $found=Invoke-LoggedCommand $vswhere @('-products','*','-version','[17,18)','-requires','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-format','json','-utf8') $WorkingDirectory (Join-Path $EvidenceDirectory 'native-vs-selection') -NativeEnvironment
     $instances=@(Get-Content -LiteralPath $found.stdout -Raw|ConvertFrom-Json)
+    if($instances.Count -ne 1) {
+        # Observe installed instances after rejection only; never select from
+        # this unfiltered query or reset the original build deadline.
+        $diagnostic=[ordered]@{schemaVersion=1;diagnosticOnly=$true;selectedForBuild=$false;filteredInstanceCount=$instances.Count;queryPassed=$false}
+        try {
+            $diagnostic.command=Invoke-LoggedCommand $vswhere @('-all','-prerelease','-products','*','-format','json','-utf8') $WorkingDirectory (Join-Path $EvidenceDirectory 'native-vs-installed') -TimeoutMinutes 1 -NativeEnvironment
+            $diagnostic.queryPassed=$true
+        } catch {$diagnostic.errorType=$_.Exception.GetType().FullName}
+        Write-BuildJson (Join-Path $EvidenceDirectory 'native-vs-installed-diagnostic.json') $diagnostic
+    }
     if($instances.Count -ne 1 -or $instances[0].isComplete -ne $true -or $instances[0].isLaunchable -ne $true -or $instances[0].isPrerelease -ne $false) {throw 'Exactly one complete installed release VS2022 native profile is required.'}
     $compiler=Get-NativeCompilerPlan $instances[0].installationPath $instances[0].installationVersion x64
     $registry=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\Windows\v10.0' -ErrorAction Stop

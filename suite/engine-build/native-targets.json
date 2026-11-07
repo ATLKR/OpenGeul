@@ -41,7 +41,7 @@
       "compilerTools": "Hostx64/x64",
       "sourceRecipe": "windows-x64-common-v2",
       "proofVersion": 2,
-      "runner": "windows-2025",
+      "runner": "windows-2022",
       "runnerArchitecture": "X64",
       "requiredBuildTypes": [
         "FIREBIRD",

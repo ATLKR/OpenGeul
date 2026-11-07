@@ -38,7 +38,7 @@ class NativeEngineTargetTests(unittest.TestCase):
                           'sha256': hashlib.sha256(POLICY.read_bytes()).hexdigest()}, pin)
         for arch, machine, cpu, triple, distro, year, toolset, tools, recipe, version, runner, runner_arch in (
             ('arm64', 0xaa64, 'AARCH64', 'aarch64-pc-cygwin', 'LibreOfficeWinArm64', '2026', 'v145', 'Hostarm64/arm64', 'windows-arm64-v1', 1, 'windows-11-arm', 'ARM64'),
-            ('x64', 0x8664, 'X86_64', 'x86_64-pc-cygwin', 'LibreOfficeWin64', '2022', 'v143', 'Hostx64/x64', 'windows-x64-common-v2', 2, 'windows-2025', 'X64')):
+            ('x64', 0x8664, 'X86_64', 'x86_64-pc-cygwin', 'LibreOfficeWin64', '2022', 'v143', 'Hostx64/x64', 'windows-x64-common-v2', 2, 'windows-2022', 'X64')):
             suffix = '-x64' if arch == 'x64' else ''
             expected = dict(architecture=arch, nativeMachine=machine, productMachine=machine, processMachine=0,
                 configureCpu=cpu, configureTriple=triple, distro=distro, compilerYear=year, toolset=toolset,
