@@ -28,6 +28,209 @@ def load_smoke():
     return module
 
 
+def assert_source_cli_dispatch(test,module,helper_name,inputs):
+    """CLI-only boundary double. No process/Gate/source qualification is claimed."""
+    import native_menu_smoke as common
+    folder=Path(test.enterContext(tempfile.TemporaryDirectory())).resolve()
+    paths={name:folder/name for name in ('suite',*inputs)}
+    for value in paths.values():value.mkdir()
+    prepared=object();pending=lambda:False
+    for architecture in (None,'arm64'):
+        output=folder/('default' if architecture is None else 'selected')
+        argv=[part for name,path in paths.items() for part in ('--'+name,str(path))]+['--output',str(output)]
+        if architecture:argv+=['--source-qualified-menu',architecture]
+        order=[]
+        @contextlib.contextmanager
+        def cohort(suite,arch,evidence):
+            test.assertEqual((suite,arch,evidence),(paths['suite'],'arm64',output));order.append('enter')
+            try:yield prepared,pending
+            finally:order.append('finish')
+        def run(*args,**options):
+            order.append('run')
+            if architecture:
+                test.assertIs(options['source_prepared'],prepared);test.assertIs(options['stop_if_pending'],pending)
+            else:test.assertEqual(options,{})
+            return 17
+        with patch.object(module,'os',SimpleNamespace(name='nt')), \
+                patch.object(module,helper_name,run),patch.object(common,'source_menu_cohort',cohort):
+            test.assertEqual(module.main(argv),17)
+        test.assertEqual(order,['run'] if architecture is None else ['enter','run','finish'])
+
+
+class SourceMenuCohortCliTests(unittest.TestCase):
+    """Caller wiring only: synthetic boundaries never qualify native source bytes."""
+    def setUp(self):
+        self.smoke=load_smoke()
+        self.folder=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+
+    def test_source_cli_option_is_explicit_closed_and_default_off(self):
+        parser=self.smoke.argument_parser()
+        self.assertIn('source_qualified_menu',[a.dest for a in parser._actions])
+        base=['--suite','suite','--fixtures','fixtures','--output','output']
+        self.assertIsNone(parser.parse_args(base).source_qualified_menu)
+        for arch in ('x64','arm64'):
+            self.assertEqual(parser.parse_args(base+['--source-qualified-menu',arch]).source_qualified_menu,arch)
+        with contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            parser.parse_args(base+['--source-qualified-menu','auto'])
+
+    def test_source_context_retains_the_real_fence_before_configure_failure(self):
+        method=getattr(self.smoke,'source_menu_cohort',None)
+        self.assertTrue(callable(method),'Source-only outer controller context is missing')
+        from native_menu_controller_fence import _ControllerFence
+        order=[]
+        def pending():
+            order.append('finish')
+            with (self.folder/'source-menu-controller-failure.json').open() as stream:
+                self.assertFalse(json.load(stream)['acceptanceEligible'])
+            return None
+        fence=_ControllerFence(pending,lambda *args:self.fail('No pending termination'),1,
+            lambda *args:self.fail('No pending fallback'))
+        def setup(retain):
+            retain(fence);order.append('configure');raise ValueError('synthetic configure failure')
+        with self.assertRaises(ValueError):
+            with method(self.folder,'arm64',self.folder,setup=setup):self.fail('Failed setup entered cohort')
+        self.assertEqual(order,['configure','finish'])
+
+    def test_source_context_prepares_once_and_closes_before_finish(self):
+        method=getattr(self.smoke,'source_menu_cohort',None)
+        self.assertTrue(callable(method),'Source-only outer controller context is missing')
+        from native_menu_controller_fence import _ControllerFence
+        order=[];prepared=object();helper=SimpleNamespace(pending_msaa_hit=lambda:None)
+        fence=_ControllerFence(lambda:order.append('finish'),lambda *a:None,1,lambda *a:None)
+        def setup(retain):retain(fence);order.append('configure');return helper
+        def prepare(suite,arch,*,deadline):
+            self.assertEqual((suite,arch),(self.folder,'x64'));self.assertEqual(deadline,160.)
+            order.append('prepare');return prepared
+        with method(self.folder,'x64',self.folder,setup=setup,prepare=prepare,clock=lambda:10.) as (value,pending):
+            self.assertIs(value,prepared);self.assertFalse(pending());order.append('evidence-closed')
+        self.assertEqual(order,['configure','prepare','evidence-closed','finish'])
+
+    def test_source_pending_unknown_is_closed_and_never_a_fake_admission(self):
+        method=getattr(self.smoke,'source_menu_pending',None)
+        self.assertTrue(callable(method),'Source cohort boundary pending check is missing')
+        for value,expected in ((None,False),(SimpleNamespace(pending=False),False),
+                               (SimpleNamespace(pending=True),True),(SimpleNamespace(pending=0),True)):
+            self.assertIs(method(SimpleNamespace(pending_msaa_hit=lambda:value)),expected)
+        def failed():raise ValueError('synthetic registry failure')
+        self.assertTrue(method(SimpleNamespace(pending_msaa_hit=failed)))
+
+    def test_source_summary_and_detached_hwp_replay_require_explicit_actual_context(self):
+        import inspect
+        self.assertIn('source_prepared',inspect.signature(self.smoke.run_modules).parameters)
+        self.assertIn('source_admission',inspect.signature(self.smoke.require_hwp_launcher_receipt).parameters)
+
+    def test_source_selected_cleanup_retires_the_existing_capsule_without_legacy_flags(self):
+        import native_menu_msaa_hit as hit
+        session=self.smoke.WindowsSession(self.folder,self.folder,self.folder,'writer')
+        session.source_prepared=object()  # Cleanup dispatch only, never source authority.
+        session.engine=SimpleNamespace(exited=lambda seconds:True,handle=88,close_handle=lambda handle:True)
+        class Lease:
+            pending=True
+            def retire(self,deadline):
+                self.pending=False;return dict(retired=1)
+        lease=Lease();record={}
+        with patch.object(hit,'pending_msaa_hit',return_value=lease):
+            result=session.cleanup(record)
+        self.assertFalse(lease.pending,'Selected source capsule skipped the original bounded retirement')
+        self.assertTrue(result);self.assertTrue(record['nativePointCallbackRetired'])
+
+    def test_source_cli_dispatch_does_not_relabel_the_default_diagnostic(self):
+        import inspect
+        self.assertIn('_run_source_qualified',inspect.getsource(self.smoke.main))
+        for arch,expected in ((None,3),('arm64',4)):
+            suite=self.folder/'suite';fixtures=self.folder/'fixtures';suite.mkdir(exist_ok=True);fixtures.mkdir(exist_ok=True)
+            output=self.folder/('out-default' if arch is None else 'out-source')
+            options=['--suite',str(suite),'--fixtures',str(fixtures),'--output',str(output)]
+            if arch:options+=['--source-qualified-menu',arch]
+            with patch.object(self.smoke,'os',SimpleNamespace(name='nt')), \
+                    patch.object(self.smoke,'_run_point_profile',return_value=3) as legacy, \
+                    patch.object(self.smoke,'_run_source_qualified',return_value=4) as selected:
+                self.assertEqual(self.smoke.main(options),expected)
+            self.assertEqual(selected.call_count,int(arch is not None));self.assertEqual(legacy.call_count,int(arch is None))
+
+    def test_source_pending_terminal_keeps_case_evidence_before_outer_fence(self):
+        import native_menu_msaa_hit as hit
+        class PendingTerminal(BaseException):pass
+        boundary=Session()
+        def failed(record):raise PendingTerminal()
+        boundary.open=failed
+        try:
+            with patch.object(hit,'pending_msaa_hit',return_value=SimpleNamespace(pending=True)):
+                value=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',
+                    session_factory=lambda *args:boundary,source_prepared=object())
+        except PendingTerminal:self.fail('Pending terminal escaped before a partial menu case was returned')
+        self.assertTrue(value['cleanupConfirmed']);self.assertFalse(value['success'])
+        self.assertEqual(value['errorType'],'PendingTerminal');self.assertNotIn('sourceMenuAdmission',value)
+
+    def test_source_actual_setup_orders_imports_install_retain_and_configure(self):
+        import builtins
+        import native_menu_controller_fence as fences
+        order=[]
+        fence=fences._ControllerFence(lambda:None,lambda *a:None,1,lambda *a:None)
+        def configure(*,pending_fence):
+            self.assertIs(pending_fence.__self__,fence);order.append('configure')
+        helper=SimpleNamespace(pending_msaa_hit=lambda:None,configure_native_launch=configure)
+        original=builtins.__import__
+        def imported(name,*args,**options):
+            if name in ('pywinauto','comtypes'):
+                order.append(name);return SimpleNamespace()
+            if name=='native_menu_msaa_hit':return helper
+            return original(name,*args,**options)
+        def install(pending,*,enabled):
+            self.assertIs(pending,helper.pending_msaa_hit);self.assertIs(enabled,True)
+            order.append('install');return fence
+        def retain(value):self.assertIs(value,fence);order.append('retain')
+        with patch.object(builtins,'__import__',imported),patch.object(fences,'install',install):
+            self.assertIs(self.smoke._configure_source_menu(retain),helper)
+        self.assertEqual(order,['pywinauto','comtypes','install','retain','configure'])
+
+    def test_source_report_joins_real_prepared_identity_and_never_qualifies_synthetic_ui(self):
+        import time
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        fixture=SourceMenuSelectionTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        prepared=fixture.prepared();selection=fixture.selected(prepared)
+        import native_menu_source_admission as gate
+        self.assertIs(type(prepared.admission),gate.SourceMenuAdmission)
+        def factory(*args):
+            session=Session();session.source_prepared=prepared
+            session.process=SimpleNamespace(opengeul_source_menu_selection=selection)
+            return session
+        output=self.folder/'selected';output.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            value=self.smoke.run_modules(fixture.suite,self.folder,output,
+                session_factory=factory,source_prepared=prepared)
+        self.assertEqual(value['nativePointProfileVersion'],4)
+        self.assertEqual(value['sourceSelectionMatchedCaseCount'],6)
+        expected=json.loads(json.dumps(prepared.admission.summary(),default=dict,allow_nan=False))
+        self.assertEqual(value['sourceMenuAdmission'],expected)
+        for invalid in (True,expected):
+            with self.assertRaises(ValueError):self.smoke.source_menu_admission_summary(invalid)
+        self.assertFalse(value['actualWindowsExecuted']);self.assertFalse(value['success'])
+
+    def test_source_no_popen_or_mixed_context_cannot_claim_v4_or_fallback_to_diagnostic(self):
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        fixture=SourceMenuSelectionTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        prepared=fixture.prepared()
+        for index,factory in enumerate((lambda *a:(_ for _ in ()).throw(ValueError('synthetic no Popen')),
+                                        lambda *a:Session())):
+            output=self.folder/('unselected-'+str(index));output.mkdir()
+            with contextlib.redirect_stdout(io.StringIO()):
+                value=self.smoke.run_modules(fixture.suite,self.folder,output,
+                    session_factory=factory,source_prepared=prepared)
+            self.assertFalse(value['success']);self.assertEqual(value['nativePointProfileVersion'],0)
+            self.assertNotIn('sourceMenuAdmission',value);self.assertNotIn('diagnosticProfile',value)
+
+    def test_source_pending_before_preflight_closes_empty_cohort_without_native_launch(self):
+        import native_menu_msaa_hit as hit
+        @contextlib.contextmanager
+        def context(*args):yield object(),lambda:True
+        with patch.object(self.smoke,'source_menu_cohort',context), \
+                patch.object(hit,'verify_native_thread_boundary',return_value=dict(nativeBoundaryPassed=0)) as launch, \
+                patch.object(self.smoke,'run_modules',return_value=dict(success=False)) as modules:
+            code=self.smoke._run_source_qualified(self.folder,self.folder,self.folder,'arm64')
+        self.assertEqual(code,1);launch.assert_not_called();modules.assert_called_once()
+
+
 def status_sample(at, started, completed, *, target=True, preview=True, menu_visible=True):
     """Synthetic numeric publisher evidence, never a Windows status RPC."""
     return dict(observedAt=at, targetMatched=target,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 import copy
 import ctypes
 import json
@@ -381,7 +382,21 @@ def capture_initial_focus_trace(session, record, *, retired=False, expected_iden
         return unknown(code)
 
 
-def require_hwp_launcher_receipt(value, writer, suite):
+def source_menu_admission_summary(admission):
+    """Serialize an actual sealed Gate; stored JSON never recreates its authority."""
+    from collections.abc import Mapping
+    from native_menu_source_admission import SourceMenuAdmission
+    if type(admission) is not SourceMenuAdmission:raise ValueError('Actual source Gate is required')
+    def plain(value):
+        if isinstance(value,Mapping):return {key:plain(child) for key,child in value.items()}
+        if type(value) is tuple:return [plain(child) for child in value]
+        if type(value) in (str,int,bool,type(None)):return value
+        if type(value) is float and math.isfinite(value):return value
+        raise ValueError('Source Gate summary has a non-JSON identity field')
+    return plain(admission.summary())
+
+
+def require_hwp_launcher_receipt(value, writer, suite, *, source_admission=None):
     """Replay the one launcher without native calls or a document/Home claim."""
     from owned_native_menu import require_native_menu_action
     from lifecycle_smoke import require_hwp_census_receipt
@@ -396,7 +411,8 @@ def require_hwp_launcher_receipt(value, writer, suite):
         assert value['launchKind']=='no-argument-launcher' and value['noArgumentBasis']=='native-new-hwp-shell-route'
         assert type(value['closeRequests']) is int and value['closeRequests']==1
         shell_pid,document=writer['shellPid'],writer['windowHwnd']
-        action=value['menuAction'];require_native_menu_action(action,shell_pid,document,'new-hwp')
+        authority={} if source_admission is None else dict(source_admission=source_admission)
+        action=value['menuAction'];require_native_menu_action(action,shell_pid,document,'new-hwp',**authority)
         assert action['gesture'] is False
         assert action['binding']==dict(document=document,parent=writer['parentHwnd'],child=writer['childHwnd'],officePid=writer['officePid'])
         office=writer['nativeArchiveGeneration'];engine=action['originalEngine']
@@ -485,6 +501,7 @@ class WindowsSession:
         self.native_point_profile = False
         self.native_point_profile_version = 1
         self.native_identity_diagnostic = 0
+        self.source_prepared = None
 
     def open(self, record):
         entry_deadline = time.monotonic() + 150
@@ -501,8 +518,9 @@ class WindowsSession:
         import owned_native_menu as menu
         from pywinauto import Desktop
         self.native, self.menu, self.desktop = native, menu, Desktop
+        options=native.source_menu_launch_options(self.source_prepared,deadline=entry_deadline) if self.source_prepared is not None else {}
         self.process = native.launch_suite(native.new_document_command(self.suite, self.module),
-            self.suite, self.output, record['case'])
+            self.suite, self.output, record['case'],**options)
         if profile:
             self.process.opengeul_native_menu_point_profile = True
             self.process.opengeul_native_menu_point_profile_version = profile_version
@@ -1056,7 +1074,7 @@ class WindowsSession:
                 record['engineHandleReleased'] = engine_released
                 if engine_released:
                     self.engine.handle = None
-        if getattr(self,'native_point_profile',False):
+        if getattr(self,'native_point_profile',False) or getattr(self,'source_prepared',None) is not None:
             from native_menu_msaa_hit import pending_msaa_hit
             lease = pending_msaa_hit()
             if lease is not None:
@@ -1071,7 +1089,7 @@ class WindowsSession:
         return bool(shell_done and engine_done and engine_released and callback_done and not getattr(self,'hwp_unretired',False))
 
 
-def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession):
+def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession, source_prepared=None):
     if module not in MODULES:
         raise ValueError('Unknown native menu module')
     record = dict(case='native-menu-' + module, module=module, success=False,
@@ -1092,6 +1110,14 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
         if diagnostic:record.update(diagnosticProfile=3,diagnosticOnly=1,acceptanceEligible=0,diagnosticComplete=0)
         record['actualWindowsExecuted'] = session.actual_windows is True and os.name == 'nt'
         session.open(record)
+        if source_prepared is not None:
+            from native_menu_source_selection import PreparedSourceMenu, SourceMenuSelection
+            from native_menu_source_admission import SourceMenuAdmission
+            assert type(source_prepared) is PreparedSourceMenu and type(source_prepared.admission) is SourceMenuAdmission
+            assert getattr(session,'source_prepared',None) is source_prepared
+            selection=getattr(session.process,'opengeul_source_menu_selection',None)
+            assert type(selection) is SourceMenuSelection and selection.prepared is source_prepared
+            record.update(nativePointProfileVersion=4,sourceMenuAdmission=source_menu_admission_summary(source_prepared.admission))
         record['stage'] = 'require-native-menu'
         assert session.ready() is True, 'The actual native menu surface is unavailable'
         record['stage'] = 'capture-initial-owned-blank-chrome'
@@ -1119,12 +1145,23 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
             result = session.hwp_launcher(record)
             assert type(result) is dict and result.get('success') is True
             assert result.get('kind') == 'owned-native-hwp-launcher'
-            if type(session) is WindowsSession: require_hwp_launcher_receipt(result,record,suite)
+            if type(session) is WindowsSession:
+                authority={}
+                if source_prepared is not None:
+                    selection=session.process.opengeul_source_menu_selection
+                    assert selection.prepared is source_prepared
+                    authority=dict(source_admission=selection.prepared.admission)
+                require_hwp_launcher_receipt(result,record,suite,**authority)
             record['hwpLauncherCompleted'] = True
         record['stage'] = 'close-original-document-and-home'
         assert session.finish(record) is True
         record.update(success=True, scenarioCompleted=True)
-    except Exception as exc:
+    except BaseException as exc:
+        if not isinstance(exc,Exception):
+            if source_prepared is None:raise
+            import native_menu_msaa_hit as helper
+            if not source_menu_pending(helper):raise
+            record['sourceMenuCohortPending']=True
         record['errorType'] = type(exc).__name__
     finally:
         if session is not None:
@@ -1197,13 +1234,16 @@ def require_native_point_preflight(value):
     assert all(value[key]>0 for key in ('controllerPid','threadId','threadBirth'))
 
 
-def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, point_preflight=None,identity_diagnostic=0):
+def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, point_preflight=None,identity_diagnostic=0,source_prepared=None,stop_if_pending=None):
     assert type(identity_diagnostic) is int and identity_diagnostic in (0,3)
     assert not identity_diagnostic or point_preflight is not None
+    assert source_prepared is None or identity_diagnostic==0
     if point_preflight is not None:require_native_point_preflight(point_preflight)
     records = []
     for module in MODULES:
-        record = run_case(suite, fixtures, output, module, session_factory=session_factory)
+        if stop_if_pending is not None and stop_if_pending():break
+        options={} if source_prepared is None else dict(source_prepared=source_prepared)
+        record = run_case(suite, fixtures, output, module, session_factory=session_factory,**options)
         assert not identity_diagnostic or record.get('diagnosticProfile')==3
         records.append(record)
         with (output / (record['case'] + '.json')).open('x', encoding='utf-8') as stream:
@@ -1212,6 +1252,7 @@ def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, poin
             'errorType', record.get('cleanupErrorType', 'unconfirmed cleanup'))), flush=True)
         if not record['cleanupConfirmed']:
             break  # An unretired original engine cannot authorize the next case.
+        if stop_if_pending is not None and stop_if_pending():break
     counts = Counter(row['module'] for row in records)
     complete = tuple(row['module'] for row in records) == MODULES and all(n == 1 for n in counts.values())
     scenario_success = complete and all(row['success'] for row in records)
@@ -1233,6 +1274,17 @@ def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, poin
         externalAcceptanceGates=list(EXTERNAL_GATES), tests=records)
     report.update(nativePointProfileVersion=2 if point_preflight is not None and not identity_diagnostic else 0,
         nativePointPreflight=point_preflight)
+    if source_prepared is not None:
+        from native_menu_source_selection import PreparedSourceMenu
+        from native_menu_source_admission import SourceMenuAdmission
+        assert type(source_prepared) is PreparedSourceMenu and type(source_prepared.admission) is SourceMenuAdmission
+        summary=source_menu_admission_summary(source_prepared.admission)
+        matched=sum(row.get('nativePointProfileVersion')==4 and row.get('sourceMenuAdmission')==summary for row in records)
+        report.update(nativePointProfileVersion=4 if records and matched==len(records) else 0,
+            sourceSelectionExpectedCaseCount=len(MODULES),sourceSelectionMatchedCaseCount=matched)
+        if records and matched==len(records):report['sourceMenuAdmission']=summary
+        if matched!=len(records) or not complete:
+            report.update(success=False,scenarioSuccess=False,nativeMenuVerified=False)
     if identity_diagnostic:
         assert report['success'] is False and report['nativeMenuVerified'] is False and report['scenarioSuccess'] is False
         report.update(diagnosticProfile=3,diagnosticOnly=1,acceptanceEligible=0,scenarioCompleted=False)
@@ -1245,7 +1297,65 @@ def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('suite', 'fixtures', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--source-qualified-menu', choices=('x64','arm64'))
     return parser
+
+
+def source_menu_pending(helper):
+    """An unknown registry blocks the next case; it is never admission evidence."""
+    try:
+        lease=helper.pending_msaa_hit()
+        if lease is None:return False
+        pending=lease.pending
+        return type(pending) is not bool or pending
+    except BaseException:
+        return True
+
+
+def _configure_source_menu(retain):
+    import pywinauto
+    import comtypes
+    import native_menu_msaa_hit as helper
+    from native_menu_controller_fence import install, _ControllerFence
+    fence=install(helper.pending_msaa_hit,enabled=True)
+    if type(fence) is not _ControllerFence:raise ValueError('Actual source menu controller fence is required')
+    retain(fence)
+    helper.configure_native_launch(pending_fence=fence.finish)
+    return helper
+
+
+@contextmanager
+def source_menu_cohort(suite,architecture,output,*,setup=None,prepare=None,clock=time.monotonic):
+    """Opt-in context: close caller evidence/owned cleanup before this fence."""
+    if architecture not in ('x64','arm64'):raise ValueError('Explicit source menu architecture is required')
+    fence=None;stage=1
+    def retain(value):
+        nonlocal fence
+        from native_menu_controller_fence import _ControllerFence
+        if type(value) is not _ControllerFence or fence is not None:
+            raise ValueError('Source menu cohort must retain one actual controller fence')
+        fence=value
+    try:
+        helper=(setup or _configure_source_menu)(retain)
+        if fence is None:raise ValueError('Source menu controller was not retained')
+        stage=2
+        if prepare is None:
+            from native_menu_source_selection import prepare_source_menu_runtime
+            prepare=prepare_source_menu_runtime
+        prepared=prepare(Path(suite),architecture,deadline=clock()+150)
+        stage=3
+        yield prepared,lambda:source_menu_pending(helper)
+    except BaseException as exc:
+        code=2 if isinstance(exc,KeyboardInterrupt) else 3 if isinstance(exc,SystemExit) else 1 if isinstance(exc,Exception) else 4
+        try:
+            with (Path(output)/'source-menu-controller-failure.json').open('x',encoding='utf-8') as stream:
+                json.dump(dict(schemaVersion=1,success=False,acceptanceEligible=False,
+                    stageCode=stage,exceptionCode=code),stream,allow_nan=False)
+        except BaseException:
+            pass
+        raise
+    finally:
+        if fence is not None:fence.finish()
 
 
 def _configure_native_point_profile():
@@ -1296,6 +1406,28 @@ def _run_point_profile(suite, fixtures, output, *, setup=None):
         fence.finish()
 
 
+def _run_source_qualified(suite,fixtures,output,architecture):
+    with source_menu_cohort(suite,architecture,output) as (prepared,pending):
+        def factory(*args):
+            session=WindowsSession(*args)
+            session.source_prepared=prepared
+            return session
+        if pending():
+            result=run_modules(suite,fixtures,output,session_factory=factory,
+                source_prepared=prepared,stop_if_pending=pending)
+            return 0 if result['success'] else 1
+        import native_menu_msaa_hit as helper
+        boundary=helper.verify_native_thread_boundary(time.monotonic()+5)
+        raw=(json.dumps(boundary,ensure_ascii=False,allow_nan=False,separators=(',',':'))+'\n').encode()
+        assert len(raw)<=64*1024
+        with (output/'native-point-preflight.json').open('xb') as stream:stream.write(raw)
+        if boundary.get('nativeBoundaryPassed')!=1:return 1
+        require_native_point_preflight(boundary)
+        result=run_modules(suite,fixtures,output,session_factory=factory,point_preflight=boundary,
+            source_prepared=prepared,stop_if_pending=pending)
+        return 0 if result['success'] else 1
+
+
 def main(argv=None):
     args = argument_parser().parse_args(argv)
     assert os.name == 'nt' and __debug__, 'Actual Windows GUI with assertions is required'
@@ -1309,6 +1441,8 @@ def main(argv=None):
     assert suite != output and suite not in output.parents
     assert fixtures != output and fixtures not in output.parents
     output.mkdir(parents=True, exist_ok=False)
+    if args.source_qualified_menu is not None:
+        return _run_source_qualified(suite,fixtures,output,args.source_qualified_menu)
     return _run_point_profile(suite, fixtures, output)
 
 

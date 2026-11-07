@@ -93,6 +93,21 @@ def activate_owned_suite(api, process, hwnd, record):
     return activate_suite_window(api.require_foreground, process, hwnd, record)
 
 
+def source_menu_launch_options(source_prepared, *, deadline):
+    if source_prepared is None:return {}
+    from native_menu_source_selection import source_menu_for_launch
+    return dict(source_menu=source_menu_for_launch(source_prepared,deadline=deadline))
+
+
+def source_menu_action_options(process):
+    selection=getattr(process,'opengeul_source_menu_selection',None)
+    return {} if selection is None else dict(source_admission=selection.prepared.admission)
+
+
+def source_menu_replay_options(source_admission):
+    return {} if source_admission is None else dict(source_admission=source_admission)
+
+
 def click_owned_editor(api, process, hwnd, parent, child, office_pid, record):
     from editor_click_readiness import click_editor_once
     return click_editor_once(api.require_foreground, process, hwnd, parent, child, office_pid, record)
@@ -948,7 +963,7 @@ def _base_save_observation_state(observation, shell_pid, document, caption, froz
     return 'ready' if ready else 'pending'
 
 
-def require_base_save_dialog_readiness(evidence, shell_pid, document_hwnd, caption, *, before_input=False, expected_trigger='owned-native-menu-pointer'):
+def require_base_save_dialog_readiness(evidence, shell_pid, document_hwnd, caption, *, before_input=False, expected_trigger='owned-native-menu-pointer', source_admission=None):
     """Replay actual native/UIA receipts without loading Windows libraries."""
     _base_int(shell_pid, positive=True); _base_int(document_hwnd, positive=True)
     assert type(before_input) is bool
@@ -995,7 +1010,7 @@ def require_base_save_dialog_readiness(evidence, shell_pid, document_hwnd, capti
     if not before_input or 'filenameInputStartedAt' in evidence:
         assert _base_time(evidence['filenameInputStartedAt']) >= finished, 'Filename input preceded exact Base readiness'
     if expected_trigger=='owned-native-menu-pointer':
-        require_native_menu_action(evidence['saveMenuAction'],shell_pid,document_hwnd,'save')
+        require_native_menu_action(evidence['saveMenuAction'],shell_pid,document_hwnd,'save',**source_menu_replay_options(source_admission))
         assert evidence['saveMenuAction']['finishedAt']<=start, 'Base picker observation preceded native menu input completion'
     elif expected_trigger=='owned-save-menu-pointer':
         require_save_menu_action(evidence['saveMenuAction'],shell_pid,document_hwnd,caption,evidence)
@@ -1192,7 +1207,7 @@ def _wait_base_save_controls(api, process, document, caption, record, *, open_di
                 if open_dialog:
                     from home_routing_smoke import require_open_dialog_readiness
                     require_open_dialog_readiness(proof, process.pid, document, before_input=True)
-                else:require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True, expected_trigger=expected_trigger)
+                else:require_base_save_dialog_readiness(proof, process.pid, document, caption, before_input=True, expected_trigger=expected_trigger,**source_menu_action_options(process))
                 return dialog, native, wrappers[0], wrappers[1]
             time.sleep(min(0.1, max(0,proof['deadline']-time.monotonic())))
         raise AssertionError('Base save readiness deadline or finite observation limit expired')
@@ -1215,7 +1230,7 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     record['stage'] = 'click-owned-native-base-save-menu'
     api.require_foreground(hwnd)
     trigger = click_native_menu_action(api,process,hwnd,record,'save')
-    require_native_menu_action(trigger,process.pid,hwnd,'save')
+    require_native_menu_action(trigger,process.pid,hwnd,'save',**source_menu_action_options(process))
     record['baseSaveMenuAction'] = trigger
 
     record['stage'] = 'wait-save-dialog'
@@ -1223,10 +1238,10 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     api.require_foreground(dialog)
     require_dialog_identity(api.pid(dialog), process.pid, api.user.GetWindow(dialog, 4), hwnd,
                             api.title(dialog), caption, native.class_name())
-    require_base_save_dialog_readiness(record['baseSaveDialogReadiness'], process.pid, hwnd, caption, before_input=True, expected_trigger='owned-native-menu-pointer')
-    require_native_menu_action(trigger,process.pid,hwnd,'save')
+    require_base_save_dialog_readiness(record['baseSaveDialogReadiness'], process.pid, hwnd, caption, before_input=True, expected_trigger='owned-native-menu-pointer',**source_menu_action_options(process))
+    require_native_menu_action(trigger,process.pid,hwnd,'save',**source_menu_action_options(process))
     record['newBaseSaveMenuActionVerified'] = True
-    require_base_save_menu_record(record,process.pid,hwnd,before_input=True)
+    require_base_save_menu_record(record,process.pid,hwnd,before_input=True,**source_menu_action_options(process))
     record['stage'] = 'type-save-path'
     record['baseSaveDialogReadiness']['filenameInputStartedAt'] = time.monotonic()
     accessible = Desktop(backend='uia').window(handle=dialog).wrapper_object()
@@ -1252,7 +1267,7 @@ def save_new_base(api, process, hwnd, fixtures, output, record):
     return target
 
 
-def require_base_save_menu_record(record, shell_pid, hwnd, *, before_input=False):
+def require_base_save_menu_record(record, shell_pid, hwnd, *, before_input=False, source_admission=None):
     """Join bounded readiness embedding to the original separately retained action."""
     caption='OpenGeul Base — 다른 이름으로 저장'
     proof=record['baseSaveDialogReadiness'];action=record['baseSaveMenuAction']
@@ -1260,8 +1275,8 @@ def require_base_save_menu_record(record, shell_pid, hwnd, *, before_input=False
     assert proof['saveMenuAction']==action
     if proof.get('trigger')=='owned-native-menu-pointer':
         assert [row for row in record['nativeMenuActions'] if row['command']=='save']==[action]
-        require_base_save_dialog_readiness(proof,shell_pid,hwnd,caption,before_input=before_input,expected_trigger='owned-native-menu-pointer')
-        return require_native_menu_action(action,shell_pid,hwnd,'save')
+        require_base_save_dialog_readiness(proof,shell_pid,hwnd,caption,before_input=before_input,expected_trigger='owned-native-menu-pointer',**source_menu_replay_options(source_admission))
+        return require_native_menu_action(action,shell_pid,hwnd,'save',**source_menu_replay_options(source_admission))
     assert [row for row in record['ownedControlActions'] if row['purpose']=='SAVE_MENU']==[action]
     from owned_save_menu import file_click_anchor
     assert action['saveMenuFileAnchor']==file_click_anchor(record,hwnd,action['originalProcess'],action['startedAt'])
@@ -1270,10 +1285,11 @@ def require_base_save_menu_record(record, shell_pid, hwnd, *, before_input=False
     return action
 
 
-def new_module(suite, output, module, *, fixtures=None):
+def new_module(suite, output, module, *, fixtures=None, source_prepared=None):
     from pywinauto import Desktop
     name = 'new-' + module
-    process = launch_suite(new_document_command(suite, module), suite, output, name)
+    options=source_menu_launch_options(source_prepared,deadline=time.monotonic()+150) if source_prepared is not None else {}
+    process = launch_suite(new_document_command(suite, module), suite, output, name,**options)
     api = Windows()
     record = {'module': module, 'kind': 'new-document', 'shellPid': process.pid, 'success': False,
               'keyboardInputVerified': False, 'contentMutationVerified': False, 'imeVerified': False,
@@ -1316,7 +1332,7 @@ def new_module(suite, output, module, *, fixtures=None):
             record.update(newBaseSaveAsVerified=True, savedFileSurvivedCleanup=True,
                           savedFileSha256=final['sha256'], savedFileBytes=final['bytes'],
                           savedDatabaseUrl=final['connection'])
-            require_base_save_menu_record(record,process.pid,hwnd)
+            require_base_save_menu_record(record,process.pid,hwnd,**source_menu_action_options(process))
         record.update(success=True, cleanClose=True, newDocumentVerified=True, stage='complete')
         return record
     except Exception as exc:
@@ -1327,9 +1343,10 @@ def new_module(suite, output, module, *, fixtures=None):
         write_result(output, name, record)
 
 
-def capture_home(suite, output):
+def capture_home(suite, output, *, source_prepared=None):
     from pywinauto import Desktop
-    process = launch_suite([str(suite / 'OpenGeul.Office.exe')], suite, output, 'home')
+    options=source_menu_launch_options(source_prepared,deadline=time.monotonic()+150) if source_prepared is not None else {}
+    process = launch_suite([str(suite / 'OpenGeul.Office.exe')], suite, output, 'home',**options)
     api = Windows()
     record = {'kind': 'home', 'shellPid': process.pid, 'success': False, 'keyboardInputVerified': False,
               'stage': 'find-home', 'stderrLog': 'home-stderr.log'}
@@ -1443,7 +1460,7 @@ def prepare_ascii_cohort(suite, output):
     return ascii_input.prepare_observer(output / 'ascii-message-observer', architecture=architecture)
 
 
-def document_case(suite, fixtures, output, module, extension, physical_input, *, prepared_library=None):
+def document_case(suite, fixtures, output, module, extension, physical_input, *, prepared_library=None, source_prepared=None):
     from pywinauto import Desktop
     assert (module, extension) in (INPUT_CASES if physical_input else ATTACH_CASES), 'Module is not eligible for this test mode'
     assert not physical_input or prepared_library is not None, 'Physical ASCII cohort must be prepared before launch'
@@ -1457,8 +1474,9 @@ def document_case(suite, fixtures, output, module, extension, physical_input, *,
     if physical_input and module=='calc':
         calc_baseline=calc_model_barrier.baseline_from_ooxml(source_bytes)
         with (output/'calc-model-baseline.xlsx').open('xb') as captured:captured.write(source_bytes)
+    options=source_menu_launch_options(source_prepared,deadline=time.monotonic()+150) if source_prepared is not None else {}
     process = launch_suite([str(suite/'OpenGeul.Office.exe'), '--module', module, '--file', str(source)],
-                           suite, output, module)
+                           suite, output, module,**options)
     api = Windows()
     record = {'module': module, 'kind': 'keyboard-edit' if physical_input else 'native-attach',
               'shellPid': process.pid, 'file': source.name, 'success': False,
@@ -1556,20 +1574,25 @@ def document_case(suite, fixtures, output, module, extension, physical_input, *,
         write_result(output, module, record)
 
 
-def edit_module(suite, fixtures, output, module, extension, *, prepared_library):
-    return document_case(suite, fixtures, output, module, extension, physical_input=True,prepared_library=prepared_library)
+def edit_module(suite, fixtures, output, module, extension, *, prepared_library, source_prepared=None):
+    options={} if source_prepared is None else dict(source_prepared=source_prepared)
+    return document_case(suite, fixtures, output, module, extension, physical_input=True,prepared_library=prepared_library,**options)
 
 
-def attach_module(suite, fixtures, output, module, extension):
-    return document_case(suite, fixtures, output, module, extension, physical_input=False)
+def attach_module(suite, fixtures, output, module, extension, *, source_prepared=None):
+    options={} if source_prepared is None else dict(source_prepared=source_prepared)
+    return document_case(suite, fixtures, output, module, extension, physical_input=False,**options)
 
 
-def collect_cases(cases, output):
+def collect_cases(cases, output, *, stop_if_pending=None):
     results = []
     for name, run in cases:
+        if stop_if_pending is not None and stop_if_pending():break
         try:
             record = dict(run())
-        except Exception as exc:
+        except BaseException as exc:
+            pending_terminal=not isinstance(exc,Exception)
+            if pending_terminal and (stop_if_pending is None or not stop_if_pending()):raise
             record = {}
             saved = output / (name + '-result.json')
             if saved.is_file() and not saved.is_symlink():
@@ -1582,8 +1605,11 @@ def collect_cases(cases, output):
                 if numeric_notice.notices_enabled():
                     record.setdefault('numericFailure', numeric_notice.capture_failure_code(exc))
             except Exception: pass
-            record.update(success=False, caseException=type(exc).__name__ + ': ' + str(exc),
-                          caseTraceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            if pending_terminal:
+                record.update(success=False,caseException=type(exc).__name__,sourceMenuCohortPending=True)
+            else:
+                record.update(success=False, caseException=type(exc).__name__ + ': ' + str(exc),
+                              caseTraceback=''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
             record.setdefault('error', record['caseException'])
         record['case'] = name
         record.setdefault('stage', 'case-setup')
@@ -1597,6 +1623,7 @@ def collect_cases(cases, output):
             record.update(success=False, recordWriteError=type(exc).__name__ + ': ' + str(exc))
         results.append(record)
         print(name + ': ' + ('passed' if record['success'] else 'FAILED: ' + record.get('error', 'Evidence write failed')), flush=True)
+        if stop_if_pending is not None and stop_if_pending():break
     return results
 
 
@@ -1622,21 +1649,42 @@ def suite_report(results):
     return report
 
 
-def run_cases(cases, output):
-    report = suite_report(collect_cases(cases, output))
+def run_cases(cases, output, *, stop_if_pending=None):
+    options={} if stop_if_pending is None else dict(stop_if_pending=stop_if_pending)
+    report = suite_report(collect_cases(cases, output,**options))
     (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     print(f"GUI cases: {report['passedCaseCount']}/{report['expectedCaseCount']} passed", flush=True)
     return 0 if report['success'] else 1
 
 
-def main():
-    if os.name != 'nt': raise RuntimeError('Actual Windows GUI execution is required')
-    if not __debug__: raise RuntimeError('Do not disable native GUI assertions with Python -O')
+def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite', type=Path, required=True)
     parser.add_argument('--fixtures', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    args = parser.parse_args()
+    parser.add_argument('--source-qualified-menu',choices=('x64','arm64'))
+    return parser
+
+
+def _run_windows_cohort(suite,fixtures,output,*,source_prepared=None,stop_if_pending=None):
+    options={} if source_prepared is None else dict(source_prepared=source_prepared)
+    pending_options={} if stop_if_pending is None else dict(stop_if_pending=stop_if_pending)
+    if stop_if_pending is not None and stop_if_pending():return run_cases([],output,**pending_options)
+    prepared_library = prepare_ascii_cohort(suite, output)
+    cases = [('home', lambda: capture_home(suite, output,**options))]
+    for module, extension in INPUT_CASES:
+        cases.append((module, lambda module=module, extension=extension: edit_module(suite, fixtures, output, module, extension,prepared_library=prepared_library,**options)))
+    for module, extension in ATTACH_CASES:
+        cases.append((module, lambda module=module, extension=extension: attach_module(suite, fixtures, output, module, extension,**options)))
+    for module in NEW_MODULES:
+        cases.append(('new-' + module, lambda module=module: new_module(suite, output, module, fixtures=fixtures,**options)))
+    return run_cases(cases, output,**pending_options)
+
+
+def main(argv=None):
+    if os.name != 'nt': raise RuntimeError('Actual Windows GUI execution is required')
+    if not __debug__: raise RuntimeError('Do not disable native GUI assertions with Python -O')
+    args = argument_parser().parse_args(argv)
     for path in (args.suite, args.fixtures, args.output):
         assert not path.is_symlink() and not getattr(path, 'is_junction', lambda: False)(), 'Linked Suite/fixture/evidence directories are not accepted'
     suite, fixtures, output = args.suite.resolve(), args.fixtures.resolve(), args.output.resolve()
@@ -1644,15 +1692,10 @@ def main():
     assert fixtures != output and fixtures not in output.parents, 'Evidence must be outside generated fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
     output.mkdir(parents=True, exist_ok=False)
-    prepared_library = prepare_ascii_cohort(suite, output)
-    cases = [('home', lambda: capture_home(suite, output))]
-    for module, extension in INPUT_CASES:
-        cases.append((module, lambda module=module, extension=extension: edit_module(suite, fixtures, output, module, extension,prepared_library=prepared_library)))
-    for module, extension in ATTACH_CASES:
-        cases.append((module, lambda module=module, extension=extension: attach_module(suite, fixtures, output, module, extension)))
-    for module in NEW_MODULES:
-        cases.append(('new-' + module, lambda module=module: new_module(suite, output, module, fixtures=fixtures)))
-    return run_cases(cases, output)
+    if args.source_qualified_menu is None:return _run_windows_cohort(suite,fixtures,output)
+    from native_menu_smoke import source_menu_cohort
+    with source_menu_cohort(suite,args.source_qualified_menu,output) as (prepared,pending):
+        return _run_windows_cohort(suite,fixtures,output,source_prepared=prepared,stop_if_pending=pending)
 
 
 if __name__ == '__main__': raise SystemExit(main())

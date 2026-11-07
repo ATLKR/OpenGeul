@@ -22,6 +22,111 @@ smoke = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(smoke)
 
 
+class SourceMenuNativeCliTests(unittest.TestCase):
+    def test_actual_new_nonbase_modules_never_replay_base_save_in_default_or_source_mode(self):
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        import generated_calc_close
+        fixture=SourceMenuSelectionTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        prepared=fixture.prepared();closed=[]
+        window=SimpleNamespace(maximize=lambda:None,capture_as_image=lambda:SimpleNamespace(save=lambda path:None))
+        desktop=lambda **options:SimpleNamespace(window=lambda **options:SimpleNamespace(wrapper_object=lambda:window))
+        api=SimpleNamespace(user=SimpleNamespace(GetForegroundWindow=lambda:11,GetAncestor=lambda *a:11),
+            windows=lambda pid:[],title=lambda hwnd:'synthetic owned blank',external_window_message=lambda *a:'synthetic error')
+        for source in (False,True):
+            for module in ('writer','calc','impress','draw','math'):
+                with self.subTest(source=source,module=module):
+                    process=SimpleNamespace(pid=77,poll=lambda:None)
+                    def launch(command,suite,output,name,**options):
+                        if source:
+                            selection=options['source_menu'];self.assertIs(selection.prepared,prepared)
+                            process.opengeul_source_menu_selection=selection
+                        else:self.assertEqual(options,{})
+                        return process
+                    failure=None
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.dict(sys.modules,{'pywinauto':SimpleNamespace(Desktop=desktop)}))
+                        for name,value in [('launch_suite',launch),('Windows',lambda:api),
+                            ('verified_attachment',lambda *a:(11,55,56,88)),
+                            ('capture_native_archive_generation',lambda *a:dict(pid=88,creationTime=200)),
+                            ('activate_owned_suite',lambda *a:None),('wait_for',lambda condition,*a,**k:condition()),
+                            ('close_document',lambda *a,**k:closed.append(module)),('close_home',lambda *a:None),
+                            ('stop_owned_test_process',lambda *a:None),('capture_failure',lambda *a:None),('write_result',lambda *a:None)]:
+                            stack.enter_context(patch.object(smoke,name,value))
+                        base=stack.enter_context(patch.object(smoke,'require_base_save_menu_record',wraps=smoke.require_base_save_menu_record))
+                        stack.enter_context(patch.object(generated_calc_close,'freeze_generated_blank_calc',return_value=object()))
+                        try:
+                            options=dict(source_prepared=prepared) if source else {}
+                            record=smoke.new_module(fixture.suite,fixture.output,module,**options)
+                        except Exception as exc:failure=type(exc).__name__
+                    self.assertIsNone(failure,'A non-Base document entered Base save replay')
+                    self.assertTrue(record['success']);base.assert_not_called()
+        self.assertEqual(len(closed),10)
+    def test_source_option_is_default_off_and_launch_selection_is_explicit(self):
+        parser=getattr(smoke,'argument_parser',None)
+        self.assertTrue(callable(parser),'Native CLI parser seam is missing')
+        base=['--suite','suite','--fixtures','fixtures','--output','output']
+        self.assertIsNone(parser().parse_args(base).source_qualified_menu)
+        self.assertEqual(parser().parse_args(base+['--source-qualified-menu','arm64']).source_qualified_menu,'arm64')
+        options=getattr(smoke,'source_menu_launch_options',None)
+        self.assertTrue(callable(options),'Explicit per-launch source selection seam is missing')
+        self.assertEqual(options(None,deadline=1.),{})
+
+    def test_selected_collector_stops_before_the_next_case_and_keeps_closed_evidence(self):
+        import inspect
+        self.assertIn('stop_if_pending',inspect.signature(smoke.collect_cases).parameters)
+        with tempfile.TemporaryDirectory() as temp:
+            output=Path(temp);calls=[];pending=[False]
+            def first():calls.append('first');pending[0]=True;return dict(success=False,stage='owned-cleanup-finished')
+            def second():calls.append('second');return dict(success=True)
+            with redirect_stdout(io.StringIO()):
+                rows=smoke.collect_cases([('first',first),('second',second)],output,stop_if_pending=lambda:pending[0])
+            self.assertEqual(calls,['first']);self.assertEqual(len(rows),1)
+            with (output/'first-result.json').open() as stream:self.assertFalse(json.load(stream)['success'])
+            self.assertFalse((output/'second-result.json').exists())
+
+    def test_source_launch_factory_uses_real_sealed_selections_and_default_does_no_work(self):
+        import time
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        fixture=SourceMenuSelectionTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        prepared=fixture.prepared();deadline=time.monotonic()+30
+        first=smoke.source_menu_launch_options(prepared,deadline=deadline)['source_menu']
+        second=smoke.source_menu_launch_options(prepared,deadline=deadline)['source_menu']
+        self.assertIsNot(first,second);self.assertIs(first.prepared,prepared);self.assertIs(second.prepared,prepared)
+        self.assertEqual((first.launch_deadline,second.launch_deadline),(deadline,deadline))
+        self.assertEqual(smoke.source_menu_launch_options(None,deadline=-1),{})
+
+    def test_source_context_is_explicit_at_each_windows_launch_leaf(self):
+        import inspect
+        for name in ('new_module','capture_home','document_case','edit_module','attach_module'):
+            self.assertIn('source_prepared',inspect.signature(getattr(smoke,name)).parameters,name)
+
+    def test_source_cli_owns_its_outer_context_instead_of_changing_global_launch(self):
+        import inspect
+        self.assertIn('source_menu_cohort',inspect.getsource(smoke.main))
+        from test_native_menu_smoke import assert_source_cli_dispatch
+        assert_source_cli_dispatch(self,smoke,'_run_windows_cohort',('fixtures',))
+
+    def test_source_pending_base_exception_still_closes_a_partial_case_cohort(self):
+        class PendingTerminal(BaseException):pass
+        with tempfile.TemporaryDirectory() as temp:
+            output=Path(temp);pending=[False];calls=[]
+            def first():
+                with (output/'first-result.json').open('w') as stream:json.dump(dict(success=False,stage='owned-cleanup-finished'),stream)
+                pending[0]=True;raise PendingTerminal()
+            try:
+                with redirect_stdout(io.StringIO()):
+                    rows=smoke.collect_cases([('first',first),('second',lambda:calls.append('second'))],output,stop_if_pending=lambda:pending[0])
+            except PendingTerminal:self.fail('Pending terminal bypassed the closed partial cohort')
+            self.assertEqual(len(rows),1);self.assertFalse(rows[0]['success']);self.assertEqual(calls,[])
+
+    def test_source_pending_cohort_never_starts_the_ascii_preparation_child(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(smoke,'prepare_ascii_cohort') as prepare,redirect_stdout(io.StringIO()):
+                result=smoke._run_windows_cohort(Path(temp),Path(temp),Path(temp),
+                    source_prepared=object(),stop_if_pending=lambda:True)
+            self.assertEqual(result,1);prepare.assert_not_called()
+
+
 class NativeSmokeTests(unittest.TestCase):
     def test_harness_can_load_by_sibling_path_in_an_isolated_interpreter(self):
         code = ('import importlib.util,sys; '

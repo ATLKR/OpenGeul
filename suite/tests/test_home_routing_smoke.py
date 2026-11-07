@@ -13,6 +13,28 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 SOURCE=Path(__file__).resolve().parents[1]/'e2e/home_routing_smoke.py'
 
 
+class SourceMenuHomeCliTests(unittest.TestCase):
+    def test_source_home_parser_preserves_default_and_requires_architecture(self):
+        spec=importlib.util.spec_from_file_location('home_source_cli',SOURCE)
+        api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)
+        parser=getattr(api,'argument_parser',None)
+        self.assertTrue(callable(parser),'Home CLI parser seam is missing')
+        base=['--suite','suite','--features','features','--hwp-fixtures','hwp','--output','output']
+        self.assertIsNone(parser().parse_args(base).source_qualified_menu)
+        self.assertEqual(parser().parse_args(base+['--source-qualified-menu','x64']).source_qualified_menu,'x64')
+
+    def test_source_home_context_and_replay_authority_are_explicit(self):
+        import inspect
+        spec=importlib.util.spec_from_file_location('home_source_cli',SOURCE)
+        api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)
+        self.assertIn('source_prepared',inspect.signature(api.HomeCase).parameters)
+        self.assertIn('stop_if_pending',inspect.signature(api.run_home_cases).parameters)
+        self.assertIn('source_admission',inspect.signature(api.require_case_result).parameters)
+        self.assertIn('source_menu_cohort',inspect.getsource(api.main))
+        from test_native_menu_smoke import assert_source_cli_dispatch
+        assert_source_cli_dispatch(self,api,'_run_home_cohort',('features','hwp-fixtures'))
+
+
 class HomeRoutingContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -298,6 +320,83 @@ class HomeRoutingContracts(unittest.TestCase):
             self.assertEqual(case.record['baseSaveDialogReadiness']['trigger'],'owned-native-menu-pointer')
             self.assertTrue(case.record['baseSaveMenuAction']['success'])
             self.assertEqual([name for name,*_ in boundary.calls].count('save-menu-click'),1)
+
+    def source_base_replay_fixture(self):
+        """Real Gate/v4 replay; native UI and unrelated Home exit proofs are synthetic."""
+        from types import SimpleNamespace as NS
+        from test_base_save_readiness import NativeBoundary
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        import owned_native_menu as menu
+        selected=SourceMenuSelectionTests();selected.setUp();self.addCleanup(selected.doCleanups)
+        prepared=selected.prepared();selection=selected.selected(prepared);admission=prepared.admission
+        boundary=NativeBoundary([lambda b:[b.edit,b.save]]);boundary.menu_root=selected.suite
+        folder=selected.output/'generated';folder.mkdir();boundary.target=folder/'New-OpenGeul-base.odb'
+        case=object.__new__(self.api.HomeCase);case.suite=selected.suite;case.output=selected.output;case.folder=folder
+        case.api=boundary.api;case.process=boundary.process;case.frames=[];case.screenshot=lambda *args:None
+        case.record=dict(next(r for r in self.api.build_plan() if r['case']=='tile-base'),attachments=[])
+        bound=NS(pid=88,creation=200,handle=888)
+        def freeze(original,executable,evidence):
+            evidence.update(pid=88,creationTime=200,handleValue=888,waitResult=258,
+                nativeCreation=dict(fileTime=200),nativeImage=str(executable),expectedImage=str(executable))
+        def source_action(api,process,document,record,command,**options):
+            action=boundary.measured_native_menu(api,process,document,record,command,**options)
+            shell,engine=action['originalProcess'],action['originalEngine']
+            action['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,
+                admission=menu._source_admission_summary(admission),generation=dict(action['binding'],
+                    shellPid=shell['pid'],shellCreationTime=shell['creationTime'],shellHandleValue=shell['handleValue'],
+                    engineCreationTime=engine['creationTime'],engineHandleValue=action['engineHandleValue']))
+            action['pointUses']=[];process.opengeul_source_menu_selection=selection
+            menu.require_native_menu_action(action,77,11,'save',source_admission=admission)
+            return action
+        original=self.api.native.require_base_save_dialog_readiness
+        def seed(*args,**options):
+            options['source_admission']=admission
+            return original(*args,**options)
+        with patch.dict(sys.modules,boundary.modules()), \
+             patch.object(self.api,'new_attachment',return_value=dict(hwnd=11,parent=55,child=56,officePid=88)), \
+             patch.object(self.api.lifecycle,'BoundHwpProcess',return_value=bound),patch.object(self.api,'freeze_live_process',side_effect=freeze), \
+             patch.object(self.api.native.time,'monotonic',boundary.clock.monotonic),patch.object(self.api.native.time,'sleep',boundary.clock.sleep), \
+             patch.object(self.api.native,'click_native_menu_action',side_effect=source_action), \
+             patch.object(self.api.native,'click_owned_control',side_effect=boundary.measured_click), \
+             patch.object(self.api.lifecycle,'set_owned_picker_filename',side_effect=boundary.assign_filename), \
+             patch.object(self.api.native,'saved_base_evidence',return_value=dict(sha256='a'*64,bytes=19,connection='sdbc:embedded:firebird')), \
+             patch.object(self.api.native,'require_base_save_dialog_readiness',side_effect=seed):
+            frame=case.attach('base',None)
+        with self.assertRaises(AssertionError):
+            original(case.record['baseSaveDialogReadiness'],77,11,'OpenGeul Base — 다른 이름으로 저장')
+        original(case.record['baseSaveDialogReadiness'],77,11,'OpenGeul Base — 다른 이름으로 저장',source_admission=admission)
+        return case,frame,admission,bound,freeze
+
+    def test_actual_source_home_attach_forwards_gate_through_base_readiness(self):
+        case,frame,admission,bound,freeze=self.source_base_replay_fixture()
+        captured=copy.deepcopy(case.record)
+        # Re-enter the actual attach replay without running a second save transaction.
+        def saved(*args):
+            for key,value in captured.items():
+                if key!='attachments':case.record[key]=copy.deepcopy(value)
+        case.frames=[];case.record['attachments']=[]
+        with patch.object(self.api,'new_attachment',return_value=dict(hwnd=11,parent=55,child=56,officePid=88)), \
+             patch.object(self.api.lifecycle,'BoundHwpProcess',return_value=bound), \
+             patch.object(self.api,'freeze_live_process',side_effect=freeze), \
+             patch.object(self.api.native,'save_new_base',side_effect=saved):
+            try:case.attach('base',None)
+            except (AssertionError,ValueError):self.fail('Home attach lost the actual Gate before nested v4 replay')
+
+    def test_actual_source_home_case_replay_forwards_gate_through_base_readiness(self):
+        import writer_model_barrier
+        case,frame,admission,_,_=self.source_base_replay_fixture();record=case.record
+        image=str(case.suite/'Office/program/soffice.bin');attachment=record['attachments'][0]
+        attachment['closed']=True
+        record.update(success=True,cleanClose=True,forcedCleanup=False,shellExitCode=0,
+            shellCommand=[str(case.suite/'OpenGeul.Office.exe')],keyboardInputVerified=False,
+            homeHwnd=10,shellPid=77,homeOnlyBeforeAction=[10],originalShell=dict(nativeCreation=dict(fileTime=100)),
+            homeActions=[dict(success=True,rawElementEquals=True,shellPid=77,homeHwnd=10)],sourceCopies=[],
+            retainedHandleClosures=[{}],frameCloses=[dict(hwnd=11,module='base',success=True,
+                menuCloseClicks=0,closeMessageCount=1,exit=dict(pid=88,creationTime=200,image=image))])
+        with patch.object(writer_model_barrier,'require_original_shell'),patch.object(self.api,'require_home_action'), \
+                patch.object(self.api,'_require_exit_and_closure'):
+            try:self.api.require_case_result(record,case.suite,source_admission=admission)
+            except (AssertionError,ValueError):self.fail('Home case replay lost the actual Gate before nested v4 replay')
 
     def document_picker_fixture(self,root):
         from test_base_save_readiness import NativeBoundary

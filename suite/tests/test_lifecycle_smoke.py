@@ -18,6 +18,38 @@ smoke = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(smoke)
 
 
+class SourceMenuLifecycleCliTests(unittest.TestCase):
+    def test_source_lifecycle_parser_rejects_saved_only_combination(self):
+        parser=getattr(smoke,'argument_parser',None)
+        self.assertTrue(callable(parser),'Lifecycle CLI parser seam is missing')
+        base=['--suite','suite','--output','output']
+        self.assertIsNone(parser().parse_args(base).source_qualified_menu)
+        self.assertEqual(parser().parse_args(base+['--source-qualified-menu','x64']).source_qualified_menu,'x64')
+        import contextlib,io
+        with contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            parser().parse_args(base+['--verify-saved','--source-qualified-menu','x64'])
+
+    def test_source_lifecycle_case_retains_context_for_the_second_route_launch(self):
+        import inspect
+        self.assertIn('source_prepared',inspect.signature(smoke.Case).parameters)
+        source=inspect.getsource(smoke.hwp_route)
+        self.assertIn('source_menu_launch_options',source)
+        self.assertIn('case.source_prepared',source)
+        self.assertIn('source_menu_cohort',inspect.getsource(smoke.main))
+        from test_native_menu_smoke import assert_source_cli_dispatch
+        assert_source_cli_dispatch(self,smoke,'_run_lifecycle_cohort',('fixtures',))
+
+    def test_source_pending_cohort_never_starts_ascii_or_independent_reopen_children(self):
+        import io,contextlib
+        with tempfile.TemporaryDirectory() as temp:
+            output=Path(temp)
+            with patch.object(smoke.native,'prepare_ascii_cohort') as prepare, \
+                    patch.object(smoke.subprocess,'run') as launch,contextlib.redirect_stdout(io.StringIO()):
+                code=smoke._run_lifecycle_cohort(output,output,output,{},
+                    source_prepared=object(),stop_if_pending=lambda:True)
+            self.assertEqual(code,1);prepare.assert_not_called();launch.assert_not_called()
+
+
 class LifecycleSmokeTests(unittest.TestCase):
     def test_lifecycle_observes_shared_focus_readiness_once_before_navigation_and_marker_input(self):
         case = object.__new__(smoke.Case)

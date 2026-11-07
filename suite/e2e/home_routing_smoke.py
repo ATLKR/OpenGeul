@@ -304,7 +304,7 @@ def shell_menu_action(api,process,document,label,record):
     native.activate_owned_suite(api,process,document,record);api.require_foreground(document)
     command='open' if label=='열기…' else 'close'
     action=click_native_menu_action(api,process,document,record,command)
-    require_native_menu_action(action,process.pid,document,command)
+    require_native_menu_action(action,process.pid,document,command,**native.source_menu_action_options(process))
     evidence.update(fileClicks=1,actionClicks=1,nativeAction=action,success=True)
     return evidence
 
@@ -315,7 +315,7 @@ def _open_button_recheck(api,accessible,button,process,dialog,proof):
     return lifecycle.require_dialog_button_ancestry(api,accessible,button,process.pid,dialog)
 
 
-def _document_picker_binding(record,home,document,action=None):
+def _document_picker_binding(record,home,document,action=None,*,source_admission=None):
     assert record['case']=='document-file-open' and record['kind']=='shared-open'
     assert type(home) is int and home==record['homeHwnd']
     assert type(document) is int and document>0 and document!=home
@@ -334,7 +334,7 @@ def _document_picker_binding(record,home,document,action=None):
     assert len({home,document,frame['parent'],frame['child']})==4 and live['pid']!=shell['pid']
     if action is not None:
         from owned_native_menu import require_native_menu_action
-        require_native_menu_action(action,shell['pid'],document,'open')
+        require_native_menu_action(action,shell['pid'],document,'open',**native.source_menu_replay_options(source_admission))
         assert action['binding']==dict(document=document,parent=frame['parent'],child=frame['child'],officePid=live['pid'])
         measured=action['originalProcess'];engine=action['originalEngine']
         assert (measured['pid'],measured['handleValue'],measured['creationTime'])==(shell['pid'],shell['handleValue'],shell['nativeCreation']['fileTime'])
@@ -357,21 +357,21 @@ def open_dialog_action(api,process,home,record,path=None,*,document=None):
         assert type(activated) is tuple and len(activated)==5
         assert activated[:2]+activated[3:]==(shell['pid'],shell['handleValue'],shell['nativeCreation']['fileTime'],258)
         assert PureWindowsPath(activated[2])==PureWindowsPath(shell['nativeImage'])
-        assert _document_picker_binding(record,home,document)==operation['documentOwnerBinding']
+        assert _document_picker_binding(record,home,document,**native.source_menu_action_options(process))==operation['documentOwnerBinding']
         assert record['attachments'][0].get('closed') is not True
         assert api.user.IsWindow(home) and api.pid(home)==process.pid and api.user.GetAncestor(home,2)==home
         assert api.attachment(document)==tuple(operation['documentOwnerBinding'][key] for key in ('parentHwnd','childHwnd','officePid'))
     if document is not None:
         # The existing shared-open plan has no document-menu Cancel operation.
         assert path is not None, 'Document-menu Cancel is outside the fixed Home plan'
-        operation['documentOwnerBinding']=_document_picker_binding(record,home,document)
+        operation['documentOwnerBinding']=_document_picker_binding(record,home,document,**native.source_menu_action_options(process))
         original_document()
     record['stage']='trigger-owned-open-dialog'
     if document is None:
         click_home_action(api,process,home,'open',record);trigger='home-button'
     else:
         action=shell_menu_action(api,process,document,'열기…',record);trigger='document-menu'
-        assert _document_picker_binding(record,home,document,action['nativeAction'])==operation['documentOwnerBinding']
+        assert _document_picker_binding(record,home,document,action['nativeAction'],**native.source_menu_action_options(process))==operation['documentOwnerBinding']
     operation['openTrigger']=dict(kind=trigger,clicks=1)
     record['stage']='wait-owned-open-dialog-readiness'
     dialog,window,filename,button=wait_open_dialog(api,process,owner,operation)
@@ -529,7 +529,8 @@ def retained_exit(bound,evidence):
 
 
 class HomeCase:
-    def __init__(self,suite,output,spec,inputs,hwp_inputs,record):
+    def __init__(self,suite,output,spec,inputs,hwp_inputs,record,*,source_prepared=None):
+        self.source_prepared=source_prepared
         self.suite,self.output,self.record,self.inputs,self.hwp_inputs=suite,output,record,inputs,hwp_inputs
         self.folder=output/'fixtures'/spec['case'];self.folder.mkdir()
         self.diagnostics=output/'diagnostics'/spec['case'];self.diagnostics.mkdir()
@@ -541,7 +542,8 @@ class HomeCase:
         previous=os.environ.get('OPENGEUL_SUITE_DIAGNOSTICS')
         try:
             os.environ['OPENGEUL_SUITE_DIAGNOSTICS']=str(self.diagnostics)
-            self.process=native.launch_suite([str(self.suite/'OpenGeul.Office.exe')],self.suite,self.output,self.record['case'])
+            options=native.source_menu_launch_options(self.source_prepared,deadline=time.monotonic()+150) if self.source_prepared is not None else {}
+            self.process=native.launch_suite([str(self.suite/'OpenGeul.Office.exe')],self.suite,self.output,self.record['case'],**options)
         finally:
             if previous is None:os.environ.pop('OPENGEUL_SUITE_DIAGNOSTICS',None)
             else:os.environ['OPENGEUL_SUITE_DIAGNOSTICS']=previous
@@ -637,7 +639,7 @@ class HomeCase:
         self.screenshot(attachment['hwnd'],module+'-attached')
         if module=='base' and source is None:
             native.save_new_base(self.api,self.process,attachment['hwnd'],self.folder,self.output,self.record)
-            native.require_base_save_dialog_readiness(self.record['baseSaveDialogReadiness'],self.process.pid,attachment['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-native-menu-pointer')
+            native.require_base_save_dialog_readiness(self.record['baseSaveDialogReadiness'],self.process.pid,attachment['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-native-menu-pointer',**native.source_menu_action_options(self.process))
         return frame
 
     def close_frame(self,frame,*,menu=False):
@@ -808,7 +810,7 @@ def summarize(records):
         nativeOfficeFeatureCertification=False,universalFormatCompatibility=False)
 
 
-def require_case_result(record,suite):
+def require_case_result(record,suite,*,source_admission=None):
     """Replay fixed native actions, picker inputs and normal retained exits."""
     from types import SimpleNamespace
     spec,=[row for row in build_plan() if row['case']==record['case']]
@@ -842,7 +844,7 @@ def require_case_result(record,suite):
         owner=record['attachments'][0]['hwnd'] if spec['kind']=='shared-open' and index==1 else home
         assert type(operation['pickerOwnerHwnd']) is int and operation['pickerOwnerHwnd']==owner
         if owner!=home:
-            assert operation['documentOwnerBinding']==_document_picker_binding(record,home,owner,record['nativeDocumentMenuActions'][0]['nativeAction'])
+            assert operation['documentOwnerBinding']==_document_picker_binding(record,home,owner,record['nativeDocumentMenuActions'][0]['nativeAction'],**native.source_menu_replay_options(source_admission))
         else:assert 'documentOwnerBinding' not in operation
         proof=operation['openDialogReadiness'];require_open_dialog_readiness(proof,pid,owner)
         assert proof['trigger']['kind']==('document-menu' if index==1 else 'home-button') and operation['success'] is True
@@ -876,7 +878,7 @@ def require_case_result(record,suite):
     if menus:
         from owned_native_menu import require_native_menu_action
         assert all(row['kind']=='owned-native-document-menu-route' for row in menus)
-        for row in menus:require_native_menu_action(row['nativeAction'],pid,row['documentHwnd'],'open' if row['label']=='열기…' else 'close')
+        for row in menus:require_native_menu_action(row['nativeAction'],pid,row['documentHwnd'],'open' if row['label']=='열기…' else 'close',**native.source_menu_replay_options(source_admission))
         assert [row['documentHwnd'] for row in menus]==[frames[0]['hwnd'],frames[1]['hwnd']]
     if spec.get('module')=='calc':
         from home_calc_close import require_calc_reader_context,_home_origin
@@ -890,10 +892,10 @@ def require_case_result(record,suite):
         if spec.get('extension')=='csv':require_csv_post_getter_screenshot(record)
     if spec['kind']=='tile' and spec['module']=='base':
         frame,=frames
-        native.require_base_save_dialog_readiness(record['baseSaveDialogReadiness'],pid,frame['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-native-menu-pointer')
+        native.require_base_save_dialog_readiness(record['baseSaveDialogReadiness'],pid,frame['hwnd'],'OpenGeul Base — 다른 이름으로 저장',expected_trigger='owned-native-menu-pointer',**native.source_menu_replay_options(source_admission))
         assert record['saveAsDialogVerified'] is True
         assert record['newBaseSaveMenuActionVerified'] is True and record.get('saveShortcutViaOwnedMenu') is False
-        trigger=native.require_base_save_menu_record(record,pid,frame['hwnd'])
+        trigger=native.require_base_save_menu_record(record,pid,frame['hwnd'],**native.source_menu_replay_options(source_admission))
         assert trigger['engineAdmissionBasis']=='existing-home-retained-engine'
         assert (trigger['originalEngine']['pid'],trigger['originalEngine']['creationTime'],trigger['originalEngine']['image'])==(frame['officePid'],frame['officeCreationTime'],frame['officeImage'])
     if spec.get('module')=='hwp':
@@ -934,19 +936,24 @@ def _require_exit_and_closure(exit,closures,binding):
     assert (closure['pid'],closure['creationTime'])==(exit['pid'],exit['creationTime']) and closure['closeHandleResult'] is True
 
 
-def run_home_cases(suite,output,inputs,hwp_inputs):
+def run_home_cases(suite,output,inputs,hwp_inputs,*,source_prepared=None,stop_if_pending=None):
     records=[]
     for spec in build_plan():
+        if stop_if_pending is not None and stop_if_pending():break
         record=dict(spec,success=False,cleanClose=False,forcedCleanup=False)
         try:
-            HomeCase(suite,output,spec,inputs,hwp_inputs,record).run()
-            if record['success'] is True:require_case_result(record,suite)
+            options={} if source_prepared is None else dict(source_prepared=source_prepared)
+            HomeCase(suite,output,spec,inputs,hwp_inputs,record,**options).run()
+            if record['success'] is True:
+                authority={} if source_prepared is None else dict(source_admission=source_prepared.admission)
+                require_case_result(record,suite,**authority)
         except BaseException as exc:native.capture_failure(output,spec['case'],record,exc)
         if record.get('success') is not True:record.setdefault('error','Case or strict cleanup failed')
         try:native.write_result(output,spec['case'],record)
         except BaseException as exc:record.update(success=False,recordWriteError=type(exc).__name__+': '+str(exc))
         records.append(record)
         print(spec['case']+': '+('passed' if record['success'] else 'FAILED: '+record.get('error','unknown')),flush=True)
+        if stop_if_pending is not None and stop_if_pending():break
     return records
 
 
@@ -958,24 +965,23 @@ def write_home_aggregate(output,report):
     with path.open('xb') as stream:stream.write(raw)
 
 
-def main():
-    if not __debug__:raise RuntimeError('Home native assertions cannot run under Python -O')
-    if os.name!='nt':raise RuntimeError('Actual Windows native GUI execution is required')
+def argument_parser():
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('suite','features','hwp-fixtures','output'):parser.add_argument('--'+name,type=Path,required=True)
-    args=parser.parse_args()
-    for path in (args.suite,args.features,args.hwp_fixtures,args.output):
-        _unlinked(path);assert not str(path).startswith(('\\\\','//'))
-    suite,feature_root,hwp_root,output=(path.resolve() for path in (args.suite,args.features,args.hwp_fixtures,args.output))
-    assert all(output!=root and root not in output.parents and output not in root.parents for root in (suite,feature_root,hwp_root))
-    output.mkdir(parents=True,exist_ok=False);(output/'fixtures').mkdir();(output/'diagnostics').mkdir()
+    parser.add_argument('--source-qualified-menu',choices=('x64','arm64'))
+    return parser
+
+
+def _run_home_cohort(suite,feature_root,hwp_root,output,*,source_prepared=None,stop_if_pending=None):
+    options={} if source_prepared is None else dict(source_prepared=source_prepared)
+    if stop_if_pending is not None:options['stop_if_pending']=stop_if_pending
     records=[];run_error=None;integrity=dict(schemaVersion=1,kind='home-native-archive-integrity',success=False)
     try:
         inputs=load_feature_inputs(suite,feature_root)
         from home_fixture_inputs import require_hwp_fixture_provenance
         raw=(hwp_root/'provenance.json').read_bytes();assert 0<len(raw)<=2*1024*1024
         proof=json.loads(raw);hwp_inputs=require_hwp_fixture_provenance(proof,suite,hwp_root)
-        records=run_home_cases(suite,output,inputs,hwp_inputs)
+        records=run_home_cases(suite,output,inputs,hwp_inputs,**options)
         assert load_feature_inputs(suite,feature_root)==inputs
         require_hwp_fixture_provenance(proof,suite,hwp_root)
     except BaseException as exc:
@@ -996,6 +1002,21 @@ def main():
             stream.write(json.dumps(failure,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8'))
         return 1
     return 0 if report['success'] else 1
+
+
+def main(argv=None):
+    if not __debug__:raise RuntimeError('Home native assertions cannot run under Python -O')
+    if os.name!='nt':raise RuntimeError('Actual Windows native GUI execution is required')
+    args=argument_parser().parse_args(argv)
+    for path in (args.suite,args.features,args.hwp_fixtures,args.output):
+        _unlinked(path);assert not str(path).startswith(('\\\\','//'))
+    suite,feature_root,hwp_root,output=(path.resolve() for path in (args.suite,args.features,args.hwp_fixtures,args.output))
+    assert all(output!=root and root not in output.parents and output not in root.parents for root in (suite,feature_root,hwp_root))
+    output.mkdir(parents=True,exist_ok=False);(output/'fixtures').mkdir();(output/'diagnostics').mkdir()
+    if args.source_qualified_menu is None:return _run_home_cohort(suite,feature_root,hwp_root,output)
+    from native_menu_smoke import source_menu_cohort
+    with source_menu_cohort(suite,args.source_qualified_menu,output) as (prepared,pending):
+        return _run_home_cohort(suite,feature_root,hwp_root,output,source_prepared=prepared,stop_if_pending=pending)
 
 
 if __name__=='__main__':raise SystemExit(main())

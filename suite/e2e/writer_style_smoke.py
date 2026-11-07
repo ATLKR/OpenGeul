@@ -99,11 +99,11 @@ def owned_saved_path(output, record):
     return path.resolve()
 
 
-def click_suite_save(api, process, hwnd, record):
+def click_suite_save(api, process, hwnd, record, *, source_admission=None):
     native.activate_owned_suite(api, process, hwnd, record)
     api.require_foreground(hwnd)
     action = native.click_native_menu_action(api, process, hwnd, record, 'save')
-    native.require_native_menu_action(action, process.pid, hwnd, 'save')
+    native.require_native_menu_action(action, process.pid, hwnd, 'save',**native.source_menu_replay_options(source_admission))
     record['saveMenuAction'] = native.detached_native_menu_action(action)
     record['savedViaOwnedSuiteMenu'] = True
 
@@ -131,7 +131,7 @@ def close_engine_witness(engine, record):
         record.update(success=False, guiVerified=False)
 
 
-def run_gui(suite, fixtures, output):
+def run_gui(suite, fixtures, output, *, source_prepared=None):
     from pywinauto import Desktop
     record = dict(case=CASE, module='writer', kind='native-writer-style', success=False,
                   guiVerified=False, stage='verify-generated-fixture', copiedFixture=COPY,
@@ -159,7 +159,8 @@ def run_gui(suite, fixtures, output):
         assert lifecycle.digest(source) == original_sha, 'Owned style fixture differs from generated original'
         record.update(originalFixture=str(original), originalSha256=original_sha, baseline=baseline)
         record['stage'] = 'launch'
-        process = native.launch_suite([str(suite / 'OpenGeul.Office.exe'), '--module', 'writer', '--file', str(source)], suite, output, CASE)
+        options=native.source_menu_launch_options(source_prepared,deadline=time.monotonic()+150) if source_prepared is not None else {}
+        process = native.launch_suite([str(suite / 'OpenGeul.Office.exe'), '--module', 'writer', '--file', str(source)], suite, output, CASE,**options)
         record['stage'] = 'native-shell-architecture'
         record['shellArchitecture'] = native_arch.observe_owned_process(process.pid, architecture)
         api = native.Windows()
@@ -198,7 +199,7 @@ def run_gui(suite, fixtures, output):
         assert not engine.exited(0), 'Owned Writer engine exited during physical style input'
         record['physicalStyleShortcutSent'] = True
         record['stage'] = 'save-via-suite-menu'
-        click_suite_save(api, process, hwnd, record)
+        click_suite_save(api, process, hwnd, record,**native.source_menu_action_options(process))
         save_deadline=time.monotonic()+35
         record['savedDocument'] = wait_saved_style(source,baseline,save_deadline,record)
         native.wait_for(lambda: not api.title(hwnd).startswith('* '), 12)
@@ -409,21 +410,26 @@ def verify_saved(suite, output):
     return 0 if result['success'] else 1
 
 
-def main(argv=None):
+def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite', required=True, type=Path)
     parser.add_argument('--fixtures', type=Path)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--verify-saved', action='store_true', help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
-    if os.name != 'nt' or not __debug__: raise RuntimeError('Actual Windows execution with assertions is required')
-    suite, output = args.suite.resolve(), args.output.resolve()
-    if args.verify_saved: return verify_saved(suite, output)
-    assert args.fixtures, 'Fresh generated engine fixtures are required'
-    lifecycle.unlinked(args.output)
-    output.mkdir(parents=True, exist_ok=False)
-    (output / 'fixtures').mkdir()
-    record = run_gui(suite, args.fixtures.resolve(), output)
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument('--verify-saved', action='store_true', help=argparse.SUPPRESS)
+    mode.add_argument('--source-qualified-menu',choices=('x64','arm64'))
+    return parser
+
+
+def _run_style_cohort(suite,fixtures,output,*,source_prepared=None,stop_if_pending=None):
+    options={} if source_prepared is None else dict(source_prepared=source_prepared)
+    if source_prepared is None:
+        record = run_gui(suite,fixtures,output,**options)
+    else:
+        pending_options={} if stop_if_pending is None else dict(stop_if_pending=stop_if_pending)
+        rows=native.collect_cases([(CASE,lambda:run_gui(suite,fixtures,output,**options))],output,**pending_options)
+        record=rows[0] if rows else dict(success=False,guiVerified=False,stage='source-cohort-not-started')
+    if stop_if_pending is not None and stop_if_pending():record.update(success=False,guiVerified=False,sourceMenuCohortPending=True)
     if record.get('guiVerified') is True:
         try:
             with (output / 'packaged-uno.log').open('xb') as log:
@@ -444,6 +450,21 @@ def main(argv=None):
     (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     print('Writer Heading 1: ' + ('passed' if record['success'] else 'FAILED: ' + str(record.get('error'))), flush=True)
     return 0 if report['success'] else 1
+
+
+def main(argv=None):
+    args = argument_parser().parse_args(argv)
+    if os.name != 'nt' or not __debug__: raise RuntimeError('Actual Windows execution with assertions is required')
+    suite, output = args.suite.resolve(), args.output.resolve()
+    if args.verify_saved: return verify_saved(suite, output)
+    assert args.fixtures, 'Fresh generated engine fixtures are required'
+    lifecycle.unlinked(args.output)
+    output.mkdir(parents=True, exist_ok=False)
+    (output / 'fixtures').mkdir()
+    if args.source_qualified_menu is None:return _run_style_cohort(suite,args.fixtures.resolve(),output)
+    from native_menu_smoke import source_menu_cohort
+    with source_menu_cohort(suite,args.source_qualified_menu,output) as (prepared,pending):
+        return _run_style_cohort(suite,args.fixtures.resolve(),output,source_prepared=prepared,stop_if_pending=pending)
 
 
 if __name__ == '__main__': raise SystemExit(main())

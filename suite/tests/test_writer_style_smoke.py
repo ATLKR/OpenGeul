@@ -20,6 +20,42 @@ if SOURCE.is_file():
 else:
     smoke = None
 
+
+class SourceMenuWriterStyleCliTests(unittest.TestCase):
+    def test_source_style_parser_rejects_saved_only_combination(self):
+        parser=getattr(smoke,'argument_parser',None)
+        self.assertTrue(callable(parser),'Writer style CLI parser seam is missing')
+        base=['--suite','suite','--output','output']
+        self.assertIsNone(parser().parse_args(base).source_qualified_menu)
+        self.assertEqual(parser().parse_args(base+['--source-qualified-menu','arm64']).source_qualified_menu,'arm64')
+        import contextlib,io
+        with contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            parser().parse_args(base+['--verify-saved','--source-qualified-menu','arm64'])
+
+    def test_source_style_launch_and_live_replay_use_explicit_context(self):
+        import inspect
+        self.assertIn('source_prepared',inspect.signature(smoke.run_gui).parameters)
+        self.assertIn('source_admission',inspect.signature(smoke.click_suite_save).parameters)
+        self.assertIn('source_menu_cohort',inspect.getsource(smoke.main))
+        from test_native_menu_smoke import assert_source_cli_dispatch
+        assert_source_cli_dispatch(self,smoke,'_run_style_cohort',('fixtures',))
+
+    def test_source_style_pending_terminal_writes_partial_report_without_reopen_launch(self):
+        class PendingTerminal(BaseException):pass
+        with tempfile.TemporaryDirectory() as temp:
+            output=Path(temp);pending=[False]
+            def failed(*args,**options):
+                with (output/(smoke.CASE+'-result.json')).open('w') as stream:
+                    json.dump(dict(success=False,guiVerified=False,stage='owned-cleanup-finished'),stream)
+                pending[0]=True;raise PendingTerminal()
+            try:
+                with mock.patch.object(smoke,'run_gui',side_effect=failed), \
+                        mock.patch.object(smoke.subprocess,'run') as launch:
+                    code=smoke._run_style_cohort(output,output,output,source_prepared=object(),stop_if_pending=lambda:pending[0])
+            except PendingTerminal:self.fail('Pending Writer terminal skipped its partial report')
+            self.assertEqual(code,1);launch.assert_not_called()
+            with (output/'results.json').open() as stream:self.assertFalse(json.load(stream)['success'])
+
 # Actual run38951093947/source98f metadata, retained without inventing OS-image evidence.
 ACTUAL_98_SUITE_ROOT = 'D:\\a\\OpenGeul\\OpenGeul\\dist\\OpenGeul-Office-0.1.1-dev-windows-x64'
 ACTUAL_98_PYTHON_OBSERVATION = {'implementation': 'cpython',

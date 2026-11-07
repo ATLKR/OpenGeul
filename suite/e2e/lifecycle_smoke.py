@@ -734,7 +734,8 @@ class WriterModelContext:
 
 
 class Case:
-    def __init__(self, suite, fixtures, output, name, *, blank=False, home=False, prepared_library=None):
+    def __init__(self, suite, fixtures, output, name, *, blank=False, home=False, prepared_library=None, source_prepared=None):
+        self.source_prepared=source_prepared
         self.suite, self.fixtures, self.output, self.name = suite, fixtures, output, name
         self.prepared_library = prepared_library
         assert name not in ASCII_EDITOR_MARKERS or prepared_library is not None, 'Physical ASCII cohort must be prepared before launch'
@@ -746,7 +747,8 @@ class Case:
         self.writer_model_contexts = {}
         command = [str(suite / 'OpenGeul.Office.exe')]
         if not home: command += ['--module', 'writer'] + (['--file', str(self.source)] if self.source else [])
-        self.process = native.launch_suite(command, suite, output, name)
+        options=native.source_menu_launch_options(source_prepared,deadline=time.monotonic()+150) if source_prepared is not None else {}
+        self.process = native.launch_suite(command, suite, output, name,**options)
         self.api = LifecycleWindows()
         self.record = {'case': name, 'kind': 'native-lifecycle', 'success': False, 'shellPid': self.process.pid,
                        'stage': 'startup', 'stderrLog': name + '-stderr.log', 'imeVerified': False}
@@ -856,14 +858,14 @@ class Case:
         self.api.require_foreground(hwnd)
         command='save' if keys=='^s' else 'saveAs'
         action=click_native_menu_action(self.api,self.process,hwnd,self.record,command)
-        return require_native_menu_action(action,self.process.pid,hwnd,command)
+        return require_native_menu_action(action,self.process.pid,hwnd,command,**native.source_menu_action_options(self.process))
 
     def new_from_menu(self, hwnd):
         from owned_native_menu import click_native_menu_action,require_native_menu_action
         native.activate_owned_suite(self.api,self.process,hwnd,self.record)
         self.api.require_foreground(hwnd)
         action=click_native_menu_action(self.api,self.process,hwnd,self.record,'new-writer')
-        return require_native_menu_action(action,self.process.pid,hwnd,'new-writer')
+        return require_native_menu_action(action,self.process.pid,hwnd,'new-writer',**native.source_menu_action_options(self.process))
 
     def dialog(self, owner, title, deadline=None):
         from pywinauto import Desktop
@@ -1473,8 +1475,9 @@ def hwp_route(case):
     case.record['hwpTileBundledProcessVerified'] = True
     case.finish()
     # The extension route is exercised through the real public Suite launch parser.
+    options=native.source_menu_launch_options(case.source_prepared,deadline=time.monotonic()+150) if getattr(case,'source_prepared',None) is not None else {}
     routed = native.launch_suite([str(case.suite / 'OpenGeul.Office.exe'), '--file', str(target)],
-                                  case.suite, case.output, case.name + '-route')
+                                  case.suite, case.output, case.name + '-route',**options)
     try:
         verify_and_close(routed, path=target)
         assert not case.api.document_windows(routed), 'HWPX was routed to an Office editor instead of HWP'
@@ -1486,37 +1489,39 @@ def hwp_route(case):
     case.record.update(webview2Verified=True, generatedHwpxUnchanged=True, hwpLaunches=launches, generatedHwpxSha256=original)
 
 
-def main(argv=None):
-    if os.name != 'nt': raise RuntimeError('Actual Windows GUI execution is required; Linux unit checks provide no native proof')
-    if not __debug__: raise RuntimeError('Do not disable lifecycle assertions with Python -O')
+def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite', type=Path, required=True)
     parser.add_argument('--fixtures', type=Path)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--verify-saved', action='store_true', help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
-    if args.verify_saved:
-        for path in (args.suite, args.output): unlinked(path)
-        return verify_saved_with_uno(args.suite.resolve(), args.output.resolve())
-    assert args.fixtures is not None, 'Generated baseline --fixtures are required for native cases'
-    for path in (args.suite, args.fixtures, args.output): unlinked(path)
-    suite, fixtures, output = (path.resolve() for path in (args.suite, args.fixtures, args.output))
-    assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Local test paths are required'
-    assert suite != output and suite not in output.parents and fixtures != output and fixtures not in output.parents, 'Evidence must be outside payload and baseline fixtures'
-    assert suite.is_dir() and fixtures.is_dir(), 'Packaged Suite and generated baseline fixtures are required'
-    baseline_hashes = {path.name: digest(path) for path in fixtures.iterdir() if path.is_file()}
-    output.mkdir(parents=True, exist_ok=False)
-    (output / 'fixtures').mkdir()
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument('--verify-saved', action='store_true', help=argparse.SUPPRESS)
+    mode.add_argument('--source-qualified-menu',choices=('x64','arm64'))
+    return parser
+
+
+def _run_lifecycle_cohort(suite,fixtures,output,baseline_hashes,*,source_prepared=None,stop_if_pending=None):
+    source_options={} if source_prepared is None else dict(source_prepared=source_prepared)
+    pending_options={} if stop_if_pending is None else dict(stop_if_pending=stop_if_pending)
+    if stop_if_pending is not None and stop_if_pending():
+        report=lifecycle_report([])
+        report.update(success=False,sourceMenuCohortPending=True)
+        (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
+        return 1
     prepared_library = native.prepare_ascii_cohort(suite, output)
     definitions = ((dirty_cancel_save, {}), (dirty_discard, {}), (new_saveas_cancel, {'blank': True}),
                    (failed_saveas, {}), (home_two_documents, {'home': True}), (resize_restore, {}),
                    (hwp_route, {'home': True}))
     cases = [(name, lambda name=name, action=action, options=options:
-              Case(suite, fixtures, output, name, prepared_library=prepared_library if name in ASCII_EDITOR_MARKERS else None, **options).run(action))
+              Case(suite, fixtures, output, name, prepared_library=prepared_library if name in ASCII_EDITOR_MARKERS else None, **options,**source_options).run(action))
              for name, (action, options) in zip(CASE_REQUIREMENTS, definitions)]
-    records = native.collect_cases(cases, output)
+    records = native.collect_cases(cases, output,**pending_options)
     report = lifecycle_report(records)
     (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    if stop_if_pending is not None and stop_if_pending():
+        report.update(success=False,sourceMenuCohortPending=True,baselineFixturesUnchanged={path.name:digest(path) for path in fixtures.iterdir() if path.is_file()}==baseline_hashes)
+        (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
+        return 1
     try:
         with (output / 'packaged-uno.log').open('xb') as log:
             verification = subprocess.run([str(suite / 'Office/program/python.exe'), str(Path(__file__).resolve()),
@@ -1553,6 +1558,28 @@ def main(argv=None):
     (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     print(f"Lifecycle cases: {report['passedCaseCount']}/{report['expectedCaseCount']} passed", flush=True)
     return 0 if report['success'] else 1
+
+
+def main(argv=None):
+    if os.name != 'nt': raise RuntimeError('Actual Windows GUI execution is required; Linux unit checks provide no native proof')
+    if not __debug__: raise RuntimeError('Do not disable lifecycle assertions with Python -O')
+    args = argument_parser().parse_args(argv)
+    if args.verify_saved:
+        for path in (args.suite, args.output): unlinked(path)
+        return verify_saved_with_uno(args.suite.resolve(), args.output.resolve())
+    assert args.fixtures is not None, 'Generated baseline --fixtures are required for native cases'
+    for path in (args.suite, args.fixtures, args.output): unlinked(path)
+    suite, fixtures, output = (path.resolve() for path in (args.suite, args.fixtures, args.output))
+    assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Local test paths are required'
+    assert suite != output and suite not in output.parents and fixtures != output and fixtures not in output.parents, 'Evidence must be outside payload and baseline fixtures'
+    assert suite.is_dir() and fixtures.is_dir(), 'Packaged Suite and generated baseline fixtures are required'
+    baseline_hashes = {path.name: digest(path) for path in fixtures.iterdir() if path.is_file()}
+    output.mkdir(parents=True, exist_ok=False)
+    (output / 'fixtures').mkdir()
+    if args.source_qualified_menu is None:return _run_lifecycle_cohort(suite,fixtures,output,baseline_hashes)
+    from native_menu_smoke import source_menu_cohort
+    with source_menu_cohort(suite,args.source_qualified_menu,output) as (prepared,pending):
+        return _run_lifecycle_cohort(suite,fixtures,output,baseline_hashes,source_prepared=prepared,stop_if_pending=pending)
 
 
 if __name__ == '__main__': raise SystemExit(main())
