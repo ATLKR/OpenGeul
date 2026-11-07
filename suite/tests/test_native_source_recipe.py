@@ -351,7 +351,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(GPG_FIXTURE.read_bytes())
         return target
 
-    def harfbuzz_replay(self, raw, **profile):
+    def harfbuzz_replay(self, raw, *, inherited_pkg_config_path=None, **profile):
         from suite.tests import test_native_meson_path as replay
         from suite.tests.test_native_python_host import require_posix_recipe_replay
         require_cygwin = os.environ.get('OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY') == '1'
@@ -363,10 +363,36 @@ class ActualSourceRecipeTests(unittest.TestCase):
                      'XDG_CACHE_HOME': '/tmp/opengeul-meson/cache',
                      'XDG_CONFIG_HOME': '/tmp/opengeul-meson/config',
                      'XDG_DATA_HOME': '/tmp/opengeul-meson/data'}
+        if inherited_pkg_config_path is not None:
+            synthetic['PKG_CONFIG_PATH'] = inherited_pkg_config_path
         profile = dict(cpu='X86_64', build='x86_64-pc-cygwin', target='x86_64-pc-cygwin') | profile
         with patch.object(os, 'environ', synthetic):
             if require_cygwin: replay.make_profile(require_cygwin=True)
             return replay.replay(self.folder, raw, **profile)
+
+    def assert_harfbuzz_package_scope(self, observed, *, setup_entries, compile_path):
+        self.assertEqual(2, len(observed))
+        self.assertEqual(setup_entries, len(observed[0]['PKG_CONFIG_PATH'].split(';')))
+        self.assertEqual(compile_path, observed[1]['PKG_CONFIG_PATH'])
+
+    def test_x64_harfbuzz_setup_package_path_does_not_replace_compile_inheritance(self):
+        from suite.tests import test_native_meson_path as replay
+        path = 'external/harfbuzz/ExternalProject_harfbuzz.mk'; original = self.inputs[path]
+        self.install('x64'); effective = (self.source / path).read_bytes()
+        for inherited, prefix, expected_compile, setup_entries in (
+                (None, '', None, 2),
+                ('C:/synthetic inherited', 'C:/unchanged inherited', 'C:/unchanged inherited', 3)):
+            with self.subTest(inherited=inherited is not None):
+                before = self.harfbuzz_replay(original, prefix=prefix, inherited_pkg_config_path=inherited)
+                after = self.harfbuzz_replay(effective, prefix=prefix, inherited_pkg_config_path=inherited)
+                self.assertEqual(0, before.returncode); self.assertEqual(0, after.returncode)
+                baseline = replay.observations(before); observed = replay.observations(after)
+                self.assertEqual(2, len(baseline))
+                self.assertEqual(expected_compile, baseline[1]['PKG_CONFIG_PATH'])
+                try:
+                    self.assert_harfbuzz_package_scope(observed, setup_entries=setup_entries, compile_path=expected_compile)
+                except AttributeError:
+                    self.fail('Compile receiver does not inherit the setup-only package assignment')
 
     def test_x64_harfbuzz_native_meson_receives_exact_compiler_argv_and_native_package_list(self):
         from suite.tests import test_native_meson_path as replay
@@ -448,7 +474,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             self.assertEqual('real-cygwin-path-and-recipe-replay', item['profileClassification'])
             self.assertTrue(item['builtinMakeHost'].endswith('-cygwin'))
             for name in ('CC', 'CXX'): self.assertEqual([expected], replay.windows_split_args()(item[name]))
-            self.assertEqual(2, len(item['PKG_CONFIG_PATH'].split(';')))
+        self.assert_harfbuzz_package_scope(observed, setup_entries=2, compile_path=None)
 
 
     def test_x64_atl_retains_all_six_exact_recipes_and_group_evidence(self):
