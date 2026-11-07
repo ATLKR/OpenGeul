@@ -7,6 +7,7 @@ import shlex
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -974,6 +975,38 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
         for field,value in [('passed',False),('rows',[]),('independentReopenVerified',False),('nativeProcesses',[{'processMachine':34404,'nativeMachine':43620}]),('nativeProcesses',[{'processMachine':0,'nativeMachine':43620,'role':'soffice-launcher'}]*3)]:
             report.write_text(json.dumps(dict(good,**{field:value})))
             self.rejected(f"Assert-BaseProof {quote(report)}")
+
+    def test_cygwin_bootstrap_requests_the_signature_verified_official_setup_checksum(self):
+        # Reuse the engine branch's signature-verified input; the public
+        # sha512.sum was independently checked again before this pin update.
+        from suite.tests.test_writer_observer_producer import child_environment
+        expected = '9bbbd4de497842446af58af875590ace5d8fa3c557cd7e27328569dfa68e58213da1cc1a6fb7102d4f0f01be38e0b92c6fa74f61b6eb7351a0481ca4bd9e8781'
+        source = SOURCE.read_text()
+        start = source.index("        $setup=Join-Path $downloads 'setup-x86_64.exe'\n")
+        stop = source.index("        $manifestPath=", start)
+        body = f"""
+$downloads={quote(self.root)};$evidence={quote(self.root)};$receipt=@{{}}
+function Get-AuthenticatedDownload($Url,$Destination,$Size,$Algorithm,$Hash,$ReceiptPath) {{
+    return [ordered]@{{url=$Url;destination=$Destination;algorithm=$Algorithm;hash=$Hash}}
+}}
+{source[start:stop]}
+$receipt.cygwinSetup|ConvertTo-Json -Compress
+"""
+        script = self.root/'cygwin-pin.ps1'
+        script.write_text("$ErrorActionPreference='Stop'\n. "+quote(SOURCE)+'\n'+body, encoding='utf-8')
+        roots = {'system_root': os.environ.get('SystemRoot'), 'windir': os.environ.get('WINDIR')} if os.name == 'nt' else {}
+        environment = child_environment(os.name, str(Path(PWSH).resolve()),
+            str(Path(sys.executable).resolve()), str(self.root), **roots)
+        for key in ('TEMP','TMP','USERPROFILE','APPDATA','LOCALAPPDATA','XDG_CACHE_HOME','XDG_CONFIG_HOME','XDG_DATA_HOME'):
+            if key in environment: Path(environment[key]).mkdir(parents=True, exist_ok=True)
+        result = subprocess.run([PWSH,'-NoLogo','-NoProfile','-File',str(script)],
+            text=True,capture_output=True,timeout=30,env=environment)
+        self.assertEqual(0, result.returncode, 'Bounded synthetic bootstrap selection failed')
+        value = json.loads(result.stdout)
+        self.assertEqual('https://cygwin.com/setup-x86_64.exe', value['url'])
+        self.assertEqual(str(self.root/'setup-x86_64.exe'), value['destination'])
+        self.assertEqual('SHA512', value['algorithm'])
+        self.assertEqual(expected, value['hash'])
 
 
 if __name__=='__main__':unittest.main()
