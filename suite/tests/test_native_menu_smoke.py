@@ -4,6 +4,7 @@ import copy
 import ctypes
 import importlib.util
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1376,6 +1377,169 @@ class InitialFocusStderrTests(unittest.TestCase):
         self.assertEqual(value['rows'],[])
         self.assertIs(type(value['errorCode']),int)
         self.assertGreater(value['errorCode'],0)
+
+    def flow_event(self, sequence=1, *, observation=1, phase=1, group=0, mask=0,
+                   true_mask=0, first=0, complete=False):
+        row=self.event(sequence=sequence)
+        row.update(event='suite.initialEditorFocusFlow',stage='observe')
+        row['details']=dict(schemaVersion=1,observationId=observation,sourceCode=4,phaseCode=phase,
+            gateGroupCode=group,evaluatedMask=mask,trueMask=true_mask,firstRejectId=first,
+            evaluationComplete=complete,pendingKnown=False,pending=False,
+            queueReturnKnown=False,queueReturn=False,originalFormHwnd=11,originalPanelHwnd=12)
+        return row
+
+    def capture_flow(self, **options):
+        method=self.smoke.capture_initial_focus_trace
+        self.assertIn('flow_out',method.__code__.co_varnames,
+            'A separate optional numeric flow projection is missing')
+        flow={};value=self.capture(flow_out=flow,**options)
+        return value,flow
+
+    def test_flow_reuses_one_read_and_preserves_the_original_projection(self):
+        self.write([self.event()]);original=self.capture()
+        self.write([self.flow_event(),self.event(),self.flow_event(2,phase=2,group=1,
+            mask=3,true_mask=2,first=2,complete=True)])
+        with patch.object(self.smoke.os,'read',wraps=os.read) as read:
+            value,flow=self.capture_flow()
+        self.assertEqual(read.call_count,1);self.assertEqual(value,original)
+        self.assertTrue(flow['known']);self.assertFalse(flow['acceptanceEligible'])
+        self.assertTrue(flow['eventCompletenessUnknown'])
+        self.assertEqual(flow['scope'],original['scope'])
+        self.assertEqual(flow['rows'][1]['firstRejectId'],2)
+        self.assertEqual(self.capture(),original)
+
+    def test_flow_observation_ids_join_late_callbacks_without_monotonic_assumptions(self):
+        self.write([self.event(),self.flow_event(observation=2),
+            self.flow_event(2,observation=1,phase=5),self.flow_event(3,observation=2,phase=11)])
+        value,flow=self.capture_flow();self.assertTrue(value['known']);self.assertTrue(flow['known'])
+        self.assertEqual([r['observationId'] for r in flow['rows']],[2,1,2])
+        for sequence in (1,True,129):
+            self.write([self.event(),self.flow_event(),self.flow_event(sequence,phase=5)])
+            value,flow=self.capture_flow();self.assertTrue(value['known']);self.assert_unknown(flow)
+            self.assertEqual(flow['errorCode'],4)
+        changed=self.flow_event(2,phase=5);changed['details']['sourceCode']=1
+        self.write([self.event(),self.flow_event(),changed]);value,flow=self.capture_flow()
+        self.assertTrue(value['known']);self.assert_unknown(flow)
+
+    def test_flow_scopes_shapes_and_types_fail_only_the_separate_stream(self):
+        self.write([self.event()]);original=self.capture()
+        mutations=(lambda r:r.update(processId=78),lambda r:r.update(workerProcessId=100),
+            lambda r:r.update(managedThreadId=2),lambda r:r.update(traceId='b'*32),
+            lambda r:r.update(stage='initial'),lambda r:r['details'].update(extra=0),
+            lambda r:r['details'].pop('pendingKnown'),lambda r:r['details'].update(schemaVersion=True),
+            lambda r:r['details'].update(originalFormHwnd=99),lambda r:r['details'].update(sourceCode=6),
+            lambda r:r['details'].update(phaseCode=0),lambda r:r['details'].update(observationId=True),
+            lambda r:r['details'].update(pendingKnown=0),lambda r:r['details'].update(pending=True),
+            lambda r:r['details'].update(queueReturn=True),lambda r:r['details'].update(evaluatedMask=1),
+            lambda r:r['details'].update(evaluationComplete=True),lambda r:r['details'].update(trueMask=1))
+        for change in mutations:
+            with self.subTest(mutation=mutations.index(change)):
+                row=self.flow_event();change(row);self.write([self.event(),row])
+                value,flow=self.capture_flow();self.assertEqual(value,original)
+                self.assert_unknown(flow)
+                if mutations.index(change) in (0,1,2,3,8):self.assertEqual(flow['errorCode'],1)
+
+    def test_flow_requires_original_rich_scope_and_reports_absent_and_gaps(self):
+        self.write([self.event()]);value,flow=self.capture_flow()
+        self.assertTrue(value['known']);self.assert_unknown(flow);self.assertEqual(flow['errorCode'],2)
+        self.write([self.flow_event()]);value,flow=self.capture_flow()
+        self.assert_unknown(value);self.assert_unknown(flow);self.assertEqual(flow['errorCode'],1)
+        self.write([self.event(),self.flow_event(2),self.flow_event(5,phase=5)])
+        value,flow=self.capture_flow();self.assertTrue(flow['known']);self.assertEqual(flow['gapCount'],3)
+        self.assertTrue(flow['gapObserved']);self.assertTrue(flow['eventCompletenessUnknown'])
+
+    def test_flow_first_false_and_incomplete_prefix_are_distinct_numeric_observations(self):
+        rows=[self.flow_event(phase=6,group=3),
+            self.flow_event(2,phase=7,group=3,mask=15,true_mask=7,first=4,complete=True),
+            self.flow_event(3,observation=2,phase=7,group=3,mask=3,true_mask=3)]
+        self.write([self.event(),*rows]);_,flow=self.capture_flow();self.assertTrue(flow['known'])
+        self.assertEqual(flow['rows'][1]['firstRejectId'],4)
+        self.assertFalse(flow['rows'][2]['evaluationComplete'])
+        self.assertEqual(flow['rows'][2]['firstRejectId'],0)
+        for changes in (dict(evaluatedMask=5),dict(trueMask=16),dict(firstRejectId=3),
+                        dict(evaluatedMask=7,trueMask=7,firstRejectId=0)):
+            row=copy.deepcopy(rows[1]);row['details'].update(changes)
+            self.write([self.event(),row]);value,bad=self.capture_flow()
+            self.assertTrue(value['known']);self.assert_unknown(bad)
+
+    def test_flow_budget_and_malformed_json_do_not_revoke_a_fixed_old_projection(self):
+        self.write([self.event()]);original=self.capture()
+        self.write([self.event(),self.flow_event()]);decode=self.smoke.json.loads;now=[0.]
+        def decode_flow(raw,**kwargs):
+            value=decode(raw,**kwargs)
+            if value.get('event')=='suite.initialEditorFocusFlow':now[0]=2.
+            return value
+        with patch.object(self.smoke.time,'monotonic',side_effect=lambda:now[0]), \
+                patch.object(self.smoke.json,'loads',decode_flow):
+            value,flow=self.capture_flow()
+        self.assertEqual(value,original);self.assert_unknown(flow);self.assertEqual(flow['errorCode'],5)
+        self.write([self.event()],suffix=b'{"event":"suite.initialEditorFocusFlow","component":"host",bad}\n')
+        value,flow=self.capture_flow();self.assertEqual(value,original);self.assert_unknown(flow)
+        duplicate=(json.dumps(self.flow_event(),separators=(',',':')).replace(
+            '"schemaVersion":1','"schemaVersion":1,"schemaVersion":1')+'\n').encode()
+        self.write([self.event()],suffix=duplicate)
+        value,flow=self.capture_flow();self.assertEqual(value,original);self.assert_unknown(flow)
+
+    def test_flow_retired_projection_is_historical_and_never_exports_trace_or_text(self):
+        self.write([self.event(),self.flow_event()]);self.retire()
+        value,flow=self.capture_flow(retired=True)
+        self.assertTrue(value['known']);self.assertTrue(flow['known'])
+        self.assertTrue(flow['historicalIdentityOnly']);self.assertTrue(flow['retirementConfirmed'])
+        def numeric(item):
+            if type(item) is dict:return all(numeric(v) for v in item.values())
+            if type(item) is list:return all(numeric(v) for v in item)
+            return type(item) in (int,bool)
+        self.assertTrue(numeric(flow))
+        exported=json.dumps(flow)
+        for forbidden in ('suite.initialEditorFocusFlow','observe',str(self.folder),'a'*32):
+            self.assertNotIn(forbidden,exported)
+
+    def test_flow_caller_joins_top_level_evidence_without_changing_primary_failure(self):
+        self.write([self.event(),self.flow_event()]);boundary=Session(fail='open-escape')
+        opening=copy.deepcopy(self.record)
+        def open_session(record):
+            boundary.open(record);record.update(copy.deepcopy(opening))
+        self.session.open=open_session
+        for name in ('ready','gesture','screenshot','view_roundtrip','hwp_launcher','finish'):
+            setattr(self.session,name,getattr(boundary,name))
+        def cleanup(record):self.retire(record);return True
+        self.session.cleanup=cleanup
+        record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=lambda *args:self.session)
+        self.assertTrue(record['initialFocusTrace']['known']);self.assertTrue(record['initialFocusFlow']['known'])
+        self.assertTrue(record['initialFocusFlowAfterRetirement']['historicalIdentityOnly'])
+        self.assertEqual(record['initialFocusFlow']['rows'],record['initialFocusFlowAfterRetirement']['rows'])
+        self.assertFalse(record['success']);self.assertTrue(record['cleanupConfirmed'])
+        self.assertEqual((record['stage'],record['errorType']),('open-escape','AssertionError'))
+
+    def test_flow_source_observers_preserve_getters_core_and_existing_logger(self):
+        source=(E2E.parent/'shell/OfficeDocumentForm.cs').read_text()
+        self.assertIn('new("suite.initialEditorFocusFlow")',source)
+        import re
+        available=source[source.index('private bool EditorFocusAvailable('):source.index('private void TryInitialEditorFocus()')]
+        operands=re.findall(r'InitialFocusGate\(flow, (\d+), ([^\n]+?)\)',available)
+        expected=['Environment.CurrentManagedThreadId == uiThreadId','attached','worker is not null',
+            '!loading','!busy','!closing','!closeApproved','!IsDisposed','!Disposing',
+            'IsHandleCreated','Enabled','Visible','!Modal','ActiveForm == this']
+        self.assertEqual(operands,[(str(i),v) for i,v in enumerate(expected,1)])
+        self.assertEqual(available.count(' &&'),13)
+        queue=source[source.index('private void QueueInitialEditorFocus()'):source.index('private void TraceInitialActivation(')]
+        operands=re.findall(r'InitialFocusQueueGate\(flow, (\d+), ([^\n]+?)\)',queue.replace('owned!.','owned.'))
+        self.assertEqual(operands,[(str(i),v) for i,v in enumerate(
+            ['!attached','loading','owned is null','!owned.InitialFocusPending','IsDisposed','Disposing','!IsHandleCreated'],1)])
+        self.assertEqual(queue.count('BeginInvoke('),1)
+        guard=queue[:queue.index('private sealed class InitialFocusFlow')]
+        self.assertEqual(guard.count(' ||'),6)
+        self.assertIn('return value;',source[source.index('private static bool InitialFocusGate('):])
+        for name,count in [('IsHandleCreated',21),('InitialFocusPending',9),('ActiveForm',2),('Visible',2),
+                           ('Modal',1),('IsDisposed',22),('Disposing',18),('BeginInvoke',4),
+                           ('QueueInitialEditorFocus',3),('TryInitialEditorFocus',2)]:
+            self.assertEqual(len(re.findall(r'\b'+name+r'\b',source)),count,name)
+        self.assertEqual(source.count('worker?.DiagnosticTraceId'),7)
+        for forbidden in ('SetForegroundWindow(', 'AttachThreadInput(', 'SetFocus(', 'SetEditorFocus('):
+            self.assertNotIn(forbidden,source)
+        for name,digest in [('OwnedEditorFocus.cs','92c782419aa76412327b728df05496ac913aeb2eb2b0d7a7d3a82a6083bd3004'),
+                            ('SaveDiagnosticsTrace.cs','a6260cfe63ca89762dff49237f4d07b1030a92022aff8ce5cc3cf8ce16232af2')]:
+            self.assertEqual(hashlib.sha256((E2E.parent/'shell/Core'/name).read_bytes()).hexdigest(),digest)
 
     def test_pascal_case_snapshots_and_lower_case_envelope_are_numeric_only(self):
         self.write([self.event(),self.event('initial.queued',2),self.event('initial.activation',3)])

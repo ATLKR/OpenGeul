@@ -20,6 +20,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly bool nativeMenuStatusDiagnostics = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OPENGEUL_SUITE_DIAGNOSTICS"));
     private readonly SaveDiagnosticsTrace saveDiagnostics = new("suite.documentSave");
     private readonly SaveDiagnosticsTrace editorFocusDiagnostics = new("suite.editorFocus");
+    private readonly SaveDiagnosticsTrace initialFocusFlowDiagnostics = new("suite.initialEditorFocusFlow");
+    private int initialFocusObservationCount;
     private readonly StandaloneSaveCloseIntent saveCloseIntent = new();
     private OwnedEditorFocus? editorFocus;
     private DocumentMenuSurface? menuSurface;
@@ -93,6 +95,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         var observedForm = pendingBefore ? editorFocusFormHwnd : 0;
         var observedPanel = pendingBefore ? editorFocusPanelHwnd : 0;
         var receivedHwnd = pendingBefore && IsHandleCreated ? Handle : 0;
+        var flow = pendingBefore ? CreateInitialFocusFlow(1, true, pendingBefore) : null;
+        WriteInitialFocusFlow(flow, 1);
         base.OnActivated(e);
         TraceInitialActivation(1, receivedHwnd, observedOwner, pendingBefore, observedForm, observedPanel);
         QueueInitialEditorFocus();
@@ -536,6 +540,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         var observedForm = pendingBefore ? editorFocusFormHwnd : 0;
         var observedPanel = pendingBefore ? editorFocusPanelHwnd : 0;
         var activationSource = m.Msg == 0x001C ? (appActivated ? 2 : 5) : m.Msg == 0x0021 ? 3 : 0;
+        var flow = activationSource != 0 && pendingBefore ? CreateInitialFocusFlow(activationSource, true, pendingBefore) : null;
+        WriteInitialFocusFlow(flow, 1);
         if (m.Msg == 0x0010) TraceClose("wmClose.received", new { messageHwnd = m.HWnd.ToInt64() });
         base.WndProc(ref m);
         if (activationSource != 0)
@@ -578,32 +584,155 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
-    private bool EditorFocusAvailable() => Environment.CurrentManagedThreadId == uiThreadId &&
-        attached && worker is not null && !loading && !busy && !closing && !closeApproved &&
-        !IsDisposed && !Disposing && IsHandleCreated && Enabled && Visible && !Modal && ActiveForm == this;
+    private bool EditorFocusAvailable(InitialFocusFlow? flow = null)
+    {
+        flow?.Begin(3);
+        WriteInitialFocusFlow(flow, 6);
+        try
+        {
+            var available = InitialFocusGate(flow, 1, Environment.CurrentManagedThreadId == uiThreadId) &&
+                InitialFocusGate(flow, 2, attached) && InitialFocusGate(flow, 3, worker is not null) &&
+                InitialFocusGate(flow, 4, !loading) && InitialFocusGate(flow, 5, !busy) &&
+                InitialFocusGate(flow, 6, !closing) && InitialFocusGate(flow, 7, !closeApproved) &&
+                InitialFocusGate(flow, 8, !IsDisposed) && InitialFocusGate(flow, 9, !Disposing) &&
+                InitialFocusGate(flow, 10, IsHandleCreated) && InitialFocusGate(flow, 11, Enabled) &&
+                InitialFocusGate(flow, 12, Visible) && InitialFocusGate(flow, 13, !Modal) &&
+                InitialFocusGate(flow, 14, ActiveForm == this);
+            flow?.Complete();
+            return available;
+        }
+        finally { WriteInitialFocusFlow(flow, 7); }
+    }
 
     private void TryInitialEditorFocus()
     {
         var owned = editorFocus;
         if (owned is null) return;
-        var available = EditorFocusAvailable();
+        var flow = CreateInitialFocusFlow(0, false, false);
+        WriteInitialFocusFlow(flow, 1);
+        var available = EditorFocusAvailable(flow);
         var result = owned.TryInitialFocus(available);
-        editorFocusDiagnostics.Write("initial", new { available, pending = owned.InitialFocusPending, result }, worker?.ProcessId, worker?.DiagnosticTraceId);
+        var pending = owned.InitialFocusPending;
+        editorFocusDiagnostics.Write("initial", new { available, pending, result }, worker?.ProcessId, worker?.DiagnosticTraceId);
+        flow?.Pending(pending);
+        WriteInitialFocusFlow(flow, 12);
     }
 
     private void QueueInitialEditorFocus()
     {
         var owned = editorFocus;
-        if (editorFocusDiagnostics.Enabled && owned?.InitialFocusPending == true)
+        var pendingBefore = editorFocusDiagnostics.Enabled && owned?.InitialFocusPending == true;
+        if (pendingBefore)
             TraceInitialActivation(4, editorFocusFormHwnd, owned, true, editorFocusFormHwnd, editorFocusPanelHwnd);
-        if (!attached || loading || owned is null || !owned.InitialFocusPending || IsDisposed || Disposing || !IsHandleCreated) return;
+        var flow = pendingBefore ? CreateInitialFocusFlow(4, true, pendingBefore) : null;
+        WriteInitialFocusFlow(flow, 1);
+        flow?.Begin(1);
+        if (InitialFocusQueueGate(flow, 1, !attached) || InitialFocusQueueGate(flow, 2, loading) ||
+            InitialFocusQueueGate(flow, 3, owned is null) || InitialFocusQueueGate(flow, 4, !owned!.InitialFocusPending) ||
+            InitialFocusQueueGate(flow, 5, IsDisposed) || InitialFocusQueueGate(flow, 6, Disposing) ||
+            InitialFocusQueueGate(flow, 7, !IsHandleCreated))
+        {
+            flow?.Complete(); WriteInitialFocusFlow(flow, 2);
+            return;
+        }
+        flow?.Complete(); WriteInitialFocusFlow(flow, 2);
         // Run after WinForms finishes activation and normal focus restoration. The retained
         // owner coalesces callbacks and rechecks all native guards at execution time.
-        var queued = owned.QueueInitialFocus(callback => BeginInvoke(callback),
-            () => ReferenceEquals(editorFocus, owned) && EditorFocusAvailable(),
-            result => editorFocusDiagnostics.Write("initial.activation", new { pending = owned.InitialFocusPending, result },
-                worker?.ProcessId, worker?.DiagnosticTraceId));
-        editorFocusDiagnostics.Write("initial.queued", new { queued, pending = owned.InitialFocusPending }, worker?.ProcessId, worker?.DiagnosticTraceId);
+        var queued = owned!.QueueInitialFocus(callback =>
+            {
+                WriteInitialFocusFlow(flow, 3);
+                BeginInvoke((Action)(() =>
+                {
+                    flow?.ForgetPending();
+                    WriteInitialFocusFlow(flow, 5);
+                    try { callback(); }
+                    finally { WriteInitialFocusFlow(flow, 10); }
+                }));
+                WriteInitialFocusFlow(flow, 4);
+            },
+            () => ObserveInitialFocusOwner(flow, ReferenceEquals(editorFocus, owned)) && EditorFocusAvailable(flow),
+            result =>
+            {
+                WriteInitialFocusFlow(flow, 8);
+                var callbackPending = owned!.InitialFocusPending;
+                editorFocusDiagnostics.Write("initial.activation", new { pending = callbackPending, result }, worker?.ProcessId, worker?.DiagnosticTraceId);
+                flow?.Pending(callbackPending);
+                WriteInitialFocusFlow(flow, 9);
+            });
+        var pending = owned!.InitialFocusPending;
+        editorFocusDiagnostics.Write("initial.queued", new { queued, pending }, worker?.ProcessId, worker?.DiagnosticTraceId);
+        flow?.Pending(pending); flow?.QueueReturn(queued);
+        WriteInitialFocusFlow(flow, 11);
+    }
+
+    private sealed class InitialFocusFlow(int observationId, int sourceCode, long form, long panel)
+    {
+        internal readonly int ObservationId = observationId, SourceCode = sourceCode;
+        internal readonly long Form = form, Panel = panel;
+        internal int Group, EvaluatedMask, TrueMask, FirstRejectId;
+        internal bool EvaluationComplete, PendingKnown, PendingValue, QueueReturnKnown, QueueReturnValue;
+        internal void Begin(int group) { Group = group; EvaluatedMask = TrueMask = FirstRejectId = 0; EvaluationComplete = false; }
+        internal void Record(int id, bool value)
+        {
+            EvaluatedMask |= 1 << (id - 1);
+            if (value) TrueMask |= 1 << (id - 1);
+            if (FirstRejectId == 0 && (Group == 1 ? value : !value)) FirstRejectId = id;
+        }
+        internal void Complete() => EvaluationComplete = true;
+        internal void Pending(bool value) { PendingKnown = true; PendingValue = value; }
+        internal void ForgetPending() { PendingKnown = PendingValue = false; }
+        internal void QueueReturn(bool value) { QueueReturnKnown = true; QueueReturnValue = value; }
+    }
+
+    private InitialFocusFlow? CreateInitialFocusFlow(int source, bool pendingKnown, bool pending)
+    {
+        try
+        {
+            // Cached HWNDs and already evaluated values only; this never creates or queries a handle.
+            if (!initialFocusFlowDiagnostics.Enabled || editorFocusFormHwnd == 0 || editorFocusPanelHwnd == 0 || initialFocusObservationCount >= 128) return null;
+            var flow = new InitialFocusFlow(++initialFocusObservationCount, source, editorFocusFormHwnd.ToInt64(), editorFocusPanelHwnd.ToInt64());
+            if (pendingKnown) flow.Pending(pending);
+            return flow;
+        }
+        catch (Exception) { return null; }
+    }
+
+    private static bool InitialFocusGate(InitialFocusFlow? flow, int id, bool value)
+    {
+        try { flow?.Record(id, value); }
+        catch (Exception) { /* Observations never change the evaluated bool. */ }
+        return value;
+    }
+
+    private static bool InitialFocusQueueGate(InitialFocusFlow? flow, int id, bool value)
+    {
+        if (id == 4) flow?.Pending(!value);
+        return InitialFocusGate(flow, id, value);
+    }
+
+    private bool ObserveInitialFocusOwner(InitialFocusFlow? flow, bool value)
+    {
+        flow?.Begin(2);
+        InitialFocusGate(flow, 1, value); flow?.Complete();
+        WriteInitialFocusFlow(flow, 7);
+        return value;
+    }
+
+    private void WriteInitialFocusFlow(InitialFocusFlow? flow, int phase)
+    {
+        if (flow is null) return;
+        try
+        {
+            initialFocusFlowDiagnostics.Write("observe", new
+            {
+                schemaVersion = 1, observationId = flow.ObservationId, sourceCode = flow.SourceCode, phaseCode = phase,
+                gateGroupCode = flow.Group, evaluatedMask = flow.EvaluatedMask, trueMask = flow.TrueMask, firstRejectId = flow.FirstRejectId,
+                evaluationComplete = flow.EvaluationComplete, pendingKnown = flow.PendingKnown, pending = flow.PendingValue,
+                queueReturnKnown = flow.QueueReturnKnown, queueReturn = flow.QueueReturnValue,
+                originalFormHwnd = flow.Form, originalPanelHwnd = flow.Panel
+            }, worker?.ProcessId, worker?.DiagnosticTraceId);
+        }
+        catch (Exception) { /* Numeric diagnostics never change activation, availability or posting. */ }
     }
 
     private void TraceInitialActivation(int sourceCode, nint receivedHwnd, OwnedEditorFocus? ownerBefore,

@@ -38,7 +38,93 @@ def _initial_focus_retired_unknown(code, *, attempted=True, retirement_confirmed
     return value
 
 
-def capture_initial_focus_trace(session, record, *, retired=False, expected_identity=None):
+def _initial_focus_flow(lines, original, *, trace, worker, managed, budget):
+    """Parse only the separate numeric observer; never revoke original evidence."""
+    code=1
+    def unknown(value):
+        result=_initial_focus_unknown(value)
+        if original.get('captureModeCode')==2:
+            result.update(captureModeCode=2,historicalIdentityOnly=True,
+                retirementConfirmed=original.get('retirementConfirmed') is True)
+        return result
+    def integer(value,maximum,minimum=0):
+        if type(value) is not int or not minimum<=value<=maximum:raise ValueError()
+        return value
+    def flag(value):
+        if type(value) is not bool:raise ValueError()
+        return value
+    def keys(value,names):
+        if type(value) is not dict or set(value)!=set(names.split()):raise ValueError()
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            if key in value:raise ValueError()
+            value[key]=item
+        return value
+    def invalid_constant(value):raise ValueError()
+    try:
+        budget()
+        assert original['known'] is True and type(managed) is int and type(worker) is int and type(trace) is str
+        scope=original['scope'];rows=[];sequence=0;gaps=0;observations={}
+        prefix=b'{"event":"suite.initialEditorFocusFlow","component":"host",'
+        for line in lines:
+            budget()
+            if not line.startswith(prefix):continue
+            code=3
+            value=json.loads(line.decode('utf-8'),object_pairs_hook=unique,parse_constant=invalid_constant)
+            keys(value,'event component stage sequence utc processId managedThreadId workerProcessId traceId details')
+            assert value['event']=='suite.initialEditorFocusFlow' and value['component']=='host' and value['stage']=='observe'
+            assert type(value['utc']) is str and re.fullmatch(r'\d{4}-\d\d-\d\dT[0-9:.]+(?:Z|[+-]\d\d:\d\d)',value['utc'])
+            process_id=integer(value['processId'],0xffffffff,1)
+            thread_id=integer(value['managedThreadId'],0x7fffffff,1)
+            worker_id=integer(value['workerProcessId'],0x7fffffff,1)
+            assert type(value['traceId']) is str
+            code=1
+            assert (process_id,thread_id,worker_id,value['traceId'])==(scope['shellPid'],managed,worker,trace)
+            code=4
+            current=integer(value['sequence'],128,1);assert current>sequence
+            gaps+=current-sequence-1;sequence=current
+            code=3
+            details=value['details']
+            keys(details,'schemaVersion observationId sourceCode phaseCode gateGroupCode evaluatedMask trueMask firstRejectId evaluationComplete pendingKnown pending queueReturnKnown queueReturn originalFormHwnd originalPanelHwnd')
+            assert integer(details['schemaVersion'],1,1)==1
+            observation=integer(details['observationId'],128,1)
+            source=integer(details['sourceCode'],5);phase=integer(details['phaseCode'],12,1)
+            group=integer(details['gateGroupCode'],3);width=(0,7,1,14)[group];maximum=(1<<width)-1
+            mask=integer(details['evaluatedMask'],maximum);true_mask=integer(details['trueMask'],maximum)
+            first=integer(details['firstRejectId'],width);complete=flag(details['evaluationComplete'])
+            assert mask&(mask+1)==0 and true_mask&~mask==0
+            rejected=true_mask if group==1 else mask^true_mask
+            assert first==(rejected&-rejected).bit_length()
+            if complete:
+                assert group>0 and mask==((1<<first)-1 if first else maximum)
+            pending_known=flag(details['pendingKnown']);pending=flag(details['pending'])
+            queue_known=flag(details['queueReturnKnown']);queued=flag(details['queueReturn'])
+            assert pending_known or not pending
+            assert queue_known or not queued
+            form=integer(details['originalFormHwnd'],2**63-1,1)
+            panel=integer(details['originalPanelHwnd'],2**63-1,1)
+            code=1
+            assert (form,panel)==(scope['formHwnd'],scope['panelHwnd'])
+            code=3
+            # A retained callback may follow a later ingress. Only envelope sequence is ordered.
+            anchor=(source,details['originalFormHwnd'],details['originalPanelHwnd'])
+            assert observations.setdefault(observation,anchor)==anchor
+            rows.append(dict(sequence=current,**details))
+        budget();code=2
+        assert rows
+        result=dict(schemaVersion=1,attempted=True,known=True,acceptanceEligible=False,errorCode=0,
+            gapObserved=gaps>0,gapCount=gaps,eventCompletenessUnknown=True,scope=dict(scope),rows=rows)
+        if original.get('captureModeCode')==2:
+            result.update(captureModeCode=2,historicalIdentityOnly=True,retirementConfirmed=True)
+        return result
+    except TimeoutError:
+        return unknown(5)
+    except Exception:
+        return unknown(code)
+
+
+def capture_initial_focus_trace(session, record, *, retired=False, expected_identity=None, flow_out=None):
     """One bounded, numeric-only read of this launch's existing C# stderr.
 
     Unknown codes: 1=owner context, 2=path, 3=bound, 4=unstable/read,
@@ -50,6 +136,8 @@ def capture_initial_focus_trace(session, record, *, retired=False, expected_iden
     diagnostic deadline rejects late data but cannot preempt synchronous file IO.
     """
     code = 1
+    if type(flow_out) is dict:
+        flow_out.clear();flow_out.update(_initial_focus_retired_unknown(1) if retired is True else _initial_focus_unknown(1))
     retirement_confirmed = False
     deadline = time.monotonic() + 1
     def budget():
@@ -279,6 +367,13 @@ def capture_initial_focus_trace(session, record, *, retired=False, expected_iden
             gapObserved=gap_count>0,gapCount=gap_count,eventCompletenessUnknown=True,scope=scope,rows=rows)
         if retired:
             value.update(captureModeCode=2,historicalIdentityOnly=True,retirementConfirmed=True)
+        if type(flow_out) is dict:
+            # Fix the original projection first. Only the observer spends the remaining budget.
+            try:
+                flow=_initial_focus_flow(lines,value,trace=trace,worker=worker,managed=initial_managed,budget=budget)
+            except Exception:
+                flow=_initial_focus_unknown(3)
+            flow_out.clear();flow_out.update(flow)
         return value
     except TimeoutError:
         return unknown(10)
@@ -986,7 +1081,8 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
         viewRoundtripCompleted=False, viewPhysicalVerified=False,
         nativeMenuVerified=False, cleanupConfirmed=False, cleanClose=False,
         hwpLauncherCompleted=False, nativeHwpMenuLaunchExecuted=False,
-        initialFocusTraceAfterRetirement=_initial_focus_retired_unknown(12,attempted=False))
+        initialFocusTraceAfterRetirement=_initial_focus_retired_unknown(12,attempted=False),
+        initialFocusFlowAfterRetirement=_initial_focus_retired_unknown(12,attempted=False))
     started = time.monotonic()
     session = None
     try:
@@ -1032,10 +1128,12 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
         record['errorType'] = type(exc).__name__
     finally:
         if session is not None:
+            flow=_initial_focus_unknown(1)
             try:
-                record['initialFocusTrace'] = capture_initial_focus_trace(session, record)
+                record['initialFocusTrace'] = capture_initial_focus_trace(session, record,flow_out=flow)
             except Exception:
                 record['initialFocusTrace'] = _initial_focus_unknown(11)
+            record['initialFocusFlow']=flow
             expected_retirement_identity=None
             try:
                 original=session._opening_focus_identity
@@ -1047,11 +1145,13 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
             except Exception as exc:
                 record['cleanupErrorType'] = type(exc).__name__
             if record['cleanupConfirmed']:
+                flow=_initial_focus_retired_unknown(1)
                 try:
                     record['initialFocusTraceAfterRetirement'] = capture_initial_focus_trace(session,record,
-                        retired=True,expected_identity=expected_retirement_identity)
+                        retired=True,expected_identity=expected_retirement_identity,flow_out=flow)
                 except Exception:
                     record['initialFocusTraceAfterRetirement'] = _initial_focus_retired_unknown(11)
+                record['initialFocusFlowAfterRetirement']=flow
         if not record['cleanupConfirmed']:
             record['success'] = False
         if record.get('diagnosticProfile')==3:
