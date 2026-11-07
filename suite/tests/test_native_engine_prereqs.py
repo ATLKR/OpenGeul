@@ -409,6 +409,99 @@ Assert-NativeConfiguredToolchain {quote(compiler)} $configuration $preflight|Out
         self.assertNotIn('ant', packages)
         self.assertNotIn('nasm', packages)
 
+    def nasm_case(self, shell_version='2.16.03', perl_version='2.16.03', resolved='owned'):
+        bindir = self.root/'cygwin/bin'; bindir.mkdir(parents=True, exist_ok=True)
+        for name in ('nasm.exe', 'perl.exe', 'bash.exe', 'cygpath.exe'):
+            (bindir/name).write_bytes(('synthetic Cygwin '+name).encode())
+        commands = self.root/'commands'; commands.mkdir(exist_ok=True)
+        evidence = self.root/'evidence'; evidence.mkdir(exist_ok=True)
+        output = self.root/'probe.stdout'
+        nasm = bindir/'nasm.exe' if resolved == 'owned' else self.root/'foreign/nasm.exe'
+        output.write_text(f'nasmPath={nasm}\nperlPath={bindir / "perl.exe"}\n'
+                          f'shellVersion=NASM version {shell_version}\nperlVersion=NASM version {perl_version}\n')
+        receipt = self.root/'probe.command.json'; receipt.write_text('{"passed":true,"exitCode":0}')
+        prefix = f"""
+function Invoke-CygwinScript($Bash,$Cygpath,$Script,$WorkingDirectory,$LogPrefix) {{
+ if($Bash -cne {quote(bindir/'bash.exe')} -or $Cygpath -cne {quote(bindir/'cygpath.exe')} -or
+    $WorkingDirectory -cne {quote(self.root)} -or $LogPrefix -cne {quote(evidence/'nasm-prerequisite')} -or
+    -not(Test-Path -LiteralPath $Script)){{throw 'Wrong owned Cygwin boundary'}}
+ @{{stdout={quote(output)};receipt={quote(receipt)}}}
+}}
+"""
+        call = f'Invoke-CygwinNasmPreflight {quote(bindir/"bash.exe")} {quote(bindir/"cygpath.exe")} {quote(commands)} {quote(self.root)} {quote(evidence)}'
+        return bindir, output, prefix, call
+
+    def test_x64_cygwin_dependency_adds_nasm_without_changing_arm_packages(self):
+        result = json.loads(self.ps("@{arm=(Get-CygwinBuildPackages arm64);x64=(Get-CygwinBuildPackages x64);default=(Get-CygwinBuildPackages)}|ConvertTo-Json -Compress"))
+        original = 'autoconf,automake,make,perl,python3,patch,bison,flex,gperf,unzip,zip,libtool,curl,git,diffutils,which,pkg-config,gcc-g++,gettext-devel,doxygen,graphviz'
+        self.assertEqual(original, result['arm'])
+        self.assertEqual(original, result['default'])
+        self.assertEqual(original+',nasm', result['x64'])
+
+    def test_cygwin_nasm_preflight_binds_owned_tools_and_both_probe_versions(self):
+        bindir, _, prefix, call = self.nasm_case()
+        result = json.loads(self.ps(prefix+f'$result={call};$result|ConvertTo-Json -Depth 8 -Compress'))
+        self.assertEqual('2.16.03', result['version'])
+        self.assertEqual(str(bindir/'nasm.exe'), result['nasm']['path'])
+        for name in ('nasm', 'perl'):
+            self.assertEqual(hashlib.sha256((bindir/(name+'.exe')).read_bytes()).hexdigest(), result[name]['sha256'])
+        for flag in ('productPayload', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified'):
+            self.assertIs(False, result[flag])
+        self.assertTrue((self.root/'evidence/cygwin-nasm-prerequisite.json').is_file())
+
+    def test_cygwin_nasm_rejects_missing_or_wrong_resolved_tool(self):
+        bindir, output, prefix, call = self.nasm_case(resolved='foreign')
+        self.rejected(prefix+call)
+        output.write_text(f'nasmPath={bindir / "nasm.exe"}\nperlPath={bindir / "perl.exe"}\nshellVersion=NASM version 2.16.03\nperlVersion=NASM version 2.16.03\n')
+        tool = bindir/'nasm.exe'; tool.unlink()
+        self.rejected(prefix+call)
+
+    def test_cygwin_nasm_rejects_linked_tool(self):
+        bindir, _, prefix, call = self.nasm_case()
+        tool = bindir/'nasm.exe'; raw = tool.read_bytes(); tool.unlink()
+        target = self.root/'nasm-target'; target.write_bytes(raw)
+        try:
+            tool.symlink_to(target)
+        except OSError:
+            self.skipTest('Host does not permit the symbolic-link fixture')
+        self.rejected(prefix+call)
+
+    def test_cygwin_nasm_rejects_unsupported_mismatched_or_malformed_probe(self):
+        _, output, prefix, call = self.nasm_case()
+        original = output.read_text()
+        packets = [original.replace('2.16.03', '2.08'), original.replace('perlVersion=NASM version 2.16.03', 'perlVersion=NASM version 2.15'),
+                   original+'extra=synthetic\n', original.replace('shellVersion=NASM version 2.16.03\n', ''),
+                   original.replace('shellVersion=NASM version 2.16.03', 'shellVersion=not-nasm')]
+        for index, packet in enumerate(packets):
+            with self.subTest(case=index):
+                output.write_text(packet); self.rejected(prefix+call)
+
+    def test_cygwin_nasm_rejects_probe_time_mutation_and_changed_configuration(self):
+        bindir, _, prefix, call = self.nasm_case()
+        changed = prefix.replace('@{stdout=', f"[IO.File]::AppendAllText({quote(bindir/'nasm.exe')},'changed');@{{stdout=")
+        self.rejected(changed+call)
+        (bindir/'nasm.exe').write_bytes(b'synthetic Cygwin nasm.exe')
+        self.ps(prefix+f"$p={call};$config=@{{NASM='nasm';PERL={quote(bindir/'perl.exe')}}};Assert-CygwinNasmConfiguration $config $p;"
+                "$config.NASM='';$bad=$false;try{Assert-CygwinNasmConfiguration $config $p}catch{$bad=$true};if(-not $bad){throw 'Empty NASM accepted'};"
+                f"$config.NASM='nasm';$config.PERL={quote(self.root/'other-perl.exe')};$bad=$false;try{{Assert-CygwinNasmConfiguration $config $p}}catch{{$bad=$true}};if(-not $bad){{throw 'Foreign Perl accepted'}};"
+                f"$config.PERL={quote(bindir/'perl.exe')};[IO.File]::AppendAllText({quote(bindir/'perl.exe')},'changed');$bad=$false;try{{Assert-CygwinNasmConfiguration $config $p}}catch{{$bad=$true}};if(-not $bad){{throw 'Changed Perl accepted'}}")
+
+    def test_cygwin_nasm_configuration_accepts_serialized_proof_and_rejects_malformed_flags(self):
+        bindir, _, prefix, call = self.nasm_case()
+        self.ps(prefix+f"$p={call};$serialized=$p|ConvertTo-Json -Depth 8;$good=$serialized|ConvertFrom-Json;$config=@{{NASM='nasm';PERL={quote(bindir/'perl.exe')}}};Assert-CygwinNasmConfiguration $config $good;"+"""
+foreach($pair in @(@('schemaVersion',$true),@('kind','other'),@('passed',1),@('version','2.08'),@('version',@('2.16.03')),@('productPayload',0),@('fullEngineQualified',$true),@('acceptanceEligible',$null),@('guiVerified',$true))) {
+ $bad=$serialized|ConvertFrom-Json;$bad.($pair[0])=$pair[1];$rejected=$false
+ try{Assert-CygwinNasmConfiguration $config $bad}catch{$rejected=$true}
+ if(-not $rejected){throw 'Malformed Cygwin prerequisite proof accepted'}
+}
+foreach($field in @('size','sha256')) {
+ $bad=$serialized|ConvertFrom-Json
+ if($field -ceq 'size'){$bad.nasm.size=$true}else{$bad.nasm.sha256=@($bad.nasm.sha256)}
+ $rejected=$false;try{Assert-CygwinNasmConfiguration $config $bad}catch{$rejected=$true}
+ if(-not $rejected){throw 'Malformed Cygwin file identity accepted'}
+}
+""")
+
     def test_driver_binds_installed_java_tools_before_large_source_downloads(self):
         jdk, ant = self.jdk(), self.ant()
         work, output = self.root/'owned-work', self.root/'evidence'

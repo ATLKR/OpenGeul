@@ -988,8 +988,69 @@ function Resolve-Ant([string]$ExplicitHome='') {
     throw ('No complete installed Apache Ant was found. Set -AntHome or ANT_HOME; Java features remain enabled. '+($errors -join '; '))
 }
 
-function Get-CygwinBuildPackages {
-    'autoconf,automake,make,perl,python3,patch,bison,flex,gperf,unzip,zip,libtool,curl,git,diffutils,which,pkg-config,gcc-g++,gettext-devel,doxygen,graphviz'
+function Get-CygwinBuildPackages([ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $packages='autoconf,automake,make,perl,python3,patch,bison,flex,gperf,unzip,zip,libtool,curl,git,diffutils,which,pkg-config,gcc-g++,gettext-devel,doxygen,graphviz'
+    if($Architecture -ceq 'x64') {$packages+=',nasm'}
+    return $packages
+}
+
+function Get-CygwinNasmFileIdentity([string]$Path) {
+    Assert-NativeBuildTimeRemaining;Assert-UnlinkedPath $Path
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)) {throw 'Required owned Cygwin NASM/Perl file is absent.'}
+    $item=Get-Item -LiteralPath $Path
+    if($item.Length -le 0) {throw 'Required owned Cygwin NASM/Perl file is empty.'}
+    return [ordered]@{path=[IO.Path]::GetFullPath($Path);size=$item.Length;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}
+}
+
+function Invoke-CygwinNasmPreflight($Bash,$Cygpath,[string]$CommandDirectory,[string]$WorkingDirectory,[string]$EvidenceDirectory) {
+    $bin=[IO.Path]::GetFullPath((Split-Path $Bash -Parent))
+    if([IO.Path]::GetFileName($Bash) -cne 'bash.exe' -or [IO.Path]::GetFullPath($Cygpath) -ine (Join-Path $bin 'cygpath.exe')) {throw 'NASM probe must use the selected Cygwin tools.'}
+    $identities=[ordered]@{nasm=(Get-CygwinNasmFileIdentity (Join-Path $bin 'nasm.exe'));perl=(Get-CygwinNasmFileIdentity (Join-Path $bin 'perl.exe'))}
+    $script=Join-Path $CommandDirectory 'nasm-prerequisite.sh'
+    # Same PATH as configure/build. OpenSSL probes plain nasm through Perl;
+    # binding only configure's NASM variable would not cover that lookup.
+    Write-BashScript $script @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',
+        'resolved_nasm=$(command -v nasm)',
+        'case "$resolved_nasm" in *.exe) ;; *) resolved_nasm="$resolved_nasm.exe" ;; esac',
+        'printf "nasmPath="; /usr/bin/cygpath -am "$resolved_nasm"',
+        'printf "perlPath="; /usr/bin/cygpath -am /usr/bin/perl.exe',
+        'printf "shellVersion="; nasm -v',
+        'printf "perlVersion="; /usr/bin/perl -e ''my $v = `nasm -v`; die "NASM child failed\n" if $?; print $v;''')
+    $result=Invoke-CygwinScript $Bash $Cygpath $script $WorkingDirectory (Join-Path $EvidenceDirectory 'nasm-prerequisite')
+    $values=@{}
+    foreach($line in Get-Content -LiteralPath $result.stdout) {
+        if($line -notmatch '^(nasmPath|perlPath|shellVersion|perlVersion)=(.+)$' -or $values.ContainsKey($Matches[1])) {throw 'Cygwin NASM probe returned unexpected fields.'}
+        $values[$Matches[1]]=$Matches[2]
+    }
+    if($values.Count -ne 4) {throw 'Cygwin NASM probe is incomplete.'}
+    foreach($name in @('nasm','perl')) {
+        $actual=Get-CygwinNasmFileIdentity $identities[$name].path
+        if([IO.Path]::GetFullPath($values[$name+'Path']) -ine $actual.path -or $actual.sha256 -cne $identities[$name].sha256 -or $actual.size -ne $identities[$name].size) {throw 'Cygwin NASM probe resolved another tool or the tool changed.'}
+    }
+    $versions=@()
+    foreach($name in @('shellVersion','perlVersion')) {
+        if($values[$name] -cnotmatch '^NASM version ([0-9]+\.[0-9]+(?:\.[0-9]+){0,2})(?:[ \t]+[^\r\n]*)?$' -or [Version]$Matches[1] -lt [Version]'2.9') {throw 'Cygwin NASM probe version is unsupported.'}
+        $versions+=,$Matches[1]
+    }
+    if($versions[0] -cne $versions[1]) {throw 'Shell and Cygwin Perl resolved different NASM versions.'}
+    $proof=[ordered]@{schemaVersion=1;kind='cygwin-x64-nasm-prerequisite';passed=$true;cygwinBin=$bin;nasm=$identities.nasm;perl=$identities.perl;version=$versions[0];commandReceipt=$result.receipt;productPayload=$false;fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false}
+    Write-BuildJson (Join-Path $EvidenceDirectory 'cygwin-nasm-prerequisite.json') $proof
+    return $proof
+}
+
+function Assert-CygwinNasmConfiguration($Configuration,$Preflight) {
+    if(($Preflight.schemaVersion -isnot [int] -and $Preflight.schemaVersion -isnot [long]) -or $Preflight.schemaVersion -ne 1 -or $Preflight.kind -cne 'cygwin-x64-nasm-prerequisite' -or $Preflight.passed -isnot [bool] -or -not $Preflight.passed -or
+       $Preflight.version -isnot [string] -or $Preflight.version -cnotmatch '^[0-9]+\.[0-9]+(?:\.[0-9]+){0,2}$' -or [Version]$Preflight.version -lt [Version]'2.9' -or $Configuration.NASM -cne 'nasm') {throw 'Configured x64 NASM prerequisite is incomplete.'}
+    foreach($name in @('productPayload','fullEngineQualified','acceptanceEligible','guiVerified')) {
+        if($Preflight.$name -isnot [bool] -or $Preflight.$name) {throw 'Cygwin NASM helper was promoted to product qualification.'}
+    }
+    foreach($name in @('nasm','perl')) {
+        $identity=$Preflight.$name;$path=Join-Path $Preflight.cygwinBin ($name+'.exe')
+        if(-not $identity -or [IO.Path]::GetFullPath($identity.path) -ine [IO.Path]::GetFullPath($path) -or $identity.sha256 -isnot [string] -or $identity.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Configured x64 NASM/Perl ownership differs.'}
+        $actual=Get-CygwinNasmFileIdentity $path
+        if(($identity.size -isnot [int] -and $identity.size -isnot [long]) -or $identity.size -ne $actual.size -or $identity.sha256 -cne $actual.sha256) {throw 'Configured x64 NASM/Perl file changed.'}
+    }
+    if(-not $Configuration.PERL -or [IO.Path]::GetFullPath($Configuration.PERL) -ine $Preflight.perl.path) {throw 'Configure selected a different Cygwin Perl.'}
 }
 
 function Get-WindowsPkgconfPin {
@@ -1989,7 +2050,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $mdds=Join-Path $downloads $mddsPin.filename
         $receipt.mddsArchive=Get-AuthenticatedDownload $mddsPin.url $mdds $mddsPin.size SHA256 $mddsPin.sha256 (Join-Path $evidence 'mdds-download.json')
         $cygwin=Join-Path $work 'cygwin';$cache=Join-Path $work 'cygwin-cache'
-        $packages=Get-CygwinBuildPackages
+        $packages=Get-CygwinBuildPackages $Architecture
         $receipt.stage='cygwin-build-tools';Assert-NativeBuildTimeRemaining
         Invoke-LoggedCommand $setup @('--quiet-mode','--no-admin','--no-shortcuts','--no-startmenu','--no-desktop','--root',$cygwin,'--local-package-dir',$cache,'--site','https://mirrors.kernel.org/sourceware/cygwin/','--packages',$packages) $work (Join-Path $evidence 'cygwin-setup')|Out-Null
         $bash=Join-Path $cygwin 'bin/bash.exe';$cygpath=Join-Path $cygwin 'bin/cygpath.exe'
@@ -1997,6 +2058,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $commands=Join-Path $work 'commands';New-Item -ItemType Directory $commands|Out-Null
         $receipt.stage='cygwin-host-identity';Assert-NativeBuildTimeRemaining
         $receipt.cygwinIdentity=Get-CygwinIdentity $bash $cygpath $commands $work $evidence
+        if($Architecture -ceq 'x64') {
+            $receipt.stage='cygwin-nasm-prerequisite';Assert-NativeBuildTimeRemaining
+            $receipt.nasmBuildTool=Invoke-CygwinNasmPreflight $bash $cygpath $commands $work $evidence
+        }
         $convert={param($path,$name) $r=Invoke-LoggedCommand $cygpath @('-u',$path) $work (Join-Path $evidence ('cygpath-'+$name));(Get-Content -LiteralPath $r.stdout -Raw).Trim()}
         $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixMdds=&$convert $mdds 'mdds';$unixDownloads=&$convert $downloads 'downloads'
         $unixJdk=&$convert $receipt.javaTools.jdk.home 'jdk';$unixAnt=&$convert $receipt.javaTools.ant.home 'ant'
@@ -2049,6 +2114,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         Copy-Item $config (Join-Path $evidence 'config_host.mk')
         $receipt.configuration=Assert-GeneratedConfiguration $config $Architecture
         if($Architecture -ceq 'x64') {
+            Assert-CygwinNasmConfiguration $receipt.configuration $receipt.nasmBuildTool
             $receipt.configurationSha256=(Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant()
             $receipt.configureArgumentsSha256=(Get-FileHash -LiteralPath (Join-Path $source 'autogen.input') -Algorithm SHA256).Hash.ToLowerInvariant()
         }
@@ -2197,6 +2263,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             if($Architecture -ceq 'x64') {
                 if((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configurationSha256 -or
                    (Get-FileHash -LiteralPath (Join-Path $source 'autogen.input') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configureArgumentsSha256) {throw 'Native configuration changed during compilation.'}
+                Assert-CygwinNasmConfiguration $receipt.configuration $receipt.nasmBuildTool
                 Assert-NativeX64Qualification $receipt $instdir
             }
             $receipt.stage=if($CalcDispatchDiagnostic){'package-calc-dispatch-diagnostic'}else{'package-qualified-source-build'};Assert-NativeBuildTimeRemaining
