@@ -11,8 +11,10 @@ from owned_native_menu import NativeMenuProbe
 class Clock:
     def __init__(self, value=0):
         self.value = value
+        self.calls = 0
 
     def __call__(self):
+        self.calls += 1
         return self.value
 
 
@@ -41,12 +43,80 @@ class Provider:
 def probe_with(provider=None, *, now=0, elapsed=0, mismatch=False):
     probe = NativeMenuProbe.__new__(NativeMenuProbe)
     probe.clock, probe.deadline = Clock(now), 5
+    probe.interop = {}
     probe.provider_client = provider if provider is not None else Provider(
         probe.clock, elapsed=elapsed, mismatch=mismatch)
     return probe
 
 
 class NativeMenuProviderTimeoutTests(unittest.TestCase):
+    def budget_observation(self, probe):
+        call=probe.interop.get('lastCall',{})
+        self.assertIn('providerBudget',call,'Existing timeout values need a scoped numeric projection')
+        row=call['providerBudget']
+        self.assertEqual(set(row),set('schemaVersion remainingMicros requestedMs connectionReadbackMs transactionReadbackMs observedMask verifiedMask setupComplete'.split()))
+        self.assertTrue(all(type(value) is int for value in row.values()))
+        return row
+
+    def test_budget_observation_reuses_original_properties_clock_and_deadline(self):
+        probe=probe_with();targets=[]
+        probe._call(lambda:targets.append(1))
+        row=self.budget_observation(probe)
+        self.assertEqual(row,dict(schemaVersion=1,remainingMicros=5000000,requestedMs=1249,
+            connectionReadbackMs=1249,transactionReadbackMs=1249,observedMask=15,verifiedMask=3,setupComplete=1))
+        self.assertEqual((len(probe.provider_client.operations),probe.clock.calls,probe.deadline,targets),(4,10,5,[1]))
+        self.assertNotIn('pending',probe.interop['lastCall'])
+
+    def test_budget_observation_marks_failed_and_unmeasured_readbacks_without_zero_coercion(self):
+        class Unsupported:
+            __slots__=()
+        class Opaque:
+            def __repr__(self):raise AssertionError('Opaque data must not be rendered')
+            def __str__(self):raise AssertionError('Opaque data must not be inspected')
+        class NonNumeric(Provider):
+            def __getattr__(self,name):
+                if name=='ConnectionTimeout':return Opaque()
+                return super().__getattr__(name)
+        for mode in ('unsupported','non-numeric','mismatch','slow'):
+            with self.subTest(mode=mode):
+                probe=probe_with(mismatch=mode=='mismatch',elapsed=1.1 if mode=='slow' else 0)
+                if mode=='unsupported':probe.provider_client=Unsupported()
+                elif mode=='non-numeric':probe.provider_client=NonNumeric(probe.clock)
+                targets=[]
+                with self.assertRaises(AttributeError if mode=='unsupported' else AssertionError):probe._call(lambda:targets.append(1))
+                row=self.budget_observation(probe)
+                self.assertEqual((row['remainingMicros'],row['requestedMs'],row['setupComplete'],targets),(5000000,1249,0,[]))
+                if mode in ('unsupported','non-numeric'):
+                    self.assertEqual((row['observedMask'],row['verifiedMask'],row['connectionReadbackMs'],row['transactionReadbackMs']),(3,0,0,0))
+                elif mode=='mismatch':
+                    self.assertEqual((row['observedMask'],row['verifiedMask'],row['connectionReadbackMs'],row['transactionReadbackMs']),(7,0,1250,0))
+                else:self.assertEqual((row['observedMask'],row['verifiedMask']),(15,3))
+
+    def test_budget_observation_is_fresh_even_when_prior_global_verified_remains_true(self):
+        class Unsupported:
+            __slots__=()
+        probe=probe_with();probe._call(lambda:None);first=dict(self.budget_observation(probe))
+        probe.clock.value=1;probe.provider_client=Unsupported()
+        with self.assertRaises(AttributeError):probe._call(lambda:None)
+        row=self.budget_observation(probe)
+        self.assertTrue(probe.provider_timeout_verified)
+        self.assertEqual((row['remainingMicros'],row['requestedMs'],row['observedMask'],row['setupComplete']),(4000000,999,3,0))
+        self.assertEqual(first['setupComplete'],1)
+        self.assertNotEqual(first,row)
+
+    def test_returned_com_error_keeps_budget_and_does_not_invent_native_pending(self):
+        class COMError(Exception):
+            hresult=-2146233083
+            def __str__(self):raise AssertionError('Exception text must not be inspected')
+        primary=COMError();probe=probe_with()
+        def target():raise primary
+        with self.assertRaises(COMError) as caught:probe._call(target)
+        self.assertIs(caught.exception,primary)
+        row=self.budget_observation(probe);call=probe.interop['lastCall']
+        self.assertEqual((row['setupComplete'],probe.clock.calls),(1,9))
+        self.assertTrue(call['calleeEntered']);self.assertFalse(call['callCompleted']);self.assertTrue(call['failed'])
+        self.assertEqual((call['exceptionCode'],call['hresult']),(2,-2146233083));self.assertNotIn('pending',call)
+
     def test_each_provider_timeout_is_less_than_one_quarter_of_original_remaining(self):
         probe = probe_with()
         self.assertEqual(probe._call(lambda value: value, 'result'), 'result')

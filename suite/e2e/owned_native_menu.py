@@ -1245,6 +1245,15 @@ class NativeMenuProbe(NativeControlProbe):
         # Connection and transaction timeouts can both be consumed by a request.
         # Reserve half the remaining time for readback, validation and cleanup.
         milliseconds=int((remaining*1000-1)//4)
+        # Only values already computed/read by this exact call are diagnostic.
+        # Mask bits1/2 cover remaining/request;4/8 cover typed readbacks.
+        budget=None;context=getattr(self,'_observed_call',None)
+        if isinstance(context,dict):
+            try:
+                budget=dict(schemaVersion=1,remainingMicros=int(remaining*1000000),requestedMs=milliseconds,
+                    connectionReadbackMs=0,transactionReadbackMs=0,observedMask=3,verifiedMask=0,setupComplete=0)
+                context['providerBudget']=budget
+            except Exception:budget=None
         assert 1<=milliseconds<=1250, 'Native UIA provider query budget expired'
         for index,name in enumerate(('ConnectionTimeout','TransactionTimeout')):
             assert self.clock()<self.deadline, 'Native UIA timeout setup deadline expired'
@@ -1254,11 +1263,16 @@ class NativeMenuProbe(NativeControlProbe):
             assert self.clock()<self.deadline, 'Native UIA timeout setter exceeded deadline'
             if isinstance(context,dict):context['providerStep']=index*2+2
             observed=getattr(self.provider_client,name)
+            if budget is not None and type(observed) is int:
+                budget['connectionReadbackMs' if index==0 else 'transactionReadbackMs']=observed
+                budget['observedMask']|=4<<index
             assert self.clock()<self.deadline, 'Native UIA timeout readback exceeded deadline'
             assert type(observed) is int and observed==milliseconds, 'Native UIA provider timeout was not accepted'
+            if budget is not None:budget['verifiedMask']|=1<<index
         assert 2*milliseconds<(self.deadline-self.clock())*1000, \
             'Native UIA timeout setup exhausted the original query budget'
         self.provider_timeout_verified=True
+        if budget is not None:budget['setupComplete']=1
     def _call(self,function,*args):
         previous=getattr(self,'_observed_call',None);sink=getattr(self,'_diagnostic_sink',None)
         context=previous if isinstance(previous,dict) else self._call_record(0)
@@ -1726,33 +1740,64 @@ class NativeMenuProbe(NativeControlProbe):
         if identity is not None:result['identity']=identity
         return result
     def _find_labels(self,root,labels,*,scope='descendants'):
+        target=getattr(self,'_active_target',None)
+        row=dict(schemaVersion=1,queryKindCode=2,targetCode=tuple(LABELS).index(target)+1 if target in LABELS else 0,
+            candidateCount=0,examinedCount=0,visibleCount=0,matchedCount=0,observedMask=0,scanComplete=0,rejectCode=0)
+        try:
+            sink=getattr(self,'_diagnostic_sink',None)
+            (sink if isinstance(sink,dict) else self.interop)['menuDiscovery']=row
+        except Exception:row=None
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuItem'))
         found=self._uia_call(2,root.FindAll,self.uia.tree_scope[scope],condition)
         count=int(self._uia_call(17,lambda:found.Length));assert 0<=count<=512
+        if row is not None:row.update(candidateCount=count,observedMask=1)
         matches=[]
         for i in range(count):
             element=self._uia_call(18,found.GetElement,i)
+            if row is not None:row['examinedCount']=i+1
             if int(self._uia_call(9,lambda:element.CurrentControlType))!=50011:continue
-            if self._uia_call(11,lambda:element.CurrentIsOffscreen):continue
+            if self._uia_call(11,lambda:element.CurrentIsOffscreen):
+                if row is not None:row['observedMask']|=2
+                continue
+            if row is not None:row['visibleCount']+=1;row['observedMask']|=2
             name=str(self._uia_call(16,lambda:element.CurrentName));assert len(name)<=256
             if _label(name) in labels:matches.append(element)
+            if row is not None:row['matchedCount']=len(matches);row['observedMask']|=4
+        if row is not None:row.update(scanComplete=1,observedMask=row['observedMask']|8,rejectCode=4 if len(matches)>1 else 0)
         assert len(matches)<=1, 'Native chrome target is ambiguous'
-        if not matches:raise NativeMenuPending('Native chrome target not visible yet')
+        if not matches:
+            if row is not None:row['rejectCode']=2
+            raise NativeMenuPending('Native chrome target not visible yet')
+        if row is not None:row['observedMask']|=16
         return matches[0]
     def _find(self,root,target,*,scope='descendants'):
         assert target in LABELS
         return self._find_labels(root,LABELS[target],scope=scope)
     def _discover_bar(self,root):
         # Ask UIA for chrome only. Never materialize document paragraphs/cells.
+        target=getattr(self,'_active_target',None)
+        row=dict(schemaVersion=1,queryKindCode=1,targetCode=tuple(LABELS).index(target)+1 if target in LABELS else 0,
+            candidateCount=0,examinedCount=0,visibleCount=0,matchedCount=0,observedMask=0,scanComplete=0,rejectCode=0)
+        try:
+            sink=getattr(self,'_diagnostic_sink',None)
+            (sink if isinstance(sink,dict) else self.interop)['menuDiscovery']=row
+        except Exception:row=None
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuBar'))
         found=self._uia_call(2,root.FindAll,self.uia.tree_scope['descendants'],condition)
         count=int(self._uia_call(17,lambda:found.Length));assert 0<=count<=8
+        if row is not None:row.update(candidateCount=count,observedMask=1)
         bars=[]
         for index in range(count):
             bar=self._uia_call(18,found.GetElement,index)
+            if row is not None:row['examinedCount']=index+1
             if not self._uia_call(11,lambda:bar.CurrentIsOffscreen):bars.append(bar)
+            if row is not None:row.update(visibleCount=len(bars),matchedCount=len(bars),observedMask=row['observedMask']|6)
+        if row is not None:row.update(scanComplete=1,observedMask=row['observedMask']|8,rejectCode=3 if len(bars)>1 else 0)
         assert len(bars)<=1, 'Native menubar is ambiguous'
-        if not bars:raise NativeMenuPending('Native menubar not visible yet')
+        if not bars:
+            if row is not None:row['rejectCode']=1
+            raise NativeMenuPending('Native menubar not visible yet')
+        if row is not None:row['observedMask']|=16
         return bars[0]
     def discover_file(self,root):
         self.menu_bar_element=self._discover_bar(root)

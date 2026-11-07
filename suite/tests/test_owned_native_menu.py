@@ -875,6 +875,84 @@ class OwnedNativeMenuTests(unittest.TestCase):
                 self.assertTrue(ui['lastCall']==ui['primaryFailureCall'])
                 self.assertEqual(len(action['pointers']),1);self.assertEqual(action['keys'],[])
 
+    def discovery_observation(self, probe):
+        self.assertIn('menuDiscovery',probe.interop,'Existing menu enumeration needs a numeric stage projection')
+        row=probe.interop['menuDiscovery']
+        self.assertEqual(set(row),set('schemaVersion queryKindCode targetCode candidateCount examinedCount visibleCount matchedCount observedMask scanComplete rejectCode'.split()))
+        self.assertTrue(all(type(value) is int for value in row.values()))
+        return row
+
+    def test_menu_discovery_distinguishes_empty_bar_from_empty_file_without_extra_queries(self):
+        for kind in (1,2):
+            with self.subTest(queryKindCode=kind):
+                m,_,_,_,_,b=self.real_chrome_fixture();p=b.probe;p._active_target='file';calls=[];original=p._uia_call
+                p._uia_call=lambda code,*args:(calls.append(code),original(code,*args))[1]
+                b.find=lambda *args:NS(Length=0,GetElement=lambda index:(_ for _ in ()).throw(AssertionError('No element may be read')))
+                with self.assertRaises(m.NativeMenuPending):
+                    if kind==1:p._discover_bar(b.Node('peer'))
+                    else:p._find_labels(b.Node('bar'),m.LABELS['file'])
+                row=self.discovery_observation(p)
+                self.assertEqual(row,dict(schemaVersion=1,queryKindCode=kind,targetCode=1,candidateCount=0,
+                    examinedCount=0,visibleCount=0,matchedCount=0,observedMask=9,scanComplete=1,rejectCode=kind))
+                self.assertEqual(calls,[13,2,17]);self.assertEqual(b.native.calls,[])
+
+    def test_menu_discovery_preserves_actual_selected_objects_on_normal_completion(self):
+        for kind in (1,2):
+            with self.subTest(queryKindCode=kind):
+                m,_,_,_,_,b=self.real_chrome_fixture();p=b.probe;p._active_target='file'
+                selected=p._discover_bar(b.Node('peer')) if kind==1 else p._find_labels(b.Node('bar'),m.LABELS['file'])
+                self.assertEqual(selected.key,'bar' if kind==1 else 'file')
+                row=self.discovery_observation(p)
+                self.assertEqual((row['candidateCount'],row['examinedCount'],row['visibleCount'],row['matchedCount']),(1,1,1,1) if kind==1 else (2,2,2,1))
+                self.assertEqual((row['observedMask'],row['scanComplete'],row['rejectCode']),(31,1,0))
+
+    def test_menu_discovery_failed_count_query_does_not_claim_zero_candidates(self):
+        m,_,_,_,_,b=self.real_chrome_fixture();p=b.probe;p._active_target='file'
+        class COMError(Exception):
+            hresult=-2146233083
+            def __str__(self):raise AssertionError('Exception text must not be inspected')
+        primary=COMError()
+        def fail(*args):raise primary
+        b.find=fail
+        with self.assertRaises(COMError) as caught:p._discover_bar(b.Node('peer'))
+        self.assertIs(caught.exception,primary);row=self.discovery_observation(p)
+        self.assertEqual((row['candidateCount'],row['observedMask'],row['scanComplete'],row['rejectCode']),(0,0,0,0))
+        self.assertFalse(p.interop['lastCall']['callCompleted']);self.assertTrue(p.interop['lastCall']['failed'])
+        self.assertEqual(b.native.calls,[])
+
+    def test_menu_discovery_partial_enumeration_keeps_exception_and_prefix_counts(self):
+        m,_,_,_,_,b=self.real_chrome_fixture();p=b.probe;p._active_target='file';calls=[];original=p._uia_call
+        p._uia_call=lambda code,*args:(calls.append(code),original(code,*args))[1]
+        class COMError(Exception):
+            hresult=-2146233083
+            def __str__(self):raise AssertionError('Exception text must not be inspected')
+        primary=COMError()
+        def element(index):
+            if index==1:raise primary
+            return b.Node('file')
+        b.find=lambda *args:NS(Length=2,GetElement=element)
+        with self.assertRaises(COMError) as caught:p._find_labels(b.Node('bar'),m.LABELS['file'])
+        self.assertIs(caught.exception,primary);row=self.discovery_observation(p)
+        self.assertEqual((row['candidateCount'],row['examinedCount'],row['visibleCount'],row['matchedCount']),(2,1,1,1))
+        self.assertEqual((row['observedMask'],row['scanComplete'],row['rejectCode']),(7,0,0))
+        self.assertEqual(calls,[13,2,17,18,9,11,16,18]);self.assertEqual(b.native.calls,[])
+
+    def test_menu_discovery_invisible_and_ambiguous_candidates_remain_rejected(self):
+        for mode in ('invisible','ambiguous'):
+            with self.subTest(mode=mode):
+                m,_,_,_,_,b=self.real_chrome_fixture();p=b.probe;p._active_target='file'
+                class Node(b.Node):
+                    @property
+                    def CurrentIsOffscreen(self):return mode=='invisible'
+                    @property
+                    def CurrentName(self):raise AssertionError('Bar discovery must not read names')
+                b.find=lambda *args:NS(Length=2,GetElement=lambda index:Node('bar'))
+                with self.assertRaises(m.NativeMenuPending if mode=='invisible' else AssertionError):p._discover_bar(b.Node('peer'))
+                row=self.discovery_observation(p)
+                self.assertEqual((row['candidateCount'],row['examinedCount'],row['scanComplete']),(2,2,1))
+                self.assertEqual((row['visibleCount'],row['matchedCount'],row['rejectCode']),(0,0,1) if mode=='invisible' else (2,2,3))
+                self.assertEqual(b.native.calls,[])
+
     def test_provider_setup_failure_or_slow_setter_is_distinct_from_callee_entry(self):
         for mode in ('error','slow'):
             with self.subTest(mode=mode):
