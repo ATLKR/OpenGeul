@@ -17,6 +17,16 @@ from types import SimpleNamespace
 from owned_control_actions import CAP, GuiThreadInfo, NativeControlProbe, _original_attachment
 from suite_window_activation import NativeActivationProbe, Rect
 
+_OWNED_WINDLL_TYPE=getattr(C,'WinDLL',None)
+_OWNED_ACTIVATION_INIT=NativeActivationProbe.__init__
+_OWNED_CFUNC_CALL=C._CFuncPtr.__call__
+_NATIVE_USER_EXPORTS=('IsWindow','IsWindowVisible','IsWindowEnabled','IsIconic','GetAncestor',
+    'GetForegroundWindow','GetWindowThreadProcessId','GetWindowRect','GetTitleBarInfo',
+    'WindowFromPhysicalPoint','SetPhysicalCursorPos','GetPhysicalCursorPos','SetThreadDpiAwarenessContext',
+    'GetThreadDpiAwarenessContext','AreDpiAwarenessContextsEqual','SendMessageTimeoutW','GetAsyncKeyState',
+    'GetSystemMetrics','SendInput')
+_NATIVE_KERNEL_EXPORTS=('GetProcessId','WaitForSingleObject','GetProcessTimes','QueryFullProcessImageNameW')
+
 
 class MenuBarInfo(C.Structure):
     _fields_=[('cbSize',C.c_uint32),('rcBar',Rect),('hMenu',C.c_void_p),
@@ -1056,14 +1066,53 @@ class NativeMenuProbe(NativeControlProbe):
         self._uia=None;self._provider_started=self._provider_closed=False
         self.interop={} if interop is None else interop
         self._identity_scope=None;self._identity_refs={};self._uses_comparison=False
-        NativeActivationProbe.__init__(self,deadline,clock,**libraries)
+        creator=NativeActivationProbe.__init__;loader=getattr(C,'WinDLL',None)
+        creator(self,deadline,clock,**libraries)
         H,D,B=C.c_void_p,C.c_uint32,C.c_int32
-        for name,args,result in [('GetWindow',(H,D),H),('GetWindowTextW',(H,C.c_wchar_p,B),B),
+        signatures=[('GetWindow',(H,D),H),('GetWindowTextW',(H,C.c_wchar_p,B),B),
             ('GetClassNameW',(H,C.c_wchar_p,B),B),('IsChild',(H,H),B),('GetPropW',(H,C.c_wchar_p),H),
             ('GetMenuBarInfo',(H,B,B,C.POINTER(MenuBarInfo)),B),
-            ('GetGUIThreadInfo',(D,C.POINTER(GuiThreadInfo)),B)]:
+            ('GetGUIThreadInfo',(D,C.POINTER(GuiThreadInfo)),B)]
+        for name,args,result in signatures:
             function=getattr(self.user,name);function.argtypes,function.restype=args,result
+        self._native_exports=()
+        if (creator is _OWNED_ACTIVATION_INIT and loader is not None and loader is _OWNED_WINDLL_TYPE
+                and getattr(C,'WinDLL',None) is loader):
+            entries=[]
+            for role,dll,names in (('user','user32',_NATIVE_USER_EXPORTS+tuple(row[0] for row in signatures)),
+                                   ('kernel','kernel32',_NATIVE_KERNEL_EXPORTS)):
+                library=vars(self).get(role)
+                if libraries.get(role) is not None or type(library) is not _OWNED_WINDLL_TYPE:continue
+                cached=vars(library);pointer=cached.get('_FuncPtr')
+                if type(cached.get('_name')) is not str or cached['_name']!=dll:continue
+                for name in names:
+                    function=cached.get(name)
+                    try:
+                        owners=function._objects;args=function.argtypes;result=function.restype;flags=function._flags_
+                        if (type(function) is not pointer or pointer.__call__ is not _OWNED_CFUNC_CALL
+                                or type(owners) is not dict or owners.get('0') is not library
+                                or type(args) is not tuple or type(getattr(function,'__name__',None)) is not str or function.__name__!=name
+                                or type(flags) is not int or flags!=(loader._func_flags_|C._FUNCFLAG_USE_LASTERROR)
+                                or getattr(function,'errcheck',None) is not None):continue
+                    except Exception:continue
+                    entries.append((role,library,dll,name,function,pointer,owners,args,result,flags))
+            self._native_exports=tuple(entries)
         self.keyboard_probe=None
+    def _native_timeout_exempt(self,function,context):
+        if type(context) is not dict or type(context.get('apiCode')) is not int or context['apiCode']!=0:return False
+        if _OWNED_WINDLL_TYPE is None or getattr(C,'WinDLL',None) is not _OWNED_WINDLL_TYPE:return False
+        for role,library,dll,name,admitted,pointer,owners,args,result,flags in getattr(self,'_native_exports',()):
+            if function is not admitted:continue
+            try:
+                cached=vars(library)
+                return (vars(self).get(role) is library and type(library) is _OWNED_WINDLL_TYPE
+                    and type(cached.get('_name')) is str and cached['_name']==dll and cached.get('_FuncPtr') is pointer and cached.get(name) is function
+                    and type(function) is pointer and pointer.__call__ is _OWNED_CFUNC_CALL
+                    and function._objects is owners and owners.get('0') is library
+                    and function.argtypes is args and function.restype is result and type(function._flags_) is int and function._flags_==flags
+                    and type(getattr(function,'__name__',None)) is str and function.__name__==name and getattr(function,'errcheck',None) is None)
+            except Exception:return False
+        return False
     @property
     def uia(self):
         if not getattr(self,'_provider_closed',False):self._ensure_provider()
@@ -1373,6 +1422,8 @@ class NativeMenuProbe(NativeControlProbe):
     def _call(self,function,*args):
         previous=getattr(self,'_observed_call',None);sink=getattr(self,'_diagnostic_sink',None)
         context=previous if isinstance(previous,dict) else self._call_record(0)
+        native_only=(previous is None or type(previous) is dict) and self._native_timeout_exempt(function,context)
+        if native_only and context is previous:context=self._call_record(0)
         self._observed_call=context
         try:
             if not isinstance(sink,dict):self._last_call_exception=None
@@ -1381,7 +1432,7 @@ class NativeMenuProbe(NativeControlProbe):
                 except BaseException:pass
             assert self.clock()<self.deadline, 'Native menu query deadline expired'
             if context is not None:context['phaseCode']=1
-            if getattr(self,'provider_client',None) is not None:self._provider_timeout()
+            if getattr(self,'provider_client',None) is not None and not (native_only and self._native_timeout_exempt(function,context)):self._provider_timeout()
             if function is getattr(getattr(self,'user',None),'SendMessageTimeoutW',None):
                 assert type(args[5]) is int and 1<=args[5]<=int((self.deadline-self.clock())*1000), 'Owned hit-test wait exceeds remaining query budget'
             if context is not None:context.update(phaseCode=2,calleeEntered=True)
@@ -1393,6 +1444,8 @@ class NativeMenuProbe(NativeControlProbe):
         except BaseException as exc:
             if context is not None:
                 context.update(failed=True,**self._exception_numbers(exc))
+                try:(sink if isinstance(sink,dict) else self.interop)['lastCall']=context
+                except BaseException:pass
             if not isinstance(sink,dict):self._last_call_exception=exc
             raise
         finally:self._observed_call=previous
