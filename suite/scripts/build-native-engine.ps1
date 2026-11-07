@@ -1804,13 +1804,50 @@ function Assert-NativeConfiguredToolchain([string]$CompilerRoot,[Collections.IDi
 
 function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','winAccFocusOrder')}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','winAccFocusOrder')}
+    $guardCount=if($Architecture -ceq 'arm64'){13}else{12}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
-       $proof.recipeSha256 -cnotmatch '^[0-9a-f]{64}$' -or ($proof.hookOrder -join '/') -cne ($order -join '/') -or @($proof.armGuardedSources).Count -ne 13 -or
+       $proof.recipeSha256 -cnotmatch '^[0-9a-f]{64}$' -or ($proof.hookOrder -join '/') -cne ($order -join '/') -or @($proof.armGuardedSources).Count -ne $guardCount -or
        $proof.nativeBuildVerified -ne $false -or $proof.fullEngineQualified -ne $false -or $proof.acceptanceEligible -ne $false -or $proof.guiVerified -ne $false) {throw 'Source recipe is not bound to this actual source/policy run.'}
     if($Architecture -ceq 'x64' -and (@($proof.armGuardedSources|Where-Object {$_.unchanged -ne $true -or $_.sha256 -cne $_.beforeSha256}).Count -or
        $Receipt.sourceHooks.kind -cne 'native-windows-common-source-hooks' -or $Receipt.sourceHooks.architecture -cne 'x64')) {throw 'x64 source receipt applied ARM-only hooks.'}
+    if($Architecture -ceq 'x64') {
+        $manifestPath=Join-Path $PSScriptRoot '../engine-build/source-build.json';Assert-UnlinkedPath $manifestPath
+        if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
+        $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
+        $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.zstdSourceLinks,
+            $manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe,$manifest.atlNativePaths.recipe)+
+            @($manifest.atlConsumerNativePaths.recipes)+@($manifest.harfbuzzNativeMesonPaths.recipe)
+        for($i=0;$i -lt 12;$i++) {
+            $row=$proof.armGuardedSources[$i]
+            if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
+        }
+        $pin=$manifest.windowsFirebirdLoaderPath;$loader=$Receipt.sourceHooks.firebirdLoaderPath
+        $fields=@('schemaVersion','kind','path','condition','beforeBytes','afterBytes','beforeSha256','afterSha256','evidence',
+            'nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')
+        if((Compare-Object -CaseSensitive @($loader.PSObject.Properties.Name) $fields) -or
+           ($loader.schemaVersion -isnot [int] -and $loader.schemaVersion -isnot [long]) -or
+           $loader.schemaVersion -ne 1 -or $loader.kind -cne 'windows-firebird-loader-path-source-hook' -or
+           $loader.path -cne 'external/firebird/ExternalProject_firebird.mk' -or $loader.path -cne $pin.path -or
+           $loader.condition -cne 'WNT_X86_64' -or $loader.condition -cne $pin.condition -or
+           ($loader.beforeBytes -isnot [int] -and $loader.beforeBytes -isnot [long]) -or
+           ($loader.afterBytes -isnot [int] -and $loader.afterBytes -isnot [long]) -or
+           $loader.beforeBytes -ne $pin.size -or $loader.afterBytes -ne $pin.afterSize -or
+           $loader.beforeSha256 -cne $pin.sha256 -or $loader.afterSha256 -cne $pin.afterSha256) {throw 'x64 Firebird loader source proof differs.'}
+        foreach($name in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+            if($loader.$name -isnot [bool] -or $loader.$name) {throw 'Source loader hook cannot qualify a native engine.'}
+        }
+        if((Compare-Object -CaseSensitive @($loader.evidence.PSObject.Properties.Name) @('original','effective'))) {throw 'Source loader evidence is incomplete.'}
+        foreach($phase in @('original','effective')) {
+            $path=$loader.evidence.$phase
+            if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or
+               [IO.Path]::GetFileName($path) -cne ($phase+'-x64-ExternalProject_firebird.mk')) {throw 'Source loader evidence path differs.'}
+            if($phase -ceq 'original') {Confirm-FileIdentity $path $pin.size SHA256 $pin.sha256|Out-Null}
+            else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
+        }
+        if([IO.Path]::GetDirectoryName($loader.evidence.original) -cne [IO.Path]::GetDirectoryName($loader.evidence.effective)) {throw 'Source loader evidence directories differ.'}
+    }
 }
 
 function Assert-WinAccBinaryProof($Proof,[string]$RuntimeRoot,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {

@@ -124,12 +124,40 @@ Microsoft signature; unsigned observations do not qualify a runtime. Consumers
 replay the recorded path/version/hash joins and authenticated receipt; root's
 independent adoption check can additionally hash the separate raw evidence.
 
-The reviewed source-policy inventory approves exactly `moduleBootstrap` then
-`winAccFocusOrder` for x64. Both are common exact-hash corrections whose
-before/after transformations were independently recomputed. Exclude the 13
-existing ARM-guarded source/recipe targets; their need or safety on x64 is
-unknown. Future unknown hooks or recipe-membership drift fail closed. This
-source-only approval does not prove actual x64 build/runtime behavior.
+The x64 recipe is exactly `moduleBootstrap`, `firebirdLoaderPath`, then
+`winAccFocusOrder`. The loader hook reclassifies only
+`external/firebird/ExternalProject_firebird.mk` after a real x64 examples/isql
+loader failure and an authenticated nested GNU make reproduction exposed two
+concatenated complete PATH assignments and the wrong Windows DLL directory.
+This establishes the source-expression defect, not that every loader failure
+has the same cause. The correction uses one existing helper for ICU/source/lib
+and Firebird/bin, guarded specifically by WNT_X86_64. It adds no driver PATH
+workaround, feature skip or other ARM hook to the x64 build.
+
+`windowsFirebirdLoaderPath` in the fixed source manifest pins the exact path,
+condition, before/after byte counts and SHA256 values. The original ARM helper,
+ARM final source bytes and thirteen-row ARM guarded plan remain unchanged.
+The x64 plan retains seventeen authenticated source inputs but treats this one
+file as common, leaving exactly twelve unchanged ARM-only source guards.
+Future unknown hooks, source-pin changes or recipe-membership drift fail closed.
+Source-only installation never proves actual native build/runtime behavior.
+
+The x64 `sourceHooks` record adds `firebirdLoaderPath`, with schemaVersion=1,
+kind=windows-firebird-loader-path-source-hook, fixed path/condition,
+beforeBytes/afterBytes, beforeSha256/afterSha256, original/effective evidence
+paths, and false nativeBuildVerified/fullEngineQualified/acceptanceEligible/
+guiVerified flags. `sourceRecipeProof` retains its existing keys; hookOrder has
+the three entries above and armGuardedSources contains the twelve exact
+unchanged ARM-only path/hash rows. ARM retains its two hooks and thirteen rows.
+The driver checks the x64 descriptor and actual retained evidence bytes against
+the manifest, rather than using diagnostic success as engine qualification.
+The runtime artifact still has exactly its original two members.
+
+The POSIX nested-make regression exercises both installed recipes and preserves
+the ARM helper's old x64 behavior independently of the new x64 dispatcher route.
+That POSIX-only replay explicitly skips on native Windows;
+its local success cannot replace a real Firebird target, native Full/Base,
+process-retirement or later Suite acceptance result.
 
 Preserve the ARM sequence: the full existing ARM installer, which already
 includes bootstrap, then the separate WinAcc installer. Never prepend bootstrap
@@ -193,4 +221,4 @@ applicable install/update/repair gates. A later changed-driver ARM Full and ARM
 Suite are separate required regression evidence before adopting that ARM output.
 Failures remain failures; no cross-architecture relabelling or MSI fallback.
 
-Source recipe classification: [reviewed inventory](2026-11-07-native-x64-source-recipes.md).
+Initial source classification (the loader reclassification above supersedes its x64 exclusion): [reviewed inventory](2026-11-07-native-x64-source-recipes.md).

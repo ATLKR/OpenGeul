@@ -20,6 +20,44 @@ def quote(value): return "'"+str(value).replace("'","''")+"'"
 
 
 class NativeEngineBuildTests(unittest.TestCase):
+    def test_x64_source_binding_requires_exact_loader_hook_and_twelve_unchanged_guards(self):
+        import copy
+        import hashlib
+        from suite.tests.test_native_source_recipe import load
+        module = load('apply_native_source'); engine = SOURCE.parents[1] / 'engine-build'
+        lock = json.loads((engine / 'source-build.json').read_bytes())
+        plan = module._select_plan(lock, (engine / 'native-targets.json').read_bytes(), 'x64')
+        source = self.root / 'source'; target = source / module.LOADER_PATH; target.parent.mkdir(parents=True)
+        target.write_bytes((SOURCE.parents[1] / 'tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes())
+        evidence = self.root / 'evidence'; evidence.mkdir()
+        loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
+        good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
+                    nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
+                    sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64', firebirdLoaderPath=loader),
+                    sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
+                        recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
+                        policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
+                        manifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
+                        recipeSha256=hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(),
+                        armGuardedSources=[dict(path=row['path'], beforeSha256=row['beforeSha256'],
+                                               sha256=row['beforeSha256'], unchanged=True) for row in plan['armGuardedSources']],
+                        nativeBuildVerified=False, fullEngineQualified=False, acceptanceEligible=False, guiVerified=False))
+        path = self.root / 'receipt.json'; path.write_text(json.dumps(good))
+        call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64"
+        self.ps(call)
+        bad = []
+        for field, value in [('schemaVersion', True), ('kind', 'other'), ('path', '../escape'), ('condition', 'WNT_AARCH64'),
+                             ('beforeBytes', 1), ('afterBytes', 1.5), ('beforeSha256', '0' * 64),
+                             ('afterSha256', '0' * 64), ('nativeBuildVerified', True), ('nativeBuildVerified', 0), ('guiVerified', True),
+                             ('acceptanceEligible', True), ('fullEngineQualified', True), ('unknown', False)]:
+            changed = copy.deepcopy(good); changed['sourceHooks']['firebirdLoaderPath'][field] = value; bad.append(changed)
+        changed = copy.deepcopy(good); changed['sourceRecipeProof']['hookOrder'] = ['moduleBootstrap', 'winAccFocusOrder']; bad.append(changed)
+        changed = copy.deepcopy(good); changed['sourceRecipeProof']['armGuardedSources'].append(dict(good['sourceRecipeProof']['armGuardedSources'][0])); bad.append(changed)
+        changed = copy.deepcopy(good); changed['sourceRecipeProof']['armGuardedSources'][0]['unchanged'] = False; bad.append(changed)
+        for index, packet in enumerate(bad):
+            with self.subTest(case=index):
+                path.write_text(json.dumps(packet)); self.rejected(call)
+
     def test_crt_terms_snapshot_hash_and_url_match_selected_visual_studio(self):
         import hashlib
         path=self.root/'terms.html'

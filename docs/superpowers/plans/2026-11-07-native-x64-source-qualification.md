@@ -60,10 +60,10 @@ do not bulk-copy between checkouts. Dependencies are 1 → 2 → 3; Task 4 may r
 
 **Interfaces:** `apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict` consumes Task 1's fixed recipe key and authenticated manifest. It returns exact applied-hook receipts; production callers cannot supply recipe contents or manifest paths.
 
-- [ ] Consume the completed, source-policy-reviewed inventory: x64 selects exactly `moduleBootstrap` then `winAccFocusOrder`, with authenticated before/after bytes; exclude the 13 existing ARM-guarded targets. Preserve ARM full-installer (bootstrap included) then WinAcc. This approval is source-only; actual x64 execution remains a separate gate. Future unknown hooks or membership drift prevent recipe success and any long build.
-- [ ] **RED:** add `test_arm_recipe_outputs_match_frozen_manifest`, `test_arm_full_installer_then_winacc_without_duplicate_bootstrap`, `test_x64_recipe_applies_exactly_module_bootstrap_then_winacc`, `test_x64_leaves_all_13_arm_guarded_targets_unchanged`, `test_unknown_missing_duplicate_reordered_or_modified_hook_fails`. Use pinned source fixtures and exact WinAcc original/candidate behavioral witnesses.
+- [ ] Consume the completed, source-policy-reviewed inventory: x64 selects exactly `moduleBootstrap`, `firebirdLoaderPath`, then `winAccFocusOrder`, with authenticated before/after bytes; reclassify only the source-proven Windows Firebird loader expression and exclude the twelve remaining ARM-only targets. Preserve ARM full-installer (bootstrap included) then WinAcc. This approval is source-only; actual x64 execution remains a separate gate. Future unknown hooks or membership drift prevent recipe success and any long build.
+- [ ] **RED:** add `test_arm_recipe_outputs_match_frozen_manifest`, `test_arm_full_installer_then_winacc_without_duplicate_bootstrap`, `test_x64_recipe_applies_exactly_bootstrap_loader_then_winacc`, `test_x64_leaves_all_12_arm_only_targets_unchanged`, `test_windows_loader_paths_survive_both_make_levels_for_each_owned_recipe`, `test_unknown_missing_duplicate_reordered_or_modified_hook_fails`. Use pinned source fixtures and exact WinAcc original/candidate behavioral witnesses.
 - [ ] Run `python -m unittest discover -s suite/tests -p 'test_native_source_recipe.py' -v`; expected failures before the dispatcher exists.
-- [ ] **GREEN:** implement the exact finite recipe dispatcher: x64 bootstrap-only operation then WinAcc; ARM full existing installer then WinAcc, without a separate bootstrap call. Reuse narrowly tested existing hook functions and require all relevant hashes/outputs; never route x64 through ARM install-all or broaden ARM guards.
+- [ ] **GREEN:** implement the exact finite recipe dispatcher: x64 bootstrap then its exact Windows loader-path hook then WinAcc; ARM full existing installer then WinAcc, without a separate bootstrap call. Reuse narrowly tested existing hook functions and require all relevant hashes/outputs; never route x64 through ARM install-all or broaden ARM guards.
 - [ ] Run recipe tests, `python -m unittest discover -s suite/tests -p 'test_native_source_module_links.py' -v`, `python -m unittest discover -s suite/tests -p 'test_firebird_arm64_port.py' -v`, and `python -m unittest discover -s suite/tests -p 'test_winacc_focus_order.py' -v`; expected exact recipe/behavior passes. Review complete recipe and commit `feat: authenticate native engine source recipes`.
 
 ### Task 3: Complete the shared producer and independent fixed x64 workflow
@@ -107,6 +107,6 @@ All spec boundaries have an owner: fixed policy/admission/defaults (1), complete
 authenticated recipe (2), one timed native lifecycle and independent workflow
 (3), strict per-architecture consumption and payload replay (4), actual builds,
 independent adoption and GUI acceptance (5). The reviewed x64 recipe is exactly
-bootstrap then WinAcc; actual native recipe execution and toolchain/time
+bootstrap, exact x64 loader-path correction, then WinAcc; actual native recipe execution and toolchain/time
 feasibility remain qualification gates, not assertions of success. No
 implementation, test, CI or lock change occurred in this design pass.

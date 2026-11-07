@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder'],
-          'x64': ['moduleBootstrap', 'winAccFocusOrder']}
+          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'winAccFocusOrder']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
 
 
@@ -84,13 +85,27 @@ class ReceiptNormalizationTests(unittest.TestCase):
 
 
 class RecipePolicyTests(unittest.TestCase):
+    def test_x64_reclassifies_only_the_pinned_firebird_loader_recipe(self):
+        module = load('apply_native_source'); lock = manifest()
+        plan = module._select_plan(lock, (ENGINE / 'native-targets.json').read_bytes(), 'x64')
+        self.assertEqual(12, len(plan['armGuardedSources']))
+        self.assertNotIn('external/firebird/ExternalProject_firebird.mk',
+                         [row['path'] for row in plan['armGuardedSources']])
+        self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'winAccFocusOrder'], plan['recipe']['hooks'])
+        original = (ROOT / 'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes()
+        pin = lock['windowsFirebirdLoaderPath']
+        for field, value in [('sha256', '0' * 64), ('afterSha256', '0' * 64), ('size', pin['size'] + 1),
+                             ('afterSize', pin['afterSize'] + 1)]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                module._loader_bytes(original, dict(pin, **{field: value}))
+
     def test_fixed_policy_selects_exact_finite_recipes(self):
         module = load('apply_native_source')
         for architecture in ORDERS:
             plan = module._select_plan(manifest(), (ENGINE / 'native-targets.json').read_bytes(), architecture)
             self.assertEqual(ORDERS[architecture], plan['recipe']['hooks'])
             self.assertEqual(RECIPES[architecture], plan['recipeId'])
-            self.assertEqual(13, len(plan['armGuardedSources']))
+            self.assertEqual(13 if architecture == 'arm64' else 12, len(plan['armGuardedSources']))
             self.assertEqual(17, len(plan['sources']))
             self.assertIn('sourceDependencies', plan)
             self.assertEqual(1 if architecture == 'arm64' else 0, len(plan['sourceDependencies']))
@@ -114,6 +129,11 @@ class RecipePolicyTests(unittest.TestCase):
                      lambda p: p['nativeSourceRecipes'][RECIPES['x64']].update(architecture='arm64'),
                      lambda p: p['nativeSourceRecipes'][RECIPES['x64']].update(coreCommit='0' * 40),
                      lambda p: p['moduleBootstrap'].update(path='../escape'),
+                     lambda p: p['windowsFirebirdLoaderPath'].update(condition='WNT_AARCH64'),
+                     lambda p: p['windowsFirebirdLoaderPath'].update(path='../escape'),
+                     lambda p: p['windowsFirebirdLoaderPath'].update(size=True),
+                     lambda p: p['windowsFirebirdLoaderPath'].update(afterSize=1.5),
+                     lambda p: p['windowsFirebirdLoaderPath'].update(unknown=True),
                      lambda p: p['atlConsumerNativePaths']['recipes'].reverse(),
                      lambda p: p['winAccFocusOrder']['sources'].pop()]
         for mutate in mutations:
@@ -168,6 +188,58 @@ class ActualSourceRecipeTests(unittest.TestCase):
     def install(self, architecture):
         return self.module.apply_native_source(self.source, self.evidence, architecture=architecture)
 
+    @unittest.skipUnless(os.name != 'nt' and shutil.which('make') and shutil.which('bash'),
+                         'This nested GNU make replay requires POSIX make/Bash; it is not native Windows proof')
+    def test_windows_loader_paths_survive_both_make_levels_for_each_owned_recipe(self):
+        fixture = ROOT / 'suite/tests/fixtures/native-icu-path'
+        for row in json.loads((fixture / 'source.json').read_text())['members']:
+            self.assertEqual(row['fixtureSha256'], hashlib.sha256((fixture / row['fixture']).read_bytes()).hexdigest())
+        project = 'external/firebird/ExternalProject_firebird.mk'
+        original = self.inputs[project]
+        self.install('x64'); x64 = (self.source / project).read_bytes()
+        arm_source = self.folder / 'arm-source'; arm_source.mkdir()
+        for name, raw in self.inputs.items():
+            target = arm_source / name; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(raw)
+        arm_evidence = self.folder / 'arm-evidence'; arm_evidence.mkdir()
+        self.module.apply_native_source(arm_source, arm_evidence, architecture='arm64')
+        arm = (arm_source / project).read_bytes()
+        observer = self.folder / 'observe.py'
+        observer.write_text("import json,os\np=os.environ['PATH'].split(':')\n"
+                            "print(json.dumps({'icu':'/cygdrive/c/source/workdir/UnpackedTarball/icu/source/lib' in p,"
+                            "'client':'/cygdrive/c/source/workdir/UnpackedTarball/firebird/gen/Release/firebird/bin' in p,"
+                            "'concatenated':any('libPATH=' in x for x in p)}))\n")
+        inner = self.folder / 'inner.mk'
+        # These path rules match the pinned Firebird examples/defaults and its
+        # locked Cygwin patch: examples runs a copy of isql outside BIN.
+        inner.write_text('ROOT := C:/source/workdir/UnpackedTarball/firebird\nTARGET := Release\n'
+                         'GEN_ROOT=$(ROOT)/gen\nFB_BUILD=$(GEN_ROOT)/$(TARGET)/firebird\nBIN=$(FB_BUILD)/bin\n'
+                         'PATH := ./:$(BIN):$(PATH)\nexport PATH\nall:\n\t$(LIBO_TUNNEL_LIBRARY_PATH) '
+                         + shlex.quote(sys.executable) + ' ' + shlex.quote(str(observer)) + '\n')
+        def replay(raw, cpu):
+            assignment = next(line.strip().removesuffix(' \\') for line in raw.decode().splitlines()
+                              if line.strip().startswith('LIBO_TUNNEL_LIBRARY_PATH='))
+            variables = 'OS := WNT\nCPUNAME := ' + cpu + '\n'
+            for key, suffix in [('SRCDIR', ''), ('BUILDDIR', ''), ('INSTDIR', '/instdir'),
+                                ('WORKDIR', '/workdir'), ('TARFILE_LOCATION', '/downloads')]:
+                variables += key + ' := C:/source' + suffix + '\n' + key + '_CYG := /cygdrive/c/source' + suffix + '\n'
+            variables += ('INSTDIR_FOR_BUILD := $(INSTDIR)\nLIBO_URE_LIB_FOLDER := program\nLIBO_BIN_FOLDER := program\n'
+                          'gb_UnpackedTarball_workdir := $(WORKDIR)/UnpackedTarball\n'
+                          'firebird_BUILDDIR := $(gb_UnpackedTarball_workdir)/firebird/gen/Release/firebird\n')
+            outer = self.folder / 'outer.mk'
+            outer.write_text(variables + (fixture / 'cyg-path.mk').read_text() + '\n'
+                             + (fixture / 'windows-loader-path.mk').read_text() + '\nall:\n\t$(MAKE) --no-print-directory -f '
+                             + shlex.quote(str(inner)) + ' ' + assignment + '\n')
+            result = subprocess.run(['make', '--no-print-directory', '-f', str(outer), 'SHELL=' + shutil.which('bash')],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            return json.loads(result.stdout.splitlines()[-1])
+        for cpu, effective in [('X86_64', x64), ('AARCH64', arm)]:
+            with self.subTest(cpu=cpu):
+                self.assertEqual({'icu': False, 'client': False, 'concatenated': True}, replay(original, cpu))
+                self.assertEqual({'icu': True, 'client': True, 'concatenated': False}, replay(effective, cpu))
+        self.assertEqual(replay(original, 'X86_64'), replay(arm, 'X86_64'))
+        self.assertEqual(replay(original, 'AARCH64'), replay(x64, 'AARCH64'))
+
     def unchanged(self):
         self.assertEqual({name: (self.source / name).read_bytes() for name in self.inputs}, self.inputs)
 
@@ -188,7 +260,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256((ENGINE / filename).read_bytes()).hexdigest(), proof[key])
         plan = self.module._select_plan(self.lock, (ENGINE / 'native-targets.json').read_bytes(), architecture)
         self.assertEqual(hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(), proof['recipeSha256'])
-        self.assertEqual(13, len(proof['armGuardedSources']))
+        self.assertEqual(13 if architecture == 'arm64' else 12, len(proof['armGuardedSources']))
         for pin, row in zip(plan['armGuardedSources'], proof['armGuardedSources']):
             expected = pin['beforeSha256'] if architecture == 'x64' else pin['afterSha256']
             self.assertEqual({'path': pin['path'], 'beforeSha256': pin['beforeSha256'],
@@ -222,26 +294,44 @@ class ActualSourceRecipeTests(unittest.TestCase):
         self.assertEqual({p.relative_to(direct).as_posix(): p.read_bytes() for p in direct.rglob('*') if p.is_file()},
                          {p.relative_to(self.source).as_posix(): p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
-    def test_x64_recipe_applies_exactly_module_bootstrap_then_winacc(self):
+    def test_x64_recipe_applies_exactly_bootstrap_loader_then_winacc(self):
         events = []; bootstrap = self.module.ARM.install_module_bootstrap; winacc = self.module.WINACC.install
+        loader = self.module._install_firebird_loader_path
         def common(*args): events.append('moduleBootstrap'); return bootstrap(*args)
+        def loader_path(*args): events.append('firebirdLoaderPath'); return loader(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         with patch.object(self.module.ARM, 'install', side_effect=AssertionError('x64 selected full ARM installer')), \
                 patch.object(self.module.ARM, 'install_module_bootstrap', side_effect=common), \
+                patch.object(self.module, '_install_firebird_loader_path', side_effect=loader_path), \
                 patch.object(self.module.WINACC, 'install', side_effect=focus):
             result = self.install('x64')
         self.proof(result, 'x64'); self.assertEqual(ORDERS['x64'], events)
         hooks = result['sourceHooks']
-        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
+        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath',
+                          'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
         self.assertEqual('native-windows-common-source-hooks', hooks['kind']); self.assertEqual('x64', hooks['architecture'])
         self.assertIs(hooks['nativeBuildVerified'], False); self.assertIs(hooks['basePersistenceVerified'], False)
         for row in self.plan['sources'][:4]:
             self.assertEqual(row['afterSha256'], hashlib.sha256((self.source / row['path']).read_bytes()).hexdigest())
+        pin = self.lock['windowsFirebirdLoaderPath']; proof = hooks['firebirdLoaderPath']
+        self.assertEqual({'schemaVersion', 'kind', 'path', 'condition', 'beforeBytes', 'afterBytes',
+                          'beforeSha256', 'afterSha256', 'evidence', 'nativeBuildVerified',
+                          'fullEngineQualified', 'acceptanceEligible', 'guiVerified'}, set(proof))
+        self.assertEqual('windows-firebird-loader-path-source-hook', proof['kind'])
+        self.assertEqual(pin['path'], proof['path']); self.assertEqual(pin['condition'], proof['condition'])
+        for field, key in [('beforeBytes', 'size'), ('afterBytes', 'afterSize'),
+                           ('beforeSha256', 'sha256'), ('afterSha256', 'afterSha256')]:
+            self.assertEqual(pin[key], proof[field])
+        self.assertEqual(self.inputs[pin['path']], Path(proof['evidence']['original']).read_bytes())
+        self.assertEqual((self.source / pin['path']).read_bytes(), Path(proof['evidence']['effective']).read_bytes())
+        for field in ['nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified']:
+            self.assertIs(proof[field], False)
 
-    def test_x64_leaves_all_13_arm_guarded_targets_unchanged(self):
+    def test_x64_leaves_all_12_arm_only_targets_unchanged(self):
         result = self.install('x64'); self.proof(result, 'x64')
         changed = {name for name, raw in self.inputs.items() if (self.source / name).read_bytes() != raw}
-        self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path']}, changed)
+        self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path'],
+                          self.lock['windowsFirebirdLoaderPath']['path']}, changed)
         self.assertEqual(set(self.inputs), {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
 
     def test_every_input_drift_rejects_before_any_recipe_write(self):
@@ -290,6 +380,16 @@ class ActualSourceRecipeTests(unittest.TestCase):
             return receipt
         with patch.object(self.module.WINACC, 'install', side_effect=corrupt), self.assertRaises(ValueError):
             self.install('x64')
+
+    def test_changed_loader_output_cannot_publish_x64_success(self):
+        install = self.module._install_firebird_loader_path
+        def corrupt(*args):
+            result = install(*args)
+            (self.source / self.lock['windowsFirebirdLoaderPath']['path']).write_bytes(b'changed loader output')
+            return result
+        with patch.object(self.module, '_install_firebird_loader_path', side_effect=corrupt) as loader:
+            with self.assertRaises(ValueError): self.install('x64')
+            self.assertEqual(1, loader.call_count)
 
     def test_cli_and_repeat_application_fail_closed(self):
         command = [sys.executable, str(ENGINE / 'apply_native_source.py'), '--libreoffice-source', str(self.source),

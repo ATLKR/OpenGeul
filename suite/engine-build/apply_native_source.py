@@ -18,7 +18,8 @@ HERE = Path(__file__).resolve().parent
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'winAccFocusOrder'])}
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'winAccFocusOrder'])}
+LOADER_PATH = 'external/firebird/ExternalProject_firebird.mk'
 ARM_PATHS = ('configure.ac', 'external/firebird/UnpackedTarball_firebird.mk',
              'external/firebird/ExternalProject_firebird.mk', 'external/zstd/UnpackedTarball_zstd.mk',
              'external/mdds/UnpackedTarball_mdds.mk', 'external/python3/ExternalProject_python3.mk',
@@ -136,6 +137,13 @@ def _select_plan(lock, policy_raw, architecture):
         if len(consumers) != 5: raise ValueError('source-recipe-input')
         arm_pins += consumers + [lock['harfbuzzNativeMesonPaths']['recipe']]
         guarded = [_pin(pin, path) for pin, path in zip(arm_pins, ARM_PATHS)]
+        if architecture == 'x64':
+            loader = lock['windowsFirebirdLoaderPath']
+            if (set(loader) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+                    or loader['condition'] != 'WNT_X86_64'):
+                raise ValueError('source-recipe-input')
+            common.append(_pin(loader, LOADER_PATH))
+            guarded = [row for row in guarded if row['path'] != LOADER_PATH]
         payloads = [('winacc-focus-order.patch', winacc['patch'])]
         dependencies = []
         if architecture == 'arm64':
@@ -162,7 +170,42 @@ def _select_plan(lock, policy_raw, architecture):
         raise ValueError('source-recipe-input') from None
 
 
-def _validate_common(inputs, lock, payloads):
+def _loader_bytes(original, pin):
+    old = (b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib)'
+           b'$(call gb_Helper_extend_ld_path,$(firebird_BUILDDIR)/lib)')
+    new = (b'$(if $(filter WNT_X86_64,$(OS)_$(CPUNAME)),'
+           b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib:$(firebird_BUILDDIR)/bin),'
+           + old + b')')
+    if (pin['path'] != LOADER_PATH or pin['condition'] != 'WNT_X86_64'
+            or len(original) != pin['size'] or _sha(original) != pin['sha256'] or original.count(old) != 1):
+        raise ValueError('source-recipe-input')
+    changed = original.replace(old, new, 1)
+    if len(changed) != pin['afterSize'] or _sha(changed) != pin['afterSha256']:
+        raise ValueError('source-recipe-input')
+    return changed
+
+
+def _install_firebird_loader_path(source, evidence, pin):
+    target = source / LOADER_PATH; original = _regular(target)
+    changed = _loader_bytes(original, pin)
+    retained = {'original': evidence / 'original-x64-ExternalProject_firebird.mk',
+                'effective': evidence / 'effective-x64-ExternalProject_firebird.mk'}
+    if any(path.exists() or path.is_symlink() for path in retained.values()):
+        raise ValueError('source-recipe-input')
+    for name, raw in [('original', original), ('effective', changed)]:
+        with retained[name].open('xb') as stream: stream.write(raw)
+    target.write_bytes(changed)
+    if _regular(target) != changed: raise ValueError('source-recipe-output')
+    return {'schemaVersion': 1, 'kind': 'windows-firebird-loader-path-source-hook',
+            'path': LOADER_PATH, 'condition': 'WNT_X86_64',
+            'beforeBytes': len(original), 'afterBytes': len(changed),
+            'beforeSha256': _sha(original), 'afterSha256': _sha(changed),
+            'evidence': {name: str(path) for name, path in retained.items()},
+            'nativeBuildVerified': False, 'fullEngineQualified': False,
+            'acceptanceEligible': False, 'guiVerified': False}
+
+
+def _validate_common(inputs, lock, payloads, architecture):
     bootstrap = lock['moduleBootstrap']
     original = inputs[COMMON_PATHS[0]]
     if original.count(b'-type d -path ') != 1 or _sha(original.replace(b'-type d -path ', b'-type d ! -path ')) != bootstrap['afterSha256']:
@@ -177,6 +220,8 @@ def _validate_common(inputs, lock, payloads):
     expected = ''.join(difflib.unified_diff(original.decode().splitlines(True), changed.decode().splitlines(True),
                        fromfile='a/' + pin['path'], tofile='b/' + pin['path'])).encode()
     if expected != payloads['winacc-focus-order.patch']: raise ValueError('source-recipe-input')
+    if architecture == 'x64':
+        _loader_bytes(inputs[LOADER_PATH], lock['windowsFirebirdLoaderPath'])
 
 
 def apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict:
@@ -201,7 +246,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
         if _sha(raw) != row['sha256'] or 'size' in row and len(raw) != row['size']:
             raise ValueError('source-recipe-input')
         payloads[row['filename']] = raw
-    _validate_common(inputs, lock, payloads)
+    _validate_common(inputs, lock, payloads, architecture)
     if architecture == 'arm64':
         for name in ARM_OUTPUTS:
             output = source / name; _directory(output.parent)
@@ -215,19 +260,20 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
     else:
         hooks = {'kind': 'native-windows-common-source-hooks', 'architecture': 'x64',
                  'moduleBootstrap': ARM.install_module_bootstrap(source, evidence),
+                 'firebirdLoaderPath': _install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath']),
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
     if architecture == 'arm64':
         for path, name in ARM_OUTPUTS.items():
             if _regular(source / path) != payloads[name]: raise ValueError('source-recipe-output')
-    guarded = []
+    guarded = []; guarded_paths = {row['path'] for row in plan['armGuardedSources']}
     for row in plan['sources'] + plan['sourceDependencies']:
-        unchanged = architecture == 'x64' and row['path'] in ARM_PATHS
+        unchanged = architecture == 'x64' and row['path'] in guarded_paths
         expected = row['beforeSha256'] if unchanged else row['afterSha256']
         raw = _regular(source / row['path'])
         if _sha(raw) != expected or not unchanged and 'afterBytes' in row and len(raw) != row['afterBytes']:
             raise ValueError('source-recipe-output')
-        if row['path'] in ARM_PATHS:
+        if row['path'] in guarded_paths:
             guarded.append({'path': row['path'], 'beforeSha256': row['beforeSha256'],
                             'sha256': expected, 'unchanged': unchanged})
     proof = {'schemaVersion': 1, 'kind': 'native-engine-source-recipe-install',
