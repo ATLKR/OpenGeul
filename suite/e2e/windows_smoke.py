@@ -66,16 +66,25 @@ def launch_working_directory(suite, working_directory=None):
     return directory
 
 
-def launch_suite(command, suite, output, name, *, environment=None, working_directory=None):
+def launch_suite(command, suite, output, name, *, environment=None, working_directory=None, source_menu=None):
     cwd = launch_working_directory(suite, working_directory)
     if working_directory is not None and (not command or not Path(command[0]).is_absolute()):
         raise ValueError('Explicit launch directory requires an absolute executable command')
-    prepare_launch_pointer(output, name)
+    if source_menu is not None:
+        from native_menu_source_selection import _verify_source_menu_launch, _source_menu_launch_ready
+        _verify_source_menu_launch(source_menu, command, suite)
+        prepare_launch_pointer(output, name, deadline=source_menu.launch_deadline)
+    else:
+        prepare_launch_pointer(output, name)
     # Popen duplicates the file handle for the child; the parent's stream closes here.
     with (output / (name + '-stderr.log')).open('xb') as stderr:
+        if source_menu is not None:
+            _source_menu_launch_ready(source_menu, command, suite)
         process = subprocess.Popen(command, cwd=cwd, shell=False, stderr=stderr, env=environment)
     process.opengeul_evidence_output, process.opengeul_evidence_case = output, name
     process.opengeul_suite_root = Path(suite).resolve()
+    if source_menu is not None:
+        process.opengeul_source_menu_selection = source_menu
     return process
 
 
