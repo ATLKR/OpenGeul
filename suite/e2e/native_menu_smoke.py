@@ -1241,6 +1241,15 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession,
             import native_menu_msaa_hit as helper
             if not source_menu_pending(helper):raise
             record['sourceMenuCohortPending']=True
+        try:
+            if (source_prepared is not None and session is not None
+                    and getattr(session,'source_prepared',None) is source_prepared
+                    and record['stage'] in ('open',*GESTURES)):
+                from native_menu_source_selection import _source_epoch_failure_summary
+                summary=_source_epoch_failure_summary(exc,source_prepared)
+                if summary is not None:record['sourceEpochFailure']=summary
+        except BaseException:
+            pass
         record['errorType'] = type(exc).__name__
     finally:
         if session is not None:

@@ -207,6 +207,14 @@ _EPOCH_FIELDS = ('schemaVersion','branchCode','comparisonStatusCode','baselineCo
     'currentCount','countsKnown','addedCount','removedCount','changedCount',
     'orderChanged','structureChanged','sampleTruncated')
 _EPOCH_ROW_FIELDS = ('changeCode','roleCode','baselineOrdinal','fieldMask')
+_EPOCH_ROW_FIELDS_V2 = _EPOCH_ROW_FIELDS+('prefixCode',)
+# Longest component prefix first; these public locations are diagnostic labels.
+_EPOCH_DIRECTORY_PREFIXES = (
+    (('Office','share','uno_packages','cache'),1),
+    (('Office','share','extensions'),3),
+    (('Office','share','registry'),4),
+    (('Office','program'),2),
+    (('worker',),5))
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -234,13 +242,26 @@ def _epoch_entries(prepared, branch, epoch):
             yield (index,0,str(row.path)), 11+index, row.state.file
 
 
+def _epoch_directory_prefix(prepared, key, role):
+    """Classify a sampled retained directory string without inspecting a path."""
+    if role not in (2,3) or type(key) is not str:return 0
+    root = str(prepared.admission.suite_root).replace('\\','/').rstrip('/').split('/')
+    parts = key.replace('\\','/').split('/')
+    if parts[:len(root)]!=root:return 0
+    relative = tuple(parts[len(root):])
+    if not relative or any(part in ('','.', '..') for part in relative):return 0
+    for prefix,code in _EPOCH_DIRECTORY_PREFIXES:
+        if relative[:len(prefix)]==prefix:return code
+    return 0
+
+
 def _epoch_difference(prepared, branch, current, deadline):
     """Pure comparison of retained metadata; never resolve or inspect a path."""
     before = prepared.payload_epoch if branch==1 else prepared.input_epoch
     baseline_count = len(before) if branch==1 else sum(len(row.state.ancestors)+1 for row in before)
     current_count = len(current) if branch==1 else sum(len(row.state.ancestors)+1 for row in current)
     def incomplete(status):
-        return (1,branch,status,baseline_count,current_count,0,0,0,0,0,int(status==3),0), ()
+        return (2,branch,status,baseline_count,current_count,0,0,0,0,0,int(status==3),0), ()
     def expired():
         now = time.monotonic()
         return type(now) not in (int,float) or not math.isfinite(now) or now>=deadline
@@ -258,22 +279,22 @@ def _epoch_difference(prepared, branch, current, deadline):
     baseline, old_order = records[0];actual, new_order = records[1]
     added = removed = changed = structure = 0
     rows = []
-    def sample(code,role,ordinal,mask):
-        if len(rows)<16:rows.append((code,role,ordinal,mask))
+    def sample(code,role,ordinal,mask,key):
+        if len(rows)<16:rows.append((code,role,ordinal,mask,_epoch_directory_prefix(prepared,key,role)))
     for key in old_order:
         if expired():return incomplete(2)
         ordinal,role,identity = baseline[key]
         if key not in actual:
-            removed += 1;sample(2,role,ordinal,0)
+            removed += 1;sample(2,role,ordinal,0,key)
         elif identity != actual[key][2]:
             other = actual[key][2]
             structure |= int(len(identity)!=len(other))
             mask = sum(1<<i for i,(left,right) in enumerate(zip(identity,other)) if left!=right)
-            changed += 1;sample(3,role,ordinal,mask)
+            changed += 1;sample(3,role,ordinal,mask,key)
     for key in new_order:
         if expired():return incomplete(2)
         if key not in baseline:
-            added += 1;sample(1,actual[key][1],0,0)
+            added += 1;sample(1,actual[key][1],0,0,key)
     old_shared = [key for key in old_order if key in actual]
     new_shared = [key for key in new_order if key in baseline]
     if branch==2:
@@ -281,7 +302,7 @@ def _epoch_difference(prepared, branch, current, deadline):
             or len(left.state.ancestors)!=len(right.state.ancestors)
             for left,right in zip(before,current)))
     if expired():return incomplete(2)
-    values = (1,branch,1,baseline_count,current_count,1,added,removed,changed,
+    values = (2,branch,1,baseline_count,current_count,1,added,removed,changed,
         int(old_shared!=new_shared),structure,int(added+removed+changed>len(rows)))
     return values, tuple(rows)
 
@@ -311,17 +332,20 @@ def _source_epoch_failure_summary(failure, prepared):
                 or any(type(value) is not int or value<0 for value in values)
                 or type(rows) is not tuple or len(rows)>16):return None
         value = dict(zip(_EPOCH_FIELDS,values))
-        if (value['schemaVersion']!=1 or value['branchCode'] not in (1,2)
+        if (value['schemaVersion'] not in (1,2) or value['branchCode'] not in (1,2)
                 or value['comparisonStatusCode'] not in (1,2,3)
                 or any(value[key] not in (0,1) for key in ('countsKnown','orderChanged','structureChanged','sampleTruncated'))
                 or value['countsKnown']!=int(value['comparisonStatusCode']==1)):
             return None
+        fields = _EPOCH_ROW_FIELDS if value['schemaVersion']==1 else _EPOCH_ROW_FIELDS_V2
         for row in rows:
-            if (type(row) is not tuple or len(row)!=4 or any(type(item) is not int for item in row)
+            if (type(row) is not tuple or len(row)!=len(fields) or any(type(item) is not int for item in row)
                     or row[0] not in (1,2,3) or row[1] not in (1,2,3,4,11,12,13,21,22,23)
                     or not 0<=row[2]<=value['baselineCount'] or not 0<=row[3]<=63
-                    or (row[2]==0)!=(row[0]==1) or row[0] in (1,2) and row[3]!=0):return None
-        value['rows'] = [dict(zip(_EPOCH_ROW_FIELDS,row)) for row in rows]
+                    or (row[2]==0)!=(row[0]==1) or row[0] in (1,2) and row[3]!=0
+                    or value['schemaVersion']==2 and (not 0<=row[4]<=5
+                        or row[4]!=0 and (value['branchCode']!=1 or row[1]!=3))):return None
+        value['rows'] = [dict(zip(fields,row)) for row in rows]
         return value
     except Exception:
         return None

@@ -231,6 +231,88 @@ class SourceMenuCohortCliTests(unittest.TestCase):
         self.assertEqual(code,1);launch.assert_not_called();modules.assert_called_once()
 
 
+class NativeSourceEpochObservationTests(unittest.TestCase):
+    def setUp(self):
+        import time
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        self.smoke=load_smoke()
+        self.owner=SourceMenuSelectionTests();self.owner.setUp();self.addCleanup(self.owner.doCleanups)
+        self.api=self.owner.implementation();self.prepared=self.owner.prepared()
+        self.selection=self.owner.selected(self.prepared)
+        self.deadline=time.monotonic()+5
+        self.current=list(self.prepared.payload_epoch)
+        index=next(i for i,row in enumerate(self.current) if row.path==str(self.owner.suite/'Office/program'))
+        values=list(self.current[index].identity);values[4]+=1
+        self.current[index]=self.api._FileEpoch(self.current[index].path,tuple(values))
+
+    def boundary(self, prepared=None):
+        prepared=self.prepared if prepared is None else prepared
+        session=Session();session.source_prepared=prepared
+        selection=self.selection if prepared is self.prepared else self.owner.selected(prepared)
+        session.process=SimpleNamespace(opengeul_source_menu_selection=selection,
+            args=self.owner.command,opengeul_suite_root=self.owner.suite)
+        return session
+
+    def run_boundary(self, session, *, prepared=None, module='writer'):
+        return self.smoke.run_case(self.owner.suite,self.owner.output,self.owner.output,module,
+            session_factory=lambda *args:session,source_prepared=self.prepared if prepared is None else prepared)
+
+    def test_native_open_and_first_probe_record_only_the_same_sealed_epoch_exception(self):
+        import time
+        for stage in ('open','open-escape'):
+            session=self.boundary();caught=[];built=[]
+            def reject(*args):
+                try:
+                    self.api.selected_native_menu_probe(session.process,self.deadline,time.monotonic,
+                        build=lambda selected:built.append(selected))
+                except ValueError as exc:
+                    caught.append(exc);raise
+            if stage=='open':session.open=reject
+            else:session.gesture=lambda name,record:reject()
+            with self.subTest(stage=stage),patch.object(self.api,'_payload_epoch',return_value=tuple(self.current)) as payload, \
+                    patch.object(self.api,'_input_epoch',side_effect=AssertionError('No later input epoch')), \
+                    patch.object(self.api.gate,'_hash_file',side_effect=AssertionError('No later byte query')):
+                value=self.run_boundary(session)
+            self.assertEqual((len(caught),payload.call_count,len(built)),(1,1,0))
+            self.assertEqual(value['stage'],stage);self.assertEqual(value['errorType'],'ValueError')
+            self.assertFalse(value['success']);self.assertTrue(value['cleanupConfirmed'])
+            self.assertEqual(value.get('gestures'),[])
+            self.assertEqual(value.get('sourceEpochFailure'),self.api._source_epoch_failure_summary(caught[0],self.prepared))
+            self.assertIsNotNone(value.get('sourceEpochFailure'))
+            self.assertEqual(value['sourceEpochFailure']['schemaVersion'],2)
+            self.assertEqual(value['sourceEpochFailure']['rows'][0]['prefixCode'],2)
+            self.assertFalse(value['nativeMenuVerified'])
+            if stage=='open':self.assertNotIn('sourceMenuAdmission',value)
+
+    def test_native_epoch_observation_does_not_cross_exception_prepared_stage_or_case(self):
+        import copy
+        error=self.api._source_epoch_exception(self.prepared,1,tuple(self.current),self.deadline)
+        other=self.owner.prepared()
+        contexts=(('plain',ValueError(*error.args),self.prepared,self.prepared,'open'),
+            ('copied',copy.copy(error),self.prepared,self.prepared,'open'),
+            ('other-prepared',error,other,other,'open'),
+            ('mixed-session',error,self.prepared,other,'open'),
+            ('readiness',error,self.prepared,self.prepared,'require-native-menu'),
+            ('screenshot',error,self.prepared,self.prepared,'capture-initial-owned-blank-chrome'))
+        for label,failure,prepared,session_prepared,stage in contexts:
+            session=self.boundary(session_prepared)
+            def reject(*args,**kwargs):raise failure
+            if stage=='open':session.open=reject
+            elif stage=='require-native-menu':session.ready=reject
+            else:session.screenshot=reject
+            with self.subTest(context=label):
+                value=self.run_boundary(session,prepared=prepared)
+                self.assertNotIn('sourceEpochFailure',value)
+                self.assertFalse(value['success']);self.assertTrue(value['cleanupConfirmed'])
+        first=self.boundary();first.open=lambda record:(_ for _ in ()).throw(error)
+        first_value=self.run_boundary(first)
+        self.assertIn('sourceEpochFailure',first_value)
+        second=self.boundary();second.open=lambda record:(_ for _ in ()).throw(ValueError(*error.args))
+        second_value=self.run_boundary(second,module='calc')
+        self.assertNotIn('sourceEpochFailure',second_value)
+        self.assertFalse(second_value['success'])
+
+
 def status_sample(at, started, completed, *, target=True, preview=True, menu_visible=True):
     """Synthetic numeric publisher evidence, never a Windows status RPC."""
     return dict(observedAt=at, targetMatched=target,

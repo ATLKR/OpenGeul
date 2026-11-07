@@ -430,12 +430,48 @@ class HomeRoutingContracts(unittest.TestCase):
         self.assertEqual((popen,stopped),([],[]));self.assertEqual(len(written),1)
         self.assertIn('sourceEpochFailure',result)
         summary=result['sourceEpochFailure']
-        self.assertEqual(summary['schemaVersion'],1);self.assertEqual(summary['branchCode'],1)
+        self.assertEqual(summary['schemaVersion'],2);self.assertEqual(summary['branchCode'],1)
         self.assertEqual(summary['countsKnown'],1);self.assertGreaterEqual(summary['changedCount'],1)
         changed=[row for row in summary['rows'] if row['baselineOrdinal']==ordinal]
         self.assertEqual(len(changed),1)
         self.assertEqual((changed[0]['changeCode'],changed[0]['roleCode']),(3,4))
         self.assertEqual(changed[0]['fieldMask']&8,8)
+        self.assertEqual(changed[0]['prefixCode'],0)
+
+    def test_source_epoch_cache_directory_prefix_keeps_sealed_prelaunch_failure_summary(self):
+        import os
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        selected=SourceMenuSelectionTests();selected.setUp();self.addCleanup(selected.doCleanups)
+        cache=selected.suite/'Office/share/uno_packages/cache';cache.mkdir(parents=True)
+        prepared=selected.prepared()
+        ordinal=next(index for index,row in enumerate(prepared.payload_epoch,1) if row.path==str(cache))
+        before=cache.stat();os.utime(cache,ns=(before.st_atime_ns,before.st_mtime_ns+2_000_000_000))
+        (selected.output/'fixtures').mkdir();(selected.output/'diagnostics').mkdir()
+        spec=next(row for row in self.api.build_plan() if row['case']=='tile-calc')
+        case=self.api.HomeCase(selected.suite,selected.output,spec,{}, {},dict(spec),source_prepared=prepared)
+        captured=[];written=[];popen=[]
+        def failure(output,name,record,exc):
+            captured.append(exc);record.update(success=False,errorType=type(exc).__name__)
+        def forbidden(*args,**options):
+            popen.append(1);self.fail('The actual cache epoch rejection crossed the Popen boundary')
+        with patch.object(self.api.native,'capture_failure',side_effect=failure), \
+                patch.object(self.api.native,'write_result',side_effect=lambda out,name,record:written.append(record)), \
+                patch.object(self.api.native.subprocess,'Popen',side_effect=forbidden):
+            result=case.run()
+        self.assertEqual(len(captured),1);self.assertIs(type(captured[0]),ValueError)
+        self.assertEqual(captured[0].args,('Source menu epoch changed; an explicit new preparation is required',))
+        self.assertFalse(result['success']);self.assertFalse(result['cleanClose']);self.assertFalse(result['forcedCleanup'])
+        self.assertEqual(result['stage'],'launch-owned-home');self.assertIsNone(case.process)
+        self.assertEqual(popen,[]);self.assertEqual(len(written),1)
+        summary=result['sourceEpochFailure']
+        self.assertEqual(summary['schemaVersion'],2);self.assertEqual(summary['branchCode'],1)
+        self.assertEqual((summary['countsKnown'],summary['addedCount'],summary['removedCount']),(1,0,0))
+        self.assertEqual(summary['baselineCount'],summary['currentCount']);self.assertGreaterEqual(summary['changedCount'],1)
+        changed=[row for row in summary['rows'] if row['baselineOrdinal']==ordinal]
+        self.assertEqual(len(changed),1)
+        self.assertEqual((changed[0]['changeCode'],changed[0]['roleCode'],changed[0]['prefixCode']),(3,3,1))
+        self.assertEqual(changed[0]['fieldMask']&16,16)
+        self.assertEqual(summary,selected.implementation()._source_epoch_failure_summary(captured[0],prepared))
 
     def test_source_epoch_observation_requires_the_exact_prelaunch_source_failure(self):
         from types import SimpleNamespace

@@ -479,10 +479,10 @@ class SourceEpochNumericObservationTests(unittest.TestCase):
             with self.subTest(field=field):
                 summary = self.summary(self.payload_failure(current))
                 self.assertEqual((summary['branchCode'],summary['countsKnown'],summary['changedCount']), (1,1,1))
-                self.assertEqual(summary['rows'], [dict(changeCode=3,roleCode=4,baselineOrdinal=index+1,fieldMask=mask)])
+                self.assertEqual(summary['rows'], [dict(changeCode=3,roleCode=4,baselineOrdinal=index+1,fieldMask=mask,prefixCode=0)])
         current = list(baseline);values = list(current[0].identity);values[2] += 1
         current[0] = self.api._FileEpoch(current[0].path, tuple(values))
-        self.assertEqual(self.summary(self.payload_failure(current))['rows'], [dict(changeCode=3,roleCode=1,baselineOrdinal=1,fieldMask=4)])
+        self.assertEqual(self.summary(self.payload_failure(current))['rows'], [dict(changeCode=3,roleCode=1,baselineOrdinal=1,fieldMask=4,prefixCode=0)])
 
     def test_input_leaf_and_ancestor_changes_are_not_hidden_by_equal_payload(self):
         from dataclasses import replace
@@ -506,7 +506,7 @@ class SourceEpochNumericObservationTests(unittest.TestCase):
         extra = [self.api._FileEpoch(str(self.owner.suite/('new-'+str(i))), (1,2,0o100644,3,4,5)) for i in range(20)]
         summary = self.summary(self.payload_failure(list(baseline)+extra))
         self.assertEqual((summary['addedCount'],summary['removedCount'],summary['sampleTruncated'],len(summary['rows'])),(20,0,1,16))
-        self.assertTrue(all(row==dict(changeCode=1,roleCode=4,baselineOrdinal=0,fieldMask=0) for row in summary['rows']))
+        self.assertTrue(all(row==dict(changeCode=1,roleCode=4,baselineOrdinal=0,fieldMask=0,prefixCode=0) for row in summary['rows']))
         summary = self.summary(self.payload_failure(baseline[1:]))
         self.assertEqual((summary['removedCount'],summary['rows'][0]['baselineOrdinal']),(1,1))
         current = list(baseline);current[0],current[1] = current[1],current[0]
@@ -522,7 +522,7 @@ class SourceEpochNumericObservationTests(unittest.TestCase):
         import copy
         current = list(self.prepared.payload_epoch);current.reverse();error = self.payload_failure(current)
         summary = self.summary(error)
-        self.assertEqual(summary['schemaVersion'],1)
+        self.assertEqual(summary['schemaVersion'],2)
         self.assertIsNone(self.summary(copy.copy(error)))
         self.assertIsNone(self.summary(ValueError(*error.args)))
         other = self.owner.prepared()
@@ -556,6 +556,85 @@ class SourceEpochNumericObservationTests(unittest.TestCase):
         self.assertEqual((summary['rows'][0]['changeCode'],summary['rows'][0]['roleCode']),(2,22))
         self.assertEqual(set(summary),{'schemaVersion','branchCode','comparisonStatusCode','baselineCount','currentCount','countsKnown','addedCount','removedCount','changedCount','orderChanged','structureChanged','sampleTruncated','rows'})
         self.assertTrue(all(type(value) is int for key,value in summary.items() if key!='rows'))
+
+    def test_directory_prefixes_are_fixed_component_matches_on_sampled_paths_only(self):
+        import stat
+        baseline = self.prepared.payload_epoch
+        names = (('Office/share/uno_packages/cache',1),
+            ('Office/share/uno_packages/cache/child',1),('Office/program/child',2),
+            ('Office/share/extensions/child',3),('Office/share/registry/child',4),
+            ('worker/child',5),('Office/share/uno_packages/cache-other',0),
+            ('Office/program-other',0),('other/Office/program',0),('worker-other',0))
+        extra = [self.api._FileEpoch(str(self.owner.suite/name), (1,2,stat.S_IFDIR|0o755,0,4,5))
+            for name,_ in names]
+        file = self.api._FileEpoch(str(self.owner.suite/'Office/program/file'), (1,2,stat.S_IFREG|0o644,3,4,5))
+        current = baseline+tuple(extra)+(file,)
+        ticks = []
+        def clock():ticks.append(1);return 0.0
+        with patch.object(Path,'stat',side_effect=AssertionError('No diagnostic stat')), \
+                patch.object(Path,'lstat',side_effect=AssertionError('No diagnostic lstat')), \
+                patch.object(Path,'resolve',side_effect=AssertionError('No diagnostic resolve')), \
+                patch.object(Path,'open',side_effect=AssertionError('No diagnostic read')), \
+                patch.object(self.api.os,'scandir',side_effect=AssertionError('No diagnostic scan')), \
+                patch.object(gate,'_hash_file',side_effect=AssertionError('No diagnostic hash')), \
+                patch.object(self.api.time,'monotonic',clock):
+            error = self.api._source_epoch_exception(self.prepared,1,current,1.0)
+            summary = self.summary(error)
+        self.assertEqual(summary['schemaVersion'],2)
+        self.assertEqual([row['prefixCode'] for row in summary['rows']], [code for _,code in names]+[0])
+        self.assertEqual([row['roleCode'] for row in summary['rows']], [3]*len(names)+[4])
+        self.assertEqual((summary['addedCount'],summary['removedCount'],summary['changedCount']), (len(names)+1,0,0))
+        self.assertEqual(len(ticks),2*(len(baseline)+len(current))+1)
+        classify=self.api._epoch_directory_prefix
+        self.assertEqual(classify(self.prepared,str(self.owner.suite/'Office/program').replace('/','\\'),3),2)
+        for path in (str(self.owner.suite)+'-other/Office/program',
+                str(self.owner.suite)+'/../Office/program',str(self.owner.suite)+'/Office//program'):
+            self.assertEqual(classify(self.prepared,path,3),0)
+        self.assertEqual(classify(self.prepared,str(self.owner.suite),2),0)
+
+    def test_prefix_keeps_baseline_ordinals_masks_removals_and_sixteen_sample_cap(self):
+        baseline = self.prepared.payload_epoch
+        index = next(i for i,row in enumerate(baseline) if row.path==str(self.owner.suite/'Office/program'))
+        current = list(baseline);identity = list(current[index].identity);identity[4] += 1
+        current[index] = self.api._FileEpoch(current[index].path,tuple(identity))
+        summary = self.summary(self.payload_failure(current))
+        self.assertEqual(summary['rows'],[dict(changeCode=3,roleCode=3,baselineOrdinal=index+1,fieldMask=16,prefixCode=2)])
+        summary = self.summary(self.payload_failure(baseline[:index]+baseline[index+1:]))
+        self.assertEqual(summary['rows'],[dict(changeCode=2,roleCode=3,baselineOrdinal=index+1,fieldMask=0,prefixCode=2)])
+        classifier = getattr(self.api,'_epoch_directory_prefix',None)
+        self.assertTrue(callable(classifier),'Directory prefix classifier is missing')
+        extra = [self.api._FileEpoch(str(self.owner.suite/('worker/extra-'+str(i))), (1,2,0o040755,0,4,5)) for i in range(20)]
+        with patch.object(self.api,'_epoch_directory_prefix',wraps=classifier) as classified:
+            summary = self.summary(self.payload_failure(list(baseline)+extra))
+        self.assertEqual((summary['addedCount'],summary['sampleTruncated'],len(summary['rows']),classified.call_count),(20,1,16,16))
+        self.assertTrue(all(row['prefixCode']==5 for row in summary['rows']))
+
+    def test_epoch_summary_versions_have_separate_closed_row_shapes(self):
+        from dataclasses import replace
+        baseline = self.prepared.payload_epoch
+        index = next(i for i,row in enumerate(baseline) if row.path==str(self.owner.suite/'Office/program'))
+        current = list(baseline);identity = list(current[index].identity);identity[4] += 1
+        current[index] = self.api._FileEpoch(current[index].path,tuple(identity))
+        error = self.payload_failure(current)
+        carrier = error._source_epoch_observation
+        self.assertEqual(self.summary(error)['schemaVersion'],2)
+        fields = {'changeCode','roleCode','baselineOrdinal','fieldMask'}
+        self.assertEqual(set(self.summary(error)['rows'][0]),fields|{'prefixCode'})
+        legacy = replace(carrier,values=(1,)+carrier.values[1:],rows=tuple(row[:4] for row in carrier.rows))
+        error._source_epoch_observation=legacy
+        self.assertEqual(self.summary(error)['schemaVersion'],1)
+        self.assertEqual(set(self.summary(error)['rows'][0]),fields)
+        invalid = (replace(carrier,rows=legacy.rows),replace(legacy,rows=carrier.rows),
+            replace(carrier,rows=(carrier.rows[0]+(0,),)),
+            *(replace(carrier,rows=(carrier.rows[0][:-1]+(value,),)) for value in (True,-1,6)),
+            replace(carrier,rows=((3,4,index+1,16,2),)),
+            replace(carrier,rows=((3,2,index+1,16,2),)),
+            replace(carrier,values=(2,2)+carrier.values[2:]))
+        for observation in invalid:
+            error._source_epoch_observation=observation
+            self.assertIsNone(self.summary(error))
+        error._source_epoch_observation=carrier
+        self.assertIsNotNone(self.summary(error))
 
 
 if __name__ == '__main__':
