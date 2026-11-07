@@ -77,7 +77,9 @@ assert 'prepare' not in sys.modules and 'payload' not in sys.modules
 class SourceMenuAdmissionTests(PayloadFixture):
     def setUp(self):
         super().setUp()
-        self.inputs = Path(self.temp.name)/'inputs'
+        # Match the real CLI's canonical Suite path, including Windows TEMP aliases.
+        self.root = self.root.resolve(strict=True)
+        self.inputs = self.root.parent/'inputs'
         self.inputs.mkdir()
         self.archive, self.runtime, self.receipt, self.proof = source_build_fixture(self.inputs)
         with zipfile.ZipFile(self.archive) as source:
@@ -91,7 +93,7 @@ class SourceMenuAdmissionTests(PayloadFixture):
         self.branding['source']['sourceUrl'] = 'https://example.org/core/'+SOURCE_CORE
         for name in ('OpenGeul.Office.exe', 'hostfxr.dll'):
             self.write(name, pe(0xaa64))
-        self.trusted = Path(self.temp.name)/'reviewed-harness'
+        self.trusted = self.root.parent/'reviewed-harness'
         (self.trusted/'suite/config').mkdir(parents=True)
         self.seal(copy_runtime=True)
 
@@ -134,6 +136,24 @@ class SourceMenuAdmissionTests(PayloadFixture):
             return module.admit_source_menu_runtime(self.root, architecture=architecture,
                 engine_zip=self.archive, receipt=self.receipt,
                 deadline=time.monotonic()+30 if deadline is None else deadline)
+
+    def test_fixture_normalizes_its_owned_paths_before_real_source_admission(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        physical = Path(temporary.name).resolve(strict=True)
+        (physical/'owned-parent').mkdir()
+        alias = physical/'owned-parent'/'..'
+        fixture = SourceMenuAdmissionTests(methodName='test_admits_real_validators_and_freezes_closed_binary_summary')
+        self.addCleanup(fixture.doCleanups)
+        owned = SimpleNamespace(name=str(alias), cleanup=temporary.cleanup)
+        with patch.object(tempfile, 'TemporaryDirectory', return_value=owned):
+            fixture.setUp()
+        self.assertEqual(fixture.root, fixture.root.resolve(strict=True))
+        self.assertEqual(fixture.inputs, fixture.inputs.resolve(strict=True))
+        self.assertEqual(fixture.trusted, fixture.trusted.resolve(strict=True))
+        admitted = fixture.admit()
+        self.assertEqual(admitted.suite_root, physical/'payload')
+        admitted.verify_provider_files(time.monotonic()+1)
 
     def test_admits_real_validators_and_freezes_closed_binary_summary(self):
         admitted = self.admit()

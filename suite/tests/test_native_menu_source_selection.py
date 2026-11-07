@@ -174,15 +174,48 @@ class SourceMenuSelectionTests(unittest.TestCase):
         self.reject_launch(selected)
 
     def test_added_removed_and_case_aliased_entries_stale_the_complete_payload_epoch(self):
-        for name in ('Office/program/extra.cache', 'Office/program/SOFFICE.exe'):
+        for name in ('Office/program/extra.cache',):
             selected = self.selected()
             target = self.suite/name
             target.write_bytes(b'changed')
             self.reject_launch(selected)
             target.unlink()
         selected = self.selected()
+        original = self.suite/'Office/program/soffice.exe'
+        alias = original.with_name('SOFFICE.exe')
+        temporary = original.with_name('case-epoch-original.tmp')
+        original_bytes = original.read_bytes()
+        self.assertFalse(temporary.exists())
+        try:
+            original.rename(temporary)
+            temporary.rename(alias)
+            self.reject_launch(selected)
+        finally:
+            if alias.exists():alias.rename(temporary)
+            if temporary.exists():temporary.rename(original)
+        self.assertEqual(original.read_bytes(), original_bytes)
+        self.assertEqual([path.name for path in original.parent.iterdir()
+            if path.name.casefold() == original.name.casefold()], ['soffice.exe'])
+        selected = self.selected()
         (self.suite/'worker/session.py').unlink()
         self.reject_launch(selected)
+
+    def test_case_alias_epoch_fixture_restores_original_executable_under_windows_semantics(self):
+        original = self.suite/'Office/program/soffice.exe'
+        original_bytes = original.read_bytes()
+        real_write, real_unlink = Path.write_bytes, Path.unlink
+        def target(path):
+            return original if path.parent == original.parent and path.name == 'SOFFICE.exe' else path
+        def write(path, raw):return real_write(target(path), raw)
+        def unlink(path, *args, **kwargs):return real_unlink(target(path), *args, **kwargs)
+        outcome = None
+        with patch.object(Path, 'write_bytes', write), patch.object(Path, 'unlink', unlink):
+            try:self.test_added_removed_and_case_aliased_entries_stale_the_complete_payload_epoch()
+            except Exception as exc:outcome = type(exc).__name__
+        self.assertIsNone(outcome, 'The alias fixture destroyed an input required by the next selection')
+        self.assertEqual(original.read_bytes(), original_bytes)
+        self.assertEqual([path.name for path in original.parent.iterdir()
+            if path.name.casefold() == original.name.casefold()], ['soffice.exe'])
 
     def test_provider_inventory_and_fixed_source_input_changes_do_not_self_authorize(self):
         for target in (self.suite/'Office/program/UAccCOM.dll', self.suite/'suite-inventory.json',
