@@ -38,6 +38,51 @@ def manifest():
     return json.loads((ENGINE / 'source-build.json').read_bytes())
 
 
+def normalize_receipt_paths(value, source, retained):
+    if isinstance(value, dict):
+        return {key: normalize_receipt_paths(item, source, retained) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_receipt_paths(item, source, retained) for item in value]
+    if isinstance(value, str):
+        for root, label in [(str(retained), '<evidence>'), (str(source), '<source>')]:
+            if value == root or value.startswith((root + '/', root + '\\')):
+                return label + value[len(root):]
+    return value
+
+
+class ReceiptNormalizationTests(unittest.TestCase):
+    def test_receipt_paths_are_normalized_before_json_escaping(self):
+        for source, retained, separator in [
+                (r'C:\synthetic\source', r'C:\synthetic\evidence', '\\'),
+                (r'C:\synthetic\한글\source', r'C:\synthetic\한글\evidence', '\\'),
+                ('/synthetic/한글 "quoted"/source', '/synthetic/한글 "quoted"/evidence', '/')]:
+            with self.subTest(separator=separator, unicode_path='한글' in source):
+                def receipt(source_root, evidence_root):
+                    return {'sourceHooks': {'targetsPath': source_root + separator + 'build.targets',
+                                             'evidence': {'original': evidence_root + separator + 'original.mk'},
+                                             'nested': [source_root, {'root': evidence_root}]},
+                            'winAcc': {'beforeSha256': 'a' * 64, 'nativeBuildVerified': False},
+                            'text': '한글 "quotes" and literal \\n', 'number': 17, 'empty': None}
+                value = receipt(source, retained); original = copy.deepcopy(value)
+                normalized = normalize_receipt_paths(value, source, retained)
+                self.assertEqual(receipt('<source>', '<evidence>'), normalized)
+                self.assertEqual(original, value)
+                self.assertEqual(normalized, json.loads(json.dumps(normalized)))
+
+    def test_receipt_normalization_preserves_non_path_data_and_parity_differences(self):
+        source, retained = '/synthetic/source', '/synthetic/evidence'
+        value = {'path': source + '/file', 'otherRoot': source + '-other/file',
+                 'message': 'prefix ' + source + '/file', source + '/field': 'unchanged',
+                 'serialized': json.dumps({'path': retained + '/file'}),
+                 'sha256': 'a' * 64, 'passed': False, 'count': 0, 'absent': None}
+        expected = dict(value, path='<source>/file')
+        normalized = normalize_receipt_paths(value, source, retained)
+        self.assertEqual(expected, normalized)
+        for key, changed in [('sha256', 'b' * 64), ('passed', True), ('count', 1)]:
+            with self.subTest(field=key):
+                self.assertNotEqual(normalized, normalize_receipt_paths(dict(value, **{key: changed}), source, retained))
+
+
 class RecipePolicyTests(unittest.TestCase):
     def test_fixed_policy_selects_exact_finite_recipes(self):
         module = load('apply_native_source')
@@ -171,10 +216,9 @@ class ActualSourceRecipeTests(unittest.TestCase):
                 patch.object(self.module.WINACC, 'install', side_effect=focus):
             result = self.install('arm64')
         self.assertEqual(ORDERS['arm64'], events); self.assertEqual(1, bootstrap.call_count)
-        def normalize(value, source, retained):
-            return json.loads(json.dumps(value).replace(str(retained), '<evidence>').replace(str(source), '<source>'))
         actual = {key: result[key] for key in expected}
-        self.assertEqual(normalize(expected, direct, evidence), normalize(actual, self.source, self.evidence))
+        self.assertEqual(normalize_receipt_paths(expected, direct, evidence),
+                         normalize_receipt_paths(actual, self.source, self.evidence))
         self.assertEqual({p.relative_to(direct).as_posix(): p.read_bytes() for p in direct.rglob('*') if p.is_file()},
                          {p.relative_to(self.source).as_posix(): p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
