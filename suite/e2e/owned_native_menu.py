@@ -1195,10 +1195,14 @@ class NativeMenuProbe(NativeControlProbe):
             assert type(child['threadId']) is int and child['threadId']>0
             assert attachment['windows']['child']['threadId']==child['threadId']
             foreground=self.foreground();observation['foregroundHwnd']=foreground
+            if foreground!=binding['document']:
+                try:self._observe_physical_foreground_mismatch(binding,attachment,child,foreground,observation)
+                except BaseException:observation['foregroundMismatchCaptureFailed']=1
             assert foreground==binding['document'], 'Physical File header requires its original foreground document'
             return child
         before=owned();observation['ownershipBefore']=True
-        file_row=_getter_call_site(self,1,self._chrome,refs['file'])
+        # File header geometry does not consume its native HWND.
+        file_row=_getter_call_site(self,1,self._chrome,refs['file'],False)
         assert file_row['pid']==binding['officePid'] and file_row['controlType']=='MenuItem'
         assert file_row['visible'] is file_row['enabled'] is True
         rect=file_row['rectangle'];assert len(rect)==4 and all(type(n) is int for n in rect)
@@ -1243,6 +1247,78 @@ class NativeMenuProbe(NativeControlProbe):
         assert owned()==before, 'Original File window generation changed'
         observation['ownershipAfter']=True
         return fresh
+    def _observe_physical_foreground_mismatch(self,binding,attachment,child,foreground,observation):
+        """One numeric native observation; it never qualifies or permits a popup."""
+        value=dict(schemaVersion=1,statusCode=0,knownPartial=1,popupQualified=0,
+            bindingBefore=0,bindingAfter=0,foregroundSame=0,foreground={},
+            ownerStopCode=0,owners=[],engineGui={},stageCode=0)
+        observation['foregroundMismatch']=value
+        def budget():
+            if self._provider_pending() or self.deadline-self.clock()<=.05:raise TimeoutError()
+        def read(function,*args):
+            budget()
+            # Native-only: do not configure UIA timeouts or overwrite its call record.
+            try:result=NativeActivationProbe._call(self,function,*args)
+            except BaseException:
+                budget()
+                raise
+            budget();return result
+        def window(hwnd):
+            self._required(read(self.user.IsWindow,hwnd),'Diagnostic window')
+            pid=C.c_uint32();tid=int(read(self.user.GetWindowThreadProcessId,hwnd,C.byref(pid)))
+            self._required(tid,'Diagnostic window thread')
+            root=int(read(self.user.GetAncestor,hwnd,2) or 0)
+            self._required(root,'Diagnostic window root')
+            return dict(hwnd=hwnd,pid=int(pid.value),threadId=tid,rootHwnd=root)
+        try:
+            budget();value['stageCode']=1
+            assert attachment['valid'] is True and attachment['binding']==binding
+            expected=attachment['windows']
+            assert (child['pid'],child['threadId'],child['rootHwnd'])==(binding['officePid'],expected['child']['threadId'],binding['document'])
+            for role in ('document','parent','child'):
+                row=expected[role]
+                assert row['hwnd']==binding[role] and row['rootHwnd']==binding['document']
+                assert all(type(row[k]) is int and row[k]>0 for k in ('hwnd','pid','threadId','rootHwnd'))
+            assert expected['document']['pid']==expected['parent']['pid']==self._identity_scope['shellPid']
+            value['bindingBefore']=1
+            value['stageCode']=2
+            raw=int(read(self.user.GetForegroundWindow) or 0)
+            root=int(read(self.user.GetAncestor,raw,2) or 0) if raw else 0
+            value['foreground']=dict(rawHwnd=raw,rootHwnd=root)
+            if root!=foreground:value['statusCode']=5;return
+            value['stageCode']=3;cursor=root;seen=set()
+            for _ in range(16):
+                if not cursor:value['ownerStopCode']=1;break
+                if cursor in (binding['child'],binding['document']):value['ownerStopCode']=2;break
+                if cursor in seen:value['ownerStopCode']=3;break
+                seen.add(cursor);row=window(cursor);value['owners'].append(row)
+                row['ownerHwnd']=int(read(self.user.GetWindow,cursor,4) or 0)
+                if row['pid']!=binding['officePid']:value['ownerStopCode']=5;break
+                cursor=row['ownerHwnd']
+            else:value['ownerStopCode']=4
+            value['stageCode']=4
+            state=GuiThreadInfo(cbSize=C.sizeof(GuiThreadInfo))
+            self._required(read(self.user.GetGUIThreadInfo,child['threadId'],C.byref(state)),'Diagnostic engine GUI')
+            focus=int(state.focus or 0);pid=C.c_uint32()
+            if focus:self._required(read(self.user.GetWindowThreadProcessId,focus,C.byref(pid)),'Diagnostic focus thread')
+            value['engineGui']=dict(threadId=child['threadId'],activeHwnd=int(state.active or 0),
+                focusHwnd=focus,focusPid=int(pid.value),
+                focusRootHwnd=int(read(self.user.GetAncestor,focus,2) or 0) if focus else 0,
+                captureHwnd=int(state.capture or 0),menuOwnerHwnd=int(state.menuOwner or 0),flags=int(state.flags))
+            value['stageCode']=5
+            for role in ('document','parent','child'):
+                assert window(binding[role])==expected[role]
+            exported=[int(read(self.user.GetPropW,binding['document'],'OpenGeul.Office.'+name+'Hwnd') or 0) for name in ('Parent','Child')]
+            assert exported==[binding['parent'],binding['child']]
+            assert read(self.user.IsChild,binding['document'],binding['parent']) and read(self.user.IsChild,binding['parent'],binding['child'])
+            value['bindingAfter']=1;value['stageCode']=6
+            after=int(read(self.user.GetForegroundWindow) or 0)
+            after_root=int(read(self.user.GetAncestor,after,2) or 0) if after else 0
+            value['foregroundSame']=int((after,after_root)==(raw,root))
+            if not value['foregroundSame']:value['statusCode']=5;return
+            value.update(statusCode=2,knownPartial=int(value['ownerStopCode']!=2))
+        except TimeoutError:value['statusCode']=1
+        except BaseException:value['statusCode']=4 if value['stageCode'] in (1,5) else 3
     def _fresh_proof_with_refs(self,target):
         assert self._identity_scope is not None and target in _scope_targets(self._identity_scope)
         fresh=self._fresh_base()
@@ -1739,14 +1815,17 @@ class NativeMenuProbe(NativeControlProbe):
                     except BaseException as exc:
                         diagnostic.update(ownershipPostStatus=3,ownershipPostError=self._exception_numbers(exc))
         finally:self._diagnostic_sink=previous
-    def _chrome(self,element):
+    def _chrome(self,element,include_native_hwnd=True):
         # Ancestor names can contain a document title; query identity only.
         def get(name):
             codes={'CurrentNativeWindowHandle':7,'CurrentProcessId':8,'CurrentControlType':9,
                 'CurrentBoundingRectangle':10,'CurrentIsOffscreen':11,'CurrentIsEnabled':12}
             return self._uia_call(codes[name],lambda:getattr(element,name))
-        handle=get('CurrentNativeWindowHandle')
-        assert handle is None or type(handle) is int and -(2**31)<=handle<2**32
+        window={}
+        if include_native_hwnd:
+            handle=get('CurrentNativeWindowHandle')
+            assert handle is None or type(handle) is int and -(2**31)<=handle<2**32
+            window['nativeHwnd']=0 if handle is None else handle&0xffffffff
         runtime,observation=self._runtime(element)
         identity=None
         if not runtime:
@@ -1758,7 +1837,7 @@ class NativeMenuProbe(NativeControlProbe):
             identity=dict(method=IDENTITY_METHOD,scope=copy.deepcopy(self._identity_scope),role=role)
         box=get('CurrentBoundingRectangle');kind=int(get('CurrentControlType'))
         result=dict(runtimeId=runtime,runtimeIdAvailable=bool(runtime),runtimeObservation=observation,pid=int(get('CurrentProcessId')),
-            nativeHwnd=0 if handle is None else handle&0xffffffff,
+            **window,
             controlType={50000:'Button',50010:'MenuBar',50011:'MenuItem',50021:'ToolBar',50032:'Window'}.get(kind,str(kind)),
             visible=not bool(get('CurrentIsOffscreen')),enabled=bool(get('CurrentIsEnabled')),
             rectangle=[int(getattr(box,key)) for key in ('left','top','right','bottom')])
@@ -1828,33 +1907,71 @@ class NativeMenuProbe(NativeControlProbe):
         self.menu_bar_element=self._discover_bar(root)
         return self._find(self.menu_bar_element,'file',scope='children')
     def _focused_menu(self,chain,file_index,bar_index):
-        result=[];cursor=self._uia_call(15,self.uia.iuia.GetFocusedElement);matched=False
-        comparison=getattr(self,'_uses_comparison',False)
-        self._focus_identity=None
-        allowed={tuple(chain[file_index]['runtimeId']),tuple(chain[bar_index]['runtimeId'])}
-        for _ in range(32):
-            if not cursor:break
-            if comparison:
-                row=_getter_call_site(self,9,self._chrome,cursor);result.append(row)
-                file_same=self._same(cursor,self.file_element);bar_same=self._same(cursor,self.menu_bar_element)
-                assert not (file_same and bar_same), 'Focused native menu roles alias'
-                if file_same or bar_same:
-                    role='file' if file_same else 'bar'
-                    self._focus_identity=dict(scope=copy.deepcopy(self._identity_scope),role=role,
-                        fileEquals=file_same,barEquals=bar_same,retainedEquals=True)
-                    matched=True;break
-            else:
-                runtime,observation=self._runtime(cursor)
-                assert runtime, 'Unbound focus ancestors still require runtime IDs'
-                kind=int(self._call(lambda:cursor.CurrentControlType))
-                result.append(dict(runtimeId=runtime,pid=int(self._call(lambda:cursor.CurrentProcessId)),controlType={50010:'MenuBar',50011:'MenuItem'}.get(kind,str(kind))))
-            if not comparison and tuple(runtime) in allowed:
-                # Resolve runtime IDs back to the retained live menu objects.
-                for ancestor in (self.file_element,self.menu_bar_element):
-                    if self._same(cursor,ancestor):matched=True
-                break
-            cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
-        return result,matched
+        diagnostic=None;entry=None
+        try:
+            diagnostic=dict(schemaVersion=1,phaseCode=1,failed=0,getFocusedReturned=0,parentReturned=0,rows=[])
+            self.interop['focusedWalk']=diagnostic
+        except BaseException:diagnostic=None
+        def note(target,**numbers):
+            try:
+                if target is not None:target.update(numbers)
+            except BaseException:pass
+        def returned(target,row):
+            try:
+                if target is None:return
+                kinds={'Button':50000,'MenuBar':50010,'MenuItem':50011,'ToolBar':50021,'Window':50032}
+                pid=row.get('pid');kind=kinds.get(row.get('controlType'))
+                if kind is None and type(row.get('controlType')) is str and re.fullmatch(r'[0-9]{1,5}',row['controlType']):kind=int(row['controlType'])
+                if type(pid) is int and 0<pid<2**32:target.update(pid=pid,observedMask=target['observedMask']|1)
+                if type(kind) is int and 0<kind<2**16:target.update(kindCode=kind,observedMask=target['observedMask']|2)
+                for name,bit in (('visible',4),('enabled',8)):
+                    if type(row.get(name)) is bool:target.update({name:int(row[name]),'observedMask':target['observedMask']|bit})
+            except BaseException:pass
+        try:
+            result=[];cursor=self._uia_call(15,self.uia.iuia.GetFocusedElement);matched=False
+            note(diagnostic,getFocusedReturned=1)
+            comparison=getattr(self,'_uses_comparison',False)
+            self._focus_identity=None
+            allowed={tuple(chain[file_index]['runtimeId']),tuple(chain[bar_index]['runtimeId'])}
+            for depth in range(32):
+                if not cursor:break
+                entry=None
+                try:
+                    if diagnostic is not None:
+                        entry=dict(depth=depth,referencePhaseCode=1 if depth==0 else 2,failed=0,
+                            observedMask=0,pid=0,kindCode=0,visible=0,enabled=0)
+                        diagnostic['rows'].append(entry)
+                except BaseException:entry=None
+                note(diagnostic,phaseCode=2)
+                if comparison:
+                    row=_getter_call_site(self,9,self._chrome,cursor);result.append(row);returned(entry,row)
+                    note(diagnostic,phaseCode=3)
+                    file_same=self._same(cursor,self.file_element);bar_same=self._same(cursor,self.menu_bar_element)
+                    assert not (file_same and bar_same), 'Focused native menu roles alias'
+                    if file_same or bar_same:
+                        role='file' if file_same else 'bar'
+                        self._focus_identity=dict(scope=copy.deepcopy(self._identity_scope),role=role,
+                            fileEquals=file_same,barEquals=bar_same,retainedEquals=True)
+                        matched=True;break
+                else:
+                    runtime,observation=self._runtime(cursor)
+                    assert runtime, 'Unbound focus ancestors still require runtime IDs'
+                    kind=int(self._call(lambda:cursor.CurrentControlType))
+                    result.append(dict(runtimeId=runtime,pid=int(self._call(lambda:cursor.CurrentProcessId)),controlType={50010:'MenuBar',50011:'MenuItem'}.get(kind,str(kind))))
+                    returned(entry,result[-1])
+                if not comparison and tuple(runtime) in allowed:
+                    # Resolve runtime IDs back to the retained live menu objects.
+                    for ancestor in (self.file_element,self.menu_bar_element):
+                        if self._same(cursor,ancestor):matched=True
+                    break
+                note(diagnostic,phaseCode=4)
+                cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
+                note(diagnostic,parentReturned=depth+1)
+            note(diagnostic,phaseCode=5)
+            return result,matched
+        except BaseException:
+            note(diagnostic,failed=1);note(entry,failed=1)
+            raise
     def _owners(self,hwnd,binding):
         rows=[]
         while hwnd:

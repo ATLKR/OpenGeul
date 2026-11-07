@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import ctypes as C
 import json
+import math
+import time
 import os
 from pathlib import Path
 
@@ -55,7 +57,8 @@ def failure(request, stage=13):
 
 def validate(value, request):
     _request(request)
-    if type(value) is not dict or value.keys() not in (_MAXIMA.keys(), _MAXIMA.keys() | {'focusCall'}):
+    if (type(value) is not dict or not _MAXIMA.keys() <= value.keys()
+            or not value.keys() <= _MAXIMA.keys() | {'focusCall', 'guiFocus'}):
         raise ValueError('Closed Writer OS result required')
     if any(type(value[key]) is not int or not 0 <= value[key] <= maximum
            for key, maximum in _MAXIMA.items()):
@@ -72,6 +75,13 @@ def validate(value, request):
             from writer_os_summary import valid_focus_call
         if not valid_focus_call(value['focusCall'], value['focusVariantType']):
             raise ValueError('Invalid Writer focus call observation')
+    if 'guiFocus' in value:
+        if __package__:
+            from .writer_os_summary import valid_gui_focus
+        else:
+            from writer_os_summary import valid_gui_focus
+        if not valid_gui_focus(value['guiFocus'], value.get('focusCall')):
+            raise ValueError('Invalid Writer GUI focus observation')
     if value['verified'] and not (
             value['stageCode'] == 12 and value['documentRole'] == 15
             and value['rootRole'] > 0 and value['focusedRole'] > 0
@@ -225,7 +235,7 @@ def observe_root_diagnostic(request, *, owner_factory=None, backend_factory=None
     return validate_root_diagnostic(record,request)
 
 
-def observe(request, *, owner_factory=None, backend_factory=None):
+def observe(request, *, owner_factory=None, backend_factory=None, gui_deadline=None, clock=None):
     """Hold every probe failure; the caller enforces it after the original VCL gate."""
     record = failure(request, 1)
     owner = backend = None
@@ -243,6 +253,8 @@ def observe(request, *, owner_factory=None, backend_factory=None):
                 record['stageCode'] = 1
                 raise
         backend = (backend_factory or RawComBackend)(guard, record)
+        if isinstance(owner, WindowsOwner) and isinstance(backend, RawComBackend):
+            backend._gui_focus_observer = _GuiFocusObserver(owner, record, gui_deadline, clock or time.monotonic)
         record['stageCode'] = 3
         root = backend.root(request['childHwnd'])
         root_identity = backend.identity(root)
@@ -354,6 +366,150 @@ class WindowsOwner:
                 raise ProbeFailure(0x80070000 | (C.get_last_error() & 0xffff))
             return True
         return False  # No exposed handle means its release was not observed.
+
+
+class _GuiObservationFailure(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+class _GuiFocusObserver:
+    """Two diagnostic intervals on one retained owner/thread; no input authority.
+
+    Codes: 0 unknown, 1 null, 2 original child, 3 its descendant,
+    4 same Office process outside child, 5 foreign process.
+    Errors: 1 missing/invalid/expired cap before work, 2 ABI, 3 owner/thread,
+    4 GUI query, 5 stale returned window, 6 unexpected exception, 7 late work.
+    A known snapshot is not a focus action acknowledgement or MSAA mapping.
+    """
+    def __init__(self, owner, record, deadline, clock):
+        self.owner, self.deadline, self.clock = owner, deadline, clock
+        self.thread, self.before_seen = 0, False
+        self.record = dict(schemaVersion=1, diagnosticOnly=1, acceptanceEligible=0,
+            before=self._empty(1), after=self._empty(2))
+        record['guiFocus'] = self.record
+
+    @staticmethod
+    def _empty(phase):
+        return dict(phaseCode=phase, attempted=0, known=0, errorCode=1,
+            focusWithinChild=0, activeCode=0, focusCode=0, captureCode=0, menuOwnerCode=0)
+
+    def _time(self):
+        if (type(self.deadline) not in (int, float) or not math.isfinite(self.deadline)
+                or self.deadline <= 0):
+            raise _GuiObservationFailure(1)
+        now = self.clock()
+        if (type(now) not in (int, float) or not math.isfinite(now)
+                or self.deadline > now + 45):
+            raise _GuiObservationFailure(1)
+        if now >= self.deadline:
+            raise _GuiObservationFailure(7 if self.row['attempted'] else 1)
+
+    def _call(self, function, *args):
+        self._time()
+        self.row['attempted'] = 1
+        result = function(*args)
+        self._time()
+        return result
+
+    def _abi(self):
+        # WindowsOwner already imported this module to construct its Windows API.
+        # Reuse the exact structure belonging to query_gui_thread_info's prototype.
+        from windows_smoke import GuiThreadInfo
+        try:
+            def integer(kind, signed):
+                return C.sizeof(kind) == 4 and kind(-1).value == (-1 if signed else 0xffffffff)
+            if (C.sizeof(C.c_void_p) != 8 or C.sizeof(GuiThreadInfo) != 72
+                    or [getattr(GuiThreadInfo, key).offset for key in
+                        ('cbSize', 'flags', 'hwndActive', 'hwndFocus', 'hwndCapture',
+                         'hwndMenuOwner', 'hwndMoveSize', 'hwndCaret', 'rcCaret')]
+                        != [0, 4, 8, 16, 24, 32, 40, 48, 56]):
+                raise ValueError()
+            fields = dict(GuiThreadInfo._fields_)
+            if (not all(integer(fields[key], False) for key in ('cbSize', 'flags'))
+                    or not all(fields[key] is C.c_void_p for key in
+                        ('hwndActive', 'hwndFocus', 'hwndCapture', 'hwndMenuOwner', 'hwndMoveSize', 'hwndCaret'))
+                    or C.sizeof(fields['rcCaret']) != 16
+                    or not all(integer(kind, True) for _, kind in fields['rcCaret']._fields_)):
+                raise ValueError()
+            user = self.owner.api.user
+            window, child, thread, gui = user.IsWindow, user.IsChild, user.GetWindowThreadProcessId, user.GetGUIThreadInfo
+            args = thread.argtypes
+            if (tuple(window.argtypes) != (C.c_void_p,) or not integer(window.restype, True)
+                    or tuple(child.argtypes) != (C.c_void_p, C.c_void_p) or not integer(child.restype, True)
+                    or len(args) != 2 or args[0] is not C.c_void_p
+                    or not integer(args[1]._type_, False) or not integer(thread.restype, False)
+                    or len(gui.argtypes) != 2 or not integer(gui.argtypes[0], False)
+                    or gui.argtypes[1] is not C.POINTER(GuiThreadInfo) or not integer(gui.restype, True)):
+                raise ValueError()
+            self.Info, self.Dword = GuiThreadInfo, args[1]._type_
+        except BaseException:
+            raise _GuiObservationFailure(2) from None
+
+    def _window_thread(self, hwnd):
+        pid = self.Dword()
+        tid = self._call(self.owner.api.user.GetWindowThreadProcessId, hwnd, C.byref(pid))
+        return pid.value, tid
+
+    def _scope(self):
+        owner, request = self.owner, self.owner.request
+        process = owner.process
+        if (process is None or not process.handle
+                or process.creation_time != request['officeCreationTime']):
+            raise _GuiObservationFailure(3)
+        if (self._call(process.exited, 0)
+                or not self._call(owner.api.user.IsWindow, request['childHwnd'])):
+            raise _GuiObservationFailure(3)
+        pid, thread = self._window_thread(request['childHwnd'])
+        if (pid != request['officePid'] or type(thread) is not int or not 0 < thread <= 0xffffffff
+                or self.thread and thread != self.thread):
+            raise _GuiObservationFailure(3)
+        self.thread = thread
+
+    def _classify(self, hwnd):
+        if not hwnd:
+            return 1
+        user, request = self.owner.api.user, self.owner.request
+        if not self._call(user.IsWindow, hwnd):
+            raise _GuiObservationFailure(5)
+        pid, thread = self._window_thread(hwnd)
+        if not pid or not thread:
+            raise _GuiObservationFailure(5)
+        if pid != request['officePid']:
+            return 5
+        if hwnd == request['childHwnd']:
+            return 2
+        return 3 if self._call(user.IsChild, request['childHwnd'], hwnd) else 4
+
+    def __call__(self, phase):
+        if phase not in (1, 2):
+            return
+        self.row = self._empty(phase)
+        try:
+            self._time()
+            if phase == 2 and (not self.before_seen or not self.thread):
+                raise _GuiObservationFailure(3)
+            if phase == 1:
+                self.before_seen = True
+            self._abi()
+            self._scope()
+            try:
+                info = self._call(self.owner.api.query_gui_thread_info, self.thread)
+            except (OSError, AssertionError):
+                raise _GuiObservationFailure(4) from None
+            if type(info) is not self.Info or info.cbSize != 72:
+                raise _GuiObservationFailure(2)
+            codes = {key: self._classify(getattr(info, field)) for key, field in
+                (('activeCode', 'hwndActive'), ('focusCode', 'hwndFocus'),
+                 ('captureCode', 'hwndCapture'), ('menuOwnerCode', 'hwndMenuOwner'))}
+            self._scope()
+            self._time()
+            self.row.update(known=1, errorCode=0, focusWithinChild=int(codes['focusCode'] in (2, 3)), **codes)
+        except _GuiObservationFailure as error:
+            self.row['errorCode'] = error.code
+        except BaseException:
+            self.row['errorCode'] = 6
+        self.record['before' if phase == 1 else 'after'] = self.row
 
 
 # Exact order in Microsoft SDK oleacc.h: IAccessibleVtbl (659..881).
@@ -483,9 +639,18 @@ class RawComBackend:
     def state(self, pointer):
         return self._number(pointer, 'get_accState')
 
+    def _gui_sample(self, phase):
+        try:
+            observer = getattr(self, '_gui_focus_observer', None)
+            if observer is not None:
+                observer(phase)
+        except BaseException:
+            pass  # Diagnostics never replace the original COM result/exception.
+
     def focus(self, root):
         self.guard()
         output = self._variant()
+        self._gui_sample(1)
         # This client boundary is not evidence of native/server entry. Unknown
         # zero values remain unknown until their corresponding observed bit.
         call = dict(attempted=1, returned=0, hrObserved=0, hr=0, vtObserved=0, rejectCode=0)
@@ -495,6 +660,8 @@ class RawComBackend:
         except BaseException:
             call['rejectCode'] = 1
             raise
+        finally:
+            self._gui_sample(2)
         call.update(returned=1, hrObserved=1, hr=hr & 0xffffffff)
         self.record['focusVariantType'] = output.vt
         call['vtObserved'] = 1

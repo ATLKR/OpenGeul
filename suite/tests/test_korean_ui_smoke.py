@@ -820,7 +820,8 @@ class WriterOsIntegrationTests(unittest.TestCase):
                 command=run.call_args.args[0];options=run.call_args.kwargs
                 self.assertEqual(command,[sys.executable,str(Path(smoke.__file__).resolve()),
                     '--writer-msaa-only','--capture-child','123','--office-pid','200',
-                    '--writer-office-creation-time','300','--writer-office-image',self.request['expectedImage']])
+                    '--writer-office-creation-time','300','--writer-office-image',self.request['expectedImage'],
+                    '--writer-msaa-deadline',repr(100.+timeout)])
                 self.assertEqual(options,dict(stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                     text=True,encoding='utf-8',errors='replace',timeout=timeout,shell=False))
 
@@ -1160,3 +1161,58 @@ class WriterRootDiagnosticRunnerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class WriterGuiFocusDeadlineTests(unittest.TestCase):
+    def setUp(self):
+        self.request = dict(officePid=200, officeCreationTime=300, childHwnd=123,
+            expectedImage=str(Path('/synthetic')/'Office/program/soffice.bin'))
+        self.value = smoke.writer_access.failure(self.request)
+
+    def test_original_capture_forwards_one_parent_absolute_cap_for_same_45_second_watchdog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'os.json'
+            seen = []
+            def child(command, **kwargs):
+                self.assertIn('--writer-msaa-deadline', command)
+                cap = float(command[command.index('--writer-msaa-deadline')+1])
+                seen.append(cap)
+                self.assertEqual((cap, kwargs['timeout']), (145., 45))
+                destination.write_text('{"controlCount":1}', encoding='utf-8')
+                return NS(returncode=0, stdout='1\n'+json.dumps(self.value))
+            with patch.object(smoke.time, 'monotonic', return_value=100.) as clock, \
+                 patch.object(smoke.subprocess, 'run', side_effect=child):
+                value = smoke.capture_bounded(123, 200, destination, writer_request=self.request)
+            self.assertEqual(value['writerOsAccessibility'], self.value)
+            self.assertEqual(seen, [145.]); self.assertEqual(clock.call_count, 1)
+
+    def test_after_native_passes_exact_original_minimum_cap_without_new_timeout(self):
+        for deadline, timeout in ((103., 3.), (145., 8.)):
+            with self.subTest(timeout=timeout):
+                seen = []
+                def child(command, **kwargs):
+                    cap = (float(command[command.index('--writer-msaa-deadline')+1])
+                        if '--writer-msaa-deadline' in command else None)
+                    seen.append((cap, kwargs['timeout']))
+                    return NS(returncode=0, stdout=json.dumps(self.value))
+                with patch.object(smoke.time, 'monotonic', return_value=100.), \
+                     patch.object(smoke.subprocess, 'run', side_effect=child):
+                    value = smoke.capture_writer_msaa_after_native(self.request, deadline)
+                self.assertEqual(value['result'], self.value)
+                self.assertEqual(seen, [(100.+timeout, timeout)])
+
+    def test_hidden_cli_preserves_absent_invalid_caps_and_passes_only_valid_numeric_argument(self):
+        for cap, expected in ((None, {}), ('invalid', {}), ('nan', {}), ('-1', {}), ('103.0', {'gui_deadline': 103.})):
+            with self.subTest(capKind='absent' if cap is None else 'provided'):
+                args = ['korean_ui_smoke.py', '--writer-msaa-only', '--capture-child', '123', '--office-pid', '200',
+                    '--writer-office-creation-time', '300', '--writer-office-image', self.request['expectedImage']]
+                if cap is not None: args.extend(['--writer-msaa-deadline', cap])
+                seen = []
+                def observe(request, **kwargs):
+                    seen.append(kwargs)
+                    self.assertTrue(request == self.request)
+                    return self.value
+                with patch.object(smoke.sys, 'argv', args), patch.object(smoke.os, 'name', 'nt'), \
+                     patch.object(smoke.writer_access, 'observe', side_effect=observe), redirect_stdout(io.StringIO()):
+                    try: result = smoke.main()
+                    except SystemExit: self.fail('Optional numeric cap must not replace the original CLI probe')
+                self.assertEqual(result, 0); self.assertEqual(seen, [expected])

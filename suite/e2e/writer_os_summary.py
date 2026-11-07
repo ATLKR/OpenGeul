@@ -52,6 +52,40 @@ def valid_focus_call(value, variant_type):
     return True
 
 
+
+_GUI_SAMPLE_MAXIMA = dict(phaseCode=2, attempted=1, known=1, errorCode=7,
+    focusWithinChild=1, activeCode=5, focusCode=5, captureCode=5, menuOwnerCode=5)
+
+
+def valid_gui_focus(value, focus_call=None):
+    """Optional Win32 interval classifications; never Writer qualification."""
+    if (type(value) is not dict or value.keys() != {
+            'schemaVersion', 'diagnosticOnly', 'acceptanceEligible', 'before', 'after'}
+            or any(type(value[key]) is not int for key in
+                ('schemaVersion', 'diagnosticOnly', 'acceptanceEligible'))
+            or (value['schemaVersion'], value['diagnosticOnly'], value['acceptanceEligible']) != (1, 1, 0)):
+        return False
+    for phase, name in ((1, 'before'), (2, 'after')):
+        row = value[name]
+        if (type(row) is not dict or row.keys() != _GUI_SAMPLE_MAXIMA.keys()
+                or any(type(row[key]) is not int or not 0 <= row[key] <= maximum
+                    for key, maximum in _GUI_SAMPLE_MAXIMA.items()) or row['phaseCode'] != phase):
+            return False
+        codes = [row[key] for key in ('activeCode', 'focusCode', 'captureCode', 'menuOwnerCode')]
+        if row['known']:
+            if (row['attempted'] != 1 or row['errorCode'] != 0 or not all(codes)
+                    or row['focusWithinChild'] != int(row['focusCode'] in (2, 3))):
+                return False
+        elif row['errorCode'] == 0 or any(codes) or row['focusWithinChild']:
+            return False
+        if row['errorCode'] in (4, 5, 7) and row['attempted'] != 1:
+            return False
+    if value['after']['attempted'] and not (value['before']['attempted']
+            and type(focus_call) is dict and focus_call.get('attempted') == 1):
+        return False
+    return True
+
+
 def valid(value):
     """Validate a failure vector without importing producer/native modules."""
     if (type(value) is not list or len(value) != len(FIELDS)
@@ -72,10 +106,13 @@ def project(record):
         return None
     result = record.get('writerOsAccessibility')
     base = {'schemaVersion', *FIELDS}
-    if (type(result) is not dict or result.keys() not in (base, base | {'focusCall'})
+    if (type(result) is not dict or not base <= result.keys()
+            or not result.keys() <= base | {'focusCall', 'guiFocus'}
             or type(result['schemaVersion']) is not int or result['schemaVersion'] != 1):
         return None
     if 'focusCall' in result and not valid_focus_call(result['focusCall'], result['focusVariantType']):
+        return None
+    if 'guiFocus' in result and not valid_gui_focus(result['guiFocus'], result.get('focusCall')):
         return None
     value = [result[key] for key in FIELDS]
     if not valid(value) or record.get('stage') != STAGE_NAMES[result['stageCode']]:

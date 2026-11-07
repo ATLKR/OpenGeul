@@ -1043,5 +1043,262 @@ class FocusCallObservationTests(unittest.TestCase):
         self.assertEqual(self.fixture.calls.count(('focus',)),1);self.balanced()
 
 
+class GuiFocusApi:
+    """Synthetic Win32 boundary; the production sampler/classifier stays real."""
+    def __init__(self):
+        from windows_smoke import GuiThreadInfo
+        self.Info = GuiThreadInfo
+        self.events = []
+        self.thread = 19
+        self.alive = True
+        self.fail_gui = False
+        self.after_query = None
+        self.windows = {123: (200, 19), 124: (200, 19), 130: (200, 20), 900: (201, 30)}
+        self.values = dict(hwndActive=130, hwndFocus=124, hwndCapture=0, hwndMenuOwner=900)
+        class Function:
+            def __init__(self, callback, args, result):
+                self.callback, self.argtypes, self.restype = callback, args, result
+            def __call__(self, *args):
+                return self.callback(*args)
+        def window(hwnd):
+            self.events.append('window')
+            return int(self.alive and hwnd in self.windows)
+        def thread(hwnd, output):
+            self.events.append('thread')
+            pid, tid = self.windows.get(hwnd, (0, 0))
+            if hwnd == 123: tid = self.thread
+            output._obj.value = pid
+            return tid
+        def child(parent, hwnd):
+            self.events.append('child')
+            return int((parent, hwnd) == (123, 124))
+        def gui(tid, output):
+            self.events.append('gui')
+            if tid != 19 or output._obj.cbSize != 72:
+                raise AssertionError('Exact original positive TID/SDK size required')
+            for key, value in self.values.items(): setattr(output._obj, key, value)
+            if self.after_query: self.after_query()
+            return int(not self.fail_gui)
+        H, D, B = C.c_void_p, C.c_uint32, C.c_int32
+        self.user = NS(IsWindow=Function(window, (H,), B),
+            GetWindowThreadProcessId=Function(thread, (H, C.POINTER(D)), D),
+            IsChild=Function(child, (H, H), B),
+            GetGUIThreadInfo=Function(gui, (D, C.POINTER(GuiThreadInfo)), B))
+    def query_gui_thread_info(self, tid):
+        info = self.Info(cbSize=C.sizeof(self.Info))
+        if not self.user.GetGUIThreadInfo(tid, C.byref(info)):
+            raise OSError('Synthetic GUI query failure')
+        return info
+
+
+class WriterGuiFocusDiagnosticTests(unittest.TestCase):
+    def make(self, deadline=5.):
+        observer = getattr(probe, '_GuiFocusObserver', None)
+        self.assertTrue(callable(observer), 'Bounded same-owner GUI observer is missing')
+        self.clock = NS(now=1.)
+        self.api = GuiFocusApi()
+        self.owner = probe.WindowsOwner(dict(REQUEST))
+        self.owner.api = self.api
+        self.owner.process = NS(creation_time=300, handle=33, exited=lambda timeout: False)
+        self.record = probe.failure(REQUEST, 4)
+        self.sampler = observer(self.owner, self.record, deadline, lambda: self.clock.now)
+        return self.sampler
+
+    def test_same_thread_sample_classifies_only_existing_child_scope_without_raw_handles(self):
+        sample = self.make(); sample(1); sample(2)
+        value = self.record['guiFocus']
+        self.assertEqual(set(value), {'schemaVersion', 'diagnosticOnly', 'acceptanceEligible', 'before', 'after'})
+        self.assertEqual((value['schemaVersion'], value['diagnosticOnly'], value['acceptanceEligible']), (1, 1, 0))
+        for phase, name in ((1, 'before'), (2, 'after')):
+            self.assertEqual(value[name], dict(phaseCode=phase, attempted=1, known=1, errorCode=0,
+                focusWithinChild=1, activeCode=4, focusCode=3, captureCode=1, menuOwnerCode=5))
+        self.assertEqual(self.api.events.count('gui'), 2)
+
+    def test_original_child_null_owned_outside_and_foreign_focus_are_distinct(self):
+        for hwnd, code, within in ((123, 2, 1), (0, 1, 0), (130, 4, 0), (900, 5, 0)):
+            with self.subTest(code=code):
+                sample = self.make(); self.api.values['hwndFocus'] = hwnd; sample(1)
+                row = self.record['guiFocus']['before']
+                self.assertEqual((row['known'], row['focusCode'], row['focusWithinChild']), (1, code, within))
+
+    def test_expired_missing_or_invalid_deadline_starts_no_native_call(self):
+        for deadline in (None, True, 1., 0., float('nan'), float('inf'), 47., 'private'):
+            with self.subTest(kind=type(deadline).__name__):
+                sample = self.make(deadline); sample(1); sample(2)
+                self.assertEqual(len(self.api.events), 0)
+                for row in (self.record['guiFocus']['before'], self.record['guiFocus']['after']):
+                    self.assertEqual((row['attempted'], row['known'], row['errorCode']), (0, 0, 1))
+
+    def test_original_thread_or_generation_change_is_unknown_and_never_queries_tid_zero(self):
+        for change in ('thread', 'generation', 'death', 'pid'):
+            with self.subTest(change=change):
+                sample = self.make(); sample(1)
+                if change == 'thread': self.api.thread = 0
+                elif change == 'generation': self.owner.process.creation_time = 301
+                elif change == 'death': self.owner.process.exited = lambda timeout: True
+                else: self.api.windows[123] = (201, 19)
+                sample(2)
+                row = self.record['guiFocus']['after']
+                self.assertEqual((row['known'], row['errorCode']), (0, 3))
+                self.assertEqual(self.api.events.count('gui'), 1)
+
+    def test_query_failure_and_stale_returned_window_remain_unknown(self):
+        for stale in (False, True):
+            with self.subTest(stale=stale):
+                sample = self.make()
+                if stale: self.api.values['hwndCapture'] = 901
+                else: self.api.fail_gui = True
+                sample(1)
+                row = self.record['guiFocus']['before']
+                self.assertEqual((row['known'], row['errorCode']), (0, 5 if stale else 4))
+                self.assertEqual(tuple(row[key] for key in ('activeCode', 'focusCode', 'captureCode', 'menuOwnerCode', 'focusWithinChild')), (0, 0, 0, 0, 0))
+
+    def test_post_query_scope_and_deadline_are_required_before_known(self):
+        for expired in (False, True):
+            with self.subTest(expired=expired):
+                sample = self.make()
+                def change():
+                    if expired: self.clock.now = 5.
+                    else: self.api.thread = 20
+                self.api.after_query = change
+                sample(1)
+                row = self.record['guiFocus']['before']
+                self.assertEqual((row['known'], row['errorCode']), (0, 7 if expired else 3))
+                before = len(self.api.events)
+                if expired:
+                    sample(2); self.assertEqual(len(self.api.events), before)
+
+    def test_exact_existing_sdk_layout_and_unsigned_dword_bool32_prototypes(self):
+        sample = self.make()
+        self.assertEqual(C.sizeof(self.api.Info), 72)
+        self.assertEqual([getattr(self.api.Info, key).offset for key in
+            ('cbSize', 'flags', 'hwndActive', 'hwndFocus', 'hwndCapture', 'hwndMenuOwner', 'hwndMoveSize', 'hwndCaret', 'rcCaret')],
+            [0, 4, 8, 16, 24, 32, 40, 48, 56])
+        for change in ('bool8', 'signedThread', 'wrongPointer'):
+            with self.subTest(change=change):
+                sample = self.make()
+                if change == 'bool8': self.api.user.GetGUIThreadInfo.restype = C.c_bool
+                elif change == 'signedThread': self.api.user.GetWindowThreadProcessId.restype = C.c_int32
+                else: self.api.user.GetGUIThreadInfo.argtypes = (C.c_uint32, C.c_void_p)
+                sample(1)
+                row = self.record['guiFocus']['before']
+                self.assertEqual((row['known'], row['errorCode']), (0, 2))
+                self.assertEqual(len(self.api.events), 0)
+
+    def test_after_without_before_and_callback_baseexception_cannot_escape(self):
+        sample = self.make(); sample(2)
+        self.assertEqual(self.record['guiFocus']['after']['known'], 0)
+        self.assertEqual(len(self.api.events), 0)
+        sample = self.make()
+        def fail(*args): raise KeyboardInterrupt()
+        self.api.user.IsWindow.callback = fail
+        sample(1)
+        self.assertEqual(self.record['guiFocus']['before']['errorCode'], 6)
+
+    def test_closed_optional_record_has_no_acceptance_authority_or_boolean_numbers(self):
+        from writer_os_summary import project
+        sample = self.make(); sample(1); sample(2)
+        value = self.record
+        value.update(rootRole=10, ownerBefore=1, ownerReleased=1,
+            focusCall=dict(attempted=1, returned=1, hrObserved=1, hr=0, vtObserved=1, rejectCode=3))
+        self.assertEqual(probe.validate(value, REQUEST)['verified'], 0)
+        import copy
+        for mutation in ('acceptance', 'extra', 'bool', 'falseWithin', 'knownUnknown'):
+            bad = copy.deepcopy(value)
+            if mutation == 'acceptance': bad['guiFocus']['acceptanceEligible'] = 1
+            elif mutation == 'extra': bad['guiFocus']['before']['rawHandle'] = 1
+            elif mutation == 'bool': bad['guiFocus']['before']['known'] = True
+            elif mutation == 'falseWithin': bad['guiFocus']['before']['focusWithinChild'] = 0
+            else: bad['guiFocus']['before']['known'] = 0
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): probe.validate(bad, REQUEST)
+        outer = dict(case='korean-ui-writer', module='writer', success=False, stage='writer-os-focus',
+            **{key: REQUEST[key] for key in ('officePid', 'officeCreationTime', 'childHwnd')}, writerOsAccessibility=value)
+        self.assertEqual(len(project(outer)), 23)
+        self.assertEqual(probe.decode(json.dumps(value), REQUEST), value)
+
+    def test_exact_original_focus_call_is_bracketed_even_when_primary_raises(self):
+        self.make()
+        fixture = RawFixture()
+        for raises in (False, True):
+            with self.subTest(raises=raises):
+                events = []; record = probe.failure(REQUEST, 4)
+                primary = KeyboardInterrupt()
+                class Backend(probe.RawComBackend):
+                    def _invoke(self, pointer, slot, result, arguments, *values):
+                        if slot == 18:
+                            events.append('focus')
+                            if raises: raise primary
+                        return super()._invoke(pointer, slot, result, arguments, *values)
+                backend = Backend(lambda: None, record, bindings=fixture.bindings)
+                backend._gui_focus_observer = lambda phase: events.append(phase)
+                try:
+                    if raises:
+                        try: backend.focus(fixture.nodes['root'])
+                        except BaseException as error: self.assertTrue(error is primary)
+                        else: self.fail('Original BaseException was lost')
+                    else: backend.focus(fixture.nodes['root'])
+                    self.assertEqual(events, [1, 'focus', 2])
+                finally: backend.close()
+                self.assertEqual(record['referencesAcquired'], record['referencesReleased'])
+                self.assertEqual(record['variantsCreated'], record['variantsCleared'])
+
+    def test_diagnostic_exception_never_replaces_original_vt_rejection(self):
+        self.make(); fixture = RawFixture(); fixture.focus_vt = 0
+        record = probe.failure(REQUEST, 4)
+        backend = probe.RawComBackend(lambda: None, record, bindings=fixture.bindings)
+        def fail(phase): raise KeyboardInterrupt()
+        backend._gui_focus_observer = fail
+        try:
+            with self.assertRaises(probe.ProbeFailure): backend.focus(fixture.nodes['root'])
+            self.assertEqual(record['focusCall'], dict(attempted=1, returned=1, hrObserved=1, hr=0, vtObserved=1, rejectCode=3))
+            self.assertEqual(record['focusVariantType'], 0)
+        finally: backend.close()
+        self.assertEqual(record['variantsCreated'], record['variantsCleared'])
+
+
+    def test_closed_sdk_failure_requires_an_attempted_native_interval(self):
+        self.make()
+        for code in (4, 5, 7):
+            with self.subTest(code=code):
+                row = self.record['guiFocus']['before']
+                row['errorCode'] = code
+                with self.assertRaises(ValueError): probe.validate(self.record, REQUEST)
+
+    def test_real_raw_observer_keeps_old_acceptance_owner_after_and_retained_close_meanings(self):
+        self.make()
+        for kind in ('owned', 'foreign', 'abi', 'expired', 'empty', 'cleanup', 'missing', 'farcap'):
+            with self.subTest(kind=kind):
+                fixture = RawFixture(); api = GuiFocusApi(); releases = []
+                owner = probe.WindowsOwner(dict(REQUEST))
+                owner.api = api
+                owner.process = NS(creation_time=300, handle=33, exited=lambda timeout: False,
+                    close_handle=lambda handle: releases.append(handle) or int(kind != 'cleanup'))
+                owner.open = lambda: None
+                owner.check = lambda **kwargs: None
+                if kind == 'foreign': api.values['hwndFocus'] = 900
+                if kind == 'abi': api.user.GetGUIThreadInfo.restype = C.c_bool
+                if kind == 'empty': fixture.focus_vt = 0
+                def backend(guard, record):
+                    return probe.RawComBackend(guard, record, bindings=fixture.bindings)
+                with patch.object(probe.C, 'get_last_error', return_value=6, create=True):
+                    value = probe.observe(dict(REQUEST), owner_factory=lambda request: owner,
+                        backend_factory=backend, gui_deadline=(None if kind == 'missing' else 47. if kind == 'farcap'
+                            else 1. if kind == 'expired' else 5.), clock=lambda: 1.)
+                self.assertEqual(value['verified'], int(kind not in ('empty', 'cleanup')))
+                self.assertEqual(value['ownerAfter'], int(kind != 'empty'))
+                self.assertEqual(value['ownerReleased'], int(kind != 'cleanup'))
+                self.assertEqual(value['cleanupFailure'], int(kind == 'cleanup'))
+                self.assertEqual(value['guiFocus']['acceptanceEligible'], 0)
+                self.assertEqual(value['guiFocus']['before']['known'], int(kind not in ('abi', 'expired', 'missing', 'farcap')))
+                if kind in ('expired', 'missing', 'farcap'): self.assertEqual(len(api.events), 0)
+                if kind == 'foreign': self.assertEqual(value['guiFocus']['before']['focusWithinChild'], 0)
+                if kind == 'empty':
+                    self.assertEqual((value['stageCode'], value['focusVariantType'], value['focusCall']['rejectCode']), (4, 0, 3))
+                self.assertEqual(releases, [33]); self.assertTrue(owner.process is None)
+                self.assertEqual(value['referencesAcquired'], value['referencesReleased'])
+                self.assertEqual(value['variantsCreated'], value['variantsCleared'])
+                self.assertTrue(all(count == 0 for count in fixture.ledger.values()), 'COM reference imbalance')
+
+
 if __name__ == '__main__':
     unittest.main()

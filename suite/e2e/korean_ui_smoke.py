@@ -91,6 +91,9 @@ def capture_bounded(child, office_pid, destination, *, writer_request=None):
         return json.loads(destination.read_text(encoding='utf-8'))
     # Same original child and watchdog. Its original UIA snapshot completes
     # before the fixed numeric checkpoint; only later probe failures are held.
+    # This cap begins before the same original 45-second subprocess watchdog.
+    # The child may consume only what remains; it never starts another budget.
+    command.extend(['--writer-msaa-deadline', repr(time.monotonic() + 45)])
     command.extend(['--writer-office-creation-time', str(writer_request['officeCreationTime']),
                     '--writer-office-image', writer_request['expectedImage'], '--writer-msaa'])
     timed_out = False
@@ -132,6 +135,7 @@ def capture_writer_msaa_after_native(request, deadline):
             evidence['result'] = writer_access.failure(request, 14)
             return evidence
         timeout = min(8., deadline - now)
+        command.extend(['--writer-msaa-deadline', repr(now + timeout)])
         evidence.update(attempted=True, timeoutSeconds=timeout)
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding='utf-8', errors='replace', timeout=timeout, shell=False)
@@ -437,7 +441,16 @@ def main():
     parser.add_argument('--writer-root-capabilities-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--writer-office-creation-time', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--writer-office-image', help=argparse.SUPPRESS)
+    parser.add_argument('--writer-msaa-deadline', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    # Invalid/missing diagnostic metadata preserves the legacy probe seam.
+    try:
+        gui_deadline = float(getattr(args, 'writer_msaa_deadline', None))
+        if not math.isfinite(gui_deadline) or gui_deadline <= 0:
+            gui_deadline = None
+    except (TypeError, ValueError, OverflowError):
+        gui_deadline = None
+    gui_options = {'gui_deadline': gui_deadline} if gui_deadline is not None else {}
     if os.name != 'nt' or not __debug__:
         raise RuntimeError('Actual Windows GUI execution with assertions enabled is required')
     if getattr(args, 'writer_root_capabilities_only', False):
@@ -455,7 +468,7 @@ def main():
         request = dict(childHwnd=args.capture_child, officePid=args.office_pid,
             officeCreationTime=args.writer_office_creation_time, expectedImage=args.writer_office_image)
         with redirect_stdout(sys.stderr):
-            value = writer_access.validate(writer_access.observe(request), request)
+            value = writer_access.validate(writer_access.observe(request, **gui_options), request)
         encoded = json.dumps(value, separators=(',', ':'), allow_nan=False)
         assert len(encoded.encode('utf-8')) <= 4096, 'Closed Writer result exceeds bound'
         print(encoded, flush=True)
@@ -475,7 +488,7 @@ def main():
             print('1', flush=True)  # Original UIA observation and file close succeeded.
             request = dict(childHwnd=args.capture_child, officePid=args.office_pid,
                 officeCreationTime=args.writer_office_creation_time, expectedImage=args.writer_office_image)
-            value = writer_access.observe(request)
+            value = writer_access.observe(request, **gui_options)
             encoded = json.dumps(value, separators=(',', ':'), allow_nan=False)
             assert len(encoded.encode('utf-8')) <= 4096, 'Closed Writer result exceeds bound'
             print(encoded, flush=True)

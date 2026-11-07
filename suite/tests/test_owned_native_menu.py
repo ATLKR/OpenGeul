@@ -2115,7 +2115,7 @@ class GetterCallsiteObservationTests(unittest.TestCase):
         self.assertFalse(hasattr(probe,'_getter_site_code'))
 
     def test_real_save_candidate_ancestor_and_retained_file_failures_keep_distinct_sites(self):
-        for mode,expected in (('candidate',10),('ancestor',11),('retained-file',1)):
+        for mode,expected in (('candidate',10),('ancestor',11),('retained-file',2)):
             with self.subTest(mode=mode):
                 m,a,p,r,clock,b=self.fixture();original=b.Node.CurrentNativeWindowHandle.fget;seen=[False]
                 if mode=='retained-file':b.probe._physical_file_refresh=True
