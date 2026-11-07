@@ -583,6 +583,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
                 self.assertIs(session.cleanup(record), released)
                 self.assertEqual(calls, [123])
                 self.assertIs(record['engineHandleReleased'], released)
+                self.assertIs(record['nativePointCallbackRetired'], True)
                 self.assertEqual(session.engine.handle, None if released else 123)
 
     def test_launched_process_without_retained_engine_witness_cannot_confirm_cleanup(self):
@@ -1093,6 +1094,7 @@ class InitialFocusStderrTests(unittest.TestCase):
             opengeul_evidence_case='native-menu-writer', opengeul_suite_root=self.folder/'suite')
         self.session.engine = SimpleNamespace(handle=888, creation_time=200)
         self.session._opening_focus_identity = (77,777,888,200,11,12,13,88)
+        self.expected_identity = self.session._opening_focus_identity
         self.record = dict(case='native-menu-writer',module='writer',shellPid=77,windowHwnd=11,
             parentHwnd=12,childHwnd=13,officePid=88,officeCreationTime=200,
             nativeArchiveGeneration=dict(pid=88,creationTime=200,
@@ -1128,10 +1130,162 @@ class InitialFocusStderrTests(unittest.TestCase):
         self.path.write_bytes(b''.join((json.dumps(row,separators=(',',':'))+'\r\n').encode()
             for row in rows)+suffix)
 
-    def capture(self):
+    def capture(self, **options):
         method=getattr(self.smoke,'capture_initial_focus_trace',None)
         self.assertTrue(callable(method),'Bounded numeric initial-focus trace capture is missing')
-        return method(self.session,self.record)
+        if options.get('retired'):options.setdefault('expected_identity',self.expected_identity)
+        return method(self.session,self.record,**options)
+
+    def retire(self, record=None):
+        """Synthetic retained cleanup proof, without opening any native handle."""
+        target=self.record if record is None else record
+        self.session.process.poll=lambda:7
+        self.session.engine.handle=None
+        target.update(cleanupConfirmed=True,shellCleanupConfirmed=True,shellExitCode=7,
+            officeExitedAfterCleanup=True,engineHandleReleased=True,nativePointCallbackRetired=True,
+            testProcessCleanup=dict(shellPid=77,shellExitCode=7,forceRequested=False,
+                gracefulShutdownVerified=False,disposition='already-exited'))
+
+    def test_retired_read_uses_only_historical_identity_after_confirmed_retirement(self):
+        self.write([self.event()]);self.retire()
+        self.session.engine.exited=lambda *args: self.fail('Closed engine must not be queried')
+        value=self.capture(retired=True)
+        self.assertTrue(value['known']);self.assertTrue(value['retirementConfirmed'])
+        self.assertEqual(value['captureModeCode'],2);self.assertTrue(value['historicalIdentityOnly'])
+        self.assertFalse(value['acceptanceEligible']);self.assertTrue(value['eventCompletenessUnknown'])
+        self.assertEqual(value['scope']['officePid'],88)
+        self.assert_unknown(self.capture())
+
+    def test_retired_read_requires_every_cleanup_proof_before_opening_the_file(self):
+        self.write([self.event()])
+        keys=('cleanupConfirmed','shellCleanupConfirmed','officeExitedAfterCleanup',
+            'engineHandleReleased','nativePointCallbackRetired')
+        for key in keys:
+            for bad in (None,False,1):
+                with self.subTest(key=key,bad=bad):
+                    self.retire();self.record[key]=bad;opened=[]
+                    with patch.object(self.smoke.os,'open',side_effect=lambda *args:opened.append(1)):
+                        value=self.capture(retired=True)
+                    self.assert_unknown(value);self.assertEqual(opened,[])
+                    self.assertFalse(value['retirementConfirmed'])
+
+    def test_retired_read_rejects_foreign_original_or_unreleased_state_without_file_access(self):
+        changes=(lambda:self.session.process.__setattr__('pid',78),
+            lambda:self.session.engine.__setattr__('creation_time',201),
+            lambda:self.session.engine.__setattr__('handle',888),
+            lambda:self.session.process.__setattr__('_handle',778),
+            lambda:self.session.process.__setattr__('poll',lambda:None),
+            lambda:self.session.process.__setattr__('poll',lambda:0),
+            lambda:self.record.__setitem__('shellExitCode',False),
+            lambda:self.record['testProcessCleanup'].__setitem__('shellPid',78),
+            lambda:self.record['testProcessCleanup'].__setitem__('disposition','stop-unconfirmed'),
+            lambda:self.session.__setattr__('_opening_focus_identity',(77,777,0,200,11,12,13,88)),
+            lambda:self.session.__setattr__('_opening_focus_identity',(77,777,889,200,11,12,13,88)),
+            lambda:self.session.__setattr__('_opening_focus_identity',(77,777,888,201,11,12,13,88)),
+            lambda:self.session.__setattr__('_opening_focus_identity',(77,777,888,200,11,12,14,88)))
+        for index,change in enumerate(changes):
+            with self.subTest(index=index):
+                self.setUp();self.write([self.event()]);self.retire();change();opened=[]
+                with patch.object(self.smoke.os,'open',side_effect=lambda *args:opened.append(1)):
+                    value=self.capture(retired=True)
+                self.assert_unknown(value);self.assertEqual(opened,[])
+
+    def test_retired_read_requires_an_immutable_precleanup_anchor_not_receipt_selection(self):
+        self.write([self.event()]);self.retire()
+        for expected in (None,list(self.expected_identity),(77,777,889,200,11,12,13,88)):
+            value=self.capture(retired=True,expected_identity=expected)
+            self.assert_unknown(value)
+
+    def test_retired_partial_late_and_unknown_fields_remain_numeric_unknown(self):
+        row=self.event();row['details']['result']['Before']['Form']['ClassName']='synthetic private sentinel'
+        self.write([row]);self.retire();value=self.capture(retired=True)
+        self.assertTrue(value['known'])
+        self.assertNotIn('synthetic private sentinel',json.dumps(value))
+        row['details']['result']['Text']='synthetic forbidden document sentinel'
+        self.write([row]);value=self.capture(retired=True);self.assert_unknown(value)
+        self.assertNotIn('synthetic forbidden document sentinel',json.dumps(value))
+        self.write([self.event()],suffix=b'partial')
+        self.assert_unknown(self.capture(retired=True))
+        self.write([self.event()])
+        with patch.object(self.smoke.time,'monotonic',side_effect=[0.,0.,2.]):
+            value=self.capture(retired=True)
+        self.assert_unknown(value);self.assertEqual(value['errorCode'],10)
+
+    def test_after_retirement_captures_late_positive_and_preserves_before_snapshot_and_primary_failure(self):
+        self.write([self.event()]);boundary=Session(fail='open-escape');calls=[]
+        opening=copy.deepcopy(self.record)
+        def open_session(record):
+            boundary.open(record);record.update(copy.deepcopy(opening))
+        for name in ('ready','gesture','screenshot','view_roundtrip','hwp_launcher','finish'):
+            setattr(self.session,name,getattr(boundary,name))
+        self.session.open=open_session
+        def cleanup(record):
+            calls.append('cleanup')
+            late=self.event('initial.activation',2,reason='editorFocused')
+            late['details'].update(pending=False)
+            late['details']['result'].update(Attempted=True,Verified=True,After=self.snapshot())
+            self.write([self.event(),late]);self.retire(record);return True
+        self.session.cleanup=cleanup
+        capture=self.smoke.capture_initial_focus_trace
+        def observed(session,record,**options):
+            calls.append('retired' if options.get('retired') else 'live')
+            return capture(session,record,**options)
+        with patch.object(self.smoke,'capture_initial_focus_trace',observed):
+            record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=lambda *args:self.session)
+        self.assertEqual(calls,['live','cleanup','retired'])
+        self.assertEqual(len(record['initialFocusTrace']['rows']),1)
+        after=record['initialFocusTraceAfterRetirement']
+        self.assertTrue(after['known']);self.assertEqual(len(after['rows']),2)
+        self.assertTrue(after['rows'][1]['verified']);self.assertTrue(after['eventCompletenessUnknown'])
+        self.assertEqual(record['errorType'],'AssertionError');self.assertEqual(record['stage'],'open-escape')
+        self.assertFalse(record['success']);self.assertTrue(record['cleanupConfirmed'])
+
+    def test_unconfirmed_or_skipped_cleanup_never_attempts_the_after_read(self):
+        for outcome in (False,'raise'):
+            boundary=Session(cleanup=outcome);calls=[]
+            def capture(session,record,**options):
+                calls.append(options.get('retired',False));return self.smoke._initial_focus_unknown(6)
+            with patch.object(self.smoke,'capture_initial_focus_trace',capture):
+                record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=lambda *args:boundary)
+            self.assertEqual(calls,[False]);after=record['initialFocusTraceAfterRetirement']
+            self.assertFalse(after['attempted']);self.assert_unknown(after)
+            self.assertFalse(after['retirementConfirmed']);self.assertFalse(record['cleanupConfirmed'])
+        def fail_factory(*args):raise RuntimeError('synthetic construction failure')
+        with patch.object(self.smoke,'capture_initial_focus_trace',side_effect=AssertionError('Forbidden read')):
+            record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=fail_factory)
+        self.assertFalse(record['initialFocusTraceAfterRetirement']['attempted'])
+
+    def test_after_retirement_capture_exception_preserves_success_cleanup_and_primary_error(self):
+        for fail in (None,'open-escape'):
+            boundary=Session(fail=fail);calls=[]
+            def capture(session,record,**options):
+                calls.append(options.get('retired',False))
+                if options.get('retired'):raise RuntimeError('synthetic private after-read failure')
+                return self.smoke._initial_focus_unknown(6)
+            with patch.object(self.smoke,'capture_initial_focus_trace',capture):
+                record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=lambda *args:boundary)
+            self.assertEqual(calls,[False,True]);self.assertTrue(record['cleanupConfirmed'])
+            self.assertEqual(record['success'],fail is None)
+            self.assertEqual(record.get('errorType'),'AssertionError' if fail else None)
+            self.assert_unknown(record['initialFocusTraceAfterRetirement'])
+            self.assertNotIn('synthetic private after-read failure',json.dumps(record))
+
+    def test_cleanup_cannot_replace_the_precleanup_private_engine_identity(self):
+        self.write([self.event()]);boundary=Session(fail='open-escape');opening=copy.deepcopy(self.record)
+        def open_session(record):record.update(copy.deepcopy(opening))
+        self.session.open=open_session
+        for name in ('ready','gesture','screenshot','view_roundtrip','hwp_launcher','finish'):
+            setattr(self.session,name,getattr(boundary,name))
+        def cleanup(record):
+            self.retire(record)
+            self.session._opening_focus_identity=(77,777,889,200,11,12,13,88)
+            return True
+        self.session.cleanup=cleanup
+        record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=lambda *args:self.session)
+        self.assertTrue(record['initialFocusTrace']['known'])
+        self.assert_unknown(record['initialFocusTraceAfterRetirement'])
+        self.assertFalse(record['success']);self.assertTrue(record['cleanupConfirmed'])
+        self.assertEqual(record['errorType'],'AssertionError')
 
     def activation_observed(self, sequence=1, *, source=1, mask=0, receiver=11, owner_same=True, pending=True):
         row=self.event('initial.activationObserved',sequence)
@@ -1322,15 +1476,17 @@ class InitialFocusStderrTests(unittest.TestCase):
         with patch.object(self.smoke.time,'monotonic',side_effect=[0.,2.]):
             self.assert_unknown(self.capture())
 
-    def test_finally_captures_once_before_cleanup_without_replacing_primary_failure(self):
+    def test_finally_keeps_both_capture_errors_separate_from_cleanup_and_primary_failure(self):
         boundary=Session(fail='open-escape');calls=[]
-        def capture(session,record):
-            calls.append('capture');raise RuntimeError('synthetic private capture failure')
+        def capture(session,record,**options):
+            calls.append('retired' if options.get('retired') else 'live')
+            raise RuntimeError('synthetic private capture failure')
         cleanup=boundary.cleanup
         boundary.cleanup=lambda record:calls.append('cleanup') or cleanup(record)
         with patch.object(self.smoke,'capture_initial_focus_trace',capture,create=True):
             record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=lambda *args:boundary)
-        self.assertEqual(calls,['capture','cleanup'])
+        self.assertEqual(calls,['live','cleanup','retired'])
         self.assertEqual(record['errorType'],'AssertionError');self.assertEqual(record['stage'],'open-escape')
         self.assertTrue(record['cleanupConfirmed']);self.assertFalse(record['success'])
         self.assert_unknown(record['initialFocusTrace'])
+        self.assert_unknown(record['initialFocusTraceAfterRetirement'])

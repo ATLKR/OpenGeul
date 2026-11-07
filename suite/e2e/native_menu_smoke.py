@@ -30,14 +30,26 @@ def _initial_focus_unknown(code):
         errorCode=code, gapObserved=False, gapCount=0, eventCompletenessUnknown=True, scope={}, rows=[])
 
 
-def capture_initial_focus_trace(session, record):
+def _initial_focus_retired_unknown(code, *, attempted=True, retirement_confirmed=False):
+    value=_initial_focus_unknown(code)
+    value.update(attempted=attempted,captureModeCode=2,historicalIdentityOnly=True,
+        retirementConfirmed=retirement_confirmed)
+    return value
+
+
+def capture_initial_focus_trace(session, record, *, retired=False, expected_identity=None):
     """One bounded, numeric-only read of this launch's existing C# stderr.
 
     Unknown codes: 1=owner context, 2=path, 3=bound, 4=unstable/read,
-    5=JSON framing, 6=no rows, 7=shape, 8=sequence, 9=generation, 10=budget.
+    5=JSON framing, 6=no rows, 7=shape, 8=sequence, 9=generation, 10=budget,
+    11=unexpected capture error, 12=retirement not attempted, 13=retirement proof.
     Missing/partial evidence never certifies a focus attempt or changes a gate.
+    Retired mode uses the caller's immutable pre-cleanup identity only as history;
+    it never queries or restores the closed engine HANDLE. Its separate one-second
+    diagnostic deadline rejects late data but cannot preempt synchronous file IO.
     """
     code = 1
+    retirement_confirmed = False
     deadline = time.monotonic() + 1
     def budget():
         if time.monotonic() >= deadline:
@@ -51,8 +63,13 @@ def capture_initial_focus_trace(session, record):
         return value
     def keys(value, expected):
         if type(value) is not dict or set(value) != set(expected.split()): raise ValueError()
+    def unknown(error_code):
+        if retired is True:
+            return _initial_focus_retired_unknown(error_code,retirement_confirmed=retirement_confirmed)
+        return _initial_focus_unknown(error_code)
     try:
         budget()
+        flag(retired)
         module=record['module'];case='native-menu-'+module
         assert module in MODULES and record['case']==case==session.process.opengeul_evidence_case
         process=session.process;engine=session.engine;output=Path(session.output)
@@ -67,7 +84,22 @@ def capture_initial_focus_trace(session, record):
         form,panel,child=(integer(value,minimum=1) for value in (session.hwnd,session.parent,session.child))
         assert (record['windowHwnd'],record['parentHwnd'],record['childHwnd'])==(form,panel,child)
         assert len({form,panel,child})==3
-        assert session._opening_focus_identity==(shell_pid,shell_handle,int(engine.handle),office_birth,form,panel,child,office_pid)
+        if retired:
+            code=13
+            assert all(record.get(key) is True for key in ('cleanupConfirmed','shellCleanupConfirmed',
+                'officeExitedAfterCleanup','engineHandleReleased','nativePointCallbackRetired'))
+            assert engine.handle is None
+            observed_exit=process.poll()
+            assert type(observed_exit) is int and type(record.get('shellExitCode')) is int
+            assert observed_exit==record['shellExitCode'] and _confirmed_shell_cleanup(record,shell_pid,observed_exit)
+            assert type(expected_identity) is tuple and len(expected_identity)==8
+            assert all(type(value) is int and value>0 for value in expected_identity)
+            assert type(session._opening_focus_identity) is tuple and session._opening_focus_identity==expected_identity
+            # No native call is made with this historical HANDLE value.
+            historical_engine_handle=integer(expected_identity[2],minimum=1)
+            assert expected_identity==(shell_pid,shell_handle,historical_engine_handle,office_birth,form,panel,child,office_pid)
+        else:
+            assert session._opening_focus_identity==(shell_pid,shell_handle,int(engine.handle),office_birth,form,panel,child,office_pid)
         expected_shell=PureWindowsPath(str(suite/'OpenGeul.Office.exe'))
         expected_engine=PureWindowsPath(str(suite/'Office/program/soffice.bin'))
         for activation in record['windowActivations']:
@@ -86,6 +118,7 @@ def capture_initial_focus_trace(session, record):
         scope=dict(moduleCode=MODULES.index(module)+1,shellPid=shell_pid,shellCreationTime=shell_birth,
             officePid=office_pid,officeCreationTime=office_birth,formHwnd=form,panelHwnd=panel,childHwnd=child,
             shellThreadId=host_thread,editorThreadId=editor_thread)
+        retirement_confirmed=retired
         code=2
         assert output.is_absolute() and not str(output).startswith(('\\\\','//')) and '..' not in output.parts
         for directory in (output,*output.parents):
@@ -241,12 +274,15 @@ def capture_initial_focus_trace(session, record):
                 row['contextInherited']=True
         # Failed writes consume sequence numbers; the logger also has a silent
         # cap and no completion marker. No absent event proves non-execution.
-        return dict(schemaVersion=1,attempted=True,known=True,acceptanceEligible=False,errorCode=0,
+        value=dict(schemaVersion=1,attempted=True,known=True,acceptanceEligible=False,errorCode=0,
             gapObserved=gap_count>0,gapCount=gap_count,eventCompletenessUnknown=True,scope=scope,rows=rows)
+        if retired:
+            value.update(captureModeCode=2,historicalIdentityOnly=True,retirementConfirmed=True)
+        return value
     except TimeoutError:
-        return _initial_focus_unknown(10)
+        return unknown(10)
     except Exception:
-        return _initial_focus_unknown(code)
+        return unknown(code)
 
 
 def require_hwp_launcher_receipt(value, writer, suite):
@@ -924,7 +960,7 @@ class WindowsSession:
                         callback_done = lease.pending is False
                     except BaseException:
                         record['nativePointCleanupErrorCode'] = 1
-                record['nativePointCallbackRetired'] = callback_done
+        record['nativePointCallbackRetired'] = callback_done
         return bool(shell_done and engine_done and engine_released and callback_done and not getattr(self,'hwp_unretired',False))
 
 
@@ -937,7 +973,8 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
         scenarioCompleted=False, actualWindowsExecuted=False,
         viewRoundtripCompleted=False, viewPhysicalVerified=False,
         nativeMenuVerified=False, cleanupConfirmed=False, cleanClose=False,
-        hwpLauncherCompleted=False, nativeHwpMenuLaunchExecuted=False)
+        hwpLauncherCompleted=False, nativeHwpMenuLaunchExecuted=False,
+        initialFocusTraceAfterRetirement=_initial_focus_retired_unknown(12,attempted=False))
     started = time.monotonic()
     session = None
     try:
@@ -982,10 +1019,22 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
                 record['initialFocusTrace'] = capture_initial_focus_trace(session, record)
             except Exception:
                 record['initialFocusTrace'] = _initial_focus_unknown(11)
+            expected_retirement_identity=None
+            try:
+                original=session._opening_focus_identity
+                if type(original) is tuple:expected_retirement_identity=tuple(original)
+            except Exception:
+                pass
             try:
                 record['cleanupConfirmed'] = session.cleanup(record) is True
             except Exception as exc:
                 record['cleanupErrorType'] = type(exc).__name__
+            if record['cleanupConfirmed']:
+                try:
+                    record['initialFocusTraceAfterRetirement'] = capture_initial_focus_trace(session,record,
+                        retired=True,expected_identity=expected_retirement_identity)
+                except Exception:
+                    record['initialFocusTraceAfterRetirement'] = _initial_focus_retired_unknown(11)
         if not record['cleanupConfirmed']:
             record['success'] = False
         record['nativeMenuVerified'] = record['success'] and record['actualWindowsExecuted']
