@@ -112,6 +112,15 @@ class PortablePackageWorkflowTests(unittest.TestCase):
         self.assertFalse((self.checkout/'build-arguments.json').exists())
         self.assertEqual({},published)
 
+    def test_portable_repair_does_not_republish_or_downgrade_the_admitted_runtime_format(self):
+        process,published,_=self.execute_build(runtime_format='source-built-zip')
+        self.assertEqual(process.returncode,0,process.stdout+process.stderr)
+        self.assertEqual(set(published),{'SUITE_PACKAGE','SUITE_ARCHIVE','SUITE_FOREIGN_CWD'})
+        arguments=json.loads((self.checkout/'build-arguments.json').read_text(encoding='utf-8-sig'))
+        self.assertEqual(arguments['engineArchive'],'.work/source-engine-input/OpenGeul-Office-engine-x64.zip')
+        self.assertEqual(arguments['engineReceipt'],'.work/source-engine-input/source-build-receipt.json')
+        self.assertNotIn('SUITE_RUNTIME_FORMAT',published,'A repaired path cannot relabel the admitted runtime')
+
     def test_unknown_runtime_format_is_fatal_before_build(self):
         process,published,_=self.execute_build(mode='focus-diagnostic',runtime_format='unknown')
         self.assertNotEqual(0,process.returncode)

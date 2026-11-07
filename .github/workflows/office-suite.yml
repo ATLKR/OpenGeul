@@ -420,7 +420,13 @@ jobs:
       shell: pwsh
       timeout-minutes: 15
       run: |
-        python suite/e2e/native_menu_smoke.py --suite "$env:SUITE_PACKAGE" --fixtures .work/suite-engine/fixtures --output .work/suite-native-menu
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        python suite/e2e/native_menu_smoke.py --suite "$env:SUITE_PACKAGE" --fixtures .work/suite-engine/fixtures --output .work/suite-native-menu @sourceMenuArgs
         $menuExit = $LASTEXITCODE
         python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
         if ($LASTEXITCODE -ne 0) { throw 'Native menu scenario changed the packaged payload.' }
@@ -452,7 +458,13 @@ jobs:
           $receipt | ConvertTo-Json -Compress | Out-File -LiteralPath '.work/suite-native-menu-archive-integrity.json' -NoClobber -Encoding utf8
           throw 'Native menu UI not executed: prerequisites unavailable.'
         }
-        python suite/e2e/native_menu_archive_completeness.py --workspace . --suite "$env:SUITE_PACKAGE" --output .work/suite-native-menu-archive-integrity.json
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        python suite/e2e/native_menu_archive_completeness.py --workspace . --suite "$env:SUITE_PACKAGE" --output .work/suite-native-menu-archive-integrity.json @sourceMenuArgs
         if ($LASTEXITCODE -ne 0) { throw 'Native menu original generation or graceful shutdown archive is incomplete.' }
         if ('${{ steps.native-menu-ui.outcome }}' -cne 'success') { throw 'Native menu UI verification did not pass.' }
     - name: native 메뉴 숫자 기록·빈 문서 상단 화면 별도 보존
@@ -730,8 +742,16 @@ jobs:
         OPENGEUL_SUITE_NOTICE_SCOPE: '2'
       shell: pwsh
       run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {
+            $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+          }
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
         $package = (Resolve-Path $env:SUITE_PACKAGE).Path
-        python suite/e2e/home_routing_smoke.py --suite $package --features .work/suite-office-features --hwp-fixtures .work/e2e-fixtures --output .work/suite-home-routing
+        python suite/e2e/home_routing_smoke.py --suite $package --features .work/suite-office-features --hwp-fixtures .work/e2e-fixtures --output .work/suite-home-routing @sourceMenuArgs
         $homeExit = $LASTEXITCODE
         python suite/scripts/verify-suite.py $package
         $integrityExit = $LASTEXITCODE
@@ -856,7 +876,13 @@ jobs:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
-        python suite/e2e/writer_style_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-writer-style
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        python suite/e2e/writer_style_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-writer-style @sourceMenuArgs
         if ($LASTEXITCODE -ne 0) { throw 'Physical Writer Heading 1 save and independent reopen failed.' }
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: Writer 스타일 원본 검증 기록 즉시 보존
@@ -874,7 +900,13 @@ jobs:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
-        python suite/e2e/lifecycle_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-lifecycle
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        python suite/e2e/lifecycle_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-lifecycle @sourceMenuArgs
         if ($LASTEXITCODE -ne 0) { throw 'Actual native document lifecycle verification failed.' }
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: lifecycle 원본 검증 기록 즉시 보존
@@ -912,8 +944,14 @@ jobs:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
         $package = (Resolve-Path $env:SUITE_PACKAGE).Path
-        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine/fixtures --output .work/suite-native
+        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine/fixtures --output .work/suite-native @sourceMenuArgs
         if ($LASTEXITCODE -ne 0) { throw 'First complete native UI verification failed.' }
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine --verify-ui
         if ($LASTEXITCODE -ne 0) { throw 'First post-GUI semantic verification failed.' }
@@ -925,10 +963,16 @@ jobs:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
         $package = (Resolve-Path $env:SUITE_PACKAGE).Path
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine-2
         if ($LASTEXITCODE -ne 0) { throw 'Second fresh engine fixtures failed.' }
-        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine-2/fixtures --output .work/suite-native-2
+        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine-2/fixtures --output .work/suite-native-2 @sourceMenuArgs
         if ($LASTEXITCODE -ne 0) { throw 'Second complete native UI verification failed.' }
         & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine-2 --verify-ui
         if ($LASTEXITCODE -ne 0) { throw 'Second post-GUI semantic verification failed.' }

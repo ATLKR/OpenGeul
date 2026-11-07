@@ -10,6 +10,8 @@ import tempfile
 import textwrap
 import unittest
 
+from suite.tests.test_portable_package_workflow import workflow_test_environment
+
 
 ROOT = Path(__file__).resolve().parents[2]
 FOCUSED = ROOT / '.github/workflows/office-home-routes.yml'
@@ -137,7 +139,7 @@ class HomeWorkflowChecks:
                 stub.write_text("import json, os, sys\nfrom pathlib import Path\nwith Path(os.environ['HOME_TEST_LOG']).open('a') as log: log.write(json.dumps(sys.argv[1:])+'\\n')\nraise SystemExit(int(os.environ['HOME_TEST_EXIT'] if sys.argv[1].endswith('home_routing_smoke.py') else os.environ['INTEGRITY_TEST_EXIT']))\n", encoding='utf-8')
                 script = folder / 'step.ps1'
                 script.write_text("$ErrorActionPreference = 'Stop'\nfunction python { & $env:HOME_TEST_PYTHON $env:HOME_TEST_STUB @args }\n" + code, encoding='utf-8')
-                environment = dict(os.environ, SUITE_PACKAGE='dist/owned-package',
+                environment = workflow_test_environment(SUITE_PACKAGE='dist/owned-package', SUITE_RUNTIME_FORMAT='msi',
                                    HOME_TEST_PYTHON=sys.executable, HOME_TEST_STUB=str(stub),
                                    HOME_TEST_LOG=str(folder / 'calls.jsonl'), HOME_TEST_EXIT=str(home_exit),
                                    INTEGRITY_TEST_EXIT=str(integrity_exit))

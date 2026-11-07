@@ -12,12 +12,27 @@ import unittest
 from suite.tests.test_calc_matrix_workflow import WORKFLOW, workflow_steps, field, run_code, ROOTS
 from suite.tests import test_full_acceptance_restore
 from suite.tests.test_com_wait_workflow import step
+from suite.tests.test_portable_package_workflow import workflow_test_environment
 
 PREREQUISITES = ('suite-unit-shell', 'build', 'worker-runtime', 'readiness',
                  'native31-privacy-prepare', 'fixtures')
 DIAGNOSTIC_MODES = ('navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic',
     'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping',
     'matched-plugin-caller', 'reader-console-diagnostic', 'calc-dispatch-diagnostic')
+
+SOURCE_MENU_SCRIPTS=('native_menu_smoke.py','native_menu_archive_completeness.py',
+    'home_routing_smoke.py','writer_style_smoke.py','lifecycle_smoke.py',
+    'windows_smoke.py','windows_smoke.py')
+
+
+def source_menu_steps():
+    selected=[]
+    for candidate in workflow_steps():
+        code=run_code(candidate) if '      run: |' in candidate else ''
+        for line in code.splitlines():
+            if any(line.startswith('python suite/e2e/'+name+' ') for name in set(SOURCE_MENU_SCRIPTS)):
+                selected.append((candidate,line.split()[1]))
+    return selected
 
 
 class NativeMenuWorkflowTests(unittest.TestCase):
@@ -138,31 +153,41 @@ class NativeMenuWorkflowExecutionTests(unittest.TestCase):
             ' out.write(json.dumps(dict(tool=tool,args=args))+"\\n")\n'
             'if tool=="dotnet":\n'
             ' sys.exit(int(os.environ["SHELL_EXIT"]))\n'
+            'if tool=="engine-python":sys.exit(0)\n'
             'if args[:2]==["-m","suite.scripts.run_unit_checks"]:\n'
             ' sys.exit(int(os.environ["UNIT_EXIT"]))\n'
             'if args and args[0]=="suite/e2e/native_menu_archive_completeness.py":\n'
             ' target=pathlib.Path(args[args.index("--output")+1]);target.parent.mkdir(exist_ok=True)\n'
             ' with target.open("x") as out:json.dump(dict(success=os.environ["ARCHIVE_EXIT"]=="0",nativeMenuExecuted=True),out)\n'
             ' sys.exit(int(os.environ["ARCHIVE_EXIT"]))\n'
+            'if args and args[0].startswith("suite/e2e/"):sys.exit(int(os.environ["MENU_EXIT"]))\n'
             'sys.exit(int(os.environ["CAPABILITY_EXIT"]))\n', encoding='utf-8')
 
     def invoke(self, name, *, outcome='success', package='synthetic-package',
                unit_exit=0, shell_exit=0, archive_exit=0, capability_exit=0,
-               unit_throw=False, shell_throw=False):
+               unit_throw=False, shell_throw=False, runtime_format='msi', architecture='arm64',
+               workflow_step=None, menu_exit=0, run_mode='acceptance'):
         def quote(value):
             return "'" + str(value).replace("'", "''") + "'"
-        code = run_code(step(name))
+        code = run_code(step(name) if workflow_step is None else workflow_step)
         code = code.replace('${{ steps.native-menu-ui.outcome }}', outcome)
-        code = code.replace('${{ matrix.architecture }}', 'arm64')
+        code = code.replace('${{ matrix.architecture }}', architecture)
+        code = code.replace('& "$package/Office/program/python.exe"','fake_engine_python')
         self.assertNotIn('${{', code)
-        environment = dict(os.environ, FAKE_CALLS=str(self.calls), UNIT_EXIT=str(unit_exit),
+        environment = workflow_test_environment(FAKE_CALLS=str(self.calls), UNIT_EXIT=str(unit_exit),
             SHELL_EXIT=str(shell_exit), ARCHIVE_EXIT=str(archive_exit), CAPABILITY_EXIT=str(capability_exit),
+            MENU_EXIT=str(menu_exit),
+            OPENGEUL_SUITE_RUN_MODE=run_mode,
             GITHUB_SHA='a' * 40, GITHUB_RUN_ID='1234567', GITHUB_RUN_ATTEMPT='1',
             FAKE_UNIT_THROW='1' if unit_throw else '0', FAKE_SHELL_THROW='1' if shell_throw else '0')
+        if runtime_format is not None:environment['SUITE_RUNTIME_FORMAT']=runtime_format
         if package is None:
             environment.pop('SUITE_PACKAGE', None)
         else:
             environment['SUITE_PACKAGE'] = package
+            (self.root/package).mkdir(parents=True,exist_ok=True)
+        self.calls.unlink(missing_ok=True)
+        if workflow_step is not None:self.archive_receipt().unlink(missing_ok=True)
         script = self.root / 'case.ps1'
         wrappers = (
             "function python { if ($env:FAKE_UNIT_THROW -ceq '1' -and $args[0] -ceq '-m') { "
@@ -171,12 +196,64 @@ class NativeMenuWorkflowExecutionTests(unittest.TestCase):
             "function dotnet { if ($env:FAKE_SHELL_THROW -ceq '1') { "
             "throw 'Original synthetic shell invocation failure.' }; & " + quote(sys.executable) +
             ' ' + quote(self.fake) + " 'dotnet' @args }\n")
+        wrappers += "function fake_engine_python { & " + quote(sys.executable) + ' ' + quote(self.fake) + " 'engine-python' @args }\n"
         script.write_text("$ErrorActionPreference='Stop'\n" + wrappers + "try {\n" + code +
             "\n} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }\n", encoding='utf-8')
         result = subprocess.run([self.pwsh, '-NoLogo', '-NoProfile', '-File', str(script)],
             cwd=self.root, env=environment, capture_output=True, text=True, timeout=20)
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
         return result, calls
+
+    def test_source_runtime_passes_explicit_architecture_to_all_seven_real_menu_commands(self):
+        candidates=source_menu_steps()
+        self.assertEqual([Path(script).name for _,script in candidates],list(SOURCE_MENU_SCRIPTS))
+        for architecture in ('x64','arm64'):
+            for index,(candidate,script) in enumerate(candidates):
+                with self.subTest(architecture=architecture,site=index):
+                    result,calls=self.invoke(None,workflow_step=candidate,architecture=architecture,runtime_format='source-built-zip')
+                    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                    target=[row for row in calls if row['tool']=='python' and row['args'][0]==script]
+                    self.assertEqual(len(target),1)
+                    self.assertEqual(target[0]['args'][-2:],['--source-qualified-menu',architecture])
+
+    def test_msi_runtime_keeps_the_default_menu_path_at_all_seven_sites(self):
+        for index,(candidate,script) in enumerate(source_menu_steps()):
+            with self.subTest(site=index):
+                result,calls=self.invoke(None,workflow_step=candidate,runtime_format='msi',architecture='x64')
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                target=[row for row in calls if row['tool']=='python' and row['args'][0]==script]
+                self.assertEqual(len(target),1);self.assertNotIn('--source-qualified-menu',target[0]['args'])
+
+    def test_unknown_or_missing_runtime_never_enters_a_menu_cli(self):
+        for runtime_format in (None,'unknown','SOURCE-BUILT-ZIP'):
+            for index,(candidate,script) in enumerate(source_menu_steps()):
+                with self.subTest(format=runtime_format,site=index):
+                    result,calls=self.invoke(None,workflow_step=candidate,runtime_format=runtime_format)
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertEqual([row for row in calls if row['tool']=='python' and row['args'][0]==script],[])
+
+    def test_failed_source_menu_preparation_cannot_retry_the_default_path(self):
+        for index,(candidate,script) in enumerate(source_menu_steps()):
+            with self.subTest(site=index):
+                result,calls=self.invoke(None,workflow_step=candidate,runtime_format='source-built-zip',
+                    menu_exit=7,archive_exit=7)
+                self.assertNotEqual(result.returncode,0)
+                target=[row for row in calls if row['tool']=='python' and row['args'][0]==script]
+                self.assertEqual(len(target),1)
+                self.assertEqual(target[0]['args'][-2:],['--source-qualified-menu','arm64'])
+
+    def test_home_ime_diagnostic_keeps_its_preselected_legacy_path(self):
+        candidate,script=next(row for row in source_menu_steps() if row[1].endswith('home_routing_smoke.py'))
+        for runtime_format in ('source-built-zip','msi','unknown'):
+            with self.subTest(format=runtime_format):
+                result,calls=self.invoke(None,workflow_step=candidate,runtime_format=runtime_format,
+                    run_mode='ime-mode-diagnostic')
+                target=[row for row in calls if row['tool']=='python' and row['args'][0]==script]
+                if runtime_format=='unknown':
+                    self.assertNotEqual(result.returncode,0);self.assertEqual(target,[])
+                else:
+                    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                    self.assertEqual(len(target),1);self.assertNotIn('--source-qualified-menu',target[0]['args'])
 
     def archive_receipt(self):
         return self.root / '.work/suite-native-menu-archive-integrity.json'
