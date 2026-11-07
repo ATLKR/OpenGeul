@@ -75,6 +75,41 @@ function Assert-WriterServerObserverEnvironment($Binding) {
     Assert-WriterServerObserverOwnerPush $context (Get-Content -LiteralPath $path -Raw|ConvertFrom-Json) $Binding
 }
 
+function Install-WriterServerObserverFocusBaseline([string]$SourceRoot,[string]$Repo,[string]$Python,[string]$EvidenceDirectory,$Pin,[hashtable]$ChildEnvironment=$null) {
+    $plan=Get-Content -LiteralPath (Join-Path $Repo 'suite/engine-build/source-build.json') -Raw|ConvertFrom-Json
+    $focus=$plan.winAccFocusOrder
+    if($Pin.coreCommit -cne 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1' -or $focus.coreCommit -cne $Pin.coreCommit -or
+       $focus.path -cne 'winaccessibility/source/service/AccObjectWinManager.cxx' -or @($focus.sources).Count -ne 3) {throw 'Writer focus baseline input differs.'}
+    $proofDirectory=Join-Path $EvidenceDirectory 'writer-focus-baseline'
+    New-Item -ItemType Directory -Path $proofDirectory -ErrorAction Stop|Out-Null
+    if($null -eq $ChildEnvironment) {
+        $ChildEnvironment=@{PYTHONUTF8='1';PYTHONDONTWRITEBYTECODE='1'}
+        foreach($key in @('PATH','SystemRoot','WINDIR','TEMP','TMP')) {
+            $value=[Environment]::GetEnvironmentVariable($key)
+            if($null -ne $value) {$ChildEnvironment[$key]=$value}
+        }
+    }
+    $result=Invoke-LoggedCommand $Python @((Join-Path $Repo 'suite/engine-build/apply_winacc_focus_order.py'),'--libreoffice-source',$SourceRoot,'--evidence-directory',$proofDirectory,'--core-commit',$Pin.coreCommit) $Repo (Join-Path $EvidenceDirectory 'writer-focus-baseline-source-hooks') -ChildEnvironment $ChildEnvironment
+    $proof=Get-Content -LiteralPath $result.stdout -Raw|ConvertFrom-Json
+    if($proof.passed -isnot [bool] -or -not $proof.passed -or $proof.schemaVersion -ne 1 -or $proof.kind -cne 'winacc-focus-order-source-patch' -or
+       $proof.coreCommit -cne $Pin.coreCommit -or $proof.path -cne $focus.path -or
+       $proof.beforeSha256 -cne $focus.sha256 -or $proof.afterSha256 -cne $focus.afterSha256 -or $proof.patchSha256 -cne $focus.patch.sha256 -or
+       $proof.nativeBuildVerified -isnot [bool] -or $proof.nativeBuildVerified -or $proof.guiVerified -isnot [bool] -or $proof.guiVerified -or
+       $proof.currentCiRootCauseConfirmed -isnot [bool] -or $proof.currentCiRootCauseConfirmed -or @($proof.sourceFiles).Count -ne 3) {throw 'Writer focus baseline receipt differs.'}
+    $seen=@{}
+    foreach($expected in @($focus.sources)) {
+        $rows=@($proof.sourceFiles|Where-Object {$_.path -ceq $expected.path})
+        if($rows.Count -ne 1 -or $seen.ContainsKey($expected.path)) {throw 'Writer focus baseline source set differs.'}
+        $seen[$expected.path]=$true;$row=$rows[0]
+        $after=if($expected.path -ceq $focus.path){$focus.afterSha256}else{$expected.sha256}
+        $afterBytes=if($expected.path -ceq $focus.path){$focus.afterBytes}else{$expected.size}
+        if($row.beforeBytes -ne $expected.size -or $row.afterBytes -ne $afterBytes -or $row.beforeSha256 -cne $expected.sha256 -or $row.afterSha256 -cne $after) {throw 'Writer focus baseline source receipt differs.'}
+        $file=Join-Path $SourceRoot $expected.path;Assert-UnlinkedPath $file
+        if((Get-Item -LiteralPath $file).Length -ne $afterBytes -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $after) {throw 'Writer focus baseline effective source differs.'}
+    }
+    return $proof
+}
+
 function Install-WriterServerObserverSource([string]$SourceRoot,[string]$Repo,[string]$Python,[string]$EvidenceDirectory,$Pin,[hashtable]$ChildEnvironment=$null) {
     $package=Join-Path $Repo 'suite/engine-build/writer-server-observer-diagnostic'
     foreach($name in @('source-lock.json','source.patch','wire-schema.json')) {
@@ -518,13 +553,23 @@ function Get-CommandCreationIdentity($Process) {
 }
 
 function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350,[hashtable]$EnvironmentOverrides=@{},[hashtable]$ChildEnvironment=$null) {
+    $closedSource=($null -ne $ChildEnvironment)
     $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null;
         timeoutMinutes=$TimeoutMinutes;pipeDrainComplete=$false;forcedTermination=$false;directProcessDeathVerified=$false;processTreeCleanup='not-requested';cleanupErrors=@()}
+    if($closedSource) {foreach($key in @('file','arguments','workingDirectory')) {$receipt.Remove($key)}}
     $stdout=$LogPrefix+'.stdout.log';$stderr=$LogPrefix+'.stderr.log'
-    foreach($path in @($stdout,$stderr,$LogPrefix+'.command.json')) {if(Test-Path -LiteralPath $path){throw 'Command evidence already exists.'}}
+    if($closedSource) {
+        try {
+            foreach($path in @($stdout,$stderr,$LogPrefix+'.command.json')) {if(Test-Path -LiteralPath $path -ErrorAction Stop){throw 'Command evidence already exists.'}}
+        } catch {throw 'Closed source command preflight failed.'}
+    } else {
+        foreach($path in @($stdout,$stderr,$LogPrefix+'.command.json')) {if(Test-Path -LiteralPath $path){throw 'Command evidence already exists.'}}
+    }
     $outStream=$null;$errStream=$null;$process=$null;$started=$false;$failure=$null
     $cancel=[Threading.CancellationTokenSource]::new();$watch=[Diagnostics.Stopwatch]::StartNew()
-    Write-Host ('Starting: '+[IO.Path]::GetFileName($FilePath)+' '+($Arguments -join ' '))
+    if(-not $closedSource) {
+        Write-Host ('Starting: '+[IO.Path]::GetFileName($FilePath)+' '+($Arguments -join ' '))
+    } else {Write-Host ('Starting closed source command: argumentCount='+@($Arguments).Count)}
     try {
         $timeoutMilliseconds=Get-NativeBuildRemaining ([int][Math]::Floor($TimeoutMinutes*60000))
         $receipt.effectiveTimeoutMilliseconds=$timeoutMilliseconds
@@ -567,7 +612,9 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
             $remaining=[int][Math]::Floor($timeoutMilliseconds-$watch.Elapsed.TotalMilliseconds)
             if($remaining -le 0) {throw 'Owned command exceeded its original time budget.'}
             if($process.WaitForExit([Math]::Min(15000,$remaining))) {break}
-            Write-Host ("Still running {0}: {1}s; stdout={2} bytes stderr={3} bytes" -f [IO.Path]::GetFileName($FilePath),[int]$watch.Elapsed.TotalSeconds,$outStream.Length,$errStream.Length)
+            if(-not $closedSource) {
+                Write-Host ("Still running {0}: {1}s; stdout={2} bytes stderr={3} bytes" -f [IO.Path]::GetFileName($FilePath),[int]$watch.Elapsed.TotalSeconds,$outStream.Length,$errStream.Length)
+            } else {Write-Host ("Closed source command: {0}s; stdout={1} bytes stderr={2} bytes" -f [int]$watch.Elapsed.TotalSeconds,$outStream.Length,$errStream.Length)}
         }
         $receipt.exitCode=$process.ExitCode;$receipt.directProcessDeathVerified=$true
         # Descendants can retain inherited output handles after the direct
@@ -580,8 +627,9 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         $receipt.pipeDrainComplete=$true
         if($process.ExitCode -ne 0) {
             $outStream.Flush();$errStream.Flush()
-            try {Write-CommandFailureTail $stdout 'stdout';Write-CommandFailureTail $stderr 'stderr'}
-            catch {Write-Host ('Owned failure tail unavailable: '+$_.Exception.Message)}
+            try {if(-not $closedSource) {Write-CommandFailureTail $stdout 'stdout';Write-CommandFailureTail $stderr 'stderr'}}
+            catch {if(-not $closedSource) {Write-Host ('Owned failure tail unavailable: '+$_.Exception.Message)}}
+            if($closedSource) {throw 'Closed source command failed.'}
             throw "Command failed with exit $($process.ExitCode); inspect $stdout and $stderr"
         }
         $receipt.passed=$true
@@ -613,10 +661,20 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         if($receipt.cleanupErrors.Count -gt 0) {$receipt.passed=$false;if(-not $receipt.error){$receipt.error='Owned command resource cleanup failed.'}}
         $receipt.elapsedSeconds=[Math]::Round($watch.Elapsed.TotalSeconds,3)
         $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
-        Write-BuildJson ($LogPrefix+'.command.json') $receipt
+        if($closedSource) {
+            # Only this explicit child-map mode withholds argv, paths and raw errors.
+            $closedReceipt=[ordered]@{schemaVersion=1;kind='closed-source-command';argumentCount=@($Arguments).Count;
+                passed=$receipt.passed;exitCode=$receipt.exitCode;timeoutMinutes=$receipt.timeoutMinutes;
+                effectiveTimeoutMilliseconds=$receipt.effectiveTimeoutMilliseconds;pipeDrainComplete=$receipt.pipeDrainComplete;
+                forcedTermination=$receipt.forcedTermination;directProcessDeathVerified=$receipt.directProcessDeathVerified;
+                processTreeCleanup=$receipt.processTreeCleanup;cleanupErrorCount=@($receipt.cleanupErrors).Count;
+                errorKnown=($null -ne $receipt.error);elapsedSeconds=$receipt.elapsedSeconds}
+            try {Write-BuildJson ($LogPrefix+'.command.json') $closedReceipt}
+            catch {throw 'Closed source command receipt write failed.'}
+        } else {Write-BuildJson ($LogPrefix+'.command.json') $receipt}
     }
-    if($failure) {throw $failure}
-    if(-not $receipt.passed) {throw $receipt.error}
+    if($failure) {if($closedSource) {throw 'Closed source command failed.'};throw $failure}
+    if(-not $receipt.passed) {if($closedSource) {throw 'Closed source command failed.'};throw $receipt.error}
     return [pscustomobject]@{stdout=$stdout;stderr=$stderr;receipt=$LogPrefix+'.command.json';exitCode=$receipt.exitCode}
 }
 
@@ -1441,6 +1499,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         }
         if($WriterServerObserverDiagnostic) {
             $receipt.stage='install-authenticated-writer-server-observer-diagnostic';Assert-NativeBuildTimeRemaining
+            $receipt.writerServerObserverFocusBaseline=Install-WriterServerObserverFocusBaseline $source $repo $python $evidence $pin
             $receipt.writerServerObserverSourceHooks=Install-WriterServerObserverSource $source $repo $python $evidence $pin
             $receipt.sourceLockSha256=$receipt.writerServerObserverSourceHooks.lockSha256
             $receipt.diagnosticFamily='writer-server-observer-diagnostic'
