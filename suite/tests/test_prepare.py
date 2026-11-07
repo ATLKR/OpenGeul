@@ -161,10 +161,13 @@ def x64_source_build_fixture(root, *, runtime_templates=False):
     for name in ('cl','link','lib'):
         tools[name]=dict(path=compiler_root+'\\bin\\Hostx64\\x64\\'+name+'.exe',machine=0x8664,
             role='nativeCompilerTool',tool=name,size=1024,sha256='8'*64,
-            version=('19' if name=='cl' else '14')+'.44.35207.0')
+            version=('19' if name=='cl' else '14')+'.44.35229.0')
+    metadata_raw=b'14.44.35207\r\n'
     compiler=dict(architecture='x64',compilerYear='2022',toolset='v143',installationPath='C:\\VS',
-        installationVersion='17.14.0',compilerRoot=compiler_root,compilerToolsVersion='14.44.35207',
-        minimumRuntimeVersion='14.44.35207.0',tools=tools)
+        installationVersion='17.14.37827.9',compilerRoot=compiler_root,compilerToolsVersion='14.44.35207',
+        minimumRuntimeVersion='14.44.35207.0',runtimeFloorBasis='selected-msvc-package-v1',
+        toolsetMetadata=dict(path='C:\\VS\\VC\\Auxiliary\\Build\\Microsoft.VCToolsVersion.default.txt',
+            size=len(metadata_raw),sha256=hashlib.sha256(metadata_raw).hexdigest(),version='14.44.35207'),tools=tools)
     sdk_files=[]
     for relative in (f'Include/{sdk_version}/um/Windows.h',f'Include/{sdk_version}/shared/sdkddkver.h',
                      f'Include/{sdk_version}/ucrt/stdio.h',f'Lib/{sdk_version}/um/x64/kernel32.lib',
@@ -176,7 +179,7 @@ def x64_source_build_fixture(root, *, runtime_templates=False):
                      machine=0x8664,role='nativeX64',size=100,sha256='a'*64)),
         archive=dict(path='C:\\probe\\owned.lib',size=100,sha256='b'*64,machines=[0x8664]),
         executable=dict(path='C:\\probe\\probe.exe',size=100,sha256='c'*64,machine=0x8664,role='nativeX64'),
-        nativeProcess=dict(native,compilerFullVersion=194435207,libraryValue=42),
+        nativeProcess=dict(native,compilerFullVersion=194435229,libraryValue=42),
         commands={name:dict(exitCode=0,receipt='C:\\evidence\\'+name+'.json',
             stdout='C:\\evidence\\'+name+'.stdout.log',stderr='C:\\evidence\\'+name+'.stderr.log')
             for name in ('member','probe','archive','link','run')})
@@ -202,19 +205,20 @@ def x64_source_build_fixture(root, *, runtime_templates=False):
             jobEmptyVerified=True,finalJobPids=[],launcherExitCode=0,errors=[],jobHandleValue=42,
             expectedEngineImage=host['image'],initialMembers=[member],finalMembers=[final])))
     proof['baseProof']['retirement']=retirements
-    source_dir='C:\\VS\\VC\\Redist\\MSVC\\14.44.35207\\x64\\Microsoft.VC143.CRT'
+    source_dir='C:\\VS\\VC\\Redist\\MSVC\\14.44.35112\\x64\\Microsoft.VC143.CRT'
     crt=[]
     for name in VC_DLLS:
         old=copy.deepcopy(proof['crtPreflight']['files'][0])
         old.update(name=name,sourcePath=source_dir+'\\'+name,machine=0x8664,
                    size=len(entries['program/'+name]),sha256=hashlib.sha256(entries['program/'+name]).hexdigest())
-        old['signature'].update(originalFilename=name,fileVersion='14.44.35207.0',productVersion='14.44.35207.0',
-                                fileVersionParts=[14,44,35207,0],productVersionParts=[14,44,35207,0])
+        old['signature'].update(originalFilename=name,fileVersion='14.44.35211.0',productVersion='14.44.35211.0',
+                                fileVersionParts=[14,44,35211,0],productVersionParts=[14,44,35211,0])
         crt.append(old)
     proof['crtPreflight']=dict(schemaVersion=1,architecture='x64',toolset='v143',
         compilerRoot=compiler_root,compilerToolsVersion='14.44.35207',minimumRuntimeVersion='14.44.35207.0',
-        redistRoot='C:\\VS\\VC\\Redist\\MSVC',redistVersionDirectory='14.44.35207',
-        redistFamily='Microsoft.VC143.CRT',sourceDirectory=source_dir,files=crt)
+        redistRoot='C:\\VS\\VC\\Redist\\MSVC',redistVersionDirectory='14.44.35112',
+        redistFamily='Microsoft.VC143.CRT',selectionBasis='actual-signed-crt-files-v1',
+        selectedFileVersionFloor='14.44.35211.0',sourceDirectory=source_dir,files=crt)
     proof['nativePreflight']['crt']=copy.deepcopy(proof['crtPreflight'])
     proof['appLocalCrt']=dict(schemaVersion=1,architecture='x64',toolset='v143',sourceDirectory=source_dir,
         programDirectory=program,files=[dict(source=copy.deepcopy(item),destination=program+'\\'+item['name'],
@@ -1300,6 +1304,74 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             item['source']=copy.deepcopy(record)
         proof['nativePreflight']['crt']=copy.deepcopy(plan)
 
+    def test_v2_package_floor_preserves_distinct_tool_resources_crt_files_and_folder(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+            observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
+            compiler=observed['nativePreflight']['compiler'];crt=observed['crtPreflight']
+            self.assertEqual(compiler['minimumRuntimeVersion'],'14.44.35207.0')
+            self.assertEqual(compiler['tools']['cl']['version'],'19.44.35229.0')
+            self.assertEqual(crt['selectedFileVersionFloor'],'14.44.35211.0')
+            self.assertEqual(crt['redistVersionDirectory'],'14.44.35112')
+            self.assertEqual(observed['nativePreflight']['nativeProcess']['compilerFullVersion'],194435229)
+
+    def test_v2_package_floor_requires_bound_default_tools_metadata(self):
+        mutations=[lambda p:p['nativePreflight']['compiler'].pop('runtimeFloorBasis'),
+            lambda p:p['nativePreflight']['compiler'].update(runtimeFloorBasis='tool-resource-maximum'),
+            lambda p:p['nativePreflight']['compiler'].pop('toolsetMetadata'),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].pop('path'),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].update(path='D:\\OtherVS\\VC\\Auxiliary\\Build\\Microsoft.VCToolsVersion.default.txt'),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].update(path='C:\\VS\\VC\\Auxiliary\\Build\\Microsoft.VCToolsRedistVersion.default.txt'),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].update(size=0),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].update(size=True),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].update(size=4097),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].update(sha256='bad'),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].update(version='14.43.35207'),
+            lambda p:p['nativePreflight']['compiler']['toolsetMetadata'].update(version='14.44.35229'),
+            lambda p:p['nativePreflight']['compiler'].update(minimumRuntimeVersion='14.44.35229.0')]
+        self.reject_mutations(mutations)
+
+    def test_v2_package_floor_preserves_resource_family_and_native_compiler_witness(self):
+        self.reject_mutations([
+            lambda p:p['nativePreflight']['compiler']['tools']['cl'].update(version='19.43.35229.0'),
+            lambda p:p['nativePreflight']['compiler']['tools']['link'].update(version='14.45.35229.0'),
+            lambda p:p['nativePreflight']['compiler']['tools']['lib'].update(version='19.44.35229.0'),
+            lambda p:p['nativePreflight']['nativeProcess'].update(compilerFullVersion=194435207)])
+
+    def test_v2_actual_crt_file_floor_requires_derived_minimum_and_selection_basis(self):
+        mutations=[]
+        for changes in ({'selectionBasis':None},{'selectionBasis':'directory-name'},
+                        {'selectedFileVersionFloor':None},{'selectedFileVersionFloor':'14.44.35229.0'},
+                        {'selectedFileVersionFloor':'14.44.35207.0'},{'selectedFileVersionFloor':'14.44.35211'},
+                        {'selectedFileVersionFloor':True}):
+            mutations.append(lambda p,changes=changes:self.rebind_crt_plan(p,**changes))
+        self.reject_mutations(mutations)
+
+    def test_v2_new_redist_folder_cannot_hide_old_unsigned_or_foreign_actual_dll(self):
+        def bad_file(proof,kind):
+            plan=proof['crtPreflight'];record=plan['files'][0]
+            if kind in ('old-file','old-product'):
+                field='file' if kind=='old-file' else 'product'
+                record['signature'][field+'VersionParts']=[14,44,35206,0]
+                record['signature'][field+'Version']='14.44.35206.0'
+                if kind=='old-file':plan['selectedFileVersionFloor']='14.44.35206.0'
+            elif kind=='unsigned':record['signature']['status']='NotSigned'
+            else:record['signature']['companyName']='Foreign vendor'
+            self.rebind_crt_plan(proof,redistVersionDirectory='14.99.99999',
+                sourceDirectory='C:\\VS\\VC\\Redist\\MSVC\\14.99.99999\\x64\\Microsoft.VC143.CRT')
+        self.reject_mutations([lambda p,kind=kind:bad_file(p,kind) for kind in
+                               ('old-file','old-product','unsigned','foreign')])
+
+    def test_v2_external_receipt_pin_detects_replaced_metadata_hash(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+            proof['nativePreflight']['compiler']['toolsetMetadata']['sha256']='c'*64
+            path.write_text(json.dumps(proof),encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'locked SHA256'):
+                module.validate_source_build_receipt(runtime,path,architecture='x64')
+
     def test_v2_crt_plan_requires_all_emitted_lineage_fields(self):
         mutations=[]
         for name in ('compilerRoot','redistRoot','redistVersionDirectory','redistFamily'):
@@ -1309,15 +1381,13 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             mutations.append(missing)
         self.reject_mutations(mutations)
 
-    def test_v2_crt_plan_rejects_foreign_vs_family_and_escaped_or_older_redist(self):
+    def test_v2_crt_plan_rejects_foreign_vs_family_and_escaped_redist(self):
         self.reject_mutations([
             lambda p:self.rebind_crt_plan(p,compilerRoot='D:\\OtherVS\\VC\\Tools\\MSVC\\14.44.35207'),
             lambda p:self.rebind_crt_plan(p,redistRoot='D:\\OtherVS\\VC\\Redist\\MSVC'),
             lambda p:self.rebind_crt_plan(p,redistVersionDirectory='14.44'),
             lambda p:self.rebind_crt_plan(p,redistVersionDirectory='../14.44.35207'),
             lambda p:self.rebind_crt_plan(p,redistVersionDirectory='v145'),
-            lambda p:self.rebind_crt_plan(p,redistVersionDirectory='14.43.0',
-                sourceDirectory='C:\\VS\\VC\\Redist\\MSVC\\14.43.0\\x64\\Microsoft.VC143.CRT'),
             lambda p:self.rebind_crt_plan(p,redistFamily='Microsoft.VC145.CRT',
                 sourceDirectory='C:\\VS\\VC\\Redist\\MSVC\\14.44.35207\\x64\\Microsoft.VC145.CRT'),
             lambda p:self.rebind_crt_plan(p,redistRoot='D:\\OtherVS\\VC\\Redist\\MSVC',
@@ -1327,7 +1397,7 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
 
     def test_v2_crt_plan_accepts_only_producer_supported_version_directory_forms(self):
         module=implementation()
-        for directory in ('14.44.35207','14.44.35207.0','v14.44.35207','V14.44.35207','v143'):
+        for directory in ('14.44.35112','14.44.35207','14.44.35207.0','v14.44.35207','V14.44.35207','v143'):
             with self.subTest(directory=directory),tempfile.TemporaryDirectory() as folder:
                 _,runtime,path,proof=x64_source_build_fixture(Path(folder))
                 self.rebind_crt_plan(proof,redistVersionDirectory=directory,

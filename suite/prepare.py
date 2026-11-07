@@ -180,19 +180,26 @@ def _source_x64_preflight(proof: dict) -> None:
     directory=_source_version(compiler.get('compilerToolsVersion'),14)
     if root != installation/'VC/Tools/MSVC'/compiler['compilerToolsVersion']:
         raise ValueError('Selected native compiler root differs from installation/version')
+    metadata=compiler.get('toolsetMetadata')
+    if (compiler.get('runtimeFloorBasis') != 'selected-msvc-package-v1'
+            or not isinstance(metadata,dict) or set(metadata) != {'path','size','sha256','version'}):
+        raise ValueError('Native runtime floor lacks selected MSVC package metadata')
+    _source_file_identity(metadata)
+    if (metadata['size'] > 4096 or metadata.get('version') != compiler['compilerToolsVersion']
+            or _source_windows_path(metadata['path']) != installation/'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt'
+            or compiler.get('minimumRuntimeVersion') != '.'.join(map(str,directory))):
+        raise ValueError('Native runtime package floor differs from selected default-tools metadata')
     tools=compiler.get('tools')
     if not isinstance(tools,dict) or set(tools) != {'cl','link','lib'}:
         raise ValueError('Native compiler tool family is incomplete')
-    floors=[directory]
+    # Tool servicing resources retain their own family/native witnesses;
+    # they are not relabelled as CRT package versions.
     for name,item in tools.items():
         _source_file_identity(item,machine=0x8664,role='nativeCompilerTool')
         version=_source_version(item.get('version'),19 if name=='cl' else 14)
         if (item.get('tool') != name or _source_windows_path(item['path']) != root/('bin/Hostx64/x64/'+name+'.exe')
                 or version[1] != directory[1] or version[2] < directory[2]):
             raise ValueError('Native compiler tool path/resource version differs')
-        floors.append((14,*version[1:]))
-    if _source_version(compiler.get('minimumRuntimeVersion'),14) != max(floors):
-        raise ValueError('Native compiler/runtime floor is not the maximum observed version')
     sdk_root=_source_windows_path(sdk.get('root'));sdk_version=sdk.get('version')
     if (not isinstance(sdk_version,str) or not re.fullmatch(r'10\.0\.[0-9]+\.0',sdk_version)
             or _source_version(sdk_version) < (10,0,20348,0)):
@@ -775,7 +782,7 @@ def _source_build_crt(proof: dict, *, architecture: str = 'arm64') -> tuple[dict
         raise ValueError('x64 source CRT schema versions require integer identities')
     minimum = version(plan.get('minimumRuntimeVersion'))
     if (architecture == 'arm64' and minimum != version(plan.get('compilerToolsVersion'))
-            or architecture == 'x64' and (minimum < version(plan.get('compilerToolsVersion'))
+            or architecture == 'x64' and (plan.get('minimumRuntimeVersion') != '.'.join(map(str,version(plan.get('compilerToolsVersion'))))
                 or plan != proof.get('nativePreflight', {}).get('crt')
                 or plan.get('compilerToolsVersion') != proof.get('nativePreflight', {}).get('compiler', {}).get('compilerToolsVersion')
                 or plan.get('minimumRuntimeVersion') != proof.get('nativePreflight', {}).get('compiler', {}).get('minimumRuntimeVersion'))):
@@ -789,8 +796,7 @@ def _source_build_crt(proof: dict, *, architecture: str = 'arm64') -> tuple[dict
         redist = compiler.parents[2]/'Redist/MSVC'
         directory = plan.get('redistVersionDirectory')
         match = re.fullmatch(r'[vV]?(14\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)', directory) if isinstance(directory, str) else None
-        candidate = minimum if directory == 'v143' else version(match[1]) if match else None
-        if (candidate is None or candidate < minimum or plan.get('redistFamily') != 'Microsoft.VC143.CRT'
+        if ((directory != 'v143' and match is None) or plan.get('redistFamily') != 'Microsoft.VC143.CRT'
                 or _source_windows_path(plan.get('redistRoot')) != redist
                 or _source_windows_path(plan.get('sourceDirectory')) != redist/directory/'x64/Microsoft.VC143.CRT'):
             raise ValueError('x64 CRT redist lineage/family differs from the selected native compiler')
@@ -831,6 +837,11 @@ def _source_build_crt(proof: dict, *, architecture: str = 'arm64') -> tuple[dict
         records[name] = record
     if set(records) != expected:
         raise ValueError('Source-build CRT exact native file family is incomplete')
+    if architecture == 'x64':
+        actual_floor=min(tuple(record['signature']['fileVersionParts']) for record in records.values())
+        if (plan.get('selectionBasis') != 'actual-signed-crt-files-v1'
+                or plan.get('selectedFileVersionFloor') != '.'.join(map(str,actual_floor))):
+            raise ValueError('x64 CRT selection does not match the actual signed file-version floor')
     seen = set()
     for item in copied['files']:
         source = item.get('source') if isinstance(item, dict) else None
