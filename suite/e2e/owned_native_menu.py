@@ -43,6 +43,25 @@ IDENTITY_METHOD='retained-uia-comparison'
 EDIT_CONTRAST=('편집','Edit')
 IDENTITY_ROLES=('file','bar','peer','contrast-edit')+tuple('target:'+name for name in LABELS if name!='file')
 
+# Fixed callsites only, never an assertion about the COM object's identity.
+# 0 unobserved; 1 retained-File chrome; 2 physical-File ancestry query;
+# 3/4 legacy global-point/target chrome; 5/6 diagnostic target/global-point;
+# 7 point target chrome; 8 failure ancestry; 9 focused ancestry;
+# 10/11 snapshot first target candidate/following ancestor; 12 repeated target;
+# 13/14 view peer/shell roots; 15/16 view target/ancestor;
+# 17/18 source-qualified global-point/target chrome.
+_GETTER_SITE_CODES=frozenset(range(19))
+_GETTER_SITE_UNSET=object()
+
+
+def _getter_call_site(probe,code,function,*args):
+    previous=getattr(probe,'_getter_site_code',_GETTER_SITE_UNSET)
+    probe._getter_site_code=code
+    try:return function(*args)
+    finally:
+        if previous is _GETTER_SITE_UNSET:probe.__dict__.pop('_getter_site_code',None)
+        else:probe._getter_site_code=previous
+
 
 class NativeMenuPending(AssertionError):pass
 
@@ -1177,7 +1196,7 @@ class NativeMenuProbe(NativeControlProbe):
             assert foreground==binding['document'], 'Physical File header requires its original foreground document'
             return child
         before=owned();observation['ownershipBefore']=True
-        file_row=self._chrome(refs['file'])
+        file_row=_getter_call_site(self,1,self._chrome,refs['file'])
         assert file_row['pid']==binding['officePid'] and file_row['controlType']=='MenuItem'
         assert file_row['visible'] is file_row['enabled'] is True
         rect=file_row['rectangle'];assert len(rect)==4 and all(type(n) is int for n in rect)
@@ -1200,7 +1219,7 @@ class NativeMenuProbe(NativeControlProbe):
         for index in range(32):
             kind=self._uia_call(9,lambda:cursor.CurrentControlType)
             owner=self._uia_call(8,lambda:cursor.CurrentProcessId)
-            raw=self._uia_call(7,lambda:cursor.CurrentNativeWindowHandle)
+            raw=_getter_call_site(self,2,self._uia_call,7,lambda:cursor.CurrentNativeWindowHandle)
             assert type(kind) is type(owner) is int and owner==binding['officePid']
             assert raw is None or type(raw) is int and -(2**31)<=raw<2**32
             hwnd=0 if raw is None else raw&0xffffffff
@@ -1301,8 +1320,12 @@ class NativeMenuProbe(NativeControlProbe):
         finally:self._observed_call=previous
     def _call_record(self,code):
         target=getattr(self,'_active_target',None)
-        return dict(apiCode=code,targetCode=tuple(LABELS).index(target)+1 if target in LABELS else 0,
+        record=dict(apiCode=code,targetCode=tuple(LABELS).index(target)+1 if target in LABELS else 0,
             phaseCode=0,providerStep=0,calleeEntered=False,callCompleted=False,failed=False,hresultObserved=False)
+        if code==7:
+            site=getattr(self,'_getter_site_code',0)
+            record['getterSiteCode']=site if type(site) is int and site in _GETTER_SITE_CODES else 0
+        return record
     @staticmethod
     def _exception_numbers(exc):
         result=dict(exceptionCode=1 if isinstance(exc,AssertionError) else 2 if type(exc).__name__=='COMError' else 3,hresultObserved=False)
@@ -1413,9 +1436,9 @@ class NativeMenuProbe(NativeControlProbe):
         creator=self._require_provider_creator();scope=self._identity_scope;binding=scope['binding']
         role=_target_role(self._active_target)
         global_point=dict(kindCode=self._uia_call(9,lambda:actual.CurrentControlType),
-            pid=self._uia_call(8,lambda:actual.CurrentProcessId),nativeHwnd=self._uia_call(7,lambda:actual.CurrentNativeWindowHandle))
+            pid=self._uia_call(8,lambda:actual.CurrentProcessId),nativeHwnd=_getter_call_site(self,3,self._uia_call,7,lambda:actual.CurrentNativeWindowHandle))
         assert global_point['kindCode']==50033 and global_point['pid']==binding['officePid']
-        rectangle=self._chrome(target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
+        rectangle=_getter_call_site(self,4,self._chrome,target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
         assert global_point['nativeHwnd']==before['hwnd']
         source_fresh=fresh_refs=None
         if version==2:
@@ -1481,8 +1504,8 @@ class NativeMenuProbe(NativeControlProbe):
             creator=self._require_provider_creator();scope=self._identity_scope;binding=scope['binding']
             assert self._uia_call(9,lambda:actual.CurrentControlType)==50033
             assert self._uia_call(8,lambda:actual.CurrentProcessId)==binding['officePid']
-            rectangle=self._chrome(target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
-            assert self._uia_call(7,lambda:actual.CurrentNativeWindowHandle)==before['hwnd']
+            rectangle=_getter_call_site(self,5,self._chrome,target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
+            assert _getter_call_site(self,6,self._uia_call,7,lambda:actual.CurrentNativeWindowHandle)==before['hwnd']
             # Discovery consumes this same narrowed expiry; it is never reset.
             captured_at=self.clock();effective=min(action_deadline,captured_at+1.5)
             self.deadline=effective
@@ -1583,7 +1606,7 @@ class NativeMenuProbe(NativeControlProbe):
             hit=int(self._call(self.user.WindowFromPhysicalPoint,Point(*point)) or 0);pid=C.c_uint32()
             if hit:self._required(self._call(self.user.GetWindowThreadProcessId,hit,C.byref(pid)),'Physical native menu hit PID')
             observation['stageCode']=2
-            target=control.element_info._element;row=self._chrome(target);handle=row['nativeHwnd']
+            target=control.element_info._element;row=_getter_call_site(self,7,self._chrome,target);handle=row['nativeHwnd']
             kinds={'Button':50000,'MenuBar':50010,'MenuItem':50011,'ToolBar':50021,'Window':50032}
             observation['target']=dict(kindCode=kinds.get(row['controlType'],0),pid=row['pid'],nativeHwnd=handle,
                 rectangle=list(row['rectangle']),enabled=row['enabled'],visible=row['visible'])
@@ -1692,7 +1715,7 @@ class NativeMenuProbe(NativeControlProbe):
                     pid=self._uia_call(8,lambda:cursor.CurrentProcessId);assert type(pid) is int and 0<pid<2**32;row['pid']=pid
                     if pid!=binding['officePid']:diagnostic['pointStatus']=5;return
                     budget();row['kindCode']=self._uia_call(9,lambda:cursor.CurrentControlType)
-                    budget();raw=self._uia_call(7,lambda:cursor.CurrentNativeWindowHandle)
+                    budget();raw=_getter_call_site(self,8,self._uia_call,7,lambda:cursor.CurrentNativeWindowHandle)
                     assert raw is None or type(raw) is int and -(2**31)<=raw<2**32
                     row['nativeHwnd']=0 if raw is None else raw&0xffffffff
                     budget();box=self._uia_call(10,lambda:cursor.CurrentBoundingRectangle)
@@ -1810,7 +1833,7 @@ class NativeMenuProbe(NativeControlProbe):
         for _ in range(32):
             if not cursor:break
             if comparison:
-                row=self._chrome(cursor);result.append(row)
+                row=_getter_call_site(self,9,self._chrome,cursor);result.append(row)
                 file_same=self._same(cursor,self.file_element);bar_same=self._same(cursor,self.menu_bar_element)
                 assert not (file_same and bar_same), 'Focused native menu roles alias'
                 if file_same or bar_same:
@@ -1975,7 +1998,7 @@ class NativeMenuProbe(NativeControlProbe):
         self.current_control=type('NativeMenuControl',(),{'element_info':type('Info',(),{'_element':element})()})()
         chain=[];cursor=element;file_index=bar_index=None;file_equal=peer_equal=False
         for _ in range(32):
-            row=self._chrome(cursor);chain.append(row);index=len(chain)-1
+            row=_getter_call_site(self,10 if not chain else 11,self._chrome,cursor);chain.append(row);index=len(chain)-1
             if self._same(cursor,self.file_element):file_index=index;file_equal=True
             if row['controlType']=='MenuBar' and file_index is not None and bar_index is None:
                 if getattr(self,'_uses_comparison',False):assert self._same(cursor,self.menu_bar_element), 'Native menubar differs from the retained original'
@@ -1983,7 +2006,7 @@ class NativeMenuProbe(NativeControlProbe):
             if self._same(cursor,root):peer_equal=True;break
             cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor);assert cursor
         else:raise AssertionError('Native menu ancestry exceeded bound')
-        control=self._chrome(element);rect=control['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
+        control=_getter_call_site(self,12,self._chrome,element);rect=control['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
         proof=self._fresh_proof(target) if getattr(self,'_uses_comparison',False) else None
         popup=None;target_point=None
         if target!='file':
@@ -2030,7 +2053,7 @@ class NativeMenuProbe(NativeControlProbe):
     def view_snapshot(self,binding,module):
         assert module in ('writer','calc')
         root=self._root(binding['child']);doc=binding['document']
-        peer_identity=self._chrome(root)
+        peer_identity=_getter_call_site(self,13,self._chrome,root)
         assert (peer_identity['pid'],peer_identity['nativeHwnd'])==(binding['officePid'],binding['child']), 'Native view UIA root is outside the original peer'
         editor=self.editor_snapshot(binding)
         condition=self._call(lambda:self.uia.build_condition(control_type='MenuBar'))
@@ -2047,7 +2070,7 @@ class NativeMenuProbe(NativeControlProbe):
             assert visible<=1
             return visible
         native_bars=menu_count(root,binding['officePid'])
-        shell=self._root(doc);document_identity=self._chrome(shell)
+        shell=self._root(doc);document_identity=_getter_call_site(self,14,self._chrome,shell)
         assert (document_identity['pid'],document_identity['nativeHwnd'])==(self.window_snapshot(doc)['pid'],doc), 'Native view UIA host root changed'
         found=self._call(shell.FindAll,self.uia.tree_scope['descendants'],condition)
         count=int(self._call(lambda:found.Length));assert 0<=count<=64
@@ -2066,12 +2089,12 @@ class NativeMenuProbe(NativeControlProbe):
             count=int(self._call(lambda:found.Length));assert 0<=count<=2
             for index in range(count):
                 element=self._call(found.GetElement,index)
-                row=self._chrome(element)
+                row=_getter_call_site(self,15,self._chrome,element)
                 if not row['visible']:continue
                 assert self._call(lambda:element.CurrentName)==label
                 chain=[];cursor=element;same=False
                 for _ in range(32):
-                    held.append(cursor);part=self._chrome(cursor);chain.append(part)
+                    held.append(cursor);part=_getter_call_site(self,16,self._chrome,cursor);chain.append(part)
                     assert part['pid']==binding['officePid']
                     if self._call(self.uia.iuia.CompareElements,cursor,root):same=True;break
                     cursor=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor);assert cursor
@@ -2215,12 +2238,12 @@ class NativeMenuProbe(NativeControlProbe):
             assert comparison['rawMatchesTarget'] is comparison['hitEqualsRetained'] is False
             assert comparison['targetEqualsRetained'] is True and all(value is False for value in comparison['differentFrom'].values())
             global_point=dict(kindCode=self._uia_call(9,lambda:actual.CurrentControlType),
-                pid=self._uia_call(8,lambda:actual.CurrentProcessId),nativeHwndRaw=self._uia_call(7,lambda:actual.CurrentNativeWindowHandle))
+                pid=self._uia_call(8,lambda:actual.CurrentProcessId),nativeHwndRaw=_getter_call_site(self,17,self._uia_call,7,lambda:actual.CurrentNativeWindowHandle))
             assert all(type(value) is int for value in global_point.values())
             raw=global_point['nativeHwndRaw'];assert -(1<<31)<=raw<1<<32
             global_point['nativeHwnd']=raw&0xffffffff if raw<0 else raw
             assert global_point['kindCode']==50033 and global_point['pid']==binding['officePid']
-            rectangle=self._chrome(target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
+            rectangle=_getter_call_site(self,18,self._chrome,target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
             assert global_point['nativeHwnd']==before['hwnd']
             captured_at=self.clock();effective=min(action_deadline,captured_at+1.5)
             self.deadline=effective

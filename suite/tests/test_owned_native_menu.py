@@ -2067,6 +2067,94 @@ class NativeMenuPointModeTests(unittest.TestCase):
                 self.assertEqual(r['nativeMenuActions'][-1]['keys'],[])
 
 
+class GetterCallsiteObservationTests(unittest.TestCase):
+    def fixture(self):
+        owner=OwnedNativeMenuTests(methodName='test_root_com_failure_retains_numeric_hresult_without_exception_text')
+        self.addCleanup(owner.doCleanups)
+        return owner.real_chrome_fixture()
+
+    def observer(self,module):
+        helper=getattr(module,'_getter_call_site',None)
+        self.assertTrue(callable(helper),'Fixed getter callsite scope is missing')
+        return helper
+
+    def test_nested_scope_restores_absence_or_prior_value_through_baseexception(self):
+        m,*_=self.fixture();observe=self.observer(m)
+        for existing in (False,True):
+            probe=NS()
+            if existing:probe._getter_site_code=9
+            original=dict(probe.__dict__);primary=KeyboardInterrupt()
+            def outer():
+                self.assertEqual(probe._getter_site_code,1)
+                self.assertEqual(observe(probe,17,lambda:probe._getter_site_code),17)
+                self.assertEqual(probe._getter_site_code,1)
+                raise primary
+            with self.subTest(existing=existing),self.assertRaises(KeyboardInterrupt) as caught:
+                observe(probe,1,outer)
+            self.assertIs(caught.exception,primary)
+            self.assertEqual(probe.__dict__,original)
+
+    def test_scope_preserves_real_chrome_queries_clock_calls_and_result(self):
+        m,_,_,_,clock,b=self.fixture();observe=self.observer(m);probe=b.probe
+        queries=[];ticks=[0];calls=probe._uia_call
+        def clocked():ticks[0]+=1;return clock()
+        def query(code,function,*args):
+            try:return calls(code,function,*args)
+            finally:queries.append((code,copy.deepcopy(probe.interop.get('lastCall',{}))))
+        probe.clock=clocked;probe._uia_call=query
+        before=probe._chrome(b.Node('peer'));baseline_ticks=ticks[0];baseline=[code for code,_ in queries]
+        queries.clear();ticks[0]=0
+        after=observe(probe,13,probe._chrome,b.Node('peer'))
+        self.assertEqual(before,after)
+        self.assertEqual([code for code,_ in queries],baseline)
+        self.assertEqual(ticks[0],baseline_ticks)
+        hwnd_calls=[record for code,record in queries if code==7]
+        self.assertEqual(len(hwnd_calls),1)
+        self.assertEqual(hwnd_calls[0]['getterSiteCode'],13)
+        self.assertTrue(hwnd_calls[0]['callCompleted'])
+        self.assertFalse(hasattr(probe,'_getter_site_code'))
+
+    def test_real_save_candidate_ancestor_and_retained_file_failures_keep_distinct_sites(self):
+        for mode,expected in (('candidate',10),('ancestor',11),('retained-file',1)):
+            with self.subTest(mode=mode):
+                m,a,p,r,clock,b=self.fixture();original=b.Node.CurrentNativeWindowHandle.fget;seen=[False]
+                if mode=='retained-file':b.probe._physical_file_refresh=True
+                class COMError(Exception):
+                    hresult=-2146233083
+                    def __str__(self):raise AssertionError('Exception text must not be observed')
+                primary=COMError()
+                def getter(node):
+                    active=getattr(b.probe,'_active_target',None)=='save'
+                    if mode=='candidate' and active and node.key=='save':raise primary
+                    if mode=='ancestor' and active and node.key=='save':seen[0]=True
+                    if mode=='ancestor' and seen[0] and node.key=='file':raise primary
+                    if mode=='retained-file' and active and b.native.opened and node.key=='file':raise primary
+                    return original(node)
+                b.Node.CurrentNativeWindowHandle=property(getter)
+                with self.assertRaises(COMError) as caught:m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=clock)
+                self.assertIs(caught.exception,primary)
+                call=r['nativeMenuActions'][0]['uiaInterop']['primaryFailureCall']
+                self.assertIn('getterSiteCode',call)
+                self.assertEqual((call['apiCode'],call['targetCode'],call['getterSiteCode']),(7,2,expected))
+                self.assertTrue(call['calleeEntered']);self.assertFalse(call['callCompleted'])
+                self.assertEqual(call['hresult'],-2146233083)
+                self.assertFalse(hasattr(b.probe,'_getter_site_code'))
+                self.assertEqual([row for row in b.native.calls if isinstance(row,tuple) and row[0] in ('click','key')],[('click','file')])
+
+    def test_unknown_callsite_is_not_a_zero_hwnd_result_or_another_api(self):
+        m,_,_,_,_,b=self.fixture();observe=self.observer(m);probe=b.probe;invocations=[]
+        def getter():invocations.append(1);return 0
+        self.assertEqual(probe._uia_call(7,getter),0)
+        self.assertIn('getterSiteCode',probe.interop['lastCall'])
+        self.assertEqual(probe.interop['lastCall']['getterSiteCode'],0)
+        self.assertTrue(probe.interop['lastCall']['callCompleted'])
+        self.assertEqual(observe(probe,17,probe._uia_call,7,getter),0)
+        self.assertEqual(probe.interop['lastCall']['getterSiteCode'],17)
+        self.assertEqual(observe(probe,17,probe._uia_call,8,lambda:88),88)
+        self.assertNotIn('getterSiteCode',probe.interop['lastCall'])
+        self.assertEqual(len(invocations),2)
+
+
 class SourceSelectedMenuCoreTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
