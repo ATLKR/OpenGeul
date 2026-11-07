@@ -1088,6 +1088,35 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
     return native_arch.require_native_pe(library, architecture)
 
 
+_COMPOSITION_PUBLICATION_FIELDS = ('nativeCount', 'overflow', 'firstSequence', 'publishedPrefixCount',
+                                   'copyReturn', 'ackBefore', 'ackAfter', 'snapshotStable')
+
+
+def _composition_publication_numbers(source):
+    """Copy only fixed numeric metadata; -1 means unavailable, never measured zero."""
+    source = source if type(source) is dict else {}
+    row = {'observed': 1 if type(source.get('observed')) is int and source['observed'] == 1 else 0}
+    for key in _COMPOSITION_PUBLICATION_FIELDS:
+        value = source.get(key)
+        row[key] = value if type(value) is int else -1
+    return row
+
+
+def retain_ime_composition_publication(record, observer, *, before_input=False):
+    """Freeze existing snapshot metadata before diagnostics or restoration can replace it."""
+    if before_input:
+        if 'imeCompositionPublication' not in record:
+            record['imeCompositionPublication'] = dict(schemaVersion=1, frozen=0,
+                beforeFirstInput=_composition_publication_numbers(getattr(observer, '_composition_publication', None)),
+                lastPending=_composition_publication_numbers(None))
+        return
+    receipt = record.get('imeCompositionPublication')
+    if type(receipt) is dict and receipt.get('frozen') == 0:
+        receipt['lastPending'] = _composition_publication_numbers(
+            getattr(observer, '_pending_composition_publication', None))
+        receipt['frozen'] = 1
+
+
 class CompositionObserver:
     def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None, diagnose_ime_mode=False, notification_binding=None, capture_ime_compartment=False):
         assert type(diagnose_ime_mode) is bool
@@ -1307,7 +1336,16 @@ class CompositionObserver:
             raise
 
     def events(self):
+        self._composition_publication = _composition_publication_numbers(None)
         state = self.state()
+        evidence = getattr(state, 'snapshotEvidence', {})
+        evidence = evidence if type(evidence) is dict else {}
+        stable = evidence.get('stable')
+        self._composition_publication = _composition_publication_numbers(dict(observed=1,
+            nativeCount=state.count, overflow=state.overflow, firstSequence=state.events[0].sequence,
+            publishedPrefixCount=-1, copyReturn=evidence.get('copyReturn'),
+            ackBefore=evidence.get('ackBefore'), ackAfter=evidence.get('ackAfter'),
+            snapshotStable=int(stable) if type(stable) is bool else -1))
         assert not state.overflow, 'Native composition receipt buffer overflowed'
         events = []
         for index in range(min(max(state.count, 0), 512)):
@@ -1318,10 +1356,15 @@ class CompositionObserver:
                 'pid': row.pid, 'tid': row.tid, 'hwnd': row.hwnd, 'layout': row.layout,
                 'origin': 'sent' if row.origin == 1 else 'posted',
                 'composition': utf16(row.composition), 'result': utf16(row.result)})
+        self._composition_publication['publishedPrefixCount'] = len(events)
         return events
 
     def pending(self, expected, after):
-        events = self.events()[after:]
+        try:
+            events = self.events()[after:]
+        finally:
+            self._pending_composition_publication = _composition_publication_numbers(
+                getattr(self, '_composition_publication', None))
         return any(row['message'] == 0x10f and row['composition'] == expected for row in events)
 
     def diagnostics(self):
@@ -1855,6 +1898,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         record['stage'] = 'physical-dubeolsik-composition'
         for ordinal, (token, expected) in enumerate(zip(EXPECTED_KEYS[:-1], ('ㅎ', '하', '한', 'ㄱ', '그', '글', '그', '글')), 1):
             after = len(observer.events())
+            if ordinal == 1: retain_ime_composition_publication(record, observer, before_input=True)
             record['imeCompositionOrdinal'] = ordinal
             record['imeCompositionStartEventCount'] = after
             physical_key(observer, token, record)
@@ -1866,6 +1910,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         wait_for(lambda: any(row['result'] == '글' for row in observer.events()), 10)
         record['events'] = observer.events()
         record['stage'] = 'restore-owned-input-thread'
+        retain_ime_composition_publication(record, observer)
         retain_ime_message_diagnostics(record, observer)
         record['restoration'] = observer.command(4)
         record['layoutRestored'] = observer.restored
@@ -1925,6 +1970,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         return record
     except Exception as exc:
         primary = exc
+        if observer is not None: retain_ime_composition_publication(record, observer)
         if focus_trace is not None:focus_trace.close(primary)
         if navigation_trace is not None: navigation_trace.close(primary)
         if observer is not None: retain_ime_message_diagnostics(record, observer)

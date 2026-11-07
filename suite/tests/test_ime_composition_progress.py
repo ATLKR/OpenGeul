@@ -1,5 +1,7 @@
 """Numeric progress follows the original controlled IME case and physical keys."""
 from contextlib import ExitStack
+import copy
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -12,7 +14,7 @@ import test_ime_case_phases as phase_tests
 
 class IMECompositionProgressTests(unittest.TestCase):
     def original_case(self,module,*,fail_at=None,fail_semantic=None,retention=None,
-                      cleanup_event_error=None,restoration_error=None):
+                      cleanup_event_error=None,restoration_error=None,publication=False):
         harness=phase_tests.IMECasePhaseTests();self.addCleanup(harness.doCleanups)
         original=ime.case;trace=[];physical_rows=[];pending_rows=[]
         def run(*args,**kwargs):
@@ -28,6 +30,9 @@ class IMECompositionProgressTests(unittest.TestCase):
                     return super().close(primary)
             class Observer(observer_boundary):
                 def diagnostics(self):
+                    if publication:
+                        retention['publicationAtDiagnostics']=copy.deepcopy(current['record'].get('imeCompositionPublication'))
+                        self._pending_composition_publication['nativeCount']=901
                     if retention is None:return super().diagnostics()
                     snapshot=dict(schemaVersion=1,kind='passive-owned-ime-messages',status='complete',
                         capacity=128,observedCount=0,events=[])
@@ -36,6 +41,9 @@ class IMECompositionProgressTests(unittest.TestCase):
                     return snapshot
                 def command(self,command,**kwargs):
                     if retention is not None and command==4:
+                        if publication:
+                            retention['publicationAtRestore']=copy.deepcopy(current['record'].get('imeCompositionPublication'))
+                            self._pending_composition_publication['nativeCount']=902
                         retention.setdefault('atRestore',[]).append(current['record'].get('imeMessageDiagnostics'))
                         retention.setdefault('order',[]).append('restore')
                     result=super().command(command,**kwargs)
@@ -45,6 +53,9 @@ class IMECompositionProgressTests(unittest.TestCase):
                     if getattr(self,'pending_failed',False) and cleanup_event_error is not None:
                         raise cleanup_event_error
                     result=super().events()
+                    if publication:
+                        self._composition_publication=dict(observed=1,nativeCount=0,overflow=0,firstSequence=0,
+                            publishedPrefixCount=0,copyReturn=1,ackBefore=3,ackAfter=3,snapshotStable=1)
                     if current['record'].get('stage')=='physical-dubeolsik-composition':
                         self.progress_event_reads=getattr(self,'progress_event_reads',0)+1
                         result=result[:self.progress_event_reads]
@@ -55,6 +66,9 @@ class IMECompositionProgressTests(unittest.TestCase):
                     record=current['record']
                     pending_rows.append((record.get('imeCompositionOrdinal'),record.get('imeCompositionStartEventCount'),after))
                     trace.append(('pending',len(pending_rows)))
+                    if publication:
+                        self._pending_composition_publication=dict(observed=1,nativeCount=2,overflow=0,firstSequence=1,
+                            publishedPrefixCount=1,copyReturn=1,ackBefore=3,ackAfter=3,snapshotStable=1)
                     if len(pending_rows)==fail_at:
                         self.pending_failed=True
                         return False
@@ -170,3 +184,97 @@ class IMECompositionProgressTests(unittest.TestCase):
                 first=snapshot_error if snapshot_error is not None else restore_error
                 self.assertEqual(record['imeCleanupError'],type(first).__name__+': '+str(first))
                 self.assertNotIn('CTRL_S',calls)
+
+    def test_case_freezes_last_pending_numbers_before_diagnostics_and_restore(self):
+        for fail_at in (None,1):
+            with self.subTest(pending_failed=fail_at is not None):
+                retention={}
+                calls,record,result,error,*_=self.original_case('writer',fail_at=fail_at,
+                    retention=retention,publication=True)
+                self.assertEqual(error is None,fail_at is None)
+                value=record.get('imeCompositionPublication')
+                self.assertIsInstance(value,dict,'missing numeric composition publication')
+                self.assertEqual(value,dict(schemaVersion=1,frozen=1,
+                    beforeFirstInput=dict(observed=1,nativeCount=0,overflow=0,firstSequence=0,
+                        publishedPrefixCount=0,copyReturn=1,ackBefore=3,ackAfter=3,snapshotStable=1),
+                    lastPending=dict(observed=1,nativeCount=2,overflow=0,firstSequence=1,
+                        publishedPrefixCount=1,copyReturn=1,ackBefore=3,ackAfter=3,snapshotStable=1)))
+                self.assertEqual(retention['publicationAtDiagnostics'],value)
+                self.assertEqual(retention['publicationAtRestore'],value)
+                self.assertEqual(calls.count(('command',4)),1)
+                self.assertEqual(calls.count('observer-close'),1)
+
+
+class IMECompositionPublicationTests(unittest.TestCase):
+    def observer(self,count=0,sequences=(),*,overflow=0,stable=True,copy_return=1,metadata=True):
+        state=ime.NativeState();state.count=count;state.overflow=overflow
+        state.ack=3
+        for index,sequence in enumerate(sequences):
+            row=state.events[index];row.sequence=sequence;row.message=0x10f
+            row.compositionBytes=2;row.composition[0]=120
+        if metadata:
+            state.snapshotEvidence=dict(copyReturn=copy_return,ackBefore=3,
+                ackAfter=3 if stable else 4,stable=stable)
+        observer=ime.CompositionObserver.__new__(ime.CompositionObserver);reads=[]
+        def snapshot():reads.append(1);return state
+        observer.state=snapshot
+        return observer,state,reads
+
+    def publication(self,observer,pending=False):
+        name='_pending_composition_publication' if pending else '_composition_publication'
+        row=getattr(observer,name,None)
+        self.assertIsInstance(row,dict,'missing numeric composition publication')
+        self.assertEqual(set(row),{'observed','nativeCount','overflow','firstSequence','publishedPrefixCount',
+            'copyReturn','ackBefore','ackAfter','snapshotStable'})
+        self.assertTrue(all(type(value) is int for value in row.values()))
+        json.dumps(row)
+        return row
+
+    def test_zero_and_unpublished_or_mismatched_prefix_keep_distinct_native_counts(self):
+        for count,sequences,prefix in [(0,(),0),(2,(0,0),0),(3,(1,0,0),1),(3,(7,0,0),0)]:
+            with self.subTest(native_count=count,sequences=sequences):
+                observer,state,reads=self.observer(count,sequences)
+                events=observer.events();row=self.publication(observer)
+                self.assertEqual(row,dict(observed=1,nativeCount=count,overflow=0,
+                    firstSequence=sequences[0] if sequences else 0,publishedPrefixCount=prefix,
+                    copyReturn=1,ackBefore=3,ackAfter=3,snapshotStable=1))
+                self.assertEqual(len(events),prefix)
+                self.assertEqual(reads,[1])
+                if prefix:self.assertEqual(events[0]['composition'],'x')
+
+    def test_unstable_ack_is_visible_without_changing_the_original_events(self):
+        observer,state,reads=self.observer(1,(1,),stable=False,copy_return=2)
+        result=observer.events();row=self.publication(observer)
+        self.assertEqual((row['copyReturn'],row['ackBefore'],row['ackAfter'],row['snapshotStable']),
+                         (2,3,4,0))
+        self.assertEqual(len(result),1);self.assertEqual(result[0]['composition'],'x')
+        self.assertEqual(reads,[1])
+
+    def test_missing_copy_metadata_is_explicit_unknown_and_never_invents_zero(self):
+        observer,state,reads=self.observer(2,(0,0),metadata=False)
+        self.assertEqual(observer.events(),[]);row=self.publication(observer)
+        self.assertEqual(row['nativeCount'],2)
+        self.assertEqual([row[key] for key in ('copyReturn','ackBefore','ackAfter','snapshotStable')],[-1]*4)
+        self.assertEqual(reads,[1])
+
+    def test_overflow_preserves_the_original_failure_and_raw_header(self):
+        observer,state,reads=self.observer(513,(1,),overflow=1)
+        with self.assertRaises(AssertionError):observer.events()
+        row=self.publication(observer)
+        self.assertEqual((row['nativeCount'],row['overflow'],row['firstSequence'],row['publishedPrefixCount']),
+                         (513,1,1,-1))
+        self.assertEqual(reads,[1])
+
+    def test_pending_uses_one_existing_snapshot_and_retains_its_value_after_later_reads(self):
+        observer,state,reads=self.observer(1,(1,))
+        self.assertTrue(observer.pending('x',0));first=dict(self.publication(observer,pending=True))
+        state.count=2;state.events[0].sequence=0;observer.events()
+        self.assertEqual(self.publication(observer,pending=True),first)
+        self.assertEqual(first['nativeCount'],1);self.assertEqual(first['publishedPrefixCount'],1)
+        self.assertEqual(reads,[1,1])
+
+    def test_pending_failure_keeps_original_predicate_and_snapshot_gap(self):
+        observer,state,reads=self.observer(2,(0,0))
+        self.assertFalse(observer.pending('x',0));row=self.publication(observer,pending=True)
+        self.assertEqual((row['nativeCount'],row['firstSequence'],row['publishedPrefixCount']),(2,0,0))
+        self.assertEqual(reads,[1])
